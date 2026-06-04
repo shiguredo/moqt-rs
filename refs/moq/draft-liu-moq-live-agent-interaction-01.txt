@@ -1,0 +1,1848 @@
+
+
+
+
+Media Over QUIC                                                   Y. Liu
+Internet-Draft                                              Alibaba Inc.
+Intended status: Standards Track                                  D. Liu
+Expires: 4 January 2027                                    Alibaba Cloud
+                                                             3 July 2026
+
+
+                    Live Agent Interaction over MoQ
+                draft-liu-moq-live-agent-interaction-01
+
+Abstract
+
+   This document defines a protocol for real-time interactive
+   communication between users and AI agents over Media over QUIC
+   Transport (MOQT).  It specifies how streaming inference outputs (ASR
+   transcripts, LLM tokens, TTS audio) map to the MOQT object model,
+   defines a turn-taking control protocol with barge-in support for
+   voice interactions, and establishes track structure conventions for
+   live agent sessions.  The protocol operates as an application-layer
+   profile on top of MOQT without modifying transport semantics.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 4 January 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 1]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+     1.1.  Motivation and Use Cases  . . . . . . . . . . . . . . . .   3
+       1.1.1.  Why Existing Approaches Are Insufficient  . . . . . .   4
+     1.2.  Distinguishing Properties . . . . . . . . . . . . . . . .   5
+     1.3.  Architecture Overview . . . . . . . . . . . . . . . . . .   6
+       1.3.1.  Protocol Scope and Layering . . . . . . . . . . . . .   6
+       1.3.2.  Design Principles . . . . . . . . . . . . . . . . . .   7
+       1.3.3.  Protocol Components . . . . . . . . . . . . . . . . .   8
+     1.4.  Conventions and Definitions . . . . . . . . . . . . . . .   9
+     1.5.  Deployment Examples . . . . . . . . . . . . . . . . . . .   9
+       1.5.1.  Example 1: With MoQ Relay . . . . . . . . . . . . . .   9
+       1.5.2.  Example 2: Without Relay  . . . . . . . . . . . . . .  10
+       1.5.3.  Protocol Compatibility  . . . . . . . . . . . . . . .  11
+   2.  Object Model Mapping for Inference Streams  . . . . . . . . .  11
+     2.1.  Mapping Principles  . . . . . . . . . . . . . . . . . . .  11
+     2.2.  Agent Text Output Track . . . . . . . . . . . . . . . . .  12
+       2.2.1.  Object Structure  . . . . . . . . . . . . . . . . . .  13
+       2.2.2.  Batching Strategy . . . . . . . . . . . . . . . . . .  13
+       2.2.3.  Partial and Final Semantics . . . . . . . . . . . . .  13
+       2.2.4.  Group Lifecycle . . . . . . . . . . . . . . . . . . .  14
+     2.3.  Agent Audio Output Track  . . . . . . . . . . . . . . . .  14
+       2.3.1.  Object Structure  . . . . . . . . . . . . . . . . . .  14
+       2.3.2.  Subgroup Semantics for Audio  . . . . . . . . . . . .  15
+       2.3.3.  Cross-Track Synchronization . . . . . . . . . . . . .  15
+     2.4.  User Audio Input Track  . . . . . . . . . . . . . . . . .  16
+       2.4.1.  Object Structure  . . . . . . . . . . . . . . . . . .  16
+       2.4.2.  Group Semantics . . . . . . . . . . . . . . . . . . .  16
+     2.5.  Tool Output Track . . . . . . . . . . . . . . . . . . . .  16
+       2.5.1.  Object Structure  . . . . . . . . . . . . . . . . . .  16
+       2.5.2.  Delivery Requirements . . . . . . . . . . . . . . . .  17
+   3.  Turn Control Protocol . . . . . . . . . . . . . . . . . . . .  17
+     3.1.  Turn State Machine  . . . . . . . . . . . . . . . . . . .  17
+     3.2.  Control Track . . . . . . . . . . . . . . . . . . . . . .  18
+     3.3.  Barge-in Handling . . . . . . . . . . . . . . . . . . . .  19
+       3.3.1.  Barge-in Signal Delivery  . . . . . . . . . . . . . .  20
+       3.3.2.  Agent Interrupt Behavior  . . . . . . . . . . . . . .  21
+       3.3.3.  Client Interrupt Behavior . . . . . . . . . . . . . .  21
+     3.4.  VAD Integration . . . . . . . . . . . . . . . . . . . . .  21
+     3.5.  Priority Assignment . . . . . . . . . . . . . . . . . . .  22
+   4.  Track Structure and Naming  . . . . . . . . . . . . . . . . .  23
+     4.1.  Namespace Convention  . . . . . . . . . . . . . . . . . .  23
+     4.2.  Track Names . . . . . . . . . . . . . . . . . . . . . . .  23
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 2]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+     4.3.  Catalog Integration . . . . . . . . . . . . . . . . . . .  24
+   5.  Delivery Policies . . . . . . . . . . . . . . . . . . . . . .  24
+     5.1.  Datagram vs Stream Selection  . . . . . . . . . . . . . .  24
+   6.  Relay Considerations  . . . . . . . . . . . . . . . . . . . .  24
+     6.1.  Relay Transparency  . . . . . . . . . . . . . . . . . . .  25
+     6.2.  Caching Behavior  . . . . . . . . . . . . . . . . . . . .  25
+     6.3.  Multi-Subscriber Scenarios  . . . . . . . . . . . . . . .  25
+   7.  Security Considerations . . . . . . . . . . . . . . . . . . .  25
+     7.1.  Authentication and Authorization  . . . . . . . . . . . .  25
+     7.2.  End-to-End Encryption . . . . . . . . . . . . . . . . . .  26
+     7.3.  Privacy Considerations  . . . . . . . . . . . . . . . . .  26
+     7.4.  Denial of Service . . . . . . . . . . . . . . . . . . . .  26
+   8.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  26
+     8.1.  MOQT Track Property Registrations . . . . . . . . . . . .  26
+     8.2.  Control Signal Type Registry  . . . . . . . . . . . . . .  27
+     8.3.  Object Payload Flags Registry . . . . . . . . . . . . . .  27
+   9.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  28
+     9.1.  Normative References  . . . . . . . . . . . . . . . . . .  28
+     9.2.  Informative References  . . . . . . . . . . . . . . . . .  28
+   Appendix A.  Interaction Examples . . . . . . . . . . . . . . . .  29
+     A.1.  Basic Voice Conversation Turn . . . . . . . . . . . . . .  29
+     A.2.  Barge-in During Agent Response  . . . . . . . . . . . . .  30
+     A.3.  Concurrent Text and Audio Delivery  . . . . . . . . . . .  30
+   Appendix B.  Design Rationale . . . . . . . . . . . . . . . . . .  31
+     B.1.  Why Not a Custom Frame Layer  . . . . . . . . . . . . . .  31
+     B.2.  Why Group = Turn  . . . . . . . . . . . . . . . . . . . .  31
+     B.3.  Why Separate Control Track  . . . . . . . . . . . . . . .  32
+   Appendix C.  Acknowledgements . . . . . . . . . . . . . . . . . .  32
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  32
+
+1.  Introduction
+
+   Large Language Models (LLMs) and multimodal AI systems have enabled a
+   new class of interactive applications where users communicate with AI
+   agents in real-time through voice and text.  These "live agent"
+   interactions share characteristics with both traditional media
+   streaming and conversational protocols, but fit neatly into neither
+   category.
+
+1.1.  Motivation and Use Cases
+
+   The following application scenarios motivate the design of a
+   dedicated protocol profile for live agent interaction over MOQT:
+
+   *  *Voice AI Assistants*: A user speaks naturally to an AI agent and
+      receives spoken responses in real-time.  The agent performs
+      streaming ASR on user audio, generates a response via LLM, and
+      synthesizes speech (TTS) delivered with sub-second latency.  The
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 3]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+      user may interrupt the agent mid-response (barge-in), requiring
+      immediate cessation of agent output.  This demands continuous
+      bidirectional audio streaming, low time-to-first-audio latency,
+      graceful interruption handling, and the ability to deliver partial
+      text results ahead of audio for perceived responsiveness.
+
+   *  *Real-Time Customer Service Agents*: In live commerce or customer
+      support deployments, an AI agent handles simultaneous voice or
+      text interactions with customers, accessing external tools
+      (inventory lookup, order status, payment processing) and relaying
+      structured results alongside natural language responses.  This
+      demands reliable delivery of tool results alongside best-effort
+      audio delivery, relay-based fan-out for scaling to thousands of
+      concurrent sessions, and per-session isolation with independent
+      priority and timeout policies.
+
+   *  *Multimodal Scene-Aware Agents*: A user points their device camera
+      at a real-world scene (e.g., a landmark, exhibit, or street sign)
+      while speaking to an AI agent that acts as a digital tour guide.
+      The agent subscribes to the user's audio and video input tracks,
+      performs visual understanding and speech recognition jointly, and
+      publishes spoken narration, text annotations, and contextual
+      information about the scene.  This demands concurrent processing
+      of multiple input modalities (audio + video), low-latency
+      multimodal fusion at the agent backend, multiple independent
+      output tracks with heterogeneous delivery requirements (reliable
+      text vs. best-effort audio), and partial reliability where stale
+      video frames or audio segments may be dropped without
+      retransmission.
+
+1.1.1.  Why Existing Approaches Are Insufficient
+
+   Live agent interactions impose strict latency budgets: users expect
+   sub-second time-to-first-token and time-to-first-audio for the
+   interaction to feel comparable to natural conversational turn-taking.
+   HTTP-based streaming approaches (SSE, WebSocket) operate over TCP,
+   where head-of-line blocking, connection-level flow control, and lack
+   of stream multiplexing make it difficult to meet these latency
+   targets — particularly when multiple output modalities (text, audio,
+   tool results) must be delivered concurrently with independent
+   priority and reliability requirements.  Furthermore, these approaches
+   cannot express per-object delivery timeouts or relay-assisted fan-out
+   at the transport level, forcing application-layer workarounds that
+   add complexity and latency.  Purpose-built AI inference APIs operate
+   in request-response or unidirectional streaming modes without support
+   for concurrent input processing, turn management, or barge-in.
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 4]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   Media over QUIC Transport addresses these limitations at the
+   transport layer: QUIC's stream multiplexing eliminates head-of-line
+   blocking between modalities, MOQT's priority system ensures latency-
+   critical signals (barge-in, user audio) are scheduled first, and
+   delivery timeouts allow stale data to be discarded without blocking
+   fresh output.  The relay infrastructure provides scalability without
+   per-connection state at the agent backend.  However, MOQT lacks
+   application-layer conventions for mapping AI inference semantics onto
+   these primitives.  This document fills that gap.
+
+1.2.  Distinguishing Properties
+
+   A live agent interaction has the following distinguishing properties:
+
+   *  *Asymmetric streaming*: User input is continuous (audio stream),
+      while agent output is incremental and multi-modal (text tokens,
+      synthesized audio, tool results).
+
+   *  *Turn-based with interruption*: Unlike media broadcast, the
+      interaction follows a dialogue structure where either party can
+      take or yield the floor.
+
+   *  *Latency-critical incremental delivery*: Users perceive agent
+      responsiveness through time-to-first-token and time-to-first-
+      audio, requiring sub-second delivery of partial results.
+
+   *  *Heterogeneous reliability requirements*: Within a single turn,
+      interim ASR transcripts are ephemeral, final transcripts are
+      authoritative, TTS audio is time-bounded, and tool results must be
+      delivered reliably.
+
+   Media over QUIC Transport [MOQT] provides a publish/subscribe
+   protocol with features well-suited to these requirements: prioritized
+   delivery, partial reliability through delivery timeouts, group-based
+   object organization, and relay infrastructure for scalability.
+   However, MOQT defines no application-layer semantics for mapping
+   inference streams to its object model, nor for managing
+   conversational turn-taking.
+
+   This document specifies:
+
+   *  A mapping of streaming inference outputs to the MOQT object data
+      model (Section 2).
+
+   *  A turn control protocol for managing dialogue state and handling
+      barge-in interruptions (Section 3).
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 5]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  Track structure conventions and naming for live agent sessions
+      (Section 4).
+
+   *  Delivery policies appropriate for each stream type (Section 5).
+
+1.3.  Architecture Overview
+
+1.3.1.  Protocol Scope and Layering
+
+   This document defines an application-layer profile that operates on
+   top of MOQT [MOQT] without modifying its transport semantics.  The
+   relationship to the MoQ protocol suite is illustrated below:
+
+  +-------------------------------------------------------------------+
+  |              Application Layer (Live Agent Interaction)            |
+  |                                                                   |
+  |  Maps conversational structure (turns, steps, frames) onto the    |
+  |  MOQT object hierarchy; adds turn-taking control via signals.     |
+  +-------------------------------------------------------------------+
+           |                    |                      |
+           v                    v                      v
+  +------------------+  +-----------------+  +-------------------+
+  | MoQ Transport    |  | LOC Container   |  | MoQ Secure        |
+  | (MOQT)           |  | (Audio/Video)   |  | Objects (E2E)     |
+  | - Object Model   |  | - Codec framing |  | - Encryption      |
+  | - Pub/Sub        |  | - Timing        |  | - Authentication  |
+  | - Relay          |  |                 |  |                   |
+  | - Priority       |  |                 |  |                   |
+  | - Delivery       |  |                 |  |                   |
+  +------------------+  +-----------------+  +-------------------+
+           |
+           v
+  +-------------------------------------------------------------------+
+  |                QUIC / WebTransport                                 |
+  |  - Stream multiplexing    - Datagram extension                    |
+  |  - TLS 1.3 encryption    - Congestion control                    |
+  |  - 0-RTT resumption      - Flow control                          |
+  +-------------------------------------------------------------------+
+
+                       Figure 1: Protocol Layering
+
+   The following table summarizes how live agent domain concepts map to
+   MOQT primitives:
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 6]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+    +================+===========+====================================+
+    | Domain Concept | MOQT      | Semantics                          |
+    |                | Primitive |                                    |
+    +================+===========+====================================+
+    | Conversation   | Group     | Atomic dialogue unit; GROUP_ORDER  |
+    | Turn           |           | descending prioritizes latest turn |
+    +----------------+-----------+------------------------------------+
+    | Inference Step | Subgroup  | A sentence, audio segment, or tool |
+    |                |           | call within a turn                 |
+    +----------------+-----------+------------------------------------+
+    | Token Batch /  | Object    | Minimum delivery unit; subject to  |
+    | Audio Frame    |           | OBJECT_DELIVERY_TIMEOUT            |
+    +----------------+-----------+------------------------------------+
+    | Stream         | Track     | Independent subscribe, priority,   |
+    | Modality       |           | and reliability per modality       |
+    +----------------+-----------+------------------------------------+
+    | Barge-in       | Datagram  | Highest priority (0x00); bypasses  |
+    | Signal         |           | head-of-line blocking              |
+    +----------------+-----------+------------------------------------+
+    | Turn Control   | Control   | Reliable delivery of state-machine |
+    |                | Track     | transitions                        |
+    +----------------+-----------+------------------------------------+
+
+                  Table 1: Domain Concept to MOQT Mapping
+
+   This document:
+
+   *  USES the MOQT object model (Track, Group, Subgroup, Object) to
+      represent conversational structure.
+
+   *  USES LOC [LOC] as the container format for audio payloads.
+
+   *  USES MOQT native mechanisms (SUBSCRIBE, priority, delivery
+      timeouts, GROUP_ORDER) for QoS enforcement.
+
+   *  MAY USE Secure Objects [SECURE-OBJECTS] for end-to-end encryption
+      of agent output through untrusted relays.
+
+   *  DOES NOT define new transport-layer framing or modify MOQT wire
+      format.
+
+1.3.2.  Design Principles
+
+   The protocol is guided by the following architectural principles:
+
+   Native MOQT Integration:  Map application semantics directly to the
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 7]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+      MOQT object hierarchy rather than introducing intermediate framing
+      layers.  This ensures MOQT relays can perform correct scheduling,
+      timeout-based discard, and caching without understanding
+      application-layer payload formats.
+
+   Relay Transparency:  All protocol operations MUST work through
+      unmodified MOQT relays.  The relay sees standard Tracks, Groups,
+      Subgroups, and Objects with associated priorities and timeouts.
+      No relay-side payload inspection is required.
+
+   Asymmetric by Design:  The protocol explicitly models the user-to-
+      agent asymmetry: user input is continuous and latency-critical for
+      the agent; agent output is incremental, multi-modal, and
+      interruptible.  This asymmetry is reflected in priority
+      assignment, timeout configuration, and track structure.
+
+   Latency Budget Awareness:  Every protocol mechanism is evaluated
+      against its contribution to end-to-end latency.  Zero additional
+      round-trips for session setup (reuse MOQT session).  Datagram
+      delivery for time-critical signals.  Batching strategies that
+      bound flush latency.
+
+   Partial Reliability as a Feature:  Not all data within a turn has
+      equal value.  The protocol assigns per-track and per-subgroup
+      delivery timeouts that allow the transport to discard stale data
+      (old audio frames, obsolete interim transcript hypotheses) while
+      guaranteeing delivery of authoritative results (final text, tool
+      outputs).
+
+   Modality Agnostic:  The protocol does not mandate specific codecs,
+      model architectures, or inference pipelines.  It defines
+      structural conventions (Group=Turn, Subgroup=inference step) that
+      apply regardless of whether the agent produces text, audio, video,
+      or structured data.
+
+1.3.3.  Protocol Components
+
+   This document comprises four logical components:
+
+   1.  *Inference Stream Delivery* (Section 2): Defines how streaming
+       outputs from ASR, LLM, and TTS pipelines map to the MOQT object
+       data model.  Covers text token batching, audio segmentation, tool
+       result framing, and cross-track synchronization.
+
+   2.  *Turn Control Protocol* (Section 3): Defines the conversational
+       state machine, control signal format, barge-in handling, VAD
+       integration, and priority assignment for managing dialogue flow.
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 8]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   3.  *Track Structure and Naming* (Section 4): Defines namespace
+       conventions, standard track names, and catalog integration for
+       live agent sessions.
+
+   4.  *Delivery Policies* (Section 5): Specifies per-track timeout
+       configurations, transport selection guidelines (Datagram vs
+       Stream), and relay caching behavior.
+
+1.4.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   The following terms are used in this document:
+
+   Live Agent Session:  A stateful interaction between a user endpoint
+      and an AI agent backend, conducted over one or more MOQT sessions.
+
+   Turn:  A contiguous period during which one party (user or agent)
+      holds the conversational floor.  Mapped to a MOQT Group.
+
+   Inference Stream:  A sequence of incremental outputs from an AI model
+      (e.g., LLM tokens, ASR transcripts, TTS audio chunks).
+
+   Barge-in:  An event where the user begins speaking while the agent is
+      still producing output, causing the agent to yield the floor.
+
+   Partial Result:  An intermediate inference output for which the final
+      result has not yet been signaled.  A Partial Result can be an
+      append-only delta, a snapshot, or a revision only when the
+      corresponding track semantics explicitly define that behavior.
+
+   Final Result:  A definitive inference output that will not be further
+      modified.
+
+1.5.  Deployment Examples
+
+   This protocol is compatible with multiple deployment topologies.  Two
+   examples are illustrated below.
+
+1.5.1.  Example 1: With MoQ Relay
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                 [Page 9]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   User Device             MoQ Relay              Agent Backend
+   (App/Browser)          (Cache/Fan-out)        (Omni-LLM)
+        |                      |                       |
+        |===== QUIC/WebTransport session =============>|
+        |                      |                       |
+        |--- Audio Track ----->|-------- fwd --------->|
+        |--- Video Track ----->|-------- fwd --------->|
+        |                      |                       |
+        |<-- Audio Track ------|<------ publish -------|
+        |<-- Text Track -------|<------ publish -------|
+        |<-- Tool Results -----|<------ publish -------|
+        |                      |                       |
+        |--- Control Signals ->|-------- fwd --------->|
+        |<-- Control Signals --|<------ publish -------|
+
+                    Figure 2: Deployment with MoQ Relay
+
+   The relay forwards user input to the agent and fans out agent output
+   to subscribers.  This topology is suited for scenarios requiring:
+
+   *  Multiple subscribers to a single agent session (monitoring,
+      recording, accessibility overlays).
+
+   *  Geographic distribution where relays are placed close to users.
+
+   *  Caching of agent output for late-joining clients.
+
+1.5.2.  Example 2: Without Relay
+
+   User Device                                    Agent Backend
+   (App/Browser)                                  (Omni-LLM)
+        |                                              |
+        |===== QUIC/WebTransport session =============>|
+        |                                              |
+        |--- Audio Track ----------------------------->|
+        |--- Video Track ----------------------------->|
+        |                                              |
+        |<-- Audio Track ------------------------------|
+        |<-- Text Track -------------------------------|
+        |<-- Tool Results -----------------------------|
+        |                                              |
+        |--- Control Signals ------------------------->|
+        |<-- Control Signals --------------------------|
+
+                     Figure 3: Deployment without Relay
+
+   The client connects directly to the agent backend.  This topology is
+   suited for scenarios requiring:
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 10]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  Minimal latency (no intermediate hop).
+
+   *  Simpler deployment without relay infrastructure.
+
+   *  Single-subscriber sessions (1:1 user-to-agent interactions).
+
+1.5.3.  Protocol Compatibility
+
+   This specification operates correctly under both topologies.  The
+   application-layer semantics (track structure, turn control, object
+   model mapping) are identical regardless of whether a MoQ relay is
+   present:
+
+   *  With relay: the relay handles subscription management, priority-
+      based scheduling, and delivery timeout enforcement transparently.
+
+   *  Without relay: the agent backend itself implements MOQT session
+      handling.  Priority and timeout semantics still apply to the QUIC
+      streams between client and agent.
+
+   Deployments MAY combine both topologies, for example using direct
+   connections for latency-sensitive single-user sessions while routing
+   multi-subscriber sessions through relays.
+
+2.  Object Model Mapping for Inference Streams
+
+   This section defines how streaming inference outputs map to the MOQT
+   object data model defined in Section 2 of [MOQT].
+
+2.1.  Mapping Principles
+
+   The MOQT object hierarchy consists of Track > Group > Subgroup >
+   Object.  This document assigns conversational semantics to each
+   level:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 11]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   +============+=====================+===============================+
+   | MOQT Level | Live Agent Semantic | Rationale                     |
+   +============+=====================+===============================+
+   | Track      | Stream type (audio, | Independent subscription unit |
+   |            | text, control)      |                               |
+   +------------+---------------------+-------------------------------+
+   | Group      | Conversation turn   | Atomic unit of dialogue;      |
+   |            |                     | enables turn-level operations |
+   +------------+---------------------+-------------------------------+
+   | Subgroup   | Inference step      | Logical segment: a sentence,  |
+   |            | within a turn       | an audio segment, a tool call |
+   +------------+---------------------+-------------------------------+
+   | Object     | Atomic delivery     | Smallest independently        |
+   |            | unit                | decodable/renderable item     |
+   +------------+---------------------+-------------------------------+
+
+                  Table 2: Object Model Semantic Mapping
+
+   Unless a track definition explicitly states otherwise, all media,
+   text, tool, and control Objects that belong to the same application
+   turn MUST use the same turn_id.  The value of turn_id is the MOQT
+   Group ID on tracks that publish Objects for that turn.  Subgroup
+   identifiers are scoped to a track; matching Subgroup identifiers
+   across tracks indicate the same logical segment only where this
+   document defines such alignment.
+
+   This mapping enables:
+
+   *  Subscribing to a specific turn onwards (Group-based filtering).
+
+   *  Dropping an entire stale turn when interrupted (Group-level
+      discard).
+
+   *  Prioritizing recent turns over old ones (GROUP_ORDER =
+      descending).
+
+   *  Independent reliability per inference step (Subgroup-level
+      timeouts).
+
+2.2.  Agent Text Output Track
+
+   The agent text output track carries streaming LLM token output.  This
+   track uses append-only delta semantics: each Object contributes new
+   text that follows the text carried by earlier Objects in the same
+   Subgroup.
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 12]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+2.2.1.  Object Structure
+
+   Each Object in the text output track carries a *token batch*: one or
+   more sequential tokens generated within a single flush interval.
+
+   Text Output Object Payload:
+   +--------+--------+-------------------------------------------+
+   | Field  | Type   | Description                               |
+   +--------+--------+-------------------------------------------+
+   | flags  | uint8  | 0x01=partial, 0x02=final, 0x04=cancelled  |
+   | seq    | varint | Sequence number within subgroup           |
+   | count  | varint | Number of tokens in this delta            |
+   | tokens | UTF-8  | Concatenated token delta text             |
+   +--------+--------+-------------------------------------------+
+
+                    Figure 4: Text Output Object Format
+
+2.2.2.  Batching Strategy
+
+   Implementations SHOULD batch tokens to amortize per-object overhead.
+   The following strategies are RECOMMENDED:
+
+   *  *Time-based*: Flush every 50ms, collecting all tokens generated in
+      that interval into a single Object.
+
+   *  *Size-based*: Flush when accumulated token text reaches 128 bytes.
+
+   *  *Semantic-based*: Flush at sentence boundaries or punctuation
+      marks.
+
+   An implementation MUST flush immediately when:
+
+   *  The inference step completes (flags = 0x02, final).
+
+   *  A barge-in interrupt is received (flags = 0x04, cancelled).
+
+   *  The subgroup ends (last object in subgroup).
+
+2.2.3.  Partial and Final Semantics
+
+   Within a Subgroup (inference step), Objects are delivered
+   incrementally:
+
+   *  Objects with flags=0x01 (partial) carry append-only token deltas.
+      A subscriber MAY append them to the displayed text immediately for
+      real-time display.  Earlier delta Objects in this text track are
+      not superseded by later delta Objects.
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 13]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  An Object with flags=0x02 (final) indicates the inference step is
+      complete.  The subscriber SHOULD treat the concatenation, in seq
+      order, of all non-cancelled delta Objects in the Subgroup as the
+      definitive output for that Subgroup.
+
+   *  An Object with flags=0x04 (cancelled) indicates the inference step
+      was interrupted (e.g., by barge-in).  The subscriber SHOULD
+      discard or visually mark the incomplete output.
+
+   Tracks or future extensions that need ASR interim transcript
+   snapshots or patch-style text revision semantics MUST define that
+   replacement or revision behavior explicitly.  Such streams MUST NOT
+   rely on the append-only output/text semantics above.
+
+2.2.4.  Group Lifecycle
+
+   A new Group is created when:
+
+   *  The agent begins responding to a new user turn.
+
+   *  The turn counter increments (see Section 3.1).
+
+   The Group is closed (LARGEST_OBJECT property set) when:
+
+   *  The agent completes its full response for this turn.
+
+   *  The agent is interrupted by barge-in (final Object has cancelled
+      flag).
+
+2.3.  Agent Audio Output Track
+
+   The agent audio output track carries TTS-synthesized audio.  The
+   encoded audio segment is carried as a complete LOC payload [LOC]
+   inside the Live Agent audio envelope defined below.  This document
+   does not extend the LOC header or append Live Agent metadata to a raw
+   LOC payload.
+
+2.3.1.  Object Structure
+
+   Each Object carries one audio segment (typically 20-60ms of audio).
+   The envelope provides explicit payload boundaries and optional
+   alignment metadata.  A profile-aware receiver parses the envelope,
+   then passes the loc_payload bytes unchanged to its LOC decoder.
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 14]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   Audio Output Object Payload:
+   +----------------------+--------+----------------------------------+
+   | Field                | Type   | Description                      |
+   +----------------------+--------+----------------------------------+
+   | flags                | uint8  | 0x01=alignment_present           |
+   | loc_payload_length   | varint | Length of loc_payload in bytes   |
+   | loc_payload          | bytes  | Complete LOC audio payload       |
+   | align_seq (optional) | varint | Text Object seq number           |
+   | align_offset (opt)   | varint | Character offset within text     |
+   +----------------------+--------+----------------------------------+
+
+                    Figure 5: Audio Output Object Format
+
+   The optional alignment fields are present only when the
+   alignment_present flag is set.  They belong to this Live Agent
+   envelope, not to LOC.  A receiver that only understands LOC will not
+   be able to decode this envelope directly; an endpoint or gateway can
+   recover the standard LOC payload by extracting loc_payload.
+
+2.3.2.  Subgroup Semantics for Audio
+
+   Each Subgroup in the audio track corresponds to one utterance or
+   sentence boundary in the agent's response.  This enables:
+
+   *  Dropping a complete sentence if delivery is too late
+      (SUBGROUP_DELIVERY_TIMEOUT).
+
+   *  Rendering audio sentence-by-sentence with natural pauses.
+
+   *  Aligning with text Subgroups at sentence granularity.
+
+2.3.3.  Cross-Track Synchronization
+
+   The agent text track and agent audio track use the same Group ID for
+   the same conversational turn.  Within a turn:
+
+   *  Text Subgroup N corresponds to Audio Subgroup N (same sentence).
+
+   *  The align_seq field in audio Objects references the text Object
+      sequence number being spoken at that audio moment.
+
+   This enables a subscriber receiving both tracks to:
+
+   *  Display text as it arrives (lower latency than audio).
+
+   *  Highlight the currently-spoken text segment during audio playback.
+
+   *  Fall back to text-only if audio delivery times out.
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 15]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+2.4.  User Audio Input Track
+
+   The user publishes a continuous audio input track.
+
+2.4.1.  Object Structure
+
+   Each Object carries a fixed-duration audio frame (typically 20ms)
+   using the LOC container format.
+
+2.4.2.  Group Semantics
+
+   Groups in the user audio track are segmented by voice activity:
+
+   *  A new Group begins when the user starts speaking (VAD trigger).
+
+   *  The Group ends when the user stops speaking (silence detection).
+
+   This enables the agent backend to:
+
+   *  Subscribe starting from the latest Group (skip silence gaps).
+
+   *  Process each utterance as a unit.
+
+   *  Implement endpoint detection without additional signaling.
+
+2.5.  Tool Output Track
+
+   The agent MAY publish a tool output track for structured results from
+   tool/function calls.
+
+2.5.1.  Object Structure
+
+   Tool Output Object Payload:
+   +-----------+--------+------------------------------------------+
+   | Field     | Type   | Description                              |
+   +-----------+--------+------------------------------------------+
+   | flags     | uint8  | 0x01=invocation, 0x02=result, 0x04=error |
+   | tool_id   | varint | Tool/function identifier                 |
+   | call_id   | varint | Unique call instance identifier          |
+   | payload   | bytes  | JSON-encoded tool call or result         |
+   +-----------+--------+------------------------------------------+
+
+                    Figure 6: Tool Output Object Format
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 16]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+2.5.2.  Delivery Requirements
+
+   Tool outputs MUST be delivered reliably (no delivery timeout).  Tool
+   invocation and result Objects are always flagged final (0x02).  The
+   subscriber MUST NOT discard tool results due to lateness.
+
+3.  Turn Control Protocol
+
+   This section defines the control protocol for managing conversational
+   turns between the user and agent.
+
+3.1.  Turn State Machine
+
+   A live agent session maintains the following turn states:
+
+                       speech_start
+            +--------+----------->+---------+
+            |  IDLE  |            |  USER   |
+            |        |<-----------+ SPEAKING|
+            +---+----+ speech_end +----+----+
+                ^                      |
+                |                      | (agent begins inference)
+                |                      v
+                |               +------+------+
+                | turn_complete |   AGENT     |
+                +--------------+  PROCESSING |
+                |               +------+------+
+                |                      |
+                |                      | (first output produced)
+                |                      v
+                |               +------+------+
+                | turn_complete |   AGENT     |<---+
+                +--------------+  SPEAKING   |    | (output continues)
+                                +------+------+----+
+                                       |
+                       barge_in        |
+                     +--------+       |
+                     |  USER  |<------+
+                     |SPEAKING|
+                     +--------+
+
+                        Figure 7: Turn State Machine
+
+   State transitions:
+
+   *  *IDLE → USER_SPEAKING*: User audio VAD detects speech onset.
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 17]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  *USER_SPEAKING → AGENT_PROCESSING*: User speech ends (silence
+      timeout or explicit end-of-turn signal).
+
+   *  *AGENT_PROCESSING → AGENT_SPEAKING*: Agent produces first output
+      Object in any output track.
+
+   *  *AGENT_SPEAKING → IDLE*: Agent completes response (closes Group in
+      all output tracks).
+
+   *  *AGENT_SPEAKING → USER_SPEAKING*: Barge-in event (user starts
+      speaking while agent is outputting).
+
+   *  *AGENT_PROCESSING → USER_SPEAKING*: Barge-in event before the
+      agent has produced its first output Object.
+
+   The AGENT_SPEAKING state means that the agent is publishing response
+   output in any output modality; the state name does not require audio
+   to be present.  TURN_STARTED signals that the agent has accepted the
+   user turn and is entering the agent side of the turn.  It MUST be
+   sent no later than the first output Object for the turn and SHOULD be
+   sent when the agent enters AGENT_PROCESSING if processing is expected
+   to be visible to the user.  THINKING is an optional progress signal
+   while the session is in AGENT_PROCESSING.
+
+   If the user starts speaking while the session is in AGENT_PROCESSING
+   or AGENT_SPEAKING, the event is a barge-in for the active agent turn.
+   If the relevant turn has already reached TURN_COMPLETE and all output
+   Groups for that turn are closed, the speech start begins a new user
+   turn instead of interrupting the completed turn.  Implementations
+   that detect a false speech start SHOULD either avoid sending
+   SPEECH_START until the signal is stable or follow it with SPEECH_END
+   carrying no media Objects for that turn.
+
+3.2.  Control Track
+
+   Turn control signals are exchanged on a dedicated bidirectional
+   control track pair (one per direction).  Datagram delivery of
+   BARGE_IN uses the same Control Object Payload format as the control
+   track; it is a fast path for the same logical event, not a separate
+   signal format.  Control Objects use the following format:
+
+
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 18]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   Control Object Payload:
+   +-----------+--------+------------------------------------------+
+   | Field     | Type   | Description                              |
+   +-----------+--------+------------------------------------------+
+   | signal    | varint | Signal type (see below)                  |
+   | turn_id   | varint | Current turn Group ID                    |
+   | timestamp | varint | Sender wall-clock time (ms since epoch)  |
+   | payload   | bytes  | Signal-specific data (may be empty)      |
+   +-----------+--------+------------------------------------------+
+
+   Signal Types:
+     0x01 = SPEECH_START     (user → agent)
+     0x02 = SPEECH_END       (user → agent)
+     0x03 = BARGE_IN         (user → agent)
+     0x04 = TURN_STARTED     (agent → user)
+     0x05 = TURN_COMPLETE    (agent → user)
+     0x06 = INTERRUPT_ACK    (agent → user)
+     0x07 = THINKING         (agent → user)
+
+                      Figure 8: Control Signal Format
+
+3.3.  Barge-in Handling
+
+   Barge-in is the critical interaction where a user interrupts the
+   agent's ongoing output.  The protocol defines the following sequence:
+
+   User Device                                  Agent Backend
+        |                                            |
+        |  [user starts speaking over agent output]  |
+        |                                            |
+        |-- Control: BARGE_IN (turn_id=N) ---------> |
+        |          (via Datagram, highest priority)   |
+        |                                            |
+        |       [agent stops TTS, notes position]    |
+        |                                            |
+        |<- Control: INTERRUPT_ACK (turn_id=N) ----- |
+        |     payload: {interrupted_group: N,        |
+        |              interrupted_subgroup: M,      |
+        |              interrupted_object: K}        |
+        |                                            |
+        |  [agent closes Group N with cancelled flag]|
+        |                                            |
+        |<- Text Object: flags=cancelled ----------- |
+        |<- Audio: subgroup FIN -------------------- |
+        |                                            |
+        |  [agent begins processing new user input]  |
+        |                                            |
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 19]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+                        Figure 9: Barge-in Sequence
+
+3.3.1.  Barge-in Signal Delivery
+
+   The BARGE_IN signal has the following delivery requirements:
+
+   *  MUST be sent via MOQT Datagram for minimum latency.  The Datagram
+      payload MUST be a complete Control Object Payload with
+      signal=BARGE_IN.
+
+   *  MUST be assigned the highest publisher priority (0x00).
+
+   *  SHOULD be sent immediately upon local VAD detection, without
+      waiting for speech_end.
+
+   *  SHOULD also be published on the user-to-agent control track as a
+      reliable mirror of the same event unless an INTERRUPT_ACK for that
+      event has already been received.
+
+   *  The agent MUST process BARGE_IN within one processing cycle
+      (target: < 50ms from receipt to output cessation).
+
+   The turn_id in a BARGE_IN Control Object identifies the interrupted
+   agent turn.  The BARGE_IN payload MUST contain an event_id that is
+   unique within the MOQT session and a new_turn_id for the user speech
+   that caused the interruption:
+
+   BARGE_IN Payload:
+   +-------------+--------+-----------------------------------------+
+   | Field       | Type   | Description                             |
+   +-------------+--------+-----------------------------------------+
+   | event_id    | varint | Unique barge-in event identifier        |
+   | new_turn_id | varint | Group ID for the new user input turn    |
+   +-------------+--------+-----------------------------------------+
+
+                        Figure 10: BARGE_IN Payload
+
+   An agent MUST deduplicate BARGE_IN events by (sender, event_id).  If
+   a Datagram copy and a reliable control-track copy of the same event
+   are both received, only the first copy that is processed changes the
+   state machine.  Later copies are acknowledgements of delivery and
+   MUST NOT trigger a second interrupt.
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 20]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   If BARGE_IN races with TURN_COMPLETE for the same turn_id, BARGE_IN
+   takes precedence while the agent turn is still active.  Once the
+   agent has committed TURN_COMPLETE and closed all output Groups for
+   that turn, a later BARGE_IN for that turn_id is stale and MUST be
+   ignored as an interrupt; the associated speech can still start
+   new_turn_id.
+
+3.3.2.  Agent Interrupt Behavior
+
+   Upon receiving BARGE_IN, the agent MUST:
+
+   1.  Cease generating new output Objects for the current turn.
+
+   2.  Close the current output Group with a cancelled Object
+       (flags=0x04 in text track, stream FIN in audio track).
+
+   3.  Send INTERRUPT_ACK with the position where output stopped.
+
+   4.  Transition to processing the new user input.
+
+   The agent SHOULD NOT:
+
+   *  Abruptly truncate mid-audio-frame (finish current audio Object).
+
+   *  Discard context from the interrupted response (the agent has it in
+      its context window for the next turn).
+
+3.3.3.  Client Interrupt Behavior
+
+   Upon sending BARGE_IN, the client SHOULD:
+
+   *  Immediately stop audio playback of the agent's output.
+
+   *  Visually indicate the response was interrupted (e.g., fade text).
+
+   *  Begin capturing and publishing user audio for the new turn.
+
+3.4.  VAD Integration
+
+   Speech activity detection events drive the turn state machine.  This
+   document does not mandate a specific detection algorithm (traditional
+   energy-based VAD, neural VAD, or other approaches) but defines the
+   signaling semantics:
+
+   *  *SPEECH_START*: Published when the implementation determines that
+      the user has begun speaking.
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 21]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  *SPEECH_END*: Published when the implementation determines that
+      the user has finished speaking.
+
+   *  *BARGE_IN*: Published when SPEECH_START occurs during
+      AGENT_PROCESSING or AGENT_SPEAKING state.  This is a composite
+      signal (implies SPEECH_START + interrupt request).
+
+   VAD signals are sent on the user→agent control track.
+   Implementations MAY perform VAD on the client, on the relay, or on
+   the agent backend.  When VAD is performed on the client, it SHOULD be
+   sent as Datagram for lowest latency.
+
+3.5.  Priority Assignment
+
+   The following priority assignments are RECOMMENDED for live agent
+   sessions (lower numeric value = higher priority):
+
+     +============================+==========+======================+
+     | Track/Signal               | Priority | Rationale            |
+     +============================+==========+======================+
+     | Control signals (BARGE_IN) | 0x00     | Must preempt all     |
+     |                            |          | other traffic        |
+     +----------------------------+----------+----------------------+
+     | Control signals (other)    | 0x01     | Turn management is   |
+     |                            |          | time-critical        |
+     +----------------------------+----------+----------------------+
+     | User audio input           | 0x02     | Agent cannot process |
+     |                            |          | without input        |
+     +----------------------------+----------+----------------------+
+     | Agent audio output         | 0x03     | Primary user-        |
+     |                            |          | perceived output     |
+     +----------------------------+----------+----------------------+
+     | Agent text output          | 0x04     | Secondary output     |
+     |                            |          | (lower bandwidth)    |
+     +----------------------------+----------+----------------------+
+     | Tool results               | 0x05     | Non-time-critical    |
+     |                            |          | structured data      |
+     +----------------------------+----------+----------------------+
+
+                 Table 3: Recommended Priority Assignment
+
+   Within agent output tracks, GROUP_ORDER SHOULD be set to descending
+   (deliver newest group first) so that relay congestion drops stale
+   turns rather than current ones.
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 22]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+4.  Track Structure and Naming
+
+4.1.  Namespace Convention
+
+   A live agent session uses the following namespace structure:
+
+   Track Namespace: moqt://{authority}/agent/{session-id}/
+
+   Where:
+
+   *  {authority} is the domain of the agent service.
+
+   *  {session-id} is a unique session identifier (RECOMMENDED: UUIDv7).
+
+4.2.  Track Names
+
+   The following track names are defined within a session namespace:
+
+      +===============+==============+==============================+
+      | Track Name    | Direction    | Content                      |
+      +===============+==============+==============================+
+      | input/audio   | User → Agent | User microphone audio (LOC)  |
+      +---------------+--------------+------------------------------+
+      | input/text    | User → Agent | User text messages           |
+      +---------------+--------------+------------------------------+
+      | output/audio  | Agent → User | TTS synthesized audio (LOC)  |
+      +---------------+--------------+------------------------------+
+      | output/text   | Agent → User | Streaming LLM text tokens    |
+      +---------------+--------------+------------------------------+
+      | output/tool   | Agent → User | Tool invocations and results |
+      +---------------+--------------+------------------------------+
+      | control/user  | User → Agent | User control signals         |
+      +---------------+--------------+------------------------------+
+      | control/agent | Agent → User | Agent control signals        |
+      +---------------+--------------+------------------------------+
+
+                       Table 4: Standard Track Names
+
+   Additional tracks MAY be defined for:
+
+   *  input/video: User camera input.
+
+   *  output/video: Agent avatar or visual output.
+
+   *  meta/catalog: Session catalog in MSF format [MSF].
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 23]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+4.3.  Catalog Integration
+
+   A live agent session SHOULD publish a catalog track conforming to the
+   MOQT Streaming Format [MSF].  The catalog declares:
+
+   *  Available tracks and their codec parameters.
+
+   *  Agent capabilities (supported input modalities, languages).
+
+   *  Session metadata (model identifier, context window size).
+
+   The catalog enables late-joining subscribers and relay-assisted
+   discovery of session characteristics.
+
+5.  Delivery Policies
+
+5.1.  Datagram vs Stream Selection
+
+    +============+===================+==========+=====================+
+    | Track      | Default Transport | Fallback | Condition           |
+    +============+===================+==========+=====================+
+    | control/*  | Datagram          | Stream   | Fast path plus      |
+    | (BARGE_IN) |                   | mirror   | reliable recovery   |
+    +------------+-------------------+----------+---------------------+
+    | control/*  | Stream            | —        | Reliable delivery   |
+    | (other)    |                   |          | needed              |
+    +------------+-------------------+----------+---------------------+
+    | input/     | Stream            | Datagram | If partial          |
+    | audio      |                   |          | reliability desired |
+    +------------+-------------------+----------+---------------------+
+    | output/    | Stream            | Datagram | For loss-tolerant   |
+    | audio      |                   |          | low-latency         |
+    +------------+-------------------+----------+---------------------+
+    | output/    | Stream            | —        | Must be reliable    |
+    | text       |                   |          |                     |
+    +------------+-------------------+----------+---------------------+
+    | output/    | Stream            | —        | Must be reliable    |
+    | tool       |                   |          |                     |
+    +------------+-------------------+----------+---------------------+
+
+                  Table 5: Transport Selection Guidelines
+
+6.  Relay Considerations
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 24]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+6.1.  Relay Transparency
+
+   This protocol is designed to operate through standard MOQT relays
+   without relay modification.  Relays treat live agent traffic as
+   normal MOQT objects with the following beneficial behaviors:
+
+   *  *Priority-based scheduling*: Relays respect publisher priority,
+      ensuring control signals and user audio are forwarded first under
+      congestion.
+
+   *  *Timeout-based expiry*: Relays discard Objects that exceed their
+      delivery timeout, preventing stale audio from consuming bandwidth.
+
+   *  *Group-order delivery*: With descending group order, relays under
+      congestion naturally shed older turns.
+
+6.2.  Caching Behavior
+
+   Relays MAY cache agent output Objects for the duration specified by
+   the MAX_CACHE_DURATION track property.  This enables:
+
+   *  Late-joining clients to receive the current turn's output.
+
+   *  Reconnecting clients to resume from where they left off.
+
+   Relays SHOULD NOT cache:
+
+   *  Control track Objects (they are ephemeral state transitions).
+
+   *  User audio input (privacy-sensitive, single-consumer).
+
+6.3.  Multi-Subscriber Scenarios
+
+   A single agent session MAY have multiple subscribers to output tracks
+   (e.g., accessibility tools, monitoring, recording).  The relay
+   naturally fans out agent output to all subscribers without additional
+   agent-side overhead.
+
+7.  Security Considerations
+
+7.1.  Authentication and Authorization
+
+   Live agent sessions MUST authenticate both the user and agent
+   endpoints.  The MOQT AUTHORIZATION_TOKEN parameter (Section 10.2.2 of
+   [MOQT]) SHOULD be used for per-track authorization.
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 25]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   User audio input tracks contain sensitive biometric data and MUST be
+   restricted to the intended agent subscriber.  Relays MUST enforce
+   subscription authorization for input tracks.
+
+7.2.  End-to-End Encryption
+
+   For deployments where relay operators are not fully trusted, agent
+   output tracks MAY use end-to-end encryption as defined in
+   [SECURE-OBJECTS].  Control tracks SHOULD NOT be E2E encrypted as
+   relay-level inspection may be needed for priority enforcement.
+
+7.3.  Privacy Considerations
+
+   *  User audio MUST NOT be cached by relays beyond the immediate
+      delivery requirement.
+
+   *  Session IDs MUST be cryptographically random (UUIDv7 with random
+      component) to prevent session correlation attacks.
+
+   *  Control signals (VAD events, barge-in) leak interaction timing
+      metadata.  Implementations MAY add padding to control track
+      Objects to mitigate traffic analysis.
+
+7.4.  Denial of Service
+
+   *  Barge-in signals are high-priority and processed immediately.
+      Implementations MUST rate-limit barge-in signals per session
+      (RECOMMENDED: maximum 10 per second) to prevent priority inversion
+      attacks.
+
+   *  Relays SHOULD enforce per-session bandwidth quotas to prevent a
+      single agent session from starving other traffic.
+
+8.  IANA Considerations
+
+8.1.  MOQT Track Property Registrations
+
+   This document registers the following track properties in the "MOQT
+   Track Properties" registry:
+
+
+
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 26]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+    +====================+=============+========+====================+
+    | Property Name      | Property ID | Type   | Description        |
+    +====================+=============+========+====================+
+    | AGENT_SESSION_ROLE | TBD         | varint | 0=user, 1=agent    |
+    +--------------------+-------------+--------+--------------------+
+    | TURN_GROUP_ORDER   | TBD         | varint | Confirms           |
+    |                    |             |        | Group=Turn mapping |
+    +--------------------+-------------+--------+--------------------+
+
+                  Table 6: Track Property Registrations
+
+8.2.  Control Signal Type Registry
+
+   IANA is requested to create a "Live Agent Control Signal Types"
+   registry under the "Media over QUIC (MoQ)" group.  The registration
+   procedure is Specification Required.
+
+   Initial registrations:
+
+                  +=======+===============+=============+
+                  | Value | Signal Name   | Reference   |
+                  +=======+===============+=============+
+                  | 0x01  | SPEECH_START  | Section 3.4 |
+                  +-------+---------------+-------------+
+                  | 0x02  | SPEECH_END    | Section 3.4 |
+                  +-------+---------------+-------------+
+                  | 0x03  | BARGE_IN      | Section 3.3 |
+                  +-------+---------------+-------------+
+                  | 0x04  | TURN_STARTED  | Section 3.1 |
+                  +-------+---------------+-------------+
+                  | 0x05  | TURN_COMPLETE | Section 3.1 |
+                  +-------+---------------+-------------+
+                  | 0x06  | INTERRUPT_ACK | Section 3.3 |
+                  +-------+---------------+-------------+
+                  | 0x07  | THINKING      | Section 3.2 |
+                  +-------+---------------+-------------+
+
+                   Table 7: Control Signal Type Registry
+
+   Values 0x08-0xFF are available for assignment.
+
+8.3.  Object Payload Flags Registry
+
+   IANA is requested to create a "Live Agent Object Flags" registry.
+
+   Initial registrations:
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 27]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+         +=====+===========+=========================+===========+
+         | Bit | Flag Name | Description             | Reference |
+         +=====+===========+=========================+===========+
+         | 0   | PARTIAL   | Object is intermediate; | This      |
+         |     |           | final not yet signaled  | document  |
+         +-----+-----------+-------------------------+-----------+
+         | 1   | FINAL     | Object is definitive    | This      |
+         |     |           |                         | document  |
+         +-----+-----------+-------------------------+-----------+
+         | 2   | CANCELLED | Object indicates        | This      |
+         |     |           | interruption            | document  |
+         +-----+-----------+-------------------------+-----------+
+
+                       Table 8: Object Flags Registry
+
+9.  References
+
+9.1.  Normative References
+
+   [LOC]      Zanaty, M., Nandakumar, S., and P. Thatcher, "Low Overhead
+              Media Container", Work in Progress, Internet-Draft, draft-
+              ietf-moq-loc-02, 15 March 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-
+              02>.
+
+   [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-18, 12 May 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-18>.
+
+   [QUIC]     Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+9.2.  Informative References
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 28]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   [A2A]      Liu, D. and S. Krishnan, "Agent Protocol over MoQ", Work
+              in Progress, Internet-Draft, draft-liu-agent-protocol-
+              over-moq-00, 2 March 2026,
+              <https://datatracker.ietf.org/doc/html/draft-liu-agent-
+              protocol-over-moq-00>.
+
+   [MSF]      Law, W. and S. Nandakumar, "MOQT Streaming Format", Work
+              in Progress, Internet-Draft, draft-ietf-moq-msf-01, 2 June
+              2026, <https://datatracker.ietf.org/doc/html/draft-ietf-
+              moq-msf-01>.
+
+   [SECURE-OBJECTS]
+              Jennings, C. F., Nandakumar, S., and R. Barnes, "End-to-
+              End Secure Objects for Media over QUIC Transport", Work in
+              Progress, Internet-Draft, draft-ietf-moq-secure-objects-
+              00, 2 March 2026, <https://datatracker.ietf.org/doc/html/
+              draft-ietf-moq-secure-objects-00>.
+
+Appendix A.  Interaction Examples
+
+A.1.  Basic Voice Conversation Turn
+
+Time  User Device              Relay          Agent Backend
+ |
+ |    [User speaks: "What's the weather?"]
+ |
+ t0   PUBLISH input/audio Group=1 ------>-----> ASR processes
+ t0   Control: SPEECH_START ----------->------>
+ |
+ t1   [User stops speaking]
+ t1   Control: SPEECH_END ------------->------>
+ |                                              LLM generates response
+ t2                            <------<------- Control: TURN_STARTED
+ t2                            <------<------- PUBLISH output/text
+ |                                              Group=1, Subgroup=0
+ |                                              Object 0: "The weather"
+ |                                              Object 1: " in Hangzhou"
+ |                                              Object 2: " is sunny,"
+ t3                            <------<------- PUBLISH output/audio
+ |                                              Group=1, Subgroup=0
+ |                                              [TTS: "The weather in
+ |                                               Hangzhou is sunny,"]
+ |
+ t4                            <------<------- Object (text, final):
+ |                                              " 28°C today."
+ t4                            <------<------- Control: TURN_COMPLETE
+
+                 Figure 11: Basic Voice Turn Example
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 29]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+A.2.  Barge-in During Agent Response
+
+Time  User Device              Relay          Agent Backend
+ |
+ |    [Agent is speaking: "The weather forecast shows..."]
+ |    [Agent output: Group=1, currently at Subgroup=2]
+ |
+ t0   [User interrupts: "Stop, just tell me temperature"]
+ t0   Control: BARGE_IN (turn=1) ----->------> received
+ |
+ t1                                            [stops TTS generation]
+ t1                            <------<------- Control: INTERRUPT_ACK
+ |                                              {interrupted: G=1,SG=2,O=5}
+ t1                            <------<------- Text Object(cancelled)
+ t1                            <------<------- Audio subgroup FIN
+ |
+ t2   PUBLISH input/audio Group=2 ---->------> ASR: "just tell me temp"
+ t2   Control: SPEECH_START ---------->------>
+ |
+ t3   Control: SPEECH_END ------------>------>
+ |                                              LLM: context includes
+ |                                              interrupted response
+ t4                            <------<------- Control: TURN_STARTED
+ t4                            <------<------- Text Group=2: "It's 28°C."
+ t4                            <------<------- Audio Group=2: [TTS]
+ t5                            <------<------- Control: TURN_COMPLETE
+
+                     Figure 12: Barge-in Example
+
+A.3.  Concurrent Text and Audio Delivery
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 30]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   Time  Subscriber View (User Device)
+    |
+    t0   [Subscribe to output/text AND output/audio, same Group ID]
+    |
+    t1   Text Object arrives: "The answer is"     → render immediately
+    t2   Text Object arrives: " forty-two."       → append to display
+    |
+    t3   Audio Object arrives: [TTS "The answer"] → begin playback
+    |    Text highlighting: "The answer" underlined (via align_seq)
+    |
+    t4   Audio Object arrives: [TTS "is forty"]   → continue playback
+    |    Text highlighting advances: "is forty"
+    |
+    t5   Audio Object arrives: [TTS "-two."]      → finish playback
+    |    Text highlighting: "-two."
+    |
+    |    [Text arrived ~200ms before audio — user saw text first,
+    |     then heard it spoken, with synchronized highlighting]
+
+               Figure 13: Cross-Track Synchronization Example
+
+Appendix B.  Design Rationale
+
+B.1.  Why Not a Custom Frame Layer
+
+   This document maps directly to the native MOQT object model rather
+   than introducing a custom frame layer because:
+
+   *  MOQT Groups/Subgroups already provide the sequencing and
+      boundaries needed for turns and inference steps.
+
+   *  MOQT delivery timeouts and priorities operate at the Object level,
+      which is the right granularity for inference delivery.
+
+   *  Standard MOQT relays can handle live agent traffic without
+      modification or frame parsing.
+
+   *  Reusing the object model means existing MOQT tooling (monitoring,
+      debugging, relay management) works unchanged.
+
+B.2.  Why Group = Turn
+
+   Alternatives considered:
+
+   *  *Group = entire session*: Loses the ability to discard stale turns
+      and prevents Group-level priority ordering.
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 31]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   *  *Group = single inference step*: Too fine-grained; creates
+      excessive Group metadata overhead and prevents turn-level
+      operations.
+
+   *  *Group = time window (e.g., 1 second)*: Arbitrary boundary that
+      doesn't align with application semantics; complicates barge-in.
+
+   Group = Turn provides the natural boundary for: - What to discard
+   when interrupted (the current turn). - What to prioritize (the latest
+   turn). - What to cache for late-joiners (the most recent complete
+   turn).
+
+B.3.  Why Separate Control Track
+
+   Embedding control signals in-band with media or text Objects was
+   considered but rejected because:
+
+   *  Control signals require different delivery characteristics.
+      BARGE_IN uses a Datagram fast path with a reliable control-track
+      mirror, while other turn-management signals use the reliable
+      control track directly.
+
+   *  Relays can apply priority to entire tracks but not to individual
+      Objects within a track.
+
+   *  Subscribers may want control-only subscription (e.g., turn status
+      for UI state management without receiving media).
+
+Appendix C.  Acknowledgements
+
+   The authors would like to thank the participants of the MoQ working
+   group for their contributions to the underlying transport protocol
+   that makes this work possible.
+
+Authors' Addresses
+
+   Yanmei Liu
+   Alibaba Inc.
+   Email: miaoji.lym@alibaba-inc.com
+
+   Additional contact information:
+
+      刘彦梅
+      Alibaba Inc.
+
+
+   Dapeng Liu
+   Alibaba Cloud
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 32]
+
+Internet-Draft             Live Agent over MoQ                 July 2026
+
+
+   Email: max.ldp@alibaba-inc.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Liu & Liu                Expires 4 January 2027                [Page 33]

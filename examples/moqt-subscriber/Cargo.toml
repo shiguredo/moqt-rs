@@ -1,0 +1,46 @@
+[package]
+name = "moqt-subscriber"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[dependencies]
+# 時雨堂クレート
+
+# AV1 デコーダ (dav1d)
+shiguredo_dav1d = "2026.2"
+# HTTP/3 / WebTransport クライアント
+shiguredo_http3 = "2026.1.0-canary.9"
+# MoQT 本体 (ローカル参照)
+shiguredo_moqt = { path = "../../" }
+# Opus デコーダ
+shiguredo_opus = "2026.2"
+
+# examples 共有トランスポート crate (QUIC / WebTransport)
+moqt-example-transport = { path = "../moqt-transport" }
+
+# 外部クレート
+
+# バイト列操作
+bytes = "1.12"
+# CLI 引数パース
+noargs = "0.4"
+# 映像プレイヤー (メインスレッド実行)
+raw_player = "2026.2"
+# QUIC クライアント
+s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+# Tokio タスクメトリクス計測
+tokio-metrics = "0.5"
+# 非同期ユーティリティ (graceful shutdown, rate limit, pool)
+tokio-utils = "0.1"
+# ログ出力
+tracing = "0.1"
+# ログのフィルタリングと購読
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# H.264 / H.265 ハードウェアデコーダ (Apple Video Toolbox)
+shiguredo_video_toolbox = "2026.1"

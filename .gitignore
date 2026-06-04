@@ -1,0 +1,11 @@
+target/
+fuzz/Cargo.lock
+*.proptest-regressions
+
+# Agents
+.claude/
+.codex/
+.qwen/
+
+# macOS
+.DS_Store

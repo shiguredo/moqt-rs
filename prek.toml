@@ -1,0 +1,87 @@
+# prek の設定ファイル
+# https://prek.j178.dev
+#:schema https://www.schemastore.org/prek.json
+
+minimum_prek_version = "0.4.0"
+
+# refs/ は参照仕様書、Cargo.lock は cargo が生成・管理するためフック対象外
+# (target/ は .gitignore でステージされないため exclude 不要)
+exclude = { glob = ["refs/**", "Cargo.lock"] }
+
+# 設定ファイル自体の健全性を検証する meta フック
+[[repos]]
+repo = "meta"
+hooks = [
+  # 全フックが少なくとも 1 ファイルに適用されることを確認する (デッドフック検出)
+  { id = "check-hooks-apply" },
+  # exclude パターンが実在ファイルを除外していることを確認する (無意味な exclude 検出)
+  { id = "check-useless-excludes" },
+]
+
+# tombi: TOML のフォーマッタ・リンタ
+[[repos]]
+repo = "https://github.com/tombi-toml/tombi-pre-commit"
+rev = "v1.5.2"
+hooks = [
+  { id = "tombi-lint" },
+  { id = "tombi-format" },
+]
+
+# markdownlint-cli2: Markdown のリンタ
+# (設定は .markdownlint.jsonc を参照する)
+[[repos]]
+repo = "https://github.com/DavidAnson/markdownlint-cli2"
+rev = "v0.23.2"
+hooks = [
+  { id = "markdownlint-cli2" },
+]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-toml" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files" },
+  { id = "detect-private-key" },
+  { id = "check-case-conflict" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+  { id = "fix-byte-order-marker" },
+  { id = "check-symlinks" },
+  { id = "destroyed-symlinks" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "cargo-fmt",
+    name = "cargo fmt",
+    entry = "cargo fmt --all -- --check",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false,
+    priority = 0,
+  },
+  {
+    id = "cargo-clippy",
+    name = "cargo clippy",
+    entry = "cargo clippy --workspace --all-targets -- -D warnings",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false,
+    priority = 10,
+  },
+  {
+    id = "cargo-test",
+    name = "cargo test",
+    entry = "cargo test --workspace",
+    language = "system",
+    types = ["rust"],
+    pass_filenames = false,
+    priority = 20,
+    # テストは実行コストが高いため commit 時ではなく push 時のみ実行する
+    stages = ["pre-push"],
+  },
+]

@@ -1,0 +1,30 @@
+[package]
+name = "shiguredo_moqt"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Sans-I/O Rust library for Media over QUIC Transport (MoQT)"
+readme = "README.md"
+repository = "https://github.com/shiguredo/moqt-rs"
+license = "Apache-2.0"
+include = ["/LICENSE", "/README.md", "/src/**"]
+
+[workspace]
+members = [
+  "examples/moqt-publisher",
+  "examples/moqt-subscriber",
+  "examples/moqt-transport",
+  "pbt",
+]
+exclude = ["fuzz"]
+
+[dependencies]
+# no_std 環境向けハッシュマップ
+hashbrown = "0.17"
+# no_std 環境向け DEFLATE / GZIP 圧縮・展開 (MSF Timeline の payload 圧縮に使用する)
+# draft-ietf-moq-msf-01 §7.1 (Media Timeline track payload) / §8.1 (Event Timeline data format)
+noflate = "0.1"
+# no_std 環境向け JSON パース / 生成 (MSF Catalog / Timeline の encode / decode に使用する)
+# draft-ietf-moq-msf-01 §5 (Catalog) / §7 (Media Timeline) / §8 (Event Timeline)
+# nojson の default feature (std) を無効化して no_std ビルドを通す
+nojson = { version = "0.3", default-features = false }
