@@ -1,0 +1,165 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[[bin]]
+doc = false
+name = "fuzz_decode_varint"
+path = "fuzz_targets/fuzz_decode_varint.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_message"
+path = "fuzz_targets/fuzz_decode_message.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_subgroup_header"
+path = "fuzz_targets/fuzz_decode_subgroup_header.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_subgroup_object"
+path = "fuzz_targets/fuzz_decode_subgroup_object.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_fetch_header"
+path = "fuzz_targets/fuzz_decode_fetch_header.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_fetch_stream_entry"
+path = "fuzz_targets/fuzz_decode_fetch_stream_entry.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_object_datagram"
+path = "fuzz_targets/fuzz_decode_object_datagram.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_setup_options"
+path = "fuzz_targets/fuzz_decode_setup_options.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_message_parameters"
+path = "fuzz_targets/fuzz_decode_message_parameters.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_track_properties"
+path = "fuzz_targets/fuzz_decode_track_properties.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_loc_properties"
+path = "fuzz_targets/fuzz_decode_loc_properties.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_object_properties"
+path = "fuzz_targets/fuzz_decode_object_properties.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_msf_timeline_gzip"
+path = "fuzz_targets/fuzz_decode_msf_timeline_gzip.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_msf_catalog"
+path = "fuzz_targets/fuzz_decode_msf_catalog.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_msf_media_timeline"
+path = "fuzz_targets/fuzz_decode_msf_media_timeline.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_msf_event_timeline"
+path = "fuzz_targets/fuzz_decode_msf_event_timeline.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_encode_msf_event_timeline"
+path = "fuzz_targets/fuzz_encode_msf_event_timeline.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_message_decoder"
+path = "fuzz_targets/fuzz_message_decoder.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_subgroup_stream_decoder"
+path = "fuzz_targets/fuzz_subgroup_stream_decoder.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_fetch_stream_decoder"
+path = "fuzz_targets/fuzz_fetch_stream_decoder.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_parse_name"
+path = "fuzz_targets/fuzz_parse_name.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_roundtrip"
+path = "fuzz_targets/fuzz_roundtrip.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_session"
+path = "fuzz_targets/fuzz_session.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_fetch_stream_encoder"
+path = "fuzz_targets/fuzz_fetch_stream_encoder.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_msf_uri"
+path = "fuzz_targets/fuzz_msf_uri.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_msf_apply_delta"
+path = "fuzz_targets/fuzz_msf_apply_delta.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_msf_template"
+path = "fuzz_targets/fuzz_msf_template.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_object_trackers"
+path = "fuzz_targets/fuzz_object_trackers.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_subgroup_tracker"
+path = "fuzz_targets/fuzz_subgroup_tracker.rs"
+
+[dependencies]
+# 構造化入力生成に使用 (Arbitrary derive)
+arbitrary = { version = "1.4", features = ["derive"] }
+# fuzz ターゲットのランタイム
+libfuzzer-sys = "0.4"
+
+[dependencies.shiguredo_moqt]
+path = ".."

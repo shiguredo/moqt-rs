@@ -1,0 +1,1254 @@
+use super::auth_token_cache::AuthTokenCache;
+use super::core::Session;
+use super::namespace::prefix_overlaps;
+use super::request_id::{MAX_OUT_OF_ORDER_REQUEST_IDS, RequestIdGenerator, RequestIdTracker};
+use super::subscription::validation::extract_forward_state;
+use super::types::*;
+use alloc::vec;
+
+use crate::error::{SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_INVALID_REQUEST_ID};
+use crate::message::common::TrackNamespace;
+use crate::message_parameter::{
+    MessageParameter, MessageParameterValue, MessageParameters, PARAM_LOCATION_FILTER,
+};
+use crate::{message::common::Location, message_parameter::LocationFilter};
+
+/// FETCH の range 指定 (AbsoluteRangeWithEnd) を持つ MessageParameters を作る
+///
+/// draft-ietf-moq-transport-21 §9.11 (FETCH): range は LOCATION_FILTER
+/// パラメータで指定する。`end.group_id < start.group_id` の場合は delta が
+/// 求まらないため panic する (テストフィクスチャの前提)。
+fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
+    let end_group_delta = end.group_id - start.group_id;
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LengthPrefixed(
+            LocationFilter::AbsoluteRangeWithEnd {
+                start,
+                end_group_delta,
+                end_object: end.object_id,
+            }
+            .encode_to_bytes(),
+        ),
+    });
+    params
+}
+
+#[test]
+fn auth_token_cache_register_and_resolve() {
+    let mut cache = AuthTokenCache::new(1024);
+    assert!(
+        cache
+            .try_register(1, 10, vec![1, 2, 3])
+            .expect("テストフィクスチャの前提条件を満たす")
+    );
+    assert_eq!(cache.resolve(1), Some((10, &[1, 2, 3][..])));
+    assert_eq!(cache.total_size(), 16 + 3);
+}
+
+#[test]
+fn auth_token_cache_duplicate_alias() {
+    let mut cache = AuthTokenCache::new(1024);
+    cache
+        .try_register(1, 10, vec![1])
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = cache
+        .try_register(1, 20, vec![2])
+        .expect_err("重複した alias の登録は失敗するはず");
+    assert_eq!(err.code, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS);
+}
+
+#[test]
+fn auth_token_cache_overflow_returns_false() {
+    let mut cache = AuthTokenCache::new(16);
+    assert!(
+        cache
+            .try_register(1, 10, vec![])
+            .expect("テストフィクスチャの前提条件を満たす")
+    );
+    assert!(
+        !cache
+            .try_register(2, 20, vec![0])
+            .expect("テストフィクスチャの前提条件を満たす")
+    );
+}
+
+#[test]
+fn auth_token_cache_delete() {
+    let mut cache = AuthTokenCache::new(1024);
+    cache
+        .try_register(1, 10, vec![1, 2, 3])
+        .expect("テストフィクスチャの前提条件を満たす");
+    cache.delete(1);
+    assert!(cache.resolve(1).is_none());
+    assert_eq!(cache.total_size(), 0);
+}
+
+#[test]
+fn request_id_generator_client_yields_even() {
+    let mut generator = RequestIdGenerator::new(Role::Client);
+    assert_eq!(generator.peek(), 0);
+    assert_eq!(generator.next_id(), 0);
+    assert_eq!(generator.next_id(), 2);
+    assert_eq!(generator.next_id(), 4);
+    assert_eq!(generator.peek(), 6);
+}
+
+#[test]
+fn request_id_generator_server_yields_odd() {
+    let mut generator = RequestIdGenerator::new(Role::Server);
+    assert_eq!(generator.next_id(), 1);
+    assert_eq!(generator.next_id(), 3);
+}
+
+#[test]
+fn peer_request_tracker_rejects_wrong_parity() {
+    let mut tracker = RequestIdTracker::new(Role::Server);
+    let err = tracker
+        .accept(0)
+        .expect_err("parity が一致しない request_id は拒否されるはず");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    assert!(tracker.accept(1).is_ok());
+}
+
+#[test]
+fn peer_request_tracker_rejects_duplicate() {
+    let mut tracker = RequestIdTracker::new(Role::Client);
+    tracker
+        .accept(4)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = tracker
+        .accept(4)
+        .expect_err("重複した request_id は拒否されるはず");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+}
+
+#[test]
+fn forward_parameter_default_is_one() {
+    let params = MessageParameters::new();
+    assert_eq!(extract_forward_state(&params), 1);
+}
+
+#[test]
+fn prefix_overlaps_detection() {
+    let a = TrackNamespace::new(vec![b"a".to_vec()]).expect("テストフィクスチャの前提条件を満たす");
+    let ab = TrackNamespace::new(vec![b"a".to_vec(), b"b".to_vec()])
+        .expect("テストフィクスチャの前提条件を満たす");
+    let c = TrackNamespace::new(vec![b"c".to_vec()]).expect("テストフィクスチャの前提条件を満たす");
+    let empty = TrackNamespace::new(vec![]).expect("テストフィクスチャの前提条件を満たす");
+    assert!(prefix_overlaps(&a, &ab));
+    assert!(prefix_overlaps(&ab, &a));
+    assert!(!prefix_overlaps(&a, &c));
+    assert!(prefix_overlaps(&empty, &a));
+}
+
+/// forget_subscription が datagram の object header 提供完了追跡エントリを掃除する
+///
+/// draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability) は object header 提供完了
+/// 時刻の保持 (MUST) と timeout 超過での drop (MUST) を規定する。drop 時にエントリを
+/// 削除すると同じオブジェクトの再送が新しい object header 提供完了時刻として記録され判定がリセット
+/// されるため、本実装では subscription の forget まで保持し、forget 時に掃除する。
+#[test]
+fn forget_subscription_cleans_datagram_header_complete_entries() {
+    use crate::error::REQUEST_INTERNAL_ERROR;
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::SetupOptions;
+    use crate::session::types::SessionState;
+    use crate::track_properties::{
+        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties, TrackProperty, TrackPropertyValue,
+    };
+
+    // Session を Established にする (QUIC / client)
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // OBJECT_DELIVERY_TIMEOUT=500 を持つ PUBLISH を送信して Pending(Publisher) を作る
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
+        value: TrackPropertyValue::VarInt(500),
+    });
+    let rid = client
+        .send_publish(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            track_properties,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    // REQUEST_OK を注入して Established にする
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // datagram を送信して object header 提供完了エントリを作る (timeout が設定されているため)
+    client
+        .send_object_datagram(rid, 0, 0, None, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 他 request のエントリ (掃除対象外) も混在させる。tick 未確定 (None) のエントリも含める
+    client
+        .timing
+        .datagram_header_complete_ms
+        .insert((9999, 0, 0), Some(100));
+    client
+        .timing
+        .datagram_header_complete_ms
+        .insert((9999, 0, 1), None);
+    assert!(
+        client
+            .timing
+            .datagram_header_complete_ms
+            .contains_key(&(rid, 0, 0)),
+        "datagram 送信で object header 提供完了エントリが作られること"
+    );
+
+    // subscription を Terminated にして forget する
+    client
+        .send_request_error(
+            rid,
+            REQUEST_INTERNAL_ERROR,
+            0,
+            crate::message::ReasonPhrase::new("rejected")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let sub = client
+        .forget_subscription(rid)
+        .expect("cleanup_ready な subscription は forget できること");
+    assert_eq!(sub.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client
+            .timing
+            .datagram_header_complete_ms
+            .contains_key(&(rid, 0, 0)),
+        "forget_subscription で該当 request の datagram object header 提供完了エントリが掃除されること"
+    );
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.len(),
+        2,
+        "他 request のエントリは残ること"
+    );
+}
+
+/// forget 系 API が REQUEST_UPDATE のクレジットカウントエントリを掃除する
+///
+/// draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES) のクレジット管理に使う
+/// `outgoing_request_updates` / `incoming_request_updates` は request の終端時に
+/// 掃除されずセッション寿命まで残る。送信側エントリは peer の SETUP の
+/// MAX_REQUEST_UPDATES > 0 宣言時のみ、受信側エントリは local の SETUP の
+/// MAX_REQUEST_UPDATES > 0 宣言時のみ生成される。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn forget_subscription_cleans_request_update_credit_entries() {
+    use crate::error::REQUEST_INTERNAL_ERROR;
+    use crate::message::{ControlMessage, ReasonPhrase, RequestOk, RequestUpdate, Setup};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_FORWARD};
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // PUBLISH を送信して Pending(Publisher) を作り、REQUEST_OK で Established にする
+    let rid = client
+        .send_publish(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 送信側エントリ: REQUEST_UPDATE を送信する (subscription で許可される FORWARD を載せる)
+    let mut update_params = MessageParameters::new();
+    update_params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(1),
+    });
+    client
+        .send_request_update(rid, update_params.clone())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // 受信側エントリ: REQUEST_UPDATE を受信する
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: rid,
+                parameters: update_params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.incoming_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 受信で incoming エントリが生成されること"
+    );
+
+    // 他 request のエントリ (掃除対象外) も混在させる
+    client.outgoing_request_updates.insert(9999, 1);
+    client.incoming_request_updates.insert(9999, 1);
+
+    // subscription を Terminated にして forget する
+    client
+        .send_request_error(
+            rid,
+            REQUEST_INTERNAL_ERROR,
+            0,
+            ReasonPhrase::new("rejected").expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let sub = client
+        .forget_subscription(rid)
+        .expect("cleanup_ready な subscription は forget できること");
+    assert_eq!(sub.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client.outgoing_request_updates.contains_key(&rid),
+        "forget_subscription で該当 request の outgoing エントリが掃除されること"
+    );
+    assert!(
+        !client.incoming_request_updates.contains_key(&rid),
+        "forget_subscription で該当 request の incoming エントリが掃除されること"
+    );
+    assert_eq!(
+        client.outgoing_request_updates.len(),
+        1,
+        "他 request の outgoing エントリは残ること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.len(),
+        1,
+        "他 request の incoming エントリは残ること"
+    );
+}
+
+/// fetch の forget が REQUEST_UPDATE のクレジットカウントエントリを掃除する
+///
+/// `forget_subscription_cleans_request_update_credit_entries` の fetch 版。
+/// FETCH の REQUEST_UPDATE は subscriber 役のみが送信でき (draft §9.11)、受信は
+/// publisher 役限定のため incoming は生成しない。受信側エントリの掃除は publisher 役の
+/// subscription テストで検証済み。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn forget_fetch_cleans_request_update_credit_entries() {
+    use crate::message::{ControlMessage, FetchOk, Setup, common::Location};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // FETCH を送信して FETCH_OK で Established にする
+    let rid = client
+        .send_fetch(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 10,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::FetchOk(FetchOk {
+                end_of_track: 0,
+                end_location: Location {
+                    group_id: 10,
+                    object_id: 0,
+                },
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 送信側エントリ: REQUEST_UPDATE を送信する (FETCH の REQUEST_UPDATE は
+    // パラメータなしでも成立する)
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // 他 request のエントリ (掃除対象外) も混在させる。受信側エントリ (incoming) は
+    // subscriber 役の fetch では REQUEST_UPDATE を受信できないため生成しない
+    // (incoming の掃除は publisher 役の subscription テストで検証済み)
+    client.outgoing_request_updates.insert(9999, 1);
+    client.incoming_request_updates.insert(9999, 1);
+
+    // bidi request stream を閉じて Terminated にして forget する
+    client
+        .recv_request_stream_closed(rid, crate::session::types::RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch = client
+        .forget_fetch(rid)
+        .expect("Terminated な fetch は forget できること");
+    assert_eq!(fetch.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client.outgoing_request_updates.contains_key(&rid),
+        "forget_fetch で該当 request の outgoing エントリが掃除されること"
+    );
+    assert_eq!(
+        client.outgoing_request_updates.len(),
+        1,
+        "他 request の outgoing エントリは残ること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.len(),
+        1,
+        "他 request の incoming エントリは残ること"
+    );
+}
+
+/// cleanup 不可状態の subscription では forget してもクレジットエントリが残ること
+///
+/// `forget_subscription` は cleanup_ready (Terminated かつ drain 終了等) でない限り
+/// `None` を返し、掃除も行わない。Established の subscription は REQUEST_UPDATE の
+/// 送受信が可能なため、エントリ生成後に forget が失敗しても両エントリが残ることを
+/// 検証する。namespace 系 3 種は Pending 状態でのみ forget が `None` を返すが、
+/// Pending では REQUEST_UPDATE が禁止されエントリを生成できないため、同型の検証は
+/// 構築できない。
+#[test]
+fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
+    use crate::message::{ControlMessage, RequestOk, RequestUpdate, Setup};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_FORWARD};
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // PUBLISH を送信して REQUEST_OK で Established にする (cleanup 不可の状態)
+    let rid = client
+        .send_publish(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // エントリを生成する (送信側: REQUEST_UPDATE 送信、受信側: REQUEST_UPDATE 受信)
+    let mut update_params = MessageParameters::new();
+    update_params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(1),
+    });
+    client
+        .send_request_update(rid, update_params.clone())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: rid,
+                parameters: update_params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid)
+            && client.incoming_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送受信で両エントリが生成されること"
+    );
+
+    // Established のまま forget すると None が返り、エントリは掃除されない
+    assert!(
+        client.forget_subscription(rid).is_none(),
+        "cleanup 不可の subscription は forget できないこと"
+    );
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid)
+            && client.incoming_request_updates.contains_key(&rid),
+        "forget 失敗時は両エントリが残ること"
+    );
+}
+
+/// cleanup 不可状態の fetch では forget してもクレジットエントリが残ること
+///
+/// `forget_fetch` は subscriber 側の fetch が Terminated でない限り `None` を返し、
+/// 掃除も行わない。Established の fetch は REQUEST_UPDATE の送信が可能なため、
+/// エントリ生成後に forget が失敗しても outgoing エントリが残ることを検証する。
+/// incoming エントリは subscriber 役の fetch では生成できないため対象外。
+#[test]
+fn forget_fetch_does_not_clean_credit_entries_when_not_finished() {
+    use crate::message::{ControlMessage, FetchOk, Setup, common::Location};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // FETCH を送信して FETCH_OK で Established にする (cleanup 不可の状態)
+    let rid = client
+        .send_fetch(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 10,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::FetchOk(FetchOk {
+                end_of_track: 0,
+                end_location: Location {
+                    group_id: 10,
+                    object_id: 0,
+                },
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // エントリを生成する (送信側: REQUEST_UPDATE 送信)
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // Established のまま forget すると None が返り、エントリは掃除されない
+    assert!(
+        client.forget_fetch(rid).is_none(),
+        "cleanup 不可の fetch は forget できないこと"
+    );
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "forget 失敗時は outgoing エントリが残ること"
+    );
+}
+
+/// namespace publication の forget が REQUEST_UPDATE のクレジットカウントエントリを掃除する
+///
+/// `forget_subscription_cleans_request_update_credit_entries` の namespace publication 版。
+/// PUBLISH_NAMESPACE の REQUEST_UPDATE は publisher 役のみが送信でき (draft
+/// §9.14)、受信は subscriber 役限定のため incoming は生成しない。受信側エントリの
+/// 掃除は publisher 役の subscription テストで検証済み。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn forget_namespace_publication_cleans_request_update_credit_entries() {
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // PUBLISH_NAMESPACE を送信して REQUEST_OK で Established にする
+    let rid = client
+        .send_publish_namespace(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 送信側エントリ: REQUEST_UPDATE を送信する (PUBLISH_NAMESPACE の REQUEST_UPDATE は
+    // パラメータなしでも成立する)
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // 他 request のエントリ (掃除対象外) も混在させる。受信側エントリ (incoming) は
+    // publisher 役の namespace publication では REQUEST_UPDATE を受信できないため生成
+    // しない (incoming の掃除は publisher 役の subscription テストで検証済み)
+    client.outgoing_request_updates.insert(9999, 1);
+    client.incoming_request_updates.insert(9999, 1);
+
+    // bidi request stream を閉じて Terminated にして forget する
+    client
+        .recv_request_stream_closed(rid, crate::session::types::RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let publication = client
+        .forget_namespace_publication(rid)
+        .expect("Terminated な namespace publication は forget できること");
+    assert_eq!(publication.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client.outgoing_request_updates.contains_key(&rid),
+        "forget_namespace_publication で該当 request の outgoing エントリが掃除されること"
+    );
+    assert_eq!(
+        client.outgoing_request_updates.len(),
+        1,
+        "他 request の outgoing エントリは残ること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.len(),
+        1,
+        "他 request の incoming エントリは残ること"
+    );
+}
+
+/// namespace subscription の forget が REQUEST_UPDATE のクレジットカウントエントリを掃除する
+///
+/// `forget_subscription_cleans_request_update_credit_entries` の namespace subscription 版。
+/// SUBSCRIBE_NAMESPACE の REQUEST_UPDATE は subscriber 役のみが送信でき (draft
+/// §9.15)、受信は publisher 役限定のため incoming は生成しない。受信側エントリの
+/// 掃除は publisher 役の subscription テストで検証済み。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn forget_namespace_subscription_cleans_request_update_credit_entries() {
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // SUBSCRIBE_NAMESPACE を送信して REQUEST_OK で Established にする
+    let rid = client
+        .send_subscribe_namespace(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 送信側エントリ: REQUEST_UPDATE を送信する (SUBSCRIBE_NAMESPACE の REQUEST_UPDATE
+    // はパラメータなしでも成立する)
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // 他 request のエントリ (掃除対象外) も混在させる。受信側エントリ (incoming) は
+    // subscriber 役の namespace subscription では REQUEST_UPDATE を受信できないため
+    // 生成しない (incoming の掃除は publisher 役の subscription テストで検証済み)
+    client.outgoing_request_updates.insert(9999, 1);
+    client.incoming_request_updates.insert(9999, 1);
+
+    // bidi request stream を閉じて Terminated にして forget する
+    client
+        .recv_request_stream_closed(rid, crate::session::types::RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let subscription = client
+        .forget_namespace_subscription(rid)
+        .expect("Terminated な namespace subscription は forget できること");
+    assert_eq!(subscription.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client.outgoing_request_updates.contains_key(&rid),
+        "forget_namespace_subscription で該当 request の outgoing エントリが掃除されること"
+    );
+    assert_eq!(
+        client.outgoing_request_updates.len(),
+        1,
+        "他 request の outgoing エントリは残ること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.len(),
+        1,
+        "他 request の incoming エントリは残ること"
+    );
+}
+
+/// track subscription の forget が REQUEST_UPDATE のクレジットカウントエントリを掃除する
+///
+/// `forget_subscription_cleans_request_update_credit_entries` の track subscription 版。
+/// SUBSCRIBE_TRACKS の REQUEST_UPDATE は subscriber 役のみが送信でき (draft
+/// §9.18)、受信は publisher 役限定のため incoming は生成しない。受信側エントリの
+/// 掃除は publisher 役の subscription テストで検証済み。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn forget_track_subscription_cleans_request_update_credit_entries() {
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::SessionState;
+    use crate::track_properties::TrackProperties;
+
+    // Session を Established にする (MAX_REQUEST_UPDATES = 1 を local / peer 両方に設定)
+    let mut local_opts = SetupOptions::new();
+    local_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut peer_opts = SetupOptions::new();
+    peer_opts.push(SetupOption {
+        option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+        value: SetupOptionValue::VarInt(1),
+    });
+    let mut client = Session::new_client(Transport::Quic, local_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup { options: peer_opts }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // SUBSCRIBE_TRACKS を送信して REQUEST_OK で Established にする
+    let rid = client
+        .send_subscribe_tracks(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 送信側エントリ: REQUEST_UPDATE を送信する (SUBSCRIBE_TRACKS の REQUEST_UPDATE は
+    // パラメータなしでも成立する)
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.outgoing_request_updates.contains_key(&rid),
+        "REQUEST_UPDATE 送信で outgoing エントリが生成されること"
+    );
+
+    // 他 request のエントリ (掃除対象外) も混在させる。受信側エントリ (incoming) は
+    // subscriber 役の track subscription では REQUEST_UPDATE を受信できないため生成
+    // しない (incoming の掃除は publisher 役の subscription テストで検証済み)
+    client.outgoing_request_updates.insert(9999, 1);
+    client.incoming_request_updates.insert(9999, 1);
+
+    // bidi request stream を閉じて Terminated にして forget する
+    client
+        .recv_request_stream_closed(rid, crate::session::types::RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let subscription = client
+        .forget_track_subscription(rid)
+        .expect("Terminated な track subscription は forget できること");
+    assert_eq!(subscription.request_id, rid);
+    // 該当 request のエントリのみ掃除され、他 request のエントリは残る
+    assert!(
+        !client.outgoing_request_updates.contains_key(&rid),
+        "forget_track_subscription で該当 request の outgoing エントリが掃除されること"
+    );
+    assert_eq!(
+        client.outgoing_request_updates.len(),
+        1,
+        "他 request の outgoing エントリは残ること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.len(),
+        1,
+        "他 request の incoming エントリは残ること"
+    );
+}
+
+/// tick 時の未確定エントリ確定が Pending 集合のみで行われる
+///
+/// `datagram_header_complete_ms` は forget まで保持されるため件数が増えても
+/// tick 走査は Pending (未確定) のみに限定される。tick 前送信は None + Pending 登録、
+/// tick で確定して Pending から除去、tick 後送信は直接 Some で Pending 登録なし、
+/// 同一オブジェクトの再送は初回時刻を上書きしないことを検証する。
+#[test]
+fn datagram_pending_entries_determined_on_tick() {
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::SetupOptions;
+    use crate::session::types::SessionState;
+    use crate::track_properties::{
+        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties, TrackProperty, TrackPropertyValue,
+    };
+
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
+        value: TrackPropertyValue::VarInt(500),
+    });
+    let rid = client
+        .send_publish(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            track_properties,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // tick 前の送信は未確定 (None) で Pending 登録される
+    client
+        .send_object_datagram(rid, 0, 0, None, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.get(&(rid, 0, 0)),
+        Some(&None),
+        "tick 前のエントリは未確定であること"
+    );
+    assert!(
+        client.timing.datagram_pending_ms.contains(&(rid, 0, 0)),
+        "tick 前のエントリは Pending 登録されること"
+    );
+
+    // tick で確定し Pending から除去される
+    client.tick(1_000);
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.get(&(rid, 0, 0)),
+        Some(&Some(1_000)),
+        "tick で未確定エントリが確定すること"
+    );
+    assert!(
+        client.timing.datagram_pending_ms.is_empty(),
+        "確定後は Pending が空になること"
+    );
+
+    // tick 後の送信は直接確定時刻で Pending 登録なし
+    client
+        .send_object_datagram(rid, 0, 1, None, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.get(&(rid, 0, 1)),
+        Some(&Some(1_000)),
+        "tick 後のエントリは確定時刻で作られること"
+    );
+    assert!(
+        client.timing.datagram_pending_ms.is_empty(),
+        "確定済み送信では Pending 登録されないこと"
+    );
+
+    // 同一オブジェクトの再送は初回時刻を上書きしない (timeout=500 のため 200ms 後に再送)
+    client.tick(1_200);
+    client
+        .send_object_datagram(rid, 0, 0, None, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.get(&(rid, 0, 0)),
+        Some(&Some(1_000)),
+        "再送で初回時刻が上書きされないこと"
+    );
+}
+
+/// subscription 単位の上限超過で最古 Group から丸ごと破棄される
+///
+/// 長期ライブ配信で追跡エントリが無制限に増加しないこと、破棄後に件数が上限に収まり
+/// 新規エントリが記録されることを検証する。破棄範囲の再送は新規扱いで再計時される。
+#[test]
+fn datagram_tracking_evicts_oldest_group_over_subscription_cap() {
+    use super::core::MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION;
+    use crate::message::{ControlMessage, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::SetupOptions;
+    use crate::session::types::SessionState;
+    use crate::track_properties::{
+        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties, TrackProperty, TrackPropertyValue,
+    };
+
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
+        value: TrackPropertyValue::VarInt(500),
+    });
+    let rid = client
+        .send_publish(
+            TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            track_properties,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client.tick(1_000);
+
+    // 上限いっぱいまで Group 0..MAX を直接登録する (送信経路では時間がかかるため)
+    for group_id in 0..MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION as u64 {
+        client
+            .timing
+            .datagram_header_complete_ms
+            .insert((rid, group_id, 0), Some(1_000));
+    }
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.len(),
+        MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION,
+        "上限いっぱいの前提条件を満たすこと"
+    );
+
+    // 新規 Group の送信で最古 Group が丸ごと破棄される
+    let new_group = MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION as u64;
+    client
+        .send_object_datagram(rid, new_group, 0, None, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        !client
+            .timing
+            .datagram_header_complete_ms
+            .contains_key(&(rid, 0, 0)),
+        "上限超過で最古 Group が破棄されること"
+    );
+    assert!(
+        client
+            .timing
+            .datagram_header_complete_ms
+            .contains_key(&(rid, new_group, 0)),
+        "新規エントリが記録されること"
+    );
+    assert_eq!(
+        client.timing.datagram_header_complete_ms.len(),
+        MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION,
+        "破棄後は件数が上限に収まること"
+    );
+}
+
+/// RequestIdTracker は未到達 Request ID の保持数に上限を設ける
+///
+/// peer が連続受信前縁より先の Request ID を飛び飛びに送り続けても `above` が
+/// 無制限に増えないことを検証する。上限ちょうどまでは受理し、超過は
+/// INVALID_REQUEST_ID で拒否する。
+#[test]
+fn peer_request_tracker_rejects_too_many_out_of_order_ids() {
+    let mut tracker = RequestIdTracker::new(Role::Client);
+    // front を確定させず (id=0 を送らず) 飛び飛びの id を上限まで受理する
+    for i in 1..=MAX_OUT_OF_ORDER_REQUEST_IDS as u64 {
+        tracker
+            .accept(i * 2)
+            .expect("上限までの未到達 request_id は受理されること");
+    }
+    assert_eq!(tracker.seen_count(), MAX_OUT_OF_ORDER_REQUEST_IDS);
+    // 上限超過は INVALID_REQUEST_ID で拒否される
+    let err = tracker
+        .accept((MAX_OUT_OF_ORDER_REQUEST_IDS as u64 + 1) * 2)
+        .expect_err("上限超過の未到達 request_id は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    // 拒否した request_id は累計受理数に数えない
+    assert_eq!(tracker.seen_count(), MAX_OUT_OF_ORDER_REQUEST_IDS);
+    // id=0 の受理で front が確定し above が全件吸収される
+    tracker.accept(0).expect("front 確定の受理に成功すること");
+    assert_eq!(
+        tracker.seen_count(),
+        MAX_OUT_OF_ORDER_REQUEST_IDS + 1,
+        "吸収後も累計受理数は維持されること"
+    );
+    // 吸収後は above に空きができ、新しい未到達 id を受理できる
+    tracker
+        .accept((MAX_OUT_OF_ORDER_REQUEST_IDS as u64 + 1) * 2)
+        .expect("吸収後は上限がリセットされて受理できること");
+}
+
+/// SUBSCRIBE_TRACKS の bidi stream 終端で peer alias の SubgroupTracker エントリが
+/// 解放されること
+///
+/// draft-ietf-moq-transport-21 §9.18 (SUBSCRIBE_TRACKS): stream 閉鎖時は
+/// active_track_aliases に残存する subscription を implicit PUBLISH_DONE 扱いで
+/// 一括終端する。このとき alias holder が空になったら SubgroupTracker の alias 単位
+/// エントリも除去しないと、alias 再利用時に古い subgroup 履歴が干渉する。
+#[test]
+fn close_track_subscription_on_stream_end_releases_peer_alias_subgroup_entries() {
+    use crate::message::{ControlMessage, Publish, RequestOk, Setup};
+    use crate::message_parameter::MessageParameters;
+    use crate::parameter::SetupOptions;
+    use crate::session::types::{RequestStreamEnd, SessionState, TrackSubscriptionState};
+    use crate::track_properties::TrackProperties;
+
+    // client (subscriber) を Established にする
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // SUBSCRIBE_TRACKS を確立する
+    let track_rid = client
+        .send_subscribe_tracks(
+            TrackNamespace::new(vec![b"example".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_stream_message(
+            track_rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(track_rid)
+            .expect("track subscription が存在すること")
+            .state,
+        TrackSubscriptionState::Established
+    );
+
+    // peer publisher からの PUBLISH で alias を active_track_aliases と
+    // peer_publisher_aliases に登録する (server 起点なので request_id は奇数)
+    let alias = 42;
+    let publish_rid = 1;
+    client
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: publish_rid,
+            track_namespace: TrackNamespace::new(vec![b"example".to_vec(), b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            track_name: b"cam".to_vec(),
+            track_alias: alias,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client
+            .track_subscription(track_rid)
+            .expect("track subscription が存在すること")
+            .active_track_aliases
+            .contains(&alias),
+        "PUBLISH 受信で active_track_aliases に alias が登録されること"
+    );
+
+    // peer publisher 由来 subgroup のライフサイクルを記録する
+    client
+        .peer_subgroups
+        .open(alias, 0, 0)
+        .expect("subgroup tracker への登録に成功すること");
+    assert!(
+        client.peer_subgroups.get(alias, 0, 0).is_some(),
+        "前提条件として SubgroupTracker にエントリが存在すること"
+    );
+
+    // SUBSCRIBE_TRACKS の bidi stream を終端する
+    client
+        .recv_request_stream_closed(track_rid, RequestStreamEnd::Fin)
+        .expect("stream 終端の処理に成功すること");
+
+    // alias holder が空になったため SubgroupTracker のエントリが除去されること
+    assert!(
+        client.peer_subgroups.get(alias, 0, 0).is_none(),
+        "SUBSCRIBE_TRACKS 終端で当該 alias の SubgroupTracker エントリが除去されること"
+    );
+}

@@ -1,0 +1,51 @@
+[package]
+name = "moqt-publisher"
+version = "2026.0.0"
+edition = "2024"
+# 依存の raden (cranelift-codegen) が MSRV 1.94 を要求するため、publisher だけ 1.94 にしている
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+# 時雨堂クレート
+
+# AV1 エンコーダ (libaom)
+shiguredo_aom = "2026.2"
+# 音声キャプチャ
+shiguredo_audio_device = "2026.3"
+# HTTP/3 / WebTransport クライアント
+shiguredo_http3 = "2026.1.0-canary.9"
+# MoQT 本体 (ローカル参照)
+shiguredo_moqt = { path = "../../" }
+# Opus エンコーダ
+shiguredo_opus = "2026.2"
+# カメラキャプチャ
+shiguredo_video_device = "2026.3"
+
+# examples 共有トランスポート crate (QUIC / WebTransport)
+moqt-example-transport = { path = "../moqt-transport" }
+
+# 外部クレート
+
+# バイト列操作
+bytes = "1.12"
+# CLI 引数パース
+noargs = "0.4"
+# 疑似キャプチャ用 2D ベクターグラフィックス
+raden = "2026.2"
+# QUIC クライアント
+s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+# Tokio タスクメトリクス計測
+tokio-metrics = "0.5"
+# 非同期ユーティリティ (graceful shutdown, rate limit, pool)
+tokio-utils = "0.1"
+# ログ出力
+tracing = "0.1"
+# ログのフィルタリングと購読
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# H.264 / H.265 ハードウェアエンコーダ (Apple Video Toolbox)
+shiguredo_video_toolbox = "2026.1"

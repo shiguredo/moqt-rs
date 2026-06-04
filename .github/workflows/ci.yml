@@ -1,0 +1,48 @@
+# GitHub Actions による CI
+#
+# - prek ジョブ: prek.toml のフック (fmt / clippy / tombi 等) を実行する
+# - test ジョブ: cargo test --workspace を実行する (pre-push フックと同範囲)
+# - fuzz-build ジョブ: fuzz/ の fuzz ターゲットをビルド確認する
+#   (fuzz は独立 workspace のため test ジョブの cargo test --workspace では検出できない)
+# - runner は macos-15 を使う。examples が macOS 専用依存 (Video Toolbox /
+#   CoreAudio 系の shiguredo_*_device 等) を持つため、Linux runner では
+#   workspace 全体をビルドできない (ubuntu-slim には Rust 自体がなく、
+#   ubuntu-latest では shiguredo_audio_device のビルドスクリプトが失敗する)。
+#   examples の単体テストは純粋なロジックのためヘッドレスでも実行できる
+# - MSRV 検証は含めない。moqt-publisher が rust-version 1.94 を要求するため
+#   workspace 単位の 1.93 検証が構造的にできない
+
+name: CI
+
+on:
+  push:
+    branches:
+      - develop
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust ツールチェーンのコンポーネントを追加する
+        run: rustup component add rustfmt clippy
+      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
+
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 全テストを実行する
+        run: cargo test --workspace
+
+  fuzz-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fuzz ターゲットをビルド確認する
+        run: cargo check --manifest-path fuzz/Cargo.toml

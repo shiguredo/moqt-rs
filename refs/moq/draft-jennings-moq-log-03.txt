@@ -1,0 +1,280 @@
+
+
+
+
+Network Working Group                                        C. Jennings
+Internet-Draft                                             S. Nandakumar
+Intended status: Informational                                     Cisco
+Expires: 23 April 2026                                   20 October 2025
+
+
+                 Logging over Media over QUIC Transport
+                       draft-jennings-moq-log-03
+
+Abstract
+
+   Real time systems often run into the problems where the network
+   bandwidth for logging in shared with the real time media and impacts
+   the media quality.  There is a desire to transport the logging data
+   at an appropriate priority level over the same transport as the
+   media.  This allows the logging data to take advantage of times when
+   the media bitrate is blow the peak rate while not impact the peak
+   rate available for media.
+
+   This document specifies how to send syslog RFC5424 type information
+   over the Media Over QUIC Transport (MOQT) [I-D.ietf-moq-transport].
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 23 April 2026.
+
+Copyright Notice
+
+   Copyright (c) 2025 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+
+
+
+Jennings & Nandakumar     Expires 23 April 2026                 [Page 1]
+
+Internet-Draft                  moqt-log                    October 2025
+
+
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   2
+   2.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . .   2
+     2.1.  Resource ID . . . . . . . . . . . . . . . . . . . . . . .   3
+   3.  Naming  . . . . . . . . . . . . . . . . . . . . . . . . . . .   3
+   4.  Object Data . . . . . . . . . . . . . . . . . . . . . . . . .   3
+   5.  IANA  . . . . . . . . . . . . . . . . . . . . . . . . . . . .   4
+   6.  Security Considerations . . . . . . . . . . . . . . . . . . .   4
+   7.  Examples  . . . . . . . . . . . . . . . . . . . . . . . . . .   4
+   8.  Normative References  . . . . . . . . . . . . . . . . . . . .   4
+   9.  Informative References  . . . . . . . . . . . . . . . . . . .   5
+   Appendix A.  Acknowledgments  . . . . . . . . . . . . . . . . . .   5
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .   5
+
+1.  Introduction
+
+   The idea is each device that was logging would publish each log
+   message as an MOQT object.  The devices or systems publishing the
+   logs are referred to as resources and have a unique ResourceID.  The
+   URLs for the objects would be set up such that a subscriber could
+   subscribe to each resource creating logs separately, and could pick
+   the log priority level in the subscriptions.  The log collector would
+   subscribe to the logs from the appropriate Resources that the
+   collector wished to monitor.
+
+   The data model used is consistent with the "OpenTelemetry
+   Specification" [OTEL] (see
+   https://opentelemetry.io/docs/specs/otel/logs/data-model/)
+   (https://opentelemetry.io/docs/specs/otel/logs/data-model/)) and a
+   superset of the [RFC5424] data model for logging.
+
+   [RFC5424] specifies a layered architecture that provides for support
+   of any number of transport layer mappings for transmitting syslog
+   messages.  This document describes the MOQT transport mapping for the
+   syslog protocol.
+
+2.  Terminology
+
+
+
+
+
+
+
+
+Jennings & Nandakumar     Expires 23 April 2026                 [Page 2]
+
+Internet-Draft                  moqt-log                    October 2025
+
+
+2.1.  Resource ID
+
+   Each Resource that creates logs has a unique resourceID.  This is
+   created by taking the MAC address of the primary network interface in
+   binary, computing the SHA1 hash of it, then truncating to lower 64
+   bits.  Note the SHA1 does not provide any security priories, it is
+   just a hash that is widely implemented in hardware.  If this is not
+   possible, any other random stable 64 bit identifier may be used.  The
+   advantage of us MAC address is that many other management systems use
+   this address and using it makes it easier to correlate with other
+   systems.  The disadvantage is that it reveals the MAC address.
+
+3.  Naming
+
+   The TrackNamespace consists of following tuples (represented in
+   string format for ease of readability):
+
+    "(moq://moq-syslog.arpa/logs-v1/),(resourceID)"
+
+   The TrackName tuple is a single byte that has the log priority level
+   in binary.  Following the pattern:
+
+    <log_level>
+
+   The MOQT Group ID is timestamp (explain in the next section) in the
+   message truncated to a 62 bit binary integer.
+
+   The MOQT Object ID is zero unless more than one message is produced
+   in the same microseconds in which case they each will get their own
+   Object ID.
+
+4.  Object Data
+
+   The object payload is a JSON [RFC8259] object with the following
+   optional fields:
+
+   *  severity: As defined in [RFC5424].  Encoded as string "Emergency",
+      "Alert", ... "Debug".  This is called ServerText in [OTEL].
+
+   *  timestamp: single integer with number of microseconds since "1 Jan
+      1972" using NTP Era zero conventions.
+
+   *  pri: As defined in [RFC5424].  Numeric value from 0 to 23 and
+      default is 1 if not present.
+
+   *  hostname: As defined in [RFC5424].  Note this might not be a
+      hostname.
+
+
+
+
+Jennings & Nandakumar     Expires 23 April 2026                 [Page 3]
+
+Internet-Draft                  moqt-log                    October 2025
+
+
+   *  appname: As defined in [RFC5424].
+
+   *  procid: As defined in [RFC5424].
+
+   *  msgid: As defined in [RFC5424].
+
+   *  msg: As defined in [RFC5424].  This is a UTF-8 string.
+
+   Any other fields are treated as structured data as defined in
+   [RFC5424] and include:
+
+   *  TraceID: Used in [OTEL] and defined in
+      [CRD-trace-context-2-20240328].
+
+   *  SpanID: As defined in [OTEL].
+
+   *  InstrumentationScope: As defined in [OTEL].
+
+   Any other fields are treated as "Attributes" when mapped to [OTEL].
+
+5.  IANA
+
+   TBD
+
+6.  Security Considerations
+
+   TBD
+
+7.  Examples
+
+   On 31 Dec 1999 UTC a server produces the log message "shutting down
+   for Y2K" with severity INFO.  The timestamp for this would be
+   3,155,587,200.  The JSON data would be:
+
+   Group 1740807280, Object ID 0
+   {
+      "timestamp":3155587200,
+      "severity":"Info",
+      "msg":"shutting down forY2K"
+   }
+
+8.  Normative References
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar     Expires 23 April 2026                 [Page 4]
+
+Internet-Draft                  moqt-log                    October 2025
+
+
+   [I-D.ietf-moq-transport]
+              Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-14, 2 September 2025,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-14>.
+
+   [RFC5424]  Gerhards, R., "The Syslog Protocol", RFC 5424,
+              DOI 10.17487/RFC5424, March 2009,
+              <https://www.rfc-editor.org/info/rfc5424>.
+
+   [RFC8259]  Bray, T., Ed., "The JavaScript Object Notation (JSON) Data
+              Interchange Format", STD 90, RFC 8259,
+              DOI 10.17487/RFC8259, December 2017,
+              <https://www.rfc-editor.org/info/rfc8259>.
+
+9.  Informative References
+
+   [CRD-trace-context-2-20240328]
+              Kanzhelev, S., Dyla, D., Shkuro, Y., Sundaram, J. K., and
+              B. Krol, "Trace Context Level 2", W3C CRD-trace-context-
+              2-20240328, 28 March 2024, <https://www.w3.org/TR/2024/
+              CRD-trace-context-2-20240328/>.
+
+   [OTEL]     Ruech, A., "OpenTelemetry Specification 1.34.0", 11 June
+              2024, <https://opentelemetry.io/docs/specs/otel/logs/>.
+
+Appendix A.  Acknowledgments
+
+   Thanks to Suhas Nandakumar and Tim Evens for contributions and
+   suggestions to this specification.
+
+Authors' Addresses
+
+   Cullen Jennings
+   Cisco
+   Canada
+   Email: fluffy@iii.ca
+
+
+   Suhas Nandakumar
+   Cisco
+   United States of America
+   Email: snandaku@cisco.com
+
+
+
+
+
+
+
+Jennings & Nandakumar     Expires 23 April 2026                 [Page 5]
