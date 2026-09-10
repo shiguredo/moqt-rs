@@ -20,3 +20,5 @@
 
 - [UPDATE] MSF の track / cloneTrack の JSON メンバー書き出しと共通検証を共通化する
   - @voluntas
+- [UPDATE] session の request 種別変換を 1 箇所に集約し、購読索引の追加・削除を単一経路化する
+  - @voluntas

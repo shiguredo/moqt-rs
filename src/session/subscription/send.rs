@@ -112,11 +112,6 @@ impl Session {
             )
             .into());
         }
-        let key = (
-            track_namespace.clone(),
-            track_name.clone(),
-            TrackRole::Subscriber,
-        );
         // draft-ietf-moq-transport-21 §3.1.1: 同一 Track への複数同時 subscription が許可されたため、
         // 自側 subscriber role の重複チェックは行わない。
         //
@@ -216,12 +211,7 @@ impl Session {
             end_of_track: None,
             pending_update_params: None,
         };
-        self.subscriptions.insert(request_id, subscription);
-        self.aliases
-            .subscriptions_by_track
-            .entry(key)
-            .or_default()
-            .push(request_id);
+        self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Subscribe);
         self.start_control_message_deadline(request_id);
@@ -323,11 +313,6 @@ impl Session {
             )
             .into());
         }
-        let key = (
-            track_namespace.clone(),
-            track_name.clone(),
-            TrackRole::Publisher,
-        );
         // draft-ietf-moq-transport-21 §3.1.1: 同一 Track への複数同時 subscription が許可されたため、
         // 自側 publisher role の重複チェックは行わない。
         // draft §9.20.1 (Parameter Scope): PUBLISH で許可されないパラメータを含む送信は
@@ -459,12 +444,7 @@ impl Session {
             end_of_track: None,
             pending_update_params: None,
         };
-        self.subscriptions.insert(request_id, subscription);
-        self.aliases
-            .subscriptions_by_track
-            .entry(key)
-            .or_default()
-            .push(request_id);
+        self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Publish);
         self.start_control_message_deadline(request_id);

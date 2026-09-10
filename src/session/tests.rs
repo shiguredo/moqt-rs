@@ -1252,3 +1252,57 @@ fn close_track_subscription_on_stream_end_releases_peer_alias_subgroup_entries()
         "SUBSCRIBE_TRACKS 終端で当該 alias の SubgroupTracker エントリが除去されること"
     );
 }
+
+/// 購読索引の登録・削除ヘルパの契約を検証する
+///
+/// `register_subscription` は `subscriptions` と `subscriptions_by_track` を同時に更新し、
+/// `remove_subscription_track_index` は 1 件削除では key を残し、最後の 1 件で key ごと消し、
+/// 未知 key では no-op になる。`subscriptions_by_track` は pub(super) のため
+/// integration test からは観測できず、ここで固定する。
+#[test]
+fn register_and_remove_subscription_track_index_contracts() {
+    use crate::message::{ControlMessage, Setup};
+    use crate::parameter::SetupOptions;
+
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let key = (
+        TrackNamespace::new(vec![b"live".to_vec()]).expect("テストフィクスチャの前提条件を満たす"),
+        b"cam".to_vec(),
+        TrackRole::Subscriber,
+    );
+    let rid1 = client
+        .send_subscribe(key.0.clone(), key.1.clone(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let rid2 = client
+        .send_subscribe(key.0.clone(), key.1.clone(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    // register_subscription が subscriptions と subscriptions_by_track を同時に更新する
+    assert!(client.subscription(rid1).is_some());
+    assert!(client.subscription(rid2).is_some());
+    assert_eq!(
+        client.aliases.subscriptions_by_track.get(&key),
+        Some(&vec![rid1, rid2])
+    );
+
+    // 1 件削除では同じ key の他 subscription が残る
+    client.remove_subscription_track_index(rid1, &key);
+    assert_eq!(
+        client.aliases.subscriptions_by_track.get(&key),
+        Some(&vec![rid2])
+    );
+
+    // 最後の 1 件削除で key ごと消える
+    client.remove_subscription_track_index(rid2, &key);
+    assert!(client.aliases.subscriptions_by_track.get(&key).is_none());
+
+    // 未知 key への削除は no-op
+    client.remove_subscription_track_index(rid1, &key);
+    assert!(client.aliases.subscriptions_by_track.get(&key).is_none());
+}

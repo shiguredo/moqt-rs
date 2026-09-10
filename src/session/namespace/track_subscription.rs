@@ -400,13 +400,8 @@ impl Session {
                     .subscriptions
                     .get(&sub_request_id)
                     .map(|s| (s.track_namespace.clone(), s.track_name.clone(), s.my_role));
-                if let Some(key) = key
-                    && let Some(ids) = self.aliases.subscriptions_by_track.get_mut(&key)
-                {
-                    ids.retain(|&id| id != sub_request_id);
-                    if ids.is_empty() {
-                        self.aliases.subscriptions_by_track.remove(&key);
-                    }
+                if let Some(key) = key {
+                    self.remove_subscription_track_index(sub_request_id, &key);
                 }
                 // alias holder が空になったときだけ SubgroupTracker の alias 単位エントリを
                 // 除去する (共有 alias の他 subscription が残っている間は除去しない)

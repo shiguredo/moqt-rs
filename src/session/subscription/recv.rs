@@ -248,12 +248,7 @@ impl Session {
             end_of_track: None,
             pending_update_params: None,
         };
-        self.subscriptions.insert(request_id, subscription);
-        self.aliases
-            .subscriptions_by_track
-            .entry(key)
-            .or_default()
-            .push(request_id);
+        self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Subscribe);
         // draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams):
@@ -473,12 +468,7 @@ impl Session {
             end_of_track: None,
             pending_update_params: None,
         };
-        self.subscriptions.insert(request_id, subscription);
-        self.aliases
-            .subscriptions_by_track
-            .entry(key)
-            .or_default()
-            .push(request_id);
+        self.register_subscription(request_id, subscription);
         self.request_streams
             .insert(request_id, RequestKind::Publish);
         self.register_peer_alias(publish.track_alias, request_id);

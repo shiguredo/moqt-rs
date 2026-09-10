@@ -385,15 +385,16 @@ pub const PUBLISH_DONE_STREAM_COUNT_UNKNOWN: u64 = u64::MAX;
 
 /// request_id が属するテーブルの種別 (内部 dispatch 用)
 ///
-/// 5 種類のテーブル (subscriptions / fetches / namespace_publications /
-/// namespace_subscriptions / track_status_requests) のどれに属するかを識別する。
-/// `send_request_ok` / `send_request_error` / `handle_peer_request_ok` /
-/// `handle_peer_request_error` の dispatch に使用する。
+/// 6 種類のテーブル (subscriptions / fetches / namespace_publications /
+/// namespace_subscriptions / track_subscriptions / track_status_requests) のどれに
+/// 属するかを識別する。`send_request_ok` / `send_request_error` /
+/// `handle_peer_request_ok` / `handle_peer_request_error` の dispatch に使用する。
 ///
 /// 公開 API 用の種別は [`super::types::RequestKind`] (bidi request stream の
 /// 開始メッセージ種別) を参照。両者は役割が異なる (前者は内部の state テーブル
 /// 単位、後者は bidi request stream の開始メッセージ単位で SUBSCRIBE と
-/// PUBLISH を区別する)。
+/// PUBLISH を区別する)。`RequestKind` からは [`RequestTable::from_kind`] で
+/// 一方向に変換する。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum RequestTable {
     Subscription,
@@ -402,6 +403,22 @@ pub(super) enum RequestTable {
     NamespaceSubscription,
     TrackSubscription,
     TrackStatus,
+}
+
+impl RequestTable {
+    /// bidi request stream の開始メッセージ種別 (`RequestKind`) から state テーブル単位へ
+    /// 変換する一方向の対応。`Subscribe` / `Publish` は同じ `Subscription` テーブルに
+    /// 対応する (多対一) ため、逆変換は定義しない。
+    pub(super) fn from_kind(kind: RequestKind) -> Self {
+        match kind {
+            RequestKind::Subscribe | RequestKind::Publish => Self::Subscription,
+            RequestKind::Fetch => Self::Fetch,
+            RequestKind::PublishNamespace => Self::NamespacePublication,
+            RequestKind::SubscribeNamespace => Self::NamespaceSubscription,
+            RequestKind::SubscribeTracks => Self::TrackSubscription,
+            RequestKind::TrackStatus => Self::TrackStatus,
+        }
+    }
 }
 
 impl Session {
@@ -897,21 +914,21 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        let reason_result = match kind {
-            RequestKind::Subscribe | RequestKind::Publish => {
-                self.close_subscription_on_stream_end(request_id, end)
-            }
-            RequestKind::Fetch => self.close_fetch_on_stream_end(request_id, end),
-            RequestKind::PublishNamespace => {
+        // 一方向変換 (`RequestKind` -> `RequestTable`) を 1 箇所に集約し、他の request 応答の
+        // dispatch と同じ state テーブル単位で分岐する
+        let reason_result = match RequestTable::from_kind(kind) {
+            RequestTable::Subscription => self.close_subscription_on_stream_end(request_id, end),
+            RequestTable::Fetch => self.close_fetch_on_stream_end(request_id, end),
+            RequestTable::NamespacePublication => {
                 self.close_namespace_publication_on_stream_end(request_id, end)
             }
-            RequestKind::SubscribeNamespace => {
+            RequestTable::NamespaceSubscription => {
                 self.close_namespace_subscription_on_stream_end(request_id, end)
             }
-            RequestKind::SubscribeTracks => {
+            RequestTable::TrackSubscription => {
                 self.close_track_subscription_on_stream_end(request_id, end)
             }
-            RequestKind::TrackStatus => self.close_track_status_on_stream_end(request_id, end),
+            RequestTable::TrackStatus => self.close_track_status_on_stream_end(request_id, end),
         };
         let reason = match reason_result {
             Ok(r) => r,

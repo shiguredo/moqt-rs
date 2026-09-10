@@ -15,6 +15,8 @@ use super::core::{Session, remove_alias_holder};
 use super::types::{
     RequestKind, SessionEvent, Subscription, SubscriptionState, TerminationReason, TrackRole,
 };
+use crate::message::common::TrackNamespace;
+use alloc::vec::Vec;
 
 impl Session {
     // ─── クエリ API ─────────────────────────────────────────
@@ -27,6 +29,45 @@ impl Session {
     /// すべての Subscription をイテレートする
     pub fn subscriptions(&self) -> impl Iterator<Item = &Subscription> {
         self.subscriptions.values()
+    }
+
+    /// 購読系索引 (`subscriptions` / `subscriptions_by_track`) への追加を 1 箇所に集約する
+    ///
+    /// subscription 本体と、Track (namespace, name, role) 単位の索引を同時に登録する。
+    /// 削除は [`Session::remove_subscription_track_index`] が `subscriptions_by_track` を担い、
+    /// subscription 本体は `forget_subscription` が除去する。alias 索引は別フェーズで登録する
+    /// (`my_publisher_aliases` は `insert_alias_holder`、`peer_publisher_aliases` は
+    /// `register_peer_alias`（受信 PUBLISH / SUBSCRIBE_OK 確定時）)。
+    pub(crate) fn register_subscription(&mut self, request_id: u64, subscription: Subscription) {
+        let key = (
+            subscription.track_namespace.clone(),
+            subscription.track_name.clone(),
+            subscription.my_role,
+        );
+        self.subscriptions.insert(request_id, subscription);
+        self.aliases
+            .subscriptions_by_track
+            .entry(key)
+            .or_default()
+            .push(request_id);
+    }
+
+    /// `subscriptions_by_track` から 1 つの request_id を除去する (空になったら key ごと削除)
+    ///
+    /// 購読系索引の削除を 1 箇所に集約する。`forget_subscription` / `supersede_pending_subscriber` /
+    /// `close_track_subscription_on_stream_end` がこのヘルパを通す。subscription 本体の除去は
+    /// `forget_subscription` のみが行う。
+    pub(crate) fn remove_subscription_track_index(
+        &mut self,
+        request_id: u64,
+        key: &(TrackNamespace, Vec<u8>, TrackRole),
+    ) {
+        if let Some(ids) = self.aliases.subscriptions_by_track.get_mut(key) {
+            ids.retain(|&id| id != request_id);
+            if ids.is_empty() {
+                self.aliases.subscriptions_by_track.remove(key);
+            }
+        }
     }
 
     /// 指定 Request ID の subscription が cleanup 可能か返す
@@ -62,12 +103,7 @@ impl Session {
         );
         // 既に別 entry (新 PUBLISH 等) が track_key を
         // 占有している可能性があるため、自分の request_id を含む場合のみ除去する。
-        if let Some(ids) = self.aliases.subscriptions_by_track.get_mut(&track_key) {
-            ids.retain(|&id| id != request_id);
-            if ids.is_empty() {
-                self.aliases.subscriptions_by_track.remove(&track_key);
-            }
-        }
+        self.remove_subscription_track_index(request_id, &track_key);
         if let Some(alias) = subscription.track_alias {
             // draft §3.1 (Subscriptions): alias は同一 Track の複数 subscription で共有されうる。
             // 自分の request_id だけを索引から外し、共有相手が残っている場合は
@@ -126,12 +162,7 @@ impl Session {
         // 旧 subscription の索引を外す。subscriptions マップ本体は Terminated 状態で
         // 残し、呼び出し側の forget_subscription で最終的に回収する (応答 stream の
         // クリーンアップが必要になる可能性があるため)。
-        if let Some(ids) = self.aliases.subscriptions_by_track.get_mut(&key) {
-            ids.retain(|&id| id != existing_id);
-            if ids.is_empty() {
-                self.aliases.subscriptions_by_track.remove(&key);
-            }
-        }
+        self.remove_subscription_track_index(existing_id, &key);
         self.clear_control_message_deadline(existing_id);
         if let Some(alias) = track_alias {
             // subscriber 役の subscription は peer_publisher_aliases を経由しないので
