@@ -1,7 +1,7 @@
 # MsfTrack / MsfCloneTrack のエンコード・検証の重複を解消する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/refactor-msf-track-clone-duplication
 - Polished: 2026-09-10
 
@@ -44,3 +44,15 @@
 - 0031 の `isLive=false` の encode 規則が維持されていること
 - 共通化の drift を検出するテストを `tests/test_msf/` または `pbt/tests/prop_msf.rs` に追加すること
 - 既存テスト / PBT がすべて通ること
+
+## 解決方法
+
+`MsfTrack` / `MsfCloneTrack` の encode と共通検証を共通化した。
+
+- JSON メンバー書き出しを `TrackJsonParts` + `write_track_json` に集約し、両型の `DisplayJson` は `is_clone` で `parentName` / `parentNamespace` の位置と `depends` / `accessibility` の空出力規則を切り替えるだけにした。メンバーの出力順・省略規則は旧実装と一致する。
+- 共存禁止 (`validate_target_latency_buffers_exclusive`) と eventType 禁止 (`validate_event_type_not_set_when_not_event_timeline`) をヘルパー化し、`validate_full_track` / `validate_clone_track_fragment` / `into_track` / `decode_track` / `decode_clone_track` から呼ぶようにした。
+- decode 専用の `CommonTrackFields` と統合しなかった理由（所有権を持つ decode 専用の蓄積型と、`&self` を借用する encode 専用ビューという差）を `TrackJsonParts` の doc に明記した。
+- 共通メンバーの smoke テスト（`track_and_clone_share_common_member_keys`）を追加した。
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した。
+
+残った改善（未対応・別途判断）: eventType「必須」側と timeline の `depends` / `mimeType` の検証は full 文脈の 3 箇所に重複が残る。`reject_coexisting_target_latency_buffers`（decode の JSON キー presence 検査）と値ベースの `validate_target_latency_buffers_exclusive` は入出力が異なるため両方必要。`is_clone` の enum 化は行っていない。
