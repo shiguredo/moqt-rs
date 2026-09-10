@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-encoder-datagram-origin
+- Polished: 2026-09-10
 
 ## 目的
 
@@ -27,8 +28,10 @@
 
 先頭 Object の分岐でも `input.is_datagram_origin` のとき `FetchSubgroupIdMode::Zero` を選ぶ。`prior_state` に保存する subgroup_id も Datagram 起源では `0` にする。
 
+Datagram 起源 Object は Subgroup ID を持たないため、デコード結果の `subgroup_id` は `0` に解決される。既存 PBT の `object.subgroup_id == input.subgroup_id` という期待値は Datagram 起源では成立しないため、期待値を通常起源と Datagram 起源で分ける。
+
 ## 完了条件
 
 - 先頭 Object が Datagram 起源の FETCH 応答をエンコードできること
 - Datagram 起源 Object の後に同一 subgroup_id の Object が続いても往復が壊れないこと
-- `is_datagram_origin = true` を含む単体テスト / PBT / fuzz が追加されていること
+- 単体テストと PBT に `is_datagram_origin = true` のケースが追加されていること。fuzz は既に任意入力で `is_datagram_origin = true` を生成しており、クラッシュ耐性の検査に変更を要しない
