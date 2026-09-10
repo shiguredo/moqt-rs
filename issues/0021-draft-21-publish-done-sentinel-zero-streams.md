@@ -1,7 +1,7 @@
 # PUBLISH_DONE の Stream Count で 0 stream 時の sentinel を禁止する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-publish-done-sentinel-zero-streams
 - Polished: 2026-09-10
 
@@ -50,3 +50,14 @@ if stream_count != PUBLISH_DONE_STREAM_COUNT_UNKNOWN
 - `published_stream_count > 0` で sentinel が許可されること
 - PBT の `should_accept` と `src/session/subscription/send.rs` の doc コメントが実装と一致すること
 - 既存の PUBLISH_DONE 関連テストが新条件に追従し、`cargo test --workspace` と PBT が通ること
+
+## 解決方法
+
+PUBLISH_DONE の Stream Count 検証を draft §9.9 に合わせた。
+
+- `send_publish_done` の受理判定を「`published_stream_count == 0` なら `stream_count == 0` のみ、`> 0` なら追跡値との一致または `PUBLISH_DONE_STREAM_COUNT_UNKNOWN`」に変更した。0 stream で sentinel を送ると `SESSION_PROTOCOL_VIOLATION` になる。
+- `send_publish_done` の doc に新条件とエラー契約を明記し、`StreamCountState::published_count` の doc (subgroup + fill fetch を数える) を実態に合わせた。
+- PBT `send_publish_done_stream_count_invariant` の `should_accept` とコメントを新条件に合わせた。
+- `published_stream_count == 0` のまま sentinel を送って Ok を期待していた既存テストを追従させた (`goaway.rs` の 1 件は stream を open→close し、`publish_done.rs` の受信側 2 件は `PublishDone` を直接組み立てて送信側 tracking から独立させた)。
+- `publish_done.rs` に 0 stream での sentinel 拒否 / 0 許可 / >0 での sentinel 許可 のテストを追加した。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
