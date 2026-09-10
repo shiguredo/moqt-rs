@@ -1027,6 +1027,27 @@ fn peer_goaway_does_not_suppress_send_publish_done() {
     server
         .recv_control(go_msg)
         .expect("テストフィクスチャの前提条件を満たす");
+    // publisher 側で 1 本 stream を open→close し、published_stream_count > 0 にする
+    // (0 stream では draft §9.9 の MUST により sentinel を送れない)
+    let pre_stream_id = DataStreamId(69);
+    server
+        .send_subgroup_header(
+            pre_stream_id,
+            pub_rid,
+            &SubgroupHeader {
+                track_alias: 999,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(1),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_data_stream_closed(pre_stream_id, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
     // 既存 subscription への PUBLISH_DONE は抑制されない
     server
         .send_publish_done(

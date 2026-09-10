@@ -964,6 +964,14 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): subscription 終了を通知する最後のメッセージ。
     /// subscription state を Terminated に遷移させる。
+    ///
+    /// # Errors
+    ///
+    /// publisher 役でない、Publish Side の状態が Pending(Publisher) / Established でない、
+    /// 未終端の outgoing data stream がある場合は `SESSION_PROTOCOL_VIOLATION` を返す。
+    /// `stream_count` は `published_count == 0` のとき `0` のみ、`published_count > 0` のとき
+    /// 追跡値との一致または `PUBLISH_DONE_STREAM_COUNT_UNKNOWN` のみを許可し、
+    /// それ以外は `SESSION_PROTOCOL_VIOLATION` を返す。
     pub fn send_publish_done(
         &mut self,
         request_id: u64,
@@ -1003,14 +1011,17 @@ impl Session {
             ));
         }
         // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
-        // - stream を 1 本も開かなかった場合は MUST 0
-        // - 正確な stream 数を提供できない場合は MUST `PUBLISH_DONE_STREAM_COUNT_UNKNOWN` (2^64 - 1) を送る
-        // - sentinel は publisher が exact 数を表明しない escape パスなので tracking 値との一致比較から常に許可する
-        // - それ以外は Session が tracking した `published_stream_count` と一致しなければ PROTOCOL_VIOLATION
-        //   (published_stream_count == 0 なら stream_count == 0 のみ許可。この等価比較で 0 本 = 0 も強制される)
-        if stream_count != PUBLISH_DONE_STREAM_COUNT_UNKNOWN
-            && stream_count != published_stream_count
-        {
+        // - stream を 1 本も開かなかった場合 (published_stream_count == 0) は MUST 0
+        // - published_stream_count > 0 のときは Session が tracking した exact 値との一致、
+        //   または正確な数を表明できない場合の escape として
+        //   `PUBLISH_DONE_STREAM_COUNT_UNKNOWN` (2^64 - 1) を許可する
+        let stream_count_accepted = if published_stream_count == 0 {
+            stream_count == 0
+        } else {
+            stream_count == published_stream_count
+                || stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN
+        };
+        if !stream_count_accepted {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "publish_done stream_count does not match tracked data streams",

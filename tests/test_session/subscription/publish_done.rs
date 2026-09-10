@@ -637,20 +637,17 @@ fn publish_done_tracks_stream_count_overrun() {
 /// (sentinel = publisher が exact 数を表明していないため比較対象が存在しない)。
 #[test]
 fn peer_publish_done_with_sentinel_does_not_set_overrun() {
-    let (mut client, mut server, rid) = establish_subscribe_track(804);
-
-    server
-        .send_publish_done(
-            rid,
-            0x2,
-            PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
-            shiguredo_moqt::message::ReasonPhrase::new("ended")
-                .expect("テストフィクスチャの前提条件を満たす"),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, done_msg) = take_send_on_stream(&mut server);
+    let (mut client, _server, rid) = establish_subscribe_track(804);
+    // 受信側の overrun 判定のみを検証するため PublishDone を直接組み立てる
+    // (送信側の stream_count 検証は send_publish_done_* テストと PBT が担保する)
+    let done = ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
+        status_code: 0x2,
+        stream_count: PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+        reason: shiguredo_moqt::message::ReasonPhrase::new("ended")
+            .expect("テストフィクスチャの前提条件を満たす"),
+    });
     client
-        .recv_stream_message(rid, done_msg)
+        .recv_stream_message(rid, done)
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
         !client
@@ -693,6 +690,77 @@ fn peer_publish_done_with_sentinel_does_not_set_overrun() {
 }
 
 /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
+/// published_stream_count == 0 では sentinel を送れず PROTOCOL_VIOLATION になる
+#[test]
+fn send_publish_done_rejects_sentinel_without_streams() {
+    let (_client, mut server, rid) = establish_subscribe_track(810);
+    let err = server
+        .send_publish_done(
+            rid,
+            0x2,
+            PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect_err("0 stream では sentinel を送れないこと");
+    assert_eq!(
+        err.code, SESSION_PROTOCOL_VIOLATION,
+        "sentinel は PROTOCOL_VIOLATION で拒否されること"
+    );
+}
+
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
+/// published_stream_count == 0 では stream_count == 0 が許可される
+#[test]
+fn send_publish_done_accepts_zero_without_streams() {
+    let (_client, mut server, rid) = establish_subscribe_track(811);
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("0 stream では 0 が許可されること");
+}
+
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
+/// published_stream_count > 0 では sentinel が許可される
+#[test]
+fn send_publish_done_accepts_sentinel_with_streams() {
+    let (_client, mut server, rid) = establish_subscribe_track(812);
+    let pre_stream_id = DataStreamId(89);
+    server
+        .send_subgroup_header(
+            pre_stream_id,
+            rid,
+            &SubgroupHeader {
+                track_alias: 812,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(1),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_data_stream_closed(pre_stream_id, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("stream を開いていれば sentinel が許可されること");
+}
+
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
 /// exact 数不明時の sentinel は `2^64 - 1` (`u64::MAX`) である。
 #[test]
 fn publish_done_stream_count_unknown_is_u64_max() {
@@ -704,24 +772,21 @@ fn publish_done_stream_count_unknown_is_u64_max() {
 }
 
 /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
-/// `stream_count = u64::MAX` の PUBLISH_DONE を送受信でき、subscriber 側で
+/// `stream_count = u64::MAX` の PUBLISH_DONE を受信でき、subscriber 側で
 /// stream 数が `u64::MAX` として届き overrun は立たない。
 #[test]
 fn peer_publish_done_with_u64_max_does_not_set_overrun() {
-    let (mut client, mut server, rid) = establish_subscribe_track(805);
-
-    server
-        .send_publish_done(
-            rid,
-            0x2,
-            u64::MAX,
-            shiguredo_moqt::message::ReasonPhrase::new("ended")
-                .expect("テストフィクスチャの前提条件を満たす"),
-        )
-        .expect("u64::MAX の stream_count は常に受理されること");
-    let (_, done_msg) = take_send_on_stream(&mut server);
+    let (mut client, _server, rid) = establish_subscribe_track(805);
+    // 受信側の overrun 判定のみを検証するため PublishDone を直接組み立てる
+    // (送信側の stream_count 検証は send_publish_done_* テストと PBT が担保する)
+    let done = ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
+        status_code: 0x2,
+        stream_count: u64::MAX,
+        reason: shiguredo_moqt::message::ReasonPhrase::new("ended")
+            .expect("テストフィクスチャの前提条件を満たす"),
+    });
     client
-        .recv_stream_message(rid, done_msg)
+        .recv_stream_message(rid, done)
         .expect("テストフィクスチャの前提条件を満たす");
     let subscription = client
         .subscription(rid)

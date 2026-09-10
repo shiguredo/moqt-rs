@@ -1060,10 +1060,10 @@ pub struct DeliveryTimeoutState {
 /// cleanup_ready() の回収判定で連携する 3 フィールドを保持する。
 #[derive(Debug, Clone)]
 pub struct StreamCountState {
-    /// この subscription で自端点が publisher として開いた subgroup data stream 数
+    /// この subscription で自端点が publisher として開いた data stream 数 (subgroup と fill fetch)
     ///
-    /// draft §9.9 (PUBLISH_DONE) の `Stream Count` と対応する。現時点では Session に通知された
-    /// publisher-side subgroup stream 数だけを数える。`my_role == Publisher` 以外では 0。
+    /// draft §9.9 (PUBLISH_DONE) の `Stream Count` と対応する。`send_subgroup_header` と
+    /// `send_fill_fetch_header` で加算し、close では減算しない。`my_role == Publisher` 以外では 0。
     pub published_count: u64,
     /// peer publisher から受信した subgroup data stream 数
     pub incoming_subgroup_count: u64,

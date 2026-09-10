@@ -321,12 +321,12 @@ fn publish_done_only_terminates_targeted_subscriptions() -> noprop::TestResult {
 // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE):
 // `send_publish_done` の `stream_count` 受理判定。
 //
-// 検証する不変条件 (sentinel `PUBLISH_DONE_STREAM_COUNT_UNKNOWN` 受容後):
-//   `stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN`
-//   または `stream_count == published_stream_count`
-//   のとき `Ok` を返し、それ以外は `Err(SESSION_PROTOCOL_VIOLATION)` を返す。
-//   (published_stream_count == 0 のとき stream_count == 0 のみ許可。draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の
-//    「stream を開かなかった場合は Stream Count を 0 にする」を送信側で強制する)
+// 検証する不変条件 (draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE)):
+//   `published_stream_count == 0` のときは `stream_count == 0` のときだけ `Ok`。
+//   `published_stream_count > 0` のときは `stream_count == published_stream_count`
+//   または `stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN` のとき `Ok`。
+//   それ以外は `Err(SESSION_PROTOCOL_VIOLATION)` を返す。
+//   (draft-ietf-moq-transport-21 §9.9 の「stream を開かなかった場合は Stream Count を 0 にする」を送信側で強制する)
 #[test]
 fn send_publish_done_stream_count_invariant() -> noprop::TestResult {
     // 受理 (Ok) と拒否 (PROTOCOL_VIOLATION) の両方の分岐の観測を
@@ -387,11 +387,11 @@ fn send_publish_done_stream_count_invariant() -> noprop::TestResult {
             0 => 0u64,
             1 => PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
             2 => published,
-            // vi64 値域 (`0..2^62`) を網羅できるようにする。sentinel (2^62-1) と published に
-            // 重なるケースは rejection で除外する (ともに出現確率はほぼ 0)。
+            // vi64 値域 (`0..2^62`) を網羅できるようにする。`0` と `published` に重なる
+            // ケースは rejection で除外する (出現確率はほぼ 0)。
             _ => noprop::sample_with_rejection(ctx, 100, |ctx| {
                 let v = noprop::sample_u64_in(ctx, 0..(1u64 << 62));
-                if v != 0 && v != PUBLISH_DONE_STREAM_COUNT_UNKNOWN && v != published {
+                if v != 0 && v != published {
                     Some(v)
                 } else {
                     None
@@ -407,8 +407,11 @@ fn send_publish_done_stream_count_invariant() -> noprop::TestResult {
                 .expect("テストフィクスチャの前提条件を満たす"),
         );
 
-        let should_accept =
-            stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN || stream_count == published;
+        let should_accept = if published == 0 {
+            stream_count == 0
+        } else {
+            stream_count == PUBLISH_DONE_STREAM_COUNT_UNKNOWN || stream_count == published
+        };
         if should_accept {
             assert!(
                 result.is_ok(),

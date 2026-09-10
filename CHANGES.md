@@ -17,6 +17,8 @@
   - @voluntas
 - [FIX] TRACK_STATUS_OK を FIN で送信し、公開済み Track の LARGEST_OBJECT を自動注入する
   - @voluntas
+- [FIX] PUBLISH_DONE の Stream Count で 0 stream 時に sentinel を送れないようにする
+  - @voluntas
 
 ### misc
 
