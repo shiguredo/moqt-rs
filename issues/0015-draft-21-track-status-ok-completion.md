@@ -1,7 +1,7 @@
 # TRACK_STATUS_OK の FIN と LARGEST_OBJECT を仕様どおりにする
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-track-status-ok-completion
 - Polished: 2026-09-10
 
@@ -49,3 +49,18 @@ INCLUDE_PROPERTIES:
 - 対象 Track の publisher 役 subscription に観測 largest がある場合、TRACK_STATUS_OK に LARGEST_OBJECT が含まれること
 - 観測 largest が無い Track では LARGEST_OBJECT を自動注入しないこと (アプリが指定した parameters は改変しないこと)
 - `tests/test_session/namespace/track_status.rs` に FIN と LARGEST_OBJECT の検証が追加されていること
+
+## 解決方法
+
+TRACK_STATUS_OK を仕様どおりに FIN で送信し、公開済み Track の LARGEST_OBJECT を自動注入するようにした。
+
+- `send_request_ok` の `SendOnStream` 発行で、TRACK_STATUS context のみ `fin: true` にした (draft §9.13)。
+- `send_ok_for_track_status` のシグネチャに `&mut MessageParameters` を追加し、`publisher_track_largest` (`src/session/subscription/fill.rs`) で
+  対象 Track の publisher 役 subscription 群が観測した largest を引いて `update_largest_object_in_parameters` で注入した (draft §9.20.18)。
+  アプリ指定値との大きい方を採り、wire に載った最終値を `TrackStatusResponse::Ok.largest_location` にも反映した。
+- `publisher_track_largest` を `pub(crate)` に広げ、doc を fill と TRACK_STATUS_OK の共用に更新した。
+- `forget_track_status` の doc に「bidi stream 終端 (`recv_request_stream_closed`) 後に呼ぶ」契約を明記し、ライフサイクルテストを終端通知後に forget する順序に修正した。
+- `tests/test_session/namespace/track_status.rs` に FIN / 注入 / 未公開時の非注入 / アプリ指定値の非降下 / 引き上げ / 複数 subscription の max / 観測なし×アプリ指定値 のテストを追加した (`tests/test_session.rs` に fin 付きヘルパーを追加)。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+
+残った制約 (スコープ外): largest は publisher 役 subscription が保持するため、`forget_subscription` 後の Track では LARGEST_OBJECT を省略する。Track 単位で largest を永続保持する改善は別途必要。
