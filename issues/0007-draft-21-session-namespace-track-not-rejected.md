@@ -1,7 +1,7 @@
 # `.session` 予約名前空間の非空トラック名を FETCH / TRACK_STATUS で拒否する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-session-namespace-track-not-rejected
 - Polished: 2026-09-10
 
@@ -36,3 +36,12 @@ FETCH / TRACK_STATUS の `.session` 判定を他メッセージ種別と同じ�
 - `.session` 名前空間の非空トラック名に対する FETCH / TRACK_STATUS が `DOES_NOT_EXIST` の `REQUEST_ERROR` になること
 - 空トラック名の既存挙動が維持されること
 - 非空トラック名の拒否テストが `tests/` に追加されていること
+
+## 解決方法
+
+`.session` 名前空間への FETCH / TRACK_STATUS をトラック名不問で拒否するようにした。
+
+- `src/session/fetch.rs` の `handle_peer_fetch` と `src/session/namespace/track_status.rs` の `handle_peer_track_status` の `.session` 判定から空トラック名の条件を外し、非空トラック名も未認識のセッションレベルトラックとして `DOES_NOT_EXIST` の REQUEST_ERROR で拒否するようにした。空トラック名と非空トラック名で reason 文字列を分け、SUBSCRIBE の既存実装と揃えた。
+- 空トラック名の既存挙動は維持し、reason 文字列を既存テストで固定した。
+- 非空トラック名の拒否テストに加えて、`.session` を先頭に持つ複数フィールド名前空間の拒否と、先頭以外の `.session` を受理する境界テストを追加した。拒否応答が FIN で送られ、request テーブルを汚染しないことも検証した。
+- `CHANGES.md` の `## develop` に `[FIX]` を追記した。
