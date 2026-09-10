@@ -13,5 +13,7 @@
 
 - [FIX] SUBSCRIBE_TRACKS の bidi stream 終端後の PUBLISH の bidi stream 終端でセッションを閉じないようにし、RequestTerminated の kind を実際の要求種別に合わせる
   - @voluntas
+- [FIX] MSF の isLive=false で targetLatency / buffers をエンコードしないようにする
+  - @voluntas
 
 ### misc

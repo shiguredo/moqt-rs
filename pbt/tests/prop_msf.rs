@@ -135,8 +135,8 @@ fn sample_track(ctx: &mut noprop::TestCaseContext) -> MsfTrack {
     }
     t.template = sample_template(ctx);
 
-    // isLive=false なら targetLatency / buffers は無視されるためエンコード側では出力されない
-    // ラウンドトリップを保つため None に統一する
+    // 生成器は正規形 (isLive=false なら None) を作る。encode 側も decode の正規化に合わせるため
+    // (draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は受信側の無視規則)、roundtrip が成立する
     t.target_latency = if is_live {
         target_latency.map(|v| v as u64)
     } else {

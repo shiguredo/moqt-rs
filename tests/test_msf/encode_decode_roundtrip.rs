@@ -222,6 +222,87 @@ fn is_complete_emitted_when_true() {
     assert!(encoded.windows(10).any(|w| w == b"isComplete"));
 }
 
+/// isLive=false の MsfTrack は targetLatency / buffers をエンコードしないこと
+///
+/// draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: isLive=false なら両フィールドは無視される。
+/// decode 側は None に正規化するため、encode 側も出力しないことで往復を一致させる。
+#[test]
+fn target_latency_and_buffers_not_emitted_when_is_live_false() {
+    let mut track = MsfTrack::new("v".to_string(), MsfPackaging::Loc, false);
+    track.target_latency = Some(500);
+    let encoded = encode_full_catalog_with_track(track);
+    assert!(!encoded.windows(15).any(|w| w == b"\"targetLatency\""));
+
+    let mut track = MsfTrack::new("b".to_string(), MsfPackaging::Loc, false);
+    track.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    let encoded = encode_full_catalog_with_track(track);
+    assert!(!encoded.windows(9).any(|w| w == b"\"buffers\""));
+    // 正の制御: isLive 自体は出力される (真空判定でないこと)
+    assert!(encoded.windows(8).any(|w| w == b"\"isLive\""));
+}
+
+/// isLive=Some(false) の MsfCloneTrack は targetLatency / buffers をエンコードしないこと
+///
+/// isLive=None (親から継承) と isLive=Some(true) では出力する。
+#[test]
+fn clone_target_latency_and_buffers_not_emitted_when_is_live_false() {
+    let mut clone = MsfCloneTrack::new("clone".to_string(), "original".to_string());
+    clone.is_live = Some(false);
+    clone.target_latency = Some(500);
+    let encoded = encode_delta_with_clone(clone);
+    assert!(!encoded.windows(15).any(|w| w == b"\"targetLatency\""));
+
+    let mut clone = MsfCloneTrack::new("clone".to_string(), "original".to_string());
+    clone.is_live = Some(false);
+    clone.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    let encoded = encode_delta_with_clone(clone);
+    assert!(!encoded.windows(9).any(|w| w == b"\"buffers\""));
+
+    // isLive=None (親から継承) と isLive=Some(true) では出力する
+    let mut clone = MsfCloneTrack::new("clone".to_string(), "original".to_string());
+    clone.target_latency = Some(500);
+    let encoded = encode_delta_with_clone(clone);
+    assert!(encoded.windows(15).any(|w| w == b"\"targetLatency\""));
+
+    let mut clone = MsfCloneTrack::new("clone".to_string(), "original".to_string());
+    clone.is_live = Some(true);
+    clone.target_latency = Some(500);
+    let encoded = encode_delta_with_clone(clone);
+    assert!(encoded.windows(15).any(|w| w == b"\"targetLatency\""));
+}
+
+fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
+    MsfCatalogDocument::Full(MsfCatalog {
+        version: MSF_VERSION.to_string(),
+        generated_at: None,
+        is_complete: true,
+        tracks: vec![track],
+        publish_tracks: Vec::new(),
+        init_data_list: Vec::new(),
+    })
+    .encode()
+    .expect("encode に成功すること")
+}
+
+fn encode_delta_with_clone(clone: MsfCloneTrack) -> Vec<u8> {
+    MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    })
+    .encode()
+    .expect("encode に成功すること")
+}
+
 #[test]
 fn clone_track_roundtrip_all_fields() {
     let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {

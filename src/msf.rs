@@ -375,8 +375,12 @@ pub struct MsfTrack {
     /// ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live)) - 必須
     pub is_live: bool,
     /// ターゲットレイテンシ ms (draft-ietf-moq-msf-01 §5.2.8 (Target latency))
+    ///
+    /// isLive=false の場合は無視され encode されない。
     pub target_latency: Option<u64>,
     /// ターゲットバッファ情報 (draft-ietf-moq-msf-01 §5.2.9 (Buffers))
+    ///
+    /// isLive=false の場合は無視され encode されない。
     pub buffers: Option<MsfBuffers>,
     /// トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))
     pub label: Option<String>,
@@ -510,11 +514,16 @@ impl DisplayJson for MsfTrack {
                 f.member("role", v.as_str())?;
             }
             f.member("isLive", self.is_live)?;
-            if let Some(v) = self.target_latency {
-                f.member("targetLatency", v)?;
-            }
-            if let Some(ref v) = self.buffers {
-                f.member("buffers", v)?;
+            // decode 側が isLive=false で targetLatency / buffers を None に正規化するため、
+            // encode も省略して対称にする。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
+            // 受信側の無視規則であり、エンコーダの出力禁止ではない。
+            if self.is_live {
+                if let Some(v) = self.target_latency {
+                    f.member("targetLatency", v)?;
+                }
+                if let Some(ref v) = self.buffers {
+                    f.member("buffers", v)?;
+                }
             }
             if let Some(ref v) = self.label {
                 f.member("label", v.as_str())?;
@@ -654,8 +663,12 @@ pub struct MsfCloneTrack {
     /// ライブフラグ (draft-ietf-moq-msf-01 §5.2.7 (Is Live)) - 省略時は親から継承
     pub is_live: Option<bool>,
     /// ターゲットレイテンシ ms (draft-ietf-moq-msf-01 §5.2.8 (Target latency))
+    ///
+    /// isLive が Some(false) の場合は無視され encode されない。None (親から継承) と Some(true) では出力する。
     pub target_latency: Option<u64>,
     /// ターゲットバッファ情報 (draft-ietf-moq-msf-01 §5.2.9 (Buffers))
+    ///
+    /// isLive が Some(false) の場合は無視され encode されない。None (親から継承) と Some(true) では出力する。
     pub buffers: Option<MsfBuffers>,
     /// トラックラベル (draft-ietf-moq-msf-01 §5.2.10 (Track label))
     pub label: Option<String>,
@@ -799,11 +812,16 @@ impl DisplayJson for MsfCloneTrack {
             if let Some(v) = self.is_live {
                 f.member("isLive", v)?;
             }
-            if let Some(v) = self.target_latency {
-                f.member("targetLatency", v)?;
-            }
-            if let Some(ref v) = self.buffers {
-                f.member("buffers", v)?;
+            // clone は is_live == None (親から継承) を保持するため、Some(false) のときだけ
+            // targetLatency / buffers を省略する。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
+            // 受信側の無視規則であり、decode の正規化に encode を合わせる。
+            if matches!(self.is_live, None | Some(true)) {
+                if let Some(v) = self.target_latency {
+                    f.member("targetLatency", v)?;
+                }
+                if let Some(ref v) = self.buffers {
+                    f.member("buffers", v)?;
+                }
             }
             if let Some(ref v) = self.label {
                 f.member("label", v.as_str())?;
