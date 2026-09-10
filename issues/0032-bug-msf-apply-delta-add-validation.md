@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-apply-delta-add-validation
+- Polished: 2026-09-10
 
 ## 目的
 
@@ -12,7 +13,9 @@
 
 `src/msf.rs` の `apply_delta` の add 経路は `track.clone()` を push するだけで、`validate_full_track` / `validate_media_track_fields` を呼ばない。`validate_after_delta` は一意性・initRef・グループ一致のみ検証する。
 
-同じ検証は `decode_track` / `validate_full_catalog_for_encode` / `validate_delta_for_encode` / `MsfCloneTrack::into_track` では呼ばれる。そのため手組みの `MsfDeltaUpdate` で `is_live=true` かつ `track_duration=Some(..)`、または role=video で codec なしのトラックを渡すと `apply_delta` は成功し、その後の `encode` で `InvalidCatalog` になる。
+同じ検証は `validate_full_catalog_for_encode` / `validate_delta_for_encode` が `validate_full_track` を呼ぶことで行われ、`decode_track` は同等の検証をインラインで行う
+(`MsfCloneTrack::into_track` も同等検証をインラインで行うが `lang` 検証を含まない)。そのため手組みの `MsfDeltaUpdate` で `is_live=true` かつ `track_duration=Some(..)`、
+または role=video で codec なしのトラックを渡すと `apply_delta` は成功し、その後の `encode` で `InvalidCatalog` になる。
 
 根拠: draft-ietf-moq-msf-01 §5.2 各フィールドの MUST。
 
