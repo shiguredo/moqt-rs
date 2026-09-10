@@ -1,7 +1,7 @@
 # fuzz_session に server role と送信 API を追加する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/test-fuzz-session-server-role
 - Polished: 2026-09-10
 
@@ -33,3 +33,14 @@
 - 送信 API が操作列に含まれ、送信側の状態遷移とイベント排出が fuzz で実行されること
 - `cargo check --manifest-path fuzz/Cargo.toml` が通ること
 - `cargo fuzz run fuzz_session -- -max_total_time=<秒>` を実行し、指定時間起動し続けること（クラッシュの有無は記録し、クラッシュした場合は原因調査を別 issue とする）
+
+## 解決方法
+
+fuzz_session を client / server 両 role と送信 API に対応させた。
+
+- 入力 `FuzzInput` を role (`is_server: bool`) + SETUP 用 AUTHORITY / PATH + 操作列 (`Vec<Op>`) にした。
+- 操作列の前に Established へ遷移させる。SETUP の検証経路 (`validate_setup_role_transport` / `validate_setup_uri_format`) は入力由来の AUTHORITY / PATH を別 Session (probe) に注入して fuzz し、操作列用の Session は固定の有効 SETUP で確実に Established にする。
+- 送信 API の Op (`SendSubscribe` / `SendPublish` / `SendFetch` / `SendRequestUpdate`) を追加した。設計方針の「生バイトを `ControlMessage::decode` して `send_*` に流す」方式は、任意バイトから妥当なメッセージに到達せず送信 API が実質呼ばれないため、固定の有効 namespace と入力由来の track 名 / alias を渡す構造化引数に変更した。`MessageParameters` は `MessageParameters::new()` 固定。
+- 送信発行 request_id は受信 Op に相関させず、送信側はイベント排出までを検証対象にした。応答系 API は request_id 非相関のため対象外とした。
+- `cargo check --manifest-path fuzz/Cargo.toml` と `cargo +nightly fuzz run fuzz_session -- -max_total_time=5` (stable は `-Zsanitizer` 非対応のため nightly。`--sanitizer none` でも可) を確認し、クラッシュなし。
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した。
