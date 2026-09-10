@@ -1,7 +1,7 @@
 # SubgroupObject の encode を書き込み前に検証し不正ワイヤと部分書き込みを防ぐ
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-object-encode-validation-order
 - Polished: 2026-09-10
 
@@ -42,3 +42,15 @@ Properties Length varint が書かれない (Length 欠落) ワイヤを生成�
 - `has_properties=true` + Properties Length = 0 を含むデータ (`&[0x00]` 等) は正常にエンコードされること
 - 回帰テストが `tests/test_stream/subgroup_object.rs` に追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `[FIX]` に記載されていること
+
+## 解決方法
+
+`SubgroupObject::encode` の検証順序を修正し、不正ワイヤ生成と部分書き込みを防いだ。
+
+- `validate_object_status(status)?` を全書き込みの前に移し、不正 status で `buf` に部分バイトを残さないようにした。
+- `has_properties=true` かつ `properties_data` が空スライスの場合を `ProtocolViolation` で拒否し、Properties Length varint が欠落した不正ワイヤの生成を防いだ (呼び出し側は Length = 0 を含むデータを渡す契約)。
+- `encode` の doc に `# Errors` を追加し、返りうるエラー条件を列挙した。
+- `tests/test_stream/subgroup_object.rs` に不正 status の部分書き込み防止 (properties 経路含む)、空 properties の拒否、Normal / 非 Normal の Properties Length = 0 正常系 のテストを追加した。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+
+残った制約 (スコープ外): `FetchStreamObject::encode` にも同型の空 properties / blob 長さ不整合の検証漏れがあり、別 issue 候補とする。また `properties_data` の Properties Length と実データ長の一致検証は本 issue のスコープ外。
