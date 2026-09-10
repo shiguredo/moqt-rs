@@ -28,3 +28,5 @@
   - @voluntas
 - [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する
   - @voluntas
+- [UPDATE] fuzz_session を client / server 両対応にし、送信 API を操作列に追加する
+  - @voluntas
