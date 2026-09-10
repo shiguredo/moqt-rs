@@ -1,7 +1,7 @@
 # doc コメントの実装との不整合を修正する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/doc-comment-inconsistencies
 - Polished: 2026-09-10
 
@@ -33,3 +33,15 @@
 
 - 上記 6 箇所の doc コメントが実装と一致していること
 - doc コメントのみの変更であり、既存の挙動とテストに影響しないこと
+
+## 解決方法
+
+コード内 doc コメントを実装に合わせて修正した（doc のみの変更で挙動は変えない）。
+
+- `src/session/core.rs` のモジュール doc から data 系関数を切り離し、`data.rs` の分離文に一本化した。兄弟モジュール一覧は制御メッセージ用の 4 モジュールのみにした。
+- `src/kvp.rs` の実在しない規約引用 (CODEBASE.md / shiguredo-rust) を外し、本モジュールの設計判断として記述した。
+- `src/session/subscription/validation.rs` の `validate_group_order` doc の重複行を統合した。
+- `src/msf.rs` の `MsfCatalogDocument::decode` 付近の deltaUpdate コメントを実装に合わせた。
+- namespace 3 ファイルの「SessionEvent variant は未実装」コメントを、`SessionEvent::ResetRequestStream` は fetch 経路で実装済み・本経路では Session は close を通知しない旨に修正した。
+- `src/message.rs` の `REQUEST_OK_ALLOWED_PARAMS` の説明を、REQUEST_OK に出現しうるのは `EXPIRES` / `LARGEST_OBJECT` のみで、codec 層は context 別検証をセッション層に委ねて意図的に広く受理する旨に修正した。
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した。
