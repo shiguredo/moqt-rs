@@ -1,7 +1,7 @@
 # MSF の isLive=false で targetLatency / buffers の encode と decode を対称にする
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-msf-islive-roundtrip
 - Polished: 2026-09-10
 
@@ -40,3 +40,14 @@ draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は `isLive=false` のとき `targetLate
 - `isLive=false` の encoded JSON に該当 key が現れないことを検証する単体テストが `tests/test_msf/` に追加されていること
 - PBT のコメントと生成器がコード修正後の実態に一致すること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリを追加すること
+
+## 解決方法
+
+`MsfTrack` / `MsfCloneTrack` の encode を decode 側の正規化に合わせた。
+
+- `DisplayJson for MsfTrack` は `is_live == false` のとき `targetLatency` / `buffers` を出力しない。
+- `DisplayJson for MsfCloneTrack` は `is_live == Some(false)` のとき出力せず、`None`（親から継承）と `Some(true)` では出力する。
+- 両型のフィールド doc に `isLive=false` で無視される旨を追記した。
+- `pbt/tests/prop_msf.rs` の生成器コメントを実装に合わせた。
+- `tests/test_msf/encode_decode_roundtrip.rs` に key 非出力の単体テストを追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
