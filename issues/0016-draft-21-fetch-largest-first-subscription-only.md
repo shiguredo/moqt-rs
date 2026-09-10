@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-largest-all-subscriptions
+- Polished: 2026-09-10
 
 ## 目的
 
