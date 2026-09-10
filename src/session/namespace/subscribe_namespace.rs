@@ -522,7 +522,8 @@ impl Session {
                 // `send_update_for_namespace_subscription` / `handle_update_for_namespace_subscription`
                 // の Established 要求ガードで再 REQUEST_UPDATE を拒否する。
                 // bidi 実際の close (RESET_STREAM / STOP_SENDING) は app が担当する
-                // (Session が close 意図を通知する SessionEvent variant は未実装)。
+                // (`SessionEvent::ResetRequestStream` は fetch 経路で実装済み。本経路では
+                //  Session は close を通知しない)。
                 entry.state = NamespaceSubscriptionState::Terminated;
             }
             NamespaceSubscriptionState::Terminated => {

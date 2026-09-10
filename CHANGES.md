@@ -22,3 +22,5 @@
   - @voluntas
 - [UPDATE] session の request 種別変換を 1 箇所に集約し、購読索引の追加・削除を単一経路化する
   - @voluntas
+- [UPDATE] コード内 doc コメントの実装との不整合を修正する
+  - @voluntas

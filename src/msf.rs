@@ -1632,7 +1632,7 @@ impl MsfCatalogDocument {
         let raw = nojson::RawJson::parse(text)?;
         let val = raw.value();
 
-        // deltaUpdate が存在し配列なら Delta、存在しないか配列以外なら Full として扱う
+        // deltaUpdate が存在しない場合のみ Full、存在して配列以外なら InvalidCatalog とする
         let delta_member = val.to_member("deltaUpdate")?.optional();
         if let Some(delta_v) = delta_member {
             // draft-ietf-moq-msf-01 §5.1.6 (Delta update): deltaUpdate は operation object の配列

@@ -84,12 +84,11 @@ pub(crate) const SUBSCRIBE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LA
 /// REQUEST_OK で許可されるパラメータ型 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) /
 /// §9.20.3 以降の各 Parameter 節 "MAY appear in" 定義から導出: AUTHORIZATION_TOKEN は非許可)
 ///
-/// これは全応答 context の許可パラメータの和集合であり、encode/decode 層は
-/// この和集合でワイヤフォーマットの妥当性のみを検証する。応答 context ごとの
-/// 厳密な検証はセッション層で `*_OK_ALLOWED_PARAMS` を用いて行う。
-/// なお本和集合は各 context の縮小 (例: PUBLISH_OK の EXPIRES のみ化) を
-/// 反映せず意図的に広く保っている。狭めるとデコード層エラーパスが変わるため、
-/// 厳密化はセッション層に委ねる。
+/// これは codec 層が REQUEST_OK のワイヤ妥当性検証に用いる許可集合である。
+/// draft-ietf-moq-transport-21 §9.20 の各 "MAY appear in" で REQUEST_OK に出現しうるのは
+/// `EXPIRES` / `LARGEST_OBJECT` のみだが、応答 context ごとの厳密な検証はセッション層が
+/// `*_OK_ALLOWED_PARAMS` で行うため、codec 層は REQUEST_UPDATE 系のパラメータも含めて
+/// 意図的に広く受理する。狭めるとデコード層エラーパスが変わる。
 const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_DELIVERY_TIMEOUT,
     PARAM_SUBGROUP_DELIVERY_TIMEOUT,

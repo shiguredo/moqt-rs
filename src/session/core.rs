@@ -5,13 +5,13 @@
 //! - ライフサイクル (作成 / `poll_event` / `close` / `fail`)
 //! - SETUP ハンドシェイク (draft §9.1 (SETUP))
 //! - 制御ストリーム受信 dispatcher (`recv_control` / `recv_request` / `recv_stream_message`)
-//! - data stream / datagram の送受信 state
-//!   (`send_subgroup_header` / `send_subgroup_object` / `send_data_stream_closed` /
-//!   `recv_data_stream_stop_sending` / `recv_data_stream_type` / `recv_subgroup_header` /
-//!   `recv_subgroup_object` / `recv_fetch_header` / `recv_object_datagram`)
 //! - Request ID API (`next_local_request_id` / `validate_peer_request`)
 //! - REQUEST_OK / REQUEST_ERROR の送受信 (共通 dispatcher)
 //!
+//! data stream / datagram の送受信 state (`send_subgroup_header` / `send_subgroup_object` /
+//! `send_data_stream_closed` / `recv_data_stream_stop_sending` / `recv_data_stream_type` /
+//! `recv_subgroup_header` / `recv_subgroup_object` / `recv_fetch_header` /
+//! `recv_object_datagram`) は `data.rs` に分離している。
 //! 各メッセージ種別 (SUBSCRIBE / PUBLISH / FETCH / NAMESPACE 系 / GOAWAY) の送受信処理は
 //! 兄弟モジュール (`subscription.rs` / `fetch.rs` / `namespace.rs` / `goaway.rs`) に
 //! 分離している。relay 全体の routing / fan-out / cache / policy はこの型の責務ではない。

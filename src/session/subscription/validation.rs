@@ -16,8 +16,7 @@ use alloc::vec::Vec;
 
 use super::super::types::SessionError;
 
-/// GROUP_ORDER の値を検証する (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))
-/// GROUP_ORDER の値域検証 (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))
+/// GROUP_ORDER の値域を検証する (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter))
 ///
 /// 許容値は Ascending (0x1) または Descending (0x2) のみ。それ以外は PROTOCOL_VIOLATION。
 /// ワイヤデコード層でも値域検証を行うが、API 経路 (MessageParameters を直接構築して
