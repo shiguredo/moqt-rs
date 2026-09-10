@@ -1,7 +1,7 @@
 # no_std ビルドと rustdoc 検査を CI に追加する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/test-add-no-std-and-rustdoc-ci
 - Polished: 2026-09-10
 
@@ -35,3 +35,12 @@
 - CI に rustdoc 検査（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt`）が追加され、成功すること
 - 追加したジョブが既存ジョブと同じく PR で実行されること
 - 既存ジョブの構成を変えず、ジョブ数を 1 つだけ増やすこと
+
+## 解決方法
+
+no_std ビルドと rustdoc 検査を CI に追加した。
+
+- `no-std-doc` ジョブを `ubuntu-latest` で追加した。`rustup target add thumbv7em-none-eabihf` → `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` → `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` を実行する。
+- runner は `shiguredo-github-actions` 規約に従い `ubuntu-slim` を第一候補としたが、Rust (rustup) が無いため `ubuntu-latest` を使う。理由を ci.yml 冒頭コメントに書いた。
+- 既存 3 ジョブは変更せず、ジョブ数を 1 つ追加した。ci.yml 冒頭コメントをジョブごとの目的・runner スコープに整理した。
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した。
