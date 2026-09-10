@@ -1,7 +1,7 @@
 # 受信 Subgroup Object に Object 単位フィルタを再適用する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/change-subgroup-object-filter-reapplied
 - Polished: 2026-09-10
 
@@ -45,3 +45,20 @@ draft-ietf-moq-transport-21 §3.1 (Subscriptions) の「subscriber は受信 Obj
 - 受信 subgroup 経路の Object 単位フィルタのテストが `tests/` に追加されていること
 - `examples/` が `FilteredOut` の payload を消費して継続し、`cargo test --workspace` と PBT が通ること
 - `CHANGES.md` の `## develop` に `[CHANGE]` として記載されていること
+
+## 解決方法
+
+受信 subgroup 経路で Object 単位のフィルタ再適用と帰属判定を行うようにした。
+
+- `src/session/data.rs` の `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、`resolve_peer_track_alias` の候補すべてへ `object_passes_filters` を再適用して、最初に通過した（キャンセル由来 `Terminated` でない）subscription へ Object を帰属させるようにした。通過がキャンセル由来候補のみなら `Discarded`、どの候補も通らなければ `FilteredOut` を返す。
+- `SubgroupIdMode::FirstObjectId` は `subgroup_id` を解決してからフィルタを評価し、`SUBGROUP_FILTER` も解決済み ID で評価するようにした。
+- フィルタ不通過でも wire 構造の整合と生存監視に必要な更新（`first_object_received` / `last_object_id` / subgroup_id 解決 / `peer_subgroups` の記録 / Malformed Track 検出 / data stream activity）は継続し、subscription スコープの更新（`largest_received_location` / Object Status 終端 / Object tracker / 先頭 Object の delivery timeout override / `ended_groups`）は帰属先にのみ適用する。
+- 共有 Track Alias の周辺挙動を整備した。
+  - `PRIORITY_FILTER` は stream が保持する header priority を候補ごとに解決して評価する。
+  - Malformed Track 条件 2 の終端対象は帰属先にする。
+  - delivery timeout override は帰属先に登録し全終端経路で削除する。
+  - キャンセル済み所有者の stream でも生きた帰属先があれば再帰属を継続し、`report_mid_object_fin` / FIN / RESET / STOP_SENDING の分岐と stream 会計を整合させる。
+  - 帰属先が回収済みの場合の生存判定と、`forget_subscription` 時の生きた他候補への移管を行う。
+- `examples/moqt-transport` / `examples/moqt-subscriber` を戻り値と payload 消費の契約に追従し、`README.md` / `skills/shiguredo-moqt/SKILL.md` を更新した。
+- `CHANGES.md` の `## develop` に `[CHANGE]` を追記した。
+- テストは `tests/test_session/subgroup_object_filter.rs`、`tests/test_session/subscription/terminated_discard.rs`、`src/session/tests.rs` に追加・更新した。
