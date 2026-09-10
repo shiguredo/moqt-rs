@@ -4,11 +4,16 @@
 # - test ジョブ: cargo test --workspace を実行する (pre-push フックと同範囲)
 # - fuzz-build ジョブ: fuzz/ の fuzz ターゲットをビルド確認する
 #   (fuzz は独立 workspace のため test ジョブの cargo test --workspace では検出できない)
-# - runner は macos-15 を使う。examples が macOS 専用依存 (Video Toolbox /
-#   CoreAudio 系の shiguredo_*_device 等) を持つため、Linux runner では
-#   workspace 全体をビルドできない (ubuntu-slim には Rust 自体がなく、
-#   ubuntu-latest では shiguredo_audio_device のビルドスクリプトが失敗する)。
-#   examples の単体テストは純粋なロジックのためヘッドレスでも実行できる
+# - no-std-doc ジョブ: no_std ビルドと rustdoc の警告を検査する
+# - runner:
+#   - prek / test は workspace 全体を対象にするため macos-15 を使う。examples が
+#     macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を持ち、
+#     Linux runner では workspace 全体をビルドできない (ubuntu-slim には Rust 自体がなく、
+#     ubuntu-latest では shiguredo_audio_device のビルドスクリプトが失敗する)。
+#     examples の単体テストは純粋なロジックのためヘッドレスでも実行できる
+#   - fuzz-build は fuzz workspace のみを対象にするが、既存ジョブと同じ macos-15 に揃えている
+#   - no-std-doc は shiguredo_moqt のみを対象にするため examples の macOS 専用依存を
+#     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
 # - MSRV 検証は含めない。moqt-publisher が rust-version 1.94 を要求するため
 #   workspace 単位の 1.93 検証が構造的にできない
 
@@ -46,3 +51,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fuzz ターゲットをビルド確認する
         run: cargo check --manifest-path fuzz/Cargo.toml
+
+  no-std-doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: thumbv7em-none-eabihf ターゲットを追加する
+        run: rustup target add thumbv7em-none-eabihf
+      - name: no_std ビルドを確認する
+        run: cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf
+      - name: rustdoc の警告を検査する
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt

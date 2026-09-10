@@ -26,3 +26,5 @@
   - @voluntas
 - [UPDATE] 未解決の intra-doc link を修正する
   - @voluntas
+- [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する
+  - @voluntas
