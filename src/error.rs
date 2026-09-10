@@ -77,9 +77,10 @@ impl core::fmt::Display for MessageError {
 /// 意図しない値であることが一目で分かるようにしている。
 ///
 /// §3.3.3 の "The publisher MUST forward only objects that pass all filters" に従って
-/// 自端が送信を止めたことだけを表し、peer のプロトコル違反ではない。したがって
-/// アプリケーションはこのエラーを `Session::fail` (crate 内専用) や
-/// [`crate::session::core::Session::close`] に渡してはならない。
+/// 自端が送信を止めたことだけを表し、peer のプロトコル違反ではない。この値は
+/// [`crate::session::types::SendRequestError::LocalFilterMismatch`] として返り、
+/// `SessionError` には載らない。wire コードを取る公開 API に渡しても各レジストリの
+/// `*_INTERNAL_ERROR` に置換される。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 pub const SESSION_LOCAL_FILTER_MISMATCH: u64 = 0xFFFF_FFFF_FFFF_FF01;
 
@@ -87,11 +88,22 @@ pub const SESSION_LOCAL_FILTER_MISMATCH: u64 = 0xFFFF_FFFF_FFFF_FF01;
 ///
 /// **この値を wire に送出してはならない。** `SESSION_LOCAL_FILTER_MISMATCH` と同様に
 /// 実装内部の値であり、peer のプロトコル違反ではない。
-/// §8 の "For datagrams, the implementation MUST drop the datagrams if the time elapsed
+/// §5.2 の "For datagrams, the implementation MUST drop the datagrams if the time elapsed
 /// exceeds OBJECT_DELIVERY_TIMEOUT" に従って自端が送信を止めたこと
-/// を表す。アプリケーションはこのエラーを `Session::fail` (crate 内専用) や
-/// [`crate::session::core::Session::close`] に渡してはならない。
+/// を表す。この値は [`crate::session::types::SendRequestError::LocalDatagramTimeout`] として
+/// 返り、`SessionError` には載らない。wire コードを取る公開 API に渡しても各レジストリの
+/// `*_INTERNAL_ERROR` に置換される。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 pub const SESSION_LOCAL_DATAGRAM_TIMEOUT: u64 = 0xFFFF_FFFF_FFFF_FF02;
+
+/// wire へ出してはならないローカル専用コードかを判定する
+///
+/// `SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT` を判定する。
+/// `Session` の wire コードを取る公開 API は本関数でローカル値を検出し、
+/// 対応するレジストリの `*_INTERNAL_ERROR` に置換する。
+pub(crate) fn is_local_error_code(code: u64) -> bool {
+    code == SESSION_LOCAL_FILTER_MISMATCH || code == SESSION_LOCAL_DATAGRAM_TIMEOUT
+}
 
 // ─── Session Termination Error Codes ──────────────────────────
 //

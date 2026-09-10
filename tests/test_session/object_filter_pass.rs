@@ -11,11 +11,11 @@
 //! 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 
 use super::*;
-use shiguredo_moqt::error::SESSION_LOCAL_FILTER_MISMATCH;
 use shiguredo_moqt::message_parameter::{
     LocationFilter, PARAM_FORWARD, PARAM_LOCATION_FILTER, PARAM_OBJECT_PROPERTY_FILTER,
     PARAM_OBJECTID_FILTER, PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_FILTER,
 };
+use shiguredo_moqt::session::types::SendRequestError;
 
 /// peer が MAX_FILTER_RANGES を宣言した状態で SUBSCRIBE を確立し (client, server, rid) を返す
 ///
@@ -91,10 +91,10 @@ fn property_range_filter(
 }
 
 /// 拒否が Pass 評価由来であることを断言する
-fn assert_filter_mismatch(err: shiguredo_moqt::session::types::SessionError, label: &str) {
-    assert_eq!(
-        err.code, SESSION_LOCAL_FILTER_MISMATCH,
-        "{label}: フィルタ不一致専用のコードであること"
+fn assert_filter_mismatch(err: SendRequestError, label: &str) {
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "{label}: フィルタ不一致専用のエラーであること"
     );
 }
 
@@ -577,9 +577,9 @@ fn first_object_id_subgroup_out_of_filter_rejected_without_state_change() {
     let err = server
         .send_subgroup_object(stream_id, 5, None)
         .expect_err("SUBGROUP_FILTER の範囲外オブジェクトは拒否されること");
-    assert_eq!(
-        err.code, SESSION_LOCAL_FILTER_MISMATCH,
-        "FirstObjectId モードでもフィルタ不一致コードが返ること"
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "FirstObjectId モードでもフィルタ不一致エラーが返ること"
     );
     // 内部状態が汚染されていないこと (filter 評価が FirstObjectId 解決より前に実行される)。
     // 後続の通過送信が ID=15 で解決されることが裏付けになる
@@ -676,9 +676,9 @@ fn empty_location_filter_range_passes_nothing() {
         let err = server
             .send_subgroup_object(stream_id, object_id, None)
             .expect_err("空範囲では全 Object が拒否されること");
-        assert_eq!(
-            err.code, SESSION_LOCAL_FILTER_MISMATCH,
-            "空範囲では SESSION_LOCAL_FILTER_MISMATCH が返ること"
+        assert!(
+            matches!(err, SendRequestError::LocalFilterMismatch),
+            "空範囲では LocalFilterMismatch が返ること"
         );
     }
     // subscription は Established を維持し、セッションは閉じない

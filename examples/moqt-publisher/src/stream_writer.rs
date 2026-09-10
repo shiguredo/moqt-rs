@@ -83,7 +83,7 @@ impl SubgroupWriter {
     /// Session のフィルタ評価を先に行い、通過時のみワイヤへ出す
     /// (draft-ietf-moq-transport-21 §3.3.3 (Combining Filters): "The publisher MUST forward
     /// only objects that pass all filters")。フィルタ不通過
-    /// (`SESSION_LOCAL_FILTER_MISMATCH`) のオブジェクトはワイヤに出さず `Skip` を返す。
+    /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
     /// オブジェクト ID だけ進める (ID ギャップは draft §11.3.1 (Subgroup Header) の
     /// "A consumer cannot infer information about the existence of Objects between the current
     /// and previous Object ID in the Subgroup" により許容される。なおフィルタ由来の

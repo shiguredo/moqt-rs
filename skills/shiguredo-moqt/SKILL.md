@@ -416,7 +416,7 @@ fn send_subgroup_object(
     stream_id: DataStreamId,
     object_id: u64,
     properties_bytes: Option<&[u8]>,
-) -> Result<(), SessionError>
+) -> Result<(), SendRequestError>
 fn send_data_stream_closed(&mut self, stream_id: DataStreamId, end: RequestStreamEnd) -> Result<(), SessionError>
 fn send_fetch_header(&mut self, stream_id: DataStreamId, request_id: u64) -> Result<(), SessionError>
 fn send_fill_fetch_header(&mut self, stream_id: DataStreamId, subscription_request_id: u64) -> Result<(), SessionError>
@@ -429,7 +429,7 @@ fn send_object_datagram(
     object_id: u64,
     properties_data: Option<Vec<u8>>,
     status: Option<u64>,
-) -> Result<(), SessionError>
+) -> Result<(), SendRequestError>
 fn send_data_stream_stop_sending(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn reset_outgoing_data_stream(
     &mut self,
@@ -458,6 +458,8 @@ pub struct SessionError {
 
 pub enum SendRequestError {
     PeerGoawayReceived,
+    LocalFilterMismatch,
+    LocalDatagramTimeout,
     Session(SessionError),
 }
 
@@ -473,7 +475,7 @@ pub enum RecvDataStreamError {
 }
 ```
 
-- `SendRequestError` は `as_session_error()` で `SessionError` を取り出せる (`PeerGoawayReceived` は `None`)。このエラーを `Session::close` に渡してはならない
+- `SendRequestError` は `as_session_error()` で `SessionError` を取り出せる (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout` は `None`)。これらは wire コードを持たないため公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `RecvRequestError` / `RecvDataStreamError` は `BeforeSessionEstablished` なら session state に影響しない
 
 ## data stream / datagram (`stream`)
@@ -895,7 +897,7 @@ fn get(&self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Option<&Subg
 
 - 型は定義元モジュールから import する。re-export は存在しない
 - `Session` は sans-I/O の状態機械であり、I/O・非同期処理・relay 固有の routing / fan-out / cache / policy は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
-- `SendRequestError` を `Session::close` に渡してはならない (wire へ流出する)
+- `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可
 - 開発中のライブラリであり、仕様は積極的に変更される場合がある

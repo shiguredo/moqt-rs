@@ -1306,3 +1306,249 @@ fn register_and_remove_subscription_track_index_contracts() {
     client.remove_subscription_track_index(rid1, &key);
     assert!(client.aliases.subscriptions_by_track.get(&key).is_none());
 }
+
+// ─── ローカル専用エラーコードの wire 流出防止 ──────────────────────
+
+/// SETUP を交換して Established にした client / server ペアを返す
+fn establish_pair_for_local_code_tests() -> (Session, Session) {
+    use crate::parameter::SetupOptions;
+
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut server = Session::new_server(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let c_setup = take_send_control_for_local_code_tests(&mut client);
+    let s_setup = take_send_control_for_local_code_tests(&mut server);
+    server
+        .recv_control(c_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(s_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (client, server)
+}
+
+fn take_send_control_for_local_code_tests(s: &mut Session) -> crate::message::ControlMessage {
+    while let Some(e) = s.poll_event() {
+        if let SessionEvent::SendControl(msg) = e {
+            return msg;
+        }
+    }
+    panic!("SendControl イベントが期待されたが発行されなかった");
+}
+
+fn take_send_request_for_local_code_tests(s: &mut Session) -> crate::message::ControlMessage {
+    while let Some(e) = s.poll_event() {
+        if let SessionEvent::SendRequest { message, .. } = e {
+            return message;
+        }
+    }
+    panic!("SendRequest イベントが期待されたが発行されなかった");
+}
+
+fn take_send_on_stream_for_local_code_tests(s: &mut Session) -> crate::message::ControlMessage {
+    while let Some(e) = s.poll_event() {
+        if let SessionEvent::SendOnStream { message, .. } = e {
+            return message;
+        }
+    }
+    panic!("SendOnStream イベントが期待されたが発行されなかった");
+}
+
+/// publisher 役 subscription を 1 本確立した server を返す
+fn establish_publisher_subscription_for_local_code_tests() -> (Session, Session, u64) {
+    use crate::track_properties::TrackProperties;
+
+    let (mut client, mut server) = establish_pair_for_local_code_tests();
+    let rid = client
+        .send_subscribe(
+            TrackNamespace::new(vec![b"live".to_vec()]).expect("有効な namespace"),
+            b"cam".to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("SUBSCRIBE に成功すること");
+    let sub_msg = take_send_request_for_local_code_tests(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK に成功すること");
+    let _ = take_send_on_stream_for_local_code_tests(&mut server);
+    (client, server, rid)
+}
+
+/// close はローカル専用コードを SESSION_INTERNAL_ERROR に置換する
+#[test]
+fn close_replaces_local_error_code_with_internal_error() {
+    use crate::error::{SESSION_INTERNAL_ERROR, SESSION_LOCAL_FILTER_MISMATCH};
+    let (mut client, _server) = establish_pair_for_local_code_tests();
+    client.close(SESSION_LOCAL_FILTER_MISMATCH, "local filter mismatch");
+    let mut code = None;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::CloseSession(err) = ev {
+            code = Some(err.code);
+        }
+    }
+    assert_eq!(
+        code,
+        Some(SESSION_INTERNAL_ERROR),
+        "close はローカルコードを SESSION_INTERNAL_ERROR に置換すること"
+    );
+}
+
+/// fail はローカル専用コードを SESSION_INTERNAL_ERROR に置換する
+#[test]
+fn fail_replaces_local_error_code_with_internal_error() {
+    use crate::error::{SESSION_INTERNAL_ERROR, SESSION_LOCAL_DATAGRAM_TIMEOUT};
+    let (mut client, _server) = establish_pair_for_local_code_tests();
+    client.fail(SessionError::new(
+        SESSION_LOCAL_DATAGRAM_TIMEOUT,
+        "local datagram timeout",
+    ));
+    let mut code = None;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::CloseSession(err) = ev {
+            code = Some(err.code);
+        }
+    }
+    assert_eq!(code, Some(SESSION_INTERNAL_ERROR));
+}
+
+/// send_request_error はローカル専用コードを REQUEST_INTERNAL_ERROR に置換する
+#[test]
+fn send_request_error_replaces_local_error_code_with_request_internal_error() {
+    use crate::error::{REQUEST_INTERNAL_ERROR, SESSION_LOCAL_FILTER_MISMATCH};
+    use crate::message::ReasonPhrase;
+    let (_client, mut server, rid) = establish_publisher_subscription_for_local_code_tests();
+    server
+        .send_request_error(
+            rid,
+            SESSION_LOCAL_FILTER_MISMATCH,
+            0,
+            ReasonPhrase::new("local filter mismatch").expect("有効な reason"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    match take_send_on_stream_for_local_code_tests(&mut server) {
+        crate::message::ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_INTERNAL_ERROR);
+        }
+        other => panic!("RequestError が期待される: {other:?}"),
+    }
+}
+
+/// send_publish_done はローカル専用コードを PUBLISH_DONE_INTERNAL_ERROR に置換する
+#[test]
+fn send_publish_done_replaces_local_error_code_with_publish_done_internal_error() {
+    use crate::error::{PUBLISH_DONE_INTERNAL_ERROR, SESSION_LOCAL_FILTER_MISMATCH};
+    use crate::message::ReasonPhrase;
+    let (_client, mut server, rid) = establish_publisher_subscription_for_local_code_tests();
+    server
+        .send_publish_done(
+            rid,
+            SESSION_LOCAL_FILTER_MISMATCH,
+            0,
+            ReasonPhrase::new("local filter mismatch").expect("有効な reason"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    match take_send_on_stream_for_local_code_tests(&mut server) {
+        crate::message::ControlMessage::PublishDone(pd) => {
+            assert_eq!(pd.status_code, PUBLISH_DONE_INTERNAL_ERROR);
+        }
+        other => panic!("PublishDone が期待される: {other:?}"),
+    }
+}
+
+/// reset_outgoing_data_stream_with_code はローカル専用コードを STREAM_INTERNAL_ERROR に置換する
+#[test]
+fn reset_with_code_replaces_local_error_code_with_stream_internal_error() {
+    use crate::error::{SESSION_LOCAL_FILTER_MISMATCH, STREAM_INTERNAL_ERROR};
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (_client, mut server, rid) = establish_publisher_subscription_for_local_code_tests();
+    let stream_id = DataStreamId(50);
+    server
+        .send_subgroup_header(
+            stream_id,
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(1),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("SUBGROUP_HEADER の送信に成功すること");
+    server
+        .reset_outgoing_data_stream_with_code(stream_id, SESSION_LOCAL_FILTER_MISMATCH)
+        .expect("RESET_STREAM の送信に成功すること");
+    let mut error_code = None;
+    while let Some(ev) = server.poll_event() {
+        if let SessionEvent::ResetDataStream {
+            error_code: code, ..
+        } = ev
+        {
+            error_code = Some(code);
+        }
+    }
+    assert_eq!(error_code, Some(STREAM_INTERNAL_ERROR));
+
+    // reset_outgoing_data_stream_at_with_code 経由でも同じ置換が行われる
+    let at_stream_id = DataStreamId(51);
+    server
+        .send_subgroup_header(
+            at_stream_id,
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 1,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(1),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("SUBGROUP_HEADER の送信に成功すること");
+    server
+        .reset_outgoing_data_stream_at_with_code(
+            at_stream_id,
+            SESSION_LOCAL_FILTER_MISMATCH,
+            Some(0),
+        )
+        .expect("RESET_STREAM_AT の送信に成功すること");
+    let mut error_code = None;
+    while let Some(ev) = server.poll_event() {
+        if let SessionEvent::ResetDataStream {
+            error_code: code, ..
+        } = ev
+        {
+            error_code = Some(code);
+        }
+    }
+    assert_eq!(error_code, Some(STREAM_INTERNAL_ERROR));
+}
+
+/// ローカル variant は `as_session_error()` が `None` を返す
+#[test]
+fn local_send_request_error_has_no_session_error() {
+    use super::types::SendRequestError;
+    assert!(
+        SendRequestError::LocalFilterMismatch
+            .as_session_error()
+            .is_none()
+    );
+    assert!(
+        SendRequestError::LocalDatagramTimeout
+            .as_session_error()
+            .is_none()
+    );
+    assert!(
+        SendRequestError::PeerGoawayReceived
+            .as_session_error()
+            .is_none()
+    );
+}

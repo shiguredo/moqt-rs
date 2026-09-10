@@ -17,9 +17,9 @@ use bytes::Bytes;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use shiguredo_moqt::decoder::MessageDecoder;
-use shiguredo_moqt::error::SESSION_LOCAL_FILTER_MISMATCH;
 use shiguredo_moqt::session::types::{
-    DatagramAcceptance, FetchState, RecvDataStreamError, SubscriptionState, TrackDataAcceptance,
+    DatagramAcceptance, FetchState, RecvDataStreamError, SendRequestError, SubscriptionState,
+    TrackDataAcceptance,
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
@@ -49,7 +49,7 @@ const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
 pub enum ObjectFilterOutcome {
     /// フィルタを通過したため、ワイヤへ送信してよい
     Pass,
-    /// フィルタ不通過 (SESSION_LOCAL_FILTER_MISMATCH)。ワイヤ送信をスキップする
+    /// フィルタ不通過 (SendRequestError::LocalFilterMismatch)。ワイヤ送信をスキップする
     Skip,
 }
 
@@ -144,7 +144,7 @@ impl DataPlaneHandle {
 
     /// subgroup object を Session に通知し、フィルタ評価の結果を返す
     ///
-    /// `SESSION_LOCAL_FILTER_MISMATCH` (フィルタ不通過) は `Skip` として返し、
+    /// `SendRequestError::LocalFilterMismatch` (フィルタ不通過) は `Skip` として返し、
     /// 呼び出し側はワイヤ送信をスキップする。その他のエラーは伝播する。
     pub fn send_subgroup_object(
         &self,
@@ -155,7 +155,7 @@ impl DataPlaneHandle {
         let mut session = lock_session(&self.session);
         match session.send_subgroup_object(stream_id, object_id, properties_bytes) {
             Ok(()) => Ok(ObjectFilterOutcome::Pass),
-            Err(e) if e.code == SESSION_LOCAL_FILTER_MISMATCH => Ok(ObjectFilterOutcome::Skip),
+            Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
             Err(e) => Err(TransportError::Internal(format!(
                 "send_subgroup_object: {e}"
             ))),
@@ -164,7 +164,7 @@ impl DataPlaneHandle {
 
     /// Object Datagram 送信を Session に通知し、フィルタ評価の結果を返す
     ///
-    /// `SESSION_LOCAL_FILTER_MISMATCH` (フィルタ不通過) は `Skip` として返し、
+    /// `SendRequestError::LocalFilterMismatch` (フィルタ不通過) は `Skip` として返し、
     /// 呼び出し側はワイヤ送信をスキップする。その他のエラーは伝播する。
     pub fn send_object_datagram(
         &self,
@@ -178,7 +178,7 @@ impl DataPlaneHandle {
         match session.send_object_datagram(request_id, group_id, object_id, properties_data, status)
         {
             Ok(()) => Ok(ObjectFilterOutcome::Pass),
-            Err(e) if e.code == SESSION_LOCAL_FILTER_MISMATCH => Ok(ObjectFilterOutcome::Skip),
+            Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
             Err(e) => Err(TransportError::Internal(format!(
                 "send_object_datagram: {e}"
             ))),

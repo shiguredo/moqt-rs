@@ -21,9 +21,10 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INVALID_AUTHORITY,
-    SESSION_INVALID_PATH, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
-    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
+    PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
+    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH,
+    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION,
+    SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
     ControlMessage, NAMESPACE_OK_ALLOWED_PARAMS, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS,
@@ -665,7 +666,16 @@ impl Session {
     ///
     /// [`SessionEvent::CloseSession`] を発行し、状態を [`SessionState::Closing`] にする。
     /// 既に Closing / Closed の場合は何もしない。
+    /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
+    /// 渡した場合は `SESSION_INTERNAL_ERROR` に置換し、未登録値を wire に出さない。
     pub fn close(&mut self, code: u64, reason: &'static str) {
+        // 公開 API の契約として、ローカル専用コードを Session Termination レジストリの
+        // INTERNAL_ERROR に置換する (`fail` の最終防御とは独立に行う)
+        let code = if is_local_error_code(code) {
+            SESSION_INTERNAL_ERROR
+        } else {
+            code
+        };
         self.fail(SessionError::new(code, reason));
     }
 
@@ -1160,6 +1170,9 @@ impl Session {
     /// REQUEST_ERROR 受信で subscription state を終える帰結)、遷移後の
     /// `send_request_update` は Established 要求のためエラーを返す
     /// (再 REQUEST_UPDATE の窓は閉じている)。
+    ///
+    /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
+    /// `error_code` に渡した場合は `REQUEST_INTERNAL_ERROR` に置換し、未登録値を wire に出さない。
     pub fn send_request_error(
         &mut self,
         request_id: u64,
@@ -1169,6 +1182,13 @@ impl Session {
         redirect: Option<Redirect>,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // ローカル専用コードが wire に流出しないよう、REQUEST_ERROR レジストリの
+        // INTERNAL_ERROR に置換する
+        let error_code = if is_local_error_code(error_code) {
+            REQUEST_INTERNAL_ERROR
+        } else {
+            error_code
+        };
         // subscription の Established 分岐で PUBLISH_DONE(UPDATE_FAILED) 自動送信、
         // fetch の Established 分岐で FETCH data stream の RESET_STREAM 自動発火が
         // 必要になるため、それぞれのスナップショットを受け取る
@@ -1776,6 +1796,13 @@ impl Session {
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     #[track_caller]
     pub(super) fn emit_request_error(&mut self, request_id: u64, error_code: u64, reason: &str) {
+        // ローカル専用コードが wire に流出しないよう、REQUEST_ERROR レジストリの
+        // INTERNAL_ERROR に置換する (`send_request_error` と同じ置換を最終防御として行う)
+        let error_code = if is_local_error_code(error_code) {
+            REQUEST_INTERNAL_ERROR
+        } else {
+            error_code
+        };
         // 拒否済み request id のストリームクローズを no-op で吸収するため、
         // `request_streams` 未登録の場合のみ集合に記録する。
         // 登録済み request への応答としての REQUEST_ERROR (REQUEST_UPDATE 拒否等) は
@@ -1854,6 +1881,13 @@ impl Session {
     }
 
     pub(super) fn fail(&mut self, err: SessionError) {
+        // ローカル専用コードの wire 流出を防ぐ最終防御。公開 API 側で置換済みだが、
+        // crate 内の誤用にも備える
+        let err = if is_local_error_code(err.code) {
+            SessionError::new(SESSION_INTERNAL_ERROR, err.reason)
+        } else {
+            err
+        };
         if matches!(self.state, SessionState::Closing | SessionState::Closed) {
             return;
         }

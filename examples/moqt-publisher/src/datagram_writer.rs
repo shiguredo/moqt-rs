@@ -54,7 +54,7 @@ impl DatagramWriter {
     /// Session のフィルタ評価を先に行い、通過時のみワイヤへ出す
     /// (draft-ietf-moq-transport-21 §3.3.3 (Combining Filters): "The publisher MUST forward
     /// only objects that pass all filters")。フィルタ不通過
-    /// (`SESSION_LOCAL_FILTER_MISMATCH`) のオブジェクトはワイヤに出さず `Skip` を返す。
+    /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
     /// オブジェクト ID だけ進める (datagram は絶対 ID のため delta の考慮は不要)。
     ///
     /// 返り値の `ObjectFilterOutcome::Pass` はワイヤへ送信したこと、`Skip` はフィルタ

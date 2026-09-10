@@ -5,7 +5,8 @@
 //! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
-    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_LOCAL_FILTER_MISMATCH, SESSION_PROTOCOL_VIOLATION,
+    PUBLISH_DONE_INTERNAL_ERROR, SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
+    is_local_error_code,
 };
 use crate::message::{
     ControlMessage, FETCH_UPDATE_ALLOWED_PARAMS, NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
@@ -232,6 +233,8 @@ impl Session {
     ///
     /// draft §3.1 (Subscriptions): Idle → Pending (Publisher) に遷移し、
     /// [`SessionEvent::SendRequest`] を発行する。`track_alias` は draft §3.1.2 (Track Alias) に従い自側が一意に採番する。
+    /// peer の TRACK_PROPERTY_FILTER を通らない Track は
+    /// [`SendRequestError::LocalFilterMismatch`] を返して送信を抑止する。
     pub fn send_publish(
         &mut self,
         track_namespace: TrackNamespace,
@@ -287,11 +290,7 @@ impl Session {
                 // prefix が一致する publisher 役の SUBSCRIBE_TRACKS は
                 // `prefix_overlaps` により最大 1 件なので、ここでの判定は 1 度しか成立しない。
                 if !track_properties_pass(&ts.track_property_filters, &track_properties) {
-                    return Err(SessionError::new(
-                        SESSION_LOCAL_FILTER_MISMATCH,
-                        "track properties do not pass the peer TRACK_PROPERTY_FILTER",
-                    )
-                    .into());
+                    return Err(SendRequestError::LocalFilterMismatch);
                 }
             }
         }
@@ -972,6 +971,8 @@ impl Session {
     /// `stream_count` は `published_count == 0` のとき `0` のみ、`published_count > 0` のとき
     /// 追跡値との一致または `PUBLISH_DONE_STREAM_COUNT_UNKNOWN` のみを許可し、
     /// それ以外は `SESSION_PROTOCOL_VIOLATION` を返す。
+    /// `status_code` にローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` /
+    /// `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を渡した場合は `PUBLISH_DONE_INTERNAL_ERROR` に置換する。
     pub fn send_publish_done(
         &mut self,
         request_id: u64,
@@ -980,6 +981,13 @@ impl Session {
         reason: ReasonPhrase,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // ローカル専用コードが wire に流出しないよう、PUBLISH_DONE レジストリの
+        // INTERNAL_ERROR に置換する
+        let status_code = if is_local_error_code(status_code) {
+            PUBLISH_DONE_INTERNAL_ERROR
+        } else {
+            status_code
+        };
         let subscription = self.subscriptions.get(&request_id).ok_or_else(|| {
             SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,

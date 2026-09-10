@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] `send_subgroup_object` / `send_object_datagram` の戻り値を `SendRequestError` に変更し、`send_publish` のフィルタ不通過も `SendRequestError::LocalFilterMismatch` にする。wire コードを取る公開 API はローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する
+  - @voluntas
 - [FIX] SUBSCRIBE_TRACKS の bidi stream 終端後の PUBLISH の bidi stream 終端でセッションを閉じないようにし、RequestTerminated の kind を実際の要求種別に合わせる
   - @voluntas
 - [FIX] MSF の isLive=false で targetLatency / buffers をエンコードしないようにする

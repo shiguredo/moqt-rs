@@ -980,6 +980,7 @@ fn send_subgroup_object_to_terminated_subscription_rejected() {
     let err = server
         .send_subgroup_object(stream_id, 5, None)
         .expect_err("Terminated 状態の subscription への送信は拒否されること");
+    let err = err.as_session_error().expect("SessionError が得られること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(
         err.reason, "outgoing subgroup stream requires Established subscription",

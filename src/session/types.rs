@@ -70,13 +70,23 @@ impl core::error::Error for SessionError {}
 /// 送信側 API (`send_*`) が拒否される理由を表す型。
 ///
 /// `SessionError` (draft-ietf-moq-transport-21 §16.11.1 由来) とは分離し、wire への流出を防ぐ。
-/// アプリは本エラーを `session.fail()` に渡してはならない。
+/// アプリは本エラーが持つ値を wire コードとして公開 API に渡してはならない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendRequestError {
     /// peer GOAWAY 受信後の新規リクエスト送信抑制 (draft §9.2 SHOULD NOT)。
     ///
-    /// アプリは本エラーを `session.fail()` に渡してはならない (wire 流出するため)。
+    /// wire コードを持たない。公開 API に渡す必要はない。
     PeerGoawayReceived,
+    /// 送信 Object / Track Property が購読フィルタを通らないローカル拒否 (draft §3.3.2 / §3.3.3)。
+    ///
+    /// wire コードを持たない。公開 API に渡す必要はない (渡しても各レジストリの
+    /// `*_INTERNAL_ERROR` に置換される)。
+    LocalFilterMismatch,
+    /// datagram の delivery timeout 超過によるローカルドロップ (draft §5.2)。
+    ///
+    /// wire コードを持たない。公開 API に渡す必要はない (渡しても各レジストリの
+    /// `*_INTERNAL_ERROR` に置換される)。
+    LocalDatagramTimeout,
     /// セッション層由来のエラー (既存の `require_established()` 失敗等)。
     Session(SessionError),
 }
@@ -88,10 +98,12 @@ impl From<SessionError> for SendRequestError {
 }
 
 impl SendRequestError {
-    /// 内部の `SessionError` を参照する (`PeerGoawayReceived` の場合は `None`)
+    /// 内部の `SessionError` を参照する (`PeerGoawayReceived` 等のローカルエラーの場合は `None`)
     pub fn as_session_error(&self) -> Option<&SessionError> {
         match self {
-            Self::PeerGoawayReceived => None,
+            Self::PeerGoawayReceived | Self::LocalFilterMismatch | Self::LocalDatagramTimeout => {
+                None
+            }
             Self::Session(e) => Some(e),
         }
     }
@@ -106,6 +118,15 @@ impl core::fmt::Display for SendRequestError {
                     "new request suppressed: peer GOAWAY received (draft §9.2 SHOULD NOT)"
                 )
             }
+            Self::LocalFilterMismatch => {
+                write!(
+                    f,
+                    "outgoing object or track properties do not pass subscription filters"
+                )
+            }
+            Self::LocalDatagramTimeout => {
+                write!(f, "datagram delivery timeout exceeded, dropping datagram")
+            }
             Self::Session(e) => write!(f, "{e}"),
         }
     }
@@ -114,7 +135,9 @@ impl core::fmt::Display for SendRequestError {
 impl core::error::Error for SendRequestError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::PeerGoawayReceived => None,
+            Self::PeerGoawayReceived | Self::LocalFilterMismatch | Self::LocalDatagramTimeout => {
+                None
+            }
             Self::Session(e) => Some(e),
         }
     }

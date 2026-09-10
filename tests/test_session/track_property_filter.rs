@@ -12,8 +12,8 @@
 //! 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 
 use super::*;
-use shiguredo_moqt::error::SESSION_LOCAL_FILTER_MISMATCH;
 use shiguredo_moqt::message_parameter::PARAM_TRACK_PROPERTY_FILTER;
+use shiguredo_moqt::session::types::SendRequestError;
 use shiguredo_moqt::track_properties::{
     PROP_MAX_CACHE_DURATION, TrackProperty, TrackPropertyValue,
 };
@@ -137,8 +137,10 @@ fn failing_track_properties_are_suppressed() {
 
     let err = try_publish(&mut server, b"cam", props_with_cache_duration(500))
         .expect_err("範囲外の Track Property は抑止される");
-    let err = err.as_session_error().expect("SessionError が得られること");
-    assert_eq!(err.code, SESSION_LOCAL_FILTER_MISMATCH);
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "フィルタ不一致エラーが返ること"
+    );
     assert_eq!(
         server.state(),
         SessionState::Established,
@@ -158,12 +160,7 @@ fn track_without_required_property_is_suppressed() {
 
     let err = try_publish(&mut server, b"cam", TrackProperties::new())
         .expect_err("必須 Property が無い Track は抑止される");
-    assert_eq!(
-        err.as_session_error()
-            .expect("SessionError が得られること")
-            .code,
-        SESSION_LOCAL_FILTER_MISMATCH
-    );
+    assert!(matches!(err, SendRequestError::LocalFilterMismatch));
 }
 
 /// フィルタ省略時は従来どおり PUBLISH できる

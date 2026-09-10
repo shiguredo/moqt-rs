@@ -1,5 +1,5 @@
 use super::*;
-use shiguredo_moqt::error::SESSION_LOCAL_DATAGRAM_TIMEOUT;
+use shiguredo_moqt::session::types::SendRequestError;
 
 #[test]
 fn data_stream_type_before_established_returns_bufferable_error() {
@@ -630,7 +630,10 @@ fn outgoing_subgroup_reset_tracks_delivery_timeout_reason() {
     let err = server
         .send_subgroup_object(DataStreamId(32), 0, None)
         .expect_err("終端済み stream への送信は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     // reset 終端した Subgroup は再オープンできる (Reset は再オープン可)
     server
         .send_subgroup_header(DataStreamId(34), rid, &header)
@@ -888,7 +891,10 @@ fn send_object_datagram_failure_does_not_update_location() {
     let err = server
         .send_object_datagram(rid, 3, 1, Some(Vec::new()), None)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
 }
@@ -950,7 +956,10 @@ fn send_object_datagram_rejected_for_non_publisher_role() {
     let err = server
         .send_object_datagram(rid, 3, 1, None, None)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
 }
@@ -970,7 +979,10 @@ fn send_object_datagram_rejected_before_established() {
     let err = server
         .send_object_datagram(rid, 3, 1, None, None)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
 }
@@ -988,7 +1000,10 @@ fn send_object_datagram_rejected_for_properties_with_non_normal_status() {
     let err = server
         .send_object_datagram(rid, 3, 1, properties_data, Some(0x3))
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
 }
@@ -2313,7 +2328,10 @@ fn reset_at_propagates_reliable_size_to_event_and_tracker() {
     let err = server
         .send_subgroup_object(stream_id, 0, None)
         .expect_err("終端済み stream への送信は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
     server
         .send_subgroup_header(DataStreamId(97), rid, &header)
         .expect("reset 済み Subgroup は再オープンできること");
@@ -2837,7 +2855,7 @@ fn datagram_sent_before_first_tick_is_not_dropped_after_tick() {
     let err = server
         .send_object_datagram(rid, 0, 0, None, None)
         .expect_err("確定後の経過 500ms >= 500ms で drop されること");
-    assert_eq!(err.code, SESSION_LOCAL_DATAGRAM_TIMEOUT);
+    assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
 }
 
 /// tick 後に送信した datagram は timeout 超過で drop され、drop 後の再送も再度 drop される
@@ -2860,12 +2878,12 @@ fn datagram_sent_after_tick_is_dropped_after_timeout() {
     let err = server
         .send_object_datagram(rid, 0, 0, None, None)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_LOCAL_DATAGRAM_TIMEOUT);
+    assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
     // drop 後もエントリが残るため、再送は再度 drop される
     let err = server
         .send_object_datagram(rid, 0, 0, None, None)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_LOCAL_DATAGRAM_TIMEOUT);
+    assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
     // drop 時は送信されないため、最大位置は初回送信時のまま更新されない
     let sub = server
         .subscription(rid)

@@ -6,9 +6,8 @@
 //! sans I/O API を提供する。
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_LOCAL_DATAGRAM_TIMEOUT,
-    SESSION_LOCAL_FILTER_MISMATCH, SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
-    STREAM_MALFORMED_TRACK,
+    PUBLISH_DONE_UPDATE_FAILED, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
+    STREAM_CANCELLED, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK, is_local_error_code,
 };
 use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
 use crate::stream::{
@@ -30,9 +29,9 @@ use super::subscription::validation::{
 };
 use super::types::{
     DataStreamId, DataStreamResetReason, DatagramAcceptance, FetchState,
-    PUBLISHER_PRIORITY_DEFAULT, RecvDataStreamError, RequestKind, RequestStreamEnd, SessionError,
-    SessionEvent, SessionState, Subscription, SubscriptionState, TerminationReason,
-    TrackDataAcceptance, TrackRole,
+    PUBLISHER_PRIORITY_DEFAULT, RecvDataStreamError, RequestKind, RequestStreamEnd,
+    SendRequestError, SessionError, SessionEvent, SessionState, Subscription, SubscriptionState,
+    TerminationReason, TrackDataAcceptance, TrackRole,
 };
 
 /// subscription がキャンセル由来 `Terminated` かどうかを判定する
@@ -272,7 +271,7 @@ impl Session {
     /// 拒否される呼び出しで内部状態を汚染しない。
     ///
     /// draft-ietf-moq-transport-21 §3.3.3 (Combining Filters) の Pass 評価を行い、
-    /// フィルタを通らない Object は [`SESSION_LOCAL_FILTER_MISMATCH`] で拒否する。
+    /// フィルタを通らない Object は [`SendRequestError::LocalFilterMismatch`] を返して拒否する。
     /// `properties_bytes` は Object Properties の生バイト列 (Properties Length varint +
     /// データ) で、OBJECT_PROPERTY_FILTER (0x28) の評価に使う。Object Properties を
     /// 付けない場合は `None` を渡す。
@@ -283,7 +282,7 @@ impl Session {
         stream_id: DataStreamId,
         object_id: u64,
         properties_bytes: Option<&[u8]>,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), SendRequestError> {
         self.require_established()?;
         let Some((request_id, track_alias, group_id, subgroup_id)) =
             self.data_streams.outgoing.get(&stream_id).map(|stream| {
@@ -298,7 +297,8 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing subgroup object received for unknown stream id",
-            ));
+            )
+            .into());
         };
         // draft §3.1.1 (Subscription State Management): "Objects MUST NOT be sent for requests
         // that end with an error." REQUEST_UPDATE 失敗応答 (`send_request_error`) で `Terminated` に
@@ -317,7 +317,8 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing subgroup stream requires Established subscription",
-            ));
+            )
+            .into());
         }
         // draft §5.1.5 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // 通らない Object は送信を拒否する (§5.1.5 の "The publisher MUST forward only objects
@@ -348,10 +349,7 @@ impl Session {
             properties_bytes,
         };
         if !object_passes_filters(subscription, &input) {
-            return Err(SessionError::new(
-                SESSION_LOCAL_FILTER_MISMATCH,
-                "outgoing subgroup object does not pass subscription filters",
-            ));
+            return Err(SendRequestError::LocalFilterMismatch);
         }
         // filter 通過後に FirstObjectId 解決の副作用を実行する (未解決のときのみ。
         // `my_subgroups.open` は同一キーが Open 中のとき `PROTOCOL_VIOLATION` を返すため、
@@ -417,6 +415,8 @@ impl Session {
     /// 逃げ道。通常は [`reset_outgoing_data_stream`](Self::reset_outgoing_data_stream) を使う。
     /// subgroup stream と fill fetch stream (draft-ietf-moq-transport-21 §3.4.1 の
     /// 失敗時即 reset 経路を含む) の両方に使える。
+    /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
+    /// `error_code` に渡した場合は `STREAM_INTERNAL_ERROR` に置換する。
     pub fn reset_outgoing_data_stream_with_code(
         &mut self,
         stream_id: DataStreamId,
@@ -453,6 +453,8 @@ impl Session {
     /// `None` の場合は従来の RESET_STREAM を発行する。
     /// 渡した値は `ResetDataStream` イベントの同名フィールドと自側 stream 追跡の
     /// 終端状態の両方に一貫して反映される。
+    /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
+    /// `error_code` に渡した場合は `STREAM_INTERNAL_ERROR` に置換し、未登録値を wire に出さない。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn reset_outgoing_data_stream_at_with_code(
         &mut self,
@@ -461,6 +463,13 @@ impl Session {
         reliable_size: Option<u64>,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // ローカル専用コードが wire に流出しないよう、Stream Reset レジストリの
+        // INTERNAL_ERROR に置換する
+        let error_code = if is_local_error_code(error_code) {
+            STREAM_INTERNAL_ERROR
+        } else {
+            error_code
+        };
         // RESET として stream 追跡を終端する。§6.4.1 (Unidirectional Streams) により subscription 状態は変えない。
         // request_id は `send_data_stream_closed` が stream を除去する前に取得する
         // (保留 PUBLISH_DONE の送信判定に使う)
@@ -1605,6 +1614,8 @@ impl Session {
     /// 節番号・規定は draft 由来であり将来の draft 改版で変更される可能性がある。
     /// draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反。
     /// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): 非 Normal status に Properties は不可。
+    /// フィルタを通らない Object は [`SendRequestError::LocalFilterMismatch`] を返し、
+    /// delivery timeout 超過によるドロップは [`SendRequestError::LocalDatagramTimeout`] を返す。
     pub fn send_object_datagram(
         &mut self,
         request_id: u64,
@@ -1612,7 +1623,7 @@ impl Session {
         object_id: u64,
         properties_data: Option<Vec<u8>>,
         status: Option<u64>,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), SendRequestError> {
         self.require_established()?;
         let subscription = self.subscriptions.get(&request_id).ok_or_else(|| {
             SessionError::new(
@@ -1624,19 +1635,22 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing object datagram requires publisher role",
-            ));
+            )
+            .into());
         }
         if subscription.state != SubscriptionState::Established {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing object datagram requires Established subscription",
-            ));
+            )
+            .into());
         }
         if subscription.track_alias.is_none() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "publisher subscription is missing track alias",
-            ));
+            )
+            .into());
         }
         // draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反
         if let Some(ref data) = properties_data
@@ -1645,7 +1659,8 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "datagram properties data must not be empty when present",
-            ));
+            )
+            .into());
         }
         // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので
@@ -1662,10 +1677,7 @@ impl Session {
                 properties_bytes: properties_data.as_deref(),
             };
             if !object_passes_filters(subscription, &input) {
-                return Err(SessionError::new(
-                    SESSION_LOCAL_FILTER_MISMATCH,
-                    "outgoing object datagram does not pass subscription filters",
-                ));
+                return Err(SendRequestError::LocalFilterMismatch);
             }
         }
         // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): 非 Normal status に Properties は不可
@@ -1673,7 +1685,8 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "properties on non-Normal status object is not allowed",
-            ));
+            )
+            .into());
         }
         // draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability):
         // "For datagrams, the implementation MUST drop the datagrams if the time elapsed
@@ -1746,10 +1759,7 @@ impl Session {
                 if let Some(header_complete_ms) = header_complete_ms {
                     let now_ms = self.timing.last_tick_ms.unwrap_or(0);
                     if now_ms.saturating_sub(header_complete_ms) >= timeout_ms {
-                        return Err(SessionError::new(
-                            SESSION_LOCAL_DATAGRAM_TIMEOUT,
-                            "datagram delivery timeout exceeded, dropping datagram",
-                        ));
+                        return Err(SendRequestError::LocalDatagramTimeout);
                     }
                 }
             }
