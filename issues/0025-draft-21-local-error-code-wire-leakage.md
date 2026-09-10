@@ -1,7 +1,7 @@
 # ローカル専用エラーコードの wire 流出を API で防ぐ
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/change-local-error-code-wire-leakage
 - Polished: 2026-09-10
 
@@ -54,3 +54,16 @@
 - `close` / `send_request_error` / `send_publish_done` / `reset_outgoing_data_stream_with_code` / `reset_outgoing_data_stream_at_with_code` にローカル専用コードを渡すと、それぞれの `*_INTERNAL_ERROR` に置換されて wire に未登録値が出ないこと (`src/session/tests.rs` の crate 内テスト)
 - 既存テスト (`tests/test_session/object_filter_pass.rs` / `data_stream.rs` / `track_property_filter.rs` / `subscription/request_update.rs`) と `examples/` を新 API に追従し、`cargo test --workspace` と PBT が通ること
 - `CHANGES.md` の `## develop` に `[CHANGE]` として記載されていること
+
+## 解決方法
+
+ローカル専用エラーコードを `SessionError` から分離し、wire 流出を API で防いだ。公開 API の後方互換のない変更のため `[CHANGE]`。
+
+- `SendRequestError` にコードを持たない `LocalFilterMismatch` / `LocalDatagramTimeout` を追加し、`as_session_error()` はこれらと `PeerGoawayReceived` に `None` を返す。
+- `send_subgroup_object` / `send_object_datagram` の戻り値型を `Result<(), SendRequestError>` に変更し、ローカル拒否を新 variant で返す。`send_publish` の TRACK_PROPERTY_FILTER 不通過も `SendRequestError::LocalFilterMismatch` に変更した。
+- `close` / `fail` / `send_request_error` / `send_publish_done` / `reset_outgoing_data_stream_with_code` / `reset_outgoing_data_stream_at_with_code` で、ローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する (`is_local_error_code` に集約)。`emit_request_error` にも最終防御として同検査を入れた。
+- `src/error.rs` / `src/session/types.rs` / `SKILL.md` の doc を新設計に合わせ、examples の `Skip` 判定と doc、既存テストを新 API に追従させた。
+- テスト: `src/session/tests.rs` に 5 API の置換 (`close` / `fail` / `send_request_error` / `send_publish_done` / `reset_outgoing_data_stream_with_code` / `_at_with_code`) と `as_session_error()` が `None` を返す検証を追加した。
+- `CHANGES.md` の `[CHANGE]` に記載した。
+
+見送った改善: `SendRequestError` / `SessionError` への `Copy` derive は、既存の `SessionError::clone()` が多数あり clippy の `clone_on_copy` を誘発するため見送った。
