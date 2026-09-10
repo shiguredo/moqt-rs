@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/doc-intra-doc-links
+- Polished: 2026-09-10
 
 ## 目的
 
