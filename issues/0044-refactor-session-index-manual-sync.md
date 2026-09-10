@@ -1,7 +1,7 @@
 # session の subscription / request 台帳の手動同期を安全にする
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/refactor-session-index-manual-sync
 - Polished: 2026-09-10
 
@@ -39,3 +39,14 @@
 - `RequestKind` → `RequestTable` の変換が 1 箇所に集約され、逆変換を定義していないこと
 - `locate_request` の探索源が state テーブルのまま変わっていないこと
 - 挙動が変わらないこと、既存テスト / PBT がすべて通ること
+
+## 解決方法
+
+session の request 種別台帳と購読索引の同期を整理した。公開 API の変更はなく、`CHANGES.md` には `### misc` の `[UPDATE]` として記録した。
+
+- `RequestTable::from_kind` を追加し、`RequestKind` から state テーブルへの一方向変換を 1 箇所に集約した。`recv_request_stream_closed` の dispatch を state テーブル単位に統一した。逆変換は定義していない。
+- 購読索引 (`subscriptions` / `subscriptions_by_track`) の追加を `register_subscription`、削除を `remove_subscription_track_index` に集約し、`forget_subscription` / `supersede_pending_subscriber` / `close_track_subscription_on_stream_end` から呼ぶようにした。
+- `request_streams` は全 request 共通索引のまま維持し、購読専用構造体には混ぜていない。`locate_request` の探索源は state テーブルのまま。
+- `Source` 内テスト (`src/session/tests.rs`) に索引ヘルパの契約を検証する白箱テストを追加した。
+
+残った改善（未対応）: 3 要素キー `(TrackNamespace, Vec<u8>, TrackRole)` の導出が複数箇所に残る（`Subscription::track_key()` への集約は未実施）。alias 索引の登録は設計方針どおり別フェーズのまま。
