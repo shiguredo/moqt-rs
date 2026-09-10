@@ -589,13 +589,18 @@ impl Session {
             );
             return Ok(());
         }
-        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間の空トラック名は DOES_NOT_EXIST で拒否
-        if track_ns.is_session_level() && track_name.is_empty() {
-            self.emit_request_error(
-                request_id,
-                REQUEST_DOES_NOT_EXIST,
-                "empty track name in .session namespace",
-            );
+        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間のリクエストは
+        // Application へ渡さず DOES_NOT_EXIST で拒否する。空トラック名は仕様上存在しないものと
+        // 定義され、非空トラック名も未認識のセッションレベルトラックとして拒否する
+        // (本ライブラリはセッションレベルトラックを登録しないため、非空トラック名はすべて未認識になる)
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある
+        if track_ns.is_session_level() {
+            let reason = if track_name.is_empty() {
+                "empty track name in .session namespace"
+            } else {
+                "session-level track does not exist"
+            };
+            self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
             return Ok(());
         }
         // draft-ietf-moq-transport-21 §9.11 (FETCH): オブジェクトが公開されていない

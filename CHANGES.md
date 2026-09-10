@@ -25,6 +25,8 @@
   - @voluntas
 - [FIX] SubgroupObject の encode を書き込み前に検証し、不正 status の部分書き込みと Properties Length 欠落を防止する
   - @voluntas
+- [FIX] `.session` 名前空間の非空トラック名への FETCH / TRACK_STATUS を `DOES_NOT_EXIST` で拒否する
+  - @voluntas
 
 ### misc
 

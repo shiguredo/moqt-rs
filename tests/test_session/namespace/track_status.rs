@@ -106,6 +106,71 @@ fn track_status_session_namespace_empty_track_rejected() {
     match err_msg {
         ControlMessage::RequestError(e) => {
             assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+            assert_eq!(e.reason.as_str(), "empty track name in .session namespace");
+        }
+        _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+    }
+}
+
+/// .session 名前空間の非空トラック名に対する TRACK_STATUS は DOES_NOT_EXIST で拒否される
+///
+/// draft-ietf-moq-transport-21 §6.5 (Session-Level Tracks and Namespaces): 未認識の
+/// session-level track へのリクエストは Application へ渡さず REQUEST_ERROR で拒否する。
+/// 本ライブラリは session-level track を登録しないため、非空トラック名も拒否対象になる。
+#[test]
+fn track_status_session_namespace_non_empty_track_rejected() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::TrackStatus as WireTrackStatus;
+    let (_, mut server) = establish_pair();
+    server
+        .recv_request(ControlMessage::TrackStatus(WireTrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b".session"]),
+            track_name: b"extension".to_vec(),
+            parameters: MessageParameters::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    // リクエスト登録より前に拒否されるため track_status_request は残らない
+    assert!(server.track_status_request(0).is_none());
+    let (stream_id, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert_eq!(stream_id, 0);
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+            assert_eq!(e.reason.as_str(), "session-level track does not exist");
+        }
+        _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+    }
+    // draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection):
+    // Application 処理を行わず拒否する場合は REQUEST_ERROR を送って stream を FIN する
+    assert!(fin, "拒否応答は FIN で送信されること");
+    // 拒否は REQUEST_ERROR のみで、セッションは閉じない
+    assert_eq!(server.state(), SessionState::Established);
+    assert_no_tracked_requests(&server);
+}
+
+/// `.session` を先頭フィールドに持つ複数フィールド名前空間の TRACK_STATUS も拒否される
+///
+/// draft-ietf-moq-transport-21 §6.5 の予約は先頭フィールドが `.session` の場合に成立する。
+/// 先頭フィールド一致で判定していることを、複数フィールドの名前空間で確認する。
+#[test]
+fn track_status_session_namespace_multi_field_rejected() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::TrackStatus as WireTrackStatus;
+    let (_, mut server) = establish_pair();
+    server
+        .recv_request(ControlMessage::TrackStatus(WireTrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b".session", b"ext"]),
+            track_name: b"extension".to_vec(),
+            parameters: MessageParameters::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(server.track_status_request(0).is_none());
+    let (_, err_msg) = take_send_on_stream(&mut server);
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
         }
         _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
     }
