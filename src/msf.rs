@@ -499,138 +499,267 @@ impl MsfTrack {
     }
 }
 
+/// MsfTrack / MsfCloneTrack の JSON メンバー書き出しを共通化するための参照束
+///
+/// 両型は公開フィールドの必須 / 省略の意味が異なるため型は分けたまま、JSON キーと値の
+/// 書き出し順を 1 関数 (`write_track_json`) に集約する。`is_clone` で clone 固有の
+/// `parentName` / `parentNamespace` の位置と、`depends` / `accessibility` の空出力規則を
+/// 切り替える。
+///
+/// decode 用の `CommonTrackFields` と統合していないのは、前者が所有権を持つ decode 専用の
+/// 蓄積型であるのに対し、本型は `&self` を借用して書き出す encode 専用のビューであり、
+/// 単一型にすると encode のたびに clone が発生するためである。共通フィールドの一覧は
+/// 両型で重複するが、フィールド追加時は `decode_common_track_fields` と `write_track_json` の
+/// 両方に追加が必要になる (roundtrip テストと drift テストで検出する)。
+struct TrackJsonParts<'a> {
+    name: &'a str,
+    packaging: Option<&'a str>,
+    parent_name: Option<&'a str>,
+    parent_namespace: Option<&'a str>,
+    namespace: Option<&'a str>,
+    event_type: Option<&'a str>,
+    role: Option<&'a str>,
+    is_live: Option<bool>,
+    target_latency: Option<u64>,
+    buffers: Option<&'a MsfBuffers>,
+    label: Option<&'a str>,
+    render_group: Option<u64>,
+    alt_group: Option<u64>,
+    init_ref: Option<&'a str>,
+    depends: Option<&'a [String]>,
+    template: Option<&'a MsfTemplate>,
+    temporal_id: Option<u64>,
+    spatial_id: Option<u64>,
+    codec: Option<&'a str>,
+    mime_type: Option<&'a str>,
+    framerate: Option<f64>,
+    timescale: Option<u64>,
+    bitrate: Option<u64>,
+    avg_bitrate: Option<u64>,
+    max_gop_duration: Option<u64>,
+    max_group_duration: Option<u64>,
+    width: Option<u64>,
+    height: Option<u64>,
+    samplerate: Option<u64>,
+    channel_config: Option<&'a str>,
+    display_width: Option<u64>,
+    display_height: Option<u64>,
+    lang: Option<&'a str>,
+    track_duration: Option<u64>,
+    connection_uri: Option<&'a str>,
+    token: Option<&'a str>,
+    encryption_scheme: Option<&'a str>,
+    cipher_suite: Option<&'a str>,
+    key_id: Option<&'a str>,
+    track_base_key: Option<&'a str>,
+    auth_info: Option<&'a [MsfAuthInfo]>,
+    accessibility: Option<&'a [MsfAccessibility]>,
+    is_clone: bool,
+}
+
+/// track / cloneTrack の JSON メンバーを 1 箇所で書き出す
+fn write_track_json(
+    f: &mut nojson::JsonObjectFormatter<'_, '_, '_>,
+    p: &TrackJsonParts<'_>,
+) -> core::fmt::Result {
+    f.member("name", p.name)?;
+    if p.is_clone {
+        if let Some(v) = p.parent_name {
+            f.member("parentName", v)?;
+        }
+        if let Some(v) = p.parent_namespace {
+            f.member("parentNamespace", v)?;
+        }
+    }
+    if let Some(v) = p.packaging {
+        f.member("packaging", v)?;
+    }
+    if let Some(v) = p.namespace {
+        f.member("namespace", v)?;
+    }
+    if let Some(v) = p.event_type {
+        f.member("eventType", v)?;
+    }
+    if let Some(v) = p.role {
+        f.member("role", v)?;
+    }
+    if let Some(v) = p.is_live {
+        f.member("isLive", v)?;
+    }
+    // decode 側が isLive=false で targetLatency / buffers を None に正規化するため、
+    // encode も省略して対称にする。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
+    // 受信側の無視規則であり、エンコーダの出力禁止ではない。
+    if p.is_live != Some(false) {
+        if let Some(v) = p.target_latency {
+            f.member("targetLatency", v)?;
+        }
+        if let Some(v) = p.buffers {
+            f.member("buffers", v)?;
+        }
+    }
+    if let Some(v) = p.label {
+        f.member("label", v)?;
+    }
+    if let Some(v) = p.render_group {
+        f.member("renderGroup", v)?;
+    }
+    if let Some(v) = p.alt_group {
+        f.member("altGroup", v)?;
+    }
+    if let Some(v) = p.init_ref {
+        f.member("initRef", v)?;
+    }
+    if let Some(deps) = p.depends
+        && (p.is_clone || !deps.is_empty())
+    {
+        f.member(
+            "depends",
+            nojson::array(|f| f.elements(deps.iter().map(|s| s.as_str()))),
+        )?;
+    }
+    if let Some(v) = p.template {
+        f.member("template", v)?;
+    }
+    if let Some(v) = p.temporal_id {
+        f.member("temporalId", v)?;
+    }
+    if let Some(v) = p.spatial_id {
+        f.member("spatialId", v)?;
+    }
+    if let Some(v) = p.codec {
+        f.member("codec", v)?;
+    }
+    if let Some(v) = p.mime_type {
+        f.member("mimeType", v)?;
+    }
+    if let Some(v) = p.framerate {
+        f.member("framerate", v)?;
+    }
+    if let Some(v) = p.timescale {
+        f.member("timescale", v)?;
+    }
+    if let Some(v) = p.bitrate {
+        f.member("bitrate", v)?;
+    }
+    if let Some(v) = p.avg_bitrate {
+        f.member("avgBitrate", v)?;
+    }
+    if let Some(v) = p.max_gop_duration {
+        f.member("maxGopDuration", v)?;
+    }
+    if let Some(v) = p.max_group_duration {
+        f.member("maxGroupDuration", v)?;
+    }
+    if let Some(v) = p.width {
+        f.member("width", v)?;
+    }
+    if let Some(v) = p.height {
+        f.member("height", v)?;
+    }
+    if let Some(v) = p.samplerate {
+        f.member("samplerate", v)?;
+    }
+    if let Some(v) = p.channel_config {
+        f.member("channelConfig", v)?;
+    }
+    if let Some(v) = p.display_width {
+        f.member("displayWidth", v)?;
+    }
+    if let Some(v) = p.display_height {
+        f.member("displayHeight", v)?;
+    }
+    if let Some(v) = p.lang {
+        f.member("lang", v)?;
+    }
+    if !p.is_clone
+        && let Some(v) = p.parent_name
+    {
+        // full (MsfTrack) は旧来の出力順を維持するため parentName を lang の後に出す
+        f.member("parentName", v)?;
+    }
+    if let Some(v) = p.track_duration {
+        f.member("trackDuration", v)?;
+    }
+    if let Some(v) = p.connection_uri {
+        f.member("connectionUri", v)?;
+    }
+    if let Some(v) = p.token {
+        f.member("token", v)?;
+    }
+    if let Some(v) = p.encryption_scheme {
+        f.member("encryptionScheme", v)?;
+    }
+    if let Some(v) = p.cipher_suite {
+        f.member("cipherSuite", v)?;
+    }
+    if let Some(v) = p.key_id {
+        f.member("keyId", v)?;
+    }
+    if let Some(v) = p.track_base_key {
+        f.member("trackBaseKey", v)?;
+    }
+    if let Some(infos) = p.auth_info {
+        f.member("authInfo", AuthInfoEntries(infos))?;
+    }
+    if let Some(descs) = p.accessibility
+        && (p.is_clone || !descs.is_empty())
+    {
+        f.member("accessibility", nojson::array(|f| f.elements(descs.iter())))?;
+    }
+    Ok(())
+}
+
 impl DisplayJson for MsfTrack {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         f.object(|f| {
-            f.member("name", self.name.as_str())?;
-            f.member("packaging", self.packaging.as_str())?;
-            if let Some(ref v) = self.namespace {
-                f.member("namespace", v.as_str())?;
-            }
-            if let Some(ref v) = self.event_type {
-                f.member("eventType", v.as_str())?;
-            }
-            if let Some(ref v) = self.role {
-                f.member("role", v.as_str())?;
-            }
-            f.member("isLive", self.is_live)?;
-            // decode 側が isLive=false で targetLatency / buffers を None に正規化するため、
-            // encode も省略して対称にする。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
-            // 受信側の無視規則であり、エンコーダの出力禁止ではない。
-            if self.is_live {
-                if let Some(v) = self.target_latency {
-                    f.member("targetLatency", v)?;
-                }
-                if let Some(ref v) = self.buffers {
-                    f.member("buffers", v)?;
-                }
-            }
-            if let Some(ref v) = self.label {
-                f.member("label", v.as_str())?;
-            }
-            if let Some(v) = self.render_group {
-                f.member("renderGroup", v)?;
-            }
-            if let Some(v) = self.alt_group {
-                f.member("altGroup", v)?;
-            }
-            if let Some(ref v) = self.init_ref {
-                f.member("initRef", v.as_str())?;
-            }
-            if !self.depends.is_empty() {
-                f.member(
-                    "depends",
-                    nojson::array(|f| f.elements(self.depends.iter().map(|s| s.as_str()))),
-                )?;
-            }
-            if let Some(ref v) = self.template {
-                f.member("template", v)?;
-            }
-            if let Some(v) = self.temporal_id {
-                f.member("temporalId", v)?;
-            }
-            if let Some(v) = self.spatial_id {
-                f.member("spatialId", v)?;
-            }
-            if let Some(ref v) = self.codec {
-                f.member("codec", v.as_str())?;
-            }
-            if let Some(ref v) = self.mime_type {
-                f.member("mimeType", v.as_str())?;
-            }
-            if let Some(v) = self.framerate {
-                f.member("framerate", v)?;
-            }
-            if let Some(v) = self.timescale {
-                f.member("timescale", v)?;
-            }
-            if let Some(v) = self.bitrate {
-                f.member("bitrate", v)?;
-            }
-            if let Some(v) = self.avg_bitrate {
-                f.member("avgBitrate", v)?;
-            }
-            if let Some(v) = self.max_gop_duration {
-                f.member("maxGopDuration", v)?;
-            }
-            if let Some(v) = self.max_group_duration {
-                f.member("maxGroupDuration", v)?;
-            }
-            if let Some(v) = self.width {
-                f.member("width", v)?;
-            }
-            if let Some(v) = self.height {
-                f.member("height", v)?;
-            }
-            if let Some(v) = self.samplerate {
-                f.member("samplerate", v)?;
-            }
-            if let Some(ref v) = self.channel_config {
-                f.member("channelConfig", v.as_str())?;
-            }
-            if let Some(v) = self.display_width {
-                f.member("displayWidth", v)?;
-            }
-            if let Some(v) = self.display_height {
-                f.member("displayHeight", v)?;
-            }
-            if let Some(ref v) = self.lang {
-                f.member("lang", v.as_str())?;
-            }
-            if let Some(ref v) = self.parent_name {
-                f.member("parentName", v.as_str())?;
-            }
-            if let Some(v) = self.track_duration {
-                f.member("trackDuration", v)?;
-            }
-            if let Some(ref v) = self.connection_uri {
-                f.member("connectionUri", v.as_str())?;
-            }
-            if let Some(ref v) = self.token {
-                f.member("token", v.as_str())?;
-            }
-            if let Some(ref v) = self.encryption_scheme {
-                f.member("encryptionScheme", v.as_str())?;
-            }
-            if let Some(ref v) = self.cipher_suite {
-                f.member("cipherSuite", v.as_str())?;
-            }
-            if let Some(ref v) = self.key_id {
-                f.member("keyId", v.as_str())?;
-            }
-            if let Some(ref v) = self.track_base_key {
-                f.member("trackBaseKey", v.as_str())?;
-            }
-            if let Some(ref infos) = self.auth_info {
-                f.member("authInfo", AuthInfoEntries(infos))?;
-            }
-            if !self.accessibility.is_empty() {
-                f.member(
-                    "accessibility",
-                    nojson::array(|f| f.elements(self.accessibility.iter())),
-                )?;
-            }
-            Ok(())
+            write_track_json(
+                f,
+                &TrackJsonParts {
+                    name: &self.name,
+                    packaging: Some(self.packaging.as_str()),
+                    parent_name: self.parent_name.as_deref(),
+                    parent_namespace: None,
+                    namespace: self.namespace.as_deref(),
+                    event_type: self.event_type.as_deref(),
+                    role: self.role.as_deref(),
+                    is_live: Some(self.is_live),
+                    target_latency: self.target_latency,
+                    buffers: self.buffers.as_ref(),
+                    label: self.label.as_deref(),
+                    render_group: self.render_group,
+                    alt_group: self.alt_group,
+                    init_ref: self.init_ref.as_deref(),
+                    depends: Some(self.depends.as_slice()),
+                    template: self.template.as_ref(),
+                    temporal_id: self.temporal_id,
+                    spatial_id: self.spatial_id,
+                    codec: self.codec.as_deref(),
+                    mime_type: self.mime_type.as_deref(),
+                    framerate: self.framerate,
+                    timescale: self.timescale,
+                    bitrate: self.bitrate,
+                    avg_bitrate: self.avg_bitrate,
+                    max_gop_duration: self.max_gop_duration,
+                    max_group_duration: self.max_group_duration,
+                    width: self.width,
+                    height: self.height,
+                    samplerate: self.samplerate,
+                    channel_config: self.channel_config.as_deref(),
+                    display_width: self.display_width,
+                    display_height: self.display_height,
+                    lang: self.lang.as_deref(),
+                    track_duration: self.track_duration,
+                    connection_uri: self.connection_uri.as_deref(),
+                    token: self.token.as_deref(),
+                    encryption_scheme: self.encryption_scheme.as_deref(),
+                    cipher_suite: self.cipher_suite.as_deref(),
+                    key_id: self.key_id.as_deref(),
+                    track_base_key: self.track_base_key.as_deref(),
+                    auth_info: self.auth_info.as_deref(),
+                    accessibility: Some(self.accessibility.as_slice()),
+                    is_clone: false,
+                },
+            )
         })
     }
 }
@@ -792,139 +921,54 @@ impl MsfCloneTrack {
 impl DisplayJson for MsfCloneTrack {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> core::fmt::Result {
         f.object(|f| {
-            f.member("name", self.name.as_str())?;
-            f.member("parentName", self.parent_name.as_str())?;
-            if let Some(ref v) = self.parent_namespace {
-                f.member("parentNamespace", v.as_str())?;
-            }
-            if let Some(ref v) = self.packaging {
-                f.member("packaging", v.as_str())?;
-            }
-            if let Some(ref v) = self.namespace {
-                f.member("namespace", v.as_str())?;
-            }
-            if let Some(ref v) = self.event_type {
-                f.member("eventType", v.as_str())?;
-            }
-            if let Some(ref v) = self.role {
-                f.member("role", v.as_str())?;
-            }
-            if let Some(v) = self.is_live {
-                f.member("isLive", v)?;
-            }
-            // clone は is_live == None (親から継承) を保持するため、Some(false) のときだけ
-            // targetLatency / buffers を省略する。draft-ietf-moq-msf-01 §5.2.8 / §5.2.9 は
-            // 受信側の無視規則であり、decode の正規化に encode を合わせる。
-            if matches!(self.is_live, None | Some(true)) {
-                if let Some(v) = self.target_latency {
-                    f.member("targetLatency", v)?;
-                }
-                if let Some(ref v) = self.buffers {
-                    f.member("buffers", v)?;
-                }
-            }
-            if let Some(ref v) = self.label {
-                f.member("label", v.as_str())?;
-            }
-            if let Some(v) = self.render_group {
-                f.member("renderGroup", v)?;
-            }
-            if let Some(v) = self.alt_group {
-                f.member("altGroup", v)?;
-            }
-            if let Some(ref v) = self.init_ref {
-                f.member("initRef", v.as_str())?;
-            }
-            if let Some(ref deps) = self.depends {
-                // clone は None (継承) と Some([]) (空上書き) を区別するため空でも出力する
-                f.member(
-                    "depends",
-                    nojson::array(|f| f.elements(deps.iter().map(|s| s.as_str()))),
-                )?;
-            }
-            if let Some(ref v) = self.template {
-                f.member("template", v)?;
-            }
-            if let Some(v) = self.temporal_id {
-                f.member("temporalId", v)?;
-            }
-            if let Some(v) = self.spatial_id {
-                f.member("spatialId", v)?;
-            }
-            if let Some(ref v) = self.codec {
-                f.member("codec", v.as_str())?;
-            }
-            if let Some(ref v) = self.mime_type {
-                f.member("mimeType", v.as_str())?;
-            }
-            if let Some(v) = self.framerate {
-                f.member("framerate", v)?;
-            }
-            if let Some(v) = self.timescale {
-                f.member("timescale", v)?;
-            }
-            if let Some(v) = self.bitrate {
-                f.member("bitrate", v)?;
-            }
-            if let Some(v) = self.avg_bitrate {
-                f.member("avgBitrate", v)?;
-            }
-            if let Some(v) = self.max_gop_duration {
-                f.member("maxGopDuration", v)?;
-            }
-            if let Some(v) = self.max_group_duration {
-                f.member("maxGroupDuration", v)?;
-            }
-            if let Some(v) = self.width {
-                f.member("width", v)?;
-            }
-            if let Some(v) = self.height {
-                f.member("height", v)?;
-            }
-            if let Some(v) = self.samplerate {
-                f.member("samplerate", v)?;
-            }
-            if let Some(ref v) = self.channel_config {
-                f.member("channelConfig", v.as_str())?;
-            }
-            if let Some(v) = self.display_width {
-                f.member("displayWidth", v)?;
-            }
-            if let Some(v) = self.display_height {
-                f.member("displayHeight", v)?;
-            }
-            if let Some(ref v) = self.lang {
-                f.member("lang", v.as_str())?;
-            }
-            if let Some(v) = self.track_duration {
-                f.member("trackDuration", v)?;
-            }
-            if let Some(ref v) = self.connection_uri {
-                f.member("connectionUri", v.as_str())?;
-            }
-            if let Some(ref v) = self.token {
-                f.member("token", v.as_str())?;
-            }
-            if let Some(ref v) = self.encryption_scheme {
-                f.member("encryptionScheme", v.as_str())?;
-            }
-            if let Some(ref v) = self.cipher_suite {
-                f.member("cipherSuite", v.as_str())?;
-            }
-            if let Some(ref v) = self.key_id {
-                f.member("keyId", v.as_str())?;
-            }
-            if let Some(ref v) = self.track_base_key {
-                f.member("trackBaseKey", v.as_str())?;
-            }
-            if let Some(ref infos) = self.auth_info {
-                f.member("authInfo", AuthInfoEntries(infos))?;
-            }
-            if let Some(ref descs) = self.accessibility {
-                // clone は None (継承) と Some([]) (空上書き) を区別するため空でも出力する
-                f.member("accessibility", nojson::array(|f| f.elements(descs.iter())))?;
-            }
-            Ok(())
+            write_track_json(
+                f,
+                &TrackJsonParts {
+                    name: &self.name,
+                    packaging: self.packaging.as_ref().map(|p| p.as_str()),
+                    parent_name: Some(self.parent_name.as_str()),
+                    parent_namespace: self.parent_namespace.as_deref(),
+                    namespace: self.namespace.as_deref(),
+                    event_type: self.event_type.as_deref(),
+                    role: self.role.as_deref(),
+                    is_live: self.is_live,
+                    target_latency: self.target_latency,
+                    buffers: self.buffers.as_ref(),
+                    label: self.label.as_deref(),
+                    render_group: self.render_group,
+                    alt_group: self.alt_group,
+                    init_ref: self.init_ref.as_deref(),
+                    depends: self.depends.as_deref(),
+                    template: self.template.as_ref(),
+                    temporal_id: self.temporal_id,
+                    spatial_id: self.spatial_id,
+                    codec: self.codec.as_deref(),
+                    mime_type: self.mime_type.as_deref(),
+                    framerate: self.framerate,
+                    timescale: self.timescale,
+                    bitrate: self.bitrate,
+                    avg_bitrate: self.avg_bitrate,
+                    max_gop_duration: self.max_gop_duration,
+                    max_group_duration: self.max_group_duration,
+                    width: self.width,
+                    height: self.height,
+                    samplerate: self.samplerate,
+                    channel_config: self.channel_config.as_deref(),
+                    display_width: self.display_width,
+                    display_height: self.display_height,
+                    lang: self.lang.as_deref(),
+                    track_duration: self.track_duration,
+                    connection_uri: self.connection_uri.as_deref(),
+                    token: self.token.as_deref(),
+                    encryption_scheme: self.encryption_scheme.as_deref(),
+                    cipher_suite: self.cipher_suite.as_deref(),
+                    key_id: self.key_id.as_deref(),
+                    track_base_key: self.track_base_key.as_deref(),
+                    auth_info: self.auth_info.as_deref(),
+                    accessibility: self.accessibility.as_deref(),
+                    is_clone: true,
+                },
+            )
         })
     }
 }
@@ -1008,11 +1052,7 @@ impl MsfCloneTrack {
         // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
         // 継承解決後に targetLatency と buffers が共存してはならない。
         // clone 側と親側で別々に指定された場合もここで検出する。
-        if target_latency.is_some() && buffers.is_some() {
-            return Err(MessageError::InvalidCatalog(
-                "targetLatency and buffers MUST NOT be present together".to_string(),
-            ));
-        }
+        validate_target_latency_buffers_exclusive(target_latency, buffers.as_ref())?;
 
         // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら trackDuration は禁止
         if is_live && track_duration.is_some() {
@@ -1028,11 +1068,10 @@ impl MsfCloneTrack {
                 "eventType is required when packaging is 'eventtimeline'".to_string(),
             ));
         }
-        if !is_event_timeline && event_type.is_some() {
-            return Err(MessageError::InvalidCatalog(
-                "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
-            ));
-        }
+        validate_event_type_not_set_when_not_event_timeline(
+            Some(&packaging),
+            event_type.as_deref(),
+        )?;
 
         // draft-ietf-moq-msf-01 §7.2 (Media Timeline Catalog requirements) / §8.2 (Event Timeline Catalog requirements):
         // timeline は depends 必須、mimeType=application/json 必須
@@ -1971,6 +2010,41 @@ fn validate_init_refs(
     Ok(())
 }
 
+/// targetLatency / buffers の共存禁止を検証する
+///
+/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers)。MsfTrack と
+/// MsfCloneTrack で同一の規則。
+fn validate_target_latency_buffers_exclusive(
+    target_latency: Option<u64>,
+    buffers: Option<&MsfBuffers>,
+) -> Result<(), MessageError> {
+    if target_latency.is_some() && buffers.is_some() {
+        return Err(MessageError::InvalidCatalog(
+            "targetLatency and buffers MUST NOT be present together".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// packaging が明示的に eventtimeline 以外のとき eventType を禁止する
+///
+/// draft-ietf-moq-msf-01 §5.2.5 (Event timeline type)。MsfTrack と MsfCloneTrack で
+/// 同一の規則 (clone は packaging 省略時に親から継承し得るため None は対象外)。
+fn validate_event_type_not_set_when_not_event_timeline(
+    packaging: Option<&MsfPackaging>,
+    event_type: Option<&str>,
+) -> Result<(), MessageError> {
+    if let Some(pkg) = packaging
+        && !matches!(pkg, MsfPackaging::EventTimeline)
+        && event_type.is_some()
+    {
+        return Err(MessageError::InvalidCatalog(
+            "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前検証用)
 ///
 /// `decode_track` の構造体ベース検証と同等の規則を、手組みの `MsfTrack` に対しても
@@ -1994,18 +2068,17 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
         ));
     }
 
-    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須、それ以外では禁止
+    // draft-ietf-moq-msf-01 §5.2.5 (Event timeline type): eventtimeline なら eventType 必須
     let is_event_timeline = matches!(track.packaging, MsfPackaging::EventTimeline);
     if is_event_timeline && track.event_type.is_none() {
         return Err(MessageError::InvalidCatalog(
             "eventType is required when packaging is 'eventtimeline'".to_string(),
         ));
     }
-    if !is_event_timeline && track.event_type.is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
-        ));
-    }
+    validate_event_type_not_set_when_not_event_timeline(
+        Some(&track.packaging),
+        track.event_type.as_deref(),
+    )?;
 
     // draft-ietf-moq-msf-01 §5.2.39 (Cipher suite) / §4.3.3 (Recommended encryption scheme)
     if track.encryption_scheme.is_some() && track.cipher_suite.is_none() {
@@ -2022,11 +2095,7 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
     }
 
     // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers): 共存禁止
-    if track.target_latency.is_some() && track.buffers.is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "targetLatency and buffers MUST NOT be present together".to_string(),
-        ));
-    }
+    validate_target_latency_buffers_exclusive(track.target_latency, track.buffers.as_ref())?;
 
     // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら禁止
     if track.is_live && track.track_duration.is_some() {
@@ -2081,21 +2150,13 @@ fn validate_full_track(track: &MsfTrack) -> Result<(), MessageError> {
 fn validate_clone_track_fragment(track: &MsfCloneTrack) -> Result<(), MessageError> {
     // packaging を明示して非 eventtimeline とした場合は eventType を禁止する
     // (packaging 省略 + eventType ありは親からの継承で正当化され得るため受理する)
-    if let Some(ref pkg) = track.packaging {
-        let is_event_timeline = matches!(pkg, MsfPackaging::EventTimeline);
-        if !is_event_timeline && track.event_type.is_some() {
-            return Err(MessageError::InvalidCatalog(
-                "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
-            ));
-        }
-    }
+    validate_event_type_not_set_when_not_event_timeline(
+        track.packaging.as_ref(),
+        track.event_type.as_deref(),
+    )?;
 
     // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers): 共存禁止
-    if track.target_latency.is_some() && track.buffers.is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "targetLatency and buffers MUST NOT be present together".to_string(),
-        ));
-    }
+    validate_target_latency_buffers_exclusive(track.target_latency, track.buffers.as_ref())?;
 
     // draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら禁止
     if track.is_live == Some(true) && track.track_duration.is_some() {
@@ -2531,11 +2592,7 @@ fn decode_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfTrack, MessageEr
             "eventType is required when packaging is 'eventtimeline'".to_string(),
         ));
     }
-    if !is_event_timeline && event_type.is_some() {
-        return Err(MessageError::InvalidCatalog(
-            "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
-        ));
-    }
+    validate_event_type_not_set_when_not_event_timeline(Some(&packaging), event_type.as_deref())?;
 
     // draft-ietf-moq-msf-01 §5.2.7 (Is Live): isLive は必須フィールド
     // §5.6 の例は非規範例であり isLive を省略しているものがある。本実装は §5.2.7 に従い
@@ -2894,14 +2951,7 @@ fn decode_clone_track(val: nojson::RawJsonValue<'_, '_>) -> Result<MsfCloneTrack
     // decode 時点では親の属性を知らないため必須違反と断定できない。
     // 検証するのは「packaging 明示 + 非 eventtimeline なのに eventType が存在する」方向のみ
     // (packaging 省略 + eventType ありも親からの継承で正当化されるため受理する)。
-    if let Some(ref pkg) = packaging {
-        let is_event_timeline = matches!(pkg, MsfPackaging::EventTimeline);
-        if !is_event_timeline && event_type.is_some() {
-            return Err(MessageError::InvalidCatalog(
-                "eventType MUST NOT be used when packaging is not 'eventtimeline'".to_string(),
-            ));
-        }
-    }
+    validate_event_type_not_set_when_not_event_timeline(packaging.as_ref(), event_type.as_deref())?;
 
     // 共存検査は isLive の値・有無によらず行い、trackDuration は isLive=true の場合のみ検証する
     // (本実装では presence 違反を優先して reject する選択とする。省略時は親から継承され得るが、

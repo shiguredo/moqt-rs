@@ -17,3 +17,6 @@
   - @voluntas
 
 ### misc
+
+- [UPDATE] MSF の track / cloneTrack の JSON メンバー書き出しと共通検証を共通化する
+  - @voluntas

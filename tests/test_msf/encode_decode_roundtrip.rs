@@ -279,6 +279,37 @@ fn clone_target_latency_and_buffers_not_emitted_when_is_live_false() {
     assert!(encoded.windows(15).any(|w| w == b"\"targetLatency\""));
 }
 
+/// full と clone で共通メンバーが同一キー名で出力されること
+///
+/// 既存 roundtrip テストはキー順に依存しないため、共通化後に 3 キーが双方に出ることを
+/// 確認する smoke テストとして残す。空 depends / accessibility の各規則は既存テスト
+/// (`depends_empty_not_emitted` / `clone_depends_empty_some_roundtrip` 等) が検証する。
+#[test]
+fn track_and_clone_share_common_member_keys() {
+    let mut full = MsfTrack::new("v".to_string(), MsfPackaging::Loc, true);
+    full.max_gop_duration = Some(2000);
+    full.lang = Some("en".to_string());
+    full.bitrate = Some(5_000_000);
+
+    let mut clone = MsfCloneTrack::new("c".to_string(), "v".to_string());
+    clone.max_gop_duration = Some(2000);
+    clone.lang = Some("en".to_string());
+    clone.bitrate = Some(5_000_000);
+
+    let full_json = encode_full_catalog_with_track(full);
+    let clone_json = encode_delta_with_clone(clone);
+    for key in ["maxGopDuration", "lang", "bitrate"] {
+        assert!(
+            full_json.windows(key.len()).any(|w| w == key.as_bytes()),
+            "full に {key} が出力されること"
+        );
+        assert!(
+            clone_json.windows(key.len()).any(|w| w == key.as_bytes()),
+            "clone に {key} が出力されること"
+        );
+    }
+}
+
 fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
     MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
