@@ -1084,7 +1084,9 @@ impl Session {
             Some(RequestTable::TrackSubscription) => {
                 self.send_ok_for_track_subscription(request_id)?
             }
-            Some(RequestTable::TrackStatus) => self.send_ok_for_track_status(request_id)?,
+            Some(RequestTable::TrackStatus) => {
+                self.send_ok_for_track_status(request_id, &mut parameters)?
+            }
             None => unreachable!("table.is_none() checked above"),
         }
         // draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter):
@@ -1107,10 +1109,13 @@ impl Session {
         });
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
+        // draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): TRACK_STATUS_OK 送信後は
+        // bidi stream を FIN で閉じる (REQUEST_ERROR 側の send_request_error は既に FIN する)。
+        let fin = matches!(table, Some(RequestTable::TrackStatus));
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
-            fin: false,
+            fin,
         });
         Ok(())
     }

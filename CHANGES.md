@@ -15,6 +15,8 @@
   - @voluntas
 - [FIX] MSF の isLive=false で targetLatency / buffers をエンコードしないようにする
   - @voluntas
+- [FIX] TRACK_STATUS_OK を FIN で送信し、公開済み Track の LARGEST_OBJECT を自動注入する
+  - @voluntas
 
 ### misc
 

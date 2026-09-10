@@ -117,10 +117,14 @@ fn should_open_fill_stream(
 impl Session {
     /// publisher が観測した track の Largest Object を返す
     ///
-    /// draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill range は
-    /// Largest Object を超えない。自側 publisher 役の同 track subscription 群の
-    /// `effective_largest_object` の最大値を取る。
-    fn publisher_track_largest(
+    /// 自側 publisher 役の同 track subscription 群の `effective_largest_object` の
+    /// 最大値を取る。値は subscription が保持するため、forget 済みの Track では `None` を
+    /// 返す (Terminated でも保持中なら寄与する)。用途:
+    /// - draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill range は
+    ///   Largest Object を超えない
+    /// - draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter):
+    ///   TRACK_STATUS_OK に載せる largest
+    pub(crate) fn publisher_track_largest(
         &self,
         track_namespace: &TrackNamespace,
         track_name: &[u8],

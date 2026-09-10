@@ -11,6 +11,7 @@ use crate::message_parameter::MessageParameters;
 use alloc::vec::Vec;
 
 use super::super::core::Session;
+use super::super::subscription::delivery::update_largest_object_in_parameters;
 use super::super::types::{
     RequestKind, RequestStreamEnd, SendRequestError, SessionError, SessionEvent, TerminationReason,
     TrackRole, TrackStatusEntry, TrackStatusResponse,
@@ -30,7 +31,13 @@ impl Session {
         self.track_status_requests.values()
     }
 
-    /// 応答済み (Ok / Error) の TRACK_STATUS を除去
+    /// 応答済み (Ok / Error) の TRACK_STATUS を除去する
+    ///
+    /// draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): TRACK_STATUS_OK / REQUEST_ERROR は
+    /// FIN で送られる。bidi stream 終端を `recv_request_stream_closed` で通知してから
+    /// 呼ぶこと (終端前に除去すると、後から届く終端が unknown id となり
+    /// `PROTOCOL_VIOLATION` で session が Closing になる)。応答前に stream が終端した
+    /// 場合は `close_track_status_on_stream_end` が `Error` を記録するため除去できる。
     pub fn forget_track_status(&mut self, request_id: u64) -> Option<TrackStatusEntry> {
         let entry = self.track_status_requests.get(&request_id)?;
         entry.response.as_ref()?;
@@ -189,26 +196,51 @@ impl Session {
 
     // ─── REQUEST_OK / REQUEST_ERROR per-kind dispatch (TRACK_STATUS) ──
 
-    pub(crate) fn send_ok_for_track_status(&mut self, request_id: u64) -> Result<(), SessionError> {
+    pub(crate) fn send_ok_for_track_status(
+        &mut self,
+        request_id: u64,
+        parameters: &mut MessageParameters,
+    ) -> Result<(), SessionError> {
+        let (track_namespace, track_name) = {
+            let entry = self
+                .track_status_requests
+                .get(&request_id)
+                .expect("locate_request guarantees key presence");
+            if entry.my_role != TrackRole::Publisher {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "request_ok (track_status) can only be sent by publisher-role",
+                ));
+            }
+            if entry.response.is_some() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "track_status already responded",
+                ));
+            }
+            (entry.track_namespace.clone(), entry.track_name.clone())
+        };
+        // draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): Objects が
+        // 公開済みなら TRACK_STATUS_OK に LARGEST_OBJECT を含める。TRACK_STATUS は
+        // Subscription を作らないため、対象 Track の publisher 役 subscription 群が
+        // 観測した largest を Track 索引から引き当てる。
+        // 注: largest は publisher 役 subscription が保持するため、対象 subscription を
+        // forget 済みの Track では未知として省略する (Terminated でも保持中なら寄与する)。
+        if let Some(location) = self.publisher_track_largest(&track_namespace, &track_name) {
+            update_largest_object_in_parameters(parameters, &location);
+        }
+        // wire に載った最終値 (アプリ指定値を含む) をローカル状態にも反映する
+        let largest_location = parameters
+            .largest_object()
+            .map(|(group_id, object_id)| Location {
+                group_id,
+                object_id,
+            });
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
-        if entry.my_role != TrackRole::Publisher {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "request_ok (track_status) can only be sent by publisher-role",
-            ));
-        }
-        if entry.response.is_some() {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "track_status already responded",
-            ));
-        }
-        entry.response = Some(TrackStatusResponse::Ok {
-            largest_location: None,
-        });
+        entry.response = Some(TrackStatusResponse::Ok { largest_location });
         Ok(())
     }
 

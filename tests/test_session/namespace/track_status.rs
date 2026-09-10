@@ -249,3 +249,435 @@ fn send_track_status_with_out_of_scope_parameter_rejected_without_state_change()
         .expect("検証エラー後の正常送信は成功すること");
     assert_eq!(rid, 0, "検証エラーで request_id が欠番にならないこと");
 }
+
+/// TRACK_STATUS_OK 送信後に bidi stream の送信方向が FIN されること
+/// (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))
+#[test]
+fn track_status_ok_is_sent_with_fin() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "TRACK_STATUS_OK は FIN で送信されること");
+}
+
+/// 対象 Track の publisher 役 subscription に観測 largest がある場合、
+/// TRACK_STATUS_OK に LARGEST_OBJECT が自動注入されること
+/// (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter))
+#[test]
+fn track_status_ok_injects_publisher_track_largest_object() {
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (mut client, mut server) = establish_pair();
+    // 既存 subscription を確立し、object {5, 9} を公開して publisher 側の観測 largest を作る
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(10);
+    server
+        .send_subgroup_header(
+            stream_id,
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 5,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(stream_id, 9, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 同じ Track へ別 request で TRACK_STATUS を送る
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                Some((5, 9)),
+                "TRACK_STATUS_OK に publisher 観測 largest が注入されること"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+}
+
+/// 観測 largest が無い Track では TRACK_STATUS_OK に LARGEST_OBJECT を自動注入しないこと
+#[test]
+fn track_status_ok_does_not_inject_without_publisher_track() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                None,
+                "未公開 Track では LARGEST_OBJECT を自動注入しないこと"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+}
+
+/// アプリが指定した LARGEST_OBJECT は自動注入で下げられないこと
+#[test]
+fn track_status_ok_app_largest_object_not_lowered() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (mut client, mut server) = establish_pair();
+    // 既存 subscription を確立し、object {5, 9} を公開して publisher 側の観測 largest を作る
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(10);
+    server
+        .send_subgroup_header(
+            stream_id,
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 5,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(stream_id, 9, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 観測 largest {5, 9} より大きい {100, 0} をアプリが指定する
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 100,
+            object: 0,
+        },
+    });
+    server
+        .send_request_ok(rid, ok_params, TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                Some((100, 0)),
+                "アプリ指定値が自動注入で下げられないこと"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+}
+
+/// アプリ指定の LARGEST_OBJECT が観測値より小さい場合、観測値まで引き上げられ、
+/// ローカル状態の largest_location も wire 値と一致すること
+#[test]
+fn track_status_ok_raises_app_largest_object_to_observed() {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    use shiguredo_moqt::session::types::TrackStatusResponse;
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (mut client, mut server) = establish_pair();
+    // 既存 subscription を確立し、object {5, 9} を公開する
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(10);
+    server
+        .send_subgroup_header(
+            stream_id,
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 5,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(stream_id, 9, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 観測 largest {5, 9} より小さい {1, 0} をアプリが指定する
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 1,
+            object: 0,
+        },
+    });
+    server
+        .send_request_ok(rid, ok_params, TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                Some((5, 9)),
+                "アプリ指定値は観測値まで引き上げられること"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+    assert_eq!(
+        server
+            .track_status_request(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .response,
+        Some(TrackStatusResponse::Ok {
+            largest_location: Some(Location {
+                group_id: 5,
+                object_id: 9,
+            }),
+        }),
+        "ローカル状態の largest_location が wire 値と一致すること"
+    );
+}
+
+/// TRACK_STATUS 以外の context (SUBSCRIBE_OK) は FIN せずに送信されること
+#[test]
+fn subscribe_ok_is_sent_without_fin() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(!fin, "SUBSCRIBE_OK は FIN せずに送信されること");
+}
+
+/// 同一 Track に publisher 役 subscription が複数ある場合、最大の largest が使われること
+#[test]
+fn track_status_ok_injects_max_largest_across_publisher_subscriptions() {
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (mut client, mut server) = establish_pair();
+    // 1 本目の subscription を確立し object {1, 0} を公開する
+    let sub1 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, m1) = take_send_request(&mut client);
+    server
+        .recv_request(m1)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub1, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok1) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub1, ok1)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let s1 = DataStreamId(10);
+    server
+        .send_subgroup_header(
+            s1,
+            sub1,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 1,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(s1, 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 2 本目の subscription を確立し object {5, 9} を公開する
+    let sub2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, m2) = take_send_request(&mut client);
+    server
+        .recv_request(m2)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub2, 2, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub2, ok2)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let s2 = DataStreamId(20);
+    server
+        .send_subgroup_header(
+            s2,
+            sub2,
+            &SubgroupHeader {
+                track_alias: 2,
+                group_id: 5,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(s2, 9, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                Some((5, 9)),
+                "複数 subscription の最大値が使われること"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+}
+
+/// 観測 largest が無い Track ではアプリ指定の LARGEST_OBJECT がそのまま残ること
+#[test]
+fn track_status_ok_keeps_app_largest_object_without_publisher_track() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 7,
+            object: 3,
+        },
+    });
+    server
+        .send_request_ok(rid, ok_params, TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg, _) = take_send_on_stream_with_fin(&mut server);
+    match ok_msg {
+        ControlMessage::RequestOk(ok) => {
+            assert_eq!(
+                ok.parameters.largest_object(),
+                Some((7, 3)),
+                "アプリ指定値が改変されないこと"
+            );
+        }
+        _ => panic!("REQUEST_OK が期待される"),
+    }
+}

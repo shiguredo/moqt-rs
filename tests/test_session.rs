@@ -173,14 +173,20 @@ fn take_send_request(s: &mut Session) -> (u64, ControlMessage) {
 }
 
 fn take_send_on_stream(s: &mut Session) -> (u64, ControlMessage) {
+    let (request_id, message, _) = take_send_on_stream_with_fin(s);
+    (request_id, message)
+}
+
+/// `SendOnStream` イベントの `fin` も含めて取り出す
+fn take_send_on_stream_with_fin(s: &mut Session) -> (u64, ControlMessage, bool) {
     while let Some(e) = s.poll_event() {
         if let SessionEvent::SendOnStream {
             request_id,
             message,
-            ..
+            fin,
         } = e
         {
-            return (request_id, message);
+            return (request_id, message, fin);
         }
     }
     panic!("SendOnStream イベントが期待されたが発行されなかった");

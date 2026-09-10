@@ -315,6 +315,13 @@ fn request_stream_tracks_track_status_lifecycle() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
+    // TRACK_STATUS_OK は FIN で送られるため、両端で bidi stream 終端を通知してから forget する
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
     client
         .forget_track_status(rid)
         .expect("テストフィクスチャの前提条件を満たす");
