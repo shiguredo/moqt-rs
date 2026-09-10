@@ -224,11 +224,15 @@ impl DataPlaneHandle {
     }
 
     /// subgroup object を Session に通知する (subscriber 側)
+    ///
+    /// 戻り値は帰属判定 (`Accepted` / `FilteredOut` / `Discarded`)。`FilteredOut` /
+    /// `Discarded` の object も wire 上は payload を持つため、呼び出し側は payload を
+    /// 読み出して消費する。header 受理済み stream では `UnknownTrackAlias` を返さない。
     pub fn recv_subgroup_object(
         &self,
         stream_id: DataStreamId,
         object: &DecodedSubgroupObject,
-    ) -> Result<()> {
+    ) -> Result<TrackDataAcceptance> {
         let mut session = lock_session(&self.session);
         session
             .recv_subgroup_object(stream_id, object)

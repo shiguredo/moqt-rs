@@ -1552,3 +1552,617 @@ fn local_send_request_error_has_no_session_error() {
             .is_none()
     );
 }
+
+/// 受信 subgroup Object のフィルタテスト用に client / server を指定の SetupOptions で
+/// Established にする
+fn establish_pair_for_data_tests(
+    client_opts: crate::parameter::SetupOptions,
+    server_opts: crate::parameter::SetupOptions,
+) -> (Session, Session) {
+    let mut client = Session::new_client(Transport::WebTransport, client_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut server = Session::new_server(Transport::WebTransport, server_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let c_setup = take_send_control_for_local_code_tests(&mut client);
+    let s_setup = take_send_control_for_local_code_tests(&mut server);
+    server
+        .recv_control(c_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(s_setup)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (client, server)
+}
+
+/// MAX_FILTER_RANGES を宣言する server 用 SetupOptions を作る
+fn max_filter_options_for_data_tests() -> crate::parameter::SetupOptions {
+    use crate::parameter::{SETUP_OPTION_MAX_FILTER_RANGES, SetupOption, SetupOptionValue};
+
+    let mut opts = crate::parameter::SetupOptions::new();
+    opts.push(SetupOption {
+        option_type: SETUP_OPTION_MAX_FILTER_RANGES,
+        value: SetupOptionValue::VarInt(8),
+    });
+    opts
+}
+
+/// 1 つの Range を持つ Range Filter パラメータを作る (param_type, set_id, start, end)
+fn object_range_filter_for_data_tests(
+    param_type: u64,
+    set_id: u8,
+    start: u64,
+    end: u64,
+) -> MessageParameter {
+    let mut bytes = vec![set_id];
+    crate::varint::encode(start, &mut bytes);
+    crate::varint::encode(end - start, &mut bytes);
+    MessageParameter {
+        param_type,
+        value: MessageParameterValue::LengthPrefixed(bytes),
+    }
+}
+
+/// client (subscriber) の subscription を 1 本 Established にする
+fn establish_subscriber_subscription_for_data_tests(
+    client: &mut Session,
+    server: &mut Session,
+    alias: u64,
+    parameters: MessageParameters,
+) -> u64 {
+    use crate::track_properties::TrackProperties;
+
+    let rid = client
+        .send_subscribe(
+            TrackNamespace::new(vec![b"live".to_vec()]).expect("有効な namespace"),
+            b"cam".to_vec(),
+            parameters,
+        )
+        .expect("SUBSCRIBE に成功すること");
+    let sub_msg = take_send_request_for_local_code_tests(client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid, alias, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK に成功すること");
+    let ok_msg = take_send_on_stream_for_local_code_tests(server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    rid
+}
+
+/// Malformed Track 検出時は Object の帰属先 subscription を終端すること
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 2 は FIN 済み Subgroup への
+/// 最終 Object ID 超過を Malformed とする。同一 Subgroup の再オープンは禁止されるため
+/// この条件は公開 API の通常手順では到達しない防御的検出であり、tracker に FIN 状態を
+/// 直接記録して帰属先の決定ロジックを検証する。
+#[test]
+fn malformed_object_after_fin_terminates_attributed_subscription() {
+    use crate::error::SESSION_PROTOCOL_VIOLATION;
+    use crate::message_parameter::PARAM_OBJECTID_FILTER;
+    use crate::stream::decoder::DecodedSubgroupObject;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    let (mut client, mut server) = establish_pair_for_data_tests(
+        crate::parameter::SetupOptions::new(),
+        max_filter_options_for_data_tests(),
+    );
+    // rid1 は Object ID [0, 9] のみ通し、rid2 は unfiltered で Object ID=50 が帰属する
+    let mut params1 = MessageParameters::new();
+    params1.push(object_range_filter_for_data_tests(
+        PARAM_OBJECTID_FILTER,
+        0,
+        0,
+        9,
+    ));
+    let rid1 =
+        establish_subscriber_subscription_for_data_tests(&mut client, &mut server, 5000, params1);
+    let rid2 = establish_subscriber_subscription_for_data_tests(
+        &mut client,
+        &mut server,
+        5000,
+        MessageParameters::new(),
+    );
+
+    // header は最初の候補 rid1 に受理される
+    let stream_id = DataStreamId(900);
+    let header = SubgroupHeader {
+        track_alias: 5000,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(7),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, header.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // FIN 済み Subgroup の最終 Object ID を tracker に記録する (再オープン禁止により
+    // 公開 API の通常手順では到達しない状態を直接作る)
+    client
+        .peer_subgroups
+        .mark_fin(5000, 0, 7, Some(5))
+        .expect("FIN 状態の記録に成功すること");
+
+    // Object ID=50 は rid1 が不合格、rid2 が合格する。Malformed 検出はフィルタ判定より
+    // 優先され、帰属先の rid2 が終端される (stream 所有者 rid1 は Established のまま)
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 50,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("FIN 済み Subgroup への Object は Malformed Track になること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid2)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "Object の帰属先 rid2 が Terminated になること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Established,
+        "stream 所有者 rid1 は Established のままであること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// フィルタ不通過 Object でも Malformed Track (条件 2) が FilteredOut より優先されること
+///
+/// Malformed の検出はフィルタ判定に依存させない。公開 API では再オープン禁止により
+/// 到達しないため、tracker に FIN 状態を直接記録して検証する。
+#[test]
+fn malformed_after_fin_takes_precedence_over_filtered_out() {
+    use crate::error::SESSION_PROTOCOL_VIOLATION;
+    use crate::message_parameter::PARAM_OBJECTID_FILTER;
+    use crate::stream::decoder::DecodedSubgroupObject;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    let (mut client, mut server) = establish_pair_for_data_tests(
+        crate::parameter::SetupOptions::new(),
+        max_filter_options_for_data_tests(),
+    );
+    // Object ID [0, 9] のみ通すため、Object ID=50 はフィルタ不通過になる
+    let mut params = MessageParameters::new();
+    params.push(object_range_filter_for_data_tests(
+        PARAM_OBJECTID_FILTER,
+        0,
+        0,
+        9,
+    ));
+    let rid =
+        establish_subscriber_subscription_for_data_tests(&mut client, &mut server, 5001, params);
+
+    let stream_id = DataStreamId(901);
+    let header = SubgroupHeader {
+        track_alias: 5001,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, header.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+
+    client
+        .peer_subgroups
+        .mark_fin(5001, 0, 0, Some(5))
+        .expect("FIN 状態の記録に成功すること");
+
+    // フィルタ不通過で本来 FilteredOut になる Object でも Malformed を優先して Err にする
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 50,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("フィルタ不通過でも Malformed Track は Err になること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "Malformed として subscription が Terminated になること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// FIN 時の `mark_fin` 失敗 (条件 3) の Malformed 終端対象が Object の帰属先に
+/// なること
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 3 は同一 Subgroup が複数
+/// stream で FIN され最終 Object が異なる場合を Malformed とする。公開 API では
+/// 再オープン禁止により通常手順で到達しないため、tracker に 1 回目の FIN を直接記録して
+/// 検証する。終端対象は stream 所有者ではなく Object を受理した帰属先にする。
+#[test]
+fn malformed_mark_fin_failure_terminates_attributed_subscription() {
+    use crate::error::SESSION_PROTOCOL_VIOLATION;
+    use crate::message_parameter::PARAM_OBJECTID_FILTER;
+    use crate::stream::decoder::DecodedSubgroupObject;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    let (mut client, mut server) = establish_pair_for_data_tests(
+        crate::parameter::SetupOptions::new(),
+        max_filter_options_for_data_tests(),
+    );
+    // rid1 は Object ID [0, 9] のみ通し、Object ID=50 は rid2 (unfiltered) に帰属する
+    let mut params1 = MessageParameters::new();
+    params1.push(object_range_filter_for_data_tests(
+        PARAM_OBJECTID_FILTER,
+        0,
+        0,
+        9,
+    ));
+    let rid1 =
+        establish_subscriber_subscription_for_data_tests(&mut client, &mut server, 5002, params1);
+    let rid2 = establish_subscriber_subscription_for_data_tests(
+        &mut client,
+        &mut server,
+        5002,
+        MessageParameters::new(),
+    );
+
+    let stream_id = DataStreamId(902);
+    let header = SubgroupHeader {
+        track_alias: 5002,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, header.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+    assert_eq!(
+        client
+            .recv_subgroup_object(
+                stream_id,
+                &DecodedSubgroupObject {
+                    object_id: 50,
+                    payload_length: 1,
+                    status: None,
+                    properties_bytes: None,
+                },
+            )
+            .expect("Object 受信に失敗しないこと"),
+        TrackDataAcceptance::Accepted,
+        "Object ID=50 は rid2 に帰属すること"
+    );
+
+    // 同一 Subgroup の 1 回目の FIN (最終 Object ID=5) を tracker に直接記録する
+    // (再オープン禁止により公開 API の通常手順では到達しない状態を直接作る)
+    client
+        .peer_subgroups
+        .mark_fin(5002, 0, 0, Some(5))
+        .expect("FIN 状態の記録に成功すること");
+
+    // 2 回目の FIN が異なる最終 Object ID=50 を主張するため条件 3 で Malformed になる。
+    // 終端対象は帰属先 rid2 (stream 所有者 rid1 は Established のまま)
+    let err = client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect_err("同一 Subgroup の最終 Object 不一致は Malformed Track になること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid2)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "Malformed の終端対象が Object の帰属先 rid2 になること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Established,
+        "stream 所有者 rid1 は Established のままであること"
+    );
+    // stream は incoming から除去済みなので、mark_fin 失敗の終端経路でも所有者の
+    // open 中の受信 stream 数が戻っている必要がある (残ると cleanup_ready が張り付く)
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("subscription が存在すること")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0,
+        "mark_fin 失敗の終端経路でも所有者 rid1 の open 中の受信 stream 数が戻ること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// キャンセル済み所有者の FIN 破棄分岐でも tracker を終端状態にし、条件 3 不一致で
+/// `mark_fin` が失敗した場合は reset として同一 Subgroup の再オープンを妨げないこと
+///
+/// 公開 API の通常手順では同一 Subgroup の FIN 済み再オープンは禁止されるため、
+/// tracker に 1 回目の FIN を直接記録して条件 3 不一致を成立させる。
+#[test]
+fn discarded_fin_marks_tracker_terminal_and_allows_reopen() {
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    use crate::subgroup_tracker::SubgroupStreamState;
+
+    let (mut client, mut server) = establish_pair_for_data_tests(
+        crate::parameter::SetupOptions::new(),
+        max_filter_options_for_data_tests(),
+    );
+    // rid1 (最初の候補) が stream 所有者、rid2 が再オープン時の受理先になる
+    let rid1 = establish_subscriber_subscription_for_data_tests(
+        &mut client,
+        &mut server,
+        5003,
+        MessageParameters::new(),
+    );
+    let rid2 = establish_subscriber_subscription_for_data_tests(
+        &mut client,
+        &mut server,
+        5003,
+        MessageParameters::new(),
+    );
+
+    let stream_id = DataStreamId(903);
+    let header = SubgroupHeader {
+        track_alias: 5003,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, header.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // 同一 Subgroup の 1 回目の FIN (最終 Object ID=5) を tracker に直接記録する
+    // (再オープン禁止により公開 API の通常手順では到達しない状態を直接作る)
+    client
+        .peer_subgroups
+        .mark_fin(5003, 0, 0, Some(5))
+        .expect("FIN 状態の記録に成功すること");
+
+    // stream 所有者 rid1 をキャンセルする。stream は Object の帰属実績が無いため
+    // FIN は破棄分岐に入る
+    client
+        .stop_sending(rid1)
+        .expect("Established の subscription は stop_sending できること");
+
+    // stream は Object を 1 つも受信していないため last_object_id は None になり、
+    // 記録済みの Some(5) と不一致で mark_fin は Err になる。破棄分岐は状態が
+    // Open のまま残らないよう reset として終端状態にする
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("破棄対象 stream の FIN は Err にならないこと");
+    assert!(
+        matches!(
+            client.peer_subgroups.get(5003, 0, 0),
+            Some(SubgroupStreamState::Reset { .. })
+        ),
+        "mark_fin 失敗時は reset として終端状態になること"
+    );
+
+    // 同一 Subgroup の再オープン: rid1 はキャンセル済みなので rid2 が受理する。
+    // 破棄分岐が tracker を終端状態にしていなければ Open 衝突で session close になる
+    let stream_id2 = DataStreamId(904);
+    client
+        .recv_data_stream_type(stream_id2, header.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id2, &header)
+            .expect("同一 Subgroup の再オープンが session close せず受理されること"),
+        TrackDataAcceptance::Accepted
+    );
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .subscription(rid2)
+            .expect("subscription が存在すること")
+            .stream_counts
+            .incoming_subgroup_count,
+        1,
+        "再オープンした stream が帰属先 rid2 に紐づくこと"
+    );
+}
+
+/// 帰属先を forget した後の FIN が生きた所有者へフォールバックし、Group 終端の記録と
+/// Malformed 終端の対象が死んだ帰属先にならないこと
+///
+/// 共有 Track Alias では Object の帰属先が stream 所有者と異なりうる。帰属先を forget すると
+/// `last_attributed_request_id` が死んだ request_id を指したまま残るため、生存判定で
+/// 所有者へフォールバックしないと END_OF_GROUP の記録が失われ、`mark_fin` 失敗時の
+/// Malformed 終端も死んだ request_id への no-op になる。条件 3 の `mark_fin` 失敗は
+/// 公開 API の通常手順では到達しないため、tracker に FIN 状態を直接記録して検証する。
+#[test]
+fn stale_attribution_falls_back_to_live_owner_on_fin() {
+    use crate::error::SESSION_PROTOCOL_VIOLATION;
+    use crate::message_parameter::PARAM_OBJECTID_FILTER;
+    use crate::stream::decoder::DecodedSubgroupObject;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+
+    let (mut client, mut server) = establish_pair_for_data_tests(
+        crate::parameter::SetupOptions::new(),
+        max_filter_options_for_data_tests(),
+    );
+    // rid1 は Object ID [0, 9] のみ通すため header は rid1 に紐づき、Object ID=50 は
+    // 2 番目の候補 rid2 (unfiltered) に帰属する
+    let mut params1 = MessageParameters::new();
+    params1.push(object_range_filter_for_data_tests(
+        PARAM_OBJECTID_FILTER,
+        0,
+        0,
+        9,
+    ));
+    let rid1 =
+        establish_subscriber_subscription_for_data_tests(&mut client, &mut server, 5004, params1);
+    let rid2 = establish_subscriber_subscription_for_data_tests(
+        &mut client,
+        &mut server,
+        5004,
+        MessageParameters::new(),
+    );
+
+    // stream A: END_OF_GROUP + FIN を通常処理させ、Group 終端の記録先を検証する
+    let stream_a = DataStreamId(905);
+    let header_a = SubgroupHeader {
+        track_alias: 5004,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: true,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_a, header_a.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_a, &header_a)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // stream B: mark_fin 失敗 (条件 3) の終端対象を検証する
+    let stream_b = DataStreamId(906);
+    let header_b = SubgroupHeader {
+        track_alias: 5004,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: true,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_b, header_b.encode()[0] as u64)
+        .expect("subgroup stream type の通知に成功すること");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_b, &header_b)
+            .expect("subgroup header の受理に成功すること"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // 両 stream の Object ID=50 は unfiltered の rid2 に帰属する
+    for stream_id in [stream_a, stream_b] {
+        assert_eq!(
+            client
+                .recv_subgroup_object(
+                    stream_id,
+                    &DecodedSubgroupObject {
+                        object_id: 50,
+                        payload_length: 1,
+                        status: None,
+                        properties_bytes: None,
+                    },
+                )
+                .expect("Object 受信に失敗しないこと"),
+            TrackDataAcceptance::Accepted,
+            "Object ID=50 は rid2 に帰属すること"
+        );
+    }
+
+    // 帰属先 rid2 だけをキャンセルして forget する (rid1 は Established のまま)。
+    // 以後 last_attributed_request_id は死んだ rid2 を指したままになる
+    client
+        .stop_sending(rid2)
+        .expect("Established の subscription は stop_sending できること");
+    client
+        .forget_subscription(rid2)
+        .expect("キャンセル由来 Terminated は cleanup_ready で forget できること");
+
+    // stream A: 死んだ rid2 ではなく生きた所有者 rid1 に Group 終端 (50 の次 = 51) が
+    // 記録される
+    client
+        .recv_data_stream_closed(stream_a, RequestStreamEnd::Fin)
+        .expect("帰属先回収後の END_OF_GROUP + FIN も正常終端すること");
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("所有者 rid1 が存在すること")
+            .ended_groups
+            .get(&0),
+        Some(&51),
+        "Group 終端が死んだ帰属先ではなく生きた所有者へ記録されること"
+    );
+
+    // stream B: 同一 Subgroup の 1 回目の FIN (最終 Object ID=5) を tracker に直接記録し、
+    // 2 回目の FIN の最終 Object ID=50 との不一致で条件 3 の mark_fin 失敗を成立させる。
+    // 終端対象は死んだ rid2 ではなく生きた所有者 rid1 になる
+    client
+        .peer_subgroups
+        .mark_fin(5004, 1, 0, Some(5))
+        .expect("FIN 状態の記録に成功すること");
+    let err = client
+        .recv_data_stream_closed(stream_b, RequestStreamEnd::Fin)
+        .expect_err("同一 Subgroup の最終 Object 不一致は Malformed Track になること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("所有者 rid1 が存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "Malformed の終端対象が生きた所有者 rid1 になること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("所有者 rid1 が存在すること")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0,
+        "mark_fin 失敗の終端経路でも所有者 rid1 の open 中の受信 stream 数が戻ること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}

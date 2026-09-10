@@ -111,6 +111,7 @@ while let Some(event) = session.poll_event() {
 - bidi request stream の先頭メッセージ：`recv_request()`
 - bidi request stream の応答：`recv_stream_message(request_id, msg)`
 - uni data stream：`recv_data_stream_type()` / `recv_subgroup_header()` / `recv_subgroup_object()` / `recv_fetch_header()`
+  - `recv_subgroup_header()` / `recv_subgroup_object()` は `TrackDataAcceptance` を返す。`recv_subgroup_object()` は受信 Object ごとに購読フィルタを再適用し、フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` になる
 - datagram：`recv_object_datagram()`
 
 送信側：

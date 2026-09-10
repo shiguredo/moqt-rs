@@ -414,6 +414,8 @@ mod request_stream;
 mod setup;
 #[path = "test_session/shared_track_alias.rs"]
 mod shared_track_alias;
+#[path = "test_session/subgroup_object_filter.rs"]
+mod subgroup_object_filter;
 #[path = "test_session/subscription.rs"]
 mod subscription;
 #[path = "test_session/timeout_api.rs"]

@@ -201,8 +201,17 @@ fn cancelled_subscription_absorbs_object_and_fin_on_existing_stream() {
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("キャンセル後の stream 終端は Err にならないこと");
     assert_eq!(client.state(), SessionState::Established);
-    // Discarded 掩き替えで計数が張り付くと cleanup_ready が永久に false になる
-    // (subscription リーク)。cleanup_ready の成立自体が計数の裏付けになる
+    // キャンセル由来 Terminated でも Object の帰属実績がある stream の FIN は通常終端として
+    // 扱われ、open 中の受信 stream 数も戻る
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("キャンセル後もアプリの forget まで subscription が残ること")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0,
+        "stream 終端で open 中の受信 stream 数が戻ること"
+    );
     assert_eq!(
         client.subscription_cleanup_ready(rid),
         Some(true),
@@ -301,6 +310,107 @@ fn stop_sending_then_peer_stream_close_is_absorbed() {
             },
         )
         .expect("STOP_SENDING 送信後の peer RESET_STREAM は no-op で吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// キャンセル済み所有者の stream を RESET で破棄終端した後、同一 Subgroup の正当な
+/// 再オープンが session close せず受理されること
+///
+/// 破棄分岐でも `SubgroupTracker` を終端状態 (`Reset`) にしないとエントリが `Open` の
+/// まま残り、draft §2.2 (Subgroups) の premature reset 後の再オープンが open 衝突として
+/// `PROTOCOL_VIOLATION` になる。
+#[test]
+fn cancelled_stream_reset_allows_subgroup_reopen() {
+    let (mut client, mut server) = establish_pair();
+    // rid1 が stream 所有者 (最初の候補)、rid2 が再オープン時の受理先になる
+    let rid1 = establish_subscribe(&mut client, &mut server, 500, MessageParameters::new());
+    let _rid2 = establish_subscribe(&mut client, &mut server, 500, MessageParameters::new());
+
+    let stream_a = DataStreamId(11);
+    client
+        .recv_data_stream_type(stream_a, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_a, &subgroup_header(500, 3, 7))
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+    client
+        .stop_sending(rid1)
+        .expect("Established の subscription は stop_sending できること");
+
+    // RESET で破棄終端する (Object の帰属実績が無いため破棄分岐に入る)
+    client
+        .recv_data_stream_closed(
+            stream_a,
+            RequestStreamEnd::Reset {
+                error_code: 0x1,
+                reliable_size: None,
+            },
+        )
+        .expect("キャンセル由来 Terminated の RESET は Err にならないこと");
+
+    // 同一 Subgroup の再オープン: rid1 はキャンセル済みのため Established な rid2 が
+    // 受理する。tracker が `Open` のままなら open 衝突で session close になる
+    let stream_b = DataStreamId(12);
+    client
+        .recv_data_stream_type(stream_b, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_b, &subgroup_header(500, 3, 7))
+            .expect("破棄終端後の同一 Subgroup の再オープンは session close せず受理されること"),
+        TrackDataAcceptance::Accepted
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// キャンセル済み所有者の stream への STOP_SENDING 送信で破棄終端した後、同一
+/// Subgroup の正当な再オープンが session close せず受理されること
+///
+/// 破棄分岐でも `SubgroupTracker` を `StoppedByPeer` にしないとエントリが `Open` の
+/// まま残り、draft §11.3.2 (Closing Subgroup Streams) / Appendix A.3
+/// (REQUEST_UPDATE の Forward State 0→1) による再オープンが open 衝突として
+/// `PROTOCOL_VIOLATION` になる。
+#[test]
+fn cancelled_stream_stop_sending_allows_subgroup_reopen() {
+    let (mut client, mut server) = establish_pair();
+    // rid1 が stream 所有者 (最初の候補)、rid2 が再オープン時の受理先になる
+    let rid1 = establish_subscribe(&mut client, &mut server, 500, MessageParameters::new());
+    let _rid2 = establish_subscribe(&mut client, &mut server, 500, MessageParameters::new());
+
+    let stream_a = DataStreamId(11);
+    client
+        .recv_data_stream_type(stream_a, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_a, &subgroup_header(500, 3, 7))
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+    client
+        .stop_sending(rid1)
+        .expect("Established の subscription は stop_sending できること");
+
+    // 破棄対象 stream への STOP_SENDING 送信で破棄終端する
+    client
+        .send_data_stream_stop_sending(stream_a)
+        .expect("キャンセル後の STOP_SENDING 送信は Err にならないこと");
+
+    // 同一 Subgroup の再オープン: rid1 はキャンセル済みのため Established な rid2 が
+    // 受理する。tracker が `Open` のままなら open 衝突で session close になる
+    let stream_b = DataStreamId(12);
+    client
+        .recv_data_stream_type(stream_b, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_b, &subgroup_header(500, 3, 7))
+            .expect("破棄終端後の同一 Subgroup の再オープンは session close せず受理されること"),
+        TrackDataAcceptance::Accepted
+    );
     assert_eq!(client.state(), SessionState::Established);
 }
 
@@ -516,7 +626,9 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
 ///
 /// アプリが decoder を回して mid-object FIN を検出した場合でも、破棄対象 stream で
 /// セッションを fail させない。`recv_data_stream_closed` との呼び出し順序で挙動が
-/// 変わらないこと (doc コメントの契約) も検証する。
+/// 変わらないこと (doc コメントの契約) も検証する。キャンセル済み所有者の
+/// `Subgroup` variant は FIN / STOP_SENDING と同じ後始末 (open 数・delivery timeout
+/// override) を行う。
 #[test]
 fn discarded_stream_report_mid_object_fin_is_absorbed_in_any_order() {
     let (mut client, mut server) = establish_pair();
@@ -539,6 +651,17 @@ fn discarded_stream_report_mid_object_fin_is_absorbed_in_any_order() {
     client
         .report_mid_object_fin(stream_a)
         .expect("破棄対象 stream での report_mid_object_fin は no-op で受理されること");
+    // Discarded variant への置き換えを行わず Subgroup variant のまま終端するため、
+    // ここで open 数を戻す (FIN / STOP_SENDING のキャンセル分岐と同じ後始末)
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在すること")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0,
+        "report_mid_object_fin で open 中の受信 stream 数が戻ること"
+    );
     client
         .recv_data_stream_closed(stream_a, RequestStreamEnd::Fin)
         .expect("report_mid_object_fin の後の FIN も no-op で吸収されること");
@@ -560,6 +683,33 @@ fn discarded_stream_report_mid_object_fin_is_absorbed_in_any_order() {
     client
         .report_mid_object_fin(stream_b)
         .expect("FIN の後の report_mid_object_fin も no-op で受理されること");
+
+    // PUBLISH_DONE 受信後の cleanup_ready は open 数に依存するため、open 数の
+    // 計上漏れがあれば true にならない (キャンセル由来 Terminated の cleanup_ready が
+    // 常に true になる性質に依存しない検証)
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("PUBLISH_DONE の受信に成功すること");
+    client.tick(1);
+    assert_eq!(
+        client.subscription_cleanup_ready(rid),
+        Some(true),
+        "open 中の受信 stream 数が漏れず cleanup_ready になること"
+    );
+    assert!(
+        client.forget_subscription(rid).is_some(),
+        "cleanup_ready な subscription は forget できること"
+    );
     assert_eq!(client.state(), SessionState::Established);
 }
 
@@ -738,9 +888,13 @@ fn shared_alias_cancelled_subscription_does_not_poison_tracking() {
         TrackDataAcceptance::Discarded,
         "共有 alias でキャンセル由来候補のみ合格の場合は Discarded になること"
     );
-    client
-        .recv_subgroup_object(discarded_stream, &object(0))
-        .expect("Discarded stream への object 受信は no-op で吸収されること");
+    assert_eq!(
+        client
+            .recv_subgroup_object(discarded_stream, &object(0))
+            .expect("Discarded stream への object 受信は no-op で吸収されること"),
+        TrackDataAcceptance::Discarded,
+        "Discarded stream への object 受信は Discarded として吸収されること"
+    );
     client
         .recv_data_stream_closed(discarded_stream, RequestStreamEnd::Fin)
         .expect("Discarded stream の終端は no-op で吸収されること");

@@ -82,6 +82,13 @@ impl Session {
     /// draft §3.1.1 (Subscription State Management): PUBLISH_DONE 後の delivery timeout や open stream drain が残る間は
     /// subscription を保持し、`cleanup_ready()` になった時点で関連索引と合わせて解放する。
     /// cleanup 不可の state の場合は `None` を返し、削除は行わない。
+    ///
+    /// 受信 subgroup stream のうち Object の帰属先が別の subscription のものは削除せず、
+    /// 帰属先へ付け替える (共有 Track Alias では stream 所有者と Object の帰属先が
+    /// 異なりうる。詳細は `remove_incoming_data_streams_for_request` の doc を参照)。
+    /// 最後の帰属先が既に回収・キャンセル済みの場合は、同じ Track Alias の生きた他候補の
+    /// 先頭へ移管する。移管対象は移管先の `incoming_subgroup_count` /
+    /// `open_incoming_subgroup_count` に加算され、移管先の終端処理まで会計が維持される。
     pub fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription> {
         let entry = self.subscriptions.get(&request_id)?;
         if !entry.cleanup_ready() {

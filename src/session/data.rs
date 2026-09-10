@@ -20,6 +20,7 @@ use crate::stream::{
 };
 use crate::varint;
 use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 use super::core::{
     MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION, PUBLISH_DONE_STREAM_COUNT_UNKNOWN, Session,
@@ -44,6 +45,25 @@ fn is_cancelled_terminated(subscription: &Subscription) -> bool {
     subscription.state == SubscriptionState::Terminated && subscription.publish_done.is_none()
 }
 
+/// request_id が `subscriptions` 内に存在し、キャンセル由来 `Terminated` でない場合に
+/// その request_id を返す
+///
+/// [`Session::live_attribution`] と同じ判定を、`Session` の一部フィールドだけを
+/// 借用して行う必要がある箇所 (`remove_incoming_data_streams_for_request` の
+/// `retain` クロージャ) から使う。メソッド呼び出しは `&self` 全体を借用してしまい、
+/// `data_streams.incoming` の可変借用と両立しないため、subscriptions マップを受け取る
+/// 自由関数にしている。
+fn live_attributed_request_id(
+    subscriptions: &HashMap<u64, Subscription>,
+    request_id: Option<u64>,
+) -> Option<u64> {
+    request_id.filter(|&request_id| {
+        subscriptions
+            .get(&request_id)
+            .is_some_and(|subscription| !is_cancelled_terminated(subscription))
+    })
+}
+
 /// 受信中の uni data stream の内部状態
 #[derive(Debug, Clone, Copy)]
 pub(super) enum IncomingDataStream {
@@ -55,7 +75,18 @@ pub(super) enum IncomingDataStream {
         track_alias: u64,
         group_id: u64,
         subgroup_id: Option<u64>,
-        /// 先頭 object を受信済みか (draft-ietf-moq-transport-21 §10.1-12.2: Object Property による
+        /// SUBGROUP_HEADER の Publisher Priority 生値 (draft §11.3.1 (Subgroup Header))
+        ///
+        /// DEFAULT_PRIORITY bit が立っている場合は `None`。Object 単位フィルタ再適用時の
+        /// PRIORITY_FILTER は、候補ごとに
+        /// [`Subscription::resolve_header_publisher_priority`] でこの生値を解決して評価する
+        /// (header 時の `header_passes_filters` と同じ規則)。解決済みの
+        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
+        /// 共有 Track Alias では stream の priority として使えない。
+        ///
+        /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
+        header_publisher_priority: Option<u8>,
+        /// 先頭 object を受信済みか (draft-ietf-moq-transport-21 §10.1 / §10.2: Object Property による
         /// delivery timeout オーバーライドは先頭 object のみ有効)
         first_object_received: bool,
         /// SUBGROUP_HEADER の END_OF_GROUP bit (draft §11.3.1 (Subgroup Header))
@@ -67,6 +98,17 @@ pub(super) enum IncomingDataStream {
         end_of_group: bool,
         /// この stream で最後に受信した Object ID (FIN 時の Group 終端確定に使う)
         last_object_id: Option<u64>,
+        /// この stream で最後に Object を受理した subscription の request_id
+        ///
+        /// 共有 Track Alias では Object ごとに帰属先が変わりうる (draft §3.1 (Subscriptions))
+        /// ため、FIN 時の Group 終端 (END_OF_GROUP) の確定先を「最後に受理した帰属先」から
+        /// 決める。フィルタ不通過・破棄の Object では更新しない。
+        last_attributed_request_id: Option<u64>,
+        /// 先頭 Object の delivery timeout override を登録した subscription の request_id
+        ///
+        /// 共有 Track Alias では先頭 Object の帰属先が stream 所有者 (header 時に紐づいた
+        /// `request_id`) と異なりうるため、stream 終端時の override 削除先をここに記録する。
+        timeout_override_request_id: Option<u64>,
     },
     Fetch {
         request_id: u64,
@@ -125,7 +167,7 @@ pub(super) struct OutgoingDataStream {
 impl Session {
     /// subscriber 側の per-subgroup effective delivery timeout を返す
     ///
-    /// draft-ietf-moq-transport-21 §10.1-12.2: subgroup の先頭 object に付与された
+    /// draft-ietf-moq-transport-21 §10.1 / §10.2: subgroup の先頭 object に付与された
     /// Object Property による Track-level 値の per-subgroup オーバーライドを反映した
     /// effective timeout を計算して返す。アプリケーション層が incoming ストリームの
     /// timeout 判定に使用する。
@@ -764,10 +806,17 @@ impl Session {
                     "subgroup header received on fetch stream",
                 ));
             }
-            Some(IncomingDataStream::Subgroup { request_id, .. }) => {
-                if self.is_cancelled_terminated_subscription(*request_id) {
-                    // キャンセル由来 Terminated に属する既存 stream への再 SUBGROUP_HEADER は
-                    // 破棄対象として no-op で吸収する
+            Some(IncomingDataStream::Subgroup {
+                request_id,
+                last_attributed_request_id,
+                ..
+            }) => {
+                if self.is_cancelled_terminated_subscription(*request_id)
+                    && self.live_attribution(*last_attributed_request_id).is_none()
+                {
+                    // キャンセル由来 Terminated に属し、生きた帰属先も無い既存 stream への
+                    // 再 SUBGROUP_HEADER は破棄対象として no-op で吸収する。生きた帰属先が
+                    // ある stream は帰属先にとって生きた stream なので吸収しない
                     cancelled_request_id = Some(*request_id);
                 } else {
                     return Err(SessionError::new(
@@ -889,9 +938,12 @@ impl Session {
                 track_alias: header.track_alias,
                 group_id: header.group_id,
                 subgroup_id,
+                header_publisher_priority: header.publisher_priority,
                 first_object_received: false,
                 end_of_group: header.end_of_group,
                 last_object_id: None,
+                last_attributed_request_id: None,
+                timeout_override_request_id: None,
             },
         );
         // draft-ietf-moq-transport-21 §10.4 (DEFAULT PUBLISHER PRIORITY):
@@ -939,72 +991,124 @@ impl Session {
     ///
     /// caller は対応する `SubgroupStreamDecoder` を回し、header 受理後に object を
     /// 逐次通知する。`SubgroupIdMode::FirstObjectId` は最初の object 受信時に解決する。
+    ///
+    /// draft-ietf-moq-transport-21 §3.1 (Subscriptions): "Because subscriptions can share a
+    /// Track Alias, the subscriber re-applies each subscription's filter to determine which
+    /// subscription a received Object belongs to." に従い、header 時に紐づけた subscription
+    /// だけでなく `resolve_peer_track_alias` の候補すべてへ `object_passes_filters` を
+    /// 再適用し、最初に通過した（キャンセル由来 `Terminated` でない）subscription へ
+    /// Object を帰属させる。
+    /// `SubgroupIdMode::FirstObjectId` は `subgroup_id` を解決してからフィルタを評価する。
+    ///
+    /// 帰属先の候補は「キャンセル由来 `Terminated` を除く候補」である。PUBLISH_DONE 受信後の
+    /// drain 中 `Terminated` (`publish_done` が `Some`) はキャンセル由来ではないため候補に含める
+    /// (draft §9.9)。`Discarded` はキャンセル由来候補のみが合格した場合・破棄対象 stream
+    /// (保持集合または `Discarded` variant)・候補消失のいずれかを表す。
+    ///
+    /// subscription スコープの状態 (`record_largest_received_location` / delivery timeout
+    /// override / Object 系 tracker) は帰属した subscription にのみ更新する。フィルタ不通過でも
+    /// wire 構造の整合と生存監視に必要な更新 (`first_object_received` / `last_object_id` /
+    /// `subgroup_id` 解決 / `check_object_after_fin` / data stream activity) は行い、
+    /// stream 会計は header 時に記録した request_id に維持する。受理した Object の帰属先は
+    /// FIN 時の Group 終端確定 ([`recv_data_stream_closed`](Self::recv_data_stream_closed)) で
+    /// 参照するため stream に記録する。
+    /// Malformed Track (draft §12.1) の検出はフィルタ判定より優先し、終端対象は帰属先が
+    /// 確定していれば帰属先、確定しなければ stream 所有者にする。
+    ///
+    /// 戻り値は帰属判定の結果:
+    /// - `Accepted`: 帰属先が確定し状態を更新した
+    /// - `FilteredOut`: 候補は存在するがどのフィルタも通らなかった
+    /// - `Discarded`: キャンセル済み subscription への不要 Object などとして破棄した
+    ///
+    /// `FilteredOut` / `Discarded` を返した Object も payload は caller が読み出して
+    /// 消費する契約である (stream に payload を残すと次の Object decode が
+    /// `ProtocolViolation` になる)。
+    ///
+    /// header 受理済み stream では `UnknownTrackAlias` を返さない (header 受理後に
+    /// subscription が忘れられた遅延 Object は破棄する。draft §3.1.2)。
+    ///
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn recv_subgroup_object(
         &mut self,
         stream_id: DataStreamId,
         object: &DecodedSubgroupObject,
-    ) -> Result<(), SessionError> {
+    ) -> Result<TrackDataAcceptance, SessionError> {
         self.require_established()?;
         // 破棄対象 stream への object 受信は no-op で吸収する (保持集合・ Discarded variant)
         if self.data_streams.discarded.contains_key(&stream_id) {
-            return Ok(());
+            return Ok(TrackDataAcceptance::Discarded);
         }
-        // キャンセル由来 Terminated に属する既存 stream を破棄対象へ変換して no-op で吸収する
-        // (内部状態を汚染しない)
-        if let Some(IncomingDataStream::Subgroup { request_id, .. }) =
-            self.data_streams.incoming.get(&stream_id)
-            && self.is_cancelled_terminated_subscription(*request_id)
-        {
-            self.register_discarded_stream(stream_id, Some(*request_id));
-            return Ok(());
-        }
-        let (request_id, track_alias, group_id, resolve_subgroup_id, is_first_object) =
-            match self.data_streams.incoming.get_mut(&stream_id) {
-                Some(IncomingDataStream::Subgroup {
-                    request_id,
-                    track_alias,
-                    group_id,
-                    subgroup_id,
-                    first_object_received,
-                    last_object_id,
-                    ..
-                }) => {
-                    let is_first = !*first_object_received;
-                    *first_object_received = true;
-                    // FIN 時に Group 終端を確定するため最終 Object ID を覚えておく
-                    // (draft §11.3.1 (Subgroup Header) の END_OF_GROUP bit)
-                    *last_object_id = Some(object.object_id);
-                    (
-                        *request_id,
-                        *track_alias,
-                        *group_id,
-                        subgroup_id.is_none(),
-                        is_first,
-                    )
-                }
-                Some(IncomingDataStream::AwaitingHeader { .. }) => {
-                    return Err(SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "subgroup object received before subgroup header",
-                    ));
-                }
-                Some(IncomingDataStream::Fetch { .. }) => {
-                    return Err(SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "subgroup object received on fetch stream",
-                    ));
-                }
-                Some(IncomingDataStream::Discarded { .. }) => {
-                    return Ok(());
-                }
-                None => {
-                    return Err(SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "subgroup object received for unknown stream id",
-                    ));
-                }
-            };
+        let (
+            stream_request_id,
+            track_alias,
+            group_id,
+            resolve_subgroup_id,
+            is_first_object,
+            header_publisher_priority,
+        ) = match self.data_streams.incoming.get_mut(&stream_id) {
+            Some(IncomingDataStream::Subgroup {
+                request_id,
+                track_alias,
+                group_id,
+                subgroup_id,
+                header_publisher_priority,
+                first_object_received,
+                last_object_id,
+                ..
+            }) => {
+                let is_first = !*first_object_received;
+                *first_object_received = true;
+                // FIN 時に Group 終端を確定するため最終 Object ID を覚えておく
+                // (draft §11.3.1 (Subgroup Header) の END_OF_GROUP bit)。
+                // フィルタ不通過でも記録し、wire 構造の整合をフィルタ判定に依存させない。
+                *last_object_id = Some(object.object_id);
+                (
+                    *request_id,
+                    *track_alias,
+                    *group_id,
+                    subgroup_id.is_none(),
+                    is_first,
+                    *header_publisher_priority,
+                )
+            }
+            Some(IncomingDataStream::AwaitingHeader { .. }) => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "subgroup object received before subgroup header",
+                ));
+            }
+            Some(IncomingDataStream::Fetch { .. }) => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "subgroup object received on fetch stream",
+                ));
+            }
+            Some(IncomingDataStream::Discarded { .. }) => {
+                return Ok(TrackDataAcceptance::Discarded);
+            }
+            None => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "subgroup object received for unknown stream id",
+                ));
+            }
+        };
 
+        // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) の
+        // DATA_STREAM_TIMEOUT (0x12) は "fields of a stream header or an object header within
+        // a data stream" も activity に含む。フィルタ不通過の Object でも受信し続けている
+        // stream を timeout で閉じないよう更新する。
+        if let Some(now_ms) = self.timing.last_tick_ms {
+            self.timing
+                .data_stream_last_activity_ms
+                .insert(stream_id, now_ms);
+        }
+
+        // draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header) の SUBGROUP_ID_MODE 0b01:
+        // "the Subgroup ID is the Object ID of the first Object transmitted in this Subgroup"。
+        // SUBGROUP_FILTER を解決済み subgroup_id で評価するため、フィルタ評価より先に解決する。
+        // フィルタ不通過でも wire 構造上の解決は済ませる (以後の Malformed Track 検出と
+        // 再オープン追跡に必要)。
         if resolve_subgroup_id {
             if let Err(err) = self
                 .peer_subgroups
@@ -1026,9 +1130,122 @@ impl Session {
             }
         }
 
-        // draft-ietf-moq-transport-21 §10.1-12.2: subgroup の先頭 object に付与された
+        // 解決済み subgroup_id (Zero / Explicit は header 時点、FirstObjectId は直前で確定)
+        let resolved_subgroup_id = self
+            .data_streams
+            .incoming
+            .get(&stream_id)
+            .and_then(|stream| match stream {
+                IncomingDataStream::Subgroup { subgroup_id, .. } => *subgroup_id,
+                _ => None,
+            });
+
+        // draft §12.1 (Malformed Tracks) 条件 2: FIN 済み Subgroup に対して最終 Object ID より
+        // 大きい Object ID の Object が来たら Malformed Track。フィルタ不通過でも wire 構造の
+        // 整合として検出する。終端対象は帰属先が確定してから決めるため (共有 Track Alias では
+        // 帰属先が stream 所有者と異なりうる)、ここでは理由だけを保持する。
+        let fin_violation = resolved_subgroup_id.and_then(|resolved_subgroup_id| {
+            self.peer_subgroups.check_object_after_fin(
+                track_alias,
+                group_id,
+                resolved_subgroup_id,
+                object.object_id,
+            )
+        });
+        // 条件 1: FirstObjectId モードで subgroup_id が遅延解決された場合、header 時点では
+        // 記録できないためここで priority を記録する。フィルタ不通過でも記録する
+        // (Subgroup 単位の wire 構造の整合)。
+        // 記録する priority は購読単位の直近値であり、Subgroup 単位の値にする対応は
+        // 既知の制約である。
+        if resolve_subgroup_id
+            && let Some(resolved_subgroup_id) = resolved_subgroup_id
+            && let Some(subscription) = self.subscriptions.get(&stream_request_id)
+        {
+            let priority = subscription.effective_publisher_priority();
+            if let Err(err) = self.peer_subgroups.record_priority(
+                track_alias,
+                group_id,
+                resolved_subgroup_id,
+                priority,
+            ) {
+                self.terminate_malformed_track(stream_request_id, Some(stream_id), err.reason);
+                return Err(err);
+            }
+        }
+
+        // draft §3.1 (Subscriptions): "the subscriber re-applies each subscription's filter
+        // to determine which subscription a received Object belongs to."
+        // 候補を順に評価し、最初に通過した Established な subscription に帰属させる。
+        // キャンセル由来 `Terminated` の候補は帰属対象から除外しつつフィルタ評価だけは実行し、
+        // 合格した候補がキャンセル由来のみの場合は `Discarded` を返す
+        // (datagram の `recv_object_datagram` と同じ規則。draft §3.1.2)。
+        let candidates = self.resolve_peer_track_alias(track_alias)?;
+        if candidates.is_empty() {
+            // header 受理済み stream では未知 alias を返さない。header 受理後に subscription が
+            // 忘れられた場合の遅延 Object は不要 Object として破棄する (draft §3.1.2)。
+            // Malformed Track の検出はフィルタ判定より優先する (帰属先が無いため stream の
+            // 所有者を終端する)。
+            if let Some(reason) = fin_violation {
+                let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, reason);
+                self.terminate_malformed_track(stream_request_id, Some(stream_id), reason);
+                return Err(err);
+            }
+            return Ok(TrackDataAcceptance::Discarded);
+        }
+        let mut matched_request_id = None;
+        let mut cancelled_matched = false;
+        for &candidate_id in &candidates {
+            if let Some(subscription) = self.subscriptions.get(&candidate_id) {
+                // PRIORITY_FILTER は wire の SUBGROUP_HEADER が持つ Publisher Priority を
+                // 候補ごとに解決して評価する (header の `header_passes_filters` と同じ規則)。
+                // `Subscription::publisher_priority` は直近 header の解決結果であり、共有
+                // Track Alias では別候補の stream で上書きされうるため使わない。
+                let publisher_priority =
+                    subscription.resolve_header_publisher_priority(header_publisher_priority);
+                let input = ObjectFilterInput {
+                    location: Location {
+                        group_id,
+                        object_id: object.object_id,
+                    },
+                    subgroup_id: resolved_subgroup_id,
+                    publisher_priority,
+                    properties_bytes: object.properties_bytes.as_deref(),
+                };
+                if object_passes_filters(subscription, &input) {
+                    if is_cancelled_terminated(subscription) {
+                        cancelled_matched = true;
+                    } else {
+                        matched_request_id = Some(candidate_id);
+                        break;
+                    }
+                }
+            }
+        }
+        // draft §12.1 (Malformed Tracks) 条件 2 の検出はフィルタ判定より優先する。終端対象は
+        // 帰属が確定していれば帰属先、確定しなければ stream 所有者にする (Object を受理する
+        // はずの subscription を Malformed として cancel する)。subscription スコープの状態
+        // 更新は行わない。
+        if let Some(reason) = fin_violation {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, reason);
+            let target_request_id = matched_request_id.unwrap_or(stream_request_id);
+            self.terminate_malformed_track(target_request_id, Some(stream_id), reason);
+            return Err(err);
+        }
+        let Some(object_request_id) = matched_request_id else {
+            // 合格した候補がキャンセル由来のみなら不要 Object として破棄し、どの候補も
+            // 通らなければフィルタ不通過として返す。どちらも subscription スコープの状態は
+            // 更新しない (wire 構造と生存監視の更新は上で完了している)。
+            return Ok(if cancelled_matched {
+                TrackDataAcceptance::Discarded
+            } else {
+                TrackDataAcceptance::FilteredOut
+            });
+        };
+
+        // draft-ietf-moq-transport-21 §10.1 / §10.2: subgroup の先頭 object に付与された
         // SUBGROUP_DELIVERY_TIMEOUT / OBJECT_DELIVERY_TIMEOUT は Track-level 値を
         // per-subgroup で上書きする。先頭以外の object では無視される。
+        // 帰属先の subscription にのみ適用する (フィルタ不通過の object は反映しない)。
         if is_first_object
             && let Some(properties_bytes) = object.properties_bytes.as_deref()
             && let Ok((properties, _)) =
@@ -1036,62 +1253,22 @@ impl Session {
         {
             let subgroup_timeout = properties.subgroup_delivery_timeout();
             let object_timeout = properties.object_delivery_timeout();
-            if subgroup_timeout.is_some() || object_timeout.is_some() {
-                // subgroup_id 解決後に現在の subgroup_id を取得する
-                let resolved_subgroup_id =
-                    self.data_streams
-                        .incoming
-                        .get(&stream_id)
-                        .and_then(|stream| match stream {
-                            IncomingDataStream::Subgroup { subgroup_id, .. } => *subgroup_id,
-                            _ => None,
-                        });
-                if let (Some(subgroup_id), Some(subscription)) = (
-                    resolved_subgroup_id,
-                    self.subscriptions.get_mut(&request_id),
-                ) {
-                    subscription
-                        .delivery_timeouts
-                        .subgroup_overrides
-                        .insert((group_id, subgroup_id), (subgroup_timeout, object_timeout));
-                }
-            }
-        }
-
-        // draft §12.1 (Malformed Tracks) 条件 2: FIN 済み Subgroup に対して最終 Object ID より
-        // 大きい Object ID の Object が来たら Malformed Track。
-        // 条件 1 (FirstObjectId モード): subgroup_id が最初の Object で解決される場合、
-        // この時点で priority を記録する。
-        if let Some(IncomingDataStream::Subgroup {
-            subgroup_id: Some(resolved_subgroup_id),
-            track_alias: resolved_track_alias,
-            ..
-        }) = self.data_streams.incoming.get(&stream_id)
-        {
-            let resolved_subgroup_id = *resolved_subgroup_id;
-            let resolved_track_alias = *resolved_track_alias;
-            if let Some(reason) = self.peer_subgroups.check_object_after_fin(
-                resolved_track_alias,
-                group_id,
-                resolved_subgroup_id,
-                object.object_id,
-            ) {
-                let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, reason);
-                self.terminate_malformed_track(request_id, Some(stream_id), reason);
-                return Err(err);
-            }
-            // 条件 1: FirstObjectId モードで subgroup_id が遅延解決された場合、
-            // header 時点では記録できないためここで priority を記録する。
-            if resolve_subgroup_id && let Some(subscription) = self.subscriptions.get(&request_id) {
-                let priority = subscription.effective_publisher_priority();
-                if let Err(err) = self.peer_subgroups.record_priority(
-                    resolved_track_alias,
-                    group_id,
-                    resolved_subgroup_id,
-                    priority,
-                ) {
-                    self.terminate_malformed_track(request_id, Some(stream_id), err.reason);
-                    return Err(err);
+            if (subgroup_timeout.is_some() || object_timeout.is_some())
+                && let Some(resolved_subgroup_id) = resolved_subgroup_id
+                && let Some(subscription) = self.subscriptions.get_mut(&object_request_id)
+            {
+                subscription.delivery_timeouts.subgroup_overrides.insert(
+                    (group_id, resolved_subgroup_id),
+                    (subgroup_timeout, object_timeout),
+                );
+                // override の削除は stream 所有者ではなく登録先 (Object の帰属先) で
+                // 行う必要があるため、登録先の request_id を stream に記録する
+                if let Some(IncomingDataStream::Subgroup {
+                    timeout_override_request_id,
+                    ..
+                }) = self.data_streams.incoming.get_mut(&stream_id)
+                {
+                    *timeout_override_request_id = Some(object_request_id);
                 }
             }
         }
@@ -1100,28 +1277,22 @@ impl Session {
             group_id,
             object_id: object.object_id,
         };
-        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+        if let Some(subscription) = self.subscriptions.get_mut(&object_request_id) {
             subscription.record_largest_received_location(received_location);
         }
 
         // draft §11.1.2 (Object Status) / §12.1 (Malformed Tracks): 終端宣言後の Object は
         // Malformed Track にあたる。該当 subscription だけを cancel する。
-        if let Some(reason) = self.object_after_track_end(
-            request_id,
-            &Location {
-                group_id,
-                object_id: object.object_id,
-            },
-        ) {
+        if let Some(reason) = self.object_after_track_end(object_request_id, &received_location) {
             let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, reason);
-            self.terminate_malformed_track(request_id, Some(stream_id), reason);
+            self.terminate_malformed_track(object_request_id, Some(stream_id), reason);
             return Err(err);
         }
         // draft §11.1.2 (Object Status): End of Group / End of Track を状態として記録する
-        self.record_object_status_end(request_id, group_id, object.object_id, object.status);
+        self.record_object_status_end(object_request_id, group_id, object.object_id, object.status);
         if let Err(msg_err) = self
             .peer_object_properties
-            .entry(request_id)
+            .entry(object_request_id)
             .or_default()
             .observe_object(
                 group_id,
@@ -1136,30 +1307,22 @@ impl Session {
             // `ObjectFieldTracker` の doc のとおり Session では検出しない (app / relay 層の責務)。
             // Malformed Track はセッション全体ではなく該当 subscription だけを cancel する。
             let err = session_error_from_data_message(msg_err);
-            self.terminate_malformed_track(request_id, Some(stream_id), err.reason);
+            self.terminate_malformed_track(object_request_id, Some(stream_id), err.reason);
             return Err(err);
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
         // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
         // subgroup stream 経由なので is_subgroup = true。
         {
-            let resolved_subgroup_id =
-                self.data_streams
-                    .incoming
-                    .get(&stream_id)
-                    .and_then(|stream| match stream {
-                        IncomingDataStream::Subgroup { subgroup_id, .. } => *subgroup_id,
-                        _ => None,
-                    });
             let publisher_priority = self
                 .subscriptions
-                .get(&request_id)
+                .get(&object_request_id)
                 .map_or(PUBLISHER_PRIORITY_DEFAULT, |s| {
                     s.effective_publisher_priority()
                 });
             if let Err(mismatch) = self
                 .peer_object_fields
-                .entry(request_id)
+                .entry(object_request_id)
                 .or_default()
                 .observe_object_fields(
                     group_id,
@@ -1169,23 +1332,28 @@ impl Session {
                     publisher_priority,
                 )
             {
-                self.terminate_malformed_track(request_id, Some(stream_id), mismatch.reason);
+                self.terminate_malformed_track(object_request_id, Some(stream_id), mismatch.reason);
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     mismatch.reason,
                 ));
             }
         }
-        // draft-ietf-moq-transport-21 §6.6 (Termination): DATA_STREAM_TIMEOUT は
-        // "an object header within a data stream" も activity に含む。
-        // Object 受信ごとに timestamp を更新し、継続受信中のストリームが
-        // 誤って timeout で閉じられるのを防ぐ。
-        if let Some(now_ms) = self.timing.last_tick_ms {
-            self.timing
-                .data_stream_last_activity_ms
-                .insert(stream_id, now_ms);
+        // FIN 時の Group 終端確定は stream 所有者ではなく Object の帰属先に反映するため、
+        // 受理した帰属先を記録する (フィルタ不通過・破棄の Object では更新しない)
+        match self.data_streams.incoming.get_mut(&stream_id) {
+            Some(IncomingDataStream::Subgroup {
+                last_attributed_request_id,
+                ..
+            }) => *last_attributed_request_id = Some(object_request_id),
+            _ => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "subgroup stream state changed before accepted object",
+                ));
+            }
         }
-        Ok(())
+        Ok(TrackDataAcceptance::Accepted)
     }
 
     /// 自端点が送る FETCH_HEADER を Session に通知する (draft §11.4.1 (Fetch Header))
@@ -1439,8 +1607,9 @@ impl Session {
         self.require_established()?;
         match self.data_streams.incoming.get_mut(&stream_id) {
             Some(IncomingDataStream::Fetch { .. }) => {
-                // draft-ietf-moq-transport-21 §6.6 (Termination): DATA_STREAM_TIMEOUT は
-                // "an object header within a data stream" も activity に含む。
+                // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) の
+                // DATA_STREAM_TIMEOUT (0x12) は "fields of a stream header or an object
+                // header within a data stream" も activity に含む。
                 // fetch entry (Object / EndOfRange いずれも) 受信ごとに timestamp を更新する。
                 if let Some(now_ms) = self.timing.last_tick_ms {
                     self.timing
@@ -2200,6 +2369,15 @@ impl Session {
     /// §11.3 は SHOULD なので、本 API を **呼ぶこと自体が** セッションを閉じる判断である。
     /// 呼び出すと `PROTOCOL_VIOLATION` で session fail し `Err` を返す。
     ///
+    /// 例外は破棄対象 stream のみである。`Discarded` variant、またはキャンセル由来
+    /// `Terminated` に属し現在も生きた Object の帰属先が無い `Subgroup` variant は
+    /// no-op で受理する (draft §3.1.2 (Track Alias) の破棄対象と、
+    /// [`recv_data_stream_closed`](Self::recv_data_stream_closed) の FIN / RESET と同じ後始末を
+    /// 行う)。帰属実績の参照先が既に `forget_subscription` で回収されている場合も
+    /// 生きた帰属先とは扱わない (死んだ id を指したまま session を閉じない)。
+    /// 帰属先 subscription が現在も生きている stream は、その subscription にとって
+    /// 生きた stream なので吸収せず、§11.3 の SHOULD どおり session を閉じる。
+    ///
     /// [`recv_data_stream_closed`](Self::recv_data_stream_closed) との呼び出し順序は問わない。
     /// stream が既に登録解除されていても閉じる (順序で挙動が変わると、アプリケーションが
     /// FIN 通知と decoder 検査のどちらを先に行うかで結果が変わってしまう)。
@@ -2213,12 +2391,40 @@ impl Session {
         // 破棄対象 stream でセッションを fail させない)
         let removed = self.data_streams.incoming.remove(&stream_id);
         self.timing.data_stream_last_activity_ms.remove(&stream_id);
-        // 破棄対象: Discarded variant、またはキャンセル由来 Terminated に属する
-        // 既存 stream (Subgroup variant)。保持集合に含まれる id も対象
-        let discarded = match &removed {
+        // 破棄対象: Discarded variant、またはキャンセル由来 Terminated に属し
+        // 現在も生きた Object の帰属先が無い Subgroup variant。保持集合に含まれる id も対象。
+        // 帰属実績の参照先が生きている stream は帰属先 subscription にとって生きた stream
+        // であり、所有者のキャンセルだけを理由に破棄しない (draft §3.1 (Subscriptions) の
+        // フィルタ再適用で Object を受理した実績が根拠)。帰属先が forget 済みの場合も
+        // 死んだ id を根拠に session を閉じず、破棄対象として吸収する
+        let discarded = match removed {
             Some(IncomingDataStream::Discarded { .. }) => true,
-            Some(IncomingDataStream::Subgroup { request_id, .. }) => {
-                self.is_cancelled_terminated_subscription(*request_id)
+            Some(IncomingDataStream::Subgroup {
+                request_id,
+                group_id,
+                subgroup_id,
+                last_attributed_request_id,
+                timeout_override_request_id,
+                ..
+            }) if self.is_cancelled_terminated_subscription(request_id)
+                && self.live_attribution(last_attributed_request_id).is_none() =>
+            {
+                // FIN / STOP_SENDING のキャンセル分岐と同じ後始末を行う。
+                // この経路は `register_discarded_stream` を通らないため、open 中の
+                // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
+                // 永久に false になるのを防ぐ)
+                let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                if let Some(subgroup_id) = subgroup_id {
+                    // per-subgroup delivery timeout override は stream 所有者と
+                    // 登録先 (先頭 Object の帰属先) の両方から削除する
+                    self.remove_subgroup_delivery_timeout_override(
+                        request_id,
+                        timeout_override_request_id,
+                        group_id,
+                        subgroup_id,
+                    );
+                }
+                true
             }
             _ => false,
         };
@@ -2244,6 +2450,19 @@ impl Session {
     /// subgroup stream は subgroup tracker に反映し、fetch stream は既存の
     /// `recv_fetch_data_stream_closed` に dispatch する。header 未受理のまま終わった
     /// stream は単に破棄する。
+    ///
+    /// END_OF_GROUP bit + FIN の Group 終端確定は、この stream で最後に Object を受理した
+    /// 帰属先 subscription に反映する (共有 Track Alias で帰属先が stream 所有者と異なる
+    /// 場合がある。draft §3.1 (Subscriptions))。帰属先がキャンセル由来 `Terminated` なら
+    /// 破棄対象として記録しない。帰属実績の参照先が既に `forget_subscription` で回収されて
+    /// いる場合も生きた帰属先とは扱わず、header 時に紐づいた所有者へフォールバックする。
+    /// 帰属実績が無い stream は header 時に紐づいた所有者を使い、所有者がキャンセル由来なら
+    /// subscription スコープの状態は更新せず no-op で吸収する。
+    /// このときも `peer_subgroups` には wire 構造の終端状態 (FIN / RESET) だけを記録する。
+    /// track 単位の事実記録であり破棄対象 subscription のデータを受理する意味ではない。
+    /// エントリを `Open` のまま残すと、同じ `(track_alias, group_id, subgroup_id)` の
+    /// 正当な再オープン (RESET 後 / STOP_SENDING 後の Forward State 0→1) が open 衝突で
+    /// session close になるためである (draft §2.2 / §11.3.2)。
     ///
     /// 本 API は Object 境界での終端を前提とする。シリアライズ途中の Object で FIN した
     /// 場合は draft §11.3 によりセッションを閉じるべきなので、アプリケーションは
@@ -2278,22 +2497,90 @@ impl Session {
                 subgroup_id,
                 end_of_group,
                 last_object_id,
+                last_attributed_request_id,
+                timeout_override_request_id,
                 ..
             } => {
+                // FIN / RESET の Group 終端確定と tracker 更新は Object の帰属先に反映する。
+                // 帰属実績が無ければ header 時に紐づいた stream 所有者を使う。帰属実績の
+                // 参照先が forget 済みの場合は死んだ id へ記録・終端しないよう所有者へ
+                // フォールバックする
+                let attributed_request_id = self
+                    .live_attribution(last_attributed_request_id)
+                    .unwrap_or(request_id);
                 // キャンセル由来 Terminated に属する既存 stream の終端は破棄対象として
-                // no-op で吸収する (tracker を汚染しない)。id は保持集合へ移して
-                // 以後の受信・終端も吸収し続ける (draft §3.1.2)
-                if self.is_cancelled_terminated_subscription(request_id) {
+                // no-op で吸収する (subscription スコープの状態は更新しない)。id は保持集合へ
+                // 移して以後の受信・終端も吸収し続ける (draft §3.1.2)。
+                // ただし帰属実績の参照先が現在も生きた subscription である stream は
+                // 帰属先にとって生きた stream なので通常終端として扱う
+                // (draft §3.1 (Subscriptions) のフィルタ再適用で Object を受理した実績が根拠)。
+                if self.is_cancelled_terminated_subscription(request_id)
+                    && self.live_attribution(last_attributed_request_id).is_none()
+                {
+                    // この経路は `register_discarded_stream` を通らないため、open 中の
+                    // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
+                    // 永久に false になるのを防ぐ)
+                    let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                    if let Some(subgroup_id) = subgroup_id {
+                        self.remove_subgroup_delivery_timeout_override(
+                            request_id,
+                            timeout_override_request_id,
+                            group_id,
+                            subgroup_id,
+                        );
+                        // 破棄分岐でも wire 構造の終端を tracker に記録する。これは
+                        // 破棄対象 subscription のデータを受理するという意味ではなく、
+                        // track 単位の wire 事実を記録するものである。記録しないと
+                        // エントリが `Open` のまま残り、同じ
+                        // `(track_alias, group_id, subgroup_id)` の正当な再オープン
+                        // (RESET 後 / STOP_SENDING 後の Forward State 0→1、
+                        // draft §2.2 / §11.3.2) が open 衝突で session close になる。
+                        match end {
+                            RequestStreamEnd::Fin => {
+                                // 条件 3 (同一 Subgroup を複数 FIN で最終 Object 不一致) の
+                                // Err では mark_fin が状態を更新しない (`Open` のまま) ため、
+                                // reset として終端状態にする
+                                if self
+                                    .peer_subgroups
+                                    .mark_fin(track_alias, group_id, subgroup_id, last_object_id)
+                                    .is_err()
+                                {
+                                    self.peer_subgroups.mark_reset(
+                                        track_alias,
+                                        group_id,
+                                        subgroup_id,
+                                        None,
+                                    );
+                                }
+                            }
+                            RequestStreamEnd::Reset { reliable_size, .. } => {
+                                self.peer_subgroups.mark_reset(
+                                    track_alias,
+                                    group_id,
+                                    subgroup_id,
+                                    reliable_size,
+                                );
+                            }
+                        }
+                    }
                     self.retain_discarded_stream_id(stream_id);
                     return Ok(());
                 }
                 // draft §11.3.1 (Subgroup Header) / §12.1 (Malformed Tracks):
                 // END_OF_GROUP bit が立った subgroup stream が FIN で終わったら、その stream の
                 // 最終 Object が Group の最終 Object になる。以降その Group に来る大きい
-                // Object ID は Malformed Track として扱う。
-                if end_of_group && matches!(end, RequestStreamEnd::Fin) {
+                // Object ID は Malformed Track として扱う。帰属先がキャンセル由来 Terminated の
+                // 場合は破棄対象なので記録しない (tracker を汚染しない)。
+                if end_of_group
+                    && matches!(end, RequestStreamEnd::Fin)
+                    && !self.is_cancelled_terminated_subscription(attributed_request_id)
+                {
                     if let Some(last_object_id) = last_object_id {
-                        self.record_group_end_after(request_id, group_id, last_object_id);
+                        self.record_group_end_after(
+                            attributed_request_id,
+                            group_id,
+                            last_object_id,
+                        );
                     } else {
                         // END_OF_GROUP 空 Subgroup（オブジェクト 0 個）の FIN:
                         // draft §11.3.1 (Subgroup Header) の END_OF_GROUP bit
@@ -2306,19 +2593,23 @@ impl Session {
                         // `record_group_end_after` は last_object_id + 1 を記録するため
                         // 0 を渡すと 1 になり「Object ID 0 すら存在しない」という空 Group
                         // の意味論を壊す。ここでは 0 を直接記録する。
-                        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+                        if let Some(subscription) =
+                            self.subscriptions.get_mut(&attributed_request_id)
+                        {
                             subscription.ended_groups.insert(group_id, 0);
                         }
                     }
                 }
                 if let Some(subgroup_id) = subgroup_id {
-                    // per-subgroup delivery timeout オーバーライドのエントリを削除する
-                    if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-                        subscription
-                            .delivery_timeouts
-                            .subgroup_overrides
-                            .remove(&(group_id, subgroup_id));
-                    }
+                    // per-subgroup delivery timeout オーバーライドのエントリを削除する。
+                    // 帰属先が stream 所有者と異なる場合があるため、両方の subscription から
+                    // 削除する
+                    self.remove_subgroup_delivery_timeout_override(
+                        request_id,
+                        timeout_override_request_id,
+                        group_id,
+                        subgroup_id,
+                    );
                     match end {
                         RequestStreamEnd::Fin => {
                             // draft §12.1 (Malformed Tracks) 条件 3: 同一 Subgroup が複数
@@ -2329,7 +2620,16 @@ impl Session {
                                 subgroup_id,
                                 last_object_id,
                             ) {
-                                self.terminate_malformed_track(request_id, None, err.reason);
+                                // stream は incoming から除去済みのため、所有者の open 中の
+                                // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
+                                // 永久に false になるのを防ぐ)
+                                let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                                // 終端対象は帰属先 (帰属実績が無ければ stream 所有者)
+                                self.terminate_malformed_track(
+                                    attributed_request_id,
+                                    None,
+                                    err.reason,
+                                );
                                 return Err(err);
                             }
                         }
@@ -2371,6 +2671,9 @@ impl Session {
     ///
     /// fetch stream は既存の `send_fetch_stop_sending` に dispatch し、subgroup stream は
     /// reopen prohibited の追跡用に `StoppedByPeer` として記録する。
+    /// キャンセル由来 `Terminated` に属し現在も生きた Object の帰属先が無い subgroup stream は
+    /// 破棄対象として no-op で吸収し、生きた帰属先がある stream は通常どおり tracker と
+    /// 会計を処理する (所有者のキャンセルだけでは帰属先への受信を止めない)。
     /// draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) /
     /// draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1583: REQUEST_UPDATE で Forward State が
     /// 0→1 に変わった場合のみ再オープン MAY。
@@ -2398,23 +2701,50 @@ impl Session {
                 track_alias,
                 group_id,
                 subgroup_id,
+                last_attributed_request_id,
+                timeout_override_request_id,
                 ..
             } => {
-                // キャンセル由来 Terminated に属する既存 stream への STOP_SENDING は
-                // 破棄対象として no-op で吸収する (tracker を汚染しない)。id は保持集合へ
-                // 移して以後の受信・終端も吸収し続ける (draft §11.1)
-                if self.is_cancelled_terminated_subscription(request_id) {
+                // キャンセル由来 Terminated に属し、現在も生きた帰属先が無い既存 stream への
+                // STOP_SENDING は破棄対象として no-op で吸収する。id は保持集合へ移して
+                // 以後の受信・終端も吸収し続ける (draft §11.1)。
+                // 生きた帰属先がある stream は帰属先にとって生きた stream なので、
+                // 通常分岐で tracker と会計を処理する
+                if self.is_cancelled_terminated_subscription(request_id)
+                    && self.live_attribution(last_attributed_request_id).is_none()
+                {
+                    // この経路は `register_discarded_stream` を通らないため、open 中の
+                    // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
+                    // 永久に false になるのを防ぐ)
+                    let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                    if let Some(subgroup_id) = subgroup_id {
+                        self.remove_subgroup_delivery_timeout_override(
+                            request_id,
+                            timeout_override_request_id,
+                            group_id,
+                            subgroup_id,
+                        );
+                        // 破棄分岐でも wire 構造の終端 (STOP_SENDING 受信) を tracker に
+                        // 記録する。track 単位の事実記録であり破棄対象 subscription の
+                        // データを受理する意味ではない。記録しないとエントリが `Open` の
+                        // まま残り、Forward State 0→1 後の正当な再オープン
+                        // (draft §11.3.2 / Appendix A.3) が open 衝突で session close になる。
+                        self.peer_subgroups
+                            .mark_stop_sending(track_alias, group_id, subgroup_id);
+                    }
                     self.retain_discarded_stream_id(stream_id);
                     return Ok(());
                 }
                 if let Some(subgroup_id) = subgroup_id {
-                    // per-subgroup delivery timeout オーバーライドのエントリを削除する
-                    if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-                        subscription
-                            .delivery_timeouts
-                            .subgroup_overrides
-                            .remove(&(group_id, subgroup_id));
-                    }
+                    // per-subgroup delivery timeout オーバーライドのエントリを削除する。
+                    // 帰属先が stream 所有者と異なる場合があるため、両方の subscription から
+                    // 削除する
+                    self.remove_subgroup_delivery_timeout_override(
+                        request_id,
+                        timeout_override_request_id,
+                        group_id,
+                        subgroup_id,
+                    );
                     self.peer_subgroups
                         .mark_stop_sending(track_alias, group_id, subgroup_id);
                 }
@@ -2442,18 +2772,106 @@ impl Session {
         }
     }
 
+    /// 指定 request の受信 data stream を Session から除去する
+    ///
+    /// 共有 Track Alias では stream の Object が header 時の所有者とは別の
+    /// subscription に帰属しうる (draft §3.1 (Subscriptions) のフィルタ再適用)。
+    /// 所有者の `forget_subscription` で stream を除去すると移管先への受信が黙って
+    /// 止まるため、移管先を次の順で決めて stream を維持する。
+    ///
+    /// 1. 最後に Object を受理した帰属先 (`last_attributed_request_id`) が現在も生きた
+    ///    subscription ならその subscription
+    /// 2. そうでなければ同じ Track Alias の生きた他候補 (`peer_publisher_aliases` の
+    ///    登録順) の先頭。忘却対象の request_id は候補から除外する
+    ///
+    /// 移管では `request_id` を移管先へ付け替え、移管先の `incoming_subgroup_count` /
+    /// `open_incoming_subgroup_count` に開いている stream として 1 本加算する。
+    /// `timeout_override_request_id` は生存判定で正規化し、回収済み・キャンセル済みの
+    /// subscription を override 所有者として参照し続けない (request_id 再利用時に
+    /// 無関係な override を削除しないため)。`track_alias` / `group_id` / `subgroup_id` /
+    /// `header_publisher_priority` / `first_object_received` / `last_object_id` /
+    /// `end_of_group` は維持する。per-subgroup delivery timeout override は移管先に
+    /// 登録済みのため削除しない。
+    ///
+    /// 移管先が無い場合のみ、従来どおり stream を除去し、帰属先が別 subscription の
+    /// override を削除して id を破棄対象の保持集合へ移す。
     pub(super) fn remove_incoming_data_streams_for_request(&mut self, request_id: u64) {
         let mut removed_ids = Vec::new();
         let mut removed_fetch_ids = Vec::new();
+        // 帰属先 (または同一 Track Alias の生きた他候補) へ移管した stream の移管先 request_id
+        let mut migrated_request_ids = Vec::new();
+        // 除去する Subgroup stream が保持する delivery timeout override のうち、
+        // 帰属先が別 subscription のもの (group_id, subgroup_id, 帰属先 request_id)
+        let mut removed_foreign_overrides = Vec::new();
         self.data_streams
             .incoming
             .retain(|stream_id, stream| match stream {
                 IncomingDataStream::AwaitingHeader { .. } => true,
                 IncomingDataStream::Subgroup {
                     request_id: stream_request_id,
+                    track_alias,
+                    group_id,
+                    subgroup_id,
+                    last_attributed_request_id,
+                    timeout_override_request_id,
                     ..
+                } => {
+                    if *stream_request_id == request_id {
+                        // 移管先: 最後の帰属先が現在も生きていればそれを優先し、死んでいる
+                        // (回収済み / キャンセル済み) 場合は同じ Track Alias の生きた他候補の
+                        // 先頭へフォールバックする。subscription はこの retain の間に
+                        // 消えないため、存在確認はここで足りる
+                        let migration_target = live_attributed_request_id(
+                            &self.subscriptions,
+                            *last_attributed_request_id,
+                        )
+                        .filter(|&owner| owner != request_id)
+                        .or_else(|| {
+                            self.aliases
+                                .peer_publisher_aliases
+                                .get(track_alias)
+                                .and_then(|candidates| {
+                                    candidates.iter().copied().find(|&candidate| {
+                                        candidate != request_id
+                                            && live_attributed_request_id(
+                                                &self.subscriptions,
+                                                Some(candidate),
+                                            )
+                                            .is_some()
+                                    })
+                                })
+                        });
+                        match migration_target {
+                            Some(owner) => {
+                                *stream_request_id = owner;
+                                // 回収済み・キャンセル済みの request_id を override 所有者と
+                                // して残さない
+                                *timeout_override_request_id = live_attributed_request_id(
+                                    &self.subscriptions,
+                                    *timeout_override_request_id,
+                                );
+                                migrated_request_ids.push(owner);
+                                true
+                            }
+                            None => {
+                                removed_ids.push(*stream_id);
+                                if let (Some(override_request_id), Some(subgroup_id)) =
+                                    (*timeout_override_request_id, *subgroup_id)
+                                {
+                                    removed_foreign_overrides.push((
+                                        *group_id,
+                                        subgroup_id,
+                                        override_request_id,
+                                    ));
+                                }
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    }
                 }
-                | IncomingDataStream::Discarded {
+                IncomingDataStream::Discarded {
                     request_id: Some(stream_request_id),
                 } => {
                     if *stream_request_id == request_id {
@@ -2476,6 +2894,14 @@ impl Session {
                     }
                 }
             });
+        // 移管した stream を帰属先の開いている受信 stream として会計に加算する。
+        // retain の判定で subscription の存在は確認済みであり、加算が Err になるのは
+        // 計数のオーバーフローという防御検出のみなのでセッションを fail させる
+        for owner in migrated_request_ids {
+            if let Err(err) = self.note_incoming_subgroup_stream_opened(owner) {
+                self.fail(err.clone());
+            }
+        }
         for id in removed_fetch_ids {
             self.timing.data_stream_last_activity_ms.remove(&id);
             // fetch stream は破棄対象の保持集合へは移さない
@@ -2490,9 +2916,15 @@ impl Session {
             // no-op で吸収し続ける (draft §11.1)
             self.retain_discarded_stream_id(id);
         }
-        // per-subgroup delivery timeout オーバーライドを全クリアする
-        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-            subscription.delivery_timeouts.subgroup_overrides.clear();
+        // 共有 Track Alias では override の帰属先が stream 所有者と異なりうる。stream と
+        // 一緒に除去しないと、帰属先の終端通知が来ず override が残留する
+        for (group_id, subgroup_id, override_request_id) in removed_foreign_overrides {
+            self.remove_subgroup_delivery_timeout_override(
+                request_id,
+                Some(override_request_id),
+                group_id,
+                subgroup_id,
+            );
         }
         self.peer_object_properties.remove(&request_id);
         self.peer_object_fields.remove(&request_id);
@@ -2630,6 +3062,16 @@ impl Session {
             .is_some_and(is_cancelled_terminated)
     }
 
+    /// 帰属実績・override 所有者の request_id が現在も有効な購読先かを判定する
+    ///
+    /// subscription が存在し、キャンセル由来 `Terminated` でない場合のみ `Some` を返す
+    /// (PUBLISH_DONE 受信後の drain 中 `Terminated` は有効な購読先として扱う)。
+    /// `forget_subscription` 後は `None` になるため、死んだ request_id を帰属実績や
+    /// delivery timeout override の所有者として参照し続けないための判定に使う。
+    fn live_attribution(&self, request_id: Option<u64>) -> Option<u64> {
+        live_attributed_request_id(&self.subscriptions, request_id)
+    }
+
     /// 破棄対象 stream を `IncomingDataStream::Discarded` として登録する
     ///
     /// `request_id` はキャンセル由来候補の subscription が存在する場合に `Some`、
@@ -2641,14 +3083,29 @@ impl Session {
     /// 保持集合 (`data_streams.discarded`) のみ。peer が終端を送らず放置した場合は
     /// I/O 層が STOP_SENDING を送って閉じることで初めて保持集合 (期限管理) に入る。
     ///
-    /// 既存 `Subgroup` variant からの掩き替えでは `open_incoming_subgroup_count` を
+    /// 既存 `Subgroup` variant からの置き換えでは `open_incoming_subgroup_count` を
     /// デクリメントする。`Discarded` variant の終端 (`retain_discarded_stream_id`) は
-    /// `note_incoming_subgroup_stream_closed` を呼ばないため、掩き替え時点で補正しないと
+    /// `note_incoming_subgroup_stream_closed` を呼ばないため、置き換え時点で補正しないと
     /// 計数が張り付いたまま残り、`cleanup_ready()` が `open_incoming_subgroup_count == 0`
     /// を要求するために `forget_subscription` が永久に不可能になる (subscription リーク)。
+    ///
+    /// 置き換え対象の stream に per-subgroup delivery timeout override があれば、stream
+    /// 所有者と override 登録先の両方から削除する (破棄された stream の override を
+    /// 残さない)。
     fn register_discarded_stream(&mut self, stream_id: DataStreamId, request_id: Option<u64>) {
-        let existing_subgroup_request_id = match self.data_streams.incoming.get(&stream_id) {
-            Some(IncomingDataStream::Subgroup { request_id, .. }) => Some(*request_id),
+        let existing_subgroup = match self.data_streams.incoming.get(&stream_id) {
+            Some(IncomingDataStream::Subgroup {
+                request_id,
+                group_id,
+                subgroup_id,
+                timeout_override_request_id,
+                ..
+            }) => Some((
+                *request_id,
+                *group_id,
+                *subgroup_id,
+                *timeout_override_request_id,
+            )),
             _ => None,
         };
         self.data_streams
@@ -2656,12 +3113,51 @@ impl Session {
             .insert(stream_id, IncomingDataStream::Discarded { request_id });
         // DATA_STREAM_TIMEOUT の監視対象から外す
         self.timing.data_stream_last_activity_ms.remove(&stream_id);
-        if let Some(subgroup_request_id) = existing_subgroup_request_id {
+        if let Some((subgroup_request_id, group_id, subgroup_id, timeout_override_request_id)) =
+            existing_subgroup
+        {
             // Subgroup variant として登録されていれば subscription は必ず存在する不変条件
             // (forget_subscription は remove_incoming_data_streams_for_request で incoming
             // からも同時に除去するため)。それでも subscription が消えていた場合は
             // 計数対象がないので何もしない (Err の伝播は不要)。
             let _ = self.note_incoming_subgroup_stream_closed(subgroup_request_id);
+            if let Some(subgroup_id) = subgroup_id {
+                self.remove_subgroup_delivery_timeout_override(
+                    subgroup_request_id,
+                    timeout_override_request_id,
+                    group_id,
+                    subgroup_id,
+                );
+            }
+        }
+    }
+
+    /// per-subgroup delivery timeout オーバーライドを stream 所有者と登録先の両方から削除する
+    ///
+    /// 共有 Track Alias では先頭 Object の帰属先 (`timeout_override_request_id`) が
+    /// stream 所有者 (`request_id`) と異なりうる。どちらか一方だけを削除するとエントリが
+    /// 残留し、`subgroup_effective_delivery_timeout` が終端済み Subgroup の古い値を返す。
+    fn remove_subgroup_delivery_timeout_override(
+        &mut self,
+        request_id: u64,
+        timeout_override_request_id: Option<u64>,
+        group_id: u64,
+        subgroup_id: u64,
+    ) {
+        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+            subscription
+                .delivery_timeouts
+                .subgroup_overrides
+                .remove(&(group_id, subgroup_id));
+        }
+        if let Some(override_request_id) = timeout_override_request_id
+            && override_request_id != request_id
+            && let Some(subscription) = self.subscriptions.get_mut(&override_request_id)
+        {
+            subscription
+                .delivery_timeouts
+                .subgroup_overrides
+                .remove(&(group_id, subgroup_id));
         }
     }
 

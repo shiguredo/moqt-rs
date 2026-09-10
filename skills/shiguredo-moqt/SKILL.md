@@ -290,7 +290,7 @@ fn recv_subgroup_object(
     &mut self,
     stream_id: DataStreamId,
     object: &DecodedSubgroupObject,
-) -> Result<(), SessionError>
+) -> Result<TrackDataAcceptance, SessionError>
 fn recv_fetch_header(&mut self, stream_id: DataStreamId, header: &FetchHeader) -> Result<(), SessionError>
 fn recv_fetch_entry(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn recv_fetch_data_stream_closed(&mut self, request_id: u64, end: RequestStreamEnd) -> Result<(), SessionError>
@@ -302,6 +302,10 @@ fn report_mid_object_fin(&mut self, stream_id: DataStreamId) -> Result<(), Sessi
 ```
 
 `DataStreamId(pub u64)` は受信 uni data stream を呼び出し側が管理するための識別子。
+
+`recv_subgroup_object()` は Object 単位のフィルタ再適用結果を `TrackDataAcceptance` で返す。
+`FilteredOut` / `Discarded` の Object は Application へ渡さないが、wire 上の payload は
+デコーダから読み出して消費する必要がある。
 
 ### 送信 API
 

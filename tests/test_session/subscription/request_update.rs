@@ -658,8 +658,8 @@ fn subscription_terminated_by_peer_request_error_accepts_subsequent_publish_done
 /// MUST に基づいて送る PUBLISH_DONE(UPDATE_FAILED) を受理する経路で、既存 stream の
 /// FIN 受信後に `forget_subscription` が可能になることを検証する。
 ///
-/// Terminated + publish_done=None の窓に既存 subgroup stream が
-/// 掩き替わったとき、計数のデクリメント漏れがあると
+/// Terminated + publish_done=None の窓に既存 subgroup stream が残っているとき、
+/// stream 終端での計数デクリメント漏れがあると
 /// `cleanup_ready` が永久に false のまま張り付き subscription がリークする。
 #[test]
 fn subscription_terminated_by_peer_request_error_forgets_after_stream_fin_and_publish_done() {
@@ -746,25 +746,31 @@ fn subscription_terminated_by_peer_request_error_forgets_after_stream_fin_and_pu
         SubscriptionState::Terminated
     );
 
-    // 既存 stream に object が届くと Subgroup → Discarded に掩き替わる。
-    // 掩き替え時に open_incoming_subgroup_count のデクリメントを行わないと、以後
-    // FIN が来ても計数が張り付いたままになる (subscription リーク)。
+    // 既存 stream にキャンセル由来 Terminated の subscription へ届いた object は、
+    // stream を Subgroup variant のまま候補評価で Discarded として吸収する
+    // (Discarded variant への置き換えは行わず、subscription スコープの状態も更新しない)。
+    // open_incoming_subgroup_count は object 受信では変更せず、stream 終端で戻す。
     let obj = DecodedSubgroupObject {
         object_id: 0,
         payload_length: 1,
         status: None,
         properties_bytes: None,
     };
-    client
-        .recv_subgroup_object(stream_id, &obj)
-        .expect("キャンセル由来 Terminated への object は no-op で吸収されること");
-    // 掩き替えで計数が張り付くと cleanup_ready が永久に false になる。
-    // 最終の cleanup_ready 成立自体が計数の裏付けになるためここでは検証しない
+    assert_eq!(
+        client
+            .recv_subgroup_object(stream_id, &obj)
+            .expect("キャンセル由来 Terminated への object は no-op で吸収されること"),
+        TrackDataAcceptance::Discarded,
+        "キャンセル由来 Terminated への object は候補評価で Discarded として吸収されること"
+    );
 
-    // 既存 stream の FIN
+    // 既存 stream の FIN。キャンセル由来 Terminated の所有者の stream は帰属実績が
+    // 無いため no-op 吸収経路で open_incoming_subgroup_count を戻す。
+    // デクリメント漏れがあると cleanup_ready が永久に false になる。
+    // 最終の cleanup_ready 成立自体が計数の裏付けになるためここでは検証しない
     client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
-        .expect("Discarded 掩き替え後の FIN は no-op で吸収されること");
+        .expect("キャンセル由来 Terminated の FIN は no-op で吸収されること");
 
     // publisher が続けて送る PUBLISH_DONE(UPDATE_FAILED)
     let (_, done_msg) = take_send_on_stream(&mut server);

@@ -1002,14 +1002,25 @@ async fn decode_video_stream(
 ) -> u64 {
     let mut frames: u64 = 0;
     loop {
-        let obj = loop {
+        // 帰属判定の結果。`FilteredOut` / `Discarded` の Object は Application へ渡さない。
+        let (obj, deliver) = loop {
             match sg_decoder.try_decode_object() {
                 Ok(Some(o)) => {
-                    if let Err(e) = data_plane.recv_subgroup_object(stream_id, &o) {
-                        tracing::warn!("Failed to register video object: {e}");
-                        return frames;
-                    }
-                    break o;
+                    let deliver = match data_plane.recv_subgroup_object(stream_id, &o) {
+                        Ok(TrackDataAcceptance::Accepted) => true,
+                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
+                        // 型上あり得るため防御的に破棄する
+                        Ok(
+                            TrackDataAcceptance::UnknownTrackAlias
+                            | TrackDataAcceptance::FilteredOut
+                            | TrackDataAcceptance::Discarded,
+                        ) => false,
+                        Err(e) => {
+                            tracing::warn!("Failed to register video object: {e}");
+                            return frames;
+                        }
+                    };
+                    break (o, deliver);
                 }
                 Ok(None) => {
                     match receive_registered_stream_data(stream, data_plane, stream_id).await {
@@ -1031,7 +1042,8 @@ async fn decode_video_stream(
         if obj.payload_length == 0 {
             continue;
         }
-        let video_config = extract_video_config(obj.properties_bytes.as_deref());
+        // `FilteredOut` / `Discarded` の Object でも payload は wire 上に存在するため
+        // 読み出して消費する。残すと次の `try_decode_object` が ProtocolViolation になる。
         let payload = loop {
             if let Some(p) = sg_decoder.try_read_payload() {
                 break p;
@@ -1045,6 +1057,10 @@ async fn decode_video_stream(
                 }
             }
         };
+        if !deliver {
+            continue;
+        }
+        let video_config = extract_video_config(obj.properties_bytes.as_deref());
         frames += decode_and_send(&payload, video_config.as_deref(), video_decoder, frame_tx);
     }
 }
@@ -1239,14 +1255,25 @@ async fn decode_audio_stream(
 ) -> u64 {
     let mut chunks: u64 = 0;
     loop {
-        let obj = loop {
+        // 帰属判定の結果。`FilteredOut` / `Discarded` の Object は Application へ渡さない。
+        let (obj, deliver) = loop {
             match sg_decoder.try_decode_object() {
                 Ok(Some(o)) => {
-                    if let Err(e) = data_plane.recv_subgroup_object(stream_id, &o) {
-                        tracing::warn!("Failed to register audio object: {e}");
-                        return chunks;
-                    }
-                    break o;
+                    let deliver = match data_plane.recv_subgroup_object(stream_id, &o) {
+                        Ok(TrackDataAcceptance::Accepted) => true,
+                        // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
+                        // 型上あり得るため防御的に破棄する
+                        Ok(
+                            TrackDataAcceptance::UnknownTrackAlias
+                            | TrackDataAcceptance::FilteredOut
+                            | TrackDataAcceptance::Discarded,
+                        ) => false,
+                        Err(e) => {
+                            tracing::warn!("Failed to register audio object: {e}");
+                            return chunks;
+                        }
+                    };
+                    break (o, deliver);
                 }
                 Ok(None) => {
                     match receive_registered_stream_data(stream, data_plane, stream_id).await {
@@ -1269,6 +1296,24 @@ async fn decode_audio_stream(
         // Audio Config を付与する意味がない (現行 publisher は実 payload 付きオブジェクトに
         // 付与する) ため、検証の前にスキップする
         if obj.payload_length == 0 {
+            continue;
+        }
+        // `FilteredOut` / `Discarded` の Object でも payload は wire 上に存在するため
+        // 読み出して消費する。残すと次の `try_decode_object` が ProtocolViolation になる。
+        let payload = loop {
+            if let Some(p) = sg_decoder.try_read_payload() {
+                break p;
+            }
+            match receive_registered_stream_data(stream, data_plane, stream_id).await {
+                Ok(Some(data)) => sg_decoder.push(&data),
+                Ok(None) => return chunks,
+                Err(e) => {
+                    tracing::warn!("Failed to read audio payload: {e}");
+                    return chunks;
+                }
+            }
+        };
+        if !deliver {
             continue;
         }
         // Audio Config (OpusHead) を含むオブジェクトを受信した最初の 1 回のみ検証する
@@ -1299,19 +1344,6 @@ async fn decode_audio_stream(
             }
         }
         let (timestamp, timescale) = extract_timestamp_timescale(obj.properties_bytes.as_deref());
-        let payload = loop {
-            if let Some(p) = sg_decoder.try_read_payload() {
-                break p;
-            }
-            match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                Ok(Some(data)) => sg_decoder.push(&data),
-                Ok(None) => return chunks,
-                Err(e) => {
-                    tracing::warn!("Failed to read audio payload: {e}");
-                    return chunks;
-                }
-            }
-        };
         let pcm = match opus_decoder.decode(&payload) {
             Ok(p) => p,
             Err(e) => {
