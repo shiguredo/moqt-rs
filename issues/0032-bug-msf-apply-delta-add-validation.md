@@ -1,7 +1,7 @@
 # MsfCatalog::apply_delta の add 経路でトラックを検証する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-msf-apply-delta-add-validation
 - Polished: 2026-09-10
 
@@ -28,3 +28,16 @@ add 経路でも `validate_full_track(track)?` を呼ぶ。`apply_delta` の doc
 - add 経路で不正トラックが `apply_delta` 時点で拒否されること
 - 既存の正常系が維持されること
 - テストが `tests/test_msf/delta_apply.rs` に追加されていること
+
+## 解決方法
+
+`MsfCatalog::apply_delta` の add 経路でトラックの MUST 制約を検証するようにした。
+
+- add するトラックに `validate_full_track` を適用し、encode 時まで不正に気付けない非対称を解消した (draft §5.2 各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33)。
+- add 操作内の全トラックを先に検証し、既存トラックおよびバッチ内の重複も全件検出してから追加することで、操作内の部分適用を避ける。
+- `apply_delta` の doc の Errors に検証内容と、操作をまたぐ非原子性 (先行操作はロールバックされない) を明記した。
+- `docs/IMPLEMENTATION.md` を更新した。
+- `tests/test_msf/delta_apply.rs` に isLive + trackDuration / video の codec 欠如 / 不正トラック混在バッチ / 重複名バッチ / 複数トラック正常系 のテストを追加した。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+
+残った制約 (スコープ外): clone の解決結果 (`MsfCloneTrack::into_track`) は `lang` 検証を含まないため、clone で不正な lang を設定すると encode 時に初めて失敗する。また `apply_delta` は操作をまたぐ原子性を持たない。
