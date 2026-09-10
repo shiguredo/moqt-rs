@@ -357,8 +357,10 @@ impl Session {
 
     /// bidi request stream 終端時の SUBSCRIBE_TRACKS 側の処理
     ///
-    /// draft §9.18 (SUBSCRIBE_TRACKS): stream 閉鎖時は active_track_aliases に残存する
-    /// Subscription を implicit PUBLISH_DONE 扱いで一括終端する。
+    /// draft-ietf-moq-transport-21 §4.1 (Subscribing to Namespaces) / §6.4.2.3 (Request
+    /// Cancellation and Rejection): SUBSCRIBE_TRACKS は §6.4.2.3 に従って cancel され、
+    /// cancel しても original publisher の以後の PUBLISH 送信を禁じない。SUBSCRIBE_TRACKS の
+    /// 終端で `active_track_aliases` に残存する subscription を暗黙終端するのは本実装の扱いである。
     pub(crate) fn close_track_subscription_on_stream_end(
         &mut self,
         request_id: u64,
@@ -376,6 +378,8 @@ impl Session {
             };
             entry.active_track_aliases.drain().collect()
         };
+        // SUBSCRIBE_TRACKS の終端種別 (FIN / RESET) を派生 subscription の終端通知にも使う
+        let reason = terminationreason_from_end(end);
         for &alias in &aliases {
             // draft §3.1 (Subscriptions): alias は同一 Track の複数 subscription で共有されうる
             // ため、この alias に紐づく全 subscription を終端する
@@ -409,18 +413,29 @@ impl Session {
                 if self.release_peer_alias(alias, sub_request_id) {
                     self.peer_subgroups.remove_track_alias(alias);
                 }
-                self.request_streams.remove(&sub_request_id);
-                self.events.push_back(SessionEvent::RequestTerminated {
-                    request_id: sub_request_id,
-                    kind: RequestKind::Publish,
-                    reason: TerminationReason::PeerStreamFin,
-                });
+                // draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure):
+                // peer は後から PUBLISH の bidi request stream を FIN / RESET で閉じる。
+                // close 未受信 (request_streams に登録あり) のときだけ rejected_request_ids に
+                // 登録し、後続のクローズを no-op で吸収する (`forget_fetch` と同じ前例)。
+                // 既にクローズ済み (`close_subscription_on_stream_end` が除去済み) のときは
+                // 再登録も RequestTerminated の再発行もしない (二重イベントと close 済み id の
+                // 永久残留を避ける)。
+                // kind は request_streams の登録値を使う。共有 alias では SUBSCRIBE_OK 由来の
+                // subscription が混在しうるため `RequestKind::Publish` 固定にはしない。
+                if let Some(kind) = self.request_streams.remove(&sub_request_id) {
+                    self.rejected_request_ids.insert(sub_request_id);
+                    self.events.push_back(SessionEvent::RequestTerminated {
+                        request_id: sub_request_id,
+                        kind,
+                        reason: reason.clone(),
+                    });
+                }
             }
         }
         if let Some(entry) = self.track_subscriptions.get_mut(&request_id) {
             entry.state = TrackSubscriptionState::Terminated;
         }
-        Ok(terminationreason_from_end(end))
+        Ok(reason)
     }
 
     fn require_track_subscription_publisher(&self, request_id: u64) -> Result<(), SessionError> {

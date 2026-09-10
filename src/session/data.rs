@@ -2137,6 +2137,12 @@ impl Session {
             return;
         };
         self.clear_control_message_deadline(request_id);
+        // malformed 終端後に bidi request stream の close 通知を受けても二重終端しないよう、
+        // close 未受信の request_streams entry を除去して rejected_request_ids に登録する
+        // (`forget_fetch` / `close_track_subscription_on_stream_end` と同じ前例)。
+        if self.request_streams.remove(&request_id).is_some() {
+            self.rejected_request_ids.insert(request_id);
+        }
         if let Some(stream_id) = stream_id {
             // draft §12.1 (Malformed Tracks): Malformed Track を運んだ data stream は
             // MALFORMED_TRACK で reset する
@@ -2602,7 +2608,8 @@ impl Session {
     /// 指定 request の subscription がキャンセル由来 `Terminated` かどうかを判定する
     ///
     /// キャンセル経路（`stop_sending` / `handle_err_for_subscription` /
-    /// `close_subscription_on_stream_end` / `terminate_malformed_track`）は `publish_done` を
+    /// `close_subscription_on_stream_end` / `close_track_subscription_on_stream_end` /
+    /// `terminate_malformed_track`）は `publish_done` を
     /// 設定しないため、`Terminated` かつ `publish_done` が `None` であればキャンセル由来と
     /// 判定できる。PUBLISH_DONE 受信による `Terminated`（`publish_done` が `Some`）は
     /// drain 期間中の遅延データを受理するため対象外

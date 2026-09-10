@@ -42,6 +42,12 @@ use super::validation::{
 };
 
 impl Session {
+    /// Subscribe / Publish の bidi request stream 終端時の共通処理
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) / §6.4.2.3
+    /// (Request Cancellation and Rejection): FIN はその方向に送るメッセージが終わったこと
+    /// だけを示し、cancel は RESET_STREAM / STOP_SENDING で表現される。state を `Terminated`
+    /// にし、`request_streams` から除去することで、以降の close 通知が重複処理されないようにする。
     pub(crate) fn close_subscription_on_stream_end(
         &mut self,
         request_id: u64,
@@ -57,6 +63,11 @@ impl Session {
         // draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // subscription のキャンセル時は open 中の fill fetch stream を reset する (MUST)。
         self.reset_open_fill_streams(request_id);
+        // クローズ通知を受信済みの request は request_streams から除去する。これにより
+        // SUBSCRIBE_TRACKS の bidi stream 終端が後から来ても、同じ subscription に対して
+        // `close_track_subscription_on_stream_end` が二重に RequestTerminated を発行したり
+        // `rejected_request_ids` に close 済み id を登録したりしない。
+        self.request_streams.remove(&request_id);
         Ok(terminationreason_from_end(end))
     }
 

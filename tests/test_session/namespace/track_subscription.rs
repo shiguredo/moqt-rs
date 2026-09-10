@@ -1347,3 +1347,242 @@ fn subscribe_tracks_request_ok_propagates_expires_parameter() {
         "SUBSCRIBE_TRACKS の REQUEST_OK 受信イベントが発火すること"
     );
 }
+
+/// SUBSCRIBE_TRACKS の bidi stream 終端で暗黙終端した PUBLISH subscription に
+/// RequestTerminated が 1 回だけ発行され、後続の PUBLISH stream 終端が no-op で
+/// 吸収されること
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure):
+/// FIN はその方向に送るメッセージが終わったことだけを示し、request の cancel ではない。
+/// SUBSCRIBE_TRACKS の終端で PUBLISH 由来 subscription の request_streams entry を
+/// 削除したあと、後続の PUBLISH stream 終端が unknown id として PROTOCOL_VIOLATION に
+/// ならないよう、終端時に rejected_request_ids へ登録する。派生 subscription の
+/// RequestTerminated.reason は SUBSCRIBE_TRACKS の終端種別 (FIN / RESET) に追従する。
+#[test]
+fn subscribe_tracks_stream_end_then_publish_stream_close_does_not_close_session() {
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::session::types::{RequestStreamEnd, SessionState};
+    let track_end_cases = [
+        (RequestStreamEnd::Fin, TerminationReason::PeerStreamFin),
+        (
+            RequestStreamEnd::Reset {
+                error_code: 0,
+                reliable_size: None,
+            },
+            TerminationReason::PeerStreamReset { error_code: 0 },
+        ),
+    ];
+    for (idx, (track_end, expected_reason)) in track_end_cases.into_iter().enumerate() {
+        let (mut client, _server, rid) = establish_subscribe_tracks_example();
+
+        // server 側から PUBLISH を受信して alias を active_track_aliases に登録する
+        // (server 起点なので request_id は奇数)
+        let alias = 42;
+        let publish_rid = 1;
+        client
+            .recv_request(ControlMessage::Publish(Publish {
+                request_id: publish_rid,
+                track_namespace: ns(&[b"example", b"live"]),
+                track_name: b"cam".to_vec(),
+                track_alias: alias,
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }))
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert!(
+            client
+                .track_subscription(rid)
+                .expect("track_subscription が存在すること")
+                .active_track_aliases
+                .contains(&alias),
+            "PUBLISH 受信で active_track_aliases に alias が登録されること"
+        );
+
+        // SUBSCRIBE_TRACKS の bidi stream を peer が track_end で終端する
+        client
+            .recv_request_stream_closed(rid, track_end)
+            .expect("SUBSCRIBE_TRACKS stream 終端は受理されること");
+
+        // 後から PUBLISH の bidi stream を peer が FIN で終端する。
+        // rejected_request_ids に登録済みのため no-op で吸収される
+        client
+            .recv_request_stream_closed(publish_rid, RequestStreamEnd::Fin)
+            .expect("後続の PUBLISH stream 終端は no-op で吸収されること");
+
+        assert_eq!(
+            client.state(),
+            SessionState::Established,
+            "case {idx}: セッションが閉じないこと"
+        );
+        // PUBLISH subscription の RequestTerminated は SUBSCRIBE_TRACKS 終端で 1 回だけ発行され、
+        // 後続の PUBLISH stream 終端では再発行されない。reason は SUBSCRIBE_TRACKS の終端種別に追従する
+        let mut terminated = 0;
+        while let Some(ev) = client.poll_event() {
+            match ev {
+                SessionEvent::CloseSession(_) => panic!("CloseSession は発行されてはならない"),
+                SessionEvent::RequestTerminated {
+                    request_id,
+                    kind,
+                    reason,
+                } if request_id == publish_rid => {
+                    assert_eq!(kind, RequestKind::Publish);
+                    assert_eq!(reason, expected_reason.clone());
+                    terminated += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            terminated, 1,
+            "case {idx}: PUBLISH subscription の RequestTerminated は 1 回だけ発行されること"
+        );
+    }
+}
+
+/// SUBSCRIBE_TRACKS の終端で発行する RequestTerminated の kind が
+/// request_streams に記録された種別と一致すること
+///
+/// 共有 alias では SUBSCRIBE_OK 由来 subscription が peer_publisher_aliases に混在しうる。
+/// `RequestKind::Publish` 固定では Subscribe 由来 subscription の kind を誤る。
+/// 本テストは、共有 alias の SUBSCRIBE_OK 由来 subscription まで SUBSCRIBE_TRACKS 終端で
+/// 終端する現状の実装挙動を固定する（過剰終端は `peer_publisher_aliases` が確立経路を
+/// 区別しない設計に起因する）。
+#[test]
+fn subscribe_tracks_stream_end_reports_registered_kind_for_shared_alias() {
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+    let (mut client, mut server, track_rid) = establish_subscribe_tracks_example();
+
+    // client が SUBSCRIBE を送り、alias=42 の SUBSCRIBE_OK を受ける (Subscribe 由来)
+    let subscribe_rid = client
+        .send_subscribe(
+            ns(&[b"example", b"live"]),
+            b"cam".to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            subscribe_rid,
+            42,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(subscribe_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // server が同じ alias=42 で PUBLISH を送る (Publish 由来)
+    let publish_rid = 1;
+    client
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: publish_rid,
+            track_namespace: ns(&[b"example", b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 42,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // SUBSCRIBE_TRACKS stream 終端で両 subscription が終端される。
+    // kind は request_streams の登録値 (Subscribe / Publish) が使われる
+    client
+        .recv_request_stream_closed(track_rid, RequestStreamEnd::Fin)
+        .expect("SUBSCRIBE_TRACKS stream 終端は受理されること");
+
+    let mut subscribe_kind = None;
+    let mut publish_kind = None;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id, kind, ..
+        } = ev
+        {
+            if request_id == subscribe_rid {
+                subscribe_kind = Some(kind);
+            } else if request_id == publish_rid {
+                publish_kind = Some(kind);
+            }
+        }
+    }
+    assert_eq!(
+        subscribe_kind,
+        Some(RequestKind::Subscribe),
+        "Subscribe 由来 subscription の kind は Subscribe であること"
+    );
+    assert_eq!(
+        publish_kind,
+        Some(RequestKind::Publish),
+        "Publish 由来 subscription の kind は Publish であること"
+    );
+}
+
+/// PUBLISH の bidi stream を先に終端し、その後に SUBSCRIBE_TRACKS stream を終端しても
+/// PUBLISH subscription の RequestTerminated が二重発行されず、close 済み id が
+/// rejected_request_ids に登録されないこと
+///
+/// `close_subscription_on_stream_end` が close 受信時に request_streams を除去するため、
+/// 後続の SUBSCRIBE_TRACKS 終端では同じ request id を再終端しない。
+#[test]
+fn publish_stream_close_then_subscribe_tracks_stream_end_terminates_once() {
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::session::types::{RequestStreamEnd, SessionState};
+    let (mut client, _server, rid) = establish_subscribe_tracks_example();
+
+    let alias = 42;
+    let publish_rid = 1;
+    client
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: publish_rid,
+            track_namespace: ns(&[b"example", b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: alias,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 先に PUBLISH の bidi stream を終端する
+    client
+        .recv_request_stream_closed(publish_rid, RequestStreamEnd::Fin)
+        .expect("PUBLISH stream 終端は受理されること");
+
+    // 後から SUBSCRIBE_TRACKS の bidi stream を終端する。
+    // PUBLISH subscription は既に close 済みのため再終端されない
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("SUBSCRIBE_TRACKS stream 終端は受理されること");
+
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションが閉じないこと"
+    );
+    let mut terminated = 0;
+    while let Some(ev) = client.poll_event() {
+        match ev {
+            SessionEvent::CloseSession(_) => panic!("CloseSession は発行されてはならない"),
+            SessionEvent::RequestTerminated { request_id, .. } if request_id == publish_rid => {
+                terminated += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        terminated, 1,
+        "PUBLISH subscription の RequestTerminated は 1 回だけ発行されること"
+    );
+
+    // close 済み id は rejected_request_ids に登録されない。再度 PUBLISH stream 終端通知が
+    // 来ると unknown id として PROTOCOL_VIOLATION になる
+    let err = client
+        .recv_request_stream_closed(publish_rid, RequestStreamEnd::Fin)
+        .expect_err("close 済み id は rejected_request_ids に残らず unknown id になること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}

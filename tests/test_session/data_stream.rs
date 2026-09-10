@@ -416,6 +416,27 @@ fn subgroup_object_malformed_track_terminates_subscription() {
         saw_terminated,
         "RequestTerminated(MalformedTrack) が発行されること (§12.1 の SHOULD)"
     );
+
+    // malformed 終端後に bidi request stream が close しても二重終端せず no-op で吸収される
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("malformed 後の bidi close は no-op で吸収されること");
+    let mut terminated_after_close = 0;
+    while let Some(e) = client.poll_event() {
+        match e {
+            SessionEvent::RequestTerminated { request_id, .. } if request_id == rid => {
+                terminated_after_close += 1;
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("セッションを閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        terminated_after_close, 0,
+        "malformed 後の bidi close で RequestTerminated は再発行されないこと"
+    );
 }
 
 #[test]

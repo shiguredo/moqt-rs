@@ -329,10 +329,11 @@ pub struct Session {
     /// draft-ietf-moq-transport-21 §6.3 (Session initialization) が規定する 7 種類の
     /// request について、`recv_request_stream_closed` など stream 単位の通知を
     /// dispatch するために使う。entry は各 request の生成時 (自側 `send_*` /
-    /// 相手発行 `handle_peer_*`) に insert され、`forget_*` 系でマップから
-    /// entry が除去されるタイミングで remove される。
+    /// 相手発行 `handle_peer_*`) に insert され、`forget_*` 系、および Subscribe / Publish の
+    /// bidi stream 終端 (`close_subscription_on_stream_end`) と SUBSCRIBE_TRACKS の終端
+    /// (`close_track_subscription_on_stream_end`) で remove される。
     pub(super) request_streams: HashMap<u64, RequestKind>,
-    /// REQUEST_ERROR で拒否した request id の集合 (`request_streams` 未登録のもの)
+    /// REQUEST_ERROR で拒否した、または peer のクローズ通知前に状態を破棄した request id の集合 (`request_streams` 未登録のもの)
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection):
     /// "When an endpoint rejects a request without performing any application processing,
@@ -350,6 +351,10 @@ pub struct Session {
     /// fail するレースが残る (本変更前から存在する既知の挙動)。fetch の終端済み
     /// (publisher 側・データストリーム終端済み。FIN / RESET の両方の終端通知を含む)
     /// 破棄だけは `forget_fetch` が本集合へ記録して遅延クローズを吸収する。
+    /// SUBSCRIBE_TRACKS の bidi stream 終端で暗黙終端した subscription のうち、まだ close
+    /// 通知を受けていないものだけを `close_track_subscription_on_stream_end` が本集合へ記録し、
+    /// 後続の PUBLISH bidi stream クローズを吸収する。malformed 終端も同様に
+    /// `terminate_malformed_track` が記録する。
     /// クローズ通知の受信時に削除される。peer がクローズ通知を送らない場合は
     /// セッション生存中に残り続ける (サイズは「拒否後・破棄済みのうち未クローズの id 数」に比例する)。
     pub(super) rejected_request_ids: HashSet<u64>,
@@ -863,8 +868,10 @@ impl Session {
     /// send a REQUEST_ERROR and FIN the stream." に従う拒否。control GOAWAY 送信後の
     /// GOING_AWAY 拒否 (draft §9.2) も含む) と、終端済み fetch の破棄
     /// (`forget_fetch` が記録する publisher 側・データストリーム終端済みの request id。
-    /// 詳細は `rejected_request_ids` のフィールド doc 参照) のストリームクローズは
-    /// 拒否済み・破棄済みのため state を持たず no-op で吸収する。登録済み request への
+    /// 詳細は `rejected_request_ids` のフィールド doc 参照)、および SUBSCRIBE_TRACKS の
+    /// bidi stream 終端で暗黙終端した subscription (`close_track_subscription_on_stream_end`
+    /// が記録する request id) のストリームクローズは
+    /// 拒否済み・破棄済み・暗黙終端済みのため state を持たず no-op で吸収する。登録済み request への
     /// REQUEST_ERROR (REQUEST_UPDATE 拒否等) のクローズは `request_streams` 経由で処理され、
     /// `RequestTerminated` が発行される。
     /// close 通知は 1 回のみを想定しており、2 回目以降の通知は unknown id として

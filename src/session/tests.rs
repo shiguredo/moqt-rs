@@ -1160,9 +1160,9 @@ fn peer_request_tracker_rejects_too_many_out_of_order_ids() {
 /// SUBSCRIBE_TRACKS の bidi stream 終端で peer alias の SubgroupTracker エントリが
 /// 解放されること
 ///
-/// draft-ietf-moq-transport-21 §9.18 (SUBSCRIBE_TRACKS): stream 閉鎖時は
-/// active_track_aliases に残存する subscription を implicit PUBLISH_DONE 扱いで
-/// 一括終端する。このとき alias holder が空になったら SubgroupTracker の alias 単位
+/// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection): SUBSCRIBE_TRACKS
+/// の終端で active_track_aliases に残存する subscription を暗黙終端するのは本実装の扱いである。
+/// このとき alias holder が空になったら SubgroupTracker の alias 単位
 /// エントリも除去しないと、alias 再利用時に古い subgroup 履歴が干渉する。
 #[test]
 fn close_track_subscription_on_stream_end_releases_peer_alias_subgroup_entries() {
