@@ -1,7 +1,7 @@
 # 未解決の intra-doc link を修正する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/doc-intra-doc-links
 - Polished: 2026-09-10
 
@@ -26,3 +26,13 @@
 
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` が成功すること
 - doc の意味が変わっていないこと
+
+## 解決方法
+
+未解決の intra-doc link をフルパス化して解消した（doc のみの変更で挙動は変えない）。
+
+- `src/session.rs` のモジュール doc の `Session` / `Role` / `TrackRole` / `SessionEvent` と各メソッドのリンクをフルパス化した。
+- `src/stream.rs` の `SubgroupHeader` / `FetchHeader` のリンクをフルパス化した。
+- 非公開 item に残っていた未解決 link (`TrackDataAcceptance::Discarded` / `Session::register_discarded_stream` / `Session::retain_discarded_stream_id`) と `src/msf.rs` の引用 `[JSON]` も修正した。
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` と `--document-private-items` の両方が成功することを確認した。
+- `CHANGES.md` の `### misc` に `[UPDATE]` エントリを追加した。
