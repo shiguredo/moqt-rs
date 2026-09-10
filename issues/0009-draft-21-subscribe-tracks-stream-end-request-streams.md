@@ -1,7 +1,7 @@
 # SUBSCRIBE_TRACKS stream 終端後の PUBLISH stream 終端でセッションを閉じない
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-10
 - Branch: feature/fix-subscribe-tracks-stream-end-request-streams
 - Polished: 2026-09-10
 
@@ -51,3 +51,14 @@ SUBSCRIBE_TRACKS の bidi request stream が終端した後、その stream か�
 - `rejected_request_ids` の doc と `recv_request_stream_closed` の doc が更新されていること
 - 当該シーケンスの回帰テストが `tests/test_session/` に追加されていること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリを追加すること
+
+## 解決方法
+
+SUBSCRIBE_TRACKS 終端で暗黙終端した subscription への後続 bidi close を no-op で吸収するよう、台帳を整合させた。
+
+- `close_track_subscription_on_stream_end` は、`request_streams` に close 未受信の entry があるときだけ `rejected_request_ids` へ登録して `RequestTerminated` を発行する。`kind` は `request_streams` の登録値、`reason` は `terminationreason_from_end(end)` から取得する。
+- `close_subscription_on_stream_end` は close 受信時に `request_streams` から除去する。これにより PUBLISH の bidi stream が先に閉じ、その後に SUBSCRIBE_TRACKS の bidi stream が終端しても二重 `RequestTerminated` や `rejected_request_ids` の残留が起きない（設計方針に加えた変更）。
+- `terminate_malformed_track` も同様に close 未受信 entry を除去して `rejected_request_ids` へ登録する（設計方針に加えた変更）。
+- `rejected_request_ids` / `recv_request_stream_closed` の doc を更新した。
+- 回帰テストを追加した。SUBSCRIBE_TRACKS 終端 → PUBLISH close（FIN / RESET と `reason`）、PUBLISH close → SUBSCRIBE_TRACKS 終端、共有 alias の `kind`、malformed 後の bidi close。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
