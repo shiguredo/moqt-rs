@@ -3139,7 +3139,7 @@ fn validate_auth_info_value_raw(value_raw: &[u8]) -> Result<(), MessageError> {
 
 /// イベントデータの生 JSON バイト列を検証する
 ///
-/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): "An event timeline track is a JSON [JSON] document."
+/// draft-ietf-moq-msf-01 §8.1 (Event Timeline data format): "An event timeline track is a JSON `[JSON]` document."
 /// この仕様は将来変更される可能性がある。
 /// encode 側の検証欠落による panic (fmt エラー時の to_string の仕様) と
 /// 不正な JSON の静的な生成を防ぐため、`data_raw` が「UTF-8 かつ単独の JSON object

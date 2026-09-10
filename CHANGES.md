@@ -24,3 +24,5 @@
   - @voluntas
 - [UPDATE] コード内 doc コメントの実装との不整合を修正する
   - @voluntas
+- [UPDATE] 未解決の intra-doc link を修正する
+  - @voluntas

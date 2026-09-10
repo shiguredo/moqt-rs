@@ -94,7 +94,7 @@ pub(super) struct AliasState {
     ///
     /// alias に紐づく subscription が 1 つも残らなくなった時点で登録し、
     /// `peer_alias_retention_ms` の期間だけ保持する。期間中に届いた Object は
-    /// [`TrackDataAcceptance::Discarded`] として報告し、未知 alias と区別する。
+    /// [`crate::session::types::TrackDataAcceptance::Discarded`] として報告し、未知 alias と区別する。
     pub(super) peer_alias_tombstones: HashMap<u64, DeadlineTimer>,
 }
 
@@ -226,8 +226,8 @@ pub(super) struct DataStreamState {
     /// (既定値は [`DEFAULT_PEER_ALIAS_RETENTION_MS`]) と同じ期間だけ、破棄対象 stream の
     /// 受信・終端を no-op で吸収するために使う。対象はキャンセル由来 `Terminated`
     /// subscription に属する stream と、`forget_subscription` 後に届く新規 stream の
-    /// 終端済み id である ([`super::data::register_discarded_stream`] /
-    /// [`super::data::retain_discarded_stream_id`] 参照)。
+    /// 終端済み id である ([`Session::register_discarded_stream`] /
+    /// [`Session::retain_discarded_stream_id`] 参照)。
     ///
     /// draft-ietf-moq-transport-21 §3.1.2 (Track Alias): "Objects can arrive after a
     /// subscription has been cancelled. Subscribers SHOULD retain sufficient state to

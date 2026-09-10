@@ -5,30 +5,30 @@
 //!
 //! # 位置づけ
 //!
-//! [`Session`] は draft が定義する 1 本の `Transport Session` (QUIC connection
+//! [`crate::session::core::Session`] は draft が定義する 1 本の `Transport Session` (QUIC connection
 //! または WebTransport session) に対応する。
 //!
 //! 本モジュールが扱うのは、この endpoint から見た peer との protocol state であり、
 //! relay 全体の routing / fan-out / cache / policy は対象外である。relay を
 //! 実装する場合でも、複数 peer との間に張った個々の `Transport Session` ごとに
-//! [`Session`] を使い分けることを想定する。
+//! [`crate::session::core::Session`] を使い分けることを想定する。
 //!
-//! [`Role`] は `Transport Session` における endpoint の役割 (`Client` / `Server`)
-//! を表し、[`TrackRole`] は各 request / track における protocol role
-//! (`Publisher` / `Subscriber`) を表す。1 本の [`Session`] の中で SUBSCRIBE /
+//! [`crate::session::types::Role`] は `Transport Session` における endpoint の役割 (`Client` / `Server`)
+//! を表し、[`crate::session::types::TrackRole`] は各 request / track における protocol role
+//! (`Publisher` / `Subscriber`) を表す。1 本の [`crate::session::core::Session`] の中で SUBSCRIBE /
 //! PUBLISH はどちらも並行して存在しうる。
 //!
 //! # 設計方針
 //!
 //! - I/O を持たない純粋な状態機械
-//! - 入力: [`Session::recv_control`] / [`Session::recv_request`] /
-//!   [`Session::send_subgroup_header`] / [`Session::send_subgroup_object`] /
-//!   [`Session::send_data_stream_closed`] / [`Session::recv_data_stream_stop_sending`] /
-//!   [`Session::recv_data_stream_type`] / [`Session::recv_object_datagram`] /
-//!   [`Session::close`] 等のアプリ要求
-//! - 出力: [`Session::poll_event`] で [`SessionEvent`] を取り出す
-//! - 呼び出し側は [`SessionEvent::SendControl`] を I/O 層に渡して送信し、
-//!   [`SessionEvent::CloseSession`] で QUIC CONNECTION_CLOSE や WebTransport
+//! - 入力: [`crate::session::core::Session::recv_control`] / [`crate::session::core::Session::recv_request`] /
+//!   [`crate::session::core::Session::send_subgroup_header`] / [`crate::session::core::Session::send_subgroup_object`] /
+//!   [`crate::session::core::Session::send_data_stream_closed`] / [`crate::session::core::Session::recv_data_stream_stop_sending`] /
+//!   [`crate::session::core::Session::recv_data_stream_type`] / [`crate::session::core::Session::recv_object_datagram`] /
+//!   [`crate::session::core::Session::close`] 等のアプリ要求
+//! - 出力: [`crate::session::core::Session::poll_event`] で [`crate::session::types::SessionEvent`] を取り出す
+//! - 呼び出し側は [`crate::session::types::SessionEvent::SendControl`] を I/O 層に渡して送信し、
+//!   [`crate::session::types::SessionEvent::CloseSession`] で QUIC CONNECTION_CLOSE や WebTransport
 //!   session close を発行する
 //!
 //! # 実装範囲

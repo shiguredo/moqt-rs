@@ -64,7 +64,7 @@ pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 /// - それ以外 → `None`
 ///
 /// 予約済みの `SUBGROUP_ID_MODE = 0b11` を含む type 値も `Subgroup` として返す。
-/// それらは後続の [`SubgroupHeader`] デコードが `PROTOCOL_VIOLATION` として reject する。
+/// それらは後続の [`crate::stream::subgroup::SubgroupHeader`] デコードが `PROTOCOL_VIOLATION` として reject する。
 pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
     // control stream (SETUP_STREAM_TYPE = 0x2F00) は data stream ではないため除外する
     // (draft-ietf-moq-transport-21 §6.4.1 (Unidirectional Streams) Table 3 で制御ストリームは別扱い)
@@ -96,7 +96,7 @@ fn encode_control_stream_prefix() -> Vec<u8> {
 
 /// 新規制御ストリームの先頭メッセージを stream type prefix 込みでエンコードする
 ///
-/// [`SubgroupHeader::encode`] や [`FetchHeader::encode`] が stream type を
+/// [`crate::stream::subgroup::SubgroupHeader::encode`] や [`crate::stream::fetch::FetchHeader::encode`] が stream type を
 /// 内包するのと同様に、制御ストリーム開設時の初回メッセージ (SETUP) も
 /// stream type prefix を自動で前置する。
 pub fn encode_control_stream_setup(msg: &ControlMessage) -> Result<Vec<u8>, MessageError> {
