@@ -132,3 +132,81 @@ fn valid_object_status_values() {
         );
     }
 }
+
+// draft-ietf-moq-transport-21 §11.1.2 (Object Status): 未知 status は protocol error。
+// 検証を書き込み前に行い、失敗時に buf へ部分バイトを残さない
+#[test]
+fn invalid_status_does_not_partially_write() {
+    let obj = SubgroupObject {
+        object_id_delta: 1,
+        payload_length: 0,
+        status: Some(0x01),
+    };
+    let mut buf = vec![0xAA, 0xBB, 0xCC];
+    assert!(matches!(
+        obj.encode(false, None, &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB, 0xCC], "失敗時に buf が変化しないこと");
+
+    // properties を伴う経路でも検証が書き込み前に走る
+    let mut buf = vec![0xAA, 0xBB];
+    assert!(matches!(
+        obj.encode(true, Some(&[0x00]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
+}
+
+// 空スライスは Properties Length varint を含まない契約違反入力として拒否する
+#[test]
+fn empty_properties_slice_rejected() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 0,
+        status: Some(0x00),
+    };
+    let mut buf = Vec::new();
+    assert!(matches!(
+        obj.encode(true, Some(&[]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert!(buf.is_empty(), "拒否時に buf が変化しないこと");
+}
+
+// has_properties=true でも Properties Length = 0 を含むデータは正常にエンコードできる
+#[test]
+fn properties_length_zero_encoded() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 0,
+        status: Some(0x00),
+    };
+    let mut buf = Vec::new();
+    obj.encode(true, Some(&[0x00]), &mut buf)
+        .expect("Properties Length = 0 は合法");
+    let (decoded, props, _) =
+        SubgroupObject::decode(&buf, true).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded.object_id_delta, 0);
+    assert_eq!(decoded.payload_length, 0);
+    assert_eq!(decoded.status, Some(0x00));
+    assert_eq!(props.as_deref(), Some(&[0x00][..]));
+}
+
+// 非 Normal status でも Properties Length = 0 を含むデータは正常にエンコードできる
+// (draft-ietf-moq-transport-21 §11.3.1: PROPERTIES bit が立ち非 Normal なら Length = 0 で表現する)
+#[test]
+fn non_normal_status_with_zero_length_properties_encoded() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 0,
+        status: Some(0x03),
+    };
+    let mut buf = Vec::new();
+    obj.encode(true, Some(&[0x00]), &mut buf)
+        .expect("非 Normal status でも Properties Length = 0 は合法");
+    let (decoded, props, _) =
+        SubgroupObject::decode(&buf, true).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(decoded.status, Some(0x03));
+    assert_eq!(props.as_deref(), Some(&[0x00][..]));
+}

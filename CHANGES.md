@@ -23,6 +23,8 @@
   - @voluntas
 - [FIX] MsfCatalog::apply_delta の add 経路でトラックの MUST 制約を検証する
   - @voluntas
+- [FIX] SubgroupObject の encode を書き込み前に検証し、不正 status の部分書き込みと Properties Length 欠落を防止する
+  - @voluntas
 
 ### misc
 

@@ -201,6 +201,14 @@ impl SubgroupObject {
     /// `has_properties` は SUBGROUP_HEADER の PROPERTIES ビットに対応する。
     /// true の場合、呼び出し元が LocProperties でエンコードした結果を `properties_data` として渡す。
     /// プロパティが空でも `has_properties` が true なら Properties Length = 0 を含むデータを渡す必要がある。
+    ///
+    /// # Errors
+    ///
+    /// - status と payload_length の組み合わせが不正、または status が未知の値: `ProtocolViolation`
+    /// - `has_properties` と `properties_data` の組み合わせが不正 (true なのに `None` / 空スライス、
+    ///   または false なのに `Some`): `ProtocolViolation`
+    /// - Properties Length varint が不正、または非 Normal status に Properties Length > 0 の
+    ///   properties が付いている: `ProtocolViolation`
     pub fn encode(
         &self,
         has_properties: bool,
@@ -227,11 +235,25 @@ impl SubgroupObject {
                 "properties data is required when has_properties is true",
             ));
         }
+        // 空スライスは Properties Length varint を含まない契約違反入力。
+        // 呼び出し側は Length = 0 を含むデータ (`&[0x00]` 等) を渡すこと
+        if has_properties && properties_data.is_some_and(|data| data.is_empty()) {
+            return Err(MessageError::ProtocolViolation(
+                "properties data must include Properties Length (empty slice is not allowed)",
+            ));
+        }
         if !has_properties && properties_data.is_some() {
             return Err(MessageError::ProtocolViolation(
                 "properties data must not be present when has_properties is false",
             ));
         }
+        // draft-ietf-moq-transport-21 §11.1.2 (Object Status): 値域検証は書き込み前に済ませ、
+        // 不正 status で buf に部分バイトを残さない。status 依存の他の検証より先に行い、
+        // 未知 status をより正確なエラーで報告する
+        if let Some(status) = self.status {
+            validate_object_status(status)?;
+        }
+
         // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
         // 実際のプロパティデータ (Properties Length > 0) が付いている場合は PROTOCOL_VIOLATION。
         // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
@@ -260,8 +282,6 @@ impl SubgroupObject {
         varint::encode(self.payload_length, buf);
 
         if let Some(status) = self.status {
-            // draft-ietf-moq-transport-21 §11.1.2 (Object Status): 値域検証
-            validate_object_status(status)?;
             varint::encode(status, buf);
         }
 
