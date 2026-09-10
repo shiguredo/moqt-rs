@@ -29,7 +29,8 @@
 
 ## 依存
 
-- `issues/0009-draft-21-subscribe-tracks-stream-end-request-streams.md` は `close_track_subscription_on_stream_end` が `request_streams` を先行削除する不具合を扱う。0009 の修正が `request_streams` の保持期間を変えるため、0009 の修正を前提として取り込み、本 issue の完了条件「挙動が変わらないこと」はその修正後を基準とする。
+- `issues/0009-draft-21-subscribe-tracks-stream-end-request-streams.md` は `close_track_subscription_on_stream_end` が `request_streams` を先行削除する不具合を扱う。0009 は `request_streams` の先行削除を維持しつつ `rejected_request_ids` 登録を追加するため、本 issue の「`request_streams` は終端処理で先行削除されうる」根拠は 0009
+  修正後も維持される。両者は同じ関数を変更するため、0009 を先に取り込み、本 issue の完了条件「挙動が変わらないこと」はその修正後を基準とする。
 
 ## 完了条件
 
