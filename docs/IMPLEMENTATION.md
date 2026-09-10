@@ -128,6 +128,7 @@ Public / Private の配置はアプリケーション層の責務です。
   - Full / Delta の判別は `MsfCatalogDocument` が行う
 - Delta 適用 (`MsfCatalog::apply_delta`)
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone の順次適用
+  - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する
   - 適用後の track name 一意性とグループ内 targetLatency / buffers 一致を再検証する
 - カタログトラック名 (`MSF_CATALOG_TRACK_NAME` = "catalog")
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド

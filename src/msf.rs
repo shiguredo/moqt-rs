@@ -1293,12 +1293,17 @@ impl MsfCatalog {
     /// - `isComplete` が true のカタログへの add / clone: `InvalidCatalog`
     ///   (draft-ietf-moq-msf-01 §5.1.3 (Is Complete))
     /// - add / clone のトラック名が既存と重複する: `InvalidCatalog`
+    /// - add するトラックが §5.2 の各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
     /// - remove / clone の対象トラックが見つからない: `InvalidCatalog`
     /// - clone の継承結果がトラックの制約に違反する: `InvalidCatalog`
     /// - 適用後のカタログがグループ内 targetLatency / buffers の一致
     ///   (§5.2.8 (Target latency) / §5.2.9 (Buffers)) に違反する: `InvalidCatalog`
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.13 (Initialization reference))
+    ///
+    /// 操作は配列順に逐次適用されるため、途中で失敗した先行操作の結果はロールバックされない
+    /// (カタログは部分的に変更され得る)。add 操作内のトラック検証は全件を先に行い、
+    /// その操作内での部分適用は避ける。
     pub fn apply_delta(
         &mut self,
         delta: &MsfDeltaUpdate,
@@ -1316,17 +1321,31 @@ impl MsfCatalog {
                                 .to_string(),
                         ));
                     }
+                    // add 操作内の全トラックを先に検証し、操作内での部分適用を避ける。
+                    // 1) §5.2 各フィールドの MUST を検証する (draft-ietf-moq-msf-01 §5.2)
+                    for track in tracks {
+                        validate_full_track(track)?;
+                    }
+                    // 2) 既存トラックおよびバッチ内の重複を全件検出してから追加する
+                    let mut batch_keys: Vec<(Option<String>, String)> =
+                        Vec::with_capacity(tracks.len());
                     for track in tracks {
                         let ns = track.namespace.as_deref().or(catalog_namespace);
+                        let key = (ns.map(str::to_string), track.name.clone());
                         if self
                             .find_track_index(ns, &track.name, catalog_namespace)
                             .is_some()
+                            || batch_keys.contains(&key)
                         {
                             return Err(MessageError::InvalidCatalog(format!(
                                 "delta add: track '{}' already exists",
                                 track.name
                             )));
                         }
+                        batch_keys.push(key);
+                    }
+                    // 3) 全件を投入順に追加する
+                    for track in tracks {
                         self.tracks.push(track.clone());
                     }
                 }
@@ -2045,7 +2064,7 @@ fn validate_event_type_not_set_when_not_event_timeline(
     Ok(())
 }
 
-/// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前検証用)
+/// 完全カタログのトラック 1 件が満たすべき MUST を検証する (encode 前 / delta add 適用前の検証用)
 ///
 /// `decode_track` の構造体ベース検証と同等の規則を、手組みの `MsfTrack` に対しても
 /// 適用する。JSON キーの存在で判定する `targetLatency` / `buffers` の共存は、

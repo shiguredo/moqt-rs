@@ -21,6 +21,8 @@
   - @voluntas
 - [FIX] PUBLISH_DONE の Stream Count で 0 stream 時に sentinel を送れないようにする
   - @voluntas
+- [FIX] MsfCatalog::apply_delta の add 経路でトラックの MUST 制約を検証する
+  - @voluntas
 
 ### misc
 

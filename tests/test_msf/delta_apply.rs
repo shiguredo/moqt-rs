@@ -43,6 +43,53 @@ fn apply_delta_add_duplicate_rejected() {
     ));
 }
 
+/// draft-ietf-moq-msf-01 §5.2.35 (Track duration): isLive=true なら trackDuration は禁止。
+/// add 経路でも encode 時まで待たず apply_delta 時点で拒否する。
+#[test]
+fn apply_delta_add_is_live_with_track_duration_rejected() {
+    let mut catalog = MsfCatalog::new();
+    // loc_track は isLive=true で作られる
+    let mut track = loc_track("v", Some("ns"));
+    track.track_duration = Some(1000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![track],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(
+        catalog.tracks.is_empty(),
+        "拒否時はトラックが追加されないこと"
+    );
+}
+
+/// draft-ietf-moq-msf-01 §5.2.18 (Codec): video トラックは codec が必須。
+/// add 経路でも encode 時まで待たず apply_delta 時点で拒否する。
+#[test]
+fn apply_delta_add_video_without_codec_rejected() {
+    let mut catalog = MsfCatalog::new();
+    let mut track = loc_track("v", Some("ns"));
+    track.role = Some("video".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![track],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(
+        catalog.tracks.is_empty(),
+        "拒否時はトラックが追加されないこと"
+    );
+}
+
 #[test]
 fn apply_delta_remove_deletes_track() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove は既存トラックを削除する
@@ -464,4 +511,65 @@ fn apply_delta_operations_applied_in_order() {
         .apply_delta(&delta, None)
         .expect("操作は配列順に適用される");
     assert_eq!(catalog.tracks.len(), 1);
+}
+
+/// 複数トラックの add で 1 件が不正な場合、部分適用せずに拒否する
+#[test]
+fn apply_delta_add_batch_with_invalid_track_rejected_without_partial_apply() {
+    let mut catalog = MsfCatalog::new();
+    let mut invalid = loc_track("bad", Some("ns"));
+    // isLive=true (loc_track の既定) なので trackDuration は不正
+    invalid.track_duration = Some(1000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("ok", Some("ns")), invalid],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(
+        catalog.tracks.is_empty(),
+        "不正トラックを含むバッチは部分適用しないこと"
+    );
+}
+
+/// 有効な複数トラックの add は全件・投入順で追加される
+#[test]
+fn apply_delta_add_multiple_tracks_appends_in_order() {
+    let mut catalog = MsfCatalog::new();
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("v1", Some("ns")), loc_track("v2", Some("ns"))],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("複数トラックの add は成功する");
+    assert_eq!(catalog.tracks.len(), 2);
+    assert_eq!(catalog.tracks[0].name, "v1");
+    assert_eq!(catalog.tracks[1].name, "v2");
+}
+
+/// add 操作内でトラック名が重複する場合も部分適用せずに拒否する
+#[test]
+fn apply_delta_add_batch_with_duplicate_name_rejected_without_partial_apply() {
+    let mut catalog = MsfCatalog::new();
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![loc_track("v", Some("ns")), loc_track("v", Some("ns"))],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+    assert!(
+        catalog.tracks.is_empty(),
+        "重複名を含むバッチは部分適用しないこと"
+    );
 }
