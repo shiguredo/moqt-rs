@@ -1,7 +1,7 @@
 # example の SubgroupWriter が FIRST_OBJECT を正しく設定する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-example-first-object-bit
 - Polished: 2026-09-11
 
@@ -35,3 +35,14 @@ draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header) の FIRST_OBJECT bit の�
 - ヘッダのワイヤ送信が最初の Pass まで遅延され、Session 登録 (`send_subgroup_header`) は `new` の時点で完了していること
 - `first_object` の決定と全 Skip 時の挙動が回帰テストで固定されていること
 - example のビルドと `--fake-capture-device` による疑似キャプチャ動作が維持されること
+
+## 解決方法
+
+`SubgroupWriter` のヘッダ送信を最初の Pass まで遅延し、FIRST_OBJECT bit と終端方法を仕様に合わせた。
+
+- ストリーム開設と Session 登録は `new` で行い、ワイヤへの SUBGROUP_HEADER 送信は最初の Pass まで遅延した。最初の Pass が Object 0 なら `first_object: true`、Object 0 が Skip された場合は false とする。
+- Object ID 追跡と FIRST_OBJECT 決定を sans-I/O の `SubgroupObjectState` に統合し、Skip を含む delta と reset 要否を単体テストで固定した。
+- 一度も Pass しなかった場合と、フィルタ不通過で省略した Object が 1 つでもある場合は、FIN ではなく `DataStreamResetReason::Cancelled` で reset し、`RequestStreamEnd::Reset` を通知する (draft-ietf-moq-transport-21 §11.3.2 の MUST)。
+- `catalog.rs` のカタログ Skip 経路でも `finish` を呼び、reset で終端するようにした。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
