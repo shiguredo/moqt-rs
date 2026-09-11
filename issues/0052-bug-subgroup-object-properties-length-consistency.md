@@ -1,7 +1,7 @@
 # encode の properties blob の Properties Length と実データ長の一致を検証する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-properties-length-consistency
 - Polished: 2026-09-11
 
@@ -33,3 +33,13 @@ status の Normal / 非 Normal を問わず行い、`Length = 0` + 余分なバ�
 - Properties Length = 0 を含むデータ (`&[0x00]`) と、Length が一致する非空プロパティが正常にエンコードされること
 - `SubgroupObject::encode` / `FetchStreamObject::encode` の両方に適用されていること
 - 回帰テストが `tests/test_stream/subgroup_object.rs` / `tests/test_stream/fetch_stream_object.rs` 等に追加されていること
+
+## 解決方法
+
+`SubgroupObject::encode` / `FetchStreamObject::encode` に Properties Length と実データ長の一致検証を追加し、不正ワイヤの生成を防いだ。
+
+- `src/stream.rs` に `validate_properties_blob` を追加し、`varint::decode` の消費バイト数 `n` を使って `Length == (data.len() - n)` を検証する (加算形は `u64::MAX` で桁あふれするため減算形)。
+- `SubgroupObject::encode` は書き込み前に同ヘルパーを呼び、非 Normal status の検査も同ヘルパーの戻り値に統合した。`FetchStreamObject::encode` も書き込み前に呼ぶ。
+- 途中で切れた Length varint、Length と実データ長の不一致、`u64::MAX` の 9 バイト varint を `ProtocolViolation` で拒否する回帰テストと、非最小エンコーディング受理・非空 Properties の正常系テストを追加した。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / no_std ビルドが通ることを確認した。
