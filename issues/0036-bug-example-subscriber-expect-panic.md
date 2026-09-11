@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-example-subscriber-expect-panic
+- Polished: 2026-09-11
 
 ## 目的
 
