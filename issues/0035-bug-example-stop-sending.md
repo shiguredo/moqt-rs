@@ -1,7 +1,7 @@
 # example の stop_sending が実際に STOP_SENDING を送るようにする
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-11
 - Branch: feature/fix-example-stop-sending
 - Polished: 2026-09-11
 
@@ -31,3 +31,14 @@ subscriber は停止時に `client.stop_sending(rid)` を呼ぶが、peer へ ca
 - メインループから bidi 受信タスクへ request_id 単位の停止指示を渡す経路が追加されていること
 - example のビルドが維持されること
 - subscriber の停止時に peer が request stream の停止を観測できることを確認する手順が、issue または example のコードコメントに記載されていること (標準フローは直後に connection close するため、確認時は close を遅らせる)
+
+## 解決方法
+
+`MoqtClient::stop_sending` が bidi request stream に実際の STOP_SENDING を送出するようにした。
+
+- `RecvStream` / `WtRecvStream` に STOP_SENDING 送出 API を追加した (QUIC / WebTransport 両対応)。
+- bidi 受信タスクへ request_id 単位で停止指示を渡すチャネルを追加し、タスクは指示を受けると受信半に STOP_SENDING を送出して結果を oneshot で返す。
+- stop_sending は Session の状態遷移後、送信方向の RESET_STREAM (draft-ietf-moq-transport-21 §6.4.2.3)、回収対象への登録、停止指示、ack 待ち (1 秒タイムアウト) の順で行う。`Sent STOP_SENDING` は送出 API 呼び出し成功後のみログし、失敗時は理由を警告ログに残す。
+- 手動確認手順を doc コメントに記載した。
+- `CHANGES.md` の `[FIX]` にエントリを追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
