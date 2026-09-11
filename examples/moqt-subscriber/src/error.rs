@@ -15,6 +15,8 @@ pub enum Error {
     Decode(shiguredo_dav1d::Error),
     /// Opus デコードエラー
     Opus(shiguredo_opus::Error),
+    /// raw_player (SDL) エラー
+    Player(raw_player::Error),
     /// Apple Video Toolbox エラー (H.264 / H.265 デコード)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
@@ -34,6 +36,7 @@ impl fmt::Display for Error {
             Self::Moqt(e) => write!(f, "MoQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
+            Self::Player(e) => write!(f, "player: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
             Self::Io(e) => write!(f, "I/O: {e}"),
@@ -65,6 +68,12 @@ impl From<shiguredo_dav1d::Error> for Error {
 impl From<shiguredo_opus::Error> for Error {
     fn from(e: shiguredo_opus::Error) -> Self {
         Self::Opus(e)
+    }
+}
+
+impl From<raw_player::Error> for Error {
+    fn from(e: raw_player::Error) -> Self {
+        Self::Player(e)
     }
 }
 

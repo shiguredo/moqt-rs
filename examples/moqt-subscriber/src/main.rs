@@ -91,18 +91,23 @@ fn main() {
     });
 
     // メインスレッドで raw_player を動かす
-    run_raw_player(frame_rx, audio_rx);
+    if let Err(e) = run_raw_player(frame_rx, audio_rx) {
+        tracing::error!("Fatal: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// メインスレッドで raw_player のイベントループを実行する
 ///
 /// macOS では SDL のウィンドウ操作がメインスレッドでしか動作しないため、
 /// raw_player はメインスレッドで動かし、MoQT 処理は別スレッドで実行する。
+///
+/// SDL の初期化やウィンドウ・レンダラー作成に失敗する環境でも panic せず、`Error::Player` として失敗を返す。
 fn run_raw_player(
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
     audio_rx: std::sync::mpsc::Receiver<DecodedAudioFrame>,
-) {
-    raw_player::init().expect("failed to init raw_player");
+) -> error::Result<()> {
+    raw_player::init()?;
     tracing::info!("Player initialized, waiting for frames...");
 
     let mut video_player: Option<raw_player::VideoPlayer> = None;
@@ -135,17 +140,13 @@ fn run_raw_player(
                 };
                 if need_recreate {
                     tracing::info!("Creating player window: {}x{}", frame.width, frame.height);
-                    video_player = Some(
-                        raw_player::VideoPlayer::new(
-                            frame.width,
-                            frame.height,
-                            "kaki - MoQT Subscriber",
-                        )
-                        .expect("failed to create player"),
-                    );
-                    if let Some(ref p) = video_player {
-                        p.play().expect("failed to play");
-                    }
+                    let player = raw_player::VideoPlayer::new(
+                        frame.width,
+                        frame.height,
+                        "kaki - MoQT Subscriber",
+                    )?;
+                    player.play()?;
+                    video_player = Some(player);
                 }
 
                 if let Some(ref p) = video_player {
@@ -228,6 +229,7 @@ fn run_raw_player(
     drop(audio_player);
     // SAFETY: プレイヤーループ終了後に一度だけ呼び出す
     unsafe { raw_player::quit() };
+    Ok(())
 }
 
 /// `&[i16]` をリトルエンディアンのバイト列に変換する

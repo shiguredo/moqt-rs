@@ -37,6 +37,8 @@
   - @voluntas
 - [FIX] moqt-transport の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
   - @voluntas
+- [FIX] moqt-subscriber の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
+  - @voluntas
 
 ### misc
 
