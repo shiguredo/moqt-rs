@@ -3,7 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-clone-into-track-lang-validation
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-11
 
 ## 目的
 
@@ -22,9 +22,11 @@
 ## 設計方針
 
 `into_track` の末尾検証を `validate_media_track_fields(&track)?` から `validate_full_track(&track)?` に置き換える (解決済みで `parent_name` は `None` なので `validate_full_track` の parentName 検査を通る)。これにより add / clone / encode で同一の検証関数を使う。
+あわせて `into_track` の `# Errors` を `validate_full_track` の検証範囲に合わせて更新し、新たに検証対象となる §5.2.32 (Language) を追記する。
 
 ## 完了条件
 
 - clone の継承結果が不正な lang を持つ場合、`apply_delta` 時点で `InvalidCatalog` として拒否されること
+- `into_track` の `# Errors` が `validate_full_track` の検証範囲 (少なくとも §5.2.32 Language) を反映していること
 - 既存の正常系が維持されること
 - 回帰テストが `tests/test_msf/` に追加されていること
