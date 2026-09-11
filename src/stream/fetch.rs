@@ -9,7 +9,7 @@
 //! - [Properties (..)]          — bit5 が立っている場合
 //! - Object Payload Length (vi64)
 //! - [Object Payload (..)]
-use super::FETCH_HEADER_TYPE;
+use super::{FETCH_HEADER_TYPE, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
@@ -342,6 +342,7 @@ impl FetchStreamObject {
     /// - Datagram 起源なのに Subgroup ID を持つ: `ProtocolViolation`
     /// - `has_properties` と `properties_data` の組み合わせが不正 (true なのに `None` / 空スライス、
     ///   または false なのに `Some`): `ProtocolViolation`
+    /// - Properties Length varint が不正、または Properties Length と実データ長が一致しない: `ProtocolViolation`
     /// - `prior_context` に対して prior 参照が不正: `ProtocolViolation`
     pub fn encode(
         &self,
@@ -376,6 +377,11 @@ impl FetchStreamObject {
             return Err(MessageError::ProtocolViolation(
                 "properties_data is provided but has_properties is not set",
             ));
+        }
+        // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): Properties Length と
+        // 実データ長の一致を書き込み前に検証する
+        if let Some(props) = properties_data {
+            validate_properties_blob(props)?;
         }
 
         // prior 参照文脈の検証

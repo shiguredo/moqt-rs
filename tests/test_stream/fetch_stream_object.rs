@@ -420,7 +420,7 @@ fn encode_non_empty_properties_roundtrip() {
         is_datagram_origin: false,
         payload_length: 5,
     };
-    let props = [0x02, 0x00, 0x00]; // Properties Length = 2 + KVP (prop_type 0 / VarInt 0)
+    let props = [0x02, 0x02, 0x00]; // Properties Length = 2 + KVP (prop_type 0x02 / VarInt 0)
     let mut buf = Vec::new();
     obj.encode(Some(&props), FetchPriorContext::HasPriorObject, &mut buf)
         .expect("Length が一致する非空 Properties は合法");
@@ -428,4 +428,79 @@ fn encode_non_empty_properties_roundtrip() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(consumed, buf.len());
     assert_eq!(entry, FetchStreamEntry::Object(obj));
+}
+
+// Properties Length varint が途中で切れている blob は拒否する
+#[test]
+fn encode_truncated_properties_length_rejected() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 32,
+    };
+    let mut buf = vec![0xAA, 0xBB];
+    assert!(matches!(
+        obj.encode(Some(&[0x80]), FetchPriorContext::HasPriorObject, &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
+}
+
+// Properties Length と実データ長が一致しない blob は拒否する
+#[test]
+fn encode_properties_length_mismatch_rejected() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 32,
+    };
+    // Length = 64 を宣言して後続データ 0 バイト
+    let mut buf = vec![0xAA, 0xBB];
+    assert!(matches!(
+        obj.encode(Some(&[0x40]), FetchPriorContext::HasPriorObject, &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
+    // Length = 0 を宣言して余分な 1 バイト
+    let mut buf = Vec::new();
+    assert!(matches!(
+        obj.encode(
+            Some(&[0x00, 0xAA]),
+            FetchPriorContext::HasPriorObject,
+            &mut buf
+        ),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+// Length が u64::MAX の 9 バイト varint でも桁あふれで panic せず拒否する
+#[test]
+fn encode_properties_length_u64_max_rejected() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 32,
+    };
+    let mut buf = vec![0xAA];
+    assert!(matches!(
+        obj.encode(
+            Some(&[0xFF; 9]),
+            FetchPriorContext::HasPriorObject,
+            &mut buf
+        ),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと");
 }

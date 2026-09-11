@@ -31,6 +31,8 @@
   - @voluntas
 - [FIX] FetchStreamObject の encode で空スライス (`Some(&[])`) の properties を拒否し、Properties Length 欠落の不正ワイヤ生成を防止する
   - @voluntas
+- [FIX] `SubgroupObject` / `FetchStreamObject` の encode で Properties Length と実データ長の不一致を `ProtocolViolation` として拒否し、不正ワイヤ生成を防止する
+  - @voluntas
 
 ### misc
 

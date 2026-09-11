@@ -210,3 +210,113 @@ fn non_normal_status_with_zero_length_properties_encoded() {
     assert_eq!(decoded.status, Some(0x03));
     assert_eq!(props.as_deref(), Some(&[0x00][..]));
 }
+
+// Properties Length varint が途中で切れている blob は拒否する
+#[test]
+fn truncated_properties_length_rejected() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 5,
+        status: None,
+    };
+    let mut buf = vec![0xAA, 0xBB];
+    assert!(matches!(
+        obj.encode(true, Some(&[0x80]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
+}
+
+// Properties Length と実データ長が一致しない blob は拒否する
+#[test]
+fn properties_length_mismatch_rejected() {
+    // Length = 64 を宣言して後続データ 0 バイト
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 5,
+        status: None,
+    };
+    let mut buf = vec![0xAA, 0xBB];
+    assert!(matches!(
+        obj.encode(true, Some(&[0x40]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
+
+    // Length = 0 を宣言して余分な 1 バイト (Normal status)
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 0,
+        status: Some(0x00),
+    };
+    let mut buf = Vec::new();
+    assert!(matches!(
+        obj.encode(true, Some(&[0x00, 0xAA]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+
+    // Length = 0 を宣言して余分な 1 バイト (非 Normal status) も拒否する
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 0,
+        status: Some(0x03),
+    };
+    let mut buf = Vec::new();
+    assert!(matches!(
+        obj.encode(true, Some(&[0x00, 0xAA]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+// Length が u64::MAX の 9 バイト varint でも桁あふれで panic せず拒否する
+#[test]
+fn properties_length_u64_max_rejected() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 5,
+        status: None,
+    };
+    let mut buf = vec![0xAA];
+    assert!(matches!(
+        obj.encode(true, Some(&[0xFF; 9]), &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと");
+}
+
+// Length が一致する非空 Properties は正常にエンコードできる
+#[test]
+fn properties_length_matching_non_empty_encoded() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 5,
+        status: None,
+    };
+    let props = [0x02, 0x02, 0x00]; // Properties Length = 2 + KVP (prop_type 0x02 / VarInt 0)
+    let mut buf = Vec::new();
+    obj.encode(true, Some(&props), &mut buf)
+        .expect("Length が一致する非空 Properties は合法");
+    let (decoded, props_out, consumed) =
+        SubgroupObject::decode(&buf, true).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, buf.len());
+    assert_eq!(decoded.payload_length, 5);
+    assert_eq!(props_out.as_deref(), Some(&props[..]));
+}
+
+// 非最小エンコーディングの Length (2 バイトで 0) も長さが一致すれば受理する
+#[test]
+fn non_minimal_properties_length_accepted() {
+    let obj = SubgroupObject {
+        object_id_delta: 0,
+        payload_length: 5,
+        status: None,
+    };
+    // &[0x80, 0x00] は Length = 0 の非最小表現 (draft §8.1 は非最小を許容する)
+    let mut buf = Vec::new();
+    obj.encode(true, Some(&[0x80, 0x00]), &mut buf)
+        .expect("非最小エンコーディングの Length は合法");
+    let (_, props_out, consumed) =
+        SubgroupObject::decode(&buf, true).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, buf.len());
+    assert_eq!(props_out.as_deref(), Some(&[0x80, 0x00][..]));
+}

@@ -12,7 +12,7 @@
 //! - bit6 = FIRST_OBJECT
 //!
 //! この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-use super::validate_object_status;
+use super::{validate_object_status, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
@@ -207,8 +207,8 @@ impl SubgroupObject {
     /// - status と payload_length の組み合わせが不正、または status が未知の値: `ProtocolViolation`
     /// - `has_properties` と `properties_data` の組み合わせが不正 (true なのに `None` / 空スライス、
     ///   または false なのに `Some`): `ProtocolViolation`
-    /// - Properties Length varint が不正、または非 Normal status に Properties Length > 0 の
-    ///   properties が付いている: `ProtocolViolation`
+    /// - Properties Length varint が不正、Properties Length と実データ長が一致しない、
+    ///   または非 Normal status に Properties Length > 0 の properties が付いている: `ProtocolViolation`
     pub fn encode(
         &self,
         has_properties: bool,
@@ -254,18 +254,15 @@ impl SubgroupObject {
             validate_object_status(status)?;
         }
 
-        // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
-        // 実際のプロパティデータ (Properties Length > 0) が付いている場合は PROTOCOL_VIOLATION。
-        // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
-        // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
-        if let Some(props) = properties_data
-            && matches!(self.status, Some(s) if s != 0)
-        {
-            // Properties Length varint をデコードして実際のプロパティ有無を判定する
-            let (prop_len, _) = varint::decode(props).map_err(|_| {
-                MessageError::ProtocolViolation("malformed properties length in subgroup object")
-            })?;
-            if prop_len > 0 {
+        // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): Properties Length と実データ長の
+        // 一致を status を問わず書き込み前に検証する
+        if let Some(props) = properties_data {
+            let prop_len = validate_properties_blob(props)?;
+            // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): status が Normal (0x0) 以外の
+            // オブジェクトに実際のプロパティデータ (Properties Length > 0) が付いている場合は PROTOCOL_VIOLATION。
+            // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
+            // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))。
+            if prop_len > 0 && matches!(self.status, Some(s) if s != 0) {
                 return Err(MessageError::ProtocolViolation(
                     "properties on non-Normal status object is not allowed",
                 ));

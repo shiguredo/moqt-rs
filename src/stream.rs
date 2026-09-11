@@ -10,6 +10,7 @@
 //! - `encoder`: Fetch ストリームのデルタ圧縮エンコーダ (sans I/O)
 use crate::error::MessageError;
 use crate::message::ControlMessage;
+use crate::varint;
 use alloc::vec::Vec;
 
 pub mod datagram;
@@ -130,4 +131,23 @@ fn validate_object_status(status: u64) -> Result<(), MessageError> {
             "unknown object status value",
         )),
     }
+}
+
+/// Properties 生バイト列の Properties Length と実データ長の一致を検証し、Length を返す
+///
+/// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): Properties は
+/// Properties Length (vi64) + Properties の構造で、Length は後続バイト数を表す。
+/// 空スライス、Properties Length varint が途中で切れた blob、長さの一致しない blob は
+/// `ProtocolViolation` とする。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+fn validate_properties_blob(data: &[u8]) -> Result<u64, MessageError> {
+    let (prop_len, n) = varint::decode(data)
+        .map_err(|_| MessageError::ProtocolViolation("malformed properties length"))?;
+    // varint::decode が Ok のとき n <= data.len() が保証されるため減算で桁あふれしない
+    if prop_len != (data.len() - n) as u64 {
+        return Err(MessageError::ProtocolViolation(
+            "properties length does not match the actual data length",
+        ));
+    }
+    Ok(prop_len)
 }
