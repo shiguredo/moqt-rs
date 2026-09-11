@@ -3,6 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-webtransport-datagram-receive
+- Polished: 2026-09-11
 
 ## 目的
 
@@ -31,6 +32,10 @@ QUIC 直結 (`moqt://`) は `s2n-quic` の datagram receiver を直接ポーリ�
 
 ## 完了条件
 
-- WebTransport 接続の subscriber が Object Datagram を受信して処理できること
+- WebTransport 接続の subscriber の `data_plane.recv_datagram` に Object Datagram の payload が届くこと
 - QUIC 直結の既存挙動が壊れないこと
 - 可能なら example の動作確認手順が `examples/README.md` に記載されていること
+
+## 依存
+
+- example publisher の `--use-datagram` は `ObjectDatagram.properties_data` に Properties Length を二重に前置する (0014)。Session はこの Properties を malformed track として扱い subscription を終端するため、Session まで含めた Object Datagram の受理確認は 0014 の修正後に行う。本 issue では datagram がアプリ層 (`data_plane.recv_datagram`) に届くことまでを確認する。
