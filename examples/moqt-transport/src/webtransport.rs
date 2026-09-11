@@ -670,6 +670,19 @@ impl WtRecvStream {
         }
     }
 
+    /// 受信方向へ STOP_SENDING を送出する (QUIC STOP_SENDING)
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
+        let code =
+            s2n_quic::application::Error::new(error_code).map_err(TransportError::transport)?;
+        self.recv
+            .stop_sending(code)
+            .map_err(TransportError::transport)
+    }
+
     /// ストリーム ID を返す (subscriber 側で使用)
     pub fn stream_id(&self) -> u64 {
         self.stream_id

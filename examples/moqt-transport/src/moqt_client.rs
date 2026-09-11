@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bytes::Bytes;
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::session::types::{
@@ -26,8 +26,8 @@ use shiguredo_moqt::{
     message::ControlMessage, message::ReasonPhrase, message::common::TrackNamespace,
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-    session::core::Session, session::types::DataStreamId, session::types::RequestStreamEnd,
-    session::types::SessionEvent, session::types::SessionState,
+    session::core::Session, session::types::DataStreamId, session::types::DataStreamResetReason,
+    session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
     session::types::Transport as MoqtTransport, stream::decoder::DecodedSubgroupObject,
     stream::fetch::FetchHeader, stream::subgroup::SubgroupHeader,
     track_properties::TrackProperties,
@@ -55,6 +55,14 @@ pub enum ObjectFilterOutcome {
 
 /// bidi 受信タスクからメインループへの通知
 pub type BidiMessage = (u64, Result<StreamRead<ControlMessage>>);
+
+/// bidi 受信タスクへの STOP_SENDING 指示
+struct StopSendingCommand {
+    /// Stream Reset Error Code (draft-ietf-moq-transport-21 §12.5 (Stream Reset Error Codes))
+    error_code: u64,
+    /// 受信半への STOP_SENDING 送出結果の完了通知
+    ack: oneshot::Sender<Result<()>>,
+}
 
 /// 制御ストリーム受信タスクからメインループへの通知
 pub type ControlIncoming = Result<StreamRead<ControlMessage>>;
@@ -115,6 +123,15 @@ impl ControlStream {
                 RecvChunk::End(end) => return Ok(StreamRead::Closed(end)),
             }
         }
+    }
+
+    /// 受信方向へ STOP_SENDING を送出する
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
+    /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
+        self.stream.stop_sending(error_code)
     }
 }
 
@@ -309,6 +326,8 @@ pub struct MoqtClient {
     control_send: SendStream,
     handle: StreamHandle,
     bidi_sends: HashMap<u64, SendStream>,
+    /// bidi 受信タスクへ STOP_SENDING の送出を依頼するチャネル (request_id 単位、値は error code と完了通知)
+    bidi_stop_txs: HashMap<u64, mpsc::Sender<StopSendingCommand>>,
     closed_request_streams: HashSet<u64>,
     control_rx: mpsc::Receiver<ControlIncoming>,
     bidi_tx: mpsc::Sender<BidiMessage>,
@@ -351,24 +370,41 @@ fn spawn_control_recv_task(
 }
 
 /// bidi request stream の受信 task を起動する
+///
+/// メインループから停止指示 (`mpsc`) を受けると、受信半に STOP_SENDING を送出し、
+/// その結果を `ack` で返して終了する。
 fn spawn_bidi_recv_task(
     request_id: u64,
     mut stream: ControlStream,
     tx: mpsc::Sender<BidiMessage>,
+    mut stop_rx: mpsc::Receiver<StopSendingCommand>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(task_monitor.clone().instrument(async move {
         loop {
-            match stream.recv_message().await {
-                Ok(message) => {
-                    let is_closed = matches!(message, StreamRead::Closed(_));
-                    if tx.send((request_id, Ok(message))).await.is_err() || is_closed {
-                        break;
+            tokio::select! {
+                biased;
+                command = stop_rx.recv() => {
+                    // 停止指示を受けたら受信半に STOP_SENDING を送出し、結果を依頼元へ返す
+                    if let Some(command) = command {
+                        let result = stream.stop_sending(command.error_code);
+                        let _ = command.ack.send(result);
                     }
-                }
-                Err(e) => {
-                    let _ = tx.send((request_id, Err(e))).await;
                     break;
+                }
+                message = stream.recv_message() => {
+                    match message {
+                        Ok(message) => {
+                            let is_closed = matches!(message, StreamRead::Closed(_));
+                            if tx.send((request_id, Ok(message))).await.is_err() || is_closed {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send((request_id, Err(e))).await;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -524,6 +560,7 @@ impl MoqtClient {
             control_send,
             handle,
             bidi_sends: HashMap::new(),
+            bidi_stop_txs: HashMap::new(),
             closed_request_streams: HashSet::new(),
             control_rx,
             bidi_tx,
@@ -725,6 +762,17 @@ impl MoqtClient {
     }
 
     /// 指定した subscription に対して STOP_SENDING を送信する (subscriber 側)
+    ///
+    /// `Session::stop_sending` で subscription を Terminated にした後、bidi 受信タスクへ
+    /// 停止指示を渡し、request stream の受信半に実際の STOP_SENDING を送出する。
+    /// 受信半への送出 API 呼び出しが成功した後にのみ `Sent STOP_SENDING` をログし、
+    /// 送出できなかった場合は未送出であることと理由を警告ログに残す。
+    /// I/O 送出に失敗しても戻り値は `Ok(())` とし、呼び出し側はログで未送出を判断する。
+    ///
+    /// 手動確認 (開発者向け): `examples/moqt-subscriber/src/pipeline.rs` の `client.close(0, "")` の直前に
+    /// `tokio::time::sleep(std::time::Duration::from_millis(100)).await` を一時的に入れて、
+    /// GOAWAY / close の前に STOP_SENDING を flush させ、peer (publisher / relay) 側で
+    /// 当該 bidi request stream が RESET_STREAM で停止することを `RUST_LOG=debug` のログで観測する。
     pub async fn stop_sending(&mut self, request_id: u64) -> Result<()> {
         {
             let mut session = lock_session(&self.session);
@@ -733,7 +781,55 @@ impl MoqtClient {
                 .map_err(|e| TransportError::Internal(format!("stop_sending: {e}")))?;
         }
         self.drain_events().await?;
-        tracing::info!("Sent STOP_SENDING (request_id={request_id})");
+        // 購読停止は subscriber 主導の cancel のため CANCELLED を使う
+        // (draft-ietf-moq-transport-21 §12.5 (Stream Reset Error Codes))
+        let error_code = DataStreamResetReason::Cancelled.error_code();
+        // 送信方向が開いたままなら RESET_STREAM で打ち切る
+        // (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
+        // RESET_STREAM、受信方向は STOP_SENDING)
+        if let Some(mut send) = self.bidi_sends.remove(&request_id)
+            && let Err(e) = send.reset(error_code)
+        {
+            tracing::warn!("Failed to reset bidi request stream (request_id={request_id}): {e}");
+        }
+        // 受信タスク終了後は peer からの close を検知できないため、回収対象として登録する。
+        // 実際の回収は通常の pump_once / tick に任せる (キュー済みの Closed を先に処理させるため、
+        // ここで即時 cleanup すると unknown request id になる余地がある)
+        self.closed_request_streams.insert(request_id);
+        let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: no bidi receive task (request_id={request_id})"
+            );
+            return Ok(());
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = StopSendingCommand {
+            error_code,
+            ack: ack_tx,
+        };
+        if stop_tx.send(command).await.is_err() {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: bidi receive task already finished (request_id={request_id})"
+            );
+            return Ok(());
+        }
+        // 受信タスクが bidi メッセージ送信でブロックしている場合に備え、ack 待ちに上限を設ける
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx).await {
+            Ok(Ok(Ok(()))) => tracing::info!("Sent STOP_SENDING (request_id={request_id})"),
+            Ok(Ok(Err(e))) => {
+                tracing::warn!("Failed to send STOP_SENDING (request_id={request_id}): {e}");
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: bidi receive task dropped the command (request_id={request_id})"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: timed out waiting for the bidi receive task (request_id={request_id})"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -901,11 +997,14 @@ impl MoqtClient {
                     let (mut send, recv) = self.handle.open_bidi_stream().await?;
                     send.send(Bytes::from(message.encode()?)).await?;
                     self.bidi_sends.insert(request_id, send);
+                    let (stop_tx, stop_rx) = mpsc::channel(1);
+                    self.bidi_stop_txs.insert(request_id, stop_tx);
                     let reader = ControlStream::new(recv);
                     spawn_bidi_recv_task(
                         request_id,
                         reader,
                         self.bidi_tx.clone(),
+                        stop_rx,
                         &self.task_monitor,
                     );
                 }
@@ -969,9 +1068,8 @@ impl MoqtClient {
                     // (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
                     // OpenFillFetchStream は fill 配信を要求された場合に発火する
                     // (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。本 example は fill 配信を行わないため無視する。
-                    // StopSendingRequestStream は受信方向の cancel 指示だが、
-                    // 受信半は受信タスクが所有し停止手段がないため無視する。
-                    // Session の自動発火経路もなく到達しない
+                    // StopSendingRequestStream は受信方向の cancel 指示だが、Session の自動発火経路がなく、
+                    // example は `MoqtClient::stop_sending` で bidi 受信タスクへ直接指示するため到達しない
                     // (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))。
                     // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
                     // ポーリングで参照するためここでは特別な処理を行わない
@@ -1006,6 +1104,7 @@ impl MoqtClient {
         }
         for request_id in forgotten {
             self.closed_request_streams.remove(&request_id);
+            self.bidi_stop_txs.remove(&request_id);
             if let Some(mut send) = self.bidi_sends.remove(&request_id) {
                 let _ = send.finish();
             }

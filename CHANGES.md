@@ -35,6 +35,8 @@
   - @voluntas
 - [FIX] moqt-publisher の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
   - @voluntas
+- [FIX] moqt-transport の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
+  - @voluntas
 
 ### misc
 
