@@ -117,8 +117,9 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<()> {
     let empty_props = LocProperties::new();
     let outcome = writer.write_object(&catalog_json, &empty_props).await?;
     if outcome == ObjectFilterOutcome::Skip {
-        // カタログがフィルタ不通過で届かないと subscriber は起動できないため、
-        // 静かに飲み込まずエラーとして扱う (従来の即終了と同等の顕在化)
+        // 全 Skip の writer を reset で終端してから、カタログが届かないことをエラーとして報告する
+        // (カタログがフィルタ不通過で届かないと subscriber は起動できないため、静かに飲み込まない)
+        writer.finish()?;
         return Err(Error::Other(
             "catalog object skipped by subscription filter".to_string(),
         ));

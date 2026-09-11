@@ -33,6 +33,8 @@
   - @voluntas
 - [FIX] `SubgroupObject` / `FetchStreamObject` の encode で Properties Length と実データ長の不一致を `ProtocolViolation` として拒否し、不正ワイヤ生成を防止する
   - @voluntas
+- [FIX] moqt-publisher の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
+  - @voluntas
 
 ### misc
 
