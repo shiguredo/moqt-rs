@@ -3,7 +3,7 @@
 - Created: 2026-09-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-stream-object-encode-validation
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-11
 
 ## 目的
 
@@ -13,7 +13,7 @@
 
 `src/stream/fetch.rs` の `FetchStreamObject::encode` は `has_properties=true` かつ `properties_data=Some(&[])` を許し、`buf.extend_from_slice(props)` が 0 バイトになるため Properties Length varint が書かれないワイヤを生成しうる。`SubgroupObject::encode` で 0033 が修正した不具合と同型。
 
-また `&mut Vec<u8>` を取るため、検証順によっては失敗時に `buf` に部分バイトが残る余地がある。
+既存の検証 (datagram 起源・properties 整合性・prior 文脈) はすべて最初の書き込みより前にあり、失敗時に `buf` は変化しない。空 properties の検証も同じく書き込み前に置き、この契約を維持する。
 
 根拠:
 
@@ -29,6 +29,6 @@
 ## 完了条件
 
 - `has_properties=true` + 空 properties が `ProtocolViolation` で拒否されること
-- 不正入力で失敗したときに `buf` が呼び出し前と一致すること
+- 空 properties の検証が書き込み前に実行され、失敗したときに `buf` が呼び出し前と一致すること
 - 正常系 (Properties Length = 0 を含むデータ、非空データ) が壊れていないこと
 - 回帰テストが `tests/test_stream/fetch_stream_object.rs` 等に追加されていること
