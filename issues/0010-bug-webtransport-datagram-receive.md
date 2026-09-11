@@ -39,3 +39,7 @@ QUIC 直結 (`moqt://`) は `s2n-quic` の datagram receiver を直接ポーリ�
 ## 依存
 
 - example publisher の `--use-datagram` は `ObjectDatagram.properties_data` に Properties Length を二重に前置する (0014)。Session はこの Properties を malformed track として扱い subscription を終端するため、Session まで含めた Object Datagram の受理確認は 0014 の修正後に行う。本 issue では datagram がアプリ層 (`data_plane.recv_datagram`) に届くことまでを確認する。
+
+## pending にする理由
+
+WebTransport セッションの確立自体が現在の依存クレート (shiguredo_http3 / s2n-quic) では成立しないことが判明した (0063)。CONNECT 前の SETTINGS 待ち、transport parameter 検証、確立前 datagram の保持が必要で、本 issue のスコープを超える。0063 の対応後に reopened して datagram 受信の確認を行う。
