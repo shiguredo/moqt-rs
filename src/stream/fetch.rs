@@ -335,6 +335,14 @@ impl FetchStreamObject {
     ///
     /// `prior_context` で prior object 参照の妥当性を検証する。
     /// `properties_data` は `has_properties` が true の場合に渡す。
+    /// プロパティが空でも `has_properties` が true なら Properties Length = 0 を含むデータを渡す必要がある。
+    ///
+    /// # Errors
+    ///
+    /// - Datagram 起源なのに Subgroup ID を持つ: `ProtocolViolation`
+    /// - `has_properties` と `properties_data` の組み合わせが不正 (true なのに `None` / 空スライス、
+    ///   または false なのに `Some`): `ProtocolViolation`
+    /// - `prior_context` に対して prior 参照が不正: `ProtocolViolation`
     pub fn encode(
         &self,
         properties_data: Option<&[u8]>,
@@ -353,6 +361,15 @@ impl FetchStreamObject {
         if self.has_properties && properties_data.is_none() {
             return Err(MessageError::ProtocolViolation(
                 "has_properties is set but properties_data is not provided",
+            ));
+        }
+        // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): Properties は
+        // Properties Length (vi64) + Properties の構造であり、空スライスは Length varint を
+        // 含まない契約違反入力。呼び出し側は Length = 0 を含むデータ (`&[0x00]` 等) を渡すこと。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        if self.has_properties && properties_data.is_some_and(|data| data.is_empty()) {
+            return Err(MessageError::ProtocolViolation(
+                "properties data must include Properties Length (empty slice is not allowed)",
             ));
         }
         if !self.has_properties && properties_data.is_some() {

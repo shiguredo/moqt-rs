@@ -29,6 +29,8 @@
   - @voluntas
 - [FIX] `.session` 名前空間の非空トラック名への FETCH / TRACK_STATUS を `DOES_NOT_EXIST` で拒否する
   - @voluntas
+- [FIX] FetchStreamObject の encode で空スライス (`Some(&[])`) の properties を拒否し、Properties Length 欠落の不正ワイヤ生成を防止する
+  - @voluntas
 
 ### misc
 

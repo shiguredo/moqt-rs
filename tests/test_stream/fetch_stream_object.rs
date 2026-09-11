@@ -365,3 +365,67 @@ fn unknown_flags_at_or_above_128_rejected() {
         ))
     ));
 }
+
+// 空スライスは Properties Length varint を含まない契約違反入力として拒否し、
+// 失敗時に buf へ部分バイトを残さない
+#[test]
+fn encode_has_properties_with_empty_slice_rejected() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 32,
+    };
+    let mut buf = vec![0xAA, 0xBB, 0xCC];
+    assert!(matches!(
+        obj.encode(Some(&[]), FetchPriorContext::HasPriorObject, &mut buf),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+    assert_eq!(buf, vec![0xAA, 0xBB, 0xCC], "失敗時に buf が変化しないこと");
+}
+
+// has_properties=true でも Properties Length = 0 を含むデータは正常にエンコードできる
+#[test]
+fn encode_properties_length_zero_roundtrip() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 32,
+    };
+    let mut buf = Vec::new();
+    obj.encode(Some(&[0x00]), FetchPriorContext::HasPriorObject, &mut buf)
+        .expect("Properties Length = 0 は合法");
+    let (entry, consumed) = FetchStreamEntry::decode(&buf, FetchPriorContext::HasPriorObject)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, buf.len());
+    assert_eq!(entry, FetchStreamEntry::Object(obj));
+}
+
+// 非空の Properties は Properties Length と実データが一致していれば正常にエンコードできる
+#[test]
+fn encode_non_empty_properties_roundtrip() {
+    let obj = FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(100),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 5,
+    };
+    let props = [0x02, 0x00, 0x00]; // Properties Length = 2 + KVP (prop_type 0 / VarInt 0)
+    let mut buf = Vec::new();
+    obj.encode(Some(&props), FetchPriorContext::HasPriorObject, &mut buf)
+        .expect("Length が一致する非空 Properties は合法");
+    let (entry, consumed) = FetchStreamEntry::decode(&buf, FetchPriorContext::HasPriorObject)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, buf.len());
+    assert_eq!(entry, FetchStreamEntry::Object(obj));
+}
