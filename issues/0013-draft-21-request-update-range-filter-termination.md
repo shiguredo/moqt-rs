@@ -1,7 +1,7 @@
 # REQUEST_UPDATE の Range Filter 拒否で subscription を終端する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-request-update-range-filter-termination
 - Polished: 2026-09-10
 
@@ -62,3 +62,16 @@ draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions) の MUST を満た�
 - SUBSCRIBE / PUBLISH / FETCH / SUBSCRIBE_TRACKS の Range Filter 拒否挙動が従来どおりであること
 - `tests/test_session/subscription/subscription_limits.rs` の既存テストが新挙動に追従し、`cargo test --workspace` と PBT が通ること
 - 単一メッセージ・累積・role 別の回帰テストが `tests/test_session/subscription/` に追加されていること
+
+## 解決方法
+
+REQUEST_UPDATE の Range Filter 拒否を state / role で分岐し、自側 publisher の subscription を PUBLISH_DONE(UPDATE_FAILED) で終端するようにした。
+
+- `src/session/core.rs` の `check_incoming_range_filters` から REQUEST_ERROR の送出を外し、拒否理由 (`&'static str`) を返すようにした。初回 SUBSCRIBE / PUBLISH / FETCH / SUBSCRIBE_TRACKS は呼び出し元で従来どおり REQUEST_ERROR (INVALID_FILTER) + FIN を送る (挙動不変)。
+- `src/session/subscription/recv.rs` に `reject_request_update_range_filters` を追加し、REQUEST_UPDATE の拒否を次のように分岐した。
+  - Established かつ自側 publisher: `send_request_error` と同じ経路で REQUEST_ERROR (INVALID_FILTER) → `Terminated` → PUBLISH_DONE(UPDATE_FAILED)。open 中の outgoing data stream (subgroup / fill fetch) がある場合は PUBLISH_DONE を保留し、全 stream 終端後に自動送信する。REQUEST_ERROR は FIN しない。
+  - Established かつ自側 subscriber: 従来どおり REQUEST_ERROR のみ。PUBLISH_DONE は publisher である peer の責務とし、セッションも閉じない。
+  - Pending / Terminated: REQUEST_UPDATE は Established の self loop のみのため state machine の違反として PROTOCOL_VIOLATION でセッションを閉じる (valid な REQUEST_UPDATE の state 検証と同じ経路)。
+- `handle_update_for_subscription` の累積上限超過も同じ分岐に載せた。拒否時に `pending_update_params` を更新しない契約は維持している (subscriber 側は据え置き、publisher 側は終端でクリア)。
+- `tests/test_session/subscription/subscription_limits.rs` の既存ヘルパー・テストを新挙動に追従させ、単一メッセージ拒否 / 累積拒否 / 保留 / 2 通目 (pipelining) / subscriber / Pending / 初回 PUBLISH・FETCH・SUBSCRIBE_TRACKS の回帰テストを追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
