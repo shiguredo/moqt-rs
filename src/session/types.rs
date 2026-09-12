@@ -279,6 +279,11 @@ pub enum SessionEvent {
         redirect: Option<Redirect>,
     },
     /// peer からの NAMESPACE を受信した (draft §9.16 (NAMESPACE))
+    ///
+    /// 既に active な同一 full namespace の NAMESPACE を再受信した場合は発行しない (full namespace は
+    /// 現在の prefix と確定待ち prefix で解決して照合する)。NAMESPACE_DONE で削除された後の再告知は
+    /// 新規として発行する。prefix 更新 (`REQUEST_OK`) の適用後に新 prefix 相対で同一 suffix 文字列の
+    /// NAMESPACE が届いた場合も、別の full namespace として新規に発行する。
     NamespaceReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -286,6 +291,11 @@ pub enum SessionEvent {
         suffix: TrackNamespace,
     },
     /// peer からの NAMESPACE_DONE を受信した (draft §9.17 (NAMESPACE_DONE))
+    ///
+    /// 現在の prefix または確定待ち prefix で解決した full namespace が Session 内部の集合に
+    /// 一致した場合に発行する。投影から外れた full namespace は、coalescing で prefix が戻った後に
+    /// 届いた NAMESPACE_DONE の照合で使う。どの候補 prefix でも一致しない NAMESPACE_DONE は
+    /// draft §9.15 (SUBSCRIBE_NAMESPACE) により PROTOCOL_VIOLATION でセッションを閉じる。
     NamespaceDoneReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -1560,10 +1570,16 @@ pub struct NamespaceSubscription {
     pub prefix: TrackNamespace,
     /// 現在の状態
     pub state: NamespaceSubscriptionState,
-    /// 現在 active な namespace suffix 集合 (NAMESPACE 受信済み、NAMESPACE_DONE 未受信)
+    /// 現在の prefix 配下にある active な namespace suffix 集合
     ///
-    /// draft §9.15 (SUBSCRIBE_NAMESPACE): NAMESPACE_DONE が対応する NAMESPACE より先に届いた場合は
-    /// PROTOCOL_VIOLATION。ストリームリセット時は全件を implicit NAMESPACE_DONE として扱う。
+    /// NAMESPACE 受信で追加し、NAMESPACE_DONE 受信で削除する。draft §9.15 (SUBSCRIBE_NAMESPACE):
+    /// NAMESPACE_DONE が対応する NAMESPACE より先に届いた場合は PROTOCOL_VIOLATION。
+    /// ストリームリセット時は全件を implicit NAMESPACE_DONE として扱う。
+    ///
+    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): prefix 更新
+    /// (`REQUEST_OK`) の適用後、新 prefix 配下にない full namespace はこの投影から外れる
+    /// (Session 内部では full namespace を保持し、旧 prefix 基準の NAMESPACE_DONE も照合する)。
+    /// アプリは `RequestOkReceived` 受信後に `prefix` と本集合を読み直すこと。
     pub active_suffixes: hashbrown::HashSet<TrackNamespace>,
 }
 

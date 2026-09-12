@@ -205,6 +205,15 @@ pub(super) fn remove_alias_holder(
 pub(super) struct NamespaceState {
     pub(super) publications: HashMap<u64, NamespacePublication>,
     pub(super) subscriptions: HashMap<u64, NamespaceSubscription>,
+    /// request_id ごとの active な full Track Namespace (フィールド列) 集合
+    ///
+    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): prefix 更新後の
+    /// NAMESPACE / NAMESPACE_DONE は新 prefix 相対になる。suffix 文字列だけでは prefix を跨いだ
+    /// 同一性を判定できないため、受信時の prefix で解決した full namespace のフィールド列で
+    /// 一意化し、重複 NAMESPACE の抑止と NAMESPACE_DONE の照合に使う。
+    /// `NamespaceSubscription::active_suffixes` は現在の prefix 配下にある full namespace の
+    /// suffix 投影である (投影から外れた full namespace も NAMESPACE_DONE の照合のため保持する)。
+    pub(super) active_full_namespaces: HashMap<u64, HashSet<Vec<Vec<u8>>>>,
 }
 
 #[derive(Debug)]
@@ -518,6 +527,7 @@ impl Session {
             namespaces: NamespaceState {
                 publications: HashMap::new(),
                 subscriptions: HashMap::new(),
+                active_full_namespaces: HashMap::new(),
             },
             track_subscriptions: HashMap::new(),
             pending_prefix_updates: HashMap::new(),

@@ -9,6 +9,7 @@ use crate::message::{
     ControlMessage, Namespace, NamespaceDone, SubscribeNamespace, common::TrackNamespace,
 };
 use crate::message_parameter::MessageParameters;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use super::super::core::Session;
@@ -20,6 +21,57 @@ use super::{
     effective_prefix, pop_pending_prefix_update, prefix_overlaps, push_pending_prefix_update,
     terminationreason_from_end,
 };
+
+/// prefix と suffix から full Track Namespace のフィールド列を作る
+fn full_namespace_fields(prefix: &TrackNamespace, suffix: &TrackNamespace) -> Vec<Vec<u8>> {
+    let mut fields = Vec::new();
+    fields.extend(prefix.fields().iter().cloned());
+    fields.extend(suffix.fields().iter().cloned());
+    fields
+}
+
+/// full namespace 集合から現在の prefix 配下の suffix 投影を作り直す
+///
+/// prefix が変わると、新 prefix 配下にない full namespace は投影から外れる (full namespace 自体は
+/// NAMESPACE_DONE の照合のため保持する)。新 prefix 基準で切り出した suffix が TrackNamespace と
+/// して不正な場合は投影に含めない。
+fn refresh_active_suffixes(
+    active_suffixes: &mut hashbrown::HashSet<TrackNamespace>,
+    prefix: &TrackNamespace,
+    active_full_namespaces: &hashbrown::HashSet<Vec<Vec<u8>>>,
+) {
+    active_suffixes.clear();
+    let prefix_fields = prefix.fields();
+    for full in active_full_namespaces {
+        if let Some(tail) = full.strip_prefix(prefix_fields)
+            && let Ok(suffix) = TrackNamespace::new(tail.to_vec())
+        {
+            active_suffixes.insert(suffix);
+        }
+    }
+}
+
+/// 受信メッセージの full namespace を解決する候補 prefix 一覧を返す
+///
+/// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): responder は複数 REQUEST_UPDATE を
+/// 累積結果のみ適用してよい (coalescing)。その場合 REQUEST_OK の間に届くメッセージは、適用済みの
+/// 中間 prefix ではなく累積結果の prefix 基準でありうるため、現在の prefix に加えて確定待ちの
+/// prefix でも照合する。
+fn candidate_prefixes<'a>(
+    current: &'a TrackNamespace,
+    pending: Option<&'a VecDeque<Option<TrackNamespace>>>,
+) -> Vec<&'a TrackNamespace> {
+    let mut prefixes = Vec::new();
+    prefixes.push(current);
+    if let Some(pending) = pending {
+        for prefix in pending.iter().flatten() {
+            if !prefixes.contains(&prefix) {
+                prefixes.push(prefix);
+            }
+        }
+    }
+    prefixes
+}
 
 impl Session {
     // ─── クエリ API ─────────────────────────────────────────
@@ -46,6 +98,7 @@ impl Session {
         self.request_streams.remove(&request_id);
         self.remove_request_update_credit_entries(request_id);
         self.pending_prefix_updates.remove(&request_id);
+        self.namespaces.active_full_namespaces.remove(&request_id);
         self.namespaces.subscriptions.remove(&request_id)
     }
 
@@ -185,6 +238,8 @@ impl Session {
         };
         let implicit_done: Vec<TrackNamespace> = entry.active_suffixes.drain().collect();
         entry.state = NamespaceSubscriptionState::Terminated;
+        // Terminated 後は NAMESPACE / NAMESPACE_DONE を受理しないため full namespace も破棄する
+        self.namespaces.active_full_namespaces.remove(&request_id);
         // bidi stream 終端で確定待ちは破棄する (REQUEST_OK は届かない)
         self.pending_prefix_updates.remove(&request_id);
         let reason = if implicit_done.is_empty() {
@@ -323,23 +378,34 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-21 §9.16 (NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE): 同一 suffix の NAMESPACE
-        // 重複は draft が MUST で禁止していないが、active_suffixes の一意性維持のため PROTOCOL_VIOLATION で拒否する。
-        if !entry
-            .active_suffixes
-            .insert(msg.track_namespace_suffix.clone())
-        {
-            let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "duplicate NAMESPACE for the same suffix",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
-        self.events.push_back(SessionEvent::NamespaceReceived {
-            request_id,
-            suffix: msg.track_namespace_suffix,
+        // draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE) / §9.16 (NAMESPACE) /
+        // §9.17 (NAMESPACE_DONE): 同一 suffix の NAMESPACE 重複受信を違反とする規定はないため、
+        // MUST でない条件でセッションを閉じない。prefix を跨いだ同一性を判定するため、
+        // 候補 prefix (現在 + 確定待ち) で解決した full namespace のフィールド列で一意化し、
+        // 重複は無視して `NamespaceReceived` も再発行しない。NAMESPACE_DONE で削除された後の
+        // 再告知は新規として受理する。
+        let suffix = msg.track_namespace_suffix;
+        let pending = self.pending_prefix_updates.get(&request_id);
+        let prefixes = candidate_prefixes(&entry.prefix, pending);
+        let duplicate = prefixes.iter().any(|prefix| {
+            self.namespaces
+                .active_full_namespaces
+                .get(&request_id)
+                .is_some_and(|active| active.contains(&full_namespace_fields(prefix, &suffix)))
         });
+        if duplicate {
+            return Ok(());
+        }
+        // 新しい full namespace は現在の prefix 基準で登録する
+        let full = full_namespace_fields(&entry.prefix, &suffix);
+        self.namespaces
+            .active_full_namespaces
+            .entry(request_id)
+            .or_default()
+            .insert(full);
+        entry.active_suffixes.insert(suffix.clone());
+        self.events
+            .push_back(SessionEvent::NamespaceReceived { request_id, suffix });
         Ok(())
     }
 
@@ -375,8 +441,21 @@ impl Session {
             return Err(err);
         }
         // draft §9.15 (SUBSCRIBE_NAMESPACE): 対応する NAMESPACE を受けていない NAMESPACE_DONE は
-        // PROTOCOL_VIOLATION
-        if !entry.active_suffixes.remove(&msg.track_namespace_suffix) {
+        // PROTOCOL_VIOLATION。prefix を跨いだ同一性判定と coalescing の OK 間メッセージ対応のため、
+        // 候補 prefix (現在 + 確定待ち) で解決した full namespace のフィールド列で照合する。
+        let suffix = msg.track_namespace_suffix;
+        let pending = self.pending_prefix_updates.get(&request_id);
+        let prefixes = candidate_prefixes(&entry.prefix, pending);
+        let mut removed_any = false;
+        for prefix in &prefixes {
+            let full = full_namespace_fields(prefix, &suffix);
+            if let Some(active) = self.namespaces.active_full_namespaces.get_mut(&request_id)
+                && active.remove(&full)
+            {
+                removed_any = true;
+            }
+        }
+        if !removed_any {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "NAMESPACE_DONE received before corresponding NAMESPACE",
@@ -384,10 +463,22 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        self.events.push_back(SessionEvent::NamespaceDoneReceived {
-            request_id,
-            suffix: msg.track_namespace_suffix,
-        });
+        // 空になったエントリは除去し、投影の単一の真実である full namespace 集合から作り直す
+        if self
+            .namespaces
+            .active_full_namespaces
+            .get(&request_id)
+            .is_some_and(|active| active.is_empty())
+        {
+            self.namespaces.active_full_namespaces.remove(&request_id);
+        }
+        if let Some(active) = self.namespaces.active_full_namespaces.get(&request_id) {
+            refresh_active_suffixes(&mut entry.active_suffixes, &entry.prefix, active);
+        } else {
+            entry.active_suffixes.clear();
+        }
+        self.events
+            .push_back(SessionEvent::NamespaceDoneReceived { request_id, suffix });
         Ok(())
     }
 
@@ -632,6 +723,17 @@ impl Session {
                 };
                 if let Some(new_prefix) = pending {
                     entry.prefix = new_prefix;
+                    // draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions):
+                    // prefix 更新後の NAMESPACE / NAMESPACE_DONE は新 prefix 相対になる。
+                    // 新 prefix 配下にない full namespace は投影から外す (full namespace は
+                    // NAMESPACE_DONE の照合のため保持する)。coalescing した peer が中間 prefix を
+                    // 適用していない場合でも、旧基準の NAMESPACE_DONE を §9.15 に従って照合できる
+                    // (draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions))。
+                    if let Some(active) = self.namespaces.active_full_namespaces.get(&request_id) {
+                        refresh_active_suffixes(&mut entry.active_suffixes, &entry.prefix, active);
+                    } else {
+                        entry.active_suffixes.clear();
+                    }
                 }
             }
             NamespaceSubscriptionState::Terminated => {
@@ -692,6 +794,8 @@ impl Session {
         }
         // REQUEST_ERROR 受信で確定待ちは破棄する (REQUEST_OK は届かない)
         self.pending_prefix_updates.remove(&request_id);
+        // Terminated 後は NAMESPACE / NAMESPACE_DONE を受理しないため full namespace も破棄する
+        self.namespaces.active_full_namespaces.remove(&request_id);
         Ok(())
     }
 }

@@ -786,6 +786,90 @@ fn subscribe_namespace_request_ok_propagates_expires_parameter() {
     );
 }
 
+/// 同一 suffix の NAMESPACE を再受信してもセッションを閉じず、イベントも再発行しない
+///
+/// draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE) / §9.16 (NAMESPACE) /
+/// §9.17 (NAMESPACE_DONE) に NAMESPACE 重複受信を違反とする規定はない。
+#[test]
+fn duplicate_namespace_is_ignored() {
+    use shiguredo_moqt::session::types::SessionEvent;
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(ns(&[b"example"]));
+
+    // 同一 suffix の NAMESPACE を 2 回配信する
+    for _ in 0..2 {
+        server
+            .send_namespace(rid, ns(&[b"live"]))
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ns_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ns_msg)
+            .expect("重複 NAMESPACE は受理されること");
+    }
+    assert_eq!(client.state(), SessionState::Established);
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"live"])),
+        "active_suffixes に当該 suffix が残ること"
+    );
+
+    // NAMESPACE_DONE は 1 回で当該 suffix を削除する
+    server
+        .send_namespace_done(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("NAMESPACE_DONE は受理されること");
+    assert!(
+        !client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"live"])),
+        "NAMESPACE_DONE で当該 suffix が削除されること"
+    );
+
+    // DONE 後の再告知は新規の NAMESPACE として受理する
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg2)
+        .expect("DONE 後の再告知は受理されること");
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"live"])),
+        "再告知で active_suffixes に戻ること"
+    );
+
+    // NamespaceReceived は重複 1 回 + 再告知 1 回、NamespaceDoneReceived は 1 回
+    let mut received = 0;
+    let mut done = 0;
+    while let Some(e) = client.poll_event() {
+        match e {
+            SessionEvent::NamespaceReceived { request_id, .. } if request_id == rid => {
+                received += 1
+            }
+            SessionEvent::NamespaceDoneReceived { request_id, .. } if request_id == rid => {
+                done += 1
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        received, 2,
+        "2 回目の NAMESPACE は再発行せず、DONE 後の再告知は発行すること"
+    );
+    assert_eq!(done, 1, "NAMESPACE_DONE は 1 回で反映されること");
+}
+
 // ─── 送信側 REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX 反映 (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions)) ─────
 
 /// 送信側は REQUEST_UPDATE の送信直後には prefix を変えず、REQUEST_OK 受信後に
@@ -1452,4 +1536,436 @@ fn subscribe_namespace_terminated_subscription_does_not_block_overlap() {
         ns(&[b"a"]),
         "Terminated 購読を無視して新 prefix が適用されること"
     );
+}
+
+/// prefix 更新後は新 prefix 相対で同一 suffix 文字列の NAMESPACE が新規として届く
+///
+/// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): prefix 更新後の
+/// NAMESPACE は新 prefix 相対になるため、旧 prefix 相対で保持していた `active_suffixes` は
+/// 破棄される。
+#[test]
+fn namespace_after_prefix_update_is_not_treated_as_duplicate() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::SessionEvent;
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(old_prefix);
+
+    // 旧 prefix 相対で suffix "live" を広告する
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+    // `take_send_on_stream` は他のイベントを破棄するため、ここで 1 回目のイベントを数える
+    let mut first_received = 0;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::NamespaceReceived { request_id, .. } = e
+            && request_id == rid
+        {
+            first_received += 1;
+        }
+    }
+    assert_eq!(first_received, 1, "旧 prefix 基準の NAMESPACE が届くこと");
+
+    // client が prefix 更新を送り、REQUEST_OK で適用する
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .prefix,
+        new_prefix
+    );
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .is_empty(),
+        "旧 prefix 相対の suffix は破棄されること"
+    );
+
+    // 新 prefix 相対で同一 suffix 文字列 "live" を 2 回広告する (1 回目は新規、2 回目は抑止)
+    for _ in 0..2 {
+        server
+            .send_namespace(rid, ns(&[b"live"]))
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ns_msg2) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ns_msg2)
+            .expect("新基準の NAMESPACE は受理されること");
+    }
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"live"])),
+        "新 prefix 基準の suffix が active_suffixes に残ること"
+    );
+
+    let mut received = 0;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::NamespaceReceived { request_id, .. } = e
+            && request_id == rid
+        {
+            received += 1;
+        }
+    }
+    assert_eq!(
+        received, 1,
+        "prefix 更新後の NAMESPACE は新規 1 回だけ発行されること"
+    );
+}
+
+/// prefix を変更しない REQUEST_UPDATE の REQUEST_OK では active_suffixes を破棄しない
+#[test]
+fn namespace_suffixes_are_kept_on_update_without_prefix() {
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(ns(&[b"example"]));
+
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+
+    // TRACK_NAMESPACE_PREFIX を含まない REQUEST_UPDATE → REQUEST_OK
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .prefix,
+        ns(&[b"example"])
+    );
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"live"])),
+        "prefix 変更なしの REQUEST_OK では active_suffixes を破棄しないこと"
+    );
+}
+
+/// prefix を P0 → P1 → P0 と更新した場合でも、旧基準の NAMESPACE_DONE を受理する
+///
+/// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): receiver は複数 REQUEST_UPDATE を
+/// 累積結果のみ適用してよい (coalescing)。その場合 P1 は一度も適用されないため、P0 基準の
+/// NAMESPACE_DONE は対応する NAMESPACE が先行しており §9.15 違反ではない。
+#[test]
+fn coalesced_prefix_revert_keeps_namespace_for_done() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::SessionEvent;
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(old_prefix.clone());
+
+    // 旧 prefix 基準で suffix "live" を広告する
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+
+    // P0 → P1 と P1 → P0 を REQUEST_OK 前に連続送信する
+    for prefix in [new_prefix.clone(), old_prefix.clone()] {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+            value: MessageParameterValue::TrackNamespacePrefix(prefix),
+        });
+        client
+            .send_request_update(rid, params)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, upd_msg) = take_send_on_stream(&mut client);
+        server
+            .recv_stream_message(rid, upd_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+
+    // responder が累積結果のみ適用した場合と同様に中間状態を広告せず REQUEST_OK を 2 件返す
+    for _ in 0..2 {
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .prefix,
+        old_prefix
+    );
+
+    // P0 基準の NAMESPACE_DONE は対応する NAMESPACE が先行しているため受理される
+    server
+        .send_namespace_done(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("旧 prefix 基準の NAMESPACE_DONE が受理されること");
+    assert_eq!(client.state(), SessionState::Established);
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .is_empty()
+    );
+
+    let mut done = 0;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::NamespaceDoneReceived { request_id, .. } = e
+            && request_id == rid
+        {
+            done += 1;
+        }
+    }
+    assert_eq!(done, 1);
+}
+
+/// prefix を短縮すると full namespace は新 prefix 配下の suffix に投影し直される
+#[test]
+fn namespace_suffix_is_reprojected_on_prefix_shortening() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"a", b"b"]);
+    let new_prefix = ns(&[b"a"]);
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(old_prefix);
+
+    server
+        .send_namespace(rid, ns(&[b"c"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .prefix,
+        new_prefix
+    );
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .contains(&ns(&[b"b", b"c"])),
+        "新 prefix 基準の suffix [b, c] に投影されること"
+    );
+
+    // 新基準の NAMESPACE_DONE が受理される
+    server
+        .send_namespace_done(rid, ns(&[b"b", b"c"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("新基準の NAMESPACE_DONE が受理されること");
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .is_empty()
+    );
+}
+
+/// coalescing で REQUEST_OK の間に届いた累積結果 prefix 基準の NAMESPACE_DONE も受理する
+#[test]
+fn coalesced_prefix_revert_accepts_done_between_request_oks() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(old_prefix.clone());
+
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+
+    // P0 → P1 と P1 → P0 を REQUEST_OK 前に連続送信する
+    for prefix in [new_prefix.clone(), old_prefix.clone()] {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+            value: MessageParameterValue::TrackNamespacePrefix(prefix),
+        });
+        client
+            .send_request_update(rid, params)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, upd_msg) = take_send_on_stream(&mut client);
+        server
+            .recv_stream_message(rid, upd_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+
+    // responder が累積結果 P0 のみ適用したまま OK1 を送り、その直後に P0 基準の DONE を送る
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok1_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_namespace_done(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("確定待ち prefix 基準の NAMESPACE_DONE が受理されること");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // OK2 で累積結果 P0 が確定する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok2_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .prefix,
+        old_prefix
+    );
+    assert!(
+        client
+            .namespace_subscription(rid)
+            .expect("namespace_subscription が存在すること")
+            .active_suffixes
+            .is_empty()
+    );
+}
+
+/// prefix 更新の完了後に旧 prefix 基準の NAMESPACE_DONE が届くと §9.15 違反で閉じる
+#[test]
+fn stale_prefix_namespace_done_closes_session() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) = establish_subscribe_namespace_with(old_prefix);
+
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ns_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ns_msg)
+        .expect("NAMESPACE は受理されること");
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 現在 prefix は ["newprefix"]。suffix "live" は ["newprefix", "live"] を意味し、
+    // active な ["example", "live"] とは一致しないため §9.15 違反になる
+    server
+        .send_namespace_done(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    let err = client
+        .recv_stream_message(rid, done_msg)
+        .expect_err("旧 prefix 基準の NAMESPACE_DONE は §9.15 違反");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
 }
