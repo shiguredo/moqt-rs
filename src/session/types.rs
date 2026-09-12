@@ -1167,9 +1167,12 @@ pub struct Subscription {
     pub dynamic_groups: bool,
     /// publisher が設定した Publisher Priority (draft §5.1.2 Scheduling Algorithm, §10.4 DEFAULT PUBLISHER PRIORITY)
     ///
-    /// subgroup header 受信時に設定される。header が DEFAULT_PRIORITY bit を立てている
-    /// (`SubgroupHeader::publisher_priority` が `None`) 場合は、§10.4 に従って
-    /// `default_publisher_priority` → 128 の順で解決した値が入る。
+    /// subgroup header 受信時に「直近の header」の解決値で上書きされる。header が
+    /// DEFAULT_PRIORITY bit を立てている (`SubgroupHeader::publisher_priority` が `None`)
+    /// 場合は、§10.4 に従って `default_publisher_priority` → 128 の順で解決した値が入る。
+    /// Subgroup 単位の検証 (§12.1 条件 1 の priority 一致、重複 Object の優先度一貫性) は
+    /// 並行 Subgroup で上書きされうるこの値ではなく、`IncomingDataStream::Subgroup` が
+    /// header 時点で保持する解決値を使う。
     pub publisher_priority: Option<u8>,
     /// Track Property の DEFAULT_PUBLISHER_PRIORITY (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
     ///

@@ -86,6 +86,16 @@ pub(super) enum IncomingDataStream {
         ///
         /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
         header_publisher_priority: Option<u8>,
+        /// SUBGROUP_HEADER 時点で解決済みの Publisher Priority (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
+        ///
+        /// 解決は [`Subscription::resolve_header_publisher_priority`] (header 値 → Track Property の
+        /// DEFAULT_PUBLISHER_PRIORITY → 128) による。Subgroup 単位の値であり、§12.1 条件 1 の
+        /// priority 一致検証と重複 Object 検証 (`observe_object_fields`) で使う。
+        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
+        /// 並行 Subgroup の検証にはこの stream 保持値を使う。
+        ///
+        /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
+        resolved_publisher_priority: u8,
         /// 先頭 object を受信済みか (draft-ietf-moq-transport-21 §10.1 / §10.2: Object Property による
         /// delivery timeout オーバーライドは先頭 object のみ有効)
         first_object_received: bool,
@@ -938,6 +948,25 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // draft-ietf-moq-transport-21 §10.4 (DEFAULT PUBLISHER PRIORITY):
+        // "Subgroups and Datagrams for this subscription inherit this priority, unless they
+        // specifically override it." / "If omitted, the Default Publisher Priority is 128."
+        //
+        // SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が
+        // `None`) 場合は override が無いので、Track Property の DEFAULT_PUBLISHER_PRIORITY を
+        // 使い、それも無ければ既定値 128 を適用する。bit が立っていなければ header の値が
+        // override になる。Subgroup 単位の検証で使うため、解決済みの値を stream に保持する
+        // (`Subscription::publisher_priority` は直近 header の解決結果で上書きされる)。
+        let resolved_priority = {
+            let subscription = self
+                .subscriptions
+                .get_mut(&request_id)
+                .expect("subscription presence already checked by note_incoming_stream_opened");
+            let priority =
+                subscription.resolve_header_publisher_priority(header.publisher_priority);
+            subscription.publisher_priority = Some(priority);
+            priority
+        };
         self.data_streams.incoming.insert(
             stream_id,
             IncomingDataStream::Subgroup {
@@ -946,6 +975,7 @@ impl Session {
                 group_id: header.group_id,
                 subgroup_id,
                 header_publisher_priority: header.publisher_priority,
+                resolved_publisher_priority: resolved_priority,
                 first_object_received: false,
                 end_of_group: header.end_of_group,
                 last_object_id: None,
@@ -953,25 +983,6 @@ impl Session {
                 timeout_override_request_id: None,
             },
         );
-        // draft-ietf-moq-transport-21 §10.4 (DEFAULT PUBLISHER PRIORITY):
-        // "Subgroups and Datagrams for this subscription inherit this priority, unless they
-        // specifically override it." / "If omitted, the Default Publisher Priority is 128."
-        //
-        // SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が
-        // `None`) 場合は override が無いので、Track Property の DEFAULT_PUBLISHER_PRIORITY を
-        // 使い、それも無ければ既定値 128 を適用する。bit が立っていなければ header の値が
-        // override になる。
-        let resolved_priority = if let Some(subscription) = self.subscriptions.get_mut(&request_id)
-        {
-            let priority =
-                subscription.resolve_header_publisher_priority(header.publisher_priority);
-            subscription.publisher_priority = Some(priority);
-            priority
-        } else {
-            header
-                .publisher_priority
-                .unwrap_or(PUBLISHER_PRIORITY_DEFAULT)
-        };
         // draft §12.1 (Malformed Tracks) 条件 1: 同一 Subgroup ID の直前 Object と
         // Publisher Priority が異なる場合を検出する。subgroup_id が確定している場合のみ
         // 記録できる (FirstObjectId モードは recv_subgroup_object で解決後に記録する)。
@@ -1052,6 +1063,7 @@ impl Session {
             resolve_subgroup_id,
             is_first_object,
             header_publisher_priority,
+            resolved_publisher_priority,
         ) = match self.data_streams.incoming.get_mut(&stream_id) {
             Some(IncomingDataStream::Subgroup {
                 request_id,
@@ -1059,6 +1071,7 @@ impl Session {
                 group_id,
                 subgroup_id,
                 header_publisher_priority,
+                resolved_publisher_priority,
                 first_object_received,
                 last_object_id,
                 ..
@@ -1076,6 +1089,7 @@ impl Session {
                     subgroup_id.is_none(),
                     is_first,
                     *header_publisher_priority,
+                    *resolved_publisher_priority,
                 )
             }
             Some(IncomingDataStream::AwaitingHeader { .. }) => {
@@ -1161,23 +1175,22 @@ impl Session {
         });
         // 条件 1: FirstObjectId モードで subgroup_id が遅延解決された場合、header 時点では
         // 記録できないためここで priority を記録する。フィルタ不通過でも記録する
-        // (Subgroup 単位の wire 構造の整合)。
-        // 記録する priority は購読単位の直近値であり、Subgroup 単位の値にする対応は
-        // 既知の制約である。
+        // (Subgroup 単位の wire 構造の整合)。priority は stream が header 時点で保持した
+        // 解決値を使う (購読単位の直近値は並行 Subgroup で上書きされるため使わない)。
+        // 購読が回収済みの stream は wire 構造の追跡対象にしない (record_priority を
+        // 呼ばない。既存挙動を維持)。
         if resolve_subgroup_id
             && let Some(resolved_subgroup_id) = resolved_subgroup_id
-            && let Some(subscription) = self.subscriptions.get(&stream_request_id)
-        {
-            let priority = subscription.effective_publisher_priority();
-            if let Err(err) = self.peer_subgroups.record_priority(
+            && self.subscriptions.contains_key(&stream_request_id)
+            && let Err(err) = self.peer_subgroups.record_priority(
                 track_alias,
                 group_id,
                 resolved_subgroup_id,
-                priority,
-            ) {
-                self.terminate_malformed_track(stream_request_id, Some(stream_id), err.reason);
-                return Err(err);
-            }
+                resolved_publisher_priority,
+            )
+        {
+            self.terminate_malformed_track(stream_request_id, Some(stream_id), err.reason);
+            return Err(err);
         }
 
         // draft §3.1 (Subscriptions): "the subscriber re-applies each subscription's filter
@@ -1319,32 +1332,27 @@ impl Session {
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
         // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
-        // subgroup stream 経由なので is_subgroup = true。
+        // subgroup stream 経由なので is_subgroup = true。Priority は stream が header 時点で
+        // 保持した Subgroup 単位の解決値を使う (購読単位の直近値は並行 Subgroup の header で
+        // 上書きされるため、別 Subgroup の header 受信後に同一 Subgroup の Object を再受信すると
+        // 直近値では priority 不一致を誤検出する)。
+        if let Err(mismatch) = self
+            .peer_object_fields
+            .entry(object_request_id)
+            .or_default()
+            .observe_object_fields(
+                group_id,
+                object.object_id,
+                true,
+                resolved_subgroup_id,
+                resolved_publisher_priority,
+            )
         {
-            let publisher_priority = self
-                .subscriptions
-                .get(&object_request_id)
-                .map_or(PUBLISHER_PRIORITY_DEFAULT, |s| {
-                    s.effective_publisher_priority()
-                });
-            if let Err(mismatch) = self
-                .peer_object_fields
-                .entry(object_request_id)
-                .or_default()
-                .observe_object_fields(
-                    group_id,
-                    object.object_id,
-                    true,
-                    resolved_subgroup_id,
-                    publisher_priority,
-                )
-            {
-                self.terminate_malformed_track(object_request_id, Some(stream_id), mismatch.reason);
-                return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    mismatch.reason,
-                ));
-            }
+            self.terminate_malformed_track(object_request_id, Some(stream_id), mismatch.reason);
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                mismatch.reason,
+            ));
         }
         // FIN 時の Group 終端確定は stream 所有者ではなく Object の帰属先に反映するため、
         // 受理した帰属先を記録する (フィルタ不通過・破棄の Object では更新しない)
@@ -2825,9 +2833,11 @@ impl Session {
     /// `timeout_override_request_id` は生存判定で正規化し、回収済み・キャンセル済みの
     /// subscription を override 所有者として参照し続けない (request_id 再利用時に
     /// 無関係な override を削除しないため)。`track_alias` / `group_id` / `subgroup_id` /
-    /// `header_publisher_priority` / `first_object_received` / `last_object_id` /
-    /// `end_of_group` は維持する。per-subgroup delivery timeout override は移管先に
-    /// 登録済みのため削除しない。
+    /// `header_publisher_priority` / `resolved_publisher_priority` / `first_object_received` /
+    /// `last_object_id` / `end_of_group` は維持する。per-subgroup delivery timeout override は
+    /// 移管先に登録済みのため削除しない。`resolved_publisher_priority` は移管元の解決値の
+    /// まま運ぶ (同一 Track Alias は同一 Track に限られ、Track Property の
+    /// DEFAULT_PUBLISHER_PRIORITY が異なる購読間で共有される前提は置かない)。
     ///
     /// 移管先が無い場合のみ、従来どおり stream を除去し、帰属先が別 subscription の
     /// override を削除して id を破棄対象の保持集合へ移す。

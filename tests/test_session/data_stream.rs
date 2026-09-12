@@ -2980,3 +2980,397 @@ fn datagram_sent_after_tick_is_dropped_after_timeout() {
     );
     assert_eq!(server.state(), SessionState::Established);
 }
+
+// ─── Subgroup 単位 priority と重複 Object 検証 (draft-ietf-moq-transport-21 §12.1 条件 1 / §7.1 (Caching Relays)) ─────
+
+/// FirstObjectId の先頭 Object 解決時、Subgroup 単位で記録された priority と同じ priority で
+/// subgroup を再オープンしても Malformed にならない
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 1 は Subgroup 単位の
+/// Publisher Priority の一致を求める。購読単位の直近値は並行 Subgroup の header で上書きされる。
+#[test]
+fn first_object_id_subgroup_reopen_with_same_priority_is_not_malformed() {
+    let alias = 830u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+
+    // stream A: FirstObjectId / priority 10 (先頭 Object はまだ処理しない)
+    let stream_a = DataStreamId(40);
+    let header_a = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_a, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_a, &header_a)
+        .expect("1 本目の header は受理される");
+
+    // stream B: FirstObjectId / priority 99 → 購読単位の直近値が 99 に上書きされる
+    let stream_b = DataStreamId(41);
+    let header_b = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_b, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_b, &header_b)
+        .expect("2 本目の header は受理される");
+
+    // stream A の先頭 Object (ID 5) → subgroup 5 の priority は stream A の 10 で記録される
+    client
+        .recv_subgroup_object(
+            stream_a,
+            &DecodedSubgroupObject {
+                object_id: 5,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("先頭 Object の受信に成功すること");
+    // STOP_SENDING で停止 → StoppedByPeer になり subgroup 5 を再オープン可能にする
+    client
+        .send_data_stream_stop_sending(stream_a)
+        .expect("STOP_SENDING に成功すること");
+
+    // subgroup 5 を priority 10 で再オープンしても Malformed にならない
+    let stream_c = DataStreamId(42);
+    let header_c = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_c, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_c, &header_c)
+        .expect("再オープンの header は受理される");
+    client
+        .recv_subgroup_object(
+            stream_c,
+            &DecodedSubgroupObject {
+                object_id: 5,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("Subgroup 単位の priority が一致するため Malformed にならない");
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established
+    );
+}
+
+/// FirstObjectId の先頭 Object 解決時、Subgroup 単位で記録された priority と異なる priority で
+/// subgroup を再オープンすると §12.1 条件 1 の Malformed として subscription が終端される
+#[test]
+fn first_object_id_subgroup_reopen_with_different_priority_terminates_subscription() {
+    let alias = 831u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+
+    // stream A: FirstObjectId / priority 10 (先頭 Object はまだ処理しない)
+    let stream_a = DataStreamId(50);
+    let header_a = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_a, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_a, &header_a)
+        .expect("1 本目の header は受理される");
+
+    // stream B: FirstObjectId / priority 99 → 購読単位の直近値が 99 に上書きされる
+    let stream_b = DataStreamId(51);
+    let header_b = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_b, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_b, &header_b)
+        .expect("2 本目の header は受理される");
+
+    // stream A の先頭 Object (ID 5) → subgroup 5 の priority は stream A の 10 で記録される
+    client
+        .recv_subgroup_object(
+            stream_a,
+            &DecodedSubgroupObject {
+                object_id: 5,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("先頭 Object の受信に成功すること");
+    // STOP_SENDING で停止 → StoppedByPeer になり subgroup 5 を再オープン可能にする
+    client
+        .send_data_stream_stop_sending(stream_a)
+        .expect("STOP_SENDING に成功すること");
+
+    // subgroup 5 を priority 99 で再オープンすると §12.1 条件 1 の Malformed
+    // (購読単位の直近値 99 を記録する旧実装では一致して検出漏れになる)
+    let stream_c = DataStreamId(52);
+    let header_c = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_c, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_c, &header_c)
+        .expect("再オープンの header は受理される");
+    let err = client
+        .recv_subgroup_object(
+            stream_c,
+            &DecodedSubgroupObject {
+                object_id: 5,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("Subgroup 単位の priority 不一致は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "該当 subscription は Terminated になること"
+    );
+}
+
+/// 同一 (group, object) を異なる Subgroup ID で受信すると §7.1 (Caching Relays) の
+/// Malformed として subscription が終端される
+///
+/// `observe_object_fields` は Forwarding Preference → Subgroup ID → Priority の順に比較する。
+#[test]
+fn duplicate_object_with_different_subgroup_id_terminates_subscription() {
+    let alias = 832u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+
+    // stream A: FirstObjectId / priority 10 (先頭 Object はまだ処理しない)
+    let stream_a = DataStreamId(60);
+    let header_a = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_a, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_a, &header_a)
+        .expect("1 本目の header は受理される");
+
+    // stream B: FirstObjectId / priority 99 → 購読単位の直近値が 99 に上書きされる
+    let stream_b = DataStreamId(61);
+    let header_b = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_b, 0x12)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_b, &header_b)
+        .expect("2 本目の header は受理される");
+
+    // stream A の先頭 Object (ID 0) → (group 0, object 0) は priority 10 で記録される
+    client
+        .recv_subgroup_object(
+            stream_a,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("先頭 Object の受信に成功すること");
+
+    // stream C: Explicit(1) / priority 99 で同一 Object (ID 0) を受信 → Subgroup ID 不一致で
+    // §7.1 の Malformed
+    let stream_c = DataStreamId(62);
+    let header_c = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(1),
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_c, 0x14)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_c, &header_c)
+        .expect("3 本目の header は受理される");
+    let err = client
+        .recv_subgroup_object(
+            stream_c,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("重複 Object の Subgroup ID 不一致は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason,
+        "malformed track: duplicate Object with different Subgroup ID"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "該当 subscription は Terminated になること"
+    );
+}
+
+/// 重複 Object の priority 検証にも stream の Subgroup 単位 priority が使われる
+///
+/// 購読単位の直近値 (stream T の 99) を重複 Object 検証に使うと、stream S の同一 Object を
+/// 再受信したときに 10 と 99 の不一致で Malformed を誤検出する
+/// (draft-ietf-moq-transport-21 §7.1 (Caching Relays))。
+#[test]
+fn duplicate_object_priority_check_uses_stream_subgroup_priority() {
+    let alias = 833u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+
+    // stream S: Explicit(0) / priority 10 で (0, 0) を受理する
+    let stream_s = DataStreamId(70);
+    let header_s = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_s, 0x14)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_s, &header_s)
+        .expect("header の受信に成功すること");
+    client
+        .recv_subgroup_object(
+            stream_s,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("object の受信に成功すること");
+
+    // stream T: Explicit(1) / priority 99 → 購読単位の直近値が 99 に上書きされる
+    let stream_t = DataStreamId(71);
+    let header_t = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(1),
+        publisher_priority: Some(99),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_t, 0x14)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_subgroup_header(stream_t, &header_t)
+        .expect("header の受信に成功すること");
+
+    // stream S の同一 Object を再受信しても、Subgroup 単位の priority が一致するため受理される
+    client
+        .recv_subgroup_object(
+            stream_s,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("Subgroup 単位の priority が一致するため Malformed にならない");
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established
+    );
+}
