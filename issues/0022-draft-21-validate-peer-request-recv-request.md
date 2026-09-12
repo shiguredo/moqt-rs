@@ -1,8 +1,8 @@
 # validate_peer_request と recv_request の併用契約を明確にする
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
-- Branch: feature/change-validate-peer-request-recv-request
+- Completed: 2026-09-12
+- Branch: feature/remove-validate-peer-request-recv-request
 - Polished: 2026-09-10
 
 ## 目的
@@ -31,7 +31,7 @@ wire 上の重複 Request ID と parity 違反の検出 MUST は維持する必�
 - `tests/test_session/setup.rs` の既存 2 テストは公開 API から移行する。
   - `client_server_request_id_cross_validation`: `recv_request` に parity の正しい request_id を持つメッセージを渡して受理されること、parity の誤った request_id で `INVALID_REQUEST_ID` になることを検証する形に書き換える。
   - `duplicate_peer_request_id_closes_session`: 同一 request_id のメッセージを `recv_request` に 2 回渡し、2 回目が `INVALID_REQUEST_ID` で `Closing` になることを検証する形に書き換える。
-- 公開 API の削除 (後方互換のない変更) のため、ブランチは `feature/change-...`、`CHANGES.md` の `## develop` に `[CHANGE]` として記載する (0025 と同じ扱い)。
+- 公開 API の削除 (後方互換のない変更) のため、ブランチは `feature/remove-...`、`CHANGES.md` の `## develop` に `[CHANGE]` として記載する (shiguredo-git の削除 prefix 規則と 0066 の前例に従う)。
 - `src/session.rs` の module doc や SKILL.md などに `validate_peer_request` の記載があれば追従する。
 
 ## 完了条件
@@ -42,3 +42,12 @@ wire 上の重複 Request ID と parity 違反の検出 MUST は維持する必�
 - `src/session/core.rs` の module doc に `validate_peer_request` の記載が残っていないこと
 - `tests/test_session/setup.rs` の既存 2 テストが `recv_request` 経由の検証に置き換わり、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[CHANGE]` として記載されていること
+
+## 解決方法
+
+公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証を `recv_request` に一本化した。
+
+- `src/session/core.rs`: `validate_peer_request` を削除した。peer Request ID の parity / 重複検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う現行構造を維持し、違反時は `INVALID_REQUEST_ID` で `Closing` に遷移する (draft §6.4.2.1)。module doc から `validate_peer_request` の記載を削除し、`recv_request` の doc に parity / 重複 / 保持上限超過の検証内容を追記した。
+- `tests/test_session/setup.rs`: 既存 2 テストを `recv_request` 経由に書き換えた。parity の正しい request_id の受理、parity 違反 (未受信 ID) と重複の 2 回目で `INVALID_REQUEST_ID` + `Closing` を検証する。SUBSCRIBE を組み立てるローカルヘルパ `subscribe_message` を追加した。
+- `CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加した。
+- ブランチ名は shiguredo-git の削除 prefix 規則に合わせて `feature/remove-validate-peer-request-recv-request` とした (issue の Branch フィールドと設計方針も追従)。
