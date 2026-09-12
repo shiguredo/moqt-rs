@@ -508,8 +508,9 @@ fn stop_sending_on_subgroup_stream_allows_reopen() {
         .send_data_stream_stop_sending(DataStreamId(20))
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1583
-    // (REQUEST_UPDATE forward 0→1): StoppedByPeer は再オープン可能
+    // draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams): STOP_SENDING 後の
+    // 再オープンは Forward 0→1 の REQUEST_UPDATE 受理後であることが sender 側の SHOULD 条件。
+    // 受信側は peer の SHOULD NOT 違反をセッションエラーにせず受理する (本挙動は変更しない)
     client
         .recv_data_stream_type(DataStreamId(21), 0x14)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2568,7 +2569,9 @@ fn condition1_priority_mismatch_terminates_subscription() {
             },
         )
         .expect("object の受信に成功すること");
-    // STOP_SENDING で停止 → StoppedByPeer になり再オープン可能
+    // STOP_SENDING で停止 → StoppedByPeer になり再オープン可能 (peer publisher 側は
+    // Forward 0→1 まで再オープンを抑止すべきだが、受信側 tracker は SHOULD NOT 違反を
+    // セッションエラーにせず StoppedByPeer からの再オープンを受理する)
     client
         .send_data_stream_stop_sending(stream1)
         .expect("STOP_SENDING に成功すること");
@@ -3373,4 +3376,576 @@ fn duplicate_object_priority_check_uses_stream_subgroup_priority() {
             .state,
         SubscriptionState::Established
     );
+}
+
+// ─── STOP_SENDING 後の Subgroup 再オープン (draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams)) ─────
+
+/// FORWARD=0 の SUBSCRIBE を確立し `(client, server, rid)` を返す
+fn establish_forward_0_subscription(alias: u64) -> (Session, Session, u64) {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+    };
+    let (mut client, mut server) = establish_pair();
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(0),
+    });
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params)
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid, alias, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    (client, server, rid)
+}
+
+/// REQUEST_UPDATE を送受信し、publisher に REQUEST_OK を返させて Forward State を 1 にする
+fn update_forward_to_1(client: &mut Session, server: &mut Session, rid: u64) {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+    };
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(1),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("REQUEST_OK の受信に成功すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .forward_state,
+        1
+    );
+}
+
+/// STOP_SENDING を受けた Subgroup の再オープンは Forward 0→1 の REQUEST_UPDATE 受理後のみ可能
+#[test]
+fn stop_sending_requires_forward_0_to_1_before_reopen() {
+    let alias = 840u64;
+    let (mut client, mut server, rid) = establish_forward_0_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(60), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(60))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // Forward 0→1 前の再オープンは拒否され、セッションは閉じない
+    let err = server
+        .send_subgroup_header(DataStreamId(61), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+
+    // FORWARD を含まない REQUEST_UPDATE の受理では解除されない
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("REQUEST_OK の受信に成功すること");
+    let err = server
+        .send_subgroup_header(DataStreamId(61), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // 停止エントリは Forward 0→1 の REQUEST_OK 適用まで残る。解除は responder 専用 API の
+    // `send_ok_for_subscription` が行うため、ここでは受信のみで OK を送らない段階では
+    // 再オープンできないことも確認する
+    let mut forward_params = MessageParameters::new();
+    forward_params.push({
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        };
+        MessageParameter {
+            param_type: PARAM_FORWARD,
+            value: MessageParameterValue::Uint8(1),
+        }
+    });
+    client
+        .send_request_update(rid, forward_params)
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    let err = server
+        .send_subgroup_header(DataStreamId(61), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // Forward 0→1 の REQUEST_OK を適用すると再オープンできる
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("REQUEST_OK の受信に成功すること");
+    server
+        .send_subgroup_header(DataStreamId(61), rid, &header)
+        .expect("Forward 0→1 後は再オープンできること");
+}
+
+/// 停止時の Forward State が 1 の場合は 0→1 遷移がないため再オープンできない
+#[test]
+fn stop_sending_with_forward_1_blocks_reopen_without_transition() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+    };
+    let alias = 841u64;
+    let (mut client, mut server, rid) = establish_subscribe_track(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(62), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(62))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // 既定の Forward State 1 のままで 0→1 遷移がないため再オープン不可
+    let err = server
+        .send_subgroup_header(DataStreamId(63), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // Forward 1 のまま FORWARD=1 の REQUEST_UPDATE を受理しても解除されない (0→1 遷移なし)
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(1),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("REQUEST_OK の受信に成功すること");
+    let err = server
+        .send_subgroup_header(DataStreamId(63), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Established);
+
+    // 停止していない別 Subgroup は影響を受けない (キー精度の確認)
+    let other_header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(4),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(63), rid, &other_header)
+        .expect("停止していない Subgroup は開けること");
+
+    // 別 Group の同一 Subgroup ID も開ける (キーの group_id 次元の確認)
+    let other_group_header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 6,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(64), rid, &other_group_header)
+        .expect("停止していない Group は開けること");
+}
+
+/// STOP_SENDING 後に reset で終端しても再オープン禁止は残り、Forward 0→1 で解除される
+#[test]
+fn stop_sending_then_reset_still_blocks_reopen_until_forward_0_to_1() {
+    let alias = 842u64;
+    let (mut client, mut server, rid) = establish_forward_0_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(64), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(64))
+        .expect("STOP_SENDING の通知に成功すること");
+    // §11.3.2 の SHOULD に従って reset しても STOP_SENDING の再オープン禁止は残る
+    server
+        .send_data_stream_closed(
+            DataStreamId(64),
+            RequestStreamEnd::Reset {
+                error_code: 0,
+                reliable_size: None,
+            },
+        )
+        .expect("reset に成功すること");
+    let err = server
+        .send_subgroup_header(DataStreamId(65), rid, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    update_forward_to_1(&mut client, &mut server, rid);
+    server
+        .send_subgroup_header(DataStreamId(65), rid, &header)
+        .expect("Forward 0→1 後は再オープンできること");
+}
+
+/// FirstObjectId の subgroup_id 解決経路でも Forward 0→1 まで再オープンできない
+#[test]
+fn first_object_id_stop_sending_blocks_resolution_until_forward_0_to_1() {
+    let alias = 843u64;
+    let (mut client, mut server, rid) = establish_forward_0_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(66), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(66))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // 先頭 Object による subgroup_id 解決経路が拒否され、セッションは閉じない
+    let err = server
+        .send_subgroup_object(DataStreamId(66), 0, None)
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
+    assert_eq!(server.state(), SessionState::Established);
+
+    update_forward_to_1(&mut client, &mut server, rid);
+    server
+        .send_subgroup_object(DataStreamId(66), 0, None)
+        .expect("Forward 0→1 後は subgroup_id を解決できること");
+}
+
+/// alias を共有する別 subscription の Forward 0→1 では再オープン禁止が解除されない
+#[test]
+fn shared_alias_forward_0_to_1_does_not_unlock_other_subscription() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+    };
+    const ALIAS: u64 = 844;
+    let (mut client, mut server) = establish_pair();
+    let mut sub_params = MessageParameters::new();
+    sub_params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(0),
+    });
+    let rid1 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), sub_params.clone())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg1) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg1)
+        .expect("SUBSCRIBE の受信に成功すること");
+    let rid2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), sub_params)
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg2) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg2)
+        .expect("SUBSCRIBE の受信に成功すること");
+    // 同一 Track の 2 subscription に同じ alias を割り当てる
+    for sub_rid in [rid1, rid2] {
+        server
+            .send_subscribe_ok(
+                sub_rid,
+                ALIAS,
+                MessageParameters::new(),
+                TrackProperties::new(),
+            )
+            .expect("SUBSCRIBE_OK の送信に成功すること");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(sub_rid, ok_msg)
+            .expect("SUBSCRIBE_OK の受信に成功すること");
+    }
+
+    // rid1 の Subgroup を開いて STOP_SENDING を受ける
+    let header = SubgroupHeader {
+        track_alias: ALIAS,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(80), rid1, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(80))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // rid2 の Forward 0→1 を受理しても rid1 の禁止は解除されない
+    update_forward_to_1(&mut client, &mut server, rid2);
+    let err = server
+        .send_subgroup_header(DataStreamId(81), rid1, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // alias を共有する rid2 経由でも同一 Subgroup は再オープンできない
+    let err = server
+        .send_subgroup_header(DataStreamId(82), rid2, &header)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // rid1 の Forward 0→1 で解除される
+    update_forward_to_1(&mut client, &mut server, rid1);
+    server
+        .send_subgroup_header(DataStreamId(81), rid1, &header)
+        .expect("rid1 の Forward 0→1 後は再オープンできること");
+}
+
+/// 解決済み Subgroup の STOP_SENDING は別の未解決 FirstObjectId stream の同一 ID 解決も拒否する
+#[test]
+fn first_object_id_resolved_stopped_subgroup_blocks_other_stream_resolution() {
+    let alias = 846u64;
+    let (_client, mut server, rid) = establish_subscribe_track(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // stream A で Object ID 3 を送り、subgroup 3 を解決する
+    server
+        .send_subgroup_header(DataStreamId(67), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .send_subgroup_object(DataStreamId(67), 3, None)
+        .expect("subgroup_id の解決に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(67))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // stream B (未解決 FirstObjectId) で同じ Object ID 3 を送ると subgroup 3 の停止に当たる
+    server
+        .send_subgroup_header(DataStreamId(68), rid, &header)
+        .expect("header の送信に成功すること");
+    let err = server
+        .send_subgroup_object(DataStreamId(68), 3, None)
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
+    assert_eq!(server.state(), SessionState::Established);
+
+    // 停止していない Object ID 4 は解決できる
+    server
+        .send_subgroup_object(DataStreamId(68), 4, None)
+        .expect("停止していない Subgroup は解決できること");
+}
+
+/// 停止の再オープン禁止は track_alias 単位であり、別 alias の同一 Subgroup には影響しない
+#[test]
+fn stop_sending_does_not_block_same_subgroup_on_different_alias() {
+    let (mut client, mut server) = establish_pair();
+    let rid1 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg1) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg1)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid1, 910, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg1) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid1, ok_msg1)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    let rid2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg2) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg2)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid2, 911, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok_msg2)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+
+    // alias 910 の (group 5, subgroup 3) を開いて STOP_SENDING を受ける
+    let header1 = SubgroupHeader {
+        track_alias: 910,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(100), rid1, &header1)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(100))
+        .expect("STOP_SENDING の通知に成功すること");
+    let err = server
+        .send_subgroup_header(DataStreamId(101), rid1, &header1)
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // 別 alias 911 の同一 (group 5, subgroup 3) は停止の影響を受けない
+    let header2 = SubgroupHeader {
+        track_alias: 911,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(102), rid2, &header2)
+        .expect("別 alias の同一 Subgroup は開けること");
+}
+
+/// forget_subscription で停止エントリが破棄され、alias 再利用後の同一 Subgroup を開ける
+#[test]
+fn forget_subscription_discards_stopped_subgroups() {
+    let alias = 920u64;
+    let (mut client, mut server, rid) = establish_subscribe_track(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(110), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(110))
+        .expect("STOP_SENDING の通知に成功すること");
+
+    // subscriber (client) が cancel し、publisher (server) が stream 終端で Terminated → forget する
+    client
+        .stop_sending(rid)
+        .expect("stop_sending に成功すること");
+    server
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: 0,
+                reliable_size: None,
+            },
+        )
+        .expect("request stream 終端の通知に成功すること");
+    server
+        .forget_subscription(rid)
+        .expect("cleanup_ready な subscription を破棄できること");
+
+    // 新規 SUBSCRIBE に同じ alias を割り当て、同一 Subgroup を開ける
+    let rid2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg2) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg2)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(
+            rid2,
+            alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok_msg2)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    server
+        .send_subgroup_header(DataStreamId(111), rid2, &header)
+        .expect("forget 済みの停止エントリに妨げられないこと");
 }

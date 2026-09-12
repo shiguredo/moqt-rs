@@ -106,7 +106,15 @@ impl Session {
                     );
                     update_subscription_expires_if_present(subscription, &pending_params, now_ms);
                     if let Some(f) = pending_params.forward() {
-                        subscription.forward_state = validate_forward(f)?;
+                        let new_forward = validate_forward(f)?;
+                        // draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams):
+                        // STOP_SENDING 後の再オープンは Forward State が 0 から 1 へ変わった
+                        // REQUEST_UPDATE が受理された場合のみ許可する。現在値が 1 である
+                        // ことでは解除しない (PUBLISH_STATE_NOTIFY などの他経路でも解除しない)
+                        if subscription.forward_state == 0 && new_forward == 1 {
+                            self.stopped_outgoing_subgroups.remove(&request_id);
+                        }
+                        subscription.forward_state = new_forward;
                     }
                     match pending_params.location_filter_update() {
                         // 省略時は値 unchanged、Length 0 はフィルタ削除

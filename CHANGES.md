@@ -21,6 +21,8 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [FIX] STOP_SENDING を受けた Subgroup の再オープンを Forward State 0→1 の REQUEST_UPDATE 受理後のみに制限する
+  - @voluntas
 - [FIX] Subgroup 単位の Publisher Priority を stream に保持し、FirstObjectId Subgroup の Malformed Track 判定で並行 Subgroup の priority 差による誤検出と検出漏れを防ぐ
   - @voluntas
 - [FIX] AUTHORIZATION_TOKEN と Setup Option Bytes の encode に値長 2^16-1 バイトの上限検証を追加する

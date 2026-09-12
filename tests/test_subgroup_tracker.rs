@@ -54,7 +54,7 @@ fn reopen_after_stop_sending_allowed() {
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");
     t.mark_stop_sending(1, 10, 0);
-    // draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1583
+    // draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1583
     // (REQUEST_UPDATE forward 0→1): StoppedByPeer は can_reopen() → 再オープン可能
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");

@@ -375,6 +375,26 @@ pub struct Session {
     pub(super) outgoing_request_updates: HashMap<u64, u64>,
     /// request stream ごとの peer 送信 outstanding REQUEST_UPDATE 数 (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))
     pub(super) incoming_request_updates: HashMap<u64, u64>,
+    /// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」集合
+    ///
+    /// draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams): "A publisher that
+    /// receives a STOP_SENDING on a Subgroup stream SHOULD NOT attempt to open a new stream
+    /// to deliver additional Objects in that Subgroup. However, if the publisher subsequently
+    /// receives a REQUEST_UPDATE that changes the Forward State from 0 to 1, it MAY open a
+    /// new stream ..." の再オープン禁止状態を保持する。値のタプル
+    /// `(track_alias, group_id, subgroup_id)` の 3 番目の `Option<u64>` は FirstObjectId
+    /// モードの未解決 subgroup_id (`None`) を表す。終端状態 (`StoppedByPeer` / `Reset`) の
+    /// 上書きに影響されず、Forward State 0→1 の REQUEST_UPDATE が受理された時点または
+    /// `forget_subscription` で破棄する (共有 alias の兄弟 subscription が残っていても
+    /// 所有者の破棄でエントリは消えるため、STOP_SENDING による再オープン禁止は適用されなく
+    /// なる。FIN で正常終了した Subgroup は tracker 側で引き続き再オープン不可)。なお
+    /// REQUEST_UPDATE の受信から REQUEST_OK の送信までに記録された STOP_SENDING も
+    /// 解除対象になる (順序の近似)。
+    ///
+    /// PUBLISH 起点 (自側 publisher) の subscription では、現状 peer subscriber の
+    /// REQUEST_UPDATE に応答する経路がなく (`send_ok_for_subscription` は responder 専用)、
+    /// Forward 0→1 による解除は行われない (既知の制限。SUBSCRIBE 起点では動作する)。
+    pub(super) stopped_outgoing_subgroups: HashMap<u64, HashSet<(u64, u64, Option<u64>)>>,
     pub(super) events: VecDeque<SessionEvent>,
 }
 
@@ -537,6 +557,7 @@ impl Session {
             },
             outgoing_request_updates: HashMap::new(),
             incoming_request_updates: HashMap::new(),
+            stopped_outgoing_subgroups: HashMap::new(),
             events,
         })
     }

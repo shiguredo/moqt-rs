@@ -33,7 +33,7 @@ fn request_update_full_cycle() {
     server
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
+    // draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは即座に適用されず、
     // pending_update_params に蓄積される。REQUEST_OK 応答後に forward_state が反映される。
     assert!(
         server
@@ -1672,7 +1672,7 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     client
         .recv_stream_message(rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
+    // draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE のパラメータは pending_update_params に蓄積される
     let pending = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
@@ -1732,7 +1732,7 @@ fn send_request_ok_by_publisher_on_subscribe_established_subscription_succeeds()
     );
 }
 
-/// draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
+/// draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1540, draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): 同一サブスクリプション上の複数 REQUEST_UPDATE が
 /// 合体 (coalesce) される。後の値が前を上書きし、累積結果のみが適用される。
 #[test]
 fn multiple_request_updates_are_coalesced() {
@@ -1875,7 +1875,7 @@ fn multiple_request_updates_are_coalesced() {
     assert!(sub.pending_update_params.is_none());
 }
 
-/// draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
+/// draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
 /// pending_update_params が破棄される。
 #[test]
 fn request_error_discards_coalesced_pending_params() {
@@ -1945,7 +1945,7 @@ fn request_error_discards_coalesced_pending_params() {
     );
 }
 
-/// draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1583: REQUEST_UPDATE で forward 0→1 に変更後、
+/// draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1583: REQUEST_UPDATE で forward 0→1 に変更後、
 /// STOP_SENDING で停止されたサブグループを publisher が再オープンできる
 #[test]
 fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
@@ -2032,7 +2032,7 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
         1
     );
 
-    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-21 Appendix A.3 (Since draft-ietf-moq-transport-17) #1583)
+    // publisher (server) が同じサブグループを再オープンできる (draft-ietf-moq-transport-21 Appendix A.4 (Since draft-ietf-moq-transport-17) #1583)
     // 再オープン成功自体が StoppedByPeer 記録の裏付けになる (他状態からは再オープン不可)
     let stream_id2 = DataStreamId(61);
     server

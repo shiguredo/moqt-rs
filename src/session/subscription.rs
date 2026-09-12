@@ -136,6 +136,8 @@ impl Session {
         self.remove_incoming_data_streams_for_request(request_id);
         self.remove_outgoing_data_plane_for_request(request_id);
         self.remove_request_update_credit_entries(request_id);
+        // STOP_SENDING による再オープン禁止エントリも破棄する
+        self.stopped_outgoing_subgroups.remove(&request_id);
         Some(subscription)
     }
 

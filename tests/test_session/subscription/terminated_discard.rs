@@ -370,7 +370,7 @@ fn cancelled_stream_reset_allows_subgroup_reopen() {
 /// Subgroup の正当な再オープンが session close せず受理されること
 ///
 /// 破棄分岐でも `SubgroupTracker` を `StoppedByPeer` にしないとエントリが `Open` の
-/// まま残り、draft §11.3.2 (Closing Subgroup Streams) / Appendix A.3
+/// まま残り、draft §11.3.2 (Closing Subgroup Streams) / Appendix A.4
 /// (REQUEST_UPDATE の Forward State 0→1) による再オープンが open 衝突として
 /// `PROTOCOL_VIOLATION` になる。
 #[test]
