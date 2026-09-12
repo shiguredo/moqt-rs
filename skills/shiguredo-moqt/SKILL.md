@@ -192,7 +192,7 @@ fn role(&self) -> Role
 fn transport(&self) -> Transport
 ```
 
-`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / data stream / GOAWAY のタイムアウトを評価し、満了時は `CloseSession` をキューへ積む。
+`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / data stream / GOAWAY のタイムアウトを評価し、満了時は `CloseSession` をキューへ積む。request stream 上の GOAWAY の timeout はセッションを閉じず、当該 request の `ResetRequestStream(GOING_AWAY)` を積む。
 
 タイマーと Auth Token:
 

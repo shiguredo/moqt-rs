@@ -724,6 +724,9 @@ impl Session {
         let Some(stream_count) = subscription.pending_publish_done.take() else {
             return;
         };
+        // PUBLISH_DONE は subscription の最終メッセージ (FIN) のため、request stream GOAWAY の
+        // reset deadline は不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: ControlMessage::PublishDone(PublishDone {
@@ -2440,6 +2443,9 @@ impl Session {
             return;
         };
         self.clear_control_message_deadline(request_id);
+        // malformed 終端でローカルから request を閉じるため、request stream GOAWAY の
+        // reset deadline も解除する
+        self.clear_request_stream_goaway_deadline(request_id);
         // malformed 終端後に bidi request stream の close 通知を受けても二重終端しないよう、
         // close 未受信の request_streams entry を除去して rejected_request_ids に登録する
         // (`forget_fetch` / `close_track_subscription_on_stream_end` と同じ前例)。

@@ -43,6 +43,7 @@ impl Session {
         self.request_streams.remove(&request_id);
         self.remove_request_update_credit_entries(request_id);
         self.pending_prefix_updates.remove(&request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.track_subscriptions.remove(&request_id)
     }
 
@@ -437,6 +438,9 @@ impl Session {
                 // subscription が混在しうるため `RequestKind::Publish` 固定にはしない。
                 if let Some(kind) = self.request_streams.remove(&sub_request_id) {
                     self.rejected_request_ids.insert(sub_request_id);
+                    // 派生 subscription の request stream をローカルから閉じるため、
+                    // request stream GOAWAY の reset deadline も解除する
+                    self.clear_request_stream_goaway_deadline(sub_request_id);
                     self.events.push_back(SessionEvent::RequestTerminated {
                         request_id: sub_request_id,
                         kind,

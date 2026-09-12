@@ -1064,6 +1064,9 @@ impl Session {
         // 呼び出し側は本関数より前に fill stream を終端していること。
         // そのため本呼び出しは通常 no-op の防御であり、到達時は終端通知漏れの残骸掃除になる。
         self.reset_open_fill_streams(request_id);
+        // PUBLISH_DONE は subscription の最終メッセージ (FIN) のため、request stream GOAWAY の
+        // reset deadline は不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
         let msg = ControlMessage::PublishDone(PublishDone {
             status_code,
             stream_count,

@@ -3,18 +3,19 @@
 //! draft-ietf-moq-transport-21 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY) に対応する
 //! `impl Session` のメソッドをまとめる。sans-I/O 制約のため、session 自体はタイマーを
 //! 持たず、外部時計から渡される `tick(now_ms)` だけが時刻源となる。
+//! draft 由来の実装のため将来変更される可能性がある。
 
 use crate::error::{
     SESSION_CONTROL_MESSAGE_TIMEOUT, SESSION_DATA_STREAM_TIMEOUT, SESSION_GOAWAY_TIMEOUT,
-    SESSION_PROTOCOL_VIOLATION,
+    SESSION_PROTOCOL_VIOLATION, STREAM_GOING_AWAY,
 };
 use crate::message::{ControlMessage, Goaway};
 use alloc::vec::Vec;
 
 use super::core::Session;
 use super::types::{
-    GoawayDrainSnapshot, MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo, Role, SessionError,
-    SessionEvent, SessionState,
+    DeadlineTimer, GoawayDrainSnapshot, MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo, Role,
+    SessionError, SessionEvent, SessionState,
 };
 
 /// GOAWAY URI の検証ヘルパー (送信側)
@@ -183,7 +184,10 @@ impl Session {
     /// session 内の `events` キューに `CloseSession` が積まれる。session 自体が
     /// 時刻取得やタイマー発火を行うことはない。
     ///
-    /// 既に Closing / Closed / GOAWAY 未送信の場合は時刻の記録のみで何もしない。
+    /// また request stream 上の GOAWAY の timeout が満了した場合は、セッションを閉じずに
+    /// 当該 request の `ResetRequestStream(STREAM_GOING_AWAY)` を積む。
+    ///
+    /// 既に Closing / Closed の場合は時刻の記録のみで何もしない。
     pub fn tick(&mut self, now_ms: u64) {
         self.timing.last_tick_ms = Some(now_ms);
         // 保留 timeout があればここで deadline を確定
@@ -243,13 +247,50 @@ impl Session {
                 SESSION_GOAWAY_TIMEOUT,
                 "goaway timeout expired",
             ));
+            return;
         }
+        // draft-ietf-moq-transport-21 §9.2 (GOAWAY): "When sent on a request stream, the sender
+        // SHOULD reset the stream with GOING_AWAY after the indicated timeout." セッションは
+        // 閉じず、当該 request stream の reset イベントを 1 回だけ発行する。
+        let mut expired = Vec::new();
+        for (request_id, deadline) in self.goaway.request_stream_deadlines.iter_mut() {
+            deadline.tick(now_ms);
+            if deadline.expired {
+                expired.push(*request_id);
+            }
+        }
+        // 同一 tick で複数が期限到達してもイベント順を決定的にする
+        expired.sort_unstable();
+        for request_id in expired {
+            self.goaway.request_stream_deadlines.remove(&request_id);
+            // request stream を reset するとローカル送信方向も閉じるため、reset 後に flush されると
+            // 矛盾する保留 PUBLISH_DONE を破棄する (PUBLISH_DONE の FIN より reset が先に確定した場合)
+            if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+                subscription.pending_publish_done = None;
+            }
+            self.events.push_back(SessionEvent::ResetRequestStream {
+                request_id,
+                error_code: STREAM_GOING_AWAY,
+            });
+        }
+    }
+
+    /// request stream 上の GOAWAY の reset deadline を解除する
+    ///
+    /// peer の FIN / RESET_STREAM 受信、`forget_*`、ローカル送信方向を FIN または RESET_STREAM で
+    /// 閉じた後に呼ぶ。以後 reset を送る意味がなくなるため deadline を破棄する。
+    pub(super) fn clear_request_stream_goaway_deadline(&mut self, request_id: u64) {
+        self.goaway.request_stream_deadlines.remove(&request_id);
     }
 
     /// リクエストストリーム上で GOAWAY を送信する (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
     ///
     /// 個別リクエストストリームに GOAWAY を送信し、そのリクエストのマイグレーションを開始する。
-    /// control stream の GOAWAY と異なり session 全体の deadline は設定しない。
+    /// `timeout > 0` の場合は request 単位の reset deadline を設定し、期限到達時に
+    /// `ResetRequestStream(STREAM_GOING_AWAY)` を 1 回だけ発行する (control stream の GOAWAY と
+    /// 異なりセッションは閉じない)。timeout == 0 は deadline を設定しない。
+    /// peer の stream 終端やローカル FIN / RESET_STREAM で request が閉じた場合は解除され、
+    /// reset は発行されない。
     ///
     /// 制約:
     /// - `Role::Client` は `new_session_uri` を空にする必要がある
@@ -279,6 +320,16 @@ impl Session {
             fin: false,
         });
         self.goaway.request_stream_sent.insert(request_id);
+        // draft-ietf-moq-transport-21 §9.2 (GOAWAY): "When sent on a request stream, the sender
+        // SHOULD reset the stream with GOING_AWAY after the indicated timeout. A value of 0
+        // indicates the sender has no specific timeout, but the recipient SHOULD migrate as
+        // quickly as possible." timeout == 0 は deadline を登録しない。
+        if timeout > 0 {
+            self.goaway.request_stream_deadlines.insert(
+                request_id,
+                DeadlineTimer::new(timeout, self.timing.last_tick_ms),
+            );
+        }
         Ok(())
     }
 

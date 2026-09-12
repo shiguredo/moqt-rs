@@ -42,6 +42,7 @@ impl Session {
         let entry = self.track_status_requests.get(&request_id)?;
         entry.response.as_ref()?;
         self.request_streams.remove(&request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.track_status_requests.remove(&request_id)
     }
 

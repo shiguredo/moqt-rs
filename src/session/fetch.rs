@@ -152,6 +152,7 @@ impl Session {
             self.rejected_request_ids.insert(request_id);
         }
         self.request_streams.remove(&request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.remove_incoming_data_streams_for_request(request_id);
         // outgoing_fetch には timing エントリが紐付かないため、エントリの除去のみでよい
         // (prior_location はエントリ内に保持され、タイムアウト追跡は存在しない)
@@ -454,6 +455,9 @@ impl Session {
     /// bidi request stream の送信方向を reset する。
     pub fn send_fetch_stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
         self.terminate_subscriber_fetch(request_id, SubscriberFetchCloseKind::StopSending)?;
+        // ローカル送信方向を reset で閉じるため、request stream GOAWAY の reset deadline は
+        // 不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
         // subscriber による cancel のため bidi 送信方向を reset する (§6.4.2.3)。
         // CANCELLED (0x1) はいずれかの端点による cancel に該当する (§12.5)。
         self.events.push_back(SessionEvent::ResetRequestStream {
@@ -503,6 +507,9 @@ impl Session {
             fetch.state = FetchState::Terminated;
         }
         self.remove_incoming_data_streams_for_request(request_id);
+        // ローカル送信方向を reset で閉じるため、request stream GOAWAY の reset deadline は
+        // 不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
         // §3.2.1 MUST の bidi reset を I/O 層に指示する。CANCELLED (0x1) は
         // subscriber による cancel に該当する (§12.5)。
         self.events.push_back(SessionEvent::ResetRequestStream {
@@ -831,6 +838,9 @@ impl Session {
                 .expect("fetch entry presence checked above");
             fetch.state = FetchState::Terminated;
             fetch.response_received = true;
+            // ローカルで fetch をキャンセルするため、request stream GOAWAY の reset deadline も
+            // 解除する
+            self.clear_request_stream_goaway_deadline(request_id);
             self.events.push_back(SessionEvent::RequestTerminated {
                 request_id,
                 kind: RequestKind::Fetch,

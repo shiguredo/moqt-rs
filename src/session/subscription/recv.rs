@@ -526,6 +526,8 @@ impl Session {
         if ok.track_properties.has_unknown_mandatory() {
             subscription.state = SubscriptionState::Terminated;
             self.clear_control_message_deadline(request_id);
+            // ローカルで購読をキャンセルするため、request stream GOAWAY の reset deadline も解除する
+            self.clear_request_stream_goaway_deadline(request_id);
             self.events.push_back(SessionEvent::RequestTerminated {
                 request_id,
                 kind: RequestKind::Subscribe,

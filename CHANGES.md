@@ -21,6 +21,8 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [FIX] request stream 上の GOAWAY の timeout を実装し、期限到達時に当該 request stream を GOING_AWAY で reset する
+  - @voluntas
 - [FIX] 同一 suffix の NAMESPACE 再受信をセッションクローズにせず無視し、prefix 更新を跨いだ重複判定と NAMESPACE_DONE 照合は full namespace 単位で行う
   - @voluntas
 - [FIX] STOP_SENDING を受けた Subgroup の再オープンを Forward State 0→1 の REQUEST_UPDATE 受理後のみに制限する

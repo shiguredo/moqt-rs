@@ -1402,3 +1402,560 @@ fn goaway_sent_side_use_alias_after_goaway_does_not_kill_session() {
         "USE_ALIAS は GOAWAY 拒否経路で cache を触らないこと"
     );
 }
+
+// ─── request stream GOAWAY の timeout (draft-ietf-moq-transport-21 §9.2 (GOAWAY)) ─────
+
+/// request stream 上の GOAWAY は timeout 経過後に GOING_AWAY で当該 stream を reset する
+#[test]
+fn request_stream_goaway_resets_stream_after_timeout() {
+    use shiguredo_moqt::error::STREAM_GOING_AWAY;
+    let (mut client, _server, rid) = establish_subscribe_track(900);
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+
+    // 期限前は reset されない
+    client.tick(1_099);
+    while let Some(e) = client.poll_event() {
+        assert!(!matches!(e, SessionEvent::ResetRequestStream { .. }));
+    }
+    // 期限到達で STREAM_GOING_AWAY の reset が 1 回だけ
+    client.tick(1_100);
+    let mut resets = Vec::new();
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::ResetRequestStream {
+            request_id,
+            error_code,
+        } = e
+        {
+            resets.push((request_id, error_code));
+        }
+    }
+    assert_eq!(resets, vec![(rid, STREAM_GOING_AWAY)]);
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+
+    // 以後の tick で再発行しない
+    client.tick(2_000);
+    while let Some(e) = client.poll_event() {
+        assert!(!matches!(e, SessionEvent::ResetRequestStream { .. }));
+    }
+}
+
+/// timeout 0 の request stream GOAWAY は自動 reset しない
+#[test]
+fn request_stream_goaway_zero_timeout_never_resets() {
+    let (mut client, _server, rid) = establish_subscribe_track(901);
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 0)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    client.tick(1_000_000);
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "timeout 0 では reset しないこと"
+        );
+    }
+}
+
+/// tick 未経験で送った request stream GOAWAY は最初の tick を基準に timeout を確定する
+#[test]
+fn request_stream_goaway_pending_timeout_starts_at_first_tick() {
+    let (mut client, _server, rid) = establish_subscribe_track(902);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    // 最初の tick が基準時刻になる
+    client.tick(5_000);
+    client.tick(5_099);
+    while let Some(e) = client.poll_event() {
+        assert!(!matches!(e, SessionEvent::ResetRequestStream { .. }));
+    }
+    client.tick(5_100);
+    let mut resets = 0;
+    while let Some(e) = client.poll_event() {
+        if matches!(e, SessionEvent::ResetRequestStream { .. }) {
+            resets += 1;
+        }
+    }
+    assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
+}
+
+/// peer の stream 終端で request stream GOAWAY の reset deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_peer_stream_close() {
+    let (mut client, _server, rid) = establish_subscribe_track(903);
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("stream 終端の通知に成功すること");
+    client.tick(2_000);
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "終端後は reset しないこと"
+        );
+    }
+}
+
+/// forget で request stream GOAWAY の reset deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_forget() {
+    let (mut client, _server, rid) = establish_subscribe_track(904);
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    client
+        .stop_sending(rid)
+        .expect("stop_sending に成功すること");
+    client
+        .forget_subscription(rid)
+        .expect("forget に成功すること");
+    client.tick(2_000);
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "forget 後は reset しないこと"
+        );
+    }
+}
+
+/// ローカル FIN (PUBLISH_DONE) で request stream GOAWAY の reset deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_local_fin() {
+    let (_client, mut server, rid) = establish_subscribe_track(905);
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    server
+        .send_publish_done(
+            rid,
+            shiguredo_moqt::error::PUBLISH_DONE_TRACK_ENDED,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("done")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "ローカル FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// REQUEST_ERROR + PUBLISH_DONE (FIN) で request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_request_error_with_publish_done() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    let (mut client, mut server, rid) = establish_subscribe_track(906);
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    // client の REQUEST_UPDATE を server が REQUEST_ERROR + PUBLISH_DONE で拒否する
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_error(
+            rid,
+            REQUEST_DOES_NOT_EXIST,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("failed")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(!fin, "REQUEST_ERROR は FIN なしで送られること");
+    let (_, msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "PUBLISH_DONE の FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// 保留 PUBLISH_DONE がある状態で期限到達すると reset が出て、保留 PUBLISH_DONE は破棄される
+#[test]
+fn request_stream_goaway_reset_discards_pending_publish_done() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    let (mut client, mut server, rid) = establish_subscribe_track(907);
+    server.tick(1_000);
+    // publisher (server) が outgoing subgroup stream を開いたままにする
+    let header = SubgroupHeader {
+        track_alias: 907,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(220), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    // open stream があるため PUBLISH_DONE は保留される
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_error(
+            rid,
+            REQUEST_DOES_NOT_EXIST,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("failed")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(!fin, "REQUEST_ERROR は FIN なしで送られること");
+
+    // 期限到達で reset が出る
+    server.tick(1_100);
+    let mut resets = 0;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::ResetRequestStream { .. }) {
+            resets += 1;
+        }
+    }
+    assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
+
+    // stream を閉じても reset 後に PUBLISH_DONE を送らない
+    server
+        .send_data_stream_closed(DataStreamId(220), RequestStreamEnd::Fin)
+        .expect("stream 終端の通知に成功すること");
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(
+                e,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::PublishDone(_),
+                    ..
+                }
+            ),
+            "reset 後に PUBLISH_DONE を送らないこと"
+        );
+    }
+}
+
+/// 保留 PUBLISH_DONE の flush (FIN) で request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_pending_publish_done_flush() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    let (mut client, mut server, rid) = establish_subscribe_track(908);
+    server.tick(1_000);
+    let header = SubgroupHeader {
+        track_alias: 908,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(221), rid, &header)
+        .expect("header の送信に成功すること");
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    server
+        .send_request_error(
+            rid,
+            REQUEST_DOES_NOT_EXIST,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("failed")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(!fin, "REQUEST_ERROR は FIN なしで送られること");
+
+    // stream を閉じると保留 PUBLISH_DONE が FIN で flush され、deadline も解除される
+    server
+        .send_data_stream_closed(DataStreamId(221), RequestStreamEnd::Fin)
+        .expect("stream 終端の通知に成功すること");
+    let (_, msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+
+    server.tick(1_100);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "flush の FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// peer の RESET_STREAM でも request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_peer_stream_reset() {
+    let (mut client, _server, rid) = establish_subscribe_track(909);
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    client
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: 0,
+                reliable_size: None,
+            },
+        )
+        .expect("stream 終端の通知に成功すること");
+    client.tick(2_000);
+    while let Some(e) = client.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "RESET 後は reset しないこと"
+        );
+    }
+}
+
+/// TRACK_STATUS_OK の FIN で request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_track_status_ok() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("TRACK_STATUS の送信に成功すること");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("TRACK_STATUS の受信に成功すること");
+
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("TRACK_STATUS_OK の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "TRACK_STATUS_OK は FIN で送られること");
+
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "TRACK_STATUS_OK の FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// Pending subscription の REQUEST_ERROR (単独 FIN) で request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_request_error_alone() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    server
+        .send_request_error(
+            rid,
+            REQUEST_DOES_NOT_EXIST,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("failed")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "REQUEST_ERROR 単独は FIN で送られること");
+
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "REQUEST_ERROR 単独の FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// 自動 REQUEST_ERROR (emit_request_error) の FIN で request stream GOAWAY の deadline は解除される
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_emit_request_error() {
+    use shiguredo_moqt::message::Subscribe;
+    let (mut _client, mut server) = establish_pair();
+    let rid = 0u64;
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    // 予約名前空間 `.` への SUBSCRIBE は自動で REQUEST_ERROR (FIN) になる
+    server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: rid,
+            track_namespace: ns(&[b"."]),
+            track_name: b"cam".to_vec(),
+            parameters: MessageParameters::new(),
+        }))
+        .expect("SUBSCRIBE の受信に成功すること");
+    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "自動拒否は FIN で送られること");
+
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "自動拒否の FIN 後は reset しないこと"
+        );
+    }
+}
+
+/// subscription 以外 (TRACK_STATUS) の request stream も期限到達で reset される
+#[test]
+fn request_stream_goaway_expires_reset_for_track_status() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("TRACK_STATUS の送信に成功すること");
+    let (_, ts_msg) = take_send_request(&mut client);
+    server
+        .recv_request(ts_msg)
+        .expect("TRACK_STATUS の受信に成功すること");
+
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    server.tick(1_100);
+
+    let mut resets = Vec::new();
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::ResetRequestStream {
+            request_id,
+            error_code,
+        } = e
+        {
+            resets.push((request_id, error_code));
+        }
+    }
+    assert_eq!(resets.len(), 1, "TRACK_STATUS でも reset が 1 回出ること");
+    assert_eq!(resets[0].0, rid);
+}
+
+/// 同一 tick で複数の期限が到達した場合、reset は request_id 昇順で発行される
+#[test]
+fn request_stream_goaway_simultaneous_expiry_orders_by_request_id() {
+    let (mut client, mut server) = establish_pair();
+    let rid1 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, m1) = take_send_request(&mut client);
+    server
+        .recv_request(m1)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid1, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok1) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid1, ok1)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    let rid2 = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, m2) = take_send_request(&mut client);
+    server
+        .recv_request(m2)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid2, 2, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok2)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    assert!(rid1 < rid2);
+
+    client.tick(1_000);
+    for rid in [rid1, rid2] {
+        client
+            .send_goaway_on_request_stream(rid, Vec::new(), 100)
+            .expect("request stream GOAWAY の送信に成功すること");
+        let (_, _) = take_send_on_stream(&mut client);
+    }
+    client.tick(1_100);
+    let mut resets = Vec::new();
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::ResetRequestStream { request_id, .. } = e {
+            resets.push(request_id);
+        }
+    }
+    assert_eq!(
+        resets,
+        vec![rid1, rid2],
+        "同時期限は request_id 昇順で発行されること"
+    );
+}

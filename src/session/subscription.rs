@@ -102,6 +102,7 @@ impl Session {
         // 返り値の subscription が「破棄済み」であることを明示する)
         subscription.pending_publish_done = None;
         self.clear_control_message_deadline(request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.request_streams.remove(&request_id);
         let track_key = (
             subscription.track_namespace.clone(),
@@ -173,6 +174,9 @@ impl Session {
         // クリーンアップが必要になる可能性があるため)。
         self.remove_subscription_track_index(existing_id, &key);
         self.clear_control_message_deadline(existing_id);
+        // 旧 subscription をローカルで終端するため、request stream GOAWAY の reset deadline も
+        // 解除する
+        self.clear_request_stream_goaway_deadline(existing_id);
         if let Some(alias) = track_alias {
             // subscriber 役の subscription は peer_publisher_aliases を経由しないので
             // 通常は None だが、将来仕様変更で alias を持つようになっても追従できるよう

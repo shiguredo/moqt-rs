@@ -99,6 +99,7 @@ impl Session {
         self.remove_request_update_credit_entries(request_id);
         self.pending_prefix_updates.remove(&request_id);
         self.namespaces.active_full_namespaces.remove(&request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.namespaces.subscriptions.remove(&request_id)
     }
 

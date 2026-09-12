@@ -38,6 +38,7 @@ impl Session {
         }
         self.request_streams.remove(&request_id);
         self.remove_request_update_credit_entries(request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
         self.namespaces.publications.remove(&request_id)
     }
 

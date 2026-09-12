@@ -264,6 +264,15 @@ pub(super) struct GoawayState {
     pub(super) peer: Option<PeerGoawayInfo>,
     pub(super) local_deadline_ms: Option<u64>,
     pub(super) local_pending_timeout_ms: Option<u64>,
+    /// request_id ごとの request stream GOAWAY の reset deadline
+    ///
+    /// draft-ietf-moq-transport-21 §9.2 (GOAWAY): request stream 上の GOAWAY は timeout 経過後に
+    /// 送信側が `GOING_AWAY` で stream を reset する SHOULD。control stream の単一スロット
+    /// (`local_deadline_ms`) とは独立に request ごとに保持し、期限到達で 1 回だけ reset イベントを
+    /// 発行してエントリを削除する。timeout == 0 の GOAWAY は登録しない。
+    /// tick 未経験で送信した場合は `DeadlineTimer::new(timeout, None)` として登録し、最初の
+    /// `tick` で `since_ms` / `deadline_ms` を確定する。
+    pub(super) request_stream_deadlines: HashMap<u64, super::types::DeadlineTimer>,
 }
 
 #[derive(Debug)]
@@ -552,6 +561,7 @@ impl Session {
                 peer: None,
                 local_deadline_ms: None,
                 local_pending_timeout_ms: None,
+                request_stream_deadlines: HashMap::new(),
             },
             timing: TimingState {
                 last_tick_ms: None,
@@ -976,6 +986,8 @@ impl Session {
         end: RequestStreamEnd,
     ) -> Result<(), SessionError> {
         self.clear_control_message_deadline(request_id);
+        // peer の FIN / RESET_STREAM 受信後は request stream GOAWAY の reset は不要
+        self.clear_request_stream_goaway_deadline(request_id);
         let Some(kind) = self.request_streams.get(&request_id).copied() else {
             // REQUEST_ERROR 拒否済み request id のクローズは通常フローであり
             // (draft §6.4.2.2: bidi の各方向は独立に閉じる。拒否する側は REQUEST_ERROR +
@@ -1189,6 +1201,11 @@ impl Session {
         // draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): TRACK_STATUS_OK 送信後は
         // bidi stream を FIN で閉じる (REQUEST_ERROR 側の send_request_error は既に FIN する)。
         let fin = matches!(table, Some(RequestTable::TrackStatus));
+        if fin {
+            // ローカル送信方向を FIN で閉じるため、request stream GOAWAY の reset deadline は
+            // 不要になる
+            self.clear_request_stream_goaway_deadline(request_id);
+        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
@@ -1295,12 +1312,18 @@ impl Session {
         });
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
+        let fin = publish_done_stream_count.is_none();
+        if fin {
+            // REQUEST_ERROR 単独が最終メッセージ (FIN) のときは request stream GOAWAY の
+            // reset deadline は不要になる (PUBLISH_DONE が続く場合はそちらで解除する)
+            self.clear_request_stream_goaway_deadline(request_id);
+        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
             // PUBLISH_DONE が続く場合は FIN をそちらに付け、REQUEST_ERROR 単独が最終の
             // 場合のみここで FIN する (§6.4.2.3 / §9.9)
-            fin: publish_done_stream_count.is_none(),
+            fin,
         });
         // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE 失敗時、
         // publisher は PUBLISH_DONE(UPDATE_FAILED) を送信する MUST。
@@ -1320,6 +1343,9 @@ impl Session {
                     .expect("send_err_for_subscription guarantees key presence");
                 subscription.pending_publish_done = Some(stream_count);
             } else {
+                // PUBLISH_DONE は subscription の最終メッセージ (FIN) のため、request stream
+                // GOAWAY の reset deadline は不要になる
+                self.clear_request_stream_goaway_deadline(request_id);
                 self.events.push_back(SessionEvent::SendOnStream {
                     request_id,
                     message: ControlMessage::PublishDone(PublishDone {
@@ -1878,6 +1904,8 @@ impl Session {
         // プロトコル層が自動で返す REQUEST_ERROR も応答であり、peer の outstanding を回復させる。
         // outstanding が 0 の初期 request 応答 (SUBSCRIBE / FETCH 等の拒否) では no-op になる。
         self.restore_incoming_request_update_credit(request_id);
+        // 自動拒否は最終応答 (FIN) のため、request stream GOAWAY の reset deadline は不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
