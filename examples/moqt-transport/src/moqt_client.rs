@@ -761,6 +761,47 @@ impl MoqtClient {
         self.cleanup_closed_requests();
     }
 
+    /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection):
+    /// 受信方向の cancel は STOP_SENDING で行う。
+    async fn request_stop_sending(&mut self, request_id: u64, error_code: u64) {
+        let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: no bidi receive task (request_id={request_id})"
+            );
+            return;
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = StopSendingCommand {
+            error_code,
+            ack: ack_tx,
+        };
+        if stop_tx.send(command).await.is_err() {
+            tracing::warn!(
+                "Failed to send STOP_SENDING: bidi receive task already finished (request_id={request_id})"
+            );
+            return;
+        }
+        // 受信タスクが bidi メッセージ送信でブロックしている場合に備え、ack 待ちに上限を設ける
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx).await {
+            Ok(Ok(Ok(()))) => tracing::info!("Sent STOP_SENDING (request_id={request_id})"),
+            Ok(Ok(Err(e))) => {
+                tracing::warn!("Failed to send STOP_SENDING (request_id={request_id}): {e}");
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: bidi receive task dropped the command (request_id={request_id})"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING: timed out waiting for the bidi receive task (request_id={request_id})"
+                );
+            }
+        }
+    }
+
     /// 指定した subscription に対して STOP_SENDING を送信する (subscriber 側)
     ///
     /// `Session::stop_sending` で subscription を Terminated にした後、bidi 受信タスクへ
@@ -796,40 +837,7 @@ impl MoqtClient {
         // 実際の回収は通常の pump_once / tick に任せる (キュー済みの Closed を先に処理させるため、
         // ここで即時 cleanup すると unknown request id になる余地がある)
         self.closed_request_streams.insert(request_id);
-        let Some(stop_tx) = self.bidi_stop_txs.remove(&request_id) else {
-            tracing::warn!(
-                "Failed to send STOP_SENDING: no bidi receive task (request_id={request_id})"
-            );
-            return Ok(());
-        };
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let command = StopSendingCommand {
-            error_code,
-            ack: ack_tx,
-        };
-        if stop_tx.send(command).await.is_err() {
-            tracing::warn!(
-                "Failed to send STOP_SENDING: bidi receive task already finished (request_id={request_id})"
-            );
-            return Ok(());
-        }
-        // 受信タスクが bidi メッセージ送信でブロックしている場合に備え、ack 待ちに上限を設ける
-        match tokio::time::timeout(std::time::Duration::from_secs(1), ack_rx).await {
-            Ok(Ok(Ok(()))) => tracing::info!("Sent STOP_SENDING (request_id={request_id})"),
-            Ok(Ok(Err(e))) => {
-                tracing::warn!("Failed to send STOP_SENDING (request_id={request_id}): {e}");
-            }
-            Ok(Err(_)) => {
-                tracing::warn!(
-                    "Failed to send STOP_SENDING: bidi receive task dropped the command (request_id={request_id})"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Failed to send STOP_SENDING: timed out waiting for the bidi receive task (request_id={request_id})"
-                );
-            }
-        }
+        self.request_stop_sending(request_id, error_code).await;
         Ok(())
     }
 
@@ -959,11 +967,16 @@ impl MoqtClient {
                         self.drain_events().await?;
                     }
                     StreamRead::Closed(end) => {
-                        let recv_result = {
+                        // 回収済み request (malformed 終端後など) への遅延 close は Session が
+                        // no-op 吸収するため、回収対象として登録しない (登録すると誰も除去できない)
+                        let register_for_cleanup = {
                             let mut session = lock_session(&self.session);
-                            session.recv_request_stream_closed(rid, end)
+                            let recv_result = session.recv_request_stream_closed(rid, end);
+                            recv_result.is_ok()
+                                && (session.subscription(rid).is_some()
+                                    || session.fetch(rid).is_some())
                         };
-                        if recv_result.is_ok() {
+                        if register_for_cleanup {
                             self.closed_request_streams.insert(rid);
                         }
                         tracing::debug!("bidi stream {rid} closed by peer");
@@ -1031,12 +1044,26 @@ impl MoqtClient {
                     request_id,
                     error_code,
                 } => {
-                    let Some(mut send) = self.bidi_sends.remove(&request_id) else {
-                        return Err(TransportError::Internal(format!(
-                            "no bidi stream for request_id {request_id}"
-                        )));
-                    };
-                    send.reset(error_code)?;
+                    // 送信方向が既に FIN / RESET 済みの request では no-op にする
+                    // (GOING_AWAY timeout reset と malformed cancel が重複して届きうる。
+                    // `ResetRequestStream` の doc 参照)
+                    if let Some(mut send) = self.bidi_sends.remove(&request_id)
+                        && let Err(e) = send.reset(error_code)
+                    {
+                        tracing::warn!(
+                            "Failed to reset bidi request stream (request_id={request_id}): {e}"
+                        );
+                    }
+                }
+                SessionEvent::StopSendingRequestStream {
+                    request_id,
+                    error_code,
+                } => {
+                    // Session が Malformed Track 検出時に発行する受信方向の cancel
+                    // (draft-ietf-moq-transport-21 §6.4.2.3)。bidi 受信タスクへ STOP_SENDING を指示する。
+                    // 受信タスク終了後は peer の close を検知できないため、回収対象として登録する
+                    self.closed_request_streams.insert(request_id);
+                    self.request_stop_sending(request_id, error_code).await;
                 }
                 SessionEvent::CloseSession(err) => {
                     self.handle.close(err.code, err.reason).await?;
@@ -1055,22 +1082,20 @@ impl MoqtClient {
                 | SessionEvent::PublishStateNotifyReceived { .. }
                 | SessionEvent::ResetDataStream { .. }
                 | SessionEvent::SubscribeTracksReceived { .. }
-                | SessionEvent::StopSendingRequestStream { .. }
                 | SessionEvent::FetchOkReceived { .. }
                 | SessionEvent::SendPaddingStream { .. }
                 | SessionEvent::OpenFillFetchStream { .. }
                 | SessionEvent::SendPaddingDatagram { .. } => {
                     // GoawayReceived / PublishDoneReceived はメインループが take_notable_event で拾う。
                     // ResetDataStream は OBJECT_DELIVERY_TIMEOUT / SUBGROUP_DELIVERY_TIMEOUT を
-                    // 設定した subscription でのみ発火する (draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability))。
+                    // 設定した subscription や malformed 検出時に発火する (draft-ietf-moq-transport-21
+                    // §5.2 (Delivery Timeouts and Data Reliability) / §12.1 (Malformed Tracks))。
+                    // 本 example は受信 data stream の reset を行わないため無視する。
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
                     // (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
                     // OpenFillFetchStream は fill 配信を要求された場合に発火する
                     // (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。本 example は fill 配信を行わないため無視する。
-                    // StopSendingRequestStream は受信方向の cancel 指示だが、Session の自動発火経路がなく、
-                    // example は `MoqtClient::stop_sending` で bidi 受信タスクへ直接指示するため到達しない
-                    // (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))。
                     // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
                     // ポーリングで参照するためここでは特別な処理を行わない
                     // (draft-ietf-moq-transport-21 §9.12 (FETCH_OK))。

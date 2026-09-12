@@ -339,6 +339,7 @@ pub enum SessionEvent {
     /// - `LocalCancel`: 自側から cancel した
     /// - `SupersededByPublish`: PUBLISH 受信で既存 Pending(Subscriber) が置き換えられた (draft §3.1 (Subscriptions))
     /// - `NamespaceImplicitDone`: SUBSCRIBE_NAMESPACE 終端時に残った active suffix を暗黙 NAMESPACE_DONE として通知 (draft §9.15 (SUBSCRIBE_NAMESPACE))
+    /// - `MalformedTrack`: Malformed Track 検出で該当 request を cancel した (draft §12.1 (Malformed Tracks))
     RequestTerminated {
         /// 対象 request の Request ID
         request_id: u64,
@@ -416,6 +417,11 @@ pub enum SessionEvent {
     /// and STOP_SENDING for a direction they are receiving."
     /// I/O 層は `request_id` に対応する bidi stream の送信方向を `error_code` で reset する。
     /// `error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
+    /// Session は Malformed Track 検出時 (§12.1) にも本イベントを
+    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) で発行する。
+    /// 送信方向が既に FIN / RESET 済みの request に対する本イベントは I/O 層で無視する
+    /// (送信方向を再度 reset しない。Session は送信方向の閉塞を追跡しないため、
+    /// GOING_AWAY timeout reset と malformed cancel が重複して届きうる)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     ResetRequestStream {
         /// 対象 request の Request ID
@@ -428,7 +434,10 @@ pub enum SessionEvent {
     /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) の
     /// 受信方向の打ち切り。I/O 層は `request_id` に対応する bidi stream の受信方向に
     /// `error_code` で STOP_SENDING を送る。`error_code` は §12.5 のコードを使う。
-    /// Session の自動発火経路は現在なく、受信方向の cancel は I/O 層主導で行う。
+    /// Session は Malformed Track 検出時 (§12.1) に、新規に `Terminated` へ遷移させる経路で
+    /// 本イベントを [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) で発行する
+    /// (続けて送信方向の cancel として `ResetRequestStream` を発行する)。既に `Terminated` の
+    /// 経路 (キャンセル由来 / PUBLISH_DONE 受信済み) では発行しない。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     StopSendingRequestStream {
         /// 対象 request の Request ID
@@ -610,7 +619,7 @@ pub enum RequestStreamEnd {
     },
 }
 
-/// request が終端した原因 (draft-ietf-moq-transport-21 §3.1 (Subscriptions) / §9.15 (SUBSCRIBE_NAMESPACE) / §6.4.2.3 (Request Cancellation and Rejection))
+/// request が終端した原因 (draft-ietf-moq-transport-21 §3.1 (Subscriptions) / §9.15 (SUBSCRIBE_NAMESPACE) / §6.4.2.3 (Request Cancellation and Rejection) / §12.1 (Malformed Tracks))
 ///
 /// `SessionEvent::RequestTerminated` の payload として使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,13 +648,14 @@ pub enum TerminationReason {
     /// Malformed Track を検出して該当 request をキャンセルした (draft §12.1 (Malformed Tracks))
     ///
     /// §12.1: "When a subscriber detects a Malformed Track, it MUST cancel any corresponding
-    /// subscription or fetches for that Track from that publisher (see Section 3.3.3), and
+    /// subscription or fetches for that Track from that publisher (see Section 6.4.2.3), and
     /// SHOULD deliver an error to the application."
     ///
-    /// 本イベントが SHOULD の「アプリケーションへのエラー通知」に相当する。アプリケーションは
-    /// §6.4.2.3 に従い当該 bidi request stream を RESET_STREAM / STOP_SENDING で閉じる。
-    /// その際のコードは [`REQUEST_MALFORMED_TRACK`](crate::error::REQUEST_MALFORMED_TRACK) /
-    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) を使う。
+    /// 本イベントが SHOULD の「アプリケーションへのエラー通知」に相当する。Session は
+    /// §6.4.2.3 に従い `StopSendingRequestStream` → `ResetRequestStream` を
+    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) で発行して
+    /// 当該 bidi request stream の両方向を cancel する
+    /// (I/O 層が実際の STOP_SENDING / RESET_STREAM を送出する)。
     ///
     /// relay として動作する場合、§12.1 は downstream の subscription を
     /// PUBLISH_DONE で終端し fetch stream を MALFORMED_TRACK で reset することを MUST とする。

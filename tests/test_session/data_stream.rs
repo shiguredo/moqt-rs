@@ -301,7 +301,7 @@ fn object_datagram_unknown_alias_is_reported_without_closing() {
 ///
 /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks): "When a subscriber detects a
 /// Malformed Track, it MUST cancel any corresponding subscription or fetches for that Track
-/// from that publisher (see Section 3.3.3), and SHOULD deliver an error to the application."
+/// from that publisher (see Section 6.4.2.3), and SHOULD deliver an error to the application."
 #[test]
 fn subgroup_object_malformed_track_terminates_subscription() {
     let (mut client, _, rid) = establish_subscribe_track(500);
@@ -2515,6 +2515,70 @@ fn reset_unknown_stream_is_rejected() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
+/// Malformed Track の cancel / 終端イベントを回収して検証する
+///
+/// 返り値は (cancel イベント列, ResetDataStream 件数, RequestTerminated(MalformedTrack) 件数)。
+/// cancel は `request_id` と `STREAM_MALFORMED_TRACK` も検証する。`expected_reset_stream_id` は
+/// `ResetDataStream` の対象 stream (datagram 経路は `None`)。CloseSession はテストの前提に
+/// 反するため panic する。
+fn drain_malformed_events(
+    session: &mut Session,
+    request_id: u64,
+    expected_reset_stream_id: Option<DataStreamId>,
+) -> (Vec<&'static str>, usize, usize) {
+    use shiguredo_moqt::error::STREAM_MALFORMED_TRACK;
+    let mut cancels = Vec::new();
+    let mut reset_data_streams = 0;
+    let mut malformed_terminations = 0;
+    while let Some(e) = session.poll_event() {
+        match e {
+            SessionEvent::StopSendingRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
+                );
+                cancels.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
+                );
+                cancels.push("reset");
+            }
+            SessionEvent::ResetDataStream { stream_id, .. } => {
+                assert_eq!(
+                    Some(stream_id),
+                    expected_reset_stream_id,
+                    "ResetDataStream の対象 stream_id が期待値と一致すること"
+                );
+                reset_data_streams += 1;
+            }
+            SessionEvent::RequestTerminated {
+                request_id: rid,
+                reason: TerminationReason::MalformedTrack { .. },
+                ..
+            } => {
+                assert_eq!(rid, request_id, "終端対象 request id が一致すること");
+                malformed_terminations += 1;
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("CloseSession が発行された: {err:?}");
+            }
+            _ => {}
+        }
+    }
+    (cancels, reset_data_streams, malformed_terminations)
+}
+
 // ─── 条件 1: 同一 Subgroup ID の Publisher Priority 不一致 ─────────────────
 
 /// 同一 Subgroup キーの 2 本目の stream で Publisher Priority を変えると Malformed Track
@@ -2606,6 +2670,22 @@ fn condition1_priority_mismatch_terminates_subscription() {
             .state,
         SubscriptionState::Terminated,
         "該当 subscription は Terminated になること"
+    );
+    // draft §12.1 MUST: subscription に対応する bidi request stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, Some(stream2));
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 1,
+        "malformed を運んだ stream を reset すること"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
     );
 }
 
@@ -2831,6 +2911,22 @@ fn condition6_priority_mismatch_on_duplicate_datagram_terminates_subscription() 
             .state,
         SubscriptionState::Terminated,
         "該当 subscription は Terminated になること"
+    );
+    // draft §12.1 MUST: datagram 経路 (stream_id なし) でも bidi request stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, None);
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 0,
+        "datagram 経路では ResetDataStream を発行しないこと"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
     );
 }
 
@@ -3189,6 +3285,22 @@ fn first_object_id_subgroup_reopen_with_different_priority_terminates_subscripti
             .state,
         SubscriptionState::Terminated,
         "該当 subscription は Terminated になること"
+    );
+    // draft §12.1 MUST: 先頭 Object 解決経路でも bidi request stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, Some(stream_c));
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 1,
+        "malformed を運んだ stream を reset すること"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
     );
 }
 

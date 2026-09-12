@@ -2373,7 +2373,7 @@ impl Session {
     /// Malformed Track を検出した request を終端する (draft §12.1 (Malformed Tracks))
     ///
     /// §12.1: "When a subscriber detects a Malformed Track, it MUST cancel any corresponding
-    /// subscription or fetches for that Track from that publisher (see Section 3.3.3), and
+    /// subscription or fetches for that Track from that publisher (see Section 6.4.2.3), and
     /// SHOULD deliver an error to the application."
     ///
     /// **セッション全体は閉じない。** 該当 request だけを Terminated にし、他の request は
@@ -2382,6 +2382,9 @@ impl Session {
     ///
     /// 行うこと:
     /// - 該当 subscription / fetch を `Terminated` へ遷移させる
+    /// - 対象 request の bidi request stream を cancel する
+    ///   ([`SessionEvent::StopSendingRequestStream`] → [`SessionEvent::ResetRequestStream`] の順、
+    ///   どちらも [`STREAM_MALFORMED_TRACK`] (§6.4.2.3 / §12.5))
     /// - `stream_id` が与えられていれば、その data stream を
     ///   [`STREAM_MALFORMED_TRACK`] で `ResetDataStream` する
     ///   (§12.1 の "reset any fetch streams with Status Code MALFORMED_TRACK" に対応)
@@ -2452,6 +2455,18 @@ impl Session {
         if self.request_streams.remove(&request_id).is_some() {
             self.rejected_request_ids.insert(request_id);
         }
+        // draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) の cancel 手順に従い、受信方向を
+        // 先に STOP_SENDING で打ち切り、続けて送信方向を RESET_STREAM で打ち切るよう I/O 層へ
+        // 指示する (送信方向が既に FIN / RESET 済みの場合の扱いは `ResetRequestStream` の doc 参照)。
+        self.events
+            .push_back(SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code: STREAM_MALFORMED_TRACK,
+            });
+        self.events.push_back(SessionEvent::ResetRequestStream {
+            request_id,
+            error_code: STREAM_MALFORMED_TRACK,
+        });
         if let Some(stream_id) = stream_id {
             // draft §12.1 (Malformed Tracks): Malformed Track を運んだ data stream は
             // MALFORMED_TRACK で reset する

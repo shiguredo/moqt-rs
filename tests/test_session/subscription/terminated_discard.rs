@@ -586,9 +586,11 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 
-    // RequestTerminated は発行されず (二重発行の抑止)、ResetDataStream のみ発行される
+    // RequestTerminated は発行されず (二重発行の抑止)、ResetDataStream のみ発行される。
+    // また既に Terminated の経路では request stream の cancel 指示 (StopSending / Reset) も発行しない
     let mut reset_count = 0;
     let mut terminated_count = 0;
+    let mut cancel_count = 0;
     while let Some(e) = client.poll_event() {
         if let SessionEvent::ResetDataStream { stream_id: sid, .. } = e {
             assert_eq!(sid, stream_id);
@@ -596,6 +598,12 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
         }
         if matches!(e, SessionEvent::RequestTerminated { .. }) {
             terminated_count += 1;
+        }
+        if matches!(
+            e,
+            SessionEvent::StopSendingRequestStream { .. } | SessionEvent::ResetRequestStream { .. }
+        ) {
+            cancel_count += 1;
         }
     }
     assert_eq!(
@@ -605,6 +613,10 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
     assert_eq!(
         terminated_count, 0,
         "PUBLISH_DONE 受信済み Terminated での再検出は RequestTerminated を発行しないこと"
+    );
+    assert_eq!(
+        cancel_count, 0,
+        "既に Terminated の経路では request stream の cancel を発行しないこと"
     );
     // drain モードが解除され、以後のデータは破棄対象になる
     assert!(
