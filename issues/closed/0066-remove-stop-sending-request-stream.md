@@ -1,7 +1,7 @@
 # 未使用の SessionEvent::StopSendingRequestStream を削除する
 
 - Created: 2026-09-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/remove-stop-sending-request-stream
 - Polished: {YYYY-MM-DD}
 
@@ -25,3 +25,9 @@
 - `StopSendingRequestStream` への参照がリポジトリから消えていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
 - `CHANGES.md` の `[CHANGE]` にエントリが追加されていること
+
+## 解決方法
+
+本 issue は取り下げる (open のままで実装できない)。
+
+直近の 0028 (Malformed Track 検出時に bidi request stream を cancel する) で `SessionEvent::StopSendingRequestStream` が malformed cancel の発火経路として使われるようになり、削除対象ではなくなった。受信方向 cancel は I/O 層主導という前提も、Session が `StopSendingRequestStream` を発行して I/O 層へ指示する形に変わっている。event の削除や `ResetRequestStream` への統合を前提とした死にコード整理は行わない。
