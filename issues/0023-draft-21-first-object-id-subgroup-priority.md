@@ -1,7 +1,7 @@
 # FirstObjectId Subgroup の Publisher Priority を Subgroup 単位で記録する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-first-object-id-subgroup-priority
 - Polished: 2026-09-10
 
@@ -42,3 +42,17 @@ FirstObjectId の並行 priority 差を扱うテストは存在しない (`tests
 - 上記再現手順 1-4 で subgroup 5 を priority 10 で再オープンしても Malformed にならないこと
 - 同じ手順で subgroup 5 を本来と異なる priority 99 で再オープンした場合は §12.1 条件 1 の Malformed として該当 subscription が Terminated になること
 - 回帰テストが `tests/test_session/data_stream.rs` に追加され、`cargo test --workspace` が通ること
+
+## 解決方法
+
+Subgroup 単位の解決済み Publisher Priority を stream に保持し、FirstObjectId Subgroup の Malformed Track 判定に使うようにした。
+
+- `src/session/data.rs`: `IncomingDataStream::Subgroup` に `resolved_publisher_priority: u8` を追加し、
+  `recv_subgroup_header` で `Subscription::resolve_header_publisher_priority` により解決して保持する。
+  `recv_subgroup_object` の §12.1 条件 1 の `record_priority` と重複 Object 検証
+  (`observe_object_fields`) は、購読単位の直近値 (`effective_publisher_priority`) ではなく
+  stream 保持値を使う。`Subscription::publisher_priority` のヘッダ毎更新は維持する。
+- `src/session/types.rs`: `Subscription::publisher_priority` の doc を「直近 header の解決値」に明確化し、Subgroup 単位の検証は stream 保持値を使うと書き分けた。
+- `src/session/data.rs`: 移管 (`remove_incoming_data_streams_for_request`) で維持するフィールドの doc に `resolved_publisher_priority` を追記した。
+- `tests/test_session/data_stream.rs`: FirstObjectId で priority 10 / 99 の並行 Subgroup を受信し、先頭 Object 解決後に同一 priority で再オープンすると Malformed にならないテスト、異なる priority で再オープンすると §12.1 条件 1 で Terminated になるテスト、重複 Object 検証が stream 保持値を使うテスト、異なる Subgroup ID の重複 Object が §7.1 の Malformed になるテストを追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
