@@ -1,7 +1,7 @@
 # KVP 値のエンコードに 2^16-1 バイト上限チェックを追加する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-encode-value-length-limit
 - Polished: 2026-09-10
 
@@ -30,3 +30,13 @@ decode 側は値長 `> 65535` を `ProtocolViolation` で拒否しているが�
 
 - `AuthorizationToken` / Setup `Bytes` / Setup `AuthorizationToken` の encode が 65536 バイト以上を拒否すること
 - 65535 / 65536 の境界テストが `tests/test_message_parameter.rs` / `tests/test_parameter.rs` に追加されていること
+
+## 解決方法
+
+値長上限 2^16-1 バイトの encode 側検証を追加し、公開 API が自分で decode できない KVP を生成しないようにした。
+
+- `src/message_parameter.rs`: `encode_value` の `AuthorizationToken` 分岐で `encode_to_bytes()` の長さを検証し、65535 バイト超を `ProtocolViolation` で拒否するようにした。`MessageParameters::encode` の `# Errors` に値長上限などの条件を追記した。
+- `src/parameter.rs`: `SetupOptions::encode` の `Bytes` と `AuthorizationToken` 分岐で値長を検証し、65535 バイト超を `ProtocolViolation` で拒否するようにした。`# Errors` に条件を追記した。
+- `tests/test_message_parameter.rs`: AuthorizationToken の 65535 / 65536 境界テストを追加し、既存の LengthPrefixed 65536 テストを値長検証だけを固定できる型 (`PARAM_SUBGROUP_FILTER`) に修正した。
+- `tests/test_parameter.rs`: Setup Bytes / Setup AuthorizationToken の 65535 / 65536 境界テストと、Setup Option の decode で 65536 を拒否するテストを追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
