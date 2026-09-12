@@ -18,7 +18,7 @@
 ## 設計方針
 
 - PBT（noprop）で次の不変条件を検証する。
-  - `open_incoming_subgroup_count` が incoming の生きた Subgroup stream 数と一致し、全 stream 終端 / forget 後に 0 になる
+  - `open_incoming_subgroup_count` が incoming の生きた data stream 数 (subgroup + fill fetch) と一致し、全 stream 終端 / forget 後に 0 になる
   - 全 stream 終端 / forget 後に delivery timeout override が残らない
   - 帰属先が「候補順で最初の非キャンセルかつ `object_passes_filters` 合格」で決定的である
   - `FilteredOut` / `Discarded` の Object が subscription スコープの状態（`largest_received_location` / `ended_groups` / Object tracker）を更新しない
