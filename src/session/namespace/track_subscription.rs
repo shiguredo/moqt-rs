@@ -3,7 +3,10 @@
 //! draft-ietf-moq-transport-21 §9.18 (SUBSCRIBE_TRACKS) / §9.19 (PUBLISH_SKIPPED) に対応する
 //! `impl Session` の送受信メソッドをまとめる。
 
-use crate::error::{REQUEST_DOES_NOT_EXIST, REQUEST_PREFIX_OVERLAP, SESSION_PROTOCOL_VIOLATION};
+use crate::error::{
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_PREFIX_OVERLAP,
+    SESSION_PROTOCOL_VIOLATION,
+};
 use crate::message::{ControlMessage, PublishSkipped, SubscribeTracks, common::TrackNamespace};
 use crate::message_parameter::{MessageParameters, PARAM_TRACK_PROPERTY_FILTER};
 use alloc::vec::Vec;
@@ -225,7 +228,8 @@ impl Session {
             return Ok(());
         }
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
-        if !self.check_incoming_range_filters(request_id, &msg.parameters) {
+        if let Err(reason) = self.check_incoming_range_filters(&msg.parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
         // draft §9.18 (SUBSCRIBE_TRACKS): SUBSCRIBE_TRACKS テーブル内での prefix overlap チェック

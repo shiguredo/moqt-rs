@@ -7,7 +7,9 @@
 //! subscription 状態など観測可能な副作用まで断言する。
 
 use super::*;
-use shiguredo_moqt::error::{REQUEST_INVALID_FILTER, SESSION_TOO_MANY_REQUEST_UPDATES};
+use shiguredo_moqt::error::{
+    PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER, SESSION_TOO_MANY_REQUEST_UPDATES,
+};
 use shiguredo_moqt::message_parameter::{
     MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_OBJECT_PROPERTY_FILTER,
     PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER,
@@ -56,21 +58,106 @@ fn assert_no_send_on_stream(s: &mut Session) {
     }
 }
 
-/// INVALID_FILTER 拒否時の副作用を検証する
+/// 自側 publisher の subscription が INVALID_FILTER で拒否されたときの副作用を検証する
 ///
-/// - REQUEST_ERROR (INVALID_FILTER) がちょうど 1 件送出される
+/// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が失敗した
+/// publisher は PUBLISH_DONE(UPDATE_FAILED) を送って subscription を終端する MUST。
+///
+/// - REQUEST_ERROR (INVALID_FILTER) がちょうど 1 件、続いて PUBLISH_DONE(UPDATE_FAILED) が出る
 /// - CloseSession は出ない
 /// - RequestUpdateReceived は出ない
-/// - pending_update_params は更新されない
-fn assert_invalid_filter_rejection(server: &mut Session, rid: u64) {
+/// - subscription は Terminated になり pending_update_params はクリアされる
+///
+/// open 中の outgoing data stream がある場合は PUBLISH_DONE が保留されるため本ヘルパーは
+/// 使えない (`invalid_filter_rejection_defers_publish_done_until_streams_close` を参照)。
+fn assert_publisher_invalid_filter_rejection(server: &mut Session, rid: u64) {
+    let mut saw_invalid_filter = false;
+    let mut saw_update_failed = false;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(err),
+                fin,
+                ..
+            } => {
+                assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+                assert!(
+                    !fin,
+                    "PUBLISH_DONE が続く場合は REQUEST_ERROR を FIN しないこと"
+                );
+                assert!(
+                    !saw_invalid_filter,
+                    "INVALID_FILTER の REQUEST_ERROR が複数回送出されている"
+                );
+                saw_invalid_filter = true;
+            }
+            SessionEvent::SendOnStream {
+                message: ControlMessage::PublishDone(done),
+                fin,
+                ..
+            } => {
+                assert!(
+                    saw_invalid_filter,
+                    "PUBLISH_DONE は REQUEST_ERROR の後に送出されること"
+                );
+                assert_eq!(
+                    done.status_code, PUBLISH_DONE_UPDATE_FAILED,
+                    "PUBLISH_DONE は UPDATE_FAILED であること"
+                );
+                assert!(fin, "PUBLISH_DONE が最終メッセージで FIN されること");
+                assert!(!saw_update_failed, "PUBLISH_DONE が複数回送出されている");
+                saw_update_failed = true;
+            }
+            SessionEvent::SendOnStream { message, .. } => {
+                panic!("REQUEST_ERROR / PUBLISH_DONE 以外の SendOnStream は想定外: {message:?}");
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("INVALID_FILTER でセッションが閉じてはいけない: {err:?}");
+            }
+            SessionEvent::RequestUpdateReceived { .. } => {
+                panic!("INVALID_FILTER では RequestUpdateReceived を発行してはいけない");
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_invalid_filter,
+        "INVALID_FILTER の REQUEST_ERROR が送出されること"
+    );
+    assert!(
+        saw_update_failed,
+        "publisher は PUBLISH_DONE(UPDATE_FAILED) で終端すること"
+    );
+    let sub = server.subscription(rid).expect("subscription が存在する");
+    assert_eq!(
+        sub.state,
+        SubscriptionState::Terminated,
+        "publisher 側の subscription は Terminated になること"
+    );
+    assert!(
+        sub.pending_update_params.is_none(),
+        "終端時に pending_update_params はクリアされること"
+    );
+}
+
+/// 自側 subscriber の subscription が INVALID_FILTER で拒否されたときの副作用を検証する
+///
+/// PUBLISH_DONE の送出は publisher である peer の責務のため、REQUEST_ERROR のみを送り、
+/// subscription は Established のまま (セッションも閉じない)。
+fn assert_subscriber_invalid_filter_rejection(server: &mut Session, rid: u64) {
     let mut saw_invalid_filter = false;
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::SendOnStream {
                 message: ControlMessage::RequestError(err),
+                fin,
                 ..
             } => {
                 assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+                assert!(
+                    fin,
+                    "REQUEST_ERROR が最終応答のため FIN されること (§6.4.2.3)"
+                );
                 assert!(
                     !saw_invalid_filter,
                     "INVALID_FILTER の REQUEST_ERROR が複数回送出されている"
@@ -93,6 +180,14 @@ fn assert_invalid_filter_rejection(server: &mut Session, rid: u64) {
         saw_invalid_filter,
         "INVALID_FILTER の REQUEST_ERROR が送出されること"
     );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "subscriber 側は Established のまま (peer の PUBLISH_DONE に委ねる)"
+    );
     assert!(
         server
             .subscription(rid)
@@ -101,6 +196,38 @@ fn assert_invalid_filter_rejection(server: &mut Session, rid: u64) {
             .is_none(),
         "拒否された REQUEST_UPDATE のパラメータが pending に残ってはいけない"
     );
+}
+
+/// PUBLISH を確立して (client, server, request_id) を返す
+///
+/// client = publisher (initiator)、server = subscriber (non-initiator) の組み合わせを作る。
+/// 拒否後も subscription が Established のまま残る subscriber 側の検証に使う。
+fn establish_publish_with(
+    client_opts: SetupOptions,
+    server_opts: SetupOptions,
+) -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair_with_options(client_opts, server_opts);
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("PUBLISH の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("REQUEST_OK の受信に成功すること");
+    (client, server, rid)
 }
 
 // ─── MAX_REQUEST_UPDATES ──────────────────────────────────────────
@@ -396,7 +523,7 @@ fn incoming_range_filters_rejected_when_max_is_zero() {
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-    assert_invalid_filter_rejection(&mut server, rid);
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 
 /// 自側 MAX_FILTER_RANGES=1 を超える受信は INVALID_FILTER で拒否される
@@ -413,7 +540,7 @@ fn incoming_range_filters_exceed_local_max() {
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-    assert_invalid_filter_rejection(&mut server, rid);
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 
 /// REQUEST_UPDATE 拒否 (INVALID_FILTER) は登録済み request への応答のため
@@ -425,15 +552,18 @@ fn incoming_range_filters_exceed_local_max() {
 /// クローズ通知時に集合から削除されずに残り続ける (リーク) 上、
 /// `forget_*` 後の遅延クローズが no-op で吸収され、2 回目以降のクローズを
 /// unknown id として fail させる保護が失われる。
+/// `emit_request_error` を通る subscriber 側 (PUBLISH で確立) の拒否で検証する。
+/// publisher 側の拒否は `send_request_error` 経路になり、この規則を通らない。
 #[test]
 fn request_update_rejection_close_goes_through_request_streams() {
-    let (_client, mut server, rid) = establish_subscribe_track(1);
+    let (_client, mut server, rid) =
+        establish_publish_with(SetupOptions::new(), SetupOptions::new());
     // 登録済み subscription への REQUEST_UPDATE を Range Filter 違反で拒否
     let upd = inject_request_update(rid, one_range_subgroup_filter());
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-    assert_invalid_filter_rejection(&mut server, rid);
+    assert_subscriber_invalid_filter_rejection(&mut server, rid);
     // 登録済み request のため no-op ではなく通常経路で処理される (RequestTerminated 発行)
     server
         .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
@@ -538,7 +668,227 @@ fn incoming_zero_range_duplicate_filters_are_rejected() {
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-    assert_invalid_filter_rejection(&mut server, rid);
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
+}
+
+/// open 中の outgoing subgroup stream がある場合、Range Filter 拒否の PUBLISH_DONE は
+/// 全 stream 終端後に自動送信される
+///
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// until it has closed all streams it will ever open ..." と §9.5.1 の MUST
+/// (REQUEST_UPDATE 失敗時は PUBLISH_DONE(UPDATE_FAILED)) を両立させる。
+#[test]
+fn invalid_filter_rejection_defers_publish_done_until_streams_close() {
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (_client, mut server, rid) = establish_subscribe_track(1);
+    // publisher 側で 1 本 outgoing subgroup stream を開く
+    let stream_id = DataStreamId(180);
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .stream_counts
+            .published_count,
+        1
+    );
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+
+    // REQUEST_ERROR は即時送出、PUBLISH_DONE は open stream がある間は保留される
+    let (_, err_msg, err_fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(err_msg, ControlMessage::RequestError(_)));
+    assert!(!err_fin, "REQUEST_ERROR は PUBLISH_DONE に FIN を譲ること");
+    let mut done_pushed = false;
+    while let Some(ev) = server.poll_event() {
+        if matches!(
+            ev,
+            SessionEvent::SendOnStream {
+                message: ControlMessage::PublishDone(_),
+                ..
+            }
+        ) {
+            done_pushed = true;
+        }
+    }
+    assert!(
+        !done_pushed,
+        "open stream がある間は PUBLISH_DONE が保留されること (§9.9 の MUST NOT)"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .pending_publish_done,
+        Some(1),
+        "保留情報に stream_count (published_count=1) が記録されること"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "拒否時に Terminated に遷移すること"
+    );
+
+    // stream 終端 (FIN) → 保留していた PUBLISH_DONE(UPDATE_FAILED) が自動送信される
+    server
+        .send_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg, done_fin) = take_send_on_stream_with_fin(&mut server);
+    match done_msg {
+        ControlMessage::PublishDone(done) => {
+            assert_eq!(done.status_code, PUBLISH_DONE_UPDATE_FAILED);
+            assert_eq!(done.stream_count, 1);
+        }
+        other => panic!("PUBLISH_DONE が期待されたが {other:?} を受け取った"),
+    }
+    assert!(done_fin, "PUBLISH_DONE が最終メッセージで FIN されること");
+}
+
+/// 拒否で Terminated になった後も pipelining された 2 通目が届いた場合、
+/// fin 付き REQUEST_ERROR を送らず state machine の違反としてセッションを閉じる
+///
+/// 保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ると
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の「PUBLISH_DONE が最終メッセージ」
+/// が守れなくなるため、Terminated への REQUEST_UPDATE は
+/// `handle_update_for_subscription` の state 検証と同じ経路で閉じる。
+#[test]
+fn second_invalid_filter_rejection_after_termination_closes_session() {
+    use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    let (_client, mut server, rid) = establish_subscribe_track(1);
+    // PUBLISH_DONE が保留される状況 (open 中の outgoing subgroup stream) を作る
+    let stream_id = DataStreamId(181);
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 1 通目: INVALID_FILTER → Terminated、PUBLISH_DONE は保留
+    server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    let (_, err_msg, err_fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(err_msg, ControlMessage::RequestError(_)));
+    assert!(!err_fin, "REQUEST_ERROR は PUBLISH_DONE に FIN を譲ること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+
+    // 2 通目 (pipelining): Terminated への REQUEST_UPDATE は state 違反として閉じる
+    let err = server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect_err("Terminated への REQUEST_UPDATE は拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Closing);
+    // 追加の REQUEST_ERROR を送らないこと (保留 PUBLISH_DONE の順序保証を壊さない)
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(
+                ev,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                }
+            ),
+            "Terminated 後の拒否で REQUEST_ERROR を送ってはいけない"
+        );
+    }
+    // Closing 中は保留 PUBLISH_DONE を flush しない (require_established で拒否される)
+    let err = server
+        .send_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect_err("Closing 中は stream のクローズ通知を受け付けない");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "Closing 中に SendOnStream を積んではいけない: {ev:?}"
+        );
+    }
+}
+
+/// Pending の subscription に Range Filter 違反付き REQUEST_UPDATE が届いても
+/// state machine の違反としてセッションを閉じる (valid な REQUEST_UPDATE と同じ経路)
+///
+/// draft-ietf-moq-transport-21 §3.1 (Subscriptions): REQUEST_UPDATE は Established の
+/// self loop のみ。Range Filter の内容検証を理由に状態違反のクローズを回避させない。
+#[test]
+fn invalid_filter_rejection_on_pending_subscription_closes_session() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .is_pending_subscriber()
+    );
+
+    let err = server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect_err("Pending への REQUEST_UPDATE は state 違反");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Closing);
+    // fin 付き REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK) を閉じないこと
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(
+                ev,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                }
+            ),
+            "state 違反で REQUEST_ERROR を送ってはいけない"
+        );
+    }
+}
+
+/// 自側 subscriber の subscription で peer publisher 発 REQUEST_UPDATE を拒否しても
+/// PUBLISH_DONE を送らず、セッションも閉じない
+///
+/// PUBLISH_DONE を送るのは publisher である peer の責務であり、state の終端は
+/// peer の PUBLISH_DONE / bidi 終端処理に委ねる。
+#[test]
+fn invalid_filter_rejection_by_subscriber_sends_request_error_only() {
+    let (_client, mut server, rid) =
+        establish_publish_with(SetupOptions::new(), SetupOptions::new());
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_subscriber_invalid_filter_rejection(&mut server, rid);
 }
 
 /// SetID が異なる同一型 Range Filter 2 本は送信 API から受信状態反映まで通る
@@ -682,41 +1032,31 @@ fn outgoing_duplicate_range_filters_are_rejected() {
 /// REQUEST_ERROR であり、回復対象に含まれる。
 ///
 /// 自側 MAX_REQUEST_UPDATES=1 / MAX_FILTER_RANGES=0 (未宣言) の状態で、Range Filter を
-/// 載せた REQUEST_UPDATE を INVALID_FILTER で拒否したあと、正当な REQUEST_UPDATE が
-/// TOO_MANY_REQUEST_UPDATES にならずに受理されることを確認する。
+/// 載せた REQUEST_UPDATE を INVALID_FILTER で拒否したあと、同一 request への 2 通目が
+/// TOO_MANY_REQUEST_UPDATES にならないこと (上限チェックを通過すること) を確認する。
 #[test]
 fn request_update_credit_recovers_after_protocol_level_error() {
-    let (mut client, mut server, rid) =
+    let (_client, mut server, rid) =
         establish_subscribe_with(SetupOptions::new(), opts_with(0x08, 1));
 
     // client の送信 API は peer MAX_FILTER_RANGES=0 で弾くため、拒否対象は注入で作る
     server
         .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-    assert_invalid_filter_rejection(&mut server, rid);
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
 
-    // 拒否でクレジットが回復していなければ、ここで上限超過になりセッションが閉じる
-    client
-        .send_request_update(rid, MessageParameters::new())
-        .expect("client 側の outstanding は 0 のままなので送信できる");
-    let (_, upd) = take_send_on_stream(&mut client);
-    server
-        .recv_stream_message(rid, upd)
-        .expect("拒否でクレジットが回復しているため受理されること");
-
-    while let Some(e) = server.poll_event() {
-        assert!(
-            !matches!(e, SessionEvent::CloseSession(_)),
-            "クレジット回復後の REQUEST_UPDATE でセッションが閉じてはいけない: {e:?}"
-        );
-    }
-    assert!(
-        server
-            .subscription(rid)
-            .expect("subscription が存在する")
-            .pending_update_params
-            .is_some(),
-        "受理された REQUEST_UPDATE が pending_update_params に反映されること"
+    // 拒否でクレジットが回復していなければ、2 通目は上限超過 (TOO_MANY_REQUEST_UPDATES) になる。
+    // 回復済みなら上限チェックを通過し、Terminated による状態違反で拒否される。
+    let err = server
+        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .expect_err("Terminated な subscription への REQUEST_UPDATE は拒否される");
+    assert_ne!(
+        err.code, SESSION_TOO_MANY_REQUEST_UPDATES,
+        "拒否でクレジットが回復していれば上限超過にならない"
+    );
+    assert_eq!(
+        err.code, SESSION_PROTOCOL_VIOLATION,
+        "上限チェックを通過し状態違反で拒否されること"
     );
 }
 
@@ -725,17 +1065,19 @@ fn request_update_credit_recovers_after_protocol_level_error() {
 /// draft-ietf-moq-transport-21 §9.1.7 の回復は「加算した分を戻す」ものであり、
 /// 拒否のたびに +1 / -1 が釣り合う。釣り合いが崩れると上限判定が緩むか、
 /// 逆に正当な REQUEST_UPDATE を拒否してしまう。
+/// 自側 publisher の subscription は拒否で終端されるため、拒否後も Established を
+/// 維持する subscriber 側 (PUBLISH で確立) で繰り返しの釣り合いを検証する。
 #[test]
 fn repeated_protocol_level_errors_keep_update_limit() {
     let (_client, mut server, rid) =
-        establish_subscribe_with(SetupOptions::new(), opts_with(0x08, 1));
+        establish_publish_with(SetupOptions::new(), opts_with(0x08, 1));
 
     // 加算 (+1) → 拒否による回復 (-1) を 2 巡させる
     for _ in 0..2 {
         server
             .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
             .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
-        assert_invalid_filter_rejection(&mut server, rid);
+        assert_subscriber_invalid_filter_rejection(&mut server, rid);
     }
 
     // 上限 1 が保たれていれば 1 通目だけが受理される
@@ -956,9 +1298,11 @@ fn incoming_unparsable_range_filter_is_rejected() {
         match e {
             SessionEvent::SendOnStream {
                 message: ControlMessage::RequestError(err),
+                fin,
                 ..
             } => {
                 assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+                assert!(fin, "最終応答で FIN されること");
                 request_errors += 1;
             }
             SessionEvent::CloseSession(err) => {
@@ -971,6 +1315,74 @@ fn incoming_unparsable_range_filter_is_rejected() {
         request_errors, 1,
         "INVALID_FILTER の REQUEST_ERROR がちょうど 1 件送出されること"
     );
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// 初回 PUBLISH / FETCH / SUBSCRIBE_TRACKS の Range Filter 拒否も
+/// REQUEST_ERROR (INVALID_FILTER) のみで、セッションを閉じない
+///
+/// `check_incoming_range_filters` の戻り値化後も初期 request の 4 経路が
+/// 従来どおり REQUEST_ERROR + FIN を返すことの回帰テスト
+/// (SUBSCRIBE 初回は `incoming_unparsable_range_filter_is_rejected` が担う)。
+#[test]
+fn initial_requests_with_range_filter_violation_send_request_error_only() {
+    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish, SubscribeTracks};
+    for (label, message) in [
+        (
+            "PUBLISH",
+            ControlMessage::Publish(WirePublish {
+                request_id: 0,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                track_alias: 1,
+                parameters: one_range_subgroup_filter(),
+                track_properties: TrackProperties::new(),
+            }),
+        ),
+        (
+            "FETCH",
+            ControlMessage::Fetch(WireFetch {
+                request_id: 0,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                parameters: one_range_subgroup_filter(),
+            }),
+        ),
+        (
+            "SUBSCRIBE_TRACKS",
+            ControlMessage::SubscribeTracks(SubscribeTracks {
+                request_id: 0,
+                track_namespace_prefix: ns(&[b"live"]),
+                parameters: one_range_subgroup_filter(),
+            }),
+        ),
+    ] {
+        let (_client, mut server) =
+            establish_pair_with_options(SetupOptions::new(), SetupOptions::new());
+        server
+            .recv_request(message)
+            .unwrap_or_else(|e| panic!("{label}: INVALID_FILTER 拒否は Result::Ok: {e:?}"));
+        let mut request_errors = 0;
+        while let Some(e) = server.poll_event() {
+            match e {
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(err),
+                    fin,
+                    ..
+                } => {
+                    assert_eq!(err.error_code, REQUEST_INVALID_FILTER, "{label}");
+                    assert!(fin, "{label}: 最終応答で FIN されること");
+                    request_errors += 1;
+                }
+                SessionEvent::CloseSession(err) => {
+                    panic!("{label}: INVALID_FILTER でセッションが閉じてはいけない: {err:?}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(request_errors, 1, "{label}: REQUEST_ERROR がちょうど 1 件");
+        assert_eq!(server.state(), SessionState::Established, "{label}");
+    }
 }
 
 // ─── MAX_FILTER_RANGES の subscription 単位累積 (§3.3.2 / §9.1.6) ─────────
@@ -1045,11 +1457,12 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
 /// 累積超過で拒否した場合、pending_update_params が 1 通目の状態のまま巻き戻ること
 ///
 /// 上限違反で拒否したのに累積側が更新されていると、以降の正当な REQUEST_UPDATE も
-/// 超過状態のまま評価され続けてしまう。
+/// 超過状態のまま評価され続けてしまう。自側 publisher は拒否で終端されるため、
+/// 拒否後も state を観測できる subscriber 側 (PUBLISH で確立) で検証する。
 #[test]
 fn cumulative_overflow_does_not_mutate_pending_params() {
     let (_client, mut server, rid) =
-        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+        establish_publish_with(SetupOptions::new(), opts_with(0x06, 1));
 
     server
         .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
@@ -1061,9 +1474,13 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok");
     while server.poll_event().is_some() {}
 
-    let pending = server
-        .subscription(rid)
-        .expect("subscription が存在する")
+    let sub = server.subscription(rid).expect("subscription が存在する");
+    assert_eq!(
+        sub.state,
+        SubscriptionState::Established,
+        "subscriber 側は拒否後も Established のまま"
+    );
+    let pending = sub
         .pending_update_params
         .as_ref()
         .expect("1 通目の累積は残ること");
@@ -1086,6 +1503,26 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
     server
         .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
         .expect("巻き戻っていれば同一型の置換は引き続き受理される");
+}
+
+/// 自側 publisher の累積上限超過も単一メッセージ超過と同じ終端になる
+///
+/// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE が
+/// 失敗した publisher は PUBLISH_DONE(UPDATE_FAILED) で subscription を終端する MUST。
+#[test]
+fn cumulative_overflow_terminates_publisher_subscription() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .expect("1 通目は上限内");
+    while server.poll_event().is_some() {}
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid, one_range_objectid_filter()))
+        .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 
 /// 同一型の置換は累積扱いにならず、上限内なら何度でも更新できる

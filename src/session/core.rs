@@ -1655,39 +1655,30 @@ impl Session {
     /// 送信側 ([`validate_outgoing_range_filters`](Self::validate_outgoing_range_filters)) は
     /// §9.1.6 に literal な MUST NOT があるため拒否する。この非対称は仕様の非対称に由来する。
     ///
-    /// 違反時は REQUEST_ERROR (INVALID_FILTER) を送出し `false` を返す。
+    /// 違反時は拒否理由 (`&'static str`) を返す。REQUEST_ERROR の送出と後始末は呼び出し元が行う
+    /// (REQUEST_UPDATE の Range Filter 拒否は role によって終端方法が異なるため、
+    /// 呼び出し元が subscription の文脈を知っている必要がある)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub(super) fn check_incoming_range_filters(
-        &mut self,
-        request_id: u64,
+        &self,
         parameters: &crate::message_parameter::MessageParameters,
-    ) -> bool {
+    ) -> Result<(), &'static str> {
         // FILL 内側の Range Filter も検証対象に含める
         // (draft-ietf-moq-transport-21 §9.20.16)。
         let has_inner_range_filters = parameters
             .fill_parameters()
             .is_some_and(|fill| fill.has_range_filters());
         if !parameters.has_range_filters() && !has_inner_range_filters {
-            return true;
+            return Ok(());
         }
         let local_max = self.local_max_filter_ranges();
         let count = parameters.count_range_filters();
         if count > local_max {
-            self.emit_request_error(
-                request_id,
-                crate::error::REQUEST_INVALID_FILTER,
-                "Range Filters exceed MAX_FILTER_RANGES",
-            );
-            return false;
+            return Err("Range Filters exceed MAX_FILTER_RANGES");
         }
         // draft-ietf-moq-transport-21 §3.3.2: デルタ溢出・重複検証
         if parameters.validate_range_filters().is_err() {
-            self.emit_request_error(
-                request_id,
-                crate::error::REQUEST_INVALID_FILTER,
-                "Range Filter validation failed",
-            );
-            return false;
+            return Err("Range Filter validation failed");
         }
         // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
         // FILL 内側の Range Filter も外側と同様に内部構造を検証する
@@ -1698,14 +1689,9 @@ impl Session {
             && fill.has_range_filters()
             && fill.validate_range_filters().is_err()
         {
-            self.emit_request_error(
-                request_id,
-                crate::error::REQUEST_INVALID_FILTER,
-                "Range Filter validation failed inside FILL_PARAMETERS",
-            );
-            return false;
+            return Err("Range Filter validation failed inside FILL_PARAMETERS");
         }
-        true
+        Ok(())
     }
 
     /// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): 送信メッセージの Range Filter を検証する。

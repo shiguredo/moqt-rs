@@ -5,13 +5,13 @@
 //! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
-    REQUEST_DOES_NOT_EXIST, REQUEST_UNSUPPORTED_EXTENSION, SESSION_DUPLICATE_TRACK_ALIAS,
-    SESSION_PROTOCOL_VIOLATION,
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_UNSUPPORTED_EXTENSION,
+    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
 };
 use crate::message::{
     FETCH_UPDATE_ALLOWED_PARAMS, NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
     NAMESPACE_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify,
-    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
     TRACK_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, common::Location,
 };
 use crate::message_parameter::{
@@ -83,7 +83,8 @@ impl Session {
         // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&subscribe.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
-        if !self.check_incoming_range_filters(request_id, &subscribe.parameters) {
+        if let Err(reason) = self.check_incoming_range_filters(&subscribe.parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間の SUBSCRIBE は拒否
@@ -267,7 +268,8 @@ impl Session {
         // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&publish.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
-        if !self.check_incoming_range_filters(request_id, &publish.parameters) {
+        if let Err(reason) = self.check_incoming_range_filters(&publish.parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(false);
         }
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間の PUBLISH は拒否
@@ -673,7 +675,10 @@ impl Session {
         }
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否。
         // スコープ上正当な Range Filter に対してのみ内容検証を行う。
-        if !self.check_incoming_range_filters(request_id, &update.parameters) {
+        // 自側 publisher の Established subscription では PUBLISH_DONE(UPDATE_FAILED) まで
+        // 終端する (§9.5.1 の MUST)。subscriber 側は REQUEST_ERROR のみで従来どおり。
+        if let Err(reason) = self.check_incoming_range_filters(&update.parameters) {
+            self.reject_request_update_range_filters(request_id, reason)?;
             return Ok(());
         }
         match table {
@@ -699,6 +704,69 @@ impl Session {
                 );
                 self.fail(err.clone());
                 Err(err)
+            }
+        }
+    }
+
+    /// REQUEST_UPDATE の Range Filter 拒否時の終端処理
+    ///
+    /// draft-ietf-moq-transport-21 §3.3.2 (Range Filters) の MUST reject に加え、
+    /// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
+    /// is unsuccessful, the publisher MUST also terminate the subscription by sending a
+    /// PUBLISH_DONE with error code UPDATE_FAILED." を満たす。
+    ///
+    /// - Established かつ自側 publisher: `send_request_error` と同じ経路で
+    ///   REQUEST_ERROR (INVALID_FILTER) → Terminated → PUBLISH_DONE(UPDATE_FAILED)。
+    ///   open 中の outgoing data stream (subgroup / fill fetch) がある場合は PUBLISH_DONE を保留する。
+    /// - Established かつ自側 subscriber: 従来どおり REQUEST_ERROR のみを送る。
+    ///   PUBLISH_DONE の送出は publisher である peer の責務であり、state の終端は
+    ///   peer の PUBLISH_DONE / bidi 終端処理に委ねる。
+    /// - Pending / Terminated: REQUEST_UPDATE は Established の self loop のみ
+    ///   (draft-ietf-moq-transport-21 §3.1 (Subscriptions)) であり、受信は state machine の
+    ///   違反である。valid な REQUEST_UPDATE に対する `handle_update_for_subscription` の
+    ///   state 検証と同じく PROTOCOL_VIOLATION でセッションを閉じる。Pending で fin 付き
+    ///   REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK 等) を閉じたり、Terminated で
+    ///   保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ったり
+    ///   しないため、応答は送らない。
+    /// - subscription 以外 (SUBSCRIBE_TRACKS の REQUEST_UPDATE 等) と subscriptions 未登録:
+    ///   従来どおり REQUEST_ERROR のみを送る。
+    ///
+    /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
+    /// (超過時は panic)。
+    fn reject_request_update_range_filters(
+        &mut self,
+        request_id: u64,
+        reason: &'static str,
+    ) -> Result<(), SessionError> {
+        let state = self
+            .subscriptions
+            .get(&request_id)
+            .map(|s| (s.state, s.my_role));
+        match state {
+            Some((SubscriptionState::Established, TrackRole::Publisher)) => self
+                .send_request_error(
+                    request_id,
+                    REQUEST_INVALID_FILTER,
+                    0,
+                    ReasonPhrase::new(reason)
+                        .expect("range filter rejection reason must be <= 1024 bytes"),
+                    None,
+                ),
+            Some((SubscriptionState::Established, _)) => {
+                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+                Ok(())
+            }
+            Some((SubscriptionState::Pending | SubscriptionState::Terminated, _)) => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "REQUEST_UPDATE requires Established subscription",
+                );
+                self.fail(err.clone());
+                Err(err)
+            }
+            _ => {
+                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+                Ok(())
             }
         }
     }
@@ -785,11 +853,10 @@ impl Session {
         if merged.has_range_filters()
             && merged.count_range_filters() > self.local_max_filter_ranges()
         {
-            self.emit_request_error(
+            self.reject_request_update_range_filters(
                 request_id,
-                crate::error::REQUEST_INVALID_FILTER,
                 "cumulative Range Filters exceed MAX_FILTER_RANGES",
-            );
+            )?;
             return Ok(());
         }
         let subscription = self

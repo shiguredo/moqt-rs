@@ -3,7 +3,10 @@
 //! draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management) / §9.11 (FETCH) / §9.12 (FETCH_OK) に対応する
 //! `impl Session` の送受信メソッドをまとめる。将来 draft 側で変更される可能性がある。
 
-use crate::error::{REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_RANGE, SESSION_PROTOCOL_VIOLATION};
+use crate::error::{
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE,
+    SESSION_PROTOCOL_VIOLATION,
+};
 use crate::message::{
     ControlMessage, FETCH_ALLOWED_PARAMS, FETCH_OK_ALLOWED_PARAMS, Fetch as WireFetch,
     FetchOk as WireFetchOk,
@@ -560,7 +563,8 @@ impl Session {
         // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&fetch.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
-        if !self.check_incoming_range_filters(request_id, &fetch.parameters) {
+        if let Err(reason) = self.check_incoming_range_filters(&fetch.parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
         // draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.3.1 (Location Filters):
