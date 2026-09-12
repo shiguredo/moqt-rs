@@ -1,7 +1,7 @@
 # Authorization Token キャッシュの §8.9 / §9.1.4 MUST を満たす
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-auth-token-cache-musts
 - Polished: 2026-09-10
 
@@ -44,3 +44,22 @@ draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) と §9.1.4 
 - `AuthTokenCache` の struct doc が 1 インスタンス 1 alias 空間の実態と一致すること
 - 新アクセサのテスト (peer SETUP 未受信時の 0 / peer が指定した値) が `tests/test_session/` に追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[ADD]` として記載されていること
+
+## 解決方法
+
+peer の `MAX_AUTH_TOKEN_CACHE_SIZE` を取得する公開アクセサを追加し、期限切れ token の扱いを doc で明示した。
+
+- `src/session/core.rs`: `Session::peer_max_auth_token_cache_size()` を追加した。peer SETUP 未受信時は暫定値 0、
+  peer SETUP 受信後に未宣言だった場合は仕様のデフォルト値 0 を返す。アプリがこの値と容量計算
+  (Token 1 つあたり 16 バイト + Token Value のバイト数。登録分を合算し DELETE 分を減算) を突き合わせて
+  purge 判断を行い、収まらない alias は USE_VALUE へフォールバックする。register 失敗と判断した alias は
+  自側が DELETE を送るまで再 REGISTER しないこと (§8.9) も明記した。
+- `src/session/core.rs` / `src/session/auth_token_cache.rs`: 期限切れ検出はアプリ責務であること、
+  alias は DELETE まで保持する §8.9 MUST、3 文脈の `EXPIRED_AUTH_TOKEN` コードの使い分け
+  (request は `REQUEST_EXPIRED_AUTH_TOKEN` / セッションは `SESSION_EXPIRED_AUTH_TOKEN` /
+  data stream は `DataStreamResetReason::ExpiredAuthToken` 経由で `STREAM_EXPIRED_AUTH_TOKEN`) を記載した。
+  `peer_auth_token_cache()` の `max_size()` が自側 MAX で、peer 宣言値は新アクセサで取得できることを区別した。
+- `AuthTokenCache` の struct doc を「1 インスタンス = 片方向の alias 空間」の実態に修正し、REGISTER はセッションエラーにならない限り他の理由の失敗でも登録する §8.9 の規則を明記した。
+- `skills/shiguredo-moqt/SKILL.md` の Auth Token API 一覧に新アクセサを追記した。
+- `tests/test_session/setup.rs` に、peer SETUP 未受信時 0 (自側 MAX 宣言済みでも 0)、peer 宣言値、peer 明示 0、peer 未宣言 0 (自側 MAX と独立)、`peer_auth_token_cache().max_size()` が自側 MAX であることの回帰テストを追加した。
+- `CHANGES.md` の `## develop` に `[ADD]` エントリを追加した。
