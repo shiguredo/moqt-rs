@@ -1045,7 +1045,7 @@ pub struct SubscriptionPublishDone {
     pub reason: ReasonPhrase,
     /// late-arriving stream を待つ drain timer
     pub drain: DeadlineTimer,
-    /// `stream_count` を超える subgroup stream を受信済みか
+    /// `stream_count` を超える data stream (subgroup / fill fetch) を受信済みか
     pub stream_count_overrun: bool,
 }
 
@@ -1088,9 +1088,16 @@ pub struct StreamCountState {
     /// draft §9.9 (PUBLISH_DONE) の `Stream Count` と対応する。`send_subgroup_header` と
     /// `send_fill_fetch_header` で加算し、close では減算しない。`my_role == Publisher` 以外では 0。
     pub published_count: u64,
-    /// peer publisher から受信した subgroup data stream 数
+    /// peer publisher から受信した data stream 数 (subgroup と fill fetch)
+    ///
+    /// draft §9.9 (PUBLISH_DONE) の `Stream Count` との比較に使う。fill fetch stream は
+    /// `recv_fetch_header` の fill 分岐で加算し、close (FIN / RESET / STOP_SENDING) では
+    /// 減算しない (open 中の本数は `open_incoming_subgroup_count` が別途保持する)。
     pub incoming_subgroup_count: u64,
-    /// 現在 open 中の受信 subgroup data stream 数
+    /// 現在 open 中の受信 data stream 数 (subgroup と fill fetch)
+    ///
+    /// `cleanup_ready()` の open stream 判定に使う。FIN / RESET / STOP_SENDING による
+    /// 終端と破棄対象化 (`register_discarded_stream`) で 1 本ずつ減算する。
     pub open_incoming_subgroup_count: u64,
 }
 
@@ -1384,6 +1391,8 @@ impl Subscription {
     ///
     /// PUBLISH_DONE 受信後は通常 drain timer 満了を待つが、`stream_count_overrun` が確定し、
     /// かつ open 中の受信 stream が残っていない場合は早期回収できる。
+    /// open stream 判定には subgroup と fill fetch の両方を含む
+    /// (`open_incoming_subgroup_count` が両方を会計する)。
     /// 詳細は [`SubscriptionPublishDone`] の doc コメントを参照。
     /// (将来の draft で変更される可能性がある)
     pub fn cleanup_ready(&self) -> bool {

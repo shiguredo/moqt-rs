@@ -1029,3 +1029,333 @@ fn forget_subscription_allows_track_alias_reuse() {
         Some(42)
     );
 }
+
+// ─── 受信 fill fetch stream の Stream Count 集計 (draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE)) ─────
+
+/// drain timer 40ms を持つ subscription を確立する
+///
+/// 返り値は (subscriber, publisher, request_id)。
+fn establish_fill_test_subscription() -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair();
+    client.tick(1_000);
+    let rid = client
+        .send_subscribe(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            delivery_timeout_params(100),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            rid,
+            9,
+            MessageParameters::new(),
+            track_properties_with_delivery_timeout(40),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (client, server, rid)
+}
+
+/// subscriber が fill fetch stream の受信を開始する
+fn recv_fill_fetch_header(client: &mut Session, stream_id: DataStreamId, request_id: u64) {
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id })
+        .expect("fill 用 FETCH_HEADER は受理されること");
+}
+
+/// publisher が fill fetch stream を `count` 本開いて閉じ、published_count を `count` にする
+///
+/// `send_publish_done` は宣言する stream_count と published_count の一致を要求するため、
+/// テストで fill 込みの Stream Count を検証するには publisher 側の実数を作る必要がある。
+fn publish_and_close_fill_streams(server: &mut Session, rid: u64, stream_base: u64, count: u64) {
+    for offset in 0..count {
+        let stream_id = DataStreamId(stream_base + offset);
+        server
+            .send_fill_fetch_header(stream_id, rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_fetch_data_stream_closed(stream_id)
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+}
+
+/// publisher が PUBLISH_DONE を送り subscriber が受信する
+fn send_and_recv_publish_done(
+    server: &mut Session,
+    client: &mut Session,
+    rid: u64,
+    stream_count: u64,
+) {
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            stream_count,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+}
+
+/// 受信 fill fetch stream は Stream Count 集計と cleanup_ready の open 判定に含まれる
+///
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): Stream Count は fill fetch stream を含み、
+/// "destroy subscription state once all open streams for the subscription have closed" の
+/// open stream 判定にも fill を含む。
+#[test]
+fn fill_fetch_streams_count_toward_stream_count_and_cleanup() {
+    let (mut client, mut server, rid) = establish_fill_test_subscription();
+
+    // fill fetch stream を 2 本受信して open のままにする
+    recv_fill_fetch_header(&mut client, DataStreamId(300), rid);
+    recv_fill_fetch_header(&mut client, DataStreamId(301), rid);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .incoming_subgroup_count,
+        2,
+        "Stream Count の集計に fill fetch stream を含むこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        2
+    );
+
+    // fill 込みの exact 数 2 を宣言した PUBLISH_DONE は overrun しない
+    publish_and_close_fill_streams(&mut server, rid, 400, 2);
+    send_and_recv_publish_done(&mut server, &mut client, rid, 2);
+    let overrun = client
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす")
+        .publish_done
+        .as_ref()
+        .expect("PUBLISH_DONE を記録済み")
+        .stream_count_overrun;
+    assert!(!overrun, "fill を含む exact 数では overrun しないこと");
+
+    // drain timer 満了後も open の fill stream が残る間は回収できない
+    client.tick(1_040);
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(false));
+    // 1 本 FIN で閉じても、まだ open stream が残る間は回収できない
+    client
+        .recv_data_stream_closed(DataStreamId(300), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        1
+    );
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(false));
+    // 2 本目を閉じると回収できる
+    client
+        .recv_data_stream_closed(DataStreamId(301), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(true));
+}
+
+/// fill fetch stream を STOP_SENDING で cancel すると open 数が減り回収できる
+///
+/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams):
+/// "A subscriber can cancel a fill fetch stream independently using STOP_SENDING."
+#[test]
+fn fill_fetch_stream_stop_sending_decrements_open_count() {
+    let (mut client, mut server, rid) = establish_fill_test_subscription();
+
+    recv_fill_fetch_header(&mut client, DataStreamId(310), rid);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .incoming_subgroup_count,
+        1
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        1
+    );
+    publish_and_close_fill_streams(&mut server, rid, 410, 1);
+    send_and_recv_publish_done(&mut server, &mut client, rid, 1);
+    // drain timer が未満了で overrun も無い間は回収できない
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(false));
+
+    client
+        .send_data_stream_stop_sending(DataStreamId(310))
+        .expect("fill fetch stream の STOP_SENDING は受理されること");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0
+    );
+    // drain timer 満了で回収できる
+    client.tick(1_040);
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(true));
+}
+
+/// fill 込みの実数より少ない Stream Count を宣言すると overrun を検出する
+#[test]
+fn fill_fetch_stream_overrun_detected() {
+    let (mut client, mut server, rid) = establish_fill_test_subscription();
+
+    recv_fill_fetch_header(&mut client, DataStreamId(320), rid);
+    // 実数 1 (fill) に対し stream_count=0 を宣言する
+    send_and_recv_publish_done(&mut server, &mut client, rid, 0);
+    let overrun = client
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす")
+        .publish_done
+        .as_ref()
+        .expect("PUBLISH_DONE を記録済み")
+        .stream_count_overrun;
+    assert!(overrun, "fill 取りこぼしによる過少申告を検出すること");
+
+    // overrun 確定でも open fill stream が残る間は回収できない
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(false));
+    // RESET で閉じると drain timer を待たずに回収できる
+    client
+        .recv_data_stream_closed(
+            DataStreamId(320),
+            RequestStreamEnd::Reset {
+                error_code: 0,
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(true));
+}
+
+/// PUBLISH_DONE の後に遅延到着した fill fetch stream を受理し、overrun を検出する
+///
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "Because PUBLISH_DONE is sent on a
+/// request stream, it is likely to arrive at the receiver before late-arriving objects,
+/// and often even late-opening streams."
+#[test]
+fn late_fill_fetch_header_after_publish_done_is_accepted() {
+    let (mut client, mut server, rid) = establish_fill_test_subscription();
+
+    // 実数 0 を宣言した PUBLISH_DONE を受信する
+    send_and_recv_publish_done(&mut server, &mut client, rid, 0);
+    assert!(
+        !client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .publish_done
+            .as_ref()
+            .expect("PUBLISH_DONE を記録済み")
+            .stream_count_overrun
+    );
+
+    // drain 中に fill fetch stream が遅延到着しても受理し、Stream Count 集計に加算する
+    recv_fill_fetch_header(&mut client, DataStreamId(330), rid);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .incoming_subgroup_count,
+        1
+    );
+    assert!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .publish_done
+            .as_ref()
+            .expect("PUBLISH_DONE を記録済み")
+            .stream_count_overrun,
+        "遅延 fill stream の加算で過少申告を検出すること"
+    );
+    // open 中の遅延 fill stream が残る間は回収できない
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(false));
+    // FIN で閉じると overrun 確定により drain timer を待たず回収できる
+    client
+        .recv_data_stream_closed(DataStreamId(330), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.subscription_cleanup_ready(rid), Some(true));
+}
+
+/// Stream Count の累計は close で減算されず、close 済み + 遅延到着の合計で overrun を判定する
+#[test]
+fn fill_fetch_stream_overrun_counts_closed_and_late_streams() {
+    let (mut client, mut server, rid) = establish_fill_test_subscription();
+
+    // 1 本目は PUBLISH_DONE 前に FIN で閉じる (累計のみ残る)
+    recv_fill_fetch_header(&mut client, DataStreamId(340), rid);
+    client
+        .recv_data_stream_closed(DataStreamId(340), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .incoming_subgroup_count,
+        1
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .stream_counts
+            .open_incoming_subgroup_count,
+        0
+    );
+
+    // 実数 1 を宣言した PUBLISH_DONE は overrun しない
+    publish_and_close_fill_streams(&mut server, rid, 420, 1);
+    send_and_recv_publish_done(&mut server, &mut client, rid, 1);
+    assert!(
+        !client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .publish_done
+            .as_ref()
+            .expect("PUBLISH_DONE を記録済み")
+            .stream_count_overrun
+    );
+
+    // drain 中に 2 本目の fill が遅延到着すると累計 2 > 1 で overrun になる
+    // (累計を close で減算する実装では 1 のままとなり、この過少申告を検出できない)
+    recv_fill_fetch_header(&mut client, DataStreamId(341), rid);
+    assert!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .publish_done
+            .as_ref()
+            .expect("PUBLISH_DONE を記録済み")
+            .stream_count_overrun,
+        "close 済み fill の累計を保持して overrun を判定すること"
+    );
+}

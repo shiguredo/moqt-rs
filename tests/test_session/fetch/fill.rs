@@ -508,7 +508,7 @@ fn subscriber_accepts_fill_fetch_headers() {
         )
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // Terminated 済みの subscription を指す FETCH_HEADER は拒否する
+    // キャンセル由来 (publish_done なし) の Terminated subscription を指す FETCH_HEADER は拒否する
     client
         .stop_sending(sub_rid)
         .expect("テストフィクスチャの前提条件を満たす");

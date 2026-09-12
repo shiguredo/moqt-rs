@@ -1182,7 +1182,7 @@ fn cancelled_stream_owner_reattributes_object_to_other_candidate() {
 /// キャンセル済み所有者の stream への STOP_SENDING 送信でも open 数が漏れないこと
 ///
 /// header 受理後に所有者をキャンセルした stream は `Subgroup` variant のまま残るため、
-/// STOP_SENDING 送信時も `note_incoming_subgroup_stream_closed` で会計を戻す必要がある。
+/// STOP_SENDING 送信時も `note_incoming_stream_closed` で会計を戻す必要がある。
 #[test]
 fn cancelled_stream_owner_stop_sending_releases_open_count() {
     const ALIAS: u64 = 3013;

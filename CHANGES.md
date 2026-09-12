@@ -17,6 +17,8 @@
   - @voluntas
 - [CHANGE] `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、受信 subgroup Object にも Object 単位フィルタを再適用する。フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` として破棄する
   - @voluntas
+- [FIX] subscriber 側の Stream Count 集計と `cleanup_ready` の open stream 判定に受信 fill fetch stream を含め、PUBLISH_DONE 受信後に遅延到着した fill fetch stream も late-opening stream として受理する
+  - @voluntas
 - [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した TRACK_NAMESPACE_PREFIX を REQUEST_OK 受信後に反映し、送信前の overlap 検査は確定待ちを考慮した実効 prefix で行う。SUBSCRIBE_TRACKS は確定待ちの間も旧 prefix と確定待ち prefix の両方で PUBLISH を紐付ける
   - @voluntas
 - [FIX] FETCH の INVALID_RANGE 判定で同一 Track の全 publisher 役 subscription の観測 Largest Object の最大値を使う

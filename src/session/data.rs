@@ -110,6 +110,13 @@ pub(super) enum IncomingDataStream {
         /// `request_id`) と異なりうるため、stream 終端時の override 削除先をここに記録する。
         timeout_override_request_id: Option<u64>,
     },
+    /// 受信 FETCH data stream (通常の FETCH 応答と fill fetch stream の両方)
+    ///
+    /// `request_id` に `fetches` の entry がある場合は通常の FETCH 応答 stream。
+    /// entry を持たない場合は fill fetch stream (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))
+    /// であり、`request_id` は subscription の Request ID を指す。この識別規則は
+    /// `recv_fetch_header` / `recv_data_stream_closed` / `send_data_stream_stop_sending` が
+    /// 依拠する。
     Fetch {
         request_id: u64,
     },
@@ -927,7 +934,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        if let Err(err) = self.note_incoming_subgroup_stream_opened(request_id) {
+        if let Err(err) = self.note_incoming_stream_opened(request_id) {
             self.fail(err.clone());
             return Err(err);
         }
@@ -1646,7 +1653,10 @@ impl Session {
     /// fill fetch stream の FETCH_HEADER は起因 SUBSCRIBE / REQUEST_UPDATE の
     /// Request ID (= subscription の Request ID) を載せ、自側 `Subscriber` 役の
     /// `Pending` / `Established` subscription に対して受理する。
-    /// それ以外 (未知 ID / 非 subscriber 役 / `Terminated`) は
+    /// PUBLISH_DONE 受信後の drain 中 (`publish_done` 付きの `Terminated`) は
+    /// late-opening stream として受理し、Stream Count 集計にも加算する
+    /// (draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE))。
+    /// それ以外 (未知 ID / 非 subscriber 役 / キャンセル由来 `Terminated`) は
     /// PROTOCOL_VIOLATION でセッションを閉じる。
     /// fill は複数本の同時存在を許すため `has_other_fetch_stream` 検証は行わない。
     /// なお FETCH と fill の判別は Session が行うため、アプリは request id 種別を
@@ -1741,15 +1751,42 @@ impl Session {
             // subscription 側で受理する。複数本の同時存在を許すため
             // `has_other_fetch_stream` 検証は行わない (FIN / RESET 後の後始末は
             // `recv_data_stream_closed` / `send_data_stream_stop_sending` が
-            // subscription に影響なく吸収する)。
+            // subscription の state を変えず Stream Count の open 数だけを戻す)。
             let fill_state = self
                 .subscriptions
                 .get(&header.request_id)
-                .map(|subscription| (subscription.my_role, subscription.state));
+                .map(|subscription| {
+                    (
+                        subscription.my_role,
+                        subscription.state,
+                        subscription.publish_done.is_some(),
+                    )
+                });
             match fill_state {
-                Some((TrackRole::Subscriber, SubscriptionState::Pending))
-                | Some((TrackRole::Subscriber, SubscriptionState::Established)) => {}
-                _ => {
+                Some((TrackRole::Subscriber, SubscriptionState::Pending, _))
+                | Some((TrackRole::Subscriber, SubscriptionState::Established, _)) => {}
+                // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): PUBLISH_DONE は
+                // late-opening stream より先に届きうる。drain 中 (publish_done 付きの
+                // Terminated) の fill fetch stream は subgroup と同じく受理する。
+                // キャンセル由来 Terminated (publish_done なし) は受理しない
+                Some((TrackRole::Subscriber, SubscriptionState::Terminated, true)) => {}
+                Some((TrackRole::Subscriber, SubscriptionState::Terminated, false)) => {
+                    let err = SessionError::new(
+                        SESSION_PROTOCOL_VIOLATION,
+                        "FETCH_HEADER received for cancelled subscription",
+                    );
+                    self.fail(err.clone());
+                    return Err(err);
+                }
+                Some(_) => {
+                    let err = SessionError::new(
+                        SESSION_PROTOCOL_VIOLATION,
+                        "FETCH_HEADER received for publisher-side subscription",
+                    );
+                    self.fail(err.clone());
+                    return Err(err);
+                }
+                None => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
                         "FETCH_HEADER received for unknown request id",
@@ -1757,6 +1794,12 @@ impl Session {
                     self.fail(err.clone());
                     return Err(err);
                 }
+            }
+            // fill fetch stream も Stream Count に含める (draft §9.9 (PUBLISH_DONE))。
+            // open / close は subscription の集計と `cleanup_ready` の open 判定で会計する
+            if let Err(err) = self.note_incoming_stream_opened(header.request_id) {
+                self.fail(err.clone());
+                return Err(err);
             }
         }
         self.data_streams.incoming.insert(
@@ -2413,7 +2456,7 @@ impl Session {
                 // この経路は `register_discarded_stream` を通らないため、open 中の
                 // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
                 // 永久に false になるのを防ぐ)
-                let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                let _ = self.note_incoming_stream_closed(request_id);
                 if let Some(subgroup_id) = subgroup_id {
                     // per-subgroup delivery timeout override は stream 所有者と
                     // 登録先 (先頭 Object の帰属先) の両方から削除する
@@ -2448,8 +2491,9 @@ impl Session {
     /// 受信 uni data stream の終端を Session に通知する
     ///
     /// subgroup stream は subgroup tracker に反映し、fetch stream は既存の
-    /// `recv_fetch_data_stream_closed` に dispatch する。header 未受理のまま終わった
-    /// stream は単に破棄する。
+    /// `recv_fetch_data_stream_closed` に dispatch する。fill fetch stream (`fetches` に
+    /// entry を持たない FETCH stream) は dispatch せず、Stream Count の open 数を戻して
+    /// 吸収する。header 未受理のまま終わった stream は単に破棄する。
     ///
     /// END_OF_GROUP bit + FIN の Group 終端確定は、この stream で最後に Object を受理した
     /// 帰属先 subscription に反映する (共有 Track Alias で帰属先が stream 所有者と異なる
@@ -2520,7 +2564,7 @@ impl Session {
                     // この経路は `register_discarded_stream` を通らないため、open 中の
                     // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
                     // 永久に false になるのを防ぐ)
-                    let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                    let _ = self.note_incoming_stream_closed(request_id);
                     if let Some(subgroup_id) = subgroup_id {
                         self.remove_subgroup_delivery_timeout_override(
                             request_id,
@@ -2623,7 +2667,7 @@ impl Session {
                                 // stream は incoming から除去済みのため、所有者の open 中の
                                 // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
                                 // 永久に false になるのを防ぐ)
-                                let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                                let _ = self.note_incoming_stream_closed(request_id);
                                 // 終端対象は帰属先 (帰属実績が無ければ stream 所有者)
                                 self.terminate_malformed_track(
                                     attributed_request_id,
@@ -2643,11 +2687,7 @@ impl Session {
                         }
                     }
                 }
-                if let Err(err) = self.note_incoming_subgroup_stream_closed(request_id) {
-                    self.fail(err.clone());
-                    return Err(err);
-                }
-                Ok(())
+                self.close_incoming_stream_or_fail(request_id)
             }
             IncomingDataStream::Discarded { .. } => {
                 // 破棄対象 stream の終端は no-op で吸収し、id を保持集合へ移す
@@ -2655,21 +2695,22 @@ impl Session {
                 Ok(())
             }
             IncomingDataStream::Fetch { request_id, .. } => {
-                if self
-                    .fetches
-                    .get(&request_id)
-                    .is_none_or(|fetch| fetch.state == FetchState::Terminated)
-                {
-                    return Ok(());
+                match self.fetches.get(&request_id).map(|fetch| fetch.state) {
+                    // fill fetch stream は `fetches` に entry を持たない。Stream Count の
+                    // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
+                    None => self.close_incoming_stream_or_fail(request_id),
+                    Some(FetchState::Terminated) => Ok(()),
+                    Some(_) => self.recv_fetch_data_stream_closed(request_id, end),
                 }
-                self.recv_fetch_data_stream_closed(request_id, end)
             }
         }
     }
 
     /// 受信 uni data stream に対して local endpoint が STOP_SENDING を送ることを通知する
     ///
-    /// fetch stream は既存の `send_fetch_stop_sending` に dispatch し、subgroup stream は
+    /// 通常の FETCH 応答 stream は既存の `send_fetch_stop_sending` に dispatch し、
+    /// fill fetch stream (`fetches` に entry を持たない FETCH stream) は Stream Count の
+    /// open 数を戻して吸収する。subgroup stream は
     /// reopen prohibited の追跡用に `StoppedByPeer` として記録する。
     /// キャンセル由来 `Terminated` に属し現在も生きた Object の帰属先が無い subgroup stream は
     /// 破棄対象として no-op で吸収し、生きた帰属先がある stream は通常どおり tracker と
@@ -2716,7 +2757,7 @@ impl Session {
                     // この経路は `register_discarded_stream` を通らないため、open 中の
                     // 受信 stream 数をここで戻す (計数リークで `cleanup_ready` が
                     // 永久に false になるのを防ぐ)
-                    let _ = self.note_incoming_subgroup_stream_closed(request_id);
+                    let _ = self.note_incoming_stream_closed(request_id);
                     if let Some(subgroup_id) = subgroup_id {
                         self.remove_subgroup_delivery_timeout_override(
                             request_id,
@@ -2748,11 +2789,7 @@ impl Session {
                     self.peer_subgroups
                         .mark_stop_sending(track_alias, group_id, subgroup_id);
                 }
-                if let Err(err) = self.note_incoming_subgroup_stream_closed(request_id) {
-                    self.fail(err.clone());
-                    return Err(err);
-                }
-                Ok(())
+                self.close_incoming_stream_or_fail(request_id)
             }
             IncomingDataStream::Discarded { .. } => {
                 // 破棄対象 stream への STOP_SENDING は no-op で吸収し、id を保持集合へ移す
@@ -2760,14 +2797,13 @@ impl Session {
                 Ok(())
             }
             IncomingDataStream::Fetch { request_id, .. } => {
-                if self
-                    .fetches
-                    .get(&request_id)
-                    .is_none_or(|fetch| fetch.state == FetchState::Terminated)
-                {
-                    return Ok(());
+                match self.fetches.get(&request_id).map(|fetch| fetch.state) {
+                    // fill fetch stream は `fetches` に entry を持たない。Stream Count の
+                    // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
+                    None => self.close_incoming_stream_or_fail(request_id),
+                    Some(FetchState::Terminated) => Ok(()),
+                    Some(_) => self.send_fetch_stop_sending(request_id),
                 }
-                self.send_fetch_stop_sending(request_id)
             }
         }
     }
@@ -2898,7 +2934,7 @@ impl Session {
         // retain の判定で subscription の存在は確認済みであり、加算が Err になるのは
         // 計数のオーバーフローという防御検出のみなのでセッションを fail させる
         for owner in migrated_request_ids {
-            if let Err(err) = self.note_incoming_subgroup_stream_opened(owner) {
+            if let Err(err) = self.note_incoming_stream_opened(owner) {
                 self.fail(err.clone());
             }
         }
@@ -2987,14 +3023,15 @@ impl Session {
                 .any(|stream| stream.request_id == request_id)
     }
 
-    fn note_incoming_subgroup_stream_opened(
-        &mut self,
-        request_id: u64,
-    ) -> Result<(), SessionError> {
+    /// 受信 data stream (subgroup / fill fetch) の open を会計する
+    ///
+    /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の Stream Count は fill fetch
+    /// stream を含むため、fill も subgroup と同じ会計を通す。
+    fn note_incoming_stream_opened(&mut self, request_id: u64) -> Result<(), SessionError> {
         let subscription = self.subscriptions.get_mut(&request_id).ok_or_else(|| {
             SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "incoming subgroup stream points to missing subscription",
+                "incoming data stream points to missing subscription",
             )
         })?;
         let counts = &mut subscription.stream_counts;
@@ -3004,14 +3041,14 @@ impl Session {
                 .checked_add(1)
                 .ok_or(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
-                    "incoming subgroup stream count overflow",
+                    "incoming data stream count overflow",
                 ))?;
         counts.open_incoming_subgroup_count = counts
             .open_incoming_subgroup_count
             .checked_add(1)
             .ok_or(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "open incoming subgroup stream count overflow",
+                "open incoming data stream count overflow",
             ))?;
         let incoming_subgroup_count = counts.incoming_subgroup_count;
         if let Some(publish_done) = subscription.publish_done.as_mut()
@@ -3026,14 +3063,21 @@ impl Session {
         Ok(())
     }
 
-    fn note_incoming_subgroup_stream_closed(
-        &mut self,
-        request_id: u64,
-    ) -> Result<(), SessionError> {
+    /// 受信 data stream (subgroup / fill fetch) の close を会計し、失敗時はセッションを閉じる
+    fn close_incoming_stream_or_fail(&mut self, request_id: u64) -> Result<(), SessionError> {
+        if let Err(err) = self.note_incoming_stream_closed(request_id) {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// 受信 data stream (subgroup / fill fetch) の close を会計する
+    fn note_incoming_stream_closed(&mut self, request_id: u64) -> Result<(), SessionError> {
         let subscription = self.subscriptions.get_mut(&request_id).ok_or_else(|| {
             SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "incoming subgroup stream points to missing subscription",
+                "incoming data stream points to missing subscription",
             )
         })?;
         let counts = &mut subscription.stream_counts;
@@ -3042,7 +3086,7 @@ impl Session {
             .checked_sub(1)
             .ok_or(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "open incoming subgroup stream count underflow",
+                "open incoming data stream count underflow",
             ))?;
         Ok(())
     }
@@ -3085,7 +3129,7 @@ impl Session {
     ///
     /// 既存 `Subgroup` variant からの置き換えでは `open_incoming_subgroup_count` を
     /// デクリメントする。`Discarded` variant の終端 (`retain_discarded_stream_id`) は
-    /// `note_incoming_subgroup_stream_closed` を呼ばないため、置き換え時点で補正しないと
+    /// `note_incoming_stream_closed` を呼ばないため、置き換え時点で補正しないと
     /// 計数が張り付いたまま残り、`cleanup_ready()` が `open_incoming_subgroup_count == 0`
     /// を要求するために `forget_subscription` が永久に不可能になる (subscription リーク)。
     ///
@@ -3120,7 +3164,7 @@ impl Session {
             // (forget_subscription は remove_incoming_data_streams_for_request で incoming
             // からも同時に除去するため)。それでも subscription が消えていた場合は
             // 計数対象がないので何もしない (Err の伝播は不要)。
-            let _ = self.note_incoming_subgroup_stream_closed(subgroup_request_id);
+            let _ = self.note_incoming_stream_closed(subgroup_request_id);
             if let Some(subgroup_id) = subgroup_id {
                 self.remove_subgroup_delivery_timeout_override(
                     subgroup_request_id,

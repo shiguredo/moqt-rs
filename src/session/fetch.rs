@@ -417,7 +417,7 @@ impl Session {
     /// 通常の FETCH 応答 stream 用であり、`request_id` には `Fetch` の Request ID を
     /// 渡す。fill fetch stream (subscription の Request ID を載せる) の終端は
     /// stream id 系 (`recv_data_stream_closed`) で通知すること
-    /// (fill 終端は subscription に影響なく吸収される)。
+    /// (fill 終端は subscription の state を変えず、Stream Count の open 数だけを戻す)。
     ///
     /// draft-ietf-moq-transport-21 §3.2.1 (Fetch State Management): subscriber は FETCH_HEADER
     /// stream の FIN 受信、または publisher 側 RESET_STREAM 受信で FETCH state を
