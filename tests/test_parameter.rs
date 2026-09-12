@@ -346,3 +346,85 @@ mod authorization_token_encoding_strictness {
         assert_eq!(decoded.authorization_tokens(), vec![&token]);
     }
 }
+
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): Setup Option 値の 2^16-1 バイト上限
+mod setup_option_value_length_limit {
+    use super::*;
+    use shiguredo_moqt::parameter::{SETUP_OPTION_AUTHORIZATION_TOKEN, SETUP_OPTION_PATH};
+
+    /// 65535 バイトの Bytes 値はエンコードでき、65536 バイトは拒否される
+    #[test]
+    fn bytes_length_boundary() {
+        for (len, expected_ok) in [(65535usize, true), (65536usize, false)] {
+            let mut options = SetupOptions::new();
+            options.push(SetupOption {
+                option_type: SETUP_OPTION_PATH,
+                value: SetupOptionValue::Bytes(vec![b'/'; len]),
+            });
+            let mut buf = Vec::new();
+            let result = options.encode(&mut buf);
+            if expected_ok {
+                result.expect("65535 バイトの Setup Option 値はエンコードできる");
+                let (decoded, consumed) =
+                    SetupOptions::decode(&buf).expect("エンコード結果を decode できる");
+                assert_eq!(consumed, buf.len());
+                let path = decoded.path().expect("PATH がデコードできる");
+                assert_eq!(path.len(), len);
+                assert!(path.iter().all(|&b| b == b'/'));
+            } else {
+                assert!(
+                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    "65536 バイトの Setup Option 値は ProtocolViolation で拒否される"
+                );
+            }
+        }
+    }
+
+    /// 65536 バイト長の Setup Option 値は decode でも ProtocolViolation になる
+    #[test]
+    fn decode_65536_bytes_error() {
+        use shiguredo_moqt::varint;
+        // delta_key=SETUP_OPTION_PATH (prev=0), length=65536 (上限超過)
+        let mut buf = Vec::new();
+        varint::encode(SETUP_OPTION_PATH, &mut buf);
+        varint::encode(65536, &mut buf);
+        let err = SetupOptions::decode(&buf).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "ProtocolViolation を期待したが {err:?} になった"
+        );
+    }
+
+    /// 65535 バイトの AuthorizationToken 値はエンコードでき、65536 バイトは拒否される
+    #[test]
+    fn authorization_token_length_boundary() {
+        // UseValue の値は alias type (1 バイト) + token_type (値 0 の 1 バイト varint)
+        // + Token Value。KVP 値長 = 2 + token_value_len となり、65533 + 2 = 65535 (上限) /
+        // 65534 + 2 = 65536 (超過) が境界になる。
+        for (token_value_len, expected_ok) in [(65533usize, true), (65534usize, false)] {
+            let token = AuthorizationToken::UseValue {
+                token_type: 0,
+                token_value: vec![0x01; token_value_len],
+            };
+            let mut options = SetupOptions::new();
+            options.push(SetupOption {
+                option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
+                value: SetupOptionValue::AuthorizationToken(token.clone()),
+            });
+            let mut buf = Vec::new();
+            let result = options.encode(&mut buf);
+            if expected_ok {
+                result.expect("65535 バイトの Setup AuthorizationToken 値はエンコードできる");
+                let (decoded, consumed) =
+                    SetupOptions::decode(&buf).expect("エンコード結果を decode できる");
+                assert_eq!(consumed, buf.len());
+                assert_eq!(decoded.authorization_tokens(), vec![&token]);
+            } else {
+                assert!(
+                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    "65536 バイトの Setup AuthorizationToken 値は ProtocolViolation で拒否される"
+                );
+            }
+        }
+    }
+}

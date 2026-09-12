@@ -840,15 +840,23 @@ mod kvp_value_length_limit {
     /// 65536 バイトの LengthPrefixed 値はエンコード時に拒否される
     #[test]
     fn length_prefixed_65536_bytes_encode_error() {
-        use shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER;
+        use shiguredo_moqt::message_parameter::PARAM_SUBGROUP_FILTER;
+        // LOCATION_FILTER は encode 前の値形式検証 (validate_param_encoding) で先に落ちるため、
+        // 値長検証だけを固定できる型を使う
         let param = MessageParameter {
-            param_type: PARAM_LOCATION_FILTER,
+            param_type: PARAM_SUBGROUP_FILTER,
             value: MessageParameterValue::LengthPrefixed(vec![0x01; 65536]),
         };
         let mut params = MessageParameters::new();
         params.push(param);
         let mut buf = Vec::new();
-        assert!(params.encode(&mut buf).is_err());
+        assert!(
+            matches!(
+                params.encode(&mut buf),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "65536 バイトの LengthPrefixed 値は ProtocolViolation で拒否される"
+        );
     }
 
     /// デコード側で 65536 バイト長の LengthPrefixed 値は ProtocolViolation
@@ -867,6 +875,43 @@ mod kvp_value_length_limit {
             matches!(err, MessageError::ProtocolViolation(_)),
             "Expected ProtocolViolation, got {err:?}"
         );
+    }
+
+    /// 65535 バイトの AuthorizationToken 値はエンコードでき、65536 バイトは拒否される
+    #[test]
+    fn authorization_token_length_boundary() {
+        use shiguredo_moqt::message_parameter::{AuthorizationToken, PARAM_AUTHORIZATION_TOKEN};
+        // REGISTER の値は alias type (1 バイト) + alias (値 0 の 1 バイト varint)
+        // + token_type (値 0 の 1 バイト varint) + Token Value。
+        // KVP 値長 = 3 + token_value_len となり、65532 + 3 = 65535 (上限) /
+        // 65533 + 3 = 65536 (超過) が境界になる。
+        for (token_value_len, expected_ok) in [(65532usize, true), (65533usize, false)] {
+            let token = AuthorizationToken::Register {
+                alias: 0,
+                token_type: 0,
+                token_value: vec![0x01; token_value_len],
+            };
+            let param = MessageParameter {
+                param_type: PARAM_AUTHORIZATION_TOKEN,
+                value: MessageParameterValue::AuthorizationToken(token.clone()),
+            };
+            let mut params = MessageParameters::new();
+            params.push(param);
+            let mut buf = Vec::new();
+            let result = params.encode(&mut buf);
+            if expected_ok {
+                result.expect("65535 バイトの AuthorizationToken 値はエンコードできる");
+                let (decoded, consumed) =
+                    MessageParameters::decode(&buf).expect("エンコード結果を decode できる");
+                assert_eq!(consumed, buf.len());
+                assert_eq!(decoded.authorization_tokens(), vec![&token]);
+            } else {
+                assert!(
+                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    "65536 バイトの AuthorizationToken 値は ProtocolViolation で拒否される"
+                );
+            }
+        }
     }
 }
 

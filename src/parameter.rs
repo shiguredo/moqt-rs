@@ -413,6 +413,13 @@ impl SetupOptions {
     /// draft-ietf-moq-transport-21 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
     /// - PATH / AUTHORITY は client のみが送信可能 (server からの送信は MUST NOT)
     /// - WebTransport 使用時は PATH / AUTHORITY を送信してはならない (MUST NOT)
+    ///
+    /// # Errors
+    ///
+    /// - 同一 Option Type の重複、型と値形式の不整合: `InvalidParameter`
+    /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
+    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS): `ProtocolViolation`
+    /// - 値長が 2^16-1 バイトを超える Setup Option 値 (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.option_type);
@@ -458,6 +465,12 @@ impl SetupOptions {
                     varint::encode(*v, buf);
                 }
                 SetupOptionValue::Bytes(bytes) => {
+                    // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
+                    if bytes.len() > 65535 {
+                        return Err(MessageError::ProtocolViolation(
+                            "setup option value too long",
+                        ));
+                    }
                     varint::encode(bytes.len() as u64, buf);
                     buf.extend_from_slice(bytes);
                 }
@@ -465,7 +478,13 @@ impl SetupOptions {
                     // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
                     // SETUP で DELETE / USE_ALIAS は PROTOCOL_VIOLATION
                     token.validate_setup_scope()?;
+                    // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
                     let bytes = token.encode_to_bytes();
+                    if bytes.len() > 65535 {
+                        return Err(MessageError::ProtocolViolation(
+                            "setup option value too long",
+                        ));
+                    }
                     varint::encode(bytes.len() as u64, buf);
                     buf.extend_from_slice(&bytes);
                 }

@@ -19,6 +19,8 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [FIX] AUTHORIZATION_TOKEN と Setup Option Bytes の encode に値長 2^16-1 バイトの上限検証を追加する
+  - @voluntas
 - [FIX] subscriber 側の Stream Count 集計と `cleanup_ready` の open stream 判定に受信 fill fetch stream を含め、PUBLISH_DONE 受信後に遅延到着した fill fetch stream も late-opening stream として受理する
   - @voluntas
 - [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した TRACK_NAMESPACE_PREFIX を REQUEST_OK 受信後に反映し、送信前の overlap 検査は確定待ちを考慮した実効 prefix で行う。SUBSCRIBE_TRACKS は確定待ちの間も旧 prefix と確定待ち prefix の両方で PUBLISH を紐付ける

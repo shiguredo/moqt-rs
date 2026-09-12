@@ -747,6 +747,15 @@ impl MessageParameters {
     /// draft-ietf-moq-transport-21 §9.20 (Control Message Parameters): パラメータ定義が明示的に複数インスタンスを
     /// 許可していない限り、同一 Parameter Type の重複送信は禁止されている。重複がある場合は
     /// `InvalidParameter` を返す。
+    ///
+    /// # Errors
+    ///
+    /// - 同一 Parameter Type の重複、型と値形式の不整合: `InvalidParameter`
+    /// - 未知の Parameter Type、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
+    ///   FILL_PARAMETERS の内側スコープ違反、LOCATION_FILTER の EndGroup オーバーフロー、
+    ///   値長が 2^16-1 バイトを超える KVP (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
+    /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
+    /// - 壊れた LOCATION_FILTER 値: `KeyValueFormattingError`
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // 同一 Parameter Type が複数ある場合、安定ソートにより push 順が保たれたまま隣接し、
         // 2 件目以降は delta=0 でエンコードされる
@@ -1492,7 +1501,13 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
             buf.extend_from_slice(bytes);
         }
         MessageParameterValue::AuthorizationToken(token) => {
+            // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
             let bytes = token.encode_to_bytes();
+            if bytes.len() > 65535 {
+                return Err(MessageError::ProtocolViolation(
+                    "message parameter value length exceeds 65535",
+                ));
+            }
             varint::encode(bytes.len() as u64, buf);
             buf.extend_from_slice(&bytes);
         }
