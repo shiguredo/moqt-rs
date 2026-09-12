@@ -484,3 +484,117 @@ fn next_local_request_id_requires_established() {
     // セッションは閉じない (純粋な API バリデーション)
     assert_eq!(client.state(), SessionState::LocalSetupSent);
 }
+
+// ─── peer_max_auth_token_cache_size (draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) ─────
+
+/// peer SETUP 未受信時の `peer_max_auth_token_cache_size` はデフォルト 0 を返す
+///
+/// draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 未指定は 0。
+#[test]
+fn peer_max_auth_token_cache_size_defaults_to_zero_before_setup() {
+    // 自側が MAX を宣言していても、peer SETUP 未受信なら 0 (自側 MAX へフォールバックしない)
+    let mut client_opts = SetupOptions::new();
+    client_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (自側 = 1024)
+        value: SetupOptionValue::VarInt(1024),
+    });
+    let client = Session::new_client(Transport::WebTransport, client_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.peer_max_auth_token_cache_size(), 0);
+    assert_eq!(
+        client.peer_auth_token_cache().max_size(),
+        0,
+        "peer SETUP 未受信時は peer cache の上限も 0 であること"
+    );
+}
+
+/// peer SETUP の宣言値と未指定時の 0 が `peer_max_auth_token_cache_size` に反映されること
+#[test]
+fn peer_max_auth_token_cache_size_returns_peer_declared_value() {
+    // 自側も別値 (1024) を宣言し、peer 宣言値 512 が返ることを交差検証する
+    let mut client_opts = SetupOptions::new();
+    client_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (自側 = 1024)
+        value: SetupOptionValue::VarInt(1024),
+    });
+    let mut client = Session::new_client(Transport::WebTransport, client_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut server_opts = SetupOptions::new();
+    server_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (peer = 512)
+        value: SetupOptionValue::VarInt(512),
+    });
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: server_opts,
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.peer_max_auth_token_cache_size(), 512);
+
+    // peer が明示的に 0 を宣言した場合も 0
+    let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut server_opts = SetupOptions::new();
+    server_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (peer = 0)
+        value: SetupOptionValue::VarInt(0),
+    });
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: server_opts,
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.peer_max_auth_token_cache_size(), 0);
+
+    // peer が option を送らない場合もデフォルト 0
+    // (自側が MAX を宣言していても peer 未宣言なら 0 で、自側 MAX へフォールバックしない)
+    let mut client_opts = SetupOptions::new();
+    client_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (自側 = 1024)
+        value: SetupOptionValue::VarInt(1024),
+    });
+    let mut client = Session::new_client(Transport::WebTransport, client_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.peer_max_auth_token_cache_size(), 0);
+}
+
+/// `peer_max_auth_token_cache_size` が自側 MAX ではなく peer 宣言値を返すこと
+///
+/// `peer_auth_token_cache().max_size()` が自側 `MAX_AUTH_TOKEN_CACHE_SIZE` で、
+/// peer の宣言値は `peer_max_auth_token_cache_size()` で取得できることを区別して固定する。
+#[test]
+fn peer_max_auth_token_cache_size_is_peer_value_not_self_limit() {
+    // 自側 (server) MAX=1024 で peer (client) MAX=16 の SETUP を受信する
+    let mut server_opts = SetupOptions::new();
+    server_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (自側 = 保持上限)
+        value: SetupOptionValue::VarInt(1024),
+    });
+    let mut server = Session::new_server(Transport::WebTransport, server_opts)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut client_opts = SetupOptions::new();
+    client_opts.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, // MAX_AUTH_TOKEN_CACHE_SIZE (peer = 宣言値)
+        value: SetupOptionValue::VarInt(16),
+    });
+    server
+        .recv_control(ControlMessage::Setup(Setup {
+            options: client_opts,
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server.peer_auth_token_cache().max_size(),
+        1024,
+        "peer_auth_token_cache の上限は自側 MAX であること"
+    );
+    assert_eq!(
+        server.peer_max_auth_token_cache_size(),
+        16,
+        "peer の宣言した MAX は新アクセサで取得できること"
+    );
+}

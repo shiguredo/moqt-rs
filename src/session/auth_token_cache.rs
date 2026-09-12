@@ -1,6 +1,6 @@
 //! AUTHORIZATION_TOKEN Alias Cache
 //!
-//! draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) / §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE) /
+//! draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) / §9.20.3 (AUTHORIZATION TOKEN Parameter) / §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE) /
 //! §9.1.4 (AUTHORIZATION TOKEN) に基づく。
 //! draft 由来の実装のため将来変更される可能性がある。
 
@@ -13,10 +13,30 @@ use super::types::SessionError;
 
 /// AUTHORIZATION_TOKEN Alias Cache
 ///
-/// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) に基づく。Client と Server は
-/// それぞれ独立した alias 空間を持つため、各エンドポイントは自側が登録した
-/// alias (相手がトラッキングすべき) と、相手が登録した alias (自側がトラッキングすべき)
-/// の 2 つを保持する。
+/// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) に基づく。1 インスタンスは
+/// 片方向の alias 空間を保持する。`Session::peer_auth_token_cache()` が返すのは
+/// peer が REGISTER した alias を自側が保持する側であり、`max_size()` は自側 SETUP の
+/// MAX_AUTH_TOKEN_CACHE_SIZE (受信側が自身のリソースを保護するために宣言する値) である。
+/// peer SETUP を受信すると自側 SETUP の宣言値で確定し、受信前は 0 になる。
+/// 自側が REGISTER した alias を peer が保持できる上限は
+/// `Session::peer_max_auth_token_cache_size()` (peer SETUP の宣言値、未指定は 0) で取得する。
+///
+/// 期限切れ token の検出はアプリ責務である (Token Type 固有の期限判定はライブラリでは
+/// 行えない。Type 0 は out-of-band 交渉)。draft-ietf-moq-transport-21 §8.9
+/// (Authorization Token Compression): "If a receiver detects that an authorization token
+/// has expired, it MUST retain the registered Alias until it is deleted by the sender"
+/// のため、`resolve` は期限切れ後も alias を DELETE まで解決し続ける。アプリが期限切れを
+/// 検出したときの応答コードは文脈ごとに異なる。
+/// - 受信 request 文脈: `REQUEST_EXPIRED_AUTH_TOKEN` を `Session::send_request_error` に渡す
+/// - SETUP などのセッション文脈: `SESSION_EXPIRED_AUTH_TOKEN` を `Session::close` に渡す
+/// - data stream 文脈: `Session::reset_outgoing_data_stream` に
+///   `DataStreamResetReason::ExpiredAuthToken` (コードは `STREAM_EXPIRED_AUTH_TOKEN`) を渡す
+///
+/// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): "The receiver
+/// of a message carrying an Authorization Token with Alias Type REGISTER that does not
+/// result in a Session error MUST register the Token Alias in the token cache, even if
+/// the message fails for other reasons" のため、request が別の理由で失敗する場合も
+/// REGISTER は cache に登録する。期限切れを理由に拒否する場合も alias 登録は維持する。
 #[derive(Debug, Clone, Default)]
 pub struct AuthTokenCache {
     entries: BTreeMap<u64, (u64, Vec<u8>)>,

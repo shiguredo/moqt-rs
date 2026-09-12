@@ -558,9 +558,51 @@ impl Session {
 
     /// 相手側 Alias Cache (peer が REGISTER したトークンで、自側が保持するもの)
     ///
-    /// 上限は自側の `MAX_AUTH_TOKEN_CACHE_SIZE` (draft §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE))。
+    /// `max_size()` は自側の `MAX_AUTH_TOKEN_CACHE_SIZE` (draft §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE)) で
+    /// あり、peer の宣言値ではない。peer SETUP を受信すると自側 SETUP の宣言値で確定し、
+    /// 受信前は 0 になる。自側が REGISTER した alias を peer が保持できる上限は
+    /// `peer_max_auth_token_cache_size()` で取得する。
+    ///
+    /// 期限切れ token の検出はアプリ責務である。`resolve` は draft-ietf-moq-transport-21 §8.9
+    /// (Authorization Token Compression): "If a receiver detects that an authorization token
+    /// has expired, it MUST retain the registered Alias until it is deleted by the sender"
+    /// のため期限切れ後も alias を DELETE まで解決し続ける。アプリが期限切れを検出したときは、
+    /// 受信 request 文脈は `send_request_error` に `REQUEST_EXPIRED_AUTH_TOKEN`、SETUP などの
+    /// セッション文脈は `close` に `SESSION_EXPIRED_AUTH_TOKEN`、data stream 文脈は
+    /// `reset_outgoing_data_stream` に `DataStreamResetReason::ExpiredAuthToken`
+    /// (コードは `STREAM_EXPIRED_AUTH_TOKEN`) を渡す。
+    /// 詳細は [`AuthTokenCache`] の doc を参照。
     pub fn peer_auth_token_cache(&self) -> &AuthTokenCache {
         &self.auth.peer_token_cache
+    }
+
+    /// peer が SETUP で宣言した `MAX_AUTH_TOKEN_CACHE_SIZE` を返す
+    ///
+    /// draft-ietf-moq-transport-21 §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): 自側が REGISTER した
+    /// token の合計サイズ (バイト) を peer が保持できる上限。peer SETUP 未受信時は暫定値として
+    /// 0 を返し、peer SETUP 受信後に未宣言だった場合の 0 が仕様のデフォルト値である。
+    /// 両者は値では区別できないため、アプリの purge 判断は peer SETUP 受信後
+    /// (`SessionEvent::Established` の受信時など) に行う (どちらの 0 も自側が peer に対して
+    /// token Alias を使用できないことを意味する)。
+    /// draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN): "the sender MUST handle
+    /// registration failures of this kind by purging any Token Aliases that failed to register
+    /// based on the peer's MAX_AUTH_TOKEN_CACHE_SIZE option in SETUP (or the default value of 0)."
+    /// ライブラリはメッセージを組み立てないため、アプリがこの値と容量計算
+    /// (draft §9.1.3: Token 1 つあたり 16 バイト + Token Value のバイト数。登録分を合算し
+    /// DELETE 分を減算する) を突き合わせ、peer の MAX に収まらない alias は register 失敗として
+    /// purge し、以後その alias を使うメッセージを USE_VALUE へフォールバックする。
+    /// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): "Once a Token Alias
+    /// has been registered, it cannot be re-registered by the same endpoint in the Session
+    /// without first being deleted." のため、register 失敗と判断した alias は自側が当該 alias の
+    /// DELETE を送って peer の登録を解除するまで再 REGISTER しない (peer 側で実際には登録が
+    /// 成立していた場合、再 REGISTER は `DUPLICATE_AUTH_TOKEN_ALIAS` でセッションを閉じる。
+    /// SETUP は DELETE を運べないため、解除はメッセージパラメータの DELETE で行う)。
+    pub fn peer_max_auth_token_cache_size(&self) -> u64 {
+        self.setup
+            .peer
+            .as_ref()
+            .and_then(|s| s.options.max_auth_token_cache_size())
+            .unwrap_or(0)
     }
 
     /// 制御メッセージ応答待ちタイムアウト (ms) を取得する (draft-ietf-moq-transport-21 §6.6 (Termination))

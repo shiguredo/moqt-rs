@@ -202,6 +202,7 @@ fn set_control_message_timeout_ms(&mut self, timeout_ms: Option<u64>)
 fn data_stream_timeout_ms(&self) -> Option<u64>
 fn set_data_stream_timeout_ms(&mut self, timeout_ms: Option<u64>)
 fn peer_auth_token_cache(&self) -> &AuthTokenCache
+fn peer_max_auth_token_cache_size(&self) -> u64
 fn peer_alias_retention_ms(&self) -> u64
 fn set_peer_alias_retention_ms(&mut self, retention_ms: u64)
 ```
