@@ -73,18 +73,19 @@ fn request_update_with_new_group_request_without_dynamic_groups_rejected() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // client (subscriber) から NEW_GROUP_REQUEST 付き REQUEST_UPDATE を送る
+    // 送信側検証の追加後は subscriber API からは送出できないため、
+    // NEW_GROUP_REQUEST 付き REQUEST_UPDATE を直接構築して受信側 MUST 検証を維持する
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_NEW_GROUP_REQUEST,
         value: MessageParameterValue::VarInt(2),
     });
-    client
-        .send_request_update(rid, params)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, upd_msg) = take_send_on_stream(&mut client);
+    let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+        request_id: rid,
+        parameters: params,
+    });
     // server 側で受信すると PROTOCOL_VIOLATION
-    let err = server.recv_stream_message(rid, upd_msg).unwrap_err();
+    let err = server.recv_stream_message(rid, update).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
@@ -119,18 +120,19 @@ fn request_update_with_new_group_request_dynamic_groups_zero_rejected() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // client (subscriber) から NEW_GROUP_REQUEST 付き REQUEST_UPDATE を送る
+    // 送信側検証の追加後は subscriber API からは送出できないため、
+    // NEW_GROUP_REQUEST 付き REQUEST_UPDATE を直接構築して受信側 MUST 検証を維持する
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_NEW_GROUP_REQUEST,
         value: MessageParameterValue::VarInt(2),
     });
-    client
-        .send_request_update(rid, params)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, upd_msg) = take_send_on_stream(&mut client);
+    let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+        request_id: rid,
+        parameters: params,
+    });
     // server 側で受信すると PROTOCOL_VIOLATION
-    let err = server.recv_stream_message(rid, upd_msg).unwrap_err();
+    let err = server.recv_stream_message(rid, update).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
@@ -179,6 +181,138 @@ fn request_update_with_new_group_request_dynamic_groups_one_accepted() {
             .state,
         SubscriptionState::Established
     );
+}
+
+/// DYNAMIC_GROUPS 非対応 Track への REQUEST_UPDATE + NEW_GROUP_REQUEST は
+/// 送信側でも PROTOCOL_VIOLATION となり、併載した他パラメータがローカルに適用されない
+///
+/// draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter):
+/// "A subscriber MUST NOT send this parameter in REQUEST_UPDATE if the Track did not
+/// include the DYNAMIC_GROUPS Property with value 1."
+#[test]
+fn request_update_with_new_group_request_send_side_rejected_without_dynamic_groups() {
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT,
+        PARAM_SUBSCRIBER_PRIORITY,
+    };
+    let (mut client, _server, rid) = establish_subscribe_track(1);
+    // NEW_GROUP_REQUEST と他パラメータ (FORWARD / LOCATION_FILTER /
+    // SUBSCRIBER_PRIORITY / OBJECT_DELIVERY_TIMEOUT) を併載する
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_NEW_GROUP_REQUEST,
+        value: MessageParameterValue::VarInt(2),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(0),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(7),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_OBJECT_DELIVERY_TIMEOUT,
+        value: MessageParameterValue::VarInt(5000),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LengthPrefixed(
+            LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 3,
+                    object_id: 1,
+                },
+                end_group_delta: 2,
+                end_object: 4,
+            }
+            .encode_to_bytes(),
+        ),
+    });
+    let err = client
+        .send_request_update(rid, params)
+        .expect_err("NEW_GROUP_REQUEST は送信側で拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // 同じコードを返す他の送信前検証 (FORWARD / filter / fill 等) と区別する
+    assert_eq!(
+        err.reason, "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
+        "NEW_GROUP_REQUEST の検証で拒否されなければならない"
+    );
+    // 拒否時に REQUEST_UPDATE が送信イベントとして積まれないこと
+    let mut sent = false;
+    while let Some(ev) = client.poll_event() {
+        if matches!(ev, SessionEvent::SendOnStream { .. }) {
+            sent = true;
+        }
+    }
+    assert!(!sent, "検証エラー時に REQUEST_UPDATE が送信されないこと");
+    // 併載パラメータがローカルに適用されないこと
+    let sub = client
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(sub.forward_state, 1, "FORWARD=0 が適用されないこと");
+    assert_eq!(
+        sub.subscriber_priority, None,
+        "SUBSCRIBER_PRIORITY が適用されないこと"
+    );
+    assert_eq!(
+        sub.delivery_timeouts.subscriber_object_ms, None,
+        "OBJECT_DELIVERY_TIMEOUT が適用されないこと"
+    );
+    assert!(sub.filter.is_none(), "LOCATION_FILTER が適用されないこと");
+    assert!(
+        sub.filter_start.is_none(),
+        "解決済み filter_start が設定されないこと"
+    );
+    assert!(
+        sub.filter_end.is_none(),
+        "解決済み filter_end が設定されないこと"
+    );
+    // 拒否後も subscription は使用可能で、正当な REQUEST_UPDATE を送信できること
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("拒否後も正当な REQUEST_UPDATE は送信できる");
+    let (sent_rid, msg) = take_send_on_stream(&mut client);
+    assert_eq!(sent_rid, rid);
+    assert!(
+        matches!(msg, ControlMessage::RequestUpdate(_)),
+        "拒否後の正当な送信で REQUEST_UPDATE が得られること"
+    );
+    // 検証エラーではセッションを閉じない
+    assert_ne!(client.state(), SessionState::Closing);
+}
+
+/// SUBSCRIBE の NEW_GROUP_REQUEST は foreknowledge 無しでも送信できる
+///
+/// draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter):
+/// "A subscriber MAY include this parameter in SUBSCRIBE without foreknowledge of support."
+#[test]
+fn subscribe_with_new_group_request_without_foreknowledge_accepted() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
+    };
+    let (mut client, _server) = establish_pair();
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_NEW_GROUP_REQUEST,
+        value: MessageParameterValue::VarInt(0),
+    });
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params)
+        .expect("SUBSCRIBE の NEW_GROUP_REQUEST は foreknowledge 無しでも許可される");
+    let (sent_rid, msg) = take_send_request(&mut client);
+    assert_eq!(sent_rid, rid);
+    match &msg {
+        ControlMessage::Subscribe(sub) => {
+            assert_eq!(
+                sub.parameters.new_group_request(),
+                Some(0),
+                "NEW_GROUP_REQUEST が SUBSCRIBE に保持されること"
+            );
+        }
+        other => panic!("Subscribe が期待されたが {other:?} を受け取った"),
+    }
 }
 
 /// SUBSCRIBE の AUTHORIZATION_TOKEN (REGISTER) を peer_auth_token_cache に登録する

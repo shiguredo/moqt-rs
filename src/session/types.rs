@@ -1150,10 +1150,13 @@ pub struct Subscription {
     pub expires: Option<DeadlineTimer>,
     /// Track の DYNAMIC_GROUPS Property (draft §10.6 (DYNAMIC GROUPS)) が `1` で発行されているか
     ///
-    /// 自側が Publisher として発行した `TrackProperties` (PUBLISH 送信または
-    /// SUBSCRIBE_OK 応答) の `DYNAMIC_GROUPS` が `1` であれば `true`。
+    /// 自側が Publisher として送信した PUBLISH / SUBSCRIBE_OK、または peer から受信した
+    /// PUBLISH / SUBSCRIBE_OK の `TrackProperties` の `DYNAMIC_GROUPS` が `1` であれば `true`。
+    /// Publisher 側は peer が `INCLUDE_PROPERTIES=0` を指定して wire 上を空化しても発行時の値で
+    /// 保持するが、Subscriber 側は空化された Track Properties を受けるため `false` のままとなり、
+    /// その subscription からは `NEW_GROUP_REQUEST` を送れない。
     /// draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter): `NEW_GROUP_REQUEST` parameter は `DYNAMIC_GROUPS == 1` の
-    /// Track 以外で PUBLISH_OK / REQUEST_UPDATE に含まれてはならない。
+    /// Track 以外で REQUEST_UPDATE に送受信してはならない。
     pub dynamic_groups: bool,
     /// publisher が設定した Publisher Priority (draft §5.1.2 Scheduling Algorithm, §10.4 DEFAULT PUBLISHER PRIORITY)
     ///

@@ -187,8 +187,9 @@ impl Session {
             },
             subscriber_rendezvous_timeout_ms,
             expires: None,
-            // Subscriber 役では track_properties は持たない (受信した SUBSCRIBE_OK 内の値で
-            // publisher 側が判定する)。NEW_GROUP_REQUEST 検証は publisher 側で行う。
+            // Subscriber 役では track_properties を持たないため false で初期化する。
+            // 受信した SUBSCRIBE_OK の値で更新され、REQUEST_UPDATE 送信時の
+            // NEW_GROUP_REQUEST 検証に使われる。
             dynamic_groups: false,
             publisher_priority: None,
             default_publisher_priority,
@@ -632,6 +633,11 @@ impl Session {
     /// 検証する。subscription のみ、FORWARD parameter が含まれていれば
     /// `forward_state` を楽観的に更新する。
     ///
+    /// draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter):
+    /// `DYNAMIC_GROUPS` が `1` でない Track の subscription に `NEW_GROUP_REQUEST` を
+    /// 含めると `SESSION_PROTOCOL_VIOLATION` を返す (`SUBSCRIBE` での foreknowledge 無しの
+    /// 送信は許可されるため対象外)。
+    ///
     /// draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): クレジットは送信が
     /// 確定したときのみ消費される (検証失敗で送信されない場合は消費されない。
     /// "A REQUEST_UPDATE is considered outstanding from when it is sent until the sender
@@ -809,6 +815,18 @@ impl Session {
         // FILL 内側の Table 6 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出を防ぐ (楽観的状態更新より前に置き、エラー時に更新済み状態を残さない)
         super::fill::validate_outgoing_fill_parameters(parameters)?;
+        // draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter):
+        // subscriber MUST NOT send this parameter in REQUEST_UPDATE if the Track did not
+        // include the DYNAMIC_GROUPS Property with value 1. 受信側
+        // `handle_update_for_subscription` と同じ MUST を送信側でも守る。SUBSCRIBE での
+        // foreknowledge 無しの送信は許可されるため REQUEST_UPDATE のみを対象とする。
+        // 楽観的状態更新より前に置き、拒否時は併載パラメータをローカルに適用しない。
+        if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
+            ));
+        }
         update_subscription_subscriber_delivery_timeouts_if_present(subscription, parameters);
         if let Some(new_forward) = new_forward {
             subscription.forward_state = new_forward;
