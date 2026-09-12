@@ -1,7 +1,7 @@
 # request stream GOAWAY の timeout を実装する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-request-stream-goaway-timeout
 - Polished: 2026-09-10
 
@@ -45,3 +45,19 @@ reset のエラーコードは §12.5 (Stream Reset Error Codes) の `GOING_AWAY
 - 同一 request への 2 回目の `send_goaway_on_request_stream` が従来どおり拒否されること
 - 回帰テストが `tests/test_session/goaway.rs` に追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` として記載されていること
+
+## 解決方法
+
+request stream 上の GOAWAY の timeout を実装し、期限到達時に当該 request stream を `GOING_AWAY` で reset するようにした。セッションは閉じない。
+
+- `src/session/core.rs`: `GoawayState` に `request_stream_deadlines: HashMap<u64, DeadlineTimer>` を追加した。control stream の単一スロットとは独立に request 単位で保持し、tick 未経験時の送信は最初の `tick` で `DeadlineTimer` が基準時刻を確定する。
+- `src/session/goaway.rs`: `send_goaway_on_request_stream` が `timeout > 0` のとき deadline を登録する
+  (`timeout == 0` は登録しない)。`tick` は期限到達した request の
+  `ResetRequestStream { error_code: STREAM_GOING_AWAY }` を request_id 昇順で 1 回だけ積み、
+  矛盾する保留 PUBLISH_DONE を破棄する。`clear_request_stream_goaway_deadline` を追加し、
+  peer の FIN / RESET、`forget_*` 6 経路、ローカル FIN / RESET
+  (PUBLISH_DONE・REQUEST_ERROR・TRACK_STATUS_OK・fetch cancel・malformed 終端・supersede など)
+  で解除する。GOAWAY_TIMEOUT の fail 後に return を追加した。
+- `tests/test_session/goaway.rs` に 15 本の回帰テストを追加した (期限前後・timeout 0・tick 未経験・peer FIN / RESET・forget・各種ローカル FIN・保留 PUBLISH_DONE 破棄・TRACK_STATUS の期限到達・同時期限の昇順)。
+- `skills/shiguredo-moqt/SKILL.md` の `tick` の説明を更新した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
