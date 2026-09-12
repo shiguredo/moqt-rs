@@ -1,7 +1,7 @@
 # send_object_datagram と ObjectDatagram の properties_data 規約を統一する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/change-object-datagram-properties-convention
 - Polished: 2026-09-10
 
@@ -49,3 +49,23 @@ Object Datagram の Object Properties を、本ライブラリの他の properti
 - `datagram_writer.rs` と同じ組み立て (`LocProperties::encode()` → `ObjectDatagram` → `encode` → 受信側 `recv_datagram`) を再現したテストで、受信が受理され Malformed Track にならないこと
 - `pbt/tests/prop_stream/datagram.rs` ほか length-less 前提のテストが新規約に追従し、`cargo test --workspace` と PBT が通ること
 - `CHANGES.md` の `## develop` に `[CHANGE]` として記載されていること
+
+## 解決方法
+
+`ObjectDatagram.properties_data` と `send_object_datagram` の `properties_data` を、SubgroupObject / FetchStreamObject と同じ「Properties Length varint + Properties」の生バイト列規約に統一した。
+
+- `src/stream/datagram.rs`:
+  - `properties_data` の doc を Length 込みに更新し、`encode` は受け取った生バイト列をそのまま書き込むようにした (Length の再前置を削除)。
+  - `validate_datagram_properties_blob` を追加し、空スライス・途中で切れた Length varint・Properties Length = 0・宣言長と実データ長の不一致を拒否するようにした。
+  - `decode` は Properties Length varint を含む生バイト列を返すようにした (Length = 0 の拒否は維持)。
+  - `encode` の `# Errors` に拒否条件を列挙した。
+- `src/session/data.rs`:
+  - `send_object_datagram` は同じ検証を送信前に行うようにした (`SESSION_PROTOCOL_VIOLATION` で拒否)。
+  - `recv_object_datagram` の Length 付け直しを削除し、`properties_data` をそのままフィルタ検証と Malformed Track 検証へ渡すようにした。
+  - 両 API の doc に入力契約と拒否条件を追記した。
+- `tests/test_stream/object_datagram.rs` に encode のワイヤ表現固定テストと拒否テストを追加した。
+- `tests/test_session/data_stream.rs` に datagram_writer 相当の組み立て (`LocProperties::encode()` →
+  `ObjectDatagram` → `encode` → `recv_datagram`) の受理テストと `send_object_datagram` の拒否テストを
+  追加し、Malformed Track テストを PRIOR_OBJECT_ID_GAP 経路の reason で固定した。
+- `pbt/tests/prop_stream/datagram.rs` を Length 込み blob の生成に追従させ、`pbt/tests/prop_stream/main.rs` の旧規約コメントを更新して `length_prefixed_properties` を共用するようにした。
+- `skills/shiguredo-moqt/SKILL.md` に Length 込み規約を追記し、`CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加した。
