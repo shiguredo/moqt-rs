@@ -1540,6 +1540,11 @@ pub struct NamespaceSubscription {
     /// 自端点の役割
     pub my_role: TrackRole,
     /// 対象の名前空間プレフィックス
+    ///
+    /// 自側 subscriber では REQUEST_OK で確定した適用済みの値 (送信した
+    /// REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX は REQUEST_OK を受信するまで
+    /// 反映されず、確定待ちは Session 内部で保持する)。自側 publisher では
+    /// 受理した REQUEST_UPDATE を反映した値 (確定待ちは保持しない)。
     pub prefix: TrackNamespace,
     /// 現在の状態
     pub state: NamespaceSubscriptionState,
@@ -1569,6 +1574,11 @@ pub struct TrackSubscription {
     /// 自端点の役割
     pub my_role: TrackRole,
     /// 対象の名前空間プレフィックス
+    ///
+    /// 自側 subscriber では REQUEST_OK で確定した適用済みの値 (送信した
+    /// REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX は REQUEST_OK を受信するまで
+    /// 反映されず、確定待ちは Session 内部で保持する)。自側 publisher では
+    /// 受理した REQUEST_UPDATE を反映した値 (確定待ちは保持しない)。
     pub prefix: TrackNamespace,
     /// 現在の状態
     pub state: TrackSubscriptionState,

@@ -16,7 +16,10 @@ use super::super::types::{
     NamespaceSubscription, NamespaceSubscriptionState, RequestKind, RequestStreamEnd,
     SendRequestError, SessionError, SessionEvent, TerminationReason, TrackRole,
 };
-use super::{prefix_overlaps, terminationreason_from_end};
+use super::{
+    effective_prefix, pop_pending_prefix_update, prefix_overlaps, push_pending_prefix_update,
+    terminationreason_from_end,
+};
 
 impl Session {
     // ─── クエリ API ─────────────────────────────────────────
@@ -42,6 +45,7 @@ impl Session {
         }
         self.request_streams.remove(&request_id);
         self.remove_request_update_credit_entries(request_id);
+        self.pending_prefix_updates.remove(&request_id);
         self.namespaces.subscriptions.remove(&request_id)
     }
 
@@ -63,11 +67,19 @@ impl Session {
             )
             .into());
         }
-        // draft §9.15 (SUBSCRIBE_NAMESPACE): SUBSCRIBE_NAMESPACE テーブル内での prefix overlap チェック
-        for existing in self.namespaces.subscriptions.values() {
-            if existing.my_role == TrackRole::Subscriber
-                && prefix_overlaps(&prefix, &existing.prefix)
+        // draft §9.15 (SUBSCRIBE_NAMESPACE): SUBSCRIBE_NAMESPACE テーブル内での prefix overlap チェック。
+        // 確定待ちの REQUEST_UPDATE がある購読とは反映後の実効 prefix で比較し、
+        // Terminated の購読は active ではないため対象外とする
+        // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
+        for (existing_id, existing) in &self.namespaces.subscriptions {
+            if existing.my_role != TrackRole::Subscriber
+                || existing.state == NamespaceSubscriptionState::Terminated
             {
+                continue;
+            }
+            let existing_effective =
+                effective_prefix(&self.pending_prefix_updates, *existing_id, &existing.prefix);
+            if prefix_overlaps(&prefix, &existing_effective) {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "local subscribe_namespace prefix overlaps existing subscription",
@@ -173,6 +185,8 @@ impl Session {
         };
         let implicit_done: Vec<TrackNamespace> = entry.active_suffixes.drain().collect();
         entry.state = NamespaceSubscriptionState::Terminated;
+        // bidi stream 終端で確定待ちは破棄する (REQUEST_OK は届かない)
+        self.pending_prefix_updates.remove(&request_id);
         let reason = if implicit_done.is_empty() {
             terminationreason_from_end(end)
         } else {
@@ -382,6 +396,7 @@ impl Session {
     pub(crate) fn send_update_for_namespace_subscription(
         &mut self,
         request_id: u64,
+        parameters: &MessageParameters,
     ) -> Result<(), SessionError> {
         let entry = self
             .namespaces
@@ -400,6 +415,40 @@ impl Session {
                 "request_update requires Established subscribe_namespace",
             ));
         }
+        // draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "If the update is accepted,
+        // NAMESPACE and NAMESPACE_DONE messages following the REQUEST_OK will contain Track
+        // Namespace suffixes relative to the updated prefix." prefix 更新は REQUEST_OK
+        // 受信までローカルへ反映しない。送信前に SUBSCRIBE_NAMESPACE 作成時と同じ条件で
+        // overlap をローカル検査し、overlap する場合は確定待ちも登録しない。
+        // 比較対象は確定待ちを含めた実効 prefix とする。
+        let own_effective =
+            effective_prefix(&self.pending_prefix_updates, request_id, &entry.prefix);
+        let pending_prefix = if let Some(new_prefix) = parameters.track_namespace_prefix()
+            && *new_prefix != own_effective
+        {
+            for (other_id, existing) in &self.namespaces.subscriptions {
+                if other_id == &request_id
+                    || existing.my_role != TrackRole::Subscriber
+                    || existing.state == NamespaceSubscriptionState::Terminated
+                {
+                    continue;
+                }
+                let other_effective =
+                    effective_prefix(&self.pending_prefix_updates, *other_id, &existing.prefix);
+                if prefix_overlaps(new_prefix, &other_effective) {
+                    return Err(SessionError::new(
+                        SESSION_PROTOCOL_VIOLATION,
+                        "local subscribe_namespace prefix overlaps existing subscription",
+                    ));
+                }
+            }
+            Some(new_prefix.clone())
+        } else {
+            None
+        };
+        // REQUEST_OK は同一 bidi stream 上で送信順に届く。prefix 変更を含まない
+        // 更新も 1 件積み、REQUEST_OK と確定待ちの対応を保つ。
+        push_pending_prefix_update(&mut self.pending_prefix_updates, request_id, pending_prefix);
         Ok(())
     }
 
@@ -564,7 +613,26 @@ impl Session {
                 entry.state = NamespaceSubscriptionState::Established;
             }
             NamespaceSubscriptionState::Established => {
-                // REQUEST_UPDATE への成功応答: state は維持する
+                // REQUEST_UPDATE への成功応答: 送信順に積んだ確定待ちの先頭を適用する。
+                // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): "The receiver MUST
+                // still send a REQUEST_OK for each successful update" のため、対応する
+                // 確定待ちが無い REQUEST_OK はプロトコル違反とする。
+                // なお responder は複数更新を累積結果のみ適用してよい (同節の coalescing) が、
+                // 成功応答は更新ごとに届くため OK 1 件を送信順の更新 1 件に対応付けて適用する
+                // (非 coalescing 前提の解釈)。
+                let Some(pending) =
+                    pop_pending_prefix_update(&mut self.pending_prefix_updates, request_id)
+                else {
+                    let err = SessionError::new(
+                        SESSION_PROTOCOL_VIOLATION,
+                        "REQUEST_OK (subscribe_namespace) without outstanding REQUEST_UPDATE",
+                    );
+                    self.fail(err.clone());
+                    return Err(err);
+                };
+                if let Some(new_prefix) = pending {
+                    entry.prefix = new_prefix;
+                }
             }
             NamespaceSubscriptionState::Terminated => {
                 let err = SessionError::new(
@@ -622,6 +690,8 @@ impl Session {
                 return Err(err);
             }
         }
+        // REQUEST_ERROR 受信で確定待ちは破棄する (REQUEST_OK は届かない)
+        self.pending_prefix_updates.remove(&request_id);
         Ok(())
     }
 }

@@ -734,10 +734,10 @@ impl Session {
                 self.send_update_for_namespace_publication(request_id)?
             }
             Some(RequestTable::NamespaceSubscription) => {
-                self.send_update_for_namespace_subscription(request_id)?
+                self.send_update_for_namespace_subscription(request_id, &parameters)?
             }
             Some(RequestTable::TrackSubscription) => {
-                self.send_update_for_track_subscription(request_id)?
+                self.send_update_for_track_subscription(request_id, &parameters)?
             }
             Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(

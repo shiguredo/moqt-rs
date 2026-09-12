@@ -9,6 +9,32 @@ fn establish_subscribe_tracks_example() -> (Session, Session, u64) {
     establish_subscribe_tracks_with(ns(&[b"example"]), MessageParameters::new())
 }
 
+/// client から 1 本の SUBSCRIBE_TRACKS を確立する
+///
+/// 返り値は request_id。
+fn establish_track_subscription(
+    client: &mut Session,
+    server: &mut Session,
+    namespace: TrackNamespace,
+    params: MessageParameters,
+) -> u64 {
+    let rid = client
+        .send_subscribe_tracks(namespace, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, st_msg) = take_send_request(client);
+    server
+        .recv_request(st_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    rid
+}
+
 /// 任意の namespace・パラメータで SUBSCRIBE_TRACKS を確立する
 ///
 /// 返り値は (subscriber, publisher, request_id)。
@@ -17,21 +43,23 @@ fn establish_subscribe_tracks_with(
     params: MessageParameters,
 ) -> (Session, Session, u64) {
     let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe_tracks(namespace, params)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, st_msg) = take_send_request(&mut client);
-    server
-        .recv_request(st_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
+    let rid = establish_track_subscription(&mut client, &mut server, namespace, params);
     (client, server, rid)
+}
+
+/// client から 2 本の SUBSCRIBE_TRACKS を確立する
+///
+/// 返り値は (subscriber, publisher, rid1, rid2)。
+fn establish_two_track_subscriptions(
+    prefix1: TrackNamespace,
+    prefix2: TrackNamespace,
+) -> (Session, Session, u64, u64) {
+    let (mut client, mut server) = establish_pair();
+    let rid1 =
+        establish_track_subscription(&mut client, &mut server, prefix1, MessageParameters::new());
+    let rid2 =
+        establish_track_subscription(&mut client, &mut server, prefix2, MessageParameters::new());
+    (client, server, rid1, rid2)
 }
 
 /// SUBSCRIBE_TRACKS の REQUEST_OK (Pending→Established) で
@@ -1585,4 +1613,707 @@ fn publish_stream_close_then_subscribe_tracks_stream_end_terminates_once() {
         .recv_request_stream_closed(publish_rid, RequestStreamEnd::Fin)
         .expect_err("close 済み id は rejected_request_ids に残らず unknown id になること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}
+
+// ─── 送信側 REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX 反映 (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions)) ─────
+
+/// 送信側は REQUEST_UPDATE の送信直後には prefix を変えず、REQUEST_OK 受信後に
+/// 新しい prefix を適用する
+///
+/// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "If the update is accepted,
+/// NAMESPACE and NAMESPACE_DONE messages following the REQUEST_OK will contain Track
+/// Namespace suffixes relative to the updated prefix."
+#[test]
+fn subscribe_tracks_update_prefix_applies_after_request_ok() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 送信直後の initiator 側 prefix は旧のまま
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "REQUEST_OK 受信前は旧 prefix のままであること"
+    );
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // responder 側は REQUEST_UPDATE の受信時点で適用する
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        new_prefix
+    );
+    // REQUEST_OK 受信で initiator 側にも適用する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        new_prefix,
+        "REQUEST_OK 受信後に新 prefix が適用されること"
+    );
+}
+
+/// REQUEST_OK 待ちの間に届いた新 prefix 相対の PUBLISH も active_track_aliases に登録される
+///
+/// SUBSCRIBE_TRACKS の PUBLISH は REQUEST_UPDATE とは別 bidi stream で順序保証がない
+/// ため、確定待ちの prefix でもマッチさせる (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
+#[test]
+fn subscribe_tracks_update_prefix_pending_publish_registers_alias() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"new"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    // responder が更新を処理して新 prefix に切り替える (REQUEST_OK はまだ送らない)
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // REQUEST_OK より前に新 prefix 相対の PUBLISH が届く
+    let alias = 21;
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"new", b"live"]),
+            b"cam".to_vec(),
+            alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut server);
+    client
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client.subscription(pub_rid).is_some(),
+        "PUBLISH の subscription が作成されること"
+    );
+    assert!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .active_track_aliases
+            .contains(&alias),
+        "確定待ち prefix にマッチする PUBLISH が active_track_aliases に登録されること"
+    );
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "REQUEST_OK までは旧 prefix のままであること"
+    );
+
+    // REQUEST_OK 受信で新 prefix を適用する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        new_prefix
+    );
+}
+
+/// bidi stream 終端で確定待ちを破棄し、prefix は旧のままにする
+#[test]
+fn subscribe_tracks_update_prefix_bidi_end_keeps_old_prefix() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::{RequestStreamEnd, TrackSubscriptionState};
+    let old_prefix = ns(&[b"example"]);
+    let (mut client, _server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"new"])),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // REQUEST_OK を受信しないまま bidi stream が終端する
+    client
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        TrackSubscriptionState::Terminated
+    );
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "bidi 終端時は prefix を更新しないこと"
+    );
+}
+
+/// prefix 変更を含まない REQUEST_UPDATE と prefix 更新を連続送信しても、
+/// それぞれに対応する REQUEST_OK まで prefix を適用しない
+#[test]
+fn subscribe_tracks_update_prefix_waits_for_corresponding_request_ok() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    // 1 通目: prefix 変更なし、2 通目: prefix 更新
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd1_msg) = take_send_on_stream(&mut client);
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd2_msg) = take_send_on_stream(&mut client);
+
+    // 1 通目の REQUEST_OK では prefix を適用しない
+    server
+        .recv_stream_message(rid, upd1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok1_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "prefix 変更なしの REQUEST_OK では prefix を適用しないこと"
+    );
+
+    // 2 通目の REQUEST_OK で prefix を適用する
+    server
+        .recv_stream_message(rid, upd2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok2_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        new_prefix
+    );
+}
+
+/// 確定待ちの間に「適用済みと同値」の prefix へ戻す更新を送っても、
+/// 送信順の REQUEST_OK ごとに p0 → p1 → p0 と適用される
+#[test]
+fn subscribe_tracks_update_prefix_reverts_before_first_request_ok() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let mid_prefix = ns(&[b"newprefix"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    // 1 通目: p0 → p1
+    let mut params1 = MessageParameters::new();
+    params1.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(mid_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params1)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd1_msg) = take_send_on_stream(&mut client);
+    // 2 通目: p1 → p0 (適用済み p0 と同値だが、確定待ち p1 を経由した後の反映値)
+    let mut params2 = MessageParameters::new();
+    params2.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(old_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params2)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd2_msg) = take_send_on_stream(&mut client);
+
+    // responder 側は p1 → p0 の順に処理する
+    server
+        .recv_stream_message(rid, upd1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .recv_stream_message(rid, upd2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix
+    );
+    // 1 通目の REQUEST_OK で p1、2 通目で p0 と適用する
+    for (expected, label) in [
+        (mid_prefix.clone(), "1 通目"),
+        (old_prefix.clone(), "2 通目"),
+    ] {
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            client
+                .track_subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .prefix,
+            expected,
+            "{label} REQUEST_OK の適用結果"
+        );
+    }
+}
+
+/// prefix 更新先が他購読と overlap する場合は送信前にローカルで拒否する
+#[test]
+fn subscribe_tracks_update_prefix_overlap_rejected_locally() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"a", b"b"]);
+    let (mut client, _server, rid1, _rid2) =
+        establish_two_track_subscriptions(old_prefix.clone(), ns(&[b"a", b"c"]));
+
+    // rid1 の prefix を ["a"] に更新 → rid2 の ["a", "c"] と overlap するため送信前に拒否
+    let mut upd_params = MessageParameters::new();
+    upd_params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"a"])),
+    });
+    let err = client
+        .send_request_update(rid1, upd_params)
+        .expect_err("overlap する prefix 更新はローカルで拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // 拒否された REQUEST_UPDATE は送信イベントを発行しない
+    while let Some(ev) = client.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された REQUEST_UPDATE は送信されないこと"
+        );
+    }
+    assert_eq!(
+        client
+            .track_subscription(rid1)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+}
+
+/// REQUEST_ERROR を受信した場合は確定待ちを反映せず、prefix は旧のままにする
+#[test]
+fn subscribe_tracks_update_prefix_request_error_keeps_old_prefix() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::TrackSubscriptionState;
+    let old_prefix = ns(&[b"example"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"newprefix"])),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_error(
+            rid,
+            0x34,
+            0,
+            ReasonPhrase::new("update failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, err_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, err_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        TrackSubscriptionState::Terminated
+    );
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "REQUEST_ERROR 受信時は prefix を更新しないこと (確定待ちキューは内部状態)"
+    );
+}
+
+/// 対応する REQUEST_UPDATE が無い REQUEST_OK はプロトコル違反でセッションを閉じる
+#[test]
+fn subscribe_tracks_request_ok_without_update_closes_session() {
+    let (mut client, mut server, rid) = establish_subscribe_tracks_example();
+
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    let err = client
+        .recv_stream_message(rid, ok_msg)
+        .expect_err("対応する REQUEST_UPDATE が無い REQUEST_OK は拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    match drain_until_close(&mut client) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+    }
+}
+
+/// 確定待ち prefix と overlap する新規 SUBSCRIBE_TRACKS はローカルで拒否する
+#[test]
+fn subscribe_tracks_create_overlapping_pending_update_rejected_locally() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let (mut client, _server, rid1) =
+        establish_subscribe_tracks_with(ns(&[b"a", b"b"]), MessageParameters::new());
+
+    // rid1 の prefix を ["a"] に更新する (確定待ち)
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"a"])),
+    });
+    client
+        .send_request_update(rid1, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 確定待ち ["a"] と overlap する ["a", "c"] の新規購読は拒否する
+    let err = client
+        .send_subscribe_tracks(ns(&[b"a", b"c"]), MessageParameters::new())
+        .expect_err("確定待ち prefix と overlap する新規購読は拒否される");
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_PROTOCOL_VIOLATION)
+    );
+    // 確定待ちでない ["x"] の新規購読は受理される
+    client
+        .send_subscribe_tracks(ns(&[b"x"]), MessageParameters::new())
+        .expect("確定待ちと overlap しない新規購読は受理される");
+}
+
+/// 他購読の確定待ち prefix と overlap する更新も送信前にローカルで拒否する
+#[test]
+fn subscribe_tracks_update_prefix_overlapping_pending_update_rejected_locally() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let (mut client, _server, rid1, rid2) =
+        establish_two_track_subscriptions(ns(&[b"a", b"b"]), ns(&[b"c", b"d"]));
+
+    // rid1 の prefix を ["x"] に更新する (確定待ち)
+    let mut params1 = MessageParameters::new();
+    params1.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"x"])),
+    });
+    client
+        .send_request_update(rid1, params1)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // rid2 の prefix を ["x", "y"] に更新すると、rid1 の確定待ち ["x"] と overlap する
+    let mut params2 = MessageParameters::new();
+    params2.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"x", b"y"])),
+    });
+    let err = client
+        .send_request_update(rid2, params2)
+        .expect_err("他購読の確定待ち prefix と overlap する更新は拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .track_subscription(rid2)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        ns(&[b"c", b"d"]),
+        "拒否時に prefix を更新しないこと"
+    );
+}
+
+/// ローカル拒否された更新は確定待ちに残らず、後続の更新だけが REQUEST_OK で適用される
+#[test]
+fn subscribe_tracks_locally_rejected_update_is_not_queued() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let (mut client, mut server, rid1, _rid2) =
+        establish_two_track_subscriptions(ns(&[b"a", b"b"]), ns(&[b"a", b"c"]));
+
+    // rid1 の ["a"] 更新は rid2 と overlap するためローカル拒否される
+    let mut rejected = MessageParameters::new();
+    rejected.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"a"])),
+    });
+    client
+        .send_request_update(rid1, rejected)
+        .expect_err("overlap する prefix 更新はローカルで拒否される");
+
+    // 後続の正当な更新 ["x"] を送り、REQUEST_OK で ["x"] が適用される
+    let mut accepted = MessageParameters::new();
+    accepted.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"x"])),
+    });
+    client
+        .send_request_update(rid1, accepted)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid1, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid1, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid1, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid1)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        ns(&[b"x"]),
+        "拒否された更新が確定待ちに残らないこと"
+    );
+}
+
+/// 確定待ちの間に旧 prefix 相対の PUBLISH が届いても active_track_aliases に登録される
+#[test]
+fn subscribe_tracks_update_prefix_pending_publish_with_old_prefix_registers_alias() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let new_prefix = ns(&[b"new"]);
+    let (mut client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(new_prefix.clone()),
+    });
+    client
+        .send_request_update(rid, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // REQUEST_OK より前に旧 prefix 相対の PUBLISH が届く (peer が更新を処理する前の送信)
+    let alias = 22;
+    server
+        .send_publish(
+            ns(&[b"example", b"live"]),
+            b"cam".to_vec(),
+            alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut server);
+    client
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .active_track_aliases
+            .contains(&alias),
+        "旧 prefix にマッチする PUBLISH が active_track_aliases に登録されること"
+    );
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "REQUEST_OK までは旧 prefix のままであること"
+    );
+}
+
+/// Terminated 購読は overlap 検査の対象外である (作成時・更新時の両方)
+#[test]
+fn subscribe_tracks_terminated_subscription_does_not_block_overlap() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::TrackSubscriptionState;
+    let (mut client, mut server, rid1) =
+        establish_subscribe_tracks_with(ns(&[b"a", b"b"]), MessageParameters::new());
+
+    // rid1 の prefix 更新を REQUEST_ERROR で Terminated にする (prefix は ["a", "b"] のまま)
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"x"])),
+    });
+    client
+        .send_request_update(rid1, params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid1, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_error(
+            rid1,
+            0x34,
+            0,
+            ReasonPhrase::new("update failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, err_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid1, err_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid1)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        TrackSubscriptionState::Terminated
+    );
+
+    // Terminated の ["a", "b"] と overlap する新規購読は受理される
+    let rid2 = client
+        .send_subscribe_tracks(ns(&[b"a", b"c"]), MessageParameters::new())
+        .expect("Terminated 購読は overlap 検査の対象外");
+    let (_, st_msg) = take_send_request(&mut client);
+    server
+        .recv_request(st_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid2, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // rid2 の更新 ["a"] も Terminated の ["a", "b"] と overlap するが受理される
+    let mut params2 = MessageParameters::new();
+    params2.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"a"])),
+    });
+    client
+        .send_request_update(rid2, params2)
+        .expect("Terminated 購読は overlap 検査の対象外");
+    let (_, upd2_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid2, upd2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid2, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok2_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid2, ok2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .track_subscription(rid2)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        ns(&[b"a"]),
+        "Terminated 購読を無視して新 prefix が適用されること"
+    );
 }

@@ -313,6 +313,16 @@ pub struct Session {
     pub(super) namespaces: NamespaceState,
     /// SUBSCRIBE_TRACKS の管理 (draft §9.18 (SUBSCRIBE_TRACKS))
     pub(super) track_subscriptions: HashMap<u64, TrackSubscription>,
+    /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した
+    /// TRACK_NAMESPACE_PREFIX の確定待ちキュー (request_id → 送信順)
+    ///
+    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "If the update is accepted,
+    /// NAMESPACE and NAMESPACE_DONE messages following the REQUEST_OK will contain Track
+    /// Namespace suffixes relative to the updated prefix." REQUEST_OK を受信するまで
+    /// ローカル prefix を更新せず、OK 受信時にキューの先頭から適用する。`None` は
+    /// prefix 変更を含まない更新であり、REQUEST_OK との対応を送信順に保つために
+    /// 1 件ずつ積む。REQUEST_ERROR 受信・bidi stream 終端・forget で破棄する。
+    pub(super) pending_prefix_updates: HashMap<u64, VecDeque<Option<TrackNamespace>>>,
     /// TRACK_STATUS の管理
     pub(super) track_status_requests: HashMap<u64, TrackStatusEntry>,
     pub(super) data_streams: DataStreamState,
@@ -490,6 +500,7 @@ impl Session {
                 subscriptions: HashMap::new(),
             },
             track_subscriptions: HashMap::new(),
+            pending_prefix_updates: HashMap::new(),
             track_status_requests: HashMap::new(),
             data_streams: DataStreamState {
                 incoming: HashMap::new(),
@@ -853,11 +864,25 @@ impl Session {
                 if self.handle_peer_publish(publish)? {
                     // SUBSCRIBE_TRACKS 経由の PUBLISH の場合、対応する subscriber role の
                     // TrackSubscription を track_namespace の片方向 prefix matching で検索して
-                    // active_track_aliases を更新する
+                    // active_track_aliases を更新する。REQUEST_UPDATE で送信した prefix は
+                    // REQUEST_OK 受信までローカルへ反映せず、PUBLISH は REQUEST_UPDATE とは
+                    // 別 bidi stream で順序保証がない。そのため確定待ちの間は旧 prefix と
+                    // 確定待ち prefix の両方でマッチさせる
+                    // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
                     for (_, ts) in self.track_subscriptions.iter_mut() {
-                        if ts.my_role == TrackRole::Subscriber
-                            && is_prefix_of(&ts.prefix, &track_namespace)
-                        {
+                        if ts.my_role != TrackRole::Subscriber {
+                            continue;
+                        }
+                        let pending_matches = self
+                            .pending_prefix_updates
+                            .get(&ts.request_id)
+                            .is_some_and(|queue| {
+                                queue
+                                    .iter()
+                                    .flatten()
+                                    .any(|prefix| is_prefix_of(prefix, &track_namespace))
+                            });
+                        if pending_matches || is_prefix_of(&ts.prefix, &track_namespace) {
                             ts.active_track_aliases.insert(track_alias);
                         }
                     }
