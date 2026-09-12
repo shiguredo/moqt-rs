@@ -1,7 +1,7 @@
 # 送信側 namespace / track subscription の REQUEST_UPDATE prefix を反映する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-12
 - Branch: feature/fix-send-side-request-update-local-state
 - Polished: 2026-09-10
 
@@ -42,3 +42,21 @@ REQUEST_UPDATE で TRACK_NAMESPACE_PREFIX を変更したとき、送信側の�
 - SUBSCRIBE_TRACKS で確定待ちの間に新 prefix の PUBLISH が届いても `active_track_aliases` に登録されること
 - REQUEST_ERROR / bidi 終端で確定待ちが破棄され、prefix が旧のままであること
 - 送信側 prefix 更新の回帰テストが `tests/test_session/namespace/` に追加され、`cargo test --workspace` が通ること
+
+## 解決方法
+
+送信側 REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX を、送信時にはローカルへ反映せず「確定待ち」キューへ積み、REQUEST_OK 受信時に適用するようにした。
+
+- `src/session/core.rs`: Session に `pending_prefix_updates: HashMap<u64, VecDeque<Option<TrackNamespace>>>` を追加した。`None` は prefix 変更なしの更新で、REQUEST_OK と確定待ちの対応を送信順に保つ。SUBSCRIBE_TRACKS の PUBLISH 紐付けは旧 prefix と確定待ち prefix の両方でマッチさせる。
+- `src/session/namespace.rs`: 確定待ちを踏まえた実効 prefix を返す `effective_prefix` と push / pop のヘルパを追加した。
+- `src/session/subscription/send.rs`: `send_update_for_namespace_subscription` / `send_update_for_track_subscription` に検証済み parameters を渡すようにした。
+- `src/session/namespace/subscribe_namespace.rs` / `track_subscription.rs`: 送信時に作成時と同じ条件で overlap を
+  送前検査し (確定待ちを含む実効 prefix で比較、Terminated は対象外)、確定待ちを登録する。REQUEST_OK の
+  Established 分岐で先頭を適用し、対応する確定待ちが無い REQUEST_OK は PROTOCOL_VIOLATION とする。
+  REQUEST_ERROR / bidi 終端 / forget で確定待ちを破棄する。作成時の overlap 検査も実効 prefix 比較に変更した。
+- `src/session/types.rs`: `prefix` の doc を役割別 (subscriber は REQUEST_OK で確定した適用済み、publisher は受理した REQUEST_UPDATE を反映) に更新した。
+- `tests/test_session/namespace/subscribe_namespace.rs` / `track_subscription.rs` に送信側 prefix 更新の回帰テストを追加した。
+  送信直後は旧 prefix / REQUEST_OK 後は新 prefix、in-flight NAMESPACE / NAMESPACE_DONE、確定待ち中の新旧 prefix PUBLISH の紐付け、
+  連続更新と REQUEST_OK の対応、ローカル overlap 拒否と確定待ち非残留、REQUEST_ERROR / bidi 終端、
+  余剰 REQUEST_OK、Terminated 購読の除外を検証する。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
