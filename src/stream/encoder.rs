@@ -20,6 +20,9 @@ pub struct FetchObjectInput {
     /// 絶対 Group ID
     pub group_id: u64,
     /// 絶対 Subgroup ID
+    ///
+    /// `is_datagram_origin` が true のときは wire に載らず 0 として扱われる
+    /// (draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Datagram 起源の Object は Subgroup ID を持たない)。
     pub subgroup_id: u64,
     /// 絶対 Object ID
     pub object_id: u64,
@@ -34,6 +37,9 @@ pub struct FetchObjectInput {
 }
 
 /// エンコード時の前回のオブジェクト情報
+///
+/// `subgroup_id` はデコーダが解決する値と揃える。Datagram 起源の Object は
+/// Subgroup ID を運ばずデコーダでも 0 に解決されるため、ここでも 0 を保持する。
 #[derive(Debug, Clone, Copy)]
 struct PriorEncodeState {
     group_id: u64,
@@ -124,12 +130,25 @@ impl FetchStreamEncoder {
         properties_data: Option<&[u8]>,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Datagram 起源 (0x40) の Object は
+        // Subgroup ID を運ばず、デコーダも下位 2 bit を無視して 0 に解決する。
+        // エンコード側も入力値ではなく 0 を正として扱い、prior 状態にも 0 を保存する。
+        let effective_subgroup_id = if input.is_datagram_origin {
+            0
+        } else {
+            input.subgroup_id
+        };
         let (group_id, subgroup_id, object_id, publisher_priority) = match self.prior_state {
             None => {
-                // 最初のオブジェクト: 全フィールド絶対値で明示必須
+                // 最初のオブジェクト: Group ID / Object ID / Publisher Priority は絶対値で明示必須
+                // (Datagram 起源の Subgroup ID は wire に載らないため Zero を選ぶ)
                 (
                     Some(input.group_id),
-                    FetchSubgroupIdMode::Explicit(input.subgroup_id),
+                    if input.is_datagram_origin {
+                        FetchSubgroupIdMode::Zero
+                    } else {
+                        FetchSubgroupIdMode::Explicit(effective_subgroup_id)
+                    },
                     Some(input.object_id),
                     Some(input.publisher_priority),
                 )
@@ -158,7 +177,7 @@ impl FetchStreamEncoder {
                     matches!(self.prior_context, FetchPriorContext::HasPriorObject);
 
                 let group_changed = input.group_id != prior.group_id;
-                let subgroup_changed = group_changed || input.subgroup_id != prior.subgroup_id;
+                let subgroup_changed = group_changed || effective_subgroup_id != prior.subgroup_id;
 
                 // group_id: 変更時にデルタ値を計算 (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))
                 let group_id = if group_changed {
@@ -192,10 +211,19 @@ impl FetchStreamEncoder {
 
                 let subgroup_id = if input.is_datagram_origin {
                     FetchSubgroupIdMode::Zero
+                } else if prior.is_datagram_origin {
+                    // draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Datagram 起源の prior Object には
+                    // Subgroup ID が無いため、Table 8 の "prior Object's Subgroup ID" を参照できない。
+                    // prior 参照を避けて送る (0 は Zero、それ以外は Explicit)
+                    if effective_subgroup_id == 0 {
+                        FetchSubgroupIdMode::Zero
+                    } else {
+                        FetchSubgroupIdMode::Explicit(effective_subgroup_id)
+                    }
                 } else if !subgroup_changed && can_use_subgroup_prior {
                     FetchSubgroupIdMode::PreviousSame
                 } else {
-                    FetchSubgroupIdMode::Explicit(input.subgroup_id)
+                    FetchSubgroupIdMode::Explicit(effective_subgroup_id)
                 };
 
                 // object_id: Group 変更時は絶対値、同 Group ならデルタ値 (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))
@@ -247,7 +275,9 @@ impl FetchStreamEncoder {
         self.prior_context = FetchPriorContext::HasPriorObject;
         self.prior_state = Some(PriorEncodeState {
             group_id: input.group_id,
-            subgroup_id: input.subgroup_id,
+            // Datagram 起源は wire 上で Subgroup ID を運ばずデコーダも 0 に解決するため、
+            // 実装状態としてもデコーダの解決値 (0) を保持して両者の意味を揃える
+            subgroup_id: effective_subgroup_id,
             object_id: input.object_id,
             publisher_priority: input.publisher_priority,
             is_datagram_origin: input.is_datagram_origin,
@@ -320,6 +350,11 @@ impl FetchStreamEncoder {
     }
 
     /// End of Range エントリ後に prior_state を更新する
+    ///
+    /// draft-ietf-moq-transport-21 §11.4.1.2 (End of Range): prior Group ID / Object ID は
+    /// End of Range の値に更新するが、Prior Subgroup ID / Priority は EOR 前の最後の
+    /// actual Object の値を維持する。`is_datagram_origin` も同様に維持し、EOR 後の
+    /// Object が Datagram 起源の prior を参照しないようにする。
     fn update_prior_for_end_of_range(&mut self, group_id: u64, object_id: u64) {
         match &mut self.prior_state {
             Some(prior) => {

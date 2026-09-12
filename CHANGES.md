@@ -15,6 +15,8 @@
   - @voluntas
 - [CHANGE] `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、受信 subgroup Object にも Object 単位フィルタを再適用する。フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` として破棄する
   - @voluntas
+- [FIX] FetchStreamEncoder が先頭の Datagram 起源 Object をエンコードできるようにし、Datagram 起源 Object の Subgroup ID をデコード結果 (0) と一致させる
+  - @voluntas
 - [FIX] DYNAMIC_GROUPS=1 でない Track への REQUEST_UPDATE に NEW_GROUP_REQUEST を含めると送信前に拒否し、同一 REQUEST_UPDATE の他パラメータをローカルに適用しない
   - @voluntas
 - [FIX] SUBSCRIBE_TRACKS の bidi stream 終端後の PUBLISH の bidi stream 終端でセッションを閉じないようにし、RequestTerminated の kind を実際の要求種別に合わせる

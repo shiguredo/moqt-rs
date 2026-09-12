@@ -4,6 +4,8 @@
 //! 内部状態で判断する (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。任意の昇順オブジェクト列を
 //! エンコードしてデコードし直したとき、絶対値の group_id / subgroup_id / object_id /
 //! publisher_priority / payload_length が保存されることを検証する。
+//! Datagram 起源 (0x40) の Object は Subgroup ID を運ばず 0 に解決されるため、
+//! subgroup_id の期待値は通常起源と Datagram 起源で分ける。
 
 use pbt::common::{sample_varint, test_runner};
 use shiguredo_moqt::stream::decoder::DecodedFetchEntry;
@@ -11,13 +13,25 @@ use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
 
 use crate::decoder::drive_fetch;
 
+/// Subgroup ID のサンプル
+///
+/// 0 は Table 8 の 0x00 (Subgroup ID is zero) に対応する値であり、Datagram 起源の
+/// prior Object の直後に Zero モードを選ぶ分岐を踏むため 1/2 の確率で混ぜる。
+fn sample_subgroup_id(ctx: &mut noprop::TestCaseContext) -> u64 {
+    if noprop::sample_bool(ctx) {
+        0
+    } else {
+        noprop::sample_u64_in(ctx, 0..=1_000_000)
+    }
+}
+
 /// エンコーダの制約 (同一 Group 内の Object ID は狭義増加、Group は昇順、同一 Subgroup 内の
 /// Priority 不変) を満たす入力列と、各オブジェクトのペイロードを生成する
 fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, Vec<u8>)> {
     let count = noprop::sample_usize_in(ctx, 1..=4);
     // 加算で overflow しないよう小さい初期値から始める
     let mut group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
-    let mut subgroup_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+    let mut subgroup_id = sample_subgroup_id(ctx);
     let mut object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
     let mut publisher_priority = noprop::sample_u8(ctx);
     let mut out = Vec::new();
@@ -26,7 +40,7 @@ fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, V
             if noprop::sample_bool(ctx) {
                 // 新しい Group (昇順): 各フィールドを再抽選する
                 group_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
-                subgroup_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+                subgroup_id = sample_subgroup_id(ctx);
                 object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
                 publisher_priority = noprop::sample_u8(ctx);
             } else {
@@ -36,6 +50,8 @@ fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, V
         }
         let payload_length = noprop::sample_u64_in(ctx, 0..=16);
         let payload = noprop::sample_bytes_vec(ctx, payload_length as usize);
+        // Datagram 起源 (0x40) を混在させる。Datagram 起源では Subgroup ID は wire に載らない
+        let is_datagram_origin = noprop::sample_bool(ctx);
         out.push((
             FetchObjectInput {
                 group_id,
@@ -43,7 +59,7 @@ fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, V
                 object_id,
                 publisher_priority,
                 has_properties: false,
-                is_datagram_origin: false,
+                is_datagram_origin,
                 payload_length,
             },
             payload,
@@ -77,7 +93,14 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
                 panic!("通常の Object エントリが返ること: {entry:?}");
             };
             assert_eq!(object.group_id, input.group_id);
-            assert_eq!(object.subgroup_id, input.subgroup_id);
+            // Datagram 起源は Subgroup ID を運ばず 0 に解決される (draft §11.4.1.1)
+            let expected_subgroup_id = if input.is_datagram_origin {
+                0
+            } else {
+                input.subgroup_id
+            };
+            assert_eq!(object.subgroup_id, expected_subgroup_id);
+            assert_eq!(object.is_datagram_origin, input.is_datagram_origin);
             assert_eq!(object.object_id, input.object_id);
             assert_eq!(object.publisher_priority, input.publisher_priority);
             assert_eq!(object.payload_length, input.payload_length);

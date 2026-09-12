@@ -72,6 +72,156 @@ fn test_single_object() {
     }
 }
 
+/// 先頭 Object が Datagram 起源でもエンコードでき、Subgroup ID は 0 に解決される
+///
+/// draft-ietf-moq-transport-21 §11.4.1.1 (Flags): bit 0x40 が立つ Datagram 起源では
+/// 下位 2 bit を無視するため、Subgroup ID は wire に載らず 0 に解決される。
+#[test]
+fn test_first_object_datagram_origin() {
+    let entries = encode_and_decode(
+        1,
+        &[(
+            FetchObjectInput {
+                group_id: 10,
+                subgroup_id: 7,
+                object_id: 0,
+                publisher_priority: 128,
+                has_properties: false,
+                is_datagram_origin: true,
+                payload_length: 3,
+            },
+            b"abc",
+        )],
+    );
+
+    assert_eq!(entries.len(), 1);
+    match &entries[0] {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.group_id, 10);
+            assert_eq!(
+                obj.subgroup_id, 0,
+                "Datagram 起源の Subgroup ID は 0 に解決されること"
+            );
+            assert_eq!(obj.object_id, 0);
+            assert_eq!(obj.publisher_priority, 128);
+            assert!(obj.is_datagram_origin);
+        }
+        _ => panic!("Object が期待された"),
+    }
+}
+
+/// Datagram 起源 Object の後に同一 subgroup_id の通常起源 Object が続いても往復が壊れない
+///
+/// Datagram 起源 Object の Subgroup ID は wire に載らずデコーダでは 0 に解決されるため、
+/// 後続の通常起源 Object が同じ subgroup_id を宣言しても解決値が混ざらないことを確認する。
+#[test]
+fn test_datagram_origin_then_same_subgroup_id() {
+    let entries = encode_and_decode(
+        1,
+        &[
+            (
+                FetchObjectInput {
+                    group_id: 10,
+                    subgroup_id: 7,
+                    object_id: 0,
+                    publisher_priority: 128,
+                    has_properties: false,
+                    is_datagram_origin: true,
+                    payload_length: 1,
+                },
+                b"a",
+            ),
+            (
+                FetchObjectInput {
+                    group_id: 10,
+                    subgroup_id: 7,
+                    object_id: 1,
+                    publisher_priority: 128,
+                    has_properties: false,
+                    is_datagram_origin: false,
+                    payload_length: 1,
+                },
+                b"b",
+            ),
+        ],
+    );
+
+    assert_eq!(entries.len(), 2);
+    let DecodedFetchEntry::Object(first) = &entries[0] else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(first.subgroup_id, 0);
+    assert!(first.is_datagram_origin);
+    let DecodedFetchEntry::Object(second) = &entries[1] else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        second.subgroup_id, 7,
+        "通常起源の後続 Object は明示 subgroup_id 7 に解決されること"
+    );
+    assert!(!second.is_datagram_origin);
+}
+
+/// Datagram 起源の直後に subgroup_id = 0 の通常起源 Object が続く場合は
+/// PreviousSame (prior 参照) ではなく Subgroup ID zero (0x00) を選ぶ
+///
+/// draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Datagram 起源の Object には Subgroup ID が
+/// 無いため、Table 8 の "prior Object's Subgroup ID" を参照させず、Zero または Explicit を選ぶ。
+/// ラウンドトリップでは直前の Datagram 起源 Object の解決済み Subgroup ID (0) に
+/// Zero / Explicit(0) / PreviousSame のいずれも一致してしまいモードを区別できないため、
+/// 2 件目の flags バイトの検証が回帰検出の主眼となる。
+#[test]
+fn test_datagram_origin_then_normal_subgroup_zero_uses_zero_mode() {
+    let mut encoder = FetchStreamEncoder::new(1);
+    let mut stream = encoder.encode_header();
+    // 1 件目: Datagram 起源 (subgroup_id は wire に載らない)
+    encoder
+        .encode_object(
+            &FetchObjectInput {
+                group_id: 10,
+                subgroup_id: 7,
+                object_id: 0,
+                publisher_priority: 128,
+                has_properties: false,
+                is_datagram_origin: true,
+                payload_length: 1,
+            },
+            None,
+            &mut stream,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"a");
+    // 2 件目: 通常起源で subgroup_id = 0 (prior 参照を避ける)
+    encoder
+        .encode_object(
+            &FetchObjectInput {
+                group_id: 10,
+                subgroup_id: 0,
+                object_id: 1,
+                publisher_priority: 128,
+                has_properties: false,
+                is_datagram_origin: false,
+                payload_length: 1,
+            },
+            None,
+            &mut stream,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"b");
+
+    assert_eq!(
+        stream,
+        vec![
+            0x05, 0x01, // FetchHeader: type = 0x05, request_id = 1
+            0x5C, 0x0A, 0x00, 0x80, 0x01, // 1 件目: Datagram + Group + Object + Priority
+            0x61, // payload "a"
+            0x00, 0x01, // 2 件目: flags 0x00 (Subgroup ID zero) + payload_length 1
+            0x62, // payload "b"
+        ],
+        "Datagram 起源の直後は PreviousSame ではなく Zero を選ぶこと"
+    );
+}
+
 #[test]
 fn test_delta_compression_same_group() {
     // 同一 group, 同一 subgroup, 連続 object_id → デルタ圧縮される
