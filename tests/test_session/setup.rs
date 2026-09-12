@@ -411,7 +411,19 @@ fn non_setup_control_message_is_violation_in_phase_one() {
 
 // ─── Phase 2: Request ID 管理 ─────────────────────────────
 
-/// 両端ハンドシェイク後、自側 / 相手側の Request ID が parity ごとに正しく動作する
+/// 指定 Request ID の SUBSCRIBE を組み立てる (parity / 重複検証のテスト用)
+fn subscribe_message(request_id: u64) -> ControlMessage {
+    use shiguredo_moqt::message::Subscribe;
+    ControlMessage::Subscribe(Subscribe {
+        request_id,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        parameters: MessageParameters::new(),
+    })
+}
+
+/// 両端ハンドシェイク後、`recv_request` が parity に応じて peer の Request ID を受理し、
+/// parity 違反は INVALID_REQUEST_ID で閉じる
 #[test]
 fn client_server_request_id_cross_validation() {
     let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
@@ -443,34 +455,47 @@ fn client_server_request_id_cross_validation() {
     assert_eq!((c0, c1), (0, 2));
     assert_eq!((s0, s1), (1, 3));
 
-    // Client が Server の Request ID (奇数) を validate
-    let empty = MessageParameters::new();
+    // Client が Server の Request ID (奇数) を recv_request で受理する
     client
-        .validate_peer_request(s0, &empty)
-        .expect("テストフィクスチャの前提条件を満たす");
+        .recv_request(subscribe_message(s0))
+        .expect("parity の正しい peer request は受理されること");
     client
-        .validate_peer_request(s1, &empty)
-        .expect("テストフィクスチャの前提条件を満たす");
+        .recv_request(subscribe_message(s1))
+        .expect("parity の正しい peer request は受理されること");
 
-    // Server が Client の Request ID (偶数) を validate
+    // Server が Client の Request ID (偶数) を recv_request で受理する
     server
-        .validate_peer_request(c0, &empty)
-        .expect("テストフィクスチャの前提条件を満たす");
+        .recv_request(subscribe_message(c0))
+        .expect("parity の正しい peer request は受理されること");
     server
-        .validate_peer_request(c1, &empty)
-        .expect("テストフィクスチャの前提条件を満たす");
+        .recv_request(subscribe_message(c1))
+        .expect("parity の正しい peer request は受理されること");
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(server.state(), SessionState::Established);
+
+    // Client が Server の parity に反する Request ID (偶数) を受けると INVALID_REQUEST_ID
+    // (6 は tracker 未受信の ID であり、parity 検証がなければ受理されてしまうため、
+    //  検証の欠落を単独で検出できる)
+    let err = client.recv_request(subscribe_message(6)).unwrap_err();
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_INVALID_REQUEST_ID)
+    );
+    assert_eq!(client.state(), SessionState::Closing);
 }
 
 /// 重複 Request ID 受信は INVALID_REQUEST_ID で閉じる
 #[test]
 fn duplicate_peer_request_id_closes_session() {
     let mut client = establish_client();
-    let empty = MessageParameters::new();
     client
-        .validate_peer_request(1, &empty)
+        .recv_request(subscribe_message(1))
         .expect("テストフィクスチャの前提条件を満たす");
-    let err = client.validate_peer_request(1, &empty).unwrap_err();
-    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    let err = client.recv_request(subscribe_message(1)).unwrap_err();
+    assert_eq!(
+        err.as_session_error().map(|e| e.code),
+        Some(SESSION_INVALID_REQUEST_ID)
+    );
     assert_eq!(client.state(), SessionState::Closing);
 }
 

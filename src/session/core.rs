@@ -5,7 +5,7 @@
 //! - ライフサイクル (作成 / `poll_event` / `close` / `fail`)
 //! - SETUP ハンドシェイク (draft §9.1 (SETUP))
 //! - 制御ストリーム受信 dispatcher (`recv_control` / `recv_request` / `recv_stream_message`)
-//! - Request ID API (`next_local_request_id` / `validate_peer_request`)
+//! - Request ID API (`next_local_request_id`)
 //! - REQUEST_OK / REQUEST_ERROR の送受信 (共通 dispatcher)
 //!
 //! data stream / datagram の送受信 state (`send_subgroup_header` / `send_subgroup_object` /
@@ -780,46 +780,9 @@ impl Session {
         Ok(self.request_ids.local_generator.next_id())
     }
 
-    /// 受信した Request ID を検証する (draft §6.4.2.1 (Request ID))
-    ///
-    /// 検証失敗時は `SessionError` を返すと同時に [`SessionEvent::CloseSession`] を発行し、
-    /// 状態を [`SessionState::Closing`] に遷移させる。
-    ///
-    /// 検証対象:
-    /// - parity (送信者 role と整合しているか)
-    /// - 重複 Request ID
-    /// - GOAWAY 送信済み時の到着後拒否 (control GOAWAY を送信済みかつ
-    ///   その後に到着した新規 request を REQUEST_ERROR(GOING_AWAY) で拒否し `Ok(false)` を返す)。
-    ///   拒否直前に `parameters` の AUTHORIZATION_TOKEN REGISTER を `peer_token_cache` に
-    ///   反映する (draft §9.20.3 の MUST。詳細は `accept_peer_request` の doc 参照)
-    ///
-    /// `Established` 外で呼ばれた場合は `PROTOCOL_VIOLATION` でクローズ (Phase 3 以降で
-    /// `recv_control` から呼ばれる前提なので、通常は到達しない防御的チェック)。
-    ///
-    /// 戻り値:
-    /// - `Ok(true)`: 受理された
-    /// - `Ok(false)`: GOAWAY 送信済みのため REQUEST_ERROR(GOING_AWAY) を送信済み (セッションは継続)
-    /// - `Err(SessionError)`: parity/重複、または REGISTER 適用時の session error
-    ///   (セッションは Closing に遷移)
-    pub fn validate_peer_request(
-        &mut self,
-        request_id: u64,
-        parameters: &MessageParameters,
-    ) -> Result<bool, SessionError> {
-        if self.state != SessionState::Established {
-            let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "peer request received before session established",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
-        self.accept_peer_request(request_id, parameters)
-    }
-
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
-    /// - `peer_request_ids.accept(request_id)` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
+    /// - `request_ids.peer_tracker.accept(request_id)` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
     /// - control GOAWAY 送信済み (`local_sent`) なら REQUEST_ERROR(GOING_AWAY) を送信し
     ///   `Ok(false)` を返す (draft §9.2 (GOAWAY))
     ///
@@ -884,6 +847,12 @@ impl Session {
     /// draft-ietf-moq-transport-21 §6.3 (Session initialization): request stream の開始メッセージ
     /// として許されるのは SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS の 7 種類のいずれか。
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
+    /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
+    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う)。
+    /// また draft 由来ではない実装保護として、未到達 Request ID の保持上限
+    /// (`MAX_OUT_OF_ORDER_REQUEST_IDS`) 超過でも同じ `INVALID_REQUEST_ID` で閉じる。
     ///
     /// draft §6.3 (Session initialization): SETUP 完了前に request stream が到着することは
     /// 許容される。本 API は session state を変えずに

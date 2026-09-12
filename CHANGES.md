@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] 公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証は `recv_request` に一本化する
+  - @voluntas
 - [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moqt-publisher の datagram_writer が Properties Length を二重に書かなくなる
   - @voluntas
 - [CHANGE] `send_subgroup_object` / `send_object_datagram` の戻り値を `SendRequestError` に変更し、`send_publish` のフィルタ不通過も `SendRequestError::LocalFilterMismatch` にする。wire コードを取る公開 API はローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する
