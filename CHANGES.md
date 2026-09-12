@@ -17,6 +17,8 @@
   - @voluntas
 - [CHANGE] `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、受信 subgroup Object にも Object 単位フィルタを再適用する。フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` として破棄する
   - @voluntas
+- [FIX] FETCH の INVALID_RANGE 判定で同一 Track の全 publisher 役 subscription の観測 Largest Object の最大値を使う
+  - @voluntas
 - [FIX] REQUEST_UPDATE の Range Filter 拒否で自側 publisher の subscription を PUBLISH_DONE(UPDATE_FAILED) で終端し、Pending / Terminated への REQUEST_UPDATE は PROTOCOL_VIOLATION で閉じる
   - @voluntas
 - [FIX] FetchStreamEncoder が先頭の Datagram 起源 Object をエンコードできるようにし、Datagram 起源 Object の Subgroup ID をデコード結果 (0) と一致させる

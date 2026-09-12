@@ -611,19 +611,11 @@ impl Session {
         // トラックへの FETCH は INVALID_RANGE。対象 subscription があり、Largest が
         // 一度も観測されていない場合が該当する。subscription 自体が無いときは受理する。
         let key = (track_ns.clone(), track_name.clone(), TrackRole::Publisher);
-        let observed_largest = self
-            .aliases
-            .subscriptions_by_track
-            .get(&key)
-            .and_then(|ids| ids.first())
-            .and_then(|&sub_request_id| self.subscriptions.get(&sub_request_id))
-            .and_then(|sub| {
-                if sub.largest_location.is_none() && sub.largest_received_location.is_none() {
-                    None
-                } else {
-                    super::subscription::delivery::effective_largest_object(sub)
-                }
-            });
+        // Largest Object は Track 単位 (§3.1.3) なので、同一 Track に複数の
+        // publisher 役 subscription がある場合は全候補の `effective_largest_object` の
+        // 最大を使う。先頭 1 件だけを見ると、先頭が未観測・他が観測済みの場合に
+        // INVALID_RANGE を誤判定する。
+        let observed_largest = self.publisher_track_largest(&track_ns, &track_name);
         let has_track_subscription = self
             .aliases
             .subscriptions_by_track

@@ -1387,3 +1387,268 @@ fn fetch_with_zero_length_location_filter_accepted_as_unfiltered() {
         shiguredo_moqt::session::types::FetchState::Pending
     );
 }
+
+// ─── 複数 publisher 役 subscription の Largest Object 集約 (§9.11 / §3.1.3) ─────
+
+/// client から同一 Track に 2 本の SUBSCRIBE を張り、server (publisher) が
+/// alias 1 / 2 で SUBSCRIBE_OK を返した状態を作る
+///
+/// 返り値は (sub1_rid, sub2_rid)。sub1 が先に登録されるため
+/// `subscriptions_by_track` の先頭になる。
+fn establish_two_publisher_subscriptions(client: &mut Session, server: &mut Session) -> (u64, u64) {
+    let sub1_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub1_msg) = take_send_request(client);
+    server
+        .recv_request(sub1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            sub1_rid,
+            1,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok1_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(sub1_rid, ok1_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let sub2_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub2_msg) = take_send_request(client);
+    server
+        .recv_request(sub2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            sub2_rid,
+            2,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok2_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(sub2_rid, ok2_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (sub1_rid, sub2_rid)
+}
+
+/// publisher (server) 側で subgroup Object を 1 件公開し、観測 Largest を確定させる
+fn publish_subgroup_object(
+    server: &mut Session,
+    request_id: u64,
+    track_alias: u64,
+    stream_id: DataStreamId,
+    group_id: u64,
+    object_id: u64,
+) {
+    server
+        .send_subgroup_header(
+            stream_id,
+            request_id,
+            &SubgroupHeader {
+                track_alias,
+                group_id,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(stream_id, object_id, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+}
+
+/// FETCH が INVALID_RANGE で拒否され、fetch エントリが作られないことを検証する
+fn assert_fetch_rejected_with_invalid_range(
+    client: &mut Session,
+    server: &mut Session,
+    start: Location,
+    end: Location,
+) {
+    use shiguredo_moqt::error::REQUEST_INVALID_RANGE;
+    let fetch_rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(start, end),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(server.fetch(fetch_rid).is_none());
+    let (_, err_msg) = take_send_on_stream(server);
+    match err_msg {
+        ControlMessage::RequestError(e) => assert_eq!(e.error_code, REQUEST_INVALID_RANGE),
+        _ => panic!("INVALID_RANGE の RequestError が期待される"),
+    }
+}
+
+/// FETCH が受理され Pending になることを検証する
+fn assert_fetch_accepted(
+    client: &mut Session,
+    server: &mut Session,
+    start: Location,
+    end: Location,
+) {
+    use shiguredo_moqt::session::types::FetchState;
+    let fetch_rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(start, end),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server.fetch(fetch_rid).expect("受理されること").state,
+        FetchState::Pending
+    );
+}
+
+/// 先頭の publisher 役 subscription が未観測でも、他の subscription が観測済みなら
+/// FETCH が INVALID_RANGE にならない (Largest は Track 単位)
+///
+/// draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.1.3: Largest Object は Track 単位の値。
+#[test]
+fn fetch_accepts_start_within_largest_of_other_publisher_subscription() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server) = establish_pair();
+    let (sub1_rid, sub2_rid) = establish_two_publisher_subscriptions(&mut client, &mut server);
+
+    // 先頭 (sub1) が未観測で、もう一方 (sub2) も未観測のままでは INVALID_RANGE
+    assert_fetch_rejected_with_invalid_range(
+        &mut client,
+        &mut server,
+        Location {
+            group_id: 10,
+            object_id: 0,
+        },
+        Location {
+            group_id: 10,
+            object_id: 1,
+        },
+    );
+
+    // 先頭ではない sub2 で {10, 5} を公開し、sub1 は未観測のままにする
+    publish_subgroup_object(&mut server, sub2_rid, 2, DataStreamId(3), 10, 5);
+    assert!(
+        server
+            .subscription(sub1_rid)
+            .expect("subscription が存在する")
+            .largest_received_location
+            .is_none(),
+        "先頭の subscription は未観測のまま"
+    );
+    assert_eq!(
+        server
+            .subscription(sub2_rid)
+            .expect("subscription が存在する")
+            .largest_received_location,
+        Some(Location {
+            group_id: 10,
+            object_id: 5,
+        })
+    );
+
+    // 先頭 (sub1) が未観測でも、他 (sub2) が観測済みなので受理される
+    assert_fetch_accepted(
+        &mut client,
+        &mut server,
+        Location {
+            group_id: 10,
+            object_id: 0,
+        },
+        Location {
+            group_id: 10,
+            object_id: 1,
+        },
+    );
+}
+
+/// 最大の Largest を持つ subscription が先頭でも、他方の Largest を上回る start が
+/// Track 最大以内なら受理される
+///
+/// draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.1.3: Largest Object は Track 単位の値。
+/// 先頭が未観測で他方が観測済みのケースは
+/// `fetch_accepts_start_within_largest_of_other_publisher_subscription` が担う。
+#[test]
+fn fetch_uses_max_largest_across_publisher_subscriptions() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server) = establish_pair();
+    let (sub1_rid, sub2_rid) = establish_two_publisher_subscriptions(&mut client, &mut server);
+    // 最大の Largest を先頭 subscription (sub1) に置き、最後の 1 件だけを見る実装を検出する
+    publish_subgroup_object(&mut server, sub1_rid, 1, DataStreamId(3), 10, 5);
+    publish_subgroup_object(&mut server, sub2_rid, 2, DataStreamId(4), 5, 0);
+
+    // start {7, 0} は sub2 の Largest {5, 0} を上回るが、Track の最大 {10, 5} 以内なので受理
+    assert_fetch_accepted(
+        &mut client,
+        &mut server,
+        Location {
+            group_id: 7,
+            object_id: 0,
+        },
+        Location {
+            group_id: 7,
+            object_id: 1,
+        },
+    );
+
+    // 最大を上回る start {20, 0} は従来どおり INVALID_RANGE
+    assert_fetch_rejected_with_invalid_range(
+        &mut client,
+        &mut server,
+        Location {
+            group_id: 20,
+            object_id: 0,
+        },
+        Location {
+            group_id: 20,
+            object_id: 1,
+        },
+    );
+}
+
+/// 先に観測済みになった subscription より、後から観測した subscription の Largest が
+/// 大きい場合でも最大値が使われる
+///
+/// 「最初に観測済みの 1 件だけを使う」実装 (`find_map` 相当) を検出する。
+/// draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.1.3: Largest Object は Track 単位の値。
+#[test]
+fn fetch_uses_larger_largest_observed_after_smaller_one() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server) = establish_pair();
+    let (sub1_rid, sub2_rid) = establish_two_publisher_subscriptions(&mut client, &mut server);
+    // 先頭 (sub1) で {5, 0} を、後から sub2 で {10, 5} を公開する
+    publish_subgroup_object(&mut server, sub1_rid, 1, DataStreamId(3), 5, 0);
+    publish_subgroup_object(&mut server, sub2_rid, 2, DataStreamId(4), 10, 5);
+
+    // start {7, 0} は最初に観測済みになった sub1 の Largest {5, 0} を上回るが、
+    // Track の最大 {10, 5} 以内なので受理される
+    assert_fetch_accepted(
+        &mut client,
+        &mut server,
+        Location {
+            group_id: 7,
+            object_id: 0,
+        },
+        Location {
+            group_id: 7,
+            object_id: 1,
+        },
+    );
+}

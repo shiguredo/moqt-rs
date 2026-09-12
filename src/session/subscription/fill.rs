@@ -122,6 +122,8 @@ impl Session {
     /// 返す (Terminated でも保持中なら寄与する)。用途:
     /// - draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill range は
     ///   Largest Object を超えない
+    /// - draft-ietf-moq-transport-21 §9.11 (FETCH): 要求 Start が Largest Object を
+    ///   上回る場合の INVALID_RANGE 判定
     /// - draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter):
     ///   TRACK_STATUS_OK に載せる largest
     pub(crate) fn publisher_track_largest(
@@ -139,6 +141,8 @@ impl Session {
             .get(&key)?
             .iter()
             .filter_map(|id| self.subscriptions.get(id))
+            // 索引キーが publisher 役を含むため現状では恒真だが、索引と本体の
+            // 不整合があった場合に subscriber 役の値を混ぜないための防御
             .filter(|sub| sub.my_role == TrackRole::Publisher)
             .filter_map(effective_largest_object)
             .max()

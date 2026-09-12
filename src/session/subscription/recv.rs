@@ -27,8 +27,8 @@ use super::super::types::{
     TerminationReason, TrackRole,
 };
 use super::delivery::{
-    compute_effective_delivery_timeout_ms, effective_largest_object, record_publish_done,
-    set_subscription_expires, set_subscription_publisher_object_delivery_timeout,
+    compute_effective_delivery_timeout_ms, record_publish_done, set_subscription_expires,
+    set_subscription_publisher_object_delivery_timeout,
     set_subscription_publisher_subgroup_delivery_timeout,
 };
 use super::validation::{
@@ -107,11 +107,6 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
             return Ok(());
         }
-        let key = (
-            subscribe.track_namespace.clone(),
-            subscribe.track_name.clone(),
-            TrackRole::Publisher,
-        );
         // draft-ietf-moq-transport-21 §3.1.1: 同一 Track への複数同時 subscription が許可されたため、
         // DUPLICATE_SUBSCRIPTION による拒否は行わない。
         // draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter): FORWARD パラメータの
@@ -172,16 +167,8 @@ impl Session {
         // 仕様の Largest Object は publisher がメッセージを処理する視点で定義されるため、
         // 未配信 track では `None` 基準 (先頭から) になる。
         // この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-        let track_largest = self
-            .aliases
-            .subscriptions_by_track
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.subscriptions.get(id))
-            .filter(|sub| sub.my_role == TrackRole::Publisher)
-            .filter_map(effective_largest_object)
-            .max();
+        let track_largest =
+            self.publisher_track_largest(&subscribe.track_namespace, &subscribe.track_name);
         let (filter_start, filter_end) = resolve_location_filter(
             filter.as_ref(),
             track_largest.as_ref(),
