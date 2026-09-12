@@ -512,6 +512,8 @@ pub enum FetchPriorContext { First, NoPriorActualObject, HasPriorObject }
 
 各ヘッダは `fn encode(&self) -> Vec<u8>` / `fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError>` を持つ。`ObjectDatagram::decode` は 1 datagram = 1 バッファを前提とする。
 
+`ObjectDatagram::properties_data` と `send_object_datagram` の `properties_data` は、Properties Length varint を含む生バイト列である (`SubgroupObject` / `FetchStreamObject` と同じ規約)。Datagram では Properties Length = 0 はプロトコル違反であり、encode / 送信 API が拒否する。
+
 ### デコーダ / エンコーダ
 
 ```rust

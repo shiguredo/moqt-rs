@@ -13,7 +13,7 @@ use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location
 use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, PADDING_DATAGRAM_TYPE,
     classify_data_stream_type,
-    datagram::{ObjectDatagram, validate_object_datagram_type},
+    datagram::{ObjectDatagram, validate_datagram_properties_blob, validate_object_datagram_type},
     decoder::DecodedSubgroupObject,
     fetch::FetchHeader,
     subgroup::{SubgroupHeader, SubgroupIdMode},
@@ -1778,10 +1778,16 @@ impl Session {
     /// publisher 側 subscription が確立済みであること、`track_alias` が割り当て済みであることを
     /// 検証する。ObjectDatagram のエンコードは呼び出し側が行う。
     ///
+    /// `properties_data` は Properties Length varint + Properties の生バイト列
+    /// ([`ObjectDatagram::properties_data`](crate::stream::datagram::ObjectDatagram::properties_data) と同じ規約)。
+    /// 空スライス (Length varint すら含まない)・Properties Length varint が途中で切れている・
+    /// Properties Length = 0・宣言長と実データ長の不一致は送信前に拒否する
+    /// (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
+    /// プロトコル違反)。
+    ///
     /// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): サブスクリプション経由で
     /// Object が公開または受信されたときに最大位置を更新する。status は問わず更新対象となる。
     /// 節番号・規定は draft 由来であり将来の draft 改版で変更される可能性がある。
-    /// draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反。
     /// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): 非 Normal status に Properties は不可。
     /// フィルタを通らない Object は [`SendRequestError::LocalFilterMismatch`] を返し、
     /// delivery timeout 超過によるドロップは [`SendRequestError::LocalDatagramTimeout`] を返す。
@@ -1821,15 +1827,13 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反
+        // draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
+        // プロトコル違反。空スライス (Length varint すら含まない) と宣言長の不一致も
+        // Session 段で早期に拒否する。
         if let Some(ref data) = properties_data
-            && data.is_empty()
+            && let Err(err) = validate_datagram_properties_blob(data)
         {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "datagram properties data must not be empty when present",
-            )
-            .into());
+            return Err(session_error_from_data_message(err).into());
         }
         // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので
@@ -2004,6 +2008,9 @@ impl Session {
     /// unknown Track Alias は draft §11.2 (Datagrams) に従い session close にせず、
     /// `UnknownTrackAlias` を返す。
     ///
+    /// `datagram.properties_data` は Properties Length varint + Properties の生バイト列
+    /// (通常は [`ObjectDatagram::decode`](crate::stream::datagram::ObjectDatagram::decode) が返す値)。
+    ///
     /// type 分岐を含む共通入口は [`recv_datagram`](Self::recv_datagram)。unknown datagram
     /// type に対する §11 の MUST (セッションクローズ) はそちらで実行される。
     pub fn recv_object_datagram(
@@ -2022,13 +2029,10 @@ impl Session {
                 TrackDataAcceptance::UnknownTrackAlias
             });
         }
-        // Object Properties の生バイト列を構築する (Properties Length varint + データ)
-        let properties_bytes = datagram.properties_data.as_ref().map(|properties_data| {
-            let mut encoded = Vec::new();
-            varint::encode(properties_data.len() as u64, &mut encoded);
-            encoded.extend_from_slice(properties_data);
-            encoded
-        });
+        // Object Properties の生バイト列 (Properties Length varint + データ) をそのまま
+        // フィルタ検証と Malformed Track 検証へ渡す
+        // (decode が Length 込みで返す規約に統一済み)。
+        let properties_bytes = datagram.properties_data.as_deref();
         // draft §3.1 (Subscriptions): "the subscriber re-applies each subscription's filter
         // to determine which subscription a received Object belongs to."
         // 候補を順に評価し、最初に通過した subscription に紐づける。
@@ -2051,7 +2055,7 @@ impl Session {
                     },
                     subgroup_id: None,
                     publisher_priority,
-                    properties_bytes: properties_bytes.as_deref(),
+                    properties_bytes,
                 };
                 if object_passes_filters(subscription, &input) {
                     if is_cancelled_terminated(subscription) {
@@ -2107,11 +2111,7 @@ impl Session {
             .peer_object_properties
             .entry(request_id)
             .or_default()
-            .observe_object(
-                datagram.group_id,
-                datagram.object_id,
-                properties_bytes.as_deref(),
-            )
+            .observe_object(datagram.group_id, datagram.object_id, properties_bytes)
         {
             // draft §12.1 (Malformed Tracks): datagram 経路も同じ扱い。datagram は stream を
             // 持たないので reset 対象の stream_id は無い。

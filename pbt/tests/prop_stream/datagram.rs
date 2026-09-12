@@ -8,6 +8,7 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 
+use crate::length_prefixed_properties;
 use pbt::common::sample_varint;
 
 /// OBJECT_DATAGRAM (status オブジェクト・ properties なし・ペイロードなし) のラウンドトリップ。
@@ -50,8 +51,8 @@ fn object_datagram_roundtrip_status_object() -> noprop::TestResult {
 
 /// OBJECT_DATAGRAM (Normal status オブジェクト・ properties あり・ペイロードなし) の
 /// ラウンドトリップ。properties は Normal(0x0) status にのみ付けられる
-/// (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。Datagram の properties_data は Length=0 が禁止のため非空
-/// (Length は encode が付与, draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+/// (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))。`properties_data` は
+/// Properties Length varint を含む生バイト列で渡す (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
 #[test]
 fn object_datagram_roundtrip_normal_status_with_properties() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -64,14 +65,17 @@ fn object_datagram_roundtrip_normal_status_with_properties() -> noprop::TestResu
         } else {
             None
         };
+        // Datagram の properties_data は Properties Length + Properties の生バイト列
+        // (SubgroupObject / FetchStreamObject と同じ規約)
         let prop_len = noprop::sample_usize_in(ctx, 1..64);
         let prop_payload = noprop::sample_bytes_vec(ctx, prop_len);
+        let prop_blob = length_prefixed_properties(&prop_payload);
         let datagram = ObjectDatagram {
             track_alias,
             group_id,
             object_id,
             publisher_priority,
-            properties_data: Some(prop_payload),
+            properties_data: Some(prop_blob),
             end_of_group: false,
             status: Some(0),
         };
@@ -131,8 +135,8 @@ fn object_datagram_roundtrip_with_payload() -> noprop::TestResult {
 }
 
 /// OBJECT_DATAGRAM (properties あり・ペイロードあり) のラウンドトリップ。
-/// Datagram の properties_data は Length=0 が禁止のため非空のデータ本体を渡す
-/// (Length は encode が付与する, draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
+/// `properties_data` は Properties Length varint を含む生バイト列で渡す
+/// (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
 #[test]
 fn object_datagram_roundtrip_with_properties() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -146,8 +150,11 @@ fn object_datagram_roundtrip_with_properties() -> noprop::TestResult {
             None
         };
         let end_of_group = noprop::sample_bool(ctx);
+        // Datagram の properties_data は Properties Length + Properties の生バイト列
+        // (SubgroupObject / FetchStreamObject と同じ規約)
         let prop_len = noprop::sample_usize_in(ctx, 1..64);
         let prop_payload = noprop::sample_bytes_vec(ctx, prop_len);
+        let prop_blob = length_prefixed_properties(&prop_payload);
         let payload_len = noprop::sample_usize_in(ctx, 1..64);
         let payload = noprop::sample_bytes_vec(ctx, payload_len);
         let datagram = ObjectDatagram {
@@ -155,7 +162,7 @@ fn object_datagram_roundtrip_with_properties() -> noprop::TestResult {
             group_id,
             object_id,
             publisher_priority,
-            properties_data: Some(prop_payload),
+            properties_data: Some(prop_blob),
             end_of_group,
             status: None,
         };

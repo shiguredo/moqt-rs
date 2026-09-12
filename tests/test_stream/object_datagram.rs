@@ -138,6 +138,112 @@ fn properties_length_exceeds_buffer_unexpected_eof() {
     ));
 }
 
+// ─── properties_data の Length 込み規約 (draft-ietf-moq-transport-21 §11.1.3 (Object Properties)) ────
+
+/// encode は properties_data に Length を付け直さない (ワイヤ表現の固定)
+///
+/// 任意入力の往復 (decode が Length 込みを返すことを含む) は PBT がカバーする。
+#[test]
+fn encode_writes_properties_data_without_reprefixing_length() {
+    let dg = ObjectDatagram {
+        track_alias: 3,
+        group_id: 10,
+        object_id: 1,
+        publisher_priority: Some(200),
+        properties_data: Some(vec![0x02, 0xAA, 0xBB]),
+        end_of_group: false,
+        status: Some(0),
+    };
+    let encoded = dg.encode().expect("正当なテスト入力の encode は成功する");
+    assert_eq!(
+        encoded,
+        vec![
+            0x21, // type_byte: PROPERTIES 0x01 + STATUS 0x20
+            0x03, // track_alias
+            0x0A, // group_id
+            0x01, // object_id
+            0xC8, // publisher_priority
+            0x02, 0xAA, 0xBB, // Properties Length = 2 + Properties 本体
+            0x00, // status = Normal
+        ],
+        "Properties Length が二重に前置されないこと"
+    );
+}
+
+/// 空スライス (Properties Length varint すら含まない) は encode で拒否される
+#[test]
+fn encode_rejects_empty_properties_data() {
+    let dg = ObjectDatagram {
+        track_alias: 3,
+        group_id: 10,
+        object_id: 1,
+        publisher_priority: Some(200),
+        properties_data: Some(Vec::new()),
+        end_of_group: false,
+        status: Some(0),
+    };
+    assert!(matches!(
+        dg.encode(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+/// Properties Length varint が途中で切れた blob は encode で拒否される
+#[test]
+fn encode_rejects_truncated_properties_length_varint() {
+    let dg = ObjectDatagram {
+        track_alias: 3,
+        group_id: 10,
+        object_id: 1,
+        publisher_priority: Some(200),
+        // 2 バイト varint の先頭バイトのみ
+        properties_data: Some(vec![0x80]),
+        end_of_group: false,
+        status: Some(0),
+    };
+    assert!(matches!(
+        dg.encode(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+/// Properties Length = 0 は encode で拒否される (datagram では禁止)
+#[test]
+fn encode_rejects_properties_length_zero() {
+    let dg = ObjectDatagram {
+        track_alias: 3,
+        group_id: 10,
+        object_id: 1,
+        publisher_priority: Some(200),
+        properties_data: Some(vec![0x00]),
+        end_of_group: false,
+        status: Some(0),
+    };
+    assert!(matches!(
+        dg.encode(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+/// 宣言 Length と実データ長の不一致は encode で拒否される
+#[test]
+fn encode_rejects_properties_length_mismatch() {
+    let dg = ObjectDatagram {
+        track_alias: 3,
+        group_id: 10,
+        object_id: 1,
+        publisher_priority: Some(200),
+        // Properties Length = 2 だが本体は 1 バイト
+        properties_data: Some(vec![0x02, 0xAA]),
+        end_of_group: false,
+        status: Some(0),
+    };
+    assert!(matches!(
+        dg.encode(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
 #[test]
 fn undefined_bit_0x40_rejected() {
     // type に未定義 bit 0x40 が立つと PROTOCOL_VIOLATION

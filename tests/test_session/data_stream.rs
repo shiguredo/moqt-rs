@@ -887,7 +887,7 @@ fn send_object_datagram_updates_location_with_non_normal_status() {
 #[test]
 fn send_object_datagram_failure_does_not_update_location() {
     let (_, mut server, rid) = establish_subscribe_track(507);
-    // 空の properties は datagram ではプロトコル違反
+    // 空スライス (Properties Length varint すら含まない) は契約違反として拒否される
     let err = server
         .send_object_datagram(rid, 3, 1, Some(Vec::new()), None)
         .unwrap_err();
@@ -897,6 +897,37 @@ fn send_object_datagram_failure_does_not_update_location() {
     );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
+}
+
+/// Properties Length = 0 と宣言長不一致の properties も送信前に拒否される
+///
+/// draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
+/// プロトコル違反。公開 API から不正なワイヤを生成しないよう Session 段でも早期に拒否する。
+#[test]
+fn send_object_datagram_rejects_invalid_properties_length() {
+    for (label, properties_data) in [
+        ("Length=0", Some(vec![0x00u8])),
+        ("宣言長不一致", Some(vec![0x02u8, 0xAA])),
+    ] {
+        let (_, mut server, rid) = establish_subscribe_track(513);
+        let err = server
+            .send_object_datagram(rid, 3, 1, properties_data, None)
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error().map(|e| e.code),
+            Some(SESSION_PROTOCOL_VIOLATION),
+            "{label}"
+        );
+        assert_eq!(
+            server
+                .subscription(rid)
+                .expect("subscription が存在する")
+                .largest_received_location,
+            None,
+            "{label}: 拒否時に最大位置を更新しないこと"
+        );
+        assert_eq!(server.state(), SessionState::Established, "{label}");
+    }
 }
 
 /// subgroup stream 送信と datagram 送信を混在させた場合も最大位置が正しく合流する
@@ -1451,6 +1482,47 @@ fn recv_datagram_object_delegates_to_object_path() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
+/// datagram_writer と同じ組み立て (LocProperties::encode() → ObjectDatagram → encode →
+/// recv_datagram) で受信が受理され、Malformed Track にならないこと
+///
+/// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): Properties は
+/// Properties Length + Key-Value-Pairs。`LocProperties::encode()` の Length 込み出力を
+/// そのまま ObjectDatagram に渡す。
+#[test]
+fn datagram_writer_style_object_datagram_is_accepted() {
+    let alias = 611;
+    let (mut client, _server, _rid) = establish_subscribe_track(alias);
+    // writer 側 (publisher) の組み立て
+    let mut props = LocProperties::new();
+    props.push(LocProperty {
+        prop_id: PROP_TIMESTAMP,
+        value: LocPropertyValue::VarInt(1234),
+    });
+    let encoded_props = props.encode().expect("正当な LOC properties である");
+    let raw = ObjectDatagram {
+        track_alias: alias,
+        group_id: 5,
+        object_id: 1,
+        publisher_priority: Some(7),
+        properties_data: Some(encoded_props),
+        end_of_group: false,
+        status: None,
+    }
+    .encode()
+    .expect("ObjectDatagram の encode に成功すること");
+    // Normal object は payload 必須 (§11.2.1: zero-length は Normal status を明示する形しか許されない)
+    let raw = [raw, vec![0xAA]].concat();
+
+    let outcome = client
+        .recv_datagram(&raw)
+        .expect("Length 込み Properties の datagram は受理される");
+    assert_eq!(
+        outcome,
+        DatagramAcceptance::Object(TrackDataAcceptance::Accepted)
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
 /// 未知 Track Alias は §11.2 に従いセッションを閉じずに報告される
 ///
 /// type は既知なので §11 の MUST の対象外であり、`recv_object_datagram` と同じ扱いになる。
@@ -1842,7 +1914,7 @@ fn malformed_track_via_datagram_terminates_subscription() {
     });
     let mut encoded = Vec::new();
     props.encode(&mut encoded).expect("encode に成功すること");
-    client
+    let err = client
         .recv_object_datagram(&ObjectDatagram {
             track_alias: alias,
             group_id: 3,
@@ -1853,6 +1925,10 @@ fn malformed_track_via_datagram_terminates_subscription() {
             status: None,
         })
         .expect_err("Malformed Track として拒否される");
+    assert_eq!(
+        err.reason, "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object",
+        "二重 Length による decode 失敗ではなく PRIOR_OBJECT_ID_GAP 経路で拒否されること"
+    );
 
     assert_eq!(
         client
@@ -1870,9 +1946,15 @@ fn malformed_track_via_datagram_terminates_subscription() {
                 panic!("datagram には reset 対象の stream が無い")
             }
             SessionEvent::RequestTerminated {
-                reason: TerminationReason::MalformedTrack { .. },
+                reason: TerminationReason::MalformedTrack { reason },
                 ..
-            } => saw_terminated = true,
+            } => {
+                assert_eq!(
+                    reason,
+                    "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object"
+                );
+                saw_terminated = true;
+            }
             SessionEvent::CloseSession(err) => panic!("セッションを閉じてはいけない: {err:?}"),
             _ => {}
         }

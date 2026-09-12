@@ -20,10 +20,10 @@ mod subgroup;
 
 /// Properties Length (varint) + データ本体を連結した「Properties 生バイト列」を作る。
 ///
-/// `SUBGROUP_OBJECT` / `FETCH_STREAM_OBJECT` の `properties_data` は、Properties Length を
-/// 含む生バイト列を要求する (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header): 空でも Length=0 を含む)。
-/// `ObjectDatagram` の `properties_data` は Length を含まないデータ本体のみを渡す点に注意
-/// (こちらはこのヘルパを使わない)。
+/// `SUBGROUP_OBJECT` / `FETCH_STREAM_OBJECT` / `OBJECT_DATAGRAM` の `properties_data` は、
+/// Properties Length を含む生バイト列を要求する
+/// (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header) / §11.4.1 (Fetch Header) /
+/// §11.2.1 (Object Datagram): 空でも Length=0 を含む。ただし datagram は Length=0 が禁止)。
 pub(crate) fn length_prefixed_properties(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     shiguredo_moqt::varint::encode(data.len() as u64, &mut buf);

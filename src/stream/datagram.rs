@@ -12,9 +12,30 @@
 //!
 //! 無効な組み合わせ: STATUS (0x20) と END_OF_GROUP (0x02) の同時指定
 //! この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-use super::validate_object_status;
+use super::{validate_object_status, validate_properties_blob};
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
+
+/// Datagram の Object Properties 生バイト列 (Properties Length + Properties) を検証する
+///
+/// draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram の properties_data は
+/// Properties Length varint + Properties の生バイト列であり、SubgroupObject /
+/// FetchStreamObject と同じく Length を含む規約である。Datagram では Properties Length = 0 は
+/// プロトコル違反 (受信側は §11.2.1 で PROTOCOL_VIOLATION)。
+/// 空スライス (Length varint すら含まない)・途中で切れた Length varint・
+/// 宣言 Length と実データ長の不一致も拒否する。
+///
+/// `ObjectDatagram::encode` と `send_object_datagram` の双方から使い、公開 API から
+/// 不正なワイヤを生成しないようにする。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub(crate) fn validate_datagram_properties_blob(data: &[u8]) -> Result<(), MessageError> {
+    if validate_properties_blob(data)? == 0 {
+        return Err(MessageError::ProtocolViolation(
+            "datagram properties length 0 is invalid when PROPERTIES bit is set",
+        ));
+    }
+    Ok(())
+}
 
 /// OBJECT_DATAGRAM の定義済み Type Flags bit
 /// (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))
@@ -58,9 +79,11 @@ pub struct ObjectDatagram {
     pub object_id: u64,
     /// `None` = DEFAULT_PRIORITY bit が立っている (サブスクリプションの優先度を継承)
     pub publisher_priority: Option<u8>,
-    /// Object Properties データ (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))
+    /// Object Properties の生バイト列 (Properties Length varint + Properties)
+    /// (draft-ietf-moq-transport-21 §11.1.3 (Object Properties))
     ///
-    /// `Some(data)` の場合は PROPERTIES bit を立て、Properties Length + data を書き込む。
+    /// `Some(data)` の場合は PROPERTIES bit を立て、data をそのまま書き込む
+    /// (SubgroupObject / FetchStreamObject と同じく Properties Length を含む)。
     /// `None` の場合は PROPERTIES bit を立てない。
     /// draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反。
     pub properties_data: Option<Vec<u8>>,
@@ -73,10 +96,18 @@ pub struct ObjectDatagram {
 impl ObjectDatagram {
     /// ヘッダをエンコードする
     ///
-    /// `properties_data` に非空のバイト列を指定すると PROPERTIES bit を立て、
-    /// Properties Length + data をエンコードする。
+    /// `properties_data` には Properties Length + Properties の生バイト列を指定すると
+    /// PROPERTIES bit を立て、そのままエンコードする。
     /// このメソッドは datagram header だけを返すため、`status == None` の場合は
     /// caller が後続に 1 byte 以上の payload を付けなければならない。
+    ///
+    /// # Errors
+    ///
+    /// - STATUS と END_OF_GROUP の同時指定: `ProtocolViolation`
+    /// - `properties_data` が空スライス / Properties Length varint が途中で切れている /
+    ///   Properties Length = 0 / 宣言長と実データ長の不一致: `ProtocolViolation`
+    /// - 非 Normal status に Properties を付けた場合: `ProtocolViolation`
+    /// - 未知の Object Status: `ProtocolViolation`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // STATUS と END_OF_GROUP の同時指定は無効
         if self.status.is_some() && self.end_of_group {
@@ -85,12 +116,8 @@ impl ObjectDatagram {
             ));
         }
         // draft-ietf-moq-transport-21 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 はプロトコル違反
-        if let Some(ref data) = self.properties_data
-            && data.is_empty()
-        {
-            return Err(MessageError::ProtocolViolation(
-                "datagram properties data must not be empty when present",
-            ));
+        if let Some(ref data) = self.properties_data {
+            validate_datagram_properties_blob(data)?;
         }
         // draft-ietf-moq-transport-21 §11.1.3 (Object Properties): status が Normal 以外のオブジェクトに Properties は不可
         if self.properties_data.is_some() && matches!(self.status, Some(s) if s != 0) {
@@ -131,7 +158,6 @@ impl ObjectDatagram {
             buf.push(prio);
         }
         if let Some(ref data) = self.properties_data {
-            varint::encode(data.len() as u64, &mut buf);
             buf.extend_from_slice(data);
         }
         if let Some(status) = self.status {
@@ -144,7 +170,8 @@ impl ObjectDatagram {
 
     /// バッファ先頭から OBJECT_DATAGRAM ヘッダをデコードし `(header, 消費バイト数)` を返す
     ///
-    /// プロパティヘッダが存在する場合はデータを保持する。
+    /// プロパティヘッダが存在する場合は Properties Length varint を含む生バイト列を保持する
+    /// (encode 側の「生バイト列をそのまま書く」規約と対称)。
     /// ステータスが存在する場合は読み込んで `status` に設定する。
     /// ペイロードはデコードしない。
     ///
@@ -194,22 +221,23 @@ impl ObjectDatagram {
             Some(prio)
         };
 
-        // プロパティヘッダを読み取る
+        // プロパティヘッダを読み取る。Properties Length varint を含む生バイト列を保持し、
+        // encode 側の「受け取った生バイト列をそのまま書く」規約と対称にする。
         let properties_data = if has_properties {
+            let prop_start = pos;
             let (ext_len, n) = varint::decode(&buf[pos..])?;
             pos += n;
             if ext_len == 0 {
                 return Err(MessageError::ProtocolViolation(
-                    "properties headers length 0 is invalid when PROPERTIES bit is set",
+                    "datagram properties length 0 is invalid when PROPERTIES bit is set",
                 ));
             }
             // sibling の subgroup.rs と同じく checked_len で u64 空間のまま境界比較してから
             // usize 変換する。32bit ターゲットで ext_len > u32::MAX のとき素キャストでは
             // 切り詰められて誤読するため、checked_len で UnexpectedEof にする。
             let ext_len = varint::checked_len(ext_len, buf[pos..].len())?;
-            let data = buf[pos..pos + ext_len].to_vec();
             pos += ext_len;
-            Some(data)
+            Some(buf[prop_start..pos].to_vec())
         } else {
             None
         };
