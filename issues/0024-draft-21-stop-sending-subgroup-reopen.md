@@ -1,7 +1,7 @@
 # STOP_SENDING 後の Subgroup 再オープンを Forward 0→1 更新時のみ許可する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-stop-sending-subgroup-reopen
 - Polished: 2026-09-10
 
@@ -48,3 +48,19 @@ draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) の SHOULD NOT �
 - `tests/test_session/data_stream.rs` の `stop_sending_on_subgroup_stream_allows_reopen` と `condition1_priority_mismatch_terminates_subscription` (再オープン前提の箇所) が新挙動に追従し、`tests/test_session/subscription/request_update.rs` の `forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup` が維持されること
 - 回帰テストが `tests/test_session/data_stream.rs` に追加され、`cargo test --workspace` と PBT が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` として記載されていること
+
+## 解決方法
+
+STOP_SENDING を受けた outgoing Subgroup を Session が request_id 単位で「再オープン禁止」として保持し、Forward State 0→1 の REQUEST_UPDATE が受理された時点でのみ解除するようにした。
+
+- `src/session/core.rs`: `Session` に `stopped_outgoing_subgroups: HashMap<u64, HashSet<(u64, u64, Option<u64>)>>` を追加した。`Option<u64>` は FirstObjectId モードの未解決 subgroup_id (`None`) を表す。SUBSCRIBE 起点では動作し、PUBLISH 起点では peer subscriber の REQUEST_UPDATE に応答する経路がない既知の制限を doc に明記した。
+- `src/session/data.rs`: `recv_data_stream_stop_sending` で `OutgoingDataStream.request_id` と
+  `(track_alias, group_id, subgroup_id)` を記録する。`send_subgroup_header` と
+  `send_subgroup_object` の FirstObjectId 解決経路で `outgoing_subgroup_reopen_blocked`
+  (全 request の停止エントリを照合) により再オープンを拒否し、`SESSION_PROTOCOL_VIOLATION` を
+  返してセッションは閉じない。
+- `src/session/subscription/dispatch.rs`: `send_ok_for_subscription` が pending の FORWARD を適用する際、`forward_state == 0` から `1` への遷移のときのみ当該 request の停止エントリを解除する。
+- `src/session/subscription.rs`: `forget_subscription` で停止エントリを破棄する。
+- `src/subgroup_tracker.rs`: `can_reopen` の doc を「終端種別のみを見て Forward 条件は Session が判定する」旨に更新し、§5.2 の DELIVERY_TIMEOUT 条件との区別を明記した。Appendix の誤引用 (A.3 → A.4) も修正した。
+- `tests/test_session/data_stream.rs` などに、Forward 0→1 前の拒否 / 0→1 後の許可、Forward 1 固定時の拒否、STOP → reset 後の拒否と 0→1 後の許可、FirstObjectId の拒否と解除、共有 alias の分離、キー次元 (alias / group)、forget 後の破棄、既存テストの追従を追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
