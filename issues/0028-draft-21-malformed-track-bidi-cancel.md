@@ -1,7 +1,7 @@
 # Malformed Track 検出時に bidi request stream を cancel する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-malformed-track-bidi-cancel
 - Polished: 2026-09-10
 
@@ -50,3 +50,18 @@ subscription の cancel は §3.1 (Subscriptions) のとおり subscriber が ST
 - `StopSendingRequestStream` / `TerminationReason::MalformedTrack` / `terminate_malformed_track` の doc が新挙動に追随し、`(see Section 3.3.3)` の誤引用が §6.4.2.3 に修正されていること
 - 回帰テストが `tests/test_session/` に追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` として記載されていること
+
+## 解決方法
+
+Malformed Track 検出時に、該当 subscription の bidi request stream を §6.4.2.3 の cancel 手順で打ち切るようにした。
+
+- `src/session/data.rs`: `terminate_malformed_track` が新規に `Terminated` へ遷移させる経路で、
+  `StopSendingRequestStream` (受信方向) → `ResetRequestStream` (送信方向) を
+  `STREAM_MALFORMED_TRACK` (0x12) で発行するようにした。既に `Terminated` の経路
+  (キャンセル由来 / PUBLISH_DONE 受信済み) では発行しない。既存の `ResetDataStream` /
+  `RequestTerminated { reason: MalformedTrack }` は維持し、`(see Section 3.3.3)` の誤引用を
+  §6.4.2.3 に修正した。
+- `src/session/types.rs`: `StopSendingRequestStream` の発行条件、`ResetRequestStream` の malformed 経路と「送信方向が既に閉じている場合は I/O 層で無視する」契約、`TerminationReason::MalformedTrack` の cancel 契約、`RequestTerminated` の reason 一覧を doc に追記・更新した。
+- `examples/moqt-transport/src/moqt_client.rs`: `StopSendingRequestStream` を `bidi_stop_txs` 経由で STOP_SENDING として送出するようにし (`request_stop_sending` に集約)、`ResetRequestStream` は送信方向が無い場合に no-op とした。回収済み request への遅延 close は `closed_request_streams` に登録しないようにした。
+- `tests/test_session/` に subgroup header / subgroup object / datagram 経路の cancel 検証と、既に Terminated の経路で cancel を発行しない検証を追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
