@@ -1,7 +1,7 @@
 # 予約名前空間の拒否とパラメータ値域 MUST の優先順位を明確にする
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/update-reserved-namespace-parameter-precedence
 - Polished: 2026-09-13
 
@@ -54,3 +54,19 @@
 - `handle_peer_fetch` で `.session` と LOCATION_FILTER 不正の組合せが `DOES_NOT_EXIST` になることがテストで固定されていること
 - 0053 の prefix 更新検証が同じ優先順位で実装できる形になっていること (0053 側の変更は 0053 で行う)
 - 既存テストがすべて通ること
+
+## 解決方法
+
+同一メッセージが予約名前空間の拒否とパラメータ値域 MUST の両方に該当するとき、予約名前空間の拒否を優先する方針を実装・コメント・テストで固定した。
+
+- 対象 5 ハンドラ (`handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_subscribe_tracks` / `handle_peer_track_status` / `handle_peer_fetch`) の予約名前空間拒否の箇所に、
+  「draft は優先順位を規定しないが、宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である」「値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が観測されるのは
+  API 経路で値域外のパラメータを手組みしたメッセージのみ」という根拠コメントを追加した
+- `handle_peer_fetch` は `.` / `.session` の拒否を LOCATION_FILTER の decode より前へ移した。これにより API 経路で `.` / `.session` かつ LOCATION_FILTER 不正な FETCH は
+  セッションクローズではなく `DOES_NOT_EXIST` の REQUEST_ERROR になる (意図した挙動変更)
+- 追加テスト: 5 ハンドラそれぞれで `.` / `.session` と値域外 GROUP_ORDER / INCLUDE_PROPERTIES / FORWARD / LOCATION_FILTER decode 失敗を組み合わせた手組みメッセージを
+  `recv_request` に渡し、`DOES_NOT_EXIST` の REQUEST_ERROR が FIN 付きで送られ、セッションが閉じず、request がテーブルに登録されないことを検証する。あわせて予約名前空間でない
+  FETCH の壊れた LOCATION_FILTER が従来どおりセッションを閉じることも検証する
+- 0053 の REQUEST_UPDATE 経路の prefix 予約名前空間検証も同じ優先順位で実装済みであることを確認した
+- RANGE FILTER の拒否 (REQUEST_ERROR 同士) は本 issue の対象外とし、別 issue の候補とした
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通る
