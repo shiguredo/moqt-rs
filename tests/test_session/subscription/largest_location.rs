@@ -507,8 +507,8 @@ fn send_ok_for_subscription_effective_largest_object_injected_without_saving() {
 
 /// subscriber-responder 経路 (my_role==Subscriber) の REQUEST_UPDATE_OK では、publisher 側の
 /// 保存廃止と無関係に、Forward State が 0→1 遷移でなくても (ここでは 1→1) LARGEST_OBJECT が
-/// 従来どおり largest_location に無条件保存される (send_ok_for_subscription は responder
-/// 共通関数であり my_role==Subscriber でも末尾保存に到達する)
+/// 従来どおり largest_location に無条件保存される (subscription の REQUEST_OK 送信共通関数で
+/// ある send_ok_for_subscription は my_role==Subscriber でも末尾保存に到達する)
 #[test]
 fn send_ok_for_subscription_subscriber_responder_saves_largest_location_unconditionally() {
     use shiguredo_moqt::message::common::Location;

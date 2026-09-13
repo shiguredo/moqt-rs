@@ -3217,3 +3217,538 @@ fn request_update_relative_filter_resolves_with_current_largest() {
         "更新時点の largest 基準で Next Group に解決されること"
     );
 }
+
+/// PUBLISH 起点 subscription では subscriber (responder) も REQUEST_UPDATE を送れ、
+/// publisher (initiator) がその REQUEST_OK を返せる。responder 側はセッションを閉じずに
+/// 受理し、RequestOkReceived(request_kind=Publish) を発火する。送信側では LARGEST_OBJECT が
+/// 注入され、受信側では EXPIRES と LARGEST_OBJECT が反映される
+/// (draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE), §9.20.18 (LARGEST OBJECT Parameter))。
+#[test]
+fn publish_originated_request_update_ok_round_trip_emits_publish_kind() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_SUBSCRIBER_PRIORITY,
+    };
+    let (mut client, mut server) = establish_pair();
+    // client=publisher が PUBLISH を送信し、server=subscriber が PUBLISH_OK (REQUEST_OK) を返す
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            30,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("PUBLISH を受けた subscriber は PUBLISH_OK を返せること");
+    let (_, pubok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, pubok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // PUBLISH_OK 受信で publisher 側にも RequestOkReceived が積まれるため消費しておく
+    let mut saw_publish_ok = false;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::RequestOkReceived { request_kind, .. } = ev {
+            assert_eq!(request_kind, RequestKind::Publish);
+            saw_publish_ok = true;
+        }
+    }
+    assert!(
+        saw_publish_ok,
+        "PUBLISH_OK 受信で RequestOkReceived が発火すること"
+    );
+
+    // publisher (client) が Object を 1 つ送信し、LARGEST_OBJECT の算出元を作る
+    let stream_id = DataStreamId(300);
+    let header = SubgroupHeader {
+        track_alias: 30,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_subgroup_object(stream_id, 2, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // subscriber (responder) から REQUEST_UPDATE を送る
+    let mut upd_params = MessageParameters::new();
+    upd_params.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(192),
+    });
+    server
+        .send_request_update(rid, upd_params)
+        .expect("PUBLISH 起点の subscriber は REQUEST_UPDATE を送信できること");
+    let (_, upd_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, upd_msg)
+        .expect("PUBLISH 起点の publisher は REQUEST_UPDATE を受理できること");
+
+    // publisher (initiator) が REQUEST_OK で応答する (従来は responder 専用として拒否されていた)
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_EXPIRES,
+        value: MessageParameterValue::VarInt(5_000),
+    });
+    client
+        .send_request_ok(rid, ok_params, TrackProperties::default())
+        .expect("PUBLISH 起点の publisher は REQUEST_UPDATE_OK を送信できること");
+    let (_, reqok_msg) = take_send_on_stream(&mut client);
+    // REQUEST_OK の送信で受理した REQUEST_UPDATE のパラメータが適用される
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .subscriber_priority,
+        Some(192),
+        "受理した REQUEST_UPDATE の SUBSCRIBER_PRIORITY が適用されること"
+    );
+    // LARGEST_OBJECT は自側が観測した最大 Location から自動注入される
+    let ControlMessage::RequestOk(ok) = &reqok_msg else {
+        unreachable!("REQUEST_OK が送信されること");
+    };
+    assert_eq!(
+        ok.parameters.largest_object(),
+        Some((5, 2)),
+        "送信した Object の最大 Location が LARGEST_OBJECT として注入されること"
+    );
+
+    // responder (subscriber) はセッションクローズせずに受理し、パラメータを反映する
+    server
+        .recv_stream_message(rid, reqok_msg)
+        .expect("PUBLISH 起点の subscriber は REQUEST_UPDATE_OK を受理できること");
+    assert_eq!(server.state(), SessionState::Established);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.largest_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 2,
+        }),
+        "REQUEST_UPDATE_OK の LARGEST_OBJECT が largest_location に保存されること"
+    );
+    assert!(
+        subscription.expires.is_some(),
+        "REQUEST_UPDATE_OK の EXPIRES が適用されること"
+    );
+    let mut got = false;
+    while let Some(ev) = server.poll_event() {
+        if let SessionEvent::RequestOkReceived {
+            request_id,
+            request_kind,
+            ..
+        } = ev
+            && request_id == rid
+        {
+            // PUBLISH 起点では PUBLISH_OK も REQUEST_UPDATE_OK も Publish になる
+            assert_eq!(request_kind, RequestKind::Publish);
+            got = true;
+        }
+    }
+    assert!(
+        got,
+        "REQUEST_UPDATE_OK 受理で RequestOkReceived(request_kind=Publish) が発火すること"
+    );
+}
+
+/// PUBLISH 起点で publisher (initiator) が Forward State を 0→1 へ変更する REQUEST_UPDATE に
+/// REQUEST_OK を返すと、STOP_SENDING で記録した再オープン禁止が解除される
+/// (draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE), §11.3.2 (Closing Subgroup Streams))。
+#[test]
+fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD,
+    };
+    let (mut client, mut server) = establish_pair();
+    // client=publisher が FORWARD=0 の PUBLISH を送信し、server=subscriber が PUBLISH_OK を返す
+    let mut pub_params = MessageParameters::new();
+    pub_params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(0),
+    });
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            31,
+            pub_params,
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pubok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, pubok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .forward_state,
+        0
+    );
+
+    // publisher (client) がサブグループを開く
+    let stream_id = DataStreamId(301);
+    let header = SubgroupHeader {
+        track_alias: 31,
+        group_id: 6,
+        subgroup_id: SubgroupIdMode::Explicit(2),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .send_subgroup_header(stream_id, rid, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // subscriber が STOP_SENDING を送信 → publisher は再オープン禁止を記録する
+    // (記録は REQUEST_OK 前の再オープン拒否で、解除は REQUEST_OK 後の再オープン成功で検証する)
+    client
+        .recv_data_stream_stop_sending(stream_id)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id2 = DataStreamId(302);
+    let err = client
+        .send_subgroup_header(stream_id2, rid, &header)
+        .unwrap_err();
+    assert_eq!(
+        err.code, SESSION_PROTOCOL_VIOLATION,
+        "REQUEST_OK を送る前は同じサブグループを再オープンできないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+
+    // subscriber (responder) が REQUEST_UPDATE で forward=1 に変更する
+    let mut upd_params = MessageParameters::new();
+    upd_params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(1),
+    });
+    server
+        .send_request_update(rid, upd_params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // publisher (initiator) が REQUEST_OK で合体パラメータを適用 → forward_state が 0→1 になる
+    client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("PUBLISH 起点の publisher は REQUEST_UPDATE_OK を送信できること");
+    let (_, reqok_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, reqok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .forward_state,
+        1,
+        "受理した REQUEST_UPDATE の FORWARD が適用されること"
+    );
+
+    // publisher (client) が同じサブグループを再オープンできる
+    // (再オープン成功自体が再オープン禁止の解除の裏付けになる)
+    client
+        .send_subgroup_header(stream_id2, rid, &header)
+        .expect("Forward 0→1 の受理後は同じサブグループを再オープンできること");
+    client
+        .send_subgroup_object(stream_id2, 0, None)
+        .expect("再オープンした stream ではオブジェクト送信できること");
+}
+
+/// PUBLISH 起点で自側 publisher (initiator) が PUBLISH_OK 未受信 (Pending(Publisher)) の間に
+/// REQUEST_OK を送ろうとすると拒否される。Pending の PUBLISH_OK は responder である自側
+/// subscriber が返す経路であり、状態による限定を外すと自分が送った PUBLISH を自分の応答で
+/// 確立扱いにしてしまう。
+#[test]
+fn publish_originated_publisher_request_ok_in_pending_is_rejected() {
+    let (mut client, _server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            32,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, _pub_msg) = take_send_request(&mut client);
+    // PUBLISH_OK はまだ受信していない (Pending(Publisher))
+    let err = client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Pending,
+        "拒否時に subscription が確立扱いにならないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// PUBLISH 起点で自側 subscriber (responder) が PUBLISH_OK 未送信 (Pending(Publisher)) の間に
+/// peer publisher から REQUEST_OK を受信すると、自分は REQUEST_UPDATE を送っていないため
+/// PROTOCOL_VIOLATION でセッションを閉じる。
+#[test]
+fn publish_originated_responder_request_ok_in_pending_closes_session() {
+    use shiguredo_moqt::message::RequestOk;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            33,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // server は PUBLISH を受けた subscriber (responder) で、まだ PUBLISH_OK を返していない
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Pending
+    );
+    let reqok = ControlMessage::RequestOk(RequestOk {
+        parameters: MessageParameters::new(),
+        track_properties: TrackProperties::default(),
+    });
+    let err = server.recv_stream_message(rid, reqok).unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "REQUEST_OK (subscription) received on responder side",
+        "responder 側の受信として拒否されること"
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    match drain_until_close(&mut server) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        _ => unreachable!("CloseSession イベントが発行されること"),
+    }
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Pending,
+        "拒否時に subscription が確立扱いにならないこと"
+    );
+}
+
+/// SUBSCRIBE 起点で自側 subscriber (initiator) は REQUEST_UPDATE を受け取る側ではないため、
+/// Established でも REQUEST_OK を送れない。拒否しても subscription は Established のまま残る。
+#[test]
+fn subscribe_originated_initiator_request_ok_in_established_is_rejected() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // client は SUBSCRIBE の initiator (自側 subscriber) であり、peer publisher は
+    // REQUEST_UPDATE を送れないため、client が REQUEST_OK を送る経路は存在しない
+    let err = client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason,
+        "request_ok (subscription) can only be sent by responder-role or by the publisher-role of an established PUBLISH subscription",
+        "送信資格のガードで拒否されること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "拒否時に subscription の状態が変わらないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// PUBLISH 起点で publisher (initiator) が REQUEST_OK を返すと、publisher が受信側として
+/// 数える MAX_REQUEST_UPDATES クレジットが回復し、続く REQUEST_UPDATE を受理できる
+/// (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))。
+#[test]
+fn publish_originated_request_update_credit_recovers_after_ok() {
+    // publisher (client) が MAX_REQUEST_UPDATES=1 を宣言する
+    let (mut client, mut server) =
+        establish_pair_with_options(opts_with(0x08, 1), SetupOptions::new());
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            34,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pubok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, pubok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 1 通目の REQUEST_UPDATE は上限内で受理される
+    server
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd1) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, upd1)
+        .expect("1 通目は上限内で受理されること");
+
+    // publisher (initiator) が REQUEST_OK を返すとクレジットが回復する
+    client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("PUBLISH 起点の publisher は REQUEST_UPDATE_OK を送信できること");
+    let (_, reqok_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, reqok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 回復後は 2 通目を送っても MAX_REQUEST_UPDATES 超過にならない
+    server
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd2) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, upd2)
+        .expect("クレジット回復後は 2 通目を受理できること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// publisher が宣言した MAX_REQUEST_UPDATES=1 を超えて subscriber が REQUEST_UPDATE を送ると
+/// セッションを閉じる (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))。
+/// 同じ SETUP を使うクレジット回復テストの前提 (上限が実際に適用されること) を固定する。
+#[test]
+fn publish_originated_request_update_exceeding_max_closes_session() {
+    use shiguredo_moqt::error::SESSION_TOO_MANY_REQUEST_UPDATES;
+    // publisher (client) が MAX_REQUEST_UPDATES=1 を宣言する
+    let (mut client, mut server) =
+        establish_pair_with_options(opts_with(0x08, 1), SetupOptions::new());
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            35,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pubok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, pubok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 1 通目は上限内で受理される
+    server
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd1) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, upd1)
+        .expect("1 通目は上限内で受理されること");
+
+    // REQUEST_OK を返す前に 2 通目が届くと local MAX_REQUEST_UPDATES 超過でセッションを閉じる。
+    // peer 側の送信上限 (同じ SETUP 値を共有する) を迂回するため wire メッセージを直接注入する。
+    let upd2 = inject_request_update(rid, MessageParameters::new());
+    let err = client
+        .recv_stream_message(rid, upd2)
+        .expect_err("応答前の 2 通目は local MAX_REQUEST_UPDATES 超過になること");
+    assert_eq!(err.code, SESSION_TOO_MANY_REQUEST_UPDATES);
+    match drain_until_close(&mut client) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_TOO_MANY_REQUEST_UPDATES),
+        _ => unreachable!("CloseSession(TOO_MANY_REQUEST_UPDATES) が発行されること"),
+    }
+}
+
+/// SUBSCRIBE 起点で自側 publisher responder は REQUEST_UPDATE を送らないため、
+/// Established で peer から REQUEST_OK を受信すると PROTOCOL_VIOLATION でセッションを閉じる。
+#[test]
+fn subscribe_originated_responder_request_ok_in_established_closes_session() {
+    use shiguredo_moqt::message::RequestOk;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // server は SUBSCRIBE の responder (自側 publisher) であり、REQUEST_UPDATE を送る側ではない
+    let reqok = ControlMessage::RequestOk(RequestOk {
+        parameters: MessageParameters::new(),
+        track_properties: TrackProperties::default(),
+    });
+    let err = server.recv_stream_message(rid, reqok).unwrap_err();
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "REQUEST_OK (subscription) received on responder side",
+        "responder 側の受信として拒否されること"
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    match drain_until_close(&mut server) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        _ => unreachable!("CloseSession イベントが発行されること"),
+    }
+}

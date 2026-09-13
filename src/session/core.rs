@@ -409,9 +409,9 @@ pub struct Session {
     /// REQUEST_UPDATE の受信から REQUEST_OK の送信までに記録された STOP_SENDING も
     /// 解除対象になる (順序の近似)。
     ///
-    /// PUBLISH 起点 (自側 publisher) の subscription では、現状 peer subscriber の
-    /// REQUEST_UPDATE に応答する経路がなく (`send_ok_for_subscription` は responder 専用)、
-    /// Forward 0→1 による解除は行われない (既知の制限。SUBSCRIBE 起点では動作する)。
+    /// PUBLISH 起点 (自側 publisher) の subscription でも、peer subscriber の
+    /// REQUEST_UPDATE に REQUEST_OK で応答できるため、Forward 0→1 の受理で解除される
+    /// (SUBSCRIBE 起点と同じ)。
     pub(super) stopped_outgoing_subgroups: HashMap<u64, HashSet<(u64, u64, Option<u64>)>>,
     pub(super) events: VecDeque<SessionEvent>,
 }
@@ -1088,7 +1088,17 @@ impl Session {
         }
     }
 
-    /// REQUEST_OK を送信する (responder 側のみ)
+    /// REQUEST_OK を送信する
+    ///
+    /// draft §9.5 (REQUEST_UPDATE): "The receiver of a REQUEST_UPDATE MUST respond with
+    /// exactly one REQUEST_OK or REQUEST_ERROR message ..." のため、REQUEST_UPDATE への応答は
+    /// それを送った側ではなく受信した側が送る。subscription の初回応答 (SUBSCRIBE_OK /
+    /// PUBLISH_OK) を送れるのは responder だけだが、REQUEST_UPDATE への応答は受信側が送るため、
+    /// PUBLISH 起点 subscription の publisher (initiator) も peer subscriber の
+    /// REQUEST_UPDATE に応答できる ("A subscriber can also send REQUEST_UPDATE to modify
+    /// parameters of a subscription established with PUBLISH.")。
+    /// なお outstanding な REQUEST_UPDATE との対応付けは検証しないため、REQUEST_UPDATE を
+    /// 受信していない購読に対して呼ぶことは想定しない。
     ///
     /// draft §9.3 (REQUEST_OK): REQUEST_OK は PUBLISH / REQUEST_UPDATE / TRACK_STATUS /
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS / PUBLISH_NAMESPACE への成功応答として送信される。

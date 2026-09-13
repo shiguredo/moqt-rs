@@ -75,6 +75,8 @@
   - @voluntas
 - [FIX] 予約名前空間 (`.` / `.session`) へのリクエストは、パラメータ値域の MUST close より予約名前空間の拒否 (DOES_NOT_EXIST) を優先する。FETCH は LOCATION_FILTER の decode 失敗より先に拒否する
   - @voluntas
+- [FIX] PUBLISH 起点 subscription でも subscriber の REQUEST_UPDATE に対する REQUEST_OK の送受信を行えるようにし、RequestOkReceived の request_kind を購読の開始メッセージ種別から求める
+  - @voluntas
 
 ### misc
 

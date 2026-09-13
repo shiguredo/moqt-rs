@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 
 use super::super::core::Session;
 use super::super::types::{
-    DataStreamId, RequestKind, SessionError, SessionEvent, SubscriptionState, TrackRole,
+    DataStreamId, RequestKind, SessionError, SessionEvent, SubscriptionInitiator,
+    SubscriptionState, TrackRole,
 };
 use super::delivery::{
     effective_largest_object, set_subscription_expires, update_largest_object_in_parameters,
@@ -32,10 +33,24 @@ impl Session {
             .subscriptions
             .get(&request_id)
             .expect("locate_request guarantees key presence");
-        if subscription.is_initiator_self() {
+        // draft §9.5 (REQUEST_UPDATE): REQUEST_OK (REQUEST_UPDATE_OK) を返せるのは、
+        // peer が送った request の responder と、PUBLISH 起点 subscription の publisher
+        // (initiator) が peer subscriber の REQUEST_UPDATE に応答する場合である
+        // ("A subscriber can also send REQUEST_UPDATE to modify parameters of a
+        // subscription established with PUBLISH.")。
+        // 後者を許可するのは Established の応答に限る。Pending(Publisher) の PUBLISH_OK は
+        // responder である自側 subscriber が返す経路であり、自側 publisher まで開けると
+        // 自分が送った PUBLISH を自分の応答で確立扱いにしてしまう。
+        // この拒否条件は handle_update_for_subscription の受理条件と対称である。
+        // PUBLISH 起点かどうかは購読を開始したメッセージ種別 (`Subscription::initiator`) で
+        // 判定する (`my_role` は自側が担う役割であり、単独では起点を表さない)。
+        // 外側の `is_initiator_self()` により、この条件が真のとき自側は publisher である。
+        let established_publish_origin = subscription.state == SubscriptionState::Established
+            && subscription.initiator == SubscriptionInitiator::Publisher;
+        if subscription.is_initiator_self() && !established_publish_origin {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "request_ok (subscription) can only be sent by responder",
+                "request_ok (subscription) can only be sent by responder-role or by the publisher-role of an established PUBLISH subscription",
             ));
         }
         // 末尾の LARGEST_OBJECT 保存判定に使う `my_role` を、match による更新前に
@@ -280,10 +295,23 @@ impl Session {
             .subscriptions
             .get(&request_id)
             .expect("locate_request guarantees key presence");
-        if !subscription.is_initiator_self() {
+        // draft §9.5 (REQUEST_UPDATE): REQUEST_UPDATE を送れるのは request の initiator と、
+        // PUBLISH 起点 subscription の subscriber である。REQUEST_OK を受理できるのは
+        // それを送れる側だからで、受理条件は send_update_for_subscription の送信条件と
+        // 対称にする。outstanding な REQUEST_UPDATE との対応付けまでは検証しない
+        // (subscription の REQUEST_OK は従来から対応付けを持たない)。
+        // 受理は Established に限る。Pending(Publisher) の REQUEST_OK は PUBLISH_OK として
+        // initiator である自側 publisher だけが受け、responder 側が受けると応答を送って
+        // いない購読を確立扱いにしてしまう。
+        // PUBLISH 起点かどうかは購読を開始したメッセージ種別 (`Subscription::initiator`) で
+        // 判定する (`my_role` は自側が担う役割であり、単独では起点を表さない)。
+        // 外側の `!is_initiator_self()` により、この条件が真のとき自側は subscriber である。
+        let established_publish_origin = subscription.state == SubscriptionState::Established
+            && subscription.initiator == SubscriptionInitiator::Publisher;
+        if !subscription.is_initiator_self() && !established_publish_origin {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "REQUEST_OK received on responder side",
+                "REQUEST_OK (subscription) received on responder side",
             );
             self.fail(err.clone());
             return Err(err);
@@ -356,9 +384,12 @@ impl Session {
                 update_subscription_expires_if_present(subscription, parameters, now_ms);
                 self.events.push_back(SessionEvent::RequestOkReceived {
                     request_id,
-                    request_kind: match subscription.my_role {
-                        TrackRole::Publisher => RequestKind::Publish,
-                        TrackRole::Subscriber => RequestKind::Subscribe,
+                    // draft §9.5 (REQUEST_UPDATE): REQUEST_UPDATE_OK は SUBSCRIBE 起点でも
+                    // PUBLISH 起点でも発火するため、自側が担う役割 (`my_role`) ではなく
+                    // 購読を開始したメッセージ種別 (`Subscription::initiator`) で判定する。
+                    request_kind: match subscription.initiator {
+                        SubscriptionInitiator::Subscriber => RequestKind::Subscribe,
+                        SubscriptionInitiator::Publisher => RequestKind::Publish,
                     },
                     parameters: parameters.clone(),
                 });

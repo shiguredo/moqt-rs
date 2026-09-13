@@ -204,14 +204,18 @@ pub enum SessionEvent {
     },
     /// peer からの REQUEST_OK を受信した (draft §9.3 (REQUEST_OK): PUBLISH_OK は REQUEST_OK に統一)
     ///
-    /// `request_kind` で context を判別する (Publish = 旧 PUBLISH_OK 相当)。
+    /// `request_kind` は購読を開始したメッセージ種別 (SUBSCRIBE 起点なら `Subscribe`、
+    /// PUBLISH 起点なら `Publish`) を表す。初回応答 (SUBSCRIBE_OK / PUBLISH_OK) と
+    /// REQUEST_UPDATE_OK はどちらも同じ `request_kind` になるため (SUBSCRIBE 起点なら
+    /// ともに `Subscribe`、PUBLISH 起点ならともに `Publish`)、両者は `request_kind` では
+    /// 区別できない。初回応答はその request で最初に受信する REQUEST_OK である。
     /// FORWARD は session 層で `Subscription::forward_state` に反映済み。
     /// application は `parameters` から `NEW_GROUP_REQUEST` / `AUTHORIZATION_TOKEN`
     /// 等を読み取る。
     RequestOkReceived {
         /// 対象 request の Request ID
         request_id: u64,
-        /// 応答対象の request 種別
+        /// 応答対象の request 種別 (subscription では購読を開始したメッセージ種別)
         request_kind: RequestKind,
         /// 受信したパラメータ
         parameters: MessageParameters,

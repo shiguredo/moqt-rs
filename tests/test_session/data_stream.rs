@@ -3605,7 +3605,7 @@ fn stop_sending_requires_forward_0_to_1_before_reopen() {
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 
-    // 停止エントリは Forward 0→1 の REQUEST_OK 適用まで残る。解除は responder 専用 API の
+    // 停止エントリは Forward 0→1 の REQUEST_OK 適用まで残る。解除は REQUEST_OK を送る
     // `send_ok_for_subscription` が行うため、ここでは受信のみで OK を送らない段階では
     // 再オープンできないことも確認する
     let mut forward_params = MessageParameters::new();
