@@ -1,7 +1,7 @@
 # 空 prefix の NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED で予約名前空間を広告できないようにする
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-session-namespace-suffix-advertisement
 - Polished: 2026-09-13
 
@@ -38,3 +38,16 @@ SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の応答で Application が予約名前�
 - 空 prefix の購読で suffix の先頭が `.session` / `.` の `send_namespace` / `send_namespace_done` / `send_publish_skipped` が `SESSION_PROTOCOL_VIOLATION` を返すこと
 - 非空 prefix の購読では同じ suffix が従来どおり送信できること (prefix の先頭フィールドが `.` / `.session` でない場合。full namespace が予約名前空間にならないため)
 - 回帰テストが追加され、`cargo test --workspace` が通ること
+
+## 解決方法
+
+`send_namespace` / `send_namespace_done` (`src/session/namespace/subscribe_namespace.rs`) と `send_publish_skipped` (`src/session/namespace/track_subscription.rs`) に、空 prefix の購読で予約名前空間を広告しないための検証を追加した。
+
+- `src/session/namespace.rs` に共有ヘルパ `advertises_reserved_namespace` (prefix が空かつ suffix の先頭フィールドが `.` / `.session` かを判定) と `require_advertisable_suffix`
+  (`SESSION_PROTOCOL_VIOLATION` を返す検証) を追加し、3 API で同じ検証を使う
+- 検証は役割・状態のガード直後、イベント発行 (`SendOnStream`) と `skipped_tracks` への記録より前に置き、拒否時に副作用を残さない
+- 3 API の doc に `# Errors` を追加し、予約名前空間の拒否条件と既存の失敗条件 (request id 不在 / publisher 役でない / Established でない) を明記した
+- 追加テスト: 空 prefix での 3 API の拒否 (エラーコードと理由文字列、複数フィールド形を含む)、非空 prefix での従来どおりの送信、REQUEST_UPDATE で prefix を空へ更新した後も拒否されること、
+  拒否された PUBLISH_SKIPPED が `skipped_tracks` に記録されず後続の PUBLISH を妨げないことを検証する
+- 受信側 (`handle_peer_namespace` / `handle_peer_publish_skipped`) の対称検証は設計方針どおり対象外とした
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通る
