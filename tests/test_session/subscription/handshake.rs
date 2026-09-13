@@ -852,3 +852,118 @@ fn publish_with_forward_sets_forward_state() {
         );
     }
 }
+
+/// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (SUBSCRIBE)
+///
+/// draft-ietf-moq-transport-21 は §2.4.2 / §6.5 の予約名前空間拒否と §9.20.9 (GROUP ORDER Parameter) /
+/// §9.20.19 (FORWARD Parameter) / §9.20.22 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
+/// §9.20.10 (LOCATION FILTER Parameter) の decode 失敗の優先順位を規定しない。宛先自体が存在しない
+/// 予約名前空間の拒否を優先する意図した選択であり、API 経路で手組みしたメッセージで観測できる。
+#[test]
+fn subscribe_reserved_namespace_precedes_parameter_range() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::Subscribe;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
+        PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER,
+    };
+    for reserved in [ns(&[b"."]), ns(&[b".session"])] {
+        let (_, mut server) = establish_pair();
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_GROUP_ORDER,
+            value: MessageParameterValue::Uint8(3), // 値域外 (0x1 / 0x2 以外)
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_INCLUDE_PROPERTIES,
+            value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1 以外)
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_FORWARD,
+            value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1 以外)
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+        });
+        server
+            .recv_request(ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                track_namespace: reserved,
+                track_name: b"cam".to_vec(),
+                parameters: params,
+            }))
+            .expect("拒否は Ok で返る");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと"
+        );
+        assert!(server.subscription(0).is_none());
+        let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+        assert!(fin, "拒否応答には FIN が付くこと");
+        match err_msg {
+            ControlMessage::RequestError(e) => assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST),
+            _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+        }
+    }
+}
+
+/// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (PUBLISH)
+///
+/// draft-ietf-moq-transport-21 は §2.4.2 / §6.5 の予約名前空間拒否と §9.20.9 (GROUP ORDER Parameter) /
+/// §9.20.19 (FORWARD Parameter) の値域 MUST、§8.3 (Key-Value-Pair Structure) の LOCATION_FILTER
+/// decode 失敗の優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択である。
+#[test]
+fn publish_reserved_namespace_precedes_parameter_range() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
+        PARAM_LOCATION_FILTER,
+    };
+    for (reserved, reason) in [
+        (ns(&[b"."]), "reserved single-period namespace"),
+        (ns(&[b".session"]), "session-level track does not exist"),
+    ] {
+        let (_, mut server) = establish_pair();
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_GROUP_ORDER,
+            value: MessageParameterValue::Uint8(3), // 値域外
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_FORWARD,
+            value: MessageParameterValue::Uint8(2), // 値域外
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+        });
+        server
+            .recv_request(ControlMessage::Publish(Publish {
+                request_id: 0,
+                track_namespace: reserved,
+                track_name: b"cam".to_vec(),
+                track_alias: 0,
+                parameters: params,
+                track_properties: TrackProperties::default(),
+            }))
+            .expect("拒否は Ok で返る");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと"
+        );
+        assert!(server.subscription(0).is_none());
+        let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+        assert!(fin, "拒否応答には FIN が付くこと");
+        match err_msg {
+            ControlMessage::RequestError(e) => {
+                assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+                assert_eq!(e.reason.as_str(), reason);
+            }
+            _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+        }
+    }
+}

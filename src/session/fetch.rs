@@ -574,23 +574,15 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
-        // draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.3.1 (Location Filters):
-        // Fetch range は LOCATION_FILTER パラメータで指定する。省略時と Length 0 は
-        // unfiltered (先頭から Largest Object まで) として扱う。
-        // 不正エンコーディングはデコード層で検証済みのためここでは到達しないが、
-        // 安全側にセッションを閉じる (SUBSCRIBE 受信経路と対称)。
-        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-        let filter = match fetch.parameters.location_filter_typed() {
-            Ok(filter) => filter,
-            Err(_) => {
-                let err =
-                    SessionError::new(SESSION_PROTOCOL_VIOLATION, "invalid fetch filter encoding");
-                self.fail(err.clone());
-                return Err(err);
-            }
-        };
         let track_ns = fetch.track_namespace;
         let track_name = fetch.track_name;
+        // draft-ietf-moq-transport-21 は値域 MUST (§9.20.10 (LOCATION FILTER Parameter) の
+        // StartGroup + EndGroupDelta 溢出や §9.20.9 (GROUP ORDER Parameter) 等) と
+        // 予約名前空間拒否の優先順位を規定しない。宛先自体が仕様上存在しない予約名前空間の拒否を
+        // LOCATION_FILTER の decode より先に行う意図した選択である (値域 MUST は wire 経路では
+        // decode 層がハンドラ到達前に発火するため、優先順位が観測されるのは API 経路で値域外の
+        // パラメータを手組みしたメッセージのみ (本ハンドラ自身は LOCATION_FILTER 以外の値を
+        // 解釈しない)。
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間の FETCH は拒否
         if track_ns.is_single_period() {
             self.emit_request_error(
@@ -614,6 +606,21 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
             return Ok(());
         }
+        // draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.3.1 (Location Filters):
+        // Fetch range は LOCATION_FILTER パラメータで指定する。省略時と Length 0 は
+        // unfiltered (先頭から Largest Object まで) として扱う。
+        // 不正エンコーディングは wire 経路ではデコード層が検証するため到達せず、API 経路で
+        // 手組みしたメッセージのみ到達する。安全側にセッションを閉じる (SUBSCRIBE 受信経路と対称)。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let filter = match fetch.parameters.location_filter_typed() {
+            Ok(filter) => filter,
+            Err(_) => {
+                let err =
+                    SessionError::new(SESSION_PROTOCOL_VIOLATION, "invalid fetch filter encoding");
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
         // draft-ietf-moq-transport-21 §9.11 (FETCH): オブジェクトが公開されていない
         // トラックへの FETCH は INVALID_RANGE。対象 subscription があり、Largest が
         // 一度も観測されていない場合が該当する。subscription 自体が無いときは受理する。

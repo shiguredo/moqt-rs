@@ -73,6 +73,8 @@
   - @voluntas
 - [FIX] 空 prefix の SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS で suffix の先頭が予約名前空間 (`.` / `.session`) の NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED を送信できないようにする
   - @voluntas
+- [FIX] 予約名前空間 (`.` / `.session`) へのリクエストは、パラメータ値域の MUST close より予約名前空間の拒否 (DOES_NOT_EXIST) を優先する。FETCH は LOCATION_FILTER の decode 失敗より先に拒否する
+  - @voluntas
 
 ### misc
 

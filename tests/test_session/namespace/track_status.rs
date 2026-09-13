@@ -746,3 +746,44 @@ fn track_status_ok_keeps_app_largest_object_without_publisher_track() {
         _ => panic!("REQUEST_OK が期待される"),
     }
 }
+
+/// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (TRACK_STATUS)
+///
+/// draft-ietf-moq-transport-21 は予約名前空間拒否 (§2.4.2 / §6.5) と値域 MUST (§9.20.22) の
+/// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択である。
+#[test]
+fn track_status_reserved_namespace_precedes_parameter_range() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::TrackStatus;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_INCLUDE_PROPERTIES,
+    };
+    for reserved in [ns(&[b"."]), ns(&[b".session"])] {
+        let (_, mut server) = establish_pair();
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_INCLUDE_PROPERTIES,
+            value: MessageParameterValue::Uint8(2), // 値域外 (0 / 1 以外)
+        });
+        server
+            .recv_request(ControlMessage::TrackStatus(TrackStatus {
+                request_id: 0,
+                track_namespace: reserved,
+                track_name: b"cam".to_vec(),
+                parameters: params,
+            }))
+            .expect("拒否は Ok で返る");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと"
+        );
+        assert!(server.track_status_request(0).is_none());
+        let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+        assert!(fin, "拒否応答には FIN が付くこと");
+        match err_msg {
+            ControlMessage::RequestError(e) => assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST),
+            _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+        }
+    }
+}

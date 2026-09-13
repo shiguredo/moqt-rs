@@ -235,6 +235,11 @@ impl Session {
         // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): REGISTER token は
         // session error でない限り MUST で保存する。名前空間チェック (REQUEST_ERROR) より前に処理する。
         self.apply_peer_message_auth_tokens(&msg.parameters)?;
+        // draft-ietf-moq-transport-21 は値域 MUST (§9.20.9 (GROUP ORDER Parameter) /
+        // §9.20.22 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
+        // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
+        // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
+        // 観測されるのは API 経路で手組みしたメッセージのみ)。
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE_TRACKS は拒否
         if msg.track_namespace_prefix.is_single_period() {
             self.emit_request_error(

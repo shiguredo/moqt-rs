@@ -594,3 +594,129 @@ fn send_fetch_with_invalid_group_order_returns_error_without_closing() {
     let (sent_rid, _) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
 }
+
+/// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (FETCH)
+///
+/// draft-ietf-moq-transport-21 は予約名前空間拒否 (§2.4.2 / §6.5) と値域 MUST (§9.20.9 / §9.20.22) の
+/// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択である。
+#[test]
+fn fetch_reserved_namespace_precedes_parameter_range() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER, PARAM_INCLUDE_PROPERTIES,
+    };
+    for reserved in [ns(&[b"."]), ns(&[b".session"])] {
+        let (_, mut server) = establish_pair();
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_GROUP_ORDER,
+            value: MessageParameterValue::Uint8(3), // 値域外
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_INCLUDE_PROPERTIES,
+            value: MessageParameterValue::Uint8(2), // 値域外
+        });
+        server
+            .recv_request(ControlMessage::Fetch(WireFetch {
+                request_id: 0,
+                track_namespace: reserved,
+                track_name: b"cam".to_vec(),
+                parameters: params,
+            }))
+            .expect("拒否は Ok で返る");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと"
+        );
+        assert!(server.fetch(0).is_none());
+        let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+        assert!(fin, "拒否応答には FIN が付くこと");
+        match err_msg {
+            ControlMessage::RequestError(e) => assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST),
+            _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+        }
+    }
+}
+
+/// `.` / `.session` の拒否は LOCATION_FILTER の decode 失敗 (MUST close) より優先される (FETCH)
+///
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は壊れた値を
+/// KEY_VALUE_FORMATTING_ERROR で閉じることを MUST とするが、本実装はセッション層で
+/// PROTOCOL_VIOLATION に畳む (§9.20.10 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta
+/// 溢出と同じ扱い)。同一メッセージが予約名前空間にも該当する場合、
+/// draft は優先順位を規定しないが予約名前空間の拒否を優先する意図した選択である (wire 経路では
+/// decode 層が先に拒否するため、この優先順位が観測されるのは API 経路で手組みしたメッセージのみ)。
+#[test]
+fn fetch_reserved_namespace_precedes_invalid_location_filter() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    for reserved in [ns(&[b"."]), ns(&[b".session"])] {
+        let (_, mut server) = establish_pair();
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+        });
+        server
+            .recv_request(ControlMessage::Fetch(WireFetch {
+                request_id: 0,
+                track_namespace: reserved,
+                track_name: b"cam".to_vec(),
+                parameters: params,
+            }))
+            .expect("拒否は Ok で返る");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと"
+        );
+        assert!(server.fetch(0).is_none());
+        let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+        assert!(fin, "拒否応答には FIN が付くこと");
+        match err_msg {
+            ControlMessage::RequestError(e) => assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST),
+            _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+        }
+    }
+}
+
+/// 予約名前空間でない FETCH の壊れた LOCATION_FILTER は従来どおりセッションを閉じる
+///
+/// 予約名前空間優先の判断で、非予約名前空間の MUST close が落ちていないことを固定する。
+#[test]
+fn fetch_invalid_location_filter_with_regular_namespace_closes_session() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    let (_, mut server) = establish_pair();
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+    });
+    let err = server
+        .recv_request(ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: params,
+        }))
+        .expect_err("壊れた LOCATION_FILTER は PROTOCOL_VIOLATION になる");
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    match drain_until_close(&mut server) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+    }
+}
