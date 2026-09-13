@@ -11,9 +11,45 @@ mod track_subscription;
 use alloc::collections::VecDeque;
 use hashbrown::HashMap;
 
+use crate::error::SESSION_PROTOCOL_VIOLATION;
 use crate::message::common::TrackNamespace;
 
-use super::types::{RequestStreamEnd, TerminationReason};
+use super::types::{RequestStreamEnd, SessionError, TerminationReason};
+
+/// 空 prefix の購読で suffix が予約名前空間を広告するかを判定する
+///
+/// draft-ietf-moq-transport-21 §6.5 (Session-Level Tracks and Namespaces) の
+/// "The Application MUST NOT publish tracks or namespaces whose first field is .session." と
+/// §2.4.2 (Reserved Namespaces) の single period `.` の MUST NOT を満たすために使う。
+/// publisher 役の購読の prefix を対象とする。full namespace は購読の prefix と suffix の
+/// 連結なので、prefix が空のときだけ suffix の
+/// 先頭フィールドが full namespace の先頭になる。prefix が非空の場合は購読の確立時と
+/// REQUEST_UPDATE の prefix 更新時に予約名前空間が拒否されているため、suffix 側の追加検証は
+/// 不要である。
+pub(super) fn advertises_reserved_namespace(
+    prefix: &TrackNamespace,
+    suffix: &TrackNamespace,
+) -> bool {
+    prefix.fields().is_empty() && (suffix.is_single_period() || suffix.is_session_level())
+}
+
+/// 予約名前空間の広告をローカル拒否する
+///
+/// `send_namespace` / `send_namespace_done` / `send_publish_skipped` の共通検証。
+/// publisher 役の購読の prefix と送信する suffix を受け取り、予約名前空間の広告になる場合は
+/// `SESSION_PROTOCOL_VIOLATION` を返す。
+pub(super) fn require_advertisable_suffix(
+    prefix: &TrackNamespace,
+    suffix: &TrackNamespace,
+) -> Result<(), SessionError> {
+    if advertises_reserved_namespace(prefix, suffix) {
+        return Err(SessionError::new(
+            SESSION_PROTOCOL_VIOLATION,
+            "application cannot advertise reserved namespace with empty subscription prefix",
+        ));
+    }
+    Ok(())
+}
 
 /// `RequestStreamEnd` を素直な `TerminationReason` に変換する
 pub(super) fn terminationreason_from_end(end: RequestStreamEnd) -> TerminationReason {

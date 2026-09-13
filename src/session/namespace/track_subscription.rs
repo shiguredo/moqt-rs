@@ -18,7 +18,7 @@ use super::super::types::{
 };
 use super::{
     effective_prefix, pop_pending_prefix_update, prefix_overlaps, push_pending_prefix_update,
-    terminationreason_from_end,
+    require_advertisable_suffix, terminationreason_from_end,
 };
 
 impl Session {
@@ -184,6 +184,13 @@ impl Session {
     }
 
     /// PUBLISH_SKIPPED を送信する (draft-ietf-moq-transport-21 §9.19 (PUBLISH_SKIPPED): SUBSCRIBE_TRACKS 専用)
+    ///
+    /// # Errors
+    ///
+    /// 空 prefix の購読で suffix の先頭フィールドが予約名前空間 (`.` / `.session`) の場合は
+    /// `SESSION_PROTOCOL_VIOLATION` を返す (draft-ietf-moq-transport-21 §6.5 / §2.4.2)。
+    /// request id が存在しない場合、publisher 役でない場合、セッションが Established でない
+    /// 場合も同じコードを返す。
     pub fn send_publish_skipped(
         &mut self,
         request_id: u64,
@@ -191,6 +198,12 @@ impl Session {
         track_name: Vec<u8>,
     ) -> Result<(), SessionError> {
         self.require_track_subscription_publisher(request_id)?;
+        let prefix = &self
+            .track_subscriptions
+            .get(&request_id)
+            .expect("require_track_subscription_publisher guarantees key presence")
+            .prefix;
+        require_advertisable_suffix(prefix, &suffix)?;
         // draft-ietf-moq-transport-21 §9.19 (PUBLISH_SKIPPED): 送信済みの Track を記録し、
         // 後続の同一 Track PUBLISH を禁止する (MUST NOT)
         if let Some(ts) = self.track_subscriptions.get_mut(&request_id) {

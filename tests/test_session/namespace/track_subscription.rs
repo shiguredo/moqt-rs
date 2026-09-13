@@ -2600,3 +2600,85 @@ fn subscribe_tracks_update_prefix_reserved_rejected_locally() {
         "有効な prefix 更新が REQUEST_UPDATE として送信されること"
     );
 }
+
+// ─── 空 prefix の購読で予約名前空間を広告できない (§6.5 (Session-Level Tracks and Namespaces) / §2.4.2 (Reserved Namespaces)) ─────
+
+/// 空 prefix の SUBSCRIBE_TRACKS では suffix の先頭が `.session` / `.` の PUBLISH_SKIPPED を送れない
+#[test]
+fn send_publish_skipped_reserved_suffix_with_empty_prefix_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (_, mut server, rid) = establish_subscribe_tracks_with(ns(&[]), MessageParameters::new());
+
+    for reserved in [
+        ns(&[b".session"]),
+        ns(&[b".session", b"ext"]),
+        ns(&[b"."]),
+        ns(&[b".", b"x"]),
+    ] {
+        let err = server
+            .send_publish_skipped(rid, reserved, b"track".to_vec())
+            .expect_err("空 prefix では予約名前空間を広告できない");
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.reason,
+            "application cannot advertise reserved namespace with empty subscription prefix"
+        );
+    }
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された PUBLISH_SKIPPED は送信されないこと"
+        );
+    }
+    // 拒否した PUBLISH_SKIPPED を送信済みとして記録すると、後続の正当な PUBLISH を
+    // ローカルで拒否してしまう (draft-ietf-moq-transport-21 §4.1 (Subscribing to Namespaces) の
+    // "The Publisher MUST NOT send a PUBLISH for a Track for a given SUBSCRIBE_TRACKS after
+    // PUBLISH_SKIPPED has been sent" を、送っていない PUBLISH_SKIPPED に適用する形になる)
+    assert!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .skipped_tracks
+            .is_empty(),
+        "拒否された PUBLISH_SKIPPED は skipped_tracks に登録されないこと"
+    );
+    // 記録されていないので、同じ Track への PUBLISH はローカル拒否されない
+    server
+        .send_publish(
+            ns(&[b"live"]),
+            b"track".to_vec(),
+            7,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("拒否された PUBLISH_SKIPPED は正当な PUBLISH を妨げないこと");
+    let _ = take_send_request(&mut server);
+
+    server
+        .send_publish_skipped(rid, ns(&[b"live"]), b"track".to_vec())
+        .expect("予約名前空間でない suffix は送信できること");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(matches!(msg, ControlMessage::PublishSkipped(_)));
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .skipped_tracks
+            .len(),
+        1,
+        "送信した PUBLISH_SKIPPED だけが記録されること"
+    );
+}
+
+/// prefix が非空なら suffix の先頭が予約名前空間でも PUBLISH_SKIPPED を送信できる
+#[test]
+fn send_publish_skipped_reserved_suffix_with_non_empty_prefix_accepted() {
+    let (_, mut server, rid) =
+        establish_subscribe_tracks_with(ns(&[b"example"]), MessageParameters::new());
+
+    server
+        .send_publish_skipped(rid, ns(&[b".session"]), b"track".to_vec())
+        .expect("prefix が非空なら full namespace は予約名前空間にならない");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(matches!(msg, ControlMessage::PublishSkipped(_)));
+}

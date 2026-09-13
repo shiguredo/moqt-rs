@@ -19,7 +19,7 @@ use super::super::types::{
 };
 use super::{
     effective_prefix, pop_pending_prefix_update, prefix_overlaps, push_pending_prefix_update,
-    terminationreason_from_end,
+    require_advertisable_suffix, terminationreason_from_end,
 };
 
 /// prefix と suffix から full Track Namespace のフィールド列を作る
@@ -185,12 +185,26 @@ impl Session {
     }
 
     /// NAMESPACE を送信する (SUBSCRIBE_NAMESPACE 応答 stream、publisher 側)
+    ///
+    /// # Errors
+    ///
+    /// 空 prefix の購読で suffix の先頭フィールドが予約名前空間 (`.` / `.session`) の場合は
+    /// `SESSION_PROTOCOL_VIOLATION` を返す (draft-ietf-moq-transport-21 §6.5 / §2.4.2)。
+    /// request id が存在しない場合、publisher 役でない場合、セッションが Established でない
+    /// 場合も同じコードを返す。
     pub fn send_namespace(
         &mut self,
         request_id: u64,
         suffix: TrackNamespace,
     ) -> Result<(), SessionError> {
         self.require_namespace_subscription_publisher(request_id)?;
+        let prefix = &self
+            .namespaces
+            .subscriptions
+            .get(&request_id)
+            .expect("require_namespace_subscription_publisher guarantees key presence")
+            .prefix;
+        require_advertisable_suffix(prefix, &suffix)?;
         let msg = ControlMessage::Namespace(Namespace {
             track_namespace_suffix: suffix,
         });
@@ -203,12 +217,26 @@ impl Session {
     }
 
     /// NAMESPACE_DONE を送信する
+    ///
+    /// # Errors
+    ///
+    /// 空 prefix の購読で suffix の先頭フィールドが予約名前空間 (`.` / `.session`) の場合は
+    /// `SESSION_PROTOCOL_VIOLATION` を返す (draft-ietf-moq-transport-21 §6.5 / §2.4.2)。
+    /// request id が存在しない場合、publisher 役でない場合、セッションが Established でない
+    /// 場合も同じコードを返す。
     pub fn send_namespace_done(
         &mut self,
         request_id: u64,
         suffix: TrackNamespace,
     ) -> Result<(), SessionError> {
         self.require_namespace_subscription_publisher(request_id)?;
+        let prefix = &self
+            .namespaces
+            .subscriptions
+            .get(&request_id)
+            .expect("require_namespace_subscription_publisher guarantees key presence")
+            .prefix;
+        require_advertisable_suffix(prefix, &suffix)?;
         let msg = ControlMessage::NamespaceDone(NamespaceDone {
             track_namespace_suffix: suffix,
         });

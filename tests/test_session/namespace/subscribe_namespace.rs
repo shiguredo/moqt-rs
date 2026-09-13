@@ -2189,3 +2189,154 @@ fn subscribe_namespace_update_prefix_reserved_rejected_locally() {
         "有効な prefix 更新が REQUEST_UPDATE として送信されること"
     );
 }
+
+// ─── 空 prefix の購読で予約名前空間を広告できない (§6.5 (Session-Level Tracks and Namespaces) / §2.4.2 (Reserved Namespaces)) ─────
+
+/// 空 prefix の SUBSCRIBE_NAMESPACE では suffix の先頭が `.session` / `.` の NAMESPACE を送れない
+///
+/// full namespace は prefix と suffix の連結なので、prefix が空のときは suffix が先頭になる。
+#[test]
+fn send_namespace_reserved_suffix_with_empty_prefix_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (_, mut server, rid) = establish_subscribe_namespace_with(ns(&[]));
+
+    for reserved in [
+        ns(&[b".session"]),
+        ns(&[b".session", b"ext"]),
+        ns(&[b"."]),
+        ns(&[b".", b"x"]),
+    ] {
+        let err = server
+            .send_namespace(rid, reserved)
+            .expect_err("空 prefix では予約名前空間を広告できない");
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.reason,
+            "application cannot advertise reserved namespace with empty subscription prefix"
+        );
+    }
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された NAMESPACE は送信されないこと"
+        );
+    }
+
+    // 予約名前空間でない suffix は従来どおり送信できる
+    // (先頭以外に `.session` を含む場合も full namespace の先頭ではないため送信できる)
+    for suffix in [ns(&[b"live"]), ns(&[b"a", b".session"])] {
+        server
+            .send_namespace(rid, suffix)
+            .expect("予約名前空間でない suffix は送信できること");
+        let (_, msg) = take_send_on_stream(&mut server);
+        assert!(matches!(msg, ControlMessage::Namespace(_)));
+    }
+}
+
+/// REQUEST_UPDATE で prefix を空へ更新した後も予約名前空間の suffix を広告できない
+///
+/// prefix は確立時だけでなく更新でも空になりうるため、更新経路でもガードが有効であることを固定する。
+#[test]
+fn send_namespace_reserved_suffix_after_prefix_cleared_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let (_, mut server, rid) = establish_subscribe_namespace_with(ns(&[b"example"]));
+
+    // 送信 API のローカル検査を通さずに prefix を空へ更新させる
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[])),
+    });
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: rid,
+                parameters: params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        server
+            .namespace_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix
+            .fields()
+            .is_empty(),
+        "prefix が空へ更新されていること"
+    );
+
+    let err = server
+        .send_namespace(rid, ns(&[b".session"]))
+        .expect_err("空 prefix では予約名前空間を広告できない");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}
+
+/// 空 prefix の SUBSCRIBE_NAMESPACE では suffix の先頭が `.session` / `.` の NAMESPACE_DONE を送れない
+#[test]
+fn send_namespace_done_reserved_suffix_with_empty_prefix_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (_, mut server, rid) = establish_subscribe_namespace_with(ns(&[]));
+
+    // draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE): 対応する NAMESPACE を先に送り、
+    // 順序違反ではない状態で予約名前空間の検証だけを確認する
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let _ = take_send_on_stream(&mut server);
+
+    for reserved in [
+        ns(&[b".session"]),
+        ns(&[b".session", b"ext"]),
+        ns(&[b"."]),
+        ns(&[b".", b"x"]),
+    ] {
+        let err = server
+            .send_namespace_done(rid, reserved)
+            .expect_err("空 prefix では予約名前空間を広告できない");
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.reason,
+            "application cannot advertise reserved namespace with empty subscription prefix"
+        );
+    }
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された NAMESPACE_DONE は送信されないこと"
+        );
+    }
+
+    server
+        .send_namespace(rid, ns(&[b"live"]))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let _ = take_send_on_stream(&mut server);
+    server
+        .send_namespace_done(rid, ns(&[b"live"]))
+        .expect("予約名前空間でない suffix は送信できること");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(matches!(msg, ControlMessage::NamespaceDone(_)));
+}
+
+/// prefix が非空なら suffix の先頭が予約名前空間でも送信できる
+///
+/// full namespace の先頭は prefix の先頭フィールドであり、予約名前空間にはならない。
+#[test]
+fn send_namespace_reserved_suffix_with_non_empty_prefix_accepted() {
+    let (_, mut server, rid) = establish_subscribe_namespace_with(ns(&[b"example"]));
+
+    server
+        .send_namespace(rid, ns(&[b".session"]))
+        .expect("prefix が非空なら full namespace は予約名前空間にならない");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(matches!(msg, ControlMessage::Namespace(_)));
+
+    server
+        .send_namespace_done(rid, ns(&[b"."]))
+        .expect("prefix が非空なら full namespace は予約名前空間にならない");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(matches!(msg, ControlMessage::NamespaceDone(_)));
+}
