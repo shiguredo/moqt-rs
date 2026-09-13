@@ -1,7 +1,7 @@
 # REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX 更新で予約名前空間を再検証する
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-request-update-prefix-reserved-namespace
 - Polished: 2026-09-13
 
@@ -46,3 +46,18 @@ REQUEST_UPDATE で `TRACK_NAMESPACE_PREFIX` を変更したとき、予約名前
 - 拒否時に REQUEST_ERROR が送られ、セッションが閉じないこと
 - 送信側の更新 API (`send_request_update` 経由) が `.` / `.session` への prefix 更新を拒否すること (初回送信 API は対象外)
 - 受信側・送信側の回帰テストが `tests/test_session/namespace/` に追加され、`cargo test --workspace` が通ること
+
+## 解決方法
+
+`TRACK_NAMESPACE_PREFIX` を更新する REQUEST_UPDATE の受信経路と送信経路の両方に、初回購読と同じ予約名前空間 (`.` / `.session`) の検証を追加した。判定は `TrackNamespace::is_single_period` / `is_session_level`
+(最初の名前空間フィールドのみを見る) を使う。
+
+- 受信側 (`handle_update_for_namespace_subscription` / `handle_update_for_track_subscription`): role / state 検証の直後、prefix overlap 検証と FORWARD 値域検証より前に予約名前空間を検証し、
+  `REQUEST_DOES_NOT_EXIST` の REQUEST_ERROR を FIN 付きで返す。prefix と subscription state は変更せず、`RequestUpdateReceived` も発行しない。FORWARD の値域違反 (MUST close) と同時に成立する場合は予約名前空間の
+  拒否を優先し、セッションを閉じない
+- 送信側 (`send_update_for_namespace_subscription` / `send_update_for_track_subscription`): 変更判定と overlap 検査より前にローカル検証を追加し、`SESSION_PROTOCOL_VIOLATION` を返して REQUEST_UPDATE を送信しない。
+  確定待ち prefix キューにも積まないため、拒否後の有効な更新はそのまま送信できる
+- 初回の送信 API (`send_subscribe_namespace` / `send_subscribe_tracks`) は設計方針どおり変更していない
+- 追加テスト: `tests/test_session/namespace/subscribe_namespace.rs` と `tests/test_session/namespace/track_subscription.rs` に、`.session` / `.` の受信拒否 (REQUEST_ERROR のコード・理由・FIN、prefix と subscription state の
+  不変、セッション非クローズ、Application へ渡さないこと)、送信側のローカル拒否 (`.` / `.session` と複数フィールド形)、予約名前空間の拒否が FORWARD 値域検証より優先されることを検証するテストを追加した
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通る
