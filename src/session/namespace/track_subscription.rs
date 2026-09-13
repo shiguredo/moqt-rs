@@ -686,6 +686,25 @@ impl Session {
         // 比較対象は確定待ちを含めた実効 prefix とする。
         let own_effective =
             effective_prefix(&self.pending_prefix_updates, request_id, &entry.prefix);
+        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces):
+        // 確立後の prefix 更新でも初回購読時の受信検証と同じ条件で予約名前空間をローカル拒否する。
+        // 判定は最初の名前空間フィールドのみを見る。そのため `[".", "x"]` のような複数フィールド形も
+        // 拒否対象になる。
+        // 現在の prefix と同一の値でも検査するため、変更判定より前に置く。
+        if let Some(new_prefix) = parameters.track_namespace_prefix() {
+            if new_prefix.is_single_period() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "application cannot use single-period reserved namespace",
+                ));
+            }
+            if new_prefix.is_session_level() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "application cannot use .session reserved namespace",
+                ));
+            }
+        }
         let pending_prefix = if let Some(new_prefix) = parameters.track_namespace_prefix()
             && *new_prefix != own_effective
         {
@@ -739,6 +758,28 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces):
+        // 確立後の prefix 更新でも初回の SUBSCRIBE_TRACKS と同じ予約名前空間を再検証する。
+        // 判定は最初の名前空間フィールドのみを見る。FORWARD の値域検証 (MUST close) より先に
+        // 判定し、予約名前空間の拒否を優先する。
+        if let Some(new_prefix) = parameters.track_namespace_prefix() {
+            if new_prefix.is_single_period() {
+                self.emit_request_error(
+                    request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    "reserved single-period namespace",
+                );
+                return Ok(());
+            }
+            if new_prefix.is_session_level() {
+                self.emit_request_error(
+                    request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    "session-level track does not exist",
+                );
+                return Ok(());
+            }
         }
         // draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter): SUBSCRIBE_TRACKS の
         // REQUEST_UPDATE で FORWARD を更新する。将来マッチする subscription の

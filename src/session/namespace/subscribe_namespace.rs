@@ -515,6 +515,25 @@ impl Session {
         // 比較対象は確定待ちを含めた実効 prefix とする。
         let own_effective =
             effective_prefix(&self.pending_prefix_updates, request_id, &entry.prefix);
+        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces):
+        // 確立後の prefix 更新でも初回購読時の受信検証と同じ条件で予約名前空間をローカル拒否する。
+        // 判定は最初の名前空間フィールドのみを見る。そのため `[".", "x"]` のような複数フィールド形も
+        // 拒否対象になる。
+        // 現在の prefix と同一の値でも検査するため、変更判定より前に置く。
+        if let Some(new_prefix) = parameters.track_namespace_prefix() {
+            if new_prefix.is_single_period() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "application cannot use single-period reserved namespace",
+                ));
+            }
+            if new_prefix.is_session_level() {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "application cannot use .session reserved namespace",
+                ));
+            }
+        }
         let pending_prefix = if let Some(new_prefix) = parameters.track_namespace_prefix()
             && *new_prefix != own_effective
         {
@@ -569,6 +588,28 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces):
+        // 確立後の prefix 更新でも初回の SUBSCRIBE_NAMESPACE と同じ予約名前空間を再検証し、
+        // 初回拒否を更新経路で迂回できないようにする。判定は最初の名前空間フィールドのみを見る。
+        // overlap より先に判定する。
+        if let Some(new_prefix) = parameters.track_namespace_prefix() {
+            if new_prefix.is_single_period() {
+                self.emit_request_error(
+                    request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    "reserved single-period namespace",
+                );
+                return Ok(());
+            }
+            if new_prefix.is_session_level() {
+                self.emit_request_error(
+                    request_id,
+                    REQUEST_DOES_NOT_EXIST,
+                    "session-level namespace does not exist",
+                );
+                return Ok(());
+            }
         }
         // draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter): TRACK_NAMESPACE_PREFIX パラメータで prefix を更新
         if let Some(new_prefix) = parameters.track_namespace_prefix()

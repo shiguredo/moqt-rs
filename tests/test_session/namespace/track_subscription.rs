@@ -2317,3 +2317,286 @@ fn subscribe_tracks_terminated_subscription_does_not_block_overlap() {
         "Terminated 購読を無視して新 prefix が適用されること"
     );
 }
+
+// ─── REQUEST_UPDATE の予約名前空間の再検証とローカル拒否 (§2.4.2 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces)) ─────
+
+/// 確立後の REQUEST_UPDATE で single period `.` 予約名前空間へ prefix を変更できない
+///
+/// 初回の SUBSCRIBE_TRACKS と同じ条件を更新経路でも検証し、DOES_NOT_EXIST の
+/// REQUEST_ERROR を FIN 付きで返す。prefix と subscription state は変わらず、
+/// セッションも閉じない。
+#[test]
+fn subscribe_tracks_update_prefix_single_period_rejected() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::TrackSubscriptionState;
+    let old_prefix = ns(&[b"example"]);
+    let (_client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"."])),
+    });
+    // 送信 API は予約名前空間をローカル拒否するため、受信側の検証は wire を経由せず
+    // メッセージを直接組み立てて注入する
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: rid,
+                parameters: params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): 失敗した REQUEST_UPDATE への
+    // 応答は FIN 付きで送る
+    let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "拒否応答には FIN が付くこと");
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+            assert_eq!(e.reason.as_str(), "reserved single-period namespace");
+        }
+        _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+    }
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        TrackSubscriptionState::Established,
+        "拒否時に subscription state を変えないこと"
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "拒否してもセッションを閉じないこと"
+    );
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::RequestUpdateReceived { .. }),
+            "拒否した REQUEST_UPDATE を Application へ渡さないこと"
+        );
+    }
+}
+
+/// 確立後の REQUEST_UPDATE で `.session` 予約名前空間へ prefix を変更できない
+///
+/// 初回の SUBSCRIBE_TRACKS と同じ条件を更新経路でも検証し、DOES_NOT_EXIST の
+/// REQUEST_ERROR を FIN 付きで返す。prefix と subscription state は変わらず、
+/// セッションも閉じない。
+#[test]
+fn subscribe_tracks_update_prefix_session_level_rejected() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    use shiguredo_moqt::session::types::TrackSubscriptionState;
+    let old_prefix = ns(&[b"example"]);
+    let (_client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b".session"])),
+    });
+    // 送信 API は予約名前空間をローカル拒否するため、受信側の検証は wire を経由せず
+    // メッセージを直接組み立てて注入する
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: rid,
+                parameters: params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): 失敗した REQUEST_UPDATE への
+    // 応答は FIN 付きで送る
+    let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "拒否応答には FIN が付くこと");
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+            assert_eq!(e.reason.as_str(), "session-level track does not exist");
+        }
+        _ => panic!("DOES_NOT_EXIST の RequestError が期待される"),
+    }
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        TrackSubscriptionState::Established,
+        "拒否時に subscription state を変えないこと"
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "拒否してもセッションを閉じないこと"
+    );
+    while let Some(ev) = server.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::RequestUpdateReceived { .. }),
+            "拒否した REQUEST_UPDATE を Application へ渡さないこと"
+        );
+    }
+}
+
+/// 予約名前空間への prefix 更新は FORWARD の値域違反 (MUST close) より優先して拒否される
+///
+/// 同一 REQUEST_UPDATE が「予約名前空間の拒否 (REQUEST_ERROR)」と「FORWARD 値域外
+/// (MUST close)」の両方に該当する場合、予約名前空間の検証を先に行い、セッションを
+/// 閉じずに DOES_NOT_EXIST の REQUEST_ERROR を返す。
+#[test]
+fn subscribe_tracks_update_reserved_prefix_precedes_forward_validation() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let (_client, mut server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"."])),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(2),
+    });
+    // 送信 API は予約名前空間をローカル拒否するため、受信側の検証は wire を経由せず
+    // メッセージを直接組み立てて注入する
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: rid,
+                parameters: params,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(fin, "拒否応答には FIN が付くこと");
+    match err_msg {
+        ControlMessage::RequestError(e) => {
+            assert_eq!(e.error_code, REQUEST_DOES_NOT_EXIST);
+            assert_eq!(e.reason.as_str(), "reserved single-period namespace");
+        }
+        _ => panic!("予約名前空間の拒否が FORWARD の値域検証より優先されること"),
+    }
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "予約名前空間の拒否ではセッションを閉じないこと"
+    );
+    assert_eq!(
+        server
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+}
+
+/// 送信側は `.` / `.session` への prefix 更新をローカルで拒否する
+///
+/// 受信側の初回検証と同じ条件 (`.` / `.session`) を更新経路でも検証し、SESSION_PROTOCOL_VIOLATION で
+/// 送信せずに拒否し、理由文字列も固定する。REQUEST_UPDATE は送信されず prefix も変わらない。
+#[test]
+fn subscribe_tracks_update_prefix_reserved_rejected_locally() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_TRACK_NAMESPACE_PREFIX,
+    };
+    let old_prefix = ns(&[b"example"]);
+    let (mut client, _server, rid) =
+        establish_subscribe_tracks_with(old_prefix.clone(), MessageParameters::new());
+
+    // 判定は「最初のフィールド」基準なので、後続フィールドの有無で結果が変わらないことも見る
+    for (reserved, reason) in [
+        (
+            ns(&[b"."]),
+            "application cannot use single-period reserved namespace",
+        ),
+        (
+            ns(&[b".", b"x"]),
+            "application cannot use single-period reserved namespace",
+        ),
+        (
+            ns(&[b".session"]),
+            "application cannot use .session reserved namespace",
+        ),
+        (
+            ns(&[b".session", b"ext"]),
+            "application cannot use .session reserved namespace",
+        ),
+    ] {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+            value: MessageParameterValue::TrackNamespacePrefix(reserved),
+        });
+        let err = client
+            .send_request_update(rid, params)
+            .expect_err("予約名前空間への prefix 更新はローカルで拒否される");
+        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(err.reason, reason);
+    }
+    while let Some(ev) = client.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された REQUEST_UPDATE は送信されないこと"
+        );
+    }
+    assert_eq!(
+        client
+            .track_subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        old_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+
+    // 拒否は確定待ちキューを汚染しないため、その後の有効な prefix 更新は送信できる
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"ok"])),
+    });
+    client
+        .send_request_update(rid, ok_params)
+        .expect("拒否後も有効な prefix 更新は送信できること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    assert!(
+        matches!(upd_msg, ControlMessage::RequestUpdate(_)),
+        "有効な prefix 更新が REQUEST_UPDATE として送信されること"
+    );
+}

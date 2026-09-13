@@ -69,6 +69,8 @@
   - @voluntas
 - [FIX] moqt-subscriber の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
   - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で TRACK_NAMESPACE_PREFIX を予約名前空間 (`.` / `.session`) へ更新できないようにし、初回拒否を更新経路で迂回できないようにする
+  - @voluntas
 
 ### misc
 
