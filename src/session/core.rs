@@ -493,7 +493,7 @@ impl Session {
         validate_setup_role_transport(&options, role, transport)?;
         validate_setup_uri_format(&options)?;
 
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): 自側 SETUP 内の AUTHORIZATION_TOKEN の alias 重複のみ事前検出する。
+        // draft §8.9 (Authorization Token Compression): 自側 SETUP 内の AUTHORIZATION_TOKEN の alias 重複のみ事前検出する。
         // サイズ判定 (MAX_AUTH_TOKEN_CACHE_SIZE) は受信側の上限に従うため、自側が送った
         // REGISTER が peer の cache に実際収まるかは peer SETUP 受信時まで確定しない
         // (draft §9.1.4 (AUTHORIZATION TOKEN) 最終段落)。自側 cache 自体は保持しない
@@ -646,24 +646,24 @@ impl Session {
             .unwrap_or(0)
     }
 
-    /// 制御メッセージ応答待ちタイムアウト (ms) を取得する (draft-ietf-moq-transport-21 §6.6 (Termination))
+    /// 制御メッセージ応答待ちタイムアウト (ms) を取得する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))
     pub fn control_message_timeout_ms(&self) -> Option<u64> {
         self.timing.control_message_timeout_ms
     }
 
-    /// 制御メッセージ応答待ちタイムアウト (ms) を設定する (draft-ietf-moq-transport-21 §6.6 (Termination))
+    /// 制御メッセージ応答待ちタイムアウト (ms) を設定する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))
     ///
     /// `None` で無効化する。設定変更後に既に開始済みの deadline は影響を受けない。
     pub fn set_control_message_timeout_ms(&mut self, timeout_ms: Option<u64>) {
         self.timing.control_message_timeout_ms = timeout_ms;
     }
 
-    /// Data Stream タイムアウト (ms) を取得する (draft-ietf-moq-transport-21 §6.6 (Termination))
+    /// Data Stream タイムアウト (ms) を取得する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))
     pub fn data_stream_timeout_ms(&self) -> Option<u64> {
         self.timing.data_stream_timeout_ms
     }
 
-    /// Data Stream タイムアウト (ms) を設定する (draft-ietf-moq-transport-21 §6.6 (Termination))
+    /// Data Stream タイムアウト (ms) を設定する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))
     ///
     /// `None` で無効化する。設定変更後に既に記録済みの activity 時刻は影響を受けない。
     pub fn set_data_stream_timeout_ms(&mut self, timeout_ms: Option<u64>) {
@@ -829,9 +829,9 @@ impl Session {
     ///
     /// GOAWAY 拒否経路では REQUEST_ERROR を発行する前に、当該 request のパラメータに
     /// 含まれる AUTHORIZATION_TOKEN の **REGISTER のみ** を `peer_token_cache` に反映させる
-    /// (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
-    /// "The receiver of a message carrying an AUTHORIZATION TOKEN with Alias Type REGISTER
-    /// that does not result in a Session error MUST register the Token Alias, in the token
+    /// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
+    /// "The receiver of a message carrying an Authorization Token with Alias Type REGISTER
+    /// that does not result in a Session error MUST register the Token Alias in the token
     /// cache, even if the message fails for other reasons, including Unauthorized." (MUST))。
     /// `REQUEST_GOING_AWAY` は request error であって session error ではないため、
     /// REGISTER の MUST が適用される。DELETE / USE_ALIAS / USE_VALUE は「失敗した request の
@@ -868,7 +868,7 @@ impl Session {
         // I/O 層が閉じる (draft §6.4.2.3 の SHOULD)。
         // 拒否済み id の記録は `emit_request_error` が共通経路で行う。
         if self.goaway.local_sent {
-            // draft §9.20.3 の REGISTER MUST を GOING_AWAY より先に適用する。
+            // draft §8.9 (Authorization Token Compression) の REGISTER MUST を GOING_AWAY より先に適用する。
             // MUST の対象は REGISTER のみ (DELETE / USE_ALIAS / USE_VALUE は failed request の
             // パラメータとして触らない)。REGISTER 適用中に session error が発生した場合は
             // session error 優先で Err を返し、REQUEST_ERROR は発行しない。
@@ -1066,7 +1066,7 @@ impl Session {
             ControlMessage::NamespaceDone(m) => self.handle_peer_namespace_done(request_id, m),
             ControlMessage::Publish(_) => {
                 // draft-ietf-moq-transport-21 §9 Table 5: PUBLISH (0x1D) は Request, First。
-                // "Messages marked 'First' MUST be the first message on a new request stream."
+                // Messages marked "First" MUST be the first message on a new request stream.
                 // 既存 bidi stream 上の PUBLISH はプロトコル違反。
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -1377,7 +1377,7 @@ impl Session {
         Ok(())
     }
 
-    /// 制御メッセージ応答待ち deadline を開始する (draft-ietf-moq-transport-21 §6.6 (Termination))
+    /// 制御メッセージ応答待ち deadline を開始する (draft-ietf-moq-transport-21 §12.2 (Session Termination Codes))
     pub(super) fn start_control_message_deadline(&mut self, request_id: u64) {
         if let Some(timeout_ms) = self.timing.control_message_timeout_ms {
             self.timing.control_message_deadlines.insert(
@@ -1591,7 +1591,7 @@ impl Session {
     /// peer GOAWAY 受信時に `Err(SendRequestError::PeerGoawayReceived)` を返す。
     ///
     /// draft-ietf-moq-transport-21 §9.2 (GOAWAY): "Upon receiving a GOAWAY on the
-    /// control stream, an endpoint SHOULD NOT initiate new requests to the peer."
+    /// control stream, an endpoint SHOULD NOT initiate new requests to the peer ..."
     /// 自側 GOAWAY 送信 (`local_sent`) は抑制対象外。
     pub(super) fn check_peer_goaway(&self) -> Result<(), SendRequestError> {
         if self.goaway.peer.is_some() {
@@ -1798,7 +1798,7 @@ impl Session {
     /// > The default value is 0, so if not specified, the peer MUST NOT send any such
     /// > filter parameters.
     ///
-    /// 条件は "such filter **parameters**" であり Range 数ではないので、peer_max が 0 なら
+    /// 条件は "any such filter parameters" であり Range 数ではないので、peer_max が 0 なら
     /// Range を 1 つも持たないインスタンス (Length=0 の削除指示など) も送出してはならない。
     /// 受信側 ([`check_incoming_range_filters`](Self::check_incoming_range_filters)) は
     /// Range 数 0 を受理するが、これは §3.3.2 に受信側の拒否 MUST が無いためで、
@@ -1936,7 +1936,7 @@ impl Session {
             return Err(err);
         }
 
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter) / §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE): peer が REGISTER したトークンの保持上限は
+        // draft §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE) / §8.9 (Authorization Token Compression): peer が REGISTER したトークンの保持上限は
         // 「自側」の MAX_AUTH_TOKEN_CACHE_SIZE で決まる (受信側が自身のリソースを
         // 保護するために宣言する値)。draft §9.1.4 (AUTHORIZATION TOKEN): SETUP の REGISTER が自側 MAX
         // を超えたら USE_VALUE 扱い (session は閉じない)。
@@ -1986,12 +1986,12 @@ impl Session {
     /// - REGISTER: `peer_auth_token_cache.try_register` を呼び出す。
     ///   duplicate alias は `DUPLICATE_AUTH_TOKEN_ALIAS` (try_register が返す),
     ///   overflow (`Ok(false)`) は `AUTH_TOKEN_CACHE_OVERFLOW` で session を閉じる
-    ///   (draft §9.20.3 (AUTHORIZATION TOKEN Parameter): 非 SETUP ではセッション終了。SETUP で閉じない例外は
+    ///   (draft §8.9 (Authorization Token Compression): 非 SETUP ではセッション終了。SETUP で閉じない例外は
     ///   §9.1.4 (AUTHORIZATION TOKEN))。
     /// - DELETE: `peer_auth_token_cache.delete(alias)` を no-op で呼び出す
     ///   (未登録 alias の DELETE に対するセッションエラー規定はない)。
     /// - USE_ALIAS: 未登録 alias への参照は `UNKNOWN_AUTH_TOKEN_ALIAS` で閉じる
-    ///   (draft §9.20.3 (AUTHORIZATION TOKEN Parameter))。
+    ///   (draft §8.9 (Authorization Token Compression))。
     /// - USE_VALUE: cache 操作なし。
     ///
     /// Malformed Token (`MALFORMED_AUTH_TOKEN`) はコーデック層 (`message_parameter`) で
@@ -2052,9 +2052,9 @@ impl Session {
     /// GOAWAY 拒否経路など「request 自体が失敗する」経路向けに、
     /// AUTHORIZATION_TOKEN のうち REGISTER だけを cache に反映する
     ///
-    /// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
-    /// "The receiver of a message carrying an AUTHORIZATION TOKEN with Alias Type REGISTER
-    /// that does not result in a Session error MUST register the Token Alias, in the token
+    /// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
+    /// "The receiver of a message carrying an Authorization Token with Alias Type REGISTER
+    /// that does not result in a Session error MUST register the Token Alias in the token
     /// cache, even if the message fails for other reasons, including Unauthorized." (MUST)
     ///
     /// MUST の対象は Alias Type が **REGISTER** の Token のみ。DELETE / USE_ALIAS / USE_VALUE

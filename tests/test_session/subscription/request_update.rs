@@ -464,7 +464,7 @@ fn send_request_error_for_subscription_in_established_transitions_to_terminated(
 /// subscription は Terminated に遷移し、RequestErrorReceived イベントが発行される。
 ///
 /// draft-ietf-moq-transport-21 §3.1.1 (Subscription State Management): "A subscriber
-/// keeps subscription state until it cancels the request (see Section 3.3.3), or until receipt
+/// keeps subscription state until it cancels the request (see Section 6.4.2.3), or until receipt
 /// of a PUBLISH_DONE or REQUEST_ERROR." により、REQUEST_UPDATE 失敗応答の REQUEST_ERROR も
 /// subscription state を終える条件に該当する。
 /// 遷移後の帰結として、`send_request_update` は Established 要求のためエラーを返し

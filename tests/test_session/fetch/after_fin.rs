@@ -850,7 +850,7 @@ fn request_ok_after_fin_accepted() {
 ///
 /// draft-ietf-moq-transport-21 §9.11 (FETCH): "If no Objects exist in the
 /// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
-/// (see Section 11.4.4) and closes the stream with a FIN."
+/// (see Section 11.4.1) and closes the stream with a FIN."
 #[test]
 fn empty_fetch_response_then_fetch_ok_accepted() {
     use shiguredo_moqt::message::common::Location;

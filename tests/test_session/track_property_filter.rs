@@ -50,7 +50,7 @@ fn props_with_cache_duration(value: u64) -> TrackProperties {
 
 /// SUBSCRIBE_TRACKS を確立して (client, server, request_id) を返す
 ///
-/// Range Filter を送るには peer (server) 側の MAX_FILTER_RANGES 宣言が必要 (§10.3.1.6)。
+/// Range Filter を送るには peer (server) 側の宣言が必要 (§9.1.6 (MAX FILTER RANGES))。
 fn establish_subscribe_tracks(params: MessageParameters) -> (Session, Session, u64) {
     let mut server_opts = SetupOptions::new();
     server_opts.push(SetupOption {

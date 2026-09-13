@@ -191,7 +191,7 @@ impl SubgroupStreamDecoder {
                 // "The Object Status field is only sent if the Object Payload Length is zero"
                 // および §11.1.2 (Object Status)
                 // "An Object MUST have an empty payload unless its Object Status value is
-                // registered as permitting a payload in the Object Status registry (Section 15.9)."
+                // registered as permitting a payload in the Object Status registry (Section 16.9)."
                 // そのため payload_length をそのまま基準にすればよく、status の有無で
                 // 分岐する必要はない。
                 let payload_length = obj.payload_length;
@@ -932,7 +932,7 @@ impl FetchStreamDecoder {
     /// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す。
     /// draft-ietf-moq-transport-21 §9.11 (FETCH): "If no Objects exist in the
     /// requested range, the publisher opens the unidirectional stream, sends the
-    /// FETCH_HEADER (see Section 11.4.4) and closes the stream with a FIN."
+    /// FETCH_HEADER (see Section 11.4.1) and closes the stream with a FIN."
     /// （要求範囲にオブジェクトが 1 つも存在しない場合、publisher は unidirectional ストリームを
     /// 開き FETCH_HEADER を送って FIN で閉じる。空応答が正規なのは §9.11 の
     /// 「track にオブジェクトが 1 つも公開されていない、または Start Location が

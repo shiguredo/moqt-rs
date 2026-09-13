@@ -323,7 +323,7 @@ mod param_encoding_strictness {
 
 /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 一意性検証を検証する。
 ///
-/// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+/// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
 /// alias 解決後の (Token Type, Token Value) の組み合わせは一意でなければならない。
 /// encode / decode の両経路で同じ検証が働くことを固定する。
 mod auth_token_uniqueness {
@@ -917,9 +917,8 @@ mod kvp_value_length_limit {
 
 /// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): REQUEST_UPDATE での Range Filter マージ
 ///
-/// "In REQUEST_UPDATE, Length can be 0 to remove a filter parameter or non-zero to replace
-/// that entire filter parameter including all sets and Property Types."
-/// "If a filter parameter is omitted from REQUEST_UPDATE, the value is unchanged."
+/// "In REQUEST_UPDATE, Length of 0 removes the filter; non-zero replaces it entirely."
+/// "If a filter parameter is omitted from REQUEST_UPDATE, it is unchanged."
 ///
 /// 「filter parameter 全体の置換」なので、型単位で全インスタンスを削除してから追加する。
 mod merge_from_range_filter {
@@ -1550,7 +1549,7 @@ mod range_filter_multiple_appearance {
     ///
     /// LOCATION_FILTER (0x21) は LengthPrefixed だが Range Filter ではない。
     /// 判定が「パラメータが空でないか」に退化すると true を返してしまい、
-    /// Range Filter を含まないメッセージにまで §5.1.4 の検証が走る。
+    /// Range Filter を含まないメッセージにまで §3.3.2 の検証が走る。
     #[test]
     fn has_range_filters_ignores_non_range_filter_types() {
         let mut params = MessageParameters::new();

@@ -567,7 +567,7 @@ impl Session {
         if !self.accept_peer_request(request_id, &fetch.parameters)? {
             return Ok(());
         }
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&fetch.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
         if let Err(reason) = self.check_incoming_range_filters(&fetch.parameters) {
@@ -827,7 +827,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft §2.5.1 (Mandatory Track Properties): 未知の必須プロパティを含む FETCH_OK は fetch をキャンセルする
+        // draft §3.6 (Mandatory Track Properties): 未知の必須プロパティを含む FETCH_OK は fetch をキャンセルする
         // FIN 後の `Terminated` でも一律スキップはしない (アプリが unknown mandatory による
         // キャンセルを検知する手段が失われるため)。bidi request stream 終端 (cancel) 経路で
         // `RequestTerminated` を発行済みの場合は 2 回 push されうるため、アプリは冪等に扱うこと。
@@ -910,9 +910,9 @@ impl Session {
             return Err(err);
         }
         // REQUEST_OK は REQUEST_UPDATE への応答 (REQUEST_UPDATE_OK) のみであり
-        // (draft §10.5 (REQUEST_OK) の応答対象に FETCH は含まれない)、REQUEST_UPDATE は
+        // (draft §9.3 (REQUEST_OK) の応答対象に FETCH は含まれない)、REQUEST_UPDATE は
         // 複数回送れるため二重応答フラグの対象外とする。FETCH への応答は FETCH_OK /
-        // REQUEST_ERROR のみ (draft §5.2 (Fetch State Management))。
+        // REQUEST_ERROR のみ (draft §3.2.1 (Fetch State Management))。
         // データストリームの FIN 後に REQUEST_UPDATE_OK が届くこともあるため、
         // `Terminated` でも受理する (REQUEST_OK は bidi request stream で送られ、
         // データストリームの終端とは独立であることからの推論。draft-ietf-moq-transport-21

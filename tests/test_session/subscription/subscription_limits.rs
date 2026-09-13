@@ -1399,8 +1399,8 @@ fn one_range_objectid_filter() -> MessageParameters {
 
 /// 型をまたぐ Range Filter の累積が自側 MAX_FILTER_RANGES を超えたら拒否される
 ///
-/// draft-ietf-moq-transport-21 §9.1.6: 上限は "the peer's total number of Ranges
-/// (Start/End pairs) allowed concurrently in all Range filter parameters for a given
+/// draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、§3.3.2 の
+/// "the total number of Ranges allowed in all Range Filter parameters for a given
 /// subscription or fetch" であり、1 メッセージ単位ではなく subscription 単位の同時保持数。
 ///
 /// `merge_from` は Range Filter を型単位で全置換するため同一型では累積しないが、

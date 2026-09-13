@@ -461,7 +461,7 @@ fn send_subscribe_tracks_single_period_rejected() {
 
 /// 既存 bidi request stream 上で PUBLISH を recv_stream_message に渡すと PROTOCOL_VIOLATION
 /// draft-ietf-moq-transport-21 §9 Table 5: PUBLISH (0x1D) は Request, First。
-/// "Messages marked \"First\" MUST be the first message on a new request stream."
+/// Messages marked "First" MUST be the first message on a new request stream.
 #[test]
 fn publish_on_existing_bidi_stream_is_protocol_violation() {
     use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;

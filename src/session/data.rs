@@ -352,7 +352,7 @@ impl Session {
     /// データ) で、OBJECT_PROPERTY_FILTER (0x28) の評価に使う。Object Properties を
     /// 付けない場合は `None` を渡す。
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある
-    /// (§5.1.1 の "Objects MUST NOT be sent" と §5.1.5 の Pass 評価の両方に係る)。
+    /// (§3.1.1 の "Objects MUST NOT be sent" と §3.3.3 の Pass 評価の両方に係る)。
     pub fn send_subgroup_object(
         &mut self,
         stream_id: DataStreamId,
@@ -414,17 +414,17 @@ impl Session {
             )
             .into());
         }
-        // draft §5.1.5 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
-        // 通らない Object は送信を拒否する (§5.1.5 の "The publisher MUST forward only objects
+        // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
+        // 通らない Object は送信を拒否する (§3.3.3 の "The publisher MUST forward only objects
         // that pass all filters")。filter 評価は FirstObjectId 解決より前に実行し、拒否される
         // 呼び出しで内部状態 (`my_subgroups.open` / `stream.subgroup_id` 代入) を汚染しない。
         // 評価用 subgroup_id は `stream.subgroup_id.or(Some(object_id))` で計算する
-        // (draft §11.4.2 の SUBGROUP_ID_MODE 0b01 "the Subgroup ID is the Object ID of the
+        // (draft §11.3.1 の SUBGROUP_ID_MODE 0b01 "the Subgroup ID is the Object ID of the
         // first Object transmitted in this Subgroup" により、未解決なら今回送信するオブジェクト
         // の ID。拒否されたオブジェクトは送信されないため、通過した最初のオブジェクトの ID が
         // subgroup id になる。単純な「移動」では実装できない: 解決前の `subgroup_id` は `None`
         // であり、`range_filters_pass` の `None => true` により SUBGROUP_FILTER が常に通過して
-        // しまい、§5.1.5 の MUST に反する転送が防げなくなるため)。
+        // しまい、§3.3.3 の MUST に反する転送が防げなくなるため)。
         let evaluation_subgroup_id = subgroup_id.or(Some(object_id));
         let publisher_priority = self
             .data_streams
@@ -1991,9 +1991,9 @@ impl Session {
         // draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability):
         // "For datagrams, the implementation MUST drop the datagrams if the time elapsed
         // exceeds OBJECT_DELIVERY_TIMEOUT." 起点は object header の最終バイト。
-        // "For objects with Object Forwarding Preference set to Datagram, the
-        // SUBGROUP_DELIVERY_TIMEOUT acts the same way as OBJECT_DELIVERY_TIMEOUT;
-        // if both are non-zero, the smaller of the two is used."
+        // "For objects whose Object Forwarding Preference is Datagram, the SUBGROUP_DELIVERY_TIMEOUT
+        // acts the same way as OBJECT_DELIVERY_TIMEOUT; if both are non-zero, the smaller of the
+        // two is used."
         {
             let subscription = self.subscriptions.get(&request_id).expect("checked above");
             let effective_timeout_ms = match (

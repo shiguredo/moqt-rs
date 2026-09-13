@@ -49,7 +49,7 @@ impl FetchHeader {
 pub(crate) const FETCH_END_OF_NON_EXISTENT_RANGE: u64 = 0x8C;
 /// Serialization Flags の特殊値: End of Unknown Range
 pub(crate) const FETCH_END_OF_UNKNOWN_RANGE: u64 = 0x10C;
-/// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7)
+/// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7)
 pub(crate) const FETCH_END_OF_TIMED_OUT_RANGE: u64 = 0x20C;
 
 /// Fetch ストリームの prior 参照文脈 (draft-ietf-moq-transport-21 §11.4.1.1 (Flags) / §11.4.1.2 (End of Range))
@@ -104,7 +104,7 @@ pub enum FetchStreamEntry {
         object_id: u64,
     },
     /// End of Timed-Out Range (0x20C)
-    /// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7: Group ID と Object ID が必須
+    /// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7: Group ID と Object ID が必須
     EndOfTimedOutRange {
         /// Group ID
         group_id: u64,
@@ -240,7 +240,7 @@ impl FetchStreamEntry {
                 ))
             }
             FETCH_END_OF_TIMED_OUT_RANGE => {
-                // draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7: Group ID と Object ID が必須
+                // draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7: Group ID と Object ID が必須
                 let (group_id, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 let (object_id, n) = varint::decode(&buf[pos..])?;
@@ -258,7 +258,7 @@ impl FetchStreamEntry {
                 // Table 7 の 3 値以外の 128 以上は未知値として先に拒否する。
                 // prior 文脈違反より未知 flags 自体を優先して報告するのは
                 // 実装の診断選択である (いずれも PROTOCOL_VIOLATION であり、
-                // draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) は
+                // draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) は
                 // 優先順位を規定しない)。
                 if flags >= 128 {
                     return Err(MessageError::ProtocolViolation(
@@ -487,7 +487,7 @@ impl FetchStreamObject {
 
     /// Serialization Flags を既にデコード済みの状態からフィールドをデコードする
     ///
-    /// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7 / §11.4.1.1 (Flags):
+    /// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7 / §11.4.1.1 (Flags):
     /// 128 未満の全 bit は定義済み (Table 8 の 0x03 / Table 9 の
     /// 0x04 / 0x08 / 0x10 / 0x20 / 0x40) のため mask 検証は no-op であり、
     /// Table 7 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は

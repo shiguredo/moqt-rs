@@ -44,7 +44,7 @@ const OBJECT_DATAGRAM_KNOWN_MASK: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
 /// Object Datagram Type として有効か検証する (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))
 ///
 /// §11.2.1 は無効な Type 値を列挙し "If an endpoint receives a datagram with any of these
-/// Type values, it MUST close the session with a PROTOCOL_VIOLATION" と規定する。
+/// values, it MUST close the session with a PROTOCOL_VIOLATION" と規定する。
 ///
 /// - 意味未定義の set bit がある値 (0x10 予約・ 0x40 未定義・ 128 以上を含む)
 /// - STATUS (0x20) と END_OF_GROUP (0x02) の両方が立っている値

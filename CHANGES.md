@@ -78,6 +78,8 @@
   - @voluntas
 - [UPDATE] コード内 doc コメントの実装との不整合を修正する
   - @voluntas
+- [UPDATE] コード内コメントが引用する draft-ietf-moq-transport-21 の節番号・節タイトル・引用文を一次資料に一致させる
+  - @voluntas
 - [UPDATE] 未解決の intra-doc link を修正する
   - @voluntas
 - [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する

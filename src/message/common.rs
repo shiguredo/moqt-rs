@@ -1,4 +1,4 @@
-//! Control Message 共通のワイヤ型 (draft-ietf-moq-transport-21 §8.2 (Location Structure) / §2.4.1 (Track Naming))
+//! Control Message 共通のワイヤ型 (draft-ietf-moq-transport-21 §8.2 (Location Structure) / §8.7 (Track Namespace Structure))
 //!
 //! `TrackNamespace` / `Location` は `message.rs` と `message_parameter.rs` の両方から使用される。
 //! 従来 `message.rs` に定義し `message_parameter.rs` から import する構成だったため、
@@ -10,7 +10,7 @@
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
-/// Full Track Name / Track Namespace の最大バイト長 (draft-ietf-moq-transport-21 §2.4.1 (Track Naming))
+/// Full Track Name / Track Namespace の最大バイト長 (draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure))
 pub(crate) const MAX_TRACK_NAME_LENGTH: usize = 4096;
 
 /// トラック名前空間 (0–32 フィールド、各フィールドは 1 バイト以上)
@@ -42,7 +42,8 @@ impl TrackNamespace {
             }
         }
         let ns = Self(fields);
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Track Namespace が 4096 バイトを超えたら PROTOCOL_VIOLATION
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
+        // PROTOCOL_VIOLATION
         if ns.byte_length() > MAX_TRACK_NAME_LENGTH {
             return Err(MessageError::ProtocolViolation(
                 "track namespace exceeds 4096 bytes",
@@ -74,15 +75,16 @@ impl TrackNamespace {
 
     /// 全フィールドの値バイト数の合計を返す
     ///
-    /// draft-ietf-moq-transport-21 §2.4.1 (Track Naming): "The length of a Track Namespace is the sum of
-    /// the Track Namespace Field Length fields."
+    /// draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): "The length of a Track
+    /// Namespace is the sum of the Track Namespace Field Length fields."
     pub fn byte_length(&self) -> usize {
         self.0.iter().map(|f| f.len()).sum()
     }
 
     /// バッファにエンコードする
     ///
-    /// draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Track Namespace が 4096 バイトを超えたら PROTOCOL_VIOLATION
+    /// draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
+    /// PROTOCOL_VIOLATION
     pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         if self.byte_length() > MAX_TRACK_NAME_LENGTH {
             return Err(MessageError::ProtocolViolation(
@@ -120,7 +122,8 @@ impl TrackNamespace {
             *pos += len;
         }
         let ns = Self(fields);
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Track Namespace が 4096 バイトを超えたら PROTOCOL_VIOLATION
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
+        // PROTOCOL_VIOLATION
         if ns.byte_length() > MAX_TRACK_NAME_LENGTH {
             return Err(MessageError::ProtocolViolation(
                 "track namespace exceeds 4096 bytes",
@@ -132,7 +135,7 @@ impl TrackNamespace {
 
 /// Full Track Name (Track Namespace + Track Name) の長さ制限を検証する
 ///
-/// draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の合計バイト長は 4096 バイトまで
+/// draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の合計バイト長は 4096 バイトまで
 pub(crate) fn validate_full_track_name(
     ns: &TrackNamespace,
     track_name: &[u8],
@@ -148,7 +151,7 @@ pub(crate) fn validate_full_track_name(
 /// length-prefixed な Track Name (vi64 length + bytes) をバッファにエンコードする
 ///
 /// Track Name は Track Namespace の後に Length (vi64) + バイト列として現れる
-/// (draft-ietf-moq-transport-21 §2.4.1 (Track Naming))。
+/// (draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure))。
 pub(crate) fn encode_track_name(track_name: &[u8], buf: &mut Vec<u8>) {
     varint::encode(track_name.len() as u64, buf);
     buf.extend_from_slice(track_name);

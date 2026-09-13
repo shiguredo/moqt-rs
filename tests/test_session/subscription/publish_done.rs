@@ -1115,7 +1115,7 @@ fn send_and_recv_publish_done(
 /// 受信 fill fetch stream は Stream Count 集計と cleanup_ready の open 判定に含まれる
 ///
 /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): Stream Count は fill fetch stream を含み、
-/// "destroy subscription state once all open streams for the subscription have closed" の
+/// "destroys subscription state once all open streams for the subscription have closed" の
 /// open stream 判定にも fill を含む。
 #[test]
 fn fill_fetch_streams_count_toward_stream_count_and_cleanup() {

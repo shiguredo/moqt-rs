@@ -142,10 +142,9 @@ pub struct ObjectFilterInput<'a> {
 
 /// SetID ごとの AND / SetID 間の OR で Range Filter を評価する
 ///
-/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): "All filter parameters with the same
-/// SetID value are combined using logical "AND" operations, then all the resulting sets are
-/// combined using logical "OR" operations. The final result is SetID=0 OR SetID=1 OR ...
-/// SetID=255, where each SetID=i is the AND of filters with SetID=i."
+/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): "Filter parameters with the same SetID
+/// are AND'd; distinct SetIDs are OR'd. The final result is SetID=0 OR SetID=1 OR ... SetID=255,
+/// where each SetID=i is the AND of all filter parameters carrying that SetID."
 fn range_filters_pass(
     filters: &SubscriptionRangeFilters,
     input: &ObjectFilterInput<'_>,

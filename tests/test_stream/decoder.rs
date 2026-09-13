@@ -1293,7 +1293,7 @@ fn test_fetch_finish_without_header_errors() {
 ///
 /// draft-ietf-moq-transport-21 §9.11 (FETCH): "If no Objects exist in the
 /// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
-/// (see Section 11.4.4) and closes the stream with a FIN."
+/// (see Section 11.4.1) and closes the stream with a FIN."
 #[test]
 fn test_fetch_finish_after_header_without_entry_ok() {
     let header = FetchHeader { request_id: 1 };

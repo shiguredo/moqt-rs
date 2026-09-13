@@ -639,7 +639,7 @@ fn test_subgroup_change_with_object_id_absent() {
     }
 }
 
-/// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7:
+/// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7:
 /// encode_end_of_timed_out_range で生成したバイト列がデコーダで
 /// DecodedFetchEntry::EndOfTimedOutRange としてアプリに通知されること
 #[test]
@@ -752,7 +752,7 @@ fn test_descending_group_order_roundtrip() {
     assert_eq!(groups, vec![5, 4], "Group ID が復元されること");
 }
 
-/// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7:
+/// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7:
 /// End of Timed-Out Range の後に Object が正しくラウンドトリップすること
 /// (NoPriorActualObject 文脈の相互作用を検証する)
 #[test]

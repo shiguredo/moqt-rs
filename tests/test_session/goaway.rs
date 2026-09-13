@@ -1240,8 +1240,8 @@ fn goaway_timeout_uses_known_base_time() {
 }
 
 /// 自側 GOAWAY 送信後に peer から届いた request に含まれる AUTHORIZATION_TOKEN REGISTER が
-/// `peer_token_cache` に反映されること (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION
-/// TOKEN Parameter): "The receiver of a message carrying an AUTHORIZATION TOKEN with Alias
+/// `peer_token_cache` に反映されること (draft-ietf-moq-transport-21 §8.9 (Authorization Token
+/// Compression): "The receiver of a message carrying an Authorization Token with Alias
 /// Type REGISTER that does not result in a Session error MUST register the Token Alias in
 /// the token cache, even if the message fails for other reasons, including Unauthorized.")。
 ///
@@ -1281,7 +1281,7 @@ fn goaway_sent_side_registers_auth_token_from_going_away_rejected_subscribe() {
         other => panic!("REQUEST_ERROR(GOING_AWAY) を期待したが {other:?} を受け取った"),
     }
 
-    // server の peer_token_cache に alias=7 が REGISTER されていること (draft §9.20.3 MUST)
+    // server の peer_token_cache に alias=7 が REGISTER されていること (draft §8.9 の MUST)
     assert!(
         server.peer_auth_token_cache().resolve(7).is_some(),
         "GOAWAY 拒否経路でも AUTHORIZATION_TOKEN REGISTER が peer_token_cache に反映されること"
@@ -1302,7 +1302,7 @@ fn goaway_sent_side_registers_auth_token_from_going_away_rejected_subscribe() {
 
 /// GOAWAY 拒否経路で REGISTER が session error (AUTH_TOKEN_CACHE_OVERFLOW) になった場合、
 /// session error が REQUEST_GOING_AWAY より優先され、セッションが Closing に遷移すること
-/// (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) の MUST は
+/// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の MUST は
 /// "does not result in a Session error" が前提)。
 ///
 /// MAX_AUTH_TOKEN_CACHE_SIZE=20 バイト (Token 1 個分 = 16 + Token Value 4 バイト) で
@@ -1360,7 +1360,7 @@ fn goaway_sent_side_register_overflow_takes_priority_over_going_away() {
 }
 
 /// GOAWAY 拒否経路では USE_ALIAS / DELETE / USE_VALUE を触らないこと
-/// (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) の MUST は
+/// (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) の MUST は
 /// "with Alias Type REGISTER" 限定で、DELETE / USE_ALIAS / USE_VALUE は「失敗した request の
 /// パラメータ」として peer 側で not-applied 扱いされる可能性があるため触らない)。
 ///

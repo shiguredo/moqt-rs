@@ -61,7 +61,7 @@ fn datagram_origin_ignores_lsb() {
     }
 }
 
-/// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7:
+/// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7:
 /// End of Timed-Out Range (0x20C) のラウンドトリップ
 #[test]
 fn end_of_timed_out_range() {
@@ -87,7 +87,7 @@ fn end_of_timed_out_range() {
 
 /// 0x8C / 0x10C / 0x20C の混在ストリームが順に decode できる
 ///
-/// draft-ietf-moq-transport-21 §11.4.1 (FETCH stream) Table 7:
+/// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7:
 /// 3 種の End of Range はいずれも既知値として受理される
 /// (128 以上の未知値拒否の一般則は別途扱う)。
 #[test]
@@ -352,7 +352,7 @@ fn decode_no_prior_actual_object_without_priority_rejected() {
 #[test]
 fn unknown_flags_at_or_above_128_rejected() {
     // Table 7 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は PROTOCOL_VIOLATION
-    // (draft-ietf-moq-transport-21 §11.4.1 (FETCH stream): "Any other value is a PROTOCOL_VIOLATION")
+    // (draft-ietf-moq-transport-21 §11.4.1 (Fetch Header): "Any other value is a PROTOCOL_VIOLATION")
     // 0x8D は 128 以上かつ特殊値ではない。First 文脈で decode し、prior 文脈違反
     // ではなく未知 flags としての拒否であることをメッセージで断定する
     // (未知値チェックが prior チェックより先行することの固定)。

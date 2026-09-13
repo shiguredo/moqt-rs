@@ -207,14 +207,14 @@ impl Session {
         self.tick_discarded_data_stream_ids(now_ms);
 
         // 以下、3 種の session close timeout を固定順で評価する。
-        // draft-ietf-moq-transport-21 §6.6 (Termination) は各エラーコードを定義するのみで、
+        // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) は各エラーコードを定義するのみで、
         // 複数 timeout の優先順位を規定していないため、実装で
         // control → data_stream → goaway の順に固定する。
         // 同一 tick に複数の deadline が満了しても、評価順で決定的に 1 つのエラーコードが
         // 選ばれる。各 HashMap ループ内の反復順は出力に影響しない。
         // (将来の draft で変更される可能性がある)
 
-        // draft-ietf-moq-transport-21 §6.6 (Termination) で定義される CONTROL_MESSAGE_TIMEOUT
+        // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) で定義される CONTROL_MESSAGE_TIMEOUT
         for deadline in self.timing.control_message_deadlines.values_mut() {
             deadline.tick(now_ms);
             if deadline.expired {
@@ -225,7 +225,7 @@ impl Session {
                 return;
             }
         }
-        // draft-ietf-moq-transport-21 §6.6 (Termination) で定義される DATA_STREAM_TIMEOUT
+        // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) で定義される DATA_STREAM_TIMEOUT
         if let Some(timeout_ms) = self.timing.data_stream_timeout_ms {
             for last_activity_ms in self.timing.data_stream_last_activity_ms.values() {
                 if now_ms.saturating_sub(*last_activity_ms) >= timeout_ms {
@@ -237,7 +237,7 @@ impl Session {
                 }
             }
         }
-        // draft-ietf-moq-transport-21 §6.6 (Termination) で定義される GOAWAY_TIMEOUT
+        // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) で定義される GOAWAY_TIMEOUT
         // (発生条件は §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) を参照)
         if let Some(deadline) = self.goaway.local_deadline_ms
             && now_ms >= deadline

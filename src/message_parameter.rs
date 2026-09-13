@@ -138,7 +138,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
 
 // ─── AuthorizationToken ───────────────────────────────────────
 
-/// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter))
+/// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))
 ///
 /// Token {
 ///   Alias Type (vi64),
@@ -185,7 +185,7 @@ pub enum AuthorizationToken {
 impl AuthorizationToken {
     /// Length-prefixed バイト列から Token 構造をデコードする
     ///
-    /// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+    /// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
     /// デコード失敗時は KEY_VALUE_FORMATTING_ERROR を返す。
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, MessageError> {
         let mut pos = 0;
@@ -284,7 +284,7 @@ impl AuthorizationToken {
 
     /// SETUP の AUTHORIZATION_TOKEN として許可されるか検証する
     ///
-    /// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+    /// draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN):
     /// SETUP で DELETE / USE_ALIAS は PROTOCOL_VIOLATION。encode / decode の両経路で
     /// 同一の検証を行うため本メソッドに集約する。
     pub(crate) fn validate_setup_scope(&self) -> Result<(), MessageError> {
@@ -363,7 +363,7 @@ pub enum LocationFilterUpdate {
     Set(LocationFilter),
 }
 
-/// LOCATION_FILTER の typed 表現 (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+/// LOCATION_FILTER の typed 表現 (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))
 ///
 /// ワイヤ形式は Length-prefixed な optional vi64 群であり、Length (バイト数) で
 /// フィールド数が決まる。フィールド数と意味の対応は次のとおり。
@@ -449,7 +449,7 @@ impl LocationFilter {
 
     /// wire format のバイト列から typed filter をデコードする
     ///
-    /// draft-ietf-moq-transport-21 §3.3.1 (Location Filters):
+    /// draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter):
     /// フィールド数が 0 / 5 以上の場合と壊れた varint は
     /// KEY_VALUE_FORMATTING_ERROR、StartGroup + EndGroupDelta が 2^64 - 1 を
     /// 超える場合は PROTOCOL_VIOLATION として扱う。
@@ -628,7 +628,7 @@ impl LocationFilter {
 
 /// LOCATION_FILTER の End Group 導出時のオーバーフローを検証する
 ///
-/// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): StartGroup + EndGroupDelta が
+/// draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter): StartGroup + EndGroupDelta が
 /// 2^64 - 1 を超えたら PROTOCOL_VIOLATION でセッションを閉じなければならない。
 /// Delta = 0 は当該 Group の残り全部であり常に正当。
 fn check_end_group_overflow(start_group: u64, end_group_delta: u64) -> Result<(), MessageError> {
@@ -664,7 +664,7 @@ pub enum MessageParameterValue {
     /// Parameters として (カウント + デルタエンコードで) エンコードされる
     /// (draft-ietf-moq-transport-21 §16.7 (Message Parameters))。
     FillParameters(MessageParameters),
-    /// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter))
+    /// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))
     AuthorizationToken(AuthorizationToken),
     /// TRACK_NAMESPACE_PREFIX (Track Namespace 形式, draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter))
     TrackNamespacePrefix(TrackNamespace),
@@ -778,7 +778,7 @@ impl MessageParameters {
             }
         }
 
-        // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない。
         // USE_ALIAS の alias 解決はセッション状態依存のためコーデック層では検証不可。
         validate_auth_token_uniqueness(sorted.iter().filter_map(|p| {
@@ -855,7 +855,7 @@ impl MessageParameters {
             let (mut value, consumed) = decode_value(encoding, &buf[pos..])?;
             pos += consumed;
 
-            // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN は Token 構造として検証する
+            // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN は Token 構造として検証する
             // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 既知 Type の Value が定義された serialization と
             // 一致しない場合は KEY_VALUE_FORMATTING_ERROR
             if param_type == PARAM_AUTHORIZATION_TOKEN
@@ -899,7 +899,7 @@ impl MessageParameters {
             prev_type = param_type;
         }
 
-        // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない
         validate_auth_token_uniqueness(params.iter().filter_map(|p| {
             if p.param_type == PARAM_AUTHORIZATION_TOKEN
@@ -960,7 +960,7 @@ impl MessageParameters {
 
     /// すべての AUTHORIZATION_TOKEN (type 0x03) を返す
     ///
-    /// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN は同一メッセージ内で複数回出現できる
+    /// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN は同一メッセージ内で複数回出現できる
     pub fn authorization_tokens(&self) -> Vec<&AuthorizationToken> {
         self.0
             .iter()
@@ -1166,7 +1166,8 @@ impl MessageParameters {
     /// Range Filter (0x25-0x29) は同一 Parameter Type が複数インスタンス存在しうるため、型単位で
     /// まとめて置換する (draft-ietf-moq-transport-21 §3.3.2: "In REQUEST_UPDATE, Length of 0 removes
     /// the filter; non-zero replaces it entirely.")。型単位の置換であり、sets と Property Types を
-    /// 含めて全体が対象になる。セマンティクスは以下のとおり:
+    /// 含めて全体が対象になる (Length=0 の符号化は §8.6 (Range Filter Structure))。
+    /// セマンティクスは以下のとおり:
     ///
     /// - `other` に型 X が出現した場合: `self` の型 X を全削除し、`other` の非ゼロインスタンスを
     ///   すべて追加する (Length=0 のみなら追加は 0 件 = 削除だけになる)
@@ -1578,8 +1579,8 @@ fn decode_value(
 
 /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 一意性を検証する
 ///
-/// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
-/// "The AUTHORIZATION TOKEN parameter MAY be repeated within a message as long as the
+/// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
+/// "An Authorization Token MAY be repeated within a message as long as the
 /// combination of Token Type and Token Value are unique after resolving any aliases."
 ///
 /// USE_ALIAS の alias 解決はセッション状態に依存するため、コーデック層では検証不可能。
@@ -1619,7 +1620,8 @@ pub struct RangeFilterSet {
     /// Property Type。OBJECT_PROPERTY_FILTER (0x28) / TRACK_PROPERTY_FILTER (0x29) のみ `Some`
     pub property_type: Option<u64>,
     /// inclusive な範囲の並び。End が `None` の要素は上限なし
-    /// (§3.3.2: "End is optional in the last pair; if omitted it indicates the last Range is open-ended.")
+    /// (§8.6 (Range Filter Structure): "End is optional in the last pair; if omitted it indicates the
+    /// last Range is open-ended.")
     pub ranges: Vec<(u64, Option<u64>)>,
 }
 
@@ -1734,10 +1736,11 @@ fn count_ranges_in_filter(param_type: u64, bytes: &[u8]) -> Option<u64> {
 
 /// Range Filter のデルタエンコーディング溢出と値域を検証する
 ///
-/// draft-ietf-moq-transport-21 §3.3.2: "If adding the delta would exceed 2^64-1, the request MUST be
-/// rejected with INVALID_FILTER."
+/// draft-ietf-moq-transport-21 §8.6 (Range Filter Structure): "If adding the delta would exceed
+/// 2^64-1, the request MUST be rejected with INVALID_FILTER."
 /// draft-ietf-moq-transport-21 §9.20.13: "If a decoded value exceeds 255, the endpoint MUST reject
-/// this with REQUEST_ERROR with error code INVALID_FILTER." (PRIORITY_FILTER の値 > 255)
+/// this with REQUEST_ERROR with error code INVALID_FILTER since Publisher Priority is an 8-bit
+/// field." (PRIORITY_FILTER の値 > 255)
 ///
 /// 本 codec 層は `MessageError::ProtocolViolation` を返し、session 層 (`validate_range_filters` in
 /// `src/session/core.rs`) がそれを wire code `REQUEST_INVALID_FILTER` にラップして REQUEST_ERROR

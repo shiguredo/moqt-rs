@@ -434,7 +434,7 @@ impl SetupOptions {
             }
         }
 
-        // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない
         validate_auth_token_uniqueness(sorted.iter().filter_map(|p| {
             if p.option_type == SETUP_OPTION_AUTHORIZATION_TOKEN
@@ -475,7 +475,7 @@ impl SetupOptions {
                     buf.extend_from_slice(bytes);
                 }
                 SetupOptionValue::AuthorizationToken(token) => {
-                    // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+                    // draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN):
                     // SETUP で DELETE / USE_ALIAS は PROTOCOL_VIOLATION
                     token.validate_setup_scope()?;
                     // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
@@ -534,9 +534,9 @@ impl SetupOptions {
                 if option_type == SETUP_OPTION_AUTHORIZATION_TOKEN {
                     // draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN): Message Parameter の AUTHORIZATION_TOKEN と
                     // 機能的に等価。Token 構造としてデコードする。
-                    // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): デコード失敗時は KEY_VALUE_FORMATTING_ERROR
+                    // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): デコード失敗時は KEY_VALUE_FORMATTING_ERROR
                     let token = AuthorizationToken::decode(&bytes)?;
-                    // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+                    // draft-ietf-moq-transport-21 §9.1.4 (AUTHORIZATION TOKEN):
                     // SETUP で DELETE / USE_ALIAS を受信した場合は PROTOCOL_VIOLATION
                     token.validate_setup_scope()?;
                     SetupOptionValue::AuthorizationToken(token)
@@ -572,7 +572,7 @@ impl SetupOptions {
             }
         }
 
-        // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN の
+        // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない
         validate_auth_token_uniqueness(options.iter().filter_map(|p| {
             if p.option_type == SETUP_OPTION_AUTHORIZATION_TOKEN

@@ -22,7 +22,7 @@ use shiguredo_moqt::track_properties::PROP_OBJECT_DELIVERY_TIMEOUT;
 
 /// MAX_FILTER_RANGES を宣言する server 用 SetupOptions を作る
 ///
-/// Range Filter を送るには peer (server) 側の宣言が必要 (§9.1.6 (MAX_FILTER_RANGES))。
+/// Range Filter を送るには peer (server) 側の宣言が必要 (§9.1.6 (MAX FILTER RANGES))。
 fn max_filter_options() -> SetupOptions {
     let mut opts = SetupOptions::new();
     opts.push(SetupOption {

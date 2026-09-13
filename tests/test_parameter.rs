@@ -4,7 +4,7 @@ use shiguredo_moqt::{
     parameter::{SetupOption, SetupOptionValue, SetupOptions},
 };
 
-/// Setup Option Type 定数が §15.4 レジストリ表と一致する
+/// Setup Option Type 定数が §16.4 (Setup Options) レジストリ表と一致する
 #[test]
 fn setup_option_type_constants_match_registry() {
     use shiguredo_moqt::parameter::{

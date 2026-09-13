@@ -79,8 +79,8 @@ impl SubgroupStreamState {
     ///
     /// §2.2: "Objects from the same Subgroup MUST NOT be sent on different streams,
     /// unless one of the streams was reset prematurely"
-    /// §11.4.3: relay は next Object か不明な場合 "it MUST reset the Subgroup stream
-    /// and open a new one to forward it"
+    /// §11.3.2 (Closing Subgroup Streams): relay は next Object か不明な場合 "it MUST reset
+    /// the Subgroup stream and open a new one to forward it"
     ///
     /// 本判定では StoppedByPeer (STOP_SENDING) と Reset (STOP_SENDING 後の reset や
     /// 送信側 reset) の両方で再オープンを許可し、Forward 条件の判定は Session に委ねる

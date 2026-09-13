@@ -219,7 +219,7 @@ impl Session {
         if !self.accept_peer_request(request_id, &msg.parameters)? {
             return Ok(());
         }
-        // draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter): REGISTER token は
+        // draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression): REGISTER token は
         // session error でない限り MUST で保存する。名前空間チェック (REQUEST_ERROR) より前に処理する。
         self.apply_peer_message_auth_tokens(&msg.parameters)?;
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間への SUBSCRIBE_TRACKS は拒否
@@ -760,10 +760,9 @@ impl Session {
         } else {
             None
         };
-        // draft §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length can be 0 to remove a filter
-        // parameter or non-zero to replace that entire filter parameter including all sets and
-        // Property Types. If a filter parameter is omitted from REQUEST_UPDATE, the value is
-        // unchanged."
+        // draft §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0 removes the filter;
+        // non-zero replaces it entirely. If a filter parameter is omitted from REQUEST_UPDATE,
+        // it is unchanged."
         //
         // `range_filter_sets` は Length=0 のインスタンスを除外するので、パラメータが存在する
         // (= 明示された) ときだけ全置換すれば規則を満たす。Length=0 のみが来た場合は空 Vec に

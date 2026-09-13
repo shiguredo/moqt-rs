@@ -80,7 +80,7 @@ impl Session {
         if !self.accept_peer_request(request_id, &subscribe.parameters)? {
             return Ok(());
         }
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&subscribe.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
         if let Err(reason) = self.check_incoming_range_filters(&subscribe.parameters) {
@@ -252,7 +252,7 @@ impl Session {
         if !self.accept_peer_request(request_id, &publish.parameters)? {
             return Ok(false);
         }
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&publish.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
         if let Err(reason) = self.check_incoming_range_filters(&publish.parameters) {
@@ -615,7 +615,7 @@ impl Session {
                 return Err(err);
             }
         }
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&update.parameters)?;
         // draft §9.20.1 (Parameter Scope): context 別の許可パラメータ集合で
         // 検証する。違反時は PROTOCOL_VIOLATION でセッションをクローズする (MUST)。
@@ -834,9 +834,9 @@ impl Session {
             }
             None => parameters.clone(),
         };
-        // draft-ietf-moq-transport-21 §3.3.2 / §9.1.6 (MAX FILTER RANGES): 上限は
-        // "the total number of Ranges ... allowed concurrently in all Range filter parameters
-        // for a given subscription or fetch" であり、1 メッセージ単位ではなく subscription 単位の
+        // draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、§3.3.2 の
+        // "the total number of Ranges allowed in all Range Filter parameters for a given
+        // subscription or fetch" であり、1 メッセージ単位ではなく subscription 単位の
         // 同時保持数である。`merge_from` は Range Filter を型単位で全置換するので同一型では
         // 累積しないが、型をまたぐと累積するため、マージ後の総数を再検証する。
         if merged.has_range_filters()

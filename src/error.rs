@@ -33,7 +33,7 @@ pub enum MessageError {
     KeyValueFormattingError(&'static str),
     /// AUTHORIZATION_TOKEN が不正 (説明付き)
     ///
-    /// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter):
+    /// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression):
     /// 受信側は MALFORMED_AUTH_TOKEN でメッセージを reject しなければならない。
     MalformedAuthToken(&'static str),
     /// MSF カタログの JSON フォーマットが不正 (説明付き)
@@ -177,7 +177,7 @@ pub const REQUEST_EXCESSIVE_LOAD: u64 = 0x9;
 pub const REQUEST_DOES_NOT_EXIST: u64 = 0x10;
 /// 無効なフィルタ範囲
 pub const REQUEST_INVALID_RANGE: u64 = 0x11;
-/// 不正なトラック (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks))
+/// 不正なトラック (draft-ietf-moq-transport-21 §12.3 (Request Error Codes))
 pub const REQUEST_MALFORMED_TRACK: u64 = 0x12;
 /// 興味なし
 pub const REQUEST_UNINTERESTED: u64 = 0x20;
@@ -215,10 +215,10 @@ pub const PUBLISH_DONE_EXPIRED: u64 = 0x6;
 pub const PUBLISH_DONE_UPDATE_FAILED: u64 = 0x8;
 /// 過負荷
 pub const PUBLISH_DONE_EXCESSIVE_LOAD: u64 = 0x9;
-/// 不正なトラック (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks))
+/// 不正なトラック (draft-ietf-moq-transport-21 §12.4 (Publish Done Codes))
 ///
-/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A relay publisher detected
-/// that the track was malformed (see Section 2.4.2)." relay が downstream の
+/// draft-ietf-moq-transport-21 §12.4 (Publish Done Codes): "A relay publisher
+/// detected that the track was malformed (see Section 12.1)." relay が downstream の
 /// subscription を終端するために送る。`Session` (endpoint-local) は自動送出せず、
 /// relay 実装が明示的に送る前提である。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
@@ -250,5 +250,5 @@ pub const STREAM_UNKNOWN_OBJECT_STATUS: u64 = 0x6;
 pub const STREAM_EXPIRED_AUTH_TOKEN: u64 = 0x7;
 /// 過負荷
 pub const STREAM_EXCESSIVE_LOAD: u64 = 0x9;
-/// 不正なトラック (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks))
+/// 不正なトラック (draft-ietf-moq-transport-21 §12.5 (Stream Reset Error Codes))
 pub const STREAM_MALFORMED_TRACK: u64 = 0x12;

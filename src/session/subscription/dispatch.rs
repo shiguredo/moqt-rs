@@ -142,10 +142,9 @@ impl Session {
                     if let Some(priority) = pending_params.subscriber_priority() {
                         subscription.subscriber_priority = Some(priority);
                     }
-                    // draft §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length can be 0 to remove
-                    // a filter parameter or non-zero to replace that entire filter parameter
-                    // including all sets and Property Types. If a filter parameter is omitted
-                    // from REQUEST_UPDATE, the value is unchanged."
+                    // draft §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0 removes the
+                    // filter; non-zero replaces it entirely. If a filter parameter is omitted
+                    // from REQUEST_UPDATE, it is unchanged."
                     // `merge_from` が型単位の全置換と Length=0 削除を済ませているので、
                     // 累積パラメータからそのまま作り直せばこの規則を満たす。
                     if pending_params.has_range_filters() {
@@ -380,7 +379,7 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-21 §3.1.1 (Subscription State Management):
     /// "A subscriber keeps subscription state until it cancels the request
-    /// (see Section 3.3.3), or after receipt of a PUBLISH_DONE or REQUEST_ERROR."
+    /// (see Section 6.4.2.3), or until receipt of a PUBLISH_DONE or REQUEST_ERROR."
     /// REQUEST_ERROR の受信を subscription state を終える明示的な条件として列挙するため、
     /// REQUEST_UPDATE 失敗応答 (Established 分岐) でも `Terminated` に遷移させる
     /// (§9.5 (REQUEST_UPDATE) の失敗応答も「REQUEST_ERROR を受信した」に変わりはない)。

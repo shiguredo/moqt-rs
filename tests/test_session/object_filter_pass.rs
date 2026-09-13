@@ -19,7 +19,7 @@ use shiguredo_moqt::session::types::SendRequestError;
 
 /// peer が MAX_FILTER_RANGES を宣言した状態で SUBSCRIBE を確立し (client, server, rid) を返す
 ///
-/// Range Filter を送るには peer (server) 側の宣言が必要 (§10.3.1.6)。
+/// Range Filter を送るには peer (server) 側の宣言が必要 (§9.1.6 (MAX FILTER RANGES))。
 fn establish_with_filters(sub_params: MessageParameters) -> (Session, Session, u64) {
     let (mut client, mut server) = establish_pair_with_options(SetupOptions::new(), {
         let mut opts = SetupOptions::new();
@@ -140,7 +140,7 @@ fn forward_zero_rejects_datagram() {
 /// 制御メッセージ (PUBLISH_DONE) は Forward State に影響されない
 ///
 /// draft-ietf-moq-transport-21 §3.1 (Subscriptions): "Control messages, such as PUBLISH_DONE
-/// (Section 10.12) are sent regardless of the forward state"
+/// (Section 9.9) are sent regardless of the forward state"
 #[test]
 fn forward_zero_still_allows_publish_done() {
     let mut params = MessageParameters::new();

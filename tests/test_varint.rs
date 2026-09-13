@@ -266,7 +266,8 @@ mod error_cases {
     }
 }
 
-/// draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers) Table 2 のテストベクトル
+/// draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers) Table 4 (Example Integer Encodings) の
+/// テストベクトル
 mod spec_test_vectors {
     use super::*;
 
@@ -295,8 +296,8 @@ mod spec_test_vectors {
         );
     }
 
-    /// 仕様 Table 2 の 0xdd7f3e7d → 494,878,333 はドラフトの誤り
-    /// 正しい最短エンコード: 0xf01d7f3e7d (5 バイト)
+    /// 494,878,333 は 4 バイト形式の上限 2^28 - 1 を超えるため、最短エンコードは
+    /// 5 バイト形式の 0xf01d7f3e7d になる
     #[test]
     fn value_494878333() {
         assert_eq!(

@@ -45,9 +45,9 @@ pub enum NameParseError {
     MissingSeparator,
     /// 境界 `--` が 2 回以上、またはハイフンの連続ラン長が 3 以上
     MultipleSeparators,
-    /// namespace + track name の合計が 4096 バイトを超える (draft-ietf-moq-transport-21 §2.4.1 (Track Naming))
+    /// namespace + track name の合計が 4096 バイトを超える (draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure))
     FullNameTooLong,
-    /// `TrackNamespace::new` のフィールド数 (32 超) 制約違反 (draft-ietf-moq-transport-21 §2.4.1 (Track Naming))
+    /// `TrackNamespace::new` のフィールド数 (32 超) 制約違反 (draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure))
     InvalidNamespace,
 }
 
@@ -180,7 +180,8 @@ pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> 
         }
     }
 
-    // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name (namespace + track name) の合計は 4096 バイト以下。
+    // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name (namespace + track name) の合計は
+    // 4096 バイト以下。
     // parse_name は `TrackNamespace` を返すため (型不変条件で namespace 単独の 4096 / 32 フィールド制約は
     // 必ず満たす)、Full Track Name 制約の範囲内で動作する。合計長は `TrackNamespace::new` が見ない
     // (namespace 単独しか見ない) ため、ここで合計を検証する。`new` の namespace 単独 4096 検査は、この
@@ -191,7 +192,7 @@ pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> 
     }
 
     // フィールド数 (<=32) を TrackNamespace::new で検証する。空フィールドと合計長は上で検証済みのため、
-    // ここで返り得るエラーはフィールド数超過のみ。draft-ietf-moq-transport-21 §2.4.1 (Track Naming) の wire 制約 (PROTOCOL_VIOLATION) の意味は
+    // ここで返り得るエラーはフィールド数超過のみ。draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) の wire 制約 (PROTOCOL_VIOLATION) の意味は
     // 持ち込まず NameParseError::InvalidNamespace へ写像する。
     let namespace = TrackNamespace::new(fields).map_err(|_| NameParseError::InvalidNamespace)?;
 

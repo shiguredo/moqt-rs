@@ -210,7 +210,7 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 
 /// PUBLISH で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-21 §9.20 各 Parameter 節の "MAY appear in PUBLISH" から
+/// draft-ietf-moq-transport-21 §9.20 各 Parameter 節の出現規定 (PUBLISH を含む) から
 /// 再導出した 9 種 (AUTHORIZATION_TOKEN / OBJECT_DELIVERY_TIMEOUT /
 /// SUBGROUP_DELIVERY_TIMEOUT / SUBSCRIBER_PRIORITY / GROUP_ORDER /
 /// LOCATION_FILTER / EXPIRES / LARGEST_OBJECT / FORWARD)。
@@ -661,7 +661,7 @@ pub struct Subscribe {
 impl Subscribe {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters.validate_scope(SUBSCRIBE_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
@@ -675,7 +675,7 @@ impl Subscribe {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;
@@ -795,7 +795,7 @@ pub struct Publish {
 impl Publish {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters.validate_scope(PUBLISH_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
@@ -814,7 +814,7 @@ impl Publish {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (track_alias, n) = varint::decode(&payload[pos..])?;
         pos += n;
@@ -918,7 +918,7 @@ pub struct PublishSkipped {
 impl PublishSkipped {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): suffix + track_name でも 4096 超ならプロトコル違反
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): suffix + track_name でも 4096 超ならプロトコル違反
         validate_full_track_name(&self.track_namespace_suffix, &self.track_name)?;
         self.track_namespace_suffix.encode_to(buf)?;
         encode_track_name(&self.track_name, buf);
@@ -967,7 +967,7 @@ impl Fetch {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         self.parameters.validate_scope(FETCH_ALLOWED_PARAMS)?;
         varint::encode(self.request_id, buf);
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.track_namespace.encode_to(buf)?;
         encode_track_name(&self.track_name, buf);
@@ -1078,7 +1078,7 @@ pub struct TrackStatus {
 impl TrackStatus {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters
             .validate_scope(TRACK_STATUS_ALLOWED_PARAMS)?;
@@ -1093,7 +1093,7 @@ impl TrackStatus {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-21 §2.4.1 (Track Naming): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;

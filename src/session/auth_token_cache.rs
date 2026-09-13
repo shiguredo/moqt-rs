@@ -13,7 +13,7 @@ use super::types::SessionError;
 
 /// AUTHORIZATION_TOKEN Alias Cache
 ///
-/// draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter) に基づく。1 インスタンスは
+/// draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression) に基づく。1 インスタンスは
 /// 片方向の alias 空間を保持する。`Session::peer_auth_token_cache()` が返すのは
 /// peer が REGISTER した alias を自側が保持する側であり、`max_size()` は自側 SETUP の
 /// MAX_AUTH_TOKEN_CACHE_SIZE (受信側が自身のリソースを保護するために宣言する値) である。
@@ -92,7 +92,7 @@ impl AuthTokenCache {
 
     /// USE_ALIAS: 登録済みの alias を Token Type / Value に解決する
     ///
-    /// draft §9.20.3 (AUTHORIZATION TOKEN Parameter): 未登録の alias を参照するとセッションエラー UNKNOWN_AUTH_TOKEN_ALIAS となるが、
+    /// draft §8.9 (Authorization Token Compression): 未登録の alias を参照するとセッションエラー UNKNOWN_AUTH_TOKEN_ALIAS となるが、
     /// 本メソッドは単に `None` を返す。呼び出し側でエラーに変換する。
     pub fn resolve(&self, alias: u64) -> Option<(u64, &[u8])> {
         self.entries.get(&alias).map(|(t, v)| (*t, v.as_slice()))
@@ -101,7 +101,7 @@ impl AuthTokenCache {
     /// DELETE: alias を除去する
     ///
     /// 未登録の alias を DELETE しようとした場合は単に no-op とする
-    /// (draft §9.20.3 (AUTHORIZATION TOKEN Parameter): 登録は sender 側の管理責任であり、unknown alias の DELETE を
+    /// (draft §8.9 (Authorization Token Compression): 登録は sender 側の管理責任であり、unknown alias の DELETE を
     /// セッションエラーにする規定はない)。
     pub fn delete(&mut self, alias: u64) {
         if let Some((_, v)) = self.entries.remove(&alias) {

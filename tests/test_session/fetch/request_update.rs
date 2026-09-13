@@ -110,7 +110,7 @@ fn fetch_request_update_full_cycle() {
 ///
 /// draft-ietf-moq-transport-21 §3.2.1: "A REQUEST_ERROR indicates that both endpoints can
 /// immediately remove state." および "A subscriber keeps FETCH state until it cancels
-/// the request (see Section 3.3.3), receives REQUEST_ERROR, or the FETCH data stream
+/// the request (see Section 6.4.2.3), receives REQUEST_ERROR, or the FETCH data stream
 /// receives a FIN or is reset." REQUEST_UPDATE 失敗応答の REQUEST_ERROR も「REQUEST_ERROR
 /// を受信した」ことに変わりはない。§9.5.1 の MUST でデータストリームはリセット済みの
 /// ため、`Established` のまま維持すると再配信不能な状態と状態機械が矛盾する。

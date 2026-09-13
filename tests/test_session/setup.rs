@@ -306,7 +306,7 @@ fn peer_authorization_token_register_over_self_limit_is_ignored() {
 
 /// 自側 SETUP 内の REGISTER で alias が重複すると new() で拒否される
 ///
-/// draft §9.20.3 (AUTHORIZATION TOKEN Parameter): alias 重複の事前検出。
+/// draft §8.9 (Authorization Token Compression): alias 重複の事前検出。
 /// 自側 cache 自体は保持しないが、重複検証は new() 時に行う。
 #[test]
 fn local_authorization_token_register_duplicate_alias_rejected() {

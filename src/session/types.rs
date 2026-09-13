@@ -464,7 +464,7 @@ pub enum DataStreamResetReason {
     /// いずれかの端点による cancel → `CANCELLED` (0x1)
     ///
     /// §12.5: "The stream was cancelled by either endpoint. For Subscriptions, PUBLISH_DONE
-    /// may have a more detailed status code."
+    /// (Section 9.9) may have a more detailed status code."
     Cancelled,
     /// delivery timeout 超過 → `DELIVERY_TIMEOUT` (0x2)
     ///
@@ -482,7 +482,7 @@ pub enum DataStreamResetReason {
     /// publisher のリソース上限超過 → `TOO_FAR_BEHIND` (0x5)
     ///
     /// §12.5: "The corresponding subscription has exceeded the publisher's resource limits and
-    /// is being terminated."
+    /// is being terminated (see Section 5.2)."
     TooFarBehind,
     /// FETCH 応答で次の Object の status を判定できない → `UNKNOWN_OBJECT_STATUS` (0x6)
     ///

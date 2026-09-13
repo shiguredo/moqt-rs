@@ -136,7 +136,7 @@ impl Session {
         if !self.accept_peer_request(request_id, &msg.parameters)? {
             return Ok(());
         }
-        // draft §9.20.3 (AUTHORIZATION TOKEN Parameter): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&msg.parameters)?;
         // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間の PUBLISH_NAMESPACE は拒否
         if msg.track_namespace.is_single_period() {

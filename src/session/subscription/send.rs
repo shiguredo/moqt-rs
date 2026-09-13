@@ -144,7 +144,7 @@ impl Session {
         // FILL 内側の Table 6 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出と状態登録を防ぐ
         super::fill::validate_outgoing_fill_parameters(&parameters)?;
-        // draft §5.1.2 / §5.1.4: 自側が送ったフィルタを保持する。自側は subscriber なので
+        // draft §3.3.1 / §3.3.2: 自側が送ったフィルタを保持する。自側は subscriber なので
         // Pass 評価には使わないが、状態として peer 側と対称に持つ。
         let (filter_start, filter_end) =
             resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
@@ -295,9 +295,9 @@ impl Session {
                 }
             }
         }
-        // draft §11.1 (Track Alias): "The same Track Alias MUST NOT be used by a publisher to
+        // draft §3.1.2 (Track Alias): "The same Track Alias MUST NOT be used by a publisher to
         // refer to two different Tracks simultaneously in the same session."
-        // 同一 Track への共有は §5.1 が明示的に許可しているので拒否しない。
+        // 同一 Track への共有は §3.1 (Subscriptions) が明示的に許可しているので拒否しない。
         if alias_used_by_different_track(
             &self.aliases.my_publisher_aliases,
             &self.subscriptions,
@@ -628,7 +628,7 @@ impl Session {
 
     /// REQUEST_UPDATE を送信する
     ///
-    /// draft §10.9 (REQUEST_UPDATE): request の sender は同じ bidi request stream に
+    /// draft §9.5 (REQUEST_UPDATE): request の sender は同じ bidi request stream に
     /// REQUEST_UPDATE を書ける。Session は `request_id` の種別ごとに送信可否を
     /// 検証する。subscription のみ、FORWARD parameter が含まれていれば
     /// `forward_state` を楽観的に更新する。
@@ -895,7 +895,7 @@ impl Session {
                 "publish_state_notify can only be sent by publisher",
             ));
         }
-        // draft §5.1 (Subscriptions): REQUEST_UPDATE と同様、確立済みの
+        // draft §3.1 (Subscriptions): REQUEST_UPDATE と同様、確立済みの
         // subscription に対する状態通知のみ送れる。
         if subscription.state != SubscriptionState::Established {
             return Err(SessionError::new(

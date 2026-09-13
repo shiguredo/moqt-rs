@@ -117,8 +117,8 @@ fn recv_control_stream_type_setup_stream_type_accepted() {
 /// 優先順位で決定的に 1 つのエラーコードが選ばれる
 #[test]
 fn timeout_priority_control_over_data_over_goaway() {
-    // draft-ietf-moq-transport-21 §6.6 (Termination) はエラーコードを定義するのみで、
-    // 複数 timeout の優先順位を規定していないため、実装で
+    // draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) はエラーコードを定義する
+    // のみで、複数 timeout の優先順位を規定していないため、実装で
     // control → data_stream → goaway の順に固定する。
     let (mut client, mut server, data_rid) = establish_subscribe_track(1);
     client.tick(0);
@@ -360,7 +360,7 @@ fn recv_padding_datagram_before_established_returns_protocol_violation() {
 
 // ─── data stream activity: object 受信による timestamp 更新 ─────────────────────────
 //
-// draft-ietf-moq-transport-21 §6.6 (Termination): DATA_STREAM_TIMEOUT は
+// draft-ietf-moq-transport-21 §12.2 (Session Termination Codes): DATA_STREAM_TIMEOUT は
 // "an object header within a data stream" も activity に含む。
 // Object 受信中のストリームは timeout で閉じられてはならない。
 
