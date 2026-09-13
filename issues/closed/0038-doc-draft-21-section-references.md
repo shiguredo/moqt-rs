@@ -1,7 +1,7 @@
 # コード内の draft-21 節番号・引用の誤りを一括修正する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-draft-21-section-references
 - Polished: 2026-09-13
 
@@ -51,3 +51,26 @@
 - 4096 バイト制限の引用および §8.7 の定義文の引用は §8.7 へ修正し、0〜32 フィールド数の `§2.4.1` 引用は維持されていること
 - 実装の挙動が変わらないこと
 - 既存テストがすべて通ること
+
+## 解決方法
+
+`src/` と `tests/` にある draft-ietf-moq-transport-21 の節参照を ripgrep で全件列挙し、節番号・節タイトル・引用文を一次資料
+`refs/moq/draft-ietf-moq-transport-21.txt` と 1 件ずつ突合して修正した。実装の挙動は変えていない (コメント・doc コメントのみ、実行コードの変更 0 行)。
+
+- 節番号の修正 (draft-20 の番号が残っていたもの):
+  `§2.4.1` → `§8.7` (4096 バイト制限・Track Namespace の wire 制約)、`§5.1.5` → `§3.3.3`、`§5.1.4` → `§3.3.2`、`§5.1.2` → `§3.3.1`、
+  `§5.1` → `§3.1`、`§5.2` → `§3.2.1`、`§2.5.1` → `§3.6`、`§11.1` → `§3.1.2`、`§10.5` → `§9.3`、`§10.9` → `§9.5`、
+  `§11.4.2` → `§11.3.1`、`§11.4.3` → `§11.3.2`、`§11.4.4` → `§11.4.1`、`§10.3.1.6` → `§9.1.6`、`§10.12` → `§9.9`、
+  `§15.9` → `§16.9`
+- 節番号の修正 (規範規則の帰属先が別節だったもの):
+  `§6.6` → `§12.2` (session close timeout のエラーコード定義)、`§9.20.3` → `§8.9` / `§9.1.4` (Token の規範規則と SETUP 固有規則)、
+  `§3.3.1` → `§9.20.10` (LOCATION_FILTER の符号化規則)、`§15.4` → `§16.4` (Setup Options レジストリ)、`Table 2` → `Table 4` (varint の例)
+- エラーコード定数の出典節を、コードを定義するレジストリ節 (`§12.3` / `§12.4` / `§12.5`) に揃えた
+- 引用文の修正: REQUEST_UPDATE の Range Filter 置換規則、MAX_FILTER_RANGES の上限、Authorization Token の REGISTER MUST と
+  (Token Type, Token Value) の一意性規則、MALFORMED_TRACK の引用、SUBGROUP_DELIVERY_TIMEOUT の Datagram 起源 Object の記述、
+  Range Filter の SetID 結合規則、Object Datagram の無効 Type 値、`CANCELLED` / `TOO_FAR_BEHIND` の 2 文、
+  `destroy subscription state ...` を一次資料の逐語に合わせた
+- `§2.4.1` のうち 0〜32 フィールドという構造を述べる箇所は、一次資料どおり `§2.4.1` のまま維持した
+- 検証: 修正後に同じ全件列挙を再実行し、draft-21 に存在しない節番号と、一次資料に逐語で存在しない引用が残っていないことを確認した。
+  `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通る
+- 再発防止の検査追加 (prek フック等) は本 issue の完了条件に含めず、別 issue の対象とした
