@@ -1,7 +1,7 @@
 # PUBLISH 起点 subscription の REQUEST_UPDATE ハンドシェイクを実装する
 
 - Created: 2026-09-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-13
 - Branch: feature/fix-publish-originated-request-update
 - Polished: 2026-09-13
 
@@ -62,3 +62,20 @@ subscription の REQUEST_UPDATE の送信可否は `src/session/subscription/sen
 - `SessionEvent::RequestOkReceived`、`stopped_outgoing_subgroups`、`Session::send_request_ok` の doc が実装と一致していること
 - 回帰テストが `tests/test_session/subscription/request_update.rs` などに追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+PUBLISH 起点 subscription で subscriber (responder) の REQUEST_UPDATE に対する REQUEST_OK の送受信を行えるようにした。
+
+- `src/session/subscription/dispatch.rs`: `send_ok_for_subscription` のガードを、Established かつ PUBLISH 起点 (自側 publisher、initiator) の応答だけを追加で許可する条件へ広げた。
+  `handle_ok_for_subscription` のガードも、Established かつ PUBLISH 起点 (自側 subscriber、responder) の REQUEST_OK だけを追加で受理する条件へ広げた。
+  どちらも緩和は Established に限り、Pending の到達経路 (response 側の PUBLISH_OK 送信と initiator 側の PUBLISH_OK 受信) は変えていない。
+  `SessionEvent::RequestOkReceived` の `request_kind` は `my_role` ではなく購読を開始したメッセージ種別 (`Subscription::initiator`) から求めるようにした。
+- `src/session/core.rs`: `stopped_outgoing_subgroups` の「PUBLISH 起点では Forward 0→1 の解除が行われない」既知の制限の記述を、解除される内容へ更新した。`Session::send_request_ok` の doc は、REQUEST_UPDATE への応答が受信側の義務 (§9.5) であることと、outstanding な REQUEST_UPDATE との対応付けを検証しない呼び出し契約が読み取れる内容へ更新した。
+- `src/session/types.rs`: `SessionEvent::RequestOkReceived` の doc を、`request_kind` が購読の開始メッセージ種別であり初回応答と REQUEST_UPDATE_OK は `request_kind` では区別できないこと、初回応答はその request で最初に受信する REQUEST_OK であることが読み取れる内容へ更新した。
+- `tests/test_session/subscription/request_update.rs` に回帰テスト 8 件を追加した。
+  REQUEST_UPDATE_OK の往復 (LARGEST_OBJECT の注入、EXPIRES と `largest_location` の反映、受理した `SUBSCRIBER_PRIORITY` の適用、`request_kind` が `Publish` であること)、
+  Forward 0→1 による再オープン解除 (REQUEST_OK 前の再オープン拒否を含む)、Pending の回帰 (自側 publisher の送信拒否 / 自側 subscriber の受信でセッションクローズ)、
+  SUBSCRIBE 起点 initiator の送信拒否、SUBSCRIBE 起点 responder の受信クローズ、MAX_REQUEST_UPDATES のクレジット回復と超過クローズを検証する。
+- `tests/test_session/data_stream.rs` と `tests/test_session/subscription/largest_location.rs` の `send_ok_for_subscription` を responder 専用と説明していた陳腐化コメントを修正した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
