@@ -47,7 +47,7 @@ use super::types::{
     DataStreamId, DeadlineTimer, Fetch, NamespacePublication, NamespaceSubscription,
     PeerGoawayInfo, RecvRequestError, RequestKind, RequestStreamEnd, Role, SendRequestError,
     SessionError, SessionEvent, SessionState, Subscription, SubscriptionState, TrackRole,
-    TrackStatusEntry, TrackSubscription, Transport,
+    TrackStatusEntry, TrackSubscription, TrackSubscriptionState, Transport,
 };
 
 /// 1 本の `MOQT Transport Session` に閉じた sans-I/O 状態機械
@@ -341,6 +341,19 @@ pub struct Session {
     /// prefix 変更を含まない更新であり、REQUEST_OK との対応を送信順に保つために
     /// 1 件ずつ積む。REQUEST_ERROR 受信・bidi stream 終端・forget で破棄する。
     pub(super) pending_prefix_updates: HashMap<u64, VecDeque<Option<TrackNamespace>>>,
+    /// SUBSCRIBE_TRACKS の prefix 更新で置換される前の TRACK_NAMESPACE_PREFIX の履歴
+    /// (request_id → 適用順)
+    ///
+    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "Updating the prefix
+    /// of a SUBSCRIBE_TRACKS has no effect on existing subscriptions." PUBLISH は REQUEST_UPDATE
+    /// とは別の bidi stream で送られるため順序保証がなく、peer が更新を処理する前に送った
+    /// 旧 prefix 基準の PUBLISH は REQUEST_OK の適用後に到着しうる。置換前の prefix を累積して
+    /// 保持し、PUBLISH の照合にのみ使う。overlap 検査には使わない (過去の prefix を比較に
+    /// 混ぜると、更新前の prefix が将来の購読を恒久的にブロックするため)。
+    /// 履歴に残る旧 prefix を後続の購読が再利用すると、その prefix 配下の PUBLISH は両方の
+    /// 購読に紐付き、共有 alias の暗黙終端で後続の購読も終端されうる。
+    /// bidi stream 終端・REQUEST_ERROR 受信・forget で破棄する。
+    pub(super) track_prefix_history: HashMap<u64, Vec<TrackNamespace>>,
     /// TRACK_STATUS の管理
     pub(super) track_status_requests: HashMap<u64, TrackStatusEntry>,
     pub(super) data_streams: DataStreamState,
@@ -540,6 +553,7 @@ impl Session {
             },
             track_subscriptions: HashMap::new(),
             pending_prefix_updates: HashMap::new(),
+            track_prefix_history: HashMap::new(),
             track_status_requests: HashMap::new(),
             data_streams: DataStreamState {
                 incoming: HashMap::new(),
@@ -919,22 +933,31 @@ impl Session {
                     // active_track_aliases を更新する。REQUEST_UPDATE で送信した prefix は
                     // REQUEST_OK 受信までローカルへ反映せず、PUBLISH は REQUEST_UPDATE とは
                     // 別 bidi stream で順序保証がない。そのため確定待ちの間は旧 prefix と
-                    // 確定待ち prefix の両方でマッチさせる
+                    // 確定待ち prefix の両方で、REQUEST_OK の適用後は置換前の prefix
+                    // (track_prefix_history) でもマッチさせる
                     // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
+                    // Terminated の購読は active ではないため対象外とする。
                     for (_, ts) in self.track_subscriptions.iter_mut() {
-                        if ts.my_role != TrackRole::Subscriber {
+                        if ts.my_role != TrackRole::Subscriber
+                            || ts.state == TrackSubscriptionState::Terminated
+                        {
                             continue;
                         }
-                        let pending_matches = self
+                        let request_id = ts.request_id;
+                        let matched = self
                             .pending_prefix_updates
-                            .get(&ts.request_id)
-                            .is_some_and(|queue| {
-                                queue
-                                    .iter()
-                                    .flatten()
-                                    .any(|prefix| is_prefix_of(prefix, &track_namespace))
-                            });
-                        if pending_matches || is_prefix_of(&ts.prefix, &track_namespace) {
+                            .get(&request_id)
+                            .into_iter()
+                            .flat_map(|queue| queue.iter().flatten())
+                            .chain(
+                                self.track_prefix_history
+                                    .get(&request_id)
+                                    .into_iter()
+                                    .flatten(),
+                            )
+                            .chain(core::iter::once(&ts.prefix))
+                            .any(|prefix| is_prefix_of(prefix, &track_namespace));
+                        if matched {
                             ts.active_track_aliases.insert(track_alias);
                         }
                     }

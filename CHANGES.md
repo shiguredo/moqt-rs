@@ -77,6 +77,8 @@
   - @voluntas
 - [FIX] PUBLISH 起点 subscription でも subscriber の REQUEST_UPDATE に対する REQUEST_OK の送受信を行えるようにし、RequestOkReceived の request_kind を購読の開始メッセージ種別から求める
   - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の prefix overlap 検査を役割を問わない対象にし、SUBSCRIBE_TRACKS の prefix 更新を跨いで届いた旧 prefix 基準の PUBLISH も紐付ける (Terminated の購読には紐付けない)
+  - @voluntas
 
 ### misc
 

@@ -2340,3 +2340,237 @@ fn send_namespace_reserved_suffix_with_non_empty_prefix_accepted() {
     let (_, msg) = take_send_on_stream(&mut server);
     assert!(matches!(msg, ControlMessage::NamespaceDone(_)));
 }
+
+/// server (peer) から受信した SUBSCRIBE_NAMESPACE を確立する
+///
+/// client 側では publisher 役の購読になる。返り値は request_id。
+fn establish_peer_subscribe_namespace(
+    client: &mut Session,
+    server: &mut Session,
+    prefix: TrackNamespace,
+) -> u64 {
+    let rid = server
+        .send_subscribe_namespace(prefix, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, req_msg) = take_send_request(server);
+    client
+        .recv_request(req_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(client);
+    server
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    rid
+}
+
+/// 受信側の overlap 検査が役割を問わない: 自側 subscriber 役の購読と overlap する
+/// REQUEST_UPDATE は PREFIX_OVERLAP で拒否する
+///
+/// draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter): "If the new prefix
+/// would share a common prefix with another active subscription of the same type in the same
+/// session, the receiver MUST respond with REQUEST_ERROR with error code PREFIX_OVERLAP."
+#[test]
+fn subscribe_namespace_update_prefix_overlap_across_roles_rejected() {
+    use shiguredo_moqt::error::REQUEST_PREFIX_OVERLAP;
+    use shiguredo_moqt::message_parameter::PARAM_TRACK_NAMESPACE_PREFIX;
+    use shiguredo_moqt::session::types::NamespaceSubscriptionState;
+    // client は自側 subscriber 役の ["a"] と、peer 起点で publisher 役の ["x"] を持つ
+    let (mut client, mut server) = establish_pair();
+    let own_rid = establish_namespace_subscription(&mut client, &mut server, ns(&[b"a"]));
+    let peer_rid = establish_peer_subscribe_namespace(&mut client, &mut server, ns(&[b"x"]));
+
+    // peer が自身の購読の prefix を ["a", "b"] へ更新する。peer 側の送信前検査は
+    // 自側 subscriber 役 ["a"] との overlap を検出してローカル拒否するため、
+    // 受信側の検査を検証するために wire メッセージを直接注入する
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"a", b"b"])),
+    });
+    client
+        .recv_stream_message(
+            peer_rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: peer_rid,
+                parameters: params,
+            }),
+        )
+        .expect("受信側の overlap 拒否は Ok で返る");
+
+    let mut err_code = None;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::SendOnStream {
+            request_id,
+            message: ControlMessage::RequestError(e),
+            ..
+        } = ev
+            && request_id == peer_rid
+        {
+            err_code = Some(e.error_code);
+            break;
+        }
+    }
+    assert_eq!(err_code, Some(REQUEST_PREFIX_OVERLAP));
+    assert_eq!(
+        client
+            .namespace_subscription(peer_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        ns(&[b"x"]),
+        "拒否時に prefix を更新しないこと"
+    );
+    assert_eq!(
+        client
+            .namespace_subscription(own_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        ns(&[b"a"]),
+        "拒否が自側 subscriber 役の購読の prefix に波及しないこと"
+    );
+    assert_eq!(
+        client
+            .namespace_subscription(peer_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        NamespaceSubscriptionState::Established,
+        "拒否時に購読の state を変更しないこと"
+    );
+}
+
+/// 送信側の overlap 検査が役割を問わない: 自側 subscriber 役の購読から peer 起点
+/// (publisher 役) の購読と overlap する prefix への更新はローカルで拒否する
+#[test]
+fn subscribe_namespace_update_prefix_overlap_across_roles_rejected_locally() {
+    use shiguredo_moqt::message_parameter::PARAM_TRACK_NAMESPACE_PREFIX;
+    let own_prefix = ns(&[b"a"]);
+    let (mut client, mut server) = establish_pair();
+    let own_rid = establish_namespace_subscription(&mut client, &mut server, own_prefix.clone());
+    let _peer_rid = establish_peer_subscribe_namespace(&mut client, &mut server, ns(&[b"x"]));
+
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(ns(&[b"x", b"y"])),
+    });
+    let err = client
+        .send_request_update(own_rid, params)
+        .expect_err("overlap する prefix 更新はローカルで拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .namespace_subscription(own_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        own_prefix,
+        "拒否時に prefix を更新しないこと"
+    );
+    while let Some(ev) = client.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendOnStream { .. }),
+            "拒否された REQUEST_UPDATE は送信されないこと"
+        );
+    }
+    // 拒否された更新は確定待ちに残らない (続く正当な更新がそのまま適用される)
+    let valid_prefix = ns(&[b"z"]);
+    let mut valid_params = MessageParameters::new();
+    valid_params.push(MessageParameter {
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(valid_prefix.clone()),
+    });
+    client
+        .send_request_update(own_rid, valid_params)
+        .expect("正当な prefix 更新は送信できること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(own_rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_ok(
+            own_rid,
+            MessageParameters::new(),
+            TrackProperties::default(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(own_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .namespace_subscription(own_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .prefix,
+        valid_prefix,
+        "拒否された更新が確定待ちに残らず、次の更新が適用されること"
+    );
+}
+
+/// 受信側の作成時 overlap 検査が役割を問わない: 自側 subscriber 役の購読と overlap する
+/// SUBSCRIBE_NAMESPACE は PREFIX_OVERLAP で拒否する
+///
+/// draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE): "if a publisher receives a
+/// SUBSCRIBE_NAMESPACE with a Track Namespace Prefix that shares a common prefix with an
+/// established SUBSCRIBE_NAMESPACE, it MUST respond with REQUEST_ERROR with error code
+/// PREFIX_OVERLAP."
+#[test]
+fn subscribe_namespace_create_overlap_across_roles_rejected() {
+    use shiguredo_moqt::error::REQUEST_PREFIX_OVERLAP;
+    use shiguredo_moqt::message::SubscribeNamespace;
+    let (mut client, mut server) = establish_pair();
+    let _own_rid = establish_namespace_subscription(&mut client, &mut server, ns(&[b"a"]));
+
+    // peer が ["a", "b"] の SUBSCRIBE_NAMESPACE を送る。peer 側の送信前検査は自側 subscriber 役
+    // ["a"] との overlap を検出してローカル拒否するため、受信側の検査を検証するために
+    // wire メッセージを直接注入する
+    client
+        .recv_request(ControlMessage::SubscribeNamespace(SubscribeNamespace {
+            request_id: 99,
+            track_namespace_prefix: ns(&[b"a", b"b"]),
+            parameters: MessageParameters::new(),
+        }))
+        .expect("受信側の overlap 拒否は Ok で返る");
+
+    let mut err_code = None;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::SendOnStream {
+            request_id,
+            message: ControlMessage::RequestError(e),
+            ..
+        } = ev
+            && request_id == 99
+        {
+            err_code = Some(e.error_code);
+            break;
+        }
+    }
+    assert_eq!(err_code, Some(REQUEST_PREFIX_OVERLAP));
+    assert!(
+        client.namespace_subscription(99).is_none(),
+        "拒否した購読を登録しないこと"
+    );
+}
+
+/// 送信側の作成時 overlap 検査が役割を問わない: peer 起点 (publisher 役) の購読と
+/// overlap する SUBSCRIBE_NAMESPACE はローカルで拒否する
+#[test]
+fn subscribe_namespace_create_overlap_across_roles_rejected_locally() {
+    let (mut client, mut server) = establish_pair();
+    let _own_rid = establish_namespace_subscription(&mut client, &mut server, ns(&[b"a"]));
+    let _peer_rid = establish_peer_subscribe_namespace(&mut client, &mut server, ns(&[b"x"]));
+
+    let err = client
+        .send_subscribe_namespace(ns(&[b"x", b"y"]), MessageParameters::new())
+        .expect_err("overlap する SUBSCRIBE_NAMESPACE はローカルで拒否される");
+    let err = err.as_session_error().expect("SessionError が得られること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // 拒否された SUBSCRIBE_NAMESPACE は送信されず、購読も登録されない
+    while let Some(ev) = client.poll_event() {
+        assert!(
+            !matches!(ev, SessionEvent::SendRequest { .. }),
+            "拒否された SUBSCRIBE_NAMESPACE は送信されないこと"
+        );
+    }
+}

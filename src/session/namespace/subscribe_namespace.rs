@@ -123,12 +123,12 @@ impl Session {
         }
         // draft §9.15 (SUBSCRIBE_NAMESPACE): SUBSCRIBE_NAMESPACE テーブル内での prefix overlap チェック。
         // 確定待ちの REQUEST_UPDATE がある購読とは反映後の実効 prefix で比較し、
-        // Terminated の購読は active ではないため対象外とする
-        // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
+        // Terminated の購読は active ではないため対象外とする。役割は問わない
+        // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "the new prefix
+        // MUST NOT share a common prefix with any other active SUBSCRIBE_NAMESPACE (for a
+        // SUBSCRIBE_NAMESPACE update) ... in the same session")。
         for (existing_id, existing) in &self.namespaces.subscriptions {
-            if existing.my_role != TrackRole::Subscriber
-                || existing.state == NamespaceSubscriptionState::Terminated
-            {
+            if existing.state == NamespaceSubscriptionState::Terminated {
                 continue;
             }
             let existing_effective =
@@ -344,10 +344,11 @@ impl Session {
             );
             return Ok(());
         }
-        // draft §9.15 (SUBSCRIBE_NAMESPACE): SUBSCRIBE_NAMESPACE テーブル内での prefix overlap チェック
+        // draft §9.15 (SUBSCRIBE_NAMESPACE): SUBSCRIBE_NAMESPACE テーブル内での prefix overlap チェック。
+        // "shares a common prefix with an established SUBSCRIBE_NAMESPACE" の "established" に
+        // 合わせて Established の購読を対象とし、役割は問わない
         for existing in self.namespaces.subscriptions.values() {
-            if existing.my_role == TrackRole::Publisher
-                && existing.state == NamespaceSubscriptionState::Established
+            if existing.state == NamespaceSubscriptionState::Established
                 && prefix_overlaps(&msg.track_namespace_prefix, &existing.prefix)
             {
                 self.emit_request_error(
@@ -567,7 +568,6 @@ impl Session {
         {
             for (other_id, existing) in &self.namespaces.subscriptions {
                 if other_id == &request_id
-                    || existing.my_role != TrackRole::Subscriber
                     || existing.state == NamespaceSubscriptionState::Terminated
                 {
                     continue;
@@ -643,10 +643,14 @@ impl Session {
         if let Some(new_prefix) = parameters.track_namespace_prefix()
             && *new_prefix != entry.prefix
         {
-            // 更新後の prefix が同タイプの他購読と overlap していないかチェック
+            // 更新後の prefix が同タイプの他購読と overlap していないかチェック。
+            // 役割は問わずに対象とする (draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX
+            // Parameter) の "another active subscription" に役割の限定はない)。state を Established に
+            // 限るのは、自側がまだ確定していない購読 (自側 publisher 役で REQUEST_OK を返していない購読と、
+            // 自側 subscriber 役で REQUEST_OK を受け取っていない購読) を根拠に peer の更新を拒否しない
+            // ためである (§9.15 / §9.18 の作成時拒否も "established" を条件にする)。比較は適用済み prefix で行う。
             for (other_id, existing) in &self.namespaces.subscriptions {
                 if other_id != &request_id
-                    && existing.my_role == TrackRole::Publisher
                     && existing.state == NamespaceSubscriptionState::Established
                     && prefix_overlaps(new_prefix, &existing.prefix)
                 {

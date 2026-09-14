@@ -9,6 +9,7 @@ mod track_status;
 mod track_subscription;
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use hashbrown::HashMap;
 
 use crate::error::SESSION_PROTOCOL_VIOLATION;
@@ -126,4 +127,21 @@ pub(super) fn pop_pending_prefix_update(
         pending_prefix_updates.remove(&request_id);
     }
     pending
+}
+
+/// SUBSCRIBE_TRACKS の prefix 更新で置換される前の prefix を履歴の末尾へ追加する
+///
+/// 保持量は当該 subscription の REQUEST_UPDATE 回数に比例する。破棄の条件は
+/// `Session::track_prefix_history` の doc を参照。確定待ちへ積まれる prefix は送信時に
+/// 実効 prefix と異なることが検査されているため (`send_update_for_track_subscription`)、
+/// 直前と同一の値が渡ることはない。
+pub(super) fn push_track_prefix_history(
+    track_prefix_history: &mut HashMap<u64, Vec<TrackNamespace>>,
+    request_id: u64,
+    prefix: TrackNamespace,
+) {
+    track_prefix_history
+        .entry(request_id)
+        .or_default()
+        .push(prefix);
 }
