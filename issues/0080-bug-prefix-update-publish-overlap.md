@@ -1,7 +1,7 @@
 # prefix 更新を跨いだ PUBLISH 紐付けと overlap 検査の残課題を解消する
 
 - Created: 2026-09-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-14
 - Branch: feature/fix-prefix-update-publish-overlap
 - Polished: 2026-09-14
 
@@ -82,3 +82,18 @@ draft-ietf-moq-transport-21 の該当規定に購読の役割による限定は�
 - 初回作成経路と prefix 更新経路で overlap 検査の条件が同じであること (送信側ローカル拒否と受信側 PREFIX_OVERLAP 応答の両方)
 - 回帰テストが `tests/test_session/namespace/` に追加され、`cargo test --workspace` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+SUBSCRIBE_TRACKS / SUBSCRIBE_NAMESPACE の prefix 更新を跨いだ PUBLISH の紐付けと、overlap 検査の役割スコープを解消した。
+
+- `src/session/core.rs`: Session に `track_prefix_history` (REQUEST_OK の適用で置換される前の prefix の履歴) を追加した。
+  `recv_request` の PUBLISH 分岐は、適用済み prefix・確定待ちの全要素・履歴のいずれかに一致する PUBLISH の `track_alias` を `active_track_aliases` に登録し、
+  照合対象を `my_role == Subscriber` かつ `state != Terminated` の TrackSubscription に限定した (`is_prefix_of` による片方向一致は 0017 から変更しない)。
+- `src/session/namespace.rs`: 置換前の prefix を履歴へ追加する `push_track_prefix_history` を追加した (履歴は PUBLISH の照合にのみ使い、overlap 検査には使わない)。
+- `src/session/namespace/track_subscription.rs`: `handle_ok_for_track_subscription` が確定待ちを適用するときに置換前の prefix を履歴へ積み、bidi 終端・REQUEST_ERROR 受信・forget で破棄するようにした。
+  overlap 検査は作成経路と更新経路の両方で役割条件を外し、送信側は `state != Terminated` を確定待ちを含む実効 prefix で、受信側は `state == Established` を適用済み prefix で比較する
+  (受信側の拒否は `emit_request_error` + `REQUEST_PREFIX_OVERLAP` のままとし、prefix も state も変更しない)。
+- `src/session/namespace/subscribe_namespace.rs`: 同じく overlap 検査の役割条件を外した。
+- `tests/test_session/namespace/track_subscription.rs` / `subscribe_namespace.rs`: 回帰テスト 11 件を追加した。REQUEST_OK 適用後の旧 prefix 基準の PUBLISH の紐付け、連続更新の中間 prefix の紐付け、Terminated の購読への非登録、役割を跨いだ overlap (作成経路・更新経路 × 送信側ローカル拒否・受信側 PREFIX_OVERLAP) を検証する。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
