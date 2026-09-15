@@ -1491,25 +1491,21 @@ pub enum TrackStatusResponse {
     Error,
 }
 
-/// TRACK_STATUS の状態エントリ
+/// 自側が送信した TRACK_STATUS の状態エントリ
+///
+/// 本ライブラリは TRACK_STATUS の送信側 (自側 subscriber) のみを扱うため、
+/// エントリは常に自側が送った要求の応答待ち状態を表す。
 #[derive(Debug, Clone)]
 pub struct TrackStatusEntry {
     /// 対象 request の Request ID
     pub request_id: u64,
-    /// 自端点の役割
-    pub my_role: TrackRole,
     /// 対象 Track の名前空間
     pub track_namespace: TrackNamespace,
     /// 対象 Track 名
     pub track_name: Vec<u8>,
-    /// 応答情報。`None` = 応答待ち (旧 `TrackStatusState::Pending`)、
-    /// `Some(Ok { .. })` = 旧 `Completed`、`Some(Error)` = 旧 `Failed`。
+    /// 応答情報。`None` = 応答待ち、`Some(Ok { .. })` = TRACK_STATUS_OK 受信済み、
+    /// `Some(Error)` = REQUEST_ERROR 受信または stream 終端。
     pub response: Option<TrackStatusResponse>,
-    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter))
-    ///
-    /// peer が TRACK_STATUS で指定した値。`Some(0)` のとき TRACK_STATUS_OK の
-    /// Track Properties を空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
-    pub include_properties: Option<u8>,
 }
 
 // ─── GOAWAY / Migration ────────────────────────────────────

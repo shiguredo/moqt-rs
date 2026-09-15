@@ -314,22 +314,6 @@ fn goaway_on_request_stream_before_established_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// goaway_drain_snapshot が track_status を drain blocker に含めること
-#[test]
-fn goaway_drain_snapshot_includes_track_status() {
-    let (mut client, mut server) = establish_pair();
-    let ts_rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let snapshot = server.goaway_drain_snapshot();
-    assert!(snapshot.blocking_track_status_request_ids.contains(&ts_rid));
-    assert!(!snapshot.ready());
-}
-
 /// Server が control stream で非空 new_session_uri の GOAWAY を受信したら PROTOCOL_VIOLATION
 ///
 /// draft-ietf-moq-transport-21 §9.2 (GOAWAY): Server (受信側) は Client (peer) からの
@@ -1694,38 +1678,6 @@ fn request_stream_goaway_deadline_is_cleared_by_peer_stream_reset() {
     }
 }
 
-/// TRACK_STATUS_OK の FIN で request stream GOAWAY の deadline は解除される
-#[test]
-fn request_stream_goaway_deadline_is_cleared_by_track_status_ok() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("TRACK_STATUS の送信に成功すること");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("TRACK_STATUS の受信に成功すること");
-
-    server.tick(1_000);
-    server
-        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
-        .expect("request stream GOAWAY の送信に成功すること");
-    let (_, _) = take_send_on_stream(&mut server);
-    server
-        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
-        .expect("TRACK_STATUS_OK の送信に成功すること");
-    let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
-    assert!(fin, "TRACK_STATUS_OK は FIN で送られること");
-
-    server.tick(2_000);
-    while let Some(e) = server.poll_event() {
-        assert!(
-            !matches!(e, SessionEvent::ResetRequestStream { .. }),
-            "TRACK_STATUS_OK の FIN 後は reset しないこと"
-        );
-    }
-}
-
 /// Pending subscription の REQUEST_ERROR (単独 FIN) で request stream GOAWAY の deadline は解除される
 #[test]
 fn request_stream_goaway_deadline_is_cleared_by_request_error_alone() {
@@ -1797,39 +1749,6 @@ fn request_stream_goaway_deadline_is_cleared_by_emit_request_error() {
             "自動拒否の FIN 後は reset しないこと"
         );
     }
-}
-
-/// subscription 以外 (TRACK_STATUS) の request stream も期限到達で reset される
-#[test]
-fn request_stream_goaway_expires_reset_for_track_status() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("TRACK_STATUS の送信に成功すること");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("TRACK_STATUS の受信に成功すること");
-
-    server.tick(1_000);
-    server
-        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
-        .expect("request stream GOAWAY の送信に成功すること");
-    let (_, _) = take_send_on_stream(&mut server);
-    server.tick(1_100);
-
-    let mut resets = Vec::new();
-    while let Some(e) = server.poll_event() {
-        if let SessionEvent::ResetRequestStream {
-            request_id,
-            error_code,
-        } = e
-        {
-            resets.push((request_id, error_code));
-        }
-    }
-    assert_eq!(resets.len(), 1, "TRACK_STATUS でも reset が 1 回出ること");
-    assert_eq!(resets[0].0, rid);
 }
 
 /// 同一 tick で複数の期限が到達した場合、reset は request_id 昇順で発行される

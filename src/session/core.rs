@@ -865,7 +865,6 @@ impl Session {
                 self.handle_peer_publish(publish)?;
             }
             ControlMessage::Fetch(fetch) => self.handle_peer_fetch(fetch)?,
-            ControlMessage::TrackStatus(m) => self.handle_peer_track_status(m)?,
             _ => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -1073,43 +1072,20 @@ impl Session {
                 self.send_ok_for_subscription(request_id, &mut parameters)?
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id)?,
-            Some(RequestTable::TrackStatus) => {
-                self.send_ok_for_track_status(request_id, &mut parameters)?
+            Some(RequestTable::TrackStatus) | None => {
+                unreachable!("TRACK_STATUS is send-side only; table is subscription or fetch")
             }
-            None => unreachable!("table.is_none() checked above"),
         }
-        // draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter):
-        // peer が TRACK_STATUS で INCLUDE_PROPERTIES=0 を指定したとき、TRACK_STATUS_OK の
-        // Track Properties は存在するが空にする (SHOULD)。他 context の REQUEST_OK は
-        // Track Properties を運べないため対象外 (上記の空検証で保証済み)。
-        let track_properties = if matches!(table, Some(RequestTable::TrackStatus))
-            && self
-                .track_status_requests
-                .get(&request_id)
-                .is_some_and(|entry| entry.include_properties == Some(0))
-        {
-            TrackProperties::new()
-        } else {
-            track_properties
-        };
         let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
             track_properties,
         });
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
-        // draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): TRACK_STATUS_OK 送信後は
-        // bidi stream を FIN で閉じる (REQUEST_ERROR 側の send_request_error は既に FIN する)。
-        let fin = matches!(table, Some(RequestTable::TrackStatus));
-        if fin {
-            // ローカル送信方向を FIN で閉じるため、request stream GOAWAY の reset deadline は
-            // 不要になる
-            self.clear_request_stream_goaway_deadline(request_id);
-        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
-            fin,
+            fin: false,
         });
         Ok(())
     }
@@ -1186,10 +1162,7 @@ impl Session {
             Some(RequestTable::Fetch) => {
                 fetch_reset_stream_id = self.send_err_for_fetch(request_id)?;
             }
-            Some(RequestTable::TrackStatus) => {
-                self.send_err_for_track_status(request_id)?;
-            }
-            None => {
+            Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_id not found for send_request_error",

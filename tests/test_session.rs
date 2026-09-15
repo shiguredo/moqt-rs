@@ -416,3 +416,5 @@ mod subgroup_object_filter;
 mod subscription;
 #[path = "test_session/timeout_api.rs"]
 mod timeout_api;
+#[path = "test_session/track_status.rs"]
+mod track_status;

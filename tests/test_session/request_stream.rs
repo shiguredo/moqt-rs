@@ -189,60 +189,6 @@ fn request_stream_tracks_fetch_lifecycle() {
     );
 }
 
-/// TRACK_STATUS request_id が `TrackStatus` で追跡され、forget で除去される
-#[test]
-fn request_stream_tracks_track_status_lifecycle() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert!(
-        client.track_status_request(rid).is_some(),
-        "送信側の track status テーブルに登録されること"
-    );
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert!(
-        server.track_status_request(rid).is_some(),
-        "受信側の track status テーブルに登録されること"
-    );
-
-    server
-        .send_request_ok(
-            rid,
-            MessageParameters::new(),
-            shiguredo_moqt::track_properties::TrackProperties::default(),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    // TRACK_STATUS_OK は FIN で送られるため、両端で bidi stream 終端を通知してから forget する
-    client
-        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
-        .expect("テストフィクスチャの前提条件を満たす");
-    client
-        .forget_track_status(rid)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .forget_track_status(rid)
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert!(
-        client.forget_track_status(rid).is_none(),
-        "除去後の再 forget は None を返すこと (追跡から除去済み)"
-    );
-    assert!(
-        server.forget_track_status(rid).is_none(),
-        "除去後の再 forget は None を返すこと (追跡から除去済み)"
-    );
-}
-
 /// 未知 request_id に対して各テーブル参照は `None` を返し、
 /// SETUP 直後は全 request テーブルが空である
 #[test]
@@ -850,42 +796,6 @@ fn redirect_nonempty_track_name_for_fetch_accepted() {
                 },
             ),
         )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    // track-scoped request には Track Name 制約がないため通常処理される
-    let result = client.recv_stream_message(
-        rid,
-        ControlMessage::RequestError(RequestError {
-            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
-            retry_interval: 0,
-            reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
-                .expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                    .expect("正当な namespace である"),
-                track_name: b"track".to_vec(),
-            }),
-        }),
-    );
-    assert!(result.is_ok());
-    assert_eq!(client.state(), SessionState::Established);
-}
-
-/// TRACK_STATUS (track-scoped) への REQUEST_ERROR で Redirect の Track Name が non-empty でもセッションは閉じない
-///
-/// Track Name の空制約は namespace-scoped request のみに適用される。
-/// TRACK_STATUS は track-scoped であるため、non-empty Track Name は許容される。
-#[test]
-fn redirect_nonempty_track_name_for_track_status_accepted() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, msg) = take_send_request(&mut client);
     server

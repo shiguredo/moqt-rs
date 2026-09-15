@@ -591,34 +591,6 @@ fn publish_ok_with_largest_object_rejected() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
-/// TRACK_STATUS_OK 応答に GROUP_ORDER を載せると PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER の scope に TRACK_STATUS_OK は含まれず、
-/// TRACK_STATUS_OK の許可は draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) LARGEST_OBJECT のみ。draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) が MUST-close 根拠。
-/// 送信側が `send_request_ok` で検出する)
-#[test]
-fn track_status_ok_with_group_order_rejected() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut ok_params = MessageParameters::new();
-    ok_params.push(MessageParameter {
-        param_type: PARAM_GROUP_ORDER,
-        value: MessageParameterValue::Uint8(1),
-    });
-    let err = server
-        .send_request_ok(rid, ok_params, TrackProperties::default())
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
 /// REQUEST_UPDATE_OK (subscription) 応答に GROUP_ORDER を載せると PROTOCOL_VIOLATION
 /// (draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter) / draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可。
 /// 送信側が `send_ok_for_subscription` で検出する)
@@ -1798,90 +1770,6 @@ fn request_update_ok_fetch_with_expires_and_largest_object_accepted() {
 }
 
 // ─── send_request_ok 送信側検証 ─────────────────
-
-/// TRACK_STATUS_OK に LARGEST_OBJECT を載せて送信すると成功する
-/// (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): LARGEST_OBJECT のみ許可)
-#[test]
-fn send_track_status_ok_with_largest_object_accepted() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut ok_params = MessageParameters::new();
-    ok_params.push(MessageParameter {
-        param_type: PARAM_LARGEST_OBJECT,
-        value: MessageParameterValue::Location {
-            group: 1,
-            object: 2,
-        },
-    });
-    server
-        .send_request_ok(rid, ok_params, TrackProperties::default())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-}
-
-/// TRACK_STATUS_OK に OBJECT_DELIVERY_TIMEOUT を載せて送信すると PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): TRACK_STATUS_OK は LARGEST_OBJECT のみ許可。
-/// 送信側が `send_request_ok` で検出する)
-#[test]
-fn send_track_status_ok_with_object_delivery_timeout_rejected() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let err = server
-        .send_request_ok(
-            rid,
-            delivery_timeout_params(5000),
-            TrackProperties::default(),
-        )
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// TRACK_STATUS_OK に非空 TrackProperties を載せて送信すると成功する
-/// (TRACK_STATUS_OK は TrackProperties を許容する唯一の REQUEST_OK context)
-#[test]
-fn send_track_status_ok_with_non_empty_track_properties_accepted() {
-    use shiguredo_moqt::track_properties::{
-        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperty, TrackPropertyValue,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut tp = TrackProperties::new();
-    tp.push(TrackProperty {
-        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
-        value: TrackPropertyValue::VarInt(5000),
-    });
-    server
-        .send_request_ok(rid, MessageParameters::new(), tp)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-}
 
 /// REQUEST_UPDATE_OK (fetch) に OBJECT_DELIVERY_TIMEOUT を載せると
 /// send_request_ok で PROTOCOL_VIOLATION (fetch の REQUEST_UPDATE_OK は EXPIRES / LARGEST_OBJECT のみ許可)

@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] TRACK_STATUS の受信側 (自側 publisher) を削除し、subscriber 側の送信と応答受信のみにする
+  - peer から TRACK_STATUS を受信した場合は未対応 request として `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - `TrackStatusEntry` から `my_role` と `include_properties` を削除し、送信側専用の型にする
+  - @voluntas
 - [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
   - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
   - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる

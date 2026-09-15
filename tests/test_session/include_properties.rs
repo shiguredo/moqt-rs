@@ -224,48 +224,6 @@ fn fetch_include_properties_zero_empties_fetch_ok() {
         .expect("テストフィクスチャの前提条件を満たす");
 }
 
-/// TRACK_STATUS + INCLUDE_PROPERTIES=0 → TRACK_STATUS_OK の Track Properties が空になる
-///
-/// draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter)
-#[test]
-fn track_status_include_properties_zero_empties_ok() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            include_properties_params(0),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        server
-            .track_status_request(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .include_properties,
-        Some(0)
-    );
-    server
-        .send_request_ok(rid, MessageParameters::new(), non_empty_track_properties())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    match ok_msg {
-        ControlMessage::RequestOk(ref ok) => {
-            assert!(
-                ok.track_properties.is_empty(),
-                "INCLUDE_PROPERTIES=0 では TRACK_STATUS_OK の Track Properties が空になること"
-            );
-        }
-        other => panic!("REQUEST_OK が期待されたが {other:?} を受け取った"),
-    }
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-}
-
 /// 値域外 INCLUDE_PROPERTIES の SUBSCRIBE 受信は PROTOCOL_VIOLATION でセッションを閉じる
 ///
 /// draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter):

@@ -119,7 +119,7 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | `PublishStateNotify` | 状態通知 |
 | `RequestUpdate` | 更新要求 |
 | `Fetch` / `FetchOk` | FETCH |
-| `TrackStatus` | TRACK_STATUS |
+| `TrackStatus` | TRACK_STATUS (送信側のみ実装) |
 
 補助型:
 
