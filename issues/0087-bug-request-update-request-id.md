@@ -69,21 +69,28 @@ REQUEST_UPDATE によって同時に複数開いた fill fetch stream を Reques
 
 ## 設計方針
 
-- `send_request_update` で `next_id` により新しい Request ID を採番し、`RequestUpdate` と
-  `SendOnStream` に採番した ID を載せる。購読の状態を引くキーは従来どおり購読の Request ID のままとし、
-  採番した ID から購読の Request ID への対応を `Session` に保持する。
+- `send_request_update` で `next_id` により新しい Request ID を採番し、wire の `RequestUpdate` に
+  採番した ID を載せる。`SendOnStream` の `request_id` は送信先 bidi request stream の識別子
+  (購読の Request ID) のままとし、購読の状態を引くキーも従来どおり購読の Request ID とする。
+  採番は既存の `send_subscribe` / `send_publish` と同じく全検証の後に行い、送信されなかった
+  REQUEST_UPDATE が peer 側の Request ID の欠番を作らないようにする。
+- 採番した Request ID から購読の Request ID への対応を `Session` に保持する。登録するのは
+  FILL_PARAMETERS を持つ REQUEST_UPDATE だけとする (fill fetch stream を開きうるのはその場合だけ)。
 - `handle_peer_request_update` から wire の Request ID と stream context の一致必須を外す。
   購読の解決は bidi request stream の context で行い、wire の Request ID を
   「この REQUEST_UPDATE の Request ID」として対応に記録する。
 - `maybe_open_fill_stream` は REQUEST_UPDATE 起因の呼び出しでは REQUEST_UPDATE の Request ID を
-  `SessionEvent::OpenFillFetchStream` に載せる。`recv_fetch_header` は購読の Request ID に加えて
-  REQUEST_UPDATE の Request ID からの対応も引いて購読を解決する。どちらにも無い Request ID は
-  従来どおり `PROTOCOL_VIOLATION` とする。
+  `SessionEvent::OpenFillFetchStream` に載せる。解決は共通の `resolve_fill_subscription` が行い、
+  REQUEST_UPDATE の Request ID の対応を先に引いてから購読の Request ID として解決する。この順序に
+  より、REQUEST_UPDATE の Request ID が別 subscription の Request ID と偶然一致しても起因メッセージの
+  購読へ帰属させる。`recv_fetch_header` と `send_fill_fetch_header` はこの解決を通し、どちらにも
+  無い Request ID は従来どおり `PROTOCOL_VIOLATION` とする。
 - MAX_REQUEST_UPDATES の残数管理と REQUEST_OK の対応付けは bidi request stream 単位の現行構造を
   変えない。
 - 購読の終端時に、その購読に属する REQUEST_UPDATE の Request ID の対応を破棄する。
-- 購読の Request ID と REQUEST_UPDATE の Request ID の対応は、fill fetch stream の識別と、
-  REQUEST_UPDATE 受信時の購読解決の 2 箇所からのみ参照する。
+- §6.4.2.1 が受信側に課す Request ID の parity 不正・重複の検出 (REQUEST_UPDATE の Request ID を
+  peer の Request ID 空間で検証すること) は本 issue の範囲外とする。本 issue は送信側の採番と、
+  購読とは異なる Request ID を持つ REQUEST_UPDATE の受理・fill fetch stream の識別を対象にする。
 
 ## 完了条件
 
