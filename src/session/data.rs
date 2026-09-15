@@ -80,9 +80,8 @@ pub(super) enum IncomingDataStream {
         /// DEFAULT_PRIORITY bit が立っている場合は `None`。Object 単位フィルタ再適用時の
         /// PRIORITY_FILTER は、候補ごとに
         /// [`Subscription::resolve_header_publisher_priority`] でこの生値を解決して評価する
-        /// (header 時の `header_passes_filters` と同じ規則)。解決済みの
-        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
-        /// 共有 Track Alias では stream の priority として使えない。
+        /// (header 時の `header_passes_filters` と同じ規則)。購読単位の直近解決値は持たない
+        /// (共有 Track Alias では別 stream の header で変わりうるため stream の priority に使えない)。
         ///
         /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
         header_publisher_priority: Option<u8>,
@@ -91,8 +90,8 @@ pub(super) enum IncomingDataStream {
         /// 解決は [`Subscription::resolve_header_publisher_priority`] (header 値 → Track Property の
         /// DEFAULT_PUBLISHER_PRIORITY → 128) による。Subgroup 単位の値であり、§12.1 条件 1 の
         /// priority 一致検証と重複 Object 検証 (`observe_object_fields`) で使う。
-        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
-        /// 並行 Subgroup の検証にはこの stream 保持値を使う。
+        /// 購読単位では直近 header の解決値を保持しないため、並行 Subgroup の検証には
+        /// この stream 保持値を使う。
         ///
         /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
         resolved_publisher_priority: u8,
@@ -1054,17 +1053,14 @@ impl Session {
         // SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が
         // `None`) 場合は override が無いので、Track Property の DEFAULT_PUBLISHER_PRIORITY を
         // 使い、それも無ければ既定値 128 を適用する。bit が立っていなければ header の値が
-        // override になる。Subgroup 単位の検証で使うため、解決済みの値を stream に保持する
-        // (`Subscription::publisher_priority` は直近 header の解決結果で上書きされる)。
+        // override になる。Subgroup 単位の検証とフィルタ評価で使うため、解決済みの値を
+        // stream に保持する (購読単位の直近値は並行 Subgroup で上書きされるため使わない)。
         let resolved_priority = {
             let subscription = self
                 .subscriptions
-                .get_mut(&request_id)
+                .get(&request_id)
                 .expect("subscription presence already checked by note_incoming_stream_opened");
-            let priority =
-                subscription.resolve_header_publisher_priority(header.publisher_priority);
-            subscription.publisher_priority = Some(priority);
-            priority
+            subscription.resolve_header_publisher_priority(header.publisher_priority)
         };
         self.data_streams.incoming.insert(
             stream_id,
@@ -1317,8 +1313,7 @@ impl Session {
             if let Some(subscription) = self.subscriptions.get(&candidate_id) {
                 // PRIORITY_FILTER は wire の SUBGROUP_HEADER が持つ Publisher Priority を
                 // 候補ごとに解決して評価する (header の `header_passes_filters` と同じ規則)。
-                // `Subscription::publisher_priority` は直近 header の解決結果であり、共有
-                // Track Alias では別候補の stream で上書きされうるため使わない。
+                // 購読単位では直近 header の解決値を保持しないため、候補ごとに解決する。
                 let publisher_priority =
                     subscription.resolve_header_publisher_priority(header_publisher_priority);
                 let input = ObjectFilterInput {
@@ -1994,7 +1989,8 @@ impl Session {
         // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので
         // SUBGROUP_FILTER は評価対象外 (`subgroup_id: None`)。Publisher Priority は
-        // §10.4 の解決結果を使う。
+        // 送信する datagram が常に DEFAULT_PRIORITY bit を立てる (§11.2.1) ため header 明示値が
+        // 無く、購読を確立した制御メッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承する。
         {
             let input = ObjectFilterInput {
                 location: Location {
@@ -2002,7 +1998,7 @@ impl Session {
                     object_id,
                 },
                 subgroup_id: None,
-                publisher_priority: subscription.effective_publisher_priority(),
+                publisher_priority: subscription.resolve_header_publisher_priority(None),
                 properties_bytes: properties_data.as_deref(),
             };
             if !object_passes_filters(subscription, &input) {
@@ -2201,9 +2197,13 @@ impl Session {
         let mut cancelled_matched = false;
         for &candidate_id in &candidates {
             if let Some(subscription) = self.subscriptions.get(&candidate_id) {
+                // DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が `None`) 場合は、
+                // 直近 SUBGROUP_HEADER の解決値ではなく購読を確立した制御メッセージの
+                // DEFAULT_PUBLISHER_PRIORITY を継承する (draft-ietf-moq-transport-21
+                // §11.2.1 (Object Datagram) / §10.4 (DEFAULT PUBLISHER PRIORITY))。
                 let publisher_priority = datagram
                     .publisher_priority
-                    .unwrap_or_else(|| subscription.effective_publisher_priority());
+                    .unwrap_or_else(|| subscription.resolve_header_publisher_priority(None));
                 let input = ObjectFilterInput {
                     location: Location {
                         group_id: datagram.group_id,
@@ -2279,11 +2279,14 @@ impl Session {
         // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
         // datagram 経由なので is_subgroup = false、subgroup_id = None。
         {
+            // DEFAULT_PRIORITY bit が立っている場合の継承元は、直近 SUBGROUP_HEADER ではなく
+            // 購読を確立した制御メッセージの DEFAULT_PUBLISHER_PRIORITY である
+            // (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
             let publisher_priority = datagram.publisher_priority.unwrap_or_else(|| {
                 self.subscriptions
                     .get(&request_id)
                     .map_or(PUBLISHER_PRIORITY_DEFAULT, |s| {
-                        s.effective_publisher_priority()
+                        s.resolve_header_publisher_priority(None)
                     })
             });
             if let Err(mismatch) = self

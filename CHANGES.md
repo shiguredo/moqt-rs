@@ -93,6 +93,9 @@
   - @voluntas
 - [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
   - @voluntas
+- [FIX] DEFAULT_PRIORITY bit が立った Datagram が直近 SUBGROUP_HEADER の Publisher Priority ではなく、購読を確立したメッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承するように修正する
+  - 誤った継承元だった `Subscription::publisher_priority` と `Subscription::effective_publisher_priority` を削除する
+  - @voluntas
 
 ### misc
 

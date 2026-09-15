@@ -847,7 +847,6 @@ mod tests {
             },
             expires: None,
             dynamic_groups: false,
-            publisher_priority: None,
             default_publisher_priority: None,
             default_publisher_group_order: None,
             stream_counts: StreamCountState {
@@ -1127,20 +1126,13 @@ pub struct Subscription {
     /// draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter): `NEW_GROUP_REQUEST` parameter は `DYNAMIC_GROUPS == 1` の
     /// Track 以外で REQUEST_UPDATE に送受信してはならない。
     pub dynamic_groups: bool,
-    /// publisher が設定した Publisher Priority (draft §5.1.2 Scheduling Algorithm, §10.4 DEFAULT PUBLISHER PRIORITY)
-    ///
-    /// subgroup header 受信時に「直近の header」の解決値で上書きされる。header が
-    /// DEFAULT_PRIORITY bit を立てている (`SubgroupHeader::publisher_priority` が `None`)
-    /// 場合は、§10.4 に従って `default_publisher_priority` → 128 の順で解決した値が入る。
-    /// Subgroup 単位の検証 (§12.1 条件 1 の priority 一致、重複 Object の優先度一貫性) は
-    /// 並行 Subgroup で上書きされうるこの値ではなく、`IncomingDataStream::Subgroup` が
-    /// header 時点で保持する解決値を使う。
-    pub publisher_priority: Option<u8>,
     /// Track Property の DEFAULT_PUBLISHER_PRIORITY (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
     ///
     /// PUBLISH / SUBSCRIBE_OK / REQUEST_OK の `TrackProperties` から取り込む。
     /// 宣言されていなければ `None` で、その場合の実効値は §10.4 のデフォルト 128 になる。
-    /// 実効値の解決は [`effective_publisher_priority`](Self::effective_publisher_priority)。
+    /// DEFAULT_PRIORITY bit が立った Subgroup / Datagram は「購読を確立した制御メッセージで
+    /// 指定された Publisher Priority」としてこの値を継承するため、解決は
+    /// [`resolve_header_publisher_priority`](Self::resolve_header_publisher_priority) を使う。
     pub default_publisher_priority: Option<u8>,
     /// Track Property の DEFAULT_PUBLISHER_GROUP_ORDER (draft §10.5 (DEFAULT PUBLISHER GROUP ORDER))
     ///
@@ -1287,18 +1279,12 @@ pub const PUBLISHER_PRIORITY_DEFAULT: u8 = 128;
 pub const DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING: u8 = 0x1;
 
 impl Subscription {
-    /// publisher の実効優先度を返す (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
-    ///
-    /// 解決順は subgroup header の明示値 → Track Property の DEFAULT_PUBLISHER_PRIORITY →
-    /// 既定値 128。`publisher_priority` は header 受信時にこの解決を済ませた値が入るため、
-    /// header を 1 つも受信していない段階では Track Property か既定値を返す。
-    pub fn effective_publisher_priority(&self) -> u8 {
-        self.publisher_priority
-            .or(self.default_publisher_priority)
-            .unwrap_or(PUBLISHER_PRIORITY_DEFAULT)
-    }
-
     /// header 明示値 → Track Property → 既定値 128 の順で解決する (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
+    ///
+    /// SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている場合は `header_priority` に
+    /// `None` を渡す。DEFAULT_PRIORITY bit が立った Object Datagram も同じ解決を使う
+    /// (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram) の「購読を確立した制御メッセージで
+    /// 指定された Publisher Priority」がこれにあたる)。
     pub fn resolve_header_publisher_priority(&self, header_priority: Option<u8>) -> u8 {
         header_priority
             .or(self.default_publisher_priority)

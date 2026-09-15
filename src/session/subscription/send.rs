@@ -186,7 +186,6 @@ impl Session {
             // 受信した SUBSCRIBE_OK の値で更新され、REQUEST_UPDATE 送信時の
             // NEW_GROUP_REQUEST 検証に使われる。
             dynamic_groups: false,
-            publisher_priority: None,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {
@@ -383,7 +382,6 @@ impl Session {
             },
             expires,
             dynamic_groups,
-            publisher_priority: None,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {
