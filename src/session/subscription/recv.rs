@@ -243,7 +243,13 @@ impl Session {
         // FILL_PARAMETERS 付き SUBSCRIBE を Forward State 1 で処理したら
         // fill fetch stream を開く。fill range が empty または Largest Object より
         // 後に始まる場合・ Largest Object 未知の場合は開設しない。
-        self.maybe_open_fill_stream(request_id, &subscribe.parameters, filter, forward_state);
+        self.maybe_open_fill_stream(
+            request_id,
+            request_id,
+            &subscribe.parameters,
+            filter,
+            forward_state,
+        );
         Ok(())
     }
 
@@ -406,9 +412,9 @@ impl Session {
         let (filter_start, filter_end) =
             resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
         let range_filters = SubscriptionRangeFilters::default();
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE / PUBLISH /
-        // SUBSCRIBE_TRACKS / FETCH に出現可能。PUBLISH には §9.18.1 (Parameters on
-        // SUBSCRIBE_TRACKS) の伝播として含めることができる。
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、PUBLISH にも
+        // 直接含められる。
         // 受信した PUBLISH の GROUP_ORDER は本処理で値域検証済みであり、初期状態として保持する。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let subscription = Subscription {
@@ -570,7 +576,8 @@ impl Session {
             ok.track_properties.subgroup_delivery_timeout(),
         );
         set_subscription_expires(subscription, ok.parameters.expires(), now_ms);
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に含まれる。
         // SUBSCRIBE_OK には含まれないため、group_order は SUBSCRIBE 送信時の値のまま保持される。
         self.register_peer_alias(ok.track_alias, request_id);
         // PUBLISH_OK 経路 (dispatch.rs) と対称に、SUBSCRIBE_OK による確立をアプリケーションに通知する
@@ -587,16 +594,23 @@ impl Session {
         request_id: u64,
         update: RequestUpdate,
     ) -> Result<(), SessionError> {
-        // RequestUpdate wire format の request_id と stream context の request_id は
-        // 一致していなければならない。mismatch は PROTOCOL_VIOLATION
-        if update.request_id != request_id {
-            let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "REQUEST_UPDATE request_id mismatch with stream context",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
+        // draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE も Request ID を
+        // 消費するメッセージとして列挙される。peer から受信した Request ID の parity 違反と
+        // 重複を検証し、違反時は INVALID_REQUEST_ID でセッションを Closing に遷移させる (MUST)。
+        // 検証は本関数の先頭で 1 回だけ行い、subscription / fetch の分岐より前に済ませる。
+        //
+        // ここでは `accept_peer_request` ではなく `validate_peer_request_id` を呼ぶ。
+        // draft §9.2 (GOAWAY) は "The GOAWAY message does not impact subscription state." と
+        // 定めており、GOAWAY 送信後に拒否してよいのは新規 request であって、既存の bidi request
+        // stream 上を流れる REQUEST_UPDATE は含まない。draft §9.5 (REQUEST_UPDATE) も受信側に
+        // REQUEST_OK / REQUEST_ERROR のいずれか 1 つで応答することを MUST としているため、
+        // GOING_AWAY による拒否経路は適用しない。
+        self.validate_peer_request_id(update.request_id)?;
+        // draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) / §9.5 (REQUEST_UPDATE):
+        // REQUEST_UPDATE は独立した Request ID を消費する。対象の request は
+        // 「同じ bidi stream 上で送る」ことで識別されるため、wire の
+        // `update.request_id` は stream context の `request_id` と一致しない。
+        // 対象 request の解決には stream context の `request_id` を使う。
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): peer からの outstanding REQUEST_UPDATE 数が
         // 自側 SETUP で宣言した MAX_REQUEST_UPDATES を超えたら TOO_MANY_REQUEST_UPDATES でセッションを閉じる。
         // デフォルト値 0 は無制限を意味する。
@@ -661,10 +675,20 @@ impl Session {
             self.reject_request_update_range_filters(request_id, reason)?;
             return Ok(());
         }
+        // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
+        // fill fetch stream は REQUEST_UPDATE 自身の Request ID を FETCH_HEADER に載せる。
+        // 受信した fill fetch stream をこの subscription へ帰属させるため対応を登録する。
+        // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけなので、
+        // その場合のみ登録する。
+        if update.parameters.fill_parameters().is_some() {
+            self.register_fill_request_subscription(update.request_id, request_id);
+        }
         match table {
-            Some(RequestTable::Subscription) => {
-                self.handle_update_for_subscription(request_id, update.parameters)
-            }
+            Some(RequestTable::Subscription) => self.handle_update_for_subscription(
+                request_id,
+                update.request_id,
+                update.parameters,
+            ),
             Some(RequestTable::Fetch) => {
                 self.handle_update_for_fetch(request_id, update.parameters)
             }
@@ -699,7 +723,7 @@ impl Session {
     ///   REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK 等) を閉じたり、Terminated で
     ///   保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ったり
     ///   しないため、応答は送らない。
-    /// - subscription 以外 (SUBSCRIBE_TRACKS の REQUEST_UPDATE 等) と subscriptions 未登録:
+    /// - subscription 以外 (FETCH の REQUEST_UPDATE 等) と subscriptions 未登録:
     ///   従来どおり REQUEST_ERROR のみを送る。
     ///
     /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
@@ -745,6 +769,7 @@ impl Session {
     pub(crate) fn handle_update_for_subscription(
         &mut self,
         request_id: u64,
+        fill_request_id: u64,
         parameters: MessageParameters,
     ) -> Result<(), SessionError> {
         let subscription = self
@@ -858,7 +883,13 @@ impl Session {
             request_id,
             parameters: merged,
         });
-        self.maybe_open_fill_stream(request_id, &parameters, post_filter, post_forward);
+        self.maybe_open_fill_stream(
+            fill_request_id,
+            request_id,
+            &parameters,
+            post_filter,
+            post_forward,
+        );
         Ok(())
     }
 

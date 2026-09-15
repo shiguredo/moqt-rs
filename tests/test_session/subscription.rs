@@ -12,9 +12,15 @@ fn recv_response_helper(session: &mut Session, request_id: u64, msg: ControlMess
 ///
 /// 送信 API が先に弾いてしまうケースを受信側で検証するため、wire を経由せず
 /// 直接メッセージを組み立てる。
-fn inject_request_update(request_id: u64, parameters: MessageParameters) -> ControlMessage {
+///
+/// `update_request_id` は wire に載せる Request ID である。draft-ietf-moq-transport-21
+/// §6.4.2.1 (Request ID): REQUEST_UPDATE も Request ID を消費し、受信側は parity 違反と
+/// 重複を INVALID_REQUEST_ID で拒否するため、購読の Request ID をそのまま渡すことはできない。
+/// 受信させる session の peer が使う Request ID (peer が server なら奇数、client なら偶数) を、
+/// peer がまだ使っていない値から選んで渡すこと。同じ session へ複数回注入する場合は 2 ずつ進める。
+fn inject_request_update(update_request_id: u64, parameters: MessageParameters) -> ControlMessage {
     ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id,
+        request_id: update_request_id,
         parameters,
     })
 }

@@ -347,14 +347,19 @@ pub enum SessionEvent {
     /// fill range の Object 送出を開始し、送り終わったら FIN で閉じる
     /// (失敗時は FETCH_HEADER の直後で即 reset する)。
     /// アプリは開いた stream を [`Session::send_fill_fetch_header`](crate::session::core::Session::send_fill_fetch_header)
-    /// で Session に登録すること。1 つの subscription に複数本の fill stream が
+    /// にそのまま `request_id` を渡して登録すること。
+    /// `request_id` は起因メッセージの Request ID である。SUBSCRIBE / PUBLISH 起因なら
+    /// subscription の Request ID、REQUEST_UPDATE 起因なら REQUEST_UPDATE 自身の
+    /// Request ID (draft-ietf-moq-transport-21 §6.4.2.1 (Request ID)) であり、
+    /// 同じ subscription でも両者は一致しない。
+    /// 1 つの subscription に複数本の fill stream が
     /// 同時に開くことがあり、いずれも同じ `request_id` (起因メッセージのもの) を載せる。
     /// fill range が empty または Largest Object より後に始まる場合は発火しない。
     /// subscription のキャンセル時は開いた fill stream を Session が
     /// `ResetDataStream` で自動 reset する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     OpenFillFetchStream {
-        /// fill 起因の request の Request ID
+        /// fill 起因の request の Request ID (FETCH_HEADER に載せる値)
         request_id: u64,
     },
     /// bidi request stream の送信方向を RESET_STREAM で打ち切る

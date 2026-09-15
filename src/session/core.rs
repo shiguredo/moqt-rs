@@ -358,6 +358,22 @@ pub struct Session {
     pub(super) outgoing_request_updates: HashMap<u64, u64>,
     /// request stream ごとの peer 送信 outstanding REQUEST_UPDATE 数 (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))
     pub(super) incoming_request_updates: HashMap<u64, u64>,
+    /// fill fetch stream の Request ID から subscription の Request ID への対応
+    ///
+    /// draft-ietf-moq-transport-21 §3.4 (Fill Semantics) / §6.4.2.1 (Request ID) /
+    /// §9.5 (REQUEST_UPDATE): fill fetch stream の FETCH_HEADER は起因メッセージの
+    /// Request ID を載せる。初回 fill は SUBSCRIBE / PUBLISH の Request ID
+    /// (= subscription の Request ID そのもの) だが、REQUEST_UPDATE 起因の fill は
+    /// REQUEST_UPDATE 自身の Request ID を載せる。REQUEST_UPDATE は §6.4.2.1 により
+    /// 独立した Request ID を消費するため、両者は一致しない。
+    ///
+    /// 受信した fill fetch stream を正しい subscription へ帰属させるために
+    /// REQUEST_UPDATE の Request ID だけを登録する (FILL_PARAMETERS を持つ
+    /// REQUEST_UPDATE だけが fill fetch stream を開きうるため、その場合のみ登録する)。
+    /// 解決は [`Session::resolve_fill_subscription`] が行い、直接 subscription の
+    /// Request ID と一致する場合より優先する。破棄は
+    /// [`Session::forget_subscription`](crate::session::core::Session::forget_subscription) が行う。
+    pub(super) fill_request_subscriptions: HashMap<u64, u64>,
     /// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」集合
     ///
     /// draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams): "A publisher that
@@ -528,6 +544,7 @@ impl Session {
             },
             outgoing_request_updates: HashMap::new(),
             incoming_request_updates: HashMap::new(),
+            fill_request_subscriptions: HashMap::new(),
             stopped_outgoing_subgroups: HashMap::new(),
             events,
         })
@@ -772,9 +789,33 @@ impl Session {
         Ok(self.request_ids.local_generator.next_id())
     }
 
+    /// peer から受信した Request ID の parity と重複を検証する
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): "If an endpoint receives a Request ID
+    /// where the least significant bit is incorrect for the sender, or a duplicate Request ID,
+    /// it MUST close the session with INVALID_REQUEST_ID." に従い、違反時は `fail` を呼んで
+    /// セッションを `Closing` に遷移させ、`INVALID_REQUEST_ID` を返す。
+    ///
+    /// 新規 request の受理判断 (GOAWAY 送信済みの peer request を `REQUEST_ERROR` で拒否する経路)
+    /// を含まないため、既存の bidi request stream 上を流れる REQUEST_UPDATE の Request ID 検証からも
+    /// 呼べる。draft §9.2 (GOAWAY) は "The GOAWAY message does not impact subscription state." と
+    /// 定めており、既存 subscription に対する REQUEST_UPDATE を `GOING_AWAY` で拒否しない。
+    ///
+    /// 同じ peer request に対して 2 回呼ぶと 2 回目が重複として拒否されるため、1 メッセージに
+    /// つき 1 回だけ呼ぶこと。
+    pub(super) fn validate_peer_request_id(&mut self, request_id: u64) -> Result<(), SessionError> {
+        // draft §6.4.2.1 (Request ID): parity 不正・重複は無条件で
+        // INVALID_REQUEST_ID クローズ。GOING_AWAY 拒否より優先。
+        if let Err(err) = self.request_ids.peer_tracker.accept(request_id) {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
-    /// - `request_ids.peer_tracker.accept(request_id)` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
+    /// - `validate_peer_request_id` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
     /// - control GOAWAY 送信済み (`local_sent`) なら REQUEST_ERROR(GOING_AWAY) を送信し
     ///   `Ok(false)` を返す (draft §9.2 (GOAWAY))
     ///
@@ -807,12 +848,7 @@ impl Session {
         request_id: u64,
         parameters: &MessageParameters,
     ) -> Result<bool, SessionError> {
-        // draft §6.4.2.1 (Request ID): parity 不正・重複は無条件で
-        // INVALID_REQUEST_ID クローズ。GOING_AWAY 拒否より優先。
-        if let Err(err) = self.request_ids.peer_tracker.accept(request_id) {
-            self.fail(err.clone());
-            return Err(err);
-        }
+        self.validate_peer_request_id(request_id)?;
         // draft §9.2 (GOAWAY): control GOAWAY を送信した側は
         // GOAWAY 後に到着する新規 request を GOING_AWAY で MAY 拒否。
         // REQUEST_ERROR は SendOnStream イベントとして発行し、自側の送信方向の FIN は

@@ -1515,8 +1515,11 @@ impl Session {
     ///
     /// `SessionEvent::OpenFillFetchStream` を受けたアプリが uni stream を開き、
     /// FETCH_HEADER (起因 SUBSCRIBE / REQUEST_UPDATE の Request ID を載せる) を
-    /// 書いたときに呼ぶ。`subscription_request_id` には fill 対象 subscription の
-    /// Request ID を渡す。通常の FETCH 応答 (`send_fetch_header`) とは異なり
+    /// 書いたときに呼ぶ。`fill_request_id` には FETCH_HEADER に載せた値
+    /// (= `SessionEvent::OpenFillFetchStream::request_id`) をそのまま渡す。
+    /// 初回 fill は subscription の Request ID そのもの、REQUEST_UPDATE 起因の fill は
+    /// REQUEST_UPDATE 自身の Request ID であり、後者は購読へ解決してから会計する。
+    /// 通常の FETCH 応答 (`send_fetch_header`) とは異なり
     /// `Fetch` 状態に紐づかず subscription に direct に紐づくため、1 つの
     /// subscription に複数本が同時に開くことがある。
     ///
@@ -1532,7 +1535,7 @@ impl Session {
     pub fn send_fill_fetch_header(
         &mut self,
         stream_id: DataStreamId,
-        subscription_request_id: u64,
+        fill_request_id: u64,
     ) -> Result<(), SessionError> {
         self.require_established()?;
         if self.data_streams.outgoing.contains_key(&stream_id)
@@ -1544,15 +1547,19 @@ impl Session {
                 "outgoing data stream id already registered",
             ));
         }
+        // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): 引数は FETCH_HEADER に
+        // 載せた起因メッセージの Request ID。REQUEST_UPDATE 起因の fill では購読の
+        // Request ID と異なるため購読へ解決してから、Stream Count と索引を会計する。
+        let Some(subscription_request_id) = self.resolve_fill_subscription(fill_request_id) else {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "subscription not found for outgoing fill fetch stream",
+            ));
+        };
         let subscription = self
             .subscriptions
             .get(&subscription_request_id)
-            .ok_or_else(|| {
-                SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "subscription not found for outgoing fill fetch stream",
-                )
-            })?;
+            .expect("resolve_fill_subscription guarantees subscription presence");
         if subscription.my_role != TrackRole::Publisher {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -1821,6 +1828,9 @@ impl Session {
             }
         }
 
+        // fill fetch stream の索引には解決済みの subscription の Request ID を記録する
+        // (通常の FETCH 応答では FETCH の Request ID のまま)。
+        let mut stream_request_id = header.request_id;
         // FETCH 応答か fill fetch stream かを解決する。borrow を閉じてから
         // `fail` を呼ぶため、判定に必要な値はコピーして取り出す。
         let fetch_state = self
@@ -1854,31 +1864,45 @@ impl Session {
             }
         } else {
             // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill fetch stream の
-            // FETCH_HEADER は起因 SUBSCRIBE / REQUEST_UPDATE の Request ID
-            // (= subscription の Request ID) を載せる。`Fetch` 状態を持たないため
+            // FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
+            // SUBSCRIBE / PUBLISH の Request ID (= subscription の Request ID) だが、
+            // REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の Request ID であり、
+            // §6.4.2.1 (Request ID) により両者は一致しない。`Fetch` 状態を持たないため
             // subscription 側で受理する。複数本の同時存在を許すため
             // `has_other_fetch_stream` 検証は行わない (FIN / RESET 後の後始末は
             // `recv_data_stream_closed` / `send_data_stream_stop_sending` が
             // subscription の state を変えず Stream Count の open 数だけを戻す)。
+            let Some(fill_subscription_request_id) =
+                self.resolve_fill_subscription(header.request_id)
+            else {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "FETCH_HEADER received for unknown request id",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            };
             let fill_state = self
                 .subscriptions
-                .get(&header.request_id)
+                .get(&fill_subscription_request_id)
                 .map(|subscription| {
                     (
                         subscription.my_role,
                         subscription.state,
                         subscription.publish_done.is_some(),
                     )
-                });
+                })
+                .expect("resolve_fill_subscription guarantees subscription presence");
+            stream_request_id = fill_subscription_request_id;
             match fill_state {
-                Some((TrackRole::Subscriber, SubscriptionState::Pending, _))
-                | Some((TrackRole::Subscriber, SubscriptionState::Established, _)) => {}
+                (TrackRole::Subscriber, SubscriptionState::Pending, _)
+                | (TrackRole::Subscriber, SubscriptionState::Established, _) => {}
                 // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): PUBLISH_DONE は
                 // late-opening stream より先に届きうる。drain 中 (publish_done 付きの
                 // Terminated) の fill fetch stream は subgroup と同じく受理する。
                 // キャンセル由来 Terminated (publish_done なし) は受理しない
-                Some((TrackRole::Subscriber, SubscriptionState::Terminated, true)) => {}
-                Some((TrackRole::Subscriber, SubscriptionState::Terminated, false)) => {
+                (TrackRole::Subscriber, SubscriptionState::Terminated, true) => {}
+                (TrackRole::Subscriber, SubscriptionState::Terminated, false) => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
                         "FETCH_HEADER received for cancelled subscription",
@@ -1886,7 +1910,7 @@ impl Session {
                     self.fail(err.clone());
                     return Err(err);
                 }
-                Some(_) => {
+                _ => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
                         "FETCH_HEADER received for publisher-side subscription",
@@ -1894,18 +1918,10 @@ impl Session {
                     self.fail(err.clone());
                     return Err(err);
                 }
-                None => {
-                    let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "FETCH_HEADER received for unknown request id",
-                    );
-                    self.fail(err.clone());
-                    return Err(err);
-                }
             }
             // fill fetch stream も Stream Count に含める (draft §9.9 (PUBLISH_DONE))。
             // open / close は subscription の集計と `cleanup_ready` の open 判定で会計する
-            if let Err(err) = self.note_incoming_stream_opened(header.request_id) {
+            if let Err(err) = self.note_incoming_stream_opened(fill_subscription_request_id) {
                 self.fail(err.clone());
                 return Err(err);
             }
@@ -1913,7 +1929,7 @@ impl Session {
         self.data_streams.incoming.insert(
             stream_id,
             IncomingDataStream::Fetch {
-                request_id: header.request_id,
+                request_id: stream_request_id,
             },
         );
         if let Some(now_ms) = self.timing.last_tick_ms {
