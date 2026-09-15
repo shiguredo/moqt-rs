@@ -138,20 +138,35 @@ fn establish_pub_side() -> (Session, Session, u64) {
     (client, server, pub_rid)
 }
 
-/// REQUEST_UPDATE を client から server へ送る
+/// REQUEST_UPDATE を client から server へ送り、REQUEST_UPDATE 自身の Request ID を返す
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE は SUBSCRIBE とは
+/// 別に新しい Request ID を消費する。fill fetch stream の FETCH_HEADER はこの ID を
+/// 載せる (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))。
 fn send_update_to_server(
     client: &mut Session,
     server: &mut Session,
     sub_rid: u64,
     params: MessageParameters,
-) {
+) -> u64 {
     client
         .send_request_update(sub_rid, params)
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, upd_msg) = take_send_on_stream(client);
+    let (stream_rid, upd_msg) = take_send_on_stream(client);
+    // SendOnStream の request_id は送信先 bidi stream の識別子 (購読の Request ID) のまま
+    assert_eq!(
+        stream_rid, sub_rid,
+        "REQUEST_UPDATE は購読の bidi stream 上で送ること"
+    );
+    let update_rid = request_update_request_id(&upd_msg);
+    assert_ne!(
+        update_rid, sub_rid,
+        "REQUEST_UPDATE は購読の Request ID を再利用してはならない"
+    );
     server
         .recv_stream_message(sub_rid, upd_msg)
         .expect("テストフィクスチャの前提条件を満たす");
+    update_rid
 }
 
 /// Largest Object 未知のまま FILL_PARAMETERS 付き SUBSCRIBE を受けても fill stream は開かない
@@ -240,7 +255,7 @@ fn subscribe_with_fill_opens_fill_stream() {
 fn request_update_with_fill_opens_fill_stream() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
     // 内側パラメータなし = subscription の設定で fill する (track 全体)
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
@@ -248,8 +263,8 @@ fn request_update_with_fill_opens_fill_stream() {
     );
     assert_eq!(
         drain_open_fill_events(&mut server),
-        vec![sub_rid],
-        "起因 SUBSCRIBE / REQUEST_UPDATE の Request ID で fill stream を開くこと"
+        vec![update_rid],
+        "起因 REQUEST_UPDATE の Request ID で fill stream を開くこと"
     );
 }
 
@@ -263,10 +278,10 @@ fn request_update_with_fill_zero_length_inner_filter_opens_fill_stream() {
         param_type: PARAM_LOCATION_FILTER,
         value: MessageParameterValue::LengthPrefixed(Vec::new()),
     });
-    send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
+    let update_rid = send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
     assert_eq!(
         drain_open_fill_events(&mut server),
-        vec![sub_rid],
+        vec![update_rid],
         "zero-length 内側 filter は track 全体として fill stream を開くこと"
     );
 }
@@ -314,20 +329,20 @@ fn request_update_without_fill_opens_nothing() {
 #[test]
 fn second_request_update_with_fill_opens_another_stream() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid1 = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid1]);
     // 1 本目を実際に開設する
     server
-        .send_fill_fetch_header(DataStreamId(100), sub_rid)
+        .send_fill_fetch_header(DataStreamId(100), update_rid1)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 1);
     // 2 回目の FILL 付き UPDATE でも新規 fill stream が開き、1 本目は残る
-    send_update_to_server(
+    let update_rid2 = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
@@ -335,11 +350,11 @@ fn second_request_update_with_fill_opens_another_stream() {
     );
     assert_eq!(
         drain_open_fill_events(&mut server),
-        vec![sub_rid],
+        vec![update_rid2],
         "2 回目の FILL 付き UPDATE でも新規 fill stream が開くこと"
     );
     server
-        .send_fill_fetch_header(DataStreamId(101), sub_rid)
+        .send_fill_fetch_header(DataStreamId(101), update_rid2)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         server.open_outgoing_fill_stream_count(sub_rid),
@@ -353,15 +368,15 @@ fn second_request_update_with_fill_opens_another_stream() {
 #[test]
 fn publish_done_rejected_while_fill_stream_open() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
     server
-        .send_fill_fetch_header(DataStreamId(100), sub_rid)
+        .send_fill_fetch_header(DataStreamId(100), update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     let err = server
         .send_publish_done(
@@ -409,24 +424,24 @@ fn fill_not_retained_in_pending_update_params() {
 #[test]
 fn fill_fetch_header_object_close_flow() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
 
-    // 未知 subscription では登録できない
+    // 未知の Request ID では登録できない
     let err = server
         .send_fill_fetch_header(DataStreamId(100), 999)
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 
-    // fill stream を開く
+    // fill stream を開く (FETCH_HEADER に載せた起因 REQUEST_UPDATE の Request ID で登録する)
     let stream_id = DataStreamId(100);
     server
-        .send_fill_fetch_header(stream_id, sub_rid)
+        .send_fill_fetch_header(stream_id, update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 1);
     server
@@ -452,22 +467,27 @@ fn fill_fetch_header_object_close_flow() {
         .expect("fill stream 数を含む Stream Count は受理されること");
 }
 
-/// subscriber は subscription の Request ID を載せた fill 用 FETCH_HEADER を受理する
+/// subscriber は起因 REQUEST_UPDATE の Request ID を載せた fill 用 FETCH_HEADER を受理する
 /// (draft-ietf-moq-transport-21 §3.4)。複数本の同時存在も許す。
 #[test]
 fn subscriber_accepts_fill_fetch_headers() {
     use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
 
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+    assert_ne!(
+        update_rid, sub_rid,
+        "fill 起因の REQUEST_UPDATE は購読とは別の Request ID を持つこと"
+    );
 
-    // fill stream 1 本目も 2 本目も受理する (同時存在可)
+    // fill stream 1 本目も 2 本目も受理する (同時存在可)。
+    // FETCH_HEADER には購読の Request ID ではなく起因 REQUEST_UPDATE の Request ID を載せる。
     for stream_no in [200u64, 201u64] {
         let stream_id = DataStreamId(stream_no);
         client
@@ -477,7 +497,7 @@ fn subscriber_accepts_fill_fetch_headers() {
             .recv_fetch_header(
                 stream_id,
                 &FetchHeader {
-                    request_id: sub_rid,
+                    request_id: update_rid,
                 },
             )
             .expect("fill 用 FETCH_HEADER は受理されること");
@@ -508,7 +528,8 @@ fn subscriber_accepts_fill_fetch_headers() {
         )
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-    // キャンセル由来 (publish_done なし) の Terminated subscription を指す FETCH_HEADER は拒否する
+    // キャンセル由来 (publish_done なし) の Terminated subscription を指す FETCH_HEADER は拒否する。
+    // 起因 REQUEST_UPDATE の Request ID からも購読へ解決できることの確認を兼ねる。
     client
         .stop_sending(sub_rid)
         .expect("テストフィクスチャの前提条件を満たす");
@@ -519,7 +540,7 @@ fn subscriber_accepts_fill_fetch_headers() {
         .recv_fetch_header(
             DataStreamId(203),
             &FetchHeader {
-                request_id: sub_rid,
+                request_id: update_rid,
             },
         )
         .unwrap_err();
@@ -547,15 +568,15 @@ fn fill_fetch_header_with_unknown_request_id_closes_session() {
 #[test]
 fn cancel_subscription_resets_open_fill_streams() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
     server
-        .send_fill_fetch_header(DataStreamId(100), sub_rid)
+        .send_fill_fetch_header(DataStreamId(100), update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 1);
 
@@ -712,16 +733,16 @@ fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
 #[test]
 fn peer_stop_sending_on_fill_absorbed() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
     let stream_id = DataStreamId(100);
     server
-        .send_fill_fetch_header(stream_id, sub_rid)
+        .send_fill_fetch_header(stream_id, update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .recv_data_stream_stop_sending(stream_id)
@@ -745,16 +766,16 @@ fn reset_single_fill_stream_emits_reset_event() {
     use shiguredo_moqt::session::types::DataStreamResetReason;
 
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
     let stream_id = DataStreamId(100);
     server
-        .send_fill_fetch_header(stream_id, sub_rid)
+        .send_fill_fetch_header(stream_id, update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .reset_outgoing_data_stream(stream_id, DataStreamResetReason::Cancelled)
@@ -813,7 +834,7 @@ fn fill_without_inner_filter_inherits_subscription_filter() {
             },
             end_group_delta: 0,
         });
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
@@ -821,7 +842,7 @@ fn fill_without_inner_filter_inherits_subscription_filter() {
     );
     assert_eq!(
         drain_open_fill_events(&mut server),
-        vec![sub_rid],
+        vec![update_rid],
         "subscription filter が範囲内なら内側省略の fill が開くこと"
     );
 }
@@ -888,10 +909,10 @@ fn fill_with_next_object_overflow_opens_saturated_range() {
     let (mut client, mut server, sub_rid) = establish_sub_with_group_object(0, u64::MAX);
     // NextObject: Start {0, MAX + 1} は {0, MAX} に飽和する
     let inner = inner_with_location_filter(&LocationFilter::NextObject);
-    send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
+    let update_rid = send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
     assert_eq!(
         drain_open_fill_events(&mut server),
-        vec![sub_rid],
+        vec![update_rid],
         "飽和した開始位置の fill は開設されること"
     );
 }
@@ -901,20 +922,22 @@ fn fill_with_next_object_overflow_opens_saturated_range() {
 #[test]
 fn cancel_subscription_resets_all_open_fill_streams() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let mut update_rids = Vec::new();
     for _ in 0..2 {
-        send_update_to_server(
+        let update_rid = send_update_to_server(
             &mut client,
             &mut server,
             sub_rid,
             fill_params(MessageParameters::new()),
         );
-        assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+        assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+        update_rids.push(update_rid);
     }
     server
-        .send_fill_fetch_header(DataStreamId(100), sub_rid)
+        .send_fill_fetch_header(DataStreamId(100), update_rids[0])
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_fill_fetch_header(DataStreamId(101), sub_rid)
+        .send_fill_fetch_header(DataStreamId(101), update_rids[1])
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 2);
     server
@@ -950,15 +973,15 @@ fn cancel_subscription_resets_all_open_fill_streams() {
 #[test]
 fn request_error_resets_fills_and_sends_publish_done() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    send_update_to_server(
+    let update_rid = send_update_to_server(
         &mut client,
         &mut server,
         sub_rid,
         fill_params(MessageParameters::new()),
     );
-    assert_eq!(drain_open_fill_events(&mut server), vec![sub_rid]);
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
     server
-        .send_fill_fetch_header(DataStreamId(100), sub_rid)
+        .send_fill_fetch_header(DataStreamId(100), update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     // setup 用 subgroup stream を終端する (残っていると PUBLISH_DONE が保留される)
     server

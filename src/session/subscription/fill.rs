@@ -155,10 +155,16 @@ impl Session {
     /// fill range が空でなく Largest Object より後に始まらない場合に
     /// `SessionEvent::OpenFillFetchStream` を発火する。Forward State 0 での運搬や
     /// FILL なし REQUEST_UPDATE では発火しない。
+    /// `fill_request_id` は fill fetch stream の FETCH_HEADER に載せる起因メッセージの
+    /// Request ID である (SUBSCRIBE / PUBLISH 起因なら subscription の Request ID、
+    /// REQUEST_UPDATE 起因なら REQUEST_UPDATE 自身の Request ID で、§6.4.2.1 により
+    /// 両者は一致しない)。`subscription_request_id` は fill 対象 subscription の
+    /// Request ID で、開設判定にだけ使う。
     /// `filter_view` は処理後観点の subscription filter
     /// (SUBSCRIBE なら新規 filter、REQUEST_UPDATE なら累積後の filter) を渡す。
     pub(super) fn maybe_open_fill_stream(
         &mut self,
+        fill_request_id: u64,
         subscription_request_id: u64,
         parameters: &MessageParameters,
         filter_view: Option<LocationFilter>,
@@ -185,8 +191,55 @@ impl Session {
         let largest = self.publisher_track_largest(&track_namespace, &track_name);
         if should_open_fill_stream(fill, filter_view.as_ref(), largest.as_ref()) {
             self.events.push_back(SessionEvent::OpenFillFetchStream {
-                request_id: subscription_request_id,
+                request_id: fill_request_id,
             });
         }
+    }
+
+    /// fill fetch stream の Request ID から subscription の Request ID を解決する
+    ///
+    /// draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill fetch stream の
+    /// FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
+    /// SUBSCRIBE / PUBLISH の Request ID (= subscription の Request ID そのもの) で、
+    /// REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の Request ID である。
+    ///
+    /// REQUEST_UPDATE の Request ID の対応を先に引き、無ければ subscription の
+    /// Request ID として解決する。この順序により、REQUEST_UPDATE の Request ID が
+    /// 別 subscription の Request ID と偶然一致しても、起因メッセージの
+    /// subscription へ帰属させる。
+    /// 対応先の subscription が既に破棄されている場合は `None` を返す。
+    pub(crate) fn resolve_fill_subscription(&self, request_id: u64) -> Option<u64> {
+        if let Some(&subscription_request_id) = self.fill_request_subscriptions.get(&request_id)
+            && self.subscriptions.contains_key(&subscription_request_id)
+        {
+            return Some(subscription_request_id);
+        }
+        if self.subscriptions.contains_key(&request_id) {
+            return Some(request_id);
+        }
+        None
+    }
+
+    /// REQUEST_UPDATE 起因の fill fetch stream の Request ID を subscription に対応付ける
+    ///
+    /// FILL_PARAMETERS を持つ REQUEST_UPDATE だけが fill fetch stream を開きうるため、
+    /// 呼び出し側はその場合のみ登録すること。初回 fill は subscription の Request ID
+    /// そのものなので登録しない。
+    pub(super) fn register_fill_request_subscription(
+        &mut self,
+        fill_request_id: u64,
+        subscription_request_id: u64,
+    ) {
+        self.fill_request_subscriptions
+            .insert(fill_request_id, subscription_request_id);
+    }
+
+    /// subscription に紐づく fill fetch stream の Request ID の対応を破棄する
+    ///
+    /// subscription の破棄時に呼ぶ。残すと破棄済み subscription への対応が
+    /// セッション生存中に蓄積する。
+    pub(super) fn remove_fill_request_subscriptions(&mut self, subscription_request_id: u64) {
+        self.fill_request_subscriptions
+            .retain(|_, subscription| *subscription != subscription_request_id);
     }
 }

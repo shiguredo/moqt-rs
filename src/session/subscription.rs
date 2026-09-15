@@ -137,6 +137,9 @@ impl Session {
         self.remove_incoming_data_streams_for_request(request_id);
         self.remove_outgoing_data_plane_for_request(request_id);
         self.remove_request_update_credit_entries(request_id);
+        // REQUEST_UPDATE 起因の fill fetch stream の Request ID 対応も破棄する
+        // (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))
+        self.remove_fill_request_subscriptions(request_id);
         // STOP_SENDING による再オープン禁止エントリも破棄する
         self.stopped_outgoing_subgroups.remove(&request_id);
         Some(subscription)

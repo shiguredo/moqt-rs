@@ -692,8 +692,23 @@ impl Session {
             *self.outgoing_request_updates.entry(request_id).or_insert(0) += 1;
         }
         self.start_control_message_deadline(request_id);
+        // draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE は
+        // SUBSCRIBE / PUBLISH とは別に新しい Request ID を消費する。購読の
+        // Request ID を再利用すると重複 Request ID となり、draft の MUST に反する。
+        // 対象 request は「同じ bidi stream 上で送る」ことで識別されるため、
+        // `SendOnStream` の `request_id` (= 送信先 stream の識別子) は購読の
+        // Request ID のままにする。採番は全検証の後に行い、送信されなかった
+        // REQUEST_UPDATE が peer 側の Request ID の欠番を作らないようにする。
+        let update_request_id = self.request_ids.local_generator.next_id();
+        // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
+        // fill fetch stream は REQUEST_UPDATE 自身の Request ID を FETCH_HEADER に載せる。
+        // 受信した fill fetch stream を購読へ帰属させるため対応を登録する。
+        // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけ。
+        if parameters.fill_parameters().is_some() {
+            self.register_fill_request_subscription(update_request_id, request_id);
+        }
         let msg = ControlMessage::RequestUpdate(RequestUpdate {
-            request_id,
+            request_id: update_request_id,
             parameters,
         });
         self.events.push_back(SessionEvent::SendOnStream {
