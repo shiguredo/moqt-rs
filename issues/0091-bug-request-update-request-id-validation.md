@@ -1,7 +1,7 @@
 # REQUEST_UPDATE の Request ID を §6.4.2.1 に従って検証する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-request-update-request-id-validation
 - Polished: {YYYY-MM-DD}
 
@@ -51,3 +51,35 @@ draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) は REQUEST_UPDATE も Reques
 - 回帰テストが `tests/test_session/` に追加され、`cargo test --workspace` が通ること
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo fmt --all -- --check` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+`handle_peer_request_update` の先頭で wire の Request ID を検証し、parity 違反と重複を
+`INVALID_REQUEST_ID` でのセッションクローズにつなげた。
+
+- `src/session/core.rs` の `accept_peer_request` が持っていた parity と重複の検証を
+  `validate_peer_request_id` として切り出した。`accept_peer_request` はこれを呼ぶ。
+- `src/session/subscription/recv.rs` の `handle_peer_request_update` は先頭で
+  `validate_peer_request_id(update.request_id)` を 1 回だけ呼び、subscription / fetch の
+  分岐より前に検証を済ませる。wire の Request ID は購読の解決には使わず、従来どおり
+  stream context の Request ID で解決する。
+- GOAWAY 送信済みでも REQUEST_UPDATE は拒否しない。§9.2 (GOAWAY) の "The GOAWAY message does
+  not impact subscription state." と、§9.5 (REQUEST_UPDATE) の「REQUEST_OK / REQUEST_ERROR の
+  いずれか 1 つで応答する」MUST を根拠に、`accept_peer_request` の GOING_AWAY 拒否経路は
+  適用せず `validate_peer_request_id` だけを呼ぶ。
+- 検証失敗時は §6.4.2.1 の MUST (即時 close) を優先し、REQUEST_ERROR は送らない。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
+
+回帰テストは `tests/test_session/subscription/request_update.rs` に 3 件追加した。
+`request_update_with_wrong_parity_closes_session` (parity 違反)、
+`request_update_with_duplicate_request_id_closes_session` (重複)、
+`request_update_after_goaway_is_accepted` (GOAWAY 後も受理し REQUEST_OK で応答できる) である。
+新規採番された正しい parity の Request ID が受理されることは、0087 で追加した
+`request_update_consumes_new_request_id` が固定している。
+
+REQUEST_UPDATE の wire Request ID に購読の Request ID と同じ値を注入していた既存テストは、
+peer が採番する Request ID を載せる形に更新した。注入は 1 通につき Request ID を 1 つ消費する
+ため、同じ session へ複数回注入するテストは 2 ずつ進める値に直した。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` がすべて通ることを確認した。
