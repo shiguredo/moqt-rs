@@ -623,11 +623,11 @@ impl Session {
     /// 本 API は既に I/O 層が閉じた stream を Session へ通知する用途で、
     /// `ResetDataStream` イベントは発行しない。
     ///
-    /// 終端後に [`maybe_flush_pending_publish_done`](Self::maybe_flush_pending_publish_done) を
-    /// 呼ぶ。同関数は該当 request の全 outgoing data stream (subgroup / fill fetch) が閉じ、
-    /// subscription が Terminated で保留中の PUBLISH_DONE (UPDATE_FAILED) があれば自動送信する
-    /// (§9.5.1 の MUST)。本 API が終端できるのは subgroup stream だけだが、flush の条件判定は
-    /// 同関数が行う。FIN / RESET のどちらでも送信する (RESET では I/O 層が既にワイヤへ
+    /// 終端後に内部で `maybe_flush_pending_publish_done` を呼ぶ。同関数は該当 request の
+    /// 全 outgoing data stream (subgroup / fill fetch) が閉じ、subscription が Terminated で
+    /// 保留中の PUBLISH_DONE (UPDATE_FAILED) があれば自動送信する (§9.5.1 の MUST)。
+    /// 本 API が終端できるのは subgroup stream だけだが、flush の条件判定は同関数が行う。
+    /// FIN / RESET のどちらでも送信する (RESET では I/O 層が既にワイヤへ
     /// RESET_STREAM を送っているため、ワイヤ順序は RESET_STREAM → PUBLISH_DONE になる)。
     ///
     /// datagram は本 API の終端判定に含めない (§9.9 の "no further datagrams" は
