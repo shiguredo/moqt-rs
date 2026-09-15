@@ -1,7 +1,7 @@
 # NAMESPACE / NAMESPACE_DONE の未知 request id と publisher 側受信のテストを追加する
 
 - Created: 2026-09-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/test-namespace-receive-error-paths
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,7 @@
 - 上記 4 ケースのテストが `tests/test_session/namespace/subscribe_namespace.rs` に追加されていること
 - 各ケースで返り値のエラーコードが `SESSION_PROTOCOL_VIOLATION` であり、セッションが `Closing` になっていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+relay 専用の namespace 発見・告知機構を削除する対応 (0084) に伴い、本 issue が対象とする `Session::handle_peer_namespace` / `Session::handle_peer_namespace_done` と 4 つの PROTOCOL_VIOLATION 経路が削除されるため、テストで固定する対象そのものが無くなった。NAMESPACE / NAMESPACE_DONE を受信する経路自体が存在しなくなる。
