@@ -381,3 +381,177 @@ fn send_publish_with_malformed_filter_rejected_without_side_effects() {
     assert_eq!(sent_rid, rid);
     assert_eq!(rid, 0, "拒否で request ID を消費しないこと");
 }
+
+/// publisher 役購読を確立し、そのうえで Object を publish した状態にする
+///
+/// `send_subgroup_object` は publisher 側の `largest_received_location` を更新するため、
+/// これ以降の `publisher_track_largest` は (5, 9) を返す。
+fn publish_objects_on_publisher_subscription(server: &mut Session, client: &mut Session) {
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg) = take_send_request(client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    let stream_id = DataStreamId(10);
+    server
+        .send_subgroup_header(
+            stream_id,
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 5,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("subgroup header の送信に成功すること");
+    server
+        .send_subgroup_object(stream_id, 9, None)
+        .expect("object の送信に成功すること");
+}
+
+/// 既に Object を publish した Track を PUBLISH で再告知する場合、LARGEST_OBJECT を補完する
+///
+/// draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) は LARGEST_OBJECT を
+/// PUBLISH に出現可能なパラメータとして列挙し、"If Objects have been published on this
+/// Track the Publisher MUST include this parameter." と規定する。
+#[test]
+fn send_publish_includes_largest_object_of_published_objects() {
+    let (mut client, mut server) = establish_pair();
+    publish_objects_on_publisher_subscription(&mut server, &mut client);
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            222,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (sent_rid, msg) = take_send_request(&mut server);
+    assert_eq!(sent_rid, rid);
+    let ControlMessage::Publish(publish) = msg else {
+        panic!("PUBLISH が送信されること");
+    };
+    assert_eq!(
+        publish.parameters.largest_object(),
+        Some((5, 9)),
+        "publish 済み Object の最大 Location が補完されること"
+    );
+}
+
+/// Object の観測値が無い Track への PUBLISH には LARGEST_OBJECT を付与しない
+///
+/// draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) の MUST は
+/// "If Objects have been published on this Track" の場合に限られる。
+#[test]
+fn send_publish_omits_largest_object_without_published_objects() {
+    let (_client, mut server) = establish_pair();
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            111,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (sent_rid, msg) = take_send_request(&mut server);
+    assert_eq!(sent_rid, rid);
+    let ControlMessage::Publish(publish) = msg else {
+        panic!("PUBLISH が送信されること");
+    };
+    assert_eq!(
+        publish.parameters.largest_object(),
+        None,
+        "観測値が無ければ LARGEST_OBJECT を付与しないこと"
+    );
+}
+
+/// 観測値より大きいアプリ指定の LARGEST_OBJECT は上書きされない
+///
+/// `update_largest_object_in_parameters` はアプリ指定値との max を取るため、
+/// 指定値が観測値以上であればそのまま残る。
+#[test]
+fn send_publish_keeps_larger_explicit_largest_object() {
+    let (mut client, mut server) = establish_pair();
+    publish_objects_on_publisher_subscription(&mut server, &mut client);
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 7,
+            object: 3,
+        },
+    });
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            222,
+            params,
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (sent_rid, msg) = take_send_request(&mut server);
+    assert_eq!(sent_rid, rid);
+    let ControlMessage::Publish(publish) = msg else {
+        panic!("PUBLISH が送信されること");
+    };
+    assert_eq!(
+        publish.parameters.largest_object(),
+        Some((7, 3)),
+        "観測値 (5, 9) より大きいアプリ指定値が上書きされないこと"
+    );
+}
+
+/// 観測値より小さいアプリ指定の LARGEST_OBJECT は観測値まで引き上げられる
+///
+/// draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) は LARGEST_OBJECT が
+/// 実際に publish 済みの最大 Location 以上であることを求めるため、指定値が小さい場合は
+/// `update_largest_object_in_parameters` の max 合流で観測値に揃える。
+#[test]
+fn send_publish_raises_smaller_explicit_largest_object() {
+    let (mut client, mut server) = establish_pair();
+    publish_objects_on_publisher_subscription(&mut server, &mut client);
+    // 観測値 (5, 9) より小さい (3, 0) を明示する
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 3,
+            object: 0,
+        },
+    });
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            222,
+            params,
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (sent_rid, msg) = take_send_request(&mut server);
+    assert_eq!(sent_rid, rid);
+    let ControlMessage::Publish(publish) = msg else {
+        panic!("PUBLISH が送信されること");
+    };
+    assert_eq!(
+        publish.parameters.largest_object(),
+        Some((5, 9)),
+        "指定値が観測値より小さければ観測値に引き上げられること"
+    );
+}

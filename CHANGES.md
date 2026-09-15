@@ -93,6 +93,9 @@
   - @voluntas
 - [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
   - @voluntas
+- [FIX] 既に Object を publish した Track を PUBLISH で再告知するとき、観測済みの最大 Location を LARGEST_OBJECT として補完するように修正する
+  - 観測値が無い Track では付与せず、アプリ指定値との max を取って上書きしない
+  - @voluntas
 
 ### misc
 
