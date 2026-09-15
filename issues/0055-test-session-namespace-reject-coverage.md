@@ -1,7 +1,7 @@
 # SUBSCRIBE / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE の .session 拒否テストを追加する
 
 - Created: 2026-09-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/test-session-namespace-reject-coverage
 - Polished: {YYYY-MM-DD}
 
@@ -41,3 +41,10 @@ draft-ietf-moq-transport-21 §6.5 の `.session` 拒否を 7 種の受信ハン�
 
 - 上記 3 種の `.session` 拒否テストが追加され、`cargo test --workspace` が通ること
 - 拒否時の状態非汚染 (request テーブル・セッション状態) がテストで確認されていること
+
+## 解決方法
+
+relay 専用の namespace 発見・告知機構を削除する対応 (0084) に伴い、本 issue の対象である PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE の受信ハンドラが削除されるため、テストを追加する対象そのものが無くなった。
+
+- 削除されるハンドラは `Session::handle_peer_publish_namespace` / `Session::handle_peer_subscribe_namespace` / `Session::handle_peer_subscribe_tracks` である。
+- SUBSCRIBE の `.session` 拒否テストは削除対象外であり、既存の `tests/test_session/subscription/handshake.rs` のケースで引き続き検証される。
