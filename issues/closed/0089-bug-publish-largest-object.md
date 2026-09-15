@@ -1,7 +1,7 @@
 # PUBLISH に LARGEST_OBJECT を付与する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-publish-largest-object
 - Polished: {YYYY-MM-DD}
 
@@ -61,3 +61,29 @@ draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) は LARGEST_OBJ
 - 回帰テストが `tests/test_session/` に追加され、`cargo test --workspace` が通ること
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo fmt --all -- --check` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+`send_publish` が、自側が publisher 役で確立した同一 Track の購読から観測最大値を引いて
+LARGEST_OBJECT を補完するようにした。
+
+- `src/session/subscription/send.rs` の `send_publish` で `publisher_track_largest` を呼び、
+  `Some` のとき `update_largest_object_in_parameters` で `parameters` を補完する。
+  `None` のときは付与しない。
+- 補完は `parameters.validate_scope(PUBLISH_ALLOWED_PARAMS)` の後、`request_id` の発行前に置いた。
+  他のパラメータ検証と同じく「検証と補完が済んでから採番する」順序を保ち、エラー時に
+  request ID の欠番を作らない。
+- `update_largest_object_in_parameters` はアプリ指定値との max を取るため、アプリが明示した
+  LARGEST_OBJECT は上書きされない。補完後の `parameters` は送信イベントと状態登録の両方で使う。
+- 応答 3 経路 (`send_subscribe_ok` / `send_publish_state_notify` / `send_ok_for_subscription`) の
+  算出元は本 issue では変更していない。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
+
+回帰テストは `tests/test_session/subscription/publish_params.rs` に 4 件追加した。
+`send_publish_includes_largest_object_of_published_objects` (publish 済み Track への付与)、
+`send_publish_omits_largest_object_without_published_objects` (観測値が無ければ付与しない)、
+`send_publish_keeps_larger_explicit_largest_object` と
+`send_publish_raises_smaller_explicit_largest_object` (アプリ指定値との max) である。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` がすべて通ることを確認した。

@@ -234,7 +234,7 @@ impl Session {
         track_namespace: TrackNamespace,
         track_name: Vec<u8>,
         track_alias: u64,
-        parameters: MessageParameters,
+        mut parameters: MessageParameters,
         track_properties: TrackProperties,
     ) -> Result<u64, SendRequestError> {
         self.require_established()?;
@@ -320,6 +320,15 @@ impl Session {
                 .into());
             }
         };
+        // draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): Track に Object を
+        // publish 済みなら Publisher は LARGEST_OBJECT を必ず含めなければならない。自側が
+        // publisher 役で確立した同一 Track の購読から観測最大値を引き、補完する
+        // (`update_largest_object_in_parameters` はアプリ指定値との max を取るため上書きしない)。
+        // 補完は request_id の発行より前に置き、他のパラメータ検証と同じく
+        // 「検証と補完が済んでから採番する」順序を保つ。
+        if let Some(largest) = self.publisher_track_largest(&track_namespace, &track_name) {
+            update_largest_object_in_parameters(&mut parameters, &largest);
+        }
         let request_id = self.request_ids.local_generator.next_id();
         if let Some(f) = parameters.forward() {
             validate_forward(f)?;
