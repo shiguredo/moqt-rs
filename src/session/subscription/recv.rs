@@ -407,9 +407,9 @@ impl Session {
         let (filter_start, filter_end) =
             resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
         let range_filters = SubscriptionRangeFilters::default();
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE / PUBLISH /
-        // SUBSCRIBE_TRACKS / FETCH に出現可能。PUBLISH には §9.18.1 (Parameters on
-        // SUBSCRIBE_TRACKS) の伝播として含めることができる。
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、PUBLISH にも
+        // 直接含められる。
         // 受信した PUBLISH の GROUP_ORDER は本処理で値域検証済みであり、初期状態として保持する。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let subscription = Subscription {
@@ -572,7 +572,8 @@ impl Session {
             ok.track_properties.subgroup_delivery_timeout(),
         );
         set_subscription_expires(subscription, ok.parameters.expires(), now_ms);
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に含まれる。
         // SUBSCRIBE_OK には含まれないため、group_order は SUBSCRIBE 送信時の値のまま保持される。
         self.register_peer_alias(ok.track_alias, request_id);
         // PUBLISH_OK 経路 (dispatch.rs) と対称に、SUBSCRIBE_OK による確立をアプリケーションに通知する
@@ -701,7 +702,7 @@ impl Session {
     ///   REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK 等) を閉じたり、Terminated で
     ///   保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ったり
     ///   しないため、応答は送らない。
-    /// - subscription 以外 (SUBSCRIBE_TRACKS の REQUEST_UPDATE 等) と subscriptions 未登録:
+    /// - subscription 以外 (FETCH の REQUEST_UPDATE 等) と subscriptions 未登録:
     ///   従来どおり REQUEST_ERROR のみを送る。
     ///
     /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること

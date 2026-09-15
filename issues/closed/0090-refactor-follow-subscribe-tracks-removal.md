@@ -1,7 +1,7 @@
 # 削除済み SUBSCRIBE_TRACKS に追従していないコメントと未使用コードを整備する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/refactor-follow-subscribe-tracks-removal
 - Polished: {YYYY-MM-DD}
 
@@ -53,3 +53,17 @@ relay 専用機構の削除 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE
 - 挙動が変わっていないこと (既存テストがすべて通ること)
 - 機能に直接影響しない変更のため `CHANGES.md` の `### misc` に `[UPDATE]` エントリが
   追加されていること
+
+## 解決方法
+
+存在しない関数への参照を外し、PUBLISH に載る GROUP_ORDER の根拠を現行 draft の出現先列挙に直し、未使用の `prefix_overlaps` を削除した。挙動の変更はない。
+
+- `src/session/subscription/send.rs` の SUBSCRIBE / PUBLISH の parameter scope 検証コメントから、存在しない `send_subscribe_tracks` への参照を外した。あわせて SUBSCRIBE_TRACKS 送信を前提にしていた設計判断の記述を削り、検証の配置理由だけを残した。
+- `src/session/subscription/validation.rs` の `validate_group_order` / `validate_forward` / `validate_include_properties` / `extract_forward_state` の doc から、存在しない `handle_peer_subscribe_tracks` と削除済みの SUBSCRIBE_TRACKS 受信経路を外した。
+- `src/session/subscription/send.rs` と `src/session/subscription/recv.rs` の GROUP_ORDER コメントを、SUBSCRIBE_TRACKS からの伝播 (§9.18.1) ではなく draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter) の出現先列挙を根拠にする記述に置き換えた。SUBSCRIBE_OK 側のコメントも同じ出現先列挙に揃えた。
+- `src/session/subscription/recv.rs` の REQUEST_UPDATE の doc に残っていた SUBSCRIBE_TRACKS の記述を FETCH に直した。
+- `src/session/subscription/validation.rs` の `prefix_overlaps` と `src/session/tests.rs` の `prefix_overlaps_detection` を削除した。`prefix_overlaps` は本番コードからの呼び出しがなく、doc も削除済みの §9.15 (SUBSCRIBE_NAMESPACE) / §9.18 (SUBSCRIBE_TRACKS) を根拠にしていた。
+- `REQUEST_PREFIX_OVERLAP` (0x30) は draft 由来の wire 定義であり、削除した機構のエラーコードをライブラリから消す理由がないため `src/error.rs` に残した。
+- `CHANGES.md` の `## develop` の `### misc` に `[UPDATE]` エントリを追加した。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` がすべて通ることを確認した。変更はコメントと未使用コードのみで、既存テストはすべて通っている。

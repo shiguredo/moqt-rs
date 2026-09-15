@@ -2,7 +2,6 @@ use super::auth_token_cache::AuthTokenCache;
 use super::core::Session;
 use super::request_id::{MAX_OUT_OF_ORDER_REQUEST_IDS, RequestIdGenerator, RequestIdTracker};
 use super::subscription::validation::extract_forward_state;
-use super::subscription::validation::prefix_overlaps;
 use super::types::*;
 use alloc::vec;
 
@@ -128,19 +127,6 @@ fn peer_request_tracker_rejects_duplicate() {
 fn forward_parameter_default_is_one() {
     let params = MessageParameters::new();
     assert_eq!(extract_forward_state(&params), 1);
-}
-
-#[test]
-fn prefix_overlaps_detection() {
-    let a = TrackNamespace::new(vec![b"a".to_vec()]).expect("テストフィクスチャの前提条件を満たす");
-    let ab = TrackNamespace::new(vec![b"a".to_vec(), b"b".to_vec()])
-        .expect("テストフィクスチャの前提条件を満たす");
-    let c = TrackNamespace::new(vec![b"c".to_vec()]).expect("テストフィクスチャの前提条件を満たす");
-    let empty = TrackNamespace::new(vec![]).expect("テストフィクスチャの前提条件を満たす");
-    assert!(prefix_overlaps(&a, &ab));
-    assert!(prefix_overlaps(&ab, &a));
-    assert!(!prefix_overlaps(&a, &c));
-    assert!(prefix_overlaps(&empty, &a));
 }
 
 /// forget_subscription が datagram の object header 提供完了追跡エントリを掃除する

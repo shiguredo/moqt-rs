@@ -98,11 +98,10 @@ impl Session {
         // まで完了した後に I/O 層のエンコード時 (validate_scope) で非同期に失敗し、アプリ
         // は送信成功と誤認したまま peer に届かない (受信側はワイヤ層で検証済みのため、
         // ここは送信側の状態整合性のための検証)。
-        // 検証は request_id 発行より前に置き、エラー時に欠番を作らない (SUBSCRIBE_TRACKS 送信
-        // (`send_subscribe_tracks`) と同じ設計判断)。なお本検証はパラメータのスコープのみを
-        // 対象とし、スコープ内の同一型の重複出現 (例: OBJECT_DELIVERY_TIMEOUT 2 件) は
-        // 検出されず encode 層の重複検出で失敗する残存ギャップがある (SUBSCRIBE_OK 送信側
-        // parameter scope 検証と同じ制約)。
+        // 検証は request_id 発行より前に置き、エラー時に欠番を作らない。なお本検証は
+        // パラメータのスコープのみを対象とし、スコープ内の同一型の重複出現
+        // (例: OBJECT_DELIVERY_TIMEOUT 2 件) は検出されず encode 層の重複検出で失敗する
+        // 残存ギャップがある (SUBSCRIBE_OK 送信側 parameter scope 検証と同じ制約)。
         if parameters.validate_scope(SUBSCRIBE_ALLOWED_PARAMS).is_err() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -282,11 +281,10 @@ impl Session {
         // 完了した後に I/O 層のエンコード時 (validate_scope) で非同期に失敗し、アプリは
         // 送信成功と誤認したまま peer に届かない (受信側はワイヤ層で検証済みのため、
         // ここは送信側の状態整合性のための検証)。
-        // 検証は request_id 発行より前に置き、エラー時に欠番を作らない (SUBSCRIBE_TRACKS 送信
-        // (`send_subscribe_tracks`) と同じ設計判断)。なお本検証はパラメータのスコープのみを
-        // 対象とし、スコープ内の同一型の重複出現 (例: EXPIRES 2 件) は検出されず encode
-        // 層の重複検出で失敗する残存ギャップがある (SUBSCRIBE_OK 送信側 parameter scope
-        // 検証と同じ制約)。
+        // 検証は request_id 発行より前に置き、エラー時に欠番を作らない。なお本検証は
+        // パラメータのスコープのみを対象とし、スコープ内の同一型の重複出現 (例: EXPIRES 2 件) は
+        // 検出されず encode 層の重複検出で失敗する残存ギャップがある (SUBSCRIBE_OK 送信側
+        // parameter scope 検証と同じ制約)。
         if parameters.validate_scope(PUBLISH_ALLOWED_PARAMS).is_err() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -294,15 +292,14 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): PUBLISH に含まれる
-        // GROUP_ORDER は SUBSCRIBE_TRACKS からの伝播 (§9.18.1) であり、値域は Ascending
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、値域は Ascending
         // (0x1) / Descending (0x2) のみ。値域外は API 呼び出し時に拒否する (検証がないと
         // request 登録・ SendRequest の push まで完了した後に I/O 層のエンコード時
         // (validate_param_encoding) で非同期に失敗する)。
         // 検証は request_id 発行より前に置き、エラー時に欠番を作らない。なお本検証は
         // Uint8 型の最初の 1 件のみを対象とし、型不一致 (VarInt)・複数出現の 2 番目以降は
-        // すり抜けて encode 時に失敗する残存ギャップがある (SUBSCRIBE_TRACKS 送信の
-        // GROUP_ORDER 値域検証と同じ制約)。
+        // すり抜けて encode 時に失敗する残存ギャップがある。
         if let Some(order) = parameters.group_order() {
             validate_group_order(order)?;
         }
@@ -341,8 +338,8 @@ impl Session {
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = track_properties.default_publisher_priority();
         let default_publisher_group_order = track_properties.default_publisher_group_order();
-        // draft-ietf-moq-transport-21 §9.8 (PUBLISH) / §9.18.1: PUBLISH の Parameters に
-        // 現れる subscription パラメータは初期状態として保持する (受信側と対称)。
+        // draft-ietf-moq-transport-21 §9.8 (PUBLISH): PUBLISH の Parameters に現れる
+        // subscription パラメータは初期状態として保持する (受信側と対称)。
         // 解決時点の largest を持たないため、相対フィルタは先頭から解決される。
         // delivery timeout の Parameters は保持しない。§5.2 の規則
         // (publisher は Track Property、subscriber は SUBSCRIBE / REQUEST_UPDATE の
@@ -352,9 +349,9 @@ impl Session {
         let (filter_start, filter_end) =
             resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
         let range_filters = SubscriptionRangeFilters::default();
-        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE / PUBLISH /
-        // SUBSCRIBE_TRACKS / FETCH に出現可能。PUBLISH には §9.18.1 (Parameters on
-        // SUBSCRIBE_TRACKS) の伝播として含めることができる。初期状態として保持する。
+        // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、PUBLISH にも
+        // 直接含められる。初期状態として保持する。
         let subscription = Subscription {
             request_id,
             initiator: SubscriptionInitiator::Publisher,
