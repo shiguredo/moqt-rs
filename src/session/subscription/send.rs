@@ -124,7 +124,6 @@ impl Session {
         let forward_state = extract_forward_state(&parameters);
         let subscriber_object_delivery_timeout_ms = parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms = parameters.subgroup_delivery_timeout();
-        let subscriber_rendezvous_timeout_ms = parameters.rendezvous_timeout();
         let filter = match parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
@@ -182,7 +181,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms,
             expires: None,
             // Subscriber 役では track_properties を持たないため false で初期化する。
             // 受信した SUBSCRIBE_OK の値で更新され、REQUEST_UPDATE 送信時の
@@ -383,7 +381,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires,
             dynamic_groups,
             publisher_priority: None,

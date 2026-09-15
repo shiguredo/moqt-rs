@@ -131,7 +131,6 @@ impl Session {
         let subscriber_object_delivery_timeout_ms = subscribe.parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms =
             subscribe.parameters.subgroup_delivery_timeout();
-        let subscriber_rendezvous_timeout_ms = subscribe.parameters.rendezvous_timeout();
         let filter = match subscribe.parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
@@ -211,7 +210,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms,
             expires: None,
             // SUBSCRIBE には TrackProperties は含まれない。Publisher である自側が
             // send_subscribe_ok で TrackProperties を発行するタイミングで dynamic_groups を設定する。
@@ -440,7 +438,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires,
             dynamic_groups,
             publisher_priority: None,

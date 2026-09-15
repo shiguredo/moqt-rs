@@ -463,67 +463,6 @@ fn effective_delivery_timeout_uses_non_zero_value_when_other_side_is_zero() {
 }
 
 #[test]
-fn rendezvous_timeout_is_preserved_for_both_subscribe_sides() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            rendezvous_timeout_params(2500),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        client
-            .subscription(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .subscriber_rendezvous_timeout_ms,
-        Some(2500)
-    );
-
-    let (_, sub_msg) = take_send_request(&mut client);
-    server
-        .recv_request(sub_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        server
-            .subscription(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .subscriber_rendezvous_timeout_ms,
-        Some(2500)
-    );
-}
-
-#[test]
-fn rendezvous_timeout_zero_is_not_normalized_away() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            rendezvous_timeout_params(0),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, sub_msg) = take_send_request(&mut client);
-    server
-        .recv_request(sub_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(
-        client
-            .subscription(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .subscriber_rendezvous_timeout_ms,
-        Some(0)
-    );
-    assert_eq!(
-        server
-            .subscription(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .subscriber_rendezvous_timeout_ms,
-        Some(0)
-    );
-}
-
-#[test]
 fn publish_done_tracks_stream_count_overrun() {
     let (mut client, mut server, rid) = establish_subscribe_track(10);
 

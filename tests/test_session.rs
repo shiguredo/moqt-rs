@@ -12,8 +12,7 @@ use shiguredo_moqt::loc::{LocProperties, LocProperty, LocPropertyValue, PROP_TIM
 use shiguredo_moqt::message::{ControlMessage, Goaway, Setup, common::TrackNamespace};
 use shiguredo_moqt::message_parameter::{
     AuthorizationToken, MessageParameter, MessageParameterValue, MessageParameters, PARAM_EXPIRES,
-    PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_RENDEZVOUS_TIMEOUT, PARAM_SUBGROUP_DELIVERY_TIMEOUT,
-    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER,
 };
 use shiguredo_moqt::object_properties::{
     ObjectProperties, ObjectProperty, ObjectPropertyValue, PROP_PRIOR_OBJECT_ID_GAP,
@@ -263,15 +262,6 @@ fn expires_params(expires_ms: u64) -> MessageParameters {
     params.push(MessageParameter {
         param_type: PARAM_EXPIRES,
         value: MessageParameterValue::VarInt(expires_ms),
-    });
-    params
-}
-
-fn rendezvous_timeout_params(rendezvous_timeout_ms: u64) -> MessageParameters {
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_RENDEZVOUS_TIMEOUT,
-        value: MessageParameterValue::VarInt(rendezvous_timeout_ms),
     });
     params
 }

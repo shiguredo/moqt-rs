@@ -845,7 +845,6 @@ mod tests {
                 effective_subgroup_ms: None,
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires: None,
             dynamic_groups: false,
             publisher_priority: None,
@@ -1114,12 +1113,6 @@ pub struct Subscription {
     pub largest_received_location: Option<Location>,
     /// delivery timeout 関連の状態 (subscriber / publisher 申告値、effective 値、per-subgroup オーバーライド)
     pub delivery_timeouts: DeliveryTimeoutState,
-    /// subscriber 側が指定した RENDEZVOUS_TIMEOUT parameter (ms)
-    ///
-    /// relay / application layer が publisher discovery policy を判断できるよう、
-    /// `SUBSCRIBE` に含まれていた値を lossless に保持する。`Some(0)` は「待たない」
-    /// を表し、`None` とは区別する。`Session` 自体はこの値で timer を動かさない。
-    pub subscriber_rendezvous_timeout_ms: Option<u64>,
     /// 直近に観測した EXPIRES parameter
     ///
     /// sender がこの subscription を終了しうる時刻の advisory deadline を表す。

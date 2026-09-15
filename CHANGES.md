@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] relay 専用の RENDEZVOUS_TIMEOUT parameter (0x04) を削除する
+  - `PARAM_RENDEZVOUS_TIMEOUT` と `MessageParameters::rendezvous_timeout`、`Subscription::subscriber_rendezvous_timeout_ms` を削除する
+  - 当該パラメータを含む SUBSCRIBE は codec の未知パラメータ検証で拒否される
+  - @voluntas
 - [CHANGE] TRACK_STATUS の受信側 (自側 publisher) を削除し、subscriber 側の送信と応答受信のみにする
   - peer から TRACK_STATUS を受信した場合は未対応 request として `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
   - `TrackStatusEntry` から `my_role` と `include_properties` を削除し、送信側専用の型にする

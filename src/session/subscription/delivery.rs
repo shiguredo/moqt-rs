@@ -218,7 +218,6 @@ mod tests {
                 effective_subgroup_ms: None,
                 subgroup_overrides: hashbrown::HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires: None,
             dynamic_groups: false,
             publisher_priority: None,

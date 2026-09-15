@@ -1137,17 +1137,21 @@ fn subscribe_with_out_of_scope_parameter_rejected_without_state_change() {
 #[test]
 fn publish_with_out_of_scope_parameter_rejected_without_state_change() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_RENDEZVOUS_TIMEOUT,
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_TRACK_NAMESPACE_PREFIX,
     };
     use shiguredo_moqt::session::types::SendRequestError;
     let (mut client, _server) = establish_pair();
-    // スコープ外の RENDEZVOUS_TIMEOUT (SUBSCRIBE のみ) と、スコープ内の EXPIRES を混在させる
+    // スコープ外の TRACK_NAMESPACE_PREFIX (SUBSCRIBE_TRACKS のみ) と、
+    // スコープ内の EXPIRES を混在させる
     // (スコープ内パラメータを含んでも検証エラーになることを確認する。
     // SUBSCRIBER_PRIORITY は draft-20 で PUBLISH に出現可能なため使わない)
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
-        param_type: PARAM_RENDEZVOUS_TIMEOUT,
-        value: MessageParameterValue::VarInt(5),
+        param_type: PARAM_TRACK_NAMESPACE_PREFIX,
+        value: MessageParameterValue::TrackNamespacePrefix(
+            shiguredo_moqt::message::common::TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+        ),
     });
     params.push(MessageParameter {
         param_type: PARAM_EXPIRES,

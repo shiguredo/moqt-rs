@@ -60,8 +60,7 @@
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証
   - session 層で Object の forward 判定 (`object_passes_filters` / `header_passes_filters`)
-  - TRACK_PROPERTY_FILTER による PUBLISH 選別 (`track_properties_pass`)
-- Rendezvous Timeout
+  - TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS 削除に伴い PUBLISH 選別を行わない
 - Subscriber Priority
 - Track Namespace Prefix
 
