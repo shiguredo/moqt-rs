@@ -524,7 +524,7 @@ fn terminated_fetch_rejects_late_request_update() {
         .recv_stream_message(
             rid,
             ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-                request_id: rid,
+                request_id: rid + 1,
                 parameters: MessageParameters::new(),
             }),
         )

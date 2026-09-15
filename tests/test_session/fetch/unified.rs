@@ -1069,7 +1069,7 @@ fn forgotten_fetch_rejects_late_request_update() {
         .recv_stream_message(
             rid,
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: rid,
+                request_id: rid + 2,
                 parameters: MessageParameters::new(),
             }),
         )

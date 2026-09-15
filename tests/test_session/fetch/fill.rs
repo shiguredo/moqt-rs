@@ -627,7 +627,7 @@ fn fill_inner_range_filter_violation_rejected_with_invalid_filter() {
         .recv_stream_message(
             sub_rid,
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: sub_rid,
+                request_id: sub_rid + 2,
                 parameters: fill_params(inner),
             }),
         )

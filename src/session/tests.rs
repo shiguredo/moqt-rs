@@ -305,11 +305,14 @@ fn forget_subscription_cleans_request_update_credit_entries() {
     );
 
     // 受信側エントリ: REQUEST_UPDATE を受信する
+    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-21
+    // §6.4.2.1 (Request ID))、購読の Request ID (自側 client の採番) とは別の値になる。
+    // 同じ値を載せると重複 Request ID として INVALID_REQUEST_ID で閉じられる。
     client
         .recv_stream_message(
             rid,
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: rid,
+                request_id: 1,
                 parameters: update_params,
             }),
         )
@@ -527,11 +530,13 @@ fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
     client
         .send_request_update(rid, update_params.clone())
         .expect("テストフィクスチャの前提条件を満たす");
+    // peer (server) が採番する Request ID は奇数であり (draft-ietf-moq-transport-21
+    // §6.4.2.1 (Request ID))、購読の Request ID (自側 client の採番) とは別の値になる。
     client
         .recv_stream_message(
             rid,
             ControlMessage::RequestUpdate(RequestUpdate {
-                request_id: rid,
+                request_id: 1,
                 parameters: update_params,
             }),
         )

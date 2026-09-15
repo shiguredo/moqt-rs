@@ -283,7 +283,7 @@ fn incoming_request_update_exceeds_local_max() {
         "1 通目は pending_update_params に蓄積される"
     );
 
-    let upd2 = inject_request_update(rid, MessageParameters::new());
+    let upd2 = inject_request_update(rid + 4, MessageParameters::new());
     let err = server
         .recv_stream_message(rid, upd2)
         .expect_err("2 通目受信は local MAX_REQUEST_UPDATES 超過");
@@ -519,7 +519,7 @@ fn outgoing_range_filters_rejected_when_max_is_zero() {
 fn incoming_range_filters_rejected_when_max_is_zero() {
     let (_client, mut server, rid) = establish_subscribe_track(1);
 
-    let upd = inject_request_update(rid, one_range_subgroup_filter());
+    let upd = inject_request_update(rid + 2, one_range_subgroup_filter());
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
@@ -536,7 +536,7 @@ fn incoming_range_filters_exceed_local_max() {
     let (_client, mut server, rid) =
         establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
 
-    let upd = inject_request_update(rid, two_range_subgroup_filter());
+    let upd = inject_request_update(rid + 2, two_range_subgroup_filter());
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
@@ -559,7 +559,7 @@ fn request_update_rejection_close_goes_through_request_streams() {
     let (_client, mut server, rid) =
         establish_publish_with(SetupOptions::new(), SetupOptions::new());
     // 登録済み subscription への REQUEST_UPDATE を Range Filter 違反で拒否
-    let upd = inject_request_update(rid, one_range_subgroup_filter());
+    let upd = inject_request_update(rid + 2, one_range_subgroup_filter());
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
@@ -664,7 +664,7 @@ fn incoming_zero_range_duplicate_filters_are_rejected() {
         "Range を持たないので Range 総数は 0 になる"
     );
 
-    let upd = inject_request_update(rid, params);
+    let upd = inject_request_update(rid + 2, params);
     server
         .recv_stream_message(rid, upd)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
@@ -705,7 +705,10 @@ fn invalid_filter_rejection_defers_publish_done_until_streams_close() {
     );
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
 
     // REQUEST_ERROR は即時送出、PUBLISH_DONE は open stream がある間は保留される
@@ -788,7 +791,10 @@ fn second_invalid_filter_rejection_after_termination_closes_session() {
 
     // 1 通目: INVALID_FILTER → Terminated、PUBLISH_DONE は保留
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
     let (_, err_msg, err_fin) = take_send_on_stream_with_fin(&mut server);
     assert!(matches!(err_msg, ControlMessage::RequestError(_)));
@@ -803,7 +809,10 @@ fn second_invalid_filter_rejection_after_termination_closes_session() {
 
     // 2 通目 (pipelining): Terminated への REQUEST_UPDATE は state 違反として閉じる
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, one_range_subgroup_filter()),
+        )
         .expect_err("Terminated への REQUEST_UPDATE は拒否される");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
@@ -856,7 +865,10 @@ fn invalid_filter_rejection_on_pending_subscription_closes_session() {
     );
 
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect_err("Pending への REQUEST_UPDATE は state 違反");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
@@ -886,7 +898,10 @@ fn invalid_filter_rejection_by_subscriber_sends_request_error_only() {
         establish_publish_with(SetupOptions::new(), SetupOptions::new());
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
     assert_subscriber_invalid_filter_rejection(&mut server, rid);
 }
@@ -1041,14 +1056,20 @@ fn request_update_credit_recovers_after_protocol_level_error() {
 
     // client の送信 API は peer MAX_FILTER_RANGES=0 で弾くため、拒否対象は注入で作る
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
     assert_publisher_invalid_filter_rejection(&mut server, rid);
 
     // 拒否でクレジットが回復していなければ、2 通目は上限超過 (TOO_MANY_REQUEST_UPDATES) になる。
     // 回復済みなら上限チェックを通過し、Terminated による状態違反で拒否される。
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, MessageParameters::new()),
+        )
         .expect_err("Terminated な subscription への REQUEST_UPDATE は拒否される");
     assert_ne!(
         err.code, SESSION_TOO_MANY_REQUEST_UPDATES,
@@ -1073,19 +1094,28 @@ fn repeated_protocol_level_errors_keep_update_limit() {
         establish_publish_with(SetupOptions::new(), opts_with(0x08, 1));
 
     // 加算 (+1) → 拒否による回復 (-1) を 2 巡させる
-    for _ in 0..2 {
+    for i in 0..2 {
         server
-            .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+            .recv_stream_message(
+                rid,
+                inject_request_update(rid + 2 + i * 2, one_range_subgroup_filter()),
+            )
             .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
         assert_subscriber_invalid_filter_rejection(&mut server, rid);
     }
 
     // 上限 1 が保たれていれば 1 通目だけが受理される
     server
-        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 6, MessageParameters::new()),
+        )
         .expect("1 通目は上限内");
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 8, MessageParameters::new()),
+        )
         .expect_err("応答を返していないので 2 通目は上限超過");
     assert_eq!(err.code, SESSION_TOO_MANY_REQUEST_UPDATES);
 }
@@ -1129,7 +1159,10 @@ fn credit_restore_does_not_underflow_on_second_response() {
     // 回り込んでいれば上限判定が無効化され、注入した 2 通が両方受理されてしまう。
     // subscription は Terminated なので受理自体が起きないことも同時に確認する。
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, MessageParameters::new()),
+        )
         .expect_err("Terminated な subscription への REQUEST_UPDATE は拒否される");
     assert_ne!(
         err.code, SESSION_TOO_MANY_REQUEST_UPDATES,
@@ -1240,7 +1273,7 @@ fn incoming_zero_range_filters_accepted_when_local_max_is_zero() {
             establish_subscribe_with(SetupOptions::new(), SetupOptions::new());
 
         server
-            .recv_stream_message(rid, inject_request_update(rid, params))
+            .recv_stream_message(rid, inject_request_update(rid + 2, params))
             .unwrap_or_else(|e| panic!("{label}: 受理されること: {e:?}"));
 
         while let Some(e) = server.poll_event() {
@@ -1405,7 +1438,10 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
 
     // 1 通目: SUBGROUP_FILTER 1 Range → 単体でも累積でも上限内
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("1 通目は上限内");
     let pending = server
         .subscription(rid)
@@ -1418,7 +1454,10 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
 
     // 2 通目: OBJECTID_FILTER 1 Range → 単体では上限内だが累積 2 で超過
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_objectid_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, one_range_objectid_filter()),
+        )
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok (セッションは維持)");
 
     let mut saw_invalid_filter = false;
@@ -1457,12 +1496,18 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
         establish_publish_with(SetupOptions::new(), opts_with(0x06, 1));
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("1 通目は上限内");
     while server.poll_event().is_some() {}
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_objectid_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, one_range_objectid_filter()),
+        )
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok");
     while server.poll_event().is_some() {}
 
@@ -1493,7 +1538,10 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
 
     // 巻き戻っているので、上限内の正当な更新は引き続き受理される
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 6, one_range_subgroup_filter()),
+        )
         .expect("巻き戻っていれば同一型の置換は引き続き受理される");
 }
 
@@ -1507,12 +1555,18 @@ fn cumulative_overflow_terminates_publisher_subscription() {
         establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("1 通目は上限内");
     while server.poll_event().is_some() {}
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_objectid_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, one_range_objectid_filter()),
+        )
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok");
     assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
@@ -1527,7 +1581,10 @@ fn cumulative_same_type_replacement_does_not_accumulate() {
 
     for i in 0..3 {
         server
-            .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+            .recv_stream_message(
+                rid,
+                inject_request_update(rid + 2 + i * 2, one_range_subgroup_filter()),
+            )
             .unwrap_or_else(|e| panic!("{i} 回目の同一型置換は受理されること: {e:?}"));
         let pending = server
             .subscription(rid)
@@ -1551,11 +1608,17 @@ fn cumulative_range_filters_at_local_max_accepted() {
         establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
 
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect("1 通目は上限内");
     while server.poll_event().is_some() {}
     server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_objectid_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 4, one_range_objectid_filter()),
+        )
         .expect("累積 2 は MAX_FILTER_RANGES=2 と一致するので受理される");
 
     let mut saw_update = false;
