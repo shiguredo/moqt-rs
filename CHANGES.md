@@ -114,3 +114,5 @@
   - @voluntas
 - [UPDATE] fuzz_session を client / server 両対応にし、送信 API を操作列に追加する
   - @voluntas
+- [UPDATE] 削除済み SUBSCRIBE_TRACKS を参照するコメントを現行 draft に合わせ、未使用の prefix_overlaps を削除する
+  - @voluntas
