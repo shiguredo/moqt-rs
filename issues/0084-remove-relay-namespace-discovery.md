@@ -1,7 +1,7 @@
 # relay 専用の namespace 発見・告知機構を削除する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/remove-relay-namespace-discovery
 - Polished: {YYYY-MM-DD}
 
@@ -55,3 +55,21 @@ codec 層と session 層の両方で 4 種の request をフル実装してい�
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
 - `docs/IMPLEMENTATION.md` のコントロールメッセージ表と `README.md`、`skills/shiguredo-moqt/SKILL.md` の記述が削除後の実装と一致していること
 - `CHANGES.md` の `## develop` に `[CHANGE]` エントリが追加されていること
+
+## 解決方法
+
+codec 層と session 層の両方から namespace 発見・告知機構を削除した。
+
+- `src/message.rs` から `ControlMessage` の 6 variant (`PublishNamespace` / `SubscribeNamespace` / `SubscribeTracks` / `Namespace` / `NamespaceDone` / `PublishSkipped`) と対応するメッセージ型、メッセージ型定数、許可パラメータ定数を削除した。
+- `src/session/namespace.rs` と `src/session/namespace/` を削除した。TRACK_STATUS の受信側は本 issue の対象外のため `src/session/track_status.rs` へ移設し、`pub mod track_status` として登録した。
+- `Session` から namespace 発見・告知系の状態と公開 API を削除した。
+  - 状態: `NamespaceState` / `track_subscriptions` / `pending_prefix_updates` / `track_prefix_history`
+  - 公開 API 15 メソッド、`RequestTable` の該当 3 variant、`RequestKind` の該当 3 variant
+  - `SessionEvent` の該当 4 variant と `TerminationReason::NamespaceImplicitDone`
+  - `RequestKind` は `Subscribe` / `Publish` / `Fetch` / `TrackStatus` の 4 種になった。
+- 共有ヘルパは削除ではなく移設した。`terminationreason_from_end` は `src/session/types.rs` へ、`prefix_overlaps` は `src/session/subscription/validation.rs` へ移し、後者はライブラリ本体で使わないため `#[cfg(test)]` とした。
+- `handle_peer_publish` は SUBSCRIBE_TRACKS 経由の PUBLISH 紐付けが不要になったため戻り値を `Result<bool, SessionError>` から `Result<(), SessionError>` に変えた。
+- `tests/test_session/namespace/` と `pbt/tests/prop_session/namespace.rs` を削除した。他のテストファイルに散る該当ケースは関数単位で削除し、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の `.session` 拒否テストと track-scoped request の Redirect テストは残した。`tests/test_session/track_property_filter.rs` は全 10 テストが SUBSCRIBE_TRACKS 前提のため削除した。
+- `docs/IMPLEMENTATION.md` / `README.md` / `skills/shiguredo-moqt/SKILL.md` を削除後の実装に合わせ、`CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加した。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` がすべて通ることを確認した。削除規模は 41 ファイル、12,316 行削除である。
