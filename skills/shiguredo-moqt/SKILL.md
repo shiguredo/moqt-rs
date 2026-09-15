@@ -115,15 +115,11 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | `Goaway(Goaway)` | セッション終了通知 |
 | `RequestOk` / `RequestError` | 共通応答 (PUBLISH への PUBLISH_OK は `RequestOk` の別名) |
 | `Subscribe` / `SubscribeOk` | SUBSCRIBE |
-| `Publish` / `PublishDone` / `PublishSkipped` | PUBLISH |
+| `Publish` / `PublishDone` | PUBLISH |
 | `PublishStateNotify` | 状態通知 |
 | `RequestUpdate` | 更新要求 |
 | `Fetch` / `FetchOk` | FETCH |
 | `TrackStatus` | TRACK_STATUS |
-| `PublishNamespace` | PUBLISH_NAMESPACE |
-| `Namespace` / `NamespaceDone` | NAMESPACE 系 |
-| `SubscribeNamespace` | SUBSCRIBE_NAMESPACE |
-| `SubscribeTracks` | SUBSCRIBE_TRACKS |
 
 補助型:
 
@@ -216,18 +212,12 @@ pub enum SessionState { LocalSetupSent, Established, Closing, Closed }
 pub enum TrackRole { Publisher, Subscriber }
 pub enum SubscriptionInitiator { Subscriber, Publisher }
 pub enum SubscriptionState { Pending, Established, Terminated }
-pub enum RequestKind {
-    Subscribe, Publish, Fetch, TrackStatus,
-    PublishNamespace, SubscribeNamespace, SubscribeTracks,
-}
+pub enum RequestKind { Subscribe, Publish, Fetch, TrackStatus }
 pub enum RequestStreamEnd {
     Fin,
     Reset { error_code: u64, reliable_size: Option<u64> },
 }
 pub enum FetchState { Pending, Established, Terminated }
-pub enum NamespacePublicationState { Pending, Established, Terminated }
-pub enum NamespaceSubscriptionState { Pending, Established, Terminated }
-pub enum TrackSubscriptionState { Pending, Established, Terminated }
 pub enum TrackDataAcceptance { Accepted, UnknownTrackAlias, Discarded, FilteredOut }
 pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 ```
@@ -251,10 +241,6 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `FetchOkReceived { request_id, end_location, end_of_track }` | FETCH_OK 受信 |
 | `PublishDoneReceived { request_id, status_code, stream_count, reason }` | PUBLISH_DONE 受信 |
 | `RequestErrorReceived { request_id, error_code, retry_interval, reason, redirect }` | REQUEST_ERROR 受信 |
-| `NamespaceReceived { request_id, suffix }` | NAMESPACE 受信 |
-| `NamespaceDoneReceived { request_id, suffix }` | NAMESPACE_DONE 受信 |
-| `PublishSkippedReceived { request_id, suffix, track_name }` | PUBLISH_SKIPPED 受信 |
-| `SubscribeTracksReceived { request_id, prefix, parameters }` | SUBSCRIBE_TRACKS 受信 |
 | `RequestTerminated { request_id, kind, reason }` | request が Terminated に遷移 |
 | `GoawayReceived { new_session_uri, timeout, on_request_stream }` | GOAWAY 受信 |
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
@@ -359,30 +345,7 @@ fn send_fetch_ok(
     track_properties: TrackProperties,
 ) -> Result<(), SessionError>
 
-// namespace / TRACK_STATUS
-fn send_publish_namespace(
-    &mut self,
-    track_namespace: TrackNamespace,
-    parameters: MessageParameters,
-) -> Result<u64, SendRequestError>
-fn send_subscribe_namespace(
-    &mut self,
-    prefix: TrackNamespace,
-    parameters: MessageParameters,
-) -> Result<u64, SendRequestError>
-fn send_namespace(&mut self, request_id: u64, suffix: TrackNamespace) -> Result<(), SessionError>
-fn send_namespace_done(&mut self, request_id: u64, suffix: TrackNamespace) -> Result<(), SessionError>
-fn send_subscribe_tracks(
-    &mut self,
-    prefix: TrackNamespace,
-    parameters: MessageParameters,
-) -> Result<u64, SendRequestError>
-fn send_publish_skipped(
-    &mut self,
-    request_id: u64,
-    suffix: TrackNamespace,
-    track_name: Vec<u8>,
-) -> Result<(), SessionError>
+// TRACK_STATUS
 fn send_track_status(
     &mut self,
     track_namespace: TrackNamespace,
@@ -903,7 +866,7 @@ fn get(&self, track_alias: u64, group_id: u64, subgroup_id: u64) -> Option<&Subg
 ## 注意事項
 
 - 型は定義元モジュールから import する。re-export は存在しない
-- `Session` は sans-I/O の状態機械であり、I/O・非同期処理・relay 固有の routing / fan-out / cache / policy は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
+- `Session` は sans-I/O の状態機械であり、I/O・非同期処理・relay が担う namespace 発見・告知と forwarding は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
 - `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可

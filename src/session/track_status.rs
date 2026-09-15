@@ -10,13 +10,13 @@ use crate::message::{
 use crate::message_parameter::MessageParameters;
 use alloc::vec::Vec;
 
-use super::super::core::Session;
-use super::super::subscription::delivery::update_largest_object_in_parameters;
-use super::super::types::{
+use super::core::Session;
+use super::subscription::delivery::update_largest_object_in_parameters;
+use super::types::terminationreason_from_end;
+use super::types::{
     RequestKind, RequestStreamEnd, SendRequestError, SessionError, SessionEvent, TerminationReason,
     TrackRole, TrackStatusEntry, TrackStatusResponse,
 };
-use super::terminationreason_from_end;
 
 impl Session {
     // ─── クエリ API ─────────────────────────────────────────
@@ -68,7 +68,7 @@ impl Session {
         // draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter):
         // 送信前に値域を検証し、不正値の送出と状態登録を防ぐ
         if let Some(v) = parameters.include_properties() {
-            super::super::subscription::validation::validate_include_properties(v)?;
+            super::subscription::validation::validate_include_properties(v)?;
         }
         // draft §9.20.1 (Parameter Scope): TRACK_STATUS で許可されないパラメータを含む送信は
         // API 呼び出し時に拒否する。検証がないと、TrackStatusEntry の登録・ control deadline
@@ -182,7 +182,7 @@ impl Session {
         // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
         let include_properties = msg.parameters.include_properties();
         if let Some(v) = include_properties
-            && let Err(err) = super::super::subscription::validation::validate_include_properties(v)
+            && let Err(err) = super::subscription::validation::validate_include_properties(v)
         {
             self.fail(err.clone());
             return Err(err);

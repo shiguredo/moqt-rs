@@ -1,6 +1,6 @@
 //! MoQT セッション状態機械 (sans-I/O)
 //!
-//! draft-ietf-moq-transport-21 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §4 (Namespace Discovery), §9 (Control Messages) に基づく。draft 由来の
+//! draft-ietf-moq-transport-21 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §9 (Control Messages) に基づく。draft 由来の
 //! 実装のため、将来のバージョンで変更される可能性がある。
 //!
 //! # 位置づけ
@@ -9,9 +9,8 @@
 //! または WebTransport session) に対応する。
 //!
 //! 本モジュールが扱うのは、この endpoint から見た peer との protocol state であり、
-//! relay 全体の routing / fan-out / cache / policy は対象外である。relay を
-//! 実装する場合でも、複数 peer との間に張った個々の `Transport Session` ごとに
-//! [`crate::session::core::Session`] を使い分けることを想定する。
+//! publisher / subscriber の endpoint が直接使う範囲に限定する。relay が担う
+//! namespace 発見・告知と forwarding は対象外である。
 //!
 //! [`crate::session::types::Role`] は `Transport Session` における endpoint の役割 (`Client` / `Server`)
 //! を表し、[`crate::session::types::TrackRole`] は各 request / track における protocol role
@@ -34,7 +33,7 @@
 //! # 実装範囲
 //!
 //! SETUP / Request ID 管理 / SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE /
-//! STOP_SENDING / FETCH / Namespace 系 / TRACK_STATUS / GOAWAY / tick 駆動の
+//! STOP_SENDING / FETCH / TRACK_STATUS / GOAWAY / tick 駆動の
 //! タイムアウト判定に加え、data plane の送受信 state
 //! (`send_subgroup_header` / `send_subgroup_object` / `send_data_stream_closed` /
 //! `recv_data_stream_stop_sending` / `recv_data_stream_type` / `recv_subgroup_header` /
@@ -43,9 +42,8 @@
 //! # Stream 抽象化
 //!
 //! MoQT は制御ストリーム (SETUP 用 uni stream ペア) と request stream (bidi、
-//! SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS / PUBLISH_NAMESPACE /
-//! SUBSCRIBE_NAMESPACE のいずれかで始まる) と data stream (uni、FETCH_HEADER /
-//! SUBGROUP_HEADER で始まる) を区別する。
+//! SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS のいずれかで始まる) と
+//! data stream (uni、FETCH_HEADER / SUBGROUP_HEADER で始まる) を区別する。
 //! 応答メッセージ (SUBSCRIBE_OK / PUBLISH_OK / REQUEST_ERROR 等) は wire
 //! format に Request ID を含まないため、bidi stream のコンテキストから特定する。
 //!
@@ -75,7 +73,7 @@
 //! - `subscription`: SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE /
 //!   STOP_SENDING 関連
 //! - `fetch`: FETCH 関連
-//! - `namespace`: Namespace 系 / TRACK_STATUS 関連
+//! - `track_status`: TRACK_STATUS 関連
 //! - `goaway`: GOAWAY / tick 関連
 
 pub mod auth_token_cache;
@@ -83,9 +81,9 @@ pub mod core;
 pub mod data;
 pub mod fetch;
 pub mod goaway;
-pub mod namespace;
 pub mod request_id;
 pub mod subscription;
+pub mod track_status;
 pub mod types;
 
 #[cfg(test)]

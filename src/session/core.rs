@@ -27,9 +27,8 @@ use crate::error::{
     SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
-    ControlMessage, NAMESPACE_OK_ALLOWED_PARAMS, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS,
-    ReasonPhrase, Redirect, RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS,
-    common::TrackNamespace,
+    ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
+    RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::TrackNamespace,
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
@@ -41,13 +40,11 @@ use crate::stream::SETUP_STREAM_TYPE;
 
 use super::auth_token_cache::AuthTokenCache;
 use super::data::{IncomingDataStream, OutgoingDataStream};
-use super::namespace::is_prefix_of;
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::types::{
-    DataStreamId, DeadlineTimer, Fetch, NamespacePublication, NamespaceSubscription,
-    PeerGoawayInfo, RecvRequestError, RequestKind, RequestStreamEnd, Role, SendRequestError,
-    SessionError, SessionEvent, SessionState, Subscription, SubscriptionState, TrackRole,
-    TrackStatusEntry, TrackSubscription, TrackSubscriptionState, Transport,
+    DataStreamId, DeadlineTimer, Fetch, PeerGoawayInfo, RecvRequestError, RequestKind,
+    RequestStreamEnd, Role, SendRequestError, SessionError, SessionEvent, SessionState,
+    Subscription, SubscriptionState, TrackRole, TrackStatusEntry, Transport,
 };
 
 /// 1 本の `MOQT Transport Session` に閉じた sans-I/O 状態機械
@@ -202,21 +199,6 @@ pub(super) fn remove_alias_holder(
 }
 
 #[derive(Debug)]
-pub(super) struct NamespaceState {
-    pub(super) publications: HashMap<u64, NamespacePublication>,
-    pub(super) subscriptions: HashMap<u64, NamespaceSubscription>,
-    /// request_id ごとの active な full Track Namespace (フィールド列) 集合
-    ///
-    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): prefix 更新後の
-    /// NAMESPACE / NAMESPACE_DONE は新 prefix 相対になる。suffix 文字列だけでは prefix を跨いだ
-    /// 同一性を判定できないため、受信時の prefix で解決した full namespace のフィールド列で
-    /// 一意化し、重複 NAMESPACE の抑止と NAMESPACE_DONE の照合に使う。
-    /// `NamespaceSubscription::active_suffixes` は現在の prefix 配下にある full namespace の
-    /// suffix 投影である (投影から外れた full namespace も NAMESPACE_DONE の照合のため保持する)。
-    pub(super) active_full_namespaces: HashMap<u64, HashSet<Vec<Vec<u8>>>>,
-}
-
-#[derive(Debug)]
 pub(super) struct DataStreamState {
     pub(super) incoming: HashMap<DataStreamId, IncomingDataStream>,
     pub(super) outgoing: HashMap<DataStreamId, OutgoingDataStream>,
@@ -328,32 +310,6 @@ pub struct Session {
     pub(super) aliases: AliasState,
     /// Fetch の管理 (Request ID 索引)
     pub(super) fetches: HashMap<u64, Fetch>,
-    pub(super) namespaces: NamespaceState,
-    /// SUBSCRIBE_TRACKS の管理 (draft §9.18 (SUBSCRIBE_TRACKS))
-    pub(super) track_subscriptions: HashMap<u64, TrackSubscription>,
-    /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した
-    /// TRACK_NAMESPACE_PREFIX の確定待ちキュー (request_id → 送信順)
-    ///
-    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "If the update is accepted,
-    /// NAMESPACE and NAMESPACE_DONE messages following the REQUEST_OK will contain Track
-    /// Namespace suffixes relative to the updated prefix." REQUEST_OK を受信するまで
-    /// ローカル prefix を更新せず、OK 受信時にキューの先頭から適用する。`None` は
-    /// prefix 変更を含まない更新であり、REQUEST_OK との対応を送信順に保つために
-    /// 1 件ずつ積む。REQUEST_ERROR 受信・bidi stream 終端・forget で破棄する。
-    pub(super) pending_prefix_updates: HashMap<u64, VecDeque<Option<TrackNamespace>>>,
-    /// SUBSCRIBE_TRACKS の prefix 更新で置換される前の TRACK_NAMESPACE_PREFIX の履歴
-    /// (request_id → 適用順)
-    ///
-    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): "Updating the prefix
-    /// of a SUBSCRIBE_TRACKS has no effect on existing subscriptions." PUBLISH は REQUEST_UPDATE
-    /// とは別の bidi stream で送られるため順序保証がなく、peer が更新を処理する前に送った
-    /// 旧 prefix 基準の PUBLISH は REQUEST_OK の適用後に到着しうる。置換前の prefix を累積して
-    /// 保持し、PUBLISH の照合にのみ使う。overlap 検査には使わない (過去の prefix を比較に
-    /// 混ぜると、更新前の prefix が将来の購読を恒久的にブロックするため)。
-    /// 履歴に残る旧 prefix を後続の購読が再利用すると、その prefix 配下の PUBLISH は両方の
-    /// 購読に紐付き、共有 alias の暗黙終端で後続の購読も終端されうる。
-    /// bidi stream 終端・REQUEST_ERROR 受信・forget で破棄する。
-    pub(super) track_prefix_history: HashMap<u64, Vec<TrackNamespace>>,
     /// TRACK_STATUS の管理
     pub(super) track_status_requests: HashMap<u64, TrackStatusEntry>,
     pub(super) data_streams: DataStreamState,
@@ -368,12 +324,11 @@ pub struct Session {
     pub(super) my_subgroups: SubgroupTracker,
     /// bidi request stream の種別逆引きマップ (request_id → [`RequestKind`])
     ///
-    /// draft-ietf-moq-transport-21 §6.3 (Session initialization) が規定する 7 種類の
-    /// request について、`recv_request_stream_closed` など stream 単位の通知を
-    /// dispatch するために使う。entry は各 request の生成時 (自側 `send_*` /
+    /// draft-ietf-moq-transport-21 §6.3 (Session initialization) が規定する request のうち
+    /// 本ライブラリが扱う 4 種類について、`recv_request_stream_closed` など stream 単位の
+    /// 通知を dispatch するために使う。entry は各 request の生成時 (自側 `send_*` /
     /// 相手発行 `handle_peer_*`) に insert され、`forget_*` 系、および Subscribe / Publish の
-    /// bidi stream 終端 (`close_subscription_on_stream_end`) と SUBSCRIBE_TRACKS の終端
-    /// (`close_track_subscription_on_stream_end`) で remove される。
+    /// bidi stream 終端 (`close_subscription_on_stream_end`) で remove される。
     pub(super) request_streams: HashMap<u64, RequestKind>,
     /// REQUEST_ERROR で拒否した、または peer のクローズ通知前に状態を破棄した request id の集合 (`request_streams` 未登録のもの)
     ///
@@ -393,10 +348,7 @@ pub struct Session {
     /// fail するレースが残る (本変更前から存在する既知の挙動)。fetch の終端済み
     /// (publisher 側・データストリーム終端済み。FIN / RESET の両方の終端通知を含む)
     /// 破棄だけは `forget_fetch` が本集合へ記録して遅延クローズを吸収する。
-    /// SUBSCRIBE_TRACKS の bidi stream 終端で暗黙終端した subscription のうち、まだ close
-    /// 通知を受けていないものだけを `close_track_subscription_on_stream_end` が本集合へ記録し、
-    /// 後続の PUBLISH bidi stream クローズを吸収する。malformed 終端も同様に
-    /// `terminate_malformed_track` が記録する。
+    /// malformed 終端も同様に `terminate_malformed_track` が記録する。
     /// クローズ通知の受信時に削除される。peer がクローズ通知を送らない場合は
     /// セッション生存中に残り続ける (サイズは「拒否後・破棄済みのうち未クローズの id 数」に比例する)。
     pub(super) rejected_request_ids: HashSet<u64>,
@@ -447,8 +399,7 @@ pub const PUBLISH_DONE_STREAM_COUNT_UNKNOWN: u64 = u64::MAX;
 
 /// request_id が属するテーブルの種別 (内部 dispatch 用)
 ///
-/// 6 種類のテーブル (subscriptions / fetches / namespace_publications /
-/// namespace_subscriptions / track_subscriptions / track_status_requests) のどれに
+/// 3 種類のテーブル (subscriptions / fetches / track_status_requests) のどれに
 /// 属するかを識別する。`send_request_ok` / `send_request_error` /
 /// `handle_peer_request_ok` / `handle_peer_request_error` の dispatch に使用する。
 ///
@@ -461,9 +412,6 @@ pub const PUBLISH_DONE_STREAM_COUNT_UNKNOWN: u64 = u64::MAX;
 pub(super) enum RequestTable {
     Subscription,
     Fetch,
-    NamespacePublication,
-    NamespaceSubscription,
-    TrackSubscription,
     TrackStatus,
 }
 
@@ -475,9 +423,6 @@ impl RequestTable {
         match kind {
             RequestKind::Subscribe | RequestKind::Publish => Self::Subscription,
             RequestKind::Fetch => Self::Fetch,
-            RequestKind::PublishNamespace => Self::NamespacePublication,
-            RequestKind::SubscribeNamespace => Self::NamespaceSubscription,
-            RequestKind::SubscribeTracks => Self::TrackSubscription,
             RequestKind::TrackStatus => Self::TrackStatus,
         }
     }
@@ -546,14 +491,6 @@ impl Session {
                 peer_alias_tombstones: HashMap::new(),
             },
             fetches: HashMap::new(),
-            namespaces: NamespaceState {
-                publications: HashMap::new(),
-                subscriptions: HashMap::new(),
-                active_full_namespaces: HashMap::new(),
-            },
-            track_subscriptions: HashMap::new(),
-            pending_prefix_updates: HashMap::new(),
-            track_prefix_history: HashMap::new(),
             track_status_requests: HashMap::new(),
             data_streams: DataStreamState {
                 incoming: HashMap::new(),
@@ -925,48 +862,9 @@ impl Session {
         match msg {
             ControlMessage::Subscribe(subscribe) => self.handle_peer_subscribe(subscribe)?,
             ControlMessage::Publish(publish) => {
-                let track_alias = publish.track_alias;
-                let track_namespace = publish.track_namespace.clone();
-                if self.handle_peer_publish(publish)? {
-                    // SUBSCRIBE_TRACKS 経由の PUBLISH の場合、対応する subscriber role の
-                    // TrackSubscription を track_namespace の片方向 prefix matching で検索して
-                    // active_track_aliases を更新する。REQUEST_UPDATE で送信した prefix は
-                    // REQUEST_OK 受信までローカルへ反映せず、PUBLISH は REQUEST_UPDATE とは
-                    // 別 bidi stream で順序保証がない。そのため確定待ちの間は旧 prefix と
-                    // 確定待ち prefix の両方で、REQUEST_OK の適用後は置換前の prefix
-                    // (track_prefix_history) でもマッチさせる
-                    // (draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions))。
-                    // Terminated の購読は active ではないため対象外とする。
-                    for (_, ts) in self.track_subscriptions.iter_mut() {
-                        if ts.my_role != TrackRole::Subscriber
-                            || ts.state == TrackSubscriptionState::Terminated
-                        {
-                            continue;
-                        }
-                        let request_id = ts.request_id;
-                        let matched = self
-                            .pending_prefix_updates
-                            .get(&request_id)
-                            .into_iter()
-                            .flat_map(|queue| queue.iter().flatten())
-                            .chain(
-                                self.track_prefix_history
-                                    .get(&request_id)
-                                    .into_iter()
-                                    .flatten(),
-                            )
-                            .chain(core::iter::once(&ts.prefix))
-                            .any(|prefix| is_prefix_of(prefix, &track_namespace));
-                        if matched {
-                            ts.active_track_aliases.insert(track_alias);
-                        }
-                    }
-                }
+                self.handle_peer_publish(publish)?;
             }
             ControlMessage::Fetch(fetch) => self.handle_peer_fetch(fetch)?,
-            ControlMessage::PublishNamespace(m) => self.handle_peer_publish_namespace(m)?,
-            ControlMessage::SubscribeNamespace(m) => self.handle_peer_subscribe_namespace(m)?,
-            ControlMessage::SubscribeTracks(m) => self.handle_peer_subscribe_tracks(m)?,
             ControlMessage::TrackStatus(m) => self.handle_peer_track_status(m)?,
             _ => {
                 let err = SessionError::new(
@@ -995,10 +893,8 @@ impl Session {
     /// send a REQUEST_ERROR and FIN the stream." に従う拒否。control GOAWAY 送信後の
     /// GOING_AWAY 拒否 (draft §9.2) も含む) と、終端済み fetch の破棄
     /// (`forget_fetch` が記録する publisher 側・データストリーム終端済みの request id。
-    /// 詳細は `rejected_request_ids` のフィールド doc 参照)、および SUBSCRIBE_TRACKS の
-    /// bidi stream 終端で暗黙終端した subscription (`close_track_subscription_on_stream_end`
-    /// が記録する request id) のストリームクローズは
-    /// 拒否済み・破棄済み・暗黙終端済みのため state を持たず no-op で吸収する。登録済み request への
+    /// 詳細は `rejected_request_ids` のフィールド doc 参照) のストリームクローズは
+    /// 拒否済み・破棄済みのため state を持たず no-op で吸収する。登録済み request への
     /// REQUEST_ERROR (REQUEST_UPDATE 拒否等) のクローズは `request_streams` 経由で処理され、
     /// `RequestTerminated` が発行される。
     /// close 通知は 1 回のみを想定しており、2 回目以降の通知は unknown id として
@@ -1031,15 +927,6 @@ impl Session {
         let reason_result = match RequestTable::from_kind(kind) {
             RequestTable::Subscription => self.close_subscription_on_stream_end(request_id, end),
             RequestTable::Fetch => self.close_fetch_on_stream_end(request_id, end),
-            RequestTable::NamespacePublication => {
-                self.close_namespace_publication_on_stream_end(request_id, end)
-            }
-            RequestTable::NamespaceSubscription => {
-                self.close_namespace_subscription_on_stream_end(request_id, end)
-            }
-            RequestTable::TrackSubscription => {
-                self.close_track_subscription_on_stream_end(request_id, end)
-            }
             RequestTable::TrackStatus => self.close_track_status_on_stream_end(request_id, end),
         };
         let reason = match reason_result {
@@ -1085,8 +972,6 @@ impl Session {
                 self.handle_peer_publish_state_notify(request_id, notify)
             }
             ControlMessage::FetchOk(ok) => self.handle_peer_fetch_ok(request_id, ok),
-            ControlMessage::Namespace(m) => self.handle_peer_namespace(request_id, m),
-            ControlMessage::NamespaceDone(m) => self.handle_peer_namespace_done(request_id, m),
             ControlMessage::Publish(_) => {
                 // draft-ietf-moq-transport-21 §9 Table 5: PUBLISH (0x1D) は Request, First。
                 // Messages marked "First" MUST be the first message on a new request stream.
@@ -1098,7 +983,6 @@ impl Session {
                 self.fail(err.clone());
                 Err(err)
             }
-            ControlMessage::PublishSkipped(m) => self.handle_peer_publish_skipped(request_id, m),
             ControlMessage::Goaway(g) => self.handle_peer_goaway_on_request_stream(request_id, g),
             _ => {
                 let err = SessionError::new(
@@ -1169,14 +1053,6 @@ impl Session {
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update for fetch) parameter not allowed",
             )),
-            Some(
-                RequestTable::NamespacePublication
-                | RequestTable::NamespaceSubscription
-                | RequestTable::TrackSubscription,
-            ) => Some((
-                NAMESPACE_OK_ALLOWED_PARAMS,
-                "REQUEST_OK (namespace/track-subscription) parameter not allowed in this context",
-            )),
             Some(RequestTable::Subscription) => None,
             None => unreachable!("table.is_none() checked above"),
         };
@@ -1186,7 +1062,7 @@ impl Session {
             return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, message));
         }
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): Range Filter を載せられるのは
-        // SUBSCRIBE / FETCH / SUBSCRIBE_TRACKS / REQUEST_UPDATE のみ。REQUEST_OK 系
+        // SUBSCRIBE / FETCH / REQUEST_UPDATE のみ。REQUEST_OK 系
         // (PUBLISH_OK / REQUEST_UPDATE_OK 等) は上の context 別スコープ検証で既に
         // 弾かれているか、そもそも Range Filter を含まないため `has_range_filters()`
         // が false になり実質 no-op になる。context 判定は追加しない。
@@ -1197,15 +1073,6 @@ impl Session {
                 self.send_ok_for_subscription(request_id, &mut parameters)?
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id)?,
-            Some(RequestTable::NamespacePublication) => {
-                self.send_ok_for_namespace_publication(request_id)?
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.send_ok_for_namespace_subscription(request_id)?
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.send_ok_for_track_subscription(request_id)?
-            }
             Some(RequestTable::TrackStatus) => {
                 self.send_ok_for_track_status(request_id, &mut parameters)?
             }
@@ -1318,15 +1185,6 @@ impl Session {
             }
             Some(RequestTable::Fetch) => {
                 fetch_reset_stream_id = self.send_err_for_fetch(request_id)?;
-            }
-            Some(RequestTable::NamespacePublication) => {
-                self.send_err_for_namespace_publication(request_id)?;
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.send_err_for_namespace_subscription(request_id)?;
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.send_err_for_track_subscription(request_id)?;
             }
             Some(RequestTable::TrackStatus) => {
                 self.send_err_for_track_status(request_id)?;
@@ -1450,42 +1308,9 @@ impl Session {
             return Err(e);
         }
         let kind = self.locate_request(request_id);
-        // draft-ietf-moq-transport-21 §9.4.1 (Redirect Structure):
-        // namespace-scoped request (SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE,
-        // SUBSCRIBE_TRACKS) への Redirect で Track Name が non-empty の場合、
-        // PROTOCOL_VIOLATION でセッションをクローズする (MUST)。
-        // Track Name は namespace-scoped request では意味を持たず、
-        // 必ず空でなければならない。
-        if let Some(ref redirect) = err.redirect
-            && !redirect.track_name.is_empty()
-            && matches!(
-                kind,
-                Some(
-                    RequestTable::NamespaceSubscription
-                        | RequestTable::NamespacePublication
-                        | RequestTable::TrackSubscription
-                )
-            )
-        {
-            let e = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "received redirect with non-empty track name for namespace-scoped request",
-            );
-            self.fail(e.clone());
-            return Err(e);
-        }
         let result = match kind {
             Some(RequestTable::Subscription) => self.handle_err_for_subscription(request_id),
             Some(RequestTable::Fetch) => self.handle_err_for_fetch(request_id),
-            Some(RequestTable::NamespacePublication) => {
-                self.handle_err_for_namespace_publication(request_id)
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.handle_err_for_namespace_subscription(request_id)
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.handle_err_for_track_subscription(request_id)
-            }
             Some(RequestTable::TrackStatus) => self.handle_err_for_track_status(request_id),
             None => {
                 let e = SessionError::new(
@@ -1497,8 +1322,8 @@ impl Session {
             }
         };
         // サブディスパッチが state を正常に遷移させた場合のみイベントを発行する。
-        // REQUEST_UPDATE 失敗応答で state を維持するケース (namespace 系の Established 維持分岐)
-        // でもアプリが副作用を取れるように、失敗理由を常に通知する。
+        // REQUEST_UPDATE 失敗応答で state を維持するケースでもアプリが副作用を取れるように、
+        // 失敗理由を常に通知する。
         // subscription / fetch は REQUEST_UPDATE 失敗応答で `Terminated` に遷移する
         // (subscription: draft §3.1.1 の REQUEST_ERROR 受信で subscription state を終える帰結)。
         if result.is_ok() {
@@ -1548,14 +1373,6 @@ impl Session {
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update for fetch) parameter not allowed in this context",
             )),
-            Some(
-                RequestTable::NamespacePublication
-                | RequestTable::NamespaceSubscription
-                | RequestTable::TrackSubscription,
-            ) => Some((
-                NAMESPACE_OK_ALLOWED_PARAMS,
-                "REQUEST_OK (namespace/track-subscription) parameter not allowed in this context",
-            )),
             Some(RequestTable::Subscription) | None => None,
         };
         if let Some((allowed, message)) = context_allowed
@@ -1570,15 +1387,6 @@ impl Session {
                 self.handle_ok_for_subscription(request_id, &ok.parameters)
             }
             Some(RequestTable::Fetch) => self.handle_ok_for_fetch(request_id, &ok.parameters),
-            Some(RequestTable::NamespacePublication) => {
-                self.handle_ok_for_namespace_publication(request_id, &ok.parameters)
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.handle_ok_for_namespace_subscription(request_id, &ok.parameters)
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.handle_ok_for_track_subscription(request_id, &ok.parameters)
-            }
             Some(RequestTable::TrackStatus) => {
                 self.handle_ok_for_track_status(request_id, &ok.parameters)
             }
@@ -1599,12 +1407,6 @@ impl Session {
             Some(RequestTable::Subscription)
         } else if self.fetches.contains_key(&request_id) {
             Some(RequestTable::Fetch)
-        } else if self.namespaces.publications.contains_key(&request_id) {
-            Some(RequestTable::NamespacePublication)
-        } else if self.namespaces.subscriptions.contains_key(&request_id) {
-            Some(RequestTable::NamespaceSubscription)
-        } else if self.track_subscriptions.contains_key(&request_id) {
-            Some(RequestTable::TrackSubscription)
         } else if self.track_status_requests.contains_key(&request_id) {
             Some(RequestTable::TrackStatus)
         } else {

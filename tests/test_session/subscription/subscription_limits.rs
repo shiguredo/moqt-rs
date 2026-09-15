@@ -1318,15 +1318,15 @@ fn incoming_unparsable_range_filter_is_rejected() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// 初回 PUBLISH / FETCH / SUBSCRIBE_TRACKS の Range Filter 拒否も
+/// 初回 PUBLISH / FETCH の Range Filter 拒否も
 /// REQUEST_ERROR (INVALID_FILTER) のみで、セッションを閉じない
 ///
-/// `check_incoming_range_filters` の戻り値化後も初期 request の 4 経路が
+/// `check_incoming_range_filters` の戻り値化後も初期 request の経路が
 /// 従来どおり REQUEST_ERROR + FIN を返すことの回帰テスト
 /// (SUBSCRIBE 初回は `incoming_unparsable_range_filter_is_rejected` が担う)。
 #[test]
 fn initial_requests_with_range_filter_violation_send_request_error_only() {
-    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish, SubscribeTracks};
+    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish};
     for (label, message) in [
         (
             "PUBLISH",
@@ -1345,14 +1345,6 @@ fn initial_requests_with_range_filter_violation_send_request_error_only() {
                 request_id: 0,
                 track_namespace: ns(&[b"live"]),
                 track_name: b"cam".to_vec(),
-                parameters: one_range_subgroup_filter(),
-            }),
-        ),
-        (
-            "SUBSCRIBE_TRACKS",
-            ControlMessage::SubscribeTracks(SubscribeTracks {
-                request_id: 0,
-                track_namespace_prefix: ns(&[b"live"]),
                 parameters: one_range_subgroup_filter(),
             }),
         ),

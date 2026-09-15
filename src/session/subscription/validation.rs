@@ -5,14 +5,11 @@
 use super::super::types::{Subscription, SubscriptionRangeFilters};
 use crate::error::SESSION_PROTOCOL_VIOLATION;
 use crate::message::common::Location;
-use crate::message_parameter::RangeFilterSet;
 use crate::message_parameter::{
     LocationFilter, LocationFilterContext, MessageParameters, PARAM_OBJECT_PROPERTY_FILTER,
     PARAM_OBJECTID_FILTER, PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_FILTER,
 };
 use crate::object_properties::ObjectProperties;
-use crate::track_properties::TrackProperties;
-use alloc::vec::Vec;
 
 use super::super::types::SessionError;
 
@@ -305,36 +302,19 @@ pub fn header_passes_filters(
         })
 }
 
-/// TRACK_PROPERTY_FILTER で Track Properties を選別する
+/// 2 つの Track Namespace が prefix overlap するか判定する
 ///
-/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): "The Track Property Filter can be used in
-/// SUBSCRIBE_TRACKS to filter PUBLISH messages with required Track Property types and values.
-/// PUBLISH messages which pass the filter will be forwarded while those which do not pass it
-/// will not be forwarded nor will any Objects."
-///
-/// 結合規則は Object 系 Range Filter と同じで、同一 SetID を AND、SetID 間を OR とする。
-/// フィルタが空なら選別しない (`true`)。指定 Property Type が Track Properties に無い場合は
-/// その条件を満たせないので AND が落ちる。
-/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-pub fn track_properties_pass(
-    filters: &[RangeFilterSet],
-    track_properties: &TrackProperties,
+/// draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE) / §9.18 (SUBSCRIBE_TRACKS) の
+/// "shares a common prefix" 判定に対応する。一方が他方の prefix (または完全一致) に
+/// なっていれば overlap とみなす。空 prefix (0 フィールド) は common prefix が空のため
+/// 任意の namespace と overlap する。
+#[cfg(test)]
+pub(crate) fn prefix_overlaps(
+    a: &crate::message::common::TrackNamespace,
+    b: &crate::message::common::TrackNamespace,
 ) -> bool {
-    if filters.is_empty() {
-        return true;
-    }
-    let mut set_ids: Vec<u8> = filters.iter().map(|set| set.set_id).collect();
-    set_ids.sort_unstable();
-    set_ids.dedup();
-    set_ids.into_iter().any(|set_id| {
-        filters
-            .iter()
-            .filter(|set| set.set_id == set_id)
-            .all(|set| match set.property_type {
-                Some(prop_type) => track_properties
-                    .find_varint(prop_type)
-                    .is_some_and(|v| set.contains(v)),
-                None => false,
-            })
-    })
+    let aa = a.fields();
+    let bb = b.fields();
+    let min = aa.len().min(bb.len());
+    aa[..min] == bb[..min]
 }

@@ -314,25 +314,10 @@ fn goaway_on_request_stream_before_established_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// goaway_drain_snapshot が namespace_subscription / namespace_publication / track_status を
-/// drain blocker に含めること
+/// goaway_drain_snapshot が track_status を drain blocker に含めること
 #[test]
-fn goaway_drain_snapshot_includes_all_request_types() {
+fn goaway_drain_snapshot_includes_track_status() {
     let (mut client, mut server) = establish_pair();
-    let ns_rid = client
-        .send_subscribe_namespace(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ns_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ns_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let pn_rid = client
-        .send_publish_namespace(ns(&[b"pub"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, pn_msg) = take_send_request(&mut client);
-    server
-        .recv_request(pn_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
     let ts_rid = client
         .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
         .expect("テストフィクスチャの前提条件を満たす");
@@ -341,16 +326,6 @@ fn goaway_drain_snapshot_includes_all_request_types() {
         .recv_request(ts_msg)
         .expect("テストフィクスチャの前提条件を満たす");
     let snapshot = server.goaway_drain_snapshot();
-    assert!(
-        snapshot
-            .blocking_namespace_subscription_request_ids
-            .contains(&ns_rid)
-    );
-    assert!(
-        snapshot
-            .blocking_namespace_publication_request_ids
-            .contains(&pn_rid)
-    );
     assert!(snapshot.blocking_track_status_request_ids.contains(&ts_rid));
     assert!(!snapshot.ready());
 }
@@ -776,38 +751,6 @@ fn peer_goaway_suppresses_send_fetch() {
     assert_eq!(err, SendRequestError::PeerGoawayReceived);
 }
 
-/// peer GOAWAY 受信後に send_publish_namespace が PeerGoawayReceived を返す
-#[test]
-fn peer_goaway_suppresses_send_publish_namespace() {
-    let (mut client, mut server) = establish_pair();
-    deliver_goaway_from_server(
-        &mut server,
-        &mut client,
-        b"moqt://relay.example/".to_vec(),
-        10000,
-    );
-    let err = client
-        .send_publish_namespace(ns(&[b"live"]), MessageParameters::new())
-        .unwrap_err();
-    assert_eq!(err, SendRequestError::PeerGoawayReceived);
-}
-
-/// peer GOAWAY 受信後に send_subscribe_namespace が PeerGoawayReceived を返す
-#[test]
-fn peer_goaway_suppresses_send_subscribe_namespace() {
-    let (mut client, mut server) = establish_pair();
-    deliver_goaway_from_server(
-        &mut server,
-        &mut client,
-        b"moqt://relay.example/".to_vec(),
-        10000,
-    );
-    let err = client
-        .send_subscribe_namespace(ns(&[b"live"]), MessageParameters::new())
-        .unwrap_err();
-    assert_eq!(err, SendRequestError::PeerGoawayReceived);
-}
-
 /// peer GOAWAY 受信後に send_track_status が PeerGoawayReceived を返す
 #[test]
 fn peer_goaway_suppresses_send_track_status() {
@@ -820,22 +763,6 @@ fn peer_goaway_suppresses_send_track_status() {
     );
     let err = client
         .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .unwrap_err();
-    assert_eq!(err, SendRequestError::PeerGoawayReceived);
-}
-
-/// peer GOAWAY 受信後に send_subscribe_tracks が PeerGoawayReceived を返す
-#[test]
-fn peer_goaway_suppresses_send_subscribe_tracks() {
-    let (mut client, mut server) = establish_pair();
-    deliver_goaway_from_server(
-        &mut server,
-        &mut client,
-        b"moqt://relay.example/".to_vec(),
-        10000,
-    );
-    let err = client
-        .send_subscribe_tracks(ns(&[b"live"]), MessageParameters::new())
         .unwrap_err();
     assert_eq!(err, SendRequestError::PeerGoawayReceived);
 }

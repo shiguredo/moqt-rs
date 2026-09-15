@@ -9,6 +9,5 @@ mod datagram;
 mod fetch;
 mod goaway;
 mod handshake;
-mod namespace;
 mod request_id;
 mod subscription;

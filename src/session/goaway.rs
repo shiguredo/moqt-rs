@@ -79,32 +79,6 @@ impl Session {
                 .copied()
                 .filter(|request_id| self.fetch_cleanup_ready(*request_id) == Some(false)),
         );
-        snapshot.blocking_track_subscription_request_ids.extend(
-            self.track_subscriptions
-                .iter()
-                .filter_map(|(&request_id, ts)| {
-                    use super::types::TrackSubscriptionState;
-                    (ts.state != TrackSubscriptionState::Terminated).then_some(request_id)
-                }),
-        );
-        snapshot.blocking_namespace_subscription_request_ids.extend(
-            self.namespaces
-                .subscriptions
-                .iter()
-                .filter_map(|(&request_id, ns)| {
-                    use super::types::NamespaceSubscriptionState;
-                    (ns.state != NamespaceSubscriptionState::Terminated).then_some(request_id)
-                }),
-        );
-        snapshot.blocking_namespace_publication_request_ids.extend(
-            self.namespaces
-                .publications
-                .iter()
-                .filter_map(|(&request_id, np)| {
-                    use super::types::NamespacePublicationState;
-                    (np.state != NamespacePublicationState::Terminated).then_some(request_id)
-                }),
-        );
         snapshot.blocking_track_status_request_ids.extend(
             self.track_status_requests
                 .iter()
@@ -112,15 +86,6 @@ impl Session {
         );
         snapshot.blocking_subscription_request_ids.sort_unstable();
         snapshot.blocking_fetch_request_ids.sort_unstable();
-        snapshot
-            .blocking_track_subscription_request_ids
-            .sort_unstable();
-        snapshot
-            .blocking_namespace_subscription_request_ids
-            .sort_unstable();
-        snapshot
-            .blocking_namespace_publication_request_ids
-            .sort_unstable();
         snapshot.blocking_track_status_request_ids.sort_unstable();
         snapshot
     }

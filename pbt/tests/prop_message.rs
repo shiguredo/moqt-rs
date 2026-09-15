@@ -3,12 +3,8 @@ use shiguredo_moqt::{
     message::Fetch,
     message::FetchOk,
     message::Goaway,
-    message::Namespace,
-    message::NamespaceDone,
     message::Publish,
     message::PublishDone,
-    message::PublishNamespace,
-    message::PublishSkipped,
     message::PublishStateNotify,
     message::ReasonPhrase,
     message::Redirect,
@@ -17,9 +13,7 @@ use shiguredo_moqt::{
     message::RequestUpdate,
     message::Setup,
     message::Subscribe,
-    message::SubscribeNamespace,
     message::SubscribeOk,
-    message::SubscribeTracks,
     message::TrackStatus,
     message::common::Location,
     message_parameter::AuthorizationToken,
@@ -391,27 +385,12 @@ const FETCH_OK_PARAMS: &[u64] = &[];
 const PUBLISH_STATE_NOTIFY_PARAMS: &[u64] =
     &[PARAM_FORWARD, PARAM_LOCATION_FILTER, PARAM_LARGEST_OBJECT];
 const TRACK_STATUS_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
-const PUBLISH_NAMESPACE_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
-const SUBSCRIBE_NAMESPACE_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
-// draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): GROUP_ORDER は SUBSCRIBE_TRACKS で許可。
-// `src/message.rs::SUBSCRIBE_TRACKS_ALLOWED_PARAMS` と一致させる。
-const SUBSCRIBE_TRACKS_PARAMS: &[u64] = &[
-    PARAM_AUTHORIZATION_TOKEN,
-    PARAM_FORWARD,
-    PARAM_GROUP_ORDER,
-    PARAM_INCLUDE_PROPERTIES,
-    PARAM_SUBGROUP_FILTER,
-    PARAM_OBJECTID_FILTER,
-    PARAM_PRIORITY_FILTER,
-    PARAM_OBJECT_PROPERTY_FILTER,
-    PARAM_TRACK_PROPERTY_FILTER,
-];
 
 // ─── メッセージ生成 ──────────────────────────────────────────
 
-/// 任意の ControlMessage を生成する (20 ブランチを等確率で選ぶ)
+/// 任意の ControlMessage を生成する (15 ブランチを等確率で選ぶ)
 fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
-    match noprop::sample_weighted_index(ctx, &[1u32; 20]) {
+    match noprop::sample_weighted_index(ctx, &[1u32; 15]) {
         // Setup
         0 => ControlMessage::Setup(Setup {
             options: sample_setup_options_with(ctx, &SETUP_SAMPLING_SMALL),
@@ -480,20 +459,15 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             stream_count: sample_small_varint(ctx),
             reason: sample_reason_phrase(ctx),
         }),
-        // PublishSkipped
-        10 => ControlMessage::PublishSkipped(PublishSkipped {
-            track_namespace_suffix: sample_namespace_prefix(ctx),
-            track_name: sample_bytes(ctx, 50),
-        }),
         // Fetch (draft-ietf-moq-transport-21 §9.11: 単一形式。range は LOCATION_FILTER で指定)
-        11 => ControlMessage::Fetch(Fetch {
+        10 => ControlMessage::Fetch(Fetch {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
             track_name: sample_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, FETCH_PARAMS),
         }),
         // FetchOk
-        12 => ControlMessage::FetchOk(FetchOk {
+        11 => ControlMessage::FetchOk(FetchOk {
             // End Of Track は 0 または 1 のみ (draft-ietf-moq-transport-21 §9.12 (FETCH_OK))
             end_of_track: noprop::sample_choice(ctx, &[0u8, 1u8]),
             end_location: sample_location(ctx),
@@ -501,41 +475,15 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             track_properties: sample_track_properties(ctx),
         }),
         // TrackStatus
-        13 => ControlMessage::TrackStatus(TrackStatus {
+        12 => ControlMessage::TrackStatus(TrackStatus {
             request_id: sample_request_id(ctx),
             track_namespace: sample_namespace_prefix(ctx),
             track_name: sample_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, TRACK_STATUS_PARAMS),
         }),
-        // PublishNamespace
-        14 => ControlMessage::PublishNamespace(PublishNamespace {
-            request_id: sample_request_id(ctx),
-            track_namespace: sample_namespace_prefix(ctx),
-            parameters: sample_scoped_parameters(ctx, PUBLISH_NAMESPACE_PARAMS),
-        }),
-        // Namespace
-        15 => ControlMessage::Namespace(Namespace {
-            track_namespace_suffix: sample_namespace_prefix(ctx),
-        }),
-        // NamespaceDone
-        16 => ControlMessage::NamespaceDone(NamespaceDone {
-            track_namespace_suffix: sample_namespace_prefix(ctx),
-        }),
-        // SubscribeNamespace
-        17 => ControlMessage::SubscribeNamespace(SubscribeNamespace {
-            request_id: sample_request_id(ctx),
-            track_namespace_prefix: sample_namespace_prefix(ctx),
-            parameters: sample_scoped_parameters(ctx, SUBSCRIBE_NAMESPACE_PARAMS),
-        }),
         // PublishStateNotify (draft-ietf-moq-transport-21 §9.10)
-        18 => ControlMessage::PublishStateNotify(PublishStateNotify {
+        _ => ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_scoped_parameters(ctx, PUBLISH_STATE_NOTIFY_PARAMS),
-        }),
-        // SubscribeTracks
-        _ => ControlMessage::SubscribeTracks(SubscribeTracks {
-            request_id: sample_request_id(ctx),
-            track_namespace_prefix: sample_namespace_prefix(ctx),
-            parameters: sample_scoped_parameters(ctx, SUBSCRIBE_TRACKS_PARAMS),
         }),
     }
 }

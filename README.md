@@ -32,7 +32,7 @@ MOQT / LOC / MSF の codec と、1 本の Transport Session に閉じたセッ�
 - no_std 対応
 - 依存は `hashbrown` / `noflate` / `nojson` の 3 つのみ
 - 1 本の Transport Session に閉じた endpoint-local な `Session` 状態機械
-  - I/O、非同期処理、relay 固有の routing / fan-out / cache / policy は含まない
+  - I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含まない
 - バッファ付きインクリメンタルデコーダー (`MessageDecoder` / `SubgroupStreamDecoder` / `FetchStreamDecoder`)
 - FETCH 応答のデルタ圧縮エンコーダー (`FetchStreamEncoder`)
 - 対応仕様

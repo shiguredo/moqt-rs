@@ -1073,15 +1073,11 @@ impl MoqtClient {
                 | SessionEvent::GoawayReceived { .. }
                 | SessionEvent::PublishDoneReceived { .. }
                 | SessionEvent::RequestErrorReceived { .. }
-                | SessionEvent::NamespaceReceived { .. }
-                | SessionEvent::NamespaceDoneReceived { .. }
                 | SessionEvent::RequestTerminated { .. }
-                | SessionEvent::PublishSkippedReceived { .. }
                 | SessionEvent::RequestOkReceived { .. }
                 | SessionEvent::RequestUpdateReceived { .. }
                 | SessionEvent::PublishStateNotifyReceived { .. }
                 | SessionEvent::ResetDataStream { .. }
-                | SessionEvent::SubscribeTracksReceived { .. }
                 | SessionEvent::FetchOkReceived { .. }
                 | SessionEvent::SendPaddingStream { .. }
                 | SessionEvent::OpenFillFetchStream { .. }

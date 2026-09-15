@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
+  - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
+  - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - @voluntas
 - [CHANGE] 公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証は `recv_request` に一本化する
   - @voluntas
 - [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moqt-publisher の datagram_writer が Properties Length を二重に書かなくなる

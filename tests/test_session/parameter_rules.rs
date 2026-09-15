@@ -546,8 +546,8 @@ fn publish_with_unknown_mandatory_property_rejected() {
 
 // ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ────
 //
-// REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK /
-// namespace 系 OK / SUBSCRIBE_TRACKS_OK が共有する単一ワイヤメッセージ。
+// REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK が
+// 共有する単一ワイヤメッセージ。
 // encode/decode 層は全 context の和集合 (REQUEST_OK_ALLOWED_PARAMS) でしか検証
 // しないため、context ごとの許可集合外パラメータは受信側 (セッション層) で
 // PROTOCOL_VIOLATION として弾く必要がある。以下は意図的エラーパス (PBT では
@@ -611,33 +611,6 @@ fn track_status_ok_with_group_order_rejected() {
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
         param_type: PARAM_GROUP_ORDER,
-        value: MessageParameterValue::Uint8(1),
-    });
-    let err = server
-        .send_request_ok(rid, ok_params, TrackProperties::default())
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// SUBSCRIBE_NAMESPACE_OK 応答に任意のパラメータ (FORWARD) を載せると PROTOCOL_VIOLATION
-/// (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) 等: namespace 系 OK はパラメータを一切許可しない。
-/// 送信側が `send_request_ok` で検出する)
-#[test]
-fn subscribe_namespace_ok_with_parameter_rejected() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe_namespace(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut ok_params = MessageParameters::new();
-    ok_params.push(MessageParameter {
-        param_type: PARAM_FORWARD,
         value: MessageParameterValue::Uint8(1),
     });
     let err = server
@@ -2106,108 +2079,6 @@ fn send_request_ok_for_fetch_with_non_empty_track_properties_rejected() {
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client
         .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut tp = TrackProperties::new();
-    tp.push(TrackProperty {
-        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
-        value: TrackPropertyValue::VarInt(5000),
-    });
-    let err = server
-        .send_request_ok(rid, MessageParameters::new(), tp)
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// PUBLISH_NAMESPACE_OK に SUBSCRIBER_PRIORITY を含む parameters を渡すと
-/// send_request_ok で PROTOCOL_VIOLATION (namespace 系 OK はパラメータを許可しない)
-#[test]
-fn send_request_ok_for_namespace_publication_with_subscriber_priority_rejected() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_SUBSCRIBER_PRIORITY,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_publish_namespace(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut ok_params = MessageParameters::new();
-    ok_params.push(MessageParameter {
-        param_type: PARAM_SUBSCRIBER_PRIORITY,
-        value: MessageParameterValue::Uint8(1),
-    });
-    let err = server
-        .send_request_ok(rid, ok_params, TrackProperties::default())
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// PUBLISH_NAMESPACE_OK に非空 TrackProperties を渡すと send_request_ok で PROTOCOL_VIOLATION
-/// (draft §9.3 (REQUEST_OK): TRACK_STATUS_OK 以外は TrackProperties 空必須)
-#[test]
-fn send_request_ok_for_namespace_publication_with_non_empty_track_properties_rejected() {
-    use shiguredo_moqt::track_properties::{
-        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperty, TrackPropertyValue,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_publish_namespace(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut tp = TrackProperties::new();
-    tp.push(TrackProperty {
-        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
-        value: TrackPropertyValue::VarInt(5000),
-    });
-    let err = server
-        .send_request_ok(rid, MessageParameters::new(), tp)
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// SUBSCRIBE_NAMESPACE_OK に非空 TrackProperties を渡すと send_request_ok で PROTOCOL_VIOLATION
-#[test]
-fn send_request_ok_for_namespace_subscription_with_non_empty_track_properties_rejected() {
-    use shiguredo_moqt::track_properties::{
-        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperty, TrackPropertyValue,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe_namespace(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    let mut tp = TrackProperties::new();
-    tp.push(TrackProperty {
-        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
-        value: TrackPropertyValue::VarInt(5000),
-    });
-    let err = server
-        .send_request_ok(rid, MessageParameters::new(), tp)
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// SUBSCRIBE_TRACKS_OK に非空 TrackProperties を渡すと send_request_ok で PROTOCOL_VIOLATION
-#[test]
-fn send_request_ok_for_track_subscription_with_non_empty_track_properties_rejected() {
-    use shiguredo_moqt::track_properties::{
-        PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperty, TrackPropertyValue,
-    };
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe_tracks(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, msg) = take_send_request(&mut client);
-    server
-        .recv_request(msg)
         .expect("テストフィクスチャの前提条件を満たす");
     let mut tp = TrackProperties::new();
     tp.push(TrackProperty {

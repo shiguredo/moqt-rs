@@ -3288,51 +3288,6 @@ fn publish_request_update_ok_emits_request_ok_received_event_with_kind_publish()
 
 // ─── Range Filter パラメータスコープ検証 (draft-ietf-moq-transport-21 §3.3.2 (Range Filters)) ────
 
-/// SUBSCRIBE_TRACKS 確立後に TRACK_PROPERTY_FILTER 付き REQUEST_UPDATE が受理されること
-/// (draft-ietf-moq-transport-21 §3.3.2 (Range Filters): TRACK_PROPERTY_FILTER は
-/// SUBSCRIBE_TRACKS の REQUEST_UPDATE に出現可能)
-#[test]
-fn subscribe_tracks_request_update_with_track_property_filter_accepted() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_TRACK_PROPERTY_FILTER,
-    };
-    // 送信側は peer が MAX_FILTER_RANGES を宣言していないと Range Filter を送出できない
-    // (draft-ietf-moq-transport-21 §9.1.6)。本テストの主題はパラメータスコープ検証なので、
-    // peer (server) 側に上限を宣言させて送出できる状態を作る。
-    let (mut client, mut server) =
-        establish_pair_with_options(SetupOptions::new(), opts_with(0x06, 1));
-    // SUBSCRIBE_TRACKS を確立する
-    let rid = client
-        .send_subscribe_tracks(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, st_msg) = take_send_request(&mut client);
-    server
-        .recv_request(st_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-
-    // TRACK_PROPERTY_FILTER 付き REQUEST_UPDATE を送信する
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_TRACK_PROPERTY_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![]),
-    });
-    client
-        .send_request_update(rid, params)
-        .expect("TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可される");
-    let (_, upd_msg) = take_send_on_stream(&mut client);
-    // 受信側でも受理されること
-    server
-        .recv_stream_message(rid, upd_msg)
-        .expect("TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可される");
-}
-
 /// SUBSCRIBE 確立後に TRACK_PROPERTY_FILTER 付き REQUEST_UPDATE が
 /// PROTOCOL_VIOLATION で拒否されること
 /// (draft-ietf-moq-transport-21 §3.3.2 (Range Filters): TRACK_PROPERTY_FILTER は
@@ -3422,51 +3377,6 @@ fn subscribe_request_update_with_subgroup_filter_accepted() {
     server
         .recv_stream_message(rid, upd_msg)
         .expect("SUBGROUP_FILTER は SUBSCRIBE の REQUEST_UPDATE で許可される");
-}
-
-/// SUBSCRIBE_TRACKS 確立後に SUBGROUP_FILTER 付き REQUEST_UPDATE が受理されること (回帰)
-/// (draft-ietf-moq-transport-21 §3.3.2 (Range Filters): Range Filter 0x25-0x28 は
-/// SUBSCRIBE_TRACKS の REQUEST_UPDATE にも出現可能)
-#[test]
-fn subscribe_tracks_request_update_with_subgroup_filter_accepted() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_SUBGROUP_FILTER,
-    };
-    // 送信側は peer が MAX_FILTER_RANGES を宣言していないと Range Filter を送出できない
-    // (draft-ietf-moq-transport-21 §9.1.6)。本テストの主題はパラメータスコープ検証なので、
-    // peer (server) 側に上限を宣言させて送出できる状態を作る。
-    let (mut client, mut server) =
-        establish_pair_with_options(SetupOptions::new(), opts_with(0x06, 1));
-    // SUBSCRIBE_TRACKS を確立する
-    let rid = client
-        .send_subscribe_tracks(ns(&[b"example"]), MessageParameters::new())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, st_msg) = take_send_request(&mut client);
-    server
-        .recv_request(st_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-
-    // SUBGROUP_FILTER 付き REQUEST_UPDATE を送信する
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_SUBGROUP_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![]),
-    });
-    client
-        .send_request_update(rid, params)
-        .expect("SUBGROUP_FILTER は SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可される");
-    let (_, upd_msg) = take_send_on_stream(&mut client);
-    // 受信側でも受理されること
-    server
-        .recv_stream_message(rid, upd_msg)
-        .expect("SUBGROUP_FILTER は SUBSCRIBE_TRACKS の REQUEST_UPDATE で許可される");
 }
 
 /// FORWARD 値域外 (2) を含む REQUEST_UPDATE の受信で、`Err` と

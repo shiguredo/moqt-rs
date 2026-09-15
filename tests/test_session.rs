@@ -97,26 +97,14 @@ fn opts_with(option_type: u64, value: u64) -> SetupOptions {
 
 /// 全 request テーブルが空であることを検証する
 ///
-/// `request_stream_count() == 0` の公開 API によらない代替。6 種の request テーブル
-/// (subscription / fetch / namespace 系 2 種 / track 系 2 種) を全走査する。
+/// `request_stream_count() == 0` の公開 API によらない代替。3 種の request テーブル
+/// (subscription / fetch / track status) を全走査する。
 fn assert_no_tracked_requests(s: &Session) {
     assert!(
         s.subscriptions().next().is_none(),
         "subscription テーブルが空であること"
     );
     assert!(s.fetches().next().is_none(), "fetch テーブルが空であること");
-    assert!(
-        s.namespace_subscriptions().next().is_none(),
-        "namespace subscription テーブルが空であること"
-    );
-    assert!(
-        s.namespace_publications().next().is_none(),
-        "namespace publication テーブルが空であること"
-    );
-    assert!(
-        s.track_subscriptions().next().is_none(),
-        "track subscription テーブルが空であること"
-    );
     assert!(
         s.track_status_requests().next().is_none(),
         "track status テーブルが空であること"
@@ -410,8 +398,6 @@ mod goaway;
 mod include_properties;
 #[path = "test_session/multi_track.rs"]
 mod multi_track;
-#[path = "test_session/namespace.rs"]
-mod namespace;
 #[path = "test_session/object_filter_pass.rs"]
 mod object_filter_pass;
 #[path = "test_session/outgoing_range_filter.rs"]
@@ -430,5 +416,3 @@ mod subgroup_object_filter;
 mod subscription;
 #[path = "test_session/timeout_api.rs"]
 mod timeout_api;
-#[path = "test_session/track_property_filter.rs"]
-mod track_property_filter;
