@@ -596,6 +596,18 @@ impl Session {
         request_id: u64,
         update: RequestUpdate,
     ) -> Result<(), SessionError> {
+        // draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE も Request ID を
+        // 消費するメッセージとして列挙される。peer から受信した Request ID の parity 違反と
+        // 重複を検証し、違反時は INVALID_REQUEST_ID でセッションを Closing に遷移させる (MUST)。
+        // 検証は本関数の先頭で 1 回だけ行い、subscription / fetch の分岐より前に済ませる。
+        //
+        // ここでは `accept_peer_request` ではなく `validate_peer_request_id` を呼ぶ。
+        // draft §9.2 (GOAWAY) は "The GOAWAY message does not impact subscription state." と
+        // 定めており、GOAWAY 送信後に拒否してよいのは新規 request であって、既存の bidi request
+        // stream 上を流れる REQUEST_UPDATE は含まない。draft §9.5 (REQUEST_UPDATE) も受信側に
+        // REQUEST_OK / REQUEST_ERROR のいずれか 1 つで応答することを MUST としているため、
+        // GOING_AWAY による拒否経路は適用しない。
+        self.validate_peer_request_id(update.request_id)?;
         // draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) / §9.5 (REQUEST_UPDATE):
         // REQUEST_UPDATE は独立した Request ID を消費する。対象の request は
         // 「同じ bidi stream 上で送る」ことで識別されるため、wire の

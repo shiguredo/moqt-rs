@@ -97,6 +97,8 @@
   - REQUEST_UPDATE 起因の fill fetch stream は REQUEST_UPDATE の Request ID で識別し、`SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数を起因メッセージの Request ID に変更する
   - `send_fill_fetch_header` は起因 REQUEST_UPDATE の Request ID から購読を解決するため、購読の Request ID を渡した場合も従来どおり登録できる
   - @voluntas
+- [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
+  - @voluntas
 
 ### misc
 
