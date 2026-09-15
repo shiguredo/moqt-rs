@@ -13,7 +13,10 @@ use shiguredo_moqt::message::common::Location;
 /// スコープ違反が PROTOCOL_VIOLATION になり REQUEST_ERROR に格下げされないことを断言する
 fn assert_scope_violation_closes_session(server: &mut Session, rid: u64) {
     let err = server
-        .recv_stream_message(rid, inject_request_update(rid, one_range_subgroup_filter()))
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, one_range_subgroup_filter()),
+        )
         .expect_err("スコープ違反は PROTOCOL_VIOLATION になる");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     let mut saw_close = false;

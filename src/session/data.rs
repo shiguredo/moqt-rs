@@ -80,9 +80,8 @@ pub(super) enum IncomingDataStream {
         /// DEFAULT_PRIORITY bit が立っている場合は `None`。Object 単位フィルタ再適用時の
         /// PRIORITY_FILTER は、候補ごとに
         /// [`Subscription::resolve_header_publisher_priority`] でこの生値を解決して評価する
-        /// (header 時の `header_passes_filters` と同じ規則)。解決済みの
-        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
-        /// 共有 Track Alias では stream の priority として使えない。
+        /// (header 時の `header_passes_filters` と同じ規則)。購読単位の直近解決値は持たない
+        /// (共有 Track Alias では別 stream の header で変わりうるため stream の priority に使えない)。
         ///
         /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
         header_publisher_priority: Option<u8>,
@@ -91,8 +90,8 @@ pub(super) enum IncomingDataStream {
         /// 解決は [`Subscription::resolve_header_publisher_priority`] (header 値 → Track Property の
         /// DEFAULT_PUBLISHER_PRIORITY → 128) による。Subgroup 単位の値であり、§12.1 条件 1 の
         /// priority 一致検証と重複 Object 検証 (`observe_object_fields`) で使う。
-        /// `Subscription::publisher_priority` は直近 header の解決結果で上書きされるため、
-        /// 並行 Subgroup の検証にはこの stream 保持値を使う。
+        /// 購読単位では直近 header の解決値を保持しないため、並行 Subgroup の検証には
+        /// この stream 保持値を使う。
         ///
         /// [`Subscription::resolve_header_publisher_priority`]: super::types::Subscription::resolve_header_publisher_priority
         resolved_publisher_priority: u8,
@@ -1054,17 +1053,14 @@ impl Session {
         // SUBGROUP_HEADER の DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が
         // `None`) 場合は override が無いので、Track Property の DEFAULT_PUBLISHER_PRIORITY を
         // 使い、それも無ければ既定値 128 を適用する。bit が立っていなければ header の値が
-        // override になる。Subgroup 単位の検証で使うため、解決済みの値を stream に保持する
-        // (`Subscription::publisher_priority` は直近 header の解決結果で上書きされる)。
+        // override になる。Subgroup 単位の検証とフィルタ評価で使うため、解決済みの値を
+        // stream に保持する (購読単位の直近値は並行 Subgroup で上書きされるため使わない)。
         let resolved_priority = {
             let subscription = self
                 .subscriptions
-                .get_mut(&request_id)
+                .get(&request_id)
                 .expect("subscription presence already checked by note_incoming_stream_opened");
-            let priority =
-                subscription.resolve_header_publisher_priority(header.publisher_priority);
-            subscription.publisher_priority = Some(priority);
-            priority
+            subscription.resolve_header_publisher_priority(header.publisher_priority)
         };
         self.data_streams.incoming.insert(
             stream_id,
@@ -1317,8 +1313,7 @@ impl Session {
             if let Some(subscription) = self.subscriptions.get(&candidate_id) {
                 // PRIORITY_FILTER は wire の SUBGROUP_HEADER が持つ Publisher Priority を
                 // 候補ごとに解決して評価する (header の `header_passes_filters` と同じ規則)。
-                // `Subscription::publisher_priority` は直近 header の解決結果であり、共有
-                // Track Alias では別候補の stream で上書きされうるため使わない。
+                // 購読単位では直近 header の解決値を保持しないため、候補ごとに解決する。
                 let publisher_priority =
                     subscription.resolve_header_publisher_priority(header_publisher_priority);
                 let input = ObjectFilterInput {
@@ -1520,8 +1515,11 @@ impl Session {
     ///
     /// `SessionEvent::OpenFillFetchStream` を受けたアプリが uni stream を開き、
     /// FETCH_HEADER (起因 SUBSCRIBE / REQUEST_UPDATE の Request ID を載せる) を
-    /// 書いたときに呼ぶ。`subscription_request_id` には fill 対象 subscription の
-    /// Request ID を渡す。通常の FETCH 応答 (`send_fetch_header`) とは異なり
+    /// 書いたときに呼ぶ。`fill_request_id` には FETCH_HEADER に載せた値
+    /// (= `SessionEvent::OpenFillFetchStream::request_id`) をそのまま渡す。
+    /// 初回 fill は subscription の Request ID そのもの、REQUEST_UPDATE 起因の fill は
+    /// REQUEST_UPDATE 自身の Request ID であり、後者は購読へ解決してから会計する。
+    /// 通常の FETCH 応答 (`send_fetch_header`) とは異なり
     /// `Fetch` 状態に紐づかず subscription に direct に紐づくため、1 つの
     /// subscription に複数本が同時に開くことがある。
     ///
@@ -1537,7 +1535,7 @@ impl Session {
     pub fn send_fill_fetch_header(
         &mut self,
         stream_id: DataStreamId,
-        subscription_request_id: u64,
+        fill_request_id: u64,
     ) -> Result<(), SessionError> {
         self.require_established()?;
         if self.data_streams.outgoing.contains_key(&stream_id)
@@ -1549,15 +1547,19 @@ impl Session {
                 "outgoing data stream id already registered",
             ));
         }
+        // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): 引数は FETCH_HEADER に
+        // 載せた起因メッセージの Request ID。REQUEST_UPDATE 起因の fill では購読の
+        // Request ID と異なるため購読へ解決してから、Stream Count と索引を会計する。
+        let Some(subscription_request_id) = self.resolve_fill_subscription(fill_request_id) else {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "subscription not found for outgoing fill fetch stream",
+            ));
+        };
         let subscription = self
             .subscriptions
             .get(&subscription_request_id)
-            .ok_or_else(|| {
-                SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "subscription not found for outgoing fill fetch stream",
-                )
-            })?;
+            .expect("resolve_fill_subscription guarantees subscription presence");
         if subscription.my_role != TrackRole::Publisher {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -1826,6 +1828,9 @@ impl Session {
             }
         }
 
+        // fill fetch stream の索引には解決済みの subscription の Request ID を記録する
+        // (通常の FETCH 応答では FETCH の Request ID のまま)。
+        let mut stream_request_id = header.request_id;
         // FETCH 応答か fill fetch stream かを解決する。borrow を閉じてから
         // `fail` を呼ぶため、判定に必要な値はコピーして取り出す。
         let fetch_state = self
@@ -1859,31 +1864,45 @@ impl Session {
             }
         } else {
             // draft-ietf-moq-transport-21 §3.4 (Fill Semantics): fill fetch stream の
-            // FETCH_HEADER は起因 SUBSCRIBE / REQUEST_UPDATE の Request ID
-            // (= subscription の Request ID) を載せる。`Fetch` 状態を持たないため
+            // FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
+            // SUBSCRIBE / PUBLISH の Request ID (= subscription の Request ID) だが、
+            // REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の Request ID であり、
+            // §6.4.2.1 (Request ID) により両者は一致しない。`Fetch` 状態を持たないため
             // subscription 側で受理する。複数本の同時存在を許すため
             // `has_other_fetch_stream` 検証は行わない (FIN / RESET 後の後始末は
             // `recv_data_stream_closed` / `send_data_stream_stop_sending` が
             // subscription の state を変えず Stream Count の open 数だけを戻す)。
+            let Some(fill_subscription_request_id) =
+                self.resolve_fill_subscription(header.request_id)
+            else {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "FETCH_HEADER received for unknown request id",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            };
             let fill_state = self
                 .subscriptions
-                .get(&header.request_id)
+                .get(&fill_subscription_request_id)
                 .map(|subscription| {
                     (
                         subscription.my_role,
                         subscription.state,
                         subscription.publish_done.is_some(),
                     )
-                });
+                })
+                .expect("resolve_fill_subscription guarantees subscription presence");
+            stream_request_id = fill_subscription_request_id;
             match fill_state {
-                Some((TrackRole::Subscriber, SubscriptionState::Pending, _))
-                | Some((TrackRole::Subscriber, SubscriptionState::Established, _)) => {}
+                (TrackRole::Subscriber, SubscriptionState::Pending, _)
+                | (TrackRole::Subscriber, SubscriptionState::Established, _) => {}
                 // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): PUBLISH_DONE は
                 // late-opening stream より先に届きうる。drain 中 (publish_done 付きの
                 // Terminated) の fill fetch stream は subgroup と同じく受理する。
                 // キャンセル由来 Terminated (publish_done なし) は受理しない
-                Some((TrackRole::Subscriber, SubscriptionState::Terminated, true)) => {}
-                Some((TrackRole::Subscriber, SubscriptionState::Terminated, false)) => {
+                (TrackRole::Subscriber, SubscriptionState::Terminated, true) => {}
+                (TrackRole::Subscriber, SubscriptionState::Terminated, false) => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
                         "FETCH_HEADER received for cancelled subscription",
@@ -1891,7 +1910,7 @@ impl Session {
                     self.fail(err.clone());
                     return Err(err);
                 }
-                Some(_) => {
+                _ => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
                         "FETCH_HEADER received for publisher-side subscription",
@@ -1899,18 +1918,10 @@ impl Session {
                     self.fail(err.clone());
                     return Err(err);
                 }
-                None => {
-                    let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "FETCH_HEADER received for unknown request id",
-                    );
-                    self.fail(err.clone());
-                    return Err(err);
-                }
             }
             // fill fetch stream も Stream Count に含める (draft §9.9 (PUBLISH_DONE))。
             // open / close は subscription の集計と `cleanup_ready` の open 判定で会計する
-            if let Err(err) = self.note_incoming_stream_opened(header.request_id) {
+            if let Err(err) = self.note_incoming_stream_opened(fill_subscription_request_id) {
                 self.fail(err.clone());
                 return Err(err);
             }
@@ -1918,7 +1929,7 @@ impl Session {
         self.data_streams.incoming.insert(
             stream_id,
             IncomingDataStream::Fetch {
-                request_id: header.request_id,
+                request_id: stream_request_id,
             },
         );
         if let Some(now_ms) = self.timing.last_tick_ms {
@@ -1994,7 +2005,8 @@ impl Session {
         // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので
         // SUBGROUP_FILTER は評価対象外 (`subgroup_id: None`)。Publisher Priority は
-        // §10.4 の解決結果を使う。
+        // 送信する datagram が常に DEFAULT_PRIORITY bit を立てる (§11.2.1) ため header 明示値が
+        // 無く、購読を確立した制御メッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承する。
         {
             let input = ObjectFilterInput {
                 location: Location {
@@ -2002,7 +2014,7 @@ impl Session {
                     object_id,
                 },
                 subgroup_id: None,
-                publisher_priority: subscription.effective_publisher_priority(),
+                publisher_priority: subscription.resolve_header_publisher_priority(None),
                 properties_bytes: properties_data.as_deref(),
             };
             if !object_passes_filters(subscription, &input) {
@@ -2201,9 +2213,13 @@ impl Session {
         let mut cancelled_matched = false;
         for &candidate_id in &candidates {
             if let Some(subscription) = self.subscriptions.get(&candidate_id) {
+                // DEFAULT_PRIORITY bit が立っている (= `publisher_priority` が `None`) 場合は、
+                // 直近 SUBGROUP_HEADER の解決値ではなく購読を確立した制御メッセージの
+                // DEFAULT_PUBLISHER_PRIORITY を継承する (draft-ietf-moq-transport-21
+                // §11.2.1 (Object Datagram) / §10.4 (DEFAULT PUBLISHER PRIORITY))。
                 let publisher_priority = datagram
                     .publisher_priority
-                    .unwrap_or_else(|| subscription.effective_publisher_priority());
+                    .unwrap_or_else(|| subscription.resolve_header_publisher_priority(None));
                 let input = ObjectFilterInput {
                     location: Location {
                         group_id: datagram.group_id,
@@ -2279,11 +2295,14 @@ impl Session {
         // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
         // datagram 経由なので is_subgroup = false、subgroup_id = None。
         {
+            // DEFAULT_PRIORITY bit が立っている場合の継承元は、直近 SUBGROUP_HEADER ではなく
+            // 購読を確立した制御メッセージの DEFAULT_PUBLISHER_PRIORITY である
+            // (draft-ietf-moq-transport-21 §11.2.1 (Object Datagram))。
             let publisher_priority = datagram.publisher_priority.unwrap_or_else(|| {
                 self.subscriptions
                     .get(&request_id)
                     .map_or(PUBLISHER_PRIORITY_DEFAULT, |s| {
-                        s.effective_publisher_priority()
+                        s.resolve_header_publisher_priority(None)
                     })
             });
             if let Err(mismatch) = self

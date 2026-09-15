@@ -67,6 +67,193 @@ fn request_update_full_cycle() {
     );
 }
 
+/// REQUEST_UPDATE は購読とは別の Request ID を消費し、peer はその ID を受理する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE は Request ID を
+/// 消費するメッセージとして列挙され、購読の Request ID の再利用は重複 Request ID の
+/// MUST 違反になる。対象の購読は同じ bidi request stream 上で送ることで識別される。
+/// 送信側は購読の Request ID の次の値から 2 ずつ採番し、受信側はそれを購読と一致しなくても
+/// 受理しなければならない。
+#[test]
+fn request_update_consumes_new_request_id() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 1 回目: 購読 (0) の次に採番される 2
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (stream_rid, upd1) = take_send_on_stream(&mut client);
+    assert_eq!(
+        stream_rid, rid,
+        "REQUEST_UPDATE は購読の bidi request stream 上で送ること"
+    );
+    assert_eq!(
+        request_update_request_id(&upd1),
+        rid + 2,
+        "REQUEST_UPDATE は購読とは別に新しい Request ID を採番すること"
+    );
+    server
+        .recv_stream_message(rid, upd1)
+        .expect("購読とは異なる Request ID の REQUEST_UPDATE を受理すること");
+    assert_ne!(server.state(), SessionState::Closing);
+
+    // 2 回目: さらに 2 進んだ 4
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd2) = take_send_on_stream(&mut client);
+    assert_eq!(
+        request_update_request_id(&upd2),
+        rid + 4,
+        "連続する REQUEST_UPDATE は 2 ずつ進めること"
+    );
+    server
+        .recv_stream_message(rid, upd2)
+        .expect("連続する REQUEST_UPDATE も受理すること");
+    assert_ne!(server.state(), SessionState::Closing);
+}
+
+/// parity が送信側の規則に合わない Request ID の REQUEST_UPDATE は INVALID_REQUEST_ID で閉じる
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): "If an endpoint receives a Request ID
+/// where the least significant bit is incorrect for the sender, or a duplicate Request ID,
+/// it MUST close the session with INVALID_REQUEST_ID."
+/// REQUEST_UPDATE も Request ID を消費するメッセージとして列挙されるため、この MUST の
+/// 対象になる。client は偶数を採番するので、奇数を載せた REQUEST_UPDATE は parity 違反になる。
+#[test]
+fn request_update_with_wrong_parity_closes_session() {
+    use shiguredo_moqt::error::SESSION_INVALID_REQUEST_ID;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // client (peer) の parity は偶数である。奇数の Request ID を載せると parity 違反になる。
+    let err = server
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 1, MessageParameters::new()),
+        )
+        .expect_err("parity 違反の Request ID は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    assert_eq!(
+        server.state(),
+        SessionState::Closing,
+        "parity 違反の Request ID でセッションが Closing に遷移すること"
+    );
+}
+
+/// 使用済みの Request ID を再利用した REQUEST_UPDATE は INVALID_REQUEST_ID で閉じる
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): 重複した Request ID の受信も
+/// INVALID_REQUEST_ID でのセッションクローズ MUST の対象である。
+/// REQUEST_UPDATE が購読の Request ID を再利用していた旧実装ではこの検証が無く、
+/// draft 準拠の peer との間でセッションが閉じていた。
+#[test]
+fn request_update_with_duplicate_request_id_closes_session() {
+    use shiguredo_moqt::error::SESSION_INVALID_REQUEST_ID;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // SUBSCRIBE が消費したものと同じ Request ID を REQUEST_UPDATE が再利用する
+    let err = server
+        .recv_stream_message(rid, inject_request_update(rid, MessageParameters::new()))
+        .expect_err("使用済みの Request ID は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    assert_eq!(
+        server.state(),
+        SessionState::Closing,
+        "重複した Request ID でセッションが Closing に遷移すること"
+    );
+}
+
+/// GOAWAY 送信後でも既存 subscription への REQUEST_UPDATE は受理される
+///
+/// draft-ietf-moq-transport-21 §9.2 (GOAWAY): "The GOAWAY message does not impact
+/// subscription state." / "A subscriber SHOULD individually unsubscribe from each existing
+/// subscription, while a publisher MAY reject new requests after sending a GOAWAY."
+/// GOAWAY 送信側が拒否してよいのは新規 request であり、既存の bidi request stream 上を流れる
+/// REQUEST_UPDATE は含まない。§9.5 (REQUEST_UPDATE) も受信側に REQUEST_OK / REQUEST_ERROR の
+/// いずれか 1 つで応答することを MUST としているため、GOING_AWAY では拒否しない。
+#[test]
+fn request_update_after_goaway_is_accepted() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    recv_response_helper(&mut client, rid, ok_msg);
+
+    // server が control GOAWAY を送信する。GOAWAY は subscription state に影響しない。
+    server
+        .send_goaway(Vec::new(), 0)
+        .expect("GOAWAY の送信に成功すること");
+    take_send_control(&mut server);
+
+    // GOAWAY 後でも既存 subscription への REQUEST_UPDATE は受理され、アプリへ通知される
+    server
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, MessageParameters::new()),
+        )
+        .expect("GOAWAY 後の既存 subscription への REQUEST_UPDATE は受理されること");
+    assert_ne!(
+        server.state(),
+        SessionState::Closing,
+        "GOAWAY 後の REQUEST_UPDATE でセッションを閉じないこと"
+    );
+    let mut saw_update = false;
+    while let Some(event) = server.poll_event() {
+        if let SessionEvent::RequestUpdateReceived { request_id, .. } = event {
+            assert_eq!(request_id, rid);
+            saw_update = true;
+        }
+    }
+    assert!(
+        saw_update,
+        "GOAWAY 後の REQUEST_UPDATE もアプリへ通知されること"
+    );
+    // アプリは REQUEST_OK で応答できる (draft §9.5 (REQUEST_UPDATE) の MUST)
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_OK の送信に成功すること");
+    let (_, msg) = take_send_on_stream(&mut server);
+    assert!(
+        matches!(msg, ControlMessage::RequestOk(_)),
+        "REQUEST_UPDATE には REQUEST_OK で応答すること"
+    );
+}
+
 /// REQUEST_UPDATE への REQUEST_OK で EXPIRES=0 が既存の期限をクリアする
 #[test]
 fn request_ok_with_expires_zero_clears_existing_expires() {
@@ -2026,7 +2213,7 @@ fn peer_request_update_in_pending_subscriber_closes_session() {
     );
     // client 側で REQUEST_UPDATE を自前構築し、server に直接流し込む。
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 2,
 
         parameters: MessageParameters::new(),
     });
@@ -2061,7 +2248,7 @@ fn peer_request_update_in_pending_publisher_closes_session() {
             .is_pending_publisher()
     );
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 2,
 
         parameters: MessageParameters::new(),
     });
@@ -2525,7 +2712,7 @@ fn peer_request_update_from_publisher_on_subscribe_closes_session() {
     // client は my_role=Subscriber, initiator=Subscriber (is_initiator_self=true)。
     // peer (publisher) から REQUEST_UPDATE が届いたケースを模擬する。
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 1,
 
         parameters: MessageParameters::new(),
     });
@@ -3322,7 +3509,7 @@ fn subscribe_request_update_with_track_property_filter_rejected() {
         value: MessageParameterValue::LengthPrefixed(vec![]),
     });
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 2,
         parameters: params,
     });
     let err = server.recv_stream_message(rid, update).unwrap_err();
@@ -3423,7 +3610,7 @@ fn peer_request_update_with_invalid_forward_closes_session() {
         .recv_stream_message(
             rid,
             ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-                request_id: rid,
+                request_id: rid + 1,
                 parameters: params,
             }),
         )
@@ -4066,13 +4253,15 @@ fn publish_originated_request_update_exceeding_max_closes_session() {
         .send_request_update(rid, MessageParameters::new())
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, upd1) = take_send_on_stream(&mut server);
+    let upd1_request_id = request_update_request_id(&upd1);
     client
         .recv_stream_message(rid, upd1)
         .expect("1 通目は上限内で受理されること");
 
     // REQUEST_OK を返す前に 2 通目が届くと local MAX_REQUEST_UPDATES 超過でセッションを閉じる。
     // peer 側の送信上限 (同じ SETUP 値を共有する) を迂回するため wire メッセージを直接注入する。
-    let upd2 = inject_request_update(rid, MessageParameters::new());
+    // wire に載せるのは peer (server) が次に使う Request ID である (draft §6.4.2.1)。
+    let upd2 = inject_request_update(upd1_request_id + 2, MessageParameters::new());
     let err = client
         .recv_stream_message(rid, upd2)
         .expect_err("応答前の 2 通目は local MAX_REQUEST_UPDATES 超過になること");

@@ -220,7 +220,6 @@ mod tests {
             },
             expires: None,
             dynamic_groups: false,
-            publisher_priority: None,
             default_publisher_priority: None,
             default_publisher_group_order: None,
             stream_counts: StreamCountState {

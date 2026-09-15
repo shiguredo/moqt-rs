@@ -96,6 +96,15 @@
 - [FIX] 既に Object を publish した Track を PUBLISH で再告知するとき、観測済みの最大 Location を LARGEST_OBJECT として補完するように修正する
   - 観測値が無い Track では付与せず、アプリ指定値との max を取って上書きしない
   - @voluntas
+- [FIX] DEFAULT_PRIORITY bit が立った Datagram が直近 SUBGROUP_HEADER の Publisher Priority ではなく、購読を確立したメッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承するように修正する
+  - 誤った継承元だった `Subscription::publisher_priority` と `Subscription::effective_publisher_priority` を削除する
+  - @voluntas
+- [FIX] REQUEST_UPDATE に購読とは別の Request ID を採番し、購読の Request ID の再利用をやめる
+  - REQUEST_UPDATE 起因の fill fetch stream は REQUEST_UPDATE の Request ID で識別し、`SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数を起因メッセージの Request ID に変更する
+  - `send_fill_fetch_header` は起因 REQUEST_UPDATE の Request ID から購読を解決するため、購読の Request ID を渡した場合も従来どおり登録できる
+  - @voluntas
+- [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
+  - @voluntas
 
 ### misc
 
@@ -112,4 +121,6 @@
 - [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する
   - @voluntas
 - [UPDATE] fuzz_session を client / server 両対応にし、送信 API を操作列に追加する
+  - @voluntas
+- [UPDATE] 削除済み SUBSCRIBE_TRACKS を参照するコメントを現行 draft に合わせ、未使用の prefix_overlaps を削除する
   - @voluntas

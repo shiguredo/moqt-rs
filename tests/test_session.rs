@@ -179,6 +179,18 @@ fn take_send_on_stream_with_fin(s: &mut Session) -> (u64, ControlMessage, bool) 
     panic!("SendOnStream イベントが期待されたが発行されなかった");
 }
 
+/// `ControlMessage::RequestUpdate` の Request ID を取り出す
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE は購読とは別に
+/// 新しい Request ID を消費する。この値は `SendOnStream` の request_id (送信先 bidi
+/// request stream の識別子) とは異なる。
+fn request_update_request_id(message: &ControlMessage) -> u64 {
+    match message {
+        ControlMessage::RequestUpdate(update) => update.request_id,
+        other => panic!("REQUEST_UPDATE が期待されたが {other:?} だった"),
+    }
+}
+
 /// `send_goaway` が control stream に積む `Goaway` を取り出す
 ///
 /// `take_send_control` は `SendControl` 以外のイベント (受信通知や終端通知) を読み飛ばし、

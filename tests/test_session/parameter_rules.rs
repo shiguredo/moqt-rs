@@ -81,7 +81,7 @@ fn request_update_with_new_group_request_without_dynamic_groups_rejected() {
         value: MessageParameterValue::VarInt(2),
     });
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 2,
         parameters: params,
     });
     // server 側で受信すると PROTOCOL_VIOLATION
@@ -128,7 +128,7 @@ fn request_update_with_new_group_request_dynamic_groups_zero_rejected() {
         value: MessageParameterValue::VarInt(2),
     });
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-        request_id: rid,
+        request_id: rid + 2,
         parameters: params,
     });
     // server 側で受信すると PROTOCOL_VIOLATION
