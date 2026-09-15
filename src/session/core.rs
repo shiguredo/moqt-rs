@@ -358,6 +358,22 @@ pub struct Session {
     pub(super) outgoing_request_updates: HashMap<u64, u64>,
     /// request stream ごとの peer 送信 outstanding REQUEST_UPDATE 数 (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))
     pub(super) incoming_request_updates: HashMap<u64, u64>,
+    /// fill fetch stream の Request ID から subscription の Request ID への対応
+    ///
+    /// draft-ietf-moq-transport-21 §3.4 (Fill Semantics) / §6.4.2.1 (Request ID) /
+    /// §9.5 (REQUEST_UPDATE): fill fetch stream の FETCH_HEADER は起因メッセージの
+    /// Request ID を載せる。初回 fill は SUBSCRIBE / PUBLISH の Request ID
+    /// (= subscription の Request ID そのもの) だが、REQUEST_UPDATE 起因の fill は
+    /// REQUEST_UPDATE 自身の Request ID を載せる。REQUEST_UPDATE は §6.4.2.1 により
+    /// 独立した Request ID を消費するため、両者は一致しない。
+    ///
+    /// 受信した fill fetch stream を正しい subscription へ帰属させるために
+    /// REQUEST_UPDATE の Request ID だけを登録する (FILL_PARAMETERS を持つ
+    /// REQUEST_UPDATE だけが fill fetch stream を開きうるため、その場合のみ登録する)。
+    /// 解決は [`Session::resolve_fill_subscription`] が行い、直接 subscription の
+    /// Request ID と一致する場合より優先する。破棄は
+    /// [`Session::forget_subscription`](crate::session::core::Session::forget_subscription) が行う。
+    pub(super) fill_request_subscriptions: HashMap<u64, u64>,
     /// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」集合
     ///
     /// draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams): "A publisher that
@@ -528,6 +544,7 @@ impl Session {
             },
             outgoing_request_updates: HashMap::new(),
             incoming_request_updates: HashMap::new(),
+            fill_request_subscriptions: HashMap::new(),
             stopped_outgoing_subgroups: HashMap::new(),
             events,
         })

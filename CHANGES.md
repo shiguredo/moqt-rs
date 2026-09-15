@@ -93,6 +93,10 @@
   - @voluntas
 - [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
   - @voluntas
+- [FIX] REQUEST_UPDATE に購読とは別の Request ID を採番し、購読の Request ID の再利用をやめる
+  - REQUEST_UPDATE 起因の fill fetch stream は REQUEST_UPDATE の Request ID で識別し、`SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数を起因メッセージの Request ID に変更する
+  - `send_fill_fetch_header` は起因 REQUEST_UPDATE の Request ID から購読を解決するため、購読の Request ID を渡した場合も従来どおり登録できる
+  - @voluntas
 
 ### misc
 

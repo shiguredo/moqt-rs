@@ -67,6 +67,66 @@ fn request_update_full_cycle() {
     );
 }
 
+/// REQUEST_UPDATE は購読とは別の Request ID を消費し、peer はその ID を受理する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): REQUEST_UPDATE は Request ID を
+/// 消費するメッセージとして列挙され、購読の Request ID の再利用は重複 Request ID の
+/// MUST 違反になる。対象の購読は同じ bidi request stream 上で送ることで識別される。
+/// 送信側は購読の Request ID の次の値から 2 ずつ採番し、受信側はそれを購読と一致しなくても
+/// 受理しなければならない。
+#[test]
+fn request_update_consumes_new_request_id() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 1 回目: 購読 (0) の次に採番される 2
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (stream_rid, upd1) = take_send_on_stream(&mut client);
+    assert_eq!(
+        stream_rid, rid,
+        "REQUEST_UPDATE は購読の bidi request stream 上で送ること"
+    );
+    assert_eq!(
+        request_update_request_id(&upd1),
+        rid + 2,
+        "REQUEST_UPDATE は購読とは別に新しい Request ID を採番すること"
+    );
+    server
+        .recv_stream_message(rid, upd1)
+        .expect("購読とは異なる Request ID の REQUEST_UPDATE を受理すること");
+    assert_ne!(server.state(), SessionState::Closing);
+
+    // 2 回目: さらに 2 進んだ 4
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd2) = take_send_on_stream(&mut client);
+    assert_eq!(
+        request_update_request_id(&upd2),
+        rid + 4,
+        "連続する REQUEST_UPDATE は 2 ずつ進めること"
+    );
+    server
+        .recv_stream_message(rid, upd2)
+        .expect("連続する REQUEST_UPDATE も受理すること");
+    assert_ne!(server.state(), SessionState::Closing);
+}
+
 /// REQUEST_UPDATE への REQUEST_OK で EXPIRES=0 が既存の期限をクリアする
 #[test]
 fn request_ok_with_expires_zero_clears_existing_expires() {
