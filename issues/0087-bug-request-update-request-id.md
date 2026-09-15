@@ -1,7 +1,7 @@
 # REQUEST_UPDATE に新しい Request ID を採番する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-request-update-request-id
 - Polished: {YYYY-MM-DD}
 
@@ -104,3 +104,44 @@ REQUEST_UPDATE によって同時に複数開いた fill fetch stream を Reques
   `cargo test --workspace` が通ること
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo fmt --all -- --check` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+REQUEST_UPDATE が購読の Request ID を再利用していたのをやめ、§6.4.2.1 (Request ID) に従って
+購読とは別の Request ID を採番するようにした。あわせて REQUEST_UPDATE 起因の fill fetch
+stream を REQUEST_UPDATE の Request ID で識別できるようにした。
+
+- `src/session/subscription/send.rs` の `send_request_update` で `RequestIds::local_generator` から
+  新しい Request ID を採番し、wire の `RequestUpdate` に載せるようにした。`SendOnStream` の
+  `request_id` は送信先 bidi request stream の識別子 (購読の Request ID) のままとした。採番は
+  全検証の後に行い、送信されなかった REQUEST_UPDATE が peer 側の Request ID の欠番を作らない
+  ようにした。
+- `src/session/subscription/recv.rs` の `handle_peer_request_update` から、wire の Request ID と
+  stream context の Request ID の一致必須の検査を外した。購読の解決は stream context の
+  Request ID で行い、wire の Request ID は「この REQUEST_UPDATE の Request ID」として扱う。
+- `src/session/core.rs` の `Session` に `fill_request_subscriptions` を追加し、REQUEST_UPDATE の
+  Request ID から購読の Request ID への対応を保持する。登録するのは FILL_PARAMETERS を持つ
+  REQUEST_UPDATE だけとし、`src/session/subscription.rs` の購読破棄経路で
+  `remove_fill_request_subscriptions` を呼んで対応も破棄する。
+- `src/session/subscription/fill.rs` の `maybe_open_fill_stream` は、REQUEST_UPDATE 起因の
+  呼び出しでは REQUEST_UPDATE の Request ID を `SessionEvent::OpenFillFetchStream` に載せるように
+  した。解決は `resolve_fill_subscription` に集約し、REQUEST_UPDATE の Request ID の対応を先に
+  引いてから購読の Request ID として解決する。この順序により、REQUEST_UPDATE の Request ID が
+  別 subscription の Request ID と偶然一致しても起因メッセージの購読へ帰属させる。
+- `src/session/data.rs` の `recv_fetch_header` と `send_fill_fetch_header` をこの解決を通すようにし、
+  受信した fill fetch stream の索引には解決済みの購読の Request ID を記録するようにした。
+  どちらにも無い Request ID は従来どおり `PROTOCOL_VIOLATION` とする。
+- `SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数の意味を
+  「FETCH_HEADER に載せる起因メッセージの Request ID」に変え、doc と
+  `skills/shiguredo-moqt/SKILL.md` を追随させた。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
+
+回帰テストは `tests/test_session/subscription/request_update.rs` に
+`request_update_consumes_new_request_id` を追加し、送信側が購読の Request ID の次の値から 2 ずつ
+採番することと、受信側が購読と一致しない Request ID の REQUEST_UPDATE を受理することを固定した。
+`tests/test_session/fetch/fill.rs` の既存テストは、REQUEST_UPDATE 起因の fill fetch stream が
+REQUEST_UPDATE の Request ID で識別される形に更新した。§6.4.2.1 が受信側に課す Request ID の
+parity 不正・重複の検出は本 issue の範囲外であり、0091 で扱う。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` がすべて通ることを確認した。
