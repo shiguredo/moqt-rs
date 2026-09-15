@@ -1,7 +1,7 @@
 # send_data_stream_closed の Reset でも保留 PUBLISH_DONE を flush する
 
 - Created: 2026-09-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-flush-pending-publish-done-on-reset
 - Polished: 2026-09-14
 
@@ -36,3 +36,26 @@ PUBLISH_DONE が送られない。
 - delivery timeout の tick 経路でも、I/O 層が `send_data_stream_closed(Reset)` を呼んだ時点で flush 条件を満たせば PUBLISH_DONE が 1 回だけ送られること
 - open 中の outgoing stream が残っている間は PUBLISH_DONE を送らないこと (§9.9 の MUST NOT) がテストで固定されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`send_data_stream_closed` の Reset 経路でも保留 PUBLISH_DONE (UPDATE_FAILED) を flush するようにした。
+
+- `src/session/data.rs`: `send_data_stream_closed` の内部処理を `close_outgoing_subgroup_stream` に切り出した。subgroup stream の追跡を終端し、flush 判断に使う request_id を `Option<u64>` で返す (flush はしない)。
+- `src/session/data.rs`: public `send_data_stream_closed` は FIN / RESET のどちらでも「終端 → `maybe_flush_pending_publish_done`」を呼ぶ。
+- `src/session/data.rs`: `reset_outgoing_data_stream_at_with_code` は「終端 → `ResetDataStream` イベント push → `maybe_flush_pending_publish_done`」の順序を保つ (ワイヤ順序 RESET_STREAM → PUBLISH_DONE を維持し、§9.9 の MUST NOT を満たす)。
+- `src/session/data.rs`: これに伴い、`reset_outgoing_data_stream_at_with_code` にあった `contains_key` による重複 lookup と、到達不能だった未知 stream エラーの二重実装を削除した。
+- `src/session/data.rs`: `send_fetch_data_stream_closed` (fill fetch stream の終端通知) が flush 契機にならない根拠を doc に明記した。
+- `src/session/data.rs`: 保留の発生源である `send_request_error` の失敗応答は、subscription を Terminated にする際に `send_err_for_subscription` が §3.4.1 の MUST で open 中の fill fetch stream を先に reset する。
+- `src/session/data.rs`: そのため保留中に open であり続ける stream は subgroup stream だけになる (Terminated 中は `send_fill_fetch_header` も拒否する)。この前提は `request_error_resets_open_fill_streams_before_publish_done` で固定した。
+- `src/session/types.rs` / `src/session/core.rs` / `src/session/subscription/dispatch.rs`: 保留条件の記述を実装に合わせ、「open 中の outgoing data stream (subgroup / fill fetch)」に統一し、flush 契機として `recv_data_stream_stop_sending` も列挙した。
+- `tests/test_session.rs`: SUBSCRIBE パラメータを指定して購読を確立する `establish_subscribe_track_with_params` を追加し、既存 `establish_subscribe_track` をその委譲にした (既存呼び出しのシグネチャは不変)。
+- `tests/test_session/subscription/request_update.rs`: 回帰テスト 5 件を追加した。
+  - `pending_publish_done_flushed_on_data_stream_closed_reset`: `send_data_stream_closed(Reset)` で最後の outgoing stream を閉じると PUBLISH_DONE (UPDATE_FAILED, fin 付き) が 1 回だけ送信され、保留情報が残らない (完了条件 1)
+  - `pending_publish_done_flushed_once_after_last_stream_reset`: open 中の stream が残る間は送らず、最後の 1 本を閉じたときに 1 回だけ送る (§9.9 の MUST NOT。完了条件 4)
+  - `reset_outgoing_data_stream_keeps_reset_before_publish_done`: `reset_outgoing_data_stream` と `reset_outgoing_data_stream_at` の両経路で、イベント順が `ResetDataStream` → `PUBLISH_DONE` のままであることと `_at` の `reliable_size` がイベントに乗ることを固定する (完了条件 2)
+  - `pending_publish_done_flushed_after_delivery_timeout_reset`: delivery timeout の tick 経路では PUBLISH_DONE を送らず、I/O 層が `send_data_stream_closed(Reset)` を呼んだ時点で 1 回だけ送る (完了条件 3)
+  - `request_error_resets_open_fill_streams_before_publish_done`: REQUEST_UPDATE 失敗応答で Terminated になるとき open 中の fill fetch stream が先に reset される前提を固定する回帰ガード
+- 検証: `cargo test --workspace` (42 スイート) / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
+- 検証: 修正前の改訂で新規テストを実行すると、完了条件 1・3・4 に対応する 3 件が PUBLISH_DONE 未送信で失敗し、回帰ガード 2 件は通ることを実測した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
