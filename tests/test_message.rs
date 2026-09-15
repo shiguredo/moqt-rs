@@ -8,7 +8,6 @@ use shiguredo_moqt::{
     message::RequestError,
     message::RequestUpdate,
     message::Setup,
-    message::Subscribe,
     message::SubscribeOk,
     message::common::Location,
     message::common::TrackNamespace,
@@ -549,25 +548,30 @@ mod error_cases {
 
     // ─── パラメータスコープ検証 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ──────────────────
 
+    /// RENDEZVOUS_TIMEOUT (0x04) は relay 専用のため codec が受理しない
+    ///
+    /// draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter): relay が publisher の
+    /// 出現を待つためのパラメータであり、本ライブラリは扱わない。未知の型として拒否される。
     #[test]
-    fn subscribe_with_rendezvous_timeout_is_accepted() {
-        use shiguredo_moqt::message_parameter::{
-            MessageParameter, MessageParameterValue, PARAM_RENDEZVOUS_TIMEOUT,
-        };
-        let ns = TrackNamespace::new(vec![b"example.com".to_vec()])
-            .expect("テストフィクスチャの前提条件を満たす");
+    fn subscribe_with_unhandled_type_0x04_is_rejected() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{MessageParameter, MessageParameterValue};
         let mut parameters = MessageParameters::new();
         parameters.push(MessageParameter {
-            param_type: PARAM_RENDEZVOUS_TIMEOUT,
+            param_type: 0x04,
             value: MessageParameterValue::VarInt(500),
         });
         let msg = ControlMessage::Subscribe(Subscribe {
             request_id: 0,
-            track_namespace: ns,
+            track_namespace: TrackNamespace::new(vec![b"example".to_vec()])
+                .expect("正当な namespace である"),
             track_name: b"video".to_vec(),
             parameters,
         });
-        assert!(msg.encode().is_ok());
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
     }
 
     #[test]

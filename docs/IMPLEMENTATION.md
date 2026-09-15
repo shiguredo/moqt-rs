@@ -13,17 +13,13 @@
 - REQUEST_OK / REQUEST_ERROR
   - PUBLISH への肯定応答 PUBLISH_OK は REQUEST_OK の別名 (共有ワイヤメッセージ)
   - REQUEST_ERROR は `Redirect` structure 付きの REDIRECT (`0x34`) に対応
-- PUBLISH / PUBLISH_DONE / PUBLISH_SKIPPED
+- PUBLISH / PUBLISH_DONE
   - PUBLISH は Subscription Parameters を運び、auth token のコピーを禁じる
 - PUBLISH_STATE_NOTIFY
 - SUBSCRIBE / SUBSCRIBE_OK / REQUEST_UPDATE
 - FETCH / FETCH_OK
   - 単一形式のみ (range は LOCATION_FILTER で指定、Standalone / Joining の種別とメッセージ内 Start / End Location は廃止済み)
-- PUBLISH_NAMESPACE
-- NAMESPACE / NAMESPACE_DONE (同一ワイヤ形式を共有)
-- SUBSCRIBE_NAMESPACE
-- SUBSCRIBE_TRACKS
-- TRACK_STATUS
+- TRACK_STATUS (subscriber 側の送信と応答受信のみ。publisher 側の受信処理は未実装)
 
 ### Data stream / Datagram
 
@@ -64,8 +60,7 @@
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証
   - session 層で Object の forward 判定 (`object_passes_filters` / `header_passes_filters`)
-  - TRACK_PROPERTY_FILTER による PUBLISH 選別 (`track_properties_pass`)
-- Rendezvous Timeout
+  - TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS 削除に伴い PUBLISH 選別を行わない
 - Subscriber Priority
 - Track Namespace Prefix
 
@@ -198,7 +193,7 @@ Public / Private の配置はアプリケーション層の責務です。
 | Stateful helper | `subgroup_tracker`, `session::auth_token_cache::AuthTokenCache`, `session::request_id::RequestIdGenerator`, `session::request_id::RequestIdTracker` | セッション実装で使う状態付き補助コンポーネント |
 | Session | `session` | 1 本の `MOQT Transport Session` に閉じた endpoint-local な protocol state を管理する |
 
-`session` は SETUP と Request ID 管理に加えて、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の bidi request stream を扱います。
+`session` は SETUP と Request ID 管理に加えて、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の bidi request stream を扱います。
 uni data stream と datagram の送受信 state も扱います。
 REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイクと drain、delivery timeout などの deadline 管理 (`tick` 駆動) も行います。
-一方で I/O、非同期処理、relay 固有の routing / fan-out / cache / policy は含みません。
+一方で I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含みません。

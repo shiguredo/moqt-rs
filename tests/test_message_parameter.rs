@@ -407,7 +407,6 @@ mod accessors {
         let params = MessageParameters::new();
         assert_eq!(params.object_delivery_timeout(), None);
         assert_eq!(params.authorization_tokens().len(), 0);
-        assert_eq!(params.rendezvous_timeout(), None);
         assert!(!params.has_expires());
         assert_eq!(params.expires(), None);
         assert_eq!(params.largest_object(), None);

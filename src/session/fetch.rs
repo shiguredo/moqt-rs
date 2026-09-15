@@ -18,10 +18,9 @@ use alloc::vec::Vec;
 
 use super::core::Session;
 use super::data::IncomingDataStream;
-use super::namespace::terminationreason_from_end;
 use super::types::{
     DataStreamId, Fetch, FetchState, RequestKind, RequestStreamEnd, SendRequestError, SessionError,
-    SessionEvent, TerminationReason, TrackRole,
+    SessionEvent, TerminationReason, TrackRole, terminationreason_from_end,
 };
 
 /// fetch が破棄可能な状態条件を満たしているか

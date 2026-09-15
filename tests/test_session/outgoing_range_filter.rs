@@ -114,19 +114,6 @@ fn fetch_rejects_duplicate_range_filters() {
     assert_rejected_without_side_effects(&mut client, err, "send_fetch 経路");
 }
 
-/// SUBSCRIBE_TRACKS は重複 Range Filter を送信前に拒否する
-#[test]
-fn subscribe_tracks_rejects_duplicate_range_filters() {
-    let (mut client, _server) = pair_for_client_send(2);
-    let err = client
-        .send_subscribe_tracks(ns(&[b"example"]), duplicate_range_filters())
-        .expect_err("重複 Range Filter は送信前に拒否される");
-    let SendRequestError::Session(err) = err else {
-        panic!("SendRequestError::Session が期待されたが {err:?}");
-    };
-    assert_rejected_without_side_effects(&mut client, err, "send_subscribe_tracks 経路");
-}
-
 /// PUBLISH_OK context の REQUEST_OK は重複 Range Filter を送信前に拒否する
 ///
 /// なお draft-ietf-moq-transport-21 Appendix A.1 #1790 以降、PUBLISH_OK は EXPIRES のみを
@@ -157,12 +144,12 @@ fn publish_ok_rejects_duplicate_range_filters() {
     assert_rejected_without_side_effects(&mut server, err, "send_request_ok (publish_ok) 経路");
 }
 
-/// peer が MAX_FILTER_RANGES を宣言していなければ 3 経路すべてが送信を拒否する
+/// peer が MAX_FILTER_RANGES を宣言していなければ 2 経路すべてが送信を拒否する
 ///
 /// draft-ietf-moq-transport-21 §9.1.6 の MUST NOT (peer が MAX_FILTER_RANGES を宣言しない
 /// (default 0) 場合、送信側は Range Filter を含む request を送出してはならない)。この判定を
-/// 集約する `validate_outgoing_range_filters` の呼び出しが 3 経路 (SUBSCRIBE_TRACKS /
-/// FETCH / PUBLISH_OK) すべてに繋がっていることを確認する。
+/// 集約する `validate_outgoing_range_filters` の呼び出しが 2 経路 (FETCH / PUBLISH_OK)
+/// すべてに繋がっていることを確認する。
 /// (draft-ietf-moq-transport-21 で Joining FETCH は廃止された)
 ///
 /// なお PUBLISH_OK (send_request_ok) への到達確認は本テストの対象外である。
@@ -185,18 +172,6 @@ fn all_send_paths_reject_when_peer_max_is_zero() {
         panic!("SendRequestError::Session が期待されたが {err:?}");
     };
     assert_eq!(err.reason, REASON, "send_fetch の拒否理由が一致すること");
-
-    let (mut client, _server) = establish_pair();
-    let err = client
-        .send_subscribe_tracks(ns(&[b"example"]), distinct_set_id_range_filters())
-        .expect_err("peer MAX 未宣言では送信できない");
-    let SendRequestError::Session(err) = err else {
-        panic!("SendRequestError::Session が期待されたが {err:?}");
-    };
-    assert_eq!(
-        err.reason, REASON,
-        "send_subscribe_tracks の拒否理由が一致すること"
-    );
 
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -225,7 +200,7 @@ fn all_send_paths_reject_when_peer_max_is_zero() {
     );
 }
 
-/// 正当な複数 SetID の Range Filter は 2 経路で送信でき、PUBLISH_OK では拒否される
+/// 正当な複数 SetID の Range Filter は FETCH で送信でき、PUBLISH_OK では拒否される
 ///
 /// 検証追加で正当なメッセージまで弾いていないことを確認する。
 /// PUBLISH_OK は draft-20 で EXPIRES のみとなり Range Filter を運べないため、
@@ -240,11 +215,6 @@ fn send_paths_accept_distinct_set_id_range_filters_and_publish_ok_rejects() {
             with_fetch_range(distinct_set_id_range_filters()),
         )
         .expect("send_fetch: 正当な Range Filter は送信できる");
-
-    let (mut client, _server) = pair_for_client_send(2);
-    client
-        .send_subscribe_tracks(ns(&[b"example"]), distinct_set_id_range_filters())
-        .expect("send_subscribe_tracks: 正当な Range Filter は送信できる");
 
     let (mut client, mut server) = pair_for_server_send(2);
     let rid = client

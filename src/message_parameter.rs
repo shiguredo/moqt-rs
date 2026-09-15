@@ -29,8 +29,6 @@ use hashbrown::HashSet;
 pub const PARAM_OBJECT_DELIVERY_TIMEOUT: u64 = 0x02;
 /// AUTHORIZATION_TOKEN (length-prefixed)
 pub const PARAM_AUTHORIZATION_TOKEN: u64 = 0x03;
-/// RENDEZVOUS_TIMEOUT (varint)
-pub const PARAM_RENDEZVOUS_TIMEOUT: u64 = 0x04;
 /// SUBGROUP_DELIVERY_TIMEOUT (varint, draft-ietf-moq-transport-21 §9.20.4 (SUBGROUP_DELIVERY_TIMEOUT Parameter))
 pub const PARAM_SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06;
 /// EXPIRES (varint)
@@ -112,7 +110,6 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
     match param_type {
         PARAM_OBJECT_DELIVERY_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_AUTHORIZATION_TOKEN => Ok(ValueEncoding::LengthPrefixed),
-        PARAM_RENDEZVOUS_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_SUBGROUP_DELIVERY_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_EXPIRES => Ok(ValueEncoding::VarInt),
         PARAM_LARGEST_OBJECT => Ok(ValueEncoding::Location),
@@ -974,11 +971,6 @@ impl MessageParameters {
                 }
             })
             .collect()
-    }
-
-    /// RENDEZVOUS_TIMEOUT (type 0x04) の値を返す
-    pub fn rendezvous_timeout(&self) -> Option<u64> {
-        self.find_varint(PARAM_RENDEZVOUS_TIMEOUT)
     }
 
     /// EXPIRES (type 0x08) パラメータが存在するかどうかを返す

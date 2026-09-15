@@ -9,12 +9,10 @@ use crate::error::{
     is_local_error_code,
 };
 use crate::message::{
-    ControlMessage, FETCH_UPDATE_ALLOWED_PARAMS, NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
-    NAMESPACE_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, PUBLISH_ALLOWED_PARAMS,
+    ControlMessage, FETCH_UPDATE_ALLOWED_PARAMS, PUBLISH_ALLOWED_PARAMS,
     PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
     RequestUpdate, SUBSCRIBE_ALLOWED_PARAMS, SUBSCRIBE_OK_ALLOWED_PARAMS,
-    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
-    TRACK_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, common::TrackNamespace,
+    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk, common::TrackNamespace,
 };
 use crate::message_parameter::{LocationFilterContext, LocationFilterUpdate, MessageParameters};
 use crate::track_properties::TrackProperties;
@@ -25,11 +23,11 @@ use super::super::core::{
     PUBLISH_DONE_STREAM_COUNT_UNKNOWN, RequestTable, Session, alias_used_by_different_track,
     insert_alias_holder,
 };
-use super::super::namespace::terminationreason_from_end;
 use super::super::types::{
     DeadlineTimer, DeliveryTimeoutState, RequestKind, RequestStreamEnd, SendRequestError,
     SessionError, SessionEvent, StreamCountState, Subscription, SubscriptionInitiator,
     SubscriptionRangeFilters, SubscriptionState, TerminationReason, TrackRole,
+    terminationreason_from_end,
 };
 use super::delivery::{
     compute_effective_delivery_timeout_ms, effective_largest_object, set_subscription_expires,
@@ -38,8 +36,8 @@ use super::delivery::{
     update_subscription_subscriber_delivery_timeouts_if_present,
 };
 use super::validation::{
-    extract_forward_state, extract_range_filters, resolve_location_filter, track_properties_pass,
-    validate_forward, validate_group_order, validate_include_properties,
+    extract_forward_state, extract_range_filters, resolve_location_filter, validate_forward,
+    validate_group_order, validate_include_properties,
 };
 
 impl Session {
@@ -65,8 +63,7 @@ impl Session {
         // subscription のキャンセル時は open 中の fill fetch stream を reset する (MUST)。
         self.reset_open_fill_streams(request_id);
         // クローズ通知を受信済みの request は request_streams から除去する。これにより
-        // SUBSCRIBE_TRACKS の bidi stream 終端が後から来ても、同じ subscription に対して
-        // `close_track_subscription_on_stream_end` が二重に RequestTerminated を発行したり
+        // 同じ subscription への遅延した終端通知で `RequestTerminated` を二重に発行したり
         // `rejected_request_ids` に close 済み id を登録したりしない。
         self.request_streams.remove(&request_id);
         Ok(terminationreason_from_end(end))
@@ -127,7 +124,6 @@ impl Session {
         let forward_state = extract_forward_state(&parameters);
         let subscriber_object_delivery_timeout_ms = parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms = parameters.subgroup_delivery_timeout();
-        let subscriber_rendezvous_timeout_ms = parameters.rendezvous_timeout();
         let filter = match parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
@@ -185,7 +181,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms,
             expires: None,
             // Subscriber 役では track_properties を持たないため false で初期化する。
             // 受信した SUBSCRIBE_OK の値で更新され、REQUEST_UPDATE 送信時の
@@ -261,39 +256,6 @@ impl Session {
                 "application cannot publish to .session namespace",
             )
             .into());
-        }
-        // draft-ietf-moq-transport-21 §9.19 (PUBLISH_SKIPPED): PUBLISH_SKIPPED 送信済みの Track には
-        // 同一 SUBSCRIBE_TRACKS に対して PUBLISH を送信してはならない (MUST NOT)
-        for ts in self.track_subscriptions.values() {
-            if ts.my_role != TrackRole::Publisher {
-                continue;
-            }
-            let prefix_fields = ts.prefix.fields();
-            let ns_fields = track_namespace.fields();
-            if ns_fields.len() >= prefix_fields.len()
-                && ns_fields[..prefix_fields.len()] == *prefix_fields
-            {
-                let suffix_fields = ns_fields[prefix_fields.len()..].to_vec();
-                if let Ok(suffix) = TrackNamespace::new(suffix_fields)
-                    && ts.skipped_tracks.contains(&(suffix, track_name.clone()))
-                {
-                    return Err(SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "cannot PUBLISH a Track after PUBLISH_SKIPPED was sent",
-                    )
-                    .into());
-                }
-                // draft §3.3.2 (Range Filters): "PUBLISH messages which pass the filter will be
-                // forwarded while those which do not pass it will not be forwarded nor will any
-                // Objects." peer subscriber が TRACK_PROPERTY_FILTER を指定していて Track が
-                // それを通らないなら PUBLISH を送らない。
-                //
-                // prefix が一致する publisher 役の SUBSCRIBE_TRACKS は
-                // `prefix_overlaps` により最大 1 件なので、ここでの判定は 1 度しか成立しない。
-                if !track_properties_pass(&ts.track_property_filters, &track_properties) {
-                    return Err(SendRequestError::LocalFilterMismatch);
-                }
-            }
         }
         // draft §3.1.2 (Track Alias): "The same Track Alias MUST NOT be used by a publisher to
         // refer to two different Tracks simultaneously in the same session."
@@ -419,7 +381,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires,
             dynamic_groups,
             publisher_priority: None,
@@ -700,18 +661,6 @@ impl Session {
                 FETCH_UPDATE_ALLOWED_PARAMS,
                 "REQUEST_UPDATE (fetch) parameter not allowed in this context",
             )),
-            Some(RequestTable::NamespacePublication) => Some((
-                NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (namespace_publication) parameter not allowed",
-            )),
-            Some(RequestTable::NamespaceSubscription) => Some((
-                NAMESPACE_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (namespace_subscription) parameter not allowed",
-            )),
-            Some(RequestTable::TrackSubscription) => Some((
-                TRACK_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (track_subscription) parameter not allowed",
-            )),
             Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -730,15 +679,6 @@ impl Session {
                 self.send_update_for_subscription(request_id, &parameters)?
             }
             Some(RequestTable::Fetch) => self.send_update_for_fetch(request_id, &parameters)?,
-            Some(RequestTable::NamespacePublication) => {
-                self.send_update_for_namespace_publication(request_id)?
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.send_update_for_namespace_subscription(request_id, &parameters)?
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.send_update_for_track_subscription(request_id, &parameters)?
-            }
             Some(RequestTable::TrackStatus) | None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,

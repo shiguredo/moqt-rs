@@ -1,7 +1,7 @@
 # TRACK_STATUS の受信側 state を削除し send 側だけ残す
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/remove-track-status-receive
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,18 @@ TRACK_STATUS は subscriber が publisher へ送る要求であり、publisher �
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
 - `docs/IMPLEMENTATION.md` と `skills/shiguredo-moqt/SKILL.md` の TRACK_STATUS の記述が削除後の実装と一致していること
 - `CHANGES.md` の `## develop` に `[CHANGE]` エントリが追加されていること
+
+## 解決方法
+
+TRACK_STATUS の受信側 (自側 publisher) を削除し、subscriber 側の送信と応答受信だけを残した。
+
+- `src/session/track_status.rs` から受信側の 3 関数 (`handle_peer_track_status` / `send_ok_for_track_status` / `send_err_for_track_status`) を削除した。モジュール doc を送信側専用である旨に書き換えた。
+- `src/session/core.rs` から TRACK_STATUS の受信 dispatch と、`send_request_ok` / `send_request_error` の TRACK_STATUS 分岐、TRACK_STATUS_OK 専用の INCLUDE_PROPERTIES 空化と FIN 指定を削除した。
+  - `RequestTable::TrackStatus` は送信側の応答処理が request_id から entry を直接引くため不要になり、`RequestTable` は `Subscription` / `Fetch` の 2 種になった。
+- `src/session/types.rs` の `TrackStatusEntry` から `my_role` と `include_properties` を削除し、送信側専用の型にした。
+- `Session::send_track_status` と `ControlMessage::TrackStatus` は維持し、REQUEST_OK / REQUEST_ERROR / stream 終端で entry を完了させる `handle_ok_for_track_status` / `handle_err_for_track_status` / `close_track_status_on_stream_end` も維持した。
+- peer から TRACK_STATUS を受信した場合は `recv_request` の未対応経路で `SESSION_PROTOCOL_VIOLATION` になる。これは送信側のテスト `recv_peer_track_status_closes_session` で固定した。
+- 受信側の挙動を検証していたテスト 10 件 (goaway 3 件 / parameter_rules 4 件 / request_stream 2 件 / include_properties 1 件) を削除し、送信側のテストを `tests/test_session/track_status.rs` として再構成した (送信時の entry 登録、REQUEST_OK / REQUEST_ERROR での完了、forget の冪等性、peer 受信の拒否、予約名前空間と許可外パラメータの送信前拒否)。
+- `docs/IMPLEMENTATION.md` / `skills/shiguredo-moqt/SKILL.md` に送信側のみの実装である旨を追記し、`CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加した。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` がすべて通ることを確認した。削除規模は 12 ファイル、524 行削除である。

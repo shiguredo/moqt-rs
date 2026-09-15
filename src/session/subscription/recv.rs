@@ -9,10 +9,8 @@ use crate::error::{
     SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
 };
 use crate::message::{
-    FETCH_UPDATE_ALLOWED_PARAMS, NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
-    NAMESPACE_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify,
-    ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
-    TRACK_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, common::Location,
+    FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
+    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk, common::Location,
 };
 use crate::message_parameter::{
     LocationFilter, LocationFilterContext, LocationFilterUpdate, MessageParameters,
@@ -133,7 +131,6 @@ impl Session {
         let subscriber_object_delivery_timeout_ms = subscribe.parameters.object_delivery_timeout();
         let subscriber_subgroup_delivery_timeout_ms =
             subscribe.parameters.subgroup_delivery_timeout();
-        let subscriber_rendezvous_timeout_ms = subscribe.parameters.rendezvous_timeout();
         let filter = match subscribe.parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
@@ -213,7 +210,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms,
             expires: None,
             // SUBSCRIBE には TrackProperties は含まれない。Publisher である自側が
             // send_subscribe_ok で TrackProperties を発行するタイミングで dynamic_groups を設定する。
@@ -252,17 +248,17 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<bool, SessionError> {
+    pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<(), SessionError> {
         let request_id = publish.request_id;
         if !self.accept_peer_request(request_id, &publish.parameters)? {
-            return Ok(false);
+            return Ok(());
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
         self.apply_peer_message_auth_tokens(&publish.parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
         if let Err(reason) = self.check_incoming_range_filters(&publish.parameters) {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
-            return Ok(false);
+            return Ok(());
         }
         // draft-ietf-moq-transport-21 は値域 MUST (§9.20.9 (GROUP ORDER Parameter) /
         // §9.20.22 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
@@ -276,7 +272,7 @@ impl Session {
                 REQUEST_DOES_NOT_EXIST,
                 "reserved single-period namespace",
             );
-            return Ok(false);
+            return Ok(());
         }
         // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間の PUBLISH は内部処理
         // 未知のセッションレベルトラックは DOES_NOT_EXIST で拒否
@@ -286,7 +282,7 @@ impl Session {
                 REQUEST_DOES_NOT_EXIST,
                 "session-level track does not exist",
             );
-            return Ok(false);
+            return Ok(());
         }
         // draft §3.6 (Mandatory Track Properties): 未知の必須トラックプロパティを含む PUBLISH は
         // REQUEST_ERROR (UNSUPPORTED_EXTENSION) で拒否する
@@ -296,7 +292,7 @@ impl Session {
                 REQUEST_UNSUPPORTED_EXTENSION,
                 "unsupported mandatory extension",
             );
-            return Ok(false);
+            return Ok(());
         }
         // draft §3.1.2 (Track Alias): "If a subscriber receives a PUBLISH or SUBSCRIBE_OK that
         // uses the same Track Alias as a different Track with an Established subscription, it
@@ -442,7 +438,6 @@ impl Session {
                 ),
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires,
             dynamic_groups,
             publisher_priority: None,
@@ -481,7 +476,7 @@ impl Session {
                 object_id,
             });
         }
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn handle_peer_subscribe_ok(
@@ -644,18 +639,6 @@ impl Session {
                 FETCH_UPDATE_ALLOWED_PARAMS,
                 "REQUEST_UPDATE (fetch) parameter not allowed in this context",
             )),
-            Some(RequestTable::NamespacePublication) => Some((
-                NAMESPACE_PUBLICATION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (namespace_publication) parameter not allowed",
-            )),
-            Some(RequestTable::NamespaceSubscription) => Some((
-                NAMESPACE_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (namespace_subscription) parameter not allowed",
-            )),
-            Some(RequestTable::TrackSubscription) => Some((
-                TRACK_SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (track_subscription) parameter not allowed",
-            )),
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -686,15 +669,6 @@ impl Session {
             }
             Some(RequestTable::Fetch) => {
                 self.handle_update_for_fetch(request_id, update.parameters)
-            }
-            Some(RequestTable::NamespacePublication) => {
-                self.handle_update_for_namespace_publication(request_id, update.parameters)
-            }
-            Some(RequestTable::NamespaceSubscription) => {
-                self.handle_update_for_namespace_subscription(request_id, update.parameters)
-            }
-            Some(RequestTable::TrackSubscription) => {
-                self.handle_update_for_track_subscription(request_id, update.parameters)
             }
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(

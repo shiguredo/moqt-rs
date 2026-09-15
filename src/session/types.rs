@@ -249,14 +249,11 @@ pub enum SessionEvent {
     /// peer からの REQUEST_ERROR を受信した
     ///
     /// draft-ietf-moq-transport-21 §9.4 (REQUEST_ERROR): REQUEST_ERROR は任意の request への失敗応答。
-    /// - `Pending*` 状態からの受信: 初回 SUBSCRIBE / PUBLISH / FETCH /
-    ///   SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / TRACK_STATUS への失敗応答で、
-    ///   対象 request は Terminated に遷移済み。
+    /// - `Pending*` 状態からの受信: 初回 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS への
+    ///   失敗応答で、対象 request は Terminated に遷移済み。
     /// - `Established` 状態からの受信: REQUEST_UPDATE への失敗応答。
     ///   subscription / fetch は Terminated に遷移する (draft §3.1.1: REQUEST_ERROR の
     ///   受信で subscription state を終える。fetch は draft §3.2.1 の破棄許可を行使する)。
-    ///   namespace 系 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) は
-    ///   state を維持する。
     ///   subscription の publisher role は `send_request_error` 内で Terminated に遷移し、
     ///   PUBLISH_DONE(UPDATE_FAILED) を自動送信する (ワイヤ順序は
     ///   REQUEST_ERROR → PUBLISH_DONE、open 中の outgoing data stream (subgroup / fill fetch)
@@ -283,59 +280,6 @@ pub enum SessionEvent {
         /// Error Code = REDIRECT の場合のみ付加される (draft-ietf-moq-transport-21 §9.4.2 (REQUEST_ERROR Message Format))
         redirect: Option<Redirect>,
     },
-    /// peer からの NAMESPACE を受信した (draft §9.16 (NAMESPACE))
-    ///
-    /// 既に active な同一 full namespace の NAMESPACE を再受信した場合は発行しない (full namespace は
-    /// 現在の prefix と確定待ち prefix で解決して照合する)。NAMESPACE_DONE で削除された後の再告知は
-    /// 新規として発行する。prefix 更新 (`REQUEST_OK`) の適用後に新 prefix 相対で同一 suffix 文字列の
-    /// NAMESPACE が届いた場合も、別の full namespace として新規に発行する。
-    NamespaceReceived {
-        /// 対象 request の Request ID
-        request_id: u64,
-        /// 対象の名前空間サフィックス
-        suffix: TrackNamespace,
-    },
-    /// peer からの NAMESPACE_DONE を受信した (draft §9.17 (NAMESPACE_DONE))
-    ///
-    /// 現在の prefix または確定待ち prefix で解決した full namespace が Session 内部の集合に
-    /// 一致した場合に発行する。投影から外れた full namespace は、coalescing で prefix が戻った後に
-    /// 届いた NAMESPACE_DONE の照合で使う。どの候補 prefix でも一致しない NAMESPACE_DONE は
-    /// draft §9.15 (SUBSCRIBE_NAMESPACE) により PROTOCOL_VIOLATION でセッションを閉じる。
-    NamespaceDoneReceived {
-        /// 対象 request の Request ID
-        request_id: u64,
-        /// 対象の名前空間サフィックス
-        suffix: TrackNamespace,
-    },
-    /// peer からの PUBLISH_SKIPPED を受信した (draft §9.19 (PUBLISH_SKIPPED))
-    PublishSkippedReceived {
-        /// 対象 request の Request ID
-        request_id: u64,
-        /// 対象の名前空間サフィックス
-        suffix: TrackNamespace,
-        /// 対象 Track 名
-        track_name: Vec<u8>,
-    },
-    /// peer からの SUBSCRIBE_TRACKS を受信した (draft §9.18 (SUBSCRIBE_TRACKS))
-    ///
-    /// PREFIX_OVERLAP 自動拒否の**後**（受け入れが確定した場合）に発火する。
-    ///
-    /// パラメータ伝播 (draft-ietf-moq-transport-21 §9.18.1 (Parameters on
-    /// SUBSCRIBE_TRACKS)): SUBSCRIBE_TRACKS の Parameters は resulting PUBLISH の
-    /// initial subscription parameters として明示的に載る。伝播の構築はアプリの
-    /// 責務であり、ライブラリは自動注入しない。アプリは本イベントの `parameters` に
-    /// `MessageParameters::resulting_publish_parameters` を適用し、得られた値を
-    /// `send_publish` の `parameters` に渡すことで伝播を実現できる
-    /// (AUTHORIZATION TOKEN は除外される。FORWARD=0 のときのみ明示し、1 は省略でよい)。
-    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    SubscribeTracksReceived {
-        /// 対象 request の Request ID
-        request_id: u64,
-        /// 対象の名前空間プレフィックス
-        prefix: TrackNamespace,
-        /// 受信したパラメータ
-        parameters: MessageParameters,
-    },
     /// bidi request stream の終端 (または REQUEST_ERROR 等による) で request が
     /// Terminated 状態に遷移した (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))
     ///
@@ -343,7 +287,6 @@ pub enum SessionEvent {
     /// - `PeerStreamFin` / `PeerStreamReset`: 相手側が bidi request stream を閉じた
     /// - `LocalCancel`: 自側から cancel した
     /// - `SupersededByPublish`: PUBLISH 受信で既存 Pending(Subscriber) が置き換えられた (draft §3.1 (Subscriptions))
-    /// - `NamespaceImplicitDone`: SUBSCRIBE_NAMESPACE 終端時に残った active suffix を暗黙 NAMESPACE_DONE として通知 (draft §9.15 (SUBSCRIBE_NAMESPACE))
     /// - `MalformedTrack`: Malformed Track 検出で該当 request を cancel した (draft §12.1 (Malformed Tracks))
     RequestTerminated {
         /// 対象 request の Request ID
@@ -586,7 +529,7 @@ pub enum DatagramAcceptance {
 
 /// bidi request stream の開始メッセージ種別 (draft-ietf-moq-transport-21 §6.3 (Session initialization))
 ///
-/// bidi request stream は以下の 7 種類のいずれかの制御メッセージで開始する。
+/// bidi request stream は以下の 4 種類のいずれかの制御メッセージで開始する。
 /// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
@@ -598,12 +541,6 @@ pub enum RequestKind {
     Fetch,
     /// TRACK_STATUS で開始
     TrackStatus,
-    /// PUBLISH_NAMESPACE で開始
-    PublishNamespace,
-    /// SUBSCRIBE_NAMESPACE で開始
-    SubscribeNamespace,
-    /// SUBSCRIBE_TRACKS で開始
-    SubscribeTracks,
 }
 
 /// bidi request stream の終端原因 (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))
@@ -624,7 +561,20 @@ pub enum RequestStreamEnd {
     },
 }
 
-/// request が終端した原因 (draft-ietf-moq-transport-21 §3.1 (Subscriptions) / §9.15 (SUBSCRIBE_NAMESPACE) / §6.4.2.3 (Request Cancellation and Rejection) / §12.1 (Malformed Tracks))
+/// `RequestStreamEnd` を素直な `TerminationReason` に変換する
+///
+/// request stream / fetch data stream の終端通知を、アプリへ通知する
+/// [`TerminationReason`] に正規化する。
+pub(crate) fn terminationreason_from_end(end: RequestStreamEnd) -> TerminationReason {
+    match end {
+        RequestStreamEnd::Fin => TerminationReason::PeerStreamFin,
+        RequestStreamEnd::Reset { error_code, .. } => {
+            TerminationReason::PeerStreamReset { error_code }
+        }
+    }
+}
+
+/// request が終端した原因 (draft-ietf-moq-transport-21 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §12.1 (Malformed Tracks))
 ///
 /// `SessionEvent::RequestTerminated` の payload として使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -643,12 +593,6 @@ pub enum TerminationReason {
     SupersededByPublish {
         /// 置き換え後の PUBLISH の Request ID
         new_request_id: u64,
-    },
-    /// SUBSCRIBE_NAMESPACE の終端時、残っていた active suffix に対する
-    /// implicit NAMESPACE_DONE 相当 (draft §9.15 (SUBSCRIBE_NAMESPACE))
-    NamespaceImplicitDone {
-        /// 暗黙 NAMESPACE_DONE とみなした suffix 群
-        suffixes: Vec<TrackNamespace>,
     },
     /// Malformed Track を検出して該当 request をキャンセルした (draft §12.1 (Malformed Tracks))
     ///
@@ -901,7 +845,6 @@ mod tests {
                 effective_subgroup_ms: None,
                 subgroup_overrides: HashMap::new(),
             },
-            subscriber_rendezvous_timeout_ms: None,
             expires: None,
             dynamic_groups: false,
             publisher_priority: None,
@@ -1170,12 +1113,6 @@ pub struct Subscription {
     pub largest_received_location: Option<Location>,
     /// delivery timeout 関連の状態 (subscriber / publisher 申告値、effective 値、per-subgroup オーバーライド)
     pub delivery_timeouts: DeliveryTimeoutState,
-    /// subscriber 側が指定した RENDEZVOUS_TIMEOUT parameter (ms)
-    ///
-    /// relay / application layer が publisher discovery policy を判断できるよう、
-    /// `SUBSCRIBE` に含まれていた値を lossless に保持する。`Some(0)` は「待たない」
-    /// を表し、`None` とは区別する。`Session` 自体はこの値で timer を動かさない。
-    pub subscriber_rendezvous_timeout_ms: Option<u64>,
     /// 直近に観測した EXPIRES parameter
     ///
     /// sender がこの subscription を終了しうる時刻の advisory deadline を表す。
@@ -1531,127 +1468,6 @@ pub struct Fetch {
     pub include_properties: Option<u8>,
 }
 
-// ─── Namespace 系 / TRACK_STATUS 状態管理 ──────────────────
-//
-// draft-ietf-moq-transport-21 §4 (Namespace Discovery) / §9.13 (TRACK_STATUS) — §9.19 (PUBLISH_SKIPPED)
-
-/// PUBLISH_NAMESPACE (draft §9.14 (PUBLISH_NAMESPACE)) の状態
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespacePublicationState {
-    /// 応答待ち
-    Pending,
-    /// REQUEST_OK 受信 / 送信済み
-    Established,
-    /// REQUEST_ERROR or cancel で終了
-    Terminated,
-}
-
-/// PUBLISH_NAMESPACE の状態エントリ
-#[derive(Debug, Clone)]
-pub struct NamespacePublication {
-    /// 対象 request の Request ID
-    pub request_id: u64,
-    /// 自端点の役割
-    pub my_role: TrackRole,
-    /// 対象 Track の名前空間
-    pub track_namespace: TrackNamespace,
-    /// 現在の状態
-    pub state: NamespacePublicationState,
-}
-
-/// SUBSCRIBE_NAMESPACE (draft §9.15 (SUBSCRIBE_NAMESPACE)) の状態
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespaceSubscriptionState {
-    /// 応答待ち
-    Pending,
-    /// 確立済み
-    Established,
-    /// 終了
-    Terminated,
-}
-
-/// SUBSCRIBE_NAMESPACE の状態エントリ (draft §9.15 (SUBSCRIBE_NAMESPACE))
-#[derive(Debug, Clone)]
-pub struct NamespaceSubscription {
-    /// 対象 request の Request ID
-    pub request_id: u64,
-    /// 自端点の役割
-    pub my_role: TrackRole,
-    /// 対象の名前空間プレフィックス
-    ///
-    /// 自側 subscriber では REQUEST_OK で確定した適用済みの値 (送信した
-    /// REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX は REQUEST_OK を受信するまで
-    /// 反映されず、確定待ちは Session 内部で保持する)。自側 publisher では
-    /// 受理した REQUEST_UPDATE を反映した値 (確定待ちは保持しない)。
-    pub prefix: TrackNamespace,
-    /// 現在の状態
-    pub state: NamespaceSubscriptionState,
-    /// 現在の prefix 配下にある active な namespace suffix 集合
-    ///
-    /// NAMESPACE 受信で追加し、NAMESPACE_DONE 受信で削除する。draft §9.15 (SUBSCRIBE_NAMESPACE):
-    /// NAMESPACE_DONE が対応する NAMESPACE より先に届いた場合は PROTOCOL_VIOLATION。
-    /// ストリームリセット時は全件を implicit NAMESPACE_DONE として扱う。
-    ///
-    /// draft-ietf-moq-transport-21 §9.5.2 (Updating Namespace Subscriptions): prefix 更新
-    /// (`REQUEST_OK`) の適用後、新 prefix 配下にない full namespace はこの投影から外れる
-    /// (Session 内部では full namespace を保持し、旧 prefix 基準の NAMESPACE_DONE も照合する)。
-    /// アプリは `RequestOkReceived` 受信後に `prefix` と本集合を読み直すこと。
-    pub active_suffixes: hashbrown::HashSet<TrackNamespace>,
-}
-
-/// SUBSCRIBE_TRACKS の状態 (draft §9.18 (SUBSCRIBE_TRACKS))
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrackSubscriptionState {
-    /// 応答待ち
-    Pending,
-    /// 確立済み
-    Established,
-    /// 終了
-    Terminated,
-}
-
-/// SUBSCRIBE_TRACKS の状態エントリ (draft §9.18 (SUBSCRIBE_TRACKS))
-#[derive(Debug, Clone)]
-pub struct TrackSubscription {
-    /// 対象 request の Request ID
-    pub request_id: u64,
-    /// 自端点の役割
-    pub my_role: TrackRole,
-    /// 対象の名前空間プレフィックス
-    ///
-    /// 自側 subscriber では REQUEST_OK で確定した適用済みの値 (送信した
-    /// REQUEST_UPDATE の TRACK_NAMESPACE_PREFIX は REQUEST_OK を受信するまで
-    /// 反映されず、確定待ちは Session 内部で保持する)。自側 publisher では
-    /// 受理した REQUEST_UPDATE を反映した値 (確定待ちは保持しない)。
-    pub prefix: TrackNamespace,
-    /// 現在の状態
-    pub state: TrackSubscriptionState,
-    /// FORWARD パラメータの値 (draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter))
-    pub forward_state: u8,
-    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter))
-    ///
-    /// peer が SUBSCRIBE_TRACKS で指定した値。`Some(0)` のとき resulting PUBLISH の
-    /// Track Properties を空にする (application 層が `track_subscription()` で参照する)。
-    /// `None` (省略時) は default 1 として扱い従来どおり含める。
-    pub include_properties: Option<u8>,
-    /// Stream 閉鎖時に未完了の subscription を implicit PUBLISH_DONE 扱いするための追跡
-    pub active_track_aliases: hashbrown::HashSet<u64>,
-    /// PUBLISH_SKIPPED 送信済みの Track (suffix, track_name) 集合
-    ///
-    /// draft-ietf-moq-transport-21 §9.19 (PUBLISH_SKIPPED): PUBLISH_SKIPPED 送信後は
-    /// 同一 SUBSCRIBE_TRACKS に対して同一 Track の PUBLISH を送信してはならない (MUST NOT)。
-    pub skipped_tracks: hashbrown::HashSet<(TrackNamespace, Vec<u8>)>,
-    /// TRACK_PROPERTY_FILTER (0x29) の型付き状態 (draft §3.3.2 (Range Filters))
-    ///
-    /// §3.3.2: "The Track Property Filter can be used in SUBSCRIBE_TRACKS to filter PUBLISH
-    /// messages with required Track Property types and values. PUBLISH messages which pass the
-    /// filter will be forwarded while those which do not pass it will not be forwarded nor will
-    /// any Objects."
-    ///
-    /// SetID ごとに AND、SetID 間で OR で結合する。空なら選別しない。
-    pub track_property_filters: Vec<RangeFilterSet>,
-}
-
 /// TRACK_STATUS (draft §9.13 (TRACK_STATUS)) の応答
 ///
 /// `TrackStatusEntry.response` が `None` なら応答待ち、`Some(_)` なら応答済み。
@@ -1668,25 +1484,21 @@ pub enum TrackStatusResponse {
     Error,
 }
 
-/// TRACK_STATUS の状態エントリ
+/// 自側が送信した TRACK_STATUS の状態エントリ
+///
+/// 本ライブラリは TRACK_STATUS の送信側 (自側 subscriber) のみを扱うため、
+/// エントリは常に自側が送った要求の応答待ち状態を表す。
 #[derive(Debug, Clone)]
 pub struct TrackStatusEntry {
     /// 対象 request の Request ID
     pub request_id: u64,
-    /// 自端点の役割
-    pub my_role: TrackRole,
     /// 対象 Track の名前空間
     pub track_namespace: TrackNamespace,
     /// 対象 Track 名
     pub track_name: Vec<u8>,
-    /// 応答情報。`None` = 応答待ち (旧 `TrackStatusState::Pending`)、
-    /// `Some(Ok { .. })` = 旧 `Completed`、`Some(Error)` = 旧 `Failed`。
+    /// 応答情報。`None` = 応答待ち、`Some(Ok { .. })` = TRACK_STATUS_OK 受信済み、
+    /// `Some(Error)` = REQUEST_ERROR 受信または stream 終端。
     pub response: Option<TrackStatusResponse>,
-    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter))
-    ///
-    /// peer が TRACK_STATUS で指定した値。`Some(0)` のとき TRACK_STATUS_OK の
-    /// Track Properties を空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
-    pub include_properties: Option<u8>,
 }
 
 // ─── GOAWAY / Migration ────────────────────────────────────
@@ -1712,12 +1524,6 @@ pub struct GoawayDrainSnapshot {
     pub blocking_subscription_request_ids: Vec<u64>,
     /// cleanup 未完了の fetch の Request ID 群
     pub blocking_fetch_request_ids: Vec<u64>,
-    /// cleanup 未完了の track subscription (SUBSCRIBE_TRACKS) の Request ID 群
-    pub blocking_track_subscription_request_ids: Vec<u64>,
-    /// cleanup 未完了の namespace subscription (SUBSCRIBE_NAMESPACE) の Request ID 群
-    pub blocking_namespace_subscription_request_ids: Vec<u64>,
-    /// cleanup 未完了の namespace publication (PUBLISH_NAMESPACE) の Request ID 群
-    pub blocking_namespace_publication_request_ids: Vec<u64>,
     /// 応答未完了の track status (TRACK_STATUS) の Request ID 群
     pub blocking_track_status_request_ids: Vec<u64>,
 }
@@ -1727,9 +1533,6 @@ impl GoawayDrainSnapshot {
     pub fn ready(&self) -> bool {
         self.blocking_subscription_request_ids.is_empty()
             && self.blocking_fetch_request_ids.is_empty()
-            && self.blocking_track_subscription_request_ids.is_empty()
-            && self.blocking_namespace_subscription_request_ids.is_empty()
-            && self.blocking_namespace_publication_request_ids.is_empty()
             && self.blocking_track_status_request_ids.is_empty()
     }
 }

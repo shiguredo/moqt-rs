@@ -54,9 +54,9 @@ impl Session {
 
     /// `subscriptions_by_track` から 1 つの request_id を除去する (空になったら key ごと削除)
     ///
-    /// 購読系索引の削除を 1 箇所に集約する。`forget_subscription` / `supersede_pending_subscriber` /
-    /// `close_track_subscription_on_stream_end` がこのヘルパを通す。subscription 本体の除去は
-    /// `forget_subscription` のみが行う。
+    /// 購読系索引の削除を 1 箇所に集約する。`forget_subscription` /
+    /// `supersede_pending_subscriber` / `close_subscription_on_stream_end` がこのヘルパを通す。
+    /// subscription 本体の除去は `forget_subscription` のみが行う。
     pub(crate) fn remove_subscription_track_index(
         &mut self,
         request_id: u64,
