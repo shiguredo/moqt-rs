@@ -214,7 +214,6 @@ impl Session {
             // SUBSCRIBE には TrackProperties は含まれない。Publisher である自側が
             // send_subscribe_ok で TrackProperties を発行するタイミングで dynamic_groups を設定する。
             dynamic_groups: false,
-            publisher_priority: None,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {
@@ -446,7 +445,6 @@ impl Session {
             },
             expires,
             dynamic_groups,
-            publisher_priority: None,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {

@@ -1,7 +1,7 @@
 # DATAGRAM の DEFAULT_PRIORITY 継承元を購読を確立したメッセージの値にする
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-datagram-default-priority-inheritance
 - Polished: {YYYY-MM-DD}
 
@@ -84,3 +84,32 @@ DEFAULT_PRIORITY の Datagram が誤った優先度で評価される。
 - 回帰テストが `tests/test_session/` に追加され、`cargo test --workspace` が通ること
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo fmt --all -- --check` が通ること
 - `CHANGES.md` の `## develop` に `[FIX]` エントリが追加されていること
+
+## 解決方法
+
+datagram の DEFAULT_PRIORITY の継承元を、直近 SUBGROUP_HEADER の解決値ではなく購読を確立した
+メッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) に統一した。
+
+- `src/session/data.rs` の 3 経路 (`send_object_datagram` のローカルフィルタ検査、
+  `recv_object_datagram` の候補購読のフィルタ評価、重複 Object の Priority 一貫性検証) を
+  `Subscription::effective_publisher_priority` から
+  `Subscription::resolve_header_publisher_priority(None)` に置き換えた。`None` は
+  DEFAULT_PRIORITY bit が立っていることを意味し、Track Property → 128 の順で解決される。
+- `src/session/data.rs` の `recv_subgroup_header` が `Subscription::publisher_priority` を
+  上書きする処理を削除した。Subgroup 単位の検証とフィルタ評価は、従来どおり
+  `IncomingDataStream::Subgroup` が header 時点で保持する解決値を使う。
+- `src/session/types.rs` から `Subscription::publisher_priority` と
+  `Subscription::effective_publisher_priority` を削除した。前者は `recv_subgroup_header` だけが
+  書き後者だけが読む誤った継承元であり、同種の誤用を再発させないために除去した。
+  併せて `default_publisher_priority` の doc を `resolve_header_publisher_priority` 参照に直した。
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した。
+
+回帰テストは `tests/test_session/default_publisher_properties.rs` に送信側と受信側の 2 件を
+追加した。`default_priority_datagram_inherits_track_property_not_recent_header` が受信側で、
+明示 Publisher Priority 付き Subgroup の後に届いた DEFAULT_PRIORITY の datagram が
+直近 header の値ではなく Track Property の値で評価されることを固定する。
+`default_priority_datagram_send_filter_uses_track_property` が送信側で同じ解決結果になることを
+固定する。
+
+検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` がすべて通ることを確認した。
