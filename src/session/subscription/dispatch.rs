@@ -275,7 +275,9 @@ impl Session {
                 // `has_open_outgoing_data_streams_for_request` の対象に含まれる)。
                 self.reset_open_fill_streams(request_id);
                 // PUBLISH_DONE push は send_request_error 側で行う (§9.9 の MUST NOT に
-                // 従い、open 中の outgoing subgroup stream がある場合は保留される)
+                // 従い、open 中の outgoing data stream (subgroup / fill fetch) がある場合は
+                // 保留される。ここで fill fetch stream を reset 済みのため、実際に残るのは
+                // subgroup stream だけである)
                 Ok(Some(stream_count))
             }
             SubscriptionState::Terminated => Err(SessionError::new(

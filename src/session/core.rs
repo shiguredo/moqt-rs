@@ -1276,8 +1276,9 @@ impl Session {
     ///
     /// subscription の REQUEST_UPDATE 失敗応答時は、PUBLISH_DONE (UPDATE_FAILED) を
     /// §9.9 (PUBLISH_DONE) の MUST NOT (全 stream を閉じるまで送ってはならない) に
-    /// 従い、open 中の outgoing subgroup stream がある場合は保留し、全 stream 終端後
-    /// (`send_data_stream_closed` / `reset_outgoing_data_stream`) に自動送信する。
+    /// 従い、open 中の outgoing data stream (subgroup / fill fetch) がある場合は保留し、
+    /// 全 stream 終端後 (`send_data_stream_closed` / `reset_outgoing_data_stream` /
+    /// `recv_data_stream_stop_sending`) に自動送信する。
     /// つまり **REQUEST_UPDATE 失敗応答後は全 stream を閉じること** (§9.5.1 の MUST)。
     /// また、保留 PUBLISH_DONE が push されるまで bidi request stream を閉じないこと
     /// (§9.9 の "A publisher sends a PUBLISH_DONE message as the final message before
@@ -1363,7 +1364,7 @@ impl Session {
         // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
         // PUBLISH_DONE until it has closed all streams it will ever open, and has no further
         // datagrams to send, for a subscription." の MUST NOT と両立するため、
-        // open 中の outgoing subgroup stream がある場合は push を保留し
+        // open 中の outgoing data stream (subgroup / fill fetch) がある場合は push を保留し
         // (`Subscription::pending_publish_done`)、全 stream 終端後
         // (`send_data_stream_closed` / `reset_outgoing_data_stream` 経由) に自動送信する。
         // open 中の stream がない場合は従来どおり REQUEST_ERROR 直後に push する

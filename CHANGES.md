@@ -79,6 +79,8 @@
   - @voluntas
 - [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の prefix overlap 検査を役割を問わない対象にし、SUBSCRIBE_TRACKS の prefix 更新を跨いで届いた旧 prefix 基準の PUBLISH も紐付ける (Terminated の購読には紐付けない)
   - @voluntas
+- [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
+  - @voluntas
 
 ### misc
 

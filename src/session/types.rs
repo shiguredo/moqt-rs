@@ -259,10 +259,11 @@ pub enum SessionEvent {
     ///   state を維持する。
     ///   subscription の publisher role は `send_request_error` 内で Terminated に遷移し、
     ///   PUBLISH_DONE(UPDATE_FAILED) を自動送信する (ワイヤ順序は
-    ///   REQUEST_ERROR → PUBLISH_DONE、open 中の outgoing subgroup stream がある場合は
-    ///   §9.9 の MUST NOT に従い全 stream 終端後に送信、
+    ///   REQUEST_ERROR → PUBLISH_DONE、open 中の outgoing data stream (subgroup / fill fetch)
+    ///   がある場合は §9.9 の MUST NOT に従い全 stream 終端後に送信、
     ///   draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions))。
-    ///   残存 outgoing subgroup stream の FIN / RESET はアプリケーション層の責務である。
+    ///   残存 outgoing data stream の FIN / RESET の実行 (Session が自動発行した fill fetch
+    ///   stream の reset を含む) はアプリケーション層の責務である。
     RequestErrorReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -1221,9 +1222,10 @@ pub struct Subscription {
     /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
     /// PUBLISH_DONE until it has closed all streams it will ever open..." の MUST NOT と
     /// §9.5.1 の MUST (REQUEST_UPDATE 失敗時、publisher は PUBLISH_DONE (UPDATE_FAILED) を
-    /// 送る) を両立するため、open 中の outgoing subgroup stream が残っている間は push を
-    /// 保留し、全 stream 終端後 (`send_data_stream_closed` / `reset_outgoing_data_stream`
-    /// で `has_open_outgoing_data_streams_for_request` が false になった時点) に自動送信する。
+    /// 送る) を両立するため、open 中の outgoing data stream (subgroup / fill fetch) が
+    /// 残っている間は push を保留し、全 stream 終端後 (`send_data_stream_closed` /
+    /// `reset_outgoing_data_stream` / `recv_data_stream_stop_sending` で
+    /// `has_open_outgoing_data_streams_for_request` が false になった時点) に自動送信する。
     /// 既存の `publish_done` フィールド (受信側 drain timer 用。送信側 PUBLISH_DONE とは
     /// 無関係) とは別フィールドであり、`cleanup_ready()` の判定に影響しない。
     /// push と同時に `None` に戻り (二重 push を防ぐ)、`forget_subscription` で除去される。

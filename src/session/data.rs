@@ -565,27 +565,14 @@ impl Session {
             error_code
         };
         // RESET として stream 追跡を終端する。§6.4.1 (Unidirectional Streams) により subscription 状態は変えない。
-        // request_id は `send_data_stream_closed` が stream を除去する前に取得する
-        // (保留 PUBLISH_DONE の送信判定に使う)
-        if self.data_streams.outgoing.contains_key(&stream_id) {
-            let request_id = self
-                .data_streams
-                .outgoing
-                .get(&stream_id)
-                .map(|s| s.request_id)
-                .ok_or_else(|| {
-                    SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
-                        "outgoing data stream close received for unknown stream id",
-                    )
-                })?;
-            self.send_data_stream_closed(
-                stream_id,
-                RequestStreamEnd::Reset {
-                    error_code,
-                    reliable_size,
-                },
-            )?;
+        // 追跡の終端を先に行い、該当 request_id を受け取る (保留 PUBLISH_DONE の送信判定に使う)
+        if let Some(request_id) = self.close_outgoing_subgroup_stream(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code,
+                reliable_size,
+            },
+        ) {
             self.events.push_back(SessionEvent::ResetDataStream {
                 stream_id,
                 error_code,
@@ -625,25 +612,62 @@ impl Session {
 
     /// 自端点が開いた uni data stream の終端を Session に通知する
     ///
-    /// publisher 側 subgroup stream のみを扱う。FIN / RESET のどちらでも open stream
-    /// 集合から除去し、reopen prohibition 用 tracker を終端状態へ進める。
+    /// publisher 側 subgroup stream (`data_streams.outgoing`) のみを扱う。FIN / RESET の
+    /// どちらでも open stream 集合から除去し、reopen prohibition 用 tracker を終端状態へ進める。
+    /// fill fetch stream の終端は
+    /// [`send_fetch_data_stream_closed`](Self::send_fetch_data_stream_closed) または
+    /// [`reset_outgoing_data_stream`](Self::reset_outgoing_data_stream) が行う。
     ///
     /// RESET 時の適切なエラーコード選択は
     /// [`reset_outgoing_data_stream`](Self::reset_outgoing_data_stream) が行う。
     /// 本 API は既に I/O 層が閉じた stream を Session へ通知する用途で、
     /// `ResetDataStream` イベントは発行しない。
+    ///
+    /// 終端後に [`maybe_flush_pending_publish_done`](Self::maybe_flush_pending_publish_done) を
+    /// 呼ぶ。同関数は該当 request の全 outgoing data stream (subgroup / fill fetch) が閉じ、
+    /// subscription が Terminated で保留中の PUBLISH_DONE (UPDATE_FAILED) があれば自動送信する
+    /// (§9.5.1 の MUST)。本 API が終端できるのは subgroup stream だけだが、flush の条件判定は
+    /// 同関数が行う。FIN / RESET のどちらでも送信する (RESET では I/O 層が既にワイヤへ
+    /// RESET_STREAM を送っているため、ワイヤ順序は RESET_STREAM → PUBLISH_DONE になる)。
+    ///
+    /// datagram は本 API の終端判定に含めない (§9.9 の "no further datagrams" は
+    /// subscription 単位の条件)。subscription が Terminated になると datagram の送信 API が
+    /// Established を要求して拒否するため、Terminated 後の終端判定で考慮する datagram は
+    /// 存在しない。
     pub fn send_data_stream_closed(
         &mut self,
         stream_id: DataStreamId,
         end: RequestStreamEnd,
     ) -> Result<(), SessionError> {
         self.require_established()?;
-        let Some(stream) = self.data_streams.outgoing.remove(&stream_id) else {
+        let Some(request_id) = self.close_outgoing_subgroup_stream(stream_id, end) else {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "outgoing data stream close received for unknown stream id",
             ));
         };
+        self.maybe_flush_pending_publish_done(request_id);
+        Ok(())
+    }
+
+    /// 自端点が開いた subgroup data stream の追跡を終端し、該当 request_id を返す
+    ///
+    /// 追跡していない stream では `None` を返す (`data_streams.outgoing` は subgroup stream
+    /// 専用のため、fill fetch stream は `None` になる)。
+    /// 保留 PUBLISH_DONE の flush は行わない。呼び出し元が、必要なら `ResetDataStream` などの
+    /// イベントを push した後で、返り値の request_id を使って
+    /// [`maybe_flush_pending_publish_done`](Self::maybe_flush_pending_publish_done) を呼ぶ
+    /// (FIN 経路の [`send_data_stream_closed`](Self::send_data_stream_closed) はイベントを
+    /// push しないため直ちに呼ぶ)。
+    /// 先に PUBLISH_DONE を push するとワイヤ順序が PUBLISH_DONE → RESET_STREAM になり
+    /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の MUST NOT に反するため、
+    /// flush の判断は呼び出し元に委ねる。
+    fn close_outgoing_subgroup_stream(
+        &mut self,
+        stream_id: DataStreamId,
+        end: RequestStreamEnd,
+    ) -> Option<u64> {
+        let stream = self.data_streams.outgoing.remove(&stream_id)?;
         // ストリーム終端時に delivery timeout 追跡を除去する
         // キーが (stream_id, object_id) の複合キーのため、同一 stream_id の全エントリを削除する
         self.timing
@@ -686,24 +710,23 @@ impl Session {
                 }
             }
         }
-        // FIN 終端時のみ、保留中の PUBLISH_DONE (UPDATE_FAILED) を自動送信する
-        // (RESET 経路は `reset_outgoing_data_stream_with_code` が `ResetDataStream` イベントを
-        // 先に push してから送信する。ここで送るとワイヤ順序が PUBLISH_DONE → RESET_STREAM
-        // になり §9.9 の MUST NOT に反する)
-        if matches!(end, RequestStreamEnd::Fin) {
-            self.maybe_flush_pending_publish_done(request_id);
-        }
-        Ok(())
+        // stream の終端が確定したので、flush 判断に使う request_id を呼び出し元へ返す
+        Some(request_id)
     }
 
     /// 保留中の PUBLISH_DONE (UPDATE_FAILED) を全 stream 終端後に自動送信する
     ///
     /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の MUST NOT (全 stream を閉じるまで
     /// PUBLISH_DONE を送ってはならない) により `send_request_error` が保留した
-    /// `Subscription::pending_publish_done` を、該当 request の全 outgoing subgroup stream が
-    /// 閉じた時点で送信する (§9.5.1 の MUST)。
+    /// `Subscription::pending_publish_done` を、該当 request の全 outgoing data stream
+    /// (subgroup / fill fetch) が閉じた時点で送信する (§9.5.1 の MUST)。
     /// 条件は「全 stream 終端 (open なし) + subscription が Terminated + 保留あり」。
     /// `take()` で取り出すため二重 push は起きない。
+    /// 保留の発生源 (`send_request_error` の失敗応答) は subscription を Terminated にする際に
+    /// `send_err_for_subscription` が open 中の fill fetch stream を §3.4.1 の MUST で reset
+    /// するため、保留中に open であり続ける stream は subgroup stream だけになる
+    /// (fill fetch stream の終端でも本関数は呼ばれるが、`send_fetch_data_stream_closed` 経由の
+    /// 終端通知は保留中に open であり得ないため flush 契機にはならない)。
     /// delivery timeout によるリセット経路 (`tick_subscription_timeouts`) は outgoing から
     /// 除去しないため open が残り、本関数は発火しない (アプリの終端通知まで保留される。
     /// ワイヤ順序は RESET_STREAM 先行で違反にはならない)。
@@ -1611,6 +1634,12 @@ impl Session {
     /// fill fetch stream (draft-ietf-moq-transport-21 §3.4) の終端通知も本 API で行う
     /// (fill stream には `Fetch` 状態がないため `data_stream_finished` 記録は行わない)。
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    ///
+    /// 本 API は保留 PUBLISH_DONE の flush 契機にはならない。保留が発生する
+    /// ([`send_request_error`](Self::send_request_error) の失敗応答) 時点で、open 中の
+    /// fill fetch stream は `send_err_for_subscription` が §3.4.1 の MUST に従って
+    /// 先に reset するため、保留中に open であり続ける fill fetch stream は存在しない
+    /// (subscription が Terminated の間は `send_fill_fetch_header` も拒否する)。
     pub fn send_fetch_data_stream_closed(
         &mut self,
         stream_id: DataStreamId,

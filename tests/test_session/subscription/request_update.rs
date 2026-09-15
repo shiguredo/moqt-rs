@@ -1075,6 +1075,464 @@ fn send_subgroup_object_to_terminated_subscription_rejected() {
     );
 }
 
+/// Established publisher の SUBSCRIBE を確立し、FirstObjectId モードの open outgoing subgroup
+/// stream を group ごとに 1 本開く
+///
+/// 返り値は (subscriber, publisher, request_id, stream_ids)。REQUEST_UPDATE は未送信で、
+/// 保留 PUBLISH_DONE もまだ発生していない。object は送らないため、delivery timeout を
+/// 検証する場合は呼び出し元が `tick` してから object を送る。
+fn establish_publisher_with_open_subgroups(
+    group_ids: &[u64],
+    params: MessageParameters,
+) -> (Session, Session, u64, Vec<DataStreamId>) {
+    let (client, mut server, rid) = establish_subscribe_track_with_params(1, params);
+
+    // FirstObjectId モードで outgoing subgroup stream を開く。
+    // stream id は本ファイル専用の帯 (170 番台) を使い、request stream と衝突させない
+    let stream_ids: Vec<DataStreamId> = group_ids
+        .iter()
+        .enumerate()
+        .map(|(index, group_id)| {
+            let stream_id = DataStreamId(170 + index as u64);
+            let header = SubgroupHeader {
+                track_alias: 1,
+                group_id: *group_id,
+                subgroup_id: SubgroupIdMode::FirstObjectId,
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            };
+            server
+                .send_subgroup_header(stream_id, rid, &header)
+                .expect("テストフィクスチャの前提条件を満たす");
+            stream_id
+        })
+        .collect();
+
+    (client, server, rid, stream_ids)
+}
+
+/// キューに積まれたイベントを全て取り出す
+fn drain_events(session: &mut Session) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    while let Some(ev) = session.poll_event() {
+        events.push(ev);
+    }
+    events
+}
+
+/// イベント列に含まれる PUBLISH_DONE の送信イベント数を数える
+fn count_publish_done(events: &[SessionEvent]) -> usize {
+    events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                ev,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::PublishDone(_),
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// イベント列に PUBLISH_DONE の送信イベントが含まれるか
+fn has_publish_done(events: &[SessionEvent]) -> bool {
+    count_publish_done(events) > 0
+}
+
+/// REQUEST_UPDATE を送り、REQUEST_ERROR (失敗応答) で subscription を Terminated にして
+/// PUBLISH_DONE を保留させる
+///
+/// open 中の outgoing stream が残っているため PUBLISH_DONE は送出されず (§9.9 の MUST NOT)、
+/// `pending_publish_done` に記録されることを確認する。
+fn fail_request_update(client: &mut Session, server: &mut Session, rid: u64) {
+    use shiguredo_moqt::message::ReasonPhrase;
+    // client → REQUEST_UPDATE → server が REQUEST_ERROR (失敗応答) → Terminated + 保留
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_error(
+            rid,
+            0x42,
+            0,
+            ReasonPhrase::new("update failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let events = drain_events(server);
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(_),
+                ..
+            }
+        )),
+        "REQUEST_ERROR が送信されていること: {events:?}"
+    );
+    assert!(
+        !has_publish_done(&events),
+        "open stream がある間は PUBLISH_DONE が保留されること (§9.9 の MUST NOT): {events:?}"
+    );
+    assert!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done
+            .is_some(),
+        "保留情報が記録されること"
+    );
+}
+
+/// Established publisher の SUBSCRIBE を確立し、指定 group の open outgoing subgroup stream を
+/// 開いたうえで REQUEST_UPDATE 失敗応答により PUBLISH_DONE を保留させる
+///
+/// 返り値は (publisher, request_id, stream_ids)。REQUEST_ERROR は消費済みで、PUBLISH_DONE は
+/// `pending_publish_done` に保留されたままになっている。
+fn establish_publisher_with_pending_publish_done(
+    group_ids: &[u64],
+) -> (Session, u64, Vec<DataStreamId>) {
+    let (mut client, mut server, rid, stream_ids) =
+        establish_publisher_with_open_subgroups(group_ids, MessageParameters::new());
+    fail_request_update(&mut client, &mut server, rid);
+    (server, rid, stream_ids)
+}
+
+/// `send_data_stream_closed(Reset)` で最後の outgoing stream を閉じると、保留 PUBLISH_DONE が
+/// 1 回だけ自動送信される
+///
+/// draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE is
+/// unsuccessful, the publisher MUST also terminate the subscription by sending a PUBLISH_DONE
+/// with error code UPDATE_FAILED." I/O 層が先に stream を reset して通知する経路でも MUST を果たす。
+#[test]
+fn pending_publish_done_flushed_on_data_stream_closed_reset() {
+    let (mut server, rid, stream_ids) = establish_publisher_with_pending_publish_done(&[0]);
+    let stream_id = stream_ids[0];
+
+    let error_code = DataStreamResetReason::Cancelled.error_code();
+    server
+        .send_data_stream_closed(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code,
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let events = drain_events(&mut server);
+    let done_count = count_publish_done(&events);
+    assert_eq!(
+        done_count, 1,
+        "Reset で最後の outgoing stream を閉じた後に PUBLISH_DONE が 1 回だけ送信されること"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(SessionEvent::SendOnStream {
+                message: ControlMessage::PublishDone(done),
+                fin: true,
+                ..
+            }) if done.status_code == shiguredo_moqt::error::PUBLISH_DONE_UPDATE_FAILED
+        ),
+        "最後のイベントが PUBLISH_DONE(UPDATE_FAILED, fin 付き) であること"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done,
+        None,
+        "送信後に保留情報が残らないこと"
+    );
+}
+
+/// open 中の outgoing stream が残っている間は `send_data_stream_closed(Reset)` でも
+/// PUBLISH_DONE を送らず、最後の 1 本を閉じたときに 1 回だけ送る
+///
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A sender MUST NOT send PUBLISH_DONE
+/// until it has closed all streams it will ever open, and has no further datagrams to send,
+/// for a subscription."
+#[test]
+fn pending_publish_done_flushed_once_after_last_stream_reset() {
+    let (mut server, rid, stream_ids) = establish_publisher_with_pending_publish_done(&[0, 1]);
+    assert_eq!(stream_ids.len(), 2);
+    let error_code = DataStreamResetReason::Cancelled.error_code();
+
+    // 1 本目を閉じても、まだ open が残るため PUBLISH_DONE は送られない
+    server
+        .send_data_stream_closed(
+            stream_ids[0],
+            RequestStreamEnd::Reset {
+                error_code,
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let events = drain_events(&mut server);
+    assert!(
+        !has_publish_done(&events),
+        "open 中の stream が残っている間は PUBLISH_DONE を送らないこと (§9.9 の MUST NOT): {events:?}"
+    );
+    assert!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done
+            .is_some(),
+        "open 中の stream が残っている間は保留情報が残ること"
+    );
+
+    // 最後の 1 本を閉じると 1 回だけ送られる
+    server
+        .send_data_stream_closed(
+            stream_ids[1],
+            RequestStreamEnd::Reset {
+                error_code,
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let done_count = count_publish_done(&drain_events(&mut server));
+    assert_eq!(done_count, 1, "全 stream 終端後に 1 回だけ送られること");
+}
+
+/// `reset_outgoing_data_stream` / `reset_outgoing_data_stream_at` 経由では、保留
+/// PUBLISH_DONE がある場合もイベント順が `ResetDataStream` → PUBLISH_DONE のままである
+///
+/// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の MUST NOT により、RESET_STREAM を
+/// 送る前に PUBLISH_DONE を送ってはならない。`reset_outgoing_data_stream_at` は
+/// `reliable_size` 付きの RESET_STREAM_AT を指定する経路で、イベントにもそれが乗る。
+///
+/// 本テストは修正前から通る回帰ガードであり、`reset_outgoing_data_stream_at_with_code` が
+/// `ResetDataStream` を push してから flush する順序を固定する。
+#[test]
+fn reset_outgoing_data_stream_keeps_reset_before_publish_done() {
+    let (mut server, rid, stream_ids) = establish_publisher_with_pending_publish_done(&[0, 1]);
+
+    // reliable_size 付きの `_at` 経路。まだ 1 本残るため PUBLISH_DONE は保留のまま
+    server
+        .reset_outgoing_data_stream_at(stream_ids[0], DataStreamResetReason::Cancelled, Some(0))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let events = drain_events(&mut server);
+    assert_eq!(
+        events.iter().find_map(|ev| match ev {
+            SessionEvent::ResetDataStream {
+                stream_id,
+                reliable_size,
+                ..
+            } => Some((*stream_id, *reliable_size)),
+            _ => None,
+        }),
+        Some((stream_ids[0], Some(0))),
+        "`_at` の reliable_size がイベントにそのまま乗ること: {events:?}"
+    );
+    assert!(
+        !has_publish_done(&events),
+        "open 中の stream が残っている間は PUBLISH_DONE を送らないこと: {events:?}"
+    );
+
+    // 最後の 1 本を通常の reset で閉じると、ResetDataStream → PUBLISH_DONE の順で発行される
+    server
+        .reset_outgoing_data_stream(stream_ids[1], DataStreamResetReason::Cancelled)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let events = drain_events(&mut server);
+    assert_eq!(
+        events.iter().find_map(|ev| match ev {
+            SessionEvent::ResetDataStream {
+                stream_id,
+                reliable_size,
+                ..
+            } => Some((*stream_id, *reliable_size)),
+            _ => None,
+        }),
+        Some((stream_ids[1], None)),
+        "通常の reset は reliable_size なしでイベントに乗ること: {events:?}"
+    );
+    let reset_index = events
+        .iter()
+        .position(|ev| matches!(ev, SessionEvent::ResetDataStream { .. }))
+        .expect("ResetDataStream が発行されること");
+    let done_index = events
+        .iter()
+        .position(|ev| {
+            matches!(
+                ev,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::PublishDone(_),
+                    ..
+                }
+            )
+        })
+        .expect("PUBLISH_DONE が発行されること");
+    assert!(
+        reset_index < done_index,
+        "イベント順が ResetDataStream → PUBLISH_DONE であること: {events:?}"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done,
+        None,
+        "送信後に保留情報が残らないこと"
+    );
+}
+
+/// delivery timeout の tick 経路でも、I/O 層が `send_data_stream_closed(Reset)` を呼んだ
+/// 時点で flush 条件を満たせば PUBLISH_DONE が 1 回だけ送られる
+///
+/// draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability) の DELIVERY_TIMEOUT で
+/// Session が `ResetDataStream` を発行した後、I/O 層がワイヤ RESET_STREAM を送って
+/// `send_data_stream_closed(Reset)` を呼ぶ契約である (§9.5.1 の MUST を果たす)。
+#[test]
+fn pending_publish_done_flushed_after_delivery_timeout_reset() {
+    // OBJECT_DELIVERY_TIMEOUT を 10ms にして確実に timeout させる
+    let (mut client, mut server, rid, stream_ids) =
+        establish_publisher_with_open_subgroups(&[0], delivery_timeout_params(10));
+    let stream_id = stream_ids[0];
+
+    // object 提供完了時刻の追跡開始点を作ってから object を送る
+    client.tick(1_000);
+    server.tick(1_000);
+    server
+        .send_subgroup_object(stream_id, 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // REQUEST_UPDATE 失敗応答で PUBLISH_DONE を保留させる
+    fail_request_update(&mut client, &mut server, rid);
+
+    // delivery timeout を発火させ、Session が ResetDataStream を発行する
+    server.tick(1_100); // 経過 100ms >= timeout 10ms
+    let events = drain_events(&mut server);
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, SessionEvent::ResetDataStream { .. })),
+        "delivery timeout で ResetDataStream が発行されること: {events:?}"
+    );
+    assert!(
+        !has_publish_done(&events),
+        "tick の時点では stream が session 追跡に残るため PUBLISH_DONE を送らないこと: {events:?}"
+    );
+
+    // I/O 層がワイヤ RESET_STREAM を送った後に通知すると、PUBLISH_DONE が 1 回だけ送られる
+    server
+        .send_data_stream_closed(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code: DataStreamResetReason::DeliveryTimeout.error_code(),
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let done_count = count_publish_done(&drain_events(&mut server));
+    assert_eq!(
+        done_count, 1,
+        "tick 経路でも I/O 層の終端通知後に PUBLISH_DONE が 1 回だけ送られること"
+    );
+}
+
+/// REQUEST_UPDATE 失敗応答で subscription が Terminated になるとき、open 中の fill fetch
+/// stream は同時に reset されるため、fill stream が保留 PUBLISH_DONE の flush を妨げない
+///
+/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
+/// subscription is cancelled, the publisher MUST reset any open fill fetch streams." この reset が
+/// Terminated への遷移と同じ箇所 (`send_err_for_subscription`) で先に行われるため、
+/// `send_request_error` の保留判定 (`has_open_outgoing_data_streams_for_request`) に fill fetch
+/// stream は残らない。よって保留中に open であり続ける stream は subgroup stream だけになり、
+/// fill 側の終端通知 (`send_fetch_data_stream_closed`) に flush を足す必要はない。
+///
+/// 本テストは修正前から通る回帰ガードであり、`src/session/data.rs` の
+/// `maybe_flush_pending_publish_done` の doc が依拠する前提 (Terminated 遷移時に fill fetch
+/// stream が先に除去される) を固定する。不具合修正そのものを固定するのは
+/// `pending_publish_done_flushed_on_data_stream_closed_reset` など subgroup 経路のテストである。
+#[test]
+fn request_error_resets_open_fill_streams_before_publish_done() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    // subgroup stream は開かず、fill fetch stream だけを open にする。
+    // stream id は本ファイル専用の帯 (190 番台) を使い、subgroup 用の 170 番台と衝突させない
+    let fill_stream_id = DataStreamId(190);
+    server
+        .send_fill_fetch_header(fill_stream_id, rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(rid),
+        1,
+        "fill fetch stream が open として計上されること"
+    );
+
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_error(
+            rid,
+            0x42,
+            0,
+            ReasonPhrase::new("update failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let events = drain_events(&mut server);
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(rid),
+        0,
+        "Terminated への遷移と同時に fill fetch stream が open 集合から除去されること"
+    );
+    // fill の reset が PUBLISH_DONE より先に発行される (§9.9 の MUST NOT を満たす)
+    let reset_index = events
+        .iter()
+        .position(|ev| {
+            matches!(
+                ev,
+                SessionEvent::ResetDataStream { stream_id, .. } if *stream_id == fill_stream_id
+            )
+        })
+        .expect("fill fetch stream の ResetDataStream が発行されること");
+    let done_index = events
+        .iter()
+        .position(|ev| {
+            matches!(
+                ev,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::PublishDone(_),
+                    ..
+                }
+            )
+        })
+        .expect("PUBLISH_DONE が発行されること");
+    assert!(
+        reset_index < done_index,
+        "イベント順が ResetDataStream → PUBLISH_DONE であること: {events:?}"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done,
+        None,
+        "fill stream は保留の妨げにならず、保留されずに送信されること"
+    );
+}
+
 /// アプリが stream を閉じないまま `forget_subscription` を呼んだ場合、保留中の
 /// PUBLISH_DONE が push されずに破棄されること
 ///

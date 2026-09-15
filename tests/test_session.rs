@@ -233,9 +233,19 @@ fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
 }
 
 fn establish_subscribe_track(alias: u64) -> (Session, Session, u64) {
+    establish_subscribe_track_with_params(alias, MessageParameters::new())
+}
+
+/// SUBSCRIBE / SUBSCRIBE_OK までを確立し、subscriber・publisher・request_id を返す
+///
+/// SUBSCRIBE に載せるパラメータを指定したいテスト (delivery timeout 等) は本関数を使う。
+fn establish_subscribe_track_with_params(
+    alias: u64,
+    params: MessageParameters,
+) -> (Session, Session, u64) {
     let (mut client, mut server) = establish_pair();
     let rid = client
-        .send_subscribe(ns(&[b"live"]), b"cam1".to_vec(), MessageParameters::new())
+        .send_subscribe(ns(&[b"live"]), b"cam1".to_vec(), params)
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, sub_msg) = take_send_request(&mut client);
     server
