@@ -37,8 +37,8 @@ pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
 ///
-/// SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / REQUEST_OK (PUBLISH_OK) / REQUEST_UPDATE 受信経路
-/// (`handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_subscribe_tracks` /
+/// SUBSCRIBE / PUBLISH / REQUEST_OK (PUBLISH_OK) / REQUEST_UPDATE 受信経路
+/// (`handle_peer_subscribe` / `handle_peer_publish` /
 /// `handle_ok_for_subscription` / `handle_update_for_subscription`) では、値域外の受信は
 /// draft §9.20.19 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
 /// PROTOCOL_VIOLATION により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
@@ -58,7 +58,7 @@ pub fn validate_forward(value: u8) -> Result<u8, SessionError> {
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
 ///
-/// SUBSCRIBE / FETCH / TRACK_STATUS / SUBSCRIBE_TRACKS 受信経路では、値域外の受信は
+/// SUBSCRIBE / FETCH / TRACK_STATUS 受信経路では、値域外の受信は
 /// draft §9.20.22 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
 /// PROTOCOL_VIOLATION により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
 pub fn validate_include_properties(value: u8) -> Result<(), SessionError> {
@@ -76,7 +76,7 @@ pub fn validate_include_properties(value: u8) -> Result<(), SessionError> {
 /// 省略時・ 1 → 1 (送る)、0 → 0 (送らない)、それ以外は 1 (default)。
 /// 本関数は送信 API (`send_subscribe` / `send_publish`) 専用であり、送信経路では前段で
 /// `validate_forward` が実行済みのためフォールバックは実質発火しない。受信経路は
-/// `handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_subscribe_tracks` が
+/// `handle_peer_subscribe` / `handle_peer_publish` が
 /// 値域検証込みで直接解釈する (本関数は使わない)。
 pub fn extract_forward_state(parameters: &MessageParameters) -> u8 {
     match parameters.forward() {
@@ -300,21 +300,4 @@ pub fn header_passes_filters(
                 .all(|set| set.contains(u64::from(publisher_priority)));
             subgroup_ok && priority_ok
         })
-}
-
-/// 2 つの Track Namespace が prefix overlap するか判定する
-///
-/// draft-ietf-moq-transport-21 §9.15 (SUBSCRIBE_NAMESPACE) / §9.18 (SUBSCRIBE_TRACKS) の
-/// "shares a common prefix" 判定に対応する。一方が他方の prefix (または完全一致) に
-/// なっていれば overlap とみなす。空 prefix (0 フィールド) は common prefix が空のため
-/// 任意の namespace と overlap する。
-#[cfg(test)]
-pub(crate) fn prefix_overlaps(
-    a: &crate::message::common::TrackNamespace,
-    b: &crate::message::common::TrackNamespace,
-) -> bool {
-    let aa = a.fields();
-    let bb = b.fields();
-    let min = aa.len().min(bb.len());
-    aa[..min] == bb[..min]
 }
