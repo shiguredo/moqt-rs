@@ -1,7 +1,7 @@
 # シンボリックリンク用の prek フックを削除する
 
 - Created: 2026-09-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-20
 - Branch: feature/remove-symlink-hooks
 - Polished: {YYYY-MM-DD}
 
@@ -30,3 +30,9 @@ CI の prek ジョブが常に失敗する状態を解消する。現在は `che
 - `prek.toml` から `check-symlinks` と `destroyed-symlinks` が削除されていること
 - `prek run --all-files` が成功すること
 - CI の prek ジョブが成功すること
+
+## 解決方法
+
+- `prek.toml` の builtin フック一覧から `check-symlinks` と `destroyed-symlinks` を削除した
+- シンボリックリンクをリポジトリで使わないため、フックを残して `check-hooks-apply` の検出力を落とす判断は取らない
+- `prek run --all-files` が成功することを確認した (`Check hooks apply` が Passed になる)
