@@ -1,0 +1,1624 @@
+
+
+
+
+Media Over QUIC                                                L. Pardue
+Internet-Draft                                                Cloudflare
+Intended status: Informational                              M. Engelbart
+Expires: 21 March 2027                    Technical University of Munich
+                                                               A. Sharma
+                                                                    Meta
+                                                       17 September 2026
+
+
+                       MoQ qlog event definitions
+                  draft-pardue-moq-qlog-moq-events-08
+
+Abstract
+
+   This document defines a qlog event schema containing concrete events
+   for MoQ.
+
+About This Document
+
+   This note is to be removed before publishing as an RFC.
+
+   The latest revision of this draft can be found at
+   https://LPardue.github.io/draft-pardue-moq-qlog-moq-events/draft-
+   pardue-moq-qlog-moq-events.html.  Status information for this
+   document may be found at https://datatracker.ietf.org/doc/draft-
+   pardue-moq-qlog-moq-events/.
+
+   Discussion of this document takes place on the Media Over QUIC
+   mailing list (mailto:moq@ietf.org), which is archived at
+   https://mailarchive.ietf.org/arch/browse/moq/.  Subscribe at
+   https://www.ietf.org/mailman/listinfo/moq/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/LPardue/draft-pardue-moq-qlog-moq-events.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 1]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 21 March 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   4
+     1.1.  Usage with QUIC . . . . . . . . . . . . . . . . . . . . .   5
+   2.  Conventions and Definitions . . . . . . . . . . . . . . . . .   6
+   3.  Event Schema Definition . . . . . . . . . . . . . . . . . . .   6
+     3.1.  Draft Event Schema Identification . . . . . . . . . . . .   6
+   4.  MOQT Events . . . . . . . . . . . . . . . . . . . . . . . . .   7
+     4.1.  control_message_created . . . . . . . . . . . . . . . . .   7
+     4.2.  control_message_parsed  . . . . . . . . . . . . . . . . .   8
+     4.3.  stream_type_set . . . . . . . . . . . . . . . . . . . . .   8
+     4.4.  object_datagram_created . . . . . . . . . . . . . . . . .   9
+     4.5.  object_datagram_parsed  . . . . . . . . . . . . . . . . .   9
+     4.6.  padding_datagram_created  . . . . . . . . . . . . . . . .  10
+     4.7.  padding_datagram_parsed . . . . . . . . . . . . . . . . .  10
+     4.8.  subgroup_header_created . . . . . . . . . . . . . . . . .  11
+     4.9.  subgroup_header_parsed  . . . . . . . . . . . . . . . . .  11
+     4.10. subgroup_object_created . . . . . . . . . . . . . . . . .  12
+     4.11. subgroup_object_parsed  . . . . . . . . . . . . . . . . .  12
+     4.12. fetch_header_created  . . . . . . . . . . . . . . . . . .  13
+     4.13. fetch_header_parsed . . . . . . . . . . . . . . . . . . .  13
+     4.14. fetch_object_created  . . . . . . . . . . . . . . . . . .  13
+     4.15. fetch_object_parsed . . . . . . . . . . . . . . . . . . .  14
+   5.  MOQT Data Type Definitions  . . . . . . . . . . . . . . . . .  15
+     5.1.  Owner . . . . . . . . . . . . . . . . . . . . . . . . . .  15
+     5.2.  MOQTLocation  . . . . . . . . . . . . . . . . . . . . . .  15
+     5.3.  MOQTSubscriptionFilter  . . . . . . . . . . . . . . . . .  15
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 2]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+     5.4.  MOQTAliasType . . . . . . . . . . . . . . . . . . . . . .  15
+     5.5.  MOQTSetupOption . . . . . . . . . . . . . . . . . . . . .  15
+       5.5.1.  MOQTAuthoritySetupOption  . . . . . . . . . . . . . .  16
+       5.5.2.  MOQTPathSetupOption . . . . . . . . . . . . . . . . .  16
+       5.5.3.  MOQTMaxAuthTokenCacheSizeSetupOption  . . . . . . . .  16
+       5.5.4.  MOQTAuthorizationTokenSetupOption . . . . . . . . . .  16
+       5.5.5.  MOQTImplementationSetupOption . . . . . . . . . . . .  17
+       5.5.6.  MOQTUnknownSetupOption  . . . . . . . . . . . . . . .  17
+     5.6.  MOQTParameter . . . . . . . . . . . . . . . . . . . . . .  17
+       5.6.1.  MOQTAuthorizationTokenParameter . . . . . . . . . . .  18
+       5.6.2.  MOQTSubgroupDeliveryTimeoutParameter  . . . . . . . .  18
+       5.6.3.  MOQTObjectDeliveryTimeoutParameter  . . . . . . . . .  18
+       5.6.4.  MOQTFillTimeoutParameter  . . . . . . . . . . . . . .  19
+       5.6.5.  MOQTRendezvousTimeoutParameter  . . . . . . . . . . .  19
+       5.6.6.  MOQTSubscriberPriorityParameter . . . . . . . . . . .  19
+       5.6.7.  MOQTGroupOrderParameter . . . . . . . . . . . . . . .  19
+       5.6.8.  MOQTSubscriptionFilterParameter . . . . . . . . . . .  19
+       5.6.9.  MOQTExpiresParameter  . . . . . . . . . . . . . . . .  19
+       5.6.10. MOQTLargestObjectParameter  . . . . . . . . . . . . .  20
+       5.6.11. MOQTForwardParameter  . . . . . . . . . . . . . . . .  20
+       5.6.12. MOQTNewGroupRequestParameter  . . . . . . . . . . . .  20
+       5.6.13. MOQTTrackNamespacePrefixParameter . . . . . . . . . .  20
+       5.6.14. MOQTUnknownParameter  . . . . . . . . . . . . . . . .  20
+     5.7.  MOQTByteString  . . . . . . . . . . . . . . . . . . . . .  21
+     5.8.  MOQTControlMessage  . . . . . . . . . . . . . . . . . . .  21
+       5.8.1.  MOQTSetupMessage  . . . . . . . . . . . . . . . . . .  22
+       5.8.2.  MOQTGoaway  . . . . . . . . . . . . . . . . . . . . .  22
+       5.8.3.  MOQTRequestOk . . . . . . . . . . . . . . . . . . . .  22
+       5.8.4.  MOQTRequestError  . . . . . . . . . . . . . . . . . .  23
+       5.8.5.  MOQTSubscribe . . . . . . . . . . . . . . . . . . . .  23
+       5.8.6.  MOQTSubscribeOk . . . . . . . . . . . . . . . . . . .  23
+       5.8.7.  MOQTRequestUpdate . . . . . . . . . . . . . . . . . .  24
+       5.8.8.  MOQTPublish . . . . . . . . . . . . . . . . . . . . .  24
+       5.8.9.  MOQTPublishDone . . . . . . . . . . . . . . . . . . .  24
+       5.8.10. MOQTFetch . . . . . . . . . . . . . . . . . . . . . .  25
+       5.8.11. MOQTFetchOk . . . . . . . . . . . . . . . . . . . . .  25
+       5.8.12. MOQTTrackStatus . . . . . . . . . . . . . . . . . . .  25
+       5.8.13. MOQTPublishNamespace  . . . . . . . . . . . . . . . .  26
+       5.8.14. MOQTNamespace . . . . . . . . . . . . . . . . . . . .  26
+       5.8.15. MOQTNamespaceDone . . . . . . . . . . . . . . . . . .  26
+       5.8.16. MOQTSubscribeNamespace  . . . . . . . . . . . . . . .  26
+       5.8.17. MOQTSubscribeTracks . . . . . . . . . . . . . . . . .  27
+       5.8.18. MOQTPublishBlocked  . . . . . . . . . . . . . . . . .  27
+     5.9.  MOQTProperty  . . . . . . . . . . . . . . . . . . . . . .  27
+   6.  Security Considerations . . . . . . . . . . . . . . . . . . .  27
+   7.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  28
+   8.  Normative References  . . . . . . . . . . . . . . . . . . . .  28
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  29
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 3]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  29
+
+1.  Introduction
+
+   This document defines a qlog event schema (Section 8 of [QLOG-MAIN])
+   containing concrete events for Media over QUIC Transport [MOQT].
+
+   The event namespace with identifier moqt is defined; see Section 3.
+   In this namespace multiple events derive from the qlog abstract Event
+   class (Section 7 of [QLOG-MAIN]), each extending the "data" field and
+   defining their "name" field values and semantics.
+
+   Table 1 summarizes the name value of each event type that is defined
+   in this specification.  Some event data fields use complex data
+   types.  These are represented as enums or re-usable definitions,
+   which are grouped together on the bottom of this document for
+   clarity.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 4]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+       +===============================+============+==============+
+       | Name value                    | Importance | Definition   |
+       +===============================+============+==============+
+       | moqt:control_message_created  | Core       | Section 4.1  |
+       +-------------------------------+------------+--------------+
+       | moqt:control_message_parsed   | Core       | Section 4.2  |
+       +-------------------------------+------------+--------------+
+       | moqt:stream_type_set          | Core       | Section 4.3  |
+       +-------------------------------+------------+--------------+
+       | moqt:object_datagram_created  | Core       | Section 4.4  |
+       +-------------------------------+------------+--------------+
+       | moqt:object_datagram_parsed   | Core       | Section 4.5  |
+       +-------------------------------+------------+--------------+
+       | moqt:padding_datagram_created | Core       | Section 4.6  |
+       +-------------------------------+------------+--------------+
+       | moqt:padding_datagram_parsed  | Core       | Section 4.7  |
+       +-------------------------------+------------+--------------+
+       | moqt:subgroup_header_created  | Core       | Section 4.8  |
+       +-------------------------------+------------+--------------+
+       | moqt:subgroup_header_parsed   | Core       | Section 4.9  |
+       +-------------------------------+------------+--------------+
+       | moqt:subgroup_object_created  | Core       | Section 4.10 |
+       +-------------------------------+------------+--------------+
+       | moqt:subgroup_object_parsed   | Core       | Section 4.11 |
+       +-------------------------------+------------+--------------+
+       | moqt:fetch_header_created     | Core       | Section 4.12 |
+       +-------------------------------+------------+--------------+
+       | moqt:fetch_header_parsed      | Core       | Section 4.13 |
+       +-------------------------------+------------+--------------+
+       | moqt:fetch_object_created     | Core       | Section 4.14 |
+       +-------------------------------+------------+--------------+
+       | moqt:fetch_object_parsed      | Core       | Section 4.15 |
+       +-------------------------------+------------+--------------+
+
+                            Table 1: MOQT Events
+
+1.1.  Usage with QUIC
+
+   The events described in this document can be used with or without
+   logging the related QUIC events defined in [QLOG-QUIC].  If used with
+   QUIC events, the QUIC document takes precedence in terms of
+   recommended filenames and trace separation setups.
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 5]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   If used without QUIC events, it is recommended that the
+   implementation assign a globally unique identifier to each MOQT
+   session.  This ID can then be used as the value of the qlog
+   "group_id" field, as well as the qlog filename or file identifier,
+   potentially suffixed by the vantagepoint type (For example,
+   abcd1234_server.qlog would contain the server-side trace of the
+   connection with GUID abcd1234).
+
+2.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   The event and data structure definitions in ths document are
+   expressed in the Concise Data Definition Language [CDDL] and its
+   extensions described in [QLOG-MAIN].
+
+   The following fields from [QLOG-MAIN] are imported and used: name,
+   namespace, type, data, group_id, RawInfo, and time-related fields.
+
+   Events are defined with an importance level as described in
+   Section 8.3 of [QLOG-MAIN].
+
+   As is the case for [QLOG-MAIN], the qlog schema definitions in this
+   document are intentionally agnostic to serialization formats.  The
+   choice of format is an implementation decision.
+
+3.  Event Schema Definition
+
+   This document describes how the MOQT protocol is expressed in qlog
+   with an event schema.  Per the requirements in Section 8 of
+   [QLOG-MAIN], this document registers the moqt namespace.  The event
+   schema URI is urn:ietf:params:qlog:events:moqt.
+
+3.1.  Draft Event Schema Identification
+
+   This section is to be removed before publishing as an RFC.
+
+   Only implementations of the final, published RFC can use the events
+   belonging to the event schema with the URI
+   urn:ietf:params:qlog:events:moqt.  Until such an RFC exists,
+   implementations MUST NOT identify themselves using this URI.
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 6]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   Implementations of draft versions of the event schema MUST append the
+   string "-" and the corresponding draft number to the URI.  For
+   example, draft 99 of this document is identified using the URI
+   urn:ietf:params:qlog:events:moqt-99.
+
+   The namespace identifier itself is not affected by this requirement.
+
+4.  MOQT Events
+
+   MOQT events extend the $ProtocolEventData extension point defined in
+   [QLOG-MAIN].  Additionally, they allow for direct extensibility by
+   their use of per-event extension points via the $$ CDDL "group
+   socket" syntax, as also described in [QLOG-MAIN].
+
+   MOQTEventData = MOQTControlMessageCreated /
+                   MOQTControlMessageParsed /
+                   MOQTStreamTypeSet /
+                   MOQTObjectDatagramCreated /
+                   MOQTObjectDatagramParsed /
+                   MOQTPaddingDatagramCreated /
+                   MOQTPaddingDatagramParsed /
+                   MOQTSubgroupHeaderCreated /
+                   MOQTSubgroupHeaderParsed /
+                   MOQTSubgroupObjectCreated /
+                   MOQTSubgroupObjectParsed /
+                   MOQTFetchHeaderCreated /
+                   MOQTFetchHeaderParsed /
+                   MOQTFetchObjectCreated /
+                   MOQTFetchObjectParsed
+
+   $ProtocolEventData /= MOQTEventData
+
+     Figure 1: MOQTEventData definition and ProtocolEventData extension
+
+   MOQT events are logged when a certain condition happens at the
+   application layer, and there isn't always a one to one mapping
+   between HTTP and QUIC events.  The exchange of data between the HTTP
+   and QUIC layer is logged via the "stream_data_moved" and
+   "datagram_data_moved" events in [QLOG-QUIC].
+
+   The concrete MOQT event types are further defined below, their type
+   identifier is the heading name.
+
+4.1.  control_message_created
+
+   The control_message_created event is emitted when a control message
+   is created.  It has Core importance level.
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 7]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   The definition of control message content is in Section 5.8.
+
+   MOQTControlMessageCreated = {
+       stream_id: uint64
+       ? length: uint16
+       message: $MOQTControlMessage
+       ? raw: RawInfo
+
+       * $$moqt-controlmessagecreated-extension
+   }
+
+               Figure 2: MOQTControlMessageCreated definition
+
+4.2.  control_message_parsed
+
+   The control_message_parsed event is emitted when a control message is
+   parsed.  It has Core importance level.
+
+   The definition of control message content is in Section 5.8.
+
+   MOQTControlMessageParsed = {
+       stream_id: uint64
+       ? length: uint16
+       message: $MOQTControlMessage
+       ? raw: RawInfo
+
+       * $$moqt-controlmessageparsed-extension
+   }
+
+               Figure 3: MOQTControlMessageParsed definition
+
+4.3.  stream_type_set
+
+   The stream_type_set event conveys when a MOQT stream type becomes
+   known.  It has Base importance level.
+
+   MOQTStreamTypeSet = {
+       ? owner: Owner
+       stream_id: uint64
+       stream_type: $MOQTStreamType
+
+       * $$moqt-streamtypeset-extension
+   }
+
+   $MOQTStreamType /=  "control" /
+                       "subgroup_header" /
+                       "fetch_header" /
+                       "padding"
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 8]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+                   Figure 4: MOQTStreamTypeSet definition
+
+4.4.  object_datagram_created
+
+   The object_datagram_created event is emitted when the OBJECT_DATAGRAM
+   message is created.  It has Core importance level.
+
+   If the publisher_priority is absent, it means that the object
+   inherits the Publisher Priority specified in the control message that
+   established the subscription.
+
+   MOQTObjectDatagramCreated = {
+       track_alias: uint64
+       group_id: uint64
+       ? object_id: uint64
+       ? publisher_priority: uint8
+       ? properties_length: uint64
+       ? properties: [* MOQTProperty]
+       ? object_status: uint64
+       ? object_payload: RawInfo
+       end_of_group: bool
+
+       * $$moqt-objectdatagramcreated-extension
+   }
+
+               Figure 5: MOQTObjectDatagramCreated definition
+
+4.5.  object_datagram_parsed
+
+   The object_datagram_parsed event is emitted when the OBJECT_DATAGRAM
+   message is parsed.  It has Core importance level.
+
+   If the publisher_priority is absent, it means that the object
+   inherits the Publisher Priority specified in the control message that
+   established the subscription.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                 [Page 9]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTObjectDatagramParsed = {
+       track_alias: uint64
+       group_id: uint64
+       ? object_id: uint64
+       ? publisher_priority: uint8
+       ? properties_length: uint64
+       ? properties: [* MOQTProperty]
+       ? object_status: uint64
+       ? object_payload: RawInfo
+       end_of_group: bool
+
+       * $$moqt-objectdatagramparsed-extension
+   }
+
+               Figure 6: MOQTObjectDatagramParsed definition
+
+4.6.  padding_datagram_created
+
+   The padding_datagram_created event is emitted when a padding datagram
+   is created.  It has Core importance level.
+
+   Padding datagrams contain no application data.
+
+   MOQTPaddingDatagramCreated = {
+       padding_length: uint64
+
+       * $$moqt-paddingdatagramcreated-extension
+   }
+
+              Figure 7: MOQTPaddingDatagramCreated definition
+
+4.7.  padding_datagram_parsed
+
+   The padding_datagram_parsed event is emitted when a padding datagram
+   is parsed.  It has Core importance level.
+
+   Padding datagrams contain no application data.
+
+   MOQTPaddingDatagramParsed = {
+       padding_length: uint64
+
+       * $$moqt-paddingdatagramparsed-extension
+   }
+
+               Figure 8: MOQTPaddingDatagramParsed definition
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 10]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+4.8.  subgroup_header_created
+
+   The subgroup_header_created event is emitted when a stream begins and
+   a SUBGROUP_HEADER is created.  It has Core importance level; see
+   Section 9.2 of [QLOG-MAIN].
+
+   The SUBGROUP_HEADER object in MoQT uses 5 bits in the type value to
+   convey various properties.  The subgroup_header_created event conveys
+   these as explicit fields, such as contains_end_of_group.
+
+   If the publisher_priority is absent, it means that the subgroup
+   inherits the Publisher Priority specified in the control message that
+   established the subscription.
+
+   MOQTSubgroupHeaderCreated = {
+       stream_id: uint64
+       track_alias: uint64
+       group_id: uint64
+       subgroup_id_mode: uint8
+       ? subgroup_id: uint64
+       ? publisher_priority: uint8
+       contains_end_of_group: bool
+       properties_present: bool
+
+       * $$moqt-subgroupheadercreated-extension
+   }
+
+               Figure 9: MOQTSubgroupHeaderCreated definition
+
+4.9.  subgroup_header_parsed
+
+   The subgroup_header_parsed event is emitted when the SUBGROUP_HEADER
+   is parsed.  It has Core importance level.
+
+   The SUBGROUP_HEADER object in MoQT uses 5 bits in the type value to
+   convey various properties.  The subgroup_header_created event conveys
+   these as explicit fields, such as contains_end_of_group.
+
+   If the publisher_priority is absent, it means that the subgroup
+   inherits the Publisher Priority specified in the control message that
+   established the subscription.
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 11]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTSubgroupHeaderParsed = {
+       stream_id: uint64
+       track_alias: uint64
+       group_id: uint64
+       subgroup_id_mode: uint8
+       ? subgroup_id: uint64
+       ? publisher_priority: uint8
+       contains_end_of_group: bool
+       properties_present: bool
+
+       * $$moqt-subgroupheaderparsed-extension
+   }
+
+               Figure 10: MOQTSubgroupHeaderParsed definition
+
+4.10.  subgroup_object_created
+
+   The subgroup_object_created event is emitted when a subgroup object
+   is created.  It has Core importance level.
+
+   MOQTSubgroupObjectCreated = {
+       stream_id: uint64
+       object_id_delta: uint64
+       ? properties: [* MOQTProperty]
+       object_payload_length: uint64
+       ? object_status: uint64
+       ? object_payload: RawInfo
+
+       * $$moqt-subgroupobjectcreated-extension
+   }
+
+              Figure 11: MOQTSubgroupObjectCreated definition
+
+4.11.  subgroup_object_parsed
+
+   The subgroup_object_parsed event is emitted when a subgroup object is
+   parsed.  It has Core importance level.
+
+   MOQTSubgroupObjectParsed = {
+       stream_id: uint64
+       object_id_delta: uint64
+       ? properties: [* MOQTProperty]
+       object_payload_length: uint64
+       ? object_status: uint64
+       ? object_payload: RawInfo
+
+       * $$moqt-subgroupobjectparsed-extension
+   }
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 12]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+               Figure 12: MOQTSubgroupObjectParsed definition
+
+4.12.  fetch_header_created
+
+   The fetch_header_created event is emitted when a stream begins and a
+   FETCH_HEADER is created.  It has Core importance level.
+
+   MOQTFetchHeaderCreated = {
+       stream_id: uint64
+       request_id: uint64
+
+       * $$moqt-fetchheadercreated-extension
+   }
+
+                Figure 13: MOQTFetchHeaderCreated definition
+
+4.13.  fetch_header_parsed
+
+   The fetch_header_parsed event is emitted when the FETCH_HEADER is
+   parsed.  It has Core importance level.
+
+   MOQTFetchHeaderParsed = {
+       stream_id: uint64
+       request_id: uint64
+
+       * $$moqt-fetchheaderparsed-extension
+   }
+
+                Figure 14: MOQTFetchHeaderParsed definition
+
+4.14.  fetch_object_created
+
+   The fetch_object_created event is emitted when a fetch object is
+   created.  It has Core importance level.
+
+   The FETCH object in MoQT uses serialization flags to encode various
+   properties.  The event conveys these as explicit fields, such as
+   end_of_unknown_range.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 13]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTFetchObjectCreated = {
+       stream_id: uint64
+       datagram: bool
+       end_of_nonexistent_range: bool
+       end_of_unknown_range: bool
+       ? subgroup_id_bits: uint8
+       ? group_id_delta: uint64
+       ? subgroup_id: uint64
+       ? object_id_delta: uint64
+       ? publisher_priority: uint8
+       ? properties_length: uint64
+       ? properties: [* MOQTProperty]
+       object_payload_length: uint64
+       ? object_payload: RawInfo
+
+       * $$moqt-fetchobjectcreated-extension
+   }
+
+                Figure 15: MOQTFetchObjectCreated definition
+
+4.15.  fetch_object_parsed
+
+   The fetch_object_parsed event is emitted when a fetch object is
+   parsed.  It has Core importance level.
+
+   The FETCH object in MoQT uses serialization flags to encode various
+   properties.  The event conveys these as explicit fields, such as
+   end_of_unknown_range.
+
+   MOQTFetchObjectParsed = {
+       stream_id: uint64
+       datagram: bool
+       end_of_nonexistent_range: bool
+       end_of_unknown_range: bool
+       ? subgroup_id_bits: uint8
+       ? group_id_delta: uint64
+       ? subgroup_id: uint64
+       ? object_id_delta: uint64
+       ? publisher_priority: uint8
+       ? properties_length: uint64
+       ? properties: [* MOQTProperty]
+       object_payload_length: uint64
+       ? object_payload: RawInfo
+
+       * $$moqt-fetchobjectparsed-extension
+   }
+
+                Figure 16: MOQTFetchObjectParsed definition
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 14]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+5.  MOQT Data Type Definitions
+
+   The following data type definitions can be used in MOQT events.
+
+5.1.  Owner
+
+   Owner = "local" /
+           "remote"
+
+                        Figure 17: Owner definition
+
+5.2.  MOQTLocation
+
+   A Location, as defined in Section 1.4.2 of [MOQT]
+
+   MOQTLocation = {
+     group: uint64
+     object: uint64
+   }
+
+                     Figure 18: MOQTLocation definition
+
+5.3.  MOQTSubscriptionFilter
+
+   A Subscription Filter, as defined in Section 5.1.2 of [MOQT]
+
+   MOQTSubscriptionFilter = {
+     filter_type: uint64
+     ? start_location: MOQTLocation
+     ? end_group_delta: uint64
+   }
+
+                Figure 19: MOQTSubscriptionFilter definition
+
+5.4.  MOQTAliasType
+
+   $MOQTAliasType /=  "delete" /
+                      "register" /
+                      "use_alias" /
+                      "use_value"
+
+                    Figure 20: MOQTAliasType definition
+
+5.5.  MOQTSetupOption
+
+   The generic $MOQTSetupOption is defined here as a CDDL "type socket"
+   extension point.  It can be extended to support additional MOQT Setup
+   Options.
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 15]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   ; The MOQTSetupOption is any key-value map (e.g., JSON object)
+   $MOQTSetupOption /= {
+       * text => any
+   }
+
+             Figure 21: MOQTSetupOption type socket definition
+
+   MOQTBaseSetupOptions /=  MOQTAuthoritySetupOption /
+                            MOQTPathSetupOption /
+                            MOQTMaxAuthTokenCacheSizeSetupOption /
+                            MOQTAuthorizationTokenSetupOption /
+                            MOQTImplementationSetupOption /
+                            MOQTUnknownSetupOption
+
+   $MOQTSetupOption /= MOQTBaseSetupOptions
+
+                 Figure 22: MOQTBaseSetupOptions definition
+
+5.5.1.  MOQTAuthoritySetupOption
+
+   MOQTAuthoritySetupOption = {
+     name: "authority"
+     value: text
+   }
+
+               Figure 23: MOQTAuthoritySetupOption definition
+
+5.5.2.  MOQTPathSetupOption
+
+   MOQTPathSetupOption = {
+     name: "path"
+     value: text
+   }
+
+                 Figure 24: MOQTPathSetupOption definition
+
+5.5.3.  MOQTMaxAuthTokenCacheSizeSetupOption
+
+   MOQTMaxAuthTokenCacheSizeSetupOption = {
+     name: "max_auth_token_cache_size"
+     value: uint64
+   }
+
+         Figure 25: MOQTMaxAuthTokenCacheSizeSetupOption definition
+
+5.5.4.  MOQTAuthorizationTokenSetupOption
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 16]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTAuthorizationTokenSetupOption = {
+     name: "authorization_token"
+     alias_type: $MOQTAliasType
+     ? token_alias: uint64
+     ? token_type: uint64
+     ? token_value: RawInfo
+   }
+
+          Figure 26: MOQTAuthorizationTokenSetupOption definition
+
+5.5.5.  MOQTImplementationSetupOption
+
+   MOQTImplementationSetupOption = {
+     name: "implementation"
+     value: text
+   }
+
+            Figure 27: MOQTImplementationSetupOption definition
+
+5.5.6.  MOQTUnknownSetupOption
+
+   MOQTUnknownSetupOption = {
+     name:"unknown"
+     name_bytes: uint64
+     ? length: uint64
+     ? value: uint64
+     ? value_bytes: RawInfo
+   }
+
+                Figure 28: MOQTUnknownSetupOption definition
+
+5.6.  MOQTParameter
+
+   The generic $MOQTParameter is defined here as a CDDL "type socket"
+   extension point.  It can be extended to support additional MOQT
+   Parameters.
+
+   ; The MOQTParameter is any key-value map (e.g., JSON object)
+   $MOQTParameter /= {
+       * text => any
+   }
+
+              Figure 29: MOQTParameter type socket definition
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 17]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTBaseParameters /= MOQTAuthorizationTokenParameter /
+                         MOQTSubgroupDeliveryTimeoutParameter /
+                         MOQTObjectDeliveryTimeoutParameter /
+                         MOQTFillTimeoutParameter /
+                         MOQTRendezvousTimeoutParameter /
+                         MOQTSubscriberPriorityParameter /
+                         MOQTGroupOrderParameter /
+                         MOQTSubscriptionFilterParameter /
+                         MOQTExpiresParameter /
+                         MOQTLargestObjectParameter /
+                         MOQTForwardParameter /
+                         MOQTNewGroupRequestParameter /
+                         MOQTTrackNamespacePrefixParameter /
+                         MOQTUnknownParameter
+
+   $MOQTParameter /= MOQTBaseParameters
+
+                  Figure 30: MOQTBaseParameters definition
+
+5.6.1.  MOQTAuthorizationTokenParameter
+
+   MOQTAuthorizationTokenParameter = {
+     name: "authorization_token"
+     alias_type: $MOQTAliasType
+     ? token_alias: uint64
+     ? token_type: uint64
+     ? token_value: RawInfo
+   }
+
+           Figure 31: MOQTAuthorizationTokenParameter definition
+
+5.6.2.  MOQTSubgroupDeliveryTimeoutParameter
+
+   MOQTSubgroupDeliveryTimeoutParameter = {
+     name: "subgroup_delivery_timeout"
+     value: uint64
+   }
+
+         Figure 32: MOQTSubgroupDeliveryTimeoutParameter definition
+
+5.6.3.  MOQTObjectDeliveryTimeoutParameter
+
+   MOQTObjectDeliveryTimeoutParameter = {
+     name: "object_delivery_timeout"
+     value: uint64
+   }
+
+          Figure 33: MOQTObjectDeliveryTimeoutParameter definition
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 18]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+5.6.4.  MOQTFillTimeoutParameter
+
+   MOQTFillTimeoutParameter = {
+     name: "fill_timeout"
+     value: uint64
+   }
+
+               Figure 34: MOQTFillTimeoutParameter definition
+
+5.6.5.  MOQTRendezvousTimeoutParameter
+
+   MOQTRendezvousTimeoutParameter = {
+     name: "rendezvous_timeout"
+     value: uint64
+   }
+
+            Figure 35: MOQTRendezvousTimeoutParameter definition
+
+5.6.6.  MOQTSubscriberPriorityParameter
+
+   MOQTSubscriberPriorityParameter = {
+     name: "subscriber_priority"
+     value: uint64
+   }
+
+           Figure 36: MOQTSubscriberPriorityParameter definition
+
+5.6.7.  MOQTGroupOrderParameter
+
+   MOQTGroupOrderParameter = {
+     name: "group_order"
+     value: uint64
+   }
+
+               Figure 37: MOQTGroupOrderParameter definition
+
+5.6.8.  MOQTSubscriptionFilterParameter
+
+   MOQTSubscriptionFilterParameter = {
+     name: "subscription_filter"
+     value: MOQTSubscriptionFilter
+   }
+
+           Figure 38: MOQTSubscriptionFilterParameter definition
+
+5.6.9.  MOQTExpiresParameter
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 19]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTExpiresParameter = {
+     name: "expires"
+     value: uint64
+   }
+
+                 Figure 39: MOQTExpiresParameter definition
+
+5.6.10.  MOQTLargestObjectParameter
+
+   MOQTLargestObjectParameter = {
+     name: "largest_object"
+     value: MOQTLocation
+   }
+
+              Figure 40: MOQTLargestObjectParameter definition
+
+5.6.11.  MOQTForwardParameter
+
+   MOQTForwardParameter = {
+     name: "forward"
+     value: uint64
+   }
+
+                 Figure 41: MOQTForwardParameter definition
+
+5.6.12.  MOQTNewGroupRequestParameter
+
+   MOQTNewGroupRequestParameter = {
+     name: "new_group_request"
+     value: uint64
+   }
+
+             Figure 42: MOQTNewGroupRequestParameter definition
+
+5.6.13.  MOQTTrackNamespacePrefixParameter
+
+   MOQTTrackNamespacePrefixParameter = {
+     name: "track_namespace_prefix"
+     value: [ *MOQTByteString]
+   }
+
+          Figure 43: MOQTTrackNamespacePrefixParameter definition
+
+5.6.14.  MOQTUnknownParameter
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 20]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTUnknownParameter = {
+     name:"unknown"
+     name_bytes: uint64
+     ? length: uint64
+     ? value: uint64
+     ? value_bytes: RawInfo
+   }
+
+                 Figure 44: MOQTUnknownParameter definition
+
+5.7.  MOQTByteString
+
+   The MOQTByteString type allows representing MOQT bytestrings, such as
+   the value of a Track or Track Namespace tuple field, using two
+   different encodings.  The value field can be used for bytestrings
+   that can be encoded in UTF-8.  The value_bytes field can be used for
+   bytestrings of any type by using the hexstring encoding.
+
+   Implementations SHOULD populate one of either the value or
+   value_bytes field.  Populating both fields is redundant.
+
+   MOQTByteString = {
+     ? value: text
+     ? value_bytes: hexstring
+   }
+
+                    Figure 45: MOQTByteString definition
+
+5.8.  MOQTControlMessage
+
+   The generic $MOQTControlMessage is defined here as a CDDL "type
+   socket" extension point.  It can be extended to support additional
+   MOQT control message types.
+
+   ; The MOQTControlMessage is any key-value map (e.g., JSON object)
+   $MOQTControlMessage /= {
+       * text => any
+   }
+
+            Figure 46: MOQTControlMessage type socket definition
+
+   The MOQT control message types defined in this document are as
+   follows:
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 21]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTBaseControlMessages = MOQTSetupMessage /
+                             MOQTGoaway /
+                             MOQTRequestOk /
+                             MOQTRequestError /
+                             MOQTSubscribe /
+                             MOQTSubscribeOk /
+                             MOQTRequestUpdate /
+                             MOQTPublish /
+                             MOQTPublishDone /
+                             MOQTFetch /
+                             MOQTFetchOk /
+                             MOQTTrackStatus /
+                             MOQTPublishNamespace /
+                             MOQTNamespace /
+                             MOQTNamespaceDone /
+                             MOQTSubscribeNamespace /
+                             MOQTSubscribeTracks /
+                             MOQTPublishBlocked
+
+   $MOQTControlMessage /= MOQTBaseControlMessages
+
+               Figure 47: MOQTBaseControlMessages definition
+
+5.8.1.  MOQTSetupMessage
+
+   MOQTSetupMessage = {
+     type: "setup"
+     ? setup_options: [* $MOQTSetupOption]
+   }
+
+                   Figure 48: MOQTSetupMessage definition
+
+5.8.2.  MOQTGoaway
+
+   MOQTGoaway = {
+     type: "goaway"
+     new_session_uri: RawInfo
+     timeout: uint64
+     ? request_id : uint64
+   }
+
+                      Figure 49: MOQTGoaway definition
+
+5.8.3.  MOQTRequestOk
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 22]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTRequestOk = {
+     type: "request_ok"
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+     ? track_properties: [* MOQTProperty]
+   }
+
+                    Figure 50: MOQTRequestOk definition
+
+5.8.4.  MOQTRequestError
+
+   MOQTRequestError = {
+     type: "request_error"
+     error_code: uint64
+     retry_interval: uint64
+     ? reason_phrase: text
+     ? redirect: $MOQTRedirect
+   }
+
+   MOQTRedirect = {
+     connect_uri: RawInfo
+     track_namespace: [ *MOQTByteString]
+     track_name: MOQTByteString
+   }
+
+                   Figure 51: MOQTRequestError definition
+
+5.8.5.  MOQTSubscribe
+
+   MOQTSubscribe = {
+     type: "subscribe"
+     request_id: uint64
+     track_namespace: [ *MOQTByteString]
+     track_name: MOQTByteString
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                    Figure 52: MOQTSubscribe definition
+
+5.8.6.  MOQTSubscribeOk
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 23]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTSubscribeOk = {
+     type: "subscribe_ok"
+     track_alias: uint64
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+     ? track_properties: [* MOQTProperty]
+   }
+
+                   Figure 53: MOQTSubscribeOk definition
+
+5.8.7.  MOQTRequestUpdate
+
+   MOQTRequestUpdate = {
+     type: "request_update"
+     request_id: uint64
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                  Figure 54: MOQTRequestUpdate definition
+
+5.8.8.  MOQTPublish
+
+   MOQTPublish = {
+     type: "publish"
+     request_id: uint64
+     track_namespace: [ *MOQTByteString]
+     track_name: MOQTByteString
+     track_alias: uint64
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+     ? track_properties: [* MOQTProperty]
+   }
+
+                     Figure 55: MOQTPublish definition
+
+5.8.9.  MOQTPublishDone
+
+   MOQTPublishDone = {
+     type: "publish_done"
+     status_code: uint64
+     stream_count: uint64
+     ? reason_phrase: text
+   }
+
+                   Figure 56: MOQTPublishDone definition
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 24]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+5.8.10.  MOQTFetch
+
+   MOQTFetch = {
+     type: "fetch"
+     request_id: uint64
+     fetch_type: $MOQTFetchType
+     ? standalone_fetch: $MOQTStandaloneFetch
+     ? joining_fetch: $MOQTJoiningFetch
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+   $MOQTStandaloneFetch = {
+     track_namespace: [ *MOQTByteString]
+     track_name: MOQTByteString
+     start_location: MOQTLocation
+     end_location: MOQTLocation
+   }
+
+   $MOQTJoiningFetch = {
+     joining_request_id: uint64
+     joining_start: uint64
+   }
+
+   $MOQTFetchType /=  "standalone" /
+                      "absolute_joining" /
+                      "relative_joining"
+
+                      Figure 57: MOQTFetch definition
+
+5.8.11.  MOQTFetchOk
+
+   MOQTFetchOk = {
+     type: "fetch_ok"
+     end_of_track: uint8
+     end_location: MOQTLocation
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+     ? track_properties: [* MOQTProperty]
+   }
+
+                     Figure 58: MOQTFetchOk definition
+
+5.8.12.  MOQTTrackStatus
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 25]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTTrackStatus = {
+     type: "track_status"
+     request_id: uint64
+     track_namespace: [ *MOQTByteString]
+     track_name: MOQTByteString
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                   Figure 59: MOQTTrackStatus definition
+
+5.8.13.  MOQTPublishNamespace
+
+   MOQTPublishNamespace = {
+     type: "publish_namespace"
+     request_id: uint64
+     track_namespace: [ *MOQTByteString]
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                 Figure 60: MOQTPublishNamespace definition
+
+5.8.14.  MOQTNamespace
+
+   MOQTNamespace = {
+     type: "namespace"
+     track_namespace_suffix: [ *MOQTByteString]
+   }
+
+                    Figure 61: MOQTNamespace definition
+
+5.8.15.  MOQTNamespaceDone
+
+   MOQTNamespaceDone = {
+     type: "namespace_done"
+     track_namespace_suffix: [ *MOQTByteString]
+   }
+
+                  Figure 62: MOQTNamespaceDone definition
+
+5.8.16.  MOQTSubscribeNamespace
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 26]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   MOQTSubscribeNamespace = {
+     type: "subscribe_namespace"
+     request_id: uint64
+     track_namespace_prefix: [ *MOQTByteString]
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                Figure 63: MOQTSubscribeNamespace definition
+
+5.8.17.  MOQTSubscribeTracks
+
+   MOQTSubscribeTracks = {
+     type: "subscribe_tracks"
+     request_id: uint64
+     track_namespace_prefix: [ *MOQTByteString]
+     number_of_parameters: uint64
+     ? parameters: [* $MOQTParameter]
+   }
+
+                 Figure 64: MOQTSubscribeTracks definition
+
+5.8.18.  MOQTPublishBlocked
+
+   MOQTPublishBlocked = {
+     type: "publish_blocked"
+     track_namespace_suffix: [ *MOQTByteString]
+     track_name: MOQTByteString
+   }
+
+                  Figure 65: MOQTPublishBlocked definition
+
+5.9.  MOQTProperty
+
+   MOQTProperty = {
+     type: uint64
+     ? value: uint64
+     ? length: uint64
+     ? value_bytes: RawInfo
+   }
+
+                       Figure 66: Property definition
+
+6.  Security Considerations
+
+   The security and privacy considerations discussed in [QLOG-MAIN]
+   apply to this document as well.
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 27]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+7.  IANA Considerations
+
+   This document registers a new entry in the "qlog event schema URIs"
+   registry (created in Section 15 of [QLOG-MAIN]).
+
+   Event schema URI:  urn:ietf:params:qlog:events:moqt
+
+   Namespace  moqt
+
+   Event Types  control_message_created, control_message_parsed,
+      stream_type_set, object_datagram_created, object_datagram_parsed,
+      padding_datagram_created, padding_datagram_parsed,
+      subgroup_header_created, subgroup_header_parsed,
+      subgroup_object_created, subgroup_object_parsed,
+      fetch_header_created, fetch_header_parsed, fetch_object_created,
+      fetch_object_parsed
+
+   Description:  Event definitions related to the MOQT protocol.
+
+   Reference:  This Document
+
+8.  Normative References
+
+   [CDDL]     Birkholz, H., Vigano, C., and C. Bormann, "Concise Data
+              Definition Language (CDDL): A Notational Convention to
+              Express Concise Binary Object Representation (CBOR) and
+              JSON Data Structures", RFC 8610, DOI 10.17487/RFC8610,
+              June 2019, <https://www.rfc-editor.org/rfc/rfc8610>.
+
+   [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-21, 8 September 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-21>.
+
+   [QLOG-MAIN]
+              Marx, R., Niccolini, L., Seemann, M., and L. Pardue,
+              "qlog: Structured Logging for Network Protocols", Work in
+              Progress, Internet-Draft, draft-ietf-quic-qlog-main-
+              schema-14, 6 July 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-quic-
+              qlog-main-schema-14>.
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 28]
+
+Internet-Draft         MoQ qlog event definitions         September 2026
+
+
+   [QLOG-QUIC]
+              Marx, R., Niccolini, L., Seemann, M., and L. Pardue, "QUIC
+              event definitions for qlog", Work in Progress, Internet-
+              Draft, draft-ietf-quic-qlog-quic-events-13, 6 July 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-quic-
+              qlog-quic-events-13>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+Acknowledgments
+
+   Thanks to Lorenzo Miniero, Sujay Patel, and Aman Sharm for feedback
+   and contributions to this document.
+
+Authors' Addresses
+
+   Lucas Pardue
+   Cloudflare
+   Email: lucas@lucaspardue.com
+
+
+   Mathis Engelbart
+   Technical University of Munich
+   Email: mathis.engelbart@gmail.com
+
+
+   Aman Sharma
+   Meta
+   Email: amsharma@meta.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pardue, et al.            Expires 21 March 2027                [Page 29]

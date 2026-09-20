@@ -1,0 +1,698 @@
+# 変更履歴
+
+- UPDATE
+  - 後方互換がある変更
+- ADD
+  - 後方互換がある追加
+- CHANGE
+  - 後方互換のない変更
+- FIX
+  - バグ修正
+
+## develop
+
+- [CHANGE] example の接続経路を `--transport` (quic / wt-h3 / wt-h2) で選ぶようにし、`--url` の scheme を `moqt://` に統一する
+  - `https://` による WebTransport over HTTP/3 の選択を廃止する
+  - @voluntas
+- [CHANGE] example の crate 名を moq-pub / moq-sub / tokio-moq (transport crate) に変更する
+  - @voluntas
+- [ADD] example が WebTransport over HTTP/2 (TCP+TLS、ALPN h2) で relay に接続できるようにする
+  - shiguredo_http2 と tokio-rustls を追加する
+  - @voluntas
+- [ADD] example が URL の MSF fragment (`#msf:<track-identifier>&c4m=<token>`) を MSF 仕様に従って検証し、`c4m` パラメータを SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する
+  - @voluntas
+- [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
+- [CHANGE] 定義済みだが未実装の制御メッセージを表す `ControlMessage::Unsupported` を追加する
+  - §9 Table 5 に定義済みの `PUBLISH_NAMESPACE` (0x06) / `SUBSCRIBE_NAMESPACE` (0x50) / `SUBSCRIBE_TRACKS` (0x51) / `NAMESPACE` (0x08) / `NAMESPACE_DONE` (0x0E) / `PUBLISH_SKIPPED` (0x0F) を decode できるようにする (公開 enum の variant 追加のため破壊的変更)
+  - request として届く先頭 3 種は `REQUEST_ERROR` の `NOT_SUPPORTED` (0x3) + FIN で拒否してセッションを維持する (draft-21 §1.5 (Modularity) の SHOULD)
+  - 応答専用の 3 種は従来どおり `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - @voluntas
+
+  - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
+  - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - @voluntas
+- [CHANGE] 公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証は `recv_request` に一本化する
+  - @voluntas
+- [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moq-pub の datagram_writer が Properties Length を二重に書かなくなる
+  - @voluntas
+- [CHANGE] `send_subgroup_object` / `send_object_datagram` の戻り値を `SendRequestError` に変更し、`send_publish` のフィルタ不通過も `SendRequestError::LocalFilterMismatch` にする。wire コードを取る公開 API はローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する
+  - @voluntas
+- [CHANGE] `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、受信 subgroup Object にも Object 単位フィルタを再適用する。フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` として破棄する
+  - @voluntas
+- [CHANGE] `FetchStreamEntry::encode` の End of Range の variant に `properties_data` を渡したら拒否する
+  - draft-ietf-moq-transport-21 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties are not present" と定めるため、`EndOfNonExistentRange` / `EndOfUnknownRange` / `EndOfTimedOutRange` に `Some(...)` を渡すと書き込み前に `ProtocolViolation` になる (`None` は従来どおり成功する)
+  - これまでは黙って無視されていたため、Properties を渡すつもりの誤った呼び出しが成立していた
+  - @voluntas
+- [CHANGE] `DecodedFetchObject` に `properties_bytes` を追加し、`DecodedFetchObject` / `DecodedFetchEntry` から `Copy` を外す
+  - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) と `Copy` の削除を伴う破壊的変更である
+  - @voluntas
+- [CHANGE] `MsfCatalog` に `removed_tracks` を追加する
+  - draft-ietf-moq-msf-01 §5.3 (Delta updates) の属性不変を delta update の適用時に検査するための内部状態 (削除済みトラックの履歴) であり、JSON には出力しない
+  - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) を伴う破壊的変更である
+  - `PartialEq` / `Debug` は削除履歴も対象になる。JSON が同一でも削除履歴が異なれば不一致になり、`Debug` には削除済みトラックも現れる
+  - @voluntas
+- [CHANGE] LOCATION_FILTER (0x21) を draft-ietf-moq-transport-22 §9.20.9 の Location Filter Type 符号化に変更する
+  - length-prefixed 符号化を廃止し、先頭の Location Filter Type (vi64) が後続フィールドを定める自己境界の符号化にする (ワイヤ非互換)
+  - フィルタなしを `LocationFilter::NoFilter` (Type 0x00)、Next Object を `LocationFilter::NextObject` (Type 0x05) として区別し、`AbsoluteStart {0, 0}` の Next Object への正規化を廃止する
+  - 0x21 の値表現を `MessageParameterValue::LengthPrefixed` から `MessageParameterValue::LocationFilter` に変更し、生バイト API `MessageParameters::location_filter()` を削除する。公開 enum への variant 追加 (`MessageParameterValue::LocationFilter` / `LocationFilter::NoFilter`) を伴うため、網羅 `match` を書いている利用側は壊れる
+  - `location_filter_typed()` / `location_filter_update()` は値の形式不一致と StartGroup + EndGroupDelta のオーバーフローで `ProtocolViolation` を返し、decode は未知の Location Filter Type を `ProtocolViolation`、必須フィールドの欠落を `UnexpectedEof` として返す (旧: フィールド数 0 または 5 以上は `KeyValueFormattingError`)
+  - @voluntas
+- [CHANGE] Object Forwarding Preference を Delivery Mode に改名し、`ObjectFieldTracker` の公開 API を `DeliveryMode` ベースにする
+  - draft-ietf-moq-transport-22 §2.1.1 (Object Fields) の改名に追従する。Original Publisher が初回送信の方法で Delivery Mode を確定し、購読では Object を Delivery Mode に従って送る MUST は実装の doc に明記する
+  - `ObjectFieldTracker` の内部表現を `DeliveryMode` に置き換え、`observe_object_fields` / `observe_object_fields_with_content` の引数も `DeliveryMode` にする (公開 API の破壊的変更)
+  - 重複 Object の Malformed 理由文字列を "different Delivery Mode" に変更する (§7.1 / §12.1 条件 7)。受信側の重複検出の挙動は変えない
+  - @voluntas
+- [CHANGE] REQUEST_OK の codec 層の許可パラメータを draft-ietf-moq-transport-22 §9.3 の和集合 (EXPIRES / LARGEST_OBJECT) に縮小する
+  - draft-21 時点の設計判断で 12 型を広く受理していたため、仕様が PROTOCOL_VIOLATION を求めるパラメータを codec 層が受理していた
+  - `REQUEST_OK_ALLOWED_PARAMS` を 2 型にし、それ以外のパラメータを含む REQUEST_OK の encode / decode を PROTOCOL_VIOLATION にする
+  - セッション層の応答 context 別検証 (PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK) は維持する
+  - examples は main ループに届く MOQT メッセージの encode / decode 失敗で PROTOCOL_VIOLATION (書式違反は KEY_VALUE_FORMATTING_ERROR) の close を送ってからエラー終了する。従来は終了コード付きの close を送っていなかった
+  - @voluntas
+- [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
+  - @voluntas
+- [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する
+  - draft-ietf-moq-transport-21 §9.2 (GOAWAY): "a publisher MAY reject new requests after sending a GOAWAY" の主語に合わせ、SUBSCRIBE / FETCH / TRACK_STATUS のみを `REQUEST_ERROR(GOING_AWAY)` + FIN で拒否する
+  - 自側が subscriber として受ける PUBLISH は拒否しない。GOAWAY を受信した後の peer の新規 request も従来どおり受理する (2 つ目の MAY は採らない)
+  - @voluntas
+- [CHANGE] 未到達 Request ID の保持上限 `MAX_OUT_OF_ORDER_REQUEST_IDS` を削除する
+  - draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` でのセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、仕様に無い条件で正当な peer を落とさないため
+  - 前縁が埋まらないまま飛び ID を送り続ける非準拠 peer では保持数が増え続けるが、interop への影響を避けるため許容する
+  - @voluntas
+- [CHANGE] 定義済みパラメータ RENDEZVOUS_TIMEOUT (0x04) を SUBSCRIBE で受理する
+  - `PARAM_RENDEZVOUS_TIMEOUT` 定数と `SUBSCRIBE_ALLOWED_PARAMS` の登録を戻す (draft-21 §9.20.7 / §16.7 Table 13)
+  - `MessageParameters::rendezvous_timeout` と `Subscription::subscriber_rendezvous_timeout_ms` は戻さない (値を解釈しないため)
+  - @voluntas
+- [CHANGE] Malformed Track の検出を表す `MessageError::MalformedTrack` を追加し、§12.1 の条件に対応する検出をこの variant に分類する
+  - 対象は `FetchStreamDecoder` の Publisher Priority 変更 / 確定済み最終 Object 超過、`SubgroupTracker::open` / `record_priority` / `mark_fin`、`ObjectPropertyTracker::observe_object` / `observe_decoded_object` の PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP 条件である
+  - セッションを終了する検証 (フレーミング違反、§12.1 の条件ではない順序違反) は従来どおり `ProtocolViolation` を使う
+  - `SubgroupTracker::open` / `record_priority` / `mark_fin` の戻り値型を `SessionError` から `MessageError` に変更する (破壊的変更)
+  - `MessageError::reason()` / `MessageError::malformed_track_reason()` を追加する
+  - @voluntas
+- [CHANGE] `ObjectFieldTracker::new` が subscription の実効 group 順序 (`ascending: bool`) を受け取るようにする
+  - tracker が group の変化に応じた prune と保持量の上限超過時の破棄方向に順序を使うため、順序を引数で受け取る (引数追加のため破壊的変更)。順序が不明な場合は `Default` (Ascending) を使う
+  - @voluntas
+- [ADD] TRACK_STATUS の受信側 (自側 publisher) を実装し、peer から受信した TRACK_STATUS に TRACK_STATUS_OK / REQUEST_ERROR で応答する
+  - draft-ietf-moq-transport-21 §6.3 (Session initialization) は TRACK_STATUS を request stream の開始メッセージとして許可するため、受信しても `PROTOCOL_VIOLATION` でセッションを閉じない
+  - 受信側は subscription state も Track Alias も作らず Objects も送らず、応答の送信後に bidi stream を FIN で閉じる (§9.13)
+  - 受信した TRACK_STATUS への応答は `send_request_ok` (TRACK_STATUS_OK) と `send_request_error` (REQUEST_ERROR) で送る
+  - `TrackStatusEntry` に `my_role` / `include_properties` / `terminated` を追加し、`INCLUDE_PROPERTIES=0` のとき TRACK_STATUS_OK の Track Properties を空にする (draft-21 §9.20.22)
+  - @voluntas
+- [FIX] エラー型に `core::error::Error` を実装する
+  - `MessageError` / `NameParseError` / `ObjectFieldMismatch` を返す公開 API のエラーを `?` で `Box<dyn std::error::Error + Send + Sync>` へ変換できるようになる
+  - `NameParseError` / `ObjectFieldMismatch` には `core::fmt::Display` も実装する
+  - @voluntas
+- [FIX] send_object_datagram の未知 status を wire 生成前に拒否する
+  - draft-ietf-moq-transport-21 §11.1.2 (Object Status) の SHOULD (未知の値は PROTOCOL_VIOLATION でセッションを閉じる) に従い、0x0 (Normal) / 0x3 (End of Group) / 0x4 (End of Track) 以外の status を `SESSION_PROTOCOL_VIOLATION` で拒否する
+  - 判定は encoder (`ObjectDatagram::encode`) と同じ `validate_object_status` を使い、フィルタ評価と最大位置更新より前に検証する (拒否時に状態を汚染しない)
+  - @voluntas
+- [UPDATE] `MsfCatalog::apply_delta` を原子的にする
+  - 複製へ適用して成功時のみ差し替える (copy-on-write) ことで、`Err` を返したときにカタログが呼び出し前と一致するようにする
+  - これまでは途中で失敗した先行操作の結果が残っていた
+  - @voluntas
+- [FIX] MsfCloneTrack::into_track の解決結果でも lang を検証する
+  - clone の継承解決後の検証を `validate_media_track_fields` から `validate_full_track` に変え、add 経路と同じ範囲 (draft-ietf-moq-msf-01 §5.2.32 Language を含む) を検査する
+  - これまで clone で不正な `lang` を設定すると `apply_delta` は成功し、encode 時まで気付けなかった
+  - @voluntas
+- [FIX] moq-sub の tokio runtime 構築失敗で終了コード 0 にならないようにする
+  - runtime の構築をメインスレッドへ移し、失敗時は英語ログと `std::process::exit(1)` で終了する
+  - 別スレッドで構築すると、失敗時にそのスレッドだけが panic し、main がメディアチャネルの切断で終了コード 0 で終わっていた
+  - @voluntas
+- [FIX] moq-sub のデコードが QUIC エンドポイントの I/O を飢えさせて受信が止まるのを緩和する
+  - AV1 / Opus のデコードを `tokio::task::block_in_place` で実行し、runtime のワーカーを長時間塞がない
+  - 同時に処理する data stream 数を 4 に制限する (音声は 1 object = 1 stream、映像は 1 group = 1 stream で届くため)
+  - 表示待ちの映像フレーム数が 20 を超えたら、古い group をまるごと捨てて受信を優先する
+    (途中のフレームを捨てると参照フレームを失って復号できないため、group 単位で捨てる)
+  - これらが無いとデコードが先行して待ちフレームが増え続け、QUIC エンドポイントの I/O が飢えて受信パケットが落ち、relay 側の輻輳ウィンドウが最小値まで崩壊して配送が止まる
+  - 90 秒運転での停止は減ったが完全には解消していない (機械全体の CPU は 500%/1400% で飽和しておらず、relay→subscriber のパケット損失が残る。relay 側の対応で継続調査)
+  - @voluntas
+- [FIX] moq-sub が終了済み subscription へ STOP_SENDING を送って警告を出す
+  - PUBLISH_DONE / GOAWAY / session close で受信ループを抜けた場合は peer が subscription を終了させており、`Session` は `Terminated` に遷移済みで STOP_SENDING が拒否される
+  - peer 由来で終了した場合は STOP_SENDING の後始末を行わず、graceful shutdown のシグナルでは従来どおり送る
+  - @voluntas
+- [FIX] example の MoqtClient が PublishDoneReceived と GoawayReceived を捨てる
+  - `drain_events` が受信メッセージを契機に生成された notable イベントをアプリへ渡す前に消費していたため、`moq-sub` が PUBLISH_DONE と GOAWAY を観測できなかった
+  - notable イベントは専用のキューへ移し、`take_notable_event` が最初に取り出すようにする
+  - @voluntas
+- [FIX] recv_object_datagram の未知 status と不正な properties を wire 経路と同じく拒否する
+  - draft-ietf-moq-transport-21 §11.1.2 (Object Status) / §11.1.3 (Object Properties) / §11.2.1 (Object Datagram) に従い、未知 status・STATUS と END_OF_GROUP の同時指定・Properties Length 不整合・Length = 0・非 Normal status への Properties 付与を `SESSION_PROTOCOL_VIOLATION` で拒否する
+  - 検証は Track Alias 解決と状態更新より前に行い、拒否時に `largest_received_location` などの subscription 状態を汚染しない
+  - Object Payload 長の規則は `ObjectDatagram` が payload を保持しないため wire decode 層の責務であることを doc に明記する
+  - @voluntas
+- [FIX] FetchStreamEncoder が同一 Subgroup の Publisher Priority 変更を Subgroup 単位で検出する
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 1 の判定を、直前 1 Object との比較から `(group_id, subgroup_id)` ごとの最後の Priority との比較に変え、間に別 Subgroup や datagram 起源 Object が挟まっても検出する (`FetchStreamDecoder` と対称)
+  - group 前進時は過去 group の記録を破棄し、記録量が Object 数に比例して増えないようにする
+  - @voluntas
+- [FIX] FORWARD 値域外の REQUEST_UPDATE を Range Filter 拒否より先に検証する
+  - draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter) の MUST close を、§3.3.2 の Range Filter 拒否 (INVALID_FILTER の REQUEST_ERROR) が隠さないようにする。両方が同一メッセージにある場合は PROTOCOL_VIOLATION でセッションを閉じる
+  - @voluntas
+- [FIX] SUBSCRIBE_OK / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY の LARGEST_OBJECT を Track 単位で算出する
+  - draft-ietf-moq-transport-21 §3.1.3 (Largest Object) / §9.20.18 (LARGEST OBJECT Parameter) は LARGEST_OBJECT を「sending endpoint が観測した Track の largest Location」と定義し、publish 済みなら Publisher は含める MUST
+  - 自側 publisher 役の応答 3 経路を `publisher_track_largest` (同一 Track の publisher 役 subscription 群の最大) に統一する。新規 subscription が観測値を持たなくても、同じ Track の別 subscription で publish 済みなら値を載せる
+  - 自側 subscriber 役は従来どおり当該 subscription の `effective_largest_object` を使う
+  - @voluntas
+- [FIX] publisher の REQUEST_UPDATE 失敗応答 (REQUEST_ERROR) で PUBLISH_DONE (UPDATE_FAILED) を送る
+  - PUBLISH 起点の subscription が Established のとき、peer からの REQUEST_ERROR は自側 REQUEST_UPDATE の失敗応答であり、draft-ietf-moq-transport-21 §9.5.1 の MUST により publisher は PUBLISH_DONE (UPDATE_FAILED) で購読を終端する
+  - §9.9 の MUST NOT と両立するため open 中の outgoing data stream がある間は送信を保留し、全 stream 終端後に 1 回だけ送る
+  - @voluntas
+- [FIX] example の fin 済み request stream への 2 度目の送信を no-op にして warn ログを残す
+  - Session が同一 request へ 2 度目の fin 付き送信を発行し得るため (拒否した REQUEST_UPDATE がパイプラインで届く場合)、example がエラー終了しないようにする
+  - @voluntas
+- [FIX] example が peer からの REQUEST_UPDATE に REQUEST_OK で応答する
+  - draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE) の「受信側は必ず 1 通の REQUEST_OK または REQUEST_ERROR で応答する」に従う
+  - `moq` の `ClientEvent` に `RequestUpdate` を追加し、`MoqtClient::send_request_ok` を追加して publisher / subscriber の両 example で応答する
+  - 応答しないと relay が下流へ応答を返せず、subscriber 側の control message 応答待ち (30 秒) が満了して CONTROL_MESSAGE_TIMEOUT (0x11) でセッションが閉じていた
+  - @voluntas
+- [FIX] Malformed Track 検出時に subscription の bidi request stream を STOP_SENDING / RESET_STREAM で cancel する
+  - @voluntas
+- [FIX] request stream 上の GOAWAY の timeout を実装し、期限到達時に当該 request stream を GOING_AWAY で reset する
+  - @voluntas
+- [FIX] 同一 suffix の NAMESPACE 再受信をセッションクローズにせず無視し、prefix 更新を跨いだ重複判定と NAMESPACE_DONE 照合は full namespace 単位で行う
+  - @voluntas
+- [FIX] STOP_SENDING を受けた Subgroup の再オープンを Forward State 0→1 の REQUEST_UPDATE 受理後のみに制限する
+  - @voluntas
+- [FIX] Subgroup 単位の Publisher Priority を stream に保持し、FirstObjectId Subgroup の Malformed Track 判定で並行 Subgroup の priority 差による誤検出と検出漏れを防ぐ
+  - @voluntas
+- [FIX] AUTHORIZATION_TOKEN と Setup Option Bytes の encode に値長 2^16-1 バイトの上限検証を追加する
+  - @voluntas
+- [FIX] subscriber 側の Stream Count 集計と `cleanup_ready` の open stream 判定に受信 fill fetch stream を含め、PUBLISH_DONE 受信後に遅延到着した fill fetch stream も late-opening stream として受理する
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した TRACK_NAMESPACE_PREFIX を REQUEST_OK 受信後に反映し、送信前の overlap 検査は確定待ちを考慮した実効 prefix で行う。SUBSCRIBE_TRACKS は確定待ちの間も旧 prefix と確定待ち prefix の両方で PUBLISH を紐付ける
+  - @voluntas
+- [FIX] FETCH の INVALID_RANGE 判定で同一 Track の全 publisher 役 subscription の観測 Largest Object の最大値を使う
+  - @voluntas
+- [FIX] REQUEST_UPDATE の Range Filter 拒否で自側 publisher の subscription を PUBLISH_DONE(UPDATE_FAILED) で終端し、Pending / Terminated への REQUEST_UPDATE は PROTOCOL_VIOLATION で閉じる
+  - @voluntas
+- [FIX] FetchStreamEncoder が先頭の Datagram 起源 Object をエンコードできるようにし、Datagram 起源 Object の Subgroup ID をデコード結果 (0) と一致させる
+  - @voluntas
+- [FIX] DYNAMIC_GROUPS=1 でない Track への REQUEST_UPDATE に NEW_GROUP_REQUEST を含めると送信前に拒否し、同一 REQUEST_UPDATE の他パラメータをローカルに適用しない
+  - @voluntas
+- [FIX] SUBSCRIBE_TRACKS の bidi stream 終端後の PUBLISH の bidi stream 終端でセッションを閉じないようにし、RequestTerminated の kind を実際の要求種別に合わせる
+  - @voluntas
+- [FIX] MSF の isLive=false で targetLatency / buffers をエンコードしないようにする
+  - @voluntas
+- [FIX] TRACK_STATUS_OK を FIN で送信し、公開済み Track の LARGEST_OBJECT を自動注入する
+  - @voluntas
+- [FIX] PUBLISH_DONE の Stream Count で 0 stream 時に sentinel を送れないようにする
+  - @voluntas
+- [FIX] MsfCatalog::apply_delta の add 経路でトラックの MUST 制約を検証する
+  - @voluntas
+- [FIX] SubgroupObject の encode を書き込み前に検証し、不正 status の部分書き込みと Properties Length 欠落を防止する
+  - @voluntas
+- [FIX] `.session` 名前空間の非空トラック名への FETCH / TRACK_STATUS を `DOES_NOT_EXIST` で拒否する
+  - @voluntas
+- [FIX] FetchStreamObject の encode で空スライス (`Some(&[])`) の properties を拒否し、Properties Length 欠落の不正ワイヤ生成を防止する
+  - @voluntas
+- [FIX] `SubgroupObject` / `FetchStreamObject` の encode で Properties Length と実データ長の不一致を `ProtocolViolation` として拒否し、不正ワイヤ生成を防止する
+  - @voluntas
+- [FIX] moq-pub の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
+  - @voluntas
+- [FIX] moq の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
+  - @voluntas
+- [FIX] moq-sub の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で TRACK_NAMESPACE_PREFIX を予約名前空間 (`.` / `.session`) へ更新できないようにし、初回拒否を更新経路で迂回できないようにする
+  - @voluntas
+- [FIX] 空 prefix の SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS で suffix の先頭が予約名前空間 (`.` / `.session`) の NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED を送信できないようにする
+  - @voluntas
+- [FIX] 予約名前空間 (`.` / `.session`) へのリクエストは、パラメータ値域の MUST close より予約名前空間の拒否 (DOES_NOT_EXIST) を優先する。FETCH は LOCATION_FILTER の decode 失敗より先に拒否する
+  - @voluntas
+- [FIX] PUBLISH 起点 subscription でも subscriber の REQUEST_UPDATE に対する REQUEST_OK の送受信を行えるようにし、RequestOkReceived の request_kind を購読の開始メッセージ種別から求める
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の prefix overlap 検査を役割を問わない対象にし、SUBSCRIBE_TRACKS の prefix 更新を跨いで届いた旧 prefix 基準の PUBLISH も紐付ける (Terminated の購読には紐付けない)
+  - @voluntas
+- [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
+  - @voluntas
+- [FIX] 既に Object を publish した Track を PUBLISH で再告知するとき、観測済みの最大 Location を LARGEST_OBJECT として補完するように修正する
+  - 観測値が無い Track では付与せず、アプリ指定値との max を取って上書きしない
+  - @voluntas
+- [FIX] DEFAULT_PRIORITY bit が立った Datagram が直近 SUBGROUP_HEADER の Publisher Priority ではなく、購読を確立したメッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承するように修正する
+  - 誤った継承元だった `Subscription::publisher_priority` と `Subscription::effective_publisher_priority` を削除する
+  - @voluntas
+- [FIX] REQUEST_UPDATE に購読とは別の Request ID を採番し、購読の Request ID の再利用をやめる
+  - REQUEST_UPDATE 起因の fill fetch stream は REQUEST_UPDATE の Request ID で識別し、`SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数を起因メッセージの Request ID に変更する
+  - `send_fill_fetch_header` は起因 REQUEST_UPDATE の Request ID から購読を解決するため、購読の Request ID を渡した場合も従来どおり登録できる
+  - @voluntas
+- [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
+  - @voluntas
+- [FIX] Redirect の Redirect target (Track Namespace + Track Name) に Full Track Name の 4,096 バイト上限を適用する
+  - draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) / §9.4.1 (Redirect Structure): §9.4.1 の Redirect target は §2.4.1 (Track Naming) の Full Track Name そのものであるため、超える場合は encode / decode とも `PROTOCOL_VIOLATION` で拒否する
+  - @voluntas
+- [FIX] PUBLISH 起点 subscription の subscriber responder が PUBLISH_DONE 受信で FIN する
+  - draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は request 完了の合図であり、PUBLISH_DONE の受信で自側が送るべきメッセージが無くなるため `SessionEvent::FinishRequestStream` を発行する
+  - §6.4.2.2 の MUST NOT に従い、必須応答を送り終えた `Established` からの遷移に限る (`Pending(Publisher)` と既に `Terminated` の経路では発行しない)
+  - @voluntas
+- [FIX] GREASE の Property Type が Mandatory Track Property 範囲に入る場合に malformed としない
+  - draft-ietf-moq-transport-21 §16.8 (Properties) Table 14 の GREASE 値 (`0x7f * N + 0x9D`) のうち N = 128 の 0x401D から N = 256 の 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入るため、Object Property として受信しても malformed とせず未知 Property として保持・転送する (§13 (Grease) / §8.4)
+  - GREASE 値でない 0x4000-0x7FFF は従来どおり malformed とする
+  - @voluntas
+- [FIX] PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の二重インスタンスを Malformed Track として検出する
+  - draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap): "An Object MUST NOT contain more than one instance of this property." 同じ型を mutable リストと IMMUTABLE_PROPERTIES 内側の両方に置いた場合も 2 インスタンスと数える (§10.7)
+  - `ObjectPropertyTracker::observe_decoded_object` で検出し、wire 経路と API 経路の両方に適用する
+  - @voluntas
+- [FIX] requester の FIN で responder が必須応答を送れなくなる問題を修正する
+  - FIN は方向ごとの終端であり cancel ではないため (draft-ietf-moq-transport-21 §6.4.2.2)、自側が SUBSCRIBE / FETCH の responder のときは peer の FIN では request を終端しない
+  - 自側が responder の request は、peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で `RequestTerminated { reason: PeerStreamFin }` を発行する (FIN の到着順に依存しない)
+  - cancel は従来どおり `RequestStreamEnd::Reset` で即時に終端する (§6.4.2.3)
+  - subscription の終端時は従来どおり open 中の fill fetch stream を reset する (§3.4.1)
+  - @voluntas
+- [FIX] 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信で cancel の RESET_STREAM / STOP_SENDING を発行する
+  - draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) の cancel は §6.4.2.3 (Request Cancellation and Rejection) のストリーム終端を含むため、`StopSendingRequestStream` と `ResetRequestStream` を `STREAM_CANCELLED` で発行する
+  - 自側が既に cancel を発行済みの fetch では再発行しない (`Fetch::local_cancel_sent` で判定する)
+  - @voluntas
+- [ADD] `ObjectFieldTracker::observe_object_fields_with_content` を追加し、重複 Object の immutable properties と payload の差異を検出する。これにより従来は受理していた内容の異なる重複 Object が Malformed Track になり得る (受信挙動の変更)
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is received more than once with different Payload or other immutable properties." への対応
+  - `immutable_properties: Option<&[u8]>` (IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列) と `payload_key: Option<&[u8]>` (呼び出し側が算出した payload の比較キー) を追加で受け取る。既存の `observe_object_fields` はシグネチャを変えず両方 `None` で委譲する
+  - 内容が食い違えば `ObjectFieldMismatch` を返し (一致する重複は従来どおり受理する)、Session はこれを Malformed Track として該当 subscription だけを cancel する
+  - 検出できるのは Session が保持する情報の範囲に限る。payload の内容は保持しないため同じ長さで内容だけが異なる payload は payload を持つ層が比較し、片方でも `None` なら比較しない (見逃し側に倒す)。これらの見逃しと、datagram の payload 長・片側だけ IMMUTABLE_PROPERTIES を持つ重複の見逃しは既知の制約である
+  - 対象は受信した subgroup Object と datagram であり、FETCH 応答の Object は対象外である
+  - `ObjectFieldTracker` の 1 レコードが immutables 長 (最大 65535 バイト) と payload_key 長を保持する (保持量は group の変化に応じた prune と記録数の上限で有界である)
+  - @voluntas
+
+- [FIX] publisher example が Subgroup の終端方法を Start Location で選ぶ
+  - draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) は「Start Location より前の Object 以外をすべて配送したなら FIN、配送すべき Object を配送せずに閉じるなら RESET_STREAM」を MUST で規定するが、従来はスキップの理由を区別せず常に RESET_STREAM で閉じていた
+  - 終端方法の判定を `SubgroupTermination` と `SubgroupObjectState::termination` に分離し、`transport::SendStream` を組み立てずに単体テストできるようにする
+  - Start Location は REQUEST_UPDATE で変わりうるため、Subgroup 開始時点の snapshot と終端時点の現在値の両方で判定し、どちらかで配送対象だった Object を省略していれば RESET_STREAM にする
+  - `MoqtClient` に購読の Start Location を読む `subscription_filter_start` を追加する
+  - @voluntas
+
+- [FIX] MAX_FILTER_RANGES が FILL_PARAMETERS 内側の Range を数えない問題を修正する
+  - draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES) / §3.3.2 (Range Filters) の上限を、§9.20.16 (FILL PARAMETERS Parameter) の内側スコープに置かれた Range Filter (0x25-0x28) の Range 総数も含めて数える
+  - 送信・受信・subscription 単位の累積検証の 3 経路すべてで合算し、外側に Range が無く内側だけに Range がある入力でも上限判定を行う
+  - 合算は session 層の private helper に閉じ、公開 API `MessageParameters::count_range_filters` / `has_range_filters` の意味は変えない
+  - この修正により、従来は受理していた「外側 + 内側の合計が上限を超える」SUBSCRIBE / REQUEST_UPDATE が INVALID_FILTER で拒否される (受信挙動の変更)
+  - peer が MAX_FILTER_RANGES を宣言していない場合、FILL_PARAMETERS 内側の Range Filter を送る API 呼び出しも `SESSION_PROTOCOL_VIOLATION` で拒否される (送信挙動の変更)
+  - @voluntas
+
+- [FIX] 空の FILL_PARAMETERS を `KEY_VALUE_FORMATTING_ERROR` で拒否し、受信側の解釈を count 付きに確定する
+  - draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の "encoded as if they were Parameters for a separate message" は各メッセージ形式が持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE) Figure 10 など) を指す。§16.7 (Message Parameters) は IANA 登録表であり符号化を規定しない
+  - decode は `Number of Parameters` を必須とし、値が空 (Length = 0) のときは §8.3 (Key-Value-Pair Structure) の MUST により `KEY_VALUE_FORMATTING_ERROR` を返す。従来は空バイト列を「内側 0 個」として受理していた (受信挙動の変更)
+  - この変更により、FILL_PARAMETERS を許可しないメッセージ (SUBSCRIBE_OK など) に空値の FILL_PARAMETERS が届いた場合は、scope 違反の `PROTOCOL_VIOLATION` ではなく値の形式違反の `KEY_VALUE_FORMATTING_ERROR` を返す (値のデコードが scope 検証より先に走るため)。どちらもセッションを閉じる
+  - 内側 0 個は count 0 の `0x00` 1 バイトであり、encode の出力は変わらない。内側の末尾の余剰バイト (`KEY_VALUE_FORMATTING_ERROR`) と draft-21 の Table 6 外の内側パラメータ (`PROTOCOL_VIOLATION`) の分類、値が途中で切れた場合 (`UnexpectedEof`) と count がバッファ容量を超える場合 (`PROTOCOL_VIOLATION`) の分類も変わらない
+  - @voluntas
+
+- [FIX] FETCH 経路で Object Properties を application に渡す
+  - draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.3." により §11.1.3 (Object Properties) と同じだが、`FetchStreamDecoder` が検証に使うだけで捨てていた
+  - `DecodedFetchObject::properties_bytes` が Subgroup 経路と同じ「Properties Length varint + Properties データ」の生バイト列を保持するようになり、`LocProperties::decode` で LOC の Public Properties を取り出せる
+  - Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が 0 のときは `None`、1 のときは wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる
+  - moq-sub の `handle_fetch_stream` が FETCH 経路でも LOC の Video Config を `decode_and_send` に渡す
+  - @voluntas
+- [FIX] moq-sub が LOC の書式違反を検出したら KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じるようにする
+  - draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は、理解している型の Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じる MUST を定めるが、example が `LocProperties::decode` の失敗を「プロパティ無し」に潰していた
+  - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が `Result` を返し、書式違反 (`KeyValueFormattingError`) と切り詰めなどの decode 失敗 (`UnexpectedEof` / `ProtocolViolation`) を区別する。後者は PROTOCOL_VIOLATION (0x3) として扱う
+  - stream task は検出時に main ループへ終了コードと理由を渡して処理を止め、close は I/O 層である main ループが行う (stream task から直接閉じると `Session closed: ...` のログが accept 分岐との競合で落ちるため)
+  - 対象は配送する Object の Properties であり、配送しない Object (`FilteredOut` / `Discarded`)・payload を持たない Object・datagram・カタログは Properties を解釈しないため対象外である
+  - @voluntas
+
+- [FIX] MSF の delta update で同一 Track の属性変更と isLive の逆行を拒否する
+  - draft-ietf-moq-msf-01 §5.3 (Delta updates) は "The tuple of Track Namespace and Track Name defines a fixed set of Track attributes which MUST NOT be modified after being declared." と定めるが、remove → add / clone で同じ (namespace, name) を再追加すると属性を自由に変更できていた
+  - 削除した Track の属性を `MsfCatalog::removed_tracks` に保持し、再追加時に name / namespace / parentName を除く属性を比較して差分があれば `InvalidCatalog` を返す。`isLive=false` のとき `targetLatency` / `buffers` は無視されるため比較の両辺で正規化する
+  - draft-ietf-moq-msf-01 §5.2.7 (Is Live) の "A True value MUST never follow a False value." は属性差分より先に検査し、専用の文言 (isLive を含む) で返す
+  - 検出対象は属性変更と isLive の逆行に限る。同一属性での remove → add は引き続き受理し、`isLive=false` のときの targetLatency / buffers は実効的な属性ではないため、これらの有無だけが異なる再追加も受理する
+  - @voluntas
+
+- [FIX] MSF URI の track-identifier で RFC 3986 の percent-encoding を扱えるようにする
+  - draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `track-identifier` は `pchar-no-amp / "/"` であり、`pct-encoded` (`%XX`) を含む。`?` は `%3F` として percent-encode することが求められるが、`%XX` を解釈できず合法な URI を拒否していた
+  - `src/name.rs` に `parse_name_with_percent_encoding` を追加し、`%XX` をデータバイトとして 1 パスでデコードする。構造 (フィールド区切りの `-` のラン) は生の文字列で確定するため `%2D` は区切りにならず、`%2E` は `.` + hex の開始として再解釈されない (RFC 3986 §2.4 (When to Encode or Decode))
+  - ABNF が生のまま許す非リテラル文字 (`/` / `~` / `:` / `@` / `sub-delims-no-amp`) もデータバイトとして受理する (§11.1.2 (MSF Namespace-Name String Encoding) の正規形は `.` + hex であり、`serialize_name` の出力は変わらない)
+  - `%XX` の octet には draft-21 §8.8.1 (Parsing Serialized Names) の `.` + hex の規則 (`UppercaseHex` / `RedundantEncoding`) を適用しない (`%61` は 0x61 のデータバイト、素の `.61` は従来どおり冗長として拒否)。`parse_name` の挙動は変えず、`&` 区切りのパラメータ列も従来どおり percent-decode しない
+  - @voluntas
+
+- [FIX] MSF の lang 検証が RFC 5646 の grandfathered irregular タグを拒否する
+  - draft-ietf-moq-msf-01 §5.2.32 (Language) が求める BCP 47 の `Language-Tag` には、`langtag` の規則に一致しない `irregular` タグの固定リストが含まれるが、`i-klingon` のように primary subtag が 1 文字のタグを拒否していた
+  - RFC 5646 §2.1 (Syntax) の `irregular` 17 タグを固定リストとして持ち、ASCII 大文字小文字を無視して一致判定する (`I-KLINGON` も受理される。§2.1.1)
+  - 大文字小文字を無視するのは `irregular` との一致判定だけに限定し、privateuse の `x` は従来どおり小文字のみを受理する
+  - @voluntas
+
+- [FIX] MSF の renderGroup / altGroup の targetLatency / buffers の省略を不一致として拒否しないようにする
+  - draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers) は同一 group 内で一致を MUST とする一方、フィールドが無く isLive が TRUE なら player が値を選んでよい (MAY) と定める。省略 (None) も 1 つの値として比較していたため、宣言と省略の混在を InvalidCatalog として拒否していた
+  - 宣言された値 (Some) だけを比較対象にし、省略されたトラックと `isLive=false` のトラックを除外する。変更は共有ヘルパー内で行うため decode / encode / delta 適用後の 3 経路すべてに反映される
+  - 宣言された 2 値が異なる場合は従来どおり拒否する (省略トラックを挟んでも検出する)
+  - @voluntas
+
+- [FIX] media track の必須フィールドを role だけでなく codec からも検証する
+  - draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration) の MUST は codec が定まるトラック (audio / video) に課され、role (§5.2.6 で Optional) の有無を条件にしていない。role を省略したカタログが MUST 違反のまま encode / decode されていた
+  - codec 文字列を WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) の登録名で audio / video と判定して要求する。`*` 付き登録名は登録名単独 (`av01`) も一致とし、可変サフィックスの前方一致では区切り文字の境界を要求する。固定文字列の登録名 (`opus`) は完全一致とする。登録外の codec は判定しない
+  - role が `video` / `audio` / `audiodescription` のときの要求を維持し、§5.2.6 Table 4 で visual track とされる `signlanguage` も video として扱う。codec による判定と食い違う場合は両方の要求を重ねて適用する
+  - 登録済みの audio / video codec を持ちながら必須フィールドを欠くトラックは、role が要求を持たない場合は従来は受理していたが、role の有無と値にかかわらず `InvalidCatalog` で拒否されるようになる (受信 / 送信挙動の変更)
+  - `signlanguage` で codec / bitrate を欠くトラックと、role と codec の判定が食い違うために片方の要求だけを満たすトラックも拒否される。samplerate / channelConfig のエラーメッセージは要求の根拠 (`role '...'` / `codec '...'`) を含む形になる
+  - @voluntas
+
+- [FIX] ポート省略 URL で既定ポート 443 を使い、ホスト名を名前解決する
+  - draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) はポート省略時に既定ポート 443 を使うと定めるが、authority を `SocketAddr` として直接パースしていたため `moqt://relay.example.com/app` のような URL で必ず接続に失敗していた
+  - `moq` に authority から host と port を取り出す純関数と、IP リテラル / ホスト名を解決する関数を追加し、QUIC と WebTransport の接続先決定を 1 箇所に集約する。IPv6 リテラルは接続先文字列を `[` `]` で囲む
+  - 接続先のアドレスファミリに合わせてローカルソケットを選ぶようにし、IPv6 に解決された接続先へも送信できるようにする
+  - authority の host が空、ブラケット無しの IPv6 リテラル、数字でないポートは `invalid server address` として拒否する
+  - authority の解釈失敗と名前解決失敗はトランスポート種別に依存しないため、利用者向けの表示から `QUIC:` が外れる
+  - 解決したアドレスを接続前にログに出す。SETUP の AUTHORITY option と WebTransport の `:authority` には URL の authority をそのまま渡し、省略されたポートは補わない
+  - 従来は接続できなかったポート省略 URL とホスト名の URL で接続できるようになる (受信 / 送信挙動の変更)
+  - @voluntas
+
+- [FIX] URI fragment を `:path` / PATH option に含めない
+  - draft-ietf-moq-transport-21 §6.1.1 (Fragment Identifiers) は fragment をサーバーへ送信せずクライアントがローカルで処理すると定め、RFC 9114 §4.3.1 は `:path` を path と query のみとする。`#` 以降を path に含めたまま接続していたため、fragment 付き URL が fragment の無い URL と同じ資源を指せなかった
+  - `parse_url` が `#` 以降を分離し、SETUP の PATH option と WebTransport の `:path` には fragment を含めない。example は fragment の値を解釈しない
+  - fragment は `<type>:<value>` として `ServerUrl::fragment` に保持する。`:` を含まない fragment、空または ASCII 小文字 / 数字 / ハイフン以外を含む fragment type、fragment 内の 2 個目の `#` (RFC 3986 §3.5 で `%23` が必要) は `parse_url` のエラーになる
+  - fragment identifier の規則は draft-ietf-moq-transport-21 §6.2.1 が WebTransport の https URI を moqt URI の scheme 置換と定め、§16.2 (Media Type Registration) が application/moqt に §6.1.1 を適用すると定めるため、moqt:// と https:// のどちらも同じ規則で扱う
+  - RFC 3986 §3.1 に従い scheme の比較を大文字小文字非区別にする (`MOQT://` / `HTTPS://` を受理する)。正規化するのは scheme だけで、authority / path / query / fragment は入力の文字列を保持する
+  - fragment 付き URL はサーバーへ fragment を送らなくなり、大文字 scheme を受理するようになる (受信 / 送信挙動の変更)
+  - @voluntas
+
+- [FIX] WebTransport の reset / STOP_SENDING でアプリケーションエラーコードを remap する
+  - draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は、WebTransport のアプリケーションエラーコード (0x00000000-0xffffffff) を WT_APPLICATION_ERROR の範囲 (0x52e4a40fa8db-0x52e5ac983162) へ remap する MUST を定める。MOQT のエラーコードをそのまま RESET_STREAM / STOP_SENDING に載せていたため、HTTP/3 のコード空間と衝突して reset の理由が peer に正しく伝わらなかった
+  - 送信は `shiguredo_http3::webtransport::ApplicationErrorCode::to_http3_code` で remap した値を `s2n_quic::application::Error::new` に渡す。受信は `from_http3_code` で MOQT のコードへ戻して `RequestStreamEnd::Reset` に入れる
+  - 32 ビットに収まらない MOQT のエラーコードは切り捨てず `internal error` にする。MOQT §13 の greasing 値 (`0x7f * N + 0x9D`) には 32 ビットを超える値 (`0x100000000` 以上) があり、§4.4 が WebTransport のアプリケーションエラーコードを 32 ビットに限るため WebTransport 経路ではリセットを送れない (2^32 以上 2^62 未満の値は従来 remap せず wire に載っていたため挙動変更。公開 API は任意の `u64` を受け付ける)
+  - WT_APPLICATION_ERROR の範囲外の HTTP/3 コード (WT_SESSION_GONE などのプロトコルコード) と予約コードポイント (0x1f * N + 0x21) は remap せず、wire の値をそのまま `RequestStreamEnd::Reset` に入れて `WARN` ログに生値を残す。`RequestStreamEnd::Reset` に「アプリケーションエラーコード無し」を表す値が無いため
+  - QUIC 経路 (`moqt://`) は QUIC のコード空間のため remap しない
+  - @voluntas
+
+- [FIX] PUBLISH の送信側が subscriber の FIN を受信しても購読を終端せず、PUBLISH_DONE を送れるようにする
+  - draft-ietf-moq-transport-21 §3.1 (Subscriptions) は購読の終端を publisher の PUBLISH_DONE と subscriber の STOP_SENDING に限り、
+    §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの終端で cancel ではない。subscriber の FIN で購読を Terminated にしていたため、
+    publisher は "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN." の MUST を果たせなかった
+  - PUBLISH を送った側 (publisher 役) の Established では peer FIN の受信だけを記録して終端を遅延し、PUBLISH_DONE (`fin: true`) の送信時点で `RequestTerminated { reason: PeerStreamFin }` を発行する。`Pending(Publisher)` と PUBLISH を受けた側 (subscriber 役) は従来どおり終端する
+  - open 中の fill fetch stream は peer FIN では reset しない (§3.4.1 の reset の MUST は cancel に対するものであり、購読が継続する限り fill の配送も継続する)。§9.9 の MUST NOT により open 中の outgoing stream がある間は PUBLISH_DONE を送れない挙動は維持する
+  - REQUEST_UPDATE 失敗応答 (受信した REQUEST_ERROR) で購読を終端する経路でも、open 中の fill fetch stream を §3.4.1 の MUST により reset する。自側が失敗応答を送る経路と対称にし、§9.9 の MUST NOT で保留した PUBLISH_DONE が fill fetch stream の終端では送られないまま残るのを防ぐ
+  - peer FIN を受信済みの subscription への REQUEST_UPDATE 送信を `SESSION_PROTOCOL_VIOLATION` で拒否する (§6.4.2.2 の FIN は「今後の REQUEST_UPDATE に応答しない」表明であり、応答待ちのまま `CONTROL_MESSAGE_TIMEOUT` でセッションを閉じないため)
+  - 従来は peer FIN の時点で `Terminated` になっていた PUBLISH 送信側の subscription が `Established` のまま維持され、`RequestTerminated { reason: PeerStreamFin }` は PUBLISH_DONE の送信時点まで遅延する (受信挙動の変更)
+  - @voluntas
+
+- [FIX] GREASE の Property Type を Mandatory Track Property 範囲 (0x4000-0x7FFF) でも unknown mandatory から除外する
+  - draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type (`0x7f * N + 0x9D`) を Scope Any として予約しており、
+    N = 128 の 0x401D から N = 256 の 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る
+  - GREASE 値を Track Property に載せた peer の PUBLISH は REQUEST_ERROR (UNSUPPORTED_EXTENSION)、SUBSCRIBE_OK は購読キャンセル、
+    FETCH_OK は fetch キャンセルになっていた。§13 (Grease) の "Endpoints MUST NOT close the session solely because they received an unknown value." と
+    §16.8 (Properties) の "Endpoints MUST ignore unknown Property types, skipping them according to the Key-Value-Pair encoding" に従い、
+    GREASE 値は unknown mandatory として扱わない (§3.6 の字面は範囲全体を Mandatory とするため解釈が割れるが、Table 14 の Scope Any を優先する)
+  - Object scope の同じ衝突は先に対応済みであり、Track scope でも同じ解釈に揃える (受信挙動の変更)
+  - @voluntas
+
+- [FIX] `ObjectFieldTracker` の保持量を group の変化に応じた prune と記録数の上限で有界にする
+  - 従来は subscription を forget するまで記録が増え続け、1 レコードが IMMUTABLE_PROPERTIES の生バイト列 (最大 65535 バイト) を保持するため、peer の送信量に比例してメモリが増えていた
+  - `ObjectFieldTracker` が直前の group を保持し、group が変わった時点で `prune_past_groups` を呼ぶ。順序は `GROUP_ORDER` parameter (draft-ietf-moq-transport-21 §9.20.9) を優先し、無ければ `DEFAULT_PUBLISHER_GROUP_ORDER` Track Property (§10.5)、どちらも無ければ Ascending (§5.1.1) の実効値を tracker の生成時に渡す
+  - 併せて記録数の上限 `ObjectFieldTracker::MAX_RECORDS` (1_000) を設け、超過時は最も古い group を group 単位で、1 group しか無い場合は古い object_id から破棄する。破棄した Object の重複は検出しない (§12.1 条件 6 と §7.1 の重複検出が及ばない範囲がある known limitation)
+  - @voluntas
+
+- [FIX] 終端を宣言した Object 自身を同一内容で再受信しても Malformed Track にしない
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4/5 は「final Object より larger than」な Object だけを Malformed とし、
+    final Object は End of Group / End of Track を宣言した Object 自身である。従来は終端を宣言した位置そのものを「存在しない」として扱っていたため、
+    同一内容の重複で subscription を cancel していた (§2.1 は、存在しないと記録した後に Object が届くことは protocol error ではないと定める)
+  - `Subscription::ended_groups` は Object Status 0x3 (End of Group) の位置 N に対して `N + 1` を記録する (`N` から変更)。
+    `Subscription::end_of_track` は宣言された Location をそのまま保持し、判定を `location > end` の厳密比較にする (`location >= end` から変更)
+  - 宣言した位置より後ろの Object は従来どおり Malformed Track になる。同じ位置の重複は §12.1 条件 6 と §7.1 の内容比較
+    (`ObjectFieldTracker`) に委ね、内容が同じなら受理、異なれば Malformed になる
+  - 保持量の上限で記録が破棄された後は同一位置の重複を比較できない (検出範囲が狭くなる known limitation)
+  - @voluntas
+
+- [FIX] example の moq が WebTransport の session ID 不正を H3_ID_ERROR で通知する
+  - draft-ietf-webtrans-http3-16 §4 (WebTransport Features) は、client-initiated bidirectional stream ID に対応しない
+    session ID を単方向 / 双方向ストリームで受信したエンドポイントに H3_ID_ERROR での接続クローズを MUST で要求するが、
+    従来はストリームヘッダーのデコードエラーを黙って捨てており違反を検知できなかった
+  - ルーティングの判定を純関数 (`decide_route`) に切り出し、`InvalidSessionId` / `SessionIdOutOfRange` は
+    `ErrorCode::IdError` (0x108) での接続クローズ、`BufferTooShort` は継続、形式不正は読み捨てとする
+  - 他セッションの session ID を持つ単方向 WebTransport ストリームを MOQT 層へ渡さず読み捨てる
+    (双方向は従来どおり HTTP/3 層へ渡す)。§4 の末尾により閉じたセッションの session ID は不正ではないため接続は閉じない
+  - 単方向ストリームのルーティングタスクは CONNECT より前に spawn されるため、session ID を `watch` で共有し
+    確定するまで照合を待つ。datagram 経路は対象外であり、依存する shiguredo_http3 が datagram の session ID 不正に
+    H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る
+  - @voluntas
+
+- [FIX] example の moq が WebTransport のセッション終了を検知し、全ストリームを WT_SESSION_GONE で中断する
+  - draft-ietf-webtrans-http3-16 §6 (Session Termination) は CONNECT stream の close (clean / abrupt) と WT_CLOSE_SESSION の
+    送受信をセッション終了の条件とし、終了を検知した端点に全 uni / bidi ストリームの `WT_SESSION_GONE` での中断と、
+    新しい datagram の送信・新しいストリームの open の禁止を MUST で要求する。従来は CONNECT stream の受信半を
+    セッション確立時に drop していたため終了を検知できず、MOQT 層の受信ループが待ち続けていた
+  - セッション状態を `watch` で各タスクへ配り、ストリームを所有するタスクが状態変化を観測して自分の送信方向を reset、
+    受信方向を stop_sending する。新規ストリームの open と datagram の送信は `WtSession` が状態を見て拒否する。
+    CONNECT stream の受信半は専用タスクで h3 層へ feed し続け、FIN / RESET_STREAM / WT_CLOSE_SESSION を
+    `WebTransportEvent::SessionClosed` として受け取る。h3 層のイベント処理は 1 経路に集約し、feed がエラーでも
+    同じ feed で発行されたイベントを取りこぼさない
+  - §4.7 (GOAWAY / WT_DRAIN_SESSION) の drain は終了と同一視せず、新しいストリームの open と datagram の送信だけを
+    拒否して既存ストリームを中断しない
+  - セッション終了は MOQT 層の受信経路 (`accept_recv_stream` / `accept_bidi_stream` / `recv_datagrams` /
+    `receive_chunk`) が `TransportError::ConnectionClosed` として返し、publisher / subscriber は終了として扱う
+    (data plane の送信経路も同じ扱いにし、終了時の後始末まで到達させる)
+  - `WT_SESSION_GONE` は HTTP/3 のプロトコルコードであり §4.4 のアプリケーションエラーコードの remap を通さない。
+    `WT_CLOSE_SESSION` の Application Error Code は 32 ビットのため、収まらない MOQT の close code は `as u32` で
+    切り捨てずエラーにする
+  - @voluntas
+
+- [FIX] example の moq が WT-Protocol の交渉結果を h3 層から受け取り、WT_ALPN_ERROR で接続を閉じる
+  - draft-ietf-webtrans-http3-16 §3.3 (Application Protocol Negotiation) は、交渉を要求したクライアントが成功応答に
+    `WT-Protocol` が無い / 不正 / 申告していない値だった場合に `WT_ALPN_ERROR` でセッションを閉じる MUST を定めるが、
+    従来は 2xx だけで確立とみなしていたため、サーバーがプロトコルを選ばなかった場合もバージョン不一致のまま MOQT を続行していた
+  - 判定は h3 層 (`handle_wt_connect_response`) が行い、example は `SessionEstablished` / `SessionClosed` の観測で結果を受け取る。
+    `TransportError::ProtocolNegotiationFailed` を追加して 2xx 以外の応答による `ConnectFailed` と区別し、交渉失敗時は
+    `s2n_quic::application::Error::new(WtErrorCode::AlpnError as u64)` で接続を閉じる (example 側に数値は直書きしない)
+  - `connect_outcome` は `HeadersEnd` で早期確定せず、`:status` / ヘッダー終端 / `SessionEstablished` / `SessionClosed` /
+    1xx 中間レスポンスを蓄積して判定する。確立前に GOAWAY / `WT_DRAIN_SESSION` (drain) や CONNECT stream の close を
+    観測した場合はセッションを確立しない
+  - @voluntas
+
+- [FIX] example の moq が h3 層の connection error を伝播して CONNECTION_CLOSE を送る
+  - RFC 9114 §6.2.1 (Control Streams) は制御ストリームの違反 (H3_MISSING_SETTINGS / H3_STREAM_CREATION_ERROR /
+    H3_CLOSED_CRITICAL_STREAM) を connection error として扱う MUST を、RFC 9297 §2.1 は HTTP/3 Datagram の
+    Quarter Stream ID の不正を H3_DATAGRAM_ERROR とする MUST を定めるが、従来は h3 層が返すエラーを捨てていたため
+    違反を検知しても接続を閉じず、datagram 経路では購読が静かに止まっていた
+  - h3 層へ入力を流す経路 (route の単方向 / 双方向ストリーム、datagram、CONNECT stream の feed と RESET_STREAM) の
+    戻り値を判定し、`Error::ConnectionError(code)` は `code.code()` を載せた CONNECTION_CLOSE で接続を閉じる。
+    接続エラーでない `Error::StreamError` は接続を閉じず、そのストリームの処理だけを止めてログに残す
+  - 接続エラーの発生は共有するセッション状態 (`watch`) に記録し、受信経路 (`accept_recv_stream` / `accept_bidi_stream` /
+    `recv_datagrams` / `receive_chunk`) が `TransportError::ConnectionClosed` を返して MOQT 層の受信ループを待たせない
+  - @voluntas
+
+- [ADD] MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `c4m` モジュールを追加する
+  - CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) のコーデックと、`moqt` / `moqt-reval` クレームの認可判定、JWT (JWS compact) の DPoP proof を扱う
+  - トークンは compact 形式 (draft-ietf-moq-c4m-01 付録 A) と COSE 形式 (CWT + COSE_Sign1 / COSE_Mac0) の両方を発行 / 検証できる。URL 埋め込み用の標準 Base64 も受理する
+  - `typ` の検証 (`VerifyOptions::expected_type`) に対応する
+  - 暗号処理は `CoseCrypto` trait に分離し、aws-lc-rs を使う実装を optional feature `aws-lc-rs` で提供する (既定ビルドは no_std のままで暗号実装をリンクしない)
+  - @voluntas
+
+- [ADD] `name` に namespace / track name 単体のシリアライズとパース (`serialize_namespace` / `parse_namespace` / `serialize_track_name` / `parse_track_name`) を追加する
+  - DPoP の Authorization Context の `tns` / `tn` の表現に使う
+  - @voluntas
+
+- [ADD] moq-sub に `--mp4` と `--no-play` を追加し、受信した映像 / 音声を MP4 ファイルへ保存できるようにする
+  - 受信したエンコード済みサンプル (AV1 / H.264 / H.265 / Opus) を再エンコードせずに `shiguredo_mp4` の `Mp4FileMuxer` で mux する
+  - `--no-play` は再生を無効化し、SDL を初期化せずデコードも行わない (受信と録画だけを行う)
+  - 録画対象のサンプルが無い場合はファイルを作成せず、既存ファイルを指定した場合は上書きする
+  - datagram 経由で届いたメディアは録画対象外とする (subgroup stream と fetch 応答ストリームのみ対応)
+  - @voluntas
+- [ADD] moq-pub に `--input-mp4` を追加し、MP4 ファイルの映像トラックを再エンコードせずに配信できるようにする
+  - AV1 / H.264 / H.265 の MP4 に対応し、codec 文字列 / 解像度 / フレームレート / 最大ビットレートは MP4 から算出して catalog に載せる
+  - 音声トラックは配信せず、catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)
+  - B フレームを含む MP4 は拒否する
+  - 末尾に達したら先頭に戻り、周回時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
+  - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
+  - @voluntas
+- [ADD] moq-pub に `--input-mp4-reencode` を追加し、MP4 ファイルの映像 / 音声をデコードして再エンコード配信できるようにする
+  - 映像は AV1 / H.264 / H.265 をデコードして `--video-codec` (既定 av1) で再エンコードし、音声は Opus を 48 kHz / 1ch にデコードして `--audio-bitrate` で再エンコードする
+  - 解像度とフレームレートは MP4 から自動検出し、`--bitrate` / `--keyframe-interval` は再エンコードの設定として使う
+  - B フレームを含む MP4 に対応し、デコード順 (DTS) でデコードして表示順 (PTS) でエンコードへ供給する。入力サンプルのタイムスタンプを LOC Timestamp に使い、`PROP_TIMESCALE` は入力トラックの timescale を使う
+  - ループの周期は映像と音声のトラック尺の最大値とし、各トラックは周期の先頭から再開する (周期より短いトラックは残りを送信しない)
+  - 8-bit 4:2:0 以外の映像はエラーにし、Opus 以外の音声は警告して対象外にする
+  - `--input-mp4` との同時指定と `--width` / `--height` / `--fps` の併用はエラーにし、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視して警告する
+  - @voluntas
+
+### misc
+
+- [ADD] secrets.TEST_MOQT_URI の relay へ moq-pub を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
+  - secrets.TEST_MOQT_URI が未設定の場合はテストを実行しない
+  - @voluntas
+- [UPDATE] moq-pub のカタログ構築を build_catalog に分離し単体テストを追加する
+  - 送信経路から分離した `build_catalog` で、video / audio の codec と必須フィールドの組み合わせが `MsfCatalogDocument::encode` に成功することを固定する
+  - @voluntas
+- [UPDATE] moq のセッション終了ログを終了コード付きにする
+  - `MoqtClient::close` は code 0 以外のとき `Session closed gracefully` ではなく `Session closed with code {code:#x} {reason}` を出す (エラー終了を正常終了と誤読しないため)
+  - @voluntas
+- [UPDATE] moq-sub の LOC プロパティ抽出の単体テストを追加・更新する
+  - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が書式違反を `Err` として返し、プロパティ無し (`Ok(None)` / `Ok((None, None))`) と区別されることを固定する
+  - @voluntas
+- [UPDATE] FETCH 経路の Object Properties の復元を PBT とテストで検証する
+  - `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため復元検証しない」という扱いを、`has_properties` と `properties_bytes` の組み合わせを網羅する往復検証に置き換える
+  - `tests/test_stream/decoder.rs` に Properties あり / なし / 空 / 非最小形 varint / End of Range の 5 ケースを追加し、moq-sub に Video Config 抽出の単体テストを追加する
+  - @voluntas
+- [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する
+  - `pbt/tests/prop_object_tracker.rs` に `object_field_tracker_content_comparison_matches_expected` を追加し、immutables と payload_key の比較が「両方 `Some` のときだけ」行われ、不一致の種類ごとに期待する `reason` が返ることを検証する (どちらの不一致も観測されたことをゲートする)
+  - `fuzz/fuzz_targets/fuzz_object_trackers.rs` の `Observe` に immutables / payload_key を追加し、内容込み API を別の tracker で呼ぶ。Group ID / Object ID / prune 対象 group を小さな空間に畳み、重複比較と prune の分岐に到達させる
+  - `tests/test_session/duplicate_object_content.rs` を追加し、subgroup / datagram の両経路で payload 長・status・immutable properties の差異を検出すること、mutable な Object Property の差異は検出しないこと、同一内容の重複が受理されることを固定する
+  - `tests/test_session/data_stream.rs` に Object Properties の KVP 不正と宣言長超過の検出を追加する
+  - @voluntas
+- [UPDATE] prek.toml からシンボリックリンク用のフックを削除する
+  - `check-symlinks` が適用対象を持たず `check-hooks-apply` が失敗して prek ジョブが赤くなっていたため、`check-symlinks` と `destroyed-symlinks` を削除する
+  - @voluntas
+- [UPDATE] 受信 subgroup 経路の PBT と fuzz を追加する
+  - `pbt/tests/prop_session/subgroup.rs` を追加し、受信 data stream の会計 (`open_incoming_subgroup_count`)、per-subgroup delivery timeout override のライフサイクル、候補順の帰属判定、`FilteredOut` / `Discarded` の Object が subscription スコープの状態を更新しないことを検証する
+  - `fuzz_session` の `Op` に subgroup header / object と FETCH_HEADER の受信操作を追加し、decode 済みの構造体を渡す操作列で panic と状態破壊を検出する
+  - @voluntas
+- [UPDATE] `cargo fuzz coverage` の出力先を fuzz の .gitignore に追加する
+  - `fuzz/coverage/` が untracked として現れないようにする
+  - @voluntas
+- [UPDATE] README / SKILL.md のコード例と API 一覧を実装に合わせる
+  - コード例を `no_run` + `fn main() -> Result<(), _>` に直し、README は `#[cfg(doctest)]` の
+    include でコンパイルを検証するようにした。SKILL.md のヘッダ型のシグネチャと
+    `subgroup_tracker` の API 一覧も実装どおりに列挙し直した
+- [UPDATE] `SubgroupObject::decode` の Properties 再デコードとマジックナンバーを整理する
+  - 到達不能な `map_err` 分岐を削除し、切り出し済み Properties の読み取りを encode 側と同じ `validate_properties_blob` に置き換える
+  - Normal status 判定のリテラル `0` を `OBJECT_STATUS_NORMAL` に置き換える (挙動と公開 API の変更はない)
+- [UPDATE] `src/session/subscription/delivery.rs` の関数に doc コメントを追加する
+  - 配信タイムアウトの正規化 (値 0 は「タイムアウトなし」) と effective 値の計算、EXPIRES の設定、PUBLISH_DONE の記録について、目的・draft-ietf-moq-transport-21 の節番号・引数の正規化規則を明記する
+  - 挙動と公開範囲は変えない
+  - @voluntas
+- [UPDATE] 内部からしか呼ばれない delivery モジュールの 4 関数を private にし、example の到達しない bidi 送信半の後始末を削除する
+  - `refresh_effective_object_delivery_timeout` / `refresh_effective_subgroup_delivery_timeout` / `set_subscription_subscriber_object_delivery_timeout` / `set_subscription_subscriber_subgroup_delivery_timeout` から `pub` を外す
+  - 4 関数は `src/session/subscription/delivery.rs` 内からのみ呼ばれ、`delivery` は `pub(super)` モジュールのため外部クレートから名前を解決できない (公開 API の変更はない)
+  - `MoqtClient::send_publish_done` の `bidi_sends.remove` は、直前の `drain_events` が `SendOnStream { fin: true }` を処理する時点で送信半が台帳から外れており常に `None` になるため削除する
+  - @voluntas
+- [UPDATE] `FetchStreamEncoder` の PBT に properties 経路を追加する
+  - `sample_objects` で `has_properties` を抽選し、`ObjectProperties::encode` の出力 (Properties Length varint 込み) を渡す経路を検証する
+  - @voluntas
+- [UPDATE] Authorization Token のエラー経路テストを追加する
+  - DELETE / USE_ALIAS の余剰バイトと未知の Alias Type の `KEY_VALUE_FORMATTING_ERROR`、SETUP での DELETE / USE_ALIAS の `PROTOCOL_VIOLATION`、値長 2^16-1 バイト上限の境界を固定する
+  - @voluntas
+- [UPDATE] 非最小 varint エンコーディングの decode テストを追加する
+  - 各バイト長の非最小形 (2〜9 バイトの 37、各長の最大値の 1 バイト長い形) を decode するテストと PBT を追加する
+  - @voluntas
+- [UPDATE] `FetchStreamEntry::encode` と `FetchStreamEncoder::encode_object` に properties 契約と `# Errors` を明記する
+  - `properties_data` が Properties Length varint を含むこと、`has_properties` との組み合わせ、返りうる `ProtocolViolation` を rustdoc から読み取れるようにする
+  - @voluntas
+- [UPDATE] example の WebTransport 受信待ちで session のロックを保持しないようにする
+  - `WtSession` の受信ストリーム receiver を acceptor が持ち、`recv()` をロック外で待つ (`take_uni_receiver` / `take_bi_receiver` を追加)
+  - @voluntas
+- [UPDATE] OBJECT_PROPERTY_FILTER の datagram 受信経路テストを追加する
+  - 一致 / 不一致の判定、状態を更新しないこと、共有 alias で最初に通過した subscription へ紐づくこと、対象 Property の値で合否が決まることを固定する
+  - @voluntas
+- [UPDATE] catalog (MSF) と LOC の relay での扱いを docs に明記する
+  - relay は payload と Properties を opaque として扱い、`moqt_msf` / `moqt_loc` を production 経路に配線しない理由を `docs/MOQT-RELAY.md` に記載する
+  - @voluntas
+- [UPDATE] LARGEST_OBJECT の集約ヘルパの配置と FETCH の INVALID_RANGE テストの重複を整理する
+  - `Session::publisher_track_largest` の定義を fill モジュールから delivery モジュールへ移し、`effective_largest_object` / `update_largest_object_in_parameters` と同じ箇所に揃える (公開範囲と算出結果は変えない)
+  - FETCH の INVALID_RANGE 応答検証を `assert_invalid_range_request_error` に集約し、4 テストに残っていた同型のインライン `match` を共通ヘルパへ置き換える
+  - @voluntas
+- [UPDATE] `SessionEvent::RequestOkReceived` の doc の読み取り例を実装に合わせる
+  - REQUEST_OK に出現しうるのは EXPIRES / LARGEST_OBJECT のみであること、FORWARD は REQUEST_UPDATE 送信時に状態へ反映される値であることを明記する
+  - @voluntas
+- [UPDATE] session の request stream 開始メッセージ一覧を実装に合わせる
+  - `recv_request` が受理するのは SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類であることを doc に明記する
+  - @voluntas
+- [UPDATE] MSF の track / cloneTrack の JSON メンバー書き出しと共通検証を共通化する
+  - @voluntas
+- [UPDATE] session の request 種別変換を 1 箇所に集約し、購読索引の追加・削除を単一経路化する
+  - @voluntas
+- [UPDATE] コード内 doc コメントの実装との不整合を修正する
+  - @voluntas
+- [UPDATE] コード内コメントが引用する draft-ietf-moq-transport-21 の節番号・節タイトル・引用文を一次資料に一致させる
+  - @voluntas
+- [UPDATE] 未解決の intra-doc link を修正する
+  - @voluntas
+- [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する
+  - @voluntas
+- [UPDATE] fuzz_session を client / server 両対応にし、送信 API を操作列に追加する
+  - @voluntas
+- [UPDATE] 削除済み SUBSCRIBE_TRACKS を参照するコメントを現行 draft に合わせ、未使用の prefix_overlaps を削除する
+  - @voluntas
+- [FIX] example の publisher が relay から転送される SUBSCRIBE / FETCH に応答できるようにする
+  - moq が peer 起動の bidi request stream を受理し、`ClientEvent::Request` としてアプリへ渡す
+  - moq-pub は SUBSCRIBE に SUBSCRIBE_OK、catalog の FETCH に FETCH_OK と FETCH 応答ストリームを返す
+  - moq-sub のカタログ取得が fetch 応答ストリームの終端を二重に通知しないようにする
+  - @voluntas
+- [FIX] FIN で閉じた受信 data stream に後から届く RESET_STREAM を無視する
+  - draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) が許容する順序でセッションを閉じていた
+  - FIN の重複通知と RESET 後の FIN は従来どおり `PROTOCOL_VIOLATION` として検出する
+  - @voluntas
+- [ADD] `SessionEvent::FinishRequestStream` を追加し、responder の FIN を受けた requester が送信方向を閉じられるようにする
+  - draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の SHOULD に対応する
+  - PUBLISH 起点の subscription は PUBLISH_DONE を送る必要があるため対象外とする
+  - @voluntas
+- [UPDATE] OBJECT_PROPERTY_FILTER を受信 datagram に再適用する挙動のテストを追加する
+  - `Session::recv_object_datagram` 経路で、Property がフィルタに一致する datagram の帰属、不一致時の `FilteredOut` と subscription スコープの状態を更新しないこと、共有 Track Alias で候補が複数ある場合に最初に通過した subscription へ紐づくことを固定する
+  - @voluntas
+- [UPDATE] `SubgroupObject::encode` の Properties 検証経路を fuzz でカバーする
+  - `fuzz_roundtrip` が decode の返した Properties 生バイト (Properties Length varint 込み) を encode へ渡すようにし、任意の Properties を渡す `fuzz_subgroup_object_encode` を追加する
+  - これまで Subgroup 側の encode は `properties_data = None` 固定で、Properties Length の不一致長・途中切れ varint の拒否経路に fuzz から到達できなかった
+- [UPDATE] 受信 subgroup Object フィルタのテストを分割し、重複していたテストヘルパを集約する
+  - `tests/test_session/subgroup_object_filter.rs` を親モジュールにし、routing / cancellation / group_end / override_lifecycle / priority の 5 サブモジュールへ分割する
+  - subscribe 確立・`DecodedSubgroupObject` 生成・`SubgroupHeader` 生成・フィルタパラメータ生成の重複定義を `tests/test_session.rs` の共通ヘルパへ集約し、`SubgroupHeader` のリテラルは既定値との差分だけを書く形にする
+  - テスト名・アサーション・期待値と `#[test]` の総数は変えない
+  - @voluntas
+- [UPDATE] 受信 subgroup Object の候補評価とキャンセル後始末を共通化し、`recv_subgroup_object` を段階ごとの関数に分割する
+  - 候補評価ループを `Session::evaluate_candidates` に集約し、SUBGROUP_HEADER / Object / Datagram の差は候補ごとのフィルタ入力 (`CandidateFilterInput`) の組み立てだけにする
+  - キャンセル済み stream の後始末を `Session::discard_cancelled_subgroup_stream` と `Session::cleanup_discarded_subgroup_stream` に集約し、破棄分岐へ入る条件の判定もそこへ寄せる
+  - `recv_subgroup_object` を「stream 状態の取得」「subgroup_id の解決」「帰属判定」「受理後の状態更新」に分割し、`IncomingDataStream::Subgroup` のフィールド列挙は `IncomingSubgroupStream` とアクセサへ寄せる
+  - 挙動・公開 API・テストの期待値は変えない
+  - @voluntas
+- [ADD] moq-sub に `--audio-output-device` を追加し、`none` で音声を出力せずに受信とデコードだけを続ける
+  - プレイヤー (raw_player) がデフォルト出力デバイスしか開けないため、受理する値は `default` と `none` に限る
+  - @voluntas
+- [FIX] example の publisher / subscriber が接続先の名前解決に応答が無いときに起動し続けるのを止める
+  - 名前解決を 5 秒で打ち切り、`failed to resolve ...: name resolution timed out after 5s` を表示して終了する
+  - @voluntas
+- [FIX] example の publisher / subscriber が DNS 名の解決結果の先頭のアドレスに接続できないとき、残りのアドレスを試さないのを止める
+  - 解決結果を順に試し、IPv4 のみ待ち受ける relay へ `moqt://localhost:4433/app` でも接続できるようにする
+  - @voluntas
+- [FIX] example の publisher / subscriber が RFC 3986 の host の規則に合わない authority を受理するのを止める
+  - `[example.com]` や IPvFuture、zone id 付き IPv6 リテラル、ポート 0、userinfo を名前解決の前に拒否する
+  - @voluntas
+- [FIX] moq-pub / moq-sub の `--help` がヘルプを表示せず必須オプション欠如のエラーで終了するのを止める
+  - 必須オプション `--url` にヘルプ表示用の例を与え、`--help` / `-h` が `moqt://host[:port]/path` を案内して正常終了するようにする
+  - @voluntas
+- [FIX] example が URL の authority と path に含まれる空白 / 制御文字を接続の前に拒否する
+  - 名前解決の失敗や SETUP の `PATH does not conform to RFC 3986` ではなく、`--url` の検証で原因を示す
+  - @voluntas
+- [FIX] example の publisher が `SessionEvent::ResetDataStream` を無視して保留 PUBLISH_DONE が送られないのを止める
+  - 該当 stream を RESET_STREAM で閉じ、`send_data_stream_closed` で Session へ終端を通知する
+  - @voluntas
+- [CHANGE] `RequestStreamEnd::Reset` の `error_code` と `TerminationReason::PeerStreamReset` の `error_code` を `Option<u64>` にする
+  - `None` は「アプリケーションエラーコード無し」を表し、WebTransport 経路で remap できないコードは生値を warn ログに残す (draft-ietf-webtrans-http3-16 §4.4)
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 で 32 ビットに収まらない MOQT の close code でも接続を閉じられるようにする
+  - 収まらない値は `WT_CLOSE_SESSION` capsule ではなく QUIC の `CONNECTION_CLOSE` に元のコードを載せ、varint の上限を超える値は `Error::UNKNOWN` に落とす
+  - @voluntas
+- [FIX] WebTransport over HTTP/3 の接続確立で制御ストリームを単方向受信ストリームの receiver より先に受け取る
+  - `take_uni_receiver` の後に `accept_uni_stream` を呼ぶと `StreamClosed` になり接続確立が必ず失敗していた
+  - @voluntas
+- [FIX] WT_CLOSE_SESSION 受信後に CONNECT stream へ追加データが届いたとき、H3_MESSAGE_ERROR でストリームを reset する
+  - セッション終了後の追加データだけを対象にし、セッション終了前の malformed capsule は従来どおりセッション終了として扱う
+  - @voluntas
+- [FIX] `moq-pub --input-mp4-reencode` の AV1 で、デコーダが保持する遅延フレームを周回の末尾に吐き切る
+  - `flush` (reset) の前に吐き切ることで、フレーム遅延のある AV1 でも周回をまたいでフレームが欠落しない
+  - @voluntas
+- [FIX] `moq-pub --input-mp4-reencode` が映像トラックの編集リスト (`elst`) を PTS に適用する
+  - `media_time` を差し引くことで、B フレームを含む MP4 で映像と音声の開始位置が揃い A/V のずれが解消する
+  - @voluntas
+- [ADD] 音声の波形の周期を使った時間圧縮・伸長 (`playout::stretch`) を追加する
+  - 4 kHz へ間引いた自己相関からピッチの周期を求め、周期 1 つ分を削る / 挿す
+  - 対応サンプルレートは 8 kHz / 16 kHz / 32 kHz / 48 kHz。相関が閾値未満の音は操作せず、無音は相関に関係なく操作する
+  - @voluntas
+- [ADD] 音声の目標遅延の学習 (`playout::delay`) と A/V 同期の遅延制御 (`playout::sync`) を追加する
+  - 到着の遅れの分布の 0.95 分位から目標遅延を決める (2 秒の窓、20 ms バケット 100 個、忘れ係数 0.983)
+  - ずれの平滑化、30 ms の不感帯、片側だけを 1 回 80 ms まで動かす制御を追加する
+  - @voluntas
+- [ADD] 音声を鳴らす時刻を決めるスケジューラ (`playout::scheduler`) を追加する
+  - 目標を過ぎた音も前の音と重なる音も捨てず、ずらして鳴らして時間圧縮で目標へ戻す
+  - 並べすぎと目標から 500 ms を超えた音は捨て、取り直し・破棄・圧縮・遅れの統計を読めるようにする
+  - @voluntas
+- [ADD] 音声と映像に共通の再生時刻を決める時間軸 (`playout::timeline`) を追加する
+  - TIMESTAMP に基準の遅れ (直近 10 秒の最小値) と表示の遅れ (音声は目標遅延、映像は揺らぎの百分位) を足した表示時刻を返す
+  - A/V 同期の制御を 1 秒ごとに適用し、`targetLatency` の下限・世代 (取り直し)・実績のずれを読めるようにする
+  - @voluntas
+- [UPDATE] Fetch の Descending Group Order のギャップ処理のテストを追加する
+  - `pbt/tests/prop_stream/encoder.rs` の roundtrip PBT を昇順 (0x01) と降順 (0x02) の両方に拡張し、`drive_fetch_with_group_order` で同じ Group Order のデコーダと往復させる (昇順 / 降順 / 降順で Group が変化するケースの観測をゲートする)
+  - 複数 Group のスキップ (10 → 3 → 1)、Group 変化時の Object ID 絶対値と同 Group 内デルタの混在、End of Range (0x8C / 0x10C / 0x20C) を Object と混在させた順序 (End of Range の Group が直前 Object と異なるケースと Object ID Delta 省略を含む) を `tests/test_stream/encoder.rs` と `tests/test_stream/decoder.rs` に固定する
+  - 実装の挙動は変えない
+  - @voluntas
+- [UPDATE] コード内コメントが引用する draft の版表記と節参照を draft-ietf-moq-transport-22 に同期する
+  - `draft-ietf-moq-transport-21` / `draft-21` の表記を draft-22 にし (削除時期を示す歴史的記述 2 件は除く)、節番号を draft-22 の構成 (§9.20.x の繰り下がり、§11.1.x の移動、§2.4.3、§3.1.2〜§3.1.4、§3.2.4、§3.7、§1.6、§6.3.2 → §6.3、§8.8、§3.6.2、Appendix の Issue 番号) に合わせる
+  - draft-22 で文面が変わった引用 (Properties Length、paused subscription、未知 flags、Object Properties の節番号など) を一次資料に合わせて更新する
+  - 実装のロジックは変えない (エラーメッセージ文字列の draft 表記のみ更新する)
+  - @voluntas
+- [UPDATE] README / docs / skill の対応仕様表記・参照リンク・節参照を draft-ietf-moq-transport-22 に更新する
+  - `docs/moqt.md` の実装状況に draft-22 の変更点 (REQUEST_OK の許可パラメータ、Location Filter の符号化、Delivery Mode、Fetch のギャップ) を追記する
+  - @voluntas
+- [ADD] moq-pub / moq-sub を lib としても使えるようにする
+  - 両クレートに lib ターゲットを追加し、`cli` / `error` / `pipeline` とデコード済みフレームの型を公開する
+  - `cli::parse_args` でオプションの配列から `Config` を組み立て、パイプラインを外部から起動できるようにする
+  - バイナリの CLI 引数、ログ出力、終了コードは変えない
+  - @voluntas
+- [UPDATE] E2E テストを relay を介した publish / subscribe の往復検証にする
+  - `e2e-tests/` を追加し、`#[ignore]` 付きのテストで実 relay に対する往復 (SETUP / PUBLISH / SUBSCRIBE / 映像の受信 / MP4 の保存 / graceful shutdown) を検証する
+  - GitHub Actions の E2E は publisher のみの検証から往復検証に置き換え、接続先のマスクと未設定時のスキップは維持する
+  - @voluntas

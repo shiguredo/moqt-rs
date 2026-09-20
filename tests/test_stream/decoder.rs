@@ -1,0 +1,1908 @@
+//! SubgroupStreamDecoder / FetchStreamDecoder の外部テスト
+//!
+//! エンコード済みバイト列をデコーダでインクリメンタルにデコードして検証する。
+use super::*;
+use shiguredo_moqt::object_properties::{
+    ObjectProperties, ObjectProperty, ObjectPropertyValue, PROP_PRIOR_OBJECT_ID_GAP,
+};
+
+/// テスト用: SubgroupHeader + SubgroupObject 列をエンコードする
+/// ペイロードも含めてバッファに書き込む（デコーダはペイロードに触れないが、
+/// consume_payload 後にバッファから drain する必要があるためテスト側で処理する）
+/// (object_id_delta, payload_length, status, payload)
+type SubgroupObjectTuple<'a> = (u64, u64, Option<u64>, Option<&'a [u8]>);
+
+fn encode_subgroup_stream(header: &SubgroupHeader, objects: &[SubgroupObjectTuple<'_>]) -> Vec<u8> {
+    let mut buf = header.encode();
+    for (delta, payload_length, status, payload) in objects {
+        let obj = SubgroupObject {
+            object_id_delta: *delta,
+            payload_length: *payload_length,
+            status: *status,
+        };
+        obj.encode(header.has_properties, None, &mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        if let Some(p) = payload {
+            buf.extend_from_slice(p);
+        }
+    }
+    buf
+}
+
+/// デコーダのバッファからペイロードを読み出して長さを検証するヘルパー
+fn drain_payload(decoder: &mut SubgroupStreamDecoder, expected_length: u64) {
+    let payload = decoder.try_read_payload().expect("payload が取れる");
+    assert_eq!(
+        payload.len() as u64,
+        expected_length,
+        "読み出したペイロード長が期待値と一致すること"
+    );
+}
+
+#[test]
+fn test_basic_decode() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 10,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // object_id: 0 (delta=0), 1 (delta=0), 2 (delta=0)
+    let data = encode_subgroup_stream(
+        &header,
+        &[
+            (0, 4, None, Some(b"aaaa")),
+            (0, 3, None, Some(b"bbb")),
+            (0, 2, None, Some(b"cc")),
+        ],
+    );
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+
+    // ヘッダーをデコードする
+    let decoded_header = decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoded_header, header);
+
+    // オブジェクト 0
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 0);
+    assert_eq!(obj.payload_length, 4);
+    drain_payload(&mut decoder, 4);
+
+    // オブジェクト 1
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 1);
+    assert_eq!(obj.payload_length, 3);
+    drain_payload(&mut decoder, 3);
+
+    // オブジェクト 2
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 2);
+    assert_eq!(obj.payload_length, 2);
+    drain_payload(&mut decoder, 2);
+}
+
+#[test]
+fn test_incremental_push() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(5),
+        publisher_priority: Some(64),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = encode_subgroup_stream(&header, &[(0, 2, None, Some(b"ab"))]);
+
+    let mut decoder = SubgroupStreamDecoder::new();
+
+    // 1 バイトずつ push してヘッダーデコードを試みる
+    for &byte in &data[..3] {
+        assert!(
+            decoder
+                .try_decode_header()
+                .expect("テストフィクスチャの前提条件を満たす")
+                .is_none()
+        );
+        decoder.push(&[byte]);
+    }
+    // 残りを push する
+    decoder.push(&data[3..]);
+    let decoded_header = decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoded_header, header);
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 0);
+    assert_eq!(obj.payload_length, 2);
+}
+
+#[test]
+fn test_object_id_delta_resolution() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // object_id: 5 (delta=5), 6 (delta=0), 10 (delta=3)
+    let data = encode_subgroup_stream(
+        &header,
+        &[
+            (5, 1, None, Some(b"a")),
+            (0, 1, None, Some(b"b")),
+            (3, 1, None, Some(b"c")),
+        ],
+    );
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 5);
+    drain_payload(&mut decoder, 1);
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 6);
+    drain_payload(&mut decoder, 1);
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 10);
+    drain_payload(&mut decoder, 1);
+}
+
+#[test]
+fn test_first_object_id_mode() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // 最初のオブジェクト: object_id = 3 → subgroup_id = 3
+    let data = encode_subgroup_stream(
+        &header,
+        &[(3, 1, None, Some(b"x")), (0, 1, None, Some(b"y"))],
+    );
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    // 未解決
+    assert_eq!(decoder.resolved_subgroup_id(), None);
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 3);
+    drain_payload(&mut decoder, 1);
+
+    // 最初のオブジェクトで subgroup_id が確定する
+    assert_eq!(decoder.resolved_subgroup_id(), Some(3));
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 4);
+    drain_payload(&mut decoder, 1);
+}
+
+#[test]
+fn test_status_object_no_payload_consume() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // object_id: 0 (通常), 1 (EndOfGroup status)
+    let data = encode_subgroup_stream(
+        &header,
+        &[(0, 2, None, Some(b"ab")), (0, 0, Some(0x3), None)],
+    );
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 0);
+    assert_eq!(obj.payload_length, 2);
+    drain_payload(&mut decoder, 2);
+
+    // status オブジェクトは consume_payload 不要で次に進める
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, 1);
+    assert_eq!(obj.payload_length, 0);
+    assert_eq!(obj.status, Some(0x3));
+}
+
+#[test]
+fn test_empty_buffer_returns_none() {
+    let mut decoder = SubgroupStreamDecoder::new();
+    assert!(
+        decoder
+            .try_decode_header()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none()
+    );
+}
+
+#[test]
+fn test_double_header_decode_error() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = header.encode();
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    // 2 回目のヘッダーデコードはエラー
+    assert!(matches!(
+        decoder.try_decode_header(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_object_before_header_error() {
+    let mut decoder = SubgroupStreamDecoder::new();
+    // ヘッダーなしでオブジェクトをデコードしようとするとエラー
+    assert!(matches!(
+        decoder.try_decode_object(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_resolved_subgroup_id_explicit() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(42),
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = header.encode();
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoder.resolved_subgroup_id(), Some(42));
+}
+
+#[test]
+fn test_resolved_subgroup_id_zero() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = header.encode();
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoder.resolved_subgroup_id(), Some(0));
+}
+
+#[test]
+fn test_subgroup_finish_without_header_errors() {
+    let decoder = SubgroupStreamDecoder::new();
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+/// ヘッダーのみ + FIN（オブジェクト 0 個）の空 Subgroup で finish が Ok を返す
+///
+/// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) 冒頭の
+/// "If a sender has delivered all objects in a Subgroup to the QUIC stream, except any
+/// Objects with Locations smaller than the subscription's Start Location, it MUST close
+/// the stream with a FIN." により、配達すべきオブジェクトが 0 個の Subgroup では
+/// ヘッダーのみ送って FIN で閉じるのが MUST に沿うフローになる。
+/// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+#[test]
+fn test_subgroup_finish_after_header_without_object_ok() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&header.encode());
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+/// ヘッダー + 不完全なオブジェクトヘッダー（バッファ非空）で finish が Err を返す
+///
+/// 空 Subgroup の受理は「バッファが空であること」で判定するため、partial object
+/// header は従来どおり UnexpectedEof として検出される。
+#[test]
+fn test_subgroup_finish_with_partial_object_header_errors() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = encode_subgroup_stream(&header, &[(0, 2, None, Some(b"ab"))]);
+    // ヘッダー全体 + オブジェクトヘッダーの先頭 1 バイトのみ（オブジェクトヘッダーとして不完全）を送る
+    let header_len = header.encode().len();
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data[..header_len + 1]);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    // partial object header はデコード不能でデータ不足として扱われる
+    assert!(
+        decoder
+            .try_decode_object()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none(),
+        "partial object header はデータ不足として扱われること"
+    );
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+/// partial SUBGROUP_HEADER（ヘッダーの途中で切れたデータ）で finish が Err を返す
+///
+/// 状態は `AwaitingHeader` のまま残るため、`finish` は Err を返す。
+/// 先頭 1 バイトは Type varint であり、track_alias 以降が欠落しているため
+/// ヘッダーデコードはデータ不足 (`Ok(None)`) になる。
+#[test]
+fn test_subgroup_finish_with_partial_header_errors() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = header.encode();
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data[..1]);
+    assert!(
+        decoder
+            .try_decode_header()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none(),
+        "partial header はデータ不足として扱われること"
+    );
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+/// `SubgroupIdMode::FirstObjectId` の空 Subgroup で finish が Ok を返し、
+/// subgroup_id が未解決 (`None`) のままである
+///
+/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) の SUBGROUP_ID_MODE 0b01 は
+/// "the Subgroup ID is the Object ID of the first Object transmitted in this Subgroup"
+/// と定義しており、オブジェクト 0 個では Subgroup ID が仕様上未定義になる。
+/// 受信側 session は `subgroup_id` が `None` の場合に tracker 更新をスキップして
+/// 終端を受理するため、decoder も正規の完了として受理する。
+#[test]
+fn test_subgroup_finish_first_object_id_empty_ok() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&header.encode());
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoder.resolved_subgroup_id(), None);
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+#[test]
+fn test_subgroup_finish_with_partial_payload_errors() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 10,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let mut data = encode_subgroup_stream(&header, &[(0, 2, None, Some(b"ab"))]);
+    data.pop();
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.payload_length, 2);
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+#[test]
+fn test_subgroup_finish_at_object_boundary_ok() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 10,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = encode_subgroup_stream(&header, &[(0, 2, None, Some(b"ab"))]);
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    drain_payload(&mut decoder, obj.payload_length);
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+/// payload 長 0 の status オブジェクトで終端した後（`ConsumingPayload` を経由しない）
+/// finish が Ok を返す
+///
+/// `try_decode_object` は payload 0 のオブジェクトでは状態を `AwaitingObject` のまま
+/// 進めるため、FIN 時点でバッファが空なら完結として受理される。
+#[test]
+fn test_subgroup_finish_after_status_object_ok() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 10,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    let data = encode_subgroup_stream(&header, &[(0, 0, Some(0x3), None)]);
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.payload_length, 0);
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+#[test]
+fn test_subgroup_rejects_object_id_delta_overflow() {
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Zero,
+        publisher_priority: Some(128),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // 最初のオブジェクト: object_id = u64::MAX - 1 (delta = u64::MAX - 1)
+    // 2 番目: delta = u64::MAX → prev + delta + 1 でオーバーフロー
+    let data = encode_subgroup_stream(
+        &header,
+        &[
+            (u64::MAX - 1, 1, None, Some(b"a")),
+            (u64::MAX, 1, None, Some(b"b")),
+        ],
+    );
+
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let obj = decoder
+        .try_decode_object()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(obj.object_id, u64::MAX - 1);
+    drain_payload(&mut decoder, 1);
+
+    // 2 番目のオブジェクトでオーバーフローが検出される
+    assert!(matches!(
+        decoder.try_decode_object(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+// ─── FetchStreamDecoder テスト ──────────────────────────────
+
+/// テスト用: FetchHeader + FetchStreamEntry 列をデコードし、最初のエントリを返す
+///
+/// ヘッダーのデコードと最初のエントリの取得だけを行う (ペイロードは消費しない)。
+fn decode_first_fetch_entry(data: &[u8]) -> DecodedFetchEntry {
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている")
+}
+
+/// (entry, properties_data, payload)
+type FetchEntryTuple<'a> = (FetchStreamEntry, Option<&'a [u8]>, Option<&'a [u8]>);
+
+/// テスト用: FetchHeader + FetchStreamEntry 列をエンコードする
+fn encode_fetch_stream(header: &FetchHeader, entries: &[FetchEntryTuple<'_>]) -> Vec<u8> {
+    let mut buf = header.encode();
+    let mut prior = FetchPriorContext::First;
+    for (entry, props, payload) in entries {
+        entry
+            .encode(*props, prior, &mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        if let Some(p) = payload {
+            buf.extend_from_slice(p);
+        }
+        // prior_context を遷移する
+        match entry {
+            FetchStreamEntry::Object(_) => {
+                prior = FetchPriorContext::HasPriorObject;
+            }
+            FetchStreamEntry::EndOfNonExistentRange { .. }
+            | FetchStreamEntry::EndOfUnknownRange { .. }
+            | FetchStreamEntry::EndOfTimedOutRange { .. } => {
+                if matches!(prior, FetchPriorContext::First) {
+                    prior = FetchPriorContext::NoPriorActualObject;
+                }
+            }
+        }
+    }
+    buf
+}
+
+#[test]
+fn test_fetch_basic_decode() {
+    let header = FetchHeader { request_id: 42 };
+    let obj1 = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 3,
+    });
+    let obj2 = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,                                 // prior (10) を継承
+        subgroup_id: FetchSubgroupIdMode::PreviousSame, // prior (0) を継承
+        object_id: None,                                // prior + 1 = 1
+        publisher_priority: None,                       // prior (128) を継承
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 2,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(obj1, None, Some(b"abc")), (obj2, None, Some(b"de"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+
+    // ヘッダー
+    let h = decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(h.request_id, 42);
+
+    // エントリ 1: 全フィールド明示
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.group_id, 10);
+            assert_eq!(obj.subgroup_id, 0);
+            assert_eq!(obj.object_id, 0);
+            assert_eq!(obj.publisher_priority, 128);
+            assert_eq!(obj.payload_length, 3);
+        }
+        _ => panic!("Object が期待された"),
+    }
+    drain_fetch_payload(&mut decoder, 3);
+
+    // エントリ 2: デルタ圧縮
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.group_id, 10); // 継承
+            assert_eq!(obj.subgroup_id, 0); // PreviousSame
+            assert_eq!(obj.object_id, 1); // prior + 1
+            assert_eq!(obj.publisher_priority, 128); // 継承
+            assert_eq!(obj.payload_length, 2);
+        }
+        _ => panic!("Object が期待された"),
+    }
+    drain_fetch_payload(&mut decoder, 2);
+}
+
+#[test]
+fn test_fetch_end_of_range_transitions() {
+    let header = FetchHeader { request_id: 1 };
+    // EndOfNonExistentRange → Object の順
+    let end_entry = FetchStreamEntry::EndOfNonExistentRange {
+        group_id: 5,
+        object_id: 10,
+    };
+    // End of Range 後の Object は NoPriorActualObject 文脈
+    // group_id / object_id は prior から参照可能だが、subgroup_id / priority は明示必須
+    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Object ID Delta absent → prior + 1
+    // prior (End of Range) の object_id=10 のとき解決値は 11
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,                                // prior (End of Range の 5) を継承
+        subgroup_id: FetchSubgroupIdMode::Explicit(0), // 明示必須
+        object_id: None,                               // absent → prior + 1 = 11
+        publisher_priority: Some(64),                  // 明示必須
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(&header, &[(end_entry, None, None), (obj, None, Some(b"x"))]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    // EndOfNonExistentRange
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::EndOfNonExistentRange {
+            group_id,
+            object_id,
+        } => {
+            assert_eq!(group_id, 5);
+            assert_eq!(object_id, 10);
+        }
+        _ => panic!("EndOfNonExistentRange が期待された"),
+    }
+
+    // Object (NoPriorActualObject 文脈)
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.group_id, 5); // End of Range の値を継承
+            assert_eq!(obj.subgroup_id, 0);
+            assert_eq!(obj.object_id, 11);
+            assert_eq!(obj.publisher_priority, 64);
+        }
+        _ => panic!("Object が期待された"),
+    }
+}
+
+#[test]
+fn test_fetch_subgroup_previous_plus_one() {
+    let header = FetchHeader { request_id: 1 };
+    let obj1 = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(0),
+        subgroup_id: FetchSubgroupIdMode::Explicit(3),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    let obj2 = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,
+        subgroup_id: FetchSubgroupIdMode::PreviousPlusOne, // 3 + 1 = 4
+        object_id: None,                                   // 0 + 1 = 1
+        publisher_priority: None,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(obj1, None, Some(b"a")), (obj2, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.subgroup_id, 3);
+        }
+        _ => panic!("Object が期待された"),
+    }
+    drain_fetch_payload(&mut decoder, 1);
+
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.subgroup_id, 4); // PreviousPlusOne
+            assert_eq!(obj.object_id, 1); // prior + 1
+        }
+        _ => panic!("Object が期待された"),
+    }
+}
+
+#[test]
+fn test_fetch_empty_buffer_returns_none() {
+    let mut decoder = FetchStreamDecoder::new();
+    assert!(
+        decoder
+            .try_decode_header()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none()
+    );
+}
+
+#[test]
+fn test_fetch_double_header_error() {
+    let header = FetchHeader { request_id: 1 };
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&header.encode());
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    assert!(matches!(
+        decoder.try_decode_header(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_entry_before_header_error() {
+    let mut decoder = FetchStreamDecoder::new();
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_zero_payload_no_consume() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(0),
+        subgroup_id: FetchSubgroupIdMode::Zero,
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+
+    let data = encode_fetch_stream(&header, &[(obj, None, None)]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => {
+            assert_eq!(obj.payload_length, 0);
+        }
+        _ => panic!("Object が期待された"),
+    }
+    // payload_length == 0 なので consume_payload 不要、次のエントリに進める
+}
+
+#[test]
+fn test_fetch_rejects_object_id_delta_overflow() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(2),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 同 Group の object_id はデルタ (prev_object + delta + 1)
+    // delta = u64::MAX でオーバーフローを起こさせる
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None, // prior を継承 → 同 Group (10)
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(u64::MAX), // デルタオーバーフロー
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(first, None, Some(b"a")), (second, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_rejects_group_id_delta_overflow_in_ascending_mode() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 非初回 Object の group_id はデルタ (prev_group + delta + 1)
+    // delta = u64::MAX でオーバーフローを起こさせる
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(u64::MAX), // デルタオーバーフロー
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0), // Group 変更時は絶対値
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(first, None, Some(b"a")), (second, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_rejects_subgroup_id_previous_plus_one_overflow() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(0),
+        subgroup_id: FetchSubgroupIdMode::Explicit(u64::MAX),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    // PreviousPlusOne: prior.subgroup_id (u64::MAX) + 1 でオーバーフロー
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,
+        subgroup_id: FetchSubgroupIdMode::PreviousPlusOne,
+        object_id: None,
+        publisher_priority: None,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(first, None, Some(b"a")), (second, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_rejects_ascending_group_in_descending_mode() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(11),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(first, None, Some(b"a")), (second, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new_with_group_order(0x02)
+        .expect("テストフィクスチャの前提条件を満たす");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+/// Descending (0x02) テスト用の FetchStreamObject エントリを作る
+///
+/// `group_id` は Group ID Delta (None は prior と同じ Group)、`object_id` は Group が
+/// 変化した場合の絶対値 / 同 Group 内のデルタ (None は prior + 1) である。
+fn descending_fetch_object(group_id: Option<u64>, object_id: Option<u64>) -> FetchStreamEntry {
+    FetchStreamEntry::Object(FetchStreamObject {
+        group_id,
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id,
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    })
+}
+
+/// Descending (0x02) で複数 Group をスキップしても絶対値が解決されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
+/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
+/// (absent なら prior + 1) になる。Group 変化時の Object ID がデルタ解釈では復元できない値
+/// (5001 → 1) を使い、絶対値として解決されることを固定する。
+#[test]
+fn test_fetch_descending_group_order_resolves_absolute_values() {
+    let header = FetchHeader { request_id: 1 };
+    // 最初の Object は絶対値。Group 変化時も Object ID は絶対値、同 Group 内はデルタ
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (
+                descending_fetch_object(Some(10), Some(5_000)),
+                None,
+                Some(b"a"),
+            ),
+            // 同 Group 内のデルタ: 5_000 + 1 = 5_001
+            (descending_fetch_object(None, Some(1)), None, Some(b"b")),
+            // Group のデルタ: 10 - (6 + 1) = 3、Group ID Delta が present なので Object ID は絶対値 1
+            (descending_fetch_object(Some(6), Some(1)), None, Some(b"c")),
+            // 同 Group 内のデルタ: 1 + 4 = 5
+            (descending_fetch_object(None, Some(4)), None, Some(b"d")),
+        ],
+    );
+
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut locations = Vec::new();
+    for _ in 0..4 {
+        let entry = decoder
+            .try_decode_entry()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .expect("テストフィクスチャに期待される内部値が入っている");
+        match entry {
+            DecodedFetchEntry::Object(object) => {
+                locations.push((object.group_id, object.object_id));
+                drain_fetch_payload(&mut decoder, 1);
+            }
+            other => panic!("Object が期待された: {other:?}"),
+        }
+    }
+    assert_eq!(
+        locations,
+        vec![(10, 5_000), (10, 5_001), (3, 1), (3, 5)],
+        "Group 降順と同 Group 内の Object ID 昇順が解決されること"
+    );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+}
+
+/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) が絶対位置として解決されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): End of Range の Group ID /
+/// Object ID は絶対値であり、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
+/// Group を直前 Object の Group と変え、直後の Object で End of Non-Existent Range /
+/// End of Unknown Range は Object ID Delta を省略し、End of Timed-Out Range は同 Group 内の
+/// デルタを使うことで、各 variant が prior を更新していること自体を検証する。
+/// エントリ境界で終端したストリームを `finish` が受容することも合わせて確認する。
+#[test]
+fn test_fetch_descending_end_of_range_entries_are_absolute() {
+    let header = FetchHeader { request_id: 1 };
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (descending_fetch_object(Some(10), Some(2)), None, Some(b"a")),
+            // 直前 Object の Group 10 とは異なる Group 9 を指す End of Range
+            (
+                FetchStreamEntry::EndOfNonExistentRange {
+                    group_id: 9,
+                    object_id: 5,
+                },
+                None,
+                None,
+            ),
+            // End of Range の prior (9, 5) を基準に Group のデルタ: 9 - (3 + 1) = 5
+            // Object ID Delta 省略は prior (End of Range の 5) + 1 = 6
+            (descending_fetch_object(Some(3), None), None, Some(b"b")),
+            // 同 Group (5) 内のデルタ: 6 + 2 = 8
+            (descending_fetch_object(None, Some(2)), None, Some(b"c")),
+            // 直前 Object の Group 5 とは異なる Group 4 を指す End of Range
+            (
+                FetchStreamEntry::EndOfUnknownRange {
+                    group_id: 4,
+                    object_id: 9,
+                },
+                None,
+                None,
+            ),
+            // End of Range の prior (4, 9) を基準に Group のデルタ: 4 - (1 + 1) = 2
+            // Object ID Delta 省略は prior (End of Range の 9) + 1 = 10
+            (descending_fetch_object(Some(1), None), None, Some(b"d")),
+            // 直前 Object の Group 2 とは異なる Group 1 を指す End of Range
+            (
+                FetchStreamEntry::EndOfTimedOutRange {
+                    group_id: 1,
+                    object_id: 11,
+                },
+                None,
+                None,
+            ),
+            // 同 Group (1) 内のデルタ: 11 + 5 = 16
+            (descending_fetch_object(None, Some(5)), None, Some(b"e")),
+        ],
+    );
+
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut entries = Vec::new();
+    while let Some(entry) = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+    {
+        match &entry {
+            DecodedFetchEntry::Object(_) => drain_fetch_payload(&mut decoder, 1),
+            DecodedFetchEntry::EndOfNonExistentRange { .. }
+            | DecodedFetchEntry::EndOfUnknownRange { .. }
+            | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+        }
+        entries.push(entry);
+    }
+    assert_eq!(
+        entries,
+        vec![
+            decoded_fetch_object(10, 2),
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id: 9,
+                object_id: 5
+            },
+            decoded_fetch_object(5, 6),
+            decoded_fetch_object(5, 8),
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id: 4,
+                object_id: 9
+            },
+            decoded_fetch_object(2, 10),
+            DecodedFetchEntry::EndOfTimedOutRange {
+                group_id: 1,
+                object_id: 11
+            },
+            decoded_fetch_object(1, 16),
+        ],
+        "End of Range が prior を更新し、絶対位置が解決されること"
+    );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+}
+
+#[test]
+fn test_fetch_rejects_priority_change_within_subgroup() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(7),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,
+        subgroup_id: FetchSubgroupIdMode::PreviousSame,
+        object_id: None,
+        publisher_priority: Some(64),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let data = encode_fetch_stream(
+        &header,
+        &[(first, None, Some(b"a")), (second, None, Some(b"b"))],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::MalformedTrack(_))
+    ));
+}
+
+#[test]
+fn test_fetch_rejects_malformed_object_properties() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    // Properties Length = 1, しかし中身が value を持たないので malformed
+    let malformed_properties = [0x01, 0x00];
+    let data = encode_fetch_stream(&header, &[(obj, Some(&malformed_properties), Some(b"a"))]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::ProtocolViolation(_))
+    ));
+}
+
+#[test]
+fn test_fetch_accepts_valid_prior_object_gap_properties() {
+    let header = FetchHeader { request_id: 1 };
+    let first = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(2),
+        publisher_priority: Some(128),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    let second = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: None,
+        subgroup_id: FetchSubgroupIdMode::PreviousSame,
+        object_id: Some(5),
+        publisher_priority: None,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+
+    let mut props = ObjectProperties::new();
+    props.push(ObjectProperty {
+        prop_type: PROP_PRIOR_OBJECT_ID_GAP,
+        value: ObjectPropertyValue::VarInt(2),
+    });
+    let mut encoded_props = Vec::new();
+    props
+        .encode(&mut encoded_props)
+        .expect("正当なテスト入力の encode は成功する");
+
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (first, Some(&encoded_props), Some(b"a")),
+            (second, None, Some(b"b")),
+        ],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let first = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(first, DecodedFetchEntry::Object(_)));
+    drain_fetch_payload(&mut decoder, 1);
+    let second = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(second, DecodedFetchEntry::Object(_)));
+}
+
+#[test]
+fn test_fetch_rejects_object_beyond_known_final_subgroup_object() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(1),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, None, Some(b"a"))]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder
+        .set_subgroup_final_object(10, 0, 0)
+        .expect("テストフィクスチャの前提条件を満たす");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    assert!(matches!(
+        decoder.try_decode_entry(),
+        Err(MessageError::MalformedTrack(_))
+    ));
+}
+
+#[test]
+fn test_fetch_finish_without_header_errors() {
+    let decoder = FetchStreamDecoder::new();
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+/// ヘッダーのみ + FIN（エントリ 0 個）は正規の空 FETCH 応答として成功を返す
+///
+/// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): "If no Objects exist in the
+/// requested range, the publisher opens the unidirectional stream, sends the FETCH_HEADER
+/// (see Section 11.4.1) and closes the stream with a FIN."
+#[test]
+fn test_fetch_finish_after_header_without_entry_ok() {
+    let header = FetchHeader { request_id: 1 };
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&header.encode());
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+/// ヘッダー + 不完全なエントリヘッダー（バッファ非空）で finish が Err を返す
+#[test]
+fn test_fetch_finish_with_partial_entry_header_errors() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    });
+    // エントリヘッダーの途中で切れたデータを作る（末尾の payload_length varint を欠落させる）
+    let mut entry_bytes = Vec::new();
+    obj.encode(None, FetchPriorContext::First, &mut entry_bytes)
+        .expect("正当なテスト入力の encode は成功する");
+    entry_bytes.pop();
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&header.encode());
+    decoder.push(&entry_bytes);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(
+        decoder
+            .try_decode_entry()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none(),
+        "partial entry header はデータ不足として扱われること"
+    );
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+/// partial FETCH_HEADER（ヘッダーの途中で切れたデータ）で finish が Err を返す
+///
+/// `request_id` の varint が 1 バイトで表現されることを前提に、末尾 1 バイトを除いて
+/// ヘッダーを不完全にする。`try_decode_header` はデータ不足として `None` を返し、
+/// 状態は `AwaitingHeader` のまま残るため、`finish` は Err を返す。
+#[test]
+fn test_fetch_finish_with_partial_header_errors() {
+    let header = FetchHeader { request_id: 1 };
+    let mut header_bytes = header.encode();
+    header_bytes.pop();
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&header_bytes);
+    assert!(
+        decoder
+            .try_decode_header()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_none(),
+        "partial FETCH_HEADER はデータ不足として扱われること"
+    );
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+#[test]
+fn test_fetch_finish_with_partial_payload_errors() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 2,
+    });
+    let mut data = encode_fetch_stream(&header, &[(obj, None, Some(b"ab"))]);
+    data.pop();
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => assert_eq!(obj.payload_length, 2),
+        _ => panic!("Object が期待された"),
+    }
+    assert_eq!(decoder.finish(), Err(MessageError::UnexpectedEof));
+}
+
+#[test]
+fn test_fetch_finish_at_entry_boundary_ok() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(10),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 2,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, None, Some(b"ab"))]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let entry = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    match entry {
+        DecodedFetchEntry::Object(obj) => drain_fetch_payload(&mut decoder, obj.payload_length),
+        _ => panic!("Object が期待された"),
+    }
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+/// End of Range エントリで終端した後の finish が Ok を返す
+///
+/// End of Range エントリは `FetchPriorContext` を `NoPriorActualObject` に遷移させる点で
+/// Object エントリと分岐が異なるため、finish の条件変更が波及しないことを固定する。
+#[test]
+fn test_fetch_finish_after_end_of_range_ok() {
+    let header = FetchHeader { request_id: 1 };
+    let entry = FetchStreamEntry::EndOfNonExistentRange {
+        group_id: 10,
+        object_id: 5,
+    };
+    let data = encode_fetch_stream(&header, &[(entry, None, None)]);
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    let decoded = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    assert!(matches!(
+        decoded,
+        DecodedFetchEntry::EndOfNonExistentRange {
+            group_id: 10,
+            object_id: 5
+        }
+    ));
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+// ─── FETCH 経路の Object Properties ──────────────────────────────────────────
+
+/// FETCH 応答の Object Properties が Properties Length varint 込みで公開されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、
+/// その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.2."
+/// により §11.1.2 (Object Properties) と同じである。
+/// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+/// MOQ Object Properties に載せると規定するため、LOC の Video Config / Timestamp / Timescale が
+/// そのまま取り出せることを固定する。
+#[test]
+fn test_fetch_object_properties_are_exposed() {
+    use shiguredo_moqt::loc::{
+        LocProperties, LocProperty, LocPropertyValue, PROP_TIMESCALE, PROP_TIMESTAMP,
+        PROP_VIDEO_CONFIG,
+    };
+
+    let mut props = LocProperties::new();
+    props.push(LocProperty {
+        prop_id: PROP_TIMESTAMP,
+        value: LocPropertyValue::VarInt(9000),
+    });
+    props.push(LocProperty {
+        prop_id: PROP_TIMESCALE,
+        value: LocPropertyValue::VarInt(90000),
+    });
+    props.push(LocProperty {
+        prop_id: PROP_VIDEO_CONFIG,
+        value: LocPropertyValue::Bytes(vec![0x01, 0x64, 0x00, 0x1F]),
+    });
+    let properties_data = props
+        .encode()
+        .expect("正当な LOC Properties は encode できる");
+
+    let header = FetchHeader { request_id: 7 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 3,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&properties_data), Some(b"abc"))]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+
+    let bytes = obj
+        .properties_bytes
+        .as_deref()
+        .expect("Properties が保持されること");
+    assert_eq!(
+        bytes,
+        properties_data.as_slice(),
+        "Properties Length varint 込みの生バイト列がそのまま保持されること"
+    );
+
+    // Subgroup 経路と同じ表現であるため LocProperties::decode にそのまま渡せる
+    let (decoded, consumed) =
+        LocProperties::decode(bytes).expect("LOC Properties として decode できる");
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(decoded.timestamp(), Some(9000));
+    assert_eq!(decoded.timescale(), Some(90000));
+    assert_eq!(
+        decoded.video_config(),
+        Some([0x01, 0x64, 0x00, 0x1F].as_slice())
+    );
+}
+
+/// 非最小形の Properties Length varint も wire の生バイトのまま保持されること
+///
+/// draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers) は
+/// "Variable-length integers do not need to be encoded using the minimum number of bytes" と定めるため、
+/// Properties Length = 0 は `0x00` 以外の形でも送られ得る。デコーダは正規化せず生バイトを保持する
+/// (Subgroup 経路の `non_minimal_properties_length_accepted` と対称)。
+#[test]
+fn test_fetch_non_minimal_properties_length_is_preserved() {
+    use shiguredo_moqt::loc::LocProperties;
+
+    // 2 バイトの非最小形で Properties Length = 0 を表す
+    let non_minimal = vec![0x80, 0x00];
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&non_minimal), None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes,
+        Some(vec![0x80, 0x00]),
+        "非最小形の Properties Length varint を最小形に正規化しないこと"
+    );
+
+    // 非最小形でも空の Properties として decode できる
+    let bytes = obj
+        .properties_bytes
+        .as_deref()
+        .expect("Properties が保持されること");
+    let (decoded, consumed) =
+        LocProperties::decode(bytes).expect("LOC Properties として decode できる");
+    assert_eq!(
+        consumed, 2,
+        "非最小形の varint も消費バイト数に含まれること"
+    );
+    assert!(
+        decoded.is_empty(),
+        "Properties Length = 0 の空の Properties であること"
+    );
+}
+
+/// Properties を持たない (Flags の bit 0x20 が 0 の) Object は properties_bytes が None になること
+#[test]
+fn test_fetch_object_without_properties_is_none() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, None, None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes, None,
+        "bit 0x20 が 0 の Object は Properties を運ばないこと"
+    );
+}
+
+/// Flags の bit 0x20 が 1 で Properties Length が 0 の Object は
+/// Properties Length varint の 1 バイトだけを持つ Some になること
+///
+/// Subgroup 経路の `SubgroupObject::decode` と同じ規則であり、
+/// 「Properties 無し (None)」と「空の Properties (Length = 0)」を混同しない。
+#[test]
+fn test_fetch_object_with_empty_properties_keeps_length_varint() {
+    use shiguredo_moqt::loc::LocProperties;
+
+    let empty_properties = LocProperties::new()
+        .encode()
+        .expect("空の LOC Properties は encode できる");
+    assert_eq!(
+        empty_properties,
+        vec![0x00],
+        "Properties Length = 0 の 1 バイト"
+    );
+
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&empty_properties), None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes,
+        Some(vec![0x00]),
+        "bit 0x20 が 1 なら Properties Length varint の 1 バイトを持つこと"
+    );
+}
+
+/// End of Range の 3 種類のエントリが Properties を運ばない variant として連続復号できること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties
+/// are not present." と定めるため、`DecodedFetchEntry` の End of Range の variant は Properties を
+/// 持たない。本テストは 3 種類を連続して復号し、それぞれの variant として返ることと、
+/// ペイロード消費なしで `finish()` が成功することを固定する。
+/// wire 上で End of Range に Properties を渡すと拒否されることは
+/// `tests/test_stream/fetch_stream_object.rs` の `encode_end_of_range_with_properties_rejected` が固定する。
+#[test]
+fn test_fetch_end_of_range_entries_carry_no_properties() {
+    let header = FetchHeader { request_id: 1 };
+    let entries = [
+        FetchStreamEntry::EndOfNonExistentRange {
+            group_id: 1,
+            object_id: 2,
+        },
+        FetchStreamEntry::EndOfUnknownRange {
+            group_id: 3,
+            object_id: 4,
+        },
+        FetchStreamEntry::EndOfTimedOutRange {
+            group_id: 5,
+            object_id: 6,
+        },
+    ];
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (entries[0], None, None),
+            (entries[1], None, None),
+            (entries[2], None, None),
+        ],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut decoded = Vec::new();
+    for _ in 0..3 {
+        decoded.push(
+            decoder
+                .try_decode_entry()
+                .expect("テストフィクスチャの前提条件を満たす")
+                .expect("テストフィクスチャに期待される内部値が入っている"),
+        );
+    }
+    assert_eq!(
+        decoded,
+        vec![
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id: 1,
+                object_id: 2
+            },
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id: 3,
+                object_id: 4
+            },
+            DecodedFetchEntry::EndOfTimedOutRange {
+                group_id: 5,
+                object_id: 6
+            },
+        ],
+        "End of Range の 3 エントリは Properties を持たない variant として返ること"
+    );
+    assert_eq!(decoder.finish(), Ok(()));
+}

@@ -1,0 +1,15 @@
+[package]
+name = "pbt"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[dependencies]
+# Property-Based Testing
+noprop = "0.2"
+# MoQT 本体 (ローカル参照)
+shiguredo_moqt = { path = ".." }
+
+[dev-dependencies]
+# integration test は lib 経由で使うため dev 依存は不要

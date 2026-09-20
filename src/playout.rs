@@ -1,0 +1,11 @@
+//! 音声の再生に関する処理
+//!
+//! 音声の再生に使う純粋な処理 (時間圧縮・伸長、目標遅延の学習、鳴らす時刻の決定、
+//! A/V 同期の遅延制御など) を置く。I/O・出力デバイス・タイマーには触れず、時刻や
+//! サンプルは呼び出し側が引数で渡す。
+
+pub mod delay;
+pub mod scheduler;
+pub mod stretch;
+pub mod sync;
+pub mod timeline;

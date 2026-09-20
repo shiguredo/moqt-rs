@@ -1,0 +1,19 @@
+[package]
+name = "e2e-tests"
+version = "0.0.0"
+edition = "2024"
+# moq-pub の依存 (raden) が MSRV 1.94 を要求するため、それに合わせる
+rust-version = "1.94"
+publish = false
+
+[dev-dependencies]
+# publisher (ローカル参照)
+moq-pub = { path = "../examples/moq-pub" }
+# subscriber (ローカル参照)
+moq-sub = { path = "../examples/moq-sub" }
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+# Tokio タスクメトリクス計測
+tokio-metrics = "0.5"
+# 非同期ユーティリティ (graceful shutdown)
+tokio-utils = "0.1"

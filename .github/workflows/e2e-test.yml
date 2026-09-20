@@ -1,0 +1,66 @@
+# GitHub Actions による E2E テスト
+#
+# - secrets.TEST_MOQT_URI に設定した relay に対し、moq-pub と moq-sub の lib API で
+#   publisher と subscriber のパイプラインを起動し、配信した映像が届くところまでを
+#   検証する (e2e-tests/tests/roundtrip.rs)
+# - secrets.TEST_MOQT_URI は moqt:// を指定する。接続経路は vars.TEST_MOQT_TRANSPORT
+#   (quic / wt-h3 / wt-h2) で選び、未設定なら quic を使う
+# - secrets.TEST_MOQT_URI が未設定の場合 (fork からの PR など) はテストを実行しない
+# - examples が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
+#   持つため macos-15 を使う (ci.yml と同じ理由)
+# - 公開ログに relay のホストやトークンを残さないよう、接続先 (host / authority) と
+#   fragment は ::add-mask:: でマスクする
+
+name: E2E Test
+
+on:
+  push:
+    branches:
+      - develop
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    timeout-minutes: 60
+    runs-on: macos-15
+    env:
+      TEST_MOQT_URI: ${{ secrets.TEST_MOQT_URI }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: TEST_MOQT_URI が未設定の場合はスキップする
+        if: env.TEST_MOQT_URI == ''
+        run: echo "TEST_MOQT_URI is not set; skipping the E2E test"
+
+      - name: 接続先をマスクする
+        if: env.TEST_MOQT_URI != ''
+        run: |
+          # 接続先の host / authority と fragment をマスクする。secrets 全体は GitHub が
+          # 自動でマスクするが、ログには host や authority 単体で現れることがある。
+          authority="${TEST_MOQT_URI#*://}"
+          authority="${authority%%/*}"
+          authority="${authority%%[?#]*}"
+          if [ "${authority#\[}" != "$authority" ]; then
+            # IPv6 リテラルは `[...]` の中身を host とする
+            host="${authority#[}"
+            host="${host%%]*}"
+          else
+            host="${authority%%:*}"
+          fi
+          echo "::add-mask::$host"
+          echo "::add-mask::$authority"
+          if [ "${TEST_MOQT_URI#*#}" != "$TEST_MOQT_URI" ]; then
+            echo "::add-mask::${TEST_MOQT_URI#*#}"
+          fi
+
+      - name: relay を介した PUBLISH / SUBSCRIBE を確認する
+        if: env.TEST_MOQT_URI != ''
+        env:
+          MOQT_E2E_URL: ${{ secrets.TEST_MOQT_URI }}
+          MOQT_E2E_TRANSPORT: ${{ vars.TEST_MOQT_TRANSPORT }}
+        run: cargo test -p e2e-tests -- --ignored

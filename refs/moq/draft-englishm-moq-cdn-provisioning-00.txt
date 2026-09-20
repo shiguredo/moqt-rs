@@ -1,0 +1,280 @@
+
+
+
+
+Media Over QUIC                                               M. English
+Internet-Draft                                                Cloudflare
+Intended status: Informational                              1 March 2026
+Expires: 2 September 2026
+
+
+                          MoQ CDN Provisioning
+                 draft-englishm-moq-cdn-provisioning-00
+
+Abstract
+
+   This document describes concepts related to provisioning MoQ relay
+   scopes on CDN infrastructure, including scope creation, credential-
+   to-scope mapping, and origin fallback configuration.  It uses a
+   provisioning API as a vehicle for describing these concepts and
+   identifying areas where common semantics across CDN providers may be
+   needed for multi-CDN compatibility.
+
+About This Document
+
+   This note is to be removed before publishing as an RFC.
+
+   The latest revision of this draft can be found at
+   https://englishm.github.io/moq-cdn-provisioning/draft-englishm-moq-
+   cdn-provisioning.html.  Status information for this document may be
+   found at https://datatracker.ietf.org/doc/draft-englishm-moq-cdn-
+   provisioning/.
+
+   Discussion of this document takes place on the Media Over QUIC
+   Working Group mailing list (mailto:moq@ietf.org), which is archived
+   at https://mailarchive.ietf.org/arch/browse/moq/.  Subscribe at
+   https://www.ietf.org/mailman/listinfo/moq/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/englishm/moq-cdn-provisioning.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+
+
+
+
+
+English                 Expires 2 September 2026                [Page 1]
+
+Internet-Draft                moq-cdn-prov                    March 2026
+
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 2 September 2026.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   2
+   2.  Conventions and Definitions . . . . . . . . . . . . . . . . .   3
+   3.  Scope Provisioning  . . . . . . . . . . . . . . . . . . . . .   3
+   4.  Connecting to a Scope . . . . . . . . . . . . . . . . . . . .   4
+   5.  Origin Fallback . . . . . . . . . . . . . . . . . . . . . . .   4
+   6.  Security Considerations . . . . . . . . . . . . . . . . . . .   4
+   7.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .   4
+   8.  Normative References  . . . . . . . . . . . . . . . . . . . .   4
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .   5
+   Author's Address  . . . . . . . . . . . . . . . . . . . . . . . .   5
+
+1.  Introduction
+
+   Media over QUIC Transport (MoQT) [MOQT] defines a pub/sub protocol
+   for media delivery through relays.  CDN providers that deploy MoQ
+   relays need to configure them in ways that are roughly analogous to
+   the rewrite rules, origin selection, and routing configuration
+   associated with HTTP reverse proxies and CDNs.  Some of these
+   configurations will need common semantics across providers to support
+   multi-CDN deployments.
+
+
+
+
+
+
+
+
+English                 Expires 2 September 2026                [Page 2]
+
+Internet-Draft                moq-cdn-prov                    March 2026
+
+
+   This document uses a provisioning API as a vehicle for describing
+   these concepts.  A customer creates a scope on a CDN relay, gets back
+   connection credentials, and hands those credentials to their
+   publishers and subscribers.  The relay uses the credentials to map
+   incoming connections to the right scope.
+
+   The API itself is part of the picture, but the more important
+   contribution here is describing the underlying concepts (scopes,
+   credential-to-scope mapping, origin fallback) in a way that could be
+   consistent across CDN providers.
+
+   A machine-readable OpenAPI description of the API described here is
+   maintained alongside this document in the source repository (see
+   openapi.yaml).
+
+2.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   Scope:  An isolated MoQ delivery context on a relay, as defined in
+      [MOQT].  All namespaces and tracks within a scope are isolated
+      from other scopes on the same relay.  A scope is the resource
+      created by the provisioning API.
+
+3.  Scope Provisioning
+
+   A CDN provider exposes an HTTP API endpoint for creating scopes:
+
+   POST /moq/scopes
+
+   The request MAY include configuration (see Section 5).
+
+   The response includes a server-generated scope identifier and
+   connection credentials:
+
+   {
+     "scope_id": "a1b2c3d4e5f6",
+     "url": "moqt://relay.example.com",
+     "token": "eyJhbGciOiJFZDI1NTE5..."
+   }
+
+   The url is the base URL of the relay service.  The token is a
+   credential that grants access to this scope.
+
+
+
+
+English                 Expires 2 September 2026                [Page 3]
+
+Internet-Draft                moq-cdn-prov                    March 2026
+
+
+4.  Connecting to a Scope
+
+   Clients connect to a provisioned scope by combining the URL and token
+   returned at creation time:
+
+   moqt://relay.example.com/{token}
+
+   The relay extracts the token from the URL path, validates it, and
+   maps the connection to the corresponding MoQT scope.
+
+   Within that scope, all MoQT operations (SUBSCRIBE, ANNOUNCE, etc.)
+   are isolated.  Publishers and subscribers in one scope cannot see
+   namespaces or tracks from another scope.
+
+5.  Origin Fallback
+
+   A scope MAY be configured with an upstream origin URL.  When a
+   subscriber requests content that isn't available on the relay, the
+   relay connects to the origin to fetch it.
+
+   This is configured at provisioning time:
+
+   {
+     "config": {
+       "origin_fallback": {
+         "url": "moqt://origin.example.com"
+       }
+     }
+   }
+
+   The relay establishes a MoQT connection to the origin URL and
+   forwards the subscription.  The origin could be another relay (at a
+   different CDN provider, or a customer's own infrastructure), or any
+   MoQT-speaking endpoint.
+
+6.  Security Considerations
+
+   TODO
+
+7.  IANA Considerations
+
+   This document has no IANA actions.
+
+8.  Normative References
+
+
+
+
+
+
+
+English                 Expires 2 September 2026                [Page 4]
+
+Internet-Draft                moq-cdn-prov                    March 2026
+
+
+   [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-16, 13 January 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-16>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+Acknowledgments
+
+   Thanks to Lucas Pardue and Jacob Curtis for design input.
+
+Author's Address
+
+   Mike English
+   Cloudflare
+   Email: ietf@englishm.net
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+English                 Expires 2 September 2026                [Page 5]

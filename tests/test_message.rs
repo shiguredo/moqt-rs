@@ -1,0 +1,1102 @@
+use shiguredo_moqt::{
+    error::MessageError,
+    message::ControlMessage,
+    message::Fetch,
+    message::FetchOk,
+    message::ReasonPhrase,
+    message::Redirect,
+    message::RequestError,
+    message::RequestUpdate,
+    message::Setup,
+    message::SubscribeOk,
+    message::common::Location,
+    message::common::TrackNamespace,
+    message_parameter::MessageParameters,
+    parameter::{SetupOption, SetupOptionValue, SetupOptions},
+    track_properties::TrackProperties,
+};
+
+mod setup_messages {
+    use super::*;
+
+    #[test]
+    fn setup_wire_format() {
+        // SETUP: type=0x2F00, length(u16), payload=空 (カウントプレフィックスなし)
+        let msg = ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        });
+        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        // type = 0x2F00 (2 byte vi64: 0x80|0x2F=0xAF, 0x00)
+        assert_eq!(encoded[0], 0xAF);
+        assert_eq!(encoded[1], 0x00);
+        // length = 0 (空の SetupOptions はカウントプレフィックスなしなので 0 バイト)
+        assert_eq!(encoded[2], 0x00);
+        assert_eq!(encoded[3], 0x00);
+        // ペイロードなし
+        assert_eq!(encoded.len(), 4);
+    }
+
+    /// malformed PATH を含む SETUP の wire decode が parameter 層では成功することを確認する
+    /// (セッション層の validate_setup_uri_format で正しいエラーコードに変換される)
+    #[test]
+    fn setup_with_malformed_path_decodes_successfully() {
+        let mut opts = SetupOptions::new();
+        opts.push(SetupOption {
+            option_type: shiguredo_moqt::parameter::SETUP_OPTION_PATH,
+            value: SetupOptionValue::Bytes(b"relative/path".to_vec()),
+        });
+        let msg = ControlMessage::Setup(Setup { options: opts });
+        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(consumed, encoded.len());
+        if let ControlMessage::Setup(setup) = decoded {
+            assert_eq!(setup.options.path(), Some(b"relative/path".as_slice()));
+        } else {
+            panic!("SETUP メッセージとしてデコードされるべき");
+        }
+    }
+}
+
+mod goaway {
+    use super::*;
+
+    /// Timeout 後に余剰バイト (draft-19 §10.4 で削除された Request ID) があると PROTOCOL_VIOLATION
+    ///
+    /// draft-ietf-moq-transport-22 §9 (Control Messages): Length が Message Body と
+    /// 一致しなければ PROTOCOL_VIOLATION。
+    #[test]
+    fn trailing_bytes_after_timeout_are_protocol_violation() {
+        use shiguredo_moqt::error::MessageError;
+        use shiguredo_moqt::varint;
+
+        // URI 空 + timeout=0 + 余剰 varint(1) を Length に含めてエンコード相当のバイト列を作る
+        let mut payload = Vec::new();
+        varint::encode(0, &mut payload); // URI length
+        varint::encode(0, &mut payload); // timeout
+        varint::encode(1, &mut payload); // 余剰 (旧 Request ID)
+
+        let mut buf = Vec::new();
+        varint::encode(0x10, &mut buf); // MSG_GOAWAY
+        let len = payload.len() as u16;
+        buf.push((len >> 8) as u8);
+        buf.push((len & 0xff) as u8);
+        buf.extend_from_slice(&payload);
+
+        let err = ControlMessage::decode(&buf).expect_err("余剰バイトは PROTOCOL_VIOLATION");
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// New Session URI が 8192 バイトを超える GOAWAY はデコードで拒否される
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
+    #[test]
+    fn uri_longer_than_8192_is_rejected_on_decode() {
+        use shiguredo_moqt::varint;
+
+        // URI 長だけ 8193 を書き、本体データは不要 (長さチェックが先に走る)
+        let mut payload = Vec::new();
+        varint::encode(8193, &mut payload);
+
+        let mut buf = Vec::new();
+        varint::encode(0x10, &mut buf); // MSG_GOAWAY
+        let len = u16::try_from(payload.len()).expect("payload は u16 に収まる");
+        buf.push((len >> 8) as u8);
+        buf.push((len & 0xff) as u8);
+        buf.extend_from_slice(&payload);
+
+        let err = ControlMessage::decode(&buf).expect_err("URI > 8192 は PROTOCOL_VIOLATION");
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// New Session URI がちょうど 8192 バイトの GOAWAY はデコードに成功する
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): 上限は 8192 バイト (含む)。
+    #[test]
+    fn uri_exactly_8192_decodes_successfully() {
+        use shiguredo_moqt::message::Goaway;
+
+        let uri = vec![b'x'; 8192];
+        let msg = ControlMessage::Goaway(Goaway {
+            new_session_uri: uri.clone(),
+            timeout: 0,
+        });
+        let encoded = msg
+            .encode()
+            .expect("8192 バイト URI の GOAWAY はエンコードできる");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("8192 バイト URI の GOAWAY はデコードできる");
+        assert_eq!(consumed, encoded.len());
+        match decoded {
+            ControlMessage::Goaway(g) => {
+                assert_eq!(g.new_session_uri, uri);
+                assert_eq!(g.timeout, 0);
+            }
+            other => panic!("Goaway が期待されたが {other:?}"),
+        }
+    }
+
+    /// New Session URI が 8192 バイトを超える GOAWAY はエンコードで拒否される
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト。
+    #[test]
+    fn uri_longer_than_8192_is_rejected_on_encode() {
+        use shiguredo_moqt::message::Goaway;
+
+        let msg = ControlMessage::Goaway(Goaway {
+            new_session_uri: vec![b'x'; 8193],
+            timeout: 0,
+        });
+        let err = msg
+            .encode()
+            .expect_err("URI > 8192 のエンコードは PROTOCOL_VIOLATION");
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "got {err:?}"
+        );
+    }
+}
+
+mod request_flow {
+    use super::*;
+
+    // ─── REQUEST_ERROR の REDIRECT present 整合検証 (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format)) ────
+    //
+    // draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format) "Redirect: Present only when Error Code is REDIRECT" に基づき、
+    // error_code と Redirect の present 整合をデコード・エンコード双方で強制する。
+    // 以下は意図的エラーパス (PBT のラウンドトリップでは表現できない) の単体テスト。
+
+    /// REDIRECT なのに Redirect 本体を欠くバイト列をデコードすると PROTOCOL_VIOLATION
+    /// (UnexpectedEof ではなく ProtocolViolation であること)
+    #[test]
+    fn request_error_redirect_missing_redirect_is_protocol_violation() {
+        // type=0x05, length=0x0003, payload=[error_code=0x34 (REDIRECT), retry=0x00, reason_len=0x00]
+        // reason まで読むと pos == payload.len() となり Redirect が欠落している
+        let bytes = [0x05u8, 0x00, 0x03, 0x34, 0x00, 0x00];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "REDIRECT で Redirect 欠落は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// 非 REDIRECT なのに末尾に余剰バイトがあるバイト列をデコードすると、末尾チェックで
+    /// PROTOCOL_VIOLATION になる
+    #[test]
+    fn request_error_non_redirect_trailing_bytes_is_protocol_violation() {
+        // type=0x05, length=0x0004, payload=[error_code=0x03, retry=0x00, reason_len=0x00, 余剰=0xAB]
+        // error_code != REDIRECT なので redirect=None となり、余剰バイトで pos != payload.len()
+        let bytes = [0x05u8, 0x00, 0x04, 0x03, 0x00, 0x00, 0xAB];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "非 REDIRECT で末尾余剰は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT で Redirect が途中で切れたバイト列をデコードすると、デコードエラー
+    /// (UnexpectedEof 系) になる。空欠落の ProtocolViolation との境界を固定する。
+    #[test]
+    fn request_error_redirect_truncated_redirect_is_unexpected_eof() {
+        // type=0x05, length=0x0004, payload=[error_code=0x34, retry=0x00, reason_len=0x00,
+        // connect_uri_len=0x05 (但し後続バイトなし)]。Redirect::decode_from が checked_len で
+        // UnexpectedEof を返す (pos < payload.len() なので ProtocolViolation 分岐には入らない)
+        let bytes = [0x05u8, 0x00, 0x04, 0x34, 0x00, 0x00, 0x05];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::UnexpectedEof),
+            "Redirect 途中切れは UnexpectedEof であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT なのに redirect=None の RequestError をエンコードすると PROTOCOL_VIOLATION
+    #[test]
+    fn request_error_encode_redirect_code_without_redirect_is_protocol_violation() {
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: 0x34, // REQUEST_REDIRECT
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("テストフィクスチャの前提条件を満たす"),
+            redirect: None,
+        });
+        let err = msg.encode().unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "REDIRECT + None のエンコードは ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// 非 REDIRECT なのに redirect=Some の RequestError をエンコードすると PROTOCOL_VIOLATION
+    #[test]
+    fn request_error_encode_non_redirect_code_with_redirect_is_protocol_violation() {
+        let ns = TrackNamespace::new(vec![b"example.com".to_vec()])
+            .expect("テストフィクスチャの前提条件を満たす");
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: 3, // REDIRECT 以外
+            retry_interval: 0,
+            reason: ReasonPhrase::new("not found").expect("テストフィクスチャの前提条件を満たす"),
+            redirect: Some(Redirect {
+                connect_uri: vec![],
+                track_namespace: ns,
+                track_name: vec![],
+            }),
+        });
+        let err = msg.encode().unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "非 REDIRECT + Some のエンコードは ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT + retry_interval=0 の RequestError は encode/decode で往復できる
+    ///
+    /// draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format): retry_interval の
+    /// 意味論 (plus one、値 1 は即時可、値 0 は SHOULD NOT retry as sent) は doc で確認し、
+    /// ここでは値 0 が欠落なく往復することと Redirect 本体が保持されることを固定する。
+    #[test]
+    fn request_error_redirect_with_zero_retry_interval_round_trip() {
+        let ns = TrackNamespace::new(vec![b"example.com".to_vec()])
+            .expect("テストフィクスチャの前提条件を満たす");
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("テストフィクスチャの前提条件を満たす"),
+            redirect: Some(Redirect {
+                connect_uri: Vec::new(),
+                track_namespace: ns,
+                track_name: Vec::new(),
+            }),
+        });
+        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+        let ControlMessage::RequestError(decoded_err) = decoded else {
+            panic!("REDIRECT が往復すること");
+        };
+        // 全体一致に含まれるが、失敗時の診断粒度のために個別にも固定する。
+        assert_eq!(
+            decoded_err.retry_interval, 0,
+            "retry_interval=0 が欠落なく往復すること"
+        );
+        assert!(
+            decoded_err.redirect.is_some(),
+            "Redirect 本体が保持されること"
+        );
+    }
+}
+
+mod fetch {
+    use super::*;
+
+    #[test]
+    fn fetch_unified_format_round_trip() {
+        use shiguredo_moqt::message_parameter::LocationFilter;
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        };
+        // draft-ietf-moq-transport-22 §9.11 (FETCH): 単一形式の往復
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 2,
+                    object_id: 3,
+                },
+                end_group_delta: 4,
+                end_object: 5,
+            }),
+        });
+        let msg = ControlMessage::Fetch(Fetch {
+            request_id: 7,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            track_name: b"cam".to_vec(),
+            parameters,
+        });
+        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn legacy_fetch_type_bytes_are_rejected() {
+        // draft-19 の Fetch Type 付きバイト列は draft-20 形式として解釈できず失敗する。
+        // 旧 Relative Joining: request_id=2, type=0x02, joining_request_id=0, joining_start=0,
+        // parameters count=0。Fetch Type バイト (0x02) が namespace フィールド数と読まれ、
+        // 後続バイトでは正当な namespace + track name + parameters が構成できない。
+        for payload in [
+            // 旧 Relative Joining FETCH
+            vec![0x02u8, 0x02, 0x00, 0x00, 0x00],
+            // 旧 Absolute Joining FETCH
+            vec![0x02u8, 0x03, 0x00, 0x00, 0x00],
+            // 旧 Standalone FETCH (type=0x01 のみ。後続なし)
+            vec![0x00u8, 0x01],
+            // 旧 Standalone FETCH 完全形
+            // (request_id=0, type=0x01, ns=["live"], name="cam", {0,0}-{1,0}, params=0)。
+            // type バイト (0x01) が namespace フィールド数と読まれ、track name 長に
+            // 0x6c (108) が来るため後続不足で失敗する。
+            vec![
+                0x00u8, 0x01, 0x01, 0x04, b'l', b'i', b'v', b'e', 0x03, b'c', b'a', b'm', 0x00,
+                0x00, 0x01, 0x00, 0x00,
+            ],
+        ] {
+            let mut buf = vec![
+                0x16u8, // MSG_FETCH type
+                0x00,
+            ];
+            buf.push(payload.len() as u8);
+            buf.extend_from_slice(&payload);
+
+            assert!(
+                ControlMessage::decode(&buf).is_err(),
+                "旧 Fetch Type 形式は拒否されること: {payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_ok_with_expires_is_rejected_on_encode() {
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_EXPIRES,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_EXPIRES,
+            value: MessageParameterValue::VarInt(100),
+        });
+        let msg = ControlMessage::FetchOk(FetchOk {
+            end_of_track: 0,
+            end_location: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            parameters,
+            track_properties: TrackProperties::new(),
+        });
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn fetch_ok_with_largest_object_is_rejected_on_decode() {
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+        };
+        let mut payload = vec![0u8, 0u8, 0u8];
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_LARGEST_OBJECT,
+            value: MessageParameterValue::Location {
+                group: 3,
+                object: 7,
+            },
+        });
+        parameters
+            .encode(&mut payload)
+            .expect("正当なテスト入力の encode は成功する");
+        TrackProperties::new()
+            .encode(&mut payload)
+            .expect("正当なテスト入力の encode は成功する");
+
+        let len = payload.len() as u16;
+        let mut encoded = vec![0x18, (len >> 8) as u8, len as u8];
+        encoded.extend_from_slice(&payload);
+
+        assert!(matches!(
+            ControlMessage::decode(&encoded),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
+mod redirect_full_track_name {
+    use super::*;
+    use shiguredo_moqt::message::{Redirect, RequestError};
+    use shiguredo_moqt::varint;
+
+    /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
+    const MSG_REQUEST_ERROR: u64 = 0x05;
+
+    /// 合計 4,096 バイトの Full Track Name を持つ Redirect を組み立てる
+    ///
+    /// `extra` バイトだけ Track Name を伸ばす。
+    fn request_error_with_redirect_total(extra: usize) -> RequestError {
+        const NAMESPACE_LEN: usize = 4096 - 1;
+        let fields = vec![vec![b'a'; NAMESPACE_LEN]];
+        let ns = TrackNamespace::new(fields).expect("正当な namespace である");
+        let track_name = vec![b'b'; 1 + extra];
+        RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な reason phrase である"),
+            redirect: Some(Redirect {
+                connect_uri: Vec::new(),
+                track_namespace: ns,
+                track_name,
+            }),
+        }
+    }
+
+    /// 合計 4,096 バイトちょうどの Redirect は encode / decode とも成功する (境界の非退行)
+    #[test]
+    fn redirect_at_limit_round_trips() {
+        let msg = ControlMessage::RequestError(request_error_with_redirect_total(0));
+        let bytes = msg
+            .encode()
+            .expect("4,096 バイトちょうどは encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+        assert_eq!(decoded, msg);
+    }
+
+    /// 合計 4,096 バイトを超える Redirect は encode で拒否される
+    ///
+    /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): "If an endpoint receives a
+    /// Track Namespace or a Full Track Name exceeding 4,096 bytes, it MUST close the session
+    /// with a PROTOCOL_VIOLATION."
+    #[test]
+    fn redirect_over_limit_is_rejected_on_encode() {
+        let msg = ControlMessage::RequestError(request_error_with_redirect_total(1));
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    /// 合計 4,096 バイトを超える Redirect は decode で拒否される
+    #[test]
+    fn redirect_over_limit_is_rejected_on_decode() {
+        // encode を通さずワイヤバイト列を組み立てる (1 バイト超過)
+        const NAMESPACE_LEN: usize = 4096 - 1;
+        let mut payload = Vec::new();
+        varint::encode(shiguredo_moqt::error::REQUEST_REDIRECT, &mut payload);
+        payload.push(0); // retry_interval
+        varint::encode(1, &mut payload); // reason length
+        payload.push(b'x'); // reason
+        varint::encode(0, &mut payload); // connect_uri length
+        varint::encode(1, &mut payload); // Track Namespace field count
+        varint::encode(NAMESPACE_LEN as u64, &mut payload);
+        payload.extend_from_slice(&vec![b'a'; NAMESPACE_LEN]);
+        varint::encode(2, &mut payload); // Track Name length (合計 4,097)
+        payload.extend_from_slice(b"bb");
+
+        let mut bytes = Vec::new();
+        varint::encode(MSG_REQUEST_ERROR, &mut bytes);
+        bytes.push((payload.len() >> 8) as u8);
+        bytes.push(payload.len() as u8);
+        bytes.extend_from_slice(&payload);
+
+        assert!(matches!(
+            ControlMessage::decode(&bytes),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
+mod error_cases {
+    use super::*;
+
+    #[test]
+    fn unknown_message_type() {
+        // 0x3F は 1 バイト varint (< 64) だが有効なメッセージ型 ID ではない
+        let buf = vec![0x3F, 0x00, 0x00];
+        assert!(matches!(
+            ControlMessage::decode(&buf),
+            Err(MessageError::InvalidMessageType(0x3F))
+        ));
+    }
+
+    #[test]
+    fn empty_buffer() {
+        assert_eq!(
+            ControlMessage::decode(&[]),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn truncated_length_field() {
+        // type=0x03 だが length フィールドが 1 バイトしかない
+        let buf = vec![0x03, 0x00];
+        assert_eq!(
+            ControlMessage::decode(&buf),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn payload_shorter_than_length() {
+        // type=0xAF, 0x00 (=0x2F00 SETUP), length=10, payload=5 bytes
+        let buf = vec![0xAF, 0x00, 0x00, 0x0A, 0x01, 0x02, 0x03, 0x04, 0x05];
+        assert_eq!(
+            ControlMessage::decode(&buf),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn invalid_fetch_namespace() {
+        // FETCH ペイロードの namespace フィールド数が後続バイトを超える場合は失敗する。
+        // (旧形式の fetch_type バイトは namespace フィールド数として読まれるため、
+        // 旧形式との互換性はない)
+        // request_id = 0 の後に namespace count = 4 が来るが後続バイトがない
+        let inner = vec![
+            0x00u8, // request_id = 0
+            0x04,   // namespace field count = 4 (満たせない)
+        ];
+
+        let mut buf = vec![
+            0x16u8, // MSG_FETCH type
+            0x00,
+        ];
+        buf.push(inner.len() as u8);
+        buf.extend_from_slice(&inner);
+
+        assert!(
+            ControlMessage::decode(&buf).is_err(),
+            "namespace フィールド不足の FETCH は拒否されること"
+        );
+    }
+
+    #[test]
+    fn reason_phrase_builds_at_boundary_lengths() {
+        // 0 バイト
+        assert!(ReasonPhrase::new("").is_ok());
+        // 1 バイト
+        assert!(ReasonPhrase::new("x").is_ok());
+        // 1023 バイト
+        assert!(ReasonPhrase::new("x".repeat(1023)).is_ok());
+        // 1024 バイト (上限)
+        assert!(ReasonPhrase::new("x".repeat(1024)).is_ok());
+    }
+
+    #[test]
+    fn reason_phrase_rejects_1025_bytes() {
+        let result = ReasonPhrase::new("x".repeat(1025));
+        assert_eq!(result, Err(MessageError::ReasonPhraseTooLong));
+    }
+
+    #[test]
+    fn decode_rejects_reason_phrase_longer_than_1024_as_protocol_violation() {
+        // draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure):
+        // 1024 バイトを超える Reason Phrase の受信は PROTOCOL_VIOLATION。
+        // PUBLISH_DONE (0x0B) のペイロードに長さ 1025 の Reason Phrase を載せる。
+        let mut payload = vec![
+            0x00, // status_code = 0
+            0x00, // stream_count = 0
+            0x44, 0x01, // reason phrase length = 1025 の vi64
+        ];
+        payload.extend_from_slice(&[b'x'; 1025]);
+
+        let mut buf = vec![0x0Bu8, (payload.len() >> 8) as u8, payload.len() as u8];
+        buf.extend_from_slice(&payload);
+
+        assert!(
+            matches!(
+                ControlMessage::decode(&buf),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "1024 バイト超の Reason Phrase の decode は PROTOCOL_VIOLATION になること"
+        );
+    }
+
+    #[test]
+    fn reason_phrase_rejects_at_utf8_multibyte_boundary() {
+        // 1023 バイト ASCII + 3 バイト UTF-8 文字 ("あ") = 1026 バイト
+        let mut s = "x".repeat(1023);
+        s.push('\u{3042}'); // "あ" = 3 バイト
+        assert_eq!(s.len(), 1026);
+        assert_eq!(ReasonPhrase::new(s), Err(MessageError::ReasonPhraseTooLong));
+    }
+
+    #[test]
+    fn reason_phrase_as_str_returns_inner_string() {
+        let rp = ReasonPhrase::new("hello").expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(rp.as_str(), "hello");
+    }
+
+    // ─── パラメータスコープ検証 (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope)) ──────────────────
+
+    /// RENDEZVOUS_TIMEOUT (0x04) は定義済みパラメータのため encode / decode で受理される
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter): "The
+    /// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
+    /// §16.7 (Message Parameters) の Table 14 にも登録されており、§9.20 (Control Message
+    /// Parameters) が PROTOCOL_VIOLATION を要求する「未知のパラメータ」には該当しない。
+    /// 本ライブラリは値を解釈しないが、受理して `MessageParameters` に残す。
+    #[test]
+    fn subscribe_with_rendezvous_timeout_is_accepted() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_RENDEZVOUS_TIMEOUT,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_RENDEZVOUS_TIMEOUT,
+            value: MessageParameterValue::VarInt(500),
+        });
+        let msg = ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"example".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"video".to_vec(),
+            parameters,
+        });
+        let encoded = msg
+            .encode()
+            .expect("定義済みパラメータを含む SUBSCRIBE は encode できること");
+        let (decoded, _) = ControlMessage::decode(&encoded)
+            .expect("定義済みパラメータを含む SUBSCRIBE は decode できること");
+        let ControlMessage::Subscribe(subscribe) = decoded else {
+            panic!("Subscribe が期待された");
+        };
+        // 0x04 が decode 後も MessageParameters に残ること (値は解釈しない)
+        let count = subscribe
+            .parameters
+            .as_slice()
+            .iter()
+            .filter(|p| p.param_type == PARAM_RENDEZVOUS_TIMEOUT)
+            .count();
+        assert_eq!(count, 1, "0x04 が decode 後も残ること");
+    }
+
+    /// Table 5 に定義済みで本ライブラリが実装しない型は Unsupported として decode できる
+    ///
+    /// draft-ietf-moq-transport-22 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
+    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
+    /// them." decode した本体を encode で再構成できることも固定する。
+    #[test]
+    fn unsupported_control_messages_roundtrip() {
+        // request として届く型 (本体が Request ID で始まる)
+        for (type_id, request_id) in [
+            (0x06u64, Some(3u64)), // PUBLISH_NAMESPACE
+            (0x50, Some(5)),       // SUBSCRIBE_NAMESPACE
+            (0x51, Some(7)),       // SUBSCRIBE_TRACKS
+        ] {
+            let original = ControlMessage::Unsupported {
+                type_id,
+                request_id,
+                // 本体は Request ID (vi64) で始まる生バイト列。decode は本体先頭の varint を
+                // request_id として読むため、body の先頭を request_id と一致させる
+                body: vec![request_id.expect("request_id は Some") as u8],
+            };
+            let bytes = original.encode().expect("encode できること");
+            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
+        }
+        // 応答専用の型 (Request ID を持たない)
+        for type_id in [0x08u64, 0x0E, 0x0F] {
+            let original = ControlMessage::Unsupported {
+                type_id,
+                request_id: None,
+                body: vec![0x01, 0x02],
+            };
+            let bytes = original.encode().expect("encode できること");
+            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
+        }
+    }
+
+    /// FILL_PARAMETERS の値が空 (Length = 0) の SUBSCRIBE は KEY_VALUE_FORMATTING_ERROR で拒否される
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) の値は各メッセージ形式が
+    /// 持つ `Number of Parameters (vi64), Parameters (..)` と解釈するため、Length = 0 は
+    /// `Number of Parameters` を欠く不正形である (理由と返すコードの根拠はパラメータ層の
+    /// `decode_fill_parameters` の doc を参照)。
+    /// パラメータ層の分類 (variant) がメッセージ層の decode でもそのまま返ることを固定する。
+    /// エラー文言そのものはパラメータ層のテストが固定する。
+    #[test]
+    fn subscribe_with_empty_fill_parameters_is_rejected() {
+        // この wire は encode が生成しない不正形である (encode は値 `0x00` と Length = 1 を書く。
+        // 受理側は subscribe_with_count_zero_fill_parameters_is_accepted が固定する)。
+        // SUBSCRIBE (0x03), Length = 14, Request ID = 7,
+        // Track Namespace: count=1 / "live", Track Name: "cam",
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
+        let wire = [
+            0x03, 0x00, 0x0E, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
+            0x01, 0x23, 0x00,
+        ];
+        assert!(
+            matches!(
+                ControlMessage::decode(&wire),
+                Err(MessageError::KeyValueFormattingError(_))
+            ),
+            "空の FILL_PARAMETERS を持つ SUBSCRIBE は KEY_VALUE_FORMATTING_ERROR であること"
+        );
+    }
+
+    /// 内側 0 個の FILL_PARAMETERS を持つ SUBSCRIBE は受理され、空の内側が保持される
+    ///
+    /// encode は内側 0 個を `Number of Parameters = 0` (`0x00` 1 バイト、Length = 1) として
+    /// 書く (Length = 1)。拒否テストと対になる受理側の固定であり、内側の count が保持されることも確認する。
+    #[test]
+    fn subscribe_with_count_zero_fill_parameters_is_accepted() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_FILL_PARAMETERS,
+            value: MessageParameterValue::FillParameters(MessageParameters::new()),
+        });
+        let msg = ControlMessage::Subscribe(Subscribe {
+            request_id: 7,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"cam".to_vec(),
+            parameters,
+        });
+        let encoded = msg
+            .encode()
+            .expect("内側 0 個の FILL_PARAMETERS は encode できること");
+        // 内側 0 個の値は count 0 の `0x00` 1 バイトであり、外側の Length は 1 になる。
+        // 拒否テストが使う wire (Length = 0) との違いを固定するため全体を比較する
+        // SUBSCRIBE (0x03), Length = 15, Request ID = 7, Track Namespace: count=1 / "live",
+        // Track Name: "cam", Parameters: count=1 / delta=0x23 / Length = 1 / 内側 count=0
+        assert_eq!(
+            encoded,
+            [
+                0x03, 0x00, 0x0F, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
+                0x01, 0x23, 0x01, 0x00,
+            ],
+            "encode の出力が count 付きの FILL_PARAMETERS を持つ SUBSCRIBE であること"
+        );
+
+        let (decoded, consumed) = ControlMessage::decode(&encoded)
+            .expect("内側 0 個の FILL_PARAMETERS を持つ SUBSCRIBE は decode できること");
+        assert_eq!(consumed, encoded.len());
+        let ControlMessage::Subscribe(subscribe) = decoded else {
+            panic!("Subscribe が期待された");
+        };
+        let fill = subscribe
+            .parameters
+            .fill_parameters()
+            .expect("FILL_PARAMETERS が保持されること");
+        assert!(
+            fill.is_empty(),
+            "内側 0 個の FILL_PARAMETERS は空の内側として保持されること"
+        );
+    }
+
+    /// FILL_PARAMETERS を許可しないメッセージに届いた FILL_PARAMETERS の分類
+    ///
+    /// 値のデコードが scope 検証より先に走るため、値が空の場合は scope 違反の
+    /// PROTOCOL_VIOLATION ではなく値の形式違反の KEY_VALUE_FORMATTING_ERROR を返す。
+    /// 値が空でなければ従来どおり scope 違反の PROTOCOL_VIOLATION になる。
+    /// どちらもセッションを閉じるが、報告される code が変わることを固定する
+    /// (CHANGES.md に記載した受信挙動の変更)。
+    #[test]
+    fn subscribe_ok_with_fill_parameters_reports_value_error_first() {
+        // SUBSCRIBE_OK (0x04), Length = 4, Track Alias = 0,
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
+        assert!(
+            matches!(
+                ControlMessage::decode(&[0x04, 0x00, 0x04, 0x00, 0x01, 0x23, 0x00]),
+                Err(MessageError::KeyValueFormattingError(_))
+            ),
+            "空の FILL_PARAMETERS は scope 検証より先に KEY_VALUE_FORMATTING_ERROR になること"
+        );
+
+        // 対照: SUBSCRIBE_OK (0x04), Length = 5, Track Alias = 0,
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 1 / 内側 count=0
+        assert!(
+            matches!(
+                ControlMessage::decode(&[0x04, 0x00, 0x05, 0x00, 0x01, 0x23, 0x01, 0x00]),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "値が空でなければ Table 7 外として PROTOCOL_VIOLATION になること"
+        );
+    }
+
+    /// Table 14 に無い未定義のパラメータ型は encode / decode で拒否される
+    ///
+    /// draft-ietf-moq-transport-22 §9.20 (Control Message Parameters): "An endpoint that
+    /// receives an unknown Message Parameter MUST close the session with PROTOCOL_VIOLATION."
+    #[test]
+    fn subscribe_with_undefined_parameter_type_is_rejected() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{MessageParameter, MessageParameterValue};
+        // Table 14 に無い型 (0x7F) を使う
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: 0x7F,
+            value: MessageParameterValue::VarInt(1),
+        });
+        let msg = ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"example".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"video".to_vec(),
+            parameters,
+        });
+        assert!(
+            matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+            "未定義のパラメータ型は encode で拒否されること"
+        );
+    }
+
+    #[test]
+    fn subscribe_ok_with_subscriber_priority_is_rejected() {
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_SUBSCRIBER_PRIORITY,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(100),
+        });
+        let msg = ControlMessage::SubscribeOk(SubscribeOk {
+            track_alias: 0,
+            parameters,
+            track_properties: TrackProperties::new(),
+        });
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn request_update_with_group_order_is_rejected() {
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_GROUP_ORDER,
+            value: MessageParameterValue::Uint8(1),
+        });
+        let msg = ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 1,
+            parameters,
+        });
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
+mod publish_state_notify {
+    use super::*;
+    use shiguredo_moqt::message::PublishStateNotify;
+    use shiguredo_moqt::message_parameter::LocationFilter;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
+        PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER,
+    };
+
+    /// 許可パラメータ群 (FORWARD / LOCATION_FILTER / LARGEST_OBJECT) を作る
+    /// (encode 時に型昇順へソートされるため、昇順で積む)
+    fn sample_params() -> MessageParameters {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LARGEST_OBJECT,
+            value: MessageParameterValue::Location {
+                group: 4,
+                object: 5,
+            },
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_FORWARD,
+            value: MessageParameterValue::Uint8(0),
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
+        });
+        params
+    }
+
+    #[test]
+    fn round_trip() {
+        // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) の往復
+        let msg = ControlMessage::PublishStateNotify(PublishStateNotify {
+            parameters: sample_params(),
+        });
+        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn disallowed_parameter_rejected_on_encode() {
+        // EXPIRES は PUBLISH_STATE_NOTIFY に出現できない
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_EXPIRES,
+            value: MessageParameterValue::VarInt(100),
+        });
+        let msg = ControlMessage::PublishStateNotify(PublishStateNotify { parameters: params });
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn disallowed_parameter_rejected_on_decode() {
+        // EXPIRES (0x08) を含むワイヤ形式は PROTOCOL_VIOLATION
+        // payload: count=1, delta=0x08, value=100
+        let payload = vec![0x01u8, 0x08, 0x64];
+        let mut buf = vec![
+            0x22u8, // MSG_PUBLISH_STATE_NOTIFY
+            0x00,
+        ];
+        buf.push(payload.len() as u8);
+        buf.extend_from_slice(&payload);
+        assert!(matches!(
+            ControlMessage::decode(&buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
+mod request_ok {
+    use super::*;
+    use shiguredo_moqt::message::RequestOk;
+    use shiguredo_moqt::message_parameter::LocationFilter;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
+        PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST,
+        PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER,
+        PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER,
+        PARAM_SUBSCRIBER_PRIORITY,
+    };
+
+    /// 和集合外のパラメータを含む REQUEST_OK は codec 層で PROTOCOL_VIOLATION になる
+    ///
+    /// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
+    /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.20.1 (Parameter Scope) の
+    /// MUST により PROTOCOL_VIOLATION で閉じる。encode と decode の両経路で同じ検証が働くことを
+    /// 固定する。和集合外の 10 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
+    #[test]
+    fn out_of_scope_params_are_protocol_violation() {
+        // (Parameter Type, typed 値, wire 上の値バイト列)
+        let out_of_scope: [(u64, MessageParameterValue, &[u8]); 10] = [
+            (
+                PARAM_OBJECT_DELIVERY_TIMEOUT,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+            (
+                PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+            (PARAM_FORWARD, MessageParameterValue::Uint8(1), &[0x01]),
+            (
+                PARAM_SUBSCRIBER_PRIORITY,
+                MessageParameterValue::Uint8(1),
+                &[0x01],
+            ),
+            (
+                PARAM_LOCATION_FILTER,
+                MessageParameterValue::LocationFilter(LocationFilter::NextObject),
+                // Location Filter Type 0x05 (Next Object) は Type のみの 1 バイト
+                &[0x05],
+            ),
+            (
+                PARAM_SUBGROUP_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                // Length 1 + 値 1 バイト
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_OBJECTID_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_PRIORITY_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_OBJECT_PROPERTY_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_NEW_GROUP_REQUEST,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+        ];
+        for (param_type, value, value_bytes) in out_of_scope {
+            let mut params = MessageParameters::new();
+            params.push(MessageParameter { param_type, value });
+            let msg = ControlMessage::RequestOk(RequestOk {
+                parameters: params,
+                track_properties: TrackProperties::default(),
+            });
+            assert!(
+                matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+                "型 {param_type:#x} の encode は PROTOCOL_VIOLATION になること"
+            );
+
+            // decode 経路: 同じパラメータを wire 形式で手組みする
+            // (REQUEST_OK の Type は 0x07、Track Properties は空なのでペイロードは
+            // Parameters ブロックのみになる)
+            let mut payload = Vec::new();
+            shiguredo_moqt::varint::encode(1, &mut payload);
+            shiguredo_moqt::varint::encode(param_type, &mut payload);
+            payload.extend_from_slice(value_bytes);
+            let mut frame = Vec::new();
+            shiguredo_moqt::varint::encode(0x07, &mut frame);
+            frame.push((payload.len() >> 8) as u8);
+            frame.push(payload.len() as u8);
+            frame.extend_from_slice(&payload);
+            assert!(
+                matches!(
+                    ControlMessage::decode(&frame),
+                    Err(MessageError::ProtocolViolation(_))
+                ),
+                "型 {param_type:#x} の decode は PROTOCOL_VIOLATION になること"
+            );
+        }
+    }
+
+    /// 和集合内の 2 型 (EXPIRES / LARGEST_OBJECT) は codec 層で受理される
+    ///
+    /// 拒否側だけを固定すると、許可集合をさらに狭める退行 (正当なパラメータを拒否する) を
+    /// 検出できないため、encode の成功も確認する。往復の網羅は PBT が担う。
+    #[test]
+    fn allowed_params_are_accepted() {
+        for (param_type, value) in [
+            (PARAM_EXPIRES, MessageParameterValue::VarInt(300)),
+            (
+                PARAM_LARGEST_OBJECT,
+                MessageParameterValue::Location {
+                    group: 4,
+                    object: 5,
+                },
+            ),
+        ] {
+            let mut params = MessageParameters::new();
+            params.push(MessageParameter { param_type, value });
+            let msg = ControlMessage::RequestOk(RequestOk {
+                parameters: params,
+                track_properties: TrackProperties::default(),
+            });
+            assert!(
+                msg.encode().is_ok(),
+                "型 {param_type:#x} の encode は成功すること"
+            );
+        }
+    }
+}

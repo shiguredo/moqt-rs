@@ -1,0 +1,144 @@
+//! draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names): Namespace / Track Name のシリアライズ・パースの property-based test。
+//! bijective 性 (binary <-> シリアライズ文字列) のラウンドトリップを検証する。
+
+use pbt::common::test_runner;
+use shiguredo_moqt::{
+    message::common::TrackNamespace, name::parse_name, name::parse_name_with_percent_encoding,
+    name::parse_namespace, name::parse_track_name, name::serialize_name, name::serialize_namespace,
+    name::serialize_track_name,
+};
+
+/// 空でない namespace フィールド (1..=16 バイト、任意値)
+fn sample_field(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
+    let len = noprop::sample_usize_in(ctx, 1..=16);
+    noprop::sample_bytes_vec(ctx, len)
+}
+
+/// TrackNamespace::new の制約を満たす namespace。フィールド数 0..=6 (0 個を含む)、各フィールド
+/// 1+ バイト、合計は小さく 4096 以下に収まる。
+fn sample_namespace(ctx: &mut noprop::TestCaseContext) -> TrackNamespace {
+    let field_count = noprop::sample_usize_in(ctx, 0..=6);
+    let fields = (0..field_count).map(|_| sample_field(ctx)).collect();
+    TrackNamespace::new(fields).expect("小さな非空フィールドは正当である")
+}
+
+/// track name (0..=16 バイト、空を含む任意値)
+fn sample_track_name(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
+    let len = noprop::sample_usize_in(ctx, 0..=16);
+    noprop::sample_bytes_vec(ctx, len)
+}
+
+/// binary -> serialize -> parse -> binary のラウンドトリップが一致する (bijective)。
+///
+/// namespace 0 個 (フィールド数 0) と track name 空 (長さ 0) も生成範囲に含み、
+/// 両方が実際に観測されたかをカバレッジゲートで検証する。
+#[test]
+fn roundtrip() -> noprop::TestResult {
+    let empty_namespace_seen = std::cell::Cell::new(false);
+    let empty_track_name_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let namespace = sample_namespace(ctx);
+        if namespace.fields().is_empty() {
+            empty_namespace_seen.set(true);
+        }
+        let track = sample_track_name(ctx);
+        if track.is_empty() {
+            empty_track_name_seen.set(true);
+        }
+        let serialized = serialize_name(&namespace, &track);
+        let (parsed_ns, parsed_track) =
+            parse_name(&serialized).expect("serialize_name の出力は parse_name で必ずパースできる");
+        assert_eq!(&parsed_ns, &namespace);
+        assert_eq!(&parsed_track, &track);
+
+        // 逆方向: serialize -> parse -> serialize が同一文字列になる (正規形の安定性)。
+        // 冗長 hex や曖昧 separator を出さないことを固定する。
+        let reserialized = serialize_name(&parsed_ns, &parsed_track);
+        assert_eq!(&reserialized, &serialized);
+        Ok(())
+    })?;
+    assert!(
+        empty_namespace_seen.get(),
+        "フィールド数 0 の namespace のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        empty_track_name_seen.get(),
+        "長さ 0 の track name のケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// `%XX` で全バイトをエスケープした track-identifier が元のバイト列へ戻ること
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の track-identifier は
+/// RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。track name の全バイトを `%XX`
+/// (小文字 hex) で表した入力が、任意のバイト列について元のバイト列へデコードされることを
+/// 検証する (`-` / `.` / `%` も `%XX` 表記なので構造と解釈が衝突しない)。
+#[test]
+fn percent_encoded_track_name_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let track_name = sample_track_name(ctx);
+        let mut identifier = String::from("ns--");
+        for b in &track_name {
+            // 小文字 hex 2 桁 (RFC 3986 §2.1 は大文字小文字を等価とする)
+            identifier.push('%');
+            identifier.push_str(&format!("{b:02x}"));
+        }
+        let (namespace, parsed) = parse_name_with_percent_encoding(&identifier)
+            .expect("%XX でエスケープした track-identifier は受理される");
+        assert_eq!(namespace.fields(), &[b"ns".to_vec()]);
+        assert_eq!(parsed, track_name);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// namespace 単体の serialize -> parse -> serialize のラウンドトリップ (DPoP の actx の tns)
+#[test]
+fn namespace_only_roundtrip() -> noprop::TestResult {
+    let empty_namespace_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let namespace = sample_namespace(ctx);
+        if namespace.fields().is_empty() {
+            empty_namespace_seen.set(true);
+        }
+        let serialized = serialize_namespace(&namespace);
+        let parsed = parse_namespace(&serialized)
+            .expect("serialize_namespace の出力は parse_namespace で必ずパースできる");
+        assert_eq!(parsed, namespace);
+        assert_eq!(serialize_namespace(&parsed), serialized);
+        Ok(())
+    })?;
+    assert!(
+        empty_namespace_seen.get(),
+        "フィールド数 0 の namespace のケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// track name 単体の serialize -> parse -> serialize のラウンドトリップ (DPoP の actx の tn)
+#[test]
+fn track_name_only_roundtrip() -> noprop::TestResult {
+    let empty_track_name_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let track = sample_track_name(ctx);
+        if track.is_empty() {
+            empty_track_name_seen.set(true);
+        }
+        let serialized = serialize_track_name(&track);
+        let parsed = parse_track_name(&serialized)
+            .expect("serialize_track_name の出力は parse_track_name で必ずパースできる");
+        assert_eq!(parsed, track);
+        assert_eq!(serialize_track_name(&parsed), serialized);
+        Ok(())
+    })?;
+    assert!(
+        empty_track_name_seen.get(),
+        "長さ 0 の track name のケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}

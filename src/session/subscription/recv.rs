@@ -1,0 +1,1166 @@
+//! SUBSCRIBE / PUBLISH / PUBLISH_DONE / REQUEST_UPDATE / PUBLISH_STATE_NOTIFY の受信
+//!
+//! draft-ietf-moq-transport-22 §9.6-§9.9 と
+//! draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) に対応。
+//! 将来 draft 側で変更される可能性がある。
+
+use crate::error::{
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_UNSUPPORTED_EXTENSION,
+    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
+};
+use crate::message::{
+    FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
+    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    common::{Location, TrackNamespace},
+};
+use crate::message_parameter::{
+    LocationFilter, LocationFilterContext, LocationFilterUpdate, MessageParameters,
+    PARAM_FILL_PARAMETERS,
+};
+use hashbrown::HashMap;
+
+use super::super::core::{
+    RequestTable, Session, alias_used_by_different_track, range_filter_usage,
+};
+use super::super::types::{
+    DeadlineTimer, DeliveryTimeoutState, RequestKind, SessionError, SessionEvent, StreamCountState,
+    Subscription, SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState,
+    TerminationReason, TrackRole,
+};
+use super::delivery::{
+    compute_effective_delivery_timeout_ms, record_publish_done, set_subscription_expires,
+    set_subscription_publisher_object_delivery_timeout,
+    set_subscription_publisher_subgroup_delivery_timeout,
+};
+use super::validation::{
+    extract_range_filters, resolve_location_filter, validate_forward, validate_group_order,
+    validate_include_properties,
+};
+
+impl Session {
+    /// subscriber 側で QUIC STOP_SENDING を発行したことを通知する
+    ///
+    /// draft §3.1.2 (Subscription State Management): subscriber 主導の終了。subscription state を Terminated に遷移。
+    /// session 層はイベントを発行しない (QUIC STOP_SENDING は I/O 層が実行済み)。
+    pub fn stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
+        self.require_established()?;
+        let subscription = self.subscriptions.get_mut(&request_id).ok_or_else(|| {
+            SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "subscription not found for stop_sending",
+            )
+        })?;
+        if subscription.my_role != TrackRole::Subscriber {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "stop_sending can only be issued by subscriber",
+            ));
+        }
+        // draft §3.1 (Subscriptions): "The subscriber terminates a subscription in
+        // the Pending (Subscriber) or Established states by sending STOP_SENDING".
+        // 自側 PUBLISH responder の Pending(Publisher) / Terminated からは送信不可。
+        if !(subscription.is_pending_subscriber()
+            || subscription.state == SubscriptionState::Established)
+        {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "stop_sending requires Pending(Subscriber) or Established state",
+            ));
+        }
+        subscription.state = SubscriptionState::Terminated;
+        Ok(())
+    }
+
+    // ─── 受信ハンドラ ──────────────────────────────────────
+
+    /// SUBSCRIBE / TRACK_STATUS の受信前に共通で行う検証
+    ///
+    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The receiver of a TRACK_STATUS
+    /// message treats it identically as if it had received a SUBSCRIBE message, except it
+    /// does not create downstream subscription state or send any Objects." したがって
+    /// 受信前の検証 (Request ID / AUTHORIZATION_TOKEN / Range Filter 数 / 予約名前空間 /
+    /// `.session` 名前空間) は両メッセージで共通である。
+    ///
+    /// `false` を返した場合は request を受理しない (REQUEST_ERROR は本関数内で発行済み、
+    /// または `Err` でセッションを閉じている)。呼び出し側は `Ok(false)` で早期 return する。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(crate) fn accept_incoming_track_request(
+        &mut self,
+        request_id: u64,
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+        parameters: &MessageParameters,
+    ) -> Result<bool, SessionError> {
+        // SUBSCRIBE と TRACK_STATUS は自側が publisher として応答する request である
+        if !self.accept_peer_request(request_id, parameters, true)? {
+            return Ok(false);
+        }
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        self.apply_peer_message_auth_tokens(parameters)?;
+        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
+        if let Err(reason) = self.check_incoming_range_filters(parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+            return Ok(false);
+        }
+        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.8 (GROUP ORDER Parameter) /
+        // §9.20.21 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
+        // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
+        // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
+        // 観測されるのは API 経路で手組みしたメッセージのみ)。
+        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間は拒否
+        if track_namespace.is_single_period() {
+            self.emit_request_error(
+                request_id,
+                REQUEST_DOES_NOT_EXIST,
+                "reserved single-period namespace",
+            );
+            return Ok(false);
+        }
+        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間は内部処理
+        // 未知のセッションレベルトラック/空トラック名は DOES_NOT_EXIST で拒否
+        if track_namespace.is_session_level() {
+            let reason = if track_name.is_empty() {
+                "empty track name in .session namespace"
+            } else {
+                "session-level track does not exist"
+            };
+            self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn handle_peer_subscribe(
+        &mut self,
+        subscribe: Subscribe,
+    ) -> Result<(), SessionError> {
+        let request_id = subscribe.request_id;
+        if !self.accept_incoming_track_request(
+            request_id,
+            &subscribe.track_namespace,
+            &subscribe.track_name,
+            &subscribe.parameters,
+        )? {
+            return Ok(());
+        }
+        // draft-ietf-moq-transport-22 §3.1 (Subscriptions): 同一 Track への複数同時 subscription が許可されたため、
+        // DUPLICATE_SUBSCRIPTION による拒否は行わない。
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): FORWARD パラメータの
+        // 抽出 (不在時はデフォルト 1)。値域外 (0 / 1 以外) の受信は MUST でセッションを
+        // PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と同じパターン。`?`
+        // 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を `forward_state` の
+        // 設定に使い、`forward()` の検索結果を検証に再利用する (検証を呼び出しと分離し、
+        // 同じパラメータを 2 回解釈しない)。
+        let forward_state = match subscribe.parameters.forward() {
+            Some(f) => match validate_forward(f) {
+                Ok(validated) => validated,
+                Err(err) => {
+                    self.fail(err.clone());
+                    return Err(err);
+                }
+            },
+            None => 1,
+        };
+        let subscriber_object_delivery_timeout_ms = subscribe.parameters.object_delivery_timeout();
+        let subscriber_subgroup_delivery_timeout_ms =
+            subscribe.parameters.subgroup_delivery_timeout();
+        let filter = match subscribe.parameters.location_filter_update() {
+            Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
+            // 省略時と Location Filter Type 0x00 (None) はどちらも unfiltered として扱う
+            Ok(_) => None,
+            Err(_) => {
+                // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+                // StartGroup + EndGroupDelta のオーバーフローは MUST close the session with
+                // PROTOCOL_VIOLATION。Location Filter 形式でない値は API 経由で手組みした
+                // メッセージでのみ起こり、wire 経路では decode 層が先に拒否するため到達しない
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "invalid subscription filter encoding",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        let subscriber_priority = subscribe.parameters.subscriber_priority();
+        let group_order = subscribe.parameters.group_order();
+        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        let include_properties = subscribe.parameters.include_properties();
+        if let Some(v) = include_properties
+            && let Err(err) = validate_include_properties(v)
+        {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §10.4 / §10.5: SUBSCRIBE には TrackProperties が含まれない。Publisher である
+        // 自側が send_subscribe_ok で発行するタイミングで DEFAULT_PUBLISHER_* を設定する。
+        let default_publisher_priority = None;
+        let default_publisher_group_order = None;
+        // draft §3.3.1 (Location Filters) / §3.3.2 (Range Filters): subscriber が SUBSCRIBE で
+        // 指定したフィルタを publisher 側の状態として取り込む。新規 subscription は解決時点の
+        // largest を持たないため、同一 track の既存 publisher 役 subscription が観測した
+        // 最大位置 (なければ先頭) で相対フィルタを解決する。
+        // 仕様の Largest Object は publisher がメッセージを処理する視点で定義されるため、
+        // 未配信 track では `None` 基準 (先頭から) になる。
+        // この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+        let track_largest =
+            self.publisher_track_largest(&subscribe.track_namespace, &subscribe.track_name);
+        let (filter_start, filter_end) = resolve_location_filter(
+            filter.as_ref(),
+            track_largest.as_ref(),
+            LocationFilterContext::Subscription,
+        );
+        let range_filters = extract_range_filters(&subscribe.parameters);
+        if let Some(order) = group_order {
+            // draft §9.20.8 (GROUP ORDER Parameter): 値域外の受信はセッションを閉じる
+            if let Err(err) = validate_group_order(order) {
+                self.fail(err.clone());
+                return Err(err);
+            }
+        }
+        let subscription = Subscription {
+            request_id,
+            initiator: SubscriptionInitiator::Subscriber,
+            my_role: TrackRole::Publisher,
+            track_namespace: subscribe.track_namespace,
+            track_name: subscribe.track_name,
+            track_alias: None,
+            state: SubscriptionState::Pending,
+            forward_state,
+            largest_location: None,
+            largest_received_location: None,
+            delivery_timeouts: DeliveryTimeoutState {
+                subscriber_object_ms: subscriber_object_delivery_timeout_ms,
+                subscriber_subgroup_ms: subscriber_subgroup_delivery_timeout_ms,
+                publisher_object_ms: None,
+                publisher_subgroup_ms: None,
+                effective_object_ms: compute_effective_delivery_timeout_ms(
+                    subscriber_object_delivery_timeout_ms,
+                    None,
+                ),
+                effective_subgroup_ms: compute_effective_delivery_timeout_ms(
+                    subscriber_subgroup_delivery_timeout_ms,
+                    None,
+                ),
+                subgroup_overrides: HashMap::new(),
+            },
+            expires: None,
+            // SUBSCRIBE には TrackProperties は含まれない。Publisher である自側が
+            // send_subscribe_ok で TrackProperties を発行するタイミングで dynamic_groups を設定する。
+            dynamic_groups: false,
+            default_publisher_priority,
+            default_publisher_group_order,
+            stream_counts: StreamCountState {
+                published_count: 0,
+                incoming_subgroup_count: 0,
+                open_incoming_subgroup_count: 0,
+            },
+            publish_done: None,
+            pending_publish_done: None,
+            filter,
+            subscriber_priority,
+            group_order,
+            // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+            // peer が SUBSCRIBE で指定した値を保持し、SUBSCRIBE_OK 送信時に参照する
+            include_properties,
+            filter_start,
+            filter_end,
+            range_filters,
+            ended_groups: HashMap::new(),
+            end_of_track: None,
+            pending_update_params: None,
+        };
+        self.register_subscription(request_id, subscription);
+        self.request_streams
+            .insert(request_id, RequestKind::Subscribe);
+        // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+        // FILL_PARAMETERS 付き SUBSCRIBE を Forward State 1 で処理したら
+        // fill fetch stream を開く。fill range が empty または Largest Object より
+        // 後に始まる場合・ Largest Object 未知の場合は開設しない。
+        self.maybe_open_fill_stream(
+            request_id,
+            request_id,
+            &subscribe.parameters,
+            filter,
+            forward_state,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<(), SessionError> {
+        let request_id = publish.request_id;
+        // PUBLISH は自側が subscriber として受ける request であり、§9.2 の publisher 限定の
+        // 拒否 MAY の対象外である
+        if !self.accept_peer_request(request_id, &publish.parameters, false)? {
+            return Ok(());
+        }
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        self.apply_peer_message_auth_tokens(&publish.parameters)?;
+        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
+        if let Err(reason) = self.check_incoming_range_filters(&publish.parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+            return Ok(());
+        }
+        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.8 (GROUP ORDER Parameter) /
+        // §9.20.21 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
+        // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
+        // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
+        // 観測されるのは API 経路で手組みしたメッセージのみ)。
+        // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): single period `.` 予約名前空間の PUBLISH は拒否
+        if publish.track_namespace.is_single_period() {
+            self.emit_request_error(
+                request_id,
+                REQUEST_DOES_NOT_EXIST,
+                "reserved single-period namespace",
+            );
+            return Ok(());
+        }
+        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間の PUBLISH は内部処理
+        // 未知のセッションレベルトラックは DOES_NOT_EXIST で拒否
+        if publish.track_namespace.is_session_level() {
+            self.emit_request_error(
+                request_id,
+                REQUEST_DOES_NOT_EXIST,
+                "session-level track does not exist",
+            );
+            return Ok(());
+        }
+        // draft §3.7 (Mandatory to Understand Track Properties): 未知の必須トラックプロパティを含む PUBLISH は
+        // REQUEST_ERROR (UNSUPPORTED_EXTENSION) で拒否する
+        if publish.track_properties.has_unknown_mandatory() {
+            self.emit_request_error(
+                request_id,
+                REQUEST_UNSUPPORTED_EXTENSION,
+                "unsupported mandatory extension",
+            );
+            return Ok(());
+        }
+        // draft §3.1.3 (Track Alias): "If a subscriber receives a PUBLISH or SUBSCRIBE_OK that
+        // uses the same Track Alias as a different Track with an Established subscription, it
+        // MUST close the session with error DUPLICATE_TRACK_ALIAS."
+        // 同一 Track への共有は §3.1 が許可しており、Pending 状態との衝突は MUST の条件外。
+        if alias_used_by_different_track(
+            &self.aliases.peer_publisher_aliases,
+            &self.subscriptions,
+            publish.track_alias,
+            &publish.track_namespace,
+            &publish.track_name,
+            None,
+            true,
+        ) {
+            let err = SessionError::new(
+                SESSION_DUPLICATE_TRACK_ALIAS,
+                "peer publisher reused track alias for a different track",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        let key = (
+            publish.track_namespace.clone(),
+            publish.track_name.clone(),
+            TrackRole::Subscriber,
+        );
+        // draft-ietf-moq-transport-22 §3.1 (Subscriptions): 同一 Track への複数同時 subscription が許可されたため、
+        // DUPLICATE_SUBSCRIPTION による拒否は行わない。
+        // ただし Pending(Subscriber) に対する PUBLISH は SUBSCRIBE と PUBLISH が交差した場合の
+        // 救済措置として既存 subscription を Terminated に遷移させる (draft §3.1)。
+        if let Some(ids) = self.aliases.subscriptions_by_track.get(&key) {
+            for &existing_id in ids {
+                let is_pending_subscriber = self
+                    .subscriptions
+                    .get(&existing_id)
+                    .is_some_and(|s| s.is_pending_subscriber());
+                if is_pending_subscriber {
+                    self.supersede_pending_subscriber(existing_id, request_id);
+                    break;
+                }
+            }
+        }
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): FORWARD パラメータの
+        // 抽出 (不在時はデフォルト 1)。値域外 (0 / 1 以外) の受信は MUST でセッションを
+        // PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と同じパターン。`?`
+        // 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を `forward_state` の
+        // 設定に使い、`forward()` の検索結果を検証に再利用する (検証を呼び出しと分離し、
+        // 同じパラメータを 2 回解釈しない)。
+        let forward_state = match publish.parameters.forward() {
+            Some(f) => match validate_forward(f) {
+                Ok(validated) => validated,
+                Err(err) => {
+                    self.fail(err.clone());
+                    return Err(err);
+                }
+            },
+            None => 1,
+        };
+        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の受信は
+        // MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let group_order = publish.parameters.group_order();
+        if let Some(order) = group_order
+            && let Err(err) = validate_group_order(order)
+        {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §9.20.9 (LOCATION FILTER Parameter):
+        // PUBLISH の Parameters は initial subscription parameters として保持する。
+        // Location Filter Type 0x00 (None) と省略はどちらも unfiltered として扱う。新規 PUBLISH は解決時点の
+        // largest を持たないため、相対フィルタは先頭から解決される。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let filter = match publish.parameters.location_filter_update() {
+            Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
+            Ok(_) => None,
+            // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
+            // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
+            Err(_) => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "invalid publish filter encoding",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        let subscriber_priority = publish.parameters.subscriber_priority();
+        // delivery timeout の Parameters は状態に保持しない。§8 の規則
+        // (publisher は Track Property、subscriber は SUBSCRIBE / REQUEST_UPDATE の
+        // Message Parameters で伝える) に従い、publisher 側値は Track Properties、
+        // subscriber 側値は REQUEST_UPDATE 経路が担う。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let publisher_object_delivery_timeout_ms =
+            publish.track_properties.object_delivery_timeout();
+        let publisher_subgroup_delivery_timeout_ms =
+            publish.track_properties.subgroup_delivery_timeout();
+        let expires = publish
+            .parameters
+            .expires()
+            .map(|expires_ms| DeadlineTimer::new(expires_ms, self.timing.last_tick_ms));
+        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): peer が発行した PUBLISH の TrackProperties に
+        // DYNAMIC_GROUPS=1 があれば記録する。自側が (responder として) REQUEST_UPDATE 応答可否を
+        // 判断する際の NEW_GROUP_REQUEST 検証の材料となる。
+        let dynamic_groups = publish.track_properties.dynamic_groups() == Some(1);
+        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        let default_publisher_priority = publish.track_properties.default_publisher_priority();
+        let default_publisher_group_order =
+            publish.track_properties.default_publisher_group_order();
+        // draft §3.3.1 (Location Filters): 解決済み値を求める。
+        // 新規 PUBLISH は解決時点の largest を持たないため、相対フィルタは
+        // 先頭から解決される。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let (filter_start, filter_end) =
+            resolve_location_filter(filter.as_ref(), None, LocationFilterContext::Subscription);
+        let range_filters = SubscriptionRangeFilters::default();
+        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、PUBLISH にも
+        // 直接含められる。
+        // 受信した PUBLISH の GROUP_ORDER は本処理で値域検証済みであり、初期状態として保持する。
+        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+        let subscription = Subscription {
+            request_id,
+            initiator: SubscriptionInitiator::Publisher,
+            my_role: TrackRole::Subscriber,
+            track_namespace: publish.track_namespace,
+            track_name: publish.track_name,
+            track_alias: Some(publish.track_alias),
+            state: SubscriptionState::Pending,
+            forward_state,
+            largest_location: None,
+            largest_received_location: None,
+            delivery_timeouts: DeliveryTimeoutState {
+                subscriber_object_ms: None,
+                subscriber_subgroup_ms: None,
+                publisher_object_ms: publisher_object_delivery_timeout_ms,
+                publisher_subgroup_ms: publisher_subgroup_delivery_timeout_ms,
+                effective_object_ms: compute_effective_delivery_timeout_ms(
+                    None,
+                    publisher_object_delivery_timeout_ms,
+                ),
+                effective_subgroup_ms: compute_effective_delivery_timeout_ms(
+                    None,
+                    publisher_subgroup_delivery_timeout_ms,
+                ),
+                subgroup_overrides: HashMap::new(),
+            },
+            expires,
+            dynamic_groups,
+            default_publisher_priority,
+            default_publisher_group_order,
+            stream_counts: StreamCountState {
+                published_count: 0,
+                incoming_subgroup_count: 0,
+                open_incoming_subgroup_count: 0,
+            },
+            publish_done: None,
+            pending_publish_done: None,
+            filter,
+            subscriber_priority,
+            group_order,
+            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
+            include_properties: None,
+            filter_start,
+            filter_end,
+            range_filters,
+            ended_groups: HashMap::new(),
+            end_of_track: None,
+            pending_update_params: None,
+        };
+        self.register_subscription(request_id, subscription);
+        self.request_streams
+            .insert(request_id, RequestKind::Publish);
+        self.register_peer_alias(publish.track_alias, request_id);
+        // draft §3.1 (Subscriptions) / §9.20.17 (LARGEST OBJECT Parameter):
+        // PUBLISH の parameters に LARGEST_OBJECT があれば広告値として保存する
+        if let Some((group_id, object_id)) = publish.parameters.largest_object()
+            && let Some(sub) = self.subscriptions.get_mut(&request_id)
+        {
+            sub.largest_location = Some(Location {
+                group_id,
+                object_id,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_peer_subscribe_ok(
+        &mut self,
+        request_id: u64,
+        ok: SubscribeOk,
+    ) -> Result<(), SessionError> {
+        let now_ms = self.timing.last_tick_ms;
+        let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "SUBSCRIBE_OK received for unknown request id",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        };
+        if subscription.my_role != TrackRole::Subscriber || !subscription.is_pending_subscriber() {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "SUBSCRIBE_OK in unexpected subscription state",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §3.1.3 (Track Alias): 異なる Track の Established subscription と衝突する場合のみ
+        // DUPLICATE_TRACK_ALIAS でセッションを閉じる。同一 Track への alias 共有は §3.1 が許可。
+        let (ns_for_alias, name_for_alias) = (
+            subscription.track_namespace.clone(),
+            subscription.track_name.clone(),
+        );
+        if alias_used_by_different_track(
+            &self.aliases.peer_publisher_aliases,
+            &self.subscriptions,
+            ok.track_alias,
+            &ns_for_alias,
+            &name_for_alias,
+            Some(request_id),
+            true,
+        ) {
+            let err = SessionError::new(
+                SESSION_DUPLICATE_TRACK_ALIAS,
+                "peer publisher reused track alias in SUBSCRIBE_OK for a different track",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("subscription presence already checked above");
+        // draft §3.7 (Mandatory to Understand Track Properties): 未知の必須プロパティを含む SUBSCRIBE_OK は購読をキャンセルする
+        if ok.track_properties.has_unknown_mandatory() {
+            // 本経路に到達する subscription は `handle_peer_subscribe_ok` の事前検証で
+            // Pending(Subscriber) に限られるため、この判定は現状つねに true になる。
+            // `StopSendingRequestStream` の doc が定める「既に Terminated の経路では
+            // 発行しない」規則を将来の経路追加に対して保つための防御である。
+            let newly_terminated = subscription.state != SubscriptionState::Terminated;
+            subscription.state = SubscriptionState::Terminated;
+            self.clear_control_message_deadline(request_id);
+            // ローカルで購読をキャンセルするため、request stream GOAWAY の reset deadline も解除する
+            self.clear_request_stream_goaway_deadline(request_id);
+            // draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) / §6.4.2.3
+            // (Request Cancellation and Rejection): cancel は開いている方向をストリーム終端で
+            // 打ち切る。受信方向を STOP_SENDING、送信方向を RESET_STREAM で打ち切るよう
+            // I/O 層へ指示する。エラーコードは §12.5 (Stream Reset Error Codes) の
+            // CANCELLED (自端の購読キャンセルであり、relay publisher の検出を表す
+            // MALFORMED_TRACK ではない)。
+            if newly_terminated {
+                self.events
+                    .push_back(SessionEvent::StopSendingRequestStream {
+                        request_id,
+                        error_code: STREAM_CANCELLED,
+                    });
+                self.events.push_back(SessionEvent::ResetRequestStream {
+                    request_id,
+                    error_code: STREAM_CANCELLED,
+                });
+            }
+            self.events.push_back(SessionEvent::RequestTerminated {
+                request_id,
+                kind: RequestKind::Subscribe,
+                reason: TerminationReason::LocalCancel,
+            });
+            return Ok(());
+        }
+        self.clear_control_message_deadline(request_id);
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("validated above");
+        subscription.track_alias = Some(ok.track_alias);
+        subscription.state = SubscriptionState::Established;
+        // draft §3.1 (Subscriptions) / §9.20.17 (LARGEST OBJECT Parameter):
+        // LARGEST_OBJECT parameter があれば広告値として保存する
+        if let Some((group_id, object_id)) = ok.parameters.largest_object() {
+            subscription.largest_location = Some(Location {
+                group_id,
+                object_id,
+            });
+        }
+        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): SUBSCRIBE_OK で peer publisher が発行する
+        // DYNAMIC_GROUPS を記録する (自側が subscriber なので REQUEST_UPDATE 送信時の
+        // NEW_GROUP_REQUEST 可否を判断するために使う)
+        subscription.dynamic_groups = ok.track_properties.dynamic_groups() == Some(1);
+        // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
+        subscription.default_publisher_priority = ok.track_properties.default_publisher_priority();
+        subscription.default_publisher_group_order =
+            ok.track_properties.default_publisher_group_order();
+        set_subscription_publisher_object_delivery_timeout(
+            subscription,
+            ok.track_properties.object_delivery_timeout(),
+        );
+        set_subscription_publisher_subgroup_delivery_timeout(
+            subscription,
+            ok.track_properties.subgroup_delivery_timeout(),
+        );
+        set_subscription_expires(subscription, ok.parameters.expires(), now_ms);
+        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
+        // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に含まれる。
+        // SUBSCRIBE_OK には含まれないため、group_order は SUBSCRIBE 送信時の値のまま保持される。
+        self.register_peer_alias(ok.track_alias, request_id);
+        // PUBLISH_OK 経路 (dispatch.rs) と対称に、SUBSCRIBE_OK による確立をアプリケーションに通知する
+        self.events.push_back(SessionEvent::RequestOkReceived {
+            request_id,
+            request_kind: RequestKind::Subscribe,
+            parameters: ok.parameters,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn handle_peer_request_update(
+        &mut self,
+        request_id: u64,
+        update: RequestUpdate,
+    ) -> Result<(), SessionError> {
+        // draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): REQUEST_UPDATE も Request ID を
+        // 消費するメッセージとして列挙される。peer から受信した Request ID の parity 違反と
+        // 重複を検証し、違反時は INVALID_REQUEST_ID でセッションを Closing に遷移させる (MUST)。
+        // 検証は本関数の先頭で 1 回だけ行い、subscription / fetch の分岐より前に済ませる。
+        //
+        // ここでは `accept_peer_request` ではなく `validate_peer_request_id` を呼ぶ。
+        // draft §9.2 (GOAWAY) は "The GOAWAY message does not impact subscription state." と
+        // 定めており、GOAWAY 送信後に拒否してよいのは新規 request であって、既存の bidi request
+        // stream 上を流れる REQUEST_UPDATE は含まない。draft §9.5 (REQUEST_UPDATE) も受信側に
+        // REQUEST_OK / REQUEST_ERROR のいずれか 1 つで応答することを MUST としているため、
+        // GOING_AWAY による拒否経路は適用しない。
+        self.validate_peer_request_id(update.request_id)?;
+        // draft-ietf-moq-transport-22 §6.4.2.1 (Request ID) / §9.5 (REQUEST_UPDATE):
+        // REQUEST_UPDATE は独立した Request ID を消費する。対象の request は
+        // 「同じ bidi stream 上で送る」ことで識別されるため、wire の
+        // `update.request_id` は stream context の `request_id` と一致しない。
+        // 対象 request の解決には stream context の `request_id` を使う。
+        // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): peer からの outstanding REQUEST_UPDATE 数が
+        // 自側 SETUP で宣言した MAX_REQUEST_UPDATES を超えたら TOO_MANY_REQUEST_UPDATES でセッションを閉じる。
+        // デフォルト値 0 は無制限を意味する。
+        let local_max = self
+            .setup
+            .local
+            .as_ref()
+            .and_then(|s| s.options.max_request_updates())
+            .unwrap_or(0);
+        if local_max > 0 {
+            let count = self.incoming_request_updates.entry(request_id).or_insert(0);
+            *count += 1;
+            if *count > local_max {
+                let err = SessionError::new(
+                    crate::error::SESSION_TOO_MANY_REQUEST_UPDATES,
+                    "peer exceeded MAX_REQUEST_UPDATES",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        }
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        self.apply_peer_message_auth_tokens(&update.parameters)?;
+        // draft §9.20.1 (Parameter Scope): context 別の許可パラメータ集合で
+        // 検証する。違反時は PROTOCOL_VIOLATION でセッションをクローズする (MUST)。
+        //
+        // この検証は Range Filter の内容検証より先に行う。Range Filter を許可しない
+        // context (FETCH_UPDATE_ALLOWED_PARAMS など) に Range Filter が来た場合、
+        // 内容検証を先に走らせると §3.3.2 の INVALID_FILTER (REQUEST_ERROR で継続) が
+        // 発火してしまい、§9.20.1 が MUST とするセッションクローズに到達しない。
+        let table = self.locate_request(request_id);
+        let context_allowed = match table {
+            Some(RequestTable::Subscription) => Some((
+                SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
+                "REQUEST_UPDATE (subscription) parameter not allowed in this context",
+            )),
+            Some(RequestTable::Fetch) => Some((
+                FETCH_UPDATE_ALLOWED_PARAMS,
+                "REQUEST_UPDATE (fetch) parameter not allowed in this context",
+            )),
+            Some(RequestTable::TrackStatus) | None => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "REQUEST_UPDATE received for unknown or unsupported request id",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        if let Some((allowed, message)) = context_allowed
+            && update.parameters.validate_scope(allowed).is_err()
+        {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, message);
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter):
+        // FORWARD は 0 / 1 のみが有効であり、値域外を受信した endpoint は
+        // PROTOCOL_VIOLATION でセッションを閉じる MUST。Range Filter の拒否
+        // (INVALID_FILTER の REQUEST_ERROR) より先に検証し、MUST close が
+        // REQUEST_ERROR に隠れないようにする。
+        if let Some(forward) = update.parameters.forward()
+            && let Err(err) = validate_forward(forward)
+        {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否。
+        // スコープ上正当な Range Filter に対してのみ内容検証を行う。
+        // 自側 publisher の Established subscription では PUBLISH_DONE(UPDATE_FAILED) まで
+        // 終端する (§9.5.1 の MUST)。subscriber 側は REQUEST_ERROR のみで従来どおり。
+        if let Err(reason) = self.check_incoming_range_filters(&update.parameters) {
+            self.reject_request_update_range_filters(request_id, reason)?;
+            return Ok(());
+        }
+        // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
+        // fill fetch stream は REQUEST_UPDATE 自身の Request ID を FETCH_HEADER に載せる。
+        // 受信した fill fetch stream をこの subscription へ帰属させるため対応を登録する。
+        // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけなので、
+        // その場合のみ登録する。
+        if update.parameters.fill_parameters().is_some() {
+            self.register_fill_request_subscription(update.request_id, request_id);
+        }
+        match table {
+            Some(RequestTable::Subscription) => self.handle_update_for_subscription(
+                request_id,
+                update.request_id,
+                update.parameters,
+            ),
+            Some(RequestTable::Fetch) => {
+                self.handle_update_for_fetch(request_id, update.parameters)
+            }
+            Some(RequestTable::TrackStatus) | None => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "REQUEST_UPDATE received for unknown or unsupported request id",
+                );
+                self.fail(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    /// REQUEST_UPDATE の Range Filter 拒否時の終端処理
+    ///
+    /// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) の MUST reject に加え、
+    /// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
+    /// is unsuccessful, the publisher MUST also terminate the subscription by sending a
+    /// PUBLISH_DONE with error code UPDATE_FAILED." を満たす。
+    ///
+    /// - Established かつ自側 publisher: `send_request_error` と同じ経路で
+    ///   REQUEST_ERROR (INVALID_FILTER) → Terminated → PUBLISH_DONE(UPDATE_FAILED)。
+    ///   open 中の outgoing data stream (subgroup / fill fetch) がある場合は PUBLISH_DONE を保留する。
+    /// - Established かつ自側 subscriber: 従来どおり REQUEST_ERROR のみを送る。
+    ///   PUBLISH_DONE の送出は publisher である peer の責務であり、state の終端は
+    ///   peer の PUBLISH_DONE / bidi 終端処理に委ねる。
+    /// - Pending / Terminated: REQUEST_UPDATE は Established の self loop のみ
+    ///   (draft-ietf-moq-transport-22 §3.1 (Subscriptions)) であり、受信は state machine の
+    ///   違反である。valid な REQUEST_UPDATE に対する `handle_update_for_subscription` の
+    ///   state 検証と同じく PROTOCOL_VIOLATION でセッションを閉じる。Pending で fin 付き
+    ///   REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK 等) を閉じたり、Terminated で
+    ///   保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ったり
+    ///   しないため、応答は送らない。
+    /// - subscription 以外 (FETCH の REQUEST_UPDATE 等) と subscriptions 未登録:
+    ///   従来どおり REQUEST_ERROR のみを送る。
+    ///
+    /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
+    /// (超過時は panic)。
+    fn reject_request_update_range_filters(
+        &mut self,
+        request_id: u64,
+        reason: &'static str,
+    ) -> Result<(), SessionError> {
+        let state = self
+            .subscriptions
+            .get(&request_id)
+            .map(|s| (s.state, s.my_role));
+        match state {
+            Some((SubscriptionState::Established, TrackRole::Publisher)) => self
+                .send_request_error(
+                    request_id,
+                    REQUEST_INVALID_FILTER,
+                    0,
+                    ReasonPhrase::new(reason)
+                        .expect("range filter rejection reason must be <= 1024 bytes"),
+                    None,
+                ),
+            Some((SubscriptionState::Established, _)) => {
+                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+                Ok(())
+            }
+            Some((SubscriptionState::Pending | SubscriptionState::Terminated, _)) => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "REQUEST_UPDATE requires Established subscription",
+                );
+                self.fail(err.clone());
+                Err(err)
+            }
+            _ => {
+                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn handle_update_for_subscription(
+        &mut self,
+        request_id: u64,
+        fill_request_id: u64,
+        parameters: MessageParameters,
+    ) -> Result<(), SessionError> {
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("locate_request guarantees key presence");
+        // draft §3.1 (Subscriptions) / state diagram:
+        // REQUEST_UPDATE は Established の self loop。Pending* / Terminated で
+        // 受信した場合は PROTOCOL_VIOLATION としてセッションを閉じる。
+        if subscription.state != SubscriptionState::Established {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "REQUEST_UPDATE requires Established subscription",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §9.5 (REQUEST_UPDATE): REQUEST_UPDATE を送れる側は
+        //   (a) 元 request の initiator (= 自側は responder)
+        //   (b) PUBLISH 経由の subscription では subscriber も送れる
+        // 自側から見ると: peer が initiator (= !is_initiator_self) か、
+        // または peer が subscriber (= 自側 my_role == Publisher) なら受理できる。
+        // それ以外 (自側 initiator かつ my_role == Subscriber = SUBSCRIBE 経由で
+        // peer が publisher) での受信は PROTOCOL_VIOLATION。
+        if subscription.is_initiator_self() && subscription.my_role != TrackRole::Publisher {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "REQUEST_UPDATE cannot be received by subscriber initiator",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter): subscriber MUST NOT send NEW_GROUP_REQUEST in
+        // REQUEST_UPDATE if Track did not include DYNAMIC_GROUPS Property with value 1.
+        if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): 値域外 (0 / 1 以外) の
+        // 受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。検証がないと
+        // `pending_update_params` に保存され、応答送信時 (REQUEST_UPDATE_OK 分岐) に初めて
+        // エラーになる遅延検証になる。検証はここで行い、下記の累積 Range Filter 上限チェック
+        // より前に置く (複合違反時は §9.20.18 の
+        // MUST に従い FORWARD のセッションクローズが優先される)。
+        // `?` 伝播のみだとセッション state が Closing に遷移せず開いたまま残る
+        // (GROUP_ORDER の値域検証と同じパターンで `self.fail()` に接続する)。
+        if let Some(f) = parameters.forward()
+            && let Err(err) = validate_forward(f)
+        {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §9.5.1 (Updating Subscriptions): REQUEST_UPDATE のパラメータを合体 (coalesce)
+        // する。後続の REQUEST_UPDATE が届くたびに pending_update_params へマージし
+        // (後の値が前を上書き)、send_request_ok 応答時に累積パラメータを適用する。
+        //
+        // `merge_from` は破壊的なのでコピー上でマージし、累積の上限検証を通ってから確定させる。
+        // 上限違反で拒否したのに累積側が更新されていると、以降の正当な REQUEST_UPDATE も
+        // 超過状態のまま評価されてしまう。
+        let merged = match subscription.pending_update_params.as_ref() {
+            Some(pending) => {
+                let mut copy = pending.clone();
+                copy.merge_from(&parameters);
+                copy
+            }
+            None => parameters.clone(),
+        };
+        // draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、同節の
+        // "the peer's total number of Ranges (Start/End pairs) allowed concurrently in all
+        // Range filter Section 3.3.2 parameters for a given subscription or fetch" であり、
+        // 1 メッセージ単位ではなく subscription 単位の同時保持数である。`merge_from` は
+        // Range Filter を型単位で全置換するので同一型では累積しないが、型をまたぐと
+        // 累積するため、マージ後の総数を再検証する。
+        //
+        // 総数は FILL_PARAMETERS の内側も合算する (`range_filter_usage` の doc を参照)。
+        // `pending_update_params` からは FILL_PARAMETERS を除去しているため `merged` の内側は
+        // 常に今回のメッセージのものであり、合算値は「マージ後の外側の Range 総数 (同一型は
+        // 今回のメッセージの値で置換済み) + 今回メッセージの内側の Range 総数」になる
+        // (前回メッセージの内側を二重計上しない)。
+        // 有無の判定は総数の比較に含まれる (総数が 1 以上なら Range Filter パラメータも必ず
+        // 存在する) ため、ここでは総数だけを見る。
+        let (_, accumulated_ranges) = range_filter_usage(&merged);
+        if accumulated_ranges > self.local_max_filter_ranges() {
+            self.reject_request_update_range_filters(
+                request_id,
+                "cumulative Range Filters exceed MAX_FILTER_RANGES",
+            )?;
+            return Ok(());
+        }
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("locate_request guarantees key presence");
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
+        // 保持されない (sticky 対象外) ため、累積パラメータへの保持から除外する。
+        // アプリへ通知する累積表示 (`merged`) には残す。
+        let mut pending = merged.clone();
+        pending.remove_type(PARAM_FILL_PARAMETERS);
+        subscription.pending_update_params = Some(pending);
+        // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+        // FILL_PARAMETERS 付き REQUEST_UPDATE を処理したら fill fetch stream の
+        // 開設を判定する。処理後観点の forward と filter で評価する。
+        let post_forward = merged.forward().unwrap_or(subscription.forward_state);
+        let post_filter: Option<LocationFilter> = match merged.location_filter_update() {
+            Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
+            // Type 0x00 (None) はフィルタ削除、省略時は現 filter を使う
+            Ok(LocationFilterUpdate::Removed) => None,
+            Ok(LocationFilterUpdate::Unchanged) => subscription.filter,
+            // デコード済みメッセージでは到達しない。安全側に現 filter を使う。
+            Err(_) => subscription.filter,
+        };
+        // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-22 §5.1.1 (Definitions)) のため更新しない
+        self.events.push_back(SessionEvent::RequestUpdateReceived {
+            request_id,
+            parameters: merged,
+        });
+        self.maybe_open_fill_stream(
+            fill_request_id,
+            request_id,
+            &parameters,
+            post_filter,
+            post_forward,
+        );
+        Ok(())
+    }
+
+    /// peer publisher からの PUBLISH_STATE_NOTIFY を受信する
+    ///
+    /// draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY):
+    /// publisher のみが subscription の bidi stream 上で送る一方向通知であり、
+    /// 応答は不要、MAX_REQUEST_UPDATES のクレジットも消費しない。
+    /// subscription 以外への受信・ subscriber からの受信は MUST でセッションを
+    /// PROTOCOL_VIOLATION により閉じる。FORWARD / LOCATION_FILTER /
+    /// LARGEST_OBJECT は subscription 状態に即時反映する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub(crate) fn handle_peer_publish_state_notify(
+        &mut self,
+        request_id: u64,
+        notify: PublishStateNotify,
+    ) -> Result<(), SessionError> {
+        let Some(subscription) = self.subscriptions.get(&request_id) else {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_STATE_NOTIFY received for unknown or unsupported request id",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        };
+        // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY):
+        // subscription 以外・ subscriber からの受信は PROTOCOL_VIOLATION (MUST)。
+        // `subscriptions` 索引に無い request (fetch / namespace 系等) は上記で弾かれる。
+        if subscription.my_role != TrackRole::Subscriber {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_STATE_NOTIFY received on publisher side",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §3.1 (Subscriptions): REQUEST_UPDATE と同様、確立済みの
+        // subscription に対する通知のみ受理する。
+        if subscription.state != SubscriptionState::Established {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_STATE_NOTIFY requires Established subscription",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): 値域外 (0 / 1 以外) の
+        // 受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        if let Some(f) = notify.parameters.forward()
+            && let Err(err) = validate_forward(f)
+        {
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // LOCATION_FILTER の形式検証を受信状態の適用より前に行う。`MessageError` から
+        // `SessionError` への `From` 実装はないため `?` では伝播できない。
+        let filter_update = match notify.parameters.location_filter_update() {
+            Ok(update) => update,
+            // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
+            // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
+            Err(_) => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "invalid filter encoding in PUBLISH_STATE_NOTIFY",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("subscription presence already checked above");
+        if let Some(f) = notify.parameters.forward() {
+            subscription.forward_state = f;
+        }
+        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // Location Filter Type 0x00 (None) はフィルタ削除、省略時は値 unchanged。解決済み値もフィルタに追随させる。
+        match filter_update {
+            LocationFilterUpdate::Unchanged => {}
+            LocationFilterUpdate::Removed => {
+                subscription.filter = None;
+                subscription.filter_start = None;
+                subscription.filter_end = None;
+            }
+            LocationFilterUpdate::Set(filter) => {
+                subscription.filter = Some(filter);
+                let largest = subscription.largest_received_location;
+                let (start, end) = resolve_location_filter(
+                    subscription.filter.as_ref(),
+                    largest.as_ref(),
+                    LocationFilterContext::Subscription,
+                );
+                subscription.filter_start = start;
+                subscription.filter_end = end;
+            }
+        }
+        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter):
+        // 通知された Largest Object を広告値として保存する。
+        if let Some((group_id, object_id)) = notify.parameters.largest_object() {
+            subscription.largest_location = Some(Location {
+                group_id,
+                object_id,
+            });
+        }
+        self.events
+            .push_back(SessionEvent::PublishStateNotifyReceived {
+                request_id,
+                parameters: notify.parameters,
+            });
+        Ok(())
+    }
+
+    pub(crate) fn handle_peer_publish_done(
+        &mut self,
+        request_id: u64,
+        done: PublishDone,
+    ) -> Result<(), SessionError> {
+        let now_ms = self.timing.last_tick_ms;
+        let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_DONE received for unknown request id",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        };
+        if subscription.my_role != TrackRole::Subscriber {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_DONE received on publisher side",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §3.1 (Subscriptions): publisher は Pending (Publisher) / Established
+        // からしか PUBLISH_DONE を送れない。したがって peer が SUBSCRIBE の
+        // initiator であり自側が publisher responder となる Pending(Subscriber) からの
+        // PUBLISH_DONE 受信は PROTOCOL_VIOLATION。
+        //
+        // ただし REQUEST_UPDATE 失敗応答経路の `Terminated` (draft §3.1.2 の
+        // REQUEST_ERROR 受信で subscription state を終える帰結として
+        // `handle_err_for_subscription` の Established 分岐で遷移) には、
+        // publisher が §9.5.1 の MUST に基づき送る PUBLISH_DONE(UPDATE_FAILED) が続く。
+        // これを拒否するとセッションが PROTOCOL_VIOLATION で閉じられる回帰になるため、
+        // 未記録 (`publish_done` が `None`) の `Terminated` に届く PUBLISH_DONE を受理する。
+        // 受理条件はデータプレーン吸収 `is_cancelled_terminated` (`src/session/data.rs`) と同一で、
+        // 記録済み (`publish_done` が `Some`) への重複 PUBLISH_DONE は従来どおり拒否される。
+        // draft §3.1.2: "A REQUEST_ERROR indicates no objects will be delivered" は
+        // publisher 側の送信禁止であり、REQUEST_ERROR 後に届く PUBLISH_DONE の drain 期間に
+        // オブジェクトが届く実害はない。
+        let allow_publish_done = subscription.is_pending_publisher()
+            || subscription.state == SubscriptionState::Established
+            || (subscription.state == SubscriptionState::Terminated
+                && subscription.publish_done.is_none());
+        if !allow_publish_done {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "PUBLISH_DONE requires Pending(Publisher), Established, or unrecorded Terminated state",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure):
+        // "A FIN sent by the responder after its response and any subsequent messages for the
+        // request signals that the request is complete". PUBLISH 起点の subscription では
+        // 自側が PUBLISH を受けた subscriber responder であり、PUBLISH_DONE の受信で
+        // 自側が送るべきメッセージは無くなる。したがって送信方向を FIN で閉じる。
+        //
+        // §6.4.2.2 "An endpoint MUST NOT send a FIN on a direction of a request stream until
+        // it has sent all required messages on that direction for its request type." より、
+        // 必須応答 (PUBLISH_OK / REQUEST_ERROR) を送り終えた `Established` からの遷移に限る。
+        // `Pending(Publisher)` からの FIN は peer に request 失敗と扱われるため発行しない。
+        // 既に `Terminated` の経路 (REQUEST_UPDATE 失敗応答に伴う PUBLISH_DONE(UPDATE_FAILED)
+        // の受信) も対象外であり、そちらは SUBSCRIBE 起点 requester の事象として
+        // `Session::recv_request_stream_closed` の requester 経路が FIN を担う。
+        let was_established = subscription.state == SubscriptionState::Established;
+        // Pending(Publisher) / Established / Terminated (未記録) のいずれも Terminated に確定させる
+        subscription.state = SubscriptionState::Terminated;
+        record_publish_done(subscription, &done, now_ms);
+        if was_established {
+            self.events
+                .push_back(SessionEvent::FinishRequestStream { request_id });
+        }
+        self.events.push_back(SessionEvent::PublishDoneReceived {
+            request_id,
+            status_code: done.status_code,
+            stream_count: done.stream_count,
+            reason: done.reason,
+        });
+        Ok(())
+    }
+
+    // ─── REQUEST_OK / REQUEST_ERROR per-kind dispatch ──────────
+}
