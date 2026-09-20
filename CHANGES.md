@@ -1,0 +1,282 @@
+# 変更履歴
+
+- UPDATE
+  - 後方互換がある変更
+- ADD
+  - 後方互換がある追加
+- CHANGE
+  - 後方互換のない変更
+- FIX
+  - バグ修正
+
+## develop
+
+- [CHANGE] relay 専用の RENDEZVOUS_TIMEOUT parameter (0x04) を削除する
+  - `PARAM_RENDEZVOUS_TIMEOUT` と `MessageParameters::rendezvous_timeout`、`Subscription::subscriber_rendezvous_timeout_ms` を削除する
+  - 当該パラメータを含む SUBSCRIBE は codec の未知パラメータ検証で拒否される
+  - @voluntas
+- [CHANGE] TRACK_STATUS の受信側 (自側 publisher) を削除し、subscriber 側の送信と応答受信のみにする
+  - peer から TRACK_STATUS を受信した場合は未対応 request として `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - `TrackStatusEntry` から `my_role` と `include_properties` を削除し、送信側専用の型にする
+  - @voluntas
+- [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
+  - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
+  - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - @voluntas
+- [CHANGE] 公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証は `recv_request` に一本化する
+  - @voluntas
+- [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moqt-publisher の datagram_writer が Properties Length を二重に書かなくなる
+  - @voluntas
+- [CHANGE] `send_subgroup_object` / `send_object_datagram` の戻り値を `SendRequestError` に変更し、`send_publish` のフィルタ不通過も `SendRequestError::LocalFilterMismatch` にする。wire コードを取る公開 API はローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する
+  - @voluntas
+- [CHANGE] `recv_subgroup_object` の戻り値を `TrackDataAcceptance` に変更し、受信 subgroup Object にも Object 単位フィルタを再適用する。フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` として破棄する
+  - @voluntas
+- [CHANGE] `FetchStreamEntry::encode` の End of Range の variant に `properties_data` を渡したら拒否する
+  - draft-ietf-moq-transport-21 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties are not present" と定めるため、`EndOfNonExistentRange` / `EndOfUnknownRange` / `EndOfTimedOutRange` に `Some(...)` を渡すと書き込み前に `ProtocolViolation` になる (`None` は従来どおり成功する)
+  - これまでは黙って無視されていたため、Properties を渡すつもりの誤った呼び出しが成立していた
+  - @voluntas
+- [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
+  - @voluntas
+- [FIX] エラー型に `core::error::Error` を実装する
+  - `MessageError` / `NameParseError` / `ObjectFieldMismatch` を返す公開 API のエラーを `?` で `Box<dyn std::error::Error + Send + Sync>` へ変換できるようになる
+  - `NameParseError` / `ObjectFieldMismatch` には `core::fmt::Display` も実装する
+  - @voluntas
+- [FIX] send_object_datagram の未知 status を wire 生成前に拒否する
+  - draft-ietf-moq-transport-21 §11.1.2 (Object Status) の SHOULD (未知の値は PROTOCOL_VIOLATION でセッションを閉じる) に従い、0x0 (Normal) / 0x3 (End of Group) / 0x4 (End of Track) 以外の status を `SESSION_PROTOCOL_VIOLATION` で拒否する
+  - 判定は encoder (`ObjectDatagram::encode`) と同じ `validate_object_status` を使い、フィルタ評価と最大位置更新より前に検証する (拒否時に状態を汚染しない)
+  - @voluntas
+- [UPDATE] `MsfCatalog::apply_delta` を原子的にする
+  - 複製へ適用して成功時のみ差し替える (copy-on-write) ことで、`Err` を返したときにカタログが呼び出し前と一致するようにする
+  - これまでは途中で失敗した先行操作の結果が残っていた
+  - @voluntas
+- [FIX] MsfCloneTrack::into_track の解決結果でも lang を検証する
+  - clone の継承解決後の検証を `validate_media_track_fields` から `validate_full_track` に変え、add 経路と同じ範囲 (draft-ietf-moq-msf-01 §5.2.32 Language を含む) を検査する
+  - これまで clone で不正な `lang` を設定すると `apply_delta` は成功し、encode 時まで気付けなかった
+  - @voluntas
+- [FIX] moqt-subscriber の tokio runtime 構築失敗で終了コード 0 にならないようにする
+  - runtime の構築をメインスレッドへ移し、失敗時は英語ログと `std::process::exit(1)` で終了する
+  - 別スレッドで構築すると、失敗時にそのスレッドだけが panic し、main がメディアチャネルの切断で終了コード 0 で終わっていた
+  - @voluntas
+- [FIX] moqt-subscriber のデコードが QUIC エンドポイントの I/O を飢えさせて受信が止まるのを緩和する
+  - AV1 / Opus のデコードを `tokio::task::block_in_place` で実行し、runtime のワーカーを長時間塞がない
+  - 同時に処理する data stream 数を 4 に制限する (音声は 1 object = 1 stream、映像は 1 group = 1 stream で届くため)
+  - 表示待ちの映像フレーム数が 20 を超えたら、古い group をまるごと捨てて受信を優先する
+    (途中のフレームを捨てると参照フレームを失って復号できないため、group 単位で捨てる)
+  - これらが無いとデコードが先行して待ちフレームが増え続け、QUIC エンドポイントの I/O が飢えて受信パケットが落ち、relay 側の輻輳ウィンドウが最小値まで崩壊して配送が止まる (moqt-rs 0101)
+  - 90 秒運転での停止は減ったが完全には解消していない (機械全体の CPU は 500%/1400% で飽和しておらず、relay→subscriber のパケット損失が残る。relay 側の対応で継続調査)
+  - @voluntas
+- [FIX] moqt-subscriber が終了済み subscription へ STOP_SENDING を送って警告を出す
+  - PUBLISH_DONE / GOAWAY / session close で受信ループを抜けた場合は peer が subscription を終了させており、`Session` は `Terminated` に遷移済みで STOP_SENDING が拒否される
+  - peer 由来で終了した場合は STOP_SENDING の後始末を行わず、graceful shutdown のシグナルでは従来どおり送る
+  - @voluntas
+- [FIX] example の MoqtClient が PublishDoneReceived と GoawayReceived を捨てる
+  - `drain_events` が受信メッセージを契機に生成された notable イベントをアプリへ渡す前に消費していたため、`moqt-subscriber` が PUBLISH_DONE と GOAWAY を観測できなかった
+  - notable イベントは専用のキューへ移し、`take_notable_event` が最初に取り出すようにする
+  - @voluntas
+- [FIX] recv_object_datagram の未知 status と不正な properties を wire 経路と同じく拒否する
+  - draft-ietf-moq-transport-21 §11.1.2 (Object Status) / §11.1.3 (Object Properties) / §11.2.1 (Object Datagram) に従い、未知 status・STATUS と END_OF_GROUP の同時指定・Properties Length 不整合・Length = 0・非 Normal status への Properties 付与を `SESSION_PROTOCOL_VIOLATION` で拒否する
+  - 検証は Track Alias 解決と状態更新より前に行い、拒否時に `largest_received_location` などの subscription 状態を汚染しない
+  - Object Payload 長の規則は `ObjectDatagram` が payload を保持しないため wire decode 層の責務であることを doc に明記する
+  - @voluntas
+- [FIX] FetchStreamEncoder が同一 Subgroup の Publisher Priority 変更を Subgroup 単位で検出する
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 1 の判定を、直前 1 Object との比較から `(group_id, subgroup_id)` ごとの最後の Priority との比較に変え、間に別 Subgroup や datagram 起源 Object が挟まっても検出する (`FetchStreamDecoder` と対称)
+  - group 前進時は過去 group の記録を破棄し、記録量が Object 数に比例して増えないようにする
+  - @voluntas
+- [FIX] FORWARD 値域外の REQUEST_UPDATE を Range Filter 拒否より先に検証する
+  - draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter) の MUST close を、§3.3.2 の Range Filter 拒否 (INVALID_FILTER の REQUEST_ERROR) が隠さないようにする。両方が同一メッセージにある場合は PROTOCOL_VIOLATION でセッションを閉じる
+  - @voluntas
+- [FIX] SUBSCRIBE_OK / REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY の LARGEST_OBJECT を Track 単位で算出する
+  - draft-ietf-moq-transport-21 §3.1.3 (Largest Object) / §9.20.18 (LARGEST OBJECT Parameter) は LARGEST_OBJECT を「sending endpoint が観測した Track の largest Location」と定義し、publish 済みなら Publisher は含める MUST
+  - 自側 publisher 役の応答 3 経路を `publisher_track_largest` (同一 Track の publisher 役 subscription 群の最大) に統一する。新規 subscription が観測値を持たなくても、同じ Track の別 subscription で publish 済みなら値を載せる
+  - 自側 subscriber 役は従来どおり当該 subscription の `effective_largest_object` を使う
+  - @voluntas
+- [FIX] publisher の REQUEST_UPDATE 失敗応答 (REQUEST_ERROR) で PUBLISH_DONE (UPDATE_FAILED) を送る
+  - PUBLISH 起点の subscription が Established のとき、peer からの REQUEST_ERROR は自側 REQUEST_UPDATE の失敗応答であり、draft-ietf-moq-transport-21 §9.5.1 の MUST により publisher は PUBLISH_DONE (UPDATE_FAILED) で購読を終端する
+  - §9.9 の MUST NOT と両立するため open 中の outgoing data stream がある間は送信を保留し、全 stream 終端後に 1 回だけ送る
+  - @voluntas
+- [FIX] example の fin 済み request stream への 2 度目の送信を no-op にして warn ログを残す
+  - Session が同一 request へ 2 度目の fin 付き送信を発行し得るため (拒否した REQUEST_UPDATE がパイプラインで届く場合)、example がエラー終了しないようにする
+  - @voluntas
+- [FIX] example が peer からの REQUEST_UPDATE に REQUEST_OK で応答する
+  - draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE) の「受信側は必ず 1 通の REQUEST_OK または REQUEST_ERROR で応答する」に従う
+  - `moqt-transport` の `ClientEvent` に `RequestUpdate` を追加し、`MoqtClient::send_request_ok` を追加して publisher / subscriber の両 example で応答する
+  - 応答しないと relay が下流へ応答を返せず、subscriber 側の control message 応答待ち (30 秒) が満了して CONTROL_MESSAGE_TIMEOUT (0x11) でセッションが閉じていた
+  - @voluntas
+- [FIX] Malformed Track 検出時に subscription の bidi request stream を STOP_SENDING / RESET_STREAM で cancel する
+  - @voluntas
+- [FIX] request stream 上の GOAWAY の timeout を実装し、期限到達時に当該 request stream を GOING_AWAY で reset する
+  - @voluntas
+- [FIX] 同一 suffix の NAMESPACE 再受信をセッションクローズにせず無視し、prefix 更新を跨いだ重複判定と NAMESPACE_DONE 照合は full namespace 単位で行う
+  - @voluntas
+- [FIX] STOP_SENDING を受けた Subgroup の再オープンを Forward State 0→1 の REQUEST_UPDATE 受理後のみに制限する
+  - @voluntas
+- [FIX] Subgroup 単位の Publisher Priority を stream に保持し、FirstObjectId Subgroup の Malformed Track 判定で並行 Subgroup の priority 差による誤検出と検出漏れを防ぐ
+  - @voluntas
+- [FIX] AUTHORIZATION_TOKEN と Setup Option Bytes の encode に値長 2^16-1 バイトの上限検証を追加する
+  - @voluntas
+- [FIX] subscriber 側の Stream Count 集計と `cleanup_ready` の open stream 判定に受信 fill fetch stream を含め、PUBLISH_DONE 受信後に遅延到着した fill fetch stream も late-opening stream として受理する
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で送信した TRACK_NAMESPACE_PREFIX を REQUEST_OK 受信後に反映し、送信前の overlap 検査は確定待ちを考慮した実効 prefix で行う。SUBSCRIBE_TRACKS は確定待ちの間も旧 prefix と確定待ち prefix の両方で PUBLISH を紐付ける
+  - @voluntas
+- [FIX] FETCH の INVALID_RANGE 判定で同一 Track の全 publisher 役 subscription の観測 Largest Object の最大値を使う
+  - @voluntas
+- [FIX] REQUEST_UPDATE の Range Filter 拒否で自側 publisher の subscription を PUBLISH_DONE(UPDATE_FAILED) で終端し、Pending / Terminated への REQUEST_UPDATE は PROTOCOL_VIOLATION で閉じる
+  - @voluntas
+- [FIX] FetchStreamEncoder が先頭の Datagram 起源 Object をエンコードできるようにし、Datagram 起源 Object の Subgroup ID をデコード結果 (0) と一致させる
+  - @voluntas
+- [FIX] DYNAMIC_GROUPS=1 でない Track への REQUEST_UPDATE に NEW_GROUP_REQUEST を含めると送信前に拒否し、同一 REQUEST_UPDATE の他パラメータをローカルに適用しない
+  - @voluntas
+- [FIX] SUBSCRIBE_TRACKS の bidi stream 終端後の PUBLISH の bidi stream 終端でセッションを閉じないようにし、RequestTerminated の kind を実際の要求種別に合わせる
+  - @voluntas
+- [FIX] MSF の isLive=false で targetLatency / buffers をエンコードしないようにする
+  - @voluntas
+- [FIX] TRACK_STATUS_OK を FIN で送信し、公開済み Track の LARGEST_OBJECT を自動注入する
+  - @voluntas
+- [FIX] PUBLISH_DONE の Stream Count で 0 stream 時に sentinel を送れないようにする
+  - @voluntas
+- [FIX] MsfCatalog::apply_delta の add 経路でトラックの MUST 制約を検証する
+  - @voluntas
+- [FIX] SubgroupObject の encode を書き込み前に検証し、不正 status の部分書き込みと Properties Length 欠落を防止する
+  - @voluntas
+- [FIX] `.session` 名前空間の非空トラック名への FETCH / TRACK_STATUS を `DOES_NOT_EXIST` で拒否する
+  - @voluntas
+- [FIX] FetchStreamObject の encode で空スライス (`Some(&[])`) の properties を拒否し、Properties Length 欠落の不正ワイヤ生成を防止する
+  - @voluntas
+- [FIX] `SubgroupObject` / `FetchStreamObject` の encode で Properties Length と実データ長の不一致を `ProtocolViolation` として拒否し、不正ワイヤ生成を防止する
+  - @voluntas
+- [FIX] moqt-publisher の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
+  - @voluntas
+- [FIX] moqt-transport の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
+  - @voluntas
+- [FIX] moqt-subscriber の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で TRACK_NAMESPACE_PREFIX を予約名前空間 (`.` / `.session`) へ更新できないようにし、初回拒否を更新経路で迂回できないようにする
+  - @voluntas
+- [FIX] 空 prefix の SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS で suffix の先頭が予約名前空間 (`.` / `.session`) の NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED を送信できないようにする
+  - @voluntas
+- [FIX] 予約名前空間 (`.` / `.session`) へのリクエストは、パラメータ値域の MUST close より予約名前空間の拒否 (DOES_NOT_EXIST) を優先する。FETCH は LOCATION_FILTER の decode 失敗より先に拒否する
+  - @voluntas
+- [FIX] PUBLISH 起点 subscription でも subscriber の REQUEST_UPDATE に対する REQUEST_OK の送受信を行えるようにし、RequestOkReceived の request_kind を購読の開始メッセージ種別から求める
+  - @voluntas
+- [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の prefix overlap 検査を役割を問わない対象にし、SUBSCRIBE_TRACKS の prefix 更新を跨いで届いた旧 prefix 基準の PUBLISH も紐付ける (Terminated の購読には紐付けない)
+  - @voluntas
+- [FIX] outgoing data stream を Reset で閉じた場合も保留 PUBLISH_DONE (UPDATE_FAILED) を自動送信し、RESET_STREAM → PUBLISH_DONE のワイヤ順序を維持する
+  - @voluntas
+- [FIX] 既に Object を publish した Track を PUBLISH で再告知するとき、観測済みの最大 Location を LARGEST_OBJECT として補完するように修正する
+  - 観測値が無い Track では付与せず、アプリ指定値との max を取って上書きしない
+  - @voluntas
+- [FIX] DEFAULT_PRIORITY bit が立った Datagram が直近 SUBGROUP_HEADER の Publisher Priority ではなく、購読を確立したメッセージの DEFAULT_PUBLISHER_PRIORITY (無ければ 128) を継承するように修正する
+  - 誤った継承元だった `Subscription::publisher_priority` と `Subscription::effective_publisher_priority` を削除する
+  - @voluntas
+- [FIX] REQUEST_UPDATE に購読とは別の Request ID を採番し、購読の Request ID の再利用をやめる
+  - REQUEST_UPDATE 起因の fill fetch stream は REQUEST_UPDATE の Request ID で識別し、`SessionEvent::OpenFillFetchStream` の `request_id` と `send_fill_fetch_header` の引数を起因メッセージの Request ID に変更する
+  - `send_fill_fetch_header` は起因 REQUEST_UPDATE の Request ID から購読を解決するため、購読の Request ID を渡した場合も従来どおり登録できる
+  - @voluntas
+- [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
+  - @voluntas
+
+### misc
+
+- [UPDATE] prek.toml からシンボリックリンク用のフックを削除する
+  - `check-symlinks` が適用対象を持たず `check-hooks-apply` が失敗して prek ジョブが赤くなっていたため、`check-symlinks` と `destroyed-symlinks` を削除する
+  - @voluntas
+- [UPDATE] 受信 subgroup 経路の PBT と fuzz を追加する
+  - `pbt/tests/prop_session/subgroup.rs` を追加し、受信 data stream の会計 (`open_incoming_subgroup_count`)、per-subgroup delivery timeout override のライフサイクル、候補順の帰属判定、`FilteredOut` / `Discarded` の Object が subscription スコープの状態を更新しないことを検証する
+  - `fuzz_session` の `Op` に subgroup header / object と FETCH_HEADER の受信操作を追加し、decode 済みの構造体を渡す操作列で panic と状態破壊を検出する
+  - @voluntas
+- [UPDATE] `cargo fuzz coverage` の出力先を fuzz の .gitignore に追加する
+  - `fuzz/coverage/` が untracked として現れないようにする
+  - @voluntas
+- [UPDATE] README / SKILL.md のコード例と API 一覧を実装に合わせる
+  - コード例を `no_run` + `fn main() -> Result<(), _>` に直し、README は `#[cfg(doctest)]` の
+    include でコンパイルを検証するようにした。SKILL.md のヘッダ型のシグネチャと
+    `subgroup_tracker` の API 一覧も実装どおりに列挙し直した
+- [UPDATE] `SubgroupObject::decode` の Properties 再デコードとマジックナンバーを整理する
+  - 到達不能な `map_err` 分岐を削除し、切り出し済み Properties の読み取りを encode 側と同じ `validate_properties_blob` に置き換える
+  - Normal status 判定のリテラル `0` を `OBJECT_STATUS_NORMAL` に置き換える (挙動と公開 API の変更はない)
+- [UPDATE] `src/session/subscription/delivery.rs` の関数に doc コメントを追加する
+  - 配信タイムアウトの正規化 (値 0 は「タイムアウトなし」) と effective 値の計算、EXPIRES の設定、PUBLISH_DONE の記録について、目的・draft-ietf-moq-transport-21 の節番号・引数の正規化規則を明記する
+  - 挙動と公開範囲は変えない
+  - @voluntas
+- [UPDATE] 内部からしか呼ばれない delivery モジュールの 4 関数を private にし、example の到達しない bidi 送信半の後始末を削除する
+  - `refresh_effective_object_delivery_timeout` / `refresh_effective_subgroup_delivery_timeout` / `set_subscription_subscriber_object_delivery_timeout` / `set_subscription_subscriber_subgroup_delivery_timeout` から `pub` を外す
+  - 4 関数は `src/session/subscription/delivery.rs` 内からのみ呼ばれ、`delivery` は `pub(super)` モジュールのため外部クレートから名前を解決できない (公開 API の変更はない)
+  - `MoqtClient::send_publish_done` の `bidi_sends.remove` は、直前の `drain_events` が `SendOnStream { fin: true }` を処理する時点で送信半が台帳から外れており常に `None` になるため削除する
+  - @voluntas
+- [UPDATE] `FetchStreamEncoder` の PBT に properties 経路を追加する
+  - `sample_objects` で `has_properties` を抽選し、`ObjectProperties::encode` の出力 (Properties Length varint 込み) を渡す経路を検証する
+  - @voluntas
+- [UPDATE] Authorization Token のエラー経路テストを追加する
+  - DELETE / USE_ALIAS の余剰バイトと未知の Alias Type の `KEY_VALUE_FORMATTING_ERROR`、SETUP での DELETE / USE_ALIAS の `PROTOCOL_VIOLATION`、値長 2^16-1 バイト上限の境界を固定する
+  - @voluntas
+- [UPDATE] 非最小 varint エンコーディングの decode テストを追加する
+  - 各バイト長の非最小形 (2〜9 バイトの 37、各長の最大値の 1 バイト長い形) を decode するテストと PBT を追加する
+  - @voluntas
+- [UPDATE] `FetchStreamEntry::encode` と `FetchStreamEncoder::encode_object` に properties 契約と `# Errors` を明記する
+  - `properties_data` が Properties Length varint を含むこと、`has_properties` との組み合わせ、返りうる `ProtocolViolation` を rustdoc から読み取れるようにする
+  - @voluntas
+- [UPDATE] example の WebTransport 受信待ちで session のロックを保持しないようにする
+  - `WtSession` の受信ストリーム receiver を acceptor が持ち、`recv()` をロック外で待つ (`take_uni_receiver` / `take_bi_receiver` を追加)
+  - @voluntas
+- [UPDATE] OBJECT_PROPERTY_FILTER の datagram 受信経路テストを追加する
+  - 一致 / 不一致の判定、状態を更新しないこと、共有 alias で最初に通過した subscription へ紐づくこと、対象 Property の値で合否が決まることを固定する
+  - @voluntas
+- [UPDATE] catalog (MSF) と LOC の relay での扱いを docs に明記する
+  - relay は payload と Properties を opaque として扱い、`moqt_msf` / `moqt_loc` を production 経路に配線しない理由を `docs/MOQT-RELAY.md` に記載する
+  - @voluntas
+- [UPDATE] LARGEST_OBJECT の集約ヘルパの配置と FETCH の INVALID_RANGE テストの重複を整理する
+  - `Session::publisher_track_largest` の定義を fill モジュールから delivery モジュールへ移し、`effective_largest_object` / `update_largest_object_in_parameters` と同じ箇所に揃える (公開範囲と算出結果は変えない)
+  - FETCH の INVALID_RANGE 応答検証を `assert_invalid_range_request_error` に集約し、4 テストに残っていた同型のインライン `match` を共通ヘルパへ置き換える
+  - @voluntas
+- [UPDATE] `SessionEvent::RequestOkReceived` の doc の読み取り例を実装に合わせる
+  - REQUEST_OK に出現しうるのは EXPIRES / LARGEST_OBJECT のみであること、FORWARD は REQUEST_UPDATE 送信時に状態へ反映される値であることを明記する
+  - @voluntas
+- [UPDATE] session の request stream 開始メッセージ一覧を実装に合わせる
+  - `recv_request` が受理するのは SUBSCRIBE / PUBLISH / FETCH の 3 種類であることを doc に明記する
+  - @voluntas
+- [UPDATE] MSF の track / cloneTrack の JSON メンバー書き出しと共通検証を共通化する
+  - @voluntas
+- [UPDATE] session の request 種別変換を 1 箇所に集約し、購読索引の追加・削除を単一経路化する
+  - @voluntas
+- [UPDATE] コード内 doc コメントの実装との不整合を修正する
+  - @voluntas
+- [UPDATE] コード内コメントが引用する draft-ietf-moq-transport-21 の節番号・節タイトル・引用文を一次資料に一致させる
+  - @voluntas
+- [UPDATE] 未解決の intra-doc link を修正する
+  - @voluntas
+- [UPDATE] no_std ビルドと rustdoc 検査を CI に追加する
+  - @voluntas
+- [UPDATE] fuzz_session を client / server 両対応にし、送信 API を操作列に追加する
+  - @voluntas
+- [UPDATE] 削除済み SUBSCRIBE_TRACKS を参照するコメントを現行 draft に合わせ、未使用の prefix_overlaps を削除する
+  - @voluntas
+- [FIX] example の publisher が relay から転送される SUBSCRIBE / FETCH に応答できるようにする
+  - moqt-transport が peer 起動の bidi request stream を受理し、`ClientEvent::Request` としてアプリへ渡す
+  - moqt-publisher は SUBSCRIBE に SUBSCRIBE_OK、catalog の FETCH に FETCH_OK と FETCH 応答ストリームを返す
+  - moqt-subscriber のカタログ取得が fetch 応答ストリームの終端を二重に通知しないようにする
+  - @voluntas
+- [FIX] FIN で閉じた受信 data stream に後から届く RESET_STREAM を無視する
+  - draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) が許容する順序でセッションを閉じていた
+  - FIN の重複通知と RESET 後の FIN は従来どおり `PROTOCOL_VIOLATION` として検出する
+  - @voluntas
+- [ADD] `SessionEvent::FinishRequestStream` を追加し、responder の FIN を受けた requester が送信方向を閉じられるようにする
+  - draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の SHOULD に対応する
+  - PUBLISH 起点の subscription は PUBLISH_DONE を送る必要があるため対象外とする
+  - @voluntas
+- [UPDATE] OBJECT_PROPERTY_FILTER を受信 datagram に再適用する挙動のテストを追加する
+  - `Session::recv_object_datagram` 経路で、Property がフィルタに一致する datagram の帰属、不一致時の `FilteredOut` と subscription スコープの状態を更新しないこと、共有 Track Alias で候補が複数ある場合に最初に通過した subscription へ紐づくことを固定する
+  - @voluntas
+- [UPDATE] `SubgroupObject::encode` の Properties 検証経路を fuzz でカバーする
+  - `fuzz_roundtrip` が decode の返した Properties 生バイト (Properties Length varint 込み) を encode へ渡すようにし、任意の Properties を渡す `fuzz_subgroup_object_encode` を追加する
+  - これまで Subgroup 側の encode は `properties_data = None` 固定で、Properties Length の不一致長・途中切れ varint の拒否経路に fuzz から到達できなかった
+- [UPDATE] 受信 subgroup Object フィルタのテストを分割し、重複していたテストヘルパを集約する
+  - `tests/test_session/subgroup_object_filter.rs` を親モジュールにし、routing / cancellation / group_end / override_lifecycle / priority の 5 サブモジュールへ分割する
+  - subscribe 確立・`DecodedSubgroupObject` 生成・`SubgroupHeader` 生成・フィルタパラメータ生成の重複定義を `tests/test_session.rs` の共通ヘルパへ集約し、`SubgroupHeader` のリテラルは既定値との差分だけを書く形にする
+  - テスト名・アサーション・期待値と `#[test]` の総数は変えない
+  - @voluntas
+- [UPDATE] 受信 subgroup Object の候補評価とキャンセル後始末を共通化し、`recv_subgroup_object` を段階ごとの関数に分割する
+  - 候補評価ループを `Session::evaluate_candidates` に集約し、SUBGROUP_HEADER / Object / Datagram の差は候補ごとのフィルタ入力 (`CandidateFilterInput`) の組み立てだけにする
+  - キャンセル済み stream の後始末を `Session::discard_cancelled_subgroup_stream` と `Session::cleanup_discarded_subgroup_stream` に集約し、破棄分岐へ入る条件の判定もそこへ寄せる
+  - `recv_subgroup_object` を「stream 状態の取得」「subgroup_id の解決」「帰属判定」「受理後の状態更新」に分割し、`IncomingDataStream::Subgroup` のフィールド列挙は `IncomingSubgroupStream` とアクセサへ寄せる
+  - 挙動・公開 API・テストの期待値は変えない
+  - @voluntas

@@ -1,0 +1,90 @@
+//! MoQT セッション状態機械 (sans-I/O)
+//!
+//! draft-ietf-moq-transport-21 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §9 (Control Messages) に基づく。draft 由来の
+//! 実装のため、将来のバージョンで変更される可能性がある。
+//!
+//! # 位置づけ
+//!
+//! [`crate::session::core::Session`] は draft が定義する 1 本の `Transport Session` (QUIC connection
+//! または WebTransport session) に対応する。
+//!
+//! 本モジュールが扱うのは、この endpoint から見た peer との protocol state であり、
+//! publisher / subscriber の endpoint が直接使う範囲に限定する。relay が担う
+//! namespace 発見・告知と forwarding は対象外である。
+//!
+//! [`crate::session::types::Role`] は `Transport Session` における endpoint の役割 (`Client` / `Server`)
+//! を表し、[`crate::session::types::TrackRole`] は各 request / track における protocol role
+//! (`Publisher` / `Subscriber`) を表す。1 本の [`crate::session::core::Session`] の中で SUBSCRIBE /
+//! PUBLISH はどちらも並行して存在しうる。
+//!
+//! # 設計方針
+//!
+//! - I/O を持たない純粋な状態機械
+//! - 入力: [`crate::session::core::Session::recv_control`] / [`crate::session::core::Session::recv_request`] /
+//!   [`crate::session::core::Session::send_subgroup_header`] / [`crate::session::core::Session::send_subgroup_object`] /
+//!   [`crate::session::core::Session::send_data_stream_closed`] / [`crate::session::core::Session::recv_data_stream_stop_sending`] /
+//!   [`crate::session::core::Session::recv_data_stream_type`] / [`crate::session::core::Session::recv_object_datagram`] /
+//!   [`crate::session::core::Session::close`] 等のアプリ要求
+//! - 出力: [`crate::session::core::Session::poll_event`] で [`crate::session::types::SessionEvent`] を取り出す
+//! - 呼び出し側は [`crate::session::types::SessionEvent::SendControl`] を I/O 層に渡して送信し、
+//!   [`crate::session::types::SessionEvent::CloseSession`] で QUIC CONNECTION_CLOSE や WebTransport
+//!   session close を発行する
+//!
+//! # 実装範囲
+//!
+//! SETUP / Request ID 管理 / SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE /
+//! STOP_SENDING / FETCH / TRACK_STATUS / GOAWAY / tick 駆動の
+//! タイムアウト判定に加え、data plane の送受信 state
+//! (`send_subgroup_header` / `send_subgroup_object` / `send_data_stream_closed` /
+//! `recv_data_stream_stop_sending` / `recv_data_stream_type` / `recv_subgroup_header` /
+//! `recv_subgroup_object` / `recv_fetch_header` / `recv_object_datagram`) を実装済み。
+//!
+//! # Stream 抽象化
+//!
+//! MoQT は制御ストリーム (SETUP 用 uni stream ペア) と request stream (bidi、
+//! SUBSCRIBE / PUBLISH / FETCH のいずれかで始まる) と
+//! data stream (uni、FETCH_HEADER / SUBGROUP_HEADER で始まる) を区別する。
+//! 応答メッセージ (SUBSCRIBE_OK / PUBLISH_OK / REQUEST_ERROR 等) は wire
+//! format に Request ID を含まないため、bidi stream のコンテキストから特定する。
+//!
+//! 本モジュールではこれを以下の API / Event で表現する:
+//!
+//! - `recv_control(msg)` / `recv_control_stream_closed(end)` /
+//!   `SessionEvent::SendControl` — 制御ストリーム用 (SETUP / GOAWAY / transport close)
+//! - `recv_request(msg)` / `SessionEvent::SendRequest { request_id, message }` —
+//!   bidi request stream の最初のメッセージ (Request ID を含む)
+//! - `recv_stream_message(request_id, msg)` / `SessionEvent::SendOnStream { request_id, message, fin }` —
+//!   bidi request stream 上の応答 (`fin` が true の応答がその stream の最終メッセージ)
+//! - `send_subgroup_header(...)` / `send_subgroup_object(...)` /
+//!   `send_data_stream_closed(stream_id, end)` / `recv_data_stream_stop_sending(stream_id)` /
+//!   `recv_data_stream_type(stream_id, type_id)` / `recv_subgroup_header(...)` /
+//!   `recv_subgroup_object(...)` / `recv_fetch_header(...)` /
+//!   `recv_data_stream_closed(stream_id, end)` — uni data stream 用
+//! - `recv_object_datagram(datagram)` — datagram 用
+//!
+//! # サブモジュール構成
+//!
+//! - `types`: 型定義 (Session 除く)
+//! - `auth_token_cache`: AUTHORIZATION_TOKEN Alias Cache
+//! - `request_id`: Request ID 採番と検証
+//! - `core`: `Session` 構造体 + ライフサイクル + SETUP / 共通ディスパッチ /
+//!   REQUEST_OK / REQUEST_ERROR の送受信
+//! - `data`: data stream / datagram の送受信 state
+//! - `subscription`: SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_DONE /
+//!   STOP_SENDING 関連
+//! - `fetch`: FETCH 関連
+//! - `track_status`: TRACK_STATUS 関連
+//! - `goaway`: GOAWAY / tick 関連
+
+pub mod auth_token_cache;
+pub mod core;
+pub mod data;
+pub mod fetch;
+pub mod goaway;
+pub mod request_id;
+pub mod subscription;
+pub mod track_status;
+pub mod types;
+
+#[cfg(test)]
+mod tests;

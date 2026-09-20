@@ -1,0 +1,29 @@
+[package]
+name = "moqt-example-transport"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[dependencies]
+# 時雨堂クレート
+
+# HTTP/3 / WebTransport クライアント
+shiguredo_http3 = "2026.1.0-canary.9"
+# MoQT 本体 (ローカル参照)
+shiguredo_moqt = { path = "../../" }
+
+# 外部クレート
+
+# バイト列操作
+bytes = "1.12"
+# TLS バックエンド (s2n-quic provider 用)
+rustls = "0.23"
+# QUIC クライアント
+s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+# Tokio タスクメトリクス計測
+tokio-metrics = "0.5"
+# ログ出力
+tracing = "0.1"
