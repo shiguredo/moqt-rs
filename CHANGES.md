@@ -173,6 +173,9 @@
 
 ### misc
 
+- [UPDATE] prek.toml からシンボリックリンク用のフックを削除する
+  - `check-symlinks` が適用対象を持たず `check-hooks-apply` が失敗して prek ジョブが赤くなっていたため、`check-symlinks` と `destroyed-symlinks` を削除する
+  - @voluntas
 - [UPDATE] 受信 subgroup 経路の PBT と fuzz を追加する
   - `pbt/tests/prop_session/subgroup.rs` を追加し、受信 data stream の会計 (`open_incoming_subgroup_count`)、per-subgroup delivery timeout override のライフサイクル、候補順の帰属判定、`FilteredOut` / `Discarded` の Object が subscription スコープの状態を更新しないことを検証する
   - `fuzz_session` の `Op` に subgroup header / object と FETCH_HEADER の受信操作を追加し、decode 済みの構造体を渡す操作列で panic と状態破壊を検出する

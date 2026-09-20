@@ -48,8 +48,6 @@ hooks = [
   { id = "check-case-conflict" },
   { id = "mixed-line-ending", args = ["--fix=lf"] },
   { id = "fix-byte-order-marker" },
-  { id = "check-symlinks" },
-  { id = "destroyed-symlinks" },
 ]
 
 [[repos]]
