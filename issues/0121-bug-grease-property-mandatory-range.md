@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-grease-property-mandatory-range
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -24,8 +24,8 @@ GREASE 値の一部は 0x4000-0x7FFF に入るため、現状は GREASE の Prop
 ## 現状
 
 - `src/object_properties.rs` の `decode_kv_pairs` は `src/track_properties.rs` の `MANDATORY_TRACK_PROPERTY_MIN` (0x4000) から `MANDATORY_TRACK_PROPERTY_MAX` (0x7FFF) までを無条件に `ProtocolViolation("malformed track: mandatory property in object scope")` にする。GREASE 値の判定は行っていない
-- `src/grease.rs` の `is_grease` は公開されているが、`src/` 内からは参照されていない (`tests/test_grease.rs` と `pbt/tests/prop_grease.rs` が単体で検証しているのみ)。この範囲判定でも使われていない
-- `0x7f * N + 0x9D` が 0x4000-0x7FFF に入るのは N = 128 (0x401D) から N = 255 (0x7F1E) までの 128 値である。N = 256 は 0x7F9D で範囲外になる
+- `src/grease.rs` の `is_grease` は公開されているが `src/` 内からは参照されていない。参照は doctest と `tests/test_grease.rs` / `pbt/tests/prop_grease.rs`、および `skills/shiguredo-moqt/SKILL.md` と `docs/IMPLEMENTATION.md` の記載だけであり、この範囲判定では使われていない
+- `0x7f * N + 0x9D` が 0x4000-0x7FFF に入るのは N = 128 (0x401D) から N = 256 (0x7F9D) までの 129 値である。N = 257 の 0x801C で範囲外になる。重なり範囲の上限が 0x7F9D である点は、`MANDATORY_TRACK_PROPERTY_MAX` (0x7FFF) との比較を検証する境界になる
 - GREASE 値は型の偶奇が交互になる (`0x9D` が奇数、`0x7f * N` の偶奇が N に依存するため)。N = 128 の 0x401D は奇数型 (長さ付きバイト列)、N = 129 の 0x409C は偶数型 (varint) である
 - 0x4000-0x7FFF の Property を Object Property として与えるテストは存在せず、この分岐はテストで固定されていない
 - 同じ衝突は Track scope にもある。`src/track_properties.rs` の `TrackProperties::has_unknown_mandatory` は 0x4000-0x7FFF を一律に未知の必須プロパティとして扱う。本 issue は Object scope の malformed 判定のみを対象とし、Track scope は対象外とする
@@ -44,7 +44,8 @@ GREASE 値の一部は 0x4000-0x7FFF に入るため、現状は GREASE の Prop
 
 ## 完了条件
 
-- GREASE 値 (奇数型の例: N = 128 の 0x401D、偶数型の例: N = 129 の 0x409C) を Object Property として含むバイト列の decode が成功し、値がそのまま保持されることを固定するテストが追加されていること
+- GREASE 値 (奇数型の例: N = 128 の 0x401D、偶数型の例: N = 129 の 0x409C、重なり範囲の上限 N = 256 の 0x7F9D) を Object Property として含むバイト列の decode が成功し、値がそのまま保持されることを固定するテストが追加されていること
 - 同じ Object を Session 経由で受信しても malformed track として購読が打ち切られないことを固定するテストが追加されていること
 - GREASE 値でない 0x4000 と 0x7FFF を Object Property として受信すると、引き続き malformed track になることを固定するテストが追加されていること (非退行)
 - Track scope の `TrackProperties::has_unknown_mandatory` の挙動を変えていないこと
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
