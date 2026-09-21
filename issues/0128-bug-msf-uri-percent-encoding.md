@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-uri-percent-encoding
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-22
 
 ## 目的
 
@@ -49,34 +49,40 @@ draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF は�
 
 ## 設計方針
 
-URI 層の `%XX` (RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded`) と §11.1.2 の `.` + 小文字 hex 2 桁を別の層として扱い、デコード順序を固定する。
+URI 層の `%XX` (RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded`) と §11.1.2 の `.` + 小文字 hex 2 桁を別の層として扱い、track-identifier を 1 パスで走査してバイト列へデコードする。
 
-1. 構造の分離を先に行う。`-` (namespace フィールド区切り) と `--` (namespace と track name の境界) は percent-decode 前の文字列で確定する。
-   RFC 3986 §2.4 (When to Encode or Decode) は "the components and subcomponents significant to the scheme-specific dereferencing process (if any) must be parsed and separated
-   before the percent-encoded octets within those components can be safely decoded, as otherwise the data may be mistaken for component delimiters." と規定する
-2. 分離した各フィールドで `%XX` をデータバイトへ 1 回だけデコードする。同じ文字列を 2 回デコードしない (RFC 3986 §2.4 の "
-   Implementations must not percent-encode or decode the same string more than once, as decoding an already decoded string might lead to misinterpreting a percent data octet as the beginning of a percent-encoding,
-   or vice versa in the case of percent-encoding an already percent-encoded string.")
-3. デコードしたバイトはデータとして扱い、区切り文字や新たなエスケープの開始として再解釈しない。`%2D` はデータバイト 0x2D (`-`) であり区切りではない。`%2E` はデータバイト 0x2E (`.`) であり `.` + hex の開始ではない。`%25` はデータバイト 0x25 (`%`) である
-4. デコード結果を §11.1.2 の表現へ寄せてから `crate::name::parse_name` に渡す。リテラル表現可能なバイト (`a-z` / `A-Z` / `0-9` / `_`) はリテラルのまま、それ以外は `.` + 小文字 hex 2 桁にする。RFC 3986 §2.4 は unreserved 集合に対応する percent-encoded octet をいつでもデコードできるとし、§11.1.2 は unreserved をリテラルで表すと規定するため、`%61` は `a` になる
-5. 生の `/` はデータバイト 0x2F として扱い `.2f` に正規化する。§11.1 の ABNF は `pchar-no-amp` と並んで `/` を許すが、§11.1.2 に `/` を区切りとする規則は無く、データの `/` は `.2f` と規定される
-6. 生の `?` は ABNF が禁じるため従来どおり拒否する。`?` の表現は `%3F` だけになる
-7. 正規化後の文字列を `crate::name::parse_name` に渡すため、大文字 hex (`UppercaseHex`)、リテラル表現可能バイトの hex 化 (`RedundantEncoding`)、空フィールド、区切りの多重化などの既存規則はそのまま適用される
+- `src/name.rs` に `parse_name` の `%XX` 許容版を追加し、`src/msf/uri.rs` の `parse_msf_fragment` から使う。`parse_name` / `decode_field` の既存の挙動 (`%` を `InvalidEscape` で拒否) は変えず、他の呼び出し元に影響させない
+- フィールドの分割は `parse_name` と同じ規則 (`-` 1 個 = namespace フィールド区切り、`--` = namespace と track name の境界、`-` 3 個以上 = 不正) を生の文字列の `-` のラン走査で確定する。`%XX` はデータバイトであり区切りを生成しない
+- 各フィールドは 1 パスで走査してバイト列にする
+  - リテラル (`a-z` / `A-Z` / `0-9` / `_`) はそのバイト
+  - `.` は直後の 2 文字が hex であることをその場で要求し、2 文字を消費したら次の文字から走査を続ける。大文字 hex は `UppercaseHex`、hex 2 桁でなければ `InvalidEscape`、デコード結果がリテラルなら `RedundantEncoding`。`RedundantEncoding` は `.` エスケープだけに適用し、`%XX` の octet には適用しない (`%61` は 0x61 のデータバイトとして受理する)
+  - `%` は直後の 2 文字が hex であることを要求し、その octet をデータバイトとして取り出す。hex の大文字小文字は問わない (RFC 3986 §2.1 は両者を等価とする)
+  - ABNF が許す生の非リテラル文字 (`/` / `~` / `:` / `@` / `sub-delims-no-amp`) はその ASCII バイトをデータとして取り出す。§11.1.2 に `/` を区切りとする規則は無く、データの `/` は `.2f` と規定される
+- `%XX` を文字列 (`a` や `.2f`) へ畳み込んでから再パースする方式にしてはならない。`.` の直後に `%XX` が続く入力を畳み込むと、入力に無い `.` + hex が生まれる。例: `msf:ns--.2%33` は生の `.` の直後が `2` と `%` のため `InvalidEscape` になるべきだが、畳み込むと `.23` になり 1 バイト 0x23 として受理される
+- 同じ文字列を 2 回デコードしない。RFC 3986 §2.4 (When to Encode or Decode) は "Implementations must not percent-encode or decode the same string more than once, as decoding an already decoded string might lead to misinterpreting a percent data octet as the beginning of a percent-encoding,
+  or vice versa in the case of percent-encoding an already percent-encoded string." と規定する
+- 構造の確定を percent-decode より先に行う。RFC 3986 §2.4 の "the components and subcomponents significant to the scheme-specific dereferencing process (if any) must be parsed and separated
+  before the percent-encoded octets within those components can be safely decoded, as otherwise the data may be mistaken for component delimiters." は、`-` のラン走査を生の文字列で行い `%XX` が区切りを生成しないことで満たす
+- デコードしたバイトはデータとして扱い、区切り文字や新たなエスケープの開始として再解釈しない。`%2D` はデータバイト 0x2D (`-`) であり区切りではない。`%2E` はデータバイト 0x2E (`.`) であり `.` + hex の開始ではない。`%25` はデータバイト 0x25 (`%`) である
+- 生の `?` は ABNF が禁じるため従来どおり拒否する。`%3F` と `%3f` は等価で、どちらも 0x3F のデータバイトになる (現行の `validate_pchar_no_amp` も `is_ascii_hexdigit` で両方受理する)
+- 大文字 hex (`UppercaseHex`)、リテラル表現可能バイトの hex 化 (`RedundantEncoding`)、空フィールド、区切りの多重化といった既存規則はそのまま適用される。`UppercaseHex` / `RedundantEncoding` は生の文字列に素で書かれた `.` + hex にのみ関わる。`%4A` は 0x4A (`J`) というデータバイトになり `UppercaseHex` にはならない。素の `.4A` が `UppercaseHex`、素の `.61` が `RedundantEncoding` になる
 
 URI 層の `%61` と MSF namespace-name 層の `.61` は別層の話である。前者は同じ octet の別表記として受理し、後者は §11.1.2 の表現として冗長なため従来どおり拒否する。
 
-`&` 区切りのパラメータ列 (`parameter-list`) の percent-decode は本 issue の対象外とし、現状どおり生の文字列を保持する。
+`&` 区切りのパラメータ列 (`parameter-list`) の percent-decode は本 issue の対象外とし、現状どおり生の文字列を保持する。同じ fragment を `&` / `=` で分解する `src/msf.rs` の `parse_fragment_pairs` / `resolve_catalog_variables` も「percent-decode は行わず、値をそのまま使う」ままにし、track-identifier だけをデコードする。同じ URI に 2 つの解釈が併存する点は本 issue では変更しない。
 
 ## 完了条件
 
-- `msf:customer--catalog%3Fpart` を `parse_msf_fragment` が受理し、track name の該当バイトが 0x3F (`?`) になるテストが `tests/test_msf/uri.rs` に追加されていること
-- `msf:ns--a/b` を `parse_msf_fragment` が受理し、track name の該当バイトが 0x2F (`/`) になるテストが追加されていること
-- `%2D` が区切りではなくデータバイト 0x2D として扱われるテストが追加されていること (namespace のフィールド数が `%2D` の前後で増えない)
-- `%2E` が `.` + hex の開始として再解釈されず、データバイト 0x2E になるテストが追加されていること
+- `msf:customer--catalog%3Fpart` を `parse_msf_fragment` が受理し、track name の該当バイトが 0x3F (`?`) になるテストが `tests/test_msf/uri.rs` に追加されていること (hex は大文字小文字を問わないため `%3f` も同じ 0x3F になる)
+- `msf:ns--a/b` を `parse_msf_fragment` が受理し、track name の該当バイトが 0x2F (`/`) になるテストが追加されていること。ABNF が許す他の非リテラル文字も同じ規則であることを 1 文字 (`:` など) で代表させる
+- `%2D` が区切りではなくデータバイト 0x2D として扱われるテストが追加されていること。namespace 部に置いた `msf:ns%2Da--catalog` が namespace 1 フィールド `ns-a` (0x6E 0x73 0x2D 0x61) になることを断言する (誤って `-` として扱うと namespace が 2 フィールド `ns` / `a` になる)
+- `%2E` がデータバイト 0x2E (`.`) になり、`msf:ns--%2E2d` が 3 バイト 0x2E 0x32 0x64 (`.` `2` `d`) になるテストが追加されていること
+- `.` の直後に `%XX` が続く入力が拒否されるテストが追加されていること。`msf:ns--.2%33` は `InvalidEscape` になる (文字列へ畳み込んでから再パースすると `.23` になり 1 バイト 0x23 として受理されてしまう)
 - `%25` がデータバイト 0x25 (`%`) になるテストが追加されていること
-- `%61` が `a` として受理され、`.61` は従来どおり拒否されるテストが追加されていること
+- `%61` が `a`、`%4A` が 0x4A (`J`) として受理され、素の `.61` は `RedundantEncoding`、素の `.4A` は `UppercaseHex` で従来どおり拒否されるテストが追加されていること
 - 生の `?` は従来どおり拒否されるテストが `parse_fragment_invalid_rejected` に維持されていること
 - §11.1.2 表現の `msf:ns--a.2fb` と `name::serialize_name` の往復が維持されていること
 - `pbt/tests/prop_msf_uri.rs` の `fragment_roundtrip` が成功すること
+- `crate::name::parse_name` が `%` を含む文字列を従来どおり `InvalidEscape` で拒否すること (`%XX` 許容版の追加で既存 API の挙動が変わっていないことを固定する)
 - `src/msf/uri.rs` のモジュール doc から「percent-decode は行わず、値をそのまま保持する」の記述が実装に合わせて更新されていること
 - `make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ること
