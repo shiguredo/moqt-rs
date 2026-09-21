@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-accept-rendezvous-timeout-parameter
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -19,14 +19,14 @@ draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter) は `RENDEZV
 > unknown Message Parameter MUST close the session with
 > PROTOCOL_VIOLATION.
 
-0x04 は draft-ietf-moq-transport-21 で定義済みであるため、これを未知として扱ってセッションを閉じるのは過剰である。本ライブラリは relay を実装しないため RENDEZVOUS_TIMEOUT の semantics を解釈しないが、解釈しないことと受信でセッションを落とすことは別である。relay を経由した subscriber が 0x04 を載せた SUBSCRIBE を送ると、本ライブラリを使う publisher がセッションを閉じてしまう interop 上の問題を解消する。
+0x04 は draft-ietf-moq-transport-21 で定義済みであるため、これを未知として扱ってセッションを閉じるのは過剰である。本ライブラリは relay を実装しないため RENDEZVOUS_TIMEOUT の semantics を解釈しないが、解釈しないことと受信でセッションを落とすことは別である。§9.20.1 のとおり Message Parameters は peer 向けで relay は転送しないため、0x04 を合法に載せた SUBSCRIBE を送る peer が存在しうる。それを未知パラメータとして `PROTOCOL_VIOLATION` で閉じるのは定義済みパラメータの扱いとして誤っている。
 
 ## 現状
 
 拒否ゲートは 2 つある。
 
 - `src/message_parameter.rs` の `value_encoding` に 0x04 の分岐が無く `MessageError::ProtocolViolation("unknown message parameter type")` を返す。closed issue 0086 で `PARAM_RENDEZVOUS_TIMEOUT` と `MessageParameters::rendezvous_timeout` を削除した結果である。
-- `src/message.rs` の `SUBSCRIBE_ALLOWED_PARAMS` に 0x04 が無いため、`Subscribe::encode_message_body` と `Subscribe::decode_message_body` の `MessageParameters::validate_scope` でも `ProtocolViolation` になる。
+- `src/message.rs` の `SUBSCRIBE_ALLOWED_PARAMS` に 0x04 が無い。encode は `Subscribe::encode_message_body` の `validate_scope` が先に `ProtocolViolation` を返し、decode は `MessageParameters::decode` から呼ばれる `value_encoding` が先に `ProtocolViolation` を返すため `validate_scope` には到達しない
 
 `tests/test_message.rs` の `subscribe_with_unhandled_type_0x04_is_rejected` が encode 側の拒否を固定している。`CHANGES.md` の `## develop` の RENDEZVOUS_TIMEOUT 削除エントリと、`docs/IMPLEMENTATION.md` の「その他、relay 専用の以下のパラメータも実装しない」にも 0x04 が残っている。
 
@@ -34,17 +34,20 @@ draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter) は `RENDEZV
 
 ## 設計方針
 
-- `value_encoding` に 0x04 (vi64 のミリ秒) を追加し、`SUBSCRIBE_ALLOWED_PARAMS` にも 0x04 を加えて SUBSCRIBE で受理する。
-- 受信した 0x04 の扱いを決めて明記する。relay 専用の購読保持 semantics (publisher の出現待ち、TIMEOUT 応答) は実装対象外とし、購読パラメータとして保持するのみで解釈しない。アプリへ値を渡すかどうかも併せて決める。
-- 送信側 (`src/message.rs` の `Subscribe`) で 0x04 を指定できるようにするかは、受信側の扱いと対称に決める。受理のみで送信 API を持たない選択もありうる。
-- 未知パラメータを PROTOCOL_VIOLATION にする §9.20 の処理はそのまま残す。`tests/test_message.rs` の `subscribe_with_unhandled_type_0x04_is_rejected` は、Table 13 に無い未定義の型を拒否することを固定するテストへ置き換える。
-- 0086 で削除した `Subscription::subscriber_rendezvous_timeout_ms` を戻すかは受信側の扱いの決定に従う。値を library 内部で使わないなら戻さない。
-- `CHANGES.md` と `docs/IMPLEMENTATION.md` の記述を実装に合わせて更新する。
+- `value_encoding` に 0x04 を `ValueEncoding::VarInt` として追加し、`PARAM_RENDEZVOUS_TIMEOUT` 定数 (0x04) を戻す。§9.20.7 に値エンコーディングの明文は無いが、§9.20 の parameter value は varint で、同型の `FILL_TIMEOUT` (0x0A) も `ValueEncoding::VarInt` である。0086 の削除前実装も `VarInt` だった
+- 専用のアクセサ `MessageParameters::rendezvous_timeout()` は戻さない。library は 0x04 を解釈しないため、生の `MessageParameters` を読めば足りる
+- `SUBSCRIBE_ALLOWED_PARAMS` に 0x04 を加える。同定数は `Subscribe::encode_message_body` / `Subscribe::decode_message_body` / `Session::send_subscribe` で共有されるため、受信と送信の両方で受理される。0x04 専用の送信 API は追加しない
+- `Session::handle_peer_subscribe` は 0x04 を解釈せず、`Subscription` にも保持しない。0086 で削除した `Subscription::subscriber_rendezvous_timeout_ms` は戻さない。値は decode 済みの `ControlMessage::Subscribe` の `parameters` に残るため、必要ならアプリが `MessageParameters` から読める
+- 未知パラメータを PROTOCOL_VIOLATION にする §9.20 の処理はそのまま残す。`tests/test_message.rs` の `subscribe_with_unhandled_type_0x04_is_rejected` は、0x04 が encode / decode の両方で受理されることを固定するテストへ置き換え、Table 13 に無い未定義の型を拒否することを固定するテストを別に残す
+- `skills/shiguredo-moqt/SKILL.md` のパラメータ型定数表に `PARAM_RENDEZVOUS_TIMEOUT` (`0x04`) の行を戻す (0086 で削除されている)
+- `CHANGES.md` と `docs/IMPLEMENTATION.md` の記述を実装に合わせて更新する
 
 ## 完了条件
 
-- 0x04 を含む SUBSCRIBE が `ControlMessage::decode` で受理されることがテストで固定されていること。
-- `Session::recv_request` に 0x04 付き SUBSCRIBE を渡してもセッションが `Closing` に遷移しないことがテストで固定されていること。受理後の 0x04 の扱い (保持のみ・無視・アプリへの通知のいずれか) も同じテストで固定する。
-- Table 13 に無いパラメータ型が引き続き `ProtocolViolation` で拒否されることがテストで固定されていること。
-- `docs/IMPLEMENTATION.md` と `CHANGES.md` の記述が実装と一致していること。
-- `cargo test --workspace` が通ること。
+- `ControlMessage::decode` に 0x04 を含む SUBSCRIBE のバイト列を渡すと受理される (decode 経路で `value_encoding` と `validate_scope` の両方を通る) ことがテストで固定されていること
+- 0x04 を含む SUBSCRIBE の encode が成功することがテストで固定されていること
+- decode で得た 0x04 付き SUBSCRIBE を `Session::recv_request` に渡してもセッションが `Closing` に遷移しないことがテストで固定されていること
+- 受理した 0x04 が `Subscription` に保持されない (0086 で削除した `subscriber_rendezvous_timeout_ms` が戻らない) ことがテストで固定されていること
+- Table 13 に無いパラメータ型が decode と encode の両方で `ProtocolViolation` になることがテストで固定されていること
+- `docs/IMPLEMENTATION.md` と `CHANGES.md` と `skills/shiguredo-moqt/SKILL.md` の記述が実装と一致していること
+- `cargo test --workspace` が通ること
