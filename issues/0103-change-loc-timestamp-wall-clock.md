@@ -3,7 +3,7 @@
 - Created: 2026-09-18
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-loc-timestamp-wall-clock
-- Polished: 2026-09-20
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -16,7 +16,7 @@
 - `build_audio_loc_properties` は毎 Object に `PROP_TIMESCALE` を付けるが、Timestamp は `audio_frame_count * samples_per_frame` で映像とは別の 0 起点になっている
 - `examples/moqt-publisher/src/catalog.rs` の `send_catalog` は `renderGroup` / `targetLatency` を設定しない。`src/msf.rs` の `MsfTrack` には `target_latency` / `render_group` があり、`validate_group_target_latency` が同一 render group 内の一致を検証する
 - 入力には capture timestamp がある (`shiguredo_audio_device::AudioFrameOwned` の `timestamp_us`、`shiguredo_video_device::VideoFrameOwned` の `timestamp_us`)。**ただしその起源はプラットフォームで異なる** (次節)
-- `examples/moqt-subscriber/src/main.rs` は映像の PTS に受信時刻を使い、カタログの `targetLatency` も参照しない
+- `examples/moqt-subscriber/src/main.rs` の `run_raw_player` は映像の PTS にプレイヤースレッド開始からの経過時間 (デキュー時刻) を使う。epoch でも受信時刻でもない。カタログの `targetLatency` も参照しない
 - `examples/moqt-subscriber/src/pipeline.rs` の `audio_pts_us` は Timescale が無いとき `AUDIO_FALLBACK_SAMPLE_RATE` (48_000) を仮定する
 
 ### capture timestamp の起源
@@ -28,12 +28,12 @@
 | 音声 macOS | `shiguredo_audio_device` の `audio_coreaudio.m` (`mHostTime` を `mach_timebase_info` で変換) | mach 絶対時刻 (monotonic) |
 | 音声 Windows | `shiguredo_audio_device` の `capture_wasapi.rs` (`QueryPerformanceCounter`) | monotonic |
 | 映像 macOS | `shiguredo_video_device` の `video_avf.m` (`CMSampleBufferGetPresentationTimeStamp`) | mach 絶対時刻 (monotonic) |
-| 映像 Windows | `shiguredo_video_device` の `capture_mf.rs` (サンプル時刻 / 10) | monotonic |
-| 映像 Linux (V4L2) | `shiguredo_video_device` の `video_v4l2.c` (`buf.timestamp`) | driver 依存 (既定は `CLOCK_MONOTONIC`。`V4L2_BUF_FLAG_TIMESTAMP_*` を見ていないため実行時に判別できない) |
+| 映像 Windows | `shiguredo_video_device` の `capture_mf.rs` (サンプル時刻 / 10) | Media Foundation のサンプル時刻由来。どのクロックかは実装から判別できない |
+| 映像 Linux (V4L2) | `shiguredo_video_device` の `video_v4l2.c` (`buf.timestamp`) | driver が選ぶ (`CLOCK_MONOTONIC` と `CLOCK_REALTIME` のどちらもあり得る)。`V4L2_BUF_FLAG_TIMESTAMP_*` を見ていないため実行時に判別できない |
 | 映像 Linux (PipeWire) | `shiguredo_video_device` の `video_pipewire.c` (`header->pts` または `clock_gettime(CLOCK_MONOTONIC)`) | monotonic |
 | fake capture | `examples/moqt-publisher/src/fake_capture.rs` と `fake_audio_capture.rs` | 0 起点 |
 
-したがって **セッション開始時の epoch を加算するだけでは正しくならない。** monotonic な経路では起動時間ぶん未来へずれる。
+epoch なのは V4L2 が `CLOCK_REALTIME` を選んだ場合だけで、しかも実行時には判別できない。したがって **セッション開始時の epoch を加算するだけでは正しくならない。** monotonic な経路では起動時間ぶん未来へずれる。
 
 ## 設計方針
 
@@ -56,21 +56,22 @@
 ### カタログ
 
 - `send_catalog` に `renderGroup` (音声・映像で同一値) と `targetLatency` (同一値) を設定する (MSF-01 §5.2.8 / §5.2.11)
-- `targetLatency` の既定は **200 ms** とし、CLI オプションで変更できるようにする。live の example としての既定値であり、MSF-01 §5.2.8 が同じ render group の track に同一値を MUST としているため、音声と映像で同じ値を使う
-- `isLive` が false のときは `targetLatency` を載せない (MSF-01 §5.2.8 の MUST)。`send_catalog` は現在 `MsfTrack::new(..., true)` で live 固定のため、この分岐は将来のための整理とする
+- `targetLatency` の既定は **200 ms** とし、`--target-latency` (ms) で変更できるようにする。live の example としての既定値であり、MSF-01 §5.2.8 が同じ render group の track に同一値を MUST としているため、音声と映像で同じ値を使う
+- MSF-01 §5.2.8 は `isLive` が false のとき `targetLatency` を無視する MUST としており、これは受信側の規則であって publisher の出力禁止ではない。`src/msf.rs` の `write_track_json` は decode と対称にするため `isLive=false` のとき `targetLatency` を出力しない実装になっており、この既存挙動は変えない。`send_catalog` は `MsfTrack::new(..., true)` で live 固定のため、この issue では `isLive` の分岐を追加しない
 
 ### 受信側との関係
 
 - 受信側で Timestamp を使った A/V 同期を実装するのは 0104 で扱う
-- **0103 を単独で入れると、0104 が入るまで subscriber の音声が壊れる。** `audio_pts_us` は Timescale が無いとき 48_000 を仮定するため、epoch マイクロ秒の Timestamp をサンプル数として解釈してしまう。0104 と同時にマージするか、0103 に `audio_pts_us` の暫定対応 (Timescale が無ければ epoch マイクロ秒として扱う) を含める
+- **0103 を単独で入れると subscriber の音声が壊れる。** `audio_pts_us` は Timescale が無いとき 48_000 を仮定するため、epoch マイクロ秒の Timestamp をサンプル数として解釈してしまう。0104 と同時にマージする前提は置かず、**0103 の中で `audio_pts_us` を修正する** (Timescale が無ければ Timestamp を epoch マイクロ秒として扱う)。0104 はこの修正を前提に、PTS の算出と再生タイミングの実装へ進む
 
 ## 完了条件
 
 - 音声・映像の Timestamp が同じ epoch マイクロ秒軸で単調に増加すること
-- **Timestamp が wall-clock と一致すること。** 受信側のローカル時刻と比較して許容範囲 (例: ±100 ms) に収まることを実機 1 ケース以上で確認する。単調性だけでは起動時間ぶんのずれを検出できない
+- **Timestamp が wall-clock と一致すること。** publisher 側でフレーム受信時の `SystemTime::now()` (epoch マイクロ秒) と変換後の Timestamp の差をログ出力し、その差が許容範囲 (例: ±100 ms) に収まることを実機 1 ケース以上で確認する。単調性だけでは起動時間ぶんのずれを検出できない
 - 映像の delta frame を単体で見ても LOC の既定どおり epoch マイクロ秒と解釈できること
 - 音声で 1 つの capture フレームから複数 Object を切り出すとき、Timestamp が単調に増加すること
 - カタログの `renderGroup` / `targetLatency` が音声・映像で同一値になっていること
-- `isLive` が false の track に `targetLatency` を載せないこと
+- `--target-latency` (ms、既定 200) が追加され、`examples/README.md` の publisher オプション表が追随していること
+- `src/msf.rs` の `write_track_json` が `isLive=false` で `targetLatency` を出力しない既存挙動を変えていないこと
 - capture timestamp の epoch 正規化と Timestamp 生成が純関数としてテストされていること
-- 0104 と同時にマージしない場合は、subscriber の音声 PTS が破綻しない暫定対応が入っていること
+- subscriber の `audio_pts_us` が Timescale 無しの Timestamp を epoch マイクロ秒として扱い、48_000 の仮定をやめていること
