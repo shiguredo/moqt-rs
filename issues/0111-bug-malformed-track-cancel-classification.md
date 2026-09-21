@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-malformed-track-cancel-classification
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -11,29 +11,63 @@ draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) は、subscriber が Malfo
 
 現状は、この条件で返るエラーがセッション終了コード `SESSION_PROTOCOL_VIOLATION` に写されるため、アプリは「セッションを閉じるべきか、購読だけ cancel すべきか」をエラー種別から判別できない。`MessageError::ProtocolViolation` はフレーミング違反などセッションを閉じるべき検証でも使われており、同じ値に 2 つの意味が載っている。
 
+Session 層の cancel 自体 (`SessionEvent::StopSendingRequestStream` → `SessionEvent::ResetRequestStream` と `SessionEvent::RequestTerminated { reason: MalformedTrack }`) は 0028 で実装済みである。本 issue は「どの検出が購読単位の cancel に相当するか」をエラー種別で判別できるようにすることを対象にする。
+
 ## 現状
 
-- `src/stream/decoder.rs` の `FetchStreamDecoder::validate_fetch_object` は、同一 Subgroup 内の Publisher Priority 変更・確定済み最終 Object を超える Object ID・昇順でない Object ID・Group 順序違反を `MessageError::ProtocolViolation` で返す (いずれも §12.1 の条件 1 / 2 / 3 相当)
-- `src/object_properties.rs` の `ObjectPropertyTracker::observe_decoded_object` / `observe_object` も「malformed track」を理由に `MessageError::ProtocolViolation` を返す
-- `src/subgroup_tracker.rs` の `SubgroupTracker::record_priority` / `mark_fin` は `SessionError { code: SESSION_PROTOCOL_VIOLATION }` を返す。
-  `SubgroupTracker::check_object_after_fin` は `Option<&'static str>` (理由文字列) を返し、`src/session/data.rs` の `Session::attribute_subgroup_object` が `SessionError::new(SESSION_PROTOCOL_VIOLATION, reason)` に包む
-- §12.1 条件 6 相当 (同一 Object の重複受信で Forwarding Preference / Subgroup ID / Priority が異なる) を検出するのは `ObjectFieldTracker::observe_object_fields` で、返る型は専用の `ObjectFieldMismatch` である。`Session` はそれを `SessionError::new(SESSION_PROTOCOL_VIOLATION, ...)` に写す
-- `src/error.rs` の `MessageError` に Malformed Track を表す variant が無い
-- `src/session/data.rs` の `Session::terminate_malformed_track` は該当する subscription のみを終了させているが、返る `SessionError` のコードはセッション終了コードのままである
-- `src/subgroup_tracker.rs` は `pub mod subgroup_tracker` として公開されており、戻り値型の変更は破壊的変更になる
+- `src/error.rs` の `MessageError` に Malformed Track を表す variant が無い。`MessageError::ProtocolViolation(&'static str)` が §12.1 の検出とフレーミング違反の両方に使われている
+- `src/stream/decoder.rs` の `FetchStreamDecoder::validate_fetch_object` は 4 つの検証を `MessageError::ProtocolViolation` で返す。§12.1 の列挙条件に対応するのは「同一 Subgroup 内の Publisher Priority 変更」(条件 1) と「確定済み最終 Object を超える Object ID」(条件 2) である
+- 残る 2 つは §12.1 の列挙条件ではない。「Object ID が昇順でない」は §2.2 (Subgroups) の定義、「FETCH の Group が昇順でない」は §9.11 (FETCH) の "A publisher MUST send fetched groups in the requested group order" に由来する
+- §12.1 条件 3 (同一 Subgroup を複数の transport stream で受信し最終 Object が異なる) を検出するのは `src/subgroup_tracker.rs` の `SubgroupTracker::mark_fin` である。`FetchStreamDecoder` は条件 3 を検出しない
+- `src/object_properties.rs` の `ObjectPropertyTracker::observe_decoded_object` / `observe_object` は §12.1 の条件と、`ObjectProperties::decode` の失敗 (フレーミング) の両方を `MessageError::ProtocolViolation` で返す
+- §12.1 条件 6 / 7 を検出するのは `ObjectFieldTracker::observe_object_fields` で、返る型は専用の `ObjectFieldMismatch` である。`Session` はそれを `SessionError::new(SESSION_PROTOCOL_VIOLATION, ...)` に写す
+- `src/subgroup_tracker.rs` の `SubgroupTracker::record_priority` / `mark_fin` は `SessionError { code: SESSION_PROTOCOL_VIOLATION }` を返す
+- `SubgroupTracker::check_object_after_fin` は `Option<&'static str>` を返し、`src/session/data.rs` の `Session::attribute_subgroup_object` が `SessionError::new(SESSION_PROTOCOL_VIOLATION, reason)` に包む
+- `Session::object_after_track_end` も §12.1 条件 4 / 5 で `Option<&'static str>` を返し、呼び出し元が `SessionError::new(SESSION_PROTOCOL_VIOLATION, reason)` に包む
+- §12.1 条件 1 は 2 経路で検出される。`Session::recv_subgroup_header` の header 時点と、`SubgroupIdMode::FirstObjectId` で subgroup_id を遅延解決する `Session::recv_subgroup_object` の `Session::resolve_object_subgroup_id` である
+- §12.1 条件 3 (`SubgroupTracker::mark_fin`) を返すのは `Session::recv_data_stream_closed` である
+- `src/session/data.rs` の `session_error_from_data_message` は `MessageError::ProtocolViolation` を `SessionError { code: SESSION_PROTOCOL_VIOLATION }` に写す。§12.1 の検出経路はこの写像を通って `Session::terminate_malformed_track` を呼び、購読単位の cancel とセッション維持を行うが、アプリへ返るエラーは `SESSION_PROTOCOL_VIOLATION` のままである
+- `Session::terminate_malformed_track` は `pub(super)` で `()` を返し、cancel イベントと `SessionEvent::RequestTerminated { reason: TerminationReason::MalformedTrack }` の発行だけを行う
+- `Session::recv_subgroup_object` と `Session::recv_object_datagram` の戻り値は `Result<TrackDataAcceptance, SessionError>` である。`src/session/types.rs` の `SessionError` は `code` (Session Termination Error Code, §16.11.1) と `reason` だけを持ち、セッションを終了しない cancel を表す値を持たない
+- `RecvDataStreamError` は `BeforeSessionEstablished` / `InvalidInput(SessionError)` / `Session(SessionError)` の 3 variant を持ち、「セッションを終了する」と「しない」を分けているが、§12.1 の cancel を表す variant が無い
+- `Session` は decoder を保持しない (`SubgroupStreamDecoder` / `FetchStreamDecoder` はアプリが Session の外で保持する)。`FetchStreamDecoder::validate_fetch_object` の戻り値は `Session` に届かないため、FETCH の §12.1 検出を判別するのはアプリである
+- `src/lib.rs` は `pub mod subgroup_tracker` / `pub mod object_properties` / `pub mod stream` を公開しており、`MessageError` は `#[non_exhaustive]` でない公開 enum である。variant 追加と `SubgroupTracker` の戻り値型変更はいずれも破壊的変更になる
+- §12.1 の各条件で `SESSION_PROTOCOL_VIOLATION` を固定しているテストが `tests/test_session/data_stream.rs` / `tests/test_session/subgroup_object_filter/` / `tests/test_session/subscription/terminated_discard.rs` / `src/session/tests.rs` にある。`err.code` の検査は戻り値型が `SessionError` であることに依存しているため、戻り値型を変える API のテストは広く更新が必要になる
 
 ## 設計方針
 
-- `src/error.rs` の `MessageError` に Malformed Track を表す variant を追加し、`src/stream/decoder.rs` と `src/object_properties.rs` の該当箇所がそれを返すようにする
-- `src/subgroup_tracker.rs` の Malformed Track 条件 (条件 1 / 2 / 3) も同じ分類で返す。公開 API の戻り値型を変えるため、`CHANGES.md` の `## develop` に `[CHANGE]` を記載する
-- `ObjectFieldMismatch` も同じ分類に寄せ、`Session` が「セッション終了コードへ写す」か「購読単位の cancel にする」かを選べるようにする
-- Session 層では §12.1 の MUST に従い、該当 subscription / fetch の cancel (`SessionEvent::StopSendingRequestStream` → `SessionEvent::ResetRequestStream`) とセッション維持を既定にする
-- フレーミング違反など、§12.1 の条件ではない既存の `MessageError::ProtocolViolation` の用途は変えない
+- `src/error.rs` の `MessageError` に `MalformedTrack(&'static str)` を追加する。§12.1 の列挙条件に対応する検出だけがこれを返す
+- 分類する検出は次のとおりに限定する
+  - `FetchStreamDecoder::validate_fetch_object` の条件 1 (Publisher Priority 変更) と条件 2 (確定済み最終 Object 超過)
+  - `SubgroupTracker::mark_fin` (条件 3) と `SubgroupTracker::record_priority` (条件 1)
+  - `ObjectPropertyTracker::observe_decoded_object` / `observe_object` の §12.1 条件に対応する分岐
+  - `Session::object_after_track_end` (条件 4 / 5) と `Session::attribute_subgroup_object` 経由の `SubgroupTracker::check_object_after_fin`
+  - `ObjectFieldMismatch` を返す `ObjectFieldTracker::observe_object_fields` (条件 6 / 7)
+- 分類しない検出は `ProtocolViolation` のまま据え置く
+  - `FetchStreamDecoder::validate_fetch_object` の「Object ID が昇順でない」(§2.2) と「Group が昇順でない」(§9.11)
+  - `ObjectPropertyTracker::observe_object` の `ObjectProperties::decode` 失敗 (フレーミング)
+  - フレーミング違反など、§12.1 の条件ではない既存の `MessageError::ProtocolViolation` の用途
+- `SubgroupTracker::record_priority` / `mark_fin` の戻り値型を `SessionError` から `MessageError` に変える。`ObjectPropertyTracker` と同じく codec 層のエラー型に揃える。`SubgroupTracker::check_object_after_fin` の `Option<&'static str>` は変えず、呼び出し元が分類する
+- `MessageError` は `#[non_exhaustive]` でない公開 enum なので variant 追加は破壊的変更である。`CHANGES.md` の `## develop` に `[CHANGE]` を記載する (項目は `MessageError` の variant 追加、`SubgroupTracker` の戻り値型変更、末尾の受信 API の戻り値型変更)
+- `src/session/types.rs` の `RecvDataStreamError` に `MalformedTrack { reason: &'static str }` を追加する。`SessionError` の `code` は Session Termination Code であり、セッションを終了しない購読単位の cancel の意味を載せない
+- §12.1 の検出を返しうる公開受信 API の戻り値型を `RecvDataStreamError` に統一する
+- 対象は `Session::recv_subgroup_header` / `Session::recv_subgroup_object` / `Session::recv_object_datagram` / `Session::recv_datagram` / `Session::recv_data_stream_closed` である。条件 3 は `Session::recv_data_stream_closed` から、条件 1 の `FirstObjectId` モードの遅延解決は `Session::recv_subgroup_object` から返る
+- §12.1 の検出では `MalformedTrack` を返し、セッション終了を伴う違反は従来どおり `Session(SessionError)` を返す。戻り値型の変更に伴い `impl From<SessionError> for RecvDataStreamError` を追加する
+- `src/session/data.rs` の `session_error_from_data_message` の `_ =>` の catch-all をそのままにすると `MessageError::MalformedTrack` が `SESSION_PROTOCOL_VIOLATION` に吸収されるため、`MalformedTrack` を `RecvDataStreamError::MalformedTrack` に写す経路に置き換える。`ProtocolViolation` とフレーミング系は従来どおり `Session(SessionError)` に写す
+- §12.1 の検出でもセッションは終了しないため `Session::fail` は呼ばない。cancel イベントの発行と該当 subscription の `Terminated` への遷移は `Session::terminate_malformed_track` の現行実装をそのまま使う
+- Session は decoder を保持しないため、FETCH の §12.1 検出はアプリが保持する `FetchStreamDecoder` の戻り値 (`MessageError::MalformedTrack`) で判別する。Session に fetch の cancel を届ける新 API は本 issue では追加しない
+- open issue 0122 は `ObjectPropertyTracker::observe_decoded_object` に §12.1 条件を追加する際に `ProtocolViolation` のままにする方針を書いているが、本 issue の分類に従う
 
 ## 完了条件
 
-- §12.1 の条件 1 / 2 / 3 / 6 相当の入力に対し、返るエラー種別から「購読単位の cancel」であることが判別できること
-- 該当 subscription / fetch だけが cancel され、セッションが閉じないことを固定するテストが `src/session/tests.rs` または `tests/test_session/` に追加されていること
-- 既存のフレーミング違反 (セッションを閉じるべき検証) の挙動が変わっていないこと
-- `SubgroupTracker` の公開 API を変更した場合は `CHANGES.md` の `## develop` に `[CHANGE]` が追加されていること
+- `FetchStreamDecoder` の条件 1 / 2 の入力で `MessageError::MalformedTrack` が返り、昇順違反と Group 順序違反では `MessageError::ProtocolViolation` が返ることがテストで固定されていること
+- `SubgroupTracker::record_priority` / `mark_fin` が §12.1 条件で `MessageError::MalformedTrack` を返すことがテストで固定されていること
+- subscription 経路で §12.1 条件 1 / 2 / 3 を検出したとき、返るエラーが `RecvDataStreamError::MalformedTrack` であることがテストで固定されていること
+- あわせて該当 subscription が `Terminated` になり、`StopSendingRequestStream` → `ResetRequestStream` が `STREAM_MALFORMED_TRACK` で発行され、セッションが `SessionState::Established` のままであることが固定されていること
+- 条件 1 は `Session::recv_subgroup_header` と `Session::recv_subgroup_object` (`FirstObjectId` モードの遅延解決)、条件 3 は `Session::recv_data_stream_closed` 経由の検出でも固定されていること
+- §12.1 条件 6 / 7 (`ObjectFieldMismatch`) の経路でも同じく `RecvDataStreamError::MalformedTrack` が返ることがテストで固定されていること
+- datagram 経路 (`Session::recv_object_datagram` / `Session::recv_datagram`) でも §12.1 の検出が `RecvDataStreamError::MalformedTrack` になることがテストで固定されていること
+- フレーミング違反 (セッションを終了する検証) では従来どおり `RecvDataStreamError::Session` が返り、セッション終了コードが変わっていないことがテストで固定されていること
+- 戻り値型を変更する API のエラーを検査している既存テストが新しい分類に合わせて更新されていること
+- `MessageError` の variant 追加と `SubgroupTracker` の戻り値型変更に対応する `[CHANGE]` が `CHANGES.md` の `## develop` に追加されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
