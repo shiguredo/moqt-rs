@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-prior-gap-duplicate-instance
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -25,6 +25,10 @@ A Track is considered malformed (see Section 12.1) if any of the following condi
 
 PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP は複数の値を許さないため、両方に置かれた時点で 2 インスタンスとなり malformed になる。現状はこれを検出しない。
 
+§12.1 の malformed 条件の列挙は網羅ではないため、§10.8 / §10.9 の条件も malformed に含まれる。
+
+> The above list of conditions is not considered exhaustive.
+
 ## 現状
 
 - `src/object_properties.rs` の `ObjectProperties::find_varint` は mutable リストを先に探し、見つからなければ IMMUTABLE_PROPERTIES の内側を探す。インスタンス数は数えない
@@ -36,16 +40,22 @@ PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP は複数の値を許さないため、
 ## 設計方針
 
 - 0x3C / 0x3E については mutable と IMMUTABLE_PROPERTIES 内側の両方を数え、2 つ以上あれば Malformed Track として扱う
-- `ObjectProperties` に「型ごとのインスタンス数 (mutable + IMMUTABLE_PROPERTIES 内側)」を返す API を追加し、`ObjectPropertyTracker::observe_decoded_object` から 0x3C / 0x3E について呼ぶ。wire 経路 (`observe_object`) と API 経路 (`observe_decoded_object`) の両方が同じ 1 か所で判定される
-- 返すエラーは `MessageError::ProtocolViolation` とし、Session の既存の malformed track 経路 (`session_error_from_data_message` から `terminate_malformed_track`) に乗せる。新しいエラー型は増やさない
+- `ObjectProperties` に private な `fn count_instances(&self, prop_type: u64) -> usize` を追加し、mutable リストと IMMUTABLE_PROPERTIES 内側の両方でその型を持つインスタンス数を返す。同一モジュール内の `ObjectPropertyTracker` からしか使わないため公開しない
+- `ObjectPropertyTracker::observe_decoded_object` から 0x3C / 0x3E について呼び、2 以上なら malformed とする。wire 経路 (`observe_object`) と API 経路 (`observe_decoded_object`) の両方が同じ 1 か所で判定される
+- 返すエラーは `MessageError::MalformedTrack` とする。これは 0111 が `MessageError` に追加する variant であり、§12.1 の列挙条件に対応する検出を分類する 0111 の方針に従う。`MessageError::ProtocolViolation` を返すと 0111 の分類を戻す手戻りになる
+- **本 issue は 0111 の実装後に着手する**。0111 が未実装の間は `MessageError::MalformedTrack` が存在しないため、`ProtocolViolation` で暫定実装しない
+- Session 側の写像 (0111 が定める `RecvDataStreamError::MalformedTrack` と `Session::terminate_malformed_track` の呼び出し) は 0111 の担当であり、本 issue では変更しない。§12.1 の検出は購読単位の cancel であり、セッションは閉じない
 - 他の型の「mutable 優先」は変えない (§10.7 の MUST search both の実装として維持する)。0x3C / 0x3E の getter も mutable 優先のままとし、二重インスタンスは tracker が拒否する。`tests/test_object_properties.rs` の `mutable_list_takes_precedence_over_immutable_inner` は getter の優先規則のテストとして残し、malformed 検出は tracker の責務であることをテストで区別する
 - IMMUTABLE_PROPERTIES の内側が破損していてデコードできない場合、内側のインスタンスは数えられない。wire 経路では decode 時に破損が拒否されるため、この制約が観測されるのは `push` で組み立てた API 入力だけである。この境界を doc とテストに明記する
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加する (公開 API の変更は無い)
 
 ## 完了条件
 
-- mutable と IMMUTABLE_PROPERTIES 内側の両方に 0x3C を置いた入力を `ObjectPropertyTracker` が Malformed Track として拒否することを固定するテストが追加されていること
+- mutable と IMMUTABLE_PROPERTIES 内側の両方に 0x3C を置いた入力を `ObjectPropertyTracker` が `MessageError::MalformedTrack` で拒否することを固定するテストが追加されていること
+- 既存の §10.8 / §10.9 条件のテスト (`tracker_rejects_prior_group_gap_covering_received_group` ほか 4 件) は 0111 の再分類後に `MalformedTrack` を期待する形になっていること。0111 で更新されていない場合は本 issue で更新する
 - 同じ入力を 0x3E で行った場合も拒否されることを固定するテストが追加されていること
 - Session 経由で受信した場合に subscription が Malformed Track で終端されることを固定するテストが追加されていること (subgroup / datagram のいずれか 1 経路以上)
-- mutable のみに 1 個、内側のみに 1 個の場合はどちらも受理されることを固定するテストが追加されていること (非退行)
+- mutable のみに 1 個、内側のみに 1 個の場合はどちらも受理されることを固定するテストが追加されていること (非退行)。両方を同時に持つ Object の拒否と対にして、1 個ずつの入力が受理されることを新規に固定する
 - §10.8 / §10.9 の他の条件 (値の不一致、gap の重なり) の既存テストが非退行であること
 - 内側が破損している入力で内側のインスタンスを数えない境界が、テストまたはコメントで明示されていること
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
