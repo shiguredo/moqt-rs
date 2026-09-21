@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-delta-track-attribute-change
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-22
 
 ## 目的
 
@@ -28,13 +28,13 @@ A restricted set of operations are allowed with each delta update: * Add a new t
 `src/msf.rs` の `MsfCatalog::apply_delta` は `self` の複製に `MsfCatalog::apply_delta_in_place` を適用し、全操作と `MsfCatalog::validate_after_delta` が成功したときだけ差し替える。各操作の実装は次のとおり。
 
 - `MsfDeltaOperation::Remove` は `MsfCatalog::find_track_index` で見つけた `MsfCatalog::tracks` の要素を削除するだけで、削除した Track の属性をどこにも残さない
-- `MsfDeltaOperation::Add` は `find_track_index` で現在の `tracks` / `publish_tracks` との名前重複を検査して `tracks` へ push する
-- `MsfDeltaOperation::Clone` は親を `MsfCloneTrack::into_track` で解決したうえで、同じく現在の名前重複だけを検査して push する
+- `MsfDeltaOperation::Add` は `find_track_index` で現在の `tracks` との名前重複を検査して `tracks` へ push する。`publish_tracks` は `find_track_index` の走査対象ではなく、そちらとの重複は `validate_after_delta` が検出する
+- `MsfDeltaOperation::Clone` は親を `MsfCloneTrack::into_track` で解決したうえで、同じく `find_track_index` による `tracks` 内の名前重複だけを検査して push する
 - `validate_after_delta` は名前の一意性、`initRef`、同一 group の `targetLatency` / `buffers` 一致を検証するだけで、削除済み Track を参照しない
 
 `MsfCatalog` には削除済み Track の履歴を持つフィールドが無い。このため次の delta update がすべて成功する。
 
-- remove → add で `label` / `codec` / `targetLatency` などの属性を変更する
+- remove → add で `label` / `codec` / `width` などの属性を変更する (`targetLatency` / `buffers` は同一 renderGroup / altGroup に isLive=true のトラックが残る場合 `validate_after_delta` が一致を検査するため例から外す)
 - remove → clone で解放された名前を再利用し、親から継承した属性で元と異なる属性にする
 - remove → add で `isLive` を false から true にする (§5.2.7 違反)
 
@@ -47,13 +47,18 @@ remove → add の属性変更を検証する既存テストは無い。`pbt/tes
 - 履歴は `MsfCatalog` のフィールドとして持つ。1 回の `apply_delta` の呼び出し内だけで判断すると、delta update をまたいだ remove → add を検出できない
 - キーは `MsfCatalog::find_track_index` と同じ規則で解決した (namespace, name) とする。namespace 省略時は catalog の namespace を継承したものとして比較する (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
 - 値は削除された `MsfTrack` を 1 件保持する。属性変更の検出には属性集合そのものが必要であり、`MsfTrack` は `Clone` と `PartialEq` を実装済みのため、エンコード文字列やハッシュへ落とすより取りこぼしが無い
-- 履歴は (namespace, name) ごとに 1 エントリとし、同じ tuple が再追加されても削除前の属性を保持し続ける。エントリ数は catalog が扱う tuple 数と同じ桁に収まる
+- 履歴は (namespace, name) ごとに 1 エントリとし、同じ tuple が再追加されても削除前の属性を保持し続ける。削除しても消えないため、add して remove した tuple の数だけ単調増加する (上限・破棄規則は設けない)。`examples/moqt-subscriber` は Full catalog の受信で catalog ごと差し替えるため、増加は 1 つの catalog インスタンスの生存期間に限られる
 - 再追加時は name と namespace を除く属性を比較し、差分があれば `InvalidCatalog` を返す。Add と Clone の両経路を対象にする
-- 比較は実効的な属性で行う。`isLive=false` のとき `targetLatency` / `buffers` は §5.2.8 (Target latency) / §5.2.9 (Buffers) により無視され、`MsfCloneTrack::into_track` と decoder は `None` へ正規化するため、`isLive=false` の Track で `targetLatency` の有無だけが異なる再追加は属性変更として扱わない
+- 比較は実効的な属性で行う。`isLive=false` のとき `targetLatency` / `buffers` は §5.2.8 (Target latency) / §5.2.9 (Buffers) により無視されるため、比較の両辺で `isLive=false` なら `targetLatency` / `buffers` を `None` とみなす。
+  `MsfCloneTrack::into_track` と decoder は `None` へ正規化するが、Add 経路は手組みの `MsfTrack` を正規化せず `tracks` へ push する (`validate_full_track` は `targetLatency` / `buffers` と `isLive` について共存禁止と `trackDuration` しか検査しない)。
+  そのため比較側で正規化しないと結果が `MsfTrack` の構築経路に依存する
 - `isLive` の false → true は §5.2.7 の独立した MUST のため、違反した MUST を特定できる専用メッセージで `InvalidCatalog` を返す。属性比較でも検出できるが、エラー理由を区別できるようにする
 - 同一属性での remove → add は本 issue では引き続き受理する。§5.3 の「未宣言の Track の追加」という文言だけを見れば拒否する解釈もあるが、本 issue は属性変更と isLive の逆行の検出に絞る
 
-`MsfCatalog` は全フィールドが public で、`tests/` 配下の構造体リテラルからも構築されている。フィールドを追加するときは `MsfCatalog::new` と `decode_full_catalog` に加えてこれらのリテラルを更新する。履歴が `PartialEq` の比較対象に含まれるため、カタログ全体を `assert_eq!` で比較する既存テストへの影響も確認する。
+`MsfCatalog` は全フィールドが public で、構造体リテラルからも構築されている。フィールドを追加するときは `MsfCatalog::new` / `impl Default for MsfCatalog` / `decode_full_catalog` (`src/msf.rs`) に加えて、次のリテラルを更新する。
+`tests/test_msf/encode_decode_roundtrip.rs` (13 箇所) / `tests/test_msf/error_cases.rs` (5 箇所) / `pbt/tests/prop_msf.rs` (2 箇所) / `examples/moqt-publisher/src/catalog.rs` (1 箇所)。
+`pbt` と `examples/moqt-publisher` は workspace member のため、漏らすと `make test` (`cargo test --workspace`) と `make clippy` (`cargo clippy --workspace --all-targets`) が通らない。
+履歴が `PartialEq` の比較対象に含まれるため、カタログ全体を `assert_eq!` で比較する既存テストへの影響も確認する。
 
 subscriber が delta update を継続受信して適用する仕組みは [issues/pending/0006](../issues/pending/0006-add-msf-catalog-subscribe.md) が扱う。本 issue は `MsfCatalog::apply_delta` の検証のみを対象とする。
 
@@ -61,7 +66,7 @@ subscriber が delta update を継続受信して適用する仕組みは [issue
 
 - remove → add で `label` / `codec` などの属性を変更した delta update が `InvalidCatalog` になるテストが `tests/test_msf/delta_apply.rs` に追加されていること
 - remove → clone で同じ (namespace, name) を再追加し属性が変わる delta update が `InvalidCatalog` になるテストが追加されていること
-- remove → add で `isLive` を false から true にする delta update が `InvalidCatalog` になるテストが追加されていること
+- remove → add で `isLive` を false から true にする delta update が `InvalidCatalog` になり、そのメッセージが §5.2.7 違反を述べる専用の文言 (`isLive` を含み、属性差分メッセージとは区別できるもの) であることを確認するテストが追加されていること (`tests/test_msf/delta_apply.rs` の既存テストと同じく `reason.contains(...)` で検査する)
 - delta update をまたぐ remove → add でも属性変更が検出されるテストが追加されていること (1 回の delta に閉じない)
 - 同一属性での remove → add が引き続き成功するテストが追加されていること
 - `isLive=false` の Track で `targetLatency` の有無だけが異なる再追加が成功するテストが追加されていること
