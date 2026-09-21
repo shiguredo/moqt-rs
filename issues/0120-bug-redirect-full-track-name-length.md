@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-redirect-full-track-name-length
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-21
 
 ## 目的
 
@@ -22,7 +22,7 @@ draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) は Full Track Nam
 - `src/message.rs` の `Redirect::encode_to` と `Redirect::decode_from` は `validate_full_track_name` を呼ばない
 - namespace 単体の上限は `TrackNamespace::encode_to` / `TrackNamespace::decode_from` が検査する。このため namespace 4,096 バイト + track name 1 バイトのような合計 4,097 バイトの Redirect が encode / decode とも通る
 - `src/session/core.rs` の `handle_peer_request_error` は §9.4.1 の Connect URI 長 (server が非ゼロ長を受信した場合の拒否) だけを検証し、Redirect target の合計長は検証しない
-- `tests/test_message.rs` の Redirect 系テストは欠落・余剰バイト・error_code と Redirect の present 整合のみを対象にしており、長さ上限のテストは無い
+- `tests/test_message.rs` の Redirect 系テストは欠落・余剰バイト・error_code と Redirect の present 整合・往復 (`request_error_redirect_with_zero_retry_interval_round_trip`) を対象にしており、長さ上限のテストは無い
 
 ## 設計方針
 
@@ -35,13 +35,15 @@ draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) は Full Track Nam
   > In MOQT, every track is identified by a Full Track Name, consisting of a Track Namespace and a Track Name.
 
   したがって §8.7 の 4,096 バイト上限が Redirect target に適用される
+- 合計長は `validate_full_track_name` と同じく値バイトの和 (namespace の `byte_length()` + track name の長さ) で数える。§8.7 の "sum of the Track Namespace Field Length fields and the Track Name Length field" は各フィールドが持つ長さの値の和を指し、既存の 4 メッセージの検査と同じ基準である。境界 (値バイトの和がちょうど 4,096) は既存の `>` 比較と同じく許容する
 - `Redirect::encode_to` と `Redirect::decode_from` の両方で `validate_full_track_name` を呼び、他のメッセージと同じ扱いに揃える。encode 側で拒否することで、上限超過のワイヤフォーマット生成を防ぐ
-- namespace-scoped なリクエスト (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の Redirect は Track Name が空でなければならない MUST がある (§9.4.1)。Track Name が空の場合の合計長は namespace 長と等しく、namespace 単体の検査で既に 4,096 バイト以下が保証されるため、この MUST の範囲では新たな拒否は生じない
-- §9.4.1 の Connect URI 長の検証 (自 role と元リクエスト種別に依存する) は現状どおり Session 層 (`handle_peer_request_error`) に置いたままとする。本 issue は合計長の検証だけを扱う
+- namespace-scoped なリクエスト (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の Redirect は Track Name が空でなければならない MUST (§9.4.1) があるが、これらの request は relay 専用機能の削除で本ライブラリに存在しないため到達不能である。本実装で Redirect が載りうるのは SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS だけであり、この MUST に対する検証は追加しない
+- §9.4.1 の Connect URI 長の検証は、仕様の "If a server receives a Redirect with a non-zero Connect URI Length it MUST close the session with a PROTOCOL_VIOLATION." に基づき自 role (server か) に依存する。現状どおり Session 層 (`handle_peer_request_error`) に置いたままとする。本 issue は合計長の検証だけを扱う
 
 ## 完了条件
 
-- 合計 4,096 バイトを超える Redirect を持つ REQUEST_ERROR の encode が PROTOCOL_VIOLATION で拒否されることを固定するテストが `tests/test_message.rs` に追加されていること
-- 合計 4,096 バイトを超える Redirect を含むバイト列の decode が PROTOCOL_VIOLATION で拒否されることを固定するテストが追加されていること
-- 合計がちょうど 4,096 バイトの Redirect が encode / decode とも成功することを固定するテストが追加されていること (境界の非退行)
-- namespace 単体が 4,096 バイトを超える既存の拒否挙動が変わらないこと
+- 合計 4,096 バイトを超える Redirect を持つ REQUEST_ERROR の encode が、codec 層の `MessageError::ProtocolViolation` (既存の `validate_full_track_name` と同じ) で拒否されることを固定するテストが `tests/test_message.rs` に追加されていること
+- 合計 4,096 バイトを超える Redirect を含むバイト列の decode が、同じく `MessageError::ProtocolViolation` で拒否されることを固定するテストが追加されていること
+- 値バイトの和がちょうど 4,096 バイトの Redirect が encode / decode とも成功することを固定するテストが追加されていること (境界の非退行)
+- namespace 単体が 4,096 バイトを超える既存の拒否挙動、および SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の既存 `validate_full_track_name` 呼び出しの挙動が変わっていないこと
+- `cargo test --workspace` が通ること
