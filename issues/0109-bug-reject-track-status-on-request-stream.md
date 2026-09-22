@@ -1,7 +1,7 @@
 # TRACK_STATUS を受信するとセッションを閉じる
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-reject-track-status-on-request-stream
 - Polished: 2026-09-21
 
@@ -69,3 +69,52 @@ TRACK_STATUS は許可された 7 種の 1 つであり、これを受信して 
 - requester が TRACK_STATUS を送った直後に FIN し、その後 responder が TRACK_STATUS_OK を送れることがテストで固定されていること
 - 既存の `Session::send_track_status` と REQUEST_OK / REQUEST_ERROR 受信の挙動 (`tests/test_session/track_status.rs`) が変わらないこと
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+draft-ietf-moq-transport-21 §6.3 (Session initialization) が許可する request stream 開始メッセージとして TRACK_STATUS を受信できるようにし、§9.13 (TRACK_STATUS) に従って応答する受信側を実装した。
+
+1. `Session::recv_request` に `ControlMessage::TrackStatus` の dispatch を追加した
+2. `Session::handle_peer_track_status` を追加した。受信前検証、`INCLUDE_PROPERTIES` の値域検証、
+   `track_status_requests` と `request_streams` への登録だけを行い、subscription state も
+   Track Alias も作らない (§9.13 "Track Alias is not used.")
+3. 受信前検証を `Session::accept_incoming_track_request` として `src/session/subscription/recv.rs`
+   に切り出し、`Session::handle_peer_subscribe` と共通化した (Request ID / AUTHORIZATION_TOKEN /
+   Range Filter 数 / 予約名前空間 / `.session` 名前空間)
+4. `Session::send_ok_for_track_status` を実装し、`Session::send_request_ok` の
+   `RequestTable::TrackStatus` 分岐 (以前は `unreachable!`) から呼ぶようにした。
+   `INCLUDE_PROPERTIES=0` のとき Track Properties を空にし (§9.20.22)、`fin: true` で
+   bidi stream を閉じる (§9.13)
+5. `Session::send_err_for_track_status` を実装し、`Session::send_request_error` の
+   `RequestTable::TrackStatus` 分岐 (以前は request_id 未発見として拒否) から呼ぶようにした。
+   受信した TRACK_STATUS をアプリが REQUEST_ERROR で拒否できる
+6. `TrackStatusEntry` に `my_role` (Subscriber = 自側が送った要求 / Publisher = 自側が受けた要求)、
+   `include_properties`、`terminated` を追加した
+7. `Session::is_local_requester` の `RequestTable::TrackStatus` 分岐を `my_role == Subscriber` の
+   ときだけ true に変更し、`Session::recv_request_stream_closed` の responder 判定に
+   `RequestKind::TrackStatus` を加えた。responder は peer FIN で終端せず、応答の FIN で
+   両方向が閉じた時点で終端する (0108 の仕組みをそのまま使う)
+8. `Session::close_track_status_on_stream_end` は requester 側で応答前に終端した要求を
+   `Error` に確定し、両側で `terminated` を立てる。cancel 後の応答は拒否され、
+   `Session::forget_track_status` で entry を破棄できる (GOAWAY drain がハングしない)
+9. `Session::handle_ok_for_track_status` / `Session::handle_err_for_track_status` は
+   自側が responder の entry への REQUEST_OK / REQUEST_ERROR を `PROTOCOL_VIOLATION` で拒否する
+10. `CHANGES.md` の `## develop` にあった「TRACK_STATUS の受信側を削除した」エントリは、
+    同一未リリース内で本 issue が受信側を復活させるため取り下げ、`[ADD]` のエントリに統合した
+
+追加したテスト (`tests/test_session/track_status.rs`):
+
+- 受信で entry が登録されセッションが閉じないこと、subscription / fetch state を作らないこと
+- TRACK_STATUS_OK / REQUEST_ERROR の送信で entry が確定し `SendOnStream { fin: true }` になること
+- `INCLUDE_PROPERTIES=0` で Track Properties が空になり、`=1` で渡した値がそのまま載ること
+- 応答前に requester の FIN を受けても応答できること、requester が FIN した後に responder が
+  応答できること、responder が `FinishRequestStream` を発行しないこと
+- requester の RESET_STREAM (cancel) 後は応答できず entry を破棄できること
+- responder が peer から REQUEST_OK / REQUEST_ERROR を受けると `PROTOCOL_VIOLATION` になること
+- 二重応答の拒否、予約名前空間 (`.` / `.session`) の拒否
+
+追加したテスト (`pbt/tests/prop_session/request_stream.rs`):
+
+- TRACK_STATUS の responder が peer FIN で終端せず、TRACK_STATUS_OK / REQUEST_ERROR の
+  どちらでも応答の FIN で終端すること
+- TRACK_STATUS の requester が responder の FIN / RESET_STREAM で終端すること
