@@ -29,6 +29,10 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する
+  - draft-ietf-moq-transport-21 §9.2 (GOAWAY): "a publisher MAY reject new requests after sending a GOAWAY" の主語に合わせ、SUBSCRIBE / FETCH / TRACK_STATUS のみを `REQUEST_ERROR(GOING_AWAY)` + FIN で拒否する
+  - 自側が subscriber として受ける PUBLISH は拒否しない。GOAWAY を受信した後の peer の新規 request も従来どおり受理する (2 つ目の MAY は採らない)
+  - @voluntas
 - [CHANGE] 未到達 Request ID の保持上限 `MAX_OUT_OF_ORDER_REQUEST_IDS` を削除する
   - draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` でのセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、仕様に無い条件で正当な peer を落とさないため
   - 前縁が埋まらないまま飛び ID を送り続ける非準拠 peer では保持数が増え続けるが、interop への影響を避けるため許容する

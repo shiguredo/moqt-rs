@@ -562,6 +562,107 @@ fn goaway_rejected_request_id_resend_closes_with_invalid_request_id() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
+/// GOAWAY 送信後でも自側が subscriber として受ける PUBLISH は拒否しない
+///
+/// draft-ietf-moq-transport-21 §9.2 (GOAWAY): "a publisher MAY reject new requests after
+/// sending a GOAWAY" — 拒否の MAY は publisher が応答する request 種別に限られる。
+/// PUBLISH は自側が subscriber として受けるため対象外である。
+#[test]
+fn local_goaway_accepts_peer_publish() {
+    let (mut client, mut server) = establish_pair();
+    deliver_goaway_from_server(&mut server, &mut client, Vec::new(), 10000);
+
+    let rid = 0u64; // Client 役の request_id (偶数)
+    server
+        .recv_request(ControlMessage::Publish(shiguredo_moqt::message::Publish {
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            request_id: rid,
+            track_alias: 7,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("PUBLISH は GOAWAY 送信後でも受理されること");
+    assert!(
+        server.subscription(rid).is_some(),
+        "subscriber 役として登録されること"
+    );
+    // 拒否の REQUEST_ERROR が発行されない
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(
+                e,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                }
+            ),
+            "PUBLISH は GOING_AWAY で拒否しないこと"
+        );
+    }
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// GOAWAY 送信後は FETCH と TRACK_STATUS も publisher として拒否する
+///
+/// draft-ietf-moq-transport-21 §9.2 (GOAWAY) の拒否 MAY は publisher が応答する request
+/// 種別 (SUBSCRIBE / FETCH / TRACK_STATUS) に限られる。
+#[test]
+fn local_goaway_rejects_peer_fetch_and_track_status() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    use shiguredo_moqt::message::TrackStatus as WireTrackStatus;
+    let (mut client, mut server) = establish_pair();
+    deliver_goaway_from_server(&mut server, &mut client, Vec::new(), 10000);
+
+    for (rid, msg) in [
+        (
+            0u64,
+            ControlMessage::Fetch(WireFetch {
+                request_id: 0,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                parameters: MessageParameters::new(),
+            }),
+        ),
+        (
+            2u64,
+            ControlMessage::TrackStatus(WireTrackStatus {
+                request_id: 2,
+                track_namespace: ns(&[b"live"]),
+                track_name: b"cam".to_vec(),
+                parameters: MessageParameters::new(),
+            }),
+        ),
+    ] {
+        server
+            .recv_request(msg)
+            .expect("GOING_AWAY 拒否は Result::Ok であること");
+        let mut saw_reject = false;
+        while let Some(e) = server.poll_event() {
+            if let SessionEvent::SendOnStream {
+                request_id,
+                message: ControlMessage::RequestError(err),
+                fin,
+            } = e
+            {
+                assert_eq!(request_id, rid);
+                assert_eq!(err.error_code, REQUEST_GOING_AWAY);
+                assert!(fin, "拒否は FIN で閉じること");
+                saw_reject = true;
+            }
+        }
+        assert!(
+            saw_reject,
+            "publisher として応答する request は拒否されること"
+        );
+    }
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "拒否でセッションを閉じないこと"
+    );
+}
+
 /// P が GOAWAY を送信しただけでは L は新規 peer request を拒否しない
 ///
 /// 現状バグでは L=Server 時に P の id=0 GOAWAY で誤拒否される。

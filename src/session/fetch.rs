@@ -575,7 +575,8 @@ impl Session {
 
     pub(super) fn handle_peer_fetch(&mut self, fetch: WireFetch) -> Result<(), SessionError> {
         let request_id = fetch.request_id;
-        if !self.accept_peer_request(request_id, &fetch.parameters)? {
+        // FETCH は自側が publisher として応答する request である
+        if !self.accept_peer_request(request_id, &fetch.parameters, true)? {
             return Ok(());
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映

@@ -89,7 +89,8 @@ impl Session {
         track_name: &[u8],
         parameters: &MessageParameters,
     ) -> Result<bool, SessionError> {
-        if !self.accept_peer_request(request_id, parameters)? {
+        // SUBSCRIBE と TRACK_STATUS は自側が publisher として応答する request である
+        if !self.accept_peer_request(request_id, parameters, true)? {
             return Ok(false);
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
@@ -285,7 +286,9 @@ impl Session {
 
     pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<(), SessionError> {
         let request_id = publish.request_id;
-        if !self.accept_peer_request(request_id, &publish.parameters)? {
+        // PUBLISH は自側が subscriber として受ける request であり、§9.2 の publisher 限定の
+        // 拒否 MAY の対象外である
+        if !self.accept_peer_request(request_id, &publish.parameters, false)? {
             return Ok(());
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映

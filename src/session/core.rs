@@ -891,6 +891,27 @@ impl Session {
     /// 致命エラー時は `fail` を呼んで session を Closing に遷移させ、
     /// エラーを返す。呼び出し側は `?` で伝播すればよい。
     ///
+    /// `is_publisher_request` は、受信した request に対して自側が publisher として応答するか
+    /// (SUBSCRIBE / FETCH / TRACK_STATUS なら true、PUBLISH なら false) を表す。
+    ///
+    /// draft-ietf-moq-transport-21 §9.2 (GOAWAY) の新規 request 拒否の MAY は 2 箇所にあり、
+    /// 主語が異なる。
+    ///
+    /// - "a publisher MAY reject new requests after sending a GOAWAY" (GOAWAY を送った publisher)
+    /// - "An endpoint that receives a GOAWAY MAY reject new requests with an appropriate error
+    ///   code (e.g., REQUEST_ERROR with error code GOING_AWAY)." (GOAWAY を受けた endpoint)
+    ///
+    /// 本実装は 1 文目を採り、仕様のとおり publisher が応答する request 種別に限定する。
+    /// 2 文目は採らない。同節は GOAWAY を送った側も migration のために新規 request を
+    /// 開始できると定めており (SHOULD avoid ただし required by migration を除く)、受信側が
+    /// 一律に拒否すると migration を阻害するためである。したがって GOAWAY を受信した後も
+    /// peer の新規 request は受理する。
+    ///
+    /// 1 文目はエラーコードを指定していない。§12.3 (Request Error Codes) は `GOING_AWAY` を
+    /// 「GOAWAY を受信した endpoint」の語で定義しており、送信側の拒否に使うと registry の
+    /// 定義とはずれる。本実装は peer に「この endpoint を離れる」ことを伝える最も近い
+    /// 定義済みコードとして `GOING_AWAY` を使う。
+    ///
     /// 戻り値:
     /// - `Ok(true)`: 受理された
     /// - `Ok(false)`: GOAWAY 送信済みのため REQUEST_ERROR(GOING_AWAY) を送信済み (セッションは継続)
@@ -900,14 +921,15 @@ impl Session {
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
+        is_publisher_request: bool,
     ) -> Result<bool, SessionError> {
         self.validate_peer_request_id(request_id)?;
-        // draft §9.2 (GOAWAY): control GOAWAY を送信した側は
+        // draft §9.2 (GOAWAY): control GOAWAY を送信した publisher は
         // GOAWAY 後に到着する新規 request を GOING_AWAY で MAY 拒否。
         // REQUEST_ERROR は SendOnStream イベントとして発行し、自側の送信方向の FIN は
         // I/O 層が閉じる (draft §6.4.2.3 の SHOULD)。
         // 拒否済み id の記録は `emit_request_error` が共通経路で行う。
-        if self.goaway.local_sent {
+        if self.goaway.local_sent && is_publisher_request {
             // draft §8.9 (Authorization Token Compression) の REGISTER MUST を GOING_AWAY より先に適用する。
             // MUST の対象は REGISTER のみ (DELETE / USE_ALIAS / USE_VALUE は failed request の
             // パラメータとして触らない)。REGISTER 適用中に session error が発生した場合は
