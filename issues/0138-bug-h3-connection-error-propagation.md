@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-h3-connection-error-propagation
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-22
 
 ## 目的
 
@@ -28,21 +28,32 @@ RFC 9297 §2.1 (HTTP/3 Datagrams) は HTTP/3 Datagram の Quarter Stream ID の�
 - `examples/moqt-transport/src/webtransport.rs` の `route_uni_stream` は HTTP/3 層へ渡すストリーム (制御 / QPACK) の `feed_stream_only` の戻り値を `let _ = ...` で捨てる。
 - 同 `route_bi_stream` も他セッション向け双方向ストリームを h3 層へ渡す際に `feed_stream_only` の戻り値を捨てる。
 - 同 datagram 受信タスクは `ClientConnectionState::feed_datagram` のエラーで `tracing::warn!` を出して `break` する。以後 datagram を読まないが接続は閉じない。publisher / subscriber の pipeline はそのまま動き続け、購読が静かに止まる。
-- 一方、セッション確立中の `ClientConnectionState::process_stream_data` / `wait_for_peer_settings` は `Result` を `?` で伝播しており、確立後だけエラーが捨てられている。
-- 依存 `shiguredo_http3` は `Error::ConnectionError(ErrorCode)` を返し、`ErrorCode` に `H3_MISSING_SETTINGS` (0x10a) / `H3_STREAM_CREATION_ERROR` (0x103) / `H3_CLOSED_CRITICAL_STREAM` (0x104) / `H3_DATAGRAM_ERROR` (0x33) などが定義されている。`ErrorCode::code()` で数値が取れる。
+- 捨てているのはこの 3 経路だけである。`WtSession::accept_uni_stream` は接続確立時に 1 回呼ばれるだけで、`WtSession::accept_bi_stream` は呼び出し元が無い (確立後は `take_bi_receiver` で receiver を取り出す)。
+  確立後の受信ループは `examples/moqt-transport/src/transport.rs` の `StreamAcceptor::accept_recv_stream` (`uni_rx.recv().await`) / `BidiStreamAcceptor::accept_bidi_stream` (`bi_rx.recv().await`) / `StreamHandle::recv_datagrams` で待つ。
+  datagram タスクの `break` はチャネルを閉じないため、待っている側は気づかない。
+- 依存 `shiguredo_http3` は `Error::ConnectionError(ErrorCode)` を返し、`ErrorCode` に `MissingSettings` (0x10a) / `StreamCreationError` (0x103) / `ClosedCriticalStream` (0x104) / `H3DatagramError` (0x33) などが定義されている (Display は `H3_MISSING_SETTINGS` などの名前を返す)。`ErrorCode::code()` で数値が取れる。
 
 ## 設計方針
 
-- HTTP/3 層へ流す経路 (`route_uni_stream` / `route_bi_stream` の `feed_stream_only`、datagram タスクの `feed_datagram`) の戻り値を伝播させる。`Result` を捨てる `let _ =` を残さない。
-- `shiguredo_http3::Error::ConnectionError(code)` は接続エラーとして扱い、`code.code()` を application error code として `s2n_quic::connection::Handle::close` で CONNECTION_CLOSE を送る。エラーコードは example 側で数値を再定義せず、h3 層の `ErrorCode` を使う。
-- `Error::StreamError` など接続エラーでないものは接続を閉じず、従来どおりそのストリームの処理にとどめる。切り分けは `Error` の variant で行う。
-- datagram 受信タスクの停止 (エラーによる `break`、および受信 API のエラー) もセッション終了として扱い、MOQT 層へ伝える。タスクは接続を閉じたうえで、`WtSession` 経由で `TransportError::ConnectionClosed` などを返す。
-- ルーティングと datagram のタスクは `WtClient::connect` の中で spawn されるため、接続エラーを example のエラー経路へ渡す共有スロット (エラー保持 + `Notify`) を `WtSession` に持たせる。`accept_uni_stream` / `accept_bi_stream` / `recv_chunk` / `take_buffered_datagrams` はスロットにエラーがあればそれを返す。
+- HTTP/3 層へ流す経路 (`route_uni_stream` / `route_bi_stream` の `feed_stream_only`、datagram タスクの `feed_datagram`) の戻り値を捨てない。`Error::ConnectionError(code)` かどうかを example の純関数 (`fn connection_error_code(e: &shiguredo_http3::Error) -> Option<u64>` など) で切り分ける。
+- `Error::ConnectionError(code)` は接続エラーとして扱い、`code.code()` を application error code として `s2n_quic::connection::Handle::close` に `s2n_quic::application::Error::new(...)` で渡して CONNECTION_CLOSE を送る。エラーコードは example 側で数値を再定義せず、h3 層の `ErrorCode` を使う。
+- `Error::StreamError` など接続エラーでないものは接続を閉じず、そのストリームの処理を止めるだけにしてログに残す (スロットには入れない)。`let _ =` を match に置き換えて 2 分岐を明示する。h3 は `StreamError` を「そのストリームを reset すべき」と定義するが、example は他セッションの bidi を h3 へ流すだけで自前の reset 対象を持たないため、ここでは処理の停止とログにとどめる。
+- 接続エラーの発生を MOQT 層の受信ループへ伝える。タスクは接続を閉じたうえで、共有スロット (エラー保持 + `Notify`) にエラーを記録して `Notify` を起こす。待機中の `recv().await` を終わらせる手段は次の 2 つで、読み出し側はどちらでもエラーを返す。
+  - 読み出し側が `tokio::select!` で `Notify` を待ち、通知されたらスロットのエラーを返す (datagram タスクは `mpsc::Sender` を持たないため、datagram の停止はこの経路でしか伝わらない)
+  - uni / bi の受信ループが持つ送信側チャネルは accept ループが保持しているため、接続を閉じて accept ループが終了し、元の sender が drop されて `recv()` が `None` を返す。読み出し側は `None` のときもスロットにエラーがあればそれを返す
+  スロットはルーティングと datagram のタスクを spawn する前に `Arc` で作り、タスクへ clone を渡し、`WtSession` にも同じ `Arc` を保持させる (タスクの spawn は `WtSession` の構築より前なので、`WtSession` を直接参照できない)。
+  読み出し側は次の 4 箇所に置く。`StreamAcceptor::accept_recv_stream` / `BidiStreamAcceptor::accept_bidi_stream` / `StreamHandle::recv_datagrams` / `ControlStream::recv_message` (`RecvStream::receive_chunk`)。チャネルが閉じて `None` になった場合も、スロットにエラーがあればそれを返す。
+- datagram 受信タスクの停止 (h3 エラーによる `break`、および受信 API のエラー) もセッション終了として扱い、上記の経路で MOQT 層へ伝える。
+- セッション終了の状態管理は [issues/0136](../issues/0136-bug-webtransport-session-termination.md) が導入する `tokio::sync::watch` と統合する。0136 の watch (セッション状態) と本 issue のスロット (エラー保持) は同じ受信経路に入るため、先に実装された側の方式に寄せて 1 箇所にまとめる。
+  [issues/0135](../issues/0135-bug-webtransport-session-id-validation.md) も同じ 2 タスクへ接続クローズを足す (route の 2 タスクが接続を閉じるための `Handle` の clone は 0135 が導入する。0138 を先に実装する場合はここで用意する)。[issues/0137](../issues/0137-bug-webtransport-protocol-header.md) は接続エラーの表現 (`ProtocolNegotiationFailed`) を追加する。
+  実装順は 0135 → 0136 → 0137 → 0138 とし、接続エラーの型は 0137 の variant と重複しない名前にする。
 
 ## 完了条件
 
 - h3 層の connection error が発生したときに接続が閉じることを確認できること。確認方法は次のとおり。
-  - 単体テスト: `ClientConnectionState` に connection error になる入力を与え、example が HTTP/3 のエラーコードで接続を閉じる判断をすること。少なくとも Quarter Stream ID が上限 (`2^60 - 1`) を超える datagram、および SETTINGS 以外のフレームで始まる制御ストリームを入力にする
-  - 実機: SETTINGS 以外の最初のフレームを送る制御ストリームを送出するテストクライアントを用意し、example が `H3_MISSING_SETTINGS` で接続を閉じることを `RUST_LOG=debug` のログで確認する。WebTransport セッションの確立自体は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消待ちであるため、実機確認は draft-15 相当の peer または 0094 の解消後に行う
-- datagram 受信タスクがエラーで停止した場合に、MOQT 層の受信ループがセッション終了を検知すること (購読が静かに止まらないこと)
-- `Error::StreamError` などの非 connection error で接続を閉じないこと (単体テストまたは再現手順で確認)
+  - 単体テスト: `Error::ConnectionError(ErrorCode::MissingSettings)` などと `Error::StreamError` を判別関数に与え、前者だけが接続を閉じる判断 (クローズするエラーコード付き) になり、後者がクローズしない判断になること
+  - 単体テスト: datagram の Quarter Stream ID が上限 (`2^60 - 1`) を超える入力を `feed_datagram` に与えると `Error::ConnectionError(H3DatagramError)` が返ること。ただし `feed_datagram` は WebTransport の交渉が完了するまで入力を `Ok(())` で捨てるため、peer SETTINGS などを流して交渉済みの状態を作ってから入力する (この前準備をテストに書く)
+  - 単体テスト: SETTINGS 以外のフレームで始まる制御ストリームを `feed_stream_only` へ流すと `Error::ConnectionError(MissingSettings)` が返ること (こちらは交渉済み状態を必要としない)
+- datagram 受信タスクがエラーで停止した場合に、MOQT 層の受信ループがセッション終了を検知すること (購読が静かに止まらないこと)。スロットの有無と `Notify` の状態から読み出し側が返す値を決める判定を純関数に切り出して単体テストで固定する (読み出し側の 4 箇所は s2n-quic のハンドルを持つため単体テストで構築できず、配線は実装のレビューと実機確認で確かめる)
+- `Error::StreamError` などの非 connection error で接続を閉じないこと (単体テスト)
+- 実機: SETTINGS 以外の最初のフレームを送る制御ストリームを送出するテストクライアントを用意し、example が `H3_MISSING_SETTINGS` で接続を閉じることを `RUST_LOG=debug` のログで確認する。WebTransport セッションの確立自体は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消待ちであるため、実機確認は draft-15 相当の peer または 0094 の解消後に行う
