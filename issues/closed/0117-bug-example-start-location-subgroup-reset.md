@@ -1,7 +1,7 @@
 # publisher example が Start Location 由来のスキップでも RESET する
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-example-start-location-subgroup-reset
 - Polished: 2026-09-21
 
@@ -69,3 +69,26 @@ limited to:
 - 判定が `SubgroupWriter` の外へ分離され、`transport::SendStream` を構築せず単体テストできる形になっていること
 - library の公開 API (`SendRequestError` / `ObjectFilterOutcome`) を変更していないこと
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+`examples/moqt-publisher/src/stream_writer.rs` の終端判定を sans-I/O な `SubgroupTermination` と `SubgroupObjectState::termination` に分離し、`SubgroupWriter::finish` が結果に従って `finish` / `reset` を呼ぶだけにした。
+
+1. `SubgroupObjectState` は省略した Object の最後の (最も大きい) Location を `max_skipped_location` として保持する。省略の理由 (Forward State 0 / Location Filter / Range Filter) は区別せず、Location だけで分類する (§11.3.2 の FIN 条件は「Start Location より前の Object 以外をすべて配送した」ことのみを見る)
+2. `termination(current_start_location)` は次のいずれかで RESET、それ以外で FIN を返す
+   - ワイヤへ `SUBGROUP_HEADER` を一度も送っていない (配送可能な Object が 1 つも無かった)
+   - 省略した Object が 1 つでも Subgroup 開始時点の Start Location 以降の Location を持つ
+   - 省略した Object が 1 つでも終端時点の Start Location 以降の Location を持つ
+   - Start Location を持たない (unfiltered) 時点がある購読で 1 つでも省略した
+3. Start Location は REQUEST_UPDATE で変わりうるため、開始時点の snapshot と終端時点の現在値の両方を使い、より小さい方を配送対象の下限にする。前者は §11.3.2 が RESET の例に挙げる Start Location の拡大を、後者は §9.5.1 (Updating Subscriptions) が想定する縮小・フィルタ削除を捉える。どちらも FIN を送ると Subgroup を完備と誤認させ、欠落分の FETCH が行われなくなる
+4. `SubgroupWriter::new` に `start_location` を追加し、`examples/moqt-transport/src/moqt_client.rs` に購読の Start Location を読む `MoqtClient::subscription_filter_start` を追加した。`pipeline.rs` (映像・音声) と `catalog.rs` がそれぞれ開始時点と終端時点の値を渡す
+5. `finish` は終端方法と判定入力 (`start_location` / `current_start_location` / `max_skipped_location`) を debug ログに残す
+6. library の公開 API (`SendRequestError` / `ObjectFilterOutcome` / `Session`) は変更していない
+
+テスト:
+
+- `examples/moqt-publisher/src/stream_writer.rs` の単体テストを 13 件に整理した。Start Location より前の Object だけを省略した場合は FIN、Start Location ちょうど・以降の Object を省略した場合は RESET、配送可能な Object が無い場合は RESET、Start Location が拡大・縮小・追加・削除された場合は RESET になることを固定する
+- 判定の各項は変異実験で固定を確認した (`min` を現在値のみ / snapshot のみ / `max` に変える、`<` を `<=` に変える、`!header_sent` を落とす、`on_skip` の記録を落とす、`reset_error_code` を反転する、のいずれも対応するテストが落ちる)
+- `SubgroupTermination::reset_error_code` を追加し、FIN は error code を持たず RESET は CANCELLED になることを固定する (`transport::SendStream` を要求する分岐そのものは example の単体テストから観測できないため、判定から終端方法への写像だけを純関数に切り出した)
+
+`CHANGES.md` の `## develop` に `[FIX]` を追加した。
