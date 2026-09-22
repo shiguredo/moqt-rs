@@ -313,6 +313,44 @@ fn recv_request_unsupported_message_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
+/// 定義済みパラメータ RENDEZVOUS_TIMEOUT (0x04) を含む SUBSCRIBE を受信しても
+/// セッションを閉じない
+///
+/// draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter): "The
+/// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
+/// 本ライブラリは値を解釈せず `Subscription` にも保持しない。
+#[test]
+fn recv_subscribe_with_rendezvous_timeout_is_accepted() {
+    use shiguredo_moqt::message::{Subscribe, common::TrackNamespace};
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_RENDEZVOUS_TIMEOUT,
+    };
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_RENDEZVOUS_TIMEOUT,
+        value: MessageParameterValue::VarInt(500),
+    });
+    server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"cam".to_vec(),
+            parameters,
+        }))
+        .expect("定義済みパラメータを含む SUBSCRIBE は受理されること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "RENDEZVOUS_TIMEOUT の受信でセッションを閉じないこと"
+    );
+    assert!(
+        server.subscription(0).is_some(),
+        "subscriber 役として登録されること"
+    );
+}
+
 // ─── recv_request_stream_closed ──────────────────
 
 /// 自側が requester のとき responder の FIN で subscription が Terminated に遷移し、

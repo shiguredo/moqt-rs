@@ -699,6 +699,7 @@ fn include_properties(&self) -> Option<u8>                  // 0x35
 | --- | --- |
 | `PARAM_OBJECT_DELIVERY_TIMEOUT` | `0x02` |
 | `PARAM_AUTHORIZATION_TOKEN` | `0x03` |
+| `PARAM_RENDEZVOUS_TIMEOUT` | `0x04` |
 | `PARAM_SUBGROUP_DELIVERY_TIMEOUT` | `0x06` |
 | `PARAM_EXPIRES` | `0x08` |
 | `PARAM_LARGEST_OBJECT` | `0x09` |

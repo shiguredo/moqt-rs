@@ -11,10 +11,6 @@
 
 ## develop
 
-- [CHANGE] relay 専用の RENDEZVOUS_TIMEOUT parameter (0x04) を削除する
-  - `PARAM_RENDEZVOUS_TIMEOUT` と `MessageParameters::rendezvous_timeout`、`Subscription::subscriber_rendezvous_timeout_ms` を削除する
-  - 当該パラメータを含む SUBSCRIBE は codec の未知パラメータ検証で拒否される
-  - @voluntas
 - [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
   - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
   - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
@@ -32,6 +28,10 @@
   - これまでは黙って無視されていたため、Properties を渡すつもりの誤った呼び出しが成立していた
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
+  - @voluntas
+- [CHANGE] 定義済みパラメータ RENDEZVOUS_TIMEOUT (0x04) を SUBSCRIBE で受理する
+  - `PARAM_RENDEZVOUS_TIMEOUT` 定数と `SUBSCRIBE_ALLOWED_PARAMS` の登録を戻す (§9.20.7 / §16.7 Table 13)
+  - `MessageParameters::rendezvous_timeout` と `Subscription::subscriber_rendezvous_timeout_ms` は戻さない (値を解釈しないため)
   - @voluntas
 - [CHANGE] Malformed Track の検出を表す `MessageError::MalformedTrack` を追加し、§12.1 の条件に対応する検出をこの variant に分類する
   - 対象は `FetchStreamDecoder` の Publisher Priority 変更 / 確定済み最終 Object 超過、`SubgroupTracker::open` / `record_priority` / `mark_fin`、`ObjectPropertyTracker::observe_object` / `observe_decoded_object` の PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP 条件である

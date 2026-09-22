@@ -107,9 +107,10 @@ relay が担う機能は本ライブラリの対象外である (`CODEBASE.md` �
 これらを受信した場合は、未知のメッセージ種別と同じく `SESSION_PROTOCOL_VIOLATION` で
 セッションを閉じる。
 
-その他、relay 専用の以下のパラメータも実装しない。
-
-- `RENDEZVOUS_TIMEOUT` (`0x04`)
+relay 専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.7 (RENDEZVOUS TIMEOUT Parameter) と
+§16.7 (Message Parameters) の Table 13 に定義済みのため、SUBSCRIBE への出現は受理する。
+ただし本ライブラリは relay を実装しないため値を解釈せず、`Subscription` にも保持しない。
+アプリは decode 済みの `MessageParameters` から読める。
 
 ## Low Overhead Container
 

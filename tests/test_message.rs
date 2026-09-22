@@ -548,17 +548,22 @@ mod error_cases {
 
     // ─── パラメータスコープ検証 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ──────────────────
 
-    /// RENDEZVOUS_TIMEOUT (0x04) は relay 専用のため codec が受理しない
+    /// RENDEZVOUS_TIMEOUT (0x04) は定義済みパラメータのため encode / decode で受理される
     ///
-    /// draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter): relay が publisher の
-    /// 出現を待つためのパラメータであり、本ライブラリは扱わない。未知の型として拒否される。
+    /// draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter): "The
+    /// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
+    /// §16.7 (Message Parameters) の Table 13 にも登録されており、§9.20 (Control Message
+    /// Parameters) が PROTOCOL_VIOLATION を要求する「未知のパラメータ」には該当しない。
+    /// 本ライブラリは値を解釈しないが、受理して `MessageParameters` に残す。
     #[test]
-    fn subscribe_with_unhandled_type_0x04_is_rejected() {
+    fn subscribe_with_rendezvous_timeout_is_accepted() {
         use shiguredo_moqt::message::Subscribe;
-        use shiguredo_moqt::message_parameter::{MessageParameter, MessageParameterValue};
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_RENDEZVOUS_TIMEOUT,
+        };
         let mut parameters = MessageParameters::new();
         parameters.push(MessageParameter {
-            param_type: 0x04,
+            param_type: PARAM_RENDEZVOUS_TIMEOUT,
             value: MessageParameterValue::VarInt(500),
         });
         let msg = ControlMessage::Subscribe(Subscribe {
@@ -568,10 +573,49 @@ mod error_cases {
             track_name: b"video".to_vec(),
             parameters,
         });
-        assert!(matches!(
-            msg.encode(),
-            Err(MessageError::ProtocolViolation(_))
-        ));
+        let encoded = msg
+            .encode()
+            .expect("定義済みパラメータを含む SUBSCRIBE は encode できること");
+        let (decoded, _) = ControlMessage::decode(&encoded)
+            .expect("定義済みパラメータを含む SUBSCRIBE は decode できること");
+        let ControlMessage::Subscribe(subscribe) = decoded else {
+            panic!("Subscribe が期待された");
+        };
+        // 0x04 が decode 後も MessageParameters に残ること (値は解釈しない)
+        let count = subscribe
+            .parameters
+            .as_slice()
+            .iter()
+            .filter(|p| p.param_type == PARAM_RENDEZVOUS_TIMEOUT)
+            .count();
+        assert_eq!(count, 1, "0x04 が decode 後も残ること");
+    }
+
+    /// Table 13 に無い未定義のパラメータ型は encode / decode で拒否される
+    ///
+    /// draft-ietf-moq-transport-21 §9.20 (Control Message Parameters): "An endpoint that
+    /// receives an unknown Message Parameter MUST close the session with PROTOCOL_VIOLATION."
+    #[test]
+    fn subscribe_with_undefined_parameter_type_is_rejected() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{MessageParameter, MessageParameterValue};
+        // Table 13 に無い型 (0x7F) を使う
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: 0x7F,
+            value: MessageParameterValue::VarInt(1),
+        });
+        let msg = ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"example".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"video".to_vec(),
+            parameters,
+        });
+        assert!(
+            matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+            "未定義のパラメータ型は encode で拒否されること"
+        );
     }
 
     #[test]

@@ -37,6 +37,14 @@ pub const PARAM_EXPIRES: u64 = 0x08;
 pub const PARAM_LARGEST_OBJECT: u64 = 0x09;
 /// FORWARD (uint8)
 pub const PARAM_FORWARD: u64 = 0x10;
+/// RENDEZVOUS_TIMEOUT (varint, draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter))
+///
+/// 本ライブラリは relay を実装しないため値を解釈しないが、§16.7 (Message Parameters) の
+/// Table 13 に定義済みであり、§9.20 (Control Message Parameters) が PROTOCOL_VIOLATION を
+/// 要求する「未知のパラメータ」には該当しない。したがって SUBSCRIBE への出現は受理し、
+/// アプリが `MessageParameters` から読む。
+/// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub const PARAM_RENDEZVOUS_TIMEOUT: u64 = 0x04;
 /// SUBSCRIBER_PRIORITY (uint8)
 pub const PARAM_SUBSCRIBER_PRIORITY: u64 = 0x20;
 /// LOCATION_FILTER (length-prefixed)
@@ -117,6 +125,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
         PARAM_SUBSCRIBER_PRIORITY => Ok(ValueEncoding::Uint8),
         PARAM_LOCATION_FILTER => Ok(ValueEncoding::LengthPrefixed),
         PARAM_GROUP_ORDER => Ok(ValueEncoding::Uint8),
+        PARAM_RENDEZVOUS_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_FILL_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_FILL_PARAMETERS => Ok(ValueEncoding::LengthPrefixed),
         PARAM_NEW_GROUP_REQUEST => Ok(ValueEncoding::VarInt),
