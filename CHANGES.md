@@ -230,6 +230,13 @@
   - `ObjectFieldTracker` の 1 レコードが immutables 長 (最大 65535 バイト) と payload_key 長を保持する。`records` は Session が subscription を forget するか `prune_past_groups` を呼ぶまで減らず、`Session` は現状 `prune_past_groups` を呼ばない (prune 配線は未実装)
   - @voluntas
 
+- [FIX] publisher example が Subgroup の終端方法を Start Location で選ぶ
+  - draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) は「Start Location より前の Object 以外をすべて配送したなら FIN、配送すべき Object を配送せずに閉じるなら RESET_STREAM」を MUST で規定するが、従来はスキップの理由を区別せず常に RESET_STREAM で閉じていた
+  - 終端方法の判定を `SubgroupTermination` と `SubgroupObjectState::termination` に分離し、`transport::SendStream` を組み立てずに単体テストできるようにする
+  - Start Location は REQUEST_UPDATE で変わりうるため、Subgroup 開始時点の snapshot と終端時点の現在値の両方で判定し、どちらかで配送対象だった Object を省略していれば RESET_STREAM にする
+  - `MoqtClient` に購読の Start Location を読む `subscription_filter_start` を追加する
+  - @voluntas
+
 ### misc
 
 - [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する

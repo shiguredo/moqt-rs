@@ -268,6 +268,7 @@ pub async fn run(
         data_plane: &data_plane,
         catalog_request_id,
         catalog_alias: CATALOG_TRACK_ALIAS,
+        start_location: client.subscription_filter_start(catalog_request_id),
         video: video_encoder.as_ref().map(|enc| catalog::VideoTrackParams {
             track_name: &config.track_name,
             namespace: &config.namespace,
@@ -347,13 +348,16 @@ pub async fn run(
                 let encoded_frames = encoder.encode(&video_frame)?;
                 for ef in encoded_frames {
                     if ef.is_keyframe {
+                        // datagram モードと Subgroup モードの両方で使うため、ここで request_id を
+                        // 確定させる (`.expect()` の重複も避ける)
+                        let video_request_id = video_request_id.expect("video request_id enabled");
                         if config.use_datagram {
                             // datagram モード: 前の writer は特に finalize しない
                             current_video_datagram_writer = Some(
                                 DatagramWriter::new(
                                     &handle,
                                     &data_plane,
-                                    video_request_id.expect("video request_id enabled"),
+                                    video_request_id,
                                     VIDEO_TRACK_ALIAS,
                                     video_group_id,
                                     DEFAULT_PUBLISHER_PRIORITY,
@@ -361,7 +365,8 @@ pub async fn run(
                             );
                         } else {
                             if let Some(writer) = current_video_writer.take() {
-                                writer.finish()?;
+                                writer
+                                    .finish(client.subscription_filter_start(video_request_id))?;
                             }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                             // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
@@ -370,11 +375,12 @@ pub async fn run(
                                 SubgroupWriter::new(
                                     &handle,
                                     &data_plane,
-                                    video_request_id.expect("video request_id enabled"),
+                                    video_request_id,
                                     VIDEO_TRACK_ALIAS,
                                     video_group_id,
                                     DEFAULT_PUBLISHER_PRIORITY,
                                     true,
+                                    client.subscription_filter_start(video_request_id),
                                 )
                                 .await?,
                             );
@@ -438,21 +444,23 @@ pub async fn run(
                         // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                         // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
                         // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+                        let audio_request_id = audio_request_id.expect("audio request_id enabled");
                         let mut writer = SubgroupWriter::new(
                             &handle,
                             &data_plane,
-                            audio_request_id.expect("audio request_id enabled"),
+                            audio_request_id,
                             AUDIO_TRACK_ALIAS,
                             audio_group_id,
                             DEFAULT_PUBLISHER_PRIORITY,
                             true,
+                            client.subscription_filter_start(audio_request_id),
                         )
                         .await?;
                         let outcome = writer.write_object(&encoded, &properties).await?;
                         if outcome == ObjectFilterOutcome::Pass {
                             audio_config_sent = true;
                         }
-                        writer.finish()?;
+                        writer.finish(client.subscription_filter_start(audio_request_id))?;
                     }
                     audio_group_id += 1;
                     audio_frame_count += 1;
@@ -521,7 +529,9 @@ pub async fn run(
     }
 
     if let Some(writer) = current_video_writer.take() {
-        writer.finish()?;
+        // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
+        // 省略があれば RESET 側に倒れる (安全側)
+        writer.finish(video_request_id.and_then(|rid| client.subscription_filter_start(rid)))?;
     }
     // datagram writer は明示的な finalize 不要
     drop(current_video_datagram_writer);

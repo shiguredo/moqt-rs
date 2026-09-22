@@ -4,6 +4,7 @@
 //! draft-ietf-moq-msf-01 §5 (Catalog) に準拠する。
 
 use shiguredo_moqt::loc::LocProperties;
+use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::{
     msf::MSF_VERSION, msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfPackaging, msf::MsfTrack,
 };
@@ -47,6 +48,12 @@ pub struct CatalogParams<'a> {
     pub data_plane: &'a DataPlaneHandle,
     pub catalog_request_id: u64,
     pub catalog_alias: u64,
+    /// カタログ track の購読の Start Location (`MoqtClient::subscription_filter_start`)
+    ///
+    /// カタログは 1 Subgroup = 1 Object なので終端方法の判定結果は変わらない (省略があれば
+    /// `SUBGROUP_HEADER` 未送信で RESET、配送すれば FIN)。複数 Object を持つ Subgroup と同じ
+    /// 形で呼び出し側から値を渡しておく。
+    pub start_location: Option<Location>,
     pub video: Option<VideoTrackParams<'a>>,
     pub audio: Option<AudioTrackParams<'a>>,
 }
@@ -115,6 +122,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         0,
         128,
         false,
+        params.start_location,
     )
     .await?;
     let empty_props = LocProperties::new();
@@ -122,12 +130,12 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
     if outcome == ObjectFilterOutcome::Skip {
         // 全 Skip の writer を reset で終端してから、カタログが届かないことをエラーとして報告する
         // (カタログがフィルタ不通過で届かないと subscriber は起動できないため、静かに飲み込まない)
-        writer.finish()?;
+        writer.finish(params.start_location)?;
         return Err(Error::Other(
             "catalog object skipped by subscription filter".to_string(),
         ));
     }
-    writer.finish()?;
+    writer.finish(params.start_location)?;
 
     Ok(catalog_json)
 }

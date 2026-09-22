@@ -1287,6 +1287,17 @@ impl MoqtClient {
         session.set_control_message_timeout_ms(timeout_ms);
     }
 
+    /// 指定 Request ID の subscription の Start Location を取得する
+    ///
+    /// 解決済みの Location Filter の Start Location を返す。Location Filter が無い (unfiltered)
+    /// 場合と該当 subscription が無い場合はどちらも `None` を返す。
+    /// この値は REQUEST_UPDATE で更新されうるため、Subgroup の終端方法を決める側
+    /// (draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams)) が時点を決めて読む。
+    pub fn subscription_filter_start(&self, request_id: u64) -> Option<Location> {
+        let session = lock_session(&self.session);
+        session.subscription(request_id)?.filter_start
+    }
+
     /// Data Stream タイムアウト (ms) を取得する
     pub fn data_stream_timeout_ms(&self) -> Option<u64> {
         let session = lock_session(&self.session);
