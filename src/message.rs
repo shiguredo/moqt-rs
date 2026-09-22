@@ -480,6 +480,11 @@ pub struct Redirect {
 
 impl Redirect {
     fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Full Track Name の
+        // 最大長は 4,096 バイト。§9.4.1 (Redirect Structure) は Track Namespace と Track Name を
+        // まとめて "Redirect target" と呼び、§2.4.1 (Track Naming) のとおりこれは
+        // Full Track Name そのものであるため、同じ上限を適用する。
+        validate_full_track_name(&self.track_namespace, &self.track_name)?;
         varint::encode(self.connect_uri.len() as u64, buf);
         buf.extend_from_slice(&self.connect_uri);
         self.track_namespace.encode_to(buf)?;
@@ -499,6 +504,9 @@ impl Redirect {
         *pos += uri_len;
         let track_namespace = TrackNamespace::decode_from(buf, pos)?;
         let track_name = decode_track_name(buf, pos)?;
+        // draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): Redirect target は
+        // Full Track Name であるため 4,096 バイト上限を decode 側でも検証する (MUST close)
+        validate_full_track_name(&track_namespace, &track_name)?;
         Ok(Self {
             connect_uri,
             track_namespace,

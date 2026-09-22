@@ -196,6 +196,9 @@
   - @voluntas
 - [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
   - @voluntas
+- [FIX] Redirect の Redirect target (Track Namespace + Track Name) に Full Track Name の 4,096 バイト上限を適用する
+  - draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure) / §9.4.1 (Redirect Structure): §9.4.1 の Redirect target は §2.4.1 (Track Naming) の Full Track Name そのものであるため、超える場合は encode / decode とも `PROTOCOL_VIOLATION` で拒否する
+  - @voluntas
 - [FIX] requester の FIN で responder が必須応答を送れなくなる問題を修正する
   - FIN は方向ごとの終端であり cancel ではないため (draft-ietf-moq-transport-21 §6.4.2.2)、自側が SUBSCRIBE / FETCH の responder のときは peer の FIN では request を終端しない
   - 自側が responder の request は、peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で `RequestTerminated { reason: PeerStreamFin }` を発行する (FIN の到着順に依存しない)

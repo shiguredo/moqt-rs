@@ -424,6 +424,89 @@ mod fetch {
     }
 }
 
+mod redirect_full_track_name {
+    use super::*;
+    use shiguredo_moqt::message::{Redirect, RequestError};
+    use shiguredo_moqt::varint;
+
+    /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-21 §9 Table 5)
+    const MSG_REQUEST_ERROR: u64 = 0x05;
+
+    /// 合計 4,096 バイトの Full Track Name を持つ Redirect を組み立てる
+    ///
+    /// `extra` バイトだけ Track Name を伸ばす。
+    fn request_error_with_redirect_total(extra: usize) -> RequestError {
+        const NAMESPACE_LEN: usize = 4096 - 1;
+        let fields = vec![vec![b'a'; NAMESPACE_LEN]];
+        let ns = TrackNamespace::new(fields).expect("正当な namespace である");
+        let track_name = vec![b'b'; 1 + extra];
+        RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な reason phrase である"),
+            redirect: Some(Redirect {
+                connect_uri: Vec::new(),
+                track_namespace: ns,
+                track_name,
+            }),
+        }
+    }
+
+    /// 合計 4,096 バイトちょうどの Redirect は encode / decode とも成功する (境界の非退行)
+    #[test]
+    fn redirect_at_limit_round_trips() {
+        let msg = ControlMessage::RequestError(request_error_with_redirect_total(0));
+        let bytes = msg
+            .encode()
+            .expect("4,096 バイトちょうどは encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+        assert_eq!(decoded, msg);
+    }
+
+    /// 合計 4,096 バイトを超える Redirect は encode で拒否される
+    ///
+    /// draft-ietf-moq-transport-21 §8.7 (Track Namespace Structure): "If an endpoint receives a
+    /// Track Namespace or a Full Track Name exceeding 4,096 bytes, it MUST close the session
+    /// with a PROTOCOL_VIOLATION."
+    #[test]
+    fn redirect_over_limit_is_rejected_on_encode() {
+        let msg = ControlMessage::RequestError(request_error_with_redirect_total(1));
+        assert!(matches!(
+            msg.encode(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    /// 合計 4,096 バイトを超える Redirect は decode で拒否される
+    #[test]
+    fn redirect_over_limit_is_rejected_on_decode() {
+        // encode を通さずワイヤバイト列を組み立てる (1 バイト超過)
+        const NAMESPACE_LEN: usize = 4096 - 1;
+        let mut payload = Vec::new();
+        varint::encode(shiguredo_moqt::error::REQUEST_REDIRECT, &mut payload);
+        payload.push(0); // retry_interval
+        varint::encode(1, &mut payload); // reason length
+        payload.push(b'x'); // reason
+        varint::encode(0, &mut payload); // connect_uri length
+        varint::encode(1, &mut payload); // Track Namespace field count
+        varint::encode(NAMESPACE_LEN as u64, &mut payload);
+        payload.extend_from_slice(&vec![b'a'; NAMESPACE_LEN]);
+        varint::encode(2, &mut payload); // Track Name length (合計 4,097)
+        payload.extend_from_slice(b"bb");
+
+        let mut bytes = Vec::new();
+        varint::encode(MSG_REQUEST_ERROR, &mut bytes);
+        bytes.push((payload.len() >> 8) as u8);
+        bytes.push(payload.len() as u8);
+        bytes.extend_from_slice(&payload);
+
+        assert!(matches!(
+            ControlMessage::decode(&bytes),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+}
+
 mod error_cases {
     use super::*;
 
