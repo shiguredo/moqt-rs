@@ -1,7 +1,7 @@
 # Mandatory Track Property 受信時の cancel で RESET_STREAM / STOP_SENDING を発行する
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-cancel-request-on-mandatory-track-property
 - Polished: 2026-09-21
 
@@ -75,3 +75,42 @@ FETCH では bidi request stream への STOP_SENDING が MUST である (§3.2.1
 - アプリが先に cancel した fetch に遅れて FETCH_OK が届いても、cancel イベント (`StopSendingRequestStream` / `ResetRequestStream`) が再発行されないこと
 - 既存の `subscribe_ok_with_unknown_mandatory_property_cancels_subscription` と `fetch_ok_with_unknown_mandatory_property_cancels_fetch` が cancel イベントの検証を含む形に更新されていること
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK を受信したとき、ローカル状態を終端するだけでなく cancel のストリーム終端指示を I/O 層へ出すようにした。
+
+1. `Session::handle_peer_subscribe_ok` の unknown mandatory 検出経路で
+   `SessionEvent::StopSendingRequestStream` と `SessionEvent::ResetRequestStream` を
+   `STREAM_CANCELLED` で発行する。順序は `Session::terminate_malformed_track` (§12.1) と
+   同じで、続けて `RequestTerminated { reason: LocalCancel }` を発行する
+2. `Session::handle_peer_fetch_ok` の同じ経路にも同じ 2 イベントを発行する
+   (§3.2.1 (Fetch State Management): "It MUST send STOP_SENDING for the bidi request
+   stream.")
+3. `Fetch` に `local_cancel_sent` を追加した。cancel の再発行を抑止する判定に
+   `FetchState::Terminated` ではなく本フラグを使う。`FetchState::Terminated` は FETCH
+   データストリームの終端でも遷移するが、データストリームの終端は bidi request stream を
+   閉じないため cancel が必要である。フラグは `Session::send_fetch_stop_sending`
+   (アプリ起点の cancel) と `Session::send_err_for_fetch` (REQUEST_UPDATE 失敗応答) が
+   `true` にする
+4. `SUBSCRIPTION` 側の再発行抑止判定は、`Session::handle_peer_subscribe_ok` の事前検証が
+   `Pending(Subscriber)` を要求するため現状つねに真になる。到達しない防御であることを
+   コメントに明記した
+5. `SessionEvent::StopSendingRequestStream` / `SessionEvent::ResetRequestStream` の doc に
+   §3.6 の経路を追記した
+
+テスト:
+
+- `tests/test_session/subscription/handshake.rs` の
+  `subscribe_ok_with_unknown_mandatory_property_cancels_subscription` を
+  `STOP_SENDING` → `RESET_STREAM` → `RequestTerminated` の順序つき・各 1 回の検証に更新した
+- `tests/test_session/fetch/validation.rs` の
+  `fetch_ok_with_unknown_mandatory_property_cancels_fetch` を同じ形に更新し、
+  `drain_fetch_cancel_events` ヘルパを追加した
+- `tests/test_session/fetch/after_fin.rs` の
+  `unknown_mandatory_fetch_ok_after_fin_terminates_fetch` (FETCH データストリームの FIN 後に
+  FETCH_OK が届く正規の順序) にも cancel の検証を足した。この順序では `FetchState` が既に
+  `Terminated` であるため、フラグ導入前は cancel が発行されなかった
+- `tests/test_session/fetch/validation.rs` に
+  `late_fetch_ok_with_unknown_mandatory_does_not_re_cancel` を追加し、アプリが先に cancel した
+  fetch では cancel を再発行しないことを固定した
