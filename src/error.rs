@@ -26,6 +26,18 @@ pub enum MessageError {
     InvalidParameter,
     /// RFC 違反 (説明付き)
     ProtocolViolation(&'static str),
+    /// Malformed Track の検出 (説明付き)
+    ///
+    /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) が列挙する条件に該当する検出。
+    /// 同節は該当する subscription / fetch の cancel (MUST) とアプリへのエラー通知 (SHOULD)
+    /// を求めており、セッションは終了しない。§6.4.2.3 (Request Cancellation and Rejection) の
+    /// cancel は送信方向の RESET_STREAM と受信方向の STOP_SENDING で表現される。
+    ///
+    /// セッションを終了する検証 (フレーミング違反、§12.1 の条件ではない順序違反など) は
+    /// 従来どおり `ProtocolViolation` を使う。両者を分けることで、アプリは返ったエラーから
+    /// 「セッションを閉じるべきか、購読だけ cancel すべきか」を判別できる。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    MalformedTrack(&'static str),
     /// 既知 Key-Value-Pair の Value が定義された serialization と一致しない
     ///
     /// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure):
@@ -55,6 +67,7 @@ impl core::fmt::Display for MessageError {
             Self::ReasonPhraseTooLong => write!(f, "reason phrase too long (max 1024 bytes)"),
             Self::InvalidParameter => write!(f, "invalid parameter encoding"),
             Self::ProtocolViolation(msg) => write!(f, "protocol violation: {msg}"),
+            Self::MalformedTrack(msg) => write!(f, "malformed track: {msg}"),
             Self::KeyValueFormattingError(msg) => {
                 write!(f, "key-value formatting error: {msg}")
             }
@@ -68,6 +81,42 @@ impl core::fmt::Display for MessageError {
 }
 
 impl core::error::Error for MessageError {}
+
+impl MessageError {
+    /// 人間可読の説明文を取り出す
+    ///
+    /// テキスト付きの variant はその文字列を、それ以外は `Display` の表現を返す。
+    /// `SessionError` の `reason` は `&'static str` のため、動的生成された文字列は
+    /// 汎用の文言に置き換わる。
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::ProtocolViolation(msg)
+            | Self::MalformedTrack(msg)
+            | Self::KeyValueFormattingError(msg)
+            | Self::MalformedAuthToken(msg) => msg,
+            Self::UnexpectedEof => "unexpected end of buffer",
+            Self::InvalidMessageType(_) => "invalid message type",
+            Self::PayloadTooLong => "payload too long",
+            Self::ReasonPhraseTooLong => "reason phrase too long",
+            Self::InvalidParameter => "invalid parameter encoding",
+            Self::InvalidCatalog(_) => "invalid MSF catalog",
+            Self::InvalidCatalogVersion(_) => "unsupported MSF catalog version",
+            Self::GzipDecode(_) => "MSF timeline gzip decode failed",
+            Self::GzipEncode(_) => "MSF timeline gzip encode failed",
+        }
+    }
+
+    /// `MalformedTrack` の理由を取り出す (他の variant は `None`)
+    ///
+    /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) の検出かどうかを判定しつつ
+    /// 説明文を取り出すために使う。
+    pub fn malformed_track_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::MalformedTrack(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
 
 // ─── ローカル専用エラーコード (wire には出ない) ──────────────────
 

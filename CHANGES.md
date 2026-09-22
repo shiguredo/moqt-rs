@@ -33,6 +33,12 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [CHANGE] Malformed Track の検出を表す `MessageError::MalformedTrack` を追加し、§12.1 の条件に対応する検出をこの variant に分類する
+  - 対象は `FetchStreamDecoder` の Publisher Priority 変更 / 確定済み最終 Object 超過、`SubgroupTracker::open` / `record_priority` / `mark_fin`、`ObjectPropertyTracker::observe_object` / `observe_decoded_object` の PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP 条件である
+  - セッションを終了する検証 (フレーミング違反、§12.1 の条件ではない順序違反) は従来どおり `ProtocolViolation` を使う
+  - `SubgroupTracker::open` / `record_priority` / `mark_fin` の戻り値型を `SessionError` から `MessageError` に変更する (破壊的変更)
+  - `MessageError::reason()` / `MessageError::malformed_track_reason()` を追加する
+  - @voluntas
 - [ADD] TRACK_STATUS の受信側 (自側 publisher) を実装し、peer から受信した TRACK_STATUS に TRACK_STATUS_OK / REQUEST_ERROR で応答する
   - draft-ietf-moq-transport-21 §6.3 (Session initialization) は TRACK_STATUS を request stream の開始メッセージとして許可するため、受信しても `PROTOCOL_VIOLATION` でセッションを閉じない
   - 受信側は subscription state も Track Alias も作らず Objects も送らず、応答の送信後に bidi stream を FIN で閉じる (§9.13)

@@ -241,7 +241,7 @@ fn decode_error_variants_are_typed() {
         assert!(
             matches!(
                 result,
-                Err(MessageError::UnexpectedEof) | Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::UnexpectedEof) | Err(MessageError::MalformedTrack(_))
             ),
             "フィクスチャ '{name}' は型付きデコードエラーを返すべき: {result:?}"
         );
@@ -279,7 +279,7 @@ fn tracker_rejects_prior_group_gap_covering_received_group() {
 
     assert!(matches!(
         tracker.observe_object(10, 0, Some(&encoded)),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 
@@ -302,7 +302,7 @@ fn tracker_rejects_group_inside_previously_announced_gap() {
 
     assert!(matches!(
         tracker.observe_object(9, 0, None),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 
@@ -325,7 +325,7 @@ fn tracker_rejects_prior_object_gap_covering_received_object() {
 
     assert!(matches!(
         tracker.observe_object(3, 10, Some(&encoded)),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 
@@ -348,7 +348,7 @@ fn tracker_rejects_object_inside_previously_announced_gap() {
 
     assert!(matches!(
         tracker.observe_object(3, 9, None),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 
@@ -381,7 +381,7 @@ fn tracker_rejects_inconsistent_prior_group_gap_within_group() {
 
     assert!(matches!(
         tracker.observe_object(10, 1, Some(&encoded_b)),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 

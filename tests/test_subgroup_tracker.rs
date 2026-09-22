@@ -2,7 +2,7 @@
 ///
 /// draft-ietf-moq-transport-21 §2.2 (Subgroups) / draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) に基づく再オープン禁止検証の
 /// 境界条件・エラーパスを PBT とは別に厳密化する。
-use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::subgroup_tracker::{SubgroupStreamState, SubgroupTracker};
 
 #[test]
@@ -31,7 +31,10 @@ fn reopen_after_fin_violation() {
     t.mark_fin(1, 10, 0, Some(3))
         .expect("テストフィクスチャの前提条件を満たす");
     let err = t.open(1, 10, 0).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert!(
+        matches!(err, MessageError::ProtocolViolation(_)),
+        "再オープン禁止違反は §12.1 の条件ではなく ProtocolViolation になる: {err:?}"
+    );
 }
 
 #[test]
@@ -64,7 +67,10 @@ fn reopen_after_stop_sending_allowed() {
     t.mark_fin(1, 10, 0, Some(7))
         .expect("テストフィクスチャの前提条件を満たす");
     let err = t.open(1, 10, 0).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert!(
+        matches!(err, MessageError::ProtocolViolation(_)),
+        "再オープン禁止違反は §12.1 の条件ではなく ProtocolViolation になる: {err:?}"
+    );
 }
 
 #[test]
@@ -73,7 +79,10 @@ fn concurrent_open_violation() {
     t.open(1, 10, 0)
         .expect("テストフィクスチャの前提条件を満たす");
     let err = t.open(1, 10, 0).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert!(
+        matches!(err, MessageError::ProtocolViolation(_)),
+        "再オープン禁止違反は §12.1 の条件ではなく ProtocolViolation になる: {err:?}"
+    );
 }
 
 #[test]

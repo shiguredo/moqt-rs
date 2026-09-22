@@ -26,8 +26,7 @@
 
 use hashbrown::HashMap;
 
-use crate::error::SESSION_PROTOCOL_VIOLATION;
-use crate::session::types::SessionError;
+use crate::error::MessageError;
 
 /// Subgroup ストリームの状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,19 +130,17 @@ impl SubgroupTracker {
         track_alias: u64,
         group_id: u64,
         subgroup_id: u64,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), MessageError> {
         let key = (track_alias, group_id, subgroup_id);
         match self.entries.get(&key) {
             Some(state) if state.can_reopen() => {
                 self.entries.insert(key, SubgroupStreamState::Open);
                 Ok(())
             }
-            Some(SubgroupStreamState::Open) => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+            Some(SubgroupStreamState::Open) => Err(MessageError::ProtocolViolation(
                 "concurrent Subgroup stream open for the same (track_alias, group_id, subgroup_id)",
             )),
-            Some(_) => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+            Some(_) => Err(MessageError::ProtocolViolation(
                 "reopening a terminated Subgroup stream is prohibited (draft-ietf-moq-transport-21 §2.2 (Subgroups) / draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams))",
             )),
             None => {
@@ -167,14 +164,13 @@ impl SubgroupTracker {
         group_id: u64,
         subgroup_id: u64,
         last_object_id: Option<u64>,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), MessageError> {
         let key = (track_alias, group_id, subgroup_id);
         // 条件 3: 同一 Subgroup が複数 stream で FIN され最終 Object が異なる
         if let Some(&prev) = self.fin_last_object_ids.get(&key)
             && prev != last_object_id
         {
-            return Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+            return Err(MessageError::MalformedTrack(
                 "malformed track: same Subgroup FINed with different final Object IDs",
             ));
         }
@@ -244,11 +240,10 @@ impl SubgroupTracker {
         group_id: u64,
         subgroup_id: u64,
         publisher_priority: u8,
-    ) -> Result<(), SessionError> {
+    ) -> Result<(), MessageError> {
         let key = (track_alias, group_id, subgroup_id);
         match self.priorities.get(&key) {
-            Some(&prev) if prev != publisher_priority => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+            Some(&prev) if prev != publisher_priority => Err(MessageError::MalformedTrack(
                 "malformed track: Publisher Priority differs from previous Object with same Subgroup ID",
             )),
             Some(_) => Ok(()),

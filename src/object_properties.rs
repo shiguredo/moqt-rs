@@ -349,11 +349,11 @@ impl ObjectPropertyTracker {
     ) -> Result<(), MessageError> {
         let properties = if let Some(bytes) = properties_bytes {
             let (properties, consumed) = ObjectProperties::decode(bytes).map_err(|_| {
-                MessageError::ProtocolViolation("malformed track: invalid object properties")
+                MessageError::ProtocolViolation("invalid object properties framing")
             })?;
             if consumed != bytes.len() {
                 return Err(MessageError::ProtocolViolation(
-                    "malformed track: invalid object properties",
+                    "invalid object properties framing",
                 ));
             }
             Some(properties)
@@ -372,7 +372,7 @@ impl ObjectPropertyTracker {
         properties: Option<&ObjectProperties>,
     ) -> Result<(), MessageError> {
         if self.prior_group_gaps.contains(group_id) {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedTrack(
                 "malformed track: group ID falls within a previously communicated gap",
             ));
         }
@@ -381,7 +381,7 @@ impl ObjectPropertyTracker {
             .get(&group_id)
             .is_some_and(|ranges| ranges.contains(object_id))
         {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedTrack(
                 "malformed track: object ID falls within a previously communicated gap",
             ));
         }
@@ -391,14 +391,14 @@ impl ObjectPropertyTracker {
                 if let Some(previous_gap) = self.group_gap_values.get(&group_id)
                     && *previous_gap != group_gap
                 {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::MalformedTrack(
                         "malformed track: PRIOR_GROUP_ID_GAP differs within the same group",
                     ));
                 }
                 self.group_gap_values.insert(group_id, group_gap);
 
                 if group_gap > group_id {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::MalformedTrack(
                         "malformed track: PRIOR_GROUP_ID_GAP exceeds the current group ID",
                     ));
                 }
@@ -406,7 +406,7 @@ impl ObjectPropertyTracker {
                     let gap_start = group_id - group_gap;
                     let gap_end = group_id - 1;
                     if self.seen_groups.overlaps(gap_start, gap_end) {
-                        return Err(MessageError::ProtocolViolation(
+                        return Err(MessageError::MalformedTrack(
                             "malformed track: PRIOR_GROUP_ID_GAP covers a previously received group",
                         ));
                     }
@@ -416,7 +416,7 @@ impl ObjectPropertyTracker {
 
             if let Some(object_gap) = properties.prior_object_id_gap() {
                 if object_gap > object_id {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::MalformedTrack(
                         "malformed track: PRIOR_OBJECT_ID_GAP exceeds the current object ID",
                     ));
                 }
@@ -425,7 +425,7 @@ impl ObjectPropertyTracker {
                     let gap_end = object_id - 1;
                     let seen_objects = self.seen_objects.entry(group_id).or_default();
                     if seen_objects.overlaps(gap_start, gap_end) {
-                        return Err(MessageError::ProtocolViolation(
+                        return Err(MessageError::MalformedTrack(
                             "malformed track: PRIOR_OBJECT_ID_GAP covers a previously received object",
                         ));
                     }
@@ -510,7 +510,7 @@ fn decode_kv_pairs(
             ..=crate::track_properties::MANDATORY_TRACK_PROPERTY_MAX)
             .contains(&prop_type)
         {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedTrack(
                 "malformed track: mandatory property in object scope",
             ));
         }

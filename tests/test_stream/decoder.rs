@@ -1161,7 +1161,7 @@ fn test_fetch_rejects_priority_change_within_subgroup() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 
@@ -1279,7 +1279,7 @@ fn test_fetch_rejects_object_beyond_known_final_subgroup_object() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedTrack(_))
     ));
 }
 

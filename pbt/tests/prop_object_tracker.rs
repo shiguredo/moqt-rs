@@ -41,8 +41,8 @@ fn prior_group_id_gap_rejects_group_in_gap() -> noprop::TestResult {
             .observe_object(in_gap, 0, None)
             .expect_err("欠落 Group に属する Object は拒否される");
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
-            "PROTOCOL_VIOLATION で拒否されること: {err:?}"
+            matches!(err, MessageError::MalformedTrack(_)),
+            "Malformed Track (§12.1) として拒否されること: {err:?}"
         );
 
         // 欠落範囲外の未観測 Group は受理される

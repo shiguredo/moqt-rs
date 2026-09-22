@@ -497,7 +497,7 @@ impl FetchStreamDecoder {
         if let Some(max_seen) = self.validation.subgroup_max_objects.get(&key)
             && *max_seen > final_object_id
         {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedTrack(
                 "malformed track: object ID exceeds the known final object for the subgroup",
             ));
         }
@@ -843,14 +843,14 @@ impl FetchStreamDecoder {
             if let Some(previous_priority) = self.validation.subgroup_priorities.get(&key)
                 && *previous_priority != obj.publisher_priority
             {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::MalformedTrack(
                     "malformed track: publisher priority changed within the same subgroup in a FETCH response",
                 ));
             }
             if let Some(final_object_id) = self.validation.subgroup_final_objects.get(&key)
                 && obj.object_id > *final_object_id
             {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::MalformedTrack(
                     "malformed track: object ID exceeds the known final object for the subgroup",
                 ));
             }

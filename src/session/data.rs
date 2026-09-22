@@ -393,8 +393,11 @@ impl Session {
                     "outgoing subgroup stream was stopped by peer; Forward State change 0 to 1 is required",
                 ));
             }
+            // 自側 publisher の送信経路であり §12.1 (Malformed Tracks) の受信側検出では
+            // ないため `MalformedTrack` は返らない。再オープン禁止違反は PROTOCOL_VIOLATION。
             self.my_subgroups
-                .open(track_alias, header.group_id, subgroup_id)?;
+                .open(track_alias, header.group_id, subgroup_id)
+                .map_err(|e| SessionError::new(SESSION_PROTOCOL_VIOLATION, e.reason()))?;
         }
         let subscription = self
             .subscriptions
@@ -543,7 +546,9 @@ impl Session {
         // `my_subgroups.open` は同一キーが Open 中のとき `PROTOCOL_VIOLATION` を返すため、
         // 解決済み stream の 2 回目以降の送信で実行しないこと)
         if subgroup_id.is_none() {
-            self.my_subgroups.open(track_alias, group_id, object_id)?;
+            self.my_subgroups
+                .open(track_alias, group_id, object_id)
+                .map_err(|e| SessionError::new(SESSION_PROTOCOL_VIOLATION, e.reason()))?;
             let Some(stream) = self.data_streams.outgoing.get_mut(&stream_id) else {
                 unreachable!(
                     "outgoing subgroup stream must still exist while resolving subgroup id"
@@ -1116,6 +1121,8 @@ impl Session {
                 self.peer_subgroups
                     .open(header.track_alias, header.group_id, subgroup_id)
         {
+            // 再オープン禁止違反 (§2.2 (Subgroups) / §11.3.2) は §12.1 の条件ではない
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
             self.fail(err.clone());
             return Err(err);
         }
@@ -1166,8 +1173,8 @@ impl Session {
                 resolved_priority,
             )
         {
-            self.terminate_malformed_track(request_id, Some(stream_id), err.reason);
-            return Err(err);
+            self.terminate_malformed_track(request_id, Some(stream_id), err.reason());
+            return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason()));
         }
         if let Some(now_ms) = self.timing.last_tick_ms {
             self.timing
@@ -1351,6 +1358,8 @@ impl Session {
                 self.peer_subgroups
                     .open(stream.track_alias, stream.group_id, object.object_id)
             {
+                // 再オープン禁止違反 (§2.2 (Subgroups) / §11.3.2) は §12.1 の条件ではない
+                let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
                 self.fail(err.clone());
                 return Err(err);
             }
@@ -1386,8 +1395,8 @@ impl Session {
                 stream.resolved_publisher_priority,
             )
         {
-            self.terminate_malformed_track(stream.request_id, Some(stream_id), err.reason);
-            return Err(err);
+            self.terminate_malformed_track(stream.request_id, Some(stream_id), err.reason());
+            return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason()));
         }
         Ok(resolved_subgroup_id)
     }
@@ -2993,9 +3002,12 @@ impl Session {
                                 self.terminate_malformed_track(
                                     attributed_request_id,
                                     None,
-                                    err.reason,
+                                    err.reason(),
                                 );
-                                return Err(err);
+                                return Err(SessionError::new(
+                                    SESSION_PROTOCOL_VIOLATION,
+                                    err.reason(),
+                                ));
                             }
                         }
                         RequestStreamEnd::Reset { reliable_size, .. } => {
@@ -3690,7 +3702,8 @@ impl Session {
 
 fn session_error_from_data_message(err: crate::error::MessageError) -> SessionError {
     match err {
-        crate::error::MessageError::ProtocolViolation(msg) => {
+        crate::error::MessageError::ProtocolViolation(msg)
+        | crate::error::MessageError::MalformedTrack(msg) => {
             SessionError::new(SESSION_PROTOCOL_VIOLATION, msg)
         }
         crate::error::MessageError::KeyValueFormattingError(msg) => {
