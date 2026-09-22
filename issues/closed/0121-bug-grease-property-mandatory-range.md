@@ -1,7 +1,7 @@
 # GREASE 値が Mandatory Track Property 範囲に入る場合に malformed としない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-grease-property-mandatory-range
 - Polished: 2026-09-21
 
@@ -49,3 +49,21 @@ GREASE 値の一部は 0x4000-0x7FFF に入るため、現状は GREASE の Prop
 - GREASE 値でない 0x4000 と 0x7FFF を Object Property として受信すると、引き続き malformed track になることを固定するテストが追加されていること (非退行)
 - Track scope の `TrackProperties::has_unknown_mandatory` の挙動を変えていないこと
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`src/object_properties.rs` の `decode_kv_pairs` の malformed 判定を「0x4000-0x7FFF に入り、かつ GREASE 値でない」に変えた。
+
+1. `src/grease.rs` の `is_grease` を使い、`0x7f * N + 0x9D` に一致する値は Object scope でも malformed としない。GREASE 値は §8.4 (Track and Object Properties) と §16.8 (Properties) に従い未知 Property として保持・転送し、値の読み飛ばしは型の偶奇の規則 (偶数型は varint、奇数型は長さ付きバイト列) に従う
+2. GREASE 値でない 0x4000-0x7FFF は従来どおり `MessageError::MalformedTrack` とする (§3.6)
+3. draft 内部の矛盾と採用した解釈をコードコメントに明記した。§3.6 と §16.8 の登録ポリシーは 0x4000-0x7FFF を Mandatory Track Property 専用とし Object scope での登録を禁じるが、GREASE 値は IANA に登録された Property ではなく Table 14 が Scope Any として予約した値である。
+§3.6 の「Mandatory Track Property」は登録された必須トラックプロパティを指し、予約値である GREASE を含まないと解釈する。この解釈は §13 の MUST NOT (未知値の受信だけでセッションを閉じない) と §8.4 の未知 Property の転送 MUST に整合する。
+4. Track scope の `TrackProperties::has_unknown_mandatory` は本 issue の対象外であり変更していない
+
+テスト:
+
+- `tests/test_object_properties.rs` に `grease_property_in_mandatory_range_is_accepted` を追加した。奇数型 (N = 128 の 0x401D)、偶数型 (N = 129 の 0x409C)、重なり範囲の上限 (N = 256 の 0x7F9D) の encode / decode が成功し、型と値がそのまま保持されることを固定する
+- `tests/test_object_properties.rs` に `non_grease_mandatory_property_in_object_scope_is_malformed` を追加した。GREASE 値でない 0x4000 と 0x7FFF が decode で `MessageError::MalformedTrack` になることを固定する (非退行)
+- `tests/test_session/data_stream.rs` に `grease_object_property_in_mandatory_range_keeps_subscription` を追加した。GREASE 値を Object Property として載せた Object を Session 経由で受信しても受理され、購読が `Established` のまま維持され、malformed 終端と cancel のイベントが発行されないことを固定する
+
+`CHANGES.md` の `## develop` に `[FIX]` を追加した。
