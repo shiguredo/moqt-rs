@@ -928,9 +928,8 @@ impl Session {
     /// draft-ietf-moq-transport-21 §6.3 (Session initialization): request stream の開始メッセージ
     /// として許されるのは SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS の 7 種類のいずれかである。
-    /// 本実装が受理するのはこのうち SUBSCRIBE / PUBLISH / FETCH の 3 種類であり、残りは
-    /// relay 専用機能の削除 (namespace 発見・告知機構) と TRACK_STATUS 受信側の削除により
-    /// 扱わない。
+    /// 本実装が受理するのはこのうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類で
+    /// あり、残り 3 種類は relay 専用機能の削除 (namespace 発見・告知機構) により扱わない。
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
@@ -944,8 +943,8 @@ impl Session {
     /// buffer して後で再投入するか、その bidi stream だけを RESET_STREAM で
     /// 閉じるかを選べる。将来 draft が変更される可能性がある。
     ///
-    /// 上記 7 種類のうち本実装が扱わない 4 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-    /// TRACK_STATUS / SUBSCRIBE_TRACKS) と、7 種類以外の message type
+    /// 上記 7 種類のうち本実装が扱わない 3 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
+    /// SUBSCRIBE_TRACKS) と、7 種類以外の message type
     /// (draft §6.3 (Session initialization) 違反) は `PROTOCOL_VIOLATION` で session を
     /// closing に遷移させる。
     pub fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError> {
@@ -959,6 +958,9 @@ impl Session {
                 self.handle_peer_publish(publish)?;
             }
             ControlMessage::Fetch(fetch) => self.handle_peer_fetch(fetch)?,
+            ControlMessage::TrackStatus(track_status) => {
+                self.handle_peer_track_status(track_status)?;
+            }
             _ => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -996,6 +998,10 @@ impl Session {
     /// - 自側が PUBLISH 起点の responder のとき: PUBLISH の送信者は §6.4.2.2 の例外であり
     ///   PUBLISH_DONE を送る前に FIN できないため、peer FIN は PUBLISH_DONE 受信後の
     ///   完了通知である。従来どおり終端する。
+    /// - 自側が TRACK_STATUS の responder のとき: SUBSCRIBE / FETCH と同じく終端しない。
+    ///   応答 (TRACK_STATUS_OK / REQUEST_ERROR) は `Session::send_request_ok` /
+    ///   `Session::emit_request_error` が `fin: true` で送るため、peer FIN を受信済みなら
+    ///   その送信時点で終端が確定する。
     ///
     /// PUBLISH 起点で自側が PUBLISH を送った側 (publisher 役) の組合せは、本 API が peer FIN を
     /// 一律に終端として扱うため未対応である。§3.1 (Subscriptions) は購読の終端を publisher の
@@ -1052,10 +1058,13 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        // 自側が SUBSCRIBE / FETCH の responder なら、peer FIN の受信だけを記録して
-        // return する (終端の確定は `finish_request_on_fin_exchange` が担う)。
+        // 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder なら、peer FIN の受信だけを
+        // 記録して return する (終端の確定は `finish_request_on_fin_exchange` が担う)。
         if matches!(end, RequestStreamEnd::Fin)
-            && matches!(kind, RequestKind::Subscribe | RequestKind::Fetch)
+            && matches!(
+                kind,
+                RequestKind::Subscribe | RequestKind::Fetch | RequestKind::TrackStatus
+            )
             && !self.is_local_requester(request_id, kind)
         {
             self.peer_fin_received.insert(request_id);
@@ -1179,9 +1188,14 @@ impl Session {
                 .fetches
                 .get(&request_id)
                 .is_some_and(|f| f.my_role == TrackRole::Subscriber),
-            // TRACK_STATUS は送信側のみ実装しているため常に自側が requester である
-            // (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。
-            RequestTable::TrackStatus => self.track_status_requests.contains_key(&request_id),
+            // TRACK_STATUS は自側が要求を送った側 (Subscriber) のときだけ requester である
+            // (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))。peer から受けた要求に
+            // 応答する側 (Publisher) は responder なので、peer FIN で送信方向を閉じない
+            // (§6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの終端)。
+            RequestTable::TrackStatus => self
+                .track_status_requests
+                .get(&request_id)
+                .is_some_and(|e| e.my_role == TrackRole::Subscriber),
         }
     }
 
@@ -1259,7 +1273,7 @@ impl Session {
         &mut self,
         request_id: u64,
         mut parameters: MessageParameters,
-        track_properties: TrackProperties,
+        mut track_properties: TrackProperties,
     ) -> Result<(), SessionError> {
         self.require_established()?;
 
@@ -1309,14 +1323,19 @@ impl Session {
         // が false になり実質 no-op になる。context 判定は追加しない。
         self.validate_outgoing_range_filters(&parameters)?;
 
+        let mut fin = false;
         match table {
             Some(RequestTable::Subscription) => {
                 self.send_ok_for_subscription(request_id, &mut parameters)?
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id)?,
-            Some(RequestTable::TrackStatus) | None => {
-                unreachable!("TRACK_STATUS is send-side only; table is subscription or fetch")
+            Some(RequestTable::TrackStatus) => {
+                track_properties = self.send_ok_for_track_status(request_id, track_properties)?;
+                // draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): "The bidi stream is closed
+                // with a FIN after TRACK_STATUS_OK or REQUEST_ERROR are sent."
+                fin = true;
             }
+            None => unreachable!("table.is_none() checked above"),
         }
         let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
@@ -1324,10 +1343,13 @@ impl Session {
         });
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
+        if fin {
+            self.mark_send_direction_closed_with_fin(request_id);
+        }
         self.events.push_back(SessionEvent::SendOnStream {
             request_id,
             message: msg,
-            fin: false,
+            fin,
         });
         Ok(())
     }
@@ -1404,7 +1426,10 @@ impl Session {
             Some(RequestTable::Fetch) => {
                 fetch_reset_stream_id = self.send_err_for_fetch(request_id)?;
             }
-            Some(RequestTable::TrackStatus) | None => {
+            Some(RequestTable::TrackStatus) => {
+                self.send_err_for_track_status(request_id)?;
+            }
+            None => {
                 return Err(SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "request_id not found for send_request_error",
@@ -1419,6 +1444,8 @@ impl Session {
         });
         // draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
+        // TRACK_STATUS への REQUEST_ERROR は subscription の PUBLISH_DONE を伴わないため
+        // REQUEST_ERROR 自体が最終メッセージ (FIN) になる (§9.13)
         let fin = publish_done_stream_count.is_none();
         if fin {
             // REQUEST_ERROR 単独が最終メッセージ (FIN) のときは request stream GOAWAY の

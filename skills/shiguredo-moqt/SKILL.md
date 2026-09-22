@@ -129,7 +129,7 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | `PublishStateNotify` | 状態通知 |
 | `RequestUpdate` | 更新要求 |
 | `Fetch` / `FetchOk` | FETCH |
-| `TrackStatus` | TRACK_STATUS (送信側のみ実装) |
+| `TrackStatus` | TRACK_STATUS (送信側と受信側の両方) |
 
 補助型:
 
@@ -370,6 +370,9 @@ fn send_track_status(
     track_name: Vec<u8>,
     parameters: MessageParameters,
 ) -> Result<u64, SendRequestError>
+
+// 受信した TRACK_STATUS への応答は send_request_ok (TRACK_STATUS_OK) と
+// send_request_error (REQUEST_ERROR) で送る。どちらも送信後に bidi stream を FIN で閉じる。
 
 // 共通応答
 fn send_request_ok(

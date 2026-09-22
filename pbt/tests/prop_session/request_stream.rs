@@ -8,6 +8,7 @@
 //! - peer RESET_STREAM (cancel) は役割にかかわらず終端する
 //! - PUBLISH 起点の responder が受ける peer FIN は従来どおり終端する
 //! - responder の終端は両方向が閉じた時点で確定し、FIN の到着順に依存しない
+//! - TRACK_STATUS の responder は peer FIN で終端せず、応答の FIN で終端する
 //!
 //! 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 
@@ -412,6 +413,135 @@ fn publish_responder_terminates_on_peer_fin() -> TestResult {
             SubscriptionState::Terminated,
             "PUBLISH 起点の responder は peer の終端で subscription を終端する"
         );
+        let expected = match end {
+            RequestStreamEnd::Fin => TerminationReason::PeerStreamFin,
+            RequestStreamEnd::Reset { error_code, .. } => {
+                TerminationReason::PeerStreamReset { error_code }
+            }
+        };
+        assert_eq!(
+            take_termination_reason(&mut client),
+            Some(expected),
+            "終端理由が peer の終端種別に対応すること"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// TRACK_STATUS の responder は peer FIN で終端せず、応答の FIN で終端する
+///
+/// draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): "The bidi stream is closed with a FIN
+/// after TRACK_STATUS_OK or REQUEST_ERROR are sent." また §6.4.2.2 (Graceful Request Stream
+/// Closure) の FIN は方向ごとの終端であり cancel ではないため、requester の FIN では
+/// responder の応答経路を塞がない。
+#[test]
+fn track_status_responder_survives_requester_fin() -> TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let ok_response = noprop::sample_bool(ctx);
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_track_status(
+                TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                b"cam".to_vec(),
+                MessageParameters::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, msg) = take_send_request(&mut client);
+        server
+            .recv_request(msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        // §9.13: subscription state を作らない
+        assert!(
+            server.subscription(rid).is_none(),
+            "TRACK_STATUS は subscription state を作らない"
+        );
+        // requester が送信方向を FIN で閉じる
+        server
+            .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+            .expect("requester の FIN を受理すること");
+        assert!(
+            server
+                .track_status_request(rid)
+                .expect("entry が存在すること")
+                .response
+                .is_none(),
+            "responder は peer FIN で応答待ち状態を変更しない"
+        );
+        if ok_response {
+            server
+                .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+                .expect("requester の FIN 後でも TRACK_STATUS_OK を送れること");
+        } else {
+            server
+                .send_request_error(
+                    rid,
+                    shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST,
+                    0,
+                    ReasonPhrase::new("no such track").expect("正当な reason phrase である"),
+                    None,
+                )
+                .expect("requester の FIN 後でも REQUEST_ERROR を送れること");
+        }
+        // 応答が FIN 付きで送られ、その時点で終端が確定する
+        let mut saw_response = false;
+        let mut fin_seen = false;
+        let mut termination = None;
+        while let Some(e) = server.poll_event() {
+            match e {
+                SessionEvent::SendOnStream {
+                    request_id, fin, ..
+                } => {
+                    assert_eq!(request_id, rid);
+                    saw_response = true;
+                    fin_seen = fin;
+                }
+                SessionEvent::RequestTerminated { reason, .. } => {
+                    assert!(termination.is_none(), "終端イベントが二重発行された");
+                    termination = Some(reason);
+                }
+                SessionEvent::CloseSession(err) => {
+                    panic!("応答の送信でセッションが閉じてはいけない: {err:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_response, "TRACK_STATUS の応答が送られること");
+        assert!(fin_seen, "TRACK_STATUS の応答は FIN で閉じること");
+        assert_eq!(
+            termination,
+            Some(TerminationReason::PeerStreamFin),
+            "応答の FIN で終端が確定すること"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// TRACK_STATUS の requester は responder の終端で request を終端する
+#[test]
+fn track_status_requester_terminates_on_responder_end() -> TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let end = sample_end(ctx);
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_track_status(
+                TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                b"cam".to_vec(),
+                MessageParameters::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, msg) = take_send_request(&mut client);
+        server
+            .recv_request(msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        client
+            .recv_request_stream_closed(rid, end)
+            .expect("responder の終端通知を受理すること");
         let expected = match end {
             RequestStreamEnd::Fin => TerminationReason::PeerStreamFin,
             RequestStreamEnd::Reset { error_code, .. } => {

@@ -10,7 +10,8 @@ use crate::error::{
 };
 use crate::message::{
     FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
-    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk, common::Location,
+    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{
     LocationFilter, LocationFilterContext, LocationFilterUpdate, MessageParameters,
@@ -70,44 +71,73 @@ impl Session {
 
     // ─── 受信ハンドラ ──────────────────────────────────────
 
-    pub(crate) fn handle_peer_subscribe(
+    /// SUBSCRIBE / TRACK_STATUS の受信前に共通で行う検証
+    ///
+    /// draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS): "The receiver of a TRACK_STATUS
+    /// message treats it identically as if it had received a SUBSCRIBE message, except it
+    /// does not create downstream subscription state or send any Objects." したがって
+    /// 受信前の検証 (Request ID / AUTHORIZATION_TOKEN / Range Filter 数 / 予約名前空間 /
+    /// `.session` 名前空間) は両メッセージで共通である。
+    ///
+    /// `false` を返した場合は request を受理しない (REQUEST_ERROR は本関数内で発行済み、
+    /// または `Err` でセッションを閉じている)。呼び出し側は `Ok(false)` で早期 return する。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(crate) fn accept_incoming_track_request(
         &mut self,
-        subscribe: Subscribe,
-    ) -> Result<(), SessionError> {
-        let request_id = subscribe.request_id;
-        if !self.accept_peer_request(request_id, &subscribe.parameters)? {
-            return Ok(());
+        request_id: u64,
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+        parameters: &MessageParameters,
+    ) -> Result<bool, SessionError> {
+        if !self.accept_peer_request(request_id, parameters)? {
+            return Ok(false);
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
-        self.apply_peer_message_auth_tokens(&subscribe.parameters)?;
+        self.apply_peer_message_auth_tokens(parameters)?;
         // draft-ietf-moq-transport-21 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否
-        if let Err(reason) = self.check_incoming_range_filters(&subscribe.parameters) {
+        if let Err(reason) = self.check_incoming_range_filters(parameters) {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
-            return Ok(());
+            return Ok(false);
         }
         // draft-ietf-moq-transport-21 は値域 MUST (§9.20.9 (GROUP ORDER Parameter) /
         // §9.20.22 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
         // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
         // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
         // 観測されるのは API 経路で手組みしたメッセージのみ)。
-        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間の SUBSCRIBE は拒否
-        if subscribe.track_namespace.is_single_period() {
+        // draft-ietf-moq-transport-21 §2.4.2 (Reserved Namespaces): single period `.` 予約名前空間は拒否
+        if track_namespace.is_single_period() {
             self.emit_request_error(
                 request_id,
                 REQUEST_DOES_NOT_EXIST,
                 "reserved single-period namespace",
             );
-            return Ok(());
+            return Ok(false);
         }
-        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間の SUBSCRIBE は内部処理
+        // draft §6.5 (Session-Level Tracks and Namespaces): .session 名前空間は内部処理
         // 未知のセッションレベルトラック/空トラック名は DOES_NOT_EXIST で拒否
-        if subscribe.track_namespace.is_session_level() {
-            let reason = if subscribe.track_name.is_empty() {
+        if track_namespace.is_session_level() {
+            let reason = if track_name.is_empty() {
                 "empty track name in .session namespace"
             } else {
                 "session-level track does not exist"
             };
             self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn handle_peer_subscribe(
+        &mut self,
+        subscribe: Subscribe,
+    ) -> Result<(), SessionError> {
+        let request_id = subscribe.request_id;
+        if !self.accept_incoming_track_request(
+            request_id,
+            &subscribe.track_namespace,
+            &subscribe.track_name,
+            &subscribe.parameters,
+        )? {
             return Ok(());
         }
         // draft-ietf-moq-transport-21 §3.1.1: 同一 Track への複数同時 subscription が許可されたため、

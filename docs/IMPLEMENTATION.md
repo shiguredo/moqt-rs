@@ -19,7 +19,7 @@
 - SUBSCRIBE / SUBSCRIBE_OK / REQUEST_UPDATE
 - FETCH / FETCH_OK
   - 単一形式のみ (range は LOCATION_FILTER で指定、Standalone / Joining の種別とメッセージ内 Start / End Location は廃止済み)
-- TRACK_STATUS (subscriber 側の送信と応答受信のみ。publisher 側の受信処理は未実装)
+- TRACK_STATUS (subscriber 側の送信と応答受信、publisher 側の受信と応答送信の両方。受信側は subscription state も Track Alias も作らない)
 
 ### Data stream / Datagram
 

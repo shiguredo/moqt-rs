@@ -15,10 +15,6 @@
   - `PARAM_RENDEZVOUS_TIMEOUT` と `MessageParameters::rendezvous_timeout`、`Subscription::subscriber_rendezvous_timeout_ms` を削除する
   - 当該パラメータを含む SUBSCRIBE は codec の未知パラメータ検証で拒否される
   - @voluntas
-- [CHANGE] TRACK_STATUS の受信側 (自側 publisher) を削除し、subscriber 側の送信と応答受信のみにする
-  - peer から TRACK_STATUS を受信した場合は未対応 request として `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
-  - `TrackStatusEntry` から `my_role` と `include_properties` を削除し、送信側専用の型にする
-  - @voluntas
 - [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
   - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
   - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
@@ -36,6 +32,12 @@
   - これまでは黙って無視されていたため、Properties を渡すつもりの誤った呼び出しが成立していた
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
+  - @voluntas
+- [ADD] TRACK_STATUS の受信側 (自側 publisher) を実装し、peer から受信した TRACK_STATUS に TRACK_STATUS_OK / REQUEST_ERROR で応答する
+  - draft-ietf-moq-transport-21 §6.3 (Session initialization) は TRACK_STATUS を request stream の開始メッセージとして許可するため、受信しても `PROTOCOL_VIOLATION` でセッションを閉じない
+  - 受信側は subscription state も Track Alias も作らず Objects も送らず、応答の送信後に bidi stream を FIN で閉じる (§9.13)
+  - 受信した TRACK_STATUS への応答は `send_request_ok` (TRACK_STATUS_OK) と `send_request_error` (REQUEST_ERROR) で送る
+  - `TrackStatusEntry` に `my_role` / `include_properties` / `terminated` を追加し、`INCLUDE_PROPERTIES=0` のとき TRACK_STATUS_OK の Track Properties を空にする (§9.20.22)
   - @voluntas
 - [FIX] エラー型に `core::error::Error` を実装する
   - `MessageError` / `NameParseError` / `ObjectFieldMismatch` を返す公開 API のエラーを `?` で `Box<dyn std::error::Error + Send + Sync>` へ変換できるようになる
@@ -238,7 +240,7 @@
   - REQUEST_OK に出現しうるのは EXPIRES / LARGEST_OBJECT のみであること、FORWARD は REQUEST_UPDATE 送信時に状態へ反映される値であることを明記する
   - @voluntas
 - [UPDATE] session の request stream 開始メッセージ一覧を実装に合わせる
-  - `recv_request` が受理するのは SUBSCRIBE / PUBLISH / FETCH の 3 種類であることを doc に明記する
+  - `recv_request` が受理するのは SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類であることを doc に明記する
   - @voluntas
 - [UPDATE] MSF の track / cloneTrack の JSON メンバー書き出しと共通検証を共通化する
   - @voluntas
