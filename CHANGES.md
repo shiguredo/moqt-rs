@@ -29,6 +29,10 @@
   - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
+- [CHANGE] 未到達 Request ID の保持上限 `MAX_OUT_OF_ORDER_REQUEST_IDS` を削除する
+  - draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` でのセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、仕様に無い条件で正当な peer を落とさないため
+  - 前縁が埋まらないまま飛び ID を送り続ける非準拠 peer では保持数が増え続けるが、interop への影響を避けるため許容する
+  - @voluntas
 - [CHANGE] 定義済みパラメータ RENDEZVOUS_TIMEOUT (0x04) を SUBSCRIBE で受理する
   - `PARAM_RENDEZVOUS_TIMEOUT` 定数と `SUBSCRIBE_ALLOWED_PARAMS` の登録を戻す (§9.20.7 / §16.7 Table 13)
   - `MessageParameters::rendezvous_timeout` と `Subscription::subscriber_rendezvous_timeout_ms` は戻さない (値を解釈しないため)

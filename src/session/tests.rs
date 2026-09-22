@@ -1,6 +1,6 @@
 use super::auth_token_cache::AuthTokenCache;
 use super::core::Session;
-use super::request_id::{MAX_OUT_OF_ORDER_REQUEST_IDS, RequestIdGenerator, RequestIdTracker};
+use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::subscription::validation::extract_forward_state;
 use super::types::*;
 use alloc::vec;
@@ -835,39 +835,46 @@ fn datagram_tracking_evicts_oldest_group_over_subscription_cap() {
     );
 }
 
-/// RequestIdTracker は未到達 Request ID の保持数に上限を設ける
+/// RequestIdTracker は未到達 Request ID の保持数に上限を設けない
 ///
-/// peer が連続受信前縁より先の Request ID を飛び飛びに送り続けても `above` が
-/// 無制限に増えないことを検証する。上限ちょうどまでは受理し、超過は
-/// INVALID_REQUEST_ID で拒否する。
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) が INVALID_REQUEST_ID でのセッション
+/// 終了を MUST とするのは parity 違反と重複の 2 条件だけである。前縁より先の Request ID を
+/// 大量に受け取っても受理し、前縁が埋まったら吸収して重複判定を維持する。
 #[test]
-fn peer_request_tracker_rejects_too_many_out_of_order_ids() {
+fn peer_request_tracker_accepts_unbounded_out_of_order_ids() {
+    // 旧実装の上限 (1024) を大きく超える 4096 件を、front を確定させず受理する
+    const COUNT: u64 = 4096;
     let mut tracker = RequestIdTracker::new(Role::Client);
-    // front を確定させず (id=0 を送らず) 飛び飛びの id を上限まで受理する
-    for i in 1..=MAX_OUT_OF_ORDER_REQUEST_IDS as u64 {
+    for i in 1..=COUNT {
         tracker
             .accept(i * 2)
-            .expect("上限までの未到達 request_id は受理されること");
+            .expect("上限を設けず未到達 request_id を受理すること");
     }
-    assert_eq!(tracker.seen_count(), MAX_OUT_OF_ORDER_REQUEST_IDS);
-    // 上限超過は INVALID_REQUEST_ID で拒否される
+    assert_eq!(tracker.seen_count(), COUNT as usize);
+
+    // 同じ id の再受信は重複として拒否される (保持しているため検出できる)
     let err = tracker
-        .accept((MAX_OUT_OF_ORDER_REQUEST_IDS as u64 + 1) * 2)
-        .expect_err("上限超過の未到達 request_id は拒否されること");
+        .accept(COUNT * 2)
+        .expect_err("保持済み id の再受信は重複として拒否されること");
     assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
-    // 拒否した request_id は累計受理数に数えない
-    assert_eq!(tracker.seen_count(), MAX_OUT_OF_ORDER_REQUEST_IDS);
-    // id=0 の受理で front が確定し above が全件吸収される
+
+    // parity 違反は従来どおり拒否される
+    let err = tracker.accept(1).expect_err("parity 違反は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+
+    // id=0 の受理で front が確定し above が全件吸収され、累計受理数は維持される
     tracker.accept(0).expect("front 確定の受理に成功すること");
-    assert_eq!(
-        tracker.seen_count(),
-        MAX_OUT_OF_ORDER_REQUEST_IDS + 1,
-        "吸収後も累計受理数は維持されること"
-    );
-    // 吸収後は above に空きができ、新しい未到達 id を受理できる
+    assert_eq!(tracker.seen_count(), COUNT as usize + 1);
+
+    // 吸収後も重複判定は変わらない
+    let err = tracker
+        .accept(2)
+        .expect_err("吸収済み id の再受信は重複として拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_REQUEST_ID);
+    // 前縁より先の新しい id は受理できる
     tracker
-        .accept((MAX_OUT_OF_ORDER_REQUEST_IDS as u64 + 1) * 2)
-        .expect("吸収後は上限がリセットされて受理できること");
+        .accept((COUNT + 1) * 2)
+        .expect("新しい未到達 id は受理されること");
 }
 
 /// 購読索引の登録・削除ヘルパの契約を検証する

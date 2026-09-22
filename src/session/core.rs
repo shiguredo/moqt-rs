@@ -934,8 +934,8 @@ impl Session {
     /// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
     /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う)。
-    /// また draft 由来ではない実装保護として、未到達 Request ID の保持上限
-    /// (`MAX_OUT_OF_ORDER_REQUEST_IDS`) 超過でも同じ `INVALID_REQUEST_ID` で閉じる。
+    /// 仕様がセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
+    /// 未到達 Request ID の保持数に上限は設けない。
     ///
     /// draft §6.3 (Session initialization): SETUP 完了前に request stream が到着することは
     /// 許容される。本 API は session state を変えずに

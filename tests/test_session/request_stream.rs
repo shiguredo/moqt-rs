@@ -351,6 +351,50 @@ fn recv_subscribe_with_rendezvous_timeout_is_accepted() {
     );
 }
 
+/// 前縁より先の Request ID を大量に受信してもセッションを閉じない
+///
+/// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` での
+/// セッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
+/// 未到達 Request ID の保持数に上限は設けない。
+#[test]
+fn recv_many_out_of_order_request_ids_keeps_session_open() {
+    use shiguredo_moqt::message::{Subscribe, common::TrackNamespace};
+    let (_client, mut server) = establish_pair();
+    // Client 役の peer は偶数を採番する。0 を送らずに飛び ID を大量に送る。
+    for i in 1..=4096u64 {
+        server
+            .recv_request(ControlMessage::Subscribe(Subscribe {
+                request_id: i * 2,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("正当な namespace である"),
+                track_name: b"cam".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .expect("未到達 Request ID の飛び ID は受理されること");
+    }
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "未到達 Request ID の保持数でセッションを閉じないこと"
+    );
+    // 保持済み id の再受信は従来どおり重複として拒否される
+    let err = server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: 2,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"cam2".to_vec(),
+            parameters: MessageParameters::new(),
+        }))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_INVALID_REQUEST_ID
+    );
+}
+
 // ─── recv_request_stream_closed ──────────────────
 
 /// 自側が requester のとき responder の FIN で subscription が Terminated に遷移し、

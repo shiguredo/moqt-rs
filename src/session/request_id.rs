@@ -9,15 +9,6 @@ use crate::error::SESSION_INVALID_REQUEST_ID;
 
 use super::types::{Role, SessionError};
 
-/// `RequestIdTracker::above` に保持できる未到達 Request ID の上限
-///
-/// peer が「連続受信前縁より先」の Request ID を飛び飛びに送り続けると `above` が
-/// 無制限に増え、メモリを消費する。上限超過は [`SessionError`] (INVALID_REQUEST_ID)
-/// として拒否し、セッションを閉じさせる。
-///
-/// 1024 は同時に未到達な request 数として十分大きく、通常運用では到達しない値として選ぶ。
-pub const MAX_OUT_OF_ORDER_REQUEST_IDS: usize = 1024;
-
 /// Request ID 採番器 (自側)
 ///
 /// draft-ietf-moq-transport-21 §6.4.2.1 (Request ID):
@@ -68,8 +59,14 @@ impl RequestIdGenerator {
 ///
 /// 内部表現として「連続受信前縁 `front`」と「飛び飛びに受信したストラグラ集合 `above`」を保持する。
 /// これにより peer が request を開閉し続けてもメモリは「同時に未到達な穴の上の受信済み id」数に
-/// 比例し、累積受信総数には比例しない。`above` の件数には
-/// [`MAX_OUT_OF_ORDER_REQUEST_IDS`] の上限を設け、超過時は INVALID_REQUEST_ID を返す。
+/// 比例し、累計受信総数には比例しない。
+///
+/// §6.4.2.1 (Request ID) が `INVALID_REQUEST_ID` でのセッション終了を MUST とするのは
+/// parity 違反と重複の 2 条件だけであり、`above` の件数に上限を設けて超過時にセッションを
+/// 閉じることは同節に無い。仕様に準拠した peer は Request ID を 2 ずつ連番で使うため前縁が
+/// 埋まるたびに `above` から吸収され、保持数は同時に未到達な request 数で抑えられる。
+/// 前縁が埋まらないまま飛び ID を送り続ける非準拠 peer では `above` が増え続けるが、
+/// 上限超過で正当な peer を落とす方が interop への影響が大きいため、この増加は許容する。
 #[derive(Debug, Clone)]
 pub struct RequestIdTracker {
     peer_role: Role,
@@ -143,19 +140,6 @@ impl RequestIdTracker {
             return Err(SessionError::new(
                 SESSION_INVALID_REQUEST_ID,
                 "duplicate request id",
-            ));
-        }
-
-        // above への新規挿入になる場合、上限を超えていないか確認する。
-        // front 前進で above から吸収される場合は挿入しないため対象外。
-        let is_in_order = match self.front {
-            None => idx == 0,
-            Some(front) => idx == self.to_index(front).saturating_add(1),
-        };
-        if !is_in_order && self.above.len() >= MAX_OUT_OF_ORDER_REQUEST_IDS {
-            return Err(SessionError::new(
-                SESSION_INVALID_REQUEST_ID,
-                "too many out-of-order request ids",
             ));
         }
 
