@@ -45,8 +45,19 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) / §6.4.2.3
     /// (Request Cancellation and Rejection): FIN はその方向に送るメッセージが終わったこと
-    /// だけを示し、cancel は RESET_STREAM / STOP_SENDING で表現される。state を `Terminated`
-    /// にし、`request_streams` から除去することで、以降の close 通知が重複処理されないようにする。
+    /// だけを示し、cancel は RESET_STREAM / STOP_SENDING で表現される。
+    ///
+    /// 自側が SUBSCRIBE の responder のときに peer の FIN を受けた場合は、応答
+    /// (SUBSCRIBE_OK / REQUEST_ERROR) と確立後の data 送信を塞がないよう request を
+    /// 終端しない。呼び出し側 (`recv_request_stream_closed`) が peer FIN の受信だけを記録して
+    /// 本関数を呼ばないため、ここに到達するのは次のいずれかである。
+    ///
+    /// - `RequestStreamEnd::Reset` (cancel)
+    /// - 自側が requester のときの responder の FIN (要求の完了通知)
+    /// - PUBLISH 起点の responder が受けた peer FIN (PUBLISH_DONE 受信後の完了通知)
+    ///
+    /// state を `Terminated` にし、`request_streams` から除去することで、以降の close 通知が
+    /// 重複処理されないようにする。
     pub(crate) fn close_subscription_on_stream_end(
         &mut self,
         request_id: u64,
@@ -60,12 +71,19 @@ impl Session {
         };
         sub.state = SubscriptionState::Terminated;
         // draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams):
-        // subscription のキャンセル時は open 中の fill fetch stream を reset する (MUST)。
+        // "When the subscription is cancelled, the publisher MUST reset any open fill fetch
+        // streams." 自側が publisher 役のときは open 中の fill fetch stream を持ちうるため、
+        // 終端時は reset する (subscriber 役の subscription は fill fetch stream を開かない
+        // ため no-op になる。`maybe_open_fill_stream` 参照)。cancel (§6.4.2.3 (Request
+        // Cancellation and Rejection)) は RESET_STREAM / STOP_SENDING であり、FIN による
+        // 終端は cancel ではない。
         self.reset_open_fill_streams(request_id);
-        // クローズ通知を受信済みの request は request_streams から除去する。これにより
-        // 同じ subscription への遅延した終端通知で `RequestTerminated` を二重に発行したり
-        // `rejected_request_ids` に close 済み id を登録したりしない。
+        // クローズ通知を受信済みの request は request_streams と peer FIN の記録から除去する。
+        // これにより同じ subscription への遅延した終端通知で `RequestTerminated` を
+        // 二重に発行したり `rejected_request_ids` に close 済み id を登録したりしない。
         self.request_streams.remove(&request_id);
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
         Ok(terminationreason_from_end(end))
     }
 
@@ -1054,6 +1072,7 @@ impl Session {
             // PUBLISH_DONE は subscription の最終メッセージのため送信後に FIN する (§9.9)
             fin: true,
         });
+        self.mark_send_direction_closed_with_fin(request_id);
         Ok(())
     }
 }

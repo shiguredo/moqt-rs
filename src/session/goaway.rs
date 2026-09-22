@@ -242,8 +242,11 @@ impl Session {
 
     /// request stream 上の GOAWAY の reset deadline を解除する
     ///
-    /// peer の FIN / RESET_STREAM 受信、`forget_*`、ローカル送信方向を FIN または RESET_STREAM で
-    /// 閉じた後に呼ぶ。以後 reset を送る意味がなくなるため deadline を破棄する。
+    /// request の終端が確定した後、または自側が送信方向を FIN / RESET_STREAM で閉じた後に
+    /// 呼ぶ。以後 reset を送る意味がなくなるため deadline を破棄する。
+    /// 自側が responder のときに peer の FIN を受けただけの場合 (`RequestStreamEnd::Fin`) は
+    /// 解除しない。応答を送るまで送信方向が開いており reset の必要が残るためである。
+    /// peer の RESET_STREAM は request を即時終端するので終端経路で解除される。
     pub(super) fn clear_request_stream_goaway_deadline(&mut self, request_id: u64) {
         self.goaway.request_stream_deadlines.remove(&request_id);
     }

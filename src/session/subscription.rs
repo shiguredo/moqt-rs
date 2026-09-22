@@ -104,6 +104,8 @@ impl Session {
         self.clear_control_message_deadline(request_id);
         self.clear_request_stream_goaway_deadline(request_id);
         self.request_streams.remove(&request_id);
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
         let track_key = (
             subscription.track_namespace.clone(),
             subscription.track_name.clone(),

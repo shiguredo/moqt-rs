@@ -174,6 +174,12 @@
   - @voluntas
 - [FIX] 受信した REQUEST_UPDATE の Request ID を parity と重複について検証し、違反時は INVALID_REQUEST_ID でセッションを閉じる
   - @voluntas
+- [FIX] requester の FIN で responder が必須応答を送れなくなる問題を修正する
+  - FIN は方向ごとの終端であり cancel ではないため (draft-ietf-moq-transport-21 §6.4.2.2)、自側が SUBSCRIBE / FETCH の responder のときは peer の FIN では request を終端しない
+  - 自側が responder の request は、peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で `RequestTerminated { reason: PeerStreamFin }` を発行する (FIN の到着順に依存しない)
+  - cancel は従来どおり `RequestStreamEnd::Reset` で即時に終端する (§6.4.2.3)
+  - subscription の終端時は従来どおり open 中の fill fetch stream を reset する (§3.4.1)
+  - @voluntas
 
 ### misc
 

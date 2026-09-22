@@ -565,6 +565,10 @@ fn fill_fetch_header_with_unknown_request_id_closes_session() {
 
 /// subscription のキャンセル時は open 中の fill fetch stream を reset する
 /// (draft-ietf-moq-transport-21 §3.4.1)
+///
+/// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) は cancel を
+/// RESET_STREAM / STOP_SENDING と定める。FIN は「その方向にもうメッセージを送らない」
+/// ことだけを示し cancel ではないため、キャンセルは RESET_STREAM で表現する。
 #[test]
 fn cancel_subscription_resets_open_fill_streams() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -580,9 +584,15 @@ fn cancel_subscription_resets_open_fill_streams() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 1);
 
-    // bidi request stream の FIN で subscription をキャンセルする
+    // bidi request stream の RESET_STREAM で subscription をキャンセルする
     server
-        .recv_request_stream_closed(sub_rid, RequestStreamEnd::Fin)
+        .recv_request_stream_closed(
+            sub_rid,
+            RequestStreamEnd::Reset {
+                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                reliable_size: None,
+            },
+        )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 0);
     let mut saw_reset = false;
@@ -603,6 +613,123 @@ fn cancel_subscription_resets_open_fill_streams() {
         }
     }
     assert!(saw_reset, "open 中の fill stream は reset されること");
+}
+
+/// PUBLISH 起点で自側が publisher の subscription でも、peer の終端で
+/// open 中の fill fetch stream を reset する
+///
+/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
+/// subscription is cancelled, the publisher MUST reset any open fill fetch streams."
+/// 自側が PUBLISH を送った側 (publisher 役) は peer の終端で購読が Terminated になるため、
+/// 残った fill fetch stream を reset して追跡から除去する。
+#[test]
+fn publish_origin_peer_fin_resets_open_fill_streams() {
+    let (mut client, mut server) = establish_pair();
+    // server が PUBLISH を送り、client が受信して subscriber 役になる
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            910,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut server);
+    client
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // client の REQUEST_OK で server 側の購読が Established になる
+    server
+        .recv_stream_message(
+            pub_rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server
+            .subscription(pub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        shiguredo_moqt::session::types::SubscriptionState::Established
+    );
+    // fill の開設判定には観測済み Largest Object が要るため、publisher が 1 件公開する
+    server
+        .send_subgroup_header(
+            DataStreamId(401),
+            pub_rid,
+            &SubgroupHeader {
+                track_alias: 910,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(DataStreamId(401), 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // peer (subscriber) が REQUEST_UPDATE で fill を要求する。PUBLISH 起点では
+    // 購読を確立した側が publisher であるため、subscriber 側は Pending のまま送る
+    // (ワイヤ上のメッセージとして注入する。fill の開設は state に依存しない)
+    let mut update = MessageParameters::new();
+    update.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(MessageParameters::new()),
+    });
+    // client (subscriber) 側の採番は偶数である (draft-ietf-moq-transport-21 §6.4.2.1 (Request ID))
+    let update_rid = pub_rid + 1;
+    server
+        .recv_stream_message(
+            pub_rid,
+            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+                request_id: update_rid,
+                parameters: update,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+    server
+        .send_fill_fetch_header(DataStreamId(400), update_rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(server.open_outgoing_fill_stream_count(pub_rid), 1);
+
+    // peer (subscriber) の終端で購読が Terminated になり、open 中の fill stream を reset する
+    server
+        .recv_request_stream_closed(pub_rid, RequestStreamEnd::Fin)
+        .expect("peer の終端通知を受理すること");
+    assert_eq!(
+        server
+            .subscription(pub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        shiguredo_moqt::session::types::SubscriptionState::Terminated
+    );
+    assert_eq!(server.open_outgoing_fill_stream_count(pub_rid), 0);
+    let mut saw_reset = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::ResetDataStream {
+            stream_id,
+            error_code,
+            ..
+        } = e
+        {
+            assert_eq!(stream_id, DataStreamId(400));
+            assert_eq!(error_code, STREAM_CANCELLED);
+            saw_reset = true;
+        }
+    }
+    assert!(
+        saw_reset,
+        "publisher 役の subscription でも open 中の fill stream は reset されること"
+    );
 }
 
 /// FILL 内側の Range Filter 不正は INVALID_FILTER で拒否し fill を開かない
@@ -919,6 +1046,9 @@ fn fill_with_next_object_overflow_opens_saturated_range() {
 
 /// 複数本の fill stream はキャンセル時にまとめて reset される
 /// (draft-ietf-moq-transport-21 §3.4.1)
+///
+/// キャンセルは draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) に
+/// 従い RESET_STREAM で表現する (FIN は cancel ではない)。
 #[test]
 fn cancel_subscription_resets_all_open_fill_streams() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -941,7 +1071,13 @@ fn cancel_subscription_resets_all_open_fill_streams() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 2);
     server
-        .recv_request_stream_closed(sub_rid, RequestStreamEnd::Fin)
+        .recv_request_stream_closed(
+            sub_rid,
+            RequestStreamEnd::Reset {
+                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                reliable_size: None,
+            },
+        )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 0);
     let mut resets = Vec::new();

@@ -523,6 +523,9 @@ impl Session {
                     // PUBLISH_DONE が最終メッセージのため送信後に FIN する (§9.9)
                     fin: true,
                 });
+                // PUBLISH 起点 (自側が PUBLISH を送った側) の request は peer FIN を
+                // `peer_fin_received` に記録しないため、ここで request の終端が確定することは
+                // ない (`finish_request_on_fin_exchange` は早期 return する)。
             }
         }
         Ok(())

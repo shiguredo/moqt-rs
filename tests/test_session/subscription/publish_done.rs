@@ -1298,3 +1298,123 @@ fn fill_fetch_stream_overrun_counts_closed_and_late_streams() {
         "close 済み fill の累計を保持して overrun を判定すること"
     );
 }
+
+/// requester の FIN 後に responder が拒否した場合も、保留 PUBLISH_DONE の送信で
+/// request が終端する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) は FIN を方向ごとの
+/// 終端として定義し cancel と区別するため、requester の FIN では request を終端しない。
+/// §9.9 (PUBLISH_DONE) の MUST NOT により open 中の outgoing data stream がある間は
+/// PUBLISH_DONE を保留し、全 stream 終端後に送る。その送信が自側の送信方向を閉じるため、
+/// 保留経路でも peer FIN 受信済みなら `RequestTerminated(PeerStreamFin)` が発行される。
+#[test]
+fn pending_publish_done_flush_terminates_request_after_requester_fin() {
+    use shiguredo_moqt::error::REQUEST_INVALID_FILTER;
+    use shiguredo_moqt::message::RequestUpdate;
+
+    let (mut client, mut server) = establish_pair();
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 保留の条件を作るため open 中の outgoing subgroup stream を 1 本持つ
+    // (PUBLISH_DONE は全 stream 終端まで送れない)
+    server
+        .send_subgroup_header(
+            DataStreamId(1),
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // requester (subscriber) が送信方向を FIN で閉じる
+    server
+        .recv_request_stream_closed(sub_rid, RequestStreamEnd::Fin)
+        .expect("requester の FIN は responder の subscription を終端しないこと");
+    assert_eq!(
+        server
+            .subscription(sub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "requester の FIN 後も responder 側の subscription は Established を維持すること"
+    );
+
+    // Range Filter 1 個を持つ REQUEST_UPDATE を MAX_FILTER_RANGES=0 の peer へ送るため、
+    // REQUEST_UPDATE を直接注入して INVALID_FILTER で拒否させる
+    let mut rejected = MessageParameters::new();
+    rejected.push(one_range_subgroup_filter_with_set_id(0));
+    server
+        .recv_stream_message(
+            sub_rid,
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: sub_rid + 2,
+                parameters: rejected,
+            }),
+        )
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    let mut saw_rejection = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::SendOnStream {
+            message: ControlMessage::RequestError(err),
+            fin,
+            ..
+        } = e
+        {
+            assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+            assert!(
+                !fin,
+                "PUBLISH_DONE が続くため REQUEST_ERROR では FIN しない"
+            );
+            saw_rejection = true;
+        }
+    }
+    assert!(
+        saw_rejection,
+        "INVALID_FILTER の REQUEST_ERROR が発行されること"
+    );
+
+    // 最後の outgoing stream を終端すると保留 PUBLISH_DONE が FIN 付きで送られ、
+    // そこで request の終端が確定する
+    server
+        .send_data_stream_closed(DataStreamId(1), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Subscribe,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, sub_rid);
+            got = true;
+        }
+    }
+    assert!(
+        got,
+        "保留 PUBLISH_DONE の flush でも RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}

@@ -44,6 +44,10 @@ impl Session {
         let entry = self.track_status_requests.get(&request_id)?;
         entry.response.as_ref()?;
         self.request_streams.remove(&request_id);
+        // TRACK_STATUS は本ライブラリでは送信側のみを実装するため、FIN 交換の記録は
+        // 到達しない。将来 responder 側を実装したときの解除漏れを防ぐための防御である。
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
         self.clear_request_stream_goaway_deadline(request_id);
         self.track_status_requests.remove(&request_id)
     }

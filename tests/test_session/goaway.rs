@@ -1400,9 +1400,12 @@ fn request_stream_goaway_pending_timeout_starts_at_first_tick() {
     assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
 }
 
-/// peer の stream 終端で request stream GOAWAY の reset deadline は解除される
+/// requester が responder の FIN を受けると request stream GOAWAY の reset deadline は
+/// 解除される
+///
+/// 自側が requester のとき peer FIN は request の終端なので、以後 reset を送る意味がない。
 #[test]
-fn request_stream_goaway_deadline_is_cleared_by_peer_stream_close() {
+fn request_stream_goaway_deadline_is_cleared_by_responder_fin() {
     let (mut client, _server, rid) = establish_subscribe_track(903);
     client.tick(1_000);
     client
@@ -1419,6 +1422,78 @@ fn request_stream_goaway_deadline_is_cleared_by_peer_stream_close() {
             "終端後は reset しないこと"
         );
     }
+}
+
+/// responder が requester の FIN を受けた後に PUBLISH_DONE を送ると deadline は解除される
+///
+/// 両方向が FIN で閉じて request が終端したため、以後 reset を送る意味がなくなる。
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_fin_exchange_on_responder() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    let (_client, mut server, rid) = establish_subscribe_track(911);
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    // peer (requester) の FIN は responder の request を終端しないため deadline は残る
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("requester の FIN の通知に成功すること");
+    // 自側の最終メッセージ (PUBLISH_DONE) で両方向が閉じ、request が終端する
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            ReasonPhrase::new("ended").expect("正当な reason phrase である"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    server.tick(1_200);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "両方向の FIN で終端した後は reset しないこと"
+        );
+    }
+}
+
+/// responder が requester の FIN を受けても request stream GOAWAY の reset deadline は維持される
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) により、requester の
+/// FIN は responder の request を終端しない。応答を送るまで自側の送信方向は開いているため、
+/// GOAWAY の timeout で reset する余地を残す (§9.2 (GOAWAY): "When sent on a request stream,
+/// the sender SHOULD reset the stream with GOING_AWAY after the indicated timeout.")。
+#[test]
+fn request_stream_goaway_deadline_survives_requester_fin_on_responder() {
+    use shiguredo_moqt::error::STREAM_GOING_AWAY;
+    let (_client, mut server, rid) = establish_subscribe_track(910);
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+    // requester の FIN は responder の request を終端しない
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("requester の FIN の通知に成功すること");
+    server.tick(1_100);
+    let mut resets = Vec::new();
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::ResetRequestStream {
+            request_id,
+            error_code,
+        } = e
+        {
+            resets.push((request_id, error_code));
+        }
+    }
+    assert_eq!(
+        resets,
+        vec![(rid, STREAM_GOING_AWAY)],
+        "requester の FIN 後も deadline が残り、期限到達で 1 回だけ reset すること"
+    );
 }
 
 /// forget で request stream GOAWAY の reset deadline は解除される

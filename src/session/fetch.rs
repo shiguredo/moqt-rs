@@ -151,6 +151,8 @@ impl Session {
             self.rejected_request_ids.insert(request_id);
         }
         self.request_streams.remove(&request_id);
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
         self.clear_request_stream_goaway_deadline(request_id);
         self.remove_incoming_data_streams_for_request(request_id);
         // outgoing_fetch には timing エントリが紐付かないため、エントリの除去のみでよい
@@ -164,10 +166,15 @@ impl Session {
 
     /// bidi request stream 終端時の FETCH 側の処理
     ///
-    /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) に従い、bidi request
-    /// stream の終端で Fetch の state を `Terminated` に遷移させる。これは
-    /// FETCH データ stream (uni) の終端とは別で、
-    /// request 自体の打ち切り処理。
+    /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) に従い、bidi
+    /// request stream の終端で Fetch の state を `Terminated` に遷移させる。FETCH データ
+    /// stream (uni) の終端とは別で、request 自体の打ち切り処理である。
+    ///
+    /// 到達しうるのは `RequestStreamEnd::Reset` (cancel) と、自側が requester のときの
+    /// responder の FIN (要求の完了通知) である。自側が responder の FETCH では peer FIN を
+    /// 終端として扱わないため、呼び出し元 (`recv_request_stream_closed`) が先に分岐する。
+    /// subscriber 役の fetch は応答 (FETCH_OK / REQUEST_ERROR) もデータストリームも送信せず、
+    /// fill fetch stream のような付随 stream も持たないため、state の遷移だけで足りる。
     pub(super) fn close_fetch_on_stream_end(
         &mut self,
         request_id: u64,

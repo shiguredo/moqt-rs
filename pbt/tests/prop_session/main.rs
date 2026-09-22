@@ -10,5 +10,6 @@ mod fetch;
 mod goaway;
 mod handshake;
 mod request_id;
+mod request_stream;
 mod subgroup;
 mod subscription;

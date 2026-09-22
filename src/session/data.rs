@@ -854,6 +854,7 @@ impl Session {
             // PUBLISH_DONE が最終メッセージのため送信後に FIN する (§9.9)
             fin: true,
         });
+        self.mark_send_direction_closed_with_fin(request_id);
     }
 
     /// peer から自端点が開いた uni data stream へ STOP_SENDING が届いたことを通知する
@@ -2691,6 +2692,8 @@ impl Session {
         if self.request_streams.remove(&request_id).is_some() {
             self.rejected_request_ids.insert(request_id);
         }
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
         // draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) の cancel 手順に従い、受信方向を
         // 先に STOP_SENDING で打ち切り、続けて送信方向を RESET_STREAM で打ち切るよう I/O 層へ
         // 指示する (送信方向が既に FIN / RESET 済みの場合の扱いは `ResetRequestStream` の doc 参照)。

@@ -44,7 +44,7 @@ use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::types::{
     DataStreamId, DeadlineTimer, Fetch, PeerGoawayInfo, RecvRequestError, RequestKind,
     RequestStreamEnd, Role, SendRequestError, SessionError, SessionEvent, SessionState,
-    Subscription, SubscriptionState, TrackRole, TrackStatusEntry, Transport,
+    Subscription, SubscriptionState, TerminationReason, TrackRole, TrackStatusEntry, Transport,
 };
 
 /// 1 本の `MOQT Transport Session` に閉じた sans-I/O 状態機械
@@ -365,6 +365,43 @@ pub struct Session {
     /// クローズ通知の受信時に削除される。peer がクローズ通知を送らない場合は
     /// セッション生存中に残り続ける (サイズは「拒否後・破棄済みのうち未クローズの id 数」に比例する)。
     pub(super) rejected_request_ids: HashSet<u64>,
+    /// 自側が responder の request で peer の FIN を受信済みの request id の集合
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): "A FIN only
+    /// indicates that an endpoint will send no further messages in that direction; it is not
+    /// a request cancellation." また §6.4.2.3 (Request Cancellation and Rejection) は cancel を
+    /// RESET_STREAM / STOP_SENDING と定める。したがって自側が responder の SUBSCRIBE / FETCH で
+    /// peer の FIN を受けても request は終端せず、応答 (SUBSCRIBE_OK / FETCH_OK /
+    /// REQUEST_ERROR) の送信経路を塞がない。この節番号・規則は draft 由来であり将来 draft
+    /// 改定で変わる可能性がある。
+    ///
+    /// 記録するのは SUBSCRIBE と FETCH の responder である。bidi stream は方向ごとに独立に
+    /// 閉じるため、request の終端は両方向が閉じた時点、すなわち本集合と
+    /// `local_fin_sent` の両方に id が入った時点で [`Session::finish_request_on_fin_exchange`]
+    /// が確定させる (順序に依存しない)。`Session::send_fetch_ok` は送信方向を閉じない
+    /// (`fin: false`) ため、FETCH の responder は自側の最終メッセージが単独 REQUEST_ERROR の
+    /// ときにだけ終端する。それ以外の FETCH の終端は `RequestStreamEnd::Reset`、
+    /// `Session::fetch_stop_sending_received`、FETCH データストリームの終端、
+    /// [`Session::forget_fetch`] に委ねる。
+    ///
+    /// 不変条件: 本集合の id は必ず `request_streams` にも entry を持つ。両者は常に同時に
+    /// 除去する (`Session::close_fetch_on_stream_end` は `request_streams` を除去しないため、
+    /// requester 側の fetch が本集合に入らないことを前提に解除も行わない)。
+    pub(super) peer_fin_received: HashSet<u64>,
+    /// 自側が送信方向を最終メッセージとともに FIN で閉じた request id の集合
+    ///
+    /// `peer_fin_received` と対になる記録である。draft-ietf-moq-transport-21 §6.4.2.2
+    /// (Graceful Request Stream Closure) の FIN は方向ごとの終端であり、request の終端は
+    /// 両方向が閉じた時点で確定する。したがって「自側が最終メッセージを送った」事実も
+    /// 記録し、peer の FIN と揃った時点で [`Session::finish_request_on_fin_exchange`] が
+    /// `SessionEvent::RequestTerminated { reason: PeerStreamFin }` を発行する。
+    ///
+    /// 記録するのは `fin: true` で最終メッセージを送る経路 (PUBLISH_DONE、単独
+    /// REQUEST_ERROR) である。解除は `peer_fin_received` と同時に行う。peer の FIN が届かな
+    /// ければ `Session::forget_subscription` などによる破棄まで残る (id 数の上限は
+    /// `request_streams` と同じ)。この節番号・規則は draft 由来であり将来 draft 改定で
+    /// 変わる可能性がある。
+    pub(super) local_fin_sent: HashSet<u64>,
     pub(super) goaway: GoawayState,
     pub(super) timing: TimingState,
     /// request stream ごとの自側送信 outstanding REQUEST_UPDATE 数 (draft-ietf-moq-transport-21 §9.1.7 (MAX_REQUEST_UPDATES))
@@ -535,6 +572,8 @@ impl Session {
             my_subgroups: SubgroupTracker::new(),
             request_streams: HashMap::new(),
             rejected_request_ids: HashSet::new(),
+            peer_fin_received: HashSet::new(),
+            local_fin_sent: HashSet::new(),
             goaway: GoawayState {
                 local_sent: false,
                 request_stream_sent: HashSet::new(),
@@ -935,9 +974,37 @@ impl Session {
     /// bidi request stream の終端 (FIN / RESET_STREAM) を session に通知する
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection): request の
-    /// cancel / reject はストリーム方向の終端で表現される。本 API は state machine を
-    /// `Terminated` 相当に進め、
-    /// `SessionEvent::RequestTerminated { request_id, kind, reason }` を発行する。
+    /// cancel / reject はストリーム方向の終端で表現される。`Reset` は request の打ち切り
+    /// として即時に `Terminated` 相当へ進め、`SessionEvent::RequestTerminated { reason:
+    /// PeerStreamReset }` を発行する。
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) は FIN を
+    /// 方向ごとの終端として定義し、cancel とは区別する。そのため FIN の扱いは終端の方向では
+    /// なく自側の役割で分岐する。
+    ///
+    /// - 自側が requester のとき: responder の FIN は「応答とそれに続くメッセージを送り
+    ///   終えた」通知なので従来どおり終端する。送信方向を閉じるための
+    ///   [`SessionEvent::FinishRequestStream`] も発行する。
+    /// - 自側が SUBSCRIBE の responder のとき: FIN は requester がもうメッセージを
+    ///   送らないことしか意味せず、request は終端しない。応答の MUST
+    ///   (§3.1 (Subscriptions)) を果たす送信経路を塞がないよう、peer FIN の受信だけを
+    ///   `peer_fin_received` に記録して `Terminated` へは遷移させない。自側が送信方向を
+    ///   最後に閉じる時点で `RequestTerminated { reason: PeerStreamFin }` を発行する。
+    /// - 自側が FETCH の responder のとき: 同じく終端せず、peer FIN の受信も記録する。
+    ///   ただし `Session::send_fetch_ok` が送信方向を閉じないため終端イベントは発行されず、
+    ///   記録は `forget_fetch` まで残る。
+    /// - 自側が PUBLISH 起点の responder のとき: PUBLISH の送信者は §6.4.2.2 の例外であり
+    ///   PUBLISH_DONE を送る前に FIN できないため、peer FIN は PUBLISH_DONE 受信後の
+    ///   完了通知である。従来どおり終端する。
+    ///
+    /// PUBLISH 起点で自側が PUBLISH を送った側 (publisher 役) の組合せは、本 API が peer FIN を
+    /// 一律に終端として扱うため未対応である。§3.1 (Subscriptions) は購読の終端を publisher の
+    /// PUBLISH_DONE と subscriber の STOP_SENDING に限るため、subscriber の FIN で終端して
+    /// しまうと publisher はその後の PUBLISH_DONE を送れなくなる。PUBLISH を受けた側
+    /// (subscriber 役) は PUBLISH_DONE を送る立場にないため、peer FIN での終端は
+    /// PUBLISH_DONE 受信後の完了通知として妥当である。節番号・規則は draft 由来であり
+    /// 将来 draft 改定で変わる可能性がある。
+    ///
     /// 呼び出し側は後続で `forget_*` を呼んでマップから除去する責務を持つ。
     ///
     /// 不明な `request_id` (既に forget 済みの場合を含む) は `PROTOCOL_VIOLATION` で
@@ -951,22 +1018,31 @@ impl Session {
     /// 拒否済み・破棄済みのため state を持たず no-op で吸収する。登録済み request への
     /// REQUEST_ERROR (REQUEST_UPDATE 拒否等) のクローズは `request_streams` 経由で処理され、
     /// `RequestTerminated` が発行される。
-    /// close 通知は 1 回のみを想定しており、2 回目以降の通知は unknown id として
-    /// `PROTOCOL_VIOLATION` になる。将来 draft が変更される可能性がある。
+    /// 終端済み request への 2 回目以降の close 通知は原則 unknown id として
+    /// `PROTOCOL_VIOLATION` になるが、responder が peer FIN を `peer_fin_received` に
+    /// 記録して return する経路 (SUBSCRIBE / FETCH) だけは冪等な no-op になる。
+    /// 将来 draft が変更される可能性がある。
     pub fn recv_request_stream_closed(
         &mut self,
         request_id: u64,
         end: RequestStreamEnd,
     ) -> Result<(), SessionError> {
         self.clear_control_message_deadline(request_id);
-        // peer の FIN / RESET_STREAM 受信後は request stream GOAWAY の reset は不要
-        self.clear_request_stream_goaway_deadline(request_id);
+        // request stream GOAWAY の reset deadline はここでは解除しない。自側が responder の
+        // 場合は送信方向がまだ開いており、応答を送るまで reset の必要が残るためである
+        // (解除は request の終端が確定した時点、または自側が最後のメッセージを送る経路で
+        // 行う。`Session::send_fetch_ok` は送信方向を閉じないため、FETCH responder が
+        // peer FIN を受けた場合は deadline が残る)。
         let Some(kind) = self.request_streams.get(&request_id).copied() else {
             // REQUEST_ERROR 拒否済み request id のクローズは通常フローであり
             // (draft §6.4.2.2: bidi の各方向は独立に閉じる。拒否する側は REQUEST_ERROR +
             // FIN を送る (SHOULD, §6.4.2.3) ため peer も自分の送信方向を閉じる)、
             // プロトコル違反ではない。state を持たないため集合から削除して no-op で返す。
             if self.rejected_request_ids.remove(&request_id) {
+                // 拒否済み request の stream は既に自側が閉じているため、GOAWAY の reset は
+                // 不要になる (request_streams 未登録の id に deadline が残っている場合に備える)
+                self.clear_request_stream_goaway_deadline(request_id);
+                self.local_fin_sent.remove(&request_id);
                 return Ok(());
             }
             let err = SessionError::new(
@@ -976,20 +1052,37 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        // 一方向変換 (`RequestKind` -> `RequestTable`) を 1 箇所に集約し、他の request 応答の
-        // dispatch と同じ state テーブル単位で分岐する
+        // 自側が SUBSCRIBE / FETCH の responder なら、peer FIN の受信だけを記録して
+        // return する (終端の確定は `finish_request_on_fin_exchange` が担う)。
+        if matches!(end, RequestStreamEnd::Fin)
+            && matches!(kind, RequestKind::Subscribe | RequestKind::Fetch)
+            && !self.is_local_requester(request_id, kind)
+        {
+            self.peer_fin_received.insert(request_id);
+            // 自側が既に最終メッセージを送っていれば両方向が閉じたため、request の終端を
+            // 確定する。まだ送っていなければ、送信時 (fin: true) に確定する。
+            self.finish_request_on_fin_exchange(request_id);
+            return Ok(());
+        }
+        // peer の RESET_STREAM は cancel であり、FIN は自側が requester のときの
+        // responder 側の終端である。いずれも request を終端する。3 分岐の dispatch を
+        // 1 つの `Result` に集約し、session の fail 処理を 1 箇所に保つ。
         let reason_result = match RequestTable::from_kind(kind) {
             RequestTable::Subscription => self.close_subscription_on_stream_end(request_id, end),
             RequestTable::Fetch => self.close_fetch_on_stream_end(request_id, end),
             RequestTable::TrackStatus => self.close_track_status_on_stream_end(request_id, end),
         };
         let reason = match reason_result {
-            Ok(r) => r,
+            Ok(reason) => reason,
             Err(err) => {
                 self.fail(err.clone());
                 return Err(err);
             }
         };
+        // request の終端が確定したため request stream GOAWAY の reset は不要になる。自側が
+        // responder で peer FIN を受けただけの場合は上で return しており、送信方向がまだ
+        // 開いているため deadline は維持する (自側が最後のメッセージを送る時点で解除する)。
+        self.clear_request_stream_goaway_deadline(request_id);
         // draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): "A FIN sent
         // by the responder after its response and any subsequent messages for the request
         // signals that the request is complete; if it has not already done so, the requester
@@ -1006,6 +1099,55 @@ impl Session {
             reason,
         });
         Ok(())
+    }
+
+    /// bidi request stream の両方向が FIN で閉じた時点で request の終端を確定する
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
+    /// 方向ごとの終端であり、cancel (§6.4.2.3 (Request Cancellation and Rejection)) とは
+    /// 区別される。自側が responder の SUBSCRIBE / FETCH では peer の FIN を受信しても
+    /// 応答の経路を塞がないよう request を終端しないため、終端は
+    /// 「peer FIN を受信済み」と「自側が最終メッセージを送信済み」の両方が揃った時点で
+    /// 確定する。呼び出し側は先に `peer_fin_received` または `local_fin_sent` へ
+    /// `request_id` を記録してから本関数を呼ぶこと。
+    ///
+    /// 両方が揃っていなければ何もしない (request は継続中で、後から届く peer の
+    /// FIN / RESET_STREAM で従来どおり終端する)。両方が揃ったときに発行する
+    /// `SessionEvent::RequestTerminated` の理由は `TerminationReason::PeerStreamFin` である。
+    ///
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(super) fn finish_request_on_fin_exchange(&mut self, request_id: u64) {
+        if !(self.peer_fin_received.contains(&request_id)
+            && self.local_fin_sent.contains(&request_id))
+        {
+            return;
+        }
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
+        // request が終端したため request stream GOAWAY の reset は不要になる
+        self.clear_request_stream_goaway_deadline(request_id);
+        // `peer_fin_received` への記録は `request_streams` に entry がある request にしか
+        // 行われず、両集合と `request_streams` は常に同時に除去されるため entry は必ずある。
+        let kind = self
+            .request_streams
+            .remove(&request_id)
+            .expect("peer_fin_received implies a request_streams entry");
+        self.events.push_back(SessionEvent::RequestTerminated {
+            request_id,
+            kind,
+            reason: TerminationReason::PeerStreamFin,
+        });
+    }
+
+    /// 自側が送信方向を最終メッセージとともに FIN で閉じたことを記録する
+    ///
+    /// `fin: true` で最終メッセージ (PUBLISH_DONE / 単独 REQUEST_ERROR) を送る経路から呼ぶ。
+    /// 既に peer の FIN を受信済みなら、この時点で request の終端が確定し
+    /// `SessionEvent::RequestTerminated { reason: PeerStreamFin }` が発行される
+    /// ([`Session::finish_request_on_fin_exchange`])。
+    pub(super) fn mark_send_direction_closed_with_fin(&mut self, request_id: u64) {
+        self.local_fin_sent.insert(request_id);
+        self.finish_request_on_fin_exchange(request_id);
     }
 
     /// 自側がその request の requester (要求を開始した側) かどうかを返す
@@ -1290,6 +1432,9 @@ impl Session {
             // 場合のみここで FIN する (§6.4.2.3 / §9.9)
             fin,
         });
+        if fin {
+            self.mark_send_direction_closed_with_fin(request_id);
+        }
         // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): REQUEST_UPDATE 失敗時、
         // publisher は PUBLISH_DONE(UPDATE_FAILED) を送信する MUST。
         // draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
@@ -1321,6 +1466,7 @@ impl Session {
                     // PUBLISH_DONE が最終メッセージのため送信後に FIN する (§9.9)
                     fin: true,
                 });
+                self.mark_send_direction_closed_with_fin(request_id);
             }
         }
         // draft-ietf-moq-transport-21 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
@@ -1821,6 +1967,11 @@ impl Session {
             // 自動拒否は最終応答のため送信後に FIN する (§6.4.2.3)
             fin: true,
         });
+        // request_streams 未登録の request (アプリ処理前の拒否) は request の状態を
+        // 持たないため記録しない。記録すると解除の契機が無くセッション寿命まで残る。
+        if self.request_streams.contains_key(&request_id) {
+            self.mark_send_direction_closed_with_fin(request_id);
+        }
     }
 
     fn handle_peer_setup(&mut self, setup: Setup) -> Result<(), SessionError> {
