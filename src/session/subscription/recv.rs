@@ -1117,9 +1117,27 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure):
+        // "A FIN sent by the responder after its response and any subsequent messages for the
+        // request signals that the request is complete". PUBLISH 起点の subscription では
+        // 自側が PUBLISH を受けた subscriber responder であり、PUBLISH_DONE の受信で
+        // 自側が送るべきメッセージは無くなる。したがって送信方向を FIN で閉じる。
+        //
+        // §6.4.2.2 "An endpoint MUST NOT send a FIN on a direction of a request stream until
+        // it has sent all required messages on that direction for its request type." より、
+        // 必須応答 (PUBLISH_OK / REQUEST_ERROR) を送り終えた `Established` からの遷移に限る。
+        // `Pending(Publisher)` からの FIN は peer に request 失敗と扱われるため発行しない。
+        // 既に `Terminated` の経路 (REQUEST_UPDATE 失敗応答に伴う PUBLISH_DONE(UPDATE_FAILED)
+        // の受信) も対象外であり、そちらは SUBSCRIBE 起点 requester の事象として
+        // `Session::recv_request_stream_closed` の requester 経路が FIN を担う。
+        let was_established = subscription.state == SubscriptionState::Established;
         // Pending(Publisher) / Established / Terminated (未記録) のいずれも Terminated に確定させる
         subscription.state = SubscriptionState::Terminated;
         record_publish_done(subscription, &done, now_ms);
+        if was_established {
+            self.events
+                .push_back(SessionEvent::FinishRequestStream { request_id });
+        }
         self.events.push_back(SessionEvent::PublishDoneReceived {
             request_id,
             status_code: done.status_code,

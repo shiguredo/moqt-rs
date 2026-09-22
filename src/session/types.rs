@@ -420,12 +420,23 @@ pub enum SessionEvent {
         /// Stream Reset Error Code (§12.5)
         error_code: u64,
     },
-    /// requester 側で bidi request stream の送信方向を FIN で閉じる
+    /// bidi request stream の送信方向を FIN で閉じる
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure):
     /// "A FIN sent by the responder after its response and any subsequent messages for the
     /// request signals that the request is complete; if it has not already done so, the
     /// requester SHOULD then send a FIN on its direction, gracefully closing the stream."
+    ///
+    /// 発行契機は 2 つある。
+    ///
+    /// - requester 側: responder の FIN を受けて送信方向を閉じる
+    ///   ([`Session::recv_request_stream_closed`](crate::session::core::Session::recv_request_stream_closed))
+    /// - responder 側: PUBLISH 起点の subscription で PUBLISH_DONE を受信し、自側が送るべき
+    ///   メッセージが無くなった時点で閉じる
+    ///   ([`Session::handle_peer_publish_done`](crate::session::subscription::recv::Session::handle_peer_publish_done))。
+    ///   §6.4.2.2 "An endpoint MUST NOT send a FIN on a direction of a request stream until it
+    ///   has sent all required messages on that direction for its request type." より、
+    ///   必須応答を送り終えた `Established` からの遷移に限る
     ///
     /// I/O 層は `request_id` に対応する bidi stream の送信方向を FIN で閉じる。既に FIN 済みの
     /// request への本イベントは I/O 層で無視する (Session は送信方向の閉塞を追跡しないため、
