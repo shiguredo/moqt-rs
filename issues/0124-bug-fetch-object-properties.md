@@ -1,7 +1,7 @@
 # FETCH 経路で Object Properties が application に渡らない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-23
 - Branch: feature/fix-fetch-object-properties
 - Polished: 2026-09-21
 
@@ -40,7 +40,7 @@ Properties の有無は同 §11.4.1.1 (Flags) Table 9 の bit `0x20` が示す�
 > |         | present                  | present                 |
 > +---------+--------------------------+-------------------------+
 
-構造は同 §11.4.1 の次の記述により §11.1.3 (Object Properties) と同じである。
+構造は同 §11.4.1.1 (Flags) の次の記述により §11.1.3 (Object Properties) と同じである。
 
 > The Object Properties structure is defined in Section 11.1.3.
 
@@ -78,3 +78,38 @@ Properties の有無は同 §11.4.1.1 (Flags) Table 9 の bit `0x20` が示す�
 - `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため、Properties の内容そのものは復元検証しない」というコメントと検証対象外の扱いが、Properties の往復検証に置き換わっていること
 - `examples/moqt-subscriber/src/pipeline.rs` の `handle_fetch_stream` が FETCH 経路でも `extract_video_config` の結果を `decode_and_send` に渡し、「H.264/H.265 は Subgroup 経由でのみ動作する」という制約コメントが解消されていること
 - `make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ること
+
+## 解決方法
+
+`FetchStreamDecoder` が `FetchStreamEntry::decode_with_properties` の返す Properties 生バイト列を検証に使うだけで捨てていたため、`DecodedFetchObject::properties_bytes` として保持し application に渡すようにした。
+
+1. `DecodedFetchObject` に `properties_bytes: Option<Vec<u8>>` を追加した。`resolve_object` の引数として `FetchStreamEntry::decode_with_properties` の返り値を受け取り、そのまま構造体に詰める (デコーダ側で組み立て直す処理は追加しない)
+2. 表現は Subgroup 経路の `DecodedSubgroupObject::properties_bytes` と同じく「Properties Length varint + Properties データ」の生バイト列である。両者の生成元 (`SubgroupObject::decode` と `FetchStreamEntry::decode_with_properties`) はどちらも Properties Length varint の直前から末尾までを切り出す同一構造であり、`LocProperties::decode` にそのまま渡せる
+3. `None` になるのは Serialization Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が 0 のときだけである。
+   bit `0x20` が 1 のときは `Some` になり、wire に現れた Properties Length varint をそのまま保持する
+   (§8.1 (Variable-Length Integers) は非最小形の varint も許すため、Properties Length = 0 は最小形なら `0x00` の 1 バイトになる)。
+   Subgroup 経路の `SubgroupObject::decode` と同じ規則であり、「Properties 無し (`None`)」と「空の Properties (`Some` で Length = 0)」を混同しない
+4. `Vec<u8>` を持つため `DecodedFetchObject` と `DecodedFetchEntry` の `Copy` を外した (`Clone` は維持)。`src` / `tests` / `examples` / `pbt` / `fuzz` の利用箇所を確認し、値コピーに依存する箇所が無いことをビルドと全テストで確認した。公開構造体へのフィールド追加と `Copy` の削除は破壊的変更であり、`CHANGES.md` では `[CHANGE]` として分離して記載した
+5. `examples/moq-subscriber/src/pipeline.rs` の `handle_fetch_stream` が、Subgroup 経路の `decode_video_stream` と同じく
+   `extract_video_config(obj.properties_bytes.as_deref())` の結果を `decode_and_send` に渡すようにした。
+   これにより FETCH 経路でも H.264/H.265 の parameter set (AVCDecoderConfigurationRecord) を適用できる。
+   現 example の publisher はカタログの FETCH 以外を `DOES_NOT_EXIST` で拒否するため、この呼び出し自体は実行時に到達せず、
+   `handle_fetch_stream` を通す結合テストは書けない (到達しない経路のため)。
+   共通の抽出処理である `extract_video_config` に単体テストを追加し、LOC の Public Properties から Video Config を取り出せることと、
+   持たない場合・他の Bytes プロパティしか無い場合・壊れている場合に `None` になることを固定した
+6. `src/stream/fetch.rs` の「Properties をスキップする」というコメントを「Properties Length varint 込みの生バイト列として切り出す」に直した
+
+テスト:
+
+- `tests/test_stream/decoder.rs` に `encode_fetch_stream` を使う FETCH 系テストを 4 本追加した
+  - `test_fetch_object_properties_are_exposed`: LOC の Timestamp / Timescale / Video Config を持つ Object をデコードし、`properties_bytes` が Properties Length varint 込みの生バイト列になり、`LocProperties::decode` で 3 つとも取り出せることを固定する
+  - `test_fetch_object_without_properties_is_none`: bit `0x20` が 0 の Object は `None` になることを固定する
+  - `test_fetch_object_with_empty_properties_keeps_length_varint`: bit `0x20` が 1 で Properties Length = 0 の Object は `Some([0x00])` になることを固定する
+  - `test_fetch_non_minimal_properties_length_is_preserved`: 非最小形 (`0x80 0x00`) の Properties Length varint を最小形に正規化せず生バイトのまま保持することを固定する (§8.1 (Variable-Length Integers) は非最小形を許す。Subgroup 経路の `non_minimal_properties_length_accepted` と対称)
+  - `test_fetch_end_of_range_entries_carry_no_properties`: End of Range の 3 エントリが Properties を持たない variant として返ることと、`FetchStreamEntry::encode` に Properties を渡すと拒否されることを固定する
+  - デコードのスキャフォールドは `decode_first_fetch_entry` ヘルパーに集約した
+- `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため、Properties の内容そのものは復元検証しない」というコメントと検証対象外の扱いを、Properties の往復検証 (`has_properties` と `properties_bytes` の 4 分岐を網羅する match) に置き換えた
+- example の `extract_video_config` にも単体テストを追加し、Video Config を持つ LOC Properties からバイト列を取り出せること、持たない場合・Properties が無い場合・壊れている場合に `None` になることを固定した
+- 各テストは変異実験で検出力を確認した (`properties_bytes` を捨てる / 生バイトから Properties Length varint を落とす / 非最小形の varint を最小形に正規化する / bit `0x20` の読み取りを反転する / `validate_fetch_object` に `None` を渡す / End of Range の Properties 拒否を無効化する / `extract_video_config` が常に `None` を返す の各変異で対応するテストが失敗する)
+
+`CHANGES.md` の `## develop` に `[CHANGE]` と `[FIX]` を追加した。`skills/shiguredo-moqt/SKILL.md` にも FETCH 経路の Object Properties の取得方法を追記した。
