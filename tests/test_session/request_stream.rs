@@ -395,6 +395,178 @@ fn recv_many_out_of_order_request_ids_keeps_session_open() {
     );
 }
 
+/// 定義済みだが未実装の request は NOT_SUPPORTED で拒否し、セッションを維持する
+///
+/// draft-ietf-moq-transport-21 §1.5 (Modularity): "Limited endpoints SHOULD respond to any
+/// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
+/// them." §9 の Table 5 で request として届く型 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
+/// SUBSCRIBE_TRACKS) が対象である。
+#[test]
+fn unsupported_request_is_rejected_with_not_supported() {
+    use shiguredo_moqt::error::REQUEST_NOT_SUPPORTED;
+    use shiguredo_moqt::varint;
+    let (_client, mut server) = establish_pair();
+
+    for (i, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
+        let rid = (i as u64) * 2; // Client 役の採番 (偶数)
+        let mut body = Vec::new();
+        varint::encode(rid, &mut body);
+        let msg = ControlMessage::Unsupported {
+            type_id,
+            request_id: Some(rid),
+            body,
+        };
+        let bytes = msg.encode().expect("encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+        server
+            .recv_request(decoded)
+            .expect("未対応 request の拒否は Result::Ok であること");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "未対応 request の受信でセッションを閉じないこと: {type_id:#x}"
+        );
+        // NOT_SUPPORTED (0x3) + FIN で拒否する
+        let mut saw_reject = false;
+        while let Some(e) = server.poll_event() {
+            if let SessionEvent::SendOnStream {
+                request_id,
+                message: ControlMessage::RequestError(err),
+                fin,
+            } = e
+            {
+                assert_eq!(request_id, rid);
+                assert_eq!(err.error_code, REQUEST_NOT_SUPPORTED);
+                assert!(fin, "拒否は FIN で閉じること");
+                saw_reject = true;
+            }
+        }
+        assert!(
+            saw_reject,
+            "NOT_SUPPORTED の REQUEST_ERROR が発行されること"
+        );
+        // 後続の終端通知は no-op で吸収される
+        server
+            .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+            .expect("拒否済み request の終端通知は no-op であること");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "終端通知でセッションを閉じないこと"
+        );
+    }
+}
+
+/// 未対応 request の parity 違反と重複は INVALID_REQUEST_ID でセッションを閉じる
+#[test]
+fn unsupported_request_parity_and_duplicate_close_session() {
+    use shiguredo_moqt::varint;
+    // parity 違反: Server 役の client に対して奇数 id を送る
+    let (_client, mut server) = establish_pair();
+    let mut body = Vec::new();
+    varint::encode(1, &mut body);
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(1),
+            body,
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_INVALID_REQUEST_ID
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+
+    // 重複: 同じ id を 2 回送る
+    let (_client, mut server) = establish_pair();
+    for _ in 0..2 {
+        let mut body = Vec::new();
+        varint::encode(0, &mut body);
+        let result = server.recv_request(ControlMessage::Unsupported {
+            type_id: 0x50,
+            request_id: Some(0),
+            body,
+        });
+        if let Err(err) = result {
+            assert_eq!(
+                err.as_session_error()
+                    .expect("Session エラーであること")
+                    .code,
+                SESSION_INVALID_REQUEST_ID
+            );
+            assert_eq!(server.state(), SessionState::Closing);
+            return;
+        }
+        while server.poll_event().is_some() {}
+    }
+    panic!("重複した id が拒否されなかった");
+}
+
+/// 自側が control GOAWAY を送信済みなら未対応 request は GOING_AWAY で拒否する
+#[test]
+fn unsupported_request_after_local_goaway_returns_going_away() {
+    use shiguredo_moqt::error::REQUEST_GOING_AWAY;
+    use shiguredo_moqt::varint;
+    let (_client, mut server) = establish_pair();
+    // server が control GOAWAY を送信する
+    server
+        .send_goaway(Vec::new(), 10_000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+
+    let rid = 0u64;
+    let mut body = Vec::new();
+    varint::encode(rid, &mut body);
+    server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x51,
+            request_id: Some(rid),
+            body,
+        })
+        .expect("GOING_AWAY 拒否は Result::Ok であること");
+    let mut saw_reject = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::SendOnStream {
+            message: ControlMessage::RequestError(err),
+            ..
+        } = e
+        {
+            assert_eq!(err.error_code, REQUEST_GOING_AWAY);
+            saw_reject = true;
+        }
+    }
+    assert!(saw_reject, "GOING_AWAY が優先されること");
+}
+
+/// 応答専用の型を request stream の先頭で受けるとセッションを閉じる
+///
+/// draft-ietf-moq-transport-21 §9 Table 5 で NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED は
+/// "First" を持たず、応答先の request も存在しない。
+#[test]
+fn response_only_message_as_request_start_closes_session() {
+    for type_id in [0x08u64, 0x0E, 0x0F] {
+        let (_client, mut server) = establish_pair();
+        let err = server
+            .recv_request(ControlMessage::Unsupported {
+                type_id,
+                request_id: None,
+                body: vec![0x01],
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error()
+                .expect("Session エラーであること")
+                .code,
+            SESSION_PROTOCOL_VIOLATION,
+            "応答専用の型は PROTOCOL_VIOLATION になること: {type_id:#x}"
+        );
+        assert_eq!(server.state(), SessionState::Closing);
+    }
+}
+
 // ─── recv_request_stream_closed ──────────────────
 
 /// 自側が requester のとき responder の FIN で subscription が Terminated に遷移し、

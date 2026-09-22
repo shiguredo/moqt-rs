@@ -12,6 +12,12 @@
 ## develop
 
 - [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
+- [CHANGE] 定義済みだが未実装の制御メッセージを表す `ControlMessage::Unsupported` を追加する
+  - §9 Table 5 に定義済みの `PUBLISH_NAMESPACE` (0x06) / `SUBSCRIBE_NAMESPACE` (0x50) / `SUBSCRIBE_TRACKS` (0x51) / `NAMESPACE` (0x08) / `NAMESPACE_DONE` (0x0E) / `PUBLISH_SKIPPED` (0x0F) を decode できるようにする (公開 enum の variant 追加のため破壊的変更)
+  - request として届く先頭 3 種は `REQUEST_ERROR` の `NOT_SUPPORTED` (0x3) + FIN で拒否してセッションを維持する (§1.5 (Modularity) の SHOULD)
+  - 応答専用の 3 種は従来どおり `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
+  - @voluntas
+
   - `ControlMessage` から該当 6 variant、`Session` から該当 15 メソッド、`session::types` から該当 6 型と `RequestKind` の該当 3 variant、`SessionEvent` の該当 4 variant を削除する
   - 該当する request を受信した場合は既存の未対応メッセージ経路と同じく `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる
   - @voluntas

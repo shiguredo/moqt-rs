@@ -591,6 +591,43 @@ mod error_cases {
         assert_eq!(count, 1, "0x04 が decode 後も残ること");
     }
 
+    /// Table 5 に定義済みで本ライブラリが実装しない型は Unsupported として decode できる
+    ///
+    /// draft-ietf-moq-transport-21 §1.5 (Modularity): "Limited endpoints SHOULD respond to any
+    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
+    /// them." decode した本体を encode で再構成できることも固定する。
+    #[test]
+    fn unsupported_control_messages_roundtrip() {
+        // request として届く型 (本体が Request ID で始まる)
+        for (type_id, request_id) in [
+            (0x06u64, Some(3u64)), // PUBLISH_NAMESPACE
+            (0x50, Some(5)),       // SUBSCRIBE_NAMESPACE
+            (0x51, Some(7)),       // SUBSCRIBE_TRACKS
+        ] {
+            let original = ControlMessage::Unsupported {
+                type_id,
+                request_id,
+                // 本体は Request ID (vi64) で始まる生バイト列。decode は本体先頭の varint を
+                // request_id として読むため、body の先頭を request_id と一致させる
+                body: vec![request_id.expect("request_id は Some") as u8],
+            };
+            let bytes = original.encode().expect("encode できること");
+            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
+        }
+        // 応答専用の型 (Request ID を持たない)
+        for type_id in [0x08u64, 0x0E, 0x0F] {
+            let original = ControlMessage::Unsupported {
+                type_id,
+                request_id: None,
+                body: vec![0x01, 0x02],
+            };
+            let bytes = original.encode().expect("encode できること");
+            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+            assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
+        }
+    }
+
     /// Table 13 に無い未定義のパラメータ型は encode / decode で拒否される
     ///
     /// draft-ietf-moq-transport-21 §9.20 (Control Message Parameters): "An endpoint that

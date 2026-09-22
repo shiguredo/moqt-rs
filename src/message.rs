@@ -43,6 +43,13 @@ const MSG_FETCH_OK: u64 = 0x18;
 const MSG_PUBLISH: u64 = 0x1D;
 const MSG_PUBLISH_STATE_NOTIFY: u64 = 0x22;
 const MSG_SETUP: u64 = 0x2F00; // src/stream.rs の SETUP_STREAM_TYPE と同じ値 (異なる名前空間)
+// relay 専用の namespace 発見・告知機構 (本ライブラリは実装しないが Table 5 に定義済み)
+const MSG_PUBLISH_NAMESPACE: u64 = 0x06;
+const MSG_NAMESPACE: u64 = 0x08;
+const MSG_NAMESPACE_DONE: u64 = 0x0E;
+const MSG_PUBLISH_SKIPPED: u64 = 0x0F;
+const MSG_SUBSCRIBE_NAMESPACE: u64 = 0x50;
+const MSG_SUBSCRIBE_TRACKS: u64 = 0x51;
 
 // ─── パラメータスコープテーブル (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ────
 
@@ -1007,6 +1014,27 @@ impl TrackStatus {
 
 // ─── ControlMessage ──────────────────────────────────────────
 
+/// 本ライブラリが実装しない定義済み request メッセージ型 (draft-ietf-moq-transport-21 §9 Table 5)
+///
+/// relay 専用の namespace 発見・告知機構のうち、request stream の先頭として届く型と
+/// その応答の型である。request として届くのは先頭 3 種 (PUBLISH_NAMESPACE /
+/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) で、残り 3 種は応答専用である。
+pub(crate) const UNSUPPORTED_MESSAGE_TYPES: &[u64] = &[
+    MSG_PUBLISH_NAMESPACE,
+    MSG_SUBSCRIBE_NAMESPACE,
+    MSG_SUBSCRIBE_TRACKS,
+    MSG_NAMESPACE,
+    MSG_NAMESPACE_DONE,
+    MSG_PUBLISH_SKIPPED,
+];
+
+/// `UNSUPPORTED_MESSAGE_TYPES` のうち本体が Request ID (vi64) で始まる型
+pub(crate) const UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID: &[u64] = &[
+    MSG_PUBLISH_NAMESPACE,
+    MSG_SUBSCRIBE_NAMESPACE,
+    MSG_SUBSCRIBE_TRACKS,
+];
+
 /// MOQT コントロールメッセージの列挙型
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlMessage {
@@ -1036,6 +1064,28 @@ pub enum ControlMessage {
     FetchOk(FetchOk),
     /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-21 §9.13 (TRACK_STATUS))
     TrackStatus(TrackStatus),
+    /// 定義済みだが本ライブラリが実装しない制御メッセージ
+    ///
+    /// draft-ietf-moq-transport-21 §1.5 (Modularity): "Limited endpoints SHOULD respond to any
+    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
+    /// them." §9 の Table 5 に定義済みの型であって本ライブラリが扱わないものを、型 ID と
+    /// 本体の生バイト列のまま保持する。Table 5 に無い型は従来どおり
+    /// `MessageError::InvalidMessageType` で拒否する。
+    ///
+    /// 対象は relay 専用の namespace 発見・告知機構 (CODEBASE.md の方針で実装しない) の
+    /// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS と、その応答である
+    /// NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED である。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    Unsupported {
+        /// 制御メッセージ型 ID (draft-ietf-moq-transport-21 §9 Table 5)
+        type_id: u64,
+        /// 本体が Request ID (vi64) で始まる型 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
+        /// SUBSCRIBE_TRACKS) のときだけ `Some`。応答専用の型 (NAMESPACE / NAMESPACE_DONE /
+        /// PUBLISH_SKIPPED) は Request ID を持たないため `None`
+        request_id: Option<u64>,
+        /// Length の後ろの生バイト列 (Request ID を含む)
+        body: Vec<u8>,
+    },
 }
 
 impl ControlMessage {
@@ -1137,6 +1187,11 @@ impl ControlMessage {
                 m.encode_message_body(&mut payload)?;
                 MSG_TRACK_STATUS
             }
+            Self::Unsupported { type_id, body, .. } => {
+                // decode で保持した本体をそのまま書き戻す (Request ID を含む)
+                payload.extend_from_slice(body);
+                *type_id
+            }
         };
         Ok((type_id, payload))
     }
@@ -1198,6 +1253,30 @@ impl ControlMessage {
             MSG_TRACK_STATUS => {
                 let (m, n) = TrackStatus::decode_message_body(payload)?;
                 (Self::TrackStatus(m), n)
+            }
+            // draft-ietf-moq-transport-21 §1.5 (Modularity): Table 5 に定義済みで本ライブラリが
+            // 実装しない型は、未知型として拒否せず NOT_SUPPORTED で応答できるようにする。
+            // 本体は解析せず生バイト列のまま保持する。
+            id if UNSUPPORTED_MESSAGE_TYPES.contains(&id) => {
+                let request_id = if UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID.contains(&id) {
+                    if payload.is_empty() {
+                        return Err(MessageError::ProtocolViolation(
+                            "unsupported request message has no request id",
+                        ));
+                    }
+                    let (rid, _) = varint::decode(payload)?;
+                    Some(rid)
+                } else {
+                    None
+                };
+                (
+                    Self::Unsupported {
+                        type_id: id,
+                        request_id,
+                        body: payload.to_vec(),
+                    },
+                    payload.len(),
+                )
             }
             _ => return Err(MessageError::InvalidMessageType(type_id)),
         };

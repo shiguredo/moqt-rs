@@ -104,8 +104,16 @@ relay が担う機能は本ライブラリの対象外である (`CODEBASE.md` �
 - `SUBSCRIBE_NAMESPACE` (`0x50`)
 - `SUBSCRIBE_TRACKS` (`0x51`)
 
-これらを受信した場合は、未知のメッセージ種別と同じく `SESSION_PROTOCOL_VIOLATION` で
-セッションを閉じる。
+request stream の先頭として届く 3 種 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` /
+`SUBSCRIBE_TRACKS`) は §9 Table 5 に定義済みの request であるため、未知のメッセージ種別とは
+扱わない。`ControlMessage::Unsupported` として受理し、`REQUEST_ERROR` の `NOT_SUPPORTED`
+(`0x3`) と送信方向の FIN で拒否する (§1.5 (Modularity) の SHOULD)。セッションは維持する。
+自側が control GOAWAY を送信済みなら `GOING_AWAY` を優先する。
+
+応答専用の 3 種 (`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は応答先の request を
+持たず Table 5 で "First" を持たないため、request stream の先頭および 2 通目以降のいずれでも
+`SESSION_PROTOCOL_VIOLATION` でセッションを閉じる。§9 Table 5 に無い型も従来どおり
+`MessageError::InvalidMessageType` で拒否する。
 
 relay 専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.7 (RENDEZVOUS TIMEOUT Parameter) と
 §16.7 (Message Parameters) の Table 13 に定義済みのため、SUBSCRIBE への出現は受理する。

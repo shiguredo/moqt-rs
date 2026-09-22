@@ -983,6 +983,13 @@ impl Session {
             ControlMessage::TrackStatus(track_status) => {
                 self.handle_peer_track_status(track_status)?;
             }
+            ControlMessage::Unsupported {
+                type_id,
+                request_id,
+                ..
+            } => {
+                self.handle_unsupported_request(type_id, request_id)?;
+            }
             _ => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -992,6 +999,50 @@ impl Session {
                 return Err(RecvRequestError::Session(err));
             }
         }
+        Ok(())
+    }
+
+    /// 定義済みだが本ライブラリが実装しない request を受信したときの処理
+    ///
+    /// draft-ietf-moq-transport-21 §1.5 (Modularity): "Limited endpoints SHOULD respond to any
+    /// unsupported messages with the appropriate NOT_SUPPORTED error code, rather than ignoring
+    /// them." §9 の Table 5 に定義済みの request 型 (PUBLISH_NAMESPACE /
+    /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR(NOT_SUPPORTED)` で拒否し、
+    /// セッションは維持する。
+    ///
+    /// 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は応答先の request を
+    /// 持たないため `PROTOCOL_VIOLATION` でセッションを閉じる。拒否コードの優先順は
+    /// parity と重複 → GOING_AWAY → NOT_SUPPORTED である。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    fn handle_unsupported_request(
+        &mut self,
+        type_id: u64,
+        request_id: Option<u64>,
+    ) -> Result<(), SessionError> {
+        let Some(request_id) = request_id else {
+            // 応答専用の型が request stream の先頭に来るのは §6.3 (Session initialization) の
+            // 7 種に反する (Table 5 で First を持たない)
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "response-only control message received as a request stream start",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        };
+        // draft §6.4.2.1 (Request ID): parity と重複は他の request と同じく検証する
+        self.validate_peer_request_id(request_id)?;
+        // draft §9.2 (GOAWAY): control GOAWAY を送信済みなら GOING_AWAY を優先する。
+        // 未対応 request は本体を解析しないため `accept_peer_request` を通せない
+        // (同関数は AUTHORIZATION_TOKEN の適用に MessageParameters を要求する)。
+        let error_code = if self.goaway.local_sent {
+            crate::error::REQUEST_GOING_AWAY
+        } else {
+            crate::error::REQUEST_NOT_SUPPORTED
+        };
+        // request_streams に登録しないため、後続の終端通知は
+        // `rejected_request_ids` の no-op 経路で吸収される (`emit_request_error` が記録する)
+        self.emit_request_error(request_id, error_code, "control message not supported");
+        let _ = type_id;
         Ok(())
     }
 
@@ -1261,6 +1312,12 @@ impl Session {
                 Err(err)
             }
             ControlMessage::Goaway(g) => self.handle_peer_goaway_on_request_stream(request_id, g),
+            // `ControlMessage::Unsupported` もここに落ちる。Table 5 で "First" を持つ型
+            // (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) が 2 通目以降に
+            // 届くのは同表の注記 ("Messages marked \"First\" MUST be the first message on a new
+            // request stream.") に反し、応答専用の型 (NAMESPACE / NAMESPACE_DONE /
+            // PUBLISH_SKIPPED) は応答先の request を持たないため、いずれも PROTOCOL_VIOLATION
+            // でセッションを閉じる。
             _ => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
