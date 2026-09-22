@@ -1244,11 +1244,13 @@ async fn handle_fetch_stream(
                     }
                 }
             };
-            // FetchStreamDecoder は properties_bytes を保持しないため video_config は渡せない
-            // (AV1 は Sequence Header が payload 内に含まれるため問題なし。H.264/H.265 は
-            // Subgroup 経由でのみ動作する)
+            // Subgroup 経路と同じく Object Properties から Video Config を取り出す
+            // (draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+            // MOQT の Object Properties に載せると規定する)。H.264/H.265 はこの
+            // AVCDecoderConfigurationRecord が無いと parameter set を適用できない。
+            let video_config = extract_video_config(obj.properties_bytes.as_deref());
             frames += tokio::task::block_in_place(|| {
-                decode_and_send(&payload, None, video_decoder, sink)
+                decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
             });
         }
     }
@@ -1838,6 +1840,83 @@ mod tests {
     fn extract_audio_config_returns_none_on_bad_properties() {
         assert_eq!(
             extract_audio_config(Some(&[0xFF, 0xFF, 0xFF])),
+            None,
+            "壊れた properties は None であること"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: LOC の Public Properties から parameter set を取り出せる
+    ///
+    /// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+    /// MOQ Object Properties に載せると規定する。Subgroup 経路と FETCH 経路の両方が
+    /// この関数を通して H.264/H.265 の AVCDecoderConfigurationRecord を取り出す。
+    #[test]
+    fn extract_video_config_returns_config() {
+        use shiguredo_moqt::loc::LocProperty;
+
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_VIDEO_CONFIG,
+            value: LocPropertyValue::Bytes(vec![0x01, 0x64, 0x00, 0x1F]),
+        });
+        let bytes = props
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            extract_video_config(Some(&bytes)),
+            Some(vec![0x01, 0x64, 0x00, 0x1F]),
+            "PROP_VIDEO_CONFIG のバイト列を取り出せること"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: 他の Bytes プロパティしか無ければ None
+    ///
+    /// PROP_AUDIO_CONFIG も奇数 ID の Bytes 値であるため、prop_id を見ずに値型だけで
+    /// 判定する実装でも取り出せてしまう。prop_id の判定が効いていることを固定する。
+    #[test]
+    fn extract_video_config_ignores_other_bytes_properties() {
+        use shiguredo_moqt::loc::LocProperty;
+
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_AUDIO_CONFIG,
+            value: LocPropertyValue::Bytes(vec![0xAA, 0xBB]),
+        });
+        let bytes = props
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            extract_video_config(Some(&bytes)),
+            None,
+            "PROP_AUDIO_CONFIG しか無ければ None であること"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: 持たない場合・壊れている場合は None
+    #[test]
+    fn extract_video_config_returns_none_without_config() {
+        use shiguredo_moqt::loc::LocProperty;
+
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(1),
+        });
+        let bytes = props
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            extract_video_config(Some(&bytes)),
+            None,
+            "VIDEO_CONFIG を持たない Properties は None であること"
+        );
+        assert_eq!(
+            extract_video_config(None),
+            None,
+            "Properties が無い場合は None であること"
+        );
+        assert_eq!(
+            extract_video_config(Some(&[0xFF, 0xFF, 0xFF])),
             None,
             "壊れた properties は None であること"
         );

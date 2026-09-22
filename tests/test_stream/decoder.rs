@@ -633,6 +633,22 @@ fn drain_fetch_payload(decoder: &mut FetchStreamDecoder, expected_length: u64) {
     );
 }
 
+/// テスト用: FetchHeader + FetchStreamEntry 列をデコードし、最初のエントリを返す
+///
+/// ヘッダーのデコードと最初のエントリの取得だけを行う (ペイロードは消費しない)。
+fn decode_first_fetch_entry(data: &[u8]) -> DecodedFetchEntry {
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+    decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている")
+}
+
 /// (entry, properties_data, payload)
 type FetchEntryTuple<'a> = (FetchStreamEntry, Option<&'a [u8]>, Option<&'a [u8]>);
 
@@ -1458,5 +1474,266 @@ fn test_fetch_finish_after_end_of_range_ok() {
             object_id: 5
         }
     ));
+    assert_eq!(decoder.finish(), Ok(()));
+}
+
+// ─── FETCH 経路の Object Properties ──────────────────────────────────────────
+
+/// FETCH 応答の Object Properties が Properties Length varint 込みで公開されること
+///
+/// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、
+/// その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.3."
+/// により §11.1.3 (Object Properties) と同じである。
+/// draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
+/// MOQ Object Properties に載せると規定するため、LOC の Video Config / Timestamp / Timescale が
+/// そのまま取り出せることを固定する。
+#[test]
+fn test_fetch_object_properties_are_exposed() {
+    use shiguredo_moqt::loc::{
+        LocProperties, LocProperty, LocPropertyValue, PROP_TIMESCALE, PROP_TIMESTAMP,
+        PROP_VIDEO_CONFIG,
+    };
+
+    let mut props = LocProperties::new();
+    props.push(LocProperty {
+        prop_id: PROP_TIMESTAMP,
+        value: LocPropertyValue::VarInt(9000),
+    });
+    props.push(LocProperty {
+        prop_id: PROP_TIMESCALE,
+        value: LocPropertyValue::VarInt(90000),
+    });
+    props.push(LocProperty {
+        prop_id: PROP_VIDEO_CONFIG,
+        value: LocPropertyValue::Bytes(vec![0x01, 0x64, 0x00, 0x1F]),
+    });
+    let properties_data = props
+        .encode()
+        .expect("正当な LOC Properties は encode できる");
+
+    let header = FetchHeader { request_id: 7 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(128),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 3,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&properties_data), Some(b"abc"))]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+
+    let bytes = obj
+        .properties_bytes
+        .as_deref()
+        .expect("Properties が保持されること");
+    assert_eq!(
+        bytes,
+        properties_data.as_slice(),
+        "Properties Length varint 込みの生バイト列がそのまま保持されること"
+    );
+
+    // Subgroup 経路と同じ表現であるため LocProperties::decode にそのまま渡せる
+    let (decoded, consumed) =
+        LocProperties::decode(bytes).expect("LOC Properties として decode できる");
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(decoded.timestamp(), Some(9000));
+    assert_eq!(decoded.timescale(), Some(90000));
+    assert_eq!(
+        decoded.video_config(),
+        Some([0x01, 0x64, 0x00, 0x1F].as_slice())
+    );
+}
+
+/// 非最小形の Properties Length varint も wire の生バイトのまま保持されること
+///
+/// draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers) は
+/// "Variable-length integers do not need to be encoded using the minimum number of bytes" と定めるため、
+/// Properties Length = 0 は `0x00` 以外の形でも送られ得る。デコーダは正規化せず生バイトを保持する
+/// (Subgroup 経路の `non_minimal_properties_length_accepted` と対称)。
+#[test]
+fn test_fetch_non_minimal_properties_length_is_preserved() {
+    use shiguredo_moqt::loc::LocProperties;
+
+    // 2 バイトの非最小形で Properties Length = 0 を表す
+    let non_minimal = vec![0x80, 0x00];
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&non_minimal), None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes,
+        Some(vec![0x80, 0x00]),
+        "非最小形の Properties Length varint を最小形に正規化しないこと"
+    );
+
+    // 非最小形でも空の Properties として decode できる
+    let bytes = obj
+        .properties_bytes
+        .as_deref()
+        .expect("Properties が保持されること");
+    let (decoded, consumed) =
+        LocProperties::decode(bytes).expect("LOC Properties として decode できる");
+    assert_eq!(
+        consumed, 2,
+        "非最小形の varint も消費バイト数に含まれること"
+    );
+    assert!(
+        decoded.is_empty(),
+        "Properties Length = 0 の空の Properties であること"
+    );
+}
+
+/// Properties を持たない (Flags の bit 0x20 が 0 の) Object は properties_bytes が None になること
+#[test]
+fn test_fetch_object_without_properties_is_none() {
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, None, None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes, None,
+        "bit 0x20 が 0 の Object は Properties を運ばないこと"
+    );
+}
+
+/// Flags の bit 0x20 が 1 で Properties Length が 0 の Object は
+/// Properties Length varint の 1 バイトだけを持つ Some になること
+///
+/// Subgroup 経路の `SubgroupObject::decode` と同じ規則であり、
+/// 「Properties 無し (None)」と「空の Properties (Length = 0)」を混同しない。
+#[test]
+fn test_fetch_object_with_empty_properties_keeps_length_varint() {
+    use shiguredo_moqt::loc::LocProperties;
+
+    let empty_properties = LocProperties::new()
+        .encode()
+        .expect("空の LOC Properties は encode できる");
+    assert_eq!(
+        empty_properties,
+        vec![0x00],
+        "Properties Length = 0 の 1 バイト"
+    );
+
+    let header = FetchHeader { request_id: 1 };
+    let obj = FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(1),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        is_datagram_origin: false,
+        payload_length: 0,
+    });
+    let data = encode_fetch_stream(&header, &[(obj, Some(&empty_properties), None)]);
+
+    let entry = decode_first_fetch_entry(&data);
+    let DecodedFetchEntry::Object(obj) = entry else {
+        panic!("Object が期待された");
+    };
+    assert_eq!(
+        obj.properties_bytes,
+        Some(vec![0x00]),
+        "bit 0x20 が 1 なら Properties Length varint の 1 バイトを持つこと"
+    );
+}
+
+/// End of Range の 3 種類のエントリが Properties を運ばない variant として連続復号できること
+///
+/// draft-ietf-moq-transport-21 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties
+/// are not present." と定めるため、`DecodedFetchEntry` の End of Range の variant は Properties を
+/// 持たない。本テストは 3 種類を連続して復号し、それぞれの variant として返ることと、
+/// ペイロード消費なしで `finish()` が成功することを固定する。
+/// wire 上で End of Range に Properties を渡すと拒否されることは
+/// `tests/test_stream/fetch_stream_object.rs` の `encode_end_of_range_with_properties_rejected` が固定する。
+#[test]
+fn test_fetch_end_of_range_entries_carry_no_properties() {
+    let header = FetchHeader { request_id: 1 };
+    let entries = [
+        FetchStreamEntry::EndOfNonExistentRange {
+            group_id: 1,
+            object_id: 2,
+        },
+        FetchStreamEntry::EndOfUnknownRange {
+            group_id: 3,
+            object_id: 4,
+        },
+        FetchStreamEntry::EndOfTimedOutRange {
+            group_id: 5,
+            object_id: 6,
+        },
+    ];
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (entries[0], None, None),
+            (entries[1], None, None),
+            (entries[2], None, None),
+        ],
+    );
+
+    let mut decoder = FetchStreamDecoder::new();
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut decoded = Vec::new();
+    for _ in 0..3 {
+        decoded.push(
+            decoder
+                .try_decode_entry()
+                .expect("テストフィクスチャの前提条件を満たす")
+                .expect("テストフィクスチャに期待される内部値が入っている"),
+        );
+    }
+    assert_eq!(
+        decoded,
+        vec![
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id: 1,
+                object_id: 2
+            },
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id: 3,
+                object_id: 4
+            },
+            DecodedFetchEntry::EndOfTimedOutRange {
+                group_id: 5,
+                object_id: 6
+            },
+        ],
+        "End of Range の 3 エントリは Properties を持たない variant として返ること"
+    );
     assert_eq!(decoder.finish(), Ok(()));
 }

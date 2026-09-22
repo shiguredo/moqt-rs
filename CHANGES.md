@@ -33,6 +33,9 @@
   - draft-ietf-moq-transport-21 §11.4.1.2 (End of Range) は "Subgroup ID, Priority and Properties are not present" と定めるため、`EndOfNonExistentRange` / `EndOfUnknownRange` / `EndOfTimedOutRange` に `Some(...)` を渡すと書き込み前に `ProtocolViolation` になる (`None` は従来どおり成功する)
   - これまでは黙って無視されていたため、Properties を渡すつもりの誤った呼び出しが成立していた
   - @voluntas
+- [CHANGE] `DecodedFetchObject` に `properties_bytes` を追加し、`DecodedFetchObject` / `DecodedFetchEntry` から `Copy` を外す
+  - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) と `Copy` の削除を伴う破壊的変更である
+  - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
 - [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する
@@ -252,8 +255,19 @@
   - 内側 0 個は count 0 の `0x00` 1 バイトであり、encode の出力は変わらない。内側の末尾の余剰バイト (`KEY_VALUE_FORMATTING_ERROR`) と Table 6 外の内側パラメータ (`PROTOCOL_VIOLATION`) の分類、値が途中で切れた場合 (`UnexpectedEof`) と count がバッファ容量を超える場合 (`PROTOCOL_VIOLATION`) の分類も変わらない
   - @voluntas
 
+- [FIX] FETCH 経路で Object Properties を application に渡す
+  - draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.3." により §11.1.3 (Object Properties) と同じだが、`FetchStreamDecoder` が検証に使うだけで捨てていた
+  - `DecodedFetchObject::properties_bytes` が Subgroup 経路と同じ「Properties Length varint + Properties データ」の生バイト列を保持するようになり、`LocProperties::decode` で LOC の Public Properties を取り出せる
+  - Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が 0 のときは `None`、1 のときは wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる
+  - moqt-subscriber の `handle_fetch_stream` が FETCH 経路でも LOC の Video Config を `decode_and_send` に渡す
+  - @voluntas
+
 ### misc
 
+- [UPDATE] FETCH 経路の Object Properties の復元を PBT とテストで検証する
+  - `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため復元検証しない」という扱いを、`has_properties` と `properties_bytes` の組み合わせを網羅する往復検証に置き換える
+  - `tests/test_stream/decoder.rs` に Properties あり / なし / 空 / 非最小形 varint / End of Range の 5 ケースを追加し、moqt-subscriber に Video Config 抽出の単体テストを追加する
+  - @voluntas
 - [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する
   - `pbt/tests/prop_object_tracker.rs` に `object_field_tracker_content_comparison_matches_expected` を追加し、immutables と payload_key の比較が「両方 `Some` のときだけ」行われ、不一致の種類ごとに期待する `reason` が返ることを検証する (どちらの不一致も観測されたことをゲートする)
   - `fuzz/fuzz_targets/fuzz_object_trackers.rs` の `Observe` に immutables / payload_key を追加し、内容込み API を別の tracker で呼ぶ。Group ID / Object ID / prune 対象 group を小さな空間に畳み、重複比較と prune の分岐に到達させる

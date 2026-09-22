@@ -31,6 +31,13 @@ pub struct DecodedSubgroupObject {
     /// Object Status (payload_length == 0 の場合のみ)
     pub status: Option<u64>,
     /// Properties の生バイト (Properties Length varint + Properties データ)
+    ///
+    /// Properties フィールドが無い場合 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header) の
+    /// Type Flags の PROPERTIES ビット (0x01) が 0) は `None`、
+    /// ある場合は wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる。
+    /// draft-ietf-moq-transport-21 §8.1 (Variable-Length Integers) は非最小形の varint も許すため、
+    /// 保持される生バイトは最小形とは限らない (Properties Length = 0 は最小形なら `0x00` の 1 バイト)。
+    /// `LocProperties::decode` にそのまま渡せる。
     pub properties_bytes: Option<Vec<u8>>,
 }
 
@@ -157,6 +164,7 @@ impl SubgroupStreamDecoder {
     /// - `Ok(Some(obj))` — デコード成功。`object_id` は絶対値に解決済み。
     ///   呼び出し側は `payload_length` バイト分のペイロードをバッファから読み出した後、
     ///   `consume_payload` を呼ぶこと。
+    ///   Object Properties は `properties_bytes` に保持される。
     /// - `Ok(None)` — データ不足、追加データが必要
     /// - `Err(e)` — デコードエラー
     pub fn try_decode_object(&mut self) -> Result<Option<DecodedSubgroupObject>, MessageError> {
@@ -332,7 +340,7 @@ impl Default for SubgroupStreamDecoder {
 ///
 /// `FetchStreamEntry` の生のデルタ値ではなく、絶対値に解決済みの情報を提供する。
 /// ペイロードは含まない。呼び出し側が `payload_length` バイト分を消費する。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFetchEntry {
     /// 通常のオブジェクト（デルタ解決済み）
     Object(DecodedFetchObject),
@@ -360,7 +368,7 @@ pub enum DecodedFetchEntry {
 }
 
 /// デコード済み Fetch オブジェクトの情報（デルタ解決済み）
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFetchObject {
     /// 絶対 Group ID
     pub group_id: u64,
@@ -374,6 +382,14 @@ pub struct DecodedFetchObject {
     pub is_datagram_origin: bool,
     /// ペイロード長
     pub payload_length: u64,
+    /// Object Properties の生バイト列 (Properties Length varint + Properties データ)
+    ///
+    /// Subgroup 経路 (`DecodedSubgroupObject::properties_bytes`) と同じ表現であり、
+    /// `LocProperties::decode` にそのまま渡せる。Flags (draft-ietf-moq-transport-21
+    /// §11.4.1.1 Table 9) の bit `0x20` が 0 のときは `None`、1 のときは `Some` になる。
+    /// §8.1 (Variable-Length Integers) は非最小形の varint も許すため、保持される生バイトは
+    /// 最小形とは限らない (Properties Length = 0 は最小形なら `0x00` の 1 バイト)。
+    pub properties_bytes: Option<Vec<u8>>,
 }
 
 /// FetchStreamDecoder のデコーダー状態
@@ -583,6 +599,7 @@ impl FetchStreamDecoder {
     /// - `Ok(Some(entry))` — デコード成功。group_id / subgroup_id / object_id は絶対値に解決済み。
     ///   Object エントリの場合、呼び出し側は `payload_length` バイト分のペイロードを
     ///   バッファから読み出した後 `consume_payload` を呼ぶこと。
+    ///   Object エントリの Object Properties は `properties_bytes` に保持される。
     ///   EndOfRange エントリの場合、`consume_payload` は不要。
     /// - `Ok(None)` — データ不足、追加データが必要
     /// - `Err(e)` — デコードエラー
@@ -614,8 +631,8 @@ impl FetchStreamDecoder {
     ) -> Result<DecodedFetchEntry, MessageError> {
         match entry {
             FetchStreamEntry::Object(obj) => {
-                let resolved = self.resolve_object(&obj)?;
-                self.validate_fetch_object(&resolved, properties_bytes.as_deref())?;
+                let resolved = self.resolve_object(&obj, properties_bytes)?;
+                self.validate_fetch_object(&resolved)?;
 
                 // prior_state を更新する
                 self.prior_state = Some(FetchPriorState {
@@ -689,7 +706,14 @@ impl FetchStreamDecoder {
     }
 
     /// FetchStreamObject のデルタフィールドを絶対値に解決する (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))
-    fn resolve_object(&self, obj: &FetchStreamObject) -> Result<DecodedFetchObject, MessageError> {
+    ///
+    /// `properties_bytes` は `FetchStreamEntry::decode_with_properties` が返した
+    /// Properties Length varint 込みの生バイト列であり、そのまま保持する。
+    fn resolve_object(
+        &self,
+        obj: &FetchStreamObject,
+        properties_bytes: Option<Vec<u8>>,
+    ) -> Result<DecodedFetchObject, MessageError> {
         let prior = self.prior_state;
 
         // 最初のオブジェクト: group_id / object_id は絶対値 (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))
@@ -781,6 +805,7 @@ impl FetchStreamDecoder {
             publisher_priority,
             is_datagram_origin: obj.is_datagram_origin,
             payload_length: obj.payload_length,
+            properties_bytes,
         })
     }
 
@@ -805,11 +830,12 @@ impl FetchStreamDecoder {
         }
     }
 
-    fn validate_fetch_object(
-        &mut self,
-        obj: &DecodedFetchObject,
-        properties_bytes: Option<&[u8]>,
-    ) -> Result<(), MessageError> {
+    /// Fetch オブジェクト列の整合性を検証し、検証用の状態を更新する
+    ///
+    /// Properties は `obj.properties_bytes` から読む。
+    /// group の前進時には過去 group の per-group 記録を破棄し、Object Property の
+    /// malformed 判定 (`ObjectPropertyTracker`) にも同じ Properties を渡す。
+    fn validate_fetch_object(&mut self, obj: &DecodedFetchObject) -> Result<(), MessageError> {
         if let Some(previous) = self.validation.last_object {
             if obj.group_id == previous.group_id && obj.object_id <= previous.object_id {
                 return Err(MessageError::ProtocolViolation(
@@ -870,7 +896,7 @@ impl FetchStreamDecoder {
         self.validation.object_properties.observe_object(
             obj.group_id,
             obj.object_id,
-            properties_bytes,
+            obj.properties_bytes.as_deref(),
         )?;
         self.validation.last_object = Some(FetchActualObjectState {
             group_id: obj.group_id,

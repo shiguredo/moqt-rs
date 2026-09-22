@@ -586,7 +586,7 @@ impl FetchStreamObject {
             None
         };
 
-        // Properties をスキップする
+        // Properties を Properties Length varint 込みの生バイト列として切り出す
         // draft-ietf-moq-transport-21 §11.4.1 (Fetch Header): Fetch object でも Properties Length = 0 は合法
         let properties_bytes = if has_properties {
             let prop_start = pos;

@@ -592,6 +592,12 @@ fn encode_end_of_timed_out_range(&mut self, group_id: u64, object_id: u64, buf: 
 
 - `SubgroupStreamDecoder` は `try_decode_object` / `consume_payload`、`FetchStreamDecoder` は `try_decode_entry` / `consume_payload` とメソッド名が異なる
 - ペイロード本体はデコーダの責務外。`payload_length` バイト分を読み出したら `consume_payload` を呼ぶ
+- Object Properties は `DecodedSubgroupObject::properties_bytes` と `DecodedFetchObject::properties_bytes` の
+  どちらも Properties Length varint 込みの生バイト列であり、`LocProperties::decode` にそのまま渡せる。
+  wire に現れた varint をそのまま保持するため、Properties Length = 0 は最小形なら `0x00` の 1 バイトになる
+- Properties フィールドの有無は Subgroup では SUBGROUP_HEADER の Type Flags の PROPERTIES ビット、
+  FETCH では Serialization Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が示す。
+  どちらの経路も、無い場合は `None`、ある場合は `Some` になる
 - `FetchStreamEncoder` は前回オブジェクトとの差分 (デルタ圧縮) を内部状態で判断する
 - `FetchStreamEncoder::new` は Group Order を Ascending (0x01) に固定する。`new_with_group_order` は 0x01 (Ascending) と 0x02 (Descending) を受け付け、それ以外は `ProtocolViolation` を返す (`FetchStreamDecoder::new_with_group_order` と対称)
 - `FetchStreamEncoder` はペイロードを出力しない。返したバイト列の後ろに呼び出し側がペイロードを結合する

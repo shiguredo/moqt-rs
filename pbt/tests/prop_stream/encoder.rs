@@ -7,7 +7,8 @@
 //! Datagram 起源 (0x40) の Object は Subgroup ID を運ばず 0 に解決されるため、
 //! subgroup_id の期待値は通常起源と Datagram 起源で分ける。
 //! Properties 付きの Object も混ぜ、delta 圧縮と Properties の組み合わせで
-//! 回帰が起きないことを検証する。
+//! 回帰が起きないこと、および Properties の生バイト列 (Properties Length varint 込み) が
+//! そのまま復元されることを検証する。
 
 use pbt::common::{sample_varint, test_runner};
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
@@ -135,7 +136,7 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
         let decoded = drive_fetch(&[&bytes]).expect("エンコーダ出力はデコードできる");
         assert_eq!(decoded.len(), objects.len());
 
-        for ((entry, payload), (input, expected_payload, _properties_data)) in
+        for ((entry, payload), (input, expected_payload, properties_data)) in
             decoded.iter().zip(objects.iter())
         {
             let DecodedFetchEntry::Object(object) = entry else {
@@ -154,9 +155,27 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
             assert_eq!(object.publisher_priority, input.publisher_priority);
             assert_eq!(object.payload_length, input.payload_length);
             assert_eq!(payload, expected_payload);
-            // `DecodedFetchEntry::Object` は Properties 生バイトを公開しないため、
-            // Properties の内容そのものは復元検証しない (デコード時に
-            // ObjectProperties::decode を通ることだけが検証される)。
+            // Properties は Properties Length varint 込みの生バイト列として復元される
+            // (`sample_properties` の doc を参照)。bit 0x20 が 0 なら `None`、
+            // 1 なら (Length = 0 でも) `Some` になる。
+            match (input.has_properties, object.properties_bytes.as_deref()) {
+                (false, None) => {}
+                (true, Some(bytes)) => assert_eq!(
+                    bytes,
+                    properties_data.as_slice(),
+                    "Properties の生バイト列が保存されること"
+                ),
+                (false, Some(bytes)) => panic!(
+                    "Properties 無しの Object が Properties を運んだ: \
+                     group_id={}, object_id={}, properties_bytes={bytes:?}",
+                    input.group_id, input.object_id
+                ),
+                (true, None) => panic!(
+                    "Properties 付きの Object が Properties を落とした: \
+                     group_id={}, object_id={}, expected={properties_data:?}",
+                    input.group_id, input.object_id
+                ),
+            }
         }
         Ok(())
     })?;
