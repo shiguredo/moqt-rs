@@ -432,8 +432,7 @@ pub enum SessionEvent {
     /// - requester 側: responder の FIN を受けて送信方向を閉じる
     ///   ([`Session::recv_request_stream_closed`](crate::session::core::Session::recv_request_stream_closed))
     /// - responder 側: PUBLISH 起点の subscription で PUBLISH_DONE を受信し、自側が送るべき
-    ///   メッセージが無くなった時点で閉じる
-    ///   ([`Session::handle_peer_publish_done`](crate::session::subscription::recv::Session::handle_peer_publish_done))。
+    ///   メッセージが無くなった時点で閉じる。
     ///   §6.4.2.2 "An endpoint MUST NOT send a FIN on a direction of a request stream until it
     ///   has sent all required messages on that direction for its request type." より、
     ///   必須応答を送り終えた `Established` からの遷移に限る
