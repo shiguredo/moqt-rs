@@ -6,10 +6,12 @@
 //! sans I/O API を提供する。
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
-    STREAM_CANCELLED, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK, is_local_error_code,
+    MessageError, PUBLISH_DONE_UPDATE_FAILED, SESSION_KEY_VALUE_FORMATTING_ERROR,
+    SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK,
+    is_local_error_code,
 };
 use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
+use crate::object_properties::ObjectProperties;
 use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, OBJECT_STATUS_NORMAL,
     PADDING_DATAGRAM_TYPE, classify_data_stream_type,
@@ -131,7 +133,7 @@ pub(super) struct IncomingSubgroupStream {
     ///
     /// 解決は [`Subscription::resolve_header_publisher_priority`] (header 値 → Track Property の
     /// DEFAULT_PUBLISHER_PRIORITY → 128) による。Subgroup 単位の値であり、§12.1 条件 1 の
-    /// priority 一致検証と重複 Object 検証 (`observe_object_fields`) で使う。
+    /// priority 一致検証と重複 Object 検証 (`observe_object_fields_with_content`) で使う。
     /// 購読単位では直近 header の解決値を保持しないため、並行 Subgroup の検証には
     /// この stream 保持値を使う。
     ///
@@ -1497,15 +1499,25 @@ impl Session {
         is_first_object: bool,
     ) -> Result<(), SessionError> {
         let group_id = stream.group_id;
+        // Object Properties を 1 度だけ decode する。framing は wire 経路の
+        // `SubgroupObject::decode` が保証するが、手組みの `DecodedSubgroupObject` を渡す
+        // API 経路ではここで framing 違反も検出する。先頭 Object の delivery timeout
+        // override、§12.1 条件 3/4/5 の gap 検証、§12.1 条件 6 の immutable properties 比較の
+        // 3 用途で使い回す。
+        let decoded_properties = match decode_object_properties(object.properties_bytes.as_deref())
+        {
+            Ok(properties) => properties,
+            Err(msg_err) => {
+                let err = session_error_from_data_message(msg_err);
+                self.terminate_malformed_track(object_request_id, Some(stream_id), err.reason);
+                return Err(err);
+            }
+        };
         // draft-ietf-moq-transport-21 §10.1 / §10.2: subgroup の先頭 object に付与された
         // SUBGROUP_DELIVERY_TIMEOUT / OBJECT_DELIVERY_TIMEOUT は Track-level 値を
         // per-subgroup で上書きする。先頭以外の object では無視される。
         // 帰属先の subscription にのみ適用する (フィルタ不通過の object は反映しない)。
-        if is_first_object
-            && let Some(properties_bytes) = object.properties_bytes.as_deref()
-            && let Ok((properties, _)) =
-                crate::object_properties::ObjectProperties::decode(properties_bytes)
-        {
+        if is_first_object && let Some(properties) = decoded_properties.as_ref() {
             let subgroup_timeout = properties.subgroup_delivery_timeout();
             let object_timeout = properties.object_delivery_timeout();
             if (subgroup_timeout.is_some() || object_timeout.is_some())
@@ -1550,38 +1562,39 @@ impl Session {
             .peer_object_properties
             .entry(object_request_id)
             .or_default()
-            .observe_object(
-                group_id,
-                object.object_id,
-                object.properties_bytes.as_deref(),
-            )
+            .observe_decoded_object(group_id, object.object_id, decoded_properties.as_ref())
         {
-            // draft §12.1 (Malformed Tracks) 条件 3/4/5: `ObjectPropertyTracker::observe_object`
+            // draft §12.1 (Malformed Tracks) 条件 3/4/5: `ObjectPropertyTracker::observe_decoded_object`
             // は PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の一貫性違反 (gap 内に後続 Object を受信する等)
-            // を Malformed Track として検出する。IMMUTABLE_PROPERTIES (0x0B) の raw バイト列不一致
-            // (条件 6 の "other immutable properties") は Sans I/O + no_std 制約下では保持不能のため、
-            // `ObjectFieldTracker` の doc のとおり Session では検出しない (app / relay 層の責務)。
-            // Malformed Track はセッション全体ではなく該当 subscription だけを cancel する。
+            // を Malformed Track として検出する。Malformed Track はセッション全体ではなく
+            // 該当 subscription だけを cancel する。
             let err = session_error_from_data_message(msg_err);
             self.terminate_malformed_track(object_request_id, Some(stream_id), err.reason);
             return Err(err);
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
-        // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
+        // 重複 Object の Forwarding Preference / Subgroup ID / Priority と、条件 6 の
+        // Payload / immutable properties の一貫性を検証する。
         // subgroup stream 経由なので is_subgroup = true。Priority は stream が header 時点で
         // 保持した Subgroup 単位の解決値を使う (購読単位の直近値は並行 Subgroup の header で
         // 上書きされるため、別 Subgroup の header 受信後に同一 Subgroup の Object を再受信すると
         // 直近値では priority 不一致を誤検出する)。
+        let immutables = decoded_properties
+            .as_ref()
+            .and_then(ObjectProperties::immutable_properties);
+        let payload_key = payload_key_of(object.status, Some(object.payload_length));
         if let Err(mismatch) = self
             .peer_object_fields
             .entry(object_request_id)
             .or_default()
-            .observe_object_fields(
+            .observe_object_fields_with_content(
                 group_id,
                 object.object_id,
                 true,
                 resolved_subgroup_id,
                 stream.resolved_publisher_priority,
+                immutables,
+                Some(&payload_key[..]),
             )
         {
             self.terminate_malformed_track(object_request_id, Some(stream_id), mismatch.reason);
@@ -2477,11 +2490,25 @@ impl Session {
         if datagram.end_of_group {
             self.record_group_end_after(request_id, datagram.group_id, datagram.object_id);
         }
+        // Object Properties を 1 度だけ decode し、gap 検証 (条件 3/4/5) と
+        // 条件 6 の immutable properties 比較に使い回す
+        let decoded_properties = match decode_object_properties(properties_bytes) {
+            Ok(properties) => properties,
+            Err(msg_err) => {
+                let err = session_error_from_data_message(msg_err);
+                self.terminate_malformed_track(request_id, None, err.reason);
+                return Err(err);
+            }
+        };
         if let Err(msg_err) = self
             .peer_object_properties
             .entry(request_id)
             .or_default()
-            .observe_object(datagram.group_id, datagram.object_id, properties_bytes)
+            .observe_decoded_object(
+                datagram.group_id,
+                datagram.object_id,
+                decoded_properties.as_ref(),
+            )
         {
             // draft §12.1 (Malformed Tracks): datagram 経路も同じ扱い。datagram は stream を
             // 持たないので reset 対象の stream_id は無い。
@@ -2490,7 +2517,8 @@ impl Session {
             return Err(err);
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
-        // 重複 Object の Forwarding Preference / Subgroup ID / Priority 一貫性を検証する。
+        // 重複 Object の Forwarding Preference / Subgroup ID / Priority と、条件 6 の
+        // Payload / immutable properties の一貫性を検証する。
         // datagram 経由なので is_subgroup = false、subgroup_id = None。
         {
             // DEFAULT_PRIORITY bit が立っている場合の継承元は、直近 SUBGROUP_HEADER ではなく
@@ -2503,16 +2531,29 @@ impl Session {
                         s.resolve_header_publisher_priority(None)
                     })
             });
+            // `ObjectDatagram` は payload 長を運ばないため、`recv_object_datagram` の API からは
+            // payload 長を知ることができない。wire 経路 (`recv_datagram`) は
+            // `ObjectDatagram::decode` の消費バイト数から payload 長を復元できるが、入口によって
+            // 検出能力が変わると同じ Object を両入口に渡した場合に誤検出になりうるため、
+            // datagram 経路は payload 長を「未提供」に統一する。
+            // その結果、同じ status で payload 長だけが異なる重複 datagram は見逃す
+            // (draft §7.1 (Caching Relays) の無条件 MUST に対する既知の穴であり、別途対応する)。
+            let immutables = decoded_properties
+                .as_ref()
+                .and_then(ObjectProperties::immutable_properties);
+            let payload_key = payload_key_of(datagram.status, None);
             if let Err(mismatch) = self
                 .peer_object_fields
                 .entry(request_id)
                 .or_default()
-                .observe_object_fields(
+                .observe_object_fields_with_content(
                     datagram.group_id,
                     datagram.object_id,
                     false,
                     None,
                     publisher_priority,
+                    immutables,
+                    Some(&payload_key[..]),
                 )
             {
                 self.terminate_malformed_track(request_id, None, mismatch.reason);
@@ -3698,6 +3739,44 @@ impl Session {
                     )
             })
     }
+}
+
+/// Object Properties の生バイト列を decode する
+///
+/// 引数は Properties Length varint を含む Object Properties の生バイト列
+/// (subgroup の `properties_bytes` / datagram の `properties_data`) である。
+/// framing の検証は [`ObjectProperties::decode_exact`] に集約している。
+fn decode_object_properties(
+    properties_bytes: Option<&[u8]>,
+) -> Result<Option<ObjectProperties>, MessageError> {
+    properties_bytes
+        .map(ObjectProperties::decode_exact)
+        .transpose()
+}
+
+/// payload の比較キー (固定長 18 バイト) を作る
+///
+/// draft-ietf-moq-transport-21 §7.1 (Caching Relays) の "Payload" と、§12.1 (Malformed Tracks)
+/// 条件 6 の "Payload" を重複 Object 間で比較するためのキーである (§11.1.2 (Object Status) は
+/// status 付き Object が payload を持たないと定めるため、status の有無の差異も Payload の
+/// 差異として扱う)。subgroup 経路は payload 長と status を、datagram 経路は status だけを
+/// 符号化する。
+///
+/// 未提供の値は「値なし」として符号化する。値 `0` と未提供を区別するため、値ごとに
+/// presence バイト (1 = あり / 0 = なし) を置く。18 バイト固定長なので比較はバイト列の
+/// 等価比較で足り、`u64::MAX` のような番兵と実値が衝突しない。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+fn payload_key_of(status: Option<u64>, payload_length: Option<u64>) -> [u8; 18] {
+    let mut key = [0u8; 18];
+    if let Some(status) = status {
+        key[0] = 1;
+        key[1..9].copy_from_slice(&status.to_be_bytes());
+    }
+    if let Some(payload_length) = payload_length {
+        key[9] = 1;
+        key[10..18].copy_from_slice(&payload_length.to_be_bytes());
+    }
+    key
 }
 
 fn session_error_from_data_message(err: crate::error::MessageError) -> SessionError {

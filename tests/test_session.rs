@@ -535,6 +535,70 @@ fn status_object(object_id: u64, status: u64) -> DecodedSubgroupObject {
     }
 }
 
+/// Malformed Track の cancel / 終端イベントを回収して検証する
+///
+/// 返り値は (cancel イベント列, ResetDataStream 件数, RequestTerminated(MalformedTrack) 件数)。
+/// cancel は `request_id` と `STREAM_MALFORMED_TRACK` も検証する。`expected_reset_stream_id` は
+/// `ResetDataStream` の対象 stream (datagram 経路は `None`)。CloseSession はテストの前提に
+/// 反するため panic する。
+fn drain_malformed_events(
+    session: &mut Session,
+    request_id: u64,
+    expected_reset_stream_id: Option<DataStreamId>,
+) -> (Vec<&'static str>, usize, usize) {
+    use shiguredo_moqt::error::STREAM_MALFORMED_TRACK;
+    let mut cancels = Vec::new();
+    let mut reset_data_streams = 0;
+    let mut malformed_terminations = 0;
+    while let Some(e) = session.poll_event() {
+        match e {
+            SessionEvent::StopSendingRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
+                );
+                cancels.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
+                );
+                cancels.push("reset");
+            }
+            SessionEvent::ResetDataStream { stream_id, .. } => {
+                assert_eq!(
+                    Some(stream_id),
+                    expected_reset_stream_id,
+                    "ResetDataStream の対象 stream_id が期待値と一致すること"
+                );
+                reset_data_streams += 1;
+            }
+            SessionEvent::RequestTerminated {
+                request_id: rid,
+                reason: TerminationReason::MalformedTrack { .. },
+                ..
+            } => {
+                assert_eq!(rid, request_id, "終端対象 request id が一致すること");
+                malformed_terminations += 1;
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("CloseSession が発行された: {err:?}");
+            }
+            _ => {}
+        }
+    }
+    (cancels, reset_data_streams, malformed_terminations)
+}
+
 /// OBJECT_DELIVERY_TIMEOUT (0x02) を 1 つ持つ Object Properties のバイト列を作る
 ///
 /// `ObjectPropertyTracker` の gap 検証対象外の Property を使い、
@@ -605,8 +669,11 @@ mod alias_tombstone;
 mod data_stream;
 #[path = "test_session/datagram_object_filter.rs"]
 mod datagram_object_filter;
+
 #[path = "test_session/default_publisher_properties.rs"]
 mod default_publisher_properties;
+#[path = "test_session/duplicate_object_content.rs"]
+mod duplicate_object_content;
 #[path = "test_session/fetch.rs"]
 mod fetch;
 #[path = "test_session/goaway.rs"]

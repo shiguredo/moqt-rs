@@ -221,9 +221,23 @@
   - draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) の cancel は §6.4.2.3 (Request Cancellation and Rejection) のストリーム終端を含むため、`StopSendingRequestStream` と `ResetRequestStream` を `STREAM_CANCELLED` で発行する
   - 自側が既に cancel を発行済みの fetch では再発行しない (`Fetch::local_cancel_sent` で判定する)
   - @voluntas
+- [ADD] `ObjectFieldTracker::observe_object_fields_with_content` を追加し、重複 Object の immutable properties と payload の差異を検出する。これにより従来は受理していた内容の異なる重複 Object が Malformed Track になり得る (受信挙動の変更)
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is received more than once with different Payload or other immutable properties." への対応
+  - `immutable_properties: Option<&[u8]>` (IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列) と `payload_key: Option<&[u8]>` (呼び出し側が算出した payload の比較キー) を追加で受け取る。既存の `observe_object_fields` はシグネチャを変えず両方 `None` で委譲する
+  - 内容が食い違えば `ObjectFieldMismatch` を返し (一致する重複は従来どおり受理する)、Session はこれを Malformed Track として該当 subscription だけを cancel する
+  - 検出できるのは Session が保持する情報の範囲に限る。payload の内容は保持しないため同じ長さで内容だけが異なる payload は payload を持つ層が比較し、片方でも `None` なら比較しない (見逃し側に倒す)。これらの見逃しと、datagram の payload 長・片側だけ IMMUTABLE_PROPERTIES を持つ重複の見逃しは既知の制約である
+  - 対象は受信した subgroup Object と datagram であり、FETCH 応答の Object は対象外である
+  - `ObjectFieldTracker` の 1 レコードが immutables 長 (最大 65535 バイト) と payload_key 長を保持する。`records` は Session が subscription を forget するか `prune_past_groups` を呼ぶまで減らず、`Session` は現状 `prune_past_groups` を呼ばない (prune 配線は未実装)
+  - @voluntas
 
 ### misc
 
+- [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する
+  - `pbt/tests/prop_object_tracker.rs` に `object_field_tracker_content_comparison_matches_expected` を追加し、immutables と payload_key の比較が「両方 `Some` のときだけ」行われ、不一致の種類ごとに期待する `reason` が返ることを検証する (どちらの不一致も観測されたことをゲートする)
+  - `fuzz/fuzz_targets/fuzz_object_trackers.rs` の `Observe` に immutables / payload_key を追加し、内容込み API を別の tracker で呼ぶ。Group ID / Object ID / prune 対象 group を小さな空間に畳み、重複比較と prune の分岐に到達させる
+  - `tests/test_session/duplicate_object_content.rs` を追加し、subgroup / datagram の両経路で payload 長・status・immutable properties の差異を検出すること、mutable な Object Property の差異は検出しないこと、同一内容の重複が受理されることを固定する
+  - `tests/test_session/data_stream.rs` に Object Properties の KVP 不正と宣言長超過の検出を追加する
+  - @voluntas
 - [UPDATE] prek.toml からシンボリックリンク用のフックを削除する
   - `check-symlinks` が適用対象を持たず `check-hooks-apply` が失敗して prek ジョブが赤くなっていたため、`check-symlinks` と `destroyed-symlinks` を削除する
   - @voluntas

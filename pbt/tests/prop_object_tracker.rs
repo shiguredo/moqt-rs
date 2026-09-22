@@ -4,6 +4,8 @@
 //!   (draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap))
 //! - `ObjectFieldTracker`: 同一 Object の再受信は全フィールド一致のときのみ成功する
 //!   (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks))
+//! - `ObjectFieldTracker::observe_object_fields_with_content`: immutables / payload_key は
+//!   両方 `Some` のときだけ比較する (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6)
 
 use pbt::common::test_runner;
 use shiguredo_moqt::error::MessageError;
@@ -117,6 +119,141 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
     assert!(
         mismatch_seen.get(),
         "フィールド不一致のケースが観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// 内容込みの再観測は「全フィールド一致」かつ「比較可能な内容が一致」のときのみ成功する
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is received
+/// more than once with different Payload or other immutable properties."
+/// `immutable_properties` と `payload_key` の比較は**両方** `Some` のときだけ行い、片方でも
+/// `None` なら比較しない (見逃し側に倒す)。この規則を全入力の組み合わせで固定する。
+#[test]
+fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestResult {
+    // 内容の不一致 2 種 (immutables / payload_key) が実際に観測されたことを検証するゲート。
+    // どちらかが一度も生成されなければ、規則を検証しないまま通ってしまう。
+    let immutables_mismatch_seen = std::cell::Cell::new(false);
+    let payload_key_mismatch_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+        let object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+        let is_subgroup = noprop::sample_bool(ctx);
+        let subgroup_id = if noprop::sample_bool(ctx) {
+            Some(noprop::sample_u64_in(ctx, 0..=1_000_000))
+        } else {
+            None
+        };
+        let publisher_priority = noprop::sample_u8(ctx);
+
+        // 内容は「未提供 (None)」と「1-8 バイトの値」をどちらも生成する
+        let sample_content = |ctx: &mut noprop::TestCaseContext| {
+            if noprop::sample_bool(ctx) {
+                None
+            } else {
+                let len = noprop::sample_usize_in(ctx, 1..=8);
+                Some(noprop::sample_bytes_vec(ctx, len))
+            }
+        };
+        // 一致ケースを確実に観測するため、一定確率で 1 回目をそのまま使う
+        let first_immutables = sample_content(ctx);
+        let first_payload_key = sample_content(ctx);
+        let (second_immutables, second_payload_key) = if noprop::sample_bool(ctx) {
+            (first_immutables.clone(), first_payload_key.clone())
+        } else {
+            (sample_content(ctx), sample_content(ctx))
+        };
+        // 3 回目は 2 回目と独立に生成する。記録は初回受信時のまま更新しないため、
+        // 3 回目の比較相手は常に 1 回目である
+        let (third_immutables, third_payload_key) = (sample_content(ctx), sample_content(ctx));
+
+        let mut tracker = ObjectFieldTracker::new();
+        tracker
+            .observe_object_fields_with_content(
+                group_id,
+                object_id,
+                is_subgroup,
+                subgroup_id,
+                publisher_priority,
+                first_immutables.as_deref(),
+                first_payload_key.as_deref(),
+            )
+            .expect("初回の観測は成功する");
+
+        let result = tracker.observe_object_fields_with_content(
+            group_id,
+            object_id,
+            is_subgroup,
+            subgroup_id,
+            publisher_priority,
+            second_immutables.as_deref(),
+            second_payload_key.as_deref(),
+        );
+
+        // 両方 `Some` のときだけ比較し、値が異なれば不一致になる
+        let content_matches =
+            |first: &Option<Vec<u8>>, second: &Option<Vec<u8>>| match (first, second) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            };
+        let immutables_matches = content_matches(&first_immutables, &second_immutables);
+        let payload_key_matches = content_matches(&first_payload_key, &second_payload_key);
+        assert_eq!(
+            result.is_ok(),
+            immutables_matches && payload_key_matches,
+            "内容の比較は両方 Some のときだけ行われること: \
+             immutables={first_immutables:?}/{second_immutables:?} \
+             payload_key={first_payload_key:?}/{second_payload_key:?}"
+        );
+        if !immutables_matches {
+            immutables_mismatch_seen.set(true);
+        }
+        if !payload_key_matches {
+            payload_key_mismatch_seen.set(true);
+        }
+        match result {
+            // immutables を先に比較するため、両方が不一致なら immutables の理由が返る
+            Err(err) if !immutables_matches => assert_eq!(
+                err.reason, "malformed track: duplicate Object with different immutable properties",
+                "immutables の不一致理由が返ること"
+            ),
+            Err(err) => assert_eq!(
+                err.reason, "malformed track: duplicate Object with different Payload",
+                "payload_key の不一致理由が返ること"
+            ),
+            Ok(()) => {}
+        }
+
+        // 3 回目の観測。記録は初回のまま更新しないため、比較相手は常に 1 回目である
+        let third = tracker.observe_object_fields_with_content(
+            group_id,
+            object_id,
+            is_subgroup,
+            subgroup_id,
+            publisher_priority,
+            third_immutables.as_deref(),
+            third_payload_key.as_deref(),
+        );
+        let expected_third_ok = content_matches(&first_immutables, &third_immutables)
+            && content_matches(&first_payload_key, &third_payload_key);
+        assert_eq!(
+            third.is_ok(),
+            expected_third_ok,
+            "記録は初回受信時のまま更新しないこと: \
+             first_immutables={first_immutables:?} second_immutables={second_immutables:?} \
+             third_immutables={third_immutables:?} first_payload_key={first_payload_key:?} \
+             second_payload_key={second_payload_key:?} third_payload_key={third_payload_key:?}"
+        );
+        Ok(())
+    })?;
+    assert!(
+        immutables_mismatch_seen.get(),
+        "immutables 不一致のケースが観測されなかった\n{runner}"
+    );
+    assert!(
+        payload_key_mismatch_seen.get(),
+        "payload_key 不一致のケースが観測されなかった\n{runner}"
     );
     Ok(())
 }

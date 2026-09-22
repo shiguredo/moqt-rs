@@ -17,6 +17,11 @@ use hashbrown::HashMap;
 ///
 /// `SubgroupObject` の生のデルタ値ではなく、絶対値に解決済みの情報を提供する。
 /// ペイロードは含まない。呼び出し側が `payload_length` バイト分を消費する。
+///
+/// 手組みの値を作って `Session::recv_subgroup_object` に渡す場合、`status` が `Some` のとき
+/// `payload_length` は 0、`status` が `None` のときは 1 以上でなければならない
+/// (draft-ietf-moq-transport-21 §11.1.2 (Object Status): status 付き Object は payload を持たない)。
+/// wire 経路では `SubgroupObject::decode` がこの不変条件を強制する。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedSubgroupObject {
     /// 絶対 Object ID (デルタから解決済み)

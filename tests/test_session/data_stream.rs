@@ -2629,70 +2629,6 @@ fn reset_unknown_stream_is_rejected() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
-/// Malformed Track の cancel / 終端イベントを回収して検証する
-///
-/// 返り値は (cancel イベント列, ResetDataStream 件数, RequestTerminated(MalformedTrack) 件数)。
-/// cancel は `request_id` と `STREAM_MALFORMED_TRACK` も検証する。`expected_reset_stream_id` は
-/// `ResetDataStream` の対象 stream (datagram 経路は `None`)。CloseSession はテストの前提に
-/// 反するため panic する。
-fn drain_malformed_events(
-    session: &mut Session,
-    request_id: u64,
-    expected_reset_stream_id: Option<DataStreamId>,
-) -> (Vec<&'static str>, usize, usize) {
-    use shiguredo_moqt::error::STREAM_MALFORMED_TRACK;
-    let mut cancels = Vec::new();
-    let mut reset_data_streams = 0;
-    let mut malformed_terminations = 0;
-    while let Some(e) = session.poll_event() {
-        match e {
-            SessionEvent::StopSendingRequestStream {
-                request_id: rid,
-                error_code,
-            } => {
-                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
-                assert_eq!(
-                    error_code, STREAM_MALFORMED_TRACK,
-                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
-                );
-                cancels.push("stop_sending");
-            }
-            SessionEvent::ResetRequestStream {
-                request_id: rid,
-                error_code,
-            } => {
-                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
-                assert_eq!(
-                    error_code, STREAM_MALFORMED_TRACK,
-                    "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
-                );
-                cancels.push("reset");
-            }
-            SessionEvent::ResetDataStream { stream_id, .. } => {
-                assert_eq!(
-                    Some(stream_id),
-                    expected_reset_stream_id,
-                    "ResetDataStream の対象 stream_id が期待値と一致すること"
-                );
-                reset_data_streams += 1;
-            }
-            SessionEvent::RequestTerminated {
-                request_id: rid,
-                reason: TerminationReason::MalformedTrack { .. },
-                ..
-            } => {
-                assert_eq!(rid, request_id, "終端対象 request id が一致すること");
-                malformed_terminations += 1;
-            }
-            SessionEvent::CloseSession(err) => {
-                panic!("CloseSession が発行された: {err:?}");
-            }
-            _ => {}
-        }
-    }
-    (cancels, reset_data_streams, malformed_terminations)
-}
-
 // ─── 条件 1: 同一 Subgroup ID の Publisher Priority 不一致 ─────────────────
 
 /// 同一 Subgroup キーの 2 本目の stream で Publisher Priority を変えると Malformed Track
@@ -3089,6 +3025,231 @@ fn duplicate_object_with_same_fields_is_not_malformed() {
     );
 }
 
+/// フレーミングは正しいが KVP が不正な Object Properties のバイト列を作る
+///
+/// 必須トラックプロパティ (0x4000-0x7FFF) を Object Property として載せる
+/// (draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties): "An Object received with a
+/// Mandatory Track Property as an Object Property is malformed")。この範囲の拒否は decode 側
+/// (`decode_kv_pairs`) にあるため encode は成功し、Properties Length も実データと一致する。
+/// 入口のフレーミング検証は通過し、Object Properties のデコードで初めて失敗する。
+fn malformed_object_properties_blob() -> Vec<u8> {
+    encode_properties([ObjectProperty {
+        prop_type: 0x4000,
+        value: ObjectPropertyValue::VarInt(1),
+    }])
+}
+
+/// フレーミングは正しいが KVP が不正な Object Properties を subgroup Object で受信すると
+/// Malformed Track として subscription が終端される
+///
+/// `ObjectProperties::decode_exact` は KVP 層の失敗要因を区別せず `ProtocolViolation` に写すため
+/// (`ObjectPropertyTracker::observe_object` と同じ写像)、Session の応答は
+/// `SESSION_PROTOCOL_VIOLATION` + 該当 subscription の終端になる。
+#[test]
+fn subgroup_object_with_malformed_properties_kvp_terminates_subscription() {
+    let alias = 842u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    let stream_id = DataStreamId(73);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: true,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: Some(malformed_object_properties_blob()),
+            },
+        )
+        .expect_err("不正な Object Properties は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "invalid object properties framing",
+        "Object Properties のデコード失敗として扱うこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "該当 subscription は Terminated になること"
+    );
+
+    // draft §12.1 MUST: bidi request stream と malformed を運んだ data stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, Some(stream_id));
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 1,
+        "malformed を運んだ stream を reset すること"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
+    );
+}
+
+/// Object Properties の宣言長より後ろに余分なバイトがあると Malformed Track として
+/// subscription が終端される
+///
+/// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): "Object Properties are serialized as
+/// a length in bytes followed by Key-Value-Pairs (see Figure 2)." のとおり、Properties Length は
+/// 実データ長と一致しなければならない。subgroup 受信 API は datagram 経路のような入口検証を
+/// 持たないため、この拒否は `ObjectProperties::decode_exact` が担う。
+#[test]
+fn subgroup_object_with_trailing_bytes_in_properties_terminates_subscription() {
+    let alias = 849u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    let stream_id = DataStreamId(75);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: true,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 正当な Properties の後ろに余分な 1 バイトを足す
+    let mut properties_bytes = encode_properties([ObjectProperty {
+        prop_type: PROP_OBJECT_DELIVERY_TIMEOUT,
+        value: ObjectPropertyValue::VarInt(100),
+    }]);
+    properties_bytes.push(0x00);
+
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: Some(properties_bytes),
+            },
+        )
+        .expect_err("宣言長より後ろに余分なバイトがある Object Properties は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "invalid object properties framing",
+        "framing 違反として扱うこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "該当 subscription は Terminated になること"
+    );
+    // draft §12.1 MUST: bidi request stream と malformed を運んだ data stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, Some(stream_id));
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 1,
+        "malformed を運んだ stream を reset すること"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
+    );
+}
+
+/// フレーミングは正しいが KVP が不正な Object Properties を datagram で受信すると
+/// Malformed Track として subscription が終端される
+#[test]
+fn datagram_with_malformed_properties_kvp_terminates_subscription() {
+    let alias = 843u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    let err = client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: alias,
+            group_id: 0,
+            object_id: 0,
+            publisher_priority: Some(50),
+            properties_data: Some(malformed_object_properties_blob()),
+            end_of_group: false,
+            status: None,
+        })
+        .expect_err("不正な Object Properties は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "invalid object properties framing",
+        "Object Properties のデコード失敗として扱うこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "該当 subscription は Terminated になること"
+    );
+
+    // draft §12.1 MUST: datagram 経路 (stream_id なし) でも bidi request stream を cancel する
+    let (cancels, reset_data_streams, malformed_terminations) =
+        drain_malformed_events(&mut client, rid, None);
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset"],
+        "受信方向 → 送信方向の順で STREAM_MALFORMED_TRACK の cancel を発行すること"
+    );
+    assert_eq!(
+        reset_data_streams, 0,
+        "datagram 経路では ResetDataStream を発行しないこと"
+    );
+    assert_eq!(
+        malformed_terminations, 1,
+        "RequestTerminated(MalformedTrack) を 1 件発行すること"
+    );
+}
+
 // ─── datagram の OBJECT_DELIVERY_TIMEOUT 判定 (draft §5.2) ────────────────────
 
 /// Track Property に OBJECT_DELIVERY_TIMEOUT=500 を持つ publisher subscription を確立する
@@ -3421,7 +3582,7 @@ fn first_object_id_subgroup_reopen_with_different_priority_terminates_subscripti
 /// 同一 (group, object) を異なる Subgroup ID で受信すると §7.1 (Caching Relays) の
 /// Malformed として subscription が終端される
 ///
-/// `observe_object_fields` は Forwarding Preference → Subgroup ID → Priority の順に比較する。
+/// `observe_object_fields_with_content` は Forwarding Preference → Subgroup ID → Priority の順に比較する。
 #[test]
 fn duplicate_object_with_different_subgroup_id_terminates_subscription() {
     let alias = 832u64;

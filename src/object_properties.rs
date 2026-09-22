@@ -181,6 +181,32 @@ impl ObjectProperties {
         Ok(())
     }
 
+    /// バッファ全体を 1 つの Object Properties ブロックとしてデコードする
+    ///
+    /// [`decode`](Self::decode) と異なり、末尾に余分なバイトが残る場合は拒否する。
+    /// draft-ietf-moq-transport-21 §11.1.3 (Object Properties): "Object Properties are
+    /// serialized as a length in bytes followed by Key-Value-Pairs (see Figure 2)." および
+    /// §8.4 (Track and Object Properties): "Object Properties (Section 11.1.3) are preceded by
+    /// an explicit length field." のとおり、Properties Length と実データ長は一致しなければ
+    /// ならない。
+    ///
+    /// # Errors
+    ///
+    /// `decode` の失敗要因 (KVP 層の malformed 等) は区別せず、末尾の余分バイトと同じ
+    /// `ProtocolViolation("invalid object properties framing")` に写す。
+    /// [`ObjectPropertyTracker::observe_object`] が従来からこの写像を使っており、
+    /// 呼び出し元 (Session の受信経路と FETCH decoder) の挙動を変えないためである。
+    pub(crate) fn decode_exact(buf: &[u8]) -> Result<Self, MessageError> {
+        let (properties, consumed) = Self::decode(buf)
+            .map_err(|_| MessageError::ProtocolViolation("invalid object properties framing"))?;
+        if consumed != buf.len() {
+            return Err(MessageError::ProtocolViolation(
+                "invalid object properties framing",
+            ));
+        }
+        Ok(properties)
+    }
+
     /// バッファ先頭から Object Properties ブロックをデコードし `(properties, 消費バイト数)` を返す
     ///
     /// フォーマット: `Properties Length (varint) | Key-Value-Pairs...`
@@ -366,18 +392,10 @@ impl ObjectPropertyTracker {
         object_id: u64,
         properties_bytes: Option<&[u8]>,
     ) -> Result<(), MessageError> {
-        let properties = if let Some(bytes) = properties_bytes {
-            let (properties, consumed) = ObjectProperties::decode(bytes).map_err(|_| {
-                MessageError::ProtocolViolation("invalid object properties framing")
-            })?;
-            if consumed != bytes.len() {
-                return Err(MessageError::ProtocolViolation(
-                    "invalid object properties framing",
-                ));
-            }
-            Some(properties)
-        } else {
-            None
+        // framing の検証は `decode_exact` に集約する (Session の受信経路も同じ関数を使う)
+        let properties = match properties_bytes {
+            Some(bytes) => Some(ObjectProperties::decode_exact(bytes)?),
+            None => None,
         };
 
         self.observe_decoded_object(group_id, object_id, properties.as_ref())
@@ -604,18 +622,30 @@ fn decode_kv_pairs(
 /// (draft §11.1.1: "Object Forwarding Preference is a property of an individual Object
 /// and can vary among Objects in the same Track")。
 ///
-/// **Payload は保持しない。** Session は Sans I/O で Object の payload バイト列を受け取らず、
-/// 保持すればメモリ消費が入力サイズに比例するため。§7.1 が挙げる 4 フィールドのうち
-/// Payload の比較は Session では原理的にできない。Forwarding Preference / Subgroup ID /
-/// Priority の 3 つに絞る。
+/// **payload の内容そのものは本トラッカーでは比較できない。** Session は Sans I/O で Object の
+/// payload バイト列を受け取らないため、呼び出し側が算出した比較キー (`payload_key`) を渡す。
+/// Session は payload 長 (subgroup 経路のみ) と status を符号化したキーを渡すため、
+/// **同じ長さで内容だけが異なる payload は Session では検出できない**。
+/// payload のバイト列を持つ層 (アプリ) がダイジェスト等を渡せば検出できる。
+/// Malformed Track の誤検出で正常な track を落とすより見逃し側に倒す設計である。
 ///
-/// **IMMUTABLE_PROPERTIES (0x0B) の差異検出も持たない。** draft §12.1 条件 6 の
-/// "other immutable properties" のうち IMMUTABLE_PROPERTIES (draft §10.7 (Immutable Properties)) の
-/// raw バイト列一致検証は、Track 単位に初回バイト列 (または hash) を保持する必要があるが、
-/// Sans I/O + no_std 制約下でメモリ消費を入力サイズに比例させる保持は許容できない。Payload と同じ
-/// 理由で Session ではなく app / relay 層 (payload や immutable metadata に触れられる層) の責務とする。
-/// draft §10.7 の "This Property MUST NOT be modified or removed and the serialization ... MUST NOT change."
-/// に対する endpoint 実装契約は Session の外側に置く。
+/// **比較は両方 `Some` のときだけ行う。** `None` になるのは次の 3 通りである。
+///
+/// - [`observe_object_fields`](Self::observe_object_fields) は内容を渡さないため常に `None`
+/// - `immutable_properties` は、その Object が IMMUTABLE_PROPERTIES (0x0B) を持たない場合に `None`
+/// - `payload_key` は、呼び出し側が比較キーを算出しない場合に `None`
+///   ([`observe_object_fields_with_content`](Self::observe_object_fields_with_content) の
+///   呼び出し側の判断であり、Session は常に `Some` を渡す)
+///
+/// したがって **一方の Object だけが IMMUTABLE_PROPERTIES を持つ重複は検出しない**
+/// (draft §10.7 は "This Property MUST NOT be modified or removed" と定めるため差異ではあるが、
+/// 見逃し側に倒す)。記録は初回受信時の値のまま更新しないため、初回に `None` だった Object は
+/// 以後も内容比較の対象にならない。
+///
+/// **保持量**: 1 レコードは immutables 長 (最大 65535 バイト) と payload_key 長を保持する。
+/// [`prune_past_groups`](Self::prune_past_groups) を呼ぶか tracker 自体を破棄するまで減らないため
+/// (同じ group 内の記録は prune でも残る)、`Session` のように prune を呼ばない利用者では
+/// 受信 Object 数 × 上記サイズまで増え続ける。
 ///
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 #[derive(Debug, Default, Clone)]
@@ -625,7 +655,9 @@ pub struct ObjectFieldTracker {
 }
 
 /// 初回受信時に記録する Object のフィールド値
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 比較はフィールド単位で行うため、構造体全体の等価比較は導出しない。
+#[derive(Debug, Clone)]
 struct ObjectFieldRecord {
     /// Object Forwarding Preference: subgroup stream 経由なら `true`、datagram 経由なら `false`
     is_subgroup: bool,
@@ -633,6 +665,12 @@ struct ObjectFieldRecord {
     subgroup_id: Option<u64>,
     /// Publisher Priority
     publisher_priority: u8,
+    /// IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列 (draft §10.7 (Immutable Properties))
+    ///
+    /// Properties の長さに律速されるため生バイト列のまま保持する。
+    immutable_properties: Option<Vec<u8>>,
+    /// payload の比較キー (呼び出し側が算出したバイト列。詳細は [`ObjectFieldTracker`] の doc)
+    payload_key: Option<Vec<u8>>,
 }
 
 /// 重複 Object のフィールド不一致エラー
@@ -677,49 +715,116 @@ impl ObjectFieldTracker {
         subgroup_id: Option<u64>,
         publisher_priority: u8,
     ) -> Result<(), ObjectFieldMismatch> {
-        let key = (group_id, object_id);
-        let record = ObjectFieldRecord {
+        self.observe_object_fields_with_content(
+            group_id,
+            object_id,
             is_subgroup,
             subgroup_id,
             publisher_priority,
+            None,
+            None,
+        )
+    }
+
+    /// 重複受信した Object を、immutable properties と payload の比較キーも含めて追跡する
+    ///
+    /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is
+    /// received more than once with different Payload or other immutable properties."
+    ///
+    /// 初回受信時は記録して `Ok(())` を返す。判定規則と保持量は [`ObjectFieldTracker`] の
+    /// doc を参照。
+    ///
+    /// `immutable_properties` は IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列
+    /// (`ObjectProperties::immutable_properties` の戻り値)。`payload_key` は呼び出し側が算出した
+    /// payload の比較キーである (payload のバイト列そのものは Session が保持しないため)。
+    /// キーの長さは問わないが、record ごとに保持するため **短い固定長** が望ましく、
+    /// payload 全体を渡すと保持量が payload 長に比例する。ダイジェストが衝突した場合は
+    /// 「不一致と判定されない」= 見逃しになる。
+    ///
+    /// # Errors
+    ///
+    /// 同一 (group_id, object_id) の再受信でフィールドまたは内容が異なる場合に
+    /// `ObjectFieldMismatch` を返す。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Forwarding Preference / Subgroup ID / Priority と条件 6 の内容比較を 1 回の観測で渡すため"
+    )]
+    pub fn observe_object_fields_with_content(
+        &mut self,
+        group_id: u64,
+        object_id: u64,
+        is_subgroup: bool,
+        subgroup_id: Option<u64>,
+        publisher_priority: u8,
+        immutable_properties: Option<&[u8]>,
+        payload_key: Option<&[u8]>,
+    ) -> Result<(), ObjectFieldMismatch> {
+        let key = (group_id, object_id);
+        // 比較は引数の借用のまま行い、複製 (immutables は最大 65535 バイト) は
+        // 初回受信で記録するときだけ作る
+        let Some(prev) = self.records.get(&key) else {
+            self.records.insert(
+                key,
+                ObjectFieldRecord {
+                    is_subgroup,
+                    subgroup_id,
+                    publisher_priority,
+                    immutable_properties: immutable_properties.map(<[u8]>::to_vec),
+                    payload_key: payload_key.map(<[u8]>::to_vec),
+                },
+            );
+            return Ok(());
         };
-        match self.records.get(&key) {
-            Some(prev) => {
-                // draft §7.1: Forwarding Preference / Subgroup ID / Priority の比較
-                if prev.is_subgroup != record.is_subgroup {
-                    return Err(ObjectFieldMismatch {
-                        group_id,
-                        object_id,
-                        reason: "malformed track: duplicate Object with different Forwarding Preference",
-                    });
-                }
-                if prev.subgroup_id != record.subgroup_id {
-                    return Err(ObjectFieldMismatch {
-                        group_id,
-                        object_id,
-                        reason: "malformed track: duplicate Object with different Subgroup ID",
-                    });
-                }
-                if prev.publisher_priority != record.publisher_priority {
-                    return Err(ObjectFieldMismatch {
-                        group_id,
-                        object_id,
-                        reason: "malformed track: duplicate Object with different Priority",
-                    });
-                }
-                Ok(())
-            }
-            None => {
-                self.records.insert(key, record);
-                Ok(())
-            }
+        // draft §7.1: Forwarding Preference / Subgroup ID / Priority の比較
+        if prev.is_subgroup != is_subgroup {
+            return Err(ObjectFieldMismatch {
+                group_id,
+                object_id,
+                reason: "malformed track: duplicate Object with different Forwarding Preference",
+            });
         }
+        if prev.subgroup_id != subgroup_id {
+            return Err(ObjectFieldMismatch {
+                group_id,
+                object_id,
+                reason: "malformed track: duplicate Object with different Subgroup ID",
+            });
+        }
+        if prev.publisher_priority != publisher_priority {
+            return Err(ObjectFieldMismatch {
+                group_id,
+                object_id,
+                reason: "malformed track: duplicate Object with different Priority",
+            });
+        }
+        // draft §12.1 (Malformed Tracks) 条件 6: Payload / immutable properties の差異
+        if let (Some(prev_immutables), Some(immutables)) =
+            (prev.immutable_properties.as_deref(), immutable_properties)
+            && prev_immutables != immutables
+        {
+            return Err(ObjectFieldMismatch {
+                group_id,
+                object_id,
+                reason: "malformed track: duplicate Object with different immutable properties",
+            });
+        }
+        if let (Some(prev_key), Some(key)) = (prev.payload_key.as_deref(), payload_key)
+            && prev_key != key
+        {
+            return Err(ObjectFieldMismatch {
+                group_id,
+                object_id,
+                reason: "malformed track: duplicate Object with different Payload",
+            });
+        }
+        Ok(())
     }
 
     /// group 境界での prune: 指定 group より過去のエントリを削除する
     ///
     /// `ObjectPropertyTracker::prune_past_groups` と同じセマンティクス。
-    /// Object 単位でフィールド値を持つと保持量が増えるため、group 境界で prune する。
+    /// 保持量を抑えたい呼び出し側が group 前進ごとに呼ぶ。保持量の詳細は
+    /// [`ObjectFieldTracker`] の doc を参照。
     pub fn prune_past_groups(&mut self, ascending: bool, current_group: u64) {
         if ascending {
             self.records.retain(|&(g, _), _| g >= current_group);
