@@ -2,6 +2,200 @@
 
 use super::*;
 
+/// PUBLISH 起点 subscription の subscriber は Established で PUBLISH_DONE を受けると FIN する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): responder の FIN は
+/// request 完了の合図である。PUBLISH 起点では PUBLISH を受けた subscriber が responder であり、
+/// PUBLISH_DONE の受信で自側が送るべきメッセージが無くなる。
+#[test]
+fn publish_origin_subscriber_finishes_on_publish_done() {
+    let (mut client, mut server) = establish_pair();
+    // client が PUBLISH を送り、server が受信して subscriber responder になる
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            910,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // server (subscriber) が PUBLISH_OK を返して Established にする
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("PUBLISH_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("PUBLISH_OK の受信に成功すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established
+    );
+
+    // PUBLISH_OK の送信直後には FIN しない (publisher が REQUEST_UPDATE を送りうる)
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::FinishRequestStream { .. }),
+            "PUBLISH_OK の時点では FIN しないこと"
+        );
+    }
+
+    // publisher が PUBLISH_DONE を送る
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
+                status_code: 0x2,
+                stream_count: 0,
+                reason: shiguredo_moqt::message::ReasonPhrase::new("ended")
+                    .expect("正当な reason phrase である"),
+            }),
+        )
+        .expect("PUBLISH_DONE の受信に成功すること");
+
+    let mut saw_finish = false;
+    let mut saw_done = false;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::FinishRequestStream { request_id } => {
+                assert_eq!(request_id, rid);
+                saw_finish = true;
+            }
+            SessionEvent::PublishDoneReceived { request_id, .. } => {
+                assert_eq!(request_id, rid);
+                saw_done = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_done, "PublishDoneReceived が発行されること");
+    assert!(
+        saw_finish,
+        "PUBLISH_DONE の受信で responder が送信方向を FIN で閉じること"
+    );
+}
+
+/// Pending(Publisher) で PUBLISH_DONE を受けても FIN しない
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2: "An endpoint MUST NOT send a FIN on a direction of a
+/// request stream until it has sent all required messages on that direction for its request
+/// type." PUBLISH_OK 未送信の状態で FIN すると peer に request 失敗と扱われる。
+#[test]
+fn publish_origin_subscriber_does_not_finish_in_pending() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            911,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // PUBLISH_OK を送らずに PUBLISH_DONE を受ける
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
+                status_code: 0x2,
+                stream_count: 0,
+                reason: shiguredo_moqt::message::ReasonPhrase::new("ended")
+                    .expect("正当な reason phrase である"),
+            }),
+        )
+        .expect("PUBLISH_DONE の受信に成功すること");
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::FinishRequestStream { .. }),
+            "Pending(Publisher) では FIN しないこと"
+        );
+    }
+}
+
+/// 既に Terminated の subscription で PUBLISH_DONE(UPDATE_FAILED) を受けても FIN しない
+///
+/// この経路は SUBSCRIBE 起点 requester の事象であり、requester 側の FIN は
+/// `recv_request_stream_closed` の既存経路が担う。
+#[test]
+fn terminated_subscription_does_not_finish_on_publish_done() {
+    use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
+    let (mut client, mut server) = establish_pair();
+    // client が PUBLISH を送り、server が subscriber responder になる
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            912,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // REQUEST_OK で Established にする
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    // server (subscriber) が REQUEST_ERROR を返して Terminated にする
+    server
+        .send_request_error(
+            rid,
+            REQUEST_DOES_NOT_EXIST,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("no").expect("正当な reason phrase である"),
+            None,
+        )
+        .expect("REQUEST_ERROR の送信に成功すること");
+    while server.poll_event().is_some() {}
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Terminated
+    );
+
+    // publisher が PUBLISH_DONE(UPDATE_FAILED) を送る
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
+                status_code: shiguredo_moqt::error::PUBLISH_DONE_UPDATE_FAILED,
+                stream_count: 0,
+                reason: shiguredo_moqt::message::ReasonPhrase::new("")
+                    .expect("空の reason phrase は常に正当である"),
+            }),
+        )
+        .expect("Terminated (未記録) への PUBLISH_DONE は受理されること");
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::FinishRequestStream { .. }),
+            "既に Terminated の subscription では FIN しないこと"
+        );
+    }
+}
+
 /// PUBLISH_DONE 送信 → subscriber 側で Terminated 遷移と PublishDoneReceived イベント発行
 #[test]
 fn publish_done_full_cycle() {
