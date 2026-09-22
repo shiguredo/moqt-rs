@@ -11,9 +11,10 @@ use shiguredo_moqt::error::{
     PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER, SESSION_TOO_MANY_REQUEST_UPDATES,
 };
 use shiguredo_moqt::message_parameter::{
-    MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_OBJECT_PROPERTY_FILTER,
-    PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER,
+    MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_FORWARD,
+    PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER,
 };
+use shiguredo_moqt::session::types::SendRequestError;
 
 /// SUBSCRIBE を確立して (client, server, request_id) を返す
 fn establish_subscribe_with(
@@ -46,6 +47,28 @@ fn two_range_subgroup_filter() -> MessageParameters {
         value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01, 0x00, 0x01]),
     });
     params
+}
+
+/// 受信側で REQUEST_ERROR も CloseSession も発行されていないことを確認する
+///
+/// 受理された REQUEST_UPDATE / SUBSCRIBE に対して拒否イベントが漏れていないことを見る。
+/// 反復内でラベル付きのメッセージを出したい場合は呼び出し側でループを書く。
+fn assert_no_rejection(s: &mut Session) {
+    while let Some(e) = s.poll_event() {
+        match e {
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(err),
+                ..
+            } => panic!(
+                "REQUEST_ERROR を返してはいけない: error_code={:#x}",
+                err.error_code
+            ),
+            SessionEvent::CloseSession(err) => {
+                panic!("セッションを閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
 }
 
 /// キューに SendOnStream が残っていないことを確認する
@@ -627,6 +650,499 @@ fn incoming_range_filters_within_max_accepted() {
         .as_ref()
         .expect("受理された REQUEST_UPDATE は pending_update_params に残る");
     assert_eq!(pending.count_range_filters(), 1);
+}
+
+// ─── FILL_PARAMETERS 内側の Range Filter の合算 (§3.3.2 / §9.1.6 / §9.20.16) ────
+
+/// FILL_PARAMETERS (0x23) の内側に `inner` を持つパラメータを作る
+///
+/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の内側スコープで
+/// 置ける Range Filter は 0x25-0x28 である (0x29 TRACK_PROPERTY_FILTER は含まれない)。
+fn fill_parameters_param(inner: MessageParameters) -> MessageParameter {
+    MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    }
+}
+
+/// 同一 (Parameter Type, SetID, Property Type) の Range Filter 2 本を持つパラメータ群を作る
+///
+/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): "If the same combination of Parameter
+/// Type, SetID, and Property Type ... repeat in any message, an endpoint MUST reject this with
+/// REQUEST_ERROR with error code INVALID_FILTER."
+fn duplicate_range_filters_inner() -> MessageParameters {
+    let mut params = MessageParameters::new();
+    for _ in 0..2 {
+        params.push(MessageParameter {
+            param_type: PARAM_SUBGROUP_FILTER,
+            value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
+        });
+    }
+    params
+}
+
+/// 外側 1 個 + FILL 内側 1 個の Range Filter を持つパラメータ群を作る
+fn outer_and_inner_one_range() -> MessageParameters {
+    let mut params = one_range_subgroup_filter();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    params
+}
+
+/// FILL 内側の Range も peer の MAX_FILTER_RANGES に合算され、送信が拒否される
+///
+/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES):
+/// 上限は "the total number of Ranges ... in all Range filter parameters for a given
+/// subscription or fetch" であり、§9.20.16 の内側も同じ subscription に適用される。
+#[test]
+fn outgoing_fill_parameters_ranges_exceed_peer_max() {
+    let (mut client, _server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    let params = outer_and_inner_one_range();
+    assert_eq!(
+        params.count_range_filters(),
+        1,
+        "公開 API は外側だけを数える (意味を変えていないこと)"
+    );
+    assert!(
+        params
+            .fill_parameters()
+            .is_some_and(|f| f.has_range_filters())
+    );
+
+    let err = client
+        .send_request_update(rid, params)
+        .expect_err("外側 1 + 内側 1 は peer MAX_FILTER_RANGES=1 超過");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "outgoing Range Filters exceed peer MAX_FILTER_RANGES",
+        "上限超過による拒否でなければならない"
+    );
+    assert_no_send_on_stream(&mut client);
+}
+
+/// FILL 内側にだけ Range 1 個がある場合は合計 = 上限となり送出できる
+///
+/// 境界の確認 (合計 = MAX_FILTER_RANGES は拒否されない)。
+#[test]
+fn outgoing_fill_parameters_inner_range_within_peer_max() {
+    let (mut client, _server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    client
+        .send_request_update(rid, params)
+        .expect("合計 1 は peer MAX_FILTER_RANGES=1 以内");
+
+    let (stream_rid, msg) = take_send_on_stream(&mut client);
+    assert_eq!(stream_rid, rid);
+    assert!(
+        matches!(msg, ControlMessage::RequestUpdate(_)),
+        "RequestUpdate として積まれること: {msg:?}"
+    );
+}
+
+/// FILL 内側の Range も peer の MAX_FILTER_RANGES に合算され、SUBSCRIBE の送信が拒否される
+///
+/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
+/// SUBSCRIBE に置けるとしているため、SUBSCRIBE の単体検証でも内側を合算する。
+#[test]
+fn outgoing_subscribe_with_fill_parameters_ranges_exceed_peer_max() {
+    let (mut client, _server) =
+        establish_pair_with_options(SetupOptions::new(), opts_with(0x06, 1));
+
+    let err = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), outer_and_inner_one_range())
+        .expect_err("外側 1 + 内側 1 は peer MAX_FILTER_RANGES=1 超過");
+    let SendRequestError::Session(err) = err else {
+        panic!("SendRequestError::Session が期待されたが {err:?}");
+    };
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "outgoing Range Filters exceed peer MAX_FILTER_RANGES",
+        "上限超過による拒否でなければならない"
+    );
+    assert_no_send_on_stream(&mut client);
+}
+
+/// 外側 1 個 + FILL 内側 1 個の SUBSCRIBE 受信は INVALID_FILTER で拒否される
+///
+/// REQUEST_UPDATE には subscription 単位の累積検証もあるため、単体メッセージの検証
+/// (`check_incoming_range_filters`) が内側を合算していることは SUBSCRIBE で固定する。
+#[test]
+fn incoming_subscribe_with_fill_parameters_ranges_exceed_local_max() {
+    use shiguredo_moqt::message::Subscribe;
+
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    // 送信 API は peer_max=1 で拒否するため、受信経路はメッセージ注入で検証する
+    let subscribe = ControlMessage::Subscribe(Subscribe {
+        request_id: rid + 2,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam2".to_vec(),
+        parameters: outer_and_inner_one_range(),
+    });
+    server
+        .recv_request(subscribe)
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    // 新規 SUBSCRIBE の拒否なので REQUEST_ERROR のみを返し、subscription は作られない。
+    // 既存の `assert_subscriber_invalid_filter_rejection` は「確立済み subscription の
+    // 拒否」を前提に subscription の存在と Established を断言するため、ここでは使えない。
+    let mut saw_invalid_filter = false;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(err),
+                fin,
+                ..
+            } => {
+                assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+                assert!(
+                    fin,
+                    "REQUEST_ERROR が最終応答のため FIN されること (§6.4.2.3)"
+                );
+                saw_invalid_filter = true;
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("セッションを閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_invalid_filter,
+        "INVALID_FILTER の REQUEST_ERROR が送出されること"
+    );
+    assert!(
+        server.subscription(rid + 2).is_none(),
+        "拒否された SUBSCRIBE の subscription は作られないこと"
+    );
+}
+
+/// 外側に Range Filter が無く FILL 内側にだけ Range がある場合も peer の宣言を要求する
+///
+/// draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
+/// specified, the peer MUST NOT send any such filter parameters." の条件は Range 数ではなく
+/// Range Filter パラメータの有無であり、FILL 内側だけに存在する場合も該当する。
+/// 有無の判定を外側だけで行うと、この入力が上限判定を素通りして送出される。
+#[test]
+fn outgoing_fill_parameters_only_ranges_rejected_when_peer_max_is_zero() {
+    let (mut client, _server, rid) = establish_subscribe_track(1);
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    assert!(!params.has_range_filters(), "外側に Range Filter は無い");
+
+    let err = client
+        .send_request_update(rid, params)
+        .expect_err("peer MAX 未宣言では FILL 内側の Range Filter も送出できない");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "peer did not declare MAX_FILTER_RANGES",
+        "宣言なしによる拒否でなければならない"
+    );
+    assert_no_send_on_stream(&mut client);
+}
+
+/// 外側に Range Filter が無く FILL 内側にだけ Range がある場合も上限超過で拒否される
+///
+/// 有無の判定を外側だけで行うと上限判定に到達しない。総数の合算だけを直しても、
+/// 有無が false なら検証自体が走らないため、両方が必要になる。
+#[test]
+fn outgoing_fill_parameters_only_ranges_exceed_peer_max() {
+    let (mut client, _server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(two_range_subgroup_filter()));
+    assert!(!params.has_range_filters(), "外側に Range Filter は無い");
+
+    let err = client
+        .send_request_update(rid, params)
+        .expect_err("FILL 内側 2 個は peer MAX_FILTER_RANGES=1 超過");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "outgoing Range Filters exceed peer MAX_FILTER_RANGES",
+        "上限超過による拒否でなければならない"
+    );
+    assert_no_send_on_stream(&mut client);
+}
+
+/// 外側 1 個 + FILL 内側 1 個で合計が上限と等しい送信は受理される
+///
+/// 境界の確認 (合計 = MAX_FILTER_RANGES は拒否されない)。
+#[test]
+fn outgoing_fill_parameters_outer_and_inner_within_peer_max() {
+    let (mut client, _server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
+
+    client
+        .send_request_update(rid, outer_and_inner_one_range())
+        .expect("合計 2 は peer MAX_FILTER_RANGES=2 以内");
+
+    let (stream_rid, msg) = take_send_on_stream(&mut client);
+    assert_eq!(stream_rid, rid);
+    assert!(
+        matches!(msg, ControlMessage::RequestUpdate(_)),
+        "RequestUpdate として積まれること: {msg:?}"
+    );
+}
+
+/// 外側 1 個 + FILL 内側 1 個の受信は INVALID_FILTER の REQUEST_ERROR で拒否される
+///
+/// 送信 API は peer_max で拒否するため、受信経路はメッセージ注入で検証する。
+#[test]
+fn incoming_fill_parameters_ranges_exceed_local_max() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    server
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, outer_and_inner_one_range()),
+        )
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
+}
+
+/// 外側 1 個 + FILL 内側 1 個で合計が上限と等しい受信は受理される
+///
+/// 境界の確認 (合計 = MAX_FILTER_RANGES は拒否されない)。累積には外側だけが残る。
+#[test]
+fn incoming_fill_parameters_outer_and_inner_within_local_max() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
+
+    server
+        .recv_stream_message(
+            rid,
+            inject_request_update(rid + 2, outer_and_inner_one_range()),
+        )
+        .expect("合計 2 は自側 MAX_FILTER_RANGES=2 以内");
+
+    assert_no_rejection(&mut server);
+    let pending = server
+        .subscription(rid)
+        .expect("subscription が存在する")
+        .pending_update_params
+        .as_ref()
+        .expect("受理された REQUEST_UPDATE は pending に残る");
+    assert!(
+        pending.fill_parameters().is_none(),
+        "FILL_PARAMETERS は pending に保持されないこと"
+    );
+    assert_eq!(
+        pending.count_range_filters(),
+        1,
+        "累積に残るのは外側の Range だけであること"
+    );
+}
+
+/// 自側 MAX_FILTER_RANGES 未宣言 (デフォルト 0) でも FILL 内側の Range は INVALID_FILTER で拒否される
+///
+/// draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES): "The default value is 0, so if not
+/// specified, the peer MUST NOT send any such filter parameters." の受信側の帰結。
+#[test]
+fn incoming_fill_parameters_only_ranges_rejected_when_local_max_is_zero() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), SetupOptions::new());
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    assert!(!params.has_range_filters(), "外側に Range Filter は無い");
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid + 2, params))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
+}
+
+/// 外側に Range Filter が無く FILL 内側にだけ Range がある受信は INVALID_FILTER で拒否される
+///
+/// 送信 API は peer_max で拒否するため、受信経路はメッセージ注入で検証する。
+#[test]
+fn incoming_fill_parameters_only_ranges_exceed_local_max() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(two_range_subgroup_filter()));
+    assert!(!params.has_range_filters(), "外側に Range Filter は無い");
+
+    server
+        .recv_stream_message(rid, inject_request_update(rid + 2, params))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
+}
+
+/// FILL 内側にだけ Range 1 個がある受信は合計 = 上限となり受理される
+#[test]
+fn incoming_fill_parameters_inner_range_within_local_max() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    server
+        .recv_stream_message(rid, inject_request_update(rid + 2, params))
+        .expect("合計 1 は自側 MAX_FILTER_RANGES=1 以内");
+
+    assert_no_rejection(&mut server);
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "subscription は Established のまま"
+    );
+    // 内側は subscription 状態として保持されない (draft §9.20.16)
+    let pending = server
+        .subscription(rid)
+        .expect("subscription が存在する")
+        .pending_update_params
+        .as_ref()
+        .expect("受理された REQUEST_UPDATE は pending に残る");
+    assert!(
+        pending.fill_parameters().is_none(),
+        "FILL_PARAMETERS は pending に保持されないこと"
+    );
+    assert_eq!(pending.count_range_filters(), 0);
+}
+
+/// 外側に Range が無く FILL 内側だけに Range がある REQUEST_UPDATE でも累積上限が働く
+///
+/// 保持済みの外側 Range Filter (2 個) と今回メッセージの内側 (2 個) の合計 4 個が上限 2 を
+/// 超える。単体メッセージの検証 (§9.1.6) は内側 2 個で上限内のため通過し、subscription 単位の
+/// 累積検証だけがこの超過を捉える。
+#[test]
+fn incoming_update_with_only_inner_ranges_uses_cumulative_max() {
+    let (mut client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
+
+    // 1 通目: 外側 2 個。合計 2 で上限内なので受理され、pending に外側が残る
+    client
+        .send_request_update(rid, two_range_subgroup_filter())
+        .expect("外側 2 個は peer MAX_FILTER_RANGES=2 以内");
+    let (_, first) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, first)
+        .expect("外側 2 個の受信に成功すること");
+    while server.poll_event().is_some() {}
+
+    // 2 通目: 外側に Range が無く、FILL 内側に 2 個。単体では上限内だが累積 4 個になる
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(two_range_subgroup_filter()));
+    assert!(!params.has_range_filters(), "外側に Range Filter は無い");
+    client
+        .send_request_update(rid, params)
+        .expect("内側 2 個は peer MAX_FILTER_RANGES=2 以内 (単体では上限内)");
+    let (_, second) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, second)
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
+}
+
+/// 前回メッセージの内側は次の REQUEST_UPDATE の累積に数え直されない
+///
+/// draft-ietf-moq-transport-21 §9.20.16: "FILL_PARAMETERS is not retained as subscription
+/// state." のため、2 通目に FILL_PARAMETERS が無ければ累積は保持済みの外側だけになる。
+/// 内側を保持する実装では 1 通目の内側 1 個と 2 通目の外側 1 個が合算されて上限 1 を超え、
+/// 2 通目が誤って拒否される。
+#[test]
+fn incoming_update_does_not_count_previous_fill_ranges() {
+    let (mut client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+    // 1 通目: 外側に Range が無く FILL 内側に 1 個。単体でも累積でも上限 1 以内
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(one_range_subgroup_filter()));
+    client
+        .send_request_update(rid, params)
+        .expect("合計 1 は peer MAX_FILTER_RANGES=1 以内");
+    let (_, first) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, first)
+        .expect("1 通目の受信に成功すること");
+    while server.poll_event().is_some() {}
+
+    // 2 通目: FILL なし + 外側 1 個。内側を保持していれば合計 2 で拒否される
+    client
+        .send_request_update(rid, one_range_subgroup_filter())
+        .expect("外側 1 個は単体では peer MAX_FILTER_RANGES=1 以内");
+    let (_, second) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, second)
+        .expect("累積 1 個は上限内なので受理されること");
+    assert_no_rejection(&mut server);
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "subscription は Established のまま"
+    );
+}
+
+/// FILL 内側の Range を持たない Range Filter も MAX_FILTER_RANGES=0 の受信で受理される
+///
+/// 合算の対象が「Range の総数」であり「Range Filter パラメータの有無」ではないことを、
+/// 内側についても固定する (外側は `incoming_zero_range_filters_accepted_when_local_max_is_zero`)。
+#[test]
+fn incoming_zero_range_filters_inside_fill_accepted_when_local_max_is_zero() {
+    for (label, params) in zero_range_filter_forms() {
+        let (_client, mut server, rid) =
+            establish_subscribe_with(SetupOptions::new(), SetupOptions::new());
+
+        let mut outer = MessageParameters::new();
+        outer.push(fill_parameters_param(params));
+        server
+            .recv_stream_message(rid, inject_request_update(rid + 2, outer))
+            .unwrap_or_else(|e| panic!("{label}: 受理されること: {e:?}"));
+        while let Some(e) = server.poll_event() {
+            match e {
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(err),
+                    ..
+                } => panic!(
+                    "{label}: REQUEST_ERROR を返してはいけない: error_code={:#x}",
+                    err.error_code
+                ),
+                SessionEvent::CloseSession(err) => {
+                    panic!("{label}: セッションを閉じてはいけない: {err:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// FETCH は FILL_PARAMETERS を運べないため、外側の Range Filter が従来どおり上限検証の対象になる
+///
+/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) が FILL_PARAMETERS を
+/// 許すのは SUBSCRIBE と subscription の REQUEST_UPDATE であり、FETCH のパラメータスコープには
+/// 含まれない。したがって FETCH では合算の対象が存在せず、外側の総数がそのまま上限と比較される。
+#[test]
+fn outgoing_fetch_range_filters_exceed_peer_max() {
+    let (mut client, _server) =
+        establish_pair_with_options(SetupOptions::new(), opts_with(0x06, 1));
+
+    let err = client
+        .send_fetch(ns(&[b"live"]), b"cam".to_vec(), two_range_subgroup_filter())
+        .expect_err("FETCH の外側 2 個は peer MAX_FILTER_RANGES=1 超過");
+    let SendRequestError::Session(err) = err else {
+        panic!("SendRequestError::Session が期待されたが {err:?}");
+    };
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "outgoing Range Filters exceed peer MAX_FILTER_RANGES",
+        "上限超過として拒否されること"
+    );
+    assert_no_send_on_stream(&mut client);
 }
 
 // ─── 同一 Parameter Type の複数出現 (draft-ietf-moq-transport-21 §3.3.2) ──────
@@ -1259,6 +1775,76 @@ fn outgoing_zero_range_filters_allowed_when_peer_max_declared() {
             "{label}: RequestUpdate として積まれること: {msg:?}"
         );
     }
+}
+
+/// peer が MAX_FILTER_RANGES を宣言していれば FILL 内側の Range を持たない Range Filter も送出できる
+///
+/// §9.1.6 の MUST NOT は「宣言が無い場合」の規定なので、宣言があれば Range 総数 0 は
+/// 上限判定を通過して送出できる。内側についての境界の確認。
+#[test]
+fn outgoing_zero_range_filters_inside_fill_allowed_when_peer_max_declared() {
+    for (label, params) in zero_range_filter_forms() {
+        let (mut client, _server, rid) =
+            establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 1));
+
+        let mut outer = MessageParameters::new();
+        outer.push(fill_parameters_param(params));
+        client
+            .send_request_update(rid, outer)
+            .unwrap_or_else(|e| panic!("{label}: peer MAX=1 なら送出できること: {e:?}"));
+        let (stream_rid, msg) = take_send_on_stream(&mut client);
+        assert_eq!(stream_rid, rid, "{label}");
+        assert!(
+            matches!(msg, ControlMessage::RequestUpdate(_)),
+            "{label}: RequestUpdate として積まれること: {msg:?}"
+        );
+    }
+}
+
+/// FILL 内側の Range Filter の構造不正 (重複) は上限内でも送信前に拒否される
+///
+/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): 同一 (Parameter Type, SetID,
+/// Property Type) の重複は INVALID_FILTER。§9.20.16 の内側スコープも同じ検証を行う
+/// (上限内の入力なので上限判定では弾かれない)。
+#[test]
+fn outgoing_duplicate_range_filters_inside_fill_are_rejected() {
+    let (mut client, _server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(duplicate_range_filters_inner()));
+    assert_eq!(
+        params
+            .fill_parameters()
+            .expect("FILL 内側が存在する")
+            .count_range_filters(),
+        2,
+        "上限 2 以内なので上限判定では弾かれない"
+    );
+
+    let err = client
+        .send_request_update(rid, params)
+        .expect_err("内側の重複 Range Filter は送信前に拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.reason, "outgoing Range Filters are invalid inside FILL_PARAMETERS",
+        "内側の構造検証による拒否でなければならない"
+    );
+    assert_no_send_on_stream(&mut client);
+}
+
+/// FILL 内側の Range Filter の構造不正 (重複) は上限内でも INVALID_FILTER で拒否される
+#[test]
+fn incoming_duplicate_range_filters_inside_fill_are_rejected() {
+    let (_client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x06, 2));
+
+    let mut params = MessageParameters::new();
+    params.push(fill_parameters_param(duplicate_range_filters_inner()));
+    server
+        .recv_stream_message(rid, inject_request_update(rid + 2, params))
+        .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 
 /// 受信側は MAX_FILTER_RANGES=0 でも Range を持たない Range Filter を受理する

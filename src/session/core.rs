@@ -198,6 +198,35 @@ pub(super) fn remove_alias_holder(
     false
 }
 
+/// Range Filter の有無と Range の総数を FILL_PARAMETERS の内側も含めて求める
+///
+/// 戻り値は `(Range Filter パラメータが 1 つでもあるか, Range の総数)` である。
+///
+/// draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES) は "all Range filter Section 3.3.2
+/// parameters for a given subscription or fetch" の Range 総数を上限の対象とする。
+/// §9.20.16 (FILL PARAMETERS Parameter) は内側に Range Filter (0x25-0x28) を置けるとし、
+/// その値を "a sequence of Parameters that apply to the fill fetch stream (see Section 3.4)"
+/// と定めるため、内側の Range も同じ subscription / fetch の予算に含まれる。
+///
+/// §9.20.16 の "separate parameter scope" は内側のパラメータを外側メッセージに出現したものと
+/// みなさないという §9.20 の重複判定のための規定であり、効力範囲は引用文自身が
+/// "for the purposes of Section 9.20" に限定している。したがって §3.3.2 の予算には及ばない。
+///
+/// [`MessageParameters::has_range_filters`] と [`MessageParameters::count_range_filters`] は
+/// 公開 API であり、`src/session/subscription/dispatch.rs` が subscription の `range_filters`
+/// 再構築という別用途で外側だけを見るために使う。意味を変えないよう合算は本 helper に閉じる。
+///
+/// FILL_PARAMETERS を運べるのは SUBSCRIBE と subscription の REQUEST_UPDATE だけであり
+/// (§9.20.16)、FETCH は内側を持ち得ないためこの合算は FETCH では外側の総数と一致する。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+pub(super) fn range_filter_usage(parameters: &MessageParameters) -> (bool, u64) {
+    let fill = parameters.fill_parameters();
+    (
+        parameters.has_range_filters() || fill.is_some_and(|inner| inner.has_range_filters()),
+        parameters.count_range_filters() + fill.map_or(0, MessageParameters::count_range_filters),
+    )
+}
+
 #[derive(Debug)]
 pub(super) struct DataStreamState {
     pub(super) incoming: HashMap<DataStreamId, IncomingDataStream>,
@@ -1917,16 +1946,14 @@ impl Session {
         &self,
         parameters: &crate::message_parameter::MessageParameters,
     ) -> Result<(), &'static str> {
-        // FILL 内側の Range Filter も検証対象に含める
-        // (draft-ietf-moq-transport-21 §9.20.16)。
-        let has_inner_range_filters = parameters
-            .fill_parameters()
-            .is_some_and(|fill| fill.has_range_filters());
-        if !parameters.has_range_filters() && !has_inner_range_filters {
+        // Range 総数は FILL 内側も合算する (`range_filter_usage` の doc を参照)。
+        // 有無の判定と総数の判定を同じ helper に揃えることで、外側に Range が無く内側だけに
+        // Range がある入力でも上限判定に到達する。
+        let (has_range_filters, count) = range_filter_usage(parameters);
+        if !has_range_filters {
             return Ok(());
         }
         let local_max = self.local_max_filter_ranges();
-        let count = parameters.count_range_filters();
         if count > local_max {
             return Err("Range Filters exceed MAX_FILTER_RANGES");
         }
@@ -1935,10 +1962,8 @@ impl Session {
             return Err("Range Filter validation failed");
         }
         // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-        // FILL 内側の Range Filter も外側と同様に内部構造を検証する
-        // (デルタ溢出・重複は INVALID_FILTER で拒否)。内側は運搬メッセージにのみ
-        // 適用される transient なスコープのため、MAX_FILTER_RANGES の累積数には
-        // 含めない (累積パラメータからも除外される)。
+        // FILL 内側の Range Filter も外側と同様に内部構造を検証する (デルタ溢出・重複は
+        // INVALID_FILTER で拒否)。内側は subscription 状態として保持されないが、総数には合算する。
         if let Some(fill) = parameters.fill_parameters()
             && fill.has_range_filters()
             && fill.validate_range_filters().is_err()
@@ -1969,19 +1994,17 @@ impl Session {
     /// 送信前に自側で弾く。セッションは閉じず `Err` を呼び出し側へ返すだけに留める。
     ///
     /// Range Filter を載せられる送信経路すべてから呼ばれる (SUBSCRIBE / REQUEST_UPDATE /
-    /// FETCH / SUBSCRIBE_TRACKS)。受信側の
+    /// FETCH)。応答経路 (REQUEST_OK 系) からも呼ばれるが、スコープ検証で弾かれるか Range
+    /// Filter を含まないため実質 no-op である。受信側の
     /// [`check_incoming_range_filters`](Self::check_incoming_range_filters) と対称である。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub(super) fn validate_outgoing_range_filters(
         &self,
         parameters: &crate::message_parameter::MessageParameters,
     ) -> Result<(), SessionError> {
-        // FILL 内側の Range Filter も送出可否の対象に含める
-        // (draft-ietf-moq-transport-21 §9.20.16)。
-        let has_inner_range_filters = parameters
-            .fill_parameters()
-            .is_some_and(|fill| fill.has_range_filters());
-        if !parameters.has_range_filters() && !has_inner_range_filters {
+        // Range 総数は FILL 内側も合算する (`range_filter_usage` の doc を参照)
+        let (has_range_filters, count) = range_filter_usage(parameters);
+        if !has_range_filters {
             return Ok(());
         }
         let peer_max = self
@@ -1998,7 +2021,6 @@ impl Session {
                 "peer did not declare MAX_FILTER_RANGES",
             ));
         }
-        let count = parameters.count_range_filters();
         if count > peer_max {
             return Err(SessionError::new(
                 crate::error::SESSION_PROTOCOL_VIOLATION,

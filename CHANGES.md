@@ -237,6 +237,14 @@
   - `MoqtClient` に購読の Start Location を読む `subscription_filter_start` を追加する
   - @voluntas
 
+- [FIX] MAX_FILTER_RANGES が FILL_PARAMETERS 内側の Range を数えない問題を修正する
+  - draft-ietf-moq-transport-21 §9.1.6 (MAX FILTER RANGES) / §3.3.2 (Range Filters) の上限を、§9.20.16 (FILL PARAMETERS Parameter) の内側スコープに置かれた Range Filter (0x25-0x28) の Range 総数も含めて数える
+  - 送信・受信・subscription 単位の累積検証の 3 経路すべてで合算し、外側に Range が無く内側だけに Range がある入力でも上限判定を行う
+  - 合算は session 層の private helper に閉じ、公開 API `MessageParameters::count_range_filters` / `has_range_filters` の意味は変えない
+  - この修正により、従来は受理していた「外側 + 内側の合計が上限を超える」SUBSCRIBE / REQUEST_UPDATE が INVALID_FILTER で拒否される (受信挙動の変更)
+  - peer が MAX_FILTER_RANGES を宣言していない場合、FILL_PARAMETERS 内側の Range Filter を送る API 呼び出しも `SESSION_PROTOCOL_VIOLATION` で拒否される (送信挙動の変更)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する

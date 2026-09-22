@@ -19,7 +19,9 @@ use crate::message_parameter::{
 };
 use hashbrown::HashMap;
 
-use super::super::core::{RequestTable, Session, alias_used_by_different_track};
+use super::super::core::{
+    RequestTable, Session, alias_used_by_different_track, range_filter_usage,
+};
 use super::super::types::{
     DeadlineTimer, DeliveryTimeoutState, RequestKind, SessionError, SessionEvent, StreamCountState,
     Subscription, SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState,
@@ -881,8 +883,8 @@ impl Session {
         // draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter): 値域外 (0 / 1 以外) の
         // 受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。検証がないと
         // `pending_update_params` に保存され、応答送信時 (REQUEST_UPDATE_OK 分岐) に初めて
-        // エラーになる遅延検証になる。検証はここで行い、累積 range filter 超過チェック
-        // (下記の `merged.count_range_filters()`) より前に置く (複合違反時は §9.20.19 の
+        // エラーになる遅延検証になる。検証はここで行い、下記の累積 Range Filter 上限チェック
+        // より前に置く (複合違反時は §9.20.19 の
         // MUST に従い FORWARD のセッションクローズが優先される)。
         // `?` 伝播のみだとセッション state が Closing に遷移せず開いたまま残る
         // (GROUP_ORDER の値域検証と同じパターンで `self.fail()` に接続する)。
@@ -912,9 +914,16 @@ impl Session {
         // subscription or fetch" であり、1 メッセージ単位ではなく subscription 単位の
         // 同時保持数である。`merge_from` は Range Filter を型単位で全置換するので同一型では
         // 累積しないが、型をまたぐと累積するため、マージ後の総数を再検証する。
-        if merged.has_range_filters()
-            && merged.count_range_filters() > self.local_max_filter_ranges()
-        {
+        //
+        // 総数は FILL_PARAMETERS の内側も合算する (`range_filter_usage` の doc を参照)。
+        // `pending_update_params` からは FILL_PARAMETERS を除去しているため `merged` の内側は
+        // 常に今回のメッセージのものであり、合算値は「マージ後の外側の Range 総数 (同一型は
+        // 今回のメッセージの値で置換済み) + 今回メッセージの内側の Range 総数」になる
+        // (前回メッセージの内側を二重計上しない)。
+        // 有無の判定は総数の比較に含まれる (総数が 1 以上なら Range Filter パラメータも必ず
+        // 存在する) ため、ここでは総数だけを見る。
+        let (_, accumulated_ranges) = range_filter_usage(&merged);
+        if accumulated_ranges > self.local_max_filter_ranges() {
             self.reject_request_update_range_filters(
                 request_id,
                 "cumulative Range Filters exceed MAX_FILTER_RANGES",
