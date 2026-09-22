@@ -580,3 +580,99 @@ fn non_grease_mandatory_property_in_object_scope_is_malformed() {
         );
     }
 }
+
+/// IMMUTABLE_PROPERTIES の内側に 1 プロパティだけを持つ ObjectProperties を作る
+///
+/// `inner_prop` を内側に持つ。エンコードした内側の生バイト列 (Properties Length を除く) を
+/// IMMUTABLE_PROPERTIES の値として載せる。
+fn properties_with_single_inner(inner_prop: ObjectProperty) -> ObjectProperties {
+    let mut inner = ObjectProperties::new();
+    inner.push(inner_prop);
+    let mut inner_buf = Vec::new();
+    inner
+        .encode(&mut inner_buf)
+        .expect("正当なテスト入力の encode は成功する");
+    let len = inner_buf[0] as usize;
+    assert_eq!(inner_buf.len(), 1 + len);
+    let raw_inner = inner_buf[1..].to_vec();
+
+    let mut outer = ObjectProperties::new();
+    outer.push(ObjectProperty {
+        prop_type: PROP_IMMUTABLE_PROPERTIES,
+        value: ObjectPropertyValue::Bytes(raw_inner),
+    });
+    outer
+}
+
+/// PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の二重インスタンスは malformed になる
+///
+/// draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+/// "An Object MUST NOT contain more than one instance of this property." 同じ型を mutable
+/// リストと IMMUTABLE_PROPERTIES 内側の両方に置いた場合も 2 インスタンスと数える (§10.7)。
+#[test]
+fn tracker_rejects_duplicate_prior_gap_instances() {
+    for prop_type in [PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP] {
+        let mut tracker = ObjectPropertyTracker::new();
+        // mutable リスト側に 1 個 + IMMUTABLE_PROPERTIES 内側に同じ型を 1 個
+        let mut mutable = properties_with_single_inner(ObjectProperty {
+            prop_type,
+            value: ObjectPropertyValue::VarInt(2),
+        });
+        mutable.push(ObjectProperty {
+            prop_type,
+            value: ObjectPropertyValue::VarInt(1),
+        });
+
+        let err = tracker
+            .observe_decoded_object(10, 0, Some(&mutable))
+            .unwrap_err();
+        assert!(
+            matches!(err, MessageError::MalformedTrack(_)),
+            "二重インスタンスは malformed になること: {prop_type:#x}: {err:?}"
+        );
+    }
+}
+
+/// どちらか片方に 1 個だけ置いた場合は受理される (非退行)
+#[test]
+fn tracker_accepts_single_prior_gap_instance() {
+    for prop_type in [PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP] {
+        // mutable リストのみ
+        let mut tracker = ObjectPropertyTracker::new();
+        let mut mutable = ObjectProperties::new();
+        mutable.push(ObjectProperty {
+            prop_type,
+            value: ObjectPropertyValue::VarInt(1),
+        });
+        // PRIOR_OBJECT_ID_GAP は object_id 以下でなければ別条件で拒否されるため object_id=10 を使う
+        tracker
+            .observe_decoded_object(10, 10, Some(&mutable))
+            .unwrap_or_else(|e| {
+                panic!("mutable のみの 1 個は受理されること: {prop_type:#x}: {e:?}")
+            });
+
+        // IMMUTABLE_PROPERTIES 内側のみ
+        let mut tracker = ObjectPropertyTracker::new();
+        let only_inner = properties_with_single_inner(ObjectProperty {
+            prop_type,
+            value: ObjectPropertyValue::VarInt(1),
+        });
+        tracker
+            .observe_decoded_object(10, 10, Some(&only_inner))
+            .unwrap_or_else(|e| panic!("内側のみの 1 個は受理されること: {prop_type:#x}: {e:?}"));
+    }
+}
+
+/// PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP を持たない Object は従来どおり受理される
+#[test]
+fn tracker_accepts_object_without_prior_gap() {
+    let mut tracker = ObjectPropertyTracker::new();
+    let mut props = ObjectProperties::new();
+    props.push(ObjectProperty {
+        prop_type: PROP_PRIOR_OBJECT_ID_GAP,
+        value: ObjectPropertyValue::VarInt(0),
+    });
+    tracker
+        .observe_decoded_object(10, 0, Some(&props))
+        .expect("gap を持たない Object は受理されること");
+}

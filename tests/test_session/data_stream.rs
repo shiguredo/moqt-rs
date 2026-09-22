@@ -297,6 +297,69 @@ fn object_datagram_unknown_alias_is_reported_without_closing() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
+/// PRIOR_OBJECT_ID_GAP の二重インスタンスを Session 経由で受信すると malformed 終端する
+///
+/// draft-ietf-moq-transport-21 §10.9 (Prior Object ID Gap): "An Object MUST NOT contain more
+/// than one instance of this property." §12.1 (Malformed Tracks) の列挙は網羅ではないため、
+/// この条件も malformed に含まれ、該当 subscription を cancel する (セッションは閉じない)。
+#[test]
+fn duplicate_prior_object_id_gap_terminates_subscription() {
+    let (mut client, _server, rid) = establish_subscribe_track(502);
+    let stream_id = DataStreamId(13);
+    let header = SubgroupHeader {
+        track_alias: 502,
+        group_id: 5,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+    // mutable に PRIOR_OBJECT_ID_GAP、IMMUTABLE_PROPERTIES 内側にも同じ型を置く。
+    // delta エンコードは prop_type の昇順を前提とするため、0x0B (IMMUTABLE_PROPERTIES) を先に置く。
+    let mut inner = Vec::new();
+    shiguredo_moqt::varint::encode(0x3E, &mut inner); // delta (prev 0 -> 0x3E)
+    shiguredo_moqt::varint::encode(0, &mut inner); // 値 0
+    let mut body = Vec::new();
+    shiguredo_moqt::varint::encode(0x0B, &mut body); // delta (prev 0 -> IMMUTABLE_PROPERTIES)
+    shiguredo_moqt::varint::encode(inner.len() as u64, &mut body);
+    body.extend_from_slice(&inner);
+    shiguredo_moqt::varint::encode(0x33, &mut body); // delta (0x0B -> 0x3E)
+    shiguredo_moqt::varint::encode(0, &mut body); // 値 0
+    let mut properties = Vec::new();
+    shiguredo_moqt::varint::encode(body.len() as u64, &mut properties);
+    properties.extend_from_slice(&body);
+
+    let err = client
+        .recv_subgroup_object(stream_id, &object_with_properties(0, properties))
+        .expect_err("二重インスタンスは malformed として拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+
+    // 該当 subscription は Terminated、セッションは維持される
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Terminated,
+        "malformed 検出で購読を打ち切ること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "malformed 検出でセッションを閉じないこと"
+    );
+}
+
 /// GREASE の Property Type が Mandatory Track Property 範囲でも malformed にならない
 ///
 /// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type

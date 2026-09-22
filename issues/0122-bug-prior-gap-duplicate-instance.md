@@ -1,7 +1,7 @@
 # PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の二重インスタンスを検出する
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-prior-gap-duplicate-instance
 - Polished: 2026-09-21
 
@@ -59,3 +59,22 @@ PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP は複数の値を許さないため、
 - §10.8 / §10.9 の他の条件 (値の不一致、gap の重なり) の既存テストが非退行であること
 - 内側が破損している入力で内側のインスタンスを数えない境界が、テストまたはコメントで明示されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`ObjectProperties` に private な `count_instances(&self, prop_type: u64) -> usize` を追加し、`ObjectPropertyTracker::observe_decoded_object` から PRIOR_GROUP_ID_GAP (0x3C) と PRIOR_OBJECT_ID_GAP (0x3E) について呼ぶようにした。2 以上なら `MessageError::MalformedTrack` を返す。
+
+1. `count_instances` は mutable リストと IMMUTABLE_PROPERTIES (0x0B) の内側の両方で指定型のインスタンス数を数える。draft-ietf-moq-transport-21 §10.7 (Immutable Properties) が両方への出現を許すのは複数の値を許すプロパティに限るため、§10.8 / §10.9 の「1 つの Object に 2 つ以上含めてはならない」MUST NOT に違反する
+2. 判定は `observe_decoded_object` の 1 か所に置いた。wire 経路 (`observe_object`) は内部で `observe_decoded_object` を呼ぶため、両経路が同じ判定を通る
+3. 返すエラーは `MessageError::MalformedTrack` とした。0111 が `MessageError` に追加した variant であり、§12.1 (Malformed Tracks) の列挙は網羅ではないため §10.8 / §10.9 の条件も malformed に含まれる
+4. IMMUTABLE_PROPERTIES の内側が破損していてデコードできない場合、内側のインスタンスは数えられない。wire 経路では decode 時に破損が拒否されるため、この制約が観測されるのは `push` で組み立てた入力だけである旨を `count_instances` の doc に明記した
+5. 0x3C / 0x3E の getter (`prior_group_id_gap` / `prior_object_id_gap`) は mutable 優先のまま維持し、`tests/test_object_properties.rs` の `mutable_list_takes_precedence_over_immutable_inner` も変更していない。二重インスタンスの検出は tracker の責務である
+
+テスト:
+
+- `tests/test_object_properties.rs` に `tracker_rejects_duplicate_prior_gap_instances` を追加した。0x3C と 0x3E それぞれについて、mutable と IMMUTABLE_PROPERTIES 内側の両方に置いた入力を `MessageError::MalformedTrack` で拒否することを固定する
+- `tests/test_object_properties.rs` に `tracker_accepts_single_prior_gap_instance` を追加した。mutable のみに 1 個、内側のみに 1 個のいずれも受理されることを固定する (非退行)
+- `tests/test_session/data_stream.rs` に `duplicate_prior_object_id_gap_terminates_subscription` を追加した。subgroup Object 経由で受信すると該当 subscription が `Terminated` になり、セッションは `Established` のままであることを固定する
+- 既存の §10.8 / §10.9 条件のテスト 4 件は 0111 の再分類で既に `MalformedTrack` を期待する形になっており、非退行を確認した
+
+`CHANGES.md` の `## develop` に `[FIX]` を追加した。

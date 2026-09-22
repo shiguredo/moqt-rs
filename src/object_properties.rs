@@ -254,6 +254,25 @@ impl ObjectProperties {
     ///
     /// draft-ietf-moq-transport-21 §3.3.2 (Range Filters) の OBJECT_PROPERTY_FILTER は任意の
     /// 偶数 Property Type を対象にできるため、型別 accessor では足りず本メソッドを公開している。
+    /// 指定 prop_type のインスタンス数を mutable リストと IMMUTABLE_PROPERTIES 内側の両方で数える
+    ///
+    /// draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+    /// "An Object MUST NOT contain more than one instance of this property." 同じ型が
+    /// mutable リストと IMMUTABLE_PROPERTIES 内側の両方に現れた場合も 2 インスタンスと数える
+    /// (§10.7 (Immutable Properties) が両方への出現を許すのは複数の値を許すプロパティに限る)。
+    ///
+    /// IMMUTABLE_PROPERTIES の内側が破損していてデコードできない場合、内側のインスタンスは
+    /// 数えられない。wire 経路では decode 時に破損が拒否されるため、この制約が観測されるのは
+    /// `push` で組み立てた入力だけである。
+    fn count_instances(&self, prop_type: u64) -> usize {
+        let inner = self.immutable_inner_properties();
+        self.0
+            .iter()
+            .chain(inner.iter())
+            .filter(|p| p.prop_type == prop_type)
+            .count()
+    }
+
     pub fn find_varint(&self, prop_type: u64) -> Option<u64> {
         // mutable リストを先に、続けて IMMUTABLE_PROPERTIES の内側を探索する (mutable 優先)
         let inner = self.immutable_inner_properties();
@@ -371,6 +390,19 @@ impl ObjectPropertyTracker {
         object_id: u64,
         properties: Option<&ObjectProperties>,
     ) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
+        // "An Object MUST NOT contain more than one instance of this property." 同じ型が
+        // mutable リストと IMMUTABLE_PROPERTIES 内側の両方に現れた場合も 2 インスタンスと数える。
+        // §12.1 (Malformed Tracks) の列挙は網羅ではないため、この条件も malformed に含まれる。
+        if let Some(properties) = properties {
+            for prop_type in [PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP] {
+                if properties.count_instances(prop_type) > 1 {
+                    return Err(MessageError::MalformedTrack(
+                        "malformed track: duplicate Prior Group/Object ID Gap property",
+                    ));
+                }
+            }
+        }
         if self.prior_group_gaps.contains(group_id) {
             return Err(MessageError::MalformedTrack(
                 "malformed track: group ID falls within a previously communicated gap",

@@ -207,6 +207,10 @@
   - draft-ietf-moq-transport-21 §16.8 (Properties) Table 14 の GREASE 値 (`0x7f * N + 0x9D`) のうち N = 128 の 0x401D から N = 256 の 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入るため、Object Property として受信しても malformed とせず未知 Property として保持・転送する (§13 (Grease) / §8.4)
   - GREASE 値でない 0x4000-0x7FFF は従来どおり malformed とする
   - @voluntas
+- [FIX] PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP の二重インスタンスを Malformed Track として検出する
+  - draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap): "An Object MUST NOT contain more than one instance of this property." 同じ型を mutable リストと IMMUTABLE_PROPERTIES 内側の両方に置いた場合も 2 インスタンスと数える (§10.7)
+  - `ObjectPropertyTracker::observe_decoded_object` で検出し、wire 経路と API 経路の両方に適用する
+  - @voluntas
 - [FIX] requester の FIN で responder が必須応答を送れなくなる問題を修正する
   - FIN は方向ごとの終端であり cancel ではないため (draft-ietf-moq-transport-21 §6.4.2.2)、自側が SUBSCRIBE / FETCH の responder のときは peer の FIN では request を終端しない
   - 自側が responder の request は、peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で `RequestTerminated { reason: PeerStreamFin }` を発行する (FIN の到着順に依存しない)
