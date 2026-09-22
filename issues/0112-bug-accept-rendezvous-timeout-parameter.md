@@ -1,7 +1,7 @@
 # 定義済みパラメータ RENDEZVOUS_TIMEOUT を未知として拒否しない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-accept-rendezvous-timeout-parameter
 - Polished: 2026-09-21
 
@@ -51,3 +51,26 @@ draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter) は `RENDEZV
 - Table 13 に無いパラメータ型が decode と encode の両方で `ProtocolViolation` になることがテストで固定されていること
 - `docs/IMPLEMENTATION.md` と `CHANGES.md` と `skills/shiguredo-moqt/SKILL.md` の記述が実装と一致していること
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+draft-ietf-moq-transport-21 §9.20.7 (RENDEZVOUS TIMEOUT Parameter) と §16.7 (Message Parameters) の Table 13 に定義済みの `RENDEZVOUS_TIMEOUT` (Parameter Type 0x04) を、SUBSCRIBE の受信・送信の両方で受理するようにした。
+
+1. `src/message_parameter.rs` に `PARAM_RENDEZVOUS_TIMEOUT` (0x04) を戻した。値エンコーディングは `ValueEncoding::VarInt` (§9.20.6 の `FILL_TIMEOUT` と同型)
+2. `src/message_parameter.rs` の `value_encoding` に 0x04 の分岐を戻した。これにより decode 経路が `ProtocolViolation` を返さなくなる
+3. `src/message.rs` の `SUBSCRIBE_ALLOWED_PARAMS` に 0x04 を加えた。同定数は `Subscribe::encode_message_body` / `Subscribe::decode_message_body` / `Session::send_subscribe` で共有されるため、受信と送信の両方で受理される
+4. `MessageParameters::rendezvous_timeout` は戻さない。本ライブラリは relay を実装せず 0x04 を解釈しないため、アプリは decode 済みの `MessageParameters` から `as_slice()` 経由で読む
+5. `Subscription::subscriber_rendezvous_timeout_ms` (0086 で削除) も戻さない。`Session::handle_peer_subscribe` は 0x04 を解釈も保持もしない
+6. 未知パラメータを `PROTOCOL_VIOLATION` にする §9.20 の処理はそのまま残した
+
+更新したドキュメント:
+
+- `CHANGES.md` の `## develop` にあった「relay 専用の RENDEZVOUS_TIMEOUT parameter (0x04) を削除する」エントリを、受理する方針の `[CHANGE]` エントリに置き換えた (同一未リリース内で実装が入れ替わるため)
+- `docs/IMPLEMENTATION.md` の「relay 専用の以下のパラメータも実装しない」から 0x04 を外し、受理するが解釈しないことを明記した
+- `skills/shiguredo-moqt/SKILL.md` のパラメータ型定数表に `PARAM_RENDEZVOUS_TIMEOUT` (`0x04`) の行を戻した
+
+テスト:
+
+- `tests/test_message.rs` の `subscribe_with_unhandled_type_0x04_is_rejected` を `subscribe_with_rendezvous_timeout_is_accepted` に置き換えた。encode と decode の両方が成功し、decode 後も 0x04 が `MessageParameters` に残ることを固定する
+- `tests/test_message.rs` に `subscribe_with_undefined_parameter_type_is_rejected` を追加し、Table 13 に無い型 (0x7F) が encode で `ProtocolViolation` になることを固定した
+- `tests/test_session/request_stream.rs` に `recv_subscribe_with_rendezvous_timeout_is_accepted` を追加し、0x04 を含む SUBSCRIBE を `Session::recv_request` に渡してもセッションが `Established` のままであることを固定した
