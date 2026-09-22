@@ -1,7 +1,7 @@
 # requester の FIN で responder が必須応答を送れなくなる
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-responder-final-response-on-requester-fin
 - Polished: 2026-09-21
 
@@ -83,3 +83,40 @@ requester の FIN は「requester がもうメッセージを送らない」こ�
 - 自側が requester のときに responder の FIN を受けて `SessionEvent::FinishRequestStream` が発行される既存挙動が維持されていること
 - PUBLISH 起点の subscription で responder (subscriber 役) が peer FIN を受けたときの既存挙動が維持されていること
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+peer FIN を request の終端として扱うかどうかを、終端の方向ではなく自側の役割で分岐するようにした。
+
+1. `Session` に `peer_fin_received` (peer の FIN を受信済みの request id) と `local_fin_sent`
+   (自側が最終メッセージとともに FIN を送信済みの request id) の 2 集合を追加した
+2. `Session::finish_request_on_fin_exchange` を追加し、両方が揃った時点で
+   `SessionEvent::RequestTerminated { reason: PeerStreamFin }` を発行して
+   `request_streams` と両集合から除去するようにした。bidi stream は方向ごとに独立に閉じるため、
+   終端は FIN の到着順に依存しない
+3. `Session::mark_send_direction_closed_with_fin` を追加し、`fin: true` で最終メッセージを送る
+   経路 (`send_publish_done` / `send_request_error` / `emit_request_error` /
+   `maybe_flush_pending_publish_done`) から呼ぶようにした
+4. `Session::recv_request_stream_closed` は、自側が SUBSCRIBE / FETCH の responder のときは
+   peer FIN を記録するだけで `Terminated` へ遷移させないようにした (`Reset` は従来どおり
+   即時に終端する)
+5. `Session::close_subscription_on_stream_end` は終端時に fill fetch stream を従来どおり
+   reset する (`reset_open_fill_streams` の呼び出しは維持)
+6. rejected-id no-op 経路と `finish_request_on_fin_exchange` で request stream GOAWAY の
+   deadline を解除するようにした
+
+追加・更新したテスト:
+
+- `tests/test_session/request_stream.rs`: requester の FIN 後に responder が SUBSCRIBE_OK /
+  FETCH_OK / REQUEST_ERROR を送れること、Established が維持されること、PUBLISH_DONE の送信で
+  `RequestTerminated(PeerStreamFin)` が発行されること、自側の FIN が先の順序でも同じであること、
+  peer の RESET_STREAM で終端すること、requester 側の `FinishRequestStream` が維持されること、
+  FETCH の responder が REQUEST_ERROR で終端すること
+- `tests/test_session/subscription/publish_done.rs`: 保留 PUBLISH_DONE の flush 経由でも
+  終端が確定すること
+- `tests/test_session/fetch/fill.rs`: キャンセルを FIN から RESET_STREAM に変更し、
+  PUBLISH 起点の publisher 役でも open 中の fill fetch stream を reset することを追加
+- `tests/test_session/goaway.rs`: responder が requester の FIN を受けても deadline が残ること、
+  両方向の FIN が揃うと解除されること
+- `pbt/tests/prop_session/request_stream.rs`: kind (SUBSCRIBE / FETCH / PUBLISH) ×
+  終端種別 (FIN / RESET_STREAM) × 役割 × FIN の到着順の行列をプロパティテストで固定
