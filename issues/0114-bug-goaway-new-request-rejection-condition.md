@@ -1,7 +1,7 @@
 # GOAWAY 後の新規 request 拒否条件を仕様の主語に合わせる
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-goaway-new-request-rejection-condition
 - Polished: 2026-09-21
 
@@ -51,3 +51,20 @@ draft-ietf-moq-transport-21 §9.2 (GOAWAY) が新規 request の拒否を MAY �
 - 既存 subscription への REQUEST_UPDATE が引き続き拒否されないことがテストで固定されていること
 - `tests/test_session/goaway.rs` の GOING_AWAY 関連テストが実装と矛盾しないこと
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+draft-ietf-moq-transport-21 §9.2 (GOAWAY) の新規 request 拒否の MAY は 2 箇所にあり主語が異なる。本実装は 1 文目 ("a publisher MAY reject new requests after sending a GOAWAY") を採り、仕様のとおり publisher が応答する request 種別に限定した。2 文目 ("An endpoint that receives a GOAWAY MAY reject new requests ...") は採らない。
+
+1. `Session::accept_peer_request` に `is_publisher_request: bool` を追加し、`self.goaway.local_sent` だけでなく request 種別でも判定するようにした
+2. 呼び出し元で種別を渡す。`Session::accept_incoming_track_request` (SUBSCRIBE / TRACK_STATUS) と `Session::handle_peer_fetch` は `true`、`Session::handle_peer_publish` は `false`
+3. 2 文目を採らない理由と、`GOING_AWAY` (0x6) を送信側の拒否に使う理由 (§12.3 の registry 定義とはずれるが、peer に離脱を伝える最も近い定義済みコードである) を `Session::accept_peer_request` の doc に明記した
+4. 拒否は `REQUEST_ERROR(GOING_AWAY)` + 自側送信方向の FIN を `Session::emit_request_error` で発行し、セッションは `Established` を維持する (§6.4.2.3 の SHOULD)
+5. request stream 上の GOAWAY (`Session::send_goaway_on_request_stream`) は `local_sent` を立てないため、新規 request の拒否に影響しない不変条件を維持した
+6. 既存 subscription への REQUEST_UPDATE は `Session::accept_peer_request` を通らないため、従来どおり拒否されない
+
+テスト:
+
+- `tests/test_session/goaway.rs` に `local_goaway_accepts_peer_publish` を追加した。GOAWAY 送信後でも PUBLISH を受理し、拒否の `REQUEST_ERROR` を発行しないことを固定する
+- `tests/test_session/goaway.rs` に `local_goaway_rejects_peer_fetch_and_track_status` を追加した。FETCH と TRACK_STATUS が `REQUEST_ERROR(GOING_AWAY)` + FIN で拒否され、セッションが `Established` のままであることを固定する
+- 既存の `local_goaway_rejects_peer_new_subscribe` (SUBSCRIBE の拒否) / `peer_goaway_does_not_trigger_local_going_away_reject` (2 文目を採らない) / `goaway_on_request_stream_does_not_reject_new_peer_requests` (request stream GOAWAY の不変条件) は期待値を変えずに維持している
