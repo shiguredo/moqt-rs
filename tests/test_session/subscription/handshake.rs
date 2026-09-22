@@ -397,6 +397,7 @@ fn send_subscribe_before_established_errors() {
 /// 未知の必須トラックプロパティを含む SUBSCRIBE_OK は購読をキャンセルする (draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties))
 #[test]
 fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
+    use shiguredo_moqt::error::STREAM_CANCELLED;
     use shiguredo_moqt::track_properties::{
         MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
     };
@@ -428,22 +429,57 @@ fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
     assert_eq!(sub.state, SubscriptionState::Terminated);
 
     let mut found = false;
+    let mut saw_stop_sending = false;
+    let mut saw_reset = false;
     while let Some(e) = client.poll_event() {
-        if let SessionEvent::RequestTerminated {
-            request_id,
-            kind,
-            reason,
-        } = e
-        {
-            assert_eq!(request_id, rid);
-            assert_eq!(kind, RequestKind::Subscribe);
-            assert_eq!(reason, TerminationReason::LocalCancel);
-            found = true;
+        match e {
+            SessionEvent::RequestTerminated {
+                request_id,
+                kind,
+                reason,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(kind, RequestKind::Subscribe);
+                assert_eq!(reason, TerminationReason::LocalCancel);
+                found = true;
+            }
+            SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, STREAM_CANCELLED);
+                saw_stop_sending = true;
+            }
+            SessionEvent::ResetRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, STREAM_CANCELLED);
+                saw_reset = true;
+            }
+            _ => {}
         }
     }
     assert!(
         found,
         "expected RequestTerminated event for cancelled subscription"
+    );
+    // draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) / §6.4.2.3
+    // (Request Cancellation and Rejection): cancel は開いている方向を打ち切る
+    assert!(
+        saw_stop_sending,
+        "cancel で受信方向の STOP_SENDING が発行されること"
+    );
+    assert!(
+        saw_reset,
+        "cancel で送信方向の RESET_STREAM が発行されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "購読キャンセルでセッションを閉じないこと"
     );
 }
 

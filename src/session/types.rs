@@ -382,8 +382,12 @@ pub enum SessionEvent {
     /// and STOP_SENDING for a direction they are receiving."
     /// I/O 層は `request_id` に対応する bidi stream の送信方向を `error_code` で reset する。
     /// `error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
-    /// Session は Malformed Track 検出時 (§12.1) にも本イベントを
-    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) で発行する。
+    /// Session が本イベントを発行するのは、Malformed Track 検出時 (§12.1 (Malformed Tracks)、
+    /// [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK)) と、未知の
+    /// Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信時
+    /// (§3.6 (Mandatory Track Properties) の cancel、
+    /// [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)) である。どちらも
+    /// `StopSendingRequestStream` と対で発行する。
     /// 送信方向が既に FIN / RESET 済みの request に対する本イベントは I/O 層で無視する
     /// (送信方向を再度 reset しない。Session は送信方向の閉塞を追跡しないため、
     /// GOING_AWAY timeout reset と malformed cancel が重複して届きうる)。
@@ -399,11 +403,17 @@ pub enum SessionEvent {
     /// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) の
     /// 受信方向の打ち切り。I/O 層は `request_id` に対応する bidi stream の受信方向に
     /// `error_code` で STOP_SENDING を送る。`error_code` は §12.5 のコードを使う。
-    /// Session は Malformed Track 検出時 (§12.1) に、新規に `Terminated` へ遷移させる経路で
-    /// 本イベントを [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK) で発行する
-    /// (続けて送信方向の cancel として `ResetRequestStream` を発行する)。既に `Terminated` の
-    /// 経路 (キャンセル由来 / PUBLISH_DONE 受信済み) では発行しない。
-    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    /// Session が本イベントを発行するのは、新規に `Terminated` へ遷移させる次の 2 経路である
+    /// (いずれも続けて送信方向の cancel として `ResetRequestStream` を発行する)。
+    ///
+    /// - Malformed Track 検出 (§12.1 (Malformed Tracks))。
+    ///   `error_code` は [`STREAM_MALFORMED_TRACK`](crate::error::STREAM_MALFORMED_TRACK)
+    /// - 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信
+    ///   (§3.6 (Mandatory Track Properties) の cancel)。`error_code` は
+    ///   [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)
+    ///
+    /// 既に `Terminated` の経路 (アプリが先に cancel した / PUBLISH_DONE 受信済み) では
+    /// 発行しない。節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     StopSendingRequestStream {
         /// 対象 request の Request ID
         request_id: u64,
@@ -1469,6 +1479,15 @@ pub struct Fetch {
     /// `Established` のままでも破棄可能にするための記録。subscriber 側は常に false のまま
     /// (受信データストリームの FIN で `Terminated` に遷移するため不要)。
     pub data_stream_finished: bool,
+    /// 自側が bidi request stream の送信方向へ cancel (RESET_STREAM) を発行済みか
+    ///
+    /// `Session::send_fetch_stop_sending` (アプリ起点の cancel) と
+    /// `Session::send_request_error` (REQUEST_UPDATE 失敗応答) が `true` にする。
+    /// 未知の Mandatory Track Property を含む FETCH_OK の受信 (§3.6 (Mandatory Track
+    /// Properties) の cancel) は、この記録を見て cancel イベントの再発行を抑止する。
+    /// `FetchState::Terminated` はデータストリームの終端でも遷移するため、状態ではなく
+    /// 本フラグで判定する (データストリーム終端は bidi request stream を閉じない)。
+    pub local_cancel_sent: bool,
     /// Subscriber Priority (draft-ietf-moq-transport-21 §9.20.8 (SUBSCRIBER PRIORITY Parameter))
     ///
     /// SUBSCRIBE / FETCH / PUBLISH_OK / REQUEST_UPDATE に含まれ、動的に変更可能。

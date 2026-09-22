@@ -247,6 +247,126 @@ fn send_fetch_single_period_namespace_rejected() {
     );
 }
 
+/// 指定 request の cancel 関連イベントを順序つきで取り出す
+///
+/// `CloseSession` は検出したら panic する (テストが失敗を握り潰さないため)。
+fn drain_fetch_cancel_events(s: &mut Session, request_id: u64) -> Vec<&'static str> {
+    use shiguredo_moqt::error::STREAM_CANCELLED;
+    let mut out = Vec::new();
+    while let Some(e) = s.poll_event() {
+        match e {
+            SessionEvent::StopSendingRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id);
+                assert_eq!(error_code, STREAM_CANCELLED);
+                out.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id: rid,
+                error_code,
+            } => {
+                assert_eq!(rid, request_id);
+                assert_eq!(error_code, STREAM_CANCELLED);
+                out.push("reset");
+            }
+            SessionEvent::RequestTerminated {
+                request_id: rid,
+                kind: RequestKind::Fetch,
+                reason: TerminationReason::LocalCancel,
+            } => {
+                assert_eq!(rid, request_id);
+                out.push("terminated");
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("fetch の cancel でセッションが閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// アプリが先に cancel した fetch に遅れて未知 mandatory 付き FETCH_OK が届いても
+/// cancel を再発行しない
+///
+/// draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) の cancel は、新規に
+/// `Terminated` へ遷移させる経路で 1 回だけ発行する。
+#[test]
+fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
+    use shiguredo_moqt::message::FetchOk as WireFetchOk;
+    use shiguredo_moqt::track_properties::{
+        MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
+    };
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // アプリが先に cancel する
+    client
+        .send_fetch_stop_sending(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        FetchState::Terminated
+    );
+    // アプリ起点 cancel のイベントを消費する
+    while client.poll_event().is_some() {}
+
+    // 遅れて未知 mandatory 付き FETCH_OK が届く
+    let mut tp = TrackProperties::new();
+    tp.push(TrackProperty {
+        prop_type: MANDATORY_TRACK_PROPERTY_MIN,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::FetchOk(WireFetchOk {
+                end_of_track: 0,
+                end_location: Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                parameters: MessageParameters::new(),
+                track_properties: tp,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // cancel の 2 イベントは再発行されない。ただし未知 mandatory の分岐には到達するため
+    // RequestTerminated(LocalCancel) は発行される (cancel が 0 件でも分岐到達を確認できる)
+    let cancels = drain_fetch_cancel_events(&mut client, rid);
+    assert_eq!(
+        cancels,
+        vec!["terminated"],
+        "アプリが先に cancel 済みなら cancel イベントを再発行しないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
 /// FETCH への FETCH_OK で未知の必須 track property を受信すると
 /// fetch が Terminated に遷移し RequestTerminated イベントが発火する
 /// (draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties))
@@ -305,24 +425,18 @@ fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
             .state,
         shiguredo_moqt::session::types::FetchState::Terminated
     );
-    // RequestTerminated イベントが Fetch / LocalCancel で発火する
-    let mut found = false;
-    while let Some(e) = client.poll_event() {
-        if let SessionEvent::RequestTerminated {
-            request_id,
-            kind,
-            reason,
-        } = e
-        {
-            assert_eq!(request_id, rid);
-            assert_eq!(kind, RequestKind::Fetch);
-            assert_eq!(reason, TerminationReason::LocalCancel);
-            found = true;
-        }
-    }
-    assert!(
-        found,
-        "FETCH_OK の未知必須プロパティで RequestTerminated イベントが期待される"
+    // RequestTerminated イベントが Fetch / LocalCancel で発火し、cancel の 2 イベントも
+    // 順序つきで 1 回だけ発行される
+    let cancels = drain_fetch_cancel_events(&mut client, rid);
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset", "terminated"],
+        "STOP_SENDING → RESET_STREAM → RequestTerminated の順で 1 回ずつ発行されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "fetch キャンセルでセッションを閉じないこと"
     );
 }
 

@@ -6,7 +6,7 @@
 
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_UNSUPPORTED_EXTENSION,
-    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
+    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
 };
 use crate::message::{
     FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
@@ -563,10 +563,32 @@ impl Session {
             .expect("subscription presence already checked above");
         // draft §3.6 (Mandatory Track Properties): 未知の必須プロパティを含む SUBSCRIBE_OK は購読をキャンセルする
         if ok.track_properties.has_unknown_mandatory() {
+            // 本経路に到達する subscription は `handle_peer_subscribe_ok` の事前検証で
+            // Pending(Subscriber) に限られるため、この判定は現状つねに true になる。
+            // `StopSendingRequestStream` の doc が定める「既に Terminated の経路では
+            // 発行しない」規則を将来の経路追加に対して保つための防御である。
+            let newly_terminated = subscription.state != SubscriptionState::Terminated;
             subscription.state = SubscriptionState::Terminated;
             self.clear_control_message_deadline(request_id);
             // ローカルで購読をキャンセルするため、request stream GOAWAY の reset deadline も解除する
             self.clear_request_stream_goaway_deadline(request_id);
+            // draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) / §6.4.2.3
+            // (Request Cancellation and Rejection): cancel は開いている方向をストリーム終端で
+            // 打ち切る。受信方向を STOP_SENDING、送信方向を RESET_STREAM で打ち切るよう
+            // I/O 層へ指示する。エラーコードは §12.5 (Stream Reset Error Codes) の
+            // CANCELLED (自端の購読キャンセルであり、relay publisher の検出を表す
+            // MALFORMED_TRACK ではない)。
+            if newly_terminated {
+                self.events
+                    .push_back(SessionEvent::StopSendingRequestStream {
+                        request_id,
+                        error_code: STREAM_CANCELLED,
+                    });
+                self.events.push_back(SessionEvent::ResetRequestStream {
+                    request_id,
+                    error_code: STREAM_CANCELLED,
+                });
+            }
             self.events.push_back(SessionEvent::RequestTerminated {
                 request_id,
                 kind: RequestKind::Subscribe,

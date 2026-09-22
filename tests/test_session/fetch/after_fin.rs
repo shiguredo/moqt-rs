@@ -714,24 +714,48 @@ fn unknown_mandatory_fetch_ok_after_fin_terminates_fetch() {
         fetch.response_received,
         "unknown mandatory 受理でも応答受領フラグが立つこと"
     );
-    let mut got = false;
+    // データストリームの終端は bidi request stream を閉じないため、cancel は必要である
+    // (§3.2.1 (Fetch State Management): "It MUST send STOP_SENDING for the bidi request
+    // stream.")。STOP_SENDING → RESET_STREAM → RequestTerminated の順で 1 回ずつ発行される。
+    let mut cancels = Vec::new();
     while let Some(ev) = client.poll_event() {
-        if let SessionEvent::RequestTerminated {
-            request_id,
-            kind,
-            reason,
-        } = ev
-            && request_id == rid
-        {
-            assert_eq!(kind, RequestKind::Fetch);
-            assert_eq!(reason, TerminationReason::LocalCancel);
-            got = true;
-            break;
+        match ev {
+            SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, shiguredo_moqt::error::STREAM_CANCELLED);
+                cancels.push("stop_sending");
+            }
+            SessionEvent::ResetRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(error_code, shiguredo_moqt::error::STREAM_CANCELLED);
+                cancels.push("reset");
+            }
+            SessionEvent::RequestTerminated {
+                request_id,
+                kind,
+                reason,
+            } => {
+                assert_eq!(request_id, rid);
+                assert_eq!(kind, RequestKind::Fetch);
+                assert_eq!(reason, TerminationReason::LocalCancel);
+                cancels.push("terminated");
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("unknown mandatory の受理でセッションが閉じてはいけない: {err:?}")
+            }
+            _ => {}
         }
     }
-    assert!(
-        got,
-        "unknown mandatory を含む FETCH_OK で RequestTerminated が push されること"
+    assert_eq!(
+        cancels,
+        vec!["stop_sending", "reset", "terminated"],
+        "unknown mandatory を含む FETCH_OK で cancel が順序どおり 1 回ずつ発行されること"
     );
 }
 

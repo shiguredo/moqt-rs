@@ -3396,7 +3396,8 @@ impl Session {
     /// 指定 request の subscription がキャンセル由来 `Terminated` かどうかを判定する
     ///
     /// キャンセル経路（`stop_sending` / `handle_err_for_subscription` /
-    /// `close_subscription_on_stream_end` / `terminate_malformed_track`）は `publish_done` を
+    /// `close_subscription_on_stream_end` / `terminate_malformed_track` /
+    /// `handle_peer_subscribe_ok` の未知 Mandatory Track Property 検出）は `publish_done` を
     /// 設定しないため、`Terminated` かつ `publish_done` が `None` であればキャンセル由来と
     /// 判定できる。PUBLISH_DONE 受信による `Terminated`（`publish_done` が `Some`）は
     /// drain 期間中の遅延データを受理するため対象外

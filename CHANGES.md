@@ -182,6 +182,10 @@
   - cancel は従来どおり `RequestStreamEnd::Reset` で即時に終端する (§6.4.2.3)
   - subscription の終端時は従来どおり open 中の fill fetch stream を reset する (§3.4.1)
   - @voluntas
+- [FIX] 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信で cancel の RESET_STREAM / STOP_SENDING を発行する
+  - draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) の cancel は §6.4.2.3 (Request Cancellation and Rejection) のストリーム終端を含むため、`StopSendingRequestStream` と `ResetRequestStream` を `STREAM_CANCELLED` で発行する
+  - 自側が既に cancel を発行済みの fetch では再発行しない (`Fetch::local_cancel_sent` で判定する)
+  - @voluntas
 
 ### misc
 

@@ -5,7 +5,7 @@
 
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE,
-    SESSION_PROTOCOL_VIOLATION,
+    SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
 };
 use crate::message::{
     ControlMessage, FETCH_ALLOWED_PARAMS, FETCH_OK_ALLOWED_PARAMS, Fetch as WireFetch,
@@ -276,6 +276,7 @@ impl Session {
             end_of_track: false,
             response_received: false,
             data_stream_finished: false,
+            local_cancel_sent: false,
             subscriber_priority: parameters.subscriber_priority(),
             group_order: parameters.group_order(),
             // 自側は subscriber のため FETCH_OK を送らず、INCLUDE_PROPERTIES の保持は不要
@@ -461,6 +462,10 @@ impl Session {
     /// bidi request stream の送信方向を reset する。
     pub fn send_fetch_stop_sending(&mut self, request_id: u64) -> Result<(), SessionError> {
         self.terminate_subscriber_fetch(request_id, SubscriberFetchCloseKind::StopSending)?;
+        if let Some(fetch) = self.fetches.get_mut(&request_id) {
+            // bidi 送信方向を RESET_STREAM で閉じるため、以後の cancel 発行は不要になる
+            fetch.local_cancel_sent = true;
+        }
         // ローカル送信方向を reset で閉じるため、request stream GOAWAY の reset deadline は
         // 不要になる
         self.clear_request_stream_goaway_deadline(request_id);
@@ -721,6 +726,7 @@ impl Session {
             end_of_track: false,
             response_received: false,
             data_stream_finished: false,
+            local_cancel_sent: false,
             subscriber_priority: fetch.parameters.subscriber_priority(),
             group_order,
             // draft-ietf-moq-transport-21 §9.20.22 (INCLUDE_PROPERTIES Parameter):
@@ -845,15 +851,37 @@ impl Session {
         // キャンセルを検知する手段が失われるため)。bidi request stream 終端 (cancel) 経路で
         // `RequestTerminated` を発行済みの場合は 2 回 push されうるため、アプリは冪等に扱うこと。
         if ok.track_properties.has_unknown_mandatory() {
+            // 自側が既に bidi 送信方向へ cancel を発行済みなら再発行しない。
+            // `FetchState::Terminated` はデータストリームの終端でも遷移し、その場合は
+            // bidi request stream が開いたままなので cancel が必要である (§3.2.1
+            // (Fetch State Management): "It MUST send STOP_SENDING for the bidi request
+            // stream.")。
             let fetch = self
                 .fetches
                 .get_mut(&request_id)
                 .expect("fetch entry presence checked above");
+            let local_cancel_sent = fetch.local_cancel_sent;
             fetch.state = FetchState::Terminated;
             fetch.response_received = true;
             // ローカルで fetch をキャンセルするため、request stream GOAWAY の reset deadline も
             // 解除する
             self.clear_request_stream_goaway_deadline(request_id);
+            // draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) / §3.2.1 (Fetch
+            // State Management) / §6.4.2.3 (Request Cancellation and Rejection): cancel は
+            // 開いている方向をストリーム終端で打ち切る。§3.2.1 は bidi request stream への
+            // STOP_SENDING を MUST とする ("It MUST send STOP_SENDING for the bidi request
+            // stream.")。エラーコードは §12.5 の CANCELLED を使う。
+            if !local_cancel_sent {
+                self.events
+                    .push_back(SessionEvent::StopSendingRequestStream {
+                        request_id,
+                        error_code: STREAM_CANCELLED,
+                    });
+                self.events.push_back(SessionEvent::ResetRequestStream {
+                    request_id,
+                    error_code: STREAM_CANCELLED,
+                });
+            }
             self.events.push_back(SessionEvent::RequestTerminated {
                 request_id,
                 kind: RequestKind::Fetch,
@@ -993,6 +1021,8 @@ impl Session {
             .fetches
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
+        // 応答 (REQUEST_ERROR) は FIN で送られ、自側の送信方向が閉じる
+        fetch.local_cancel_sent = true;
         if fetch.my_role != TrackRole::Publisher {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
