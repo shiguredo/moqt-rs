@@ -1,7 +1,7 @@
 # 未実装の定義済み request メッセージに NOT_SUPPORTED を返す
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-respond-not-supported-for-unimplemented-messages
 - Polished: 2026-09-21
 
@@ -66,3 +66,31 @@ draft-ietf-moq-transport-21 §1.5 (Modularity) は、限定的な endpoint に�
 - `ControlMessage::Unsupported` の `encode` が decode 前のバイト列を再構成できることがテストで固定されていること
 - `docs/IMPLEMENTATION.md` と `CHANGES.md` の記述が実装と一致し、`CHANGES.md` の `## develop` に `[CHANGE]` が追加されていること
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+draft-ietf-moq-transport-21 §1.5 (Modularity) の "Limited endpoints SHOULD respond to any unsupported messages with the appropriate NOT_SUPPORTED error code" に従い、§9 Table 5 に定義済みで本ライブラリが実装しない制御メッセージを未知型として拒否するのをやめた。
+
+1. `ControlMessage` に `Unsupported { type_id, request_id, body }` を追加した。Table 5 の allowlist (`UNSUPPORTED_MESSAGE_TYPES` = 0x06 / 0x50 / 0x51 / 0x08 / 0x0E / 0x0F) に含まれる型だけをこの variant として返す
+2. `request_id` は本体が Request ID (vi64) で始まる 0x06 / 0x50 / 0x51 (`UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID`) だけ `Some` にする。0x08 / 0x0E / 0x0F は Request ID を持たないため `None`
+3. 0x06 / 0x50 / 0x51 で本体が空、または Request ID の vi64 が途中で切れている場合は `ProtocolViolation` を返す (既存の decode エラーと同じく I/O 層がセッション終了として扱う)
+4. `body` は Length の後ろの生バイト列を保持し、`ControlMessage::encode` が type + Length + body を再構成する。decode の末尾長一致検証と衝突しないよう、この分岐は payload 全体を消費したものとして扱う
+5. `Session::handle_unsupported_request` を追加し、`Session::recv_request` から呼ぶ
+   - `request_id` が `None` (応答専用の型) は §6.3 の 7 種に反するため `PROTOCOL_VIOLATION` でセッションを閉じる
+   - `Session::validate_peer_request_id` で parity と重複を検証する (§6.4.2.1 の MUST)
+   - 拒否コードは自側が control GOAWAY を送信済みなら `GOING_AWAY`、そうでなければ `NOT_SUPPORTED` とする。`Session::emit_request_error` で `REQUEST_ERROR` + FIN を発行し、`request_streams` に登録しないため後続の終端通知は `rejected_request_ids` の no-op 経路で吸収される
+6. `Session::recv_stream_message` (2 通目以降) は既存の catch-all で `PROTOCOL_VIOLATION` になる。Table 5 の "First" 注記に反する型と、応答先の request を持たない応答専用型のいずれも閉じることをコメントで明記した
+7. relay 専用機能を実装しない方針 (CODEBASE.md) は変えず、名前空間の告知・発見の状態機械は追加していない
+
+更新したドキュメント:
+
+- `docs/IMPLEMENTATION.md` の「未対応」を、request として届く 3 種は `NOT_SUPPORTED` で拒否してセッションを維持し、応答専用の 3 種と Table 5 に無い型はセッションを閉じる、という内容に書き換えた
+- `CHANGES.md` の `## develop` に `ControlMessage::Unsupported` 追加の `[CHANGE]` を追加した (公開 enum の variant 追加のため破壊的変更)
+
+テスト:
+
+- `tests/test_message.rs` に `unsupported_control_messages_roundtrip` を追加した。request として届く 3 種 (Request ID あり) と応答専用の 3 種 (Request ID なし) の encode → decode が一致することを固定する。Table 5 に無い型の拒否は既存の `unknown_message_type` が引き続き固定している
+- `tests/test_session/request_stream.rs` に `unsupported_request_is_rejected_with_not_supported` を追加した。3 種それぞれで `NOT_SUPPORTED` + FIN を発行し、セッションが `Established` のままであること、後続の終端通知が no-op で吸収されることを固定する
+- `tests/test_session/request_stream.rs` に `unsupported_request_parity_and_duplicate_close_session` を追加した。parity 違反と重複が `INVALID_REQUEST_ID` でセッションを閉じることを固定する
+- `tests/test_session/request_stream.rs` に `unsupported_request_after_local_goaway_returns_going_away` を追加した。control GOAWAY 送信済みなら `GOING_AWAY` が優先されることを固定する
+- `tests/test_session/request_stream.rs` に `response_only_message_as_request_start_closes_session` を追加した。応答専用の 3 種を request stream の先頭で受けると `PROTOCOL_VIOLATION` でセッションを閉じることを固定する
