@@ -666,9 +666,12 @@ pub enum MessageParameterValue {
     LengthPrefixed(Vec<u8>),
     /// FILL_PARAMETERS の内側パラメータ群 (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))
     ///
-    /// ワイヤ上は length-prefixed バイト列であり、内側は独立メッセージの
-    /// Parameters として (カウント + デルタエンコードで) エンコードされる
-    /// (draft-ietf-moq-transport-21 §16.7 (Message Parameters))。
+    /// ワイヤ上は length-prefixed バイト列であり、内側は独立メッセージの Parameters として
+    /// 各メッセージ形式が持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE)
+    /// Figure 10 など) と同じ count + デルタエンコードで書く。
+    /// 内側が 0 個の場合は `Number of Parameters = 0` の 1 バイトとして書く。受信側は値が空
+    /// (Length = 0) の FILL_PARAMETERS を `KeyValueFormattingError` として拒否する
+    /// (`decode_fill_parameters` の doc を参照)。
     FillParameters(MessageParameters),
     /// AUTHORIZATION_TOKEN の Token 構造 (draft-ietf-moq-transport-21 §8.9 (Authorization Token Compression))
     AuthorizationToken(AuthorizationToken),
@@ -811,6 +814,19 @@ impl MessageParameters {
     }
 
     /// バッファの先頭から Message Parameters をデコードし `(Self, 消費バイト数)` を返す
+    ///
+    /// # Errors
+    ///
+    /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 6 外の
+    ///   内側パラメータ、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
+    ///   LOCATION_FILTER の EndGroup オーバーフロー、Track Namespace のデコード失敗
+    ///   (フィールド数超過 / 空フィールド / 4096 バイト超過)、フレーミング違反 (KVP Type の delta
+    ///   オーバーフロー、count がバッファ容量を超える場合、値長が 2^16-1 バイトを超える KVP
+    ///   (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))): `ProtocolViolation`
+    /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
+    /// - 値の直列化 (Length/Value) が型の定義と一致しない場合 (FILL_PARAMETERS の値が空、内側の
+    ///   余剰バイト、壊れた LOCATION_FILTER / AUTHORIZATION_TOKEN): `KeyValueFormattingError`
+    /// - バッファが途中で切れている場合: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         Self::decode_inner(buf, true)
     }
@@ -1458,16 +1474,32 @@ fn validate_location_filter_bytes(bytes: &[u8]) -> Result<(), MessageError> {
 
 /// FILL_PARAMETERS の値バイト列を内側パラメータ群としてデコードする
 ///
-/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-/// 値は独立メッセージの Parameters としてのエンコーディング
-/// (draft-ietf-moq-transport-21 §16.7 (Message Parameters)) であり、
-/// 空バイト列は内側パラメータなし (subscription の値を使う) として受け付ける。
-/// 内側の末尾に余剰バイトがあれば KEY_VALUE_FORMATTING_ERROR、
-/// Table 6 外のパラメータがあれば PROTOCOL_VIOLATION を返す。
+/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter): "Its value is a sequence
+/// of Parameters that apply to the fill fetch stream (see Section 3.4), encoded as if they were
+/// Parameters for a separate message (see Section 16.7)." の "Parameters" を、各メッセージ形式が
+/// 持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE) Figure 10 など) と
+/// 解釈する。§16.7 (Message Parameters) は登録表であり符号化を規定しない。§9.20 (Control
+/// Message Parameters) の "the block is bounded by a parameter count rather than a length" も
+/// パラメータ列が count で区切られる同じ構造を述べている。
+///
+/// - 値が空 (Length = 0) は `Number of Parameters` を欠く不正形である。Type 0x23 を理解して
+///   いて Length/Value が §9.20.16 の直列化に一致しないため、§8.3 (Key-Value-Pair Structure)
+///   の MUST により KEY_VALUE_FORMATTING_ERROR を返す (内側の並びは KVP ではなく Parameters
+///   であるが、外側の FILL_PARAMETERS 自身は Type と Length/Value を持つ Key-Value-Pair である)
+/// - 内側の末尾の余剰バイトも KEY_VALUE_FORMATTING_ERROR を返す。この検査を `validate_scope`
+///   より先に行うため、既知型だが Table 6 に無いパラメータが同時にある場合はこちらが優先になる。
+///   未知の型と入れ子の FILL_PARAMETERS は `decode_inner` の段階で先に PROTOCOL_VIOLATION になる
+/// - Table 6 外のパラメータだけがある場合は §9.20.16 の MUST に従い PROTOCOL_VIOLATION を返す
+/// - 値が途中で切れた場合と count がバッファ容量を超える場合は 1 番目 (値が空の場合) の規則の
+///   対象外であり、フレーミング違反として外側のパラメータブロックと同じ分類 (`UnexpectedEof` /
+///   `ProtocolViolation`) のまま扱う
+///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn decode_fill_parameters(bytes: &[u8]) -> Result<MessageParameters, MessageError> {
     if bytes.is_empty() {
-        return Ok(MessageParameters::new());
+        return Err(MessageError::KeyValueFormattingError(
+            "FILL_PARAMETERS has no Number of Parameters",
+        ));
     }
     let (inner, consumed) = MessageParameters::decode_inner(bytes, false)?;
     if consumed != bytes.len() {
@@ -1515,8 +1547,9 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
         }
         MessageParameterValue::FillParameters(inner) => {
             // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-            // 内側は独立メッセージの Parameters としてエンコードする
-            // (draft-ietf-moq-transport-21 §16.7 (Message Parameters))。
+            // 内側は独立メッセージの Parameters としてエンコードする。値は各メッセージ形式が
+            // 持つ `Number of Parameters (vi64), Parameters (..)` と同じ構造になる
+            // (decode 側の `decode_fill_parameters` の doc を参照)。
             let mut inner_buf = Vec::new();
             inner.encode(&mut inner_buf)?;
             // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト

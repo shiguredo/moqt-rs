@@ -711,6 +711,118 @@ mod error_cases {
         }
     }
 
+    /// FILL_PARAMETERS の値が空 (Length = 0) の SUBSCRIBE は KEY_VALUE_FORMATTING_ERROR で拒否される
+    ///
+    /// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の値は各メッセージ形式が
+    /// 持つ `Number of Parameters (vi64), Parameters (..)` と解釈するため、Length = 0 は
+    /// `Number of Parameters` を欠く不正形である (理由と返すコードの根拠はパラメータ層の
+    /// `decode_fill_parameters` の doc を参照)。
+    /// パラメータ層の分類 (variant) がメッセージ層の decode でもそのまま返ることを固定する。
+    /// エラー文言そのものはパラメータ層のテストが固定する。
+    #[test]
+    fn subscribe_with_empty_fill_parameters_is_rejected() {
+        // この wire は encode が生成しない不正形である (encode は値 `0x00` と Length = 1 を書く。
+        // 受理側は subscribe_with_count_zero_fill_parameters_is_accepted が固定する)。
+        // SUBSCRIBE (0x03), Length = 14, Request ID = 7,
+        // Track Namespace: count=1 / "live", Track Name: "cam",
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
+        let wire = [
+            0x03, 0x00, 0x0E, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
+            0x01, 0x23, 0x00,
+        ];
+        assert!(
+            matches!(
+                ControlMessage::decode(&wire),
+                Err(MessageError::KeyValueFormattingError(_))
+            ),
+            "空の FILL_PARAMETERS を持つ SUBSCRIBE は KEY_VALUE_FORMATTING_ERROR であること"
+        );
+    }
+
+    /// 内側 0 個の FILL_PARAMETERS を持つ SUBSCRIBE は受理され、空の内側が保持される
+    ///
+    /// encode は内側 0 個を `Number of Parameters = 0` (`0x00` 1 バイト、Length = 1) として
+    /// 書く (Length = 1)。拒否テストと対になる受理側の固定であり、内側の count が保持されることも確認する。
+    #[test]
+    fn subscribe_with_count_zero_fill_parameters_is_accepted() {
+        use shiguredo_moqt::message::Subscribe;
+        use shiguredo_moqt::message_parameter::{
+            MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+        };
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_FILL_PARAMETERS,
+            value: MessageParameterValue::FillParameters(MessageParameters::new()),
+        });
+        let msg = ControlMessage::Subscribe(Subscribe {
+            request_id: 7,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"cam".to_vec(),
+            parameters,
+        });
+        let encoded = msg
+            .encode()
+            .expect("内側 0 個の FILL_PARAMETERS は encode できること");
+        // 内側 0 個の値は count 0 の `0x00` 1 バイトであり、外側の Length は 1 になる。
+        // 拒否テストが使う wire (Length = 0) との違いを固定するため全体を比較する
+        // SUBSCRIBE (0x03), Length = 15, Request ID = 7, Track Namespace: count=1 / "live",
+        // Track Name: "cam", Parameters: count=1 / delta=0x23 / Length = 1 / 内側 count=0
+        assert_eq!(
+            encoded,
+            [
+                0x03, 0x00, 0x0F, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
+                0x01, 0x23, 0x01, 0x00,
+            ],
+            "encode の出力が count 付きの FILL_PARAMETERS を持つ SUBSCRIBE であること"
+        );
+
+        let (decoded, consumed) = ControlMessage::decode(&encoded)
+            .expect("内側 0 個の FILL_PARAMETERS を持つ SUBSCRIBE は decode できること");
+        assert_eq!(consumed, encoded.len());
+        let ControlMessage::Subscribe(subscribe) = decoded else {
+            panic!("Subscribe が期待された");
+        };
+        let fill = subscribe
+            .parameters
+            .fill_parameters()
+            .expect("FILL_PARAMETERS が保持されること");
+        assert!(
+            fill.is_empty(),
+            "内側 0 個の FILL_PARAMETERS は空の内側として保持されること"
+        );
+    }
+
+    /// FILL_PARAMETERS を許可しないメッセージに届いた FILL_PARAMETERS の分類
+    ///
+    /// 値のデコードが scope 検証より先に走るため、値が空の場合は scope 違反の
+    /// PROTOCOL_VIOLATION ではなく値の形式違反の KEY_VALUE_FORMATTING_ERROR を返す。
+    /// 値が空でなければ従来どおり scope 違反の PROTOCOL_VIOLATION になる。
+    /// どちらもセッションを閉じるが、報告される code が変わることを固定する
+    /// (CHANGES.md に記載した受信挙動の変更)。
+    #[test]
+    fn subscribe_ok_with_fill_parameters_reports_value_error_first() {
+        // SUBSCRIBE_OK (0x04), Length = 4, Track Alias = 0,
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
+        assert!(
+            matches!(
+                ControlMessage::decode(&[0x04, 0x00, 0x04, 0x00, 0x01, 0x23, 0x00]),
+                Err(MessageError::KeyValueFormattingError(_))
+            ),
+            "空の FILL_PARAMETERS は scope 検証より先に KEY_VALUE_FORMATTING_ERROR になること"
+        );
+
+        // 対照: SUBSCRIBE_OK (0x04), Length = 5, Track Alias = 0,
+        // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 1 / 内側 count=0
+        assert!(
+            matches!(
+                ControlMessage::decode(&[0x04, 0x00, 0x05, 0x00, 0x01, 0x23, 0x01, 0x00]),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "値が空でなければ Table 6 外として PROTOCOL_VIOLATION になること"
+        );
+    }
+
     /// Table 13 に無い未定義のパラメータ型は encode / decode で拒否される
     ///
     /// draft-ietf-moq-transport-21 §9.20 (Control Message Parameters): "An endpoint that

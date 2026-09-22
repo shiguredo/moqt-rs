@@ -245,6 +245,13 @@
   - peer が MAX_FILTER_RANGES を宣言していない場合、FILL_PARAMETERS 内側の Range Filter を送る API 呼び出しも `SESSION_PROTOCOL_VIOLATION` で拒否される (送信挙動の変更)
   - @voluntas
 
+- [FIX] 空の FILL_PARAMETERS を `KEY_VALUE_FORMATTING_ERROR` で拒否し、受信側の解釈を count 付きに確定する
+  - draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の "encoded as if they were Parameters for a separate message" は各メッセージ形式が持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE) Figure 10 など) を指す。§16.7 (Message Parameters) は IANA 登録表であり符号化を規定しない
+  - decode は `Number of Parameters` を必須とし、値が空 (Length = 0) のときは §8.3 (Key-Value-Pair Structure) の MUST により `KEY_VALUE_FORMATTING_ERROR` を返す。従来は空バイト列を「内側 0 個」として受理していた (受信挙動の変更)
+  - この変更により、FILL_PARAMETERS を許可しないメッセージ (SUBSCRIBE_OK など) に空値の FILL_PARAMETERS が届いた場合は、scope 違反の `PROTOCOL_VIOLATION` ではなく値の形式違反の `KEY_VALUE_FORMATTING_ERROR` を返す (値のデコードが scope 検証より先に走るため)。どちらもセッションを閉じる
+  - 内側 0 個は count 0 の `0x00` 1 バイトであり、encode の出力は変わらない。内側の末尾の余剰バイト (`KEY_VALUE_FORMATTING_ERROR`) と Table 6 外の内側パラメータ (`PROTOCOL_VIOLATION`) の分類、値が途中で切れた場合 (`UnexpectedEof`) と count がバッファ容量を超える場合 (`PROTOCOL_VIOLATION`) の分類も変わらない
+  - @voluntas
+
 ### misc
 
 - [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する

@@ -1686,8 +1686,11 @@ mod fill_parameters {
     }
 
     #[test]
-    fn empty_fill_accepted() {
-        // 空の FILL_PARAMETERS は内側パラメータなしとして受け付ける
+    fn empty_inner_parameters_are_encoded_with_count_zero() {
+        // 内側 0 個の FILL_PARAMETERS は Number of Parameters = 0 の 1 バイト (`0x00`) で表す。
+        // 値が空バイト列になるのではなく、その外側の Length varint が 1 (`0x01`) になる。
+        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の値は
+        // 各メッセージ形式の `Number of Parameters (vi64), Parameters (..)` として符号化する。
         let mut params = MessageParameters::new();
         params.push(fill_param(MessageParameters::new()));
 
@@ -1695,6 +1698,12 @@ mod fill_parameters {
         params
             .encode(&mut buf)
             .expect("正当なテスト入力の encode は成功する");
+        assert_eq!(
+            buf,
+            vec![0x01, 0x23, 0x01, 0x00],
+            "外側 count=1 / delta=0x23 / Length = 1 / 内側 count=0 であること"
+        );
+
         let (decoded, consumed) =
             MessageParameters::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, buf.len());
@@ -1702,6 +1711,55 @@ mod fill_parameters {
             .fill_parameters()
             .expect("FILL_PARAMETERS が保持されること");
         assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn inner_parameters_start_with_number_of_parameters() {
+        // 内側 1 個 (FILL_TIMEOUT = 100) の値は count 1 + delta=0x0A + 値 0x64 の 3 バイトになる
+        let mut inner = MessageParameters::new();
+        inner.push(MessageParameter {
+            param_type: PARAM_FILL_TIMEOUT,
+            value: MessageParameterValue::VarInt(100),
+        });
+        let mut params = MessageParameters::new();
+        params.push(fill_param(inner));
+
+        let mut buf = Vec::new();
+        params
+            .encode(&mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        assert_eq!(
+            buf,
+            vec![0x01, 0x23, 0x03, 0x01, 0x0A, 0x64],
+            "外側 count=1 / delta=0x23 / Length = 3 / 内側 count=1 / FILL_TIMEOUT=100 であること"
+        );
+
+        let (decoded, consumed) =
+            MessageParameters::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded
+                .fill_parameters()
+                .expect("FILL_PARAMETERS が保持されること")
+                .fill_timeout(),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn empty_fill_value_is_key_value_formatting_error() {
+        // Number of Parameters を欠く空バイト列は値の不正形であり、§8.3 (Key-Value-Pair
+        // Structure) の MUST により KEY_VALUE_FORMATTING_ERROR で拒否する (根拠は
+        // decode_fill_parameters の doc を参照)
+        // 外側: count=1, delta=0x23, Length = 0
+        let wire = vec![0x01, 0x23, 0x00];
+        assert_eq!(
+            MessageParameters::decode(&wire),
+            Err(MessageError::KeyValueFormattingError(
+                "FILL_PARAMETERS has no Number of Parameters"
+            )),
+            "空の FILL_PARAMETERS の値は KEY_VALUE_FORMATTING_ERROR であること"
+        );
     }
 
     #[test]
@@ -1723,26 +1781,11 @@ mod fill_parameters {
     }
 
     #[test]
-    fn nested_fill_on_decode_is_protocol_violation() {
-        // FILL の内側に FILL (0x23) を含むと PROTOCOL_VIOLATION (別スコープの証拠)
-        // 内側: count=1, delta=0x23, len=0
-        let inner = vec![0x01, 0x23, 0x00];
-        let mut buf = vec![0x01, 0x23, inner.len() as u8];
-        buf.extend_from_slice(&inner);
-
-        assert!(
-            matches!(
-                MessageParameters::decode(&buf),
-                Err(MessageError::ProtocolViolation(_))
-            ),
-            "FILL の入れ子は PROTOCOL_VIOLATION であること"
-        );
-    }
-
-    #[test]
-    fn nested_fill_rejected_before_recursion() {
-        // FILL の内側に FILL (0x23) が現れた時点で、再帰する前に拒否されること。
-        // 再帰後に validate_scope で弾く実装では深い入れ子でスタックオーバーフローする。
+    fn nested_fill_rejected_before_value_validation() {
+        // FILL の内側に FILL (0x23) を含むと PROTOCOL_VIOLATION。
+        // 内側の FILL の値は空 (= 内側の内側に Number of Parameters が無い) にしてある。
+        // 入れ子の拒否が値の検証より先に行われる実装であれば PROTOCOL_VIOLATION になり、
+        // 値の検証が先なら KEY_VALUE_FORMATTING_ERROR になるため、両者の順序を固定できる。
         // 内側: count=1, delta=0x23, len=0
         let inner = vec![0x01, 0x23, 0x00];
         let mut buf = vec![0x01, 0x23, inner.len() as u8];
@@ -1753,7 +1796,156 @@ mod fill_parameters {
             Err(MessageError::ProtocolViolation(
                 "FILL_PARAMETERS must not be nested"
             )),
+            "FILL の入れ子は内側の値の検証より先に PROTOCOL_VIOLATION で拒否されること"
+        );
+    }
+
+    #[test]
+    fn nested_fill_is_rejected_by_nesting_check() {
+        // 入れ子の FILL_PARAMETERS が、内側スコープの検証 (validate_scope) ではなく
+        // 入れ子判定そのもののエラーで拒否されること。深さ 1 では再帰の有無は観測できないため、
+        // 再帰前に拒否されることは deeply_nested_fill_is_rejected_before_recursion が固定する。
+        // 内側: count=1, delta=0x23, Length = 1, 値=0x00 (内側 0 個の FILL)
+        let inner = vec![0x01, 0x23, 0x01, 0x00];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(
+                "FILL_PARAMETERS must not be nested"
+            )),
             "FILL の入れ子は再帰前に拒否されること"
+        );
+    }
+
+    #[test]
+    fn truncated_inner_value_is_unexpected_eof() {
+        // 値が途中で切れている場合は空値の規則の対象外であり、フレーミング違反として外側の
+        // パラメータブロックと同じ UnexpectedEof になる (分類の根拠は decode_fill_parameters
+        // の doc を参照)。外側: count=1, delta=0x23, Length = 3, 内側: count=1 + delta=0x0A
+        // (値の varint が 0x80 で継続ビットだけ立っており途中で切れている)
+        let inner = vec![0x01, 0x0A, 0x80];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::UnexpectedEof),
+            "内側の varint が途中で切れた場合は UnexpectedEof であること"
+        );
+
+        // 外側ブロック単体でも同じ入力は UnexpectedEof になる (分類が一致することの確認)
+        assert_eq!(
+            MessageParameters::decode(&[0x01, 0x0A, 0x80]),
+            Err(MessageError::UnexpectedEof),
+            "外側の varint が途中で切れた場合も UnexpectedEof であること"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_fill_is_rejected_before_recursion() {
+        // 1000 段の入れ子でも 2 段目 (最初の入れ子) で拒否され、深部を再帰的に解釈しないこと。
+        // 深さ 1 のテストと同じエラーになることが「深部を解釈していない」ことの裏付けであり、
+        // 再帰してから拒否する実装では 1000 段の再帰でテストスレッドのスタックを消費して
+        // debug ビルド (CI の cargo test) ではスタックオーバーフローで落ちる (変異実験で確認済み)。
+        // encode は入れ子の FILL_PARAMETERS を拒否するため、ワイヤを内側から組み立てる。
+        // 各段は count=1 / delta=0x23 / Length varint / 値 (1 段内側の wire) の並びになる。
+        let mut wire = vec![0x00]; // 最内側: Number of Parameters = 0
+        for _ in 0..1000 {
+            let mut outer = vec![0x01, 0x23];
+            shiguredo_moqt::varint::encode(wire.len() as u64, &mut outer);
+            outer.extend_from_slice(&wire);
+            wire = outer;
+        }
+
+        assert_eq!(
+            MessageParameters::decode(&wire),
+            Err(MessageError::ProtocolViolation(
+                "FILL_PARAMETERS must not be nested"
+            )),
+            "1000 段の入れ子の FILL_PARAMETERS でも同じ入れ子エラーで拒否されること"
+        );
+    }
+
+    #[test]
+    fn known_type_outside_table6_and_trailing_bytes_prefer_formatting_error() {
+        // 内側の余剰バイトの検査は `validate_scope` より先に行う。
+        // 内側: count=1, delta=0x10 (FORWARD は Table 6 に無い) + 値 0x00 + 余剰 0xFF
+        let inner = vec![0x01, 0x10, 0x00, 0xFF];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "FILL_PARAMETERS has trailing bytes"
+            )),
+            "Table 6 外のパラメータと余剰バイトが同時にある場合は余剰バイトを優先すること"
+        );
+
+        // 余剰バイトが無ければ Table 6 外として PROTOCOL_VIOLATION になる (対照)
+        let inner = vec![0x01, 0x10, 0x00];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(
+                "message parameter not allowed in this message type"
+            )),
+            "Table 6 外のパラメータだけがある場合は PROTOCOL_VIOLATION であること"
+        );
+    }
+
+    #[test]
+    fn unknown_type_and_nested_fill_are_rejected_before_trailing_bytes() {
+        // 未知の型と入れ子の FILL_PARAMETERS は `decode_inner` の段階で拒否されるため、
+        // 余剰バイトがあっても PROTOCOL_VIOLATION のままである (余剰バイト検査まで到達しない)。
+        // 内側: count=1, delta=0x01 (未定義) + 値 0x00 + 余剰 0xFF
+        let inner = vec![0x01, 0x01, 0x00, 0xFF];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(
+                "unknown message parameter type"
+            )),
+            "未知の型は余剰バイトより先に拒否されること"
+        );
+
+        // 内側: count=1, delta=0x23 (入れ子) + 値 0x00 + 余剰 0xFF
+        let inner = vec![0x01, 0x23, 0x00, 0xFF];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(
+                "FILL_PARAMETERS must not be nested"
+            )),
+            "入れ子の FILL_PARAMETERS は余剰バイトより先に拒否されること"
+        );
+    }
+
+    #[test]
+    fn inner_count_exceeding_capacity_is_protocol_violation() {
+        // count が残りバッファ容量を超える場合は、内側も外側と同じ PROTOCOL_VIOLATION になる。
+        // 外側: count=1, delta=0x23, Length = 1, 内側: count=1 だがパラメータが 1 バイトも無い
+        let inner = vec![0x01];
+        let mut buf = vec![0x01, 0x23, inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(
+                "message parameter count exceeds buffer capacity"
+            )),
+            "内側の count がバッファ容量を超える場合は PROTOCOL_VIOLATION であること"
+        );
+
+        // 外側ブロック単体でも同じ分類になることの確認 (count=2 に対して残り 1 バイト)
+        assert_eq!(
+            MessageParameters::decode(&[0x02, 0x0A]),
+            Err(MessageError::ProtocolViolation(
+                "message parameter count exceeds buffer capacity"
+            )),
+            "外側の count がバッファ容量を超える場合も PROTOCOL_VIOLATION であること"
         );
     }
 
@@ -1787,8 +1979,8 @@ mod fill_parameters {
             "FILL の重複 encode は拒否されること"
         );
 
-        // 外側: count=2, FILL(len=0), delta=0 の FILL(len=0)
-        let wire = vec![0x02, 0x23, 0x00, 0x00, 0x00];
+        // 外側: count=2, FILL(len=1, 内側 count=0), delta=0 の FILL(len=1, 内側 count=0)
+        let wire = vec![0x02, 0x23, 0x01, 0x00, 0x00, 0x01, 0x00];
         assert!(
             matches!(
                 MessageParameters::decode(&wire),
