@@ -3,7 +3,7 @@
 - Created: 2026-09-21
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-grease-track-property-mandatory-range
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-22
 
 ## 目的
 
@@ -11,7 +11,7 @@ draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE 用に�
 「未知値を受けただけでセッションを閉じてはならない MUST NOT」と規定する。一方 §3.6 (Mandatory Track Properties) は 0x4000-0x7FFF を Mandatory Track Property とし、
 理解できない Mandatory Track Property を受けた端末に「その Track を処理も転送もしてはならない」を課す。
 
-GREASE 値のうち N = 128〜255 (0x401D〜0x7F1E) はこの範囲に重なるため、現状は GREASE を送る peer の Track を購読できない。Object scope 側は [issues/0121](../issues/0121-bug-grease-property-mandatory-range.md) で扱う。本 issue は Track scope 側を扱う。
+GREASE 値のうち N = 128〜256 (0x401D〜0x7F9D の 129 値) はこの範囲に重なるため、現状は GREASE を送る peer の Track を購読できない (N = 257 は 0x801C で範囲外)。Object scope 側は [issues/0121](../issues/0121-bug-grease-property-mandatory-range.md) で扱う。本 issue は Track scope 側を扱う。
 
 ## 現状
 
@@ -19,8 +19,8 @@ GREASE 値のうち N = 128〜255 (0x401D〜0x7F1E) はこの範囲に重なる�
 - 呼び出し元は `src/session/subscription/recv.rs` の `Session::handle_peer_publish` と `Session::handle_peer_subscribe_ok`、
   `src/session/fetch.rs` の `Session::handle_peer_fetch_ok` である。検出すると §3.6 に従って該当の購読 / fetch を終了する
   (cancel の手段は [issues/0110](../issues/0110-bug-cancel-request-on-mandatory-track-property.md) で扱う)
-- GREASE 値は偶奇が交互になるため、varint 値の型と長さ付きバイト列の型の両方が 0x4000-0x7FFF に入る。`TrackProperties::decode` はどちらも受理する
-- 0x4000-0x7FFF の Track Property を与える既存テストは無く、この分岐は未テストである
+- GREASE 値の偶奇は N の偶奇で入れ替わる (0x401D は奇数、0x409C は偶数) ため、型の偶奇が交互になり、varint 値として解釈される GREASE 値と長さ付きバイト列として解釈される GREASE 値の両方が 0x4000-0x7FFF に入る。`TrackProperties::decode` はどちらも受理する
+- GREASE 値 (0x401D〜0x7F9D) を与える Track Property のテストは無く、この分岐は未テストである (非 GREASE の 0x4000 / 0x5000 を与える既存テストはある)
 
 ## 設計方針
 
@@ -30,7 +30,7 @@ GREASE 値のうち N = 128〜255 (0x401D〜0x7F1E) はこの範囲に重なる�
 
 ## 完了条件
 
-- GREASE 値 (0x401D〜0x7F1E のいずれか) を Track Property として含む PUBLISH / SUBSCRIBE_OK / FETCH_OK を受信しても、unknown mandatory として扱わないことを固定するテストが追加されていること
+- GREASE 値 (0x401D〜0x7F9D のいずれか。下限 0x401D と上限 0x7F9D の両方を含める) を Track Property として含む PUBLISH / SUBSCRIBE_OK / FETCH_OK を受信しても、unknown mandatory として扱わないことを固定するテストが追加されていること
 - GREASE 以外の未知 Mandatory Track Property は従来どおり §3.6 の対象であり続けることを固定するテストが追加されていること
 - 偶奇両方の GREASE 値 (varint 型と長さ付きバイト列型) を覆っていること
 - Object scope 側 ([issues/0121](../issues/0121-bug-grease-property-mandatory-range.md)) と同じ解釈で実装されていること
