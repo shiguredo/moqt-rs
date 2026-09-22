@@ -297,6 +297,77 @@ fn object_datagram_unknown_alias_is_reported_without_closing() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
+/// GREASE の Property Type が Mandatory Track Property 範囲でも malformed にならない
+///
+/// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+/// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
+/// 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
+/// IANA 登録された Property ではないため malformed とせず、購読を打ち切らない
+/// (§13 (Grease) の "Endpoints MUST NOT close the session solely because they received an
+/// unknown value.")。
+#[test]
+fn grease_object_property_in_mandatory_range_keeps_subscription() {
+    let (mut client, _server, rid) = establish_subscribe_track(501);
+    let stream_id = DataStreamId(12);
+    let header = SubgroupHeader {
+        track_alias: 501,
+        group_id: 4,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: true,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x15)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+    // 奇数型の GREASE 値 0x401D を Object Property として載せる
+    let mut inner = Vec::new();
+    shiguredo_moqt::varint::encode(0x401D, &mut inner);
+    shiguredo_moqt::varint::encode(1, &mut inner);
+    inner.push(0xAB);
+    let mut properties = Vec::new();
+    shiguredo_moqt::varint::encode(inner.len() as u64, &mut properties);
+    properties.extend_from_slice(&inner);
+
+    let outcome = client
+        .recv_subgroup_object(stream_id, &object_with_properties(0, properties))
+        .expect("GREASE 値の Object Property は拒否されないこと");
+    assert_eq!(outcome, TrackDataAcceptance::Accepted);
+
+    // 購読は生きており、malformed 終端のイベントも出ない
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "GREASE 値の Object Property で購読を打ち切らないこと"
+    );
+    while let Some(e) = client.poll_event() {
+        match e {
+            SessionEvent::RequestTerminated {
+                reason: TerminationReason::MalformedTrack { .. },
+                ..
+            } => panic!("GREASE 値の Object Property を malformed として扱った"),
+            SessionEvent::StopSendingRequestStream { .. }
+            | SessionEvent::ResetRequestStream { .. } => {
+                panic!("GREASE 値の Object Property で cancel を発行した")
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("GREASE 値の Object Property でセッションを閉じた: {err:?}")
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Malformed Track 検出時はセッションを閉じず該当 subscription だけを終端する
 ///
 /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks): "When a subscriber detects a

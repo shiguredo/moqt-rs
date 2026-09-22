@@ -9,6 +9,7 @@ use shiguredo_moqt::object_properties::{
     ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP,
 };
 use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+use shiguredo_moqt::varint;
 
 #[test]
 fn empty_encode_decode() {
@@ -507,4 +508,75 @@ fn object_field_mismatch_converts_into_boxed_error() {
         "Display が不一致の内容を表すこと"
     );
     assert!(err.source().is_none(), "内包するエラーは無いこと");
+}
+
+/// GREASE の Property Type は 0x4000-0x7FFF に入っていても Object scope で malformed にならない
+///
+/// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+/// (`0x7f * N + 0x9D`) を Scope Any として予約しており、その一部 (N = 128 の 0x401D から
+/// N = 256 の 0x7F9D まで) は §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。
+/// GREASE 値は IANA に登録された Property ではないため malformed としない (§13 (Grease) の
+/// "Endpoints MUST NOT close the session solely because they received an unknown value.")。
+#[test]
+fn grease_property_in_mandatory_range_is_accepted() {
+    // 奇数型 (長さ付きバイト列) の GREASE 値: N = 128 -> 0x401D
+    // 偶数型 (varint) の GREASE 値: N = 129 -> 0x409C
+    // 重なり範囲の上限: N = 256 -> 0x7F9D (奇数型)
+    for (prop_type, value) in [
+        (0x401Du64, ObjectPropertyValue::Bytes(vec![0xAB])),
+        (0x409C, ObjectPropertyValue::VarInt(7)),
+        (0x7F9D, ObjectPropertyValue::Bytes(vec![0xCD])),
+    ] {
+        assert!(
+            shiguredo_moqt::grease::is_grease(prop_type),
+            "テスト前提として GREASE 値であること: {prop_type:#x}"
+        );
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type,
+            value: value.clone(),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .unwrap_or_else(|e| panic!("GREASE 値の encode は成功すること: {prop_type:#x}: {e:?}"));
+        let (decoded, _) = ObjectProperties::decode(&buf)
+            .unwrap_or_else(|e| panic!("GREASE 値の decode は成功すること: {prop_type:#x}: {e:?}"));
+        assert_eq!(
+            decoded.as_slice().len(),
+            1,
+            "GREASE 値が保持されること: {prop_type:#x}"
+        );
+        assert_eq!(decoded.as_slice()[0].prop_type, prop_type);
+        assert_eq!(decoded.as_slice()[0].value, value);
+    }
+}
+
+/// GREASE 値でない 0x4000-0x7FFF は Object scope で malformed のままである
+///
+/// draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties): "An Object received with a
+/// Mandatory Track Property as an Object Property is malformed".
+#[test]
+fn non_grease_mandatory_property_in_object_scope_is_malformed() {
+    for prop_type in [0x4000u64, 0x7FFF] {
+        assert!(
+            !shiguredo_moqt::grease::is_grease(prop_type),
+            "テスト前提として GREASE 値でないこと: {prop_type:#x}"
+        );
+        // Object scope の wire 表現 (Properties Length + delta エンコードされた KVP) を
+        // 手組みして decode させる。malformed の判定は decode 側の `decode_kv_pairs` にある。
+        let mut inner = Vec::new();
+        varint::encode(prop_type, &mut inner); // prev_type = 0 からの delta
+        varint::encode(1, &mut inner); // 偶数型は varint 値
+        let mut buf = Vec::new();
+        varint::encode(inner.len() as u64, &mut buf);
+        buf.extend_from_slice(&inner);
+        assert!(
+            matches!(
+                ObjectProperties::decode(&buf),
+                Err(MessageError::MalformedTrack(_))
+            ),
+            "GREASE 値でない必須プロパティは decode で malformed になること: {prop_type:#x}"
+        );
+    }
 }

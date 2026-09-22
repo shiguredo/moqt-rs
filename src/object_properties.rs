@@ -504,14 +504,25 @@ fn decode_kv_pairs(
             ));
         }
 
-        // draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties): 必須トラックプロパティ (0x4000-0x7FFF) は
-        // Track スコープのみ。Object Properties で受信したら malformed track
+        // draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties): 必須トラックプロパティ
+        // (0x4000-0x7FFF) は Track スコープのみ。Object Properties で受信したら malformed track。
+        //
+        // ただし §16.8 (Properties) の Table 14 が GREASE の Property Type
+        // (`0x7f * N + 0x9D`) を Scope Any として予約しており、その一部 (N = 128 の 0x401D から
+        // N = 256 の 0x7F9D まで) はこの範囲に入る。GREASE 値は IANA に登録された Property では
+        // ないため、§3.6 の「Mandatory Track Property」は登録された必須トラックプロパティを指し、
+        // 予約値である GREASE を含まないと解釈する。この解釈は §13 (Grease) の
+        // "Endpoints MUST NOT close the session solely because they received an unknown value."
+        // と §8.4 (Track and Object Properties) の未知 Property の転送 MUST に整合する。
+        // GREASE 値は未知 Property として §8.4 / §16.8 に従い保持・転送する。
+        // draft 内部の登録ポリシーと予約値の関係は将来の draft 改版で変わりうる。
         if (crate::track_properties::MANDATORY_TRACK_PROPERTY_MIN
             ..=crate::track_properties::MANDATORY_TRACK_PROPERTY_MAX)
             .contains(&prop_type)
+            && !crate::grease::is_grease(prop_type)
         {
             return Err(MessageError::MalformedTrack(
-                "malformed track: mandatory property in object scope",
+                "mandatory property in object scope",
             ));
         }
 
