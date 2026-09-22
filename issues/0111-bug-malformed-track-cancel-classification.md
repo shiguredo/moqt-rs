@@ -1,7 +1,7 @@
 # Malformed Track の検出を購読単位の cancel として扱えるようにする
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-22
 - Branch: feature/fix-malformed-track-cancel-classification
 - Polished: 2026-09-21
 
@@ -71,3 +71,49 @@ Session 層の cancel 自体 (`SessionEvent::StopSendingRequestStream` → `Sess
 - 戻り値型を変更する API のエラーを検査している既存テストが新しい分類に合わせて更新されていること
 - `MessageError` の variant 追加と `SubgroupTracker` の戻り値型変更に対応する `[CHANGE]` が `CHANGES.md` の `## develop` に追加されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+### 実装した内容
+
+`src/error.rs` の `MessageError` に `MalformedTrack(&'static str)` を追加し、draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) が列挙する条件に対応する検出だけをこの variant に分類した。
+
+分類した検出:
+
+- `src/stream/decoder.rs` の `FetchStreamDecoder::validate_fetch_object` (条件 1 = 同一 Subgroup 内の Publisher Priority 変更、条件 2 = 確定済み最終 Object の超過) と `FetchStreamDecoder::set_subgroup_final_object`
+- `src/subgroup_tracker.rs` の `SubgroupTracker::record_priority` (条件 1) と `SubgroupTracker::mark_fin` (条件 3)
+- `src/object_properties.rs` の `ObjectPropertyTracker::observe_decoded_object` / `observe_object` の PRIOR_GROUP_ID_GAP / PRIOR_OBJECT_ID_GAP 条件
+
+分類しなかった検出 (`ProtocolViolation` のまま):
+
+- `ObjectProperties::decode` の失敗と `observe_object` の Properties フレーミング不一致
+- `FetchStreamDecoder::validate_fetch_object` の Object ID 昇順違反 (§2.2 (Subgroups)) と Group 順序違反 (§9.11 (FETCH))
+- `SubgroupTracker::open` の再オープン禁止違反 (§2.2 / §11.3.2 (Closing Subgroup Streams))
+
+あわせて次の API を追加・変更した。
+
+- `MessageError::reason()` — 人間可読の説明文を取り出す
+- `MessageError::malformed_track_reason()` — §12.1 の検出かどうかを判定しつつ理由を取り出す
+- `SubgroupTracker::open` / `record_priority` / `mark_fin` の戻り値型を `SessionError` から `MessageError` に変更
+- `src/session/data.rs` の `session_error_from_data_message` は `MalformedTrack` も理由文を保って `SESSION_PROTOCOL_VIOLATION` に写す。呼び出し元は `MessageError::reason()` で理由を取り出し、`terminate_malformed_track` の cancel 経路を従来どおり維持する
+
+### 完了条件のうち未達の項目
+
+**§12.1 の検出を返しうる公開受信 API の戻り値型を `RecvDataStreamError` に統一する部分は未実装である。** 対象は `Session::recv_subgroup_header` / `recv_subgroup_object` / `recv_object_datagram` / `recv_datagram` / `recv_data_stream_closed` の 5 API と、`RecvDataStreamError::MalformedTrack { reason }` variant の追加である。
+
+現状のアプリは `SessionEvent::RequestTerminated { reason: TerminationReason::MalformedTrack }` と、アプリが保持する `FetchStreamDecoder` の戻り値 (`MessageError::MalformedTrack`) で §12.1 の検出を判別できる。Session の受信 API の戻り値からは判別できない。
+
+この部分は呼び出し箇所が約 373 に及び、影響を受ける既存テストの更新を含めて別途対応が必要である。実装の指針は次のとおり。
+
+- `RecvDataStreamError` に `MalformedTrack { reason }` と `malformed_track_reason()` を追加し、`From<SessionError>` を実装する
+- 5 API の戻り値型を変更し、`SessionError` を返す箇所は `RecvDataStreamError::Session(err)` で包む
+- `MalformedTrack` を返す箇所は `RecvDataStreamError::MalformedTrack { reason }` にする。`recv_data_stream_type` が同じ形 (`Result<DataStreamType, RecvDataStreamError>`) で既に実装済みなので、その書き方を踏襲する
+
+### テスト
+
+`MessageError::MalformedTrack` への分類に合わせて次のテストの期待値を更新した。
+
+- `tests/test_subgroup_tracker.rs` — 再オープン禁止違反が `ProtocolViolation` のままであること
+- `tests/test_object_properties.rs` — §12.1 の条件が `MalformedTrack`、コーデックのフレーミング違反が `ProtocolViolation` になること
+- `tests/test_stream/decoder.rs` — FETCH の条件 1 / 2 が `MalformedTrack` になること
+- `pbt/tests/prop_object_tracker.rs` — PRIOR_GROUP_ID_GAP の条件が `MalformedTrack` になること
