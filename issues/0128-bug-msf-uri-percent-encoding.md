@@ -1,7 +1,7 @@
 # MSF URI の track-identifier で percent-encoding を扱えない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-23
 - Branch: feature/fix-msf-uri-percent-encoding
 - Polished: 2026-09-22
 
@@ -86,3 +86,35 @@ URI 層の `%61` と MSF namespace-name 層の `.61` は別層の話である。
 - `crate::name::parse_name` が `%` を含む文字列を従来どおり `InvalidEscape` で拒否すること (`%XX` 許容版の追加で既存 API の挙動が変わっていないことを固定する)
 - `src/msf/uri.rs` のモジュール doc から「percent-decode は行わず、値をそのまま保持する」の記述が実装に合わせて更新されていること
 - `make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ること
+
+## 解決方法
+
+URI 層の `%XX` (RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded`) と draft-ietf-moq-msf-01 §11.1.2 (MSF Namespace-Name String Encoding) の `.` + 小文字 hex 2 桁を別の層として扱い、track-identifier を 1 パスで走査してバイト列へデコードするようにした。
+
+1. `src/name.rs` に `parse_name_with_percent_encoding` を追加した。`parse_name` と共通の `parse_name_inner` に `PercentEncoding` (Forbidden / Allowed) を渡す形にし、`parse_name` の挙動 (`%` は `InvalidEscape`) は変えていない
+2. フィールドの分割は `parse_name` と同じ規則 (`-` 1 個 = namespace フィールド区切り、`--` = namespace と track name の境界、`-` 3 個以上 = 不正) を生の文字列の `-` のラン走査で確定する。`%XX` はデータバイトであり区切りを生成しない (`%2D` は 0x2D のデータバイト)
+3. 各フィールドは `decode_field` を 1 パスで走査してバイト列にする
+   - リテラル (`a-z` / `A-Z` / `0-9` / `_`) はそのバイト
+   - `.` は直後の 2 文字が小文字 hex であることをその場で要求し、デコード結果がリテラルなら `RedundantEncoding`、大文字 hex なら `UppercaseHex`
+   - `%` は直後の 2 文字が hex (大文字小文字は問わない) であることを要求し、その octet をデータバイトとして取り出す。`%XX` の octet には `UppercaseHex` / `RedundantEncoding` を適用しない (`%61` は 0x61 のデータバイト)
+   - ABNF が生で許す非リテラル文字 (`/` / `~` / `:` / `@` / `sub-delims-no-amp`) はその ASCII バイトをデータとして取り出す (`is_uri_data_byte`)
+4. `%XX` を文字列へ畳み込んでから再パースしない。`.` の直後に `%XX` が続く入力 (`msf:ns--.2%33`) は 1 パス走査では `InvalidEscape` になる (畳み込むと `.23` になり 1 バイト 0x23 として受理されてしまう)。`%2E` も 0x2E のデータバイトであり `.` + hex の開始として再解釈しない (RFC 3986 §2.4 (When to Encode or Decode) の「同じ文字列を 2 回 decode しない」を満たす)
+5. `src/msf/uri.rs` の `parse_msf_fragment` は track-identifier に新しい関数を使い、モジュール doc を「track-identifier は `%XX` をデコードする。`&` 区切りのパラメータ列は percent-decode せず生の文字列のまま保持する」に更新した。`&` 区切りの分解 (`parse_fragment_pairs` / `resolve_catalog_variables`) は変更していない
+
+テスト:
+
+- `tests/test_msf/uri.rs` に 6 本追加した
+  - `parse_fragment_decodes_percent_encoded_track_identifier`: `msf:customer--catalog%3Fpart` の track name が `catalog?part` になり、`%3f` でも同じ結果になること。`%25` が 0x25、`%61` が 0x61、`%4A` が 0x4A になること
+  - `parse_fragment_accepts_raw_pchar_no_amp_characters`: ABNF (`pchar-no-amp / "/"`) が生のまま許す 14 文字を 1 文字ずつ通し、それぞれの ASCII バイトになることと、ABNF 外の `?` を拒否することを固定する (検証側の `is_pchar_no_amp_byte` と同じ文字集合であることの回帰検出)
+  - `parse_fragment_percent_encoded_hyphen_is_data`: `msf:ns%2Da--catalog` の namespace が 1 フィールド `ns-a` (0x6E 0x73 0x2D 0x61) になること
+  - `parse_fragment_percent_encoded_period_is_data`: `msf:ns--%2E2d` の track name が 3 バイト 0x2E 0x32 0x64 になること
+  - `parse_fragment_escape_followed_by_percent_rejected`: `msf:ns--.2%33` が `InvalidEscape` で拒否されること
+  - `parse_fragment_keeps_dot_escape_rules`: `msf:ns--a.2fb` が `a/b` になり、素の `.61` が `RedundantEncoding`、素の `.4A` が `UppercaseHex` で拒否されること
+- `tests/test_name.rs` に 2 本追加した
+  - `parse_name_rejects_percent_encoding`: `parse_name` が `%` を含む文字列を従来どおり `InvalidEscape` で拒否すること (既存 API の挙動不変)
+  - `parse_name_with_percent_encoding_decodes_octets`: 新しい関数が `%XX` をデータバイトとして受理し、`.` + hex の規則は維持すること。`%` の後が hex 2 桁でない入力 (`ns--a%` / `ns--a%3` / `ns--a%zz` / `ns--a%zzz` / `ns--a%3z`) が `InvalidEscape` になること
+- `fuzz/fuzz_targets/fuzz_parse_name.rs` に `parse_name_with_percent_encoding` の呼び出しを追加した (新しい公開パーサも panic 非発生を fuzz で担保する)
+- 生の `?` の拒否は既存の `parse_fragment_invalid_rejected` が維持している
+- 変異実験で検出力を確認した (`.` の直後で `%` を許す / `%XX` に `RedundantEncoding` を適用する / `%XX` を hex 2 桁でなく 1 桁として読む / `is_uri_data_byte` から `/` を外す の各変異で対応するテストが失敗する)
+
+`CHANGES.md` の `## develop` の `[FIX]` 群の末尾に `[FIX]` を追加し、`docs/IMPLEMENTATION.md` と `skills/shiguredo-moqt/SKILL.md` の `name` モジュール API 一覧に `parse_name_with_percent_encoding` を追記した。
