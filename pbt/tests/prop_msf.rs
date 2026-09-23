@@ -514,6 +514,7 @@ fn full_catalog_roundtrip() -> noprop::TestResult {
             is_complete: false,
             tracks: unique_tracks,
             publish_tracks,
+            removed_tracks: Default::default(),
             init_data_list,
         });
         let encoded = doc.encode().expect("encode に成功すること");
@@ -541,6 +542,7 @@ fn full_catalog_is_complete_roundtrip() -> noprop::TestResult {
             is_complete: true,
             tracks: vec![],
             publish_tracks: Vec::new(),
+            removed_tracks: Default::default(),
             init_data_list: Vec::new(),
         });
         let encoded = doc.encode().expect("encode に成功すること");

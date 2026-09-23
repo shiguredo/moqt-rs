@@ -846,6 +846,7 @@ fn auth_info_non_utf8_value_rejected_on_encode() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     assert!(
@@ -870,6 +871,7 @@ fn auth_info_non_utf8_value_in_publish_tracks_rejected_on_encode() {
         is_complete: false,
         tracks: Vec::new(),
         publish_tracks: vec![track],
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     assert!(
@@ -894,6 +896,7 @@ fn auth_info_non_json_value_rejected_on_encode() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     assert!(
@@ -916,6 +919,7 @@ fn full_doc(
         is_complete: false,
         tracks,
         publish_tracks,
+        removed_tracks: Default::default(),
         init_data_list,
     })
 }

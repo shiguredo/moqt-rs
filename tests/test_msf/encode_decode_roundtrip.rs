@@ -40,6 +40,7 @@ fn full_catalog_with_all_fields() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -62,6 +63,7 @@ fn full_catalog_with_max_durations_absent() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -93,6 +95,7 @@ fn full_catalog_with_init_data_list_and_buffers() {
         is_complete: true,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: vec![MsfInitData {
             id: "init1".to_string(),
             kind: MsfInitDataKind::Inline,
@@ -118,6 +121,7 @@ fn full_catalog_with_media_timeline_track() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -202,6 +206,7 @@ fn is_complete_not_emitted_when_false() {
         is_complete: false,
         tracks: vec![],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -216,6 +221,7 @@ fn is_complete_emitted_when_true() {
         is_complete: true,
         tracks: vec![],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -317,6 +323,7 @@ fn encode_full_catalog_with_track(track: MsfTrack) -> Vec<u8> {
         is_complete: true,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     })
     .encode()
@@ -528,6 +535,7 @@ fn depends_empty_not_emitted() {
         is_complete: false,
         tracks: vec![MsfTrack::new("t".to_string(), MsfPackaging::Loc, true)],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -597,6 +605,7 @@ fn publish_tracks_roundtrip() {
         is_complete: false,
         tracks: vec![],
         publish_tracks: vec![metrics, log],
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -614,6 +623,7 @@ fn publish_tracks_absent_not_emitted() {
         is_complete: false,
         tracks: vec![],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -667,6 +677,7 @@ fn publish_tracks_key_order() {
         is_complete: false,
         tracks: vec![MsfTrack::new("v".to_string(), MsfPackaging::Loc, true)],
         publish_tracks: vec![log],
+        removed_tracks: Default::default(),
         init_data_list: vec![MsfInitData {
             id: "init1".to_string(),
             kind: MsfInitDataKind::Inline,
@@ -703,6 +714,7 @@ fn connection_uri_token_roundtrip() {
         is_complete: false,
         tracks: vec![],
         publish_tracks: vec![metrics],
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");
@@ -756,6 +768,7 @@ fn encryption_signaling_roundtrip() {
         is_complete: false,
         tracks: vec![track],
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
     let encoded = doc.encode().expect("encode に成功すること");

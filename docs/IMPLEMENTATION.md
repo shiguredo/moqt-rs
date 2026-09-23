@@ -149,6 +149,7 @@ Public / Private の配置はアプリケーション層の責務です。
 
 - Catalog (`MsfCatalog`)
   - version / generatedAt / isComplete / tracks / publishTracks / initDataList
+  - `removed_tracks`：削除済みトラックの履歴 (JSON には出力しない内部状態。delta update の適用時に属性不変の検査へ使う)
 - Delta Update (`MsfDeltaUpdate`)
   - deltaUpdate (operation object の配列：`op` = "add" / "remove" / "clone") / generatedAt
   - Full / Delta の判別は `MsfCatalogDocument` が行う
@@ -156,6 +157,7 @@ Public / Private の配置はアプリケーション層の責務です。
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone の順次適用
   - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する
   - 適用後の track name 一意性とグループ内 targetLatency / buffers 一致を再検証する
+  - 削除済みの同じ (namespace, name) の再追加は、属性変更と isLive の false から true への変更を拒否する (§5.3 / §5.2.7)
 - カタログトラック名 (`MSF_CATALOG_TRACK_NAME` = "catalog")
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド
   - 共通：name / namespace / packaging / eventType / role / isLive / label / lang / targetLatency / buffers / trackDuration / renderGroup / altGroup / initRef / depends / parentName / template / maxGopDuration / maxGroupDuration

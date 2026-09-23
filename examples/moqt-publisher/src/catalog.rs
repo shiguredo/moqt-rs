@@ -101,6 +101,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         is_complete: false,
         tracks,
         publish_tracks: Vec::new(),
+        removed_tracks: Default::default(),
         init_data_list: Vec::new(),
     });
 

@@ -678,3 +678,390 @@ fn apply_delta_applies_all_operations_on_success() {
     assert!(catalog.tracks.iter().any(|t| t.name == "v2"));
     assert!(catalog.tracks.iter().any(|t| t.name == "a"));
 }
+
+/// namespace 指定付きの remove 参照を作るヘルパー
+fn remove_ref(name: &str, namespace: &str) -> MsfRemoveTrack {
+    MsfRemoveTrack {
+        name: name.to_string(),
+        namespace: Some(namespace.to_string()),
+    }
+}
+
+/// 同一 (namespace, name) の属性変更を検出するための codec / width を持つトラック
+fn video_track(name: &str, namespace: &str) -> MsfTrack {
+    let mut track = loc_track(name, Some(namespace));
+    track.codec = Some("av01".to_string());
+    track.width = Some(1920);
+    track.height = Some(1080);
+    track
+}
+
+/// namespace を省略した video_track (カタログの namespace を継承する)
+fn video_track_omitted_ns(name: &str) -> MsfTrack {
+    let mut track = video_track(name, "cns");
+    track.namespace = None;
+    track
+}
+
+/// remove → add で属性を変更した delta update は拒否される
+///
+/// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
+/// defines a fixed set of Track attributes which MUST NOT be modified after being declared.
+/// To modify any attribute, a new track with a different Namespace|Name tuple is created by
+/// Adding or Cloning and then the old track is removed."
+#[test]
+fn apply_delta_readd_with_changed_attribute_rejected() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track("v", "ns"));
+
+    // 1 回の delta で remove → add し、label と codec を変更する
+    let mut changed = video_track("v", "ns");
+    changed.codec = Some("vp09".to_string());
+    changed.label = Some("main".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![changed],
+            },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, None) else {
+        panic!("属性変更を伴う再追加は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
+    );
+    // 失敗時はカタログを変更しない (copy-on-write)
+    assert_eq!(catalog.tracks.len(), 1, "失敗時にトラックが消えないこと");
+    assert_eq!(
+        catalog.tracks[0].codec.as_deref(),
+        Some("av01"),
+        "失敗時に属性が変わらないこと"
+    );
+}
+
+/// remove → clone で同じ (namespace, name) を再追加し属性が変わる delta update は拒否される
+#[test]
+fn apply_delta_readd_by_clone_with_changed_attribute_rejected() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track("v", "ns"));
+    // clone の親になる別トラック (codec が異なる)
+    let mut parent = video_track("src", "ns");
+    parent.codec = Some("vp09".to_string());
+    parent.width = Some(1280);
+    catalog.tracks.push(parent);
+
+    let mut clone = MsfCloneTrack::new("v".to_string(), "src".to_string());
+    clone.parent_namespace = Some("ns".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, None) else {
+        panic!("clone による属性変更を伴う再追加は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
+    );
+    assert_eq!(catalog.tracks.len(), 2, "失敗時にトラックが消えないこと");
+}
+
+/// remove → add で isLive を false から true に戻す delta update は拒否される
+///
+/// draft-ietf-moq-msf-01 §5.2.7 (Is Live): "A True value MUST never follow a False value."
+/// 属性差分の文言とは区別できる専用のメッセージで返す。
+#[test]
+fn apply_delta_readd_with_is_live_regression_rejected() {
+    let mut catalog = MsfCatalog::new();
+    let mut offline = loc_track("v", Some("ns"));
+    offline.is_live = false;
+    catalog.tracks.push(offline);
+
+    let mut live = loc_track("v", Some("ns"));
+    live.is_live = true;
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add { tracks: vec![live] },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, None) else {
+        panic!("isLive の逆行は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("isLive"),
+        "§5.2.7 違反を述べること: {reason}"
+    );
+    assert!(
+        !reason.contains("attributes MUST NOT be modified"),
+        "属性差分の文言と区別できること: {reason}"
+    );
+}
+
+/// delta update をまたぐ remove → add でも属性変更が検出される
+#[test]
+fn apply_delta_readd_attribute_change_across_deltas_rejected() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track("v", "ns"));
+
+    // 1 回目の delta: remove のみ
+    let remove_delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Remove {
+            tracks: vec![remove_ref("v", "ns")],
+        }],
+    };
+    catalog
+        .apply_delta(&remove_delta, None)
+        .expect("remove は成功する");
+    assert!(catalog.tracks.is_empty());
+
+    // 2 回目の delta: 属性を変えて add
+    let mut changed = video_track("v", "ns");
+    changed.codec = Some("vp09".to_string());
+    let add_delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![changed],
+        }],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&add_delta, None) else {
+        panic!("delta をまたぐ属性変更は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
+    );
+    assert!(
+        catalog.tracks.is_empty(),
+        "失敗時にトラックが追加されないこと"
+    );
+}
+
+/// 同一属性での remove → add は引き続き成功する
+#[test]
+fn apply_delta_readd_with_same_attributes_succeeds() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track("v", "ns"));
+
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![video_track("v", "ns")],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("同一属性の再追加は成功する");
+    assert_eq!(catalog.tracks.len(), 1);
+    assert_eq!(catalog.tracks[0].codec.as_deref(), Some("av01"));
+}
+
+/// isLive=false のトラックは targetLatency の有無だけが異なる再追加を受理する
+///
+/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は isLive=false のとき targetLatency を
+/// 無視するため、比較の両辺で isLive=false なら targetLatency を `None` とみなす。
+#[test]
+fn apply_delta_readd_is_live_false_ignores_target_latency() {
+    let mut catalog = MsfCatalog::new();
+    let mut original = loc_track("v", Some("ns"));
+    original.is_live = false;
+    catalog.tracks.push(original);
+
+    // 再追加では targetLatency を付ける (isLive=false のため無視される)
+    let mut readded = loc_track("v", Some("ns"));
+    readded.is_live = false;
+    readded.target_latency = Some(500);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![readded],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("isLive=false では targetLatency の有無だけの差異は属性変更とみなさない");
+    assert_eq!(catalog.tracks.len(), 1);
+    assert_eq!(catalog.tracks[0].target_latency, Some(500));
+}
+
+/// namespace を省略したトラックでも、継承した namespace で再追加の属性変更を検出する
+///
+/// draft-ietf-moq-msf-01 §5.2.2 (Track namespace): namespace 省略時はカタログの namespace を
+/// 継承する。履歴のキーも同じ規則で解決しないと照合が外れる。
+#[test]
+fn apply_delta_readd_attribute_change_with_inherited_namespace_rejected() {
+    let mut catalog = MsfCatalog::new();
+    let mut original = loc_track("v", None);
+    original.codec = Some("av01".to_string());
+    catalog.tracks.push(original);
+
+    // remove は namespace を明示し、add は省略する (どちらも継承した "cns" に解決される)。
+    // remove 側の解決に catalog namespace の継承が効いていないと履歴を引けず、属性変更を
+    // 見逃す。
+    let mut changed = loc_track("v", None);
+    changed.codec = Some("vp09".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "cns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![changed],
+            },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("cns")) else {
+        panic!("継承した namespace でも属性変更を検出すること");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
+    );
+}
+
+/// 省略した namespace と明示した namespace は同じ tuple として扱われる
+///
+/// 履歴のキーは解決済みの namespace なので、宣言時に省略し、remove と再追加で明示しても
+/// 同じトラックとして属性変更を検出する。
+#[test]
+fn apply_delta_readd_with_explicit_namespace_matches_inherited() {
+    let mut catalog = MsfCatalog::new();
+    let mut original = loc_track("v", None);
+    original.codec = Some("av01".to_string());
+    catalog.tracks.push(original);
+
+    let mut changed = video_track("v", "cns");
+    changed.codec = Some("vp09".to_string());
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "cns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![changed],
+            },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("cns")) else {
+        panic!("省略形と明示形は同じ tuple として扱うこと");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
+    );
+}
+
+/// namespace の表現 (省略形 / 明示形) が宣言と再追加で異なっても、同一属性なら再追加できる
+///
+/// キーは解決済み namespace で同一性を確認するため、生の表現差 (省略形と明示形) は
+/// 属性変更とみなさない。
+#[test]
+fn apply_delta_readd_with_different_namespace_representation_succeeds() {
+    // 宣言は明示、再追加は省略
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track("v", "cns"));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![MsfRemoveTrack::new("v".to_string())],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![video_track_omitted_ns("v")],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some("cns"))
+        .expect("明示形から省略形への再追加は成功する");
+    assert_eq!(catalog.tracks.len(), 1);
+    assert_eq!(catalog.tracks[0].codec.as_deref(), Some("av01"));
+
+    // 宣言は省略、再追加は明示
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(video_track_omitted_ns("v"));
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "cns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![video_track("v", "cns")],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, Some("cns"))
+        .expect("省略形から明示形への再追加は成功する");
+    assert_eq!(catalog.tracks.len(), 1);
+    assert_eq!(catalog.tracks[0].codec.as_deref(), Some("av01"));
+}
+
+/// isLive=false のトラックは buffers の有無だけが異なる再追加を受理する
+///
+/// draft-ietf-moq-msf-01 §5.2.9 (Buffers) は isLive=false のとき buffers を無視するため、
+/// 比較の両辺で isLive=false なら buffers を `None` とみなす。
+#[test]
+fn apply_delta_readd_is_live_false_ignores_buffers() {
+    let mut catalog = MsfCatalog::new();
+    let mut original = loc_track("v", Some("ns"));
+    original.is_live = false;
+    catalog.tracks.push(original);
+
+    let mut readded = loc_track("v", Some("ns"));
+    readded.is_live = false;
+    readded.buffers = Some(MsfBuffers {
+        target: Some(100),
+        min: None,
+        max: Some(200),
+    });
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![readded],
+            },
+        ],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("isLive=false では buffers の有無だけの差異は属性変更とみなさない");
+    assert_eq!(catalog.tracks.len(), 1);
+    assert_eq!(
+        catalog.tracks[0].buffers.as_ref().and_then(|b| b.target),
+        Some(100)
+    );
+}

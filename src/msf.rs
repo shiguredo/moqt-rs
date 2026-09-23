@@ -1207,6 +1207,10 @@ impl DisplayJson for MsfRemoveTrack {
 }
 
 /// Full カタログ (draft-ietf-moq-msf-01 §5.1 (Root Catalog Fields))
+///
+/// `removed_tracks` は delta update の検証のための内部状態であり、JSON には含まれない。
+/// ただし `PartialEq` / `Debug` には含まれるため、JSON が同一でも削除履歴が異なれば
+/// 等価にはならず、`Debug` には削除済みトラックも現れる。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsfCatalog {
     /// MSF バージョン (draft-ietf-moq-msf-01 §5.1.1 (MSF version))
@@ -1223,13 +1227,21 @@ pub struct MsfCatalog {
     pub publish_tracks: Vec<MsfTrack>,
     /// 初期化データ一覧 (draft-ietf-moq-msf-01 §5.1.7 (Initialization Data List))
     pub init_data_list: Vec<MsfInitData>,
+    /// 削除済みトラックの履歴 (キーは解決済みの (namespace, name))
+    ///
+    /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
+    /// defines a fixed set of Track attributes which MUST NOT be modified after being declared."
+    /// を delta update の適用時に検査するための内部状態である。JSON には出力せず、
+    /// デコード直後は空になる。同じ (namespace, name) が再追加されても削除前の属性を
+    /// 保持し続ける (削除しても消えないため、remove した tuple の数だけ単調増加する)。
+    pub removed_tracks: hashbrown::HashMap<(Option<String>, String), MsfTrack>,
 }
 
 impl MsfCatalog {
     /// 空のカタログを作成する
     ///
     /// version は対応バージョン ([`MSF_VERSION`]) とし、tracks / publishTracks /
-    /// initDataList は空とする。
+    /// initDataList / removedTracks は空とする。
     pub fn new() -> Self {
         Self {
             version: MSF_VERSION.to_string(),
@@ -1238,6 +1250,7 @@ impl MsfCatalog {
             tracks: Vec::new(),
             publish_tracks: Vec::new(),
             init_data_list: Vec::new(),
+            removed_tracks: hashbrown::HashMap::new(),
         }
     }
 }
@@ -1305,6 +1318,10 @@ impl MsfCatalog {
     ///   (§5.2.8 (Target latency) / §5.2.9 (Buffers)) に違反する: `InvalidCatalog`
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.13 (Initialization reference))
+    /// - 削除済みの同じ (namespace, name) を再追加し、属性が変わる: `InvalidCatalog`
+    ///   (§5.3 (Delta updates) の属性不変)
+    /// - 削除済みの同じ (namespace, name) を `isLive=false` から `true` で再追加する: `InvalidCatalog`
+    ///   (§5.2.7 (Is Live))
     ///
     /// 失敗時はカタログを変更しない。操作は複製に対して配列順に適用し、全操作と
     /// 適用後検証が成功したときだけ `self` を差し替える (copy-on-write)。
@@ -1348,10 +1365,9 @@ impl MsfCatalog {
                     let mut batch_keys: Vec<(Option<String>, String)> =
                         Vec::with_capacity(tracks.len());
                     for track in tracks {
-                        let ns = track.namespace.as_deref().or(catalog_namespace);
-                        let key = (ns.map(str::to_string), track.name.clone());
+                        let key = Self::track_key(track, catalog_namespace);
                         if self
-                            .find_track_index(ns, &track.name, catalog_namespace)
+                            .find_track_index(key.0.as_deref(), &track.name, catalog_namespace)
                             .is_some()
                             || batch_keys.contains(&key)
                         {
@@ -1362,7 +1378,11 @@ impl MsfCatalog {
                         }
                         batch_keys.push(key);
                     }
-                    // 3) 全件を投入順に追加する
+                    // 3) 削除済みの同じ (namespace, name) があれば属性変更と isLive の逆行を検査する
+                    for track in tracks {
+                        self.validate_readded_track(track, catalog_namespace, ReaddOperation::Add)?;
+                    }
+                    // 4) 全件を投入順に追加する
                     for track in tracks {
                         self.tracks.push(track.clone());
                     }
@@ -1378,7 +1398,16 @@ impl MsfCatalog {
                                     r.name
                                 ))
                             })?;
-                        self.tracks.remove(idx);
+                        let removed = self.tracks.remove(idx);
+                        // draft-ietf-moq-msf-01 §5.3 (Delta updates): 削除した Track の属性を
+                        // 履歴として残し、同じ (namespace, name) の再追加で属性変更と
+                        // isLive の逆行を検出できるようにする。`or_insert` により、同じ
+                        // tuple が既に履歴にある場合は最初に削除されたときの属性を保持し続ける
+                        // (§5.3 が求める「宣言時の属性」を保持する側に倒す。apply_delta 経由で
+                        // 再追加される限り直近の削除で上書きしても検証結果は変わらないが、
+                        // 履歴の値は公開フィールドとして観測できるため差が生じる)。
+                        let key = Self::track_key(&removed, catalog_namespace);
+                        self.removed_tracks.entry(key).or_insert(removed);
                     }
                 }
                 MsfDeltaOperation::Clone { tracks } => {
@@ -1412,6 +1441,11 @@ impl MsfCatalog {
                                 new_track.name
                             )));
                         }
+                        self.validate_readded_track(
+                            &new_track,
+                            catalog_namespace,
+                            ReaddOperation::Clone,
+                        )?;
                         self.tracks.push(new_track);
                     }
                 }
@@ -1422,6 +1456,59 @@ impl MsfCatalog {
             self.generated_at = Some(generated_at);
         }
         self.validate_after_delta(catalog_namespace)
+    }
+
+    /// トラックの (解決済み namespace, name) キーを作る
+    ///
+    /// namespace 省略時はカタログの namespace を継承したものとして解決する
+    /// (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+    fn track_key(track: &MsfTrack, catalog_namespace: Option<&str>) -> (Option<String>, String) {
+        (
+            track
+                .namespace
+                .as_deref()
+                .or(catalog_namespace)
+                .map(str::to_string),
+            track.name.clone(),
+        )
+    }
+
+    /// 削除済みの同じ (namespace, name) に再追加されるトラックを検証する
+    ///
+    /// draft-ietf-moq-msf-01 §5.3 (Delta updates): "The tuple of Track Namespace and Track Name
+    /// defines a fixed set of Track attributes which MUST NOT be modified after being declared.
+    /// To modify any attribute, a new track with a different Namespace|Name tuple is created by
+    /// Adding or Cloning and then the old track is removed."
+    ///
+    /// §5.2.7 (Is Live): "A True value MUST never follow a False value." は独立した MUST のため、
+    /// 属性差分より先に検査して専用の文言で返す。
+    fn validate_readded_track(
+        &self,
+        track: &MsfTrack,
+        catalog_namespace: Option<&str>,
+        operation: ReaddOperation,
+    ) -> Result<(), MessageError> {
+        let key = Self::track_key(track, catalog_namespace);
+        let Some(previous) = self.removed_tracks.get(&key) else {
+            return Ok(());
+        };
+        if !previous.is_live && track.is_live {
+            return Err(MessageError::InvalidCatalog(format!(
+                "delta {}: track '{}' isLive MUST NOT change from false to true \
+                 (draft-ietf-moq-msf-01 §5.2.7)",
+                operation.as_str(),
+                track.name
+            )));
+        }
+        if comparable_attributes(previous) != comparable_attributes(track) {
+            return Err(MessageError::InvalidCatalog(format!(
+                "delta {}: track '{}' attributes MUST NOT be modified after being \
+                 declared (draft-ietf-moq-msf-01 §5.3)",
+                operation.as_str(),
+                track.name
+            )));
+        }
+        Ok(())
     }
 
     /// namespace / name が一致するトラックの index を返す
@@ -1465,6 +1552,54 @@ impl MsfCatalog {
         validate_group_buffers(&self.tracks, "renderGroup", |t| t.render_group)?;
         validate_group_buffers(&self.tracks, "altGroup", |t| t.alt_group)?;
         Ok(())
+    }
+}
+
+/// 属性比較用に正規化した Track を返す
+///
+/// 履歴のキー (解決済み namespace, name) で同一性を確認したトラック同士を比較するが、
+/// 元の表現は一致するとは限らないため次を比較対象外にする。
+///
+/// - `name` / `namespace`: キーで同一性を確認済み。namespace は省略形と明示形で
+///   生の表現が異なる (どちらも同じ tuple を指す)
+/// - `parent_name`: clone 以外では §5.2.33 (Parent name) により出現せず、clone の解決後
+///   (`MsfCloneTrack::into_track`) は常に `None` になる
+///
+/// `isLive=false` のときの `target_latency` / `buffers` は draft-ietf-moq-msf-01
+/// §5.2.8 (Target latency) / §5.2.9 (Buffers) により無視されるため `None` とみなす。
+/// Add 経路は手組みの `MsfTrack` を正規化せず追加するため、比較側で正規化しないと
+/// 結果が構築経路 (Add / Clone) に依存する。この正規化により、`isLive=false` の
+/// トラックは targetLatency / buffers の有無だけが異なる再追加も受理する (実効的な
+/// 属性が同じなら受理するという本検査の範囲。`isLive=false` のときの targetLatency /
+/// buffers は値の変更も検出しない)。
+fn comparable_attributes(track: &MsfTrack) -> MsfTrack {
+    let mut normalized = track.clone();
+    normalized.name.clear();
+    normalized.namespace = None;
+    normalized.parent_name = None;
+    if !normalized.is_live {
+        normalized.target_latency = None;
+        normalized.buffers = None;
+    }
+    normalized
+}
+
+/// 削除済みトラックの再追加を検査する操作 (エラー文言に使う)
+#[derive(Clone, Copy)]
+enum ReaddOperation {
+    /// delta update の add 操作
+    Add,
+    /// delta update の clone 操作
+    Clone,
+}
+
+impl ReaddOperation {
+    /// エラー文言に埋め込む操作名
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Clone => "clone",
+        }
     }
 }
 
@@ -2356,6 +2491,7 @@ fn decode_full_catalog(
         tracks,
         publish_tracks,
         init_data_list,
+        removed_tracks: hashbrown::HashMap::new(),
     })
 }
 

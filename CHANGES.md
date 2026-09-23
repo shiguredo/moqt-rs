@@ -36,6 +36,11 @@
 - [CHANGE] `DecodedFetchObject` に `properties_bytes` を追加し、`DecodedFetchObject` / `DecodedFetchEntry` から `Copy` を外す
   - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) と `Copy` の削除を伴う破壊的変更である
   - @voluntas
+- [CHANGE] `MsfCatalog` に `removed_tracks` を追加する
+  - draft-ietf-moq-msf-01 §5.3 (Delta updates) の属性不変を delta update の適用時に検査するための内部状態 (削除済みトラックの履歴) であり、JSON には出力しない
+  - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) を伴う破壊的変更である
+  - `PartialEq` / `Debug` は削除履歴も対象になる。JSON が同一でも削除履歴が異なれば不一致になり、`Debug` には削除済みトラックも現れる
+  - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
 - [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する
@@ -266,6 +271,13 @@
   - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が `Result` を返し、書式違反 (`KeyValueFormattingError`) と切り詰めなどの decode 失敗 (`UnexpectedEof` / `ProtocolViolation`) を区別する。後者は PROTOCOL_VIOLATION (0x3) として扱う
   - stream task は検出時に main ループへ終了コードと理由を渡して処理を止め、close は I/O 層である main ループが行う (stream task から直接閉じると `Session closed: ...` のログが accept 分岐との競合で落ちるため)
   - 対象は配送する Object の Properties であり、配送しない Object (`FilteredOut` / `Discarded`)・payload を持たない Object・datagram・カタログは Properties を解釈しないため対象外である
+  - @voluntas
+
+- [FIX] MSF の delta update で同一 Track の属性変更と isLive の逆行を拒否する
+  - draft-ietf-moq-msf-01 §5.3 (Delta updates) は "The tuple of Track Namespace and Track Name defines a fixed set of Track attributes which MUST NOT be modified after being declared." と定めるが、remove → add / clone で同じ (namespace, name) を再追加すると属性を自由に変更できていた
+  - 削除した Track の属性を `MsfCatalog::removed_tracks` に保持し、再追加時に name / namespace / parentName を除く属性を比較して差分があれば `InvalidCatalog` を返す。`isLive=false` のとき `targetLatency` / `buffers` は無視されるため比較の両辺で正規化する
+  - draft-ietf-moq-msf-01 §5.2.7 (Is Live) の "A True value MUST never follow a False value." は属性差分より先に検査し、専用の文言 (isLive を含む) で返す
+  - 検出対象は属性変更と isLive の逆行に限る。同一属性での remove → add は引き続き受理し、`isLive=false` のときの targetLatency / buffers は実効的な属性ではないため、これらの有無だけが異なる再追加も受理する
   - @voluntas
 
 ### misc
