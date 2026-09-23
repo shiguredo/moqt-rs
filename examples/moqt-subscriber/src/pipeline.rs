@@ -10,11 +10,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
+use shiguredo_moqt::error::{
+    MessageError, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
+};
 use shiguredo_moqt::loc::{
     LocProperties, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_TIMESTAMP,
     PROP_VIDEO_CONFIG,
 };
-use shiguredo_moqt::session::types::TrackDataAcceptance;
+use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
 use shiguredo_moqt::{
     message::common::TrackNamespace, msf::MSF_CATALOG_TRACK_NAME, msf::MsfCatalog,
     msf::MsfCatalogDocument, msf::MsfTrack, session::types::DataStreamId,
@@ -94,11 +97,88 @@ fn stream_diag_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("MOQT_STREAM_DIAG").is_ok_and(|v| v == "1"))
 }
 
+/// 終了コード付きでセッションを閉じ、結果をログに残す
+///
+/// 失敗しても `?` では伝播させない (閉じた事実を `Session closed: {:#x} {}` の形式で
+/// 記録して終了する)。呼び出し側は「送信して閉じた」ことを `session_terminated` に反映する。
+async fn close_session(client: &mut MoqtClient, termination: SessionError) {
+    if let Err(e) = client.close(termination.code, termination.reason).await {
+        tracing::warn!("Failed to close session: {e}");
+    }
+    tracing::warn!(
+        "Session closed: {:#x} {}",
+        termination.code,
+        termination.reason,
+    );
+}
+
+/// 正常終了の後始末で STOP_SENDING を送るか
+///
+/// peer が subscription / session を終了させた場合 (購読は既に Terminated) と、
+/// 自側で終了コード付きに閉じた場合 (session が Closing / Closed で状態機械に拒否される)
+/// は送らない。
+fn should_stop_sending(peer_ended: bool, session_terminated: bool) -> bool {
+    !peer_ended && !session_terminated
+}
+
+/// 正常終了の後始末で GOAWAY と正常 close (`close(0, "")`) を送るか
+///
+/// 自側で終了コード付きに閉じた場合は送らない (閉じた session への送信は拒否され、
+/// 誤解を招く警告ログになる)。
+fn should_close_gracefully(session_terminated: bool) -> bool {
+    !session_terminated
+}
+
+/// decode 失敗をセッション終了コードへ写す
+///
+/// library の data plane が使う `session_error_from_data_message` と同じ写像である
+/// (`src/session/data.rs`)。
+///
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) が MUST を定める書式違反は
+/// KEY_VALUE_FORMATTING_ERROR (0x6)、それ以外の decode 失敗 (`UnexpectedEof` /
+/// `ProtocolViolation` など) は PROTOCOL_VIOLATION (0x3) で閉じる
+/// (コードは §12.2 (Session Termination Codes))。
+fn session_error_code(error: &MessageError) -> u64 {
+    match error {
+        MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
+        _ => SESSION_PROTOCOL_VIOLATION,
+    }
+}
+
+/// LOC Properties の decode 失敗を main ループへ伝え、セッション終了を依頼する
+///
+/// 呼び出し側はこの後その stream の処理を打ち切る。transport close を送出できるのは
+/// `MoqtClient` を所有する main ループだけであり (`DataPlaneHandle` は `Session` しか
+/// 共有していない)、stream task から直接 `Session::close` を呼ぶと main ループが
+/// `SessionEvent::CloseSession` を観測できないまま accept 分岐が接続クローズを拾い、
+/// `Session closed: ...` のログが落ちる。そのため終了コードと理由を渡し、close は
+/// I/O 層である main ループが行う。
+///
+/// `try_send` が失敗するのは、別の終了依頼が既に積まれている (容量 1 のため理由を問わず
+/// 2 件目は入らない) か、main ループが受信ループを終えて受信側を drop した場合である。
+/// 複数の stream が同時に失敗した場合は最初の 1 件のコードで閉じる。受信ループの終了後は
+/// join の前に 1 件だけ回収し、それ以降に届いた依頼は破棄される。
+fn request_session_termination(
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    error: &MessageError,
+) {
+    let code = session_error_code(error);
+    let reason = error.reason();
+    if termination_tx
+        .try_send(SessionError::new(code, reason))
+        .is_err()
+    {
+        tracing::debug!("Session termination is already requested or the main loop has stopped");
+        return;
+    }
+    tracing::warn!("Closing session on LOC property error: {code:#x} {reason}");
+}
+
 /// 受け入れた data stream の処理タスクを起動する。
 ///
 /// `permit` はこの stream の処理枠である。タスクの終了時に手放すので、
 /// 処理中は同時実行数が `MAX_CONCURRENT_STREAMS` を超えない。
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn spawn_stream_task(
     join_set: &mut tokio::task::JoinSet<()>,
     task_monitor: &tokio_metrics::TaskMonitor,
@@ -115,6 +195,7 @@ fn spawn_stream_task(
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) {
     let track_map = track_map.clone();
     let data_plane = data_plane.clone();
@@ -125,6 +206,7 @@ fn spawn_stream_task(
     let backlog = std::sync::Arc::clone(display_backlog);
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
+    let termination_tx = termination_tx.clone();
     join_set.spawn(task_monitor.clone().instrument(async move {
         handle_incoming_stream(
             stream,
@@ -139,6 +221,7 @@ fn spawn_stream_task(
             backlog,
             audio_decoder.as_ref(),
             &audio_config_handled,
+            &termination_tx,
         )
         .await;
         // stream の処理が終わるまで枠を保持する
@@ -434,9 +517,17 @@ pub async fn run(
     // 枠待ちの stream。accept 済みだがまだ処理を開始していない
     let mut pending_streams: std::collections::VecDeque<transport::RecvStream> =
         std::collections::VecDeque::new();
+    // stream task からのセッション終了依頼。close は I/O 層である main ループが行う。
+    // 送信側の原本を main ループが保持するため、受信ループが動いている間このチャネルは
+    // 閉じない (`select!` の受信分岐は `Some` のみを受ける)。
+    let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
     // peer が subscription / session を終了させて受信ループを抜けたか。
     // この場合の subscription は Terminated であり、STOP_SENDING は不要である
     let mut peer_ended = false;
+    // 自側の判断 (LOC の書式違反など) でセッションを閉じて受信ループを抜けたか。
+    // 閉じた session への GOAWAY / 正常 close は状態機械に拒否され、誤解を招く
+    // 警告ログになるため送らない
+    let mut session_terminated = false;
 
     'main: loop {
         // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ
@@ -464,6 +555,7 @@ pub async fn run(
                 &display_backlog,
                 audio_decoder.as_ref(),
                 &audio_config_handled,
+                &termination_tx,
             );
         }
 
@@ -489,6 +581,9 @@ pub async fn run(
                 pending_streams.push_back(stream);
             }
             notable = client.next_event() => {
+                // transport 自体のエラーは `?` で `run` を終える。接続が死んでいるため
+                // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
+                // (既知の限界)。
                 match notable? {
                     Some(ClientEvent::Session(SessionEvent::GoawayReceived { timeout, .. })) => {
                         tracing::info!("Received GOAWAY (timeout={timeout})");
@@ -544,6 +639,12 @@ pub async fn run(
                     _ => {}
                 }
             }
+            Some(termination) = termination_rx.recv() => {
+                // 自側から終了コード付きで閉じる
+                close_session(&mut client, termination).await;
+                session_terminated = true;
+                break 'main;
+            }
             _ = tick_interval.tick() => {
                 let now_ms = Instant::now().duration_since(start).as_millis() as u64;
                 client.tick(now_ms);
@@ -569,6 +670,14 @@ pub async fn run(
         }
     }
 
+    // select! で別の終了要因 (accept の終了 / GOAWAY / PUBLISH_DONE / peer の close /
+    // shutdown など) が先に成立していても、既に届いている終了依頼があればそのコードで閉じる
+    // (draft-ietf-moq-transport-21 §8.3 の MUST を終了コード 0x0 で上書きしない)。
+    if !session_terminated && let Ok(termination) = termination_rx.try_recv() {
+        close_session(&mut client, termination).await;
+        session_terminated = true;
+    }
+
     while let Some(result) = join_set.join_next().await {
         if let Err(e) = result {
             tracing::warn!("Stream task panicked: {e}");
@@ -577,7 +686,7 @@ pub async fn run(
 
     // peer が subscription を終了させた場合は送信先の購読が既に Terminated であり、
     // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-21 §6.4.2.3)
-    if !peer_ended {
+    if should_stop_sending(peer_ended, session_terminated) {
         if let Some(rid) = video_request_id
             && let Err(e) = client.stop_sending(rid).await
         {
@@ -590,12 +699,15 @@ pub async fn run(
         }
     }
 
-    if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
-        tracing::warn!("Failed to send GOAWAY: {e}");
-    }
+    // 自側で終了コード付きに閉じた場合は、閉じた session へ GOAWAY / 正常 close を送らない
+    if should_close_gracefully(session_terminated) {
+        if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
+            tracing::warn!("Failed to send GOAWAY: {e}");
+        }
 
-    if let Err(e) = client.close(0, "").await {
-        tracing::warn!("Failed to close session gracefully: {e}");
+        if let Err(e) = client.close(0, "").await {
+            tracing::warn!("Failed to close session gracefully: {e}");
+        }
     }
 
     tracing::info!("Pipeline stopped: {total_streams} streams received");
@@ -838,6 +950,7 @@ async fn handle_incoming_stream(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) {
     let started = Instant::now();
     let raw_stream_id = stream.stream_id();
@@ -857,6 +970,7 @@ async fn handle_incoming_stream(
         display_backlog,
         audio_decoder,
         audio_config_handled,
+        termination_tx,
     )
     .await;
     // 診断時は stream ごとの滞在時間を残す。枠を長時間占有する stream を特定する
@@ -872,7 +986,7 @@ async fn handle_incoming_stream(
 ///
 /// 早期 return が多いため、呼び出し側で入口と出口を 1 か所にまとめて記録できる
 /// ように本体を分けている。
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn handle_stream_body(
     stream: &mut transport::RecvStream,
     data_plane: DataPlaneHandle,
@@ -886,6 +1000,7 @@ async fn handle_stream_body(
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) {
     let stream_id = DataStreamId(stream.stream_id());
     let mut buf = Vec::new();
@@ -943,6 +1058,7 @@ async fn handle_stream_body(
                     display_backlog: &display_backlog,
                 },
                 stream_num,
+                termination_tx,
             )
             .await;
         }
@@ -1065,6 +1181,7 @@ async fn handle_stream_body(
                             frame_tx,
                             display_backlog: &display_backlog,
                         },
+                        termination_tx,
                     )
                     .await;
                     tracing::debug!(
@@ -1115,6 +1232,7 @@ async fn handle_stream_body(
                         is_opus_codec,
                         sample_rate,
                         channels,
+                        termination_tx,
                     )
                     .await;
                     if handled {
@@ -1137,6 +1255,7 @@ async fn handle_stream_body(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn handle_fetch_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
@@ -1145,6 +1264,7 @@ async fn handle_fetch_stream(
     video_decoder: &mut decoder::VideoDecoder,
     sink: &FrameSink<'_>,
     stream_num: u64,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) {
     let mut decoder = FetchStreamDecoder::new();
     decoder.push(buf);
@@ -1248,7 +1368,13 @@ async fn handle_fetch_stream(
             // (draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
             // MOQT の Object Properties に載せると規定する)。H.264/H.265 はこの
             // AVCDecoderConfigurationRecord が無いと parameter set を適用できない。
-            let video_config = extract_video_config(obj.properties_bytes.as_deref());
+            let video_config = match extract_video_config(obj.properties_bytes.as_deref()) {
+                Ok(config) => config,
+                Err(e) => {
+                    request_session_termination(termination_tx, &e);
+                    return;
+                }
+            };
             frames += tokio::task::block_in_place(|| {
                 decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
             });
@@ -1263,6 +1389,7 @@ async fn decode_video_stream(
     sg_decoder: &mut SubgroupStreamDecoder,
     video_decoder: &mut decoder::VideoDecoder,
     sink: &FrameSink<'_>,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) -> u64 {
     let mut frames: u64 = 0;
     loop {
@@ -1321,10 +1448,19 @@ async fn decode_video_stream(
                 }
             }
         };
+        // 配送しない Object (`FilteredOut` / `Discarded`) は Properties を解釈しない。
+        // 書式違反の検出は配送する Object に限る (フィルタ済みの Object まで
+        // セッションを閉じる理由にするのは本 example の用途に対して過剰なため)。
         if !deliver {
             continue;
         }
-        let video_config = extract_video_config(obj.properties_bytes.as_deref());
+        let video_config = match extract_video_config(obj.properties_bytes.as_deref()) {
+            Ok(config) => config,
+            Err(e) => {
+                request_session_termination(termination_tx, &e);
+                return frames;
+            }
+        };
         frames += tokio::task::block_in_place(|| {
             decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
         });
@@ -1355,28 +1491,46 @@ fn decode_and_send(
     frames
 }
 
+/// LOC Properties の抽出結果
+///
+/// example の `Result` は `crate::error::Result` (エラー型固定) であるため、
+/// 抽出関数は `MessageError` を返す `std::result::Result` を使う。
+type ExtractResult<T> = std::result::Result<T, MessageError>;
+
 /// object の properties バイト列から PROP_VIDEO_CONFIG を取り出す
-fn extract_video_config(properties_bytes: Option<&[u8]>) -> Option<Vec<u8>> {
-    let bytes = properties_bytes?;
-    let (props, _) = LocProperties::decode(bytes).ok()?;
+///
+/// `Ok(None)` は「Properties が無い、または PROP_VIDEO_CONFIG を持たない」を意味する。
+/// `LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) の MUST に従って
+/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+fn extract_video_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
+    let Some(bytes) = properties_bytes else {
+        return Ok(None);
+    };
+    let (props, _) = LocProperties::decode(bytes)?;
     for p in props.iter() {
         if p.prop_id == PROP_VIDEO_CONFIG
             && let LocPropertyValue::Bytes(ref b) = p.value
         {
-            return Some(b.clone());
+            return Ok(Some(b.clone()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// object の properties バイト列から PROP_TIMESTAMP / PROP_TIMESCALE を取り出す
-fn extract_timestamp_timescale(properties_bytes: Option<&[u8]>) -> (Option<u64>, Option<u64>) {
+///
+/// `Ok((None, None))` は「Properties が無い、または Timestamp / Timescale を持たない」を
+/// 意味する。`LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) の MUST に従って
+/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+fn extract_timestamp_timescale(
+    properties_bytes: Option<&[u8]>,
+) -> ExtractResult<(Option<u64>, Option<u64>)> {
     let Some(bytes) = properties_bytes else {
-        return (None, None);
+        return Ok((None, None));
     };
-    let Ok((props, _)) = LocProperties::decode(bytes) else {
-        return (None, None);
-    };
+    let (props, _) = LocProperties::decode(bytes)?;
     let mut ts = None;
     let mut tscale = None;
     for p in props.iter() {
@@ -1394,7 +1548,7 @@ fn extract_timestamp_timescale(properties_bytes: Option<&[u8]>) -> (Option<u64>,
             _ => {}
         }
     }
-    (ts, tscale)
+    Ok((ts, tscale))
 }
 
 /// LOC の Timestamp と Timescale から音声 PTS (マイクロ秒) を計算する
@@ -1446,21 +1600,23 @@ fn parse_opus_head(bytes: &[u8]) -> Option<ParsedOpusHead> {
 
 /// object の properties バイト列から PROP_AUDIO_CONFIG のバイト列を取り出す
 ///
-/// LocProperties のデコード失敗は `None` を返し、検証は静かにスキップされる
-/// (不正 properties は `extract_timestamp_timescale` と同じ扱い)。
-fn extract_audio_config(properties_bytes: Option<&[u8]>) -> Option<Vec<u8>> {
-    let bytes = properties_bytes?;
-    let Ok((props, _)) = LocProperties::decode(bytes) else {
-        return None;
+/// `Ok(None)` は「Properties が無い、または PROP_AUDIO_CONFIG を持たない」を意味する。
+/// `LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
+/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) の MUST に従って
+/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+fn extract_audio_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
+    let Some(bytes) = properties_bytes else {
+        return Ok(None);
     };
+    let (props, _) = LocProperties::decode(bytes)?;
     for p in props.iter() {
         if p.prop_id == PROP_AUDIO_CONFIG
             && let LocPropertyValue::Bytes(b) = &p.value
         {
-            return Some(b.clone());
+            return Ok(Some(b.clone()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// OpusHead と catalog の整合を検証し、不一致の警告メッセージを返す (デコードは停止しない)
@@ -1519,6 +1675,7 @@ async fn decode_audio_stream(
     is_opus_codec: bool,
     catalog_sample_rate: u32,
     catalog_channels: u8,
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) -> u64 {
     let mut chunks: u64 = 0;
     loop {
@@ -1580,14 +1737,23 @@ async fn decode_audio_stream(
                 }
             }
         };
+        // 配送しない Object (`FilteredOut` / `Discarded`) と payload を持たない Object は
+        // Properties を解釈しないため、書式違反の検出対象外である (映像経路と同じ)。
         if !deliver {
             continue;
         }
+        // 書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出するため、
+        // ここでは常に抽出する (検証は下の `!*audio_config_handled` で 1 回に絞る)
+        let audio_config = match extract_audio_config(obj.properties_bytes.as_deref()) {
+            Ok(config) => config,
+            Err(e) => {
+                request_session_termination(termination_tx, &e);
+                return chunks;
+            }
+        };
         // Audio Config (OpusHead) を含むオブジェクトを受信した最初の 1 回のみ検証する
         // (途中参加で OpusHead を受信しない場合はスキップされる)
-        if !*audio_config_handled
-            && let Some(config_bytes) = extract_audio_config(obj.properties_bytes.as_deref())
-        {
+        if !*audio_config_handled && let Some(config_bytes) = audio_config {
             *audio_config_handled = true;
             if is_opus_codec {
                 match parse_opus_head(&config_bytes) {
@@ -1610,7 +1776,14 @@ async fn decode_audio_stream(
                 tracing::debug!("Audio Config received but codec is not opus; skipped validation");
             }
         }
-        let (timestamp, timescale) = extract_timestamp_timescale(obj.properties_bytes.as_deref());
+        let (timestamp, timescale) =
+            match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
+                Ok(ts) => ts,
+                Err(e) => {
+                    request_session_termination(termination_tx, &e);
+                    return chunks;
+                }
+            };
         let decoded = tokio::task::block_in_place(|| opus_decoder.decode(&payload));
         let pcm = match decoded {
             Ok(p) => p,
@@ -1810,38 +1983,40 @@ mod tests {
             value: LocPropertyValue::Bytes(head.clone()),
         });
         let encoded = props.encode().expect("encode に成功すること");
-        let extracted = extract_audio_config(Some(&encoded));
         assert_eq!(
-            extracted,
-            Some(head),
+            extract_audio_config(Some(&encoded)),
+            Ok(Some(head)),
             "Audio Config のバイト列が取り出せること"
         );
     }
 
-    /// PROP_AUDIO_CONFIG の抽出: 無ければ None
+    /// PROP_AUDIO_CONFIG の抽出: 無ければ Ok(None)
     #[test]
     fn extract_audio_config_returns_none_when_absent() {
         let props = LocProperties::new();
         let encoded = props.encode().expect("encode に成功すること");
         assert_eq!(
             extract_audio_config(Some(&encoded)),
-            None,
-            "Audio Config が無ければ None であること"
+            Ok(None),
+            "Audio Config が無ければ Ok(None) であること"
         );
         assert_eq!(
             extract_audio_config(None),
-            None,
-            "properties 自体が無ければ None であること"
+            Ok(None),
+            "properties 自体が無ければ Ok(None) であること"
         );
     }
 
-    /// PROP_AUDIO_CONFIG の抽出: 壊れた properties は None (検証はスキップされる)
+    /// PROP_AUDIO_CONFIG の抽出: 切り詰められた properties は UnexpectedEof
+    ///
+    /// `[0xFF, 0xFF, 0xFF]` は 8 バイト形 varint の途中終端であり、プロパティ無しの
+    /// `Ok(None)` とは区別される (呼び出し側はセッションを閉じる)。
     #[test]
-    fn extract_audio_config_returns_none_on_bad_properties() {
+    fn extract_audio_config_reports_eof_on_truncated_properties() {
         assert_eq!(
             extract_audio_config(Some(&[0xFF, 0xFF, 0xFF])),
-            None,
-            "壊れた properties は None であること"
+            Err(MessageError::UnexpectedEof),
+            "切り詰められた properties は UnexpectedEof であること"
         );
     }
 
@@ -1864,12 +2039,52 @@ mod tests {
             .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(
             extract_video_config(Some(&bytes)),
-            Some(vec![0x01, 0x64, 0x00, 0x1F]),
+            Ok(Some(vec![0x01, 0x64, 0x00, 0x1F])),
             "PROP_VIDEO_CONFIG のバイト列を取り出せること"
         );
     }
 
-    /// PROP_VIDEO_CONFIG の抽出: 他の Bytes プロパティしか無ければ None
+    /// LOC の書式違反 (Video Frame Marking の宣言長 5) は KeyValueFormattingError
+    ///
+    /// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は、理解している型の
+    /// Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) で
+    /// セッションを閉じる MUST を定める。Video Frame Marking の Length は 1-4 バイト
+    /// (draft-ietf-moq-loc-04 §2.3.2.2 (Video Frame Marking)) である。
+    /// 書式違反をプロパティ無しに潰さないことを固定する。
+    #[test]
+    fn extract_video_config_reports_key_value_formatting_error() {
+        // LocProperties::encode は違反値を拒否するため、生バイト列を組み立てる
+        // (Properties Length = 7 = delta 1 バイト + Length 1 バイト + 値 5 バイト)
+        let mut bytes = vec![0x07, 0x09, 0x05];
+        bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let err = extract_video_config(Some(&bytes)).expect_err("書式違反はエラーになること");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Video Frame Marking の宣言長違反は KeyValueFormattingError であること: {err:?}"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: Properties 自体が無ければ Ok(None)
+    #[test]
+    fn extract_video_config_returns_none_when_absent() {
+        assert_eq!(
+            extract_video_config(None),
+            Ok(None),
+            "properties 自体が無ければ Ok(None) であること"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: 切り詰められた properties は UnexpectedEof
+    #[test]
+    fn extract_video_config_reports_eof_on_truncated_properties() {
+        assert_eq!(
+            extract_video_config(Some(&[0xFF, 0xFF, 0xFF])),
+            Err(MessageError::UnexpectedEof),
+            "切り詰められた properties は UnexpectedEof であること"
+        );
+    }
+
+    /// PROP_VIDEO_CONFIG の抽出: 他の Bytes プロパティしか無ければ Ok(None)
     ///
     /// PROP_AUDIO_CONFIG も奇数 ID の Bytes 値であるため、prop_id を見ずに値型だけで
     /// 判定する実装でも取り出せてしまう。prop_id の判定が効いていることを固定する。
@@ -1887,12 +2102,12 @@ mod tests {
             .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(
             extract_video_config(Some(&bytes)),
-            None,
-            "PROP_AUDIO_CONFIG しか無ければ None であること"
+            Ok(None),
+            "PROP_AUDIO_CONFIG しか無ければ Ok(None) であること"
         );
     }
 
-    /// PROP_VIDEO_CONFIG の抽出: 持たない場合・壊れている場合は None
+    /// PROP_VIDEO_CONFIG の抽出: 持たない場合は Ok(None)
     #[test]
     fn extract_video_config_returns_none_without_config() {
         use shiguredo_moqt::loc::LocProperty;
@@ -1907,18 +2122,151 @@ mod tests {
             .expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(
             extract_video_config(Some(&bytes)),
-            None,
-            "VIDEO_CONFIG を持たない Properties は None であること"
+            Ok(None),
+            "VIDEO_CONFIG を持たない Properties は Ok(None) であること"
+        );
+    }
+
+    /// LOC の書式違反 (Audio Level 256) は KeyValueFormattingError
+    ///
+    /// Audio Level は 8 bit 範囲 (draft-ietf-moq-loc-04 §2.3.3.2 (Audio Level)) のため、256 は
+    /// §8.3 (Key-Value-Pair Structure) の書式違反になる。Audio Config / Timestamp /
+    /// Timescale の抽出も同じ扱いであることを固定する。
+    #[test]
+    fn extract_audio_fields_report_key_value_formatting_error() {
+        // Properties Length = 3 / delta=0x0C (Audio Level) / vi64 の 256 (2 バイト形)
+        let mut bytes = vec![0x03, 0x0C];
+        shiguredo_moqt::varint::encode(256, &mut bytes);
+        assert_eq!(
+            usize::from(bytes[0]),
+            bytes.len() - 1,
+            "宣言した Properties Length と実データ長が一致すること"
+        );
+        let err = extract_audio_config(Some(&bytes)).expect_err("書式違反はエラーになること");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Audio Level の値域違反は KeyValueFormattingError であること: {err:?}"
+        );
+        let err =
+            extract_timestamp_timescale(Some(&bytes)).expect_err("書式違反はエラーになること");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Timestamp / Timescale の抽出でも同じエラーになること: {err:?}"
+        );
+    }
+
+    /// Timestamp / Timescale の抽出: 無ければ Ok((None, None))
+    #[test]
+    fn extract_timestamp_timescale_returns_none_when_absent() {
+        let props = LocProperties::new();
+        let encoded = props.encode().expect("encode に成功すること");
+        assert_eq!(
+            extract_timestamp_timescale(Some(&encoded)),
+            Ok((None, None)),
+            "Timestamp / Timescale が無ければ Ok((None, None)) であること"
         );
         assert_eq!(
-            extract_video_config(None),
-            None,
-            "Properties が無い場合は None であること"
+            extract_timestamp_timescale(None),
+            Ok((None, None)),
+            "properties 自体が無ければ Ok((None, None)) であること"
+        );
+    }
+
+    /// 終了要因ごとに後始末の送信有無が決まること
+    #[test]
+    fn cleanup_decisions_follow_termination_cause() {
+        // 通常終了 (peer も自側も終了していない) は STOP_SENDING と GOAWAY / 正常 close を送る
+        assert!(
+            should_stop_sending(false, false),
+            "通常終了では STOP_SENDING を送ること"
+        );
+        assert!(
+            should_close_gracefully(false),
+            "通常終了では GOAWAY と正常 close を送ること"
+        );
+
+        // peer が終了させた場合は STOP_SENDING だけを送らない
+        assert!(
+            !should_stop_sending(true, false),
+            "peer が終了させた場合は STOP_SENDING を送らないこと"
+        );
+        assert!(
+            should_close_gracefully(false),
+            "peer が終了させた場合も GOAWAY と正常 close は送ること"
+        );
+
+        // 自側で終了コード付きに閉じた場合はどちらも送らない
+        assert!(
+            !should_stop_sending(false, true),
+            "自側で閉じた場合は STOP_SENDING を送らないこと"
+        );
+        assert!(
+            !should_close_gracefully(true),
+            "自側で閉じた場合は GOAWAY と正常 close を送らないこと"
+        );
+
+        // 回収経路では peer の終了と自側の終了が同時に立ち得る
+        assert!(
+            !should_stop_sending(true, true),
+            "両方が終了した場合は STOP_SENDING を送らないこと"
+        );
+        assert!(
+            !should_close_gracefully(true),
+            "両方が終了した場合は GOAWAY と正常 close を送らないこと"
+        );
+    }
+
+    /// LOC の decode 失敗がセッション終了コードへ写ること
+    ///
+    /// draft-ietf-moq-transport-21 §12.2 (Session Termination Codes) の
+    /// KEY_VALUE_FORMATTING_ERROR (0x6) と PROTOCOL_VIOLATION (0x3) を使い分ける。
+    #[test]
+    fn session_error_code_maps_decode_failures() {
+        assert_eq!(
+            session_error_code(&MessageError::KeyValueFormattingError(
+                "test formatting error"
+            )),
+            SESSION_KEY_VALUE_FORMATTING_ERROR,
+            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
         );
         assert_eq!(
-            extract_video_config(Some(&[0xFF, 0xFF, 0xFF])),
-            None,
-            "壊れた properties は None であること"
+            session_error_code(&MessageError::ProtocolViolation("test violation")),
+            SESSION_PROTOCOL_VIOLATION,
+            "プロトコル違反は PROTOCOL_VIOLATION (0x3) であること"
+        );
+        // メッセージを持たない失敗も PROTOCOL_VIOLATION として扱う
+        assert_eq!(
+            session_error_code(&MessageError::UnexpectedEof),
+            SESSION_PROTOCOL_VIOLATION,
+            "切り詰めは PROTOCOL_VIOLATION (0x3) であること"
+        );
+    }
+
+    /// 検出した書式違反が main ループへ終了依頼として届くこと
+    ///
+    /// stream task は `request_session_termination` で終了コードと理由を送り、
+    /// main ループが `MoqtClient::close` を呼ぶ。ここでは送信までを固定する
+    /// (close の実行は transport を必要とするため実機確認で扱う)。
+    #[tokio::test]
+    async fn request_session_termination_sends_error_and_keeps_first_request() {
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
+
+        // 書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) として送られる
+        let error = MessageError::KeyValueFormattingError("LOC property value is out of range");
+        request_session_termination(&termination_tx, &error);
+
+        // 容量 1 のため、依頼が積まれている間の 2 件目は届かない (panic もしない)
+        request_session_termination(&termination_tx, &MessageError::UnexpectedEof);
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), termination_rx.recv())
+                .await
+                .expect("終了依頼が送られること"),
+            Some(SessionError::new(
+                SESSION_KEY_VALUE_FORMATTING_ERROR,
+                "LOC property value is out of range",
+            )),
+            "先に積まれた書式違反の依頼が届き、後続の依頼で置き換わらないこと"
         );
     }
 

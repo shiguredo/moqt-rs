@@ -261,9 +261,21 @@
   - Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が 0 のときは `None`、1 のときは wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる
   - moqt-subscriber の `handle_fetch_stream` が FETCH 経路でも LOC の Video Config を `decode_and_send` に渡す
   - @voluntas
+- [FIX] moqt-subscriber が LOC の書式違反を検出したら KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じるようにする
+  - draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は、理解している型の Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じる MUST を定めるが、example が `LocProperties::decode` の失敗を「プロパティ無し」に潰していた
+  - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が `Result` を返し、書式違反 (`KeyValueFormattingError`) と切り詰めなどの decode 失敗 (`UnexpectedEof` / `ProtocolViolation`) を区別する。後者は PROTOCOL_VIOLATION (0x3) として扱う
+  - stream task は検出時に main ループへ終了コードと理由を渡して処理を止め、close は I/O 層である main ループが行う (stream task から直接閉じると `Session closed: ...` のログが accept 分岐との競合で落ちるため)
+  - 対象は配送する Object の Properties であり、配送しない Object (`FilteredOut` / `Discarded`)・payload を持たない Object・datagram・カタログは Properties を解釈しないため対象外である
+  - @voluntas
 
 ### misc
 
+- [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする
+  - `MoqtClient::close` は code 0 以外のとき `Session closed gracefully` ではなく `Session closed with code {code:#x} {reason}` を出す (エラー終了を正常終了と誤読しないため)
+  - @voluntas
+- [UPDATE] moqt-subscriber の LOC プロパティ抽出の単体テストを追加・更新する
+  - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が書式違反を `Err` として返し、プロパティ無し (`Ok(None)` / `Ok((None, None))`) と区別されることを固定する
+  - @voluntas
 - [UPDATE] FETCH 経路の Object Properties の復元を PBT とテストで検証する
   - `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため復元検証しない」という扱いを、`has_properties` と `properties_bytes` の組み合わせを網羅する往復検証に置き換える
   - `tests/test_stream/decoder.rs` に Properties あり / なし / 空 / 非最小形 varint / End of Range の 5 ケースを追加し、moqt-subscriber に Video Config 抽出の単体テストを追加する

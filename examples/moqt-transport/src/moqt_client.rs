@@ -1320,7 +1320,14 @@ impl MoqtClient {
             session.close(code, reason);
         }
         self.drain_events().await?;
-        tracing::info!("Session closed gracefully");
+        // コード 0 以外はエラー終了なので "gracefully" とは出さない。
+        // アプリ側が `Session closed: {:#x} {}` を警告として記録するため、
+        // ここでは通常終了と同じ info を出さず debug に留める
+        if code == 0 {
+            tracing::info!("Session closed gracefully");
+        } else {
+            tracing::debug!("Session close sent: {code:#x} {reason}");
+        }
         Ok(())
     }
 
