@@ -90,6 +90,34 @@ fn apply_delta_add_video_without_codec_rejected() {
     );
 }
 
+/// draft-ietf-moq-msf-01 §5.2.28 (Audio sample rate): codec から audio と判定したトラックは
+/// role が無くても samplerate が必須。add 経路でも encode 時まで待たず apply_delta 時点で
+/// 拒否する。
+#[test]
+fn apply_delta_add_codec_audio_without_samplerate_rejected() {
+    let mut catalog = MsfCatalog::new();
+    let mut track = loc_track("a", Some("ns"));
+    track.codec = Some("opus".to_string());
+    track.bitrate = Some(32_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![track],
+        }],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, None) else {
+        panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("samplerate") && reason.contains("codec 'opus'"),
+        "codec 由来の samplerate 要求を述べること: {reason}"
+    );
+    assert!(
+        catalog.tracks.is_empty(),
+        "拒否時はトラックが追加されないこと"
+    );
+}
+
 #[test]
 fn apply_delta_remove_deletes_track() {
     // draft-ietf-moq-msf-01 §5.1.6 (Delta update): remove は既存トラックを削除する
@@ -159,6 +187,39 @@ fn apply_delta_clone_inherits_and_overrides() {
     assert_eq!(cloned.bitrate, Some(2_000_000));
     // 解決済みトラックには parentName を残さない
     assert_eq!(cloned.parent_name, None);
+}
+
+/// clone が codec で audio と判定される属性を追加した場合も samplerate が必須
+///
+/// 親が codec を持たない raw data トラックでも、clone が codec を追加すれば §5.2.28 の
+/// MUST が解決後のトラックに適用される。
+#[test]
+fn apply_delta_clone_added_audio_codec_without_samplerate_rejected() {
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(loc_track("base", None));
+
+    let mut clone = MsfCloneTrack::new("a".to_string(), "base".to_string());
+    clone.codec = Some("opus".to_string());
+    clone.bitrate = Some(32_000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, Some("catalog-ns"))
+    else {
+        panic!("codec 由来の samplerate 欠如は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("samplerate") && reason.contains("codec 'opus'"),
+        "codec 由来の samplerate 要求を述べること: {reason}"
+    );
+    assert_eq!(
+        catalog.tracks.len(),
+        1,
+        "拒否時は clone されたトラックが追加されないこと"
+    );
 }
 
 #[test]
@@ -943,9 +1004,13 @@ fn remove_ref(name: &str, namespace: &str) -> MsfRemoveTrack {
 }
 
 /// 同一 (namespace, name) の属性変更を検出するための codec / width を持つトラック
+///
+/// codec `av01` は video と判定されるため、§5.2.22 (Maximum Bitrate) の MUST を満たす
+/// bitrate も持たせる。
 fn video_track(name: &str, namespace: &str) -> MsfTrack {
     let mut track = loc_track(name, Some(namespace));
     track.codec = Some("av01".to_string());
+    track.bitrate = Some(1_000_000);
     track.width = Some(1920);
     track.height = Some(1080);
     track
@@ -1210,6 +1275,8 @@ fn apply_delta_readd_attribute_change_with_inherited_namespace_rejected() {
     let mut catalog = MsfCatalog::new();
     let mut original = loc_track("v", None);
     original.codec = Some("av01".to_string());
+    // codec から video と判定されるため §5.2.22 (Maximum Bitrate) の bitrate も持たせる
+    original.bitrate = Some(1_000_000);
     catalog.tracks.push(original);
 
     // remove は namespace を明示し、add は省略する (どちらも継承した "cns" に解決される)。
@@ -1217,6 +1284,7 @@ fn apply_delta_readd_attribute_change_with_inherited_namespace_rejected() {
     // 見逃す。
     let mut changed = loc_track("v", None);
     changed.codec = Some("vp09".to_string());
+    changed.bitrate = Some(1_000_000);
     let delta = MsfDeltaUpdate {
         generated_at: None,
         operations: vec![
@@ -1246,6 +1314,8 @@ fn apply_delta_readd_with_explicit_namespace_matches_inherited() {
     let mut catalog = MsfCatalog::new();
     let mut original = loc_track("v", None);
     original.codec = Some("av01".to_string());
+    // codec から video と判定されるため §5.2.22 (Maximum Bitrate) の bitrate も持たせる
+    original.bitrate = Some(1_000_000);
     catalog.tracks.push(original);
 
     let mut changed = video_track("v", "cns");

@@ -299,8 +299,19 @@
   - 宣言された 2 値が異なる場合は従来どおり拒否する (省略トラックを挟んでも検出する)
   - @voluntas
 
+- [FIX] media track の必須フィールドを role だけでなく codec からも検証する
+  - draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration) の MUST は codec が定まるトラック (audio / video) に課され、role (§5.2.6 で Optional) の有無を条件にしていない。role を省略したカタログが MUST 違反のまま encode / decode されていた
+  - codec 文字列を WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) の登録名で audio / video と判定して要求する。`*` 付き登録名は登録名単独 (`av01`) も一致とし、可変サフィックスの前方一致では区切り文字の境界を要求する。固定文字列の登録名 (`opus`) は完全一致とする。登録外の codec は判定しない
+  - role が `video` / `audio` / `audiodescription` のときの要求を維持し、§5.2.6 Table 4 で visual track とされる `signlanguage` も video として扱う。codec による判定と食い違う場合は両方の要求を重ねて適用する
+  - 登録済みの audio / video codec を持ちながら必須フィールドを欠くトラックは、role が要求を持たない場合は従来は受理していたが、role の有無と値にかかわらず `InvalidCatalog` で拒否されるようになる (受信 / 送信挙動の変更)
+  - `signlanguage` で codec / bitrate を欠くトラックと、role と codec の判定が食い違うために片方の要求だけを満たすトラックも拒否される。samplerate / channelConfig のエラーメッセージは要求の根拠 (`role '...'` / `codec '...'`) を含む形になる
+  - @voluntas
+
 ### misc
 
+- [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
+  - 送信経路から分離した `build_catalog` で、video / audio の codec と必須フィールドの組み合わせが `MsfCatalogDocument::encode` に成功することを固定する
+  - @voluntas
 - [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする
   - `MoqtClient::close` は code 0 以外のとき `Session closed gracefully` ではなく `Session closed with code {code:#x} {reason}` を出す (エラー終了を正常終了と誤読しないため)
   - @voluntas

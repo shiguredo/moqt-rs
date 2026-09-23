@@ -2158,47 +2158,117 @@ fn validate_group_buffers(
     Ok(())
 }
 
-/// role が video / audio / audiodescription のトラックに必須のフィールドを検証する
+/// codec 文字列がレジストリの登録名に一致するかを判定する
+///
+/// draft-ietf-moq-msf-01 §5.2.18 (Codec) が参照する登録表記に一致するかで判定する。
+/// 登録名との完全一致、または `登録名 + separator` で始まる文字列を一致とみなす。
+/// 登録表記の `*` は可変サフィックスを表し、`*` に隣接する区切り文字も可変部分に含めるため、
+/// 登録名単独 (`av01`) と区切り文字だけの `名前.` / `名前-` も一致とする。
+fn codec_matches_registry_name(codec: &str, name: &str, separator: u8) -> bool {
+    codec == name
+        || (codec.starts_with(name) && codec.as_bytes().get(name.len()) == Some(&separator))
+}
+
+/// WEBCODECS-CODEC-REGISTRY の Audio Codec Registry の登録表記に一致するかを判定する
+///
+/// 登録内容は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 (Audio Codec Registry)
+/// に基づく。既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
+fn is_audio_codec(codec: &str) -> bool {
+    // 登録表記が名前だけの codec (`flac` / `mp3` / `opus` / `vorbis` / `ulaw` / `alaw`) は完全一致のみ
+    const EXACT_NAMES: [&str; 6] = ["flac", "mp3", "opus", "vorbis", "ulaw", "alaw"];
+    if EXACT_NAMES.contains(&codec) {
+        return true;
+    }
+    // `mp4a.*` は `mp4a` 単独と `mp4a.` 始まり、`pcm-*` は `pcm` 単独と `pcm-` 始まり
+    codec_matches_registry_name(codec, "mp4a", b'.')
+        || codec_matches_registry_name(codec, "pcm", b'-')
+}
+
+/// WEBCODECS-CODEC-REGISTRY の Video Codec Registry の登録表記に一致するかを判定する
+///
+/// 登録内容は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §4 (Video Codec Registry)
+/// に基づく。既存エントリは削除・非推奨にできないため、新規登録があれば同じ定数表に追記する。
+fn is_video_codec(codec: &str) -> bool {
+    // 登録表記が名前だけの codec (`vp8`) は完全一致のみ
+    if codec == "vp8" {
+        return true;
+    }
+    // `av01.*` / `avc1.*` / `avc3.*` / `hev1.*` / `hvc1.*` / `vp09.*` は登録名単独と `登録名.` 始まり
+    const VARIABLE_NAMES: [&str; 6] = ["av01", "avc1", "avc3", "hev1", "hvc1", "vp09"];
+    VARIABLE_NAMES
+        .iter()
+        .any(|name| codec_matches_registry_name(codec, name, b'.'))
+}
+
+/// codec / bitrate / samplerate / channelConfig の必須フィールドを検証する
 ///
 /// draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) /
 /// §5.2.28 (Audio sample rate) / §5.2.29 (Channel configuration)。
-/// role が省略されたトラックは「inherent codec を持つ」と機械的に判定できないため、
-/// role が明示されたトラックのみを対象とする。
+/// 必須条件は codec が定まるトラック (audio / video) に課され、role の有無には依存しない。
+/// そのため codec 文字列から audio / video を判定して要求する。role が `video` / `audio` /
+/// `audiodescription` (§5.2.6 Table 4 の予約 role のうち audio / video に対応するもの) の
+/// トラックには、従来どおり role に基づく要求も重ねて適用する。`signlanguage` は Table 4 で
+/// "A visual track for hearing impaired users." と定められる visual track のため video として
+/// 扱う。
+/// codec からも role からも種別を判定できないトラック (codec なし、または登録外の codec で
+/// role からも audio / video と判定できない場合) は codec に基づく要求を行わない。
 /// この仕様は将来変更される可能性がある。
 fn validate_media_track_fields(track: &MsfTrack) -> Result<(), MessageError> {
-    let is_audio = matches!(
-        track.role.as_deref(),
-        Some("audio") | Some("audiodescription")
-    );
-    let is_video = matches!(track.role.as_deref(), Some("video"));
-    if !is_audio && !is_video {
+    let role = track.role.as_deref();
+    let role_audio = matches!(role, Some("audio") | Some("audiodescription"));
+    // §5.2.6 Table 4 の `signlanguage` は "A visual track for hearing impaired users." のため video
+    let role_video = matches!(role, Some("video") | Some("signlanguage"));
+
+    let codec_audio = track.codec.as_deref().is_some_and(is_audio_codec);
+    let codec_video = track.codec.as_deref().is_some_and(is_video_codec);
+
+    // role による判定と codec による判定が食い違う場合は、両方の要求を重ねて適用する
+    let require_audio = role_audio || codec_audio;
+    let require_video = role_video || codec_video;
+    if !require_audio && !require_video {
         return Ok(());
     }
+
+    // codec から種別を判定した場合は codec が存在するため、ここに来るのは role 指定時だけ
     if track.codec.is_none() {
         return Err(MessageError::InvalidCatalog(format!(
             "track '{}' with role '{}' MUST specify codec",
             track.name,
-            track.role.as_deref().unwrap_or("")
+            role.unwrap_or("")
         )));
     }
+
+    // 要求の根拠 (role か codec か) をエラーメッセージに含め、食い違い時も原因を追えるようにする
+    // 成功経路で String を確保しないよう、エラー分岐の中でだけ組み立てる
+    let requirement_source = |by_role: bool| {
+        if by_role {
+            format!("role '{}'", role.unwrap_or(""))
+        } else {
+            format!("codec '{}'", track.codec.as_deref().unwrap_or(""))
+        }
+    };
+
     if track.bitrate.is_none() {
         return Err(MessageError::InvalidCatalog(format!(
-            "track '{}' with role '{}' MUST specify bitrate",
+            "track '{}' with {} MUST specify bitrate",
             track.name,
-            track.role.as_deref().unwrap_or("")
+            requirement_source(role_audio || role_video)
         )));
     }
-    if is_audio {
+
+    if require_audio {
         if track.samplerate.is_none() {
             return Err(MessageError::InvalidCatalog(format!(
-                "audio track '{}' MUST specify samplerate",
-                track.name
+                "track '{}' with {} MUST specify samplerate",
+                track.name,
+                requirement_source(role_audio)
             )));
         }
         if track.channel_config.is_none() {
             return Err(MessageError::InvalidCatalog(format!(
-                "audio track '{}' MUST specify channelConfig",
-                track.name
+                "track '{}' with {} MUST specify channelConfig",
+                track.name,
+                requirement_source(role_audio)
             )));
         }
     }

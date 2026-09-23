@@ -58,17 +58,18 @@ pub struct CatalogParams<'a> {
     pub audio: Option<AudioTrackParams<'a>>,
 }
 
-/// MSF カタログを構築して送信する
+/// video / audio のパラメータから MSF カタログを構築する
 ///
-/// カタログトラックとして Group 0 / Object 0 に Full カタログを送信する。
-/// 戻り値は送信したカタログの JSON バイト列である。MOQT relay が subscriber の
-/// FETCH を転送してきた場合、publisher は同じバイト列を FETCH 応答として返すため、
-/// 呼び出し側で保持する。
+/// video / audio のいずれも指定されない場合は、トラックを 1 つも持たないカタログになるため
+/// 構築せずにエラーを返す。
 /// draft-ietf-moq-msf-01 §5 (Catalog)
-pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
+fn build_catalog(
+    video: Option<&VideoTrackParams<'_>>,
+    audio: Option<&AudioTrackParams<'_>>,
+) -> Result<MsfCatalogDocument> {
     let mut tracks = Vec::new();
 
-    if let Some(v) = &params.video {
+    if let Some(v) = video {
         let mut track = MsfTrack::new(v.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(v.namespace.to_string());
         track.codec = Some(v.codec.to_string());
@@ -79,7 +80,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         tracks.push(track);
     }
 
-    if let Some(a) = &params.audio {
+    if let Some(a) = audio {
         let mut track = MsfTrack::new(a.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(a.namespace.to_string());
         track.codec = Some(a.codec.to_string());
@@ -95,7 +96,7 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         ));
     }
 
-    let catalog = MsfCatalogDocument::Full(MsfCatalog {
+    Ok(MsfCatalogDocument::Full(MsfCatalog {
         version: MSF_VERSION.to_string(),
         generated_at: None,
         is_complete: false,
@@ -103,7 +104,18 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         publish_tracks: Vec::new(),
         removed_tracks: Default::default(),
         init_data_list: Vec::new(),
-    });
+    }))
+}
+
+/// MSF カタログを構築して送信する
+///
+/// カタログトラックとして Group 0 / Object 0 に Full カタログを送信する。
+/// 戻り値は送信したカタログの JSON バイト列である。MOQT relay が subscriber の
+/// FETCH を転送してきた場合、publisher は同じバイト列を FETCH 応答として返すため、
+/// 呼び出し側で保持する。
+/// draft-ietf-moq-msf-01 §5 (Catalog)
+pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
+    let catalog = build_catalog(params.video.as_ref(), params.audio.as_ref())?;
 
     let catalog_json = catalog
         .encode()
@@ -139,4 +151,71 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
     writer.finish(params.start_location)?;
 
     Ok(catalog_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// publisher が生成する video / audio の構成のカタログが encode に成功すること
+    ///
+    /// codec 文字列が audio / video と判定されること自体は、library 側の登録名テストで
+    /// `av01.0.08M.08` / `opus` を含めて固定している。
+    /// draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate)
+    #[test]
+    fn publisher_catalog_tracks_encode() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+        };
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "2",
+            bitrate: 128,
+        };
+        let catalog = build_catalog(Some(&video), Some(&audio)).expect("カタログを構築できること");
+        catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+    }
+
+    /// `--video-codec h264` / `h265` の codec 文字列でも encode に成功すること
+    ///
+    /// `avc1.640028` / `hvc1.1.6.L120.B0` が video と判定されることは、library 側の
+    /// 登録名テストで固定している。
+    #[test]
+    fn publisher_alternate_video_codecs_encode() {
+        for codec in ["avc1.640028", "hvc1.1.6.L120.B0"] {
+            let video = VideoTrackParams {
+                track_name: "video",
+                namespace: "ns",
+                codec,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate: 5_000,
+            };
+            let catalog = build_catalog(Some(&video), None).expect("カタログを構築できること");
+            catalog
+                .encode()
+                .expect("代替の video codec でも encode に成功すること");
+        }
+    }
+
+    /// トラックが 1 つも無い場合はカタログを構築しないこと
+    #[test]
+    fn empty_catalog_is_rejected() {
+        assert!(
+            build_catalog(None, None).is_err(),
+            "トラックが 1 つも無い場合はエラーになること"
+        );
+    }
 }

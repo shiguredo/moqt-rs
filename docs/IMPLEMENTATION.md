@@ -174,7 +174,12 @@ Public / Private の配置はアプリケーション層の責務です。
   - isComplete=false 禁止
   - timeline の depends / mimeType 必須
   - initRef の initDataList 参照整合性
-  - role に応じた codec / bitrate / samplerate / channelConfig 必須
+  - codec が audio / video と判定できるトラックは bitrate 必須 (audio は samplerate / channelConfig も)
+  - 判定は WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 / §4 の登録表記に基づく
+  - role (`video` / `audio` / `audiodescription`) は codec が無い場合も従来どおり codec / bitrate (audio は samplerate / channelConfig) を要求する
+  - role `signlanguage` は §5.2.6 Table 4 の visual track のため video として扱い、codec / bitrate を要求する
+  - codec と role の判定が食い違う場合は両方の要求を満たす
+  - codec なし・登録外 codec は codec に基づく要求を行わない
   - lang の BCP 47 簡易検証 (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
 
 ### Timeline
