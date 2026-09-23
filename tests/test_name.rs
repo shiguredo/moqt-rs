@@ -3,7 +3,8 @@
 //! 不正入力・境界・特異値と、`NameParseError` が `core::error::Error` を実装していることを検証する。
 
 use shiguredo_moqt::{
-    message::common::TrackNamespace, name::NameParseError, name::parse_name, name::serialize_name,
+    message::common::TrackNamespace, name::NameParseError, name::parse_name,
+    name::parse_name_with_percent_encoding, name::serialize_name,
 };
 
 /// フィールドリストから TrackNamespace を作る
@@ -230,4 +231,65 @@ fn name_parse_error_converts_into_boxed_error() {
         "Display が失敗の内容を表すこと"
     );
     assert!(err.source().is_none(), "内包するエラーは無いこと");
+}
+
+/// `parse_name` は URI 層の `%XX` を受理しない (§8.8.1 の表現のみを扱う)
+///
+/// percent-decoding は MSF URI 用の `parse_name_with_percent_encoding` だけが行う。
+#[test]
+fn parse_name_rejects_percent_encoding() {
+    assert_eq!(parse_name("x--a%3Fb"), Err(NameParseError::InvalidEscape));
+    assert_eq!(parse_name("x--%61"), Err(NameParseError::InvalidEscape));
+    assert_eq!(parse_name("x%2Da--b"), Err(NameParseError::InvalidEscape));
+}
+
+/// `parse_name_with_percent_encoding` は `%XX` をデータバイトとして受理すること
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の track-identifier は
+/// `pct-encoded` を含む。`.` + hex の規則 (`UppercaseHex` / `RedundantEncoding`) は
+/// `%XX` には適用せず、素の `.` エスケープには従来どおり適用する。
+#[test]
+fn parse_name_with_percent_encoding_decodes_octets() {
+    let (namespace, track_name) = parse_name_with_percent_encoding("ns--a%3Fb")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(namespace.fields(), &[b"ns".to_vec()]);
+    assert_eq!(track_name, b"a?b".to_vec());
+
+    // `%61` は 0x61 のデータバイト (素の `.61` は冗長として拒否)
+    let (_, track_name) =
+        parse_name_with_percent_encoding("ns--%61").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(track_name, vec![0x61]);
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--.61"),
+        Err(NameParseError::RedundantEncoding)
+    );
+
+    // `.` の直後は hex 2 桁でなければならない (畳み込みは行わない)
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--.2%33"),
+        Err(NameParseError::InvalidEscape)
+    );
+
+    // `%` の後が hex 2 桁でない場合は InvalidEscape
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--a%"),
+        Err(NameParseError::InvalidEscape)
+    );
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--a%3"),
+        Err(NameParseError::InvalidEscape)
+    );
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--a%zz"),
+        Err(NameParseError::InvalidEscape)
+    );
+    // 2 文字揃っていても hex でなければ InvalidEscape (`%zzz` / `%3z` は長さ検査を通過する)
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--a%zzz"),
+        Err(NameParseError::InvalidEscape)
+    );
+    assert_eq!(
+        parse_name_with_percent_encoding("ns--a%3z"),
+        Err(NameParseError::InvalidEscape)
+    );
 }

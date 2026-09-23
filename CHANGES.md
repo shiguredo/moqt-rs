@@ -280,6 +280,13 @@
   - 検出対象は属性変更と isLive の逆行に限る。同一属性での remove → add は引き続き受理し、`isLive=false` のときの targetLatency / buffers は実効的な属性ではないため、これらの有無だけが異なる再追加も受理する
   - @voluntas
 
+- [FIX] MSF URI の track-identifier で RFC 3986 の percent-encoding を扱えるようにする
+  - draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `track-identifier` は `pchar-no-amp / "/"` であり、`pct-encoded` (`%XX`) を含む。`?` は `%3F` として percent-encode することが求められるが、`%XX` を解釈できず合法な URI を拒否していた
+  - `src/name.rs` に `parse_name_with_percent_encoding` を追加し、`%XX` をデータバイトとして 1 パスでデコードする。構造 (フィールド区切りの `-` のラン) は生の文字列で確定するため `%2D` は区切りにならず、`%2E` は `.` + hex の開始として再解釈されない (RFC 3986 §2.4 (When to Encode or Decode))
+  - ABNF が生のまま許す非リテラル文字 (`/` / `~` / `:` / `@` / `sub-delims-no-amp`) もデータバイトとして受理する (§11.1.2 (MSF Namespace-Name String Encoding) の正規形は `.` + hex であり、`serialize_name` の出力は変わらない)
+  - `%XX` の octet には §8.8.1 (Parsing Serialized Names) の `.` + hex の規則 (`UppercaseHex` / `RedundantEncoding`) を適用しない (`%61` は 0x61 のデータバイト、素の `.61` は従来どおり冗長として拒否)。`parse_name` の挙動は変えず、`&` 区切りのパラメータ列も従来どおり percent-decode しない
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする

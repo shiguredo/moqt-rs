@@ -88,7 +88,7 @@
 ### その他
 
 - GREASE 値の生成と判定 (`grease::{generate / is_grease}`)
-- Namespace / Track Name のシリアライズ表現とパース (`name::{parse_name / serialize_name}`)
+- Namespace / Track Name のシリアライズ表現とパース (`name::{parse_name / parse_name_with_percent_encoding / serialize_name}`)
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
 - セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)
 
@@ -207,7 +207,7 @@ Public / Private の配置はアプリケーション層の責務です。
 | `message` | 制御メッセージ、`TrackNamespace`、`Location` |
 | `message_parameter` | Message Parameters と `AUTHORIZATION_TOKEN` |
 | `msf` | MSF Catalog / Timeline / URI の encode / decode |
-| `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `serialize_name`) |
+| `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `parse_name_with_percent_encoding` / `serialize_name`) |
 | `object_properties` | Object-scoped Properties と `IMMUTABLE_PROPERTIES` 補助デコーダー |
 | `parameter` | SETUP Options の encode / decode |
 | `session` | 1 本の `MOQT Transport Session` に閉じた sans I/O な状態機械で、control plane に加えて request stream / data stream / datagram の state も扱う |

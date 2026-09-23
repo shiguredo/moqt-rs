@@ -21,6 +21,12 @@
 //! 本ライブラリの `TrackNamespace` は空フィールドを表現できないため、bijective 性は `TrackNamespace::new`
 //! を通せる binary 値に限定して成立する。
 //!
+//! [`parse_name_with_percent_encoding`] は MSF URI の track-identifier 用に、URI 層の
+//! `%XX` (RFC 3986 §2.1 (Percent-Encoding)) もデータバイトとして受理する。`.` + hex と
+//! `%XX` は別の層の表現であり、`%XX` の octet には `.` エスケープの規則
+//! (`UppercaseHex` / `RedundantEncoding`) を適用しない。同じ値に複数の表現 (`a` と `%61`、
+//! `a/b` と `a.2fb`) を受理するため単射ではなく、`serialize_name` の出力が正規形である。
+//!
 //! この節番号・規則は draft-ietf-moq-transport-21 由来であり、将来の draft 改版で変わる可能性がある。
 
 use crate::message::{common::MAX_TRACK_NAME_LENGTH, common::TrackNamespace};
@@ -37,7 +43,9 @@ pub enum NameParseError {
     UppercaseHex,
     /// リテラル表現可能バイトの hex 化 (例 `.61`、draft-ietf-moq-transport-21 §8.8.1 (Parsing Serialized Names): 冗長エンコード禁止)
     RedundantEncoding,
-    /// 末尾ピリオド / hex 1 桁 / 非 hex 文字、または想定外のバイト (裸の `-` 等)
+    /// 末尾ピリオド / hex 1 桁 / 非 hex 文字、想定外のバイト (裸の `-` 等)、
+    /// または `%` の後が hex 2 桁でない (`parse_name_with_percent_encoding` のみ。
+    /// `parse_name` は `%` 自体を拒否するためこの理由では発生しない)
     InvalidEscape,
     /// 連続 / 先頭 / 末尾ハイフンによる空の namespace フィールド
     EmptyNamespaceField,
@@ -85,13 +93,21 @@ fn hex_digit(nibble: u8) -> char {
     char::from(b"0123456789abcdef"[nibble as usize])
 }
 
-/// 小文字 hex 文字を 0..=15 へ変換する。大文字は `UppercaseHex`、非 hex は `InvalidEscape`。
+/// hex 1 桁を 0..=15 へ変換する (大文字小文字は問わない)。非 hex は `None`。
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 小文字 hex 文字を 0..=15 へ変換する (§8.8.1 の `.` エスケープ用)。大文字は `UppercaseHex`、非 hex は `InvalidEscape`。
 fn decode_hex(b: u8) -> Result<u8, NameParseError> {
     match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
         b'A'..=b'F' => Err(NameParseError::UppercaseHex),
-        _ => Err(NameParseError::InvalidEscape),
+        _ => hex_nibble(b).ok_or(NameParseError::InvalidEscape),
     }
 }
 
@@ -127,8 +143,64 @@ pub fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String {
     out
 }
 
+/// フィールドのデコードで URI 層の `pct-encoded` を許容するか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PercentEncoding {
+    /// §8.8.1 の表現のみ (`%` は `InvalidEscape`)
+    Forbidden,
+    /// RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` (`%` HEXDIG HEXDIG) も
+    /// データバイトとして許容する (MSF URI の track-identifier 用)
+    Allowed,
+}
+
+/// RFC 3986 §2.1 の `pct-encoded` 以外で、URI 層が生のままデータとして許す ASCII バイト
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `pchar-no-amp / "/"`
+/// から、リテラル (`a-z` / `A-Z` / `0-9` / `_`) と、本層で意味を持つ `.` (エスケープ開始) /
+/// `-` (フィールド区切り) / `%` (pct-encoded 開始) を除いたものである。`unreserved` の
+/// `~`、`sub-delims-no-amp`、`:`、`@`、`/` が該当する。
+///
+/// §11.1.2 (MSF Namespace-Name String Encoding) はリテラル以外を `.` + 小文字 hex 2 桁で
+/// 書くことを MUST とするため、これらは正規形ではない。ABNF が許す表現として受信側で
+/// 受理し、`serialize_name` が出力する正規形は `.` + hex のままとする。
+/// ABNF が除外する `&` (パラメータ区切り) と `?` (ABNF 外) はここにも含めない。
+///
+/// 同じ ABNF の文字クラスを `src/msf/uri.rs` の `is_pchar_no_amp_byte` が検証用に持つ。
+/// 両者は対で保守すること (この 14 文字の範囲で、検証が通ってデコードで拒否される文字を
+/// 作らない。リテラルと構造文字の `-` / `.` / `%` は別の分岐で扱う)。
+fn is_uri_data_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'~' | b'!'
+            | b'$'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b':'
+            | b'@'
+            | b'/'
+    )
+}
+
+/// pct-encoded の hex 1 桁を値へ変換する (大文字小文字は問わない)
+///
+/// RFC 3986 §2.1 (Percent-Encoding) は `pct-encoded` の hex について大文字小文字を
+/// 等価とするため、`UppercaseHex` は適用しない。
+fn decode_hex_any_case(b: u8) -> Option<u8> {
+    hex_nibble(b)
+}
+
 /// draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) 表現の単一フィールドを binary バイト列へデコードする (draft-ietf-moq-transport-21 §8.8.1 (Parsing Serialized Names) の MUST を厳格に適用)
-fn decode_field(bytes: &[u8]) -> Result<Vec<u8>, NameParseError> {
+///
+/// `percent` が [`PercentEncoding::Allowed`] のときは、URI 層の `%XX` を 1 パスで
+/// データバイトとして取り出す。`.` + hex と `%XX` は別の層の表現であり、`%XX` の octet は
+/// リテラルであっても `RedundantEncoding` にしない (`%61` は 0x61 のデータバイト)。
+fn decode_field(bytes: &[u8], percent: PercentEncoding) -> Result<Vec<u8>, NameParseError> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -148,8 +220,26 @@ fn decode_field(bytes: &[u8]) -> Result<Vec<u8>, NameParseError> {
             }
             out.push(decoded);
             i += 3;
+        } else if percent == PercentEncoding::Allowed && b == b'%' {
+            // pct-encoded = "%" HEXDIG HEXDIG (大文字小文字は等価)
+            if i + 2 >= bytes.len() {
+                return Err(NameParseError::InvalidEscape);
+            }
+            let (Some(high), Some(low)) = (
+                decode_hex_any_case(bytes[i + 1]),
+                decode_hex_any_case(bytes[i + 2]),
+            ) else {
+                return Err(NameParseError::InvalidEscape);
+            };
+            out.push((high << 4) | low);
+            i += 3;
+        } else if percent == PercentEncoding::Allowed && is_uri_data_byte(b) {
+            // ABNF が生のまま許す非リテラル文字 (`.` エスケープの対象外)
+            out.push(b);
+            i += 1;
         } else {
-            // 裸の `-` を含む想定外バイト (リテラルでも `.` でもない)
+            // リテラル / `.` + 小文字 hex / (Allowed なら) `%XX` と ABNF の生文字の
+            // いずれでもないバイト (裸の `-`、`?`、`&`、非 ASCII、制御文字など)
             return Err(NameParseError::InvalidEscape);
         }
     }
@@ -158,6 +248,32 @@ fn decode_field(bytes: &[u8]) -> Result<Vec<u8>, NameParseError> {
 
 /// draft-ietf-moq-transport-21 §8.8.1 (Parsing Serialized Names) の MUST を厳格に適用してシリアライズ文字列を namespace タプル + track name へパースする
 pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> {
+    parse_name_inner(s, PercentEncoding::Forbidden)
+}
+
+/// MSF URI の track-identifier 用に、URI 層の `%XX` もデータバイトとして受理してパースする
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の `track-identifier`
+/// は `pchar-no-amp / "/"` であり、RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を
+/// 含む。`?` は同節が `%3F` として percent-encode することを求めるため、`%3F` は
+/// 0x3F (`?`) のデータバイトになる。構造 (フィールド区切りの `-` のラン) は生の文字列で
+/// 確定するため、`%2D` は区切りではなくデータバイト 0x2D になる
+/// (RFC 3986 §2.4 (When to Encode or Decode) の「コンポーネントを分離してから decode する」
+/// と「同じ文字列を 2 回 decode しない」を満たす)。
+///
+/// `%XX` の octet には [`NameParseError::RedundantEncoding`] / [`NameParseError::UppercaseHex`]
+/// を適用しない (どちらも §8.8.1 の `.` + hex 表現に対する規則)。
+pub fn parse_name_with_percent_encoding(
+    s: &str,
+) -> Result<(TrackNamespace, Vec<u8>), NameParseError> {
+    parse_name_inner(s, PercentEncoding::Allowed)
+}
+
+/// `parse_name` / `parse_name_with_percent_encoding` の共通実装
+fn parse_name_inner(
+    s: &str,
+    percent: PercentEncoding,
+) -> Result<(TrackNamespace, Vec<u8>), NameParseError> {
     let bytes = s.as_bytes();
 
     // 境界 `--` (ハイフンの極大連続ラン長 2) を一意に特定する。
@@ -190,7 +306,7 @@ pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> 
     let track_part = &bytes[boundary + 2..];
 
     // track name 部をデコードする (裸の `-` を含む想定外バイトは decode_field が InvalidEscape で弾く)
-    let track_name = decode_field(track_part)?;
+    let track_name = decode_field(track_part, percent)?;
 
     // namespace 部を `-` で分割して各フィールドをデコードする。
     // ns_part が空文字列なら 0 フィールド (空フィールド 1 個と混同しない)。
@@ -200,7 +316,7 @@ pub fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError> 
             if field_bytes.is_empty() {
                 return Err(NameParseError::EmptyNamespaceField);
             }
-            fields.push(decode_field(field_bytes)?);
+            fields.push(decode_field(field_bytes, percent)?);
         }
     }
 

@@ -914,9 +914,10 @@ fn checked_len(len: u64, remaining: usize) -> Result<usize, MessageError>
 fn encoded_len(val: u64) -> usize
 
 // name
-use shiguredo_moqt::name::{parse_name, serialize_name};
+use shiguredo_moqt::name::{parse_name, parse_name_with_percent_encoding, serialize_name};
 fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String
 fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError>
+fn parse_name_with_percent_encoding(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError>
 
 // grease
 use shiguredo_moqt::grease::{generate, is_grease};

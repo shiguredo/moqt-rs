@@ -333,3 +333,161 @@ fn parse_uri_invalid_rejected() {
         Err(MessageError::InvalidCatalog(_))
     ));
 }
+
+/// track-identifier の `%XX` (RFC 3986 §2.1 (Percent-Encoding)) をデータバイトへデコードすること
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF は
+/// `track-identifier = 1*( pchar-no-amp / "/" )` であり、`pchar-no-amp` は `pct-encoded` を含む。
+/// `?` は同節が `%3F` として percent-encode することを求める。
+#[test]
+fn parse_fragment_decodes_percent_encoded_track_identifier() {
+    // `%3F` は 0x3F (`?`) のデータバイトになる (hex の大文字小文字は等価)
+    let fragment = parse_msf_fragment("msf:customer--catalog%3Fpart")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fragment.track_name,
+        b"catalog?part".to_vec(),
+        "%3F が 0x3F としてデコードされること"
+    );
+    let lower = parse_msf_fragment("msf:customer--catalog%3fpart")
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        lower.track_name,
+        b"catalog?part".to_vec(),
+        "%3f も %3F と同じ 0x3F になること"
+    );
+
+    // `%25` は 0x25 (`%`) のデータバイトになる (2 回デコードしない)
+    let fragment =
+        parse_msf_fragment("msf:ns--a%25b").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fragment.track_name, b"a%b".to_vec());
+
+    // `%61` は 0x61 (`a`)、`%4A` は 0x4A (`J`)。`.` + hex の冗長 / 大文字規則は適用しない
+    let fragment =
+        parse_msf_fragment("msf:ns--%61%4A").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fragment.track_name, vec![0x61, 0x4A]);
+}
+
+/// ABNF (`pchar-no-amp / "/"`) が生のまま許す非リテラル文字はその ASCII バイトをデータとして取り出すこと
+///
+/// §11.1.2 (MSF Namespace-Name String Encoding) はリテラル以外を `.` + 小文字 hex 2 桁で
+/// 書くことを MUST とするため、これらは正規形ではないが、ABNF が許す表現として受理する。
+/// `is_uri_data_byte` がデータとして扱う 14 文字を 1 文字ずつ通し、検証 (`is_pchar_no_amp_byte`)
+/// とデコードで扱いがずれないことを固定する。リテラルと構造文字の `-` / `.` / `%` は
+/// 別のテストで固定する。
+#[test]
+fn parse_fragment_accepts_raw_pchar_no_amp_characters() {
+    // unreserved のうち本層で意味を持つ `-` (区切り) / `.` (エスケープ) / `%` を除く `~`
+    // と、`pchar-no-amp` の `:` `@` `sub-delims-no-amp`、および ABNF が加える `/`
+    for (ch, byte) in [
+        ('~', 0x7E),
+        ('!', 0x21),
+        ('$', 0x24),
+        ('\'', 0x27),
+        ('(', 0x28),
+        (')', 0x29),
+        ('*', 0x2A),
+        ('+', 0x2B),
+        (',', 0x2C),
+        (';', 0x3B),
+        ('=', 0x3D),
+        (':', 0x3A),
+        ('@', 0x40),
+        ('/', 0x2F),
+    ] {
+        let fragment = parse_msf_fragment(&format!("msf:ns--a{ch}b"))
+            .unwrap_or_else(|e| panic!("生の {ch} は受理されること: {e:?}"));
+        assert_eq!(
+            fragment.track_name,
+            vec![b'a', byte, b'b'],
+            "生の {ch} は {byte:#04X} のデータバイトになること"
+        );
+    }
+
+    // ABNF が除外する `&` は track-identifier の終端 (パラメータ区切り) になる。
+    // データとしての `&` は `%26` で表す。
+    let fragment =
+        parse_msf_fragment("msf:ns--a&x=y").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fragment.track_name,
+        b"a".to_vec(),
+        "生の & は track-identifier の終端になること"
+    );
+    assert_eq!(
+        fragment.parameter_values("x"),
+        vec!["y"],
+        "& の後ろはパラメータとして解釈されること"
+    );
+    let fragment =
+        parse_msf_fragment("msf:ns--a%26b").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fragment.track_name,
+        b"a&b".to_vec(),
+        "%26 は 0x26 のデータバイトになること"
+    );
+}
+
+/// `%2D` は区切りではなくデータバイト 0x2D として扱われること
+///
+/// 構造の確定 (`-` のラン走査) を percent-decode より先に行うため、`%2D` は namespace の
+/// フィールド区切りを生成しない (RFC 3986 §2.4 (When to Encode or Decode))。
+#[test]
+fn parse_fragment_percent_encoded_hyphen_is_data() {
+    let fragment =
+        parse_msf_fragment("msf:ns%2Da--catalog").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fragment.namespace,
+        shiguredo_moqt::message::common::TrackNamespace::new(vec![b"ns-a".to_vec()])
+            .expect("テストフィクスチャの前提条件を満たす"),
+        "%2D は区切りではなくデータバイト 0x2D であること"
+    );
+    assert_eq!(fragment.track_name, b"catalog".to_vec());
+}
+
+/// `%2E` はデータバイト 0x2E (`.`) になり、`.` + hex の開始として再解釈されないこと
+///
+/// RFC 3986 §2.4 (When to Encode or Decode) の「同じ文字列を 2 回 decode しない」を満たす。
+#[test]
+fn parse_fragment_percent_encoded_period_is_data() {
+    let fragment =
+        parse_msf_fragment("msf:ns--%2E2d").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fragment.track_name,
+        vec![0x2E, 0x32, 0x64],
+        "%2E は 0x2E のデータバイトであり .2d として再解釈されないこと"
+    );
+}
+
+/// `.` の直後に `%XX` が続く入力は拒否されること
+///
+/// 文字列へ畳み込んでから再パースすると `.2%33` が `.23` になり 1 バイト 0x23 として
+/// 受理されてしまう。1 パスで走査するため `.` の直後は hex 2 桁でなければならない。
+#[test]
+fn parse_fragment_escape_followed_by_percent_rejected() {
+    let err = parse_msf_fragment("msf:ns--.2%33").expect_err("畳み込みは受理しないこと");
+    assert!(
+        matches!(&err, MessageError::InvalidCatalog(reason) if reason.contains("InvalidEscape")),
+        ". の直後の % は InvalidEscape であること: {err:?}"
+    );
+}
+
+/// `.` + hex の既存規則は percent-encoding 対応後も維持されること
+#[test]
+fn parse_fragment_keeps_dot_escape_rules() {
+    // §11.1.2 の表現: `.2f` は `/`
+    let fragment =
+        parse_msf_fragment("msf:ns--a.2fb").expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fragment.track_name, b"a/b".to_vec());
+
+    // 素の `.61` は冗長、素の `.4A` は大文字 hex として拒否する
+    let err = parse_msf_fragment("msf:ns--.61").expect_err("冗長エンコードは拒否すること");
+    assert!(
+        matches!(&err, MessageError::InvalidCatalog(reason) if reason.contains("RedundantEncoding")),
+        ".61 は RedundantEncoding であること: {err:?}"
+    );
+    let err = parse_msf_fragment("msf:ns--.4A").expect_err("大文字 hex は拒否すること");
+    assert!(
+        matches!(&err, MessageError::InvalidCatalog(reason) if reason.contains("UppercaseHex")),
+        ".4A は UppercaseHex であること: {err:?}"
+    );
+}

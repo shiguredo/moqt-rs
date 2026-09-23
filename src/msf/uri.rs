@@ -1,11 +1,14 @@
 //! MSF URI と fragment のパース (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation))
 //!
 //! `moqt://` URI の fragment 部 (`msf:...`) をパースし、MSF namespace-name 文字列を
-//! [`crate::name::parse_name`] で namespace / track name へ分解する。
+//! [`crate::name::parse_name_with_percent_encoding`] で namespace / track name へ分解する。
 //! 予約 fragment パラメータ (§11.1.1 (Reserved fragment parameters)) の値型アクセサを提供する。
 //!
 //! 本モジュールは URI の構文解析のみを行い、MOQT セッションの確立や SUBSCRIBE / FETCH の
-//! 発行は行わない。percent-decode は行わず、値をそのまま保持する。
+//! 発行は行わない。
+//! track-identifier は RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` (`%XX`) を
+//! データバイトとしてデコードする (§11.1 が `?` を `%3F` と書くことを求めるため)。
+//! 一方、`&` 区切りのパラメータ列は percent-decode せず生の文字列のまま保持する。
 //! この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 
 use crate::{error::MessageError, message::common::TrackNamespace, name};
@@ -222,12 +225,17 @@ pub fn parse_msf_uri(uri: &str) -> Result<MsfUri, MessageError> {
 /// `#` 以降の fragment (`msf:...`) をパースする
 ///
 /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の ABNF に従う。
-/// track-identifier は §11.1.2 (MSF Namespace-Name String Encoding) の表現として
-/// [`crate::name::parse_name`] で分解する。
+/// track-identifier は §11.1 (URL construction and interpretation) の `pchar-no-amp / "/"` を
+/// §11.1.2 (MSF Namespace-Name String Encoding) の表現として
+/// [`crate::name::parse_name_with_percent_encoding`] で分解する。URI 層の `%XX`
+/// (RFC 3986 §2.1 (Percent-Encoding)) はデータバイトとしてデコードする。
+///
+/// `&` 区切りのパラメータ列は percent-decode せず生の文字列のまま保持する。
 ///
 /// # Errors
 ///
 /// - `msf:` で始まらない / track-identifier が空 / パラメータ形式不正: `InvalidCatalog`
+/// - track-identifier の文字が ABNF 外、または `%XX` が hex 2 桁でない: `InvalidCatalog`
 /// - track-identifier が namespace-name 表現として不正: `InvalidCatalog`
 pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
     let value = fragment.strip_prefix("msf:").ok_or_else(|| {
@@ -248,9 +256,13 @@ pub fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError> {
         ));
     }
     validate_pchar_no_amp(track_identifier, true)?;
-    let (namespace, track_name) = name::parse_name(track_identifier).map_err(|e| {
-        MessageError::InvalidCatalog(format!("invalid MSF track identifier: {e:?}"))
-    })?;
+    // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): track-identifier は
+    // `pchar-no-amp / "/"` であり、RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。
+    // `%XX` をデータバイトとしてデコードする (`?` は `%3F` として現れる)。
+    let (namespace, track_name) = name::parse_name_with_percent_encoding(track_identifier)
+        .map_err(|e| {
+            MessageError::InvalidCatalog(format!("invalid MSF track identifier: {e:?}"))
+        })?;
 
     let mut parameters = Vec::new();
     for element in parts {

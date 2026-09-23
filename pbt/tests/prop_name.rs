@@ -2,7 +2,10 @@
 //! bijective 性 (binary <-> シリアライズ文字列) のラウンドトリップを検証する。
 
 use pbt::common::test_runner;
-use shiguredo_moqt::{message::common::TrackNamespace, name::parse_name, name::serialize_name};
+use shiguredo_moqt::{
+    message::common::TrackNamespace, name::parse_name, name::parse_name_with_percent_encoding,
+    name::serialize_name,
+};
 
 /// 空でない namespace フィールド (1..=16 バイト、任意値)
 fn sample_field(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
@@ -62,5 +65,31 @@ fn roundtrip() -> noprop::TestResult {
         empty_track_name_seen.get(),
         "長さ 0 の track name のケースが生成されなかった\n{runner}"
     );
+    Ok(())
+}
+
+/// `%XX` で全バイトをエスケープした track-identifier が元のバイト列へ戻ること
+///
+/// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の track-identifier は
+/// RFC 3986 §2.1 (Percent-Encoding) の `pct-encoded` を含む。track name の全バイトを `%XX`
+/// (小文字 hex) で表した入力が、任意のバイト列について元のバイト列へデコードされることを
+/// 検証する (`-` / `.` / `%` も `%XX` 表記なので構造と解釈が衝突しない)。
+#[test]
+fn percent_encoded_track_name_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let track_name = sample_track_name(ctx);
+        let mut identifier = String::from("ns--");
+        for b in &track_name {
+            // 小文字 hex 2 桁 (RFC 3986 §2.1 は大文字小文字を等価とする)
+            identifier.push('%');
+            identifier.push_str(&format!("{b:02x}"));
+        }
+        let (namespace, parsed) = parse_name_with_percent_encoding(&identifier)
+            .expect("%XX でエスケープした track-identifier は受理される");
+        assert_eq!(namespace.fields(), &[b"ns".to_vec()]);
+        assert_eq!(parsed, track_name);
+        Ok(())
+    })?;
     Ok(())
 }
