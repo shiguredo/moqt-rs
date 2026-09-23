@@ -252,7 +252,7 @@ fn apply_delta_clone_event_timeline_without_event_type_rejected() {
 
 #[test]
 fn apply_delta_group_latency_mismatch_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup の targetLatency は一致
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup の宣言された targetLatency は一致 (省略は比較対象外)
     let mut first = loc_track("v1", None);
     first.render_group = Some(1);
     first.target_latency = Some(500);
@@ -270,6 +270,261 @@ fn apply_delta_group_latency_mismatch_rejected() {
     assert!(matches!(
         catalog.apply_delta(&delta, None),
         Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 同一 renderGroup で片方だけ targetLatency を宣言した delta 適用は受理されること
+#[test]
+fn apply_delta_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): フィールドが無く isLive=true なら
+    // player が遅延を選んでよい (MAY)。delta 適用後の検証でも省略は不一致としない
+    let mut first = loc_track("v1", None);
+    first.render_group = Some(1);
+    first.target_latency = Some(500);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    let mut second = loc_track("v2", None);
+    second.render_group = Some(1);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![second],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("省略された targetLatency は不一致として拒否されない");
+}
+
+/// 同一 renderGroup で片方だけ buffers を宣言した delta 適用は受理されること
+#[test]
+fn apply_delta_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): フィールドが無く isLive=true なら
+    // player がバッファを選んでよい (MAY)。delta 適用後の検証でも省略は不一致としない
+    let mut first = loc_track("v1", None);
+    first.render_group = Some(1);
+    first.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    let mut second = loc_track("v2", None);
+    second.render_group = Some(1);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![second],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("省略された buffers は不一致として拒否されない");
+}
+
+/// 省略トラックを挟んでも宣言された targetLatency の不一致は delta 適用後の検証で拒否されること
+#[test]
+fn apply_delta_group_omitted_between_different_target_latency_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略トラックを挟んでも
+    // 宣言された 2 値の不一致は delta 適用後の検証で検出すること
+    let mut first = loc_track("v1", None);
+    first.render_group = Some(1);
+    first.target_latency = Some(500);
+    let mut omitted = loc_track("v2", None);
+    omitted.render_group = Some(1);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    catalog.tracks.push(omitted);
+    let mut third = loc_track("v3", None);
+    third.render_group = Some(1);
+    third.target_latency = Some(1000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![third],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 省略トラックを挟んでも宣言された buffers の不一致は delta 適用後の検証で拒否されること
+#[test]
+fn apply_delta_group_omitted_between_different_buffers_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略トラックを挟んでも
+    // 宣言された 2 値の不一致は delta 適用後の検証で検出すること
+    let mut first = loc_track("v1", None);
+    first.render_group = Some(1);
+    first.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut omitted = loc_track("v2", None);
+    omitted.render_group = Some(1);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    catalog.tracks.push(omitted);
+    let mut third = loc_track("v3", None);
+    third.render_group = Some(1);
+    third.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![third],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 同一 altGroup で片方だけ targetLatency を宣言した delta 適用は受理されること
+#[test]
+fn apply_delta_alt_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): delta 適用後の検証でも
+    // altGroup の省略は不一致としない
+    let mut first = loc_track("v1", None);
+    first.alt_group = Some(2);
+    first.target_latency = Some(500);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    let mut second = loc_track("v2", None);
+    second.alt_group = Some(2);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![second],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("altGroup でも省略された targetLatency は拒否されない");
+}
+
+/// 同一 altGroup で片方だけ buffers を宣言した delta 適用は受理されること
+#[test]
+fn apply_delta_alt_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): delta 適用後の検証でも
+    // altGroup の省略は不一致としない
+    let mut first = loc_track("v1", None);
+    first.alt_group = Some(2);
+    first.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    let mut second = loc_track("v2", None);
+    second.alt_group = Some(2);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![second],
+        }],
+    };
+    catalog
+        .apply_delta(&delta, None)
+        .expect("altGroup でも省略された buffers は拒否されない");
+}
+
+/// altGroup でも省略トラックを挟んだ宣言値の不一致は delta 適用後の検証で拒否されること
+#[test]
+fn apply_delta_alt_group_omitted_between_different_buffers_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略トラックを挟んだ
+    // 宣言値の不一致は delta 適用後の検証で検出すること
+    let mut first = loc_track("v1", None);
+    first.alt_group = Some(2);
+    first.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut omitted = loc_track("v2", None);
+    omitted.alt_group = Some(2);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    catalog.tracks.push(omitted);
+    let mut third = loc_track("v3", None);
+    third.alt_group = Some(2);
+    third.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![third],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// altGroup でも省略トラックを挟んだ targetLatency の不一致は delta 適用後の検証で拒否されること
+#[test]
+fn apply_delta_alt_group_omitted_between_different_target_latency_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略トラックを挟んだ
+    // 宣言値の不一致は delta 適用後の検証で検出すること
+    let mut first = loc_track("v1", None);
+    first.alt_group = Some(2);
+    first.target_latency = Some(500);
+    let mut omitted = loc_track("v2", None);
+    omitted.alt_group = Some(2);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(first);
+    catalog.tracks.push(omitted);
+    let mut third = loc_track("v3", None);
+    third.alt_group = Some(2);
+    third.target_latency = Some(1000);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Add {
+            tracks: vec![third],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// clone が親から継承した宣言値を別 group へ持ち込み衝突する場合、delta 適用後の検証で拒否されること
+#[test]
+fn apply_delta_clone_inherited_group_conflict_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 適用前のカタログは正当であり、
+    // clone が親から継承した targetLatency を renderGroup 1 に持ち込むことで初めて衝突する
+    let mut parent = loc_track("v1", None);
+    parent.target_latency = Some(500);
+    let mut catalog = MsfCatalog::new();
+    catalog.tracks.push(parent);
+    let mut other = loc_track("v2", None);
+    other.render_group = Some(1);
+    other.target_latency = Some(1000);
+    catalog.tracks.push(other);
+    let mut clone = MsfCloneTrack::new("v3".to_string(), "v1".to_string());
+    clone.render_group = Some(1);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![MsfDeltaOperation::Clone {
+            tracks: vec![clone],
+        }],
+    };
+    assert!(matches!(
+        catalog.apply_delta(&delta, None),
+        Err(MessageError::InvalidCatalog(reason)) if reason.contains("renderGroup 1")
     ));
 }
 
@@ -742,6 +997,41 @@ fn apply_delta_readd_with_changed_attribute_rejected() {
         catalog.tracks[0].codec.as_deref(),
         Some("av01"),
         "失敗時に属性が変わらないこと"
+    );
+}
+
+/// remove → add で宣言済みの targetLatency を省略した再追加は拒否される
+///
+/// draft-ietf-moq-msf-01 §5.3 (Delta updates): 属性は宣言後に変更できないため、
+/// isLive=true での「宣言 (Some) → 省略 (None)」は属性変更として拒否する。
+/// §5.2.8 (Target latency) のグループ内一致検証が省略を比較対象外とするのとは要求が異なる。
+#[test]
+fn apply_delta_readd_omitted_target_latency_rejected() {
+    let mut catalog = MsfCatalog::new();
+    let mut original = video_track("v", "ns");
+    original.render_group = Some(1);
+    original.target_latency = Some(500);
+    catalog.tracks.push(original);
+
+    let mut omitted = video_track("v", "ns");
+    omitted.render_group = Some(1);
+    let delta = MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Remove {
+                tracks: vec![remove_ref("v", "ns")],
+            },
+            MsfDeltaOperation::Add {
+                tracks: vec![omitted],
+            },
+        ],
+    };
+    let Err(MessageError::InvalidCatalog(reason)) = catalog.apply_delta(&delta, None) else {
+        panic!("宣言済み targetLatency の省略は InvalidCatalog であること");
+    };
+    assert!(
+        reason.contains("attributes MUST NOT be modified"),
+        "§5.3 の属性不変を述べること: {reason}"
     );
 }
 

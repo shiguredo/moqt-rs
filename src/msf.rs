@@ -1365,8 +1365,9 @@ impl MsfCatalog {
     /// - add するトラックが §5.2 の各フィールド / §4.3.3 / §7.2 / §8.2 / §5.2.33 の MUST に違反する: `InvalidCatalog`
     /// - remove / clone の対象トラックが見つからない: `InvalidCatalog`
     /// - clone の継承結果がトラックの制約に違反する: `InvalidCatalog`
-    /// - 適用後のカタログがグループ内 targetLatency / buffers の一致
+    /// - 適用後のカタログがグループ内で宣言された targetLatency / buffers の一致
     ///   (§5.2.8 (Target latency) / §5.2.9 (Buffers)) に違反する: `InvalidCatalog`
+    ///   (省略されたトラックは player の裁量 (MAY) のため比較対象外、`isLive=false` は無視)
     /// - 適用後の initRef が initDataList の id を指さない: `InvalidCatalog`
     ///   (§5.2.13 (Initialization reference))
     /// - 削除済みの同じ (namespace, name) を再追加し、属性が変わる: `InvalidCatalog`
@@ -1597,7 +1598,9 @@ impl MsfCatalog {
         // publishTracks の initRef が initDataList の id を指すこと。
         validate_init_refs(&self.tracks, &self.publish_tracks, &self.init_data_list)?;
         // draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers):
-        // 同一 renderGroup / altGroup 内の isLive=true トラックの値は一致
+        // 同一 renderGroup / altGroup 内の isLive=true トラックが宣言した値は一致しなければならない (MUST)。
+        // 省略は player の裁量 (MAY) のため比較しない。この仕様は将来変更される可能性がある。
+        // delta の操作は self.tracks のみを変更するため publishTracks のグループ一致は再検証しない
         validate_group_target_latency(&self.tracks, "renderGroup", |t| t.render_group)?;
         validate_group_target_latency(&self.tracks, "altGroup", |t| t.alt_group)?;
         validate_group_buffers(&self.tracks, "renderGroup", |t| t.render_group)?;
@@ -1623,6 +1626,10 @@ impl MsfCatalog {
 /// トラックは targetLatency / buffers の有無だけが異なる再追加も受理する (実効的な
 /// 属性が同じなら受理するという本検査の範囲。`isLive=false` のときの targetLatency /
 /// buffers は値の変更も検出しない)。
+///
+/// なお `isLive=true` での「宣言 (`Some`) ↔ 省略 (`None`)」は §5.3 (Delta updates) の
+/// 属性不変に基づき属性変更として拒否する。これは §5.2.8 (Target latency) / §5.2.9 (Buffers)
+/// のグループ内一致検証が省略を比較対象外とするのとは要求が異なるためである。
 fn comparable_attributes(track: &MsfTrack) -> MsfTrack {
     let mut normalized = track.clone();
     normalized.name.clear();
@@ -2062,28 +2069,40 @@ impl MsfEventTimeline {
 
 // ─── 内部デコード・検証ヘルパー ────────────────────────────────────────────────────
 
-/// 同一グループ内で targetLatency が一致することを検証する
+/// 同一グループ内で宣言された targetLatency が一致することを検証する
 ///
 /// draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false のトラックでは targetLatency は無視されるため、
-/// 同一 group 内の isLive=true トラック間で一致することのみを検証する。
+/// 同一 group 内の isLive=true かつ targetLatency を宣言したトラック間で一致することのみを検証する。
+/// また同節は「フィールドが無い場合、isLive が TRUE なら player が遅延を選んでよい (MAY)」と定めるため、
+/// 省略されたトラックは比較対象に加えない。
+///
+/// "All tracks belonging to the same render group MUST have identical target latencies." の主語は
+/// 宣言の有無を限定せず逐語からは一意に決まらないため、本実装は MUST を「targetLatency を宣言した
+/// トラック同士の同一性」と解釈する。省略時は player が値を選ぶ (MAY) ため player が宣言値と同じ値を
+/// 選べば MUST は満たせ、省略を不一致として扱うと同一 group 内でフィールドを使い分ける構成まで
+/// 拒否してしまうためである。この仕様は将来変更される可能性がある。
 fn validate_group_target_latency(
     tracks: &[MsfTrack],
     group_name: &str,
     get_group: impl Fn(&MsfTrack) -> Option<u64>,
 ) -> Result<(), MessageError> {
-    let mut seen: hashbrown::HashMap<u64, Option<u64>> = hashbrown::HashMap::new();
+    let mut seen: hashbrown::HashMap<u64, u64> = hashbrown::HashMap::new();
     for t in tracks {
         // isLive=false のトラックでは targetLatency は無視されるため比較対象外とする
         if !t.is_live {
             continue;
         }
+        // 省略された targetLatency は player の裁量 (MAY) に委ねられるため比較対象外とする
+        let Some(latency) = t.target_latency else {
+            continue;
+        };
         if let Some(gid) = get_group(t) {
             match seen.entry(gid) {
                 hashbrown::hash_map::Entry::Vacant(e) => {
-                    e.insert(t.target_latency);
+                    e.insert(latency);
                 }
                 hashbrown::hash_map::Entry::Occupied(e) => {
-                    if *e.get() != t.target_latency {
+                    if *e.get() != latency {
                         return Err(MessageError::InvalidCatalog(format!(
                             "tracks in {group_name} {gid} have different targetLatency values"
                         )));
@@ -2095,28 +2114,39 @@ fn validate_group_target_latency(
     Ok(())
 }
 
-/// 同一グループ内で buffers が一致することを検証する
+/// 同一グループ内で宣言された buffers が一致することを検証する
 ///
 /// draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false のトラックでは buffers は無視されるため、
-/// 同一 group 内の isLive=true トラック間で一致することのみを検証する。
+/// 同一 group 内の isLive=true かつ buffers を宣言したトラック間で一致することのみを検証する。
+/// また同節は「フィールドが無い場合、isLive が TRUE なら player がバッファを選んでよい (MAY)」と定めるため、
+/// 省略されたトラックは比較対象に加えない。
+///
+/// "All tracks belonging to the same render group MUST have identical target buffers." の解釈は
+/// `validate_group_target_latency` と同じく「buffers を宣言したトラック同士の同一性」とし、
+/// 省略されたトラックは比較対象外とする。この仕様は将来変更される可能性がある。
+/// `MsfBuffers` 内部の `target` / `min` / `max` の省略規則はここでは扱わない。
 fn validate_group_buffers(
     tracks: &[MsfTrack],
     group_name: &str,
     get_group: impl Fn(&MsfTrack) -> Option<u64>,
 ) -> Result<(), MessageError> {
-    let mut seen: hashbrown::HashMap<u64, Option<MsfBuffers>> = hashbrown::HashMap::new();
+    let mut seen: hashbrown::HashMap<u64, MsfBuffers> = hashbrown::HashMap::new();
     for t in tracks {
         // isLive=false のトラックでは buffers は無視されるため比較対象外とする
         if !t.is_live {
             continue;
         }
+        // 省略された buffers は player の裁量 (MAY) に委ねられるため比較対象外とする
+        let Some(buffers) = t.buffers else {
+            continue;
+        };
         if let Some(gid) = get_group(t) {
             match seen.entry(gid) {
                 hashbrown::hash_map::Entry::Vacant(e) => {
-                    e.insert(t.buffers);
+                    e.insert(buffers);
                 }
                 hashbrown::hash_map::Entry::Occupied(e) => {
-                    if *e.get() != t.buffers {
+                    if *e.get() != buffers {
                         return Err(MessageError::InvalidCatalog(format!(
                             "tracks in {group_name} {gid} have different buffers values"
                         )));
@@ -2515,8 +2545,8 @@ fn decode_full_catalog(
     // tracks と publishTracks を通して検査する。
     validate_track_name_uniqueness(&tracks, &publish_tracks)?;
 
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup / altGroup 内の
-    // isLive=true トラックの targetLatency は一致しなければならない (MUST)
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup / altGroup 内で
+    // isLive=true かつ targetLatency を宣言したトラック同士の値は一致しなければならない (MUST)
     // この仕様は将来変更される可能性がある。
     validate_group_target_latency(&tracks, "renderGroup", |t| t.render_group)?;
     validate_group_target_latency(&tracks, "altGroup", |t| t.alt_group)?;
@@ -2527,8 +2557,8 @@ fn decode_full_catalog(
     validate_group_target_latency(&publish_tracks, "renderGroup", |t| t.render_group)?;
     validate_group_target_latency(&publish_tracks, "altGroup", |t| t.alt_group)?;
 
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup / altGroup 内の
-    // isLive=true トラックの buffers は一致しなければならない (MUST)
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup / altGroup 内で
+    // isLive=true かつ buffers を宣言したトラック同士の値は一致しなければならない (MUST)
     // この仕様は将来変更される可能性がある。
     validate_group_buffers(&tracks, "renderGroup", |t| t.render_group)?;
     validate_group_buffers(&tracks, "altGroup", |t| t.alt_group)?;

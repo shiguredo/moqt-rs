@@ -293,6 +293,12 @@
   - 大文字小文字を無視するのは `irregular` との一致判定だけに限定し、privateuse の `x` は従来どおり小文字のみを受理する
   - @voluntas
 
+- [FIX] MSF の renderGroup / altGroup の targetLatency / buffers の省略を不一致として拒否しないようにする
+  - draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.9 (Buffers) は同一 group 内で一致を MUST とする一方、フィールドが無く isLive が TRUE なら player が値を選んでよい (MAY) と定める。省略 (None) も 1 つの値として比較していたため、宣言と省略の混在を InvalidCatalog として拒否していた
+  - 宣言された値 (Some) だけを比較対象にし、省略されたトラックと `isLive=false` のトラックを除外する。変更は共有ヘルパー内で行うため decode / encode / delta 適用後の 3 経路すべてに反映される
+  - 宣言された 2 値が異なる場合は従来どおり拒否する (省略トラックを挟んでも検出する)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする

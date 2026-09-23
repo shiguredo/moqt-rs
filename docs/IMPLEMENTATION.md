@@ -156,7 +156,7 @@ Public / Private の配置はアプリケーション層の責務です。
 - Delta 適用 (`MsfCatalog::apply_delta`)
   - clone の継承解決 (`MsfCloneTrack::into_track`) と add / remove / clone の順次適用
   - add するトラックは適用時点で §5.2 各フィールドの MUST を検証し、add 操作内の全トラックを検証してから追加する
-  - 適用後の track name 一意性とグループ内 targetLatency / buffers 一致を再検証する
+  - 適用後の track name 一意性と、宣言された targetLatency / buffers のグループ内一致を再検証する (省略は player の裁量のため比較対象外、isLive=false は無視)
   - 削除済みの同じ (namespace, name) の再追加は、属性変更と isLive の false から true への変更を拒否する (§5.3 / §5.2.7)
 - カタログトラック名 (`MSF_CATALOG_TRACK_NAME` = "catalog")
 - Track (`MsfTrack`)：Codec / Video / Audio は draft 上の論理的な分類で、実体は単一の `MsfTrack` のフィールド
@@ -170,7 +170,7 @@ Public / Private の配置はアプリケーション層の責務です。
   - 削除用 `MsfRemoveTrack`
   - `MsfInitData` / `MsfBuffers` / `MsfPackaging` (loc / mediatimeline / eventtimeline / moqlog / moqmetrics)
 - 検証規則
-  - targetLatency / buffers のグループ内一致
+  - targetLatency / buffers のグループ内一致 (宣言値のみ。isLive=false は無視)
   - isComplete=false 禁止
   - timeline の depends / mimeType 必須
   - initRef の initDataList 参照整合性

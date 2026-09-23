@@ -147,7 +147,7 @@ fn depends_entry_not_string() {
 
 #[test]
 fn render_group_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup 内の isLive=true トラックの targetLatency は一致必須
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 renderGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
@@ -160,7 +160,7 @@ fn render_group_different_target_latency_rejected() {
 
 #[test]
 fn alt_group_different_target_latency_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 altGroup 内の isLive=true トラックの targetLatency は一致必須
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 同一 altGroup 内の isLive=true トラックが宣言した targetLatency は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":1000}
@@ -178,6 +178,55 @@ fn render_group_same_target_latency_accepted() {
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500}
         ]}"#;
     assert!(MsfCatalogDocument::decode(json).is_ok());
+}
+
+#[test]
+fn render_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): フィールドが無く isLive=true なら
+    // player が遅延を選んでよい (MAY)。省略は宣言値との不一致として拒否しない
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
+            {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
+        ]}"#;
+    MsfCatalogDocument::decode(json).expect("省略された targetLatency は拒否されないこと");
+}
+
+#[test]
+fn alt_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略は不一致としない
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"targetLatency":500},
+            {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
+        ]}"#;
+    MsfCatalogDocument::decode(json)
+        .expect("altGroup でも省略された targetLatency は拒否されないこと");
+}
+
+#[test]
+fn render_group_target_latency_and_buffers_split_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 / §5.2.9: 省略を比較対象外とするため、同一 group で
+    // 一方が targetLatency のみ、他方が buffers のみを宣言する構成も受理される (本実装の解釈)
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
+            {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
+        ]}"#;
+    MsfCatalogDocument::decode(json)
+        .expect("group 内で targetLatency と buffers を使い分けても拒否されないこと");
+}
+
+#[test]
+fn render_group_omitted_between_different_target_latency_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略トラックを挟んでも
+    // 宣言された 2 値の不一致は検出すること
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
+            {"name":"b","packaging":"loc","isLive":true,"renderGroup":1},
+            {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":1000}
+        ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
 }
 
 // ─── lang BCP 47 軽量バリデーション ───────────────────────────────────────────
@@ -577,7 +626,7 @@ fn target_latency_and_buffers_together_rejected_in_clone() {
 
 #[test]
 fn render_group_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup 内の isLive=true トラックの buffers は一致必須
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 renderGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
@@ -598,23 +647,65 @@ fn render_group_same_buffers_accepted() {
 }
 
 #[test]
+fn render_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): フィールドが無く isLive=true なら
+    // player がバッファを選んでよい (MAY)。省略は宣言値との不一致として拒否しない
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
+            {"name":"b","packaging":"loc","isLive":true,"renderGroup":1}
+        ]}"#;
+    MsfCatalogDocument::decode(json).expect("省略された buffers は拒否されないこと");
+}
+
+#[test]
+fn alt_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略は不一致としない
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"altGroup":2,"buffers":{"target":500}},
+            {"name":"b","packaging":"loc","isLive":true,"altGroup":2}
+        ]}"#;
+    MsfCatalogDocument::decode(json).expect("altGroup でも省略された buffers は拒否されないこと");
+}
+
+#[test]
+fn render_group_omitted_between_different_buffers_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略トラックを挟んでも
+    // 宣言された 2 値の不一致は検出すること
+    let json = br#"{"version":"draft-01","tracks":[
+            {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
+            {"name":"b","packaging":"loc","isLive":true,"renderGroup":1},
+            {"name":"c","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":1000}}
+        ]}"#;
+    assert!(matches!(
+        MsfCatalogDocument::decode(json),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+#[test]
 fn render_group_mixed_live_ignored_for_buffers() {
-    // isLive=false のトラックは group 検証の対象外
+    // isLive=false のトラックは group 検証の対象外。ただし b は buffers を宣言していないため、
+    // 本テストだけでは isLive 除外と省略除外を区別できない。省略除外は
+    // render_group_buffers_omitted_accepted、isLive 除外は
+    // encode_full_group_buffers_is_live_false_ignored がそれぞれ固定する
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    MsfCatalogDocument::decode(json).expect("isLive=false の省略は拒否されないこと");
 }
 
 #[test]
 fn render_group_mixed_live_ignored_for_target_latency() {
-    // isLive=false のトラックは group 検証の対象外
+    // isLive=false のトラックは group 検証の対象外。ただし b は targetLatency を宣言していないため、
+    // 本テストだけでは isLive 除外と省略除外を区別できない。省略除外は
+    // render_group_target_latency_omitted_accepted、isLive 除外は
+    // encode_full_group_target_latency_is_live_false_ignored がそれぞれ固定する
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"renderGroup":1,"targetLatency":500},
             {"name":"b","packaging":"loc","isLive":false,"renderGroup":1}
         ]}"#;
-    assert!(MsfCatalogDocument::decode(json).is_ok());
+    MsfCatalogDocument::decode(json).expect("isLive=false の省略は拒否されないこと");
 }
 
 // ─── initDataList ─────────────────────────────────────────────────────────────
@@ -759,7 +850,7 @@ fn buffers_non_number_value_rejected() {
 
 #[test]
 fn alt_group_different_buffers_rejected() {
-    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 altGroup 内の isLive=true トラックの buffers は一致必須
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 同一 altGroup 内の isLive=true トラックが宣言した buffers は一致必須 (省略は比較対象外)
     let json = br#"{"version":"draft-01","tracks":[
             {"name":"a","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":500}},
             {"name":"b","packaging":"loc","isLive":true,"altGroup":1,"buffers":{"target":1000}}
@@ -1186,6 +1277,264 @@ fn encode_full_publish_tracks_group_buffers_mismatch_rejected() {
         full_doc(vec![], vec![a, b], vec![]).encode(),
         Err(MessageError::InvalidCatalog(_))
     ));
+}
+
+/// 同一 renderGroup で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
+#[test]
+fn encode_full_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): 省略は player の裁量 (MAY) であり不一致ではない
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(1);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("省略された targetLatency は encode できること");
+}
+
+/// 同一 renderGroup で片方だけ buffers を宣言した手組みカタログは encode でも受理されること
+#[test]
+fn encode_full_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): 省略は player の裁量 (MAY) であり不一致ではない
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(1);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("省略された buffers は encode できること");
+}
+
+/// 同一 altGroup で片方だけ buffers を宣言した手組みカタログは encode でも受理されること
+#[test]
+fn encode_full_alt_group_buffers_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): altGroup でも省略は不一致としない
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.alt_group = Some(2);
+    a.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.alt_group = Some(2);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("altGroup でも省略された buffers は encode できること");
+}
+
+/// 同一 altGroup で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
+#[test]
+fn encode_full_alt_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): altGroup でも省略は不一致としない
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.alt_group = Some(2);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.alt_group = Some(2);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("altGroup でも省略された targetLatency は encode できること");
+}
+
+/// renderGroup と altGroup を同時に持つトラックでも renderGroup の不一致は拒否されること
+#[test]
+fn encode_full_group_render_conflict_rejected() {
+    // renderGroup の不一致が altGroup の相違に隠されないこと (altGroup は衝突しない)
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.alt_group = Some(2);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(1);
+    b.alt_group = Some(2);
+    b.target_latency = Some(500);
+    let mut c = MsfTrack::new("c".to_string(), MsfPackaging::Loc, true);
+    c.render_group = Some(1);
+    c.alt_group = Some(3);
+    c.target_latency = Some(1000);
+    // c は renderGroup 1 で a / b と衝突する (altGroup は異なる)
+    assert!(matches!(
+        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(reason)) if reason.contains("renderGroup 1")
+    ));
+}
+
+/// renderGroup が衝突しない構成でも altGroup の不一致は拒否されること
+#[test]
+fn encode_full_group_alt_conflict_rejected() {
+    // altGroup の不一致が renderGroup の相違に隠されないこと
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.alt_group = Some(2);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(2);
+    b.alt_group = Some(2);
+    b.target_latency = Some(1000);
+    // renderGroup は 1 と 2 で衝突せず、altGroup 2 のみが衝突する
+    assert!(matches!(
+        full_doc(vec![a, b], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(reason)) if reason.contains("altGroup 2")
+    ));
+}
+
+/// group 値 0 も通常の group 値として宣言値の一致を検証すること
+#[test]
+fn encode_full_group_zero_target_latency_mismatch_rejected() {
+    // group 値は 0 も有効な値であり、省略 (None) と混同して比較対象外にしないこと
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(0);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(0);
+    b.target_latency = Some(1000);
+    assert!(matches!(
+        full_doc(vec![a, b], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// group 値 0 の buffers でも通常の group 値として宣言値の一致を検証すること
+#[test]
+fn encode_full_group_zero_buffers_mismatch_rejected() {
+    // targetLatency 側だけでなく buffers 側でも 0 を省略と混同しないこと
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(0);
+    a.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(0);
+    b.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    assert!(matches!(
+        full_doc(vec![a, b], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// group 未所属のトラックは宣言値が異なっても group 検証で拒否されないこと
+#[test]
+fn encode_full_without_group_different_target_latency_accepted() {
+    // group 値が無い (None) トラック同士は group 検証の対象外であること
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.target_latency = Some(1000);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("group 未所属のトラックは group 検証の対象外であること");
+}
+
+/// publishTracks 内で片方だけ targetLatency を宣言した手組みカタログは encode でも受理されること
+#[test]
+fn encode_full_publish_tracks_group_target_latency_omitted_accepted() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): tracks と publishTracks は分離して検証するが
+    // 省略を比較対象外とする規則は publishTracks 側にも適用される
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::MoqLog, true);
+    a.render_group = Some(1);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::MoqLog, true);
+    b.render_group = Some(1);
+    full_doc(vec![], vec![a, b], vec![])
+        .encode()
+        .expect("publishTracks でも省略された targetLatency は encode できること");
+}
+
+/// 省略トラックを挟んでも宣言された targetLatency の不一致は encode でも拒否されること
+#[test]
+fn encode_full_group_omitted_between_different_target_latency_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency)
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(1);
+    let mut c = MsfTrack::new("c".to_string(), MsfPackaging::Loc, true);
+    c.render_group = Some(1);
+    c.target_latency = Some(1000);
+    assert!(matches!(
+        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// 省略トラックを挟んでも宣言された buffers の不一致は encode でも拒否されること
+#[test]
+fn encode_full_group_omitted_between_different_buffers_rejected() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers)
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, true);
+    b.render_group = Some(1);
+    let mut c = MsfTrack::new("c".to_string(), MsfPackaging::Loc, true);
+    c.render_group = Some(1);
+    c.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    assert!(matches!(
+        full_doc(vec![a, b, c], vec![], vec![]).encode(),
+        Err(MessageError::InvalidCatalog(_))
+    ));
+}
+
+/// isLive=false のトラックの targetLatency は手組みカタログの encode でも比較対象外であること
+#[test]
+fn encode_full_group_target_latency_is_live_false_ignored() {
+    // draft-ietf-moq-msf-01 §5.2.8 (Target latency): isLive=false では targetLatency は無視される。
+    // decode 経路は decode_track が isLive=false の値を None に正規化するため、
+    // 正規化を通らない手組みの MsfCatalog で除外そのものを固定する
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.target_latency = Some(500);
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, false);
+    b.render_group = Some(1);
+    b.target_latency = Some(1000);
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("isLive=false の targetLatency は encode の比較対象外であること");
+}
+
+/// isLive=false のトラックの buffers は手組みカタログの encode でも比較対象外であること
+#[test]
+fn encode_full_group_buffers_is_live_false_ignored() {
+    // draft-ietf-moq-msf-01 §5.2.9 (Buffers): isLive=false では buffers は無視される
+    let mut a = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    a.render_group = Some(1);
+    a.buffers = Some(MsfBuffers {
+        target: Some(500),
+        min: None,
+        max: None,
+    });
+    let mut b = MsfTrack::new("b".to_string(), MsfPackaging::Loc, false);
+    b.render_group = Some(1);
+    b.buffers = Some(MsfBuffers {
+        target: Some(1000),
+        min: None,
+        max: None,
+    });
+    full_doc(vec![a, b], vec![], vec![])
+        .encode()
+        .expect("isLive=false の buffers は encode の比較対象外であること");
 }
 
 /// 非 eventtimeline での eventType は encode でも拒否されること
