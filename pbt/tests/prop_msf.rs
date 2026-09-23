@@ -12,10 +12,24 @@ use shiguredo_moqt::msf::{
 /// 有効な lang 文字列を生成する
 ///
 /// draft-ietf-moq-msf-01 §5.2.32 (Language): BCP 47 言語タグ。
-/// primary 2〜3 文字 + 任意個の `-` 区切り英数字サブタグ。None:Some = 3:2 の重み。
+/// primary 2〜3 文字 + 任意個の `-` 区切り英数字サブタグを基本とし、
+/// 1/8 の重みで RFC 5646 §2.1 (Syntax) の grandfathered タグ
+/// (`i-klingon` のように primary subtag が 1 文字の irregular タグを含む) を返す。
+/// None:Some = 3:2 の重みのため、全体に占める割合は約 1/20 (Some のうち 1/8)。
 fn sample_lang(ctx: &mut noprop::TestCaseContext) -> Option<String> {
     if noprop::sample_ratio(ctx, noprop::Ratio::new(3, 5)) {
         return None;
+    }
+    // grandfathered タグは langtag の規則に一致しないものがあるため、
+    // 軽量検証 (src/msf.rs の validate_lang_tag) と encode / decode 往復を PBT で固定する
+    if noprop::sample_ratio(ctx, noprop::Ratio::new(1, 8)) {
+        return Some(
+            noprop::sample_choice(
+                ctx,
+                &["i-klingon", "I-AMI", "i-default", "en-GB-oed", "zh-min-nan"],
+            )
+            .to_string(),
+        );
     }
     let primary_len = noprop::sample_usize_in(ctx, 2..=3);
     let mut s: String = (0..primary_len)

@@ -60,15 +60,61 @@ fn parse_finite_f64(v: nojson::RawJsonValue<'_, '_>) -> Result<f64, nojson::Json
     Ok(f)
 }
 
+/// RFC 5646 §2.1 (Syntax) の `irregular` (grandfathered) タグの固定リスト
+///
+/// 同節が "These tags were registered under [RFC3066] and are a fixed list that can never
+/// change." と述べる固定リストの一部であり、IANA Language Subtag Registry の更新では増えない
+/// (この文は `regular` と `irregular` を合わせた grandfathered タグ全体について述べており、
+/// `irregular` はその一部である)。
+/// 値は同節の ABNF の表記のまま (正規表記) とし、一次資料と目視で照合できるようにする。
+/// ABNF は大文字小文字を区別しないため、比較は ASCII 大文字小文字を無視する
+/// (RFC 5646 §2.1.1 (Formatting of Language Tags))。
+const LANG_IRREGULAR_TAGS: [&str; 17] = [
+    "en-GB-oed",
+    "i-ami",
+    "i-bnn",
+    "i-default",
+    "i-enochian",
+    "i-hak",
+    "i-klingon",
+    "i-lux",
+    "i-mingo",
+    "i-navajo",
+    "i-pwn",
+    "i-tao",
+    "i-tay",
+    "i-tsu",
+    "sgn-BE-FR",
+    "sgn-BE-NL",
+    "sgn-CH-DE",
+];
+
+/// lang が RFC 5646 §2.1 (Syntax) の `irregular` タグかどうか (ASCII 大文字小文字を無視)
+fn is_lang_irregular(lang: &str) -> bool {
+    LANG_IRREGULAR_TAGS
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(lang))
+}
+
 /// lang フィールドの軽量構文バリデーション
 ///
 /// draft-ietf-moq-msf-01 §5.2.32 (Language): lang は BCP 47 言語タグでなければならない (MUST)
 /// この仕様は将来変更される可能性がある。
 /// 完全な BCP 47 準拠は行わず、RFC 5646 §2.1 (Syntax) に沿った簡略ルールで
 /// 明らかに不正な値のみを拒否する:
+/// - irregular (grandfathered) タグ: `LANG_IRREGULAR_TAGS` の 17 タグ (大文字小文字を問わない)。
+///   `i-klingon` のように primary subtag が 1 文字のものも含む
 /// - primary language subtag: 2〜3 文字 / 4 文字 / 5〜8 文字の ASCII 英字 (language)
 /// - privateuse tag: `x` に 1 個以上の `-` 区切りサブタグが続くもの
 /// - 後続サブタグ（任意）: `-` 区切り、各サブタグは 1 文字以上の ASCII 英数字
+///
+/// `irregular` は `langtag` の規則に一致しないため primary subtag の検査より先に判定する。
+/// 大文字小文字を無視するのは `irregular` との一致判定だけに限定する。privateuse の `x` は
+/// 小文字のみを受理し、`X-FOO` のような大文字 `X` は受理しない (RFC 5646 §2.1.1 に合わせた
+/// 大文字小文字無視の全面対応は行わず、軽量構文検査の現行の受理範囲を維持する)。
+/// IANA Language Subtag Registry との照合、primary language subtag 以外のサブタグの最大長
+/// (同節 "All subtags have a maximum length of eight characters.") の検査、
+/// `extlang` / `variant` / `extension` の構造検査は行わない (軽量構文検査の範囲を維持する)。
 fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
     let mut parts = lang.split('-');
     let primary = parts.next().expect("split never returns an empty iterator");
@@ -88,6 +134,11 @@ fn validate_lang_tag(lang: &str) -> Result<(), MessageError> {
                 "invalid language tag '{lang}': privateuse tag must have at least one subtag"
             )));
         }
+        return Ok(());
+    }
+    // RFC 5646 §2.1 (Syntax): irregular は langtag の規則に一致しない固定リストのタグ。
+    // 大文字小文字を無視して比較する (§2.1.1)。"I-AMI" は "i-ami" と等価。
+    if is_lang_irregular(lang) {
         return Ok(());
     }
     // RFC 5646 §2.1 (Syntax): language = 2*3ALPHA / 4ALPHA / 5*8ALPHA

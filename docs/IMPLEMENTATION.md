@@ -175,7 +175,7 @@ Public / Private の配置はアプリケーション層の責務です。
   - timeline の depends / mimeType 必須
   - initRef の initDataList 参照整合性
   - role に応じた codec / bitrate / samplerate / channelConfig 必須
-  - lang の BCP 47 簡易検証
+  - lang の BCP 47 簡易検証 (RFC 5646 §2.1 の grandfathered タグを含む。`irregular` は固定リスト、`regular` は langtag 規則で受理する)
 
 ### Timeline
 

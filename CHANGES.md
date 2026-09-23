@@ -287,6 +287,12 @@
   - `%XX` の octet には §8.8.1 (Parsing Serialized Names) の `.` + hex の規則 (`UppercaseHex` / `RedundantEncoding`) を適用しない (`%61` は 0x61 のデータバイト、素の `.61` は従来どおり冗長として拒否)。`parse_name` の挙動は変えず、`&` 区切りのパラメータ列も従来どおり percent-decode しない
   - @voluntas
 
+- [FIX] MSF の lang 検証が RFC 5646 の grandfathered irregular タグを拒否する
+  - draft-ietf-moq-msf-01 §5.2.32 (Language) が求める BCP 47 の `Language-Tag` には、`langtag` の規則に一致しない `irregular` タグの固定リストが含まれるが、`i-klingon` のように primary subtag が 1 文字のタグを拒否していた
+  - RFC 5646 §2.1 (Syntax) の `irregular` 17 タグを固定リストとして持ち、ASCII 大文字小文字を無視して一致判定する (`I-KLINGON` も受理される。§2.1.1)
+  - 大文字小文字を無視するのは `irregular` との一致判定だけに限定し、privateuse の `x` は従来どおり小文字のみを受理する
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする

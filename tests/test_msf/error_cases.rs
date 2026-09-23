@@ -203,7 +203,9 @@ fn lang_invalid_numeric_primary() {
     ));
 }
 
-/// primary language subtag が 1 文字の場合は拒否されることを確認する
+/// primary language subtag が 1 文字の場合は拒否されることを確認する (irregular 固定リストの `i-*` を除く)
+///
+/// irregular 固定リストの `i-*` だけが例外であり、`i-` 接頭辞一般が許されるわけではない
 #[test]
 fn lang_invalid_single_char() {
     let json =
@@ -292,6 +294,159 @@ fn lang_privateuse_without_subtag_rejected() {
         MsfCatalogDocument::decode(json),
         Err(MessageError::InvalidCatalog(_))
     ));
+}
+
+/// RFC 5646 §2.1 (Syntax): irregular (grandfathered) タグの固定リスト 17 件を受理すること
+///
+/// 値は仕様の ABNF の正規表記のまま渡す。このうち `i-*` の 13 件は primary language subtag が
+/// 1 文字のため固定リストとの一致でなければ受理されず、`en-GB-oed` と `sgn-*` の 4 件は
+/// primary が 2〜3 文字で後続も英数字のため汎用規則でも受理される
+/// (固定リストへの登録が結果を変えるのは 13 件である)。大文字小文字を無視した一致は
+/// `lang_irregular_case_insensitive_accepted` が検証する
+#[test]
+fn lang_irregular_tags_accepted() {
+    for lang in [
+        "en-GB-oed",
+        "i-ami",
+        "i-bnn",
+        "i-default",
+        "i-enochian",
+        "i-hak",
+        "i-klingon",
+        "i-lux",
+        "i-mingo",
+        "i-navajo",
+        "i-pwn",
+        "i-tao",
+        "i-tay",
+        "i-tsu",
+        "sgn-BE-FR",
+        "sgn-BE-NL",
+        "sgn-CH-DE",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            "irregular '{lang}' は受理されること"
+        );
+    }
+}
+
+/// RFC 5646 §2.1.1 (Formatting of Language Tags): 大文字小文字は区別しないため
+/// "I-AMI" は "i-ami" と等価であり、大文字表記も受理されること
+#[test]
+fn lang_irregular_case_insensitive_accepted() {
+    // primary subtag が 1 文字の `i-*` は irregular の一致判定でなければ受理されない
+    for lang in ["I-AMI", "I-KLINGON", "I-Default", "I-ENOCHIAN", "I-NAVAJO"] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            "irregular '{lang}' は大文字小文字を問わず受理されること"
+        );
+    }
+}
+
+/// RFC 5646 §2.1 (Syntax): regular (grandfathered) タグは `langtag` の規則に一致するため
+/// 受理されること
+#[test]
+fn lang_regular_grandfathered_tags_accepted() {
+    for lang in [
+        "art-lojban",
+        "cel-gaulish",
+        "no-bok",
+        "no-nyn",
+        "zh-guoyu",
+        "zh-hakka",
+        "zh-min",
+        "zh-min-nan",
+        "zh-xiang",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            MsfCatalogDocument::decode(json.as_bytes()).is_ok(),
+            "regular '{lang}' は受理されること"
+        );
+    }
+}
+
+/// irregular 固定リストに一致しない 1 文字 primary は拒否されること
+///
+/// `i-` 接頭辞を一般的な規則として受理しないことと、固定リストとのタグ全体の一致のみ
+/// (ASCII 大文字小文字は無視) を受理することを確認する。
+/// すべて primary language subtag の形式検査で拒否される
+#[test]
+fn lang_unknown_single_char_primary_rejected() {
+    for lang in [
+        "i",
+        "i-not-a-tag",
+        "i-klingonish",
+        "i-klingon-x",
+        "i-klingon-",
+        // 後続サブタグが付いた irregular タグも完全一致しないため拒否される
+        "I-KLINGON-X",
+    ] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(reason))
+                    if reason.contains("primary language subtag")
+            ),
+            "irregular 固定リストに無い '{lang}' は primary language subtag の形式検査で拒否されること"
+        );
+    }
+}
+
+/// privateuse の `x` は小文字のみを受理すること
+///
+/// 大文字小文字を無視するのは irregular 固定リストとの一致判定だけに限定する。
+/// `X-FOO` は privateuse として扱われず、primary language subtag が 1 文字のため
+/// その形式検査で拒否される
+#[test]
+fn lang_uppercase_privateuse_rejected() {
+    for lang in ["X-FOO", "X-foo"] {
+        let json = format!(
+            r#"{{"version":"draft-01","tracks":[{{"name":"a","packaging":"loc","isLive":true,"lang":"{lang}"}}]}}"#
+        );
+        assert!(
+            matches!(
+                MsfCatalogDocument::decode(json.as_bytes()),
+                Err(MessageError::InvalidCatalog(reason))
+                    if reason.contains("primary language subtag")
+            ),
+            "大文字 X の privateuse '{lang}' は primary language subtag の形式検査で拒否されること"
+        );
+    }
+    // 小文字 `x` は従来どおり受理される (対になる確認)
+    let json =
+        br#"{"version":"draft-01","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"x-foo"}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(json).is_ok(),
+        "小文字 x の privateuse は受理されること"
+    );
+}
+
+/// delta add / clone 経路でも irregular タグが受理されること
+#[test]
+fn lang_irregular_in_delta_add_and_clone_accepted() {
+    let add = br#"{"deltaUpdate":[{"op":"add","tracks":[{"name":"a","packaging":"loc","isLive":true,"lang":"i-klingon"}]}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(add).is_ok(),
+        "delta add の irregular タグは受理されること"
+    );
+    let clone = br#"{"deltaUpdate":[{"op":"clone","tracks":[{"name":"a","parentName":"parent","lang":"i-klingon"}]}]}"#;
+    assert!(
+        MsfCatalogDocument::decode(clone).is_ok(),
+        "delta clone の irregular タグは受理されること"
+    );
 }
 
 /// add operation 経路でも lang バリデーションが発火することを確認する
@@ -1108,6 +1263,26 @@ fn encode_full_invalid_lang_rejected() {
     ));
 }
 
+/// irregular タグは encode でも受理され、decode で同じ値に戻ること
+#[test]
+fn encode_full_irregular_lang_roundtrip() {
+    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    let mut track = MsfTrack::new("t".to_string(), MsfPackaging::Loc, true);
+    track.lang = Some("i-klingon".to_string());
+    let bytes = full_doc(vec![track], vec![], vec![])
+        .encode()
+        .expect("irregular タグは encode できること");
+    let decoded = MsfCatalogDocument::decode(&bytes).expect("encode 結果は decode できること");
+    let MsfCatalogDocument::Full(catalog) = decoded else {
+        panic!("Full catalog に戻ること");
+    };
+    assert_eq!(
+        catalog.tracks[0].lang.as_deref(),
+        Some("i-klingon"),
+        "encode / decode で lang が保持されること"
+    );
+}
+
 /// 通常トラックの parentName は encode でも拒否されること
 #[test]
 fn encode_full_parent_name_rejected() {
@@ -1229,4 +1404,27 @@ fn encode_delta_clone_invalid_lang_rejected() {
         }],
     });
     assert!(matches!(doc.encode(), Err(MessageError::InvalidCatalog(_))));
+}
+
+/// delta add / clone の irregular タグは encode でも受理され、decode で同じ値に戻ること
+#[test]
+fn encode_delta_irregular_lang_roundtrip() {
+    // draft-ietf-moq-msf-01 §5.2.32 (Language)
+    let mut add = MsfTrack::new("a".to_string(), MsfPackaging::Loc, true);
+    add.lang = Some("i-klingon".to_string());
+    let mut clone = MsfCloneTrack::new("c".to_string(), "p".to_string());
+    // 大文字表記も encode / decode で正規化されずそのまま保持されることを確認する
+    clone.lang = Some("I-AMI".to_string());
+    let doc = MsfCatalogDocument::Delta(MsfDeltaUpdate {
+        generated_at: None,
+        operations: vec![
+            MsfDeltaOperation::Add { tracks: vec![add] },
+            MsfDeltaOperation::Clone {
+                tracks: vec![clone],
+            },
+        ],
+    });
+    let bytes = doc.encode().expect("irregular タグは encode できること");
+    let decoded = MsfCatalogDocument::decode(&bytes).expect("encode 結果は decode できること");
+    assert_eq!(decoded, doc, "encode / decode で lang が保持されること");
 }
