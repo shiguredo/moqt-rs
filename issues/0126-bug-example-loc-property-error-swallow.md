@@ -1,7 +1,7 @@
 # subscriber example が LOC の書式違反を握り潰してセッションを閉じない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-23
 - Branch: feature/fix-example-loc-property-error-swallow
 - Polished: 2026-09-22
 
@@ -75,3 +75,56 @@ library の `src/loc.rs` はこの検証を `validate_known_property` (Audio Lev
     (`- [FIX] moqt-subscriber が LOC の書式違反を検出したら KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じるようにする` とその補足、`@voluntas`)
 - 正常な Video Frame Marking (1-4 バイト) と Audio Level (8 bit 範囲) を受信した場合、および `properties_bytes` が `None` の場合の既存挙動 (config / Timestamp 無しでも再生を継続する) が変わらないこと
 - `make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ること
+
+## 解決方法
+
+`LocProperties::decode` の失敗を「プロパティ無し」に潰していた 3 つの抽出関数を `Result` 化し、書式違反をセッション終了として扱うようにした。close は I/O 層である main ループが行う。
+
+1. `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` の戻り値を `ExtractResult<T>` (`std::result::Result<T, MessageError>`) にした。`Ok(None)` / `Ok((None, None))` は「Properties が無い、または対象のプロパティを持たない」、`Err` は decode 失敗である
+2. `session_error_code` が decode 失敗を終了コードへ写す。`MessageError::KeyValueFormattingError` は §8.3 (Key-Value-Pair Structure) の
+   MUST に対応する `SESSION_KEY_VALUE_FORMATTING_ERROR` (`0x6`)、それ以外 (`UnexpectedEof` / `ProtocolViolation` など) は `SESSION_PROTOCOL_VIOLATION` (`0x3`) にする。
+   理由文は `MessageError::reason()` (`&'static str`) をそのまま使う
+3. 呼び出し側 (`handle_fetch_stream` / `decode_video_stream` / `decode_audio_stream` の 4 箇所) は `Err` を受けたら `request_session_termination` で main ループへ `SessionError` (library の型) を送り、その stream の処理を打ち切る
+4. main ループの `tokio::select!` に終了依頼の受信分岐を追加し、`MoqtClient::close(code, reason)` を呼んで
+   `Session closed: {:#x} {}` を記録して `break 'main` する。transport close (QUIC では `CONNECTION_CLOSE`、
+   WebTransport では CLOSE_SESSION capsule) を送出できるのは `MoqtClient` を所有する main ループだけであり、
+   stream task から直接 `Session::close` を呼ぶと main ループが `SessionEvent::CloseSession` を観測できないまま
+   accept 分岐が接続クローズを拾って `Session closed: ...` のログが落ちる
+5. 自側から終了コード付きで閉じた場合は `session_terminated` フラグを立て、close 済みの session へ `STOP_SENDING` / `GOAWAY` /
+   正常 close を送らない。これらは状態機械に拒否され "Failed to send GOAWAY" などの誤解を招く警告ログになるためである。
+   送信有無の判定は `should_stop_sending` / `should_close_gracefully` に切り出し、単体テストで固定した。
+   `select!` の別分岐 (GOAWAY / PUBLISH_DONE / peer の close / shutdown) が先に成立した場合も、
+   受信ループを抜けた直後に届いている終了依頼を回収し、§8.3 の MUST を終了コード 0 で上書きしない
+6. 終了依頼のチャネルは容量 1 で、既に依頼が積まれている間の 2 件目は送らない (最初に検出した失敗のコードで閉じる)。`select!` の受信は `Some(termination) = ...` で受ける (送信側の原本を main ループが保持するため受信ループ中はチャネルが閉じない)
+7. 配送しない Object (`FilteredOut` / `Discarded`) と payload を持たない Object は Properties を解釈しないため、書式違反の検出対象外である旨をコメントに残した。datagram 経路とカタログ FETCH は LOC のメディア プロパティを扱わないため対象外である
+
+テスト:
+
+- `examples/moqt-subscriber/src/pipeline.rs` の `#[cfg(test)] mod tests` を次のように更新・追加した
+  - `extract_video_config_returns_config` / `extract_video_config_returns_none_without_config` / `extract_video_config_returns_none_when_absent` / `extract_video_config_reports_eof_on_truncated_properties`: 正常値・対象プロパティ無し・Properties 無し・切り詰めを固定する
+  - `extract_video_config_reports_key_value_formatting_error`: Video Frame Marking の宣言長 5 (draft-ietf-moq-loc-04 §2.3.2.2 の 1-4 バイト違反) が `KeyValueFormattingError` になることを固定する (`LocProperties::encode` は違反値を拒否するため生バイト列を組み立てる)
+  - `extract_audio_config_returns_bytes_when_present` / `extract_audio_config_returns_none_when_absent` /
+    `extract_audio_config_reports_eof_on_truncated_properties`: Audio Config の正常値・無し・切り詰めを固定する。
+    `extract_audio_config_returns_none_on_bad_properties` は「壊れた properties は `None`」という旧契約をやめ、
+    切り詰め (`[0xFF, 0xFF, 0xFF]` は 8 バイト形 varint の途中終端で `UnexpectedEof`) を固定する
+  - `extract_audio_fields_report_key_value_formatting_error`: Audio Level 256 (8 bit 範囲違反) が両方の抽出で `KeyValueFormattingError` になることを固定する
+  - `extract_timestamp_timescale_returns_none_when_absent`: Timestamp / Timescale 無しの `Ok((None, None))` を固定する
+  - `session_error_code_maps_decode_failures`: `KeyValueFormattingError` → `0x6`、`ProtocolViolation` / `UnexpectedEof` → `0x3` の写像を固定する
+  - `cleanup_decisions_follow_termination_cause`: 終了要因の組み合わせごとに STOP_SENDING / GOAWAY / 正常 close の送信有無が決まることを固定する
+  - `request_session_termination_sends_error_and_keeps_first_request`: 終了依頼が `SessionError` としてチャネルに届くこと、容量 1 のため先に積まれた依頼が後続で置き換わらないことを固定する (`tokio::time::timeout` で包み、送信しない実装ではハングせず失敗する)
+- 変異実験で検出力を確認した (写像を常に `0x3` にする / `try_send` を無効化する / 抽出関数がエラーを潰す / Video Frame Marking の値域検証を無効化する / Audio Level の値域検証を無効化する の各変異で対応するテストが失敗する)
+
+実機確認の結果:
+
+- 接続先は sora-moq の local clone の dev relay (`_build/dev/rel/sora_moq/bin/sora_moq foreground`、`moqt://127.0.0.1:4433`) を使った
+- 正常系: 無改変の publisher (`--fake-capture-device`) と subscriber を接続し、subscriber が video 645 フレーム / audio 1207 チャンクを再生できることを確認した
+- 異常系: publisher の `examples/moqt-publisher/src/stream_writer.rs` の `write_object` を一時的に `Some(vec![0x07, 0x09, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05])` (宣言長 5 の Video Frame Marking) へ差し替えてビルドし、ソースは元に戻したうえでその binary を実行した
+  - subscriber 側は次のログを出し、`Pipeline stopped: 1 streams received` を経て exit code 0 で終了した。
+    `Failed to send GOAWAY` の警告は出ておらず、自側終了時の後始末スキップが機能している
+    - `WARN moqt_subscriber::pipeline: Closing session on LOC property error: 0x6 Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-04 §2.3.2.2)`
+    - `INFO moqt_example_transport::moqt_client: Session closed with code 0x6 Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-04 §2.3.2.2)`
+    - `WARN moqt_subscriber::pipeline: Session closed: 0x6 Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-04 §2.3.2.2)`
+    - `WARN moqt_example_transport::moqt_client: Failed to accept peer bidi stream: QUIC error: The connection was closed on the application level with error application::Error(6) by the local endpoint`
+  - relay 側 (peer の観測): `INFO MOQT transport closed: {connection_closed,6,<<>>}` を記録した。QUIC の CONNECTION_CLOSE が application error code 6 (`KEY_VALUE_FORMATTING_ERROR`) で送出されたことを peer 側からも確認できる
+- publisher は relay との接続を維持したままだった。relay が間に入る構成では下流 (subscriber) の close は上流 (publisher) へ伝播しないためである (issue の完了条件にある「publisher 側が接続クローズで終了する」は publisher と subscriber が直接接続する構成を想定した記述であり、relay 経由の本確認では観測されない)
+- 確認後は publisher の一時改変を revert し、起動した relay も停止した
