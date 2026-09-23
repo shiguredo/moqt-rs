@@ -1,7 +1,7 @@
 # renderGroup の targetLatency / buffers の「欠如」を不一致として拒否しない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-23
 - Branch: feature/fix-msf-render-group-missing-value
 - Polished: 2026-09-22
 
@@ -64,3 +64,58 @@ targetLatency を消費する subscriber 側の扱い (省略時に何を再生�
   ただし decode 経路は `decode_track` が `isLive=false` の `targetLatency` / `buffers` を `None` に正規化するため、この 2 テストは変更後の「省略を比較しない」規則だけでも通る。
   そのため isLive による除外そのものは正規化を通らない経路で固定する。手組みの `MsfCatalog` (`is_live=false` かつ別の値を持つ `MsfTrack` を同一 group に置く) を `MsfCatalogDocument::encode` するテスト、または `apply_delta` に同じ `MsfTrack` を渡すテストを追加すること
 - `make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ること
+
+## 解決方法
+
+`src/msf.rs` の `validate_group_target_latency` / `validate_group_buffers` を、グループ内で宣言された値だけを比較するよう修正した。
+
+- 比較用の map を `HashMap<u64, Option<u64>>` / `HashMap<u64, Option<MsfBuffers>>` から `HashMap<u64, u64>` / `HashMap<u64, MsfBuffers>` に変更し、省略 (`None`) のトラックは比較に加えない
+- `isLive=false` のトラックを比較対象外とする既存の扱いは維持する
+- 変更は共有ヘルパーの内部で行うため、decode (`decode_full_catalog`)、encode (`validate_full_catalog_for_encode`)、delta 適用後 (`MsfCatalog::validate_after_delta`) の 3 経路に自動的に反映される
+- `MsfBuffers` 内部の `target` / `min` / `max` の省略規則と、`validate_delta_for_encode` が group 検証を行わない現状は変更しない
+- `apply_delta` の `# Errors`、`validate_after_delta` / `comparable_attributes` のコメント、`docs/IMPLEMENTATION.md` の該当記述を新しい規則に追随させた
+
+追加・更新したテスト:
+
+- `tests/test_msf/error_cases.rs`
+  - decode 受理:
+    - `render_group_target_latency_omitted_accepted`
+    - `alt_group_target_latency_omitted_accepted`
+    - `render_group_buffers_omitted_accepted`
+    - `alt_group_buffers_omitted_accepted`
+    - `render_group_target_latency_and_buffers_split_accepted`
+  - decode 拒否:
+    - `render_group_omitted_between_different_target_latency_rejected`
+    - `render_group_omitted_between_different_buffers_rejected`
+  - encode 受理:
+    - `encode_full_group_target_latency_omitted_accepted`
+    - `encode_full_group_buffers_omitted_accepted`
+    - `encode_full_alt_group_target_latency_omitted_accepted`
+    - `encode_full_alt_group_buffers_omitted_accepted`
+    - `encode_full_publish_tracks_group_target_latency_omitted_accepted`
+    - `encode_full_without_group_different_target_latency_accepted`
+  - encode 拒否:
+    - `encode_full_group_omitted_between_different_target_latency_rejected`
+    - `encode_full_group_omitted_between_different_buffers_rejected`
+    - `encode_full_group_render_conflict_rejected`
+    - `encode_full_group_alt_conflict_rejected`
+    - `encode_full_group_zero_target_latency_mismatch_rejected`
+    - `encode_full_group_zero_buffers_mismatch_rejected`
+  - isLive 除外 (decode の正規化を通らない encode 経路で固定):
+    - `encode_full_group_target_latency_is_live_false_ignored`
+    - `encode_full_group_buffers_is_live_false_ignored`
+  - `render_group_mixed_live_ignored_for_buffers` / `render_group_mixed_live_ignored_for_target_latency` のコメントを、固定対象が実態と合うよう修正
+- `tests/test_msf/delta_apply.rs`
+  - 受理:
+    - `apply_delta_group_target_latency_omitted_accepted`
+    - `apply_delta_group_buffers_omitted_accepted`
+    - `apply_delta_alt_group_target_latency_omitted_accepted`
+    - `apply_delta_alt_group_buffers_omitted_accepted`
+  - 拒否:
+    - `apply_delta_group_omitted_between_different_target_latency_rejected`
+    - `apply_delta_group_omitted_between_different_buffers_rejected`
+    - `apply_delta_alt_group_omitted_between_different_target_latency_rejected`
+    - `apply_delta_alt_group_omitted_between_different_buffers_rejected`
+  - `apply_delta_clone_inherited_group_conflict_rejected` / `apply_delta_readd_omitted_target_latency_rejected`
+
+`make test` (`cargo test --workspace`) と `make clippy` と `make fmt` が通ることを確認した。
