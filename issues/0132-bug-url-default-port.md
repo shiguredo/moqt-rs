@@ -1,7 +1,7 @@
 # ポート省略 URL で既定ポート 443 を使う
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-24
 - Branch: feature/fix-url-default-port
 - Polished: 2026-09-22
 
@@ -58,3 +58,43 @@ draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) は、URI でポ�
   3. `moqt-subscriber --url moqt://127.0.0.1/app` でも同じ確認を行う
   4. ホスト名経路は `moqt://localhost/app` を指定し、ログの解決後アドレスが `127.0.0.1:443` または `[::1]:443` になることを確認する (接続の成否は relay の待ち受けアドレスに依存する)
 - `Transport::WebTransport` 分岐も同じアドレス決定関数を通ること。WebTransport 経路の実接続確認は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) (RESET_STREAM_AT 非対応) の解消後に relay の応答次第で行う。
+
+## 解決方法
+
+`examples/moqt-transport/src/lib.rs` に authority から host と port を取り出す純関数 (`authority_parts`) と、接続先を解決する関数 (`resolve_socket_addr`) を追加した。
+ポートが省略された authority は draft-ietf-moq-transport-21 §6.1.2 の既定ポート 443 を使う。
+ホスト名は `tokio::net::lookup_host` で解決して最初の結果を使い、解決したアドレスを接続前に `Resolved {authority} to {addr}` としてログに出す。
+
+`quic::connect` は authority ではなく解決済みの `SocketAddr` を受け取るようにし、publisher / subscriber の pipeline は transport 分岐の前に 1 回だけ解決する。
+QUIC と WebTransport の両方が同じ `SocketAddr` を使う。
+接続先のアドレスファミリに合わせてローカルソケットを選ぶようにし (`local_bind_addr`)、IPv6 に解決された接続先へも送信できるようにした。
+SETUP の AUTHORITY option と WebTransport の `:authority` には URL の authority をそのまま渡す。
+
+次の authority は `invalid server address` として拒否する。
+
+- host が空 (`""` / `:4443`)
+- IPv6 リテラルの閉じ括弧が無い (`[::1`)、または `]` の直後がポート区切りでない (`[::1]x`)
+- ブラケット無しの IPv6 リテラル (`::1` / `2001:db8::1`)
+- ポートの区切りがあるのに数字が続かない (`127.0.0.1:` / `127.0.0.1:abc` / `127.0.0.1:65536`)
+
+authority の解釈失敗と名前解決失敗は `TransportError::InvalidAuthority` / `TransportError::ResolutionFailed` として返し、利用者向けの表示に `QUIC:` を付けない。
+
+実機で確認した内容:
+
+- `moqt://sora-moq.shiguredo.co.jp/app` (ポート省略) で publisher / subscriber の両方が既定ポート 443 に接続し、SETUP が成立した。
+  名前解決は `[2600:3c18::2000:8cff:fed9:2055]:443` になり、subscriber は SUBSCRIBE_OK の後に 700 フレームを描画した。
+  IPv6 に解決された接続先へ送信できたのは `local_bind_addr` の効果である
+- 443 を待ち受ける relay をこの環境 (非 root) では用意できないため、ローカルの relay (sora-moq) を 4433 で待ち受けて
+  `moqt://127.0.0.1:4433/app` の SETUP 成立も確認した
+- `moqt://[::1]:5556/app` の QUIC Initial が IPv6 の listener に到達することを確認した (修正前は 1 パケットも届かなかった)
+- 不正な authority は `Fatal: invalid server address '::1': IPv6 literal must be enclosed in '[' and ']'` のように表示される
+
+`examples/README.md` の URL スキーム節と実行例、publisher / subscriber の `--url` ヘルプの文字列、`CHANGES.md` を実態に合わせて更新した。両バイナリの `--help` がヘルプを表示しない既存の不具合は `issues/0151-bug-moqt-example-help-flag.md` で扱う。
+
+追加したテスト (lib ターゲットは 41 件が成功):
+
+- `examples/moqt-transport/src/lib.rs` に 21 件
+  - 純関数: 443 の補完 (IPv4 / IPv6 / ホスト名)、明示ポートの維持、`parse_url` との連結、拒否条件 6 件
+  - 解決関数: IPv4 / IPv6 リテラルと `localhost` の解決、不正 authority の拒否
+  - `local_bind_addr` のファミリ選択、`TransportError` の表示に `QUIC:` を付けないこと
+- `examples/moqt-publisher/src/error.rs` と `examples/moqt-subscriber/src/error.rs` に `From<TransportError>` の写像テスト (各 2 件)
