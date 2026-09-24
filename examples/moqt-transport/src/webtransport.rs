@@ -45,7 +45,9 @@ pub struct ClientConfig {
     pub remote_addr: SocketAddr,
     /// SNI / 証明書検証に使うサーバー名 (ポートを含まない)
     pub server_name: String,
-    /// WebTransport CONNECT の `:authority` に使う値 (ポートを含む)
+    /// WebTransport CONNECT の `:authority` に使う値 (URL の authority)
+    ///
+    /// URL でポートを省略した場合はポートを含まない。
     pub authority: String,
     pub ca_cert_pem: Option<String>,
     pub disable_cert_validation: bool,
@@ -75,9 +77,9 @@ impl ClientConfig {
 
     /// WebTransport CONNECT の `:authority` を設定する
     ///
-    /// draft-ietf-webtrans-http3-16 §3.2 は `:authority` に target URI の authority
-    /// (非デフォルトポートを含む) を設定する MUST を定める。SNI 用の `server_name` とは
-    /// 別に、ポート込みの authority を指定するために使う。
+    /// draft-ietf-webtrans-http3-16 §3.2 は拡張 CONNECT で `:authority` と `:path` を
+    /// 設定する MUST を定める。SNI 用の `server_name` とは別に、target URI の authority を
+    /// URL の表記どおり (ポートの有無も含めて) 指定するために使う。
     pub fn authority(mut self, authority: impl Into<String>) -> Self {
         self.authority = authority.into();
         self
@@ -232,7 +234,7 @@ impl WtClient {
             s2n_quic::Client::builder()
                 .with_tls(tls)
                 .map_err(TransportError::transport)?
-                .with_io("0.0.0.0:0")
+                .with_io(crate::local_bind_addr(config.remote_addr))
                 .map_err(TransportError::transport)?
                 .with_datagram(datagram_endpoint)
                 .map_err(TransportError::transport)?
@@ -242,7 +244,7 @@ impl WtClient {
             s2n_quic::Client::builder()
                 .with_tls(ca_pem.as_str())
                 .map_err(TransportError::transport)?
-                .with_io("0.0.0.0:0")
+                .with_io(crate::local_bind_addr(config.remote_addr))
                 .map_err(TransportError::transport)?
                 .with_datagram(datagram_endpoint)
                 .map_err(TransportError::transport)?

@@ -307,6 +307,16 @@
   - `signlanguage` で codec / bitrate を欠くトラックと、role と codec の判定が食い違うために片方の要求だけを満たすトラックも拒否される。samplerate / channelConfig のエラーメッセージは要求の根拠 (`role '...'` / `codec '...'`) を含む形になる
   - @voluntas
 
+- [FIX] ポート省略 URL で既定ポート 443 を使い、ホスト名を名前解決する
+  - draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) はポート省略時に既定ポート 443 を使うと定めるが、authority を `SocketAddr` として直接パースしていたため `moqt://relay.example.com/app` のような URL で必ず接続に失敗していた
+  - `moqt-example-transport` に authority から host と port を取り出す純関数と、IP リテラル / ホスト名を解決する関数を追加し、QUIC と WebTransport の接続先決定を 1 箇所に集約する。IPv6 リテラルは接続先文字列を `[` `]` で囲む
+  - 接続先のアドレスファミリに合わせてローカルソケットを選ぶようにし、IPv6 に解決された接続先へも送信できるようにする
+  - authority の host が空、ブラケット無しの IPv6 リテラル、数字でないポートは `invalid server address` として拒否する
+  - authority の解釈失敗と名前解決失敗はトランスポート種別に依存しないため、利用者向けの表示から `QUIC:` が外れる
+  - 解決したアドレスを接続前にログに出す。SETUP の AUTHORITY option と WebTransport の `:authority` には URL の authority をそのまま渡し、省略されたポートは補わない
+  - 従来は接続できなかったポート省略 URL とホスト名の URL で接続できるようになる (受信 / 送信挙動の変更)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

@@ -80,7 +80,7 @@ pub fn parse() -> noargs::Result<Option<Config>> {
     let url: ServerUrl = noargs::opt("url")
         .short('u')
         .ty("URL")
-        .doc("Server URL (moqt://host:port/path or https://host:port/path)")
+        .doc("Server URL (moqt://host[:port]/path or https://host[:port]/path)")
         .take(&mut args)
         .then(|o| {
             let v = o.value();

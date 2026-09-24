@@ -92,8 +92,10 @@ fn packet_diag_enabled() -> bool {
 }
 
 /// QUIC クライアント接続を確立する
+///
+/// `socket_addr` は呼び出し側が [`crate::resolve_socket_addr`] で解決した接続先を使う。
 pub async fn connect(
-    authority: &str,
+    socket_addr: std::net::SocketAddr,
     server_name: &str,
     cert_path: Option<&str>,
 ) -> Result<Connection> {
@@ -119,7 +121,7 @@ pub async fn connect(
     let client = Client::builder()
         .with_tls(tls)
         .map_err(|e| TransportError::Quic(format!("TLS configuration failed: {e}")))?
-        .with_io("0.0.0.0:0")
+        .with_io(crate::local_bind_addr(socket_addr))
         .map_err(|e| TransportError::Quic(format!("I/O binding failed: {e}")))?
         .with_datagram(datagram_endpoint)
         .map_err(|e| TransportError::Quic(format!("datagram provider failed: {e}")))?
@@ -130,17 +132,13 @@ pub async fn connect(
         .start()
         .map_err(|e| TransportError::Quic(format!("client start failed: {e}")))?;
 
-    let socket_addr: std::net::SocketAddr = authority
-        .parse()
-        .map_err(|e| TransportError::Quic(format!("invalid server address '{authority}': {e}")))?;
-
     let connect = Connect::new(socket_addr).with_server_name(server_name);
     let connection = client
         .connect(connect)
         .await
         .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
 
-    tracing::info!("Connected to {authority}");
+    tracing::info!("Connected to {socket_addr}");
     Ok(connection)
 }
 

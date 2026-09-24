@@ -41,6 +41,7 @@ use moqt_example_transport::moqt_client::{
     ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome,
 };
 use moqt_example_transport::quic;
+use moqt_example_transport::resolve_socket_addr;
 
 /// 映像キャプチャの寿命管理
 ///
@@ -104,11 +105,15 @@ pub async fn run(
     // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
     let server_name = host_from_authority(&config.url.authority);
 
+    // 接続先の解決は QUIC / WebTransport で共通にする。ポートが省略された URL は
+    // 既定ポート 443 を使い、ホスト名は名前解決する (draft-ietf-moq-transport-21 §6.1.2)。
+    let socket_addr = resolve_socket_addr(&config.url.authority).await?;
+
     // 1. 接続確立と SETUP ハンドシェイク
     let mut client = match config.url.transport {
         Transport::Quic => {
             let connection =
-                quic::connect(&config.url.authority, server_name, config.cert.as_deref()).await?;
+                quic::connect(socket_addr, server_name, config.cert.as_deref()).await?;
             let (client, _acceptor) = MoqtClient::establish_quic(
                 connection,
                 &config.url.path,
@@ -120,15 +125,9 @@ pub async fn run(
             client
         }
         Transport::WebTransport => {
-            let socket_addr: std::net::SocketAddr = config.url.authority.parse().map_err(|e| {
-                Error::Other(format!(
-                    "invalid server address '{}': {e}",
-                    config.url.authority
-                ))
-            })?;
             let mut client_config =
                 moqt_example_transport::webtransport::ClientConfig::new(socket_addr, server_name)
-                    // :authority はポート込みの target URI authority を使う (draft-ietf-webtrans-http3-16 §3.2)
+                    // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
                     .authority(&config.url.authority)
                     .enable_webtransport(
                         shiguredo_http3::webtransport::Settings::new()

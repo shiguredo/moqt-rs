@@ -9,6 +9,10 @@
 pub enum TransportError {
     /// QUIC 接続 / ストリームのエラー (詳細メッセージ付き)
     Quic(String),
+    /// 接続先 URL の authority を解釈できなかった (トランスポート種別に依存しない)
+    InvalidAuthority(String),
+    /// 接続先の名前解決に失敗した (トランスポート種別に依存しない)
+    ResolutionFailed(String),
     /// s2n-quic トランスポートエラー
     Transport(Box<dyn std::error::Error + Send + Sync>),
     /// HTTP/3 プロトコルエラー
@@ -37,6 +41,8 @@ impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Quic(msg) => write!(f, "QUIC error: {msg}"),
+            // トランスポート種別に依存しない失敗のため `QUIC:` を付けない (メッセージは生成側で組み立てる)
+            Self::InvalidAuthority(msg) | Self::ResolutionFailed(msg) => write!(f, "{msg}"),
             Self::Transport(e) => write!(f, "transport error: {e}"),
             Self::Http3(e) => write!(f, "http3 error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),

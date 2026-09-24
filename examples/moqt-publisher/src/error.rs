@@ -101,15 +101,63 @@ impl From<std::io::Error> for Error {
 
 impl From<moqt_example_transport::error::TransportError> for Error {
     fn from(e: moqt_example_transport::error::TransportError) -> Self {
-        // QUIC 由来のエラーは app の Quic variant に振り分け、ログ表示を共通化前と等価に保つ。
-        // その他のトランスポートエラーは WebTransport variant に畳む。
+        // Quic だけを app の Quic variant に振り分ける。トランスポート種別に依存しない
+        // 失敗 (Internal / InvalidAuthority / ResolutionFailed) は Other にして
+        // `QUIC:` を付けない。それ以外は WebTransport variant に畳む。
         match e {
             moqt_example_transport::error::TransportError::Quic(msg) => Self::Quic(msg),
             // 統合した MoqtClient 由来の内部エラーは従来の Other 表示に合わせる
             moqt_example_transport::error::TransportError::Internal(msg) => Self::Other(msg),
+            // catch-all に落とすと WebTransport variant になり `WebTransport:` が付くため明示する
+            moqt_example_transport::error::TransportError::InvalidAuthority(msg)
+            | moqt_example_transport::error::TransportError::ResolutionFailed(msg) => {
+                Self::Other(msg)
+            }
             other => Self::WebTransport(other.to_string()),
         }
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// publisher と subscriber で表示方針を揃えるため、もう一方の error.rs と同じテストを持つ
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moqt_example_transport::error::TransportError;
+
+    /// トランスポート種別に依存しない失敗は `Other` になり `QUIC:` が付かない
+    #[test]
+    fn transport_error_mapping_omits_quic_prefix() {
+        let cases = [
+            TransportError::InvalidAuthority(
+                "invalid server address ':4443': empty host".to_string(),
+            ),
+            TransportError::ResolutionFailed(
+                "failed to resolve 'relay.invalid': no address".to_string(),
+            ),
+        ];
+        for case in cases {
+            let err = Error::from(case);
+            assert!(
+                matches!(err, Error::Other(_)),
+                "Other に振り分けられること: {err}"
+            );
+            assert!(
+                !err.to_string().contains("QUIC"),
+                "QUIC を付けないこと: {err}"
+            );
+        }
+    }
+
+    /// QUIC 由来のエラーは `Quic` variant のまま `QUIC:` を付ける
+    #[test]
+    fn transport_error_mapping_keeps_quic_prefix() {
+        let err = Error::from(TransportError::Quic("connection failed".to_string()));
+        assert!(
+            matches!(err, Error::Quic(_)),
+            "Quic に振り分けられること: {err}"
+        );
+        assert_eq!(err.to_string(), "QUIC: connection failed");
+    }
+}

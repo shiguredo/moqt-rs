@@ -33,7 +33,7 @@ cargo run -p moqt-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
 cargo run -p moqt-subscriber -- --url moqt://127.0.0.1:4443
 ```
 
-`--url https://host:port/path` を指定すると WebTransport over HTTP/3 で接続する。
+`--url https://host[:port]/path` を指定すると WebTransport over HTTP/3 で接続する。
 
 ## CLI オプション
 
@@ -73,10 +73,12 @@ cargo run -p moqt-subscriber -- --url moqt://127.0.0.1:4443
 
 ## URL スキーム
 
-- `moqt://host:port/path`：QUIC 直接接続
-- `https://host:port/path`：WebTransport over HTTP/3
+- `moqt://host[:port]/path`：QUIC 直接接続
+- `https://host[:port]/path`：WebTransport over HTTP/3
 
-現状のサンプルは `host` に IP リテラル (例：`127.0.0.1`) のみを受け付ける。DNS 名は名前解決を行わないため接続できない。
+`port` を省略すると 443 を使う (draft-ietf-moq-transport-21 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
+
+DNS 名が複数のアドレスに解決される場合は、先頭のアドレスに接続する。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。
 
