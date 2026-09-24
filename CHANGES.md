@@ -317,6 +317,15 @@
   - 従来は接続できなかったポート省略 URL とホスト名の URL で接続できるようになる (受信 / 送信挙動の変更)
   - @voluntas
 
+- [FIX] URI fragment を `:path` / PATH option に含めない
+  - draft-ietf-moq-transport-21 §6.1.1 (Fragment Identifiers) は fragment をサーバーへ送信せずクライアントがローカルで処理すると定め、RFC 9114 §4.3.1 は `:path` を path と query のみとする。`#` 以降を path に含めたまま接続していたため、fragment 付き URL が fragment の無い URL と同じ資源を指せなかった
+  - `parse_url` が `#` 以降を分離し、SETUP の PATH option と WebTransport の `:path` には fragment を含めない。example は fragment の値を解釈しない
+  - fragment は `<type>:<value>` として `ServerUrl::fragment` に保持する。`:` を含まない fragment、空または ASCII 小文字 / 数字 / ハイフン以外を含む fragment type、fragment 内の 2 個目の `#` (RFC 3986 §3.5 で `%23` が必要) は `parse_url` のエラーになる
+  - fragment identifier の規則は draft-ietf-moq-transport-21 §6.2.1 が WebTransport の https URI を moqt URI の scheme 置換と定め、§16.2 (Media Type Registration) が application/moqt に §6.1.1 を適用すると定めるため、moqt:// と https:// のどちらも同じ規則で扱う
+  - RFC 3986 §3.1 に従い scheme の比較を大文字小文字非区別にする (`MOQT://` / `HTTPS://` を受理する)。正規化するのは scheme だけで、authority / path / query / fragment は入力の文字列を保持する
+  - fragment 付き URL はサーバーへ fragment を送らなくなり、大文字 scheme を受理するようになる (受信 / 送信挙動の変更)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

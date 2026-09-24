@@ -82,6 +82,11 @@ DNS 名が複数のアドレスに解決される場合は、先頭のアドレ�
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。
 
+fragment (`#type:value`) は draft-ietf-moq-transport-21 §6.1.1 に従いサーバーへ送信せず、SETUP の PATH option と WebTransport の `:path` には含めない。§6.2.1 が WebTransport の https:// URI を moqt URI の scheme 置換と定め、§16.2 が application/moqt の fragment identifier を同節に従わせるため、moqt:// と https:// のどちらも同じ規則で扱う。
+`type` は ASCII 小文字 / 数字 / ハイフンに限り、`:` を含まない fragment、空または規則に一致しない `type`、fragment 内の 2 個目の `#` (RFC 3986 §3.5 により `%23` が必要) はエラーになる。example は fragment の値を解釈しない。
+
+scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT://` / `HTTPS://` も受理する)。authority / path / query / fragment は入力の大文字小文字をそのまま使う。
+
 ## TLS 証明書
 
 publisher / subscriber は `--cert` を省略すると証明書検証をスキップする。
