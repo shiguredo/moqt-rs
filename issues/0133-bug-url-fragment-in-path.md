@@ -1,7 +1,7 @@
 # URI fragment を :path / PATH に含めない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-24
 - Branch: feature/fix-url-fragment-in-path
 - Polished: 2026-09-22
 
@@ -71,3 +71,48 @@ RFC 9114 §4.3.1 も `:path` を path と query のみと規定する。
 - 大文字 scheme (`MOQT://127.0.0.1:4443/path` / `HTTPS://127.0.0.1:4443/path`) が受理され、小文字 scheme と同じ `Transport` と authority / path に解決されること
 - scheme 以外の成分が小文字化されないこと (`MOQT://127.0.0.1:4443/Path?X=Y` の path が `/Path?X=Y` のまま)
 - fragment を持つ URL と持たない URL で、`parse_url` の authority と path が一致すること (fragment の有無が MOQT の経路に影響しないこと)
+
+## 解決方法
+
+`examples/moqt-transport/src/lib.rs` の `parse_url` で `#` 以降を fragment として分離し、`ServerUrl` に `fragment: Option<MoqtFragment>` を追加した。
+fragment は `<type>:<value>` を `type` と `value` に分けた型で保持し、`#` を含む生文字列のまま保持しない。
+分離後の path が SETUP の PATH option と WebTransport の `:path` に渡るため、fragment が接続経路に混入しなくなる。
+
+fragment の扱いは次のとおり。
+
+- `:` を含まない fragment と空の `type` は拒否する (draft-ietf-moq-transport-21 §6.1.1 の `:` の MUST)
+- `type` が ASCII 小文字 / 数字 / ハイフン以外を含む場合は拒否する (同節の文字種の MUST)
+- fragment 内の 2 個目の `#` は拒否する (RFC 3986 §3.5 の `fragment = *( pchar / "/" / "?" )` は `#` を含まず `%23` が必要)
+- 数字とハイフンの `type` (`#a-b:value` / `#1:value`) と空の `value` (`#type:`) は受理する
+- `https://` の fragment も同じ規則で検証する。§6.2.1 が WebTransport の https URI を moqt URI の scheme 置換と定め、
+  §16.2 が application/moqt の fragment を §6.1.1 に従わせ、RFC 3986 §3.5 が fragment の意味は scheme に依存しないと定めるため
+
+authority の有無は fragment の解釈より先に判定し、`moqt://` / `https:///app` / `moqt://?x=1#t:v` は authority のエラーとして報告する。
+`parse_url` のエラーメッセージはすべて URL を含み、原因を特定できる。
+
+scheme の比較は RFC 3986 §3.1 に従い大文字小文字非区別にした (`MOQT://` / `HTTPS://` を受理する)。
+正規化するのは scheme だけで、authority / path / query / fragment は入力の文字列のまま保持する。
+
+実機で確認した内容:
+
+- ローカルの relay (sora-moq、4433) に対し `moqt://127.0.0.1:4433/app#type:value` の publisher と
+  `MOQT://127.0.0.1:4433/app?x=1#type:value` の subscriber が接続し、SETUP と SUBSCRIBE_OK が成立して 200 フレームを描画した
+- 不正な fragment は起動時に拒否される
+  - `moqt://127.0.0.1:4433/app#a:b#c:d` は `invalid moqt URI fragment: ... ('#' inside a fragment must be percent-encoded)`
+  - `moqt://127.0.0.1:4433/app#` は `invalid moqt URI fragment: ... (must be '<type>:<value>')`
+  - `https://127.0.0.1:4433/app#section-2` は `invalid moqt URI fragment: ... (must be '<type>:<value>')`
+- WebTransport の `:path` は実機で確認できなかった。ローカルの relay への WebTransport 接続が
+  `webtransport setup error: reset_stream_at transport parameter not supported` で失敗するため
+  (`issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` で扱う)。https の分岐は `parse_url` の単体テストで担保する
+
+`examples/README.md` の URL スキーム節、publisher / subscriber の `--url` ヘルプ、`CHANGES.md` を更新した。
+library の `msf::uri::parse_msf_uri` は `msf:` fragment 専用で `msf:` 前置を必須とするため再利用していない。
+
+追加したテスト (`moqt-example-transport` の lib ターゲットは 41 件から 64 件になった):
+
+- `examples/moqt-transport/src/lib.rs` に 23 件
+  - fragment の分離: path / query / authority / https / IPv6 リテラル / 大文字 scheme
+  - `SetupOptions::path()` と SETUP のエンコード結果に `#` が入らないこと
+  - `type` と `value` の分離、空の `value`、数字とハイフンの `type`
+  - 拒否: `:` 無し、空の `type`、文字種違反 (`.` と `_` を含む)、fragment 内の 2 個目の `#`、空 authority
+    (メッセージの完全一致で URL の含有も固定する)
