@@ -1,7 +1,7 @@
 # WebTransport の reset / STOP_SENDING でアプリケーションエラーコードを remap する
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-24
 - Branch: feature/fix-webtransport-error-code-remap
 - Polished: 2026-09-22
 
@@ -79,3 +79,58 @@ draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は、WebTransport �
 - 送信の 2 サイト (`WtSendStream::reset` / `WtRecvStream::stop_sending`) は `s2n_quic` の I/O ハンドルを保持し、ハンドルを生成するには接続が必要なため、配線そのものを自動テストで固定できない。
   remap の経路を `moqt_application_error` の 1 本に集約したうえで配線はレビューで確認する
 - 実接続での send / recv の往復確認は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消後に行う (0135〜0137 と同じ扱い)
+
+## 解決方法
+
+`examples/moqt-transport/src/webtransport.rs` に WebTransport のエラーコード変換を追加し、
+`WtSendStream::reset` / `WtRecvStream::stop_sending` / `WtRecvStream::recv_chunk` から通るようにした。
+
+送信は `shiguredo_http3::webtransport::ApplicationErrorCode::to_http3_code` で remap した値を
+`s2n_quic::application::Error::new` に渡す。remap と s2n-quic のエラー構築は
+`fn moqt_application_error(error_code: u64) -> Result<s2n_quic::application::Error>` に閉じ、
+生の `Error::new` をこのモジュールの変換関数以外から呼ばない。
+
+受信は `fn wt_recv_end(error: s2n_quic::stream::Error) -> Result<RecvChunk>` がエラー分岐を担い、
+`RESET_STREAM` の HTTP/3 コードを `fn wt_reset_error_code(http3_code: u64) -> u64` で MOQT のコードへ戻し、
+`fn wt_reset_stream_end(http3_code: u64) -> RequestStreamEnd` が `RequestStreamEnd::Reset` を組み立てる。
+`from_http3_code` が `None` を返す値 (WT_APPLICATION_ERROR の範囲外と予約コードポイント) は wire の値をそのまま入れる。
+
+変換の詳細:
+
+- §4.4 のアンカーは 0x00000000 が 0x52e4a40fa8db、0xffffffff が 0x52e5ac983162 で、テストでリテラル固定した
+- 予約コードポイント (0x1f * N + 0x21) は `is_application_error` が範囲内と判定するため、
+  `wt_reset_error_code` は `is_application_error` で予約と範囲外を区別して別の warn を出す
+  - 範囲外: `RESET_STREAM received with an HTTP/3 error code outside the WebTransport application error range: {http3_code:#x}`
+  - 予約: `RESET_STREAM received with a reserved HTTP/3 error code point: {http3_code:#x}`
+- 32 ビットに収まらない MOQT のコードは切り捨てず `internal error` にする。§4.4 が WebTransport の
+  アプリケーションエラーコードを 32 ビットに限るため、§13 (Grease) の greasing 値
+  (0x7f * N + 0x9D、`0x9D, 0x11C, ..., 0x3fffffffffffffde`) のうち 32 ビットを超えるものは WebTransport 経路では送れない。
+  2^32 以上 2^62 未満の値は従来 remap せず wire に載っていたため、この防御は挙動変更になる
+- `RequestStreamEnd::Reset` は `error_code: u64` を必須で持ち「アプリケーションエラーコード無し」を表せないため、
+  §4.4 の SHOULD (no application error code として届ける) には従わず wire の値を入れる。
+  `Option<u64>` への型変更は `SessionEvent` / `TerminationReason` の公開 API とその構築サイトに波及するため別途対応になる
+- peer から受信する STOP_SENDING のコード変換は対象外。s2n-quic は受信した STOP_SENDING を送信側の
+  `StreamError::StreamReset` に変換するが、example はこの経路で MOQT のコードへ戻さない
+- QUIC 経路 (`moqt://`) は QUIC のコード空間のため remap しない (`examples/moqt-transport/src/transport.rs` は無変更)
+
+`CHANGES.md` に [FIX] を追加した。
+
+追加したテスト (`moqt-example-transport` の lib ターゲットは 64 件から 76 件になった):
+
+- 登録コード 0x0 / 0x1 / 0x12 と境界値 0x1e / 0x1f / 0xffffffff の往復、0x1e の remap 結果が予約コードポイントでないこと
+- §4.4 のアンカー (0x00000000 / 0xffffffff と 0x52e4a40fa8db / 0x52e5ac983162) を両方向でリテラル固定
+- 予約コードポイントが `None` になり、0x0-0x1000 の remap 結果が予約コードポイントにならないこと
+- WT_APPLICATION_ERROR の範囲外のコード (WT_SESSION_GONE / 0x12345678 / 範囲の直前直後) が `None` になること
+- 範囲外と予約で warn の文言が異なり、どちらも生値を含むこと (ログを記録するサブスクライバで確認)
+- `moqt_application_error` が remap 後の値で s2n-quic のエラーを作ること、u32::MAX + 1 と u64::MAX がエラーになること
+- `wt_recv_end` が `RESET_STREAM` を remap 後の値を持つ `RequestStreamEnd::Reset` にし、他のストリームエラーはエラーのまま返すこと
+
+送信の 2 サイト (`WtSendStream::reset` / `WtRecvStream::stop_sending`) は s2n-quic の I/O ハンドルを保持し、
+ハンドルを生成するには接続が必要なため配線を自動テストで固定できない。remap の経路を 1 関数に集約したうえで
+レビューで確認し、`recv_chunk` が `wt_recv_end` を通ることは clippy の dead_code 検査 (`-D warnings`) で守る。
+実接続での send / recv の往復確認は `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` の
+解消後に行う (ローカル relay への WebTransport 接続が `reset_stream_at transport parameter not supported` で失敗するため)。
+
+検証は `cargo test --workspace` (42 テストスイート)、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`cargo check --manifest-path fuzz/Cargo.toml`、`RUSTDOCFLAGS="-D warnings" cargo doc`、
+`prek run --all-files` がすべて成功した。差分レビューは 2 レビュアーで 3 周行い、致命的 0 件 / 重要 0 件になった。
