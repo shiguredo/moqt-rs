@@ -326,6 +326,14 @@
   - fragment 付き URL はサーバーへ fragment を送らなくなり、大文字 scheme を受理するようになる (受信 / 送信挙動の変更)
   - @voluntas
 
+- [FIX] WebTransport の reset / STOP_SENDING でアプリケーションエラーコードを remap する
+  - draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は、WebTransport のアプリケーションエラーコード (0x00000000-0xffffffff) を WT_APPLICATION_ERROR の範囲 (0x52e4a40fa8db-0x52e5ac983162) へ remap する MUST を定める。MOQT のエラーコードをそのまま RESET_STREAM / STOP_SENDING に載せていたため、HTTP/3 のコード空間と衝突して reset の理由が peer に正しく伝わらなかった
+  - 送信は `shiguredo_http3::webtransport::ApplicationErrorCode::to_http3_code` で remap した値を `s2n_quic::application::Error::new` に渡す。受信は `from_http3_code` で MOQT のコードへ戻して `RequestStreamEnd::Reset` に入れる
+  - 32 ビットに収まらない MOQT のエラーコードは切り捨てず `internal error` にする。MOQT §13 の greasing 値 (`0x7f * N + 0x9D`) には 32 ビットを超える値 (`0x100000000` 以上) があり、§4.4 が WebTransport のアプリケーションエラーコードを 32 ビットに限るため WebTransport 経路ではリセットを送れない (2^32 以上 2^62 未満の値は従来 remap せず wire に載っていたため挙動変更。公開 API は任意の `u64` を受け付ける)
+  - WT_APPLICATION_ERROR の範囲外の HTTP/3 コード (WT_SESSION_GONE などのプロトコルコード) と予約コードポイント (0x1f * N + 0x21) は remap せず、wire の値をそのまま `RequestStreamEnd::Reset` に入れて `WARN` ログに生値を残す。`RequestStreamEnd::Reset` に「アプリケーションエラーコード無し」を表す値が無いため
+  - QUIC 経路 (`moqt://`) は QUIC のコード空間のため remap しない
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
