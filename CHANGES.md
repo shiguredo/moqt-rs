@@ -458,3 +458,6 @@
   - `recv_subgroup_object` を「stream 状態の取得」「subgroup_id の解決」「帰属判定」「受理後の状態更新」に分割し、`IncomingDataStream::Subgroup` のフィールド列挙は `IncomingSubgroupStream` とアクセサへ寄せる
   - 挙動・公開 API・テストの期待値は変えない
   - @voluntas
+- [ADD] moqt-subscriber に `--audio-output-device` を追加し、`none` で音声を出力せずに受信とデコードだけを続ける
+  - プレイヤー (raw_player) がデフォルト出力デバイスしか開けないため、受理する値は `default` と `none` に限る
+  - @voluntas

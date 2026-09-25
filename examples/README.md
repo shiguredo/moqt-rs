@@ -70,6 +70,7 @@ cargo run -p moqt-subscriber -- --url moqt://127.0.0.1:4443
 | `--namespace` | | `kaki` | Track Namespace |
 | `--no-video` | | | 映像トラックの購読を無効化する |
 | `--no-audio` | | | 音声トラックの購読を無効化する |
+| `--audio-output-device` | | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
 
 ## URL スキーム
 

@@ -34,6 +34,10 @@ fn main() {
     let shutdown = tokio_utils::ShutdownController::new();
     let shutdown_monitor = shutdown.subscribe();
 
+    // 音声出力の指定はプレイヤー (メインスレッド) が使うため、config を
+    // tokio ランタイムへ move する前に取り出しておく
+    let audio_output_device = config.audio_output_device;
+
     // デコード済みフレーム用チャネル (映像 / 音声)
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<DecodedVideoFrame>();
     let (audio_tx, audio_rx) = std::sync::mpsc::channel::<DecodedAudioFrame>();
@@ -89,7 +93,7 @@ fn main() {
     });
 
     // メインスレッドで raw_player を動かす
-    if let Err(e) = run_raw_player(frame_rx, audio_rx, display_backlog) {
+    if let Err(e) = run_raw_player(frame_rx, audio_rx, display_backlog, audio_output_device) {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
     }
@@ -101,16 +105,30 @@ fn main() {
 /// raw_player はメインスレッドで動かし、MoQT 処理は別スレッドで実行する。
 ///
 /// SDL の初期化やウィンドウ・レンダラー作成に失敗する環境でも panic せず、`Error::Player` として失敗を返す。
+///
+/// `audio_output_device` が [`cli::AudioOutputDevice::None`] のときは SDL の音声出力デバイスを
+/// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。
 fn run_raw_player(
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
     audio_rx: std::sync::mpsc::Receiver<DecodedAudioFrame>,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    audio_output_device: cli::AudioOutputDevice,
 ) -> error::Result<()> {
     raw_player::init()?;
     tracing::info!("Player initialized, waiting for frames...");
 
     let mut video_player: Option<raw_player::VideoPlayer> = None;
-    let audio_player = raw_player::AudioPlayer::new();
+    // 音声出力を行わない指定では AudioPlayer を作らない。
+    // raw_player の AudioPlayer は生成時点ではデバイスを開かず play() で開くが、
+    // 生成自体を避けることで音声出力の経路へ一切入らないようにする。
+    let audio_player = match audio_output_device {
+        cli::AudioOutputDevice::Default => Some(raw_player::AudioPlayer::new()),
+        cli::AudioOutputDevice::None => {
+            tracing::info!("Audio output disabled, decoded audio is not played");
+            None
+        }
+    };
+    let audio_output_enabled = audio_player.is_some();
     let mut audio_started = false;
 
     // wall-clock PTS: 再生開始からの経過時間を映像 PTS として使用する
@@ -196,30 +214,38 @@ fn run_raw_player(
 
         match audio_rx.try_recv() {
             Ok(audio) => {
-                let pcm_bytes = pcm_i16_to_bytes(&audio.pcm);
-                if let Err(e) = audio_player.enqueue_audio(
-                    &pcm_bytes,
-                    audio.pts_us,
-                    audio.sample_rate as i32,
-                    audio.channels as i32,
-                    raw_player::AudioFormat::S16,
-                ) {
-                    tracing::warn!("Failed to enqueue audio chunk: {e}");
-                }
-                if !audio_started {
-                    if let Err(e) = audio_player.play() {
-                        tracing::warn!("Failed to start audio playback: {e}");
-                    } else {
-                        audio_started = true;
-                        tracing::info!("Audio playback started");
+                if let Some(audio_player) = audio_player.as_ref() {
+                    let pcm_bytes = pcm_i16_to_bytes(&audio.pcm);
+                    if let Err(e) = audio_player.enqueue_audio(
+                        &pcm_bytes,
+                        audio.pts_us,
+                        audio.sample_rate as i32,
+                        audio.channels as i32,
+                        raw_player::AudioFormat::S16,
+                    ) {
+                        tracing::warn!("Failed to enqueue audio chunk: {e}");
                     }
-                }
-                if let Err(e) = audio_player.process() {
-                    tracing::warn!("Failed to process audio queue: {e}");
+                    if !audio_started {
+                        if let Err(e) = audio_player.play() {
+                            tracing::warn!("Failed to start audio playback: {e}");
+                        } else {
+                            audio_started = true;
+                            tracing::info!("Audio playback started");
+                        }
+                    }
+                    if let Err(e) = audio_player.process() {
+                        tracing::warn!("Failed to process audio queue: {e}");
+                    }
                 }
                 audio_chunk_count += 1;
                 if audio_chunk_count.is_multiple_of(100) {
-                    tracing::info!("Played {audio_chunk_count} audio chunks");
+                    if audio_output_enabled {
+                        tracing::info!("Played {audio_chunk_count} audio chunks");
+                    } else {
+                        tracing::info!(
+                            "Decoded {audio_chunk_count} audio chunks (audio output disabled)"
+                        );
+                    }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
