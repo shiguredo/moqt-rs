@@ -1,7 +1,7 @@
 # moqt-subscriber に --audio-output-device を追加して音声出力を無効にできるようにする
 
 - Created: 2026-09-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/add-audio-output-device
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -29,3 +29,13 @@
 - 未対応の値がエラーになることが単体テストで固定されていること
 - `examples/README.md` にオプションが記載されていること
 - `cargo test --workspace` と `cargo clippy --all-targets` が通ること
+
+## 解決方法
+
+- `examples/moqt-subscriber/src/cli.rs` に `--audio-output-device` を追加した。`AudioOutputDevice` は `default` と `none` の 2 値だけを受理し、それ以外の値はエラーとして拒否する
+- `examples/moqt-subscriber/src/main.rs` の `run_raw_player` は、`none` のとき `raw_player::AudioPlayer` を生成せず音声トラックの受信とデコードだけを続け、チャンク数のログで出力の有無が分かるようにした
+- cli の値パースの単体テストを追加し、`examples/README.md` と `CHANGES.md` に追記した
+
+検証は `cargo fmt --all --check`、`cargo clippy -p moqt-subscriber --all-targets`、`cargo test --workspace` (moqt-subscriber は 35 件) が成功した。
+リレーへ接続し、`--audio-output-device none` では音声を出力せずに映像と音声の受信・デコードが継続すること、`default` では従来どおり出力されること、未対応の値がエラーになることを確認した (確認中にスピーカーへ音声は出力していない)。
+push 後の CI も success。
