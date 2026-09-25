@@ -160,6 +160,26 @@ doc = false
 name = "fuzz_subgroup_object_encode"
 path = "fuzz_targets/fuzz_subgroup_object_encode.rs"
 
+[[bin]]
+doc = false
+name = "fuzz_cbor_decode"
+path = "fuzz_targets/fuzz_cbor_decode.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_cbor_decode_all"
+path = "fuzz_targets/fuzz_cbor_decode_all.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_cbor_round_trip"
+path = "fuzz_targets/fuzz_cbor_round_trip.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_cbor_canonical"
+path = "fuzz_targets/fuzz_cbor_canonical.rs"
+
 [dependencies]
 # 構造化入力生成に使用 (Arbitrary derive)
 arbitrary = { version = "1.4", features = ["derive"] }

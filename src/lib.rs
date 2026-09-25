@@ -24,6 +24,8 @@ struct ReadmeDoctests;
 /// sans I/O なセッション状態機械 [`session::core::Session`] を提供する。
 /// [`session::core::Session`] は peer / endpoint 視点の protocol state を扱い、relay 全体の
 /// routing / fan-out / cache / policy は対象外とする。
+/// CBOR (RFC 8949) と CBOR Sequences (RFC 8742) のコーデック
+pub mod cbor;
 pub mod decoder;
 /// エラー型と終了コード定義 (draft-ietf-moq-transport-21 §16.11 (Error Codes))
 pub mod error;

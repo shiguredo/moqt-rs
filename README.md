@@ -35,6 +35,7 @@ MOQT / LOC / MSF の codec と、1 本の Transport Session に閉じたセッ�
   - I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含まない
 - バッファ付きインクリメンタルデコーダー (`MessageDecoder` / `SubgroupStreamDecoder` / `FetchStreamDecoder`)
 - FETCH 応答のデルタ圧縮エンコーダー (`FetchStreamEncoder`)
+- CBOR (RFC 8949) / CBOR Sequences (RFC 8742) コーデック
 - 対応仕様
   - Media over QUIC Transport (MOQT) `draft-21`
   - Low Overhead Container (LOC) `draft-04`
@@ -197,11 +198,13 @@ gh skill install shiguredo/moqt-rs shiguredo-moqt
 
 ## 規格書
 
-このライブラリが準拠している主な IETF draft です。
+このライブラリが準拠している主な IETF draft と RFC です。
 
 - [draft-ietf-moq-transport-21](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-21)：Media over QUIC Transport
 - [draft-ietf-moq-loc-04](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04)：Media over QUIC - Low Overhead Container
 - [draft-ietf-moq-msf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01)：MOQT Streaming Format
+- [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)：Concise Binary Object Representation (CBOR)
+- [RFC 8742](https://www.rfc-editor.org/rfc/rfc8742)：CBOR Sequences
 
 ## ビルドとテスト
 
