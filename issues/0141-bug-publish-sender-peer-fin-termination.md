@@ -1,7 +1,7 @@
 # PUBLISH の送信側が subscriber の FIN を受けると PUBLISH_DONE を送れない
 
 - Created: 2026-09-22
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/fix-publish-sender-peer-fin-termination
 - Polished: 2026-09-25
 
@@ -169,3 +169,35 @@ subscriber は購読終了を知らないまま残る
   `src/session/subscription/send.rs` の `Session::close_subscription_on_stream_end`、`skills/shiguredo-moqt/SKILL.md`、
   `pbt/tests/prop_session/request_stream.rs` の `publish_responder_terminates_on_peer_fin` の doc コメントを対象とする
 - `cargo test --workspace` が通ること
+
+## 解決方法
+
+`Session::recv_request_stream_closed` の遅延条件を新しい private メソッド `Session::defers_peer_fin` に集約し、PUBLISH を送った側 (publisher 役) の peer FIN を終端として扱わないようにした。
+
+- `src/session/core.rs`: `Session::defers_peer_fin` を追加し、`Session::recv_request_stream_closed` の分岐を
+  `matches!(end, RequestStreamEnd::Fin) && self.defers_peer_fin(request_id, kind)` に置き換えた。
+  PUBLISH の条件は「`Pending(Publisher)` ではない」「`Subscription::initiator` が Publisher」「`Subscription::my_role` が Publisher」
+  「自側の最終メッセージ未送信 (`Session::local_fin_sent` に無い)」である
+  - 設計方針では `Established` に限るとしていたが、§9.9 の MUST NOT で保留した PUBLISH_DONE が残っている間は
+    `Terminated` でも自側の最終メッセージが未送信であるため、条件を「最終メッセージ未送信」まで広げた。
+    先に終端するとアプリが購読を破棄でき、§9.5.1 の MUST を果たせない
+- `src/session/subscription/dispatch.rs`: `Session::handle_err_for_subscription` の Pending / Established 分岐で
+  `Session::reset_open_fill_streams` を呼び、自側が失敗応答を送る `Session::send_err_for_subscription` と対称にした。
+  open 中の fill fetch stream が残ると、保留した PUBLISH_DONE が fill fetch stream の終端では送られず §9.5.1 の MUST を果たせない
+- `src/session/subscription/send.rs`: peer FIN を受信済みの subscription への `Session::send_request_update` を
+  `SESSION_PROTOCOL_VIOLATION` で拒否する。peer は応答できず、応答待ちのまま `CONTROL_MESSAGE_TIMEOUT` でセッションを閉じるためである
+- doc の更新: `Session::recv_request_stream_closed` / `Session::peer_fin_received` /
+  `Session::finish_request_on_fin_exchange` / `Session::close_subscription_on_stream_end` /
+  `Session::maybe_flush_pending_publish_done` / `Session::send_request_update` /
+  `SessionEvent::RequestTerminated` / `Session::clear_request_stream_goaway_deadline` を対応後の内容にし、
+  応答の MUST の節番号を SUBSCRIBE (§3.1) / FETCH (§3.2.1) / TRACK_STATUS (§9.13) に書き分けた。
+  `skills/shiguredo-moqt/SKILL.md` も追随させた
+- 追加・更新したテスト
+  - `tests/test_session/request_stream.rs`: peer FIN 後の PUBLISH_DONE 送信と `RequestTerminated { reason: PeerStreamFin }`、
+    PUBLISH_DONE が先の場合、遅延中の RESET (cancel) の即時終端、`Pending(Publisher)` の peer FIN 終端、
+    peer FIN 後の REQUEST_UPDATE 拒否
+  - `tests/test_session/subscription/publish_done.rs`: 自側 REQUEST_UPDATE の失敗応答後に peer FIN が届いても終端が失われないこと
+  - `tests/test_session/fetch/fill.rs`: peer FIN では fill fetch stream を reset せず PUBLISH_DONE を保留すること、
+    受信 REQUEST_ERROR では §3.4.1 の MUST により reset すること、cancel (RESET_STREAM) では reset すること
+  - `tests/test_session.rs`: PUBLISH 起点 publisher 役の共有ヘルパー
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した
