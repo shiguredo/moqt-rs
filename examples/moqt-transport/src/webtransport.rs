@@ -24,10 +24,11 @@ use shiguredo_http3::webtransport::connect::ConnectRequest;
 use shiguredo_http3::webtransport::stream::{
     ClassifiedUniStream, StreamHeader, StreamHeaderDecodeError, classify_uni_stream_checked,
 };
-use shiguredo_http3::{ClientConnection, Event, Settings as H3Settings};
+use shiguredo_http3::{ClientConnection, ErrorCode as H3ErrorCode, Event, Settings as H3Settings};
 use shiguredo_moqt::session::types::RequestStreamEnd;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::error::{Result, TransportError};
 
@@ -303,6 +304,9 @@ impl WtClient {
         let unblock_notify = Arc::new(Notify::new());
         let (uni_tx, uni_rx) = mpsc::channel::<WtRecvStream>(16);
         let (bi_tx, bi_rx) = mpsc::channel::<(WtSendStream, WtRecvStream)>(16);
+        // CONNECT の stream id (= session ID) を単方向ストリームのルーティングタスクへ共有する。
+        // 単方向ストリームのタスクは CONNECT より前に spawn されるため、確定値を watch で配る。
+        let (session_id_tx, session_id_rx) = watch::channel(None::<u64>);
 
         // 単方向ストリーム受信タスク
         //
@@ -310,13 +314,18 @@ impl WtClient {
         // 単方向ストリームは `uni_tx` へ渡す。
         let state_for_uni = Arc::clone(&state);
         let notify_for_uni = Arc::clone(&unblock_notify);
+        let handle_for_uni = handle.clone();
         tokio::spawn(async move {
             while let Ok(Some(recv)) = uni_acceptor.accept_receive_stream().await {
                 let state = Arc::clone(&state_for_uni);
                 let notify = Arc::clone(&notify_for_uni);
                 let uni_tx = uni_tx.clone();
+                let session_id = session_id_rx.clone();
+                let handle = handle_for_uni.clone();
                 let stream_id: u64 = recv.id();
-                tokio::spawn(route_uni_stream(stream_id, recv, state, notify, uni_tx));
+                tokio::spawn(route_uni_stream(
+                    stream_id, recv, state, notify, uni_tx, session_id, handle,
+                ));
             }
         });
 
@@ -345,6 +354,8 @@ impl WtClient {
         let connect_stream = handle.open_bidirectional_stream().await?;
         let connect_stream_id: u64 = connect_stream.id();
         let (mut recv_stream, mut send_stream) = connect_stream.split();
+        // 単方向ストリームのルーティングタスクへ session ID を配る (draft-ietf-webtrans-http3-16 §4)
+        session_id_tx.send_replace(Some(connect_stream_id));
 
         // Sans I/O で CONNECT リクエストをエンコードする
         let request_data = {
@@ -388,11 +399,13 @@ impl WtClient {
         // CONNECT stream の id が要るため、CONNECT を開いた後に起動する。
         let state_for_bi = Arc::clone(&state);
         let notify_for_bi = Arc::clone(&unblock_notify);
+        let handle_for_bi = handle.clone();
         tokio::spawn(async move {
             while let Ok(Some(stream)) = bidi_acceptor.accept_bidirectional_stream().await {
                 let state = Arc::clone(&state_for_bi);
                 let notify = Arc::clone(&notify_for_bi);
                 let bi_tx = bi_tx.clone();
+                let handle = handle_for_bi.clone();
                 let stream_id: u64 = stream.id();
                 tokio::spawn(route_bi_stream(
                     connect_stream_id,
@@ -401,6 +414,7 @@ impl WtClient {
                     state,
                     notify,
                     bi_tx,
+                    handle,
                 ));
             }
         });
@@ -977,27 +991,136 @@ impl WtBiStream {
 }
 
 // ---------------------------------------------------------------------------
+// ストリームルーティングの判定
+// ---------------------------------------------------------------------------
+
+/// ストリームの方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDirection {
+    /// 単方向ストリーム
+    Uni,
+    /// 双方向ストリーム
+    Bi,
+}
+
+/// デコード結果を方向に依存しない形へ正規化した判定入力
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteInput {
+    /// WebTransport のストリーム。`own_session` は自セッションの session ID と一致するか
+    WebTransport { own_session: bool },
+    /// HTTP/3 のストリーム (制御 / QPACK など、WebTransport 以外)
+    Http3,
+    /// ヘッダーのデコードにバッファが足りない
+    BufferTooShort,
+    /// session ID が client-initiated bidirectional stream ID ではない
+    InvalidSessionId,
+    /// session ID が QUIC のストリーム ID の範囲外
+    SessionIdOutOfRange,
+    /// 形式が不正 (WebTransport 以外のタイプ / 双方向の signal 値が所定の値でない)
+    InvalidFormat,
+}
+
+/// ストリームをどこへ流すかの判定結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteAction {
+    /// MOQT 層へ渡す (単方向は `uni_tx`、双方向は `bi_tx`)
+    ForwardToMoqt,
+    /// HTTP/3 層へ流す (制御 / QPACK ストリームなど)
+    ForwardToH3,
+    /// 読み捨てる
+    Discard,
+    /// 追加の受信を待つ
+    Continue,
+    /// 接続を HTTP/3 のエラーコードで閉じる
+    CloseConnection(H3ErrorCode),
+}
+
+/// デコード結果から次の動作を決める純関数
+///
+/// draft-ietf-webtrans-http3-16 §4 (WebTransport Features): session ID は CONNECT ストリームの
+/// stream ID 由来であり、常に client-initiated bidirectional stream に対応しなければならない。
+/// "If an endpoint receives a session ID on a unidirectional stream, bidirectional stream, or
+/// datagram that does not correspond to a client-initiated bidirectional stream ID, the endpoint
+/// MUST close the connection with an H3_ID_ERROR error code." に従い、`InvalidSessionId` と
+/// `SessionIdOutOfRange` は接続クローズにする (`SessionIdOutOfRange` は受信経路では
+/// `StreamHeader::new` からのみ生成されるため到達しないが、網羅性のために扱いを固定する)。
+///
+/// 他セッションの session ID を持つストリームは §4 の "Session IDs that correspond to closed
+/// sessions are not considered invalid for the purposes of this check" により接続を閉じない。
+/// 単方向は MOQT 層へ渡さず読み捨て、双方向は HTTP/3 層へ流す (従来動作)。
+///
+/// datagram 経路は対象外である。依存する shiguredo_http3 は datagram の session ID 不正に
+/// H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る (別 issue)。
+fn decide_route(direction: StreamDirection, input: RouteInput) -> RouteAction {
+    match input {
+        RouteInput::WebTransport { own_session: true } => RouteAction::ForwardToMoqt,
+        // 他セッション向けのストリームは MOQT の data stream ではない
+        RouteInput::WebTransport { own_session: false } => match direction {
+            StreamDirection::Uni => RouteAction::Discard,
+            StreamDirection::Bi => RouteAction::ForwardToH3,
+        },
+        RouteInput::Http3 => RouteAction::ForwardToH3,
+        RouteInput::BufferTooShort => RouteAction::Continue,
+        RouteInput::InvalidSessionId | RouteInput::SessionIdOutOfRange => {
+            RouteAction::CloseConnection(H3ErrorCode::IdError)
+        }
+        RouteInput::InvalidFormat => RouteAction::Discard,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 単方向ストリームルーティング
 // ---------------------------------------------------------------------------
 
 /// 単方向ストリームをタイプで判別してルーティングする
+///
+/// 自セッション以外の session ID を持つ WebTransport ストリームは MOQT 層へ渡さず読み捨てる
+/// (`decide_route`)。CONNECT の stream id が確定するまでは session ID を照合できないため、
+/// `session_id` が設定されるまで待ってから判定する。
 async fn route_uni_stream(
     stream_id: u64,
     mut recv_stream: ReceiveStream,
     state: Arc<StdMutex<ClientConnectionState>>,
     notify: Arc<Notify>,
     uni_tx: mpsc::Sender<WtRecvStream>,
+    session_id: watch::Receiver<Option<u64>>,
+    handle: s2n_quic::connection::Handle,
 ) {
     let mut type_buf: Vec<u8> = Vec::new();
+    let mut data_offset: Option<usize> = None;
 
-    let classified = loop {
+    let mut action: Option<RouteAction> = None;
+    while action.is_none() {
         match recv_stream.receive().await {
             Ok(Some(data)) => {
                 type_buf.extend_from_slice(&data);
-                match classify_uni_stream_checked(&type_buf) {
-                    Ok(result) => break Some(result),
-                    Err(StreamHeaderDecodeError::BufferTooShort) => continue,
-                    Err(_) => return,
+                let input = match classify_uni_stream_checked(&type_buf) {
+                    Ok(ClassifiedUniStream::WebTransport {
+                        session_id: stream_session_id,
+                        data_offset: offset,
+                    }) => {
+                        data_offset = Some(offset);
+                        let Some(own_session_id) = wait_for_session_id(session_id.clone()).await
+                        else {
+                            return;
+                        };
+                        RouteInput::WebTransport {
+                            own_session: stream_session_id == own_session_id,
+                        }
+                    }
+                    Ok(ClassifiedUniStream::Http3 { .. }) => RouteInput::Http3,
+                    Err(StreamHeaderDecodeError::BufferTooShort) => RouteInput::BufferTooShort,
+                    Err(StreamHeaderDecodeError::InvalidSessionId) => RouteInput::InvalidSessionId,
+                    Err(StreamHeaderDecodeError::SessionIdOutOfRange) => {
+                        RouteInput::SessionIdOutOfRange
+                    }
+                    // 単方向では WebTransport 以外の stream type がここに来る
+                    // (`classify_uni_stream_checked` は `InvalidFormat` を返さない)
+                    Err(StreamHeaderDecodeError::InvalidFormat) => RouteInput::InvalidFormat,
+                };
+                match decide_route(StreamDirection::Uni, input) {
+                    RouteAction::Continue => continue,
+                    decided => action = Some(decided),
                 }
             }
             Ok(None) => {
@@ -1010,15 +1133,16 @@ async fn route_uni_stream(
             }
             Err(_) => return,
         }
-    };
+    }
 
-    match classified {
-        Some(ClassifiedUniStream::WebTransport { data_offset, .. }) => {
-            let pending = type_buf[data_offset..].to_vec();
+    match action.expect("the classification loop always yields an action") {
+        RouteAction::ForwardToMoqt => {
+            let offset = data_offset.expect("WebTransport classification records a data offset");
+            let pending = type_buf[offset..].to_vec();
             let wt_recv = WtRecvStream::new(stream_id, recv_stream, pending);
             let _ = uni_tx.send(wt_recv).await;
         }
-        _ => {
+        RouteAction::ForwardToH3 => {
             let _ = state
                 .lock()
                 .expect("connection state mutex must not be poisoned")
@@ -1037,6 +1161,16 @@ async fn route_uni_stream(
                 .feed_stream_only(stream_id, &[], true);
             notify.notify_one();
         }
+        RouteAction::Discard => {
+            // 他セッション向けのストリームは MOQT 層へ渡さず読み捨てる。読み続けないと
+            // 受信バッファが滞留してフロー制御で peer が止まるため、FIN まで読み切る
+            while let Ok(Some(_)) = recv_stream.receive().await {}
+        }
+        RouteAction::CloseConnection(code) => {
+            close_connection_with_h3_error(&handle, code, "unidirectional stream");
+        }
+        // `decide_route` が `Continue` を返すのはデコード途中のみであり、この時点では返らない
+        RouteAction::Continue => {}
     }
 }
 
@@ -1054,42 +1188,100 @@ async fn route_bi_stream(
     state: Arc<StdMutex<ClientConnectionState>>,
     notify: Arc<Notify>,
     bi_tx: mpsc::Sender<(WtSendStream, WtRecvStream)>,
+    handle: s2n_quic::connection::Handle,
 ) {
     let (mut recv_stream, send_stream) = stream.split();
     let mut header_buf: Vec<u8> = Vec::new();
+    let mut data_offset: Option<usize> = None;
 
-    loop {
+    let mut action: Option<RouteAction> = None;
+    while action.is_none() {
         match recv_stream.receive().await {
             Ok(Some(data)) => {
                 header_buf.extend_from_slice(&data);
-                match StreamHeader::decode_bidirectional_checked(&header_buf) {
-                    Ok((header, data_offset)) if header.session_id() == session_id => {
-                        let pending = header_buf[data_offset..].to_vec();
-                        let wt_send = WtSendStream {
-                            stream_id,
-                            send: send_stream,
-                        };
-                        let wt_recv = WtRecvStream::new(stream_id, recv_stream, pending);
-                        let _ = bi_tx.send((wt_send, wt_recv)).await;
-                        return;
+                let input = match StreamHeader::decode_bidirectional_checked(&header_buf) {
+                    Ok((header, offset)) => {
+                        data_offset = Some(offset);
+                        RouteInput::WebTransport {
+                            own_session: header.session_id() == session_id,
+                        }
                     }
-                    Ok(_) => {
-                        // 他 session の双方向ストリームは HTTP/3 層の管轄である
-                        let _ = state
-                            .lock()
-                            .expect("connection state mutex must not be poisoned")
-                            .feed_stream_only(stream_id, &header_buf, false);
-                        notify.notify_one();
-                        return;
+                    Err(StreamHeaderDecodeError::BufferTooShort) => RouteInput::BufferTooShort,
+                    Err(StreamHeaderDecodeError::InvalidSessionId) => RouteInput::InvalidSessionId,
+                    Err(StreamHeaderDecodeError::SessionIdOutOfRange) => {
+                        RouteInput::SessionIdOutOfRange
                     }
-                    Err(StreamHeaderDecodeError::BufferTooShort) => continue,
-                    Err(_) => return,
+                    // 双方向では signal 値が所定の値でない場合にここに来る
+                    Err(StreamHeaderDecodeError::InvalidFormat) => RouteInput::InvalidFormat,
+                };
+                match decide_route(StreamDirection::Bi, input) {
+                    RouteAction::Continue => continue,
+                    decided => action = Some(decided),
                 }
             }
             Ok(None) => return,
             Err(_) => return,
         }
     }
+
+    match action.expect("the classification loop always yields an action") {
+        RouteAction::ForwardToMoqt => {
+            let offset = data_offset.expect("WebTransport classification records a data offset");
+            let pending = header_buf[offset..].to_vec();
+            let wt_send = WtSendStream {
+                stream_id,
+                send: send_stream,
+            };
+            let wt_recv = WtRecvStream::new(stream_id, recv_stream, pending);
+            let _ = bi_tx.send((wt_send, wt_recv)).await;
+        }
+        RouteAction::ForwardToH3 => {
+            // 他 session の双方向ストリームは HTTP/3 層の管轄である
+            let _ = state
+                .lock()
+                .expect("connection state mutex must not be poisoned")
+                .feed_stream_only(stream_id, &header_buf, false);
+            notify.notify_one();
+        }
+        RouteAction::CloseConnection(code) => {
+            close_connection_with_h3_error(&handle, code, "bidirectional stream");
+        }
+        // 双方向の形式不正は MOQT 層へ渡さず drop する (従来動作)。追加受信待ちはループ内で
+        // 消化されるためこの時点では残らない
+        RouteAction::Discard | RouteAction::Continue => {}
+    }
+}
+
+/// CONNECT の stream id (= session ID) が確定するまで待つ
+///
+/// 単方向ストリームのルーティングタスクは CONNECT より前に spawn されるため、session ID を
+/// 共有セルで受け取り、確定するまで照合しない (確定前のストリームを他セッション扱いしないため)。
+/// 送信側が drop された場合 (CONNECT の失敗) は `None` を返し、呼び出し側はストリームを捨てる。
+async fn wait_for_session_id(mut session_id: watch::Receiver<Option<u64>>) -> Option<u64> {
+    let id = session_id.wait_for(|id| id.is_some()).await.ok()?;
+    *id
+}
+
+/// 接続を HTTP/3 のエラーコードで閉じる
+///
+/// h3 層は Sans I/O のため CONNECTION_CLOSE の送出は I/O 層 (s2n-quic) が行う。application
+/// error code に HTTP/3 のエラーコードを渡す。draft-ietf-webtrans-http3-16 §4 の H3_ID_ERROR は
+/// `ErrorCode::IdError` であり、数値は example 側で再定義しない。
+fn close_connection_with_h3_error(
+    handle: &s2n_quic::connection::Handle,
+    code: H3ErrorCode,
+    stream_kind: &str,
+) {
+    tracing::warn!(
+        code = code.code(),
+        stream_kind,
+        "closing connection with HTTP/3 error code"
+    );
+    // HTTP/3 のエラーコードは QUIC の application error code の範囲に収まるため失敗しない。
+    // 失敗時に別のコードで閉じると MUST の通知が変わってしまうため、ここで止める
+    let error = s2n_quic::application::Error::new(code.code())
+        .expect("HTTP/3 error code fits in the QUIC application error code range");
+    handle.close(error);
 }
 
 #[cfg(test)]
@@ -1470,5 +1662,79 @@ mod tests {
                 "{moqt_code:#x} のエラーメッセージ"
             );
         }
+    }
+
+    /// ストリームのルーティング判定 (draft-ietf-webtrans-http3-16 §4)
+    ///
+    /// session ID は CONNECT ストリームの ID 由来であり、client-initiated bidirectional stream
+    /// に対応しない session ID を受けたエンドポイントは H3_ID_ERROR で接続を閉じなければならない。
+    #[test]
+    fn decide_route_closes_connection_for_invalid_session_id() {
+        for input in [
+            RouteInput::InvalidSessionId,
+            RouteInput::SessionIdOutOfRange,
+        ] {
+            for direction in [StreamDirection::Uni, StreamDirection::Bi] {
+                assert_eq!(
+                    decide_route(direction, input),
+                    RouteAction::CloseConnection(H3ErrorCode::IdError),
+                    "{direction:?} の {input:?} は H3_ID_ERROR で接続を閉じること"
+                );
+            }
+        }
+        // 数値は example 側で再定義しない (spec 側の値を固定する)
+        assert_eq!(H3ErrorCode::IdError.code(), 0x108);
+    }
+
+    /// WebTransport 以外とデコード途中の入力の扱い
+    #[test]
+    fn decide_route_continues_and_discards() {
+        for direction in [StreamDirection::Uni, StreamDirection::Bi] {
+            assert_eq!(
+                decide_route(direction, RouteInput::BufferTooShort),
+                RouteAction::Continue,
+                "{direction:?} は追加受信を待つこと"
+            );
+            assert_eq!(
+                decide_route(direction, RouteInput::InvalidFormat),
+                RouteAction::Discard,
+                "{direction:?} の形式不正は読み捨てること"
+            );
+            assert_eq!(
+                decide_route(direction, RouteInput::Http3),
+                RouteAction::ForwardToH3,
+                "{direction:?} の HTTP/3 ストリームは HTTP/3 層へ渡すこと"
+            );
+        }
+    }
+
+    /// 自セッションのストリームは MOQT 層へ、他セッションのストリームは MOQT 層へ渡さない
+    #[test]
+    fn decide_route_handles_own_and_other_session() {
+        for direction in [StreamDirection::Uni, StreamDirection::Bi] {
+            assert_eq!(
+                decide_route(direction, RouteInput::WebTransport { own_session: true }),
+                RouteAction::ForwardToMoqt,
+                "{direction:?} の自セッションのストリームは MOQT 層へ渡すこと"
+            );
+        }
+        // 他セッション向けの単方向ストリームは MOQT 層へ渡さず読み捨てる
+        assert_eq!(
+            decide_route(
+                StreamDirection::Uni,
+                RouteInput::WebTransport { own_session: false }
+            ),
+            RouteAction::Discard,
+            "他セッション向けの単方向ストリームを MOQT 層へ渡さないこと"
+        );
+        // 他セッション向けの双方向ストリームは HTTP/3 層の管轄である (従来動作)
+        assert_eq!(
+            decide_route(
+                StreamDirection::Bi,
+                RouteInput::WebTransport { own_session: false }
+            ),
+            RouteAction::ForwardToH3,
+            "他セッション向けの双方向ストリームは HTTP/3 層へ渡すこと"
+        );
     }
 }

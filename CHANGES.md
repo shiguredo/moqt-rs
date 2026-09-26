@@ -375,6 +375,19 @@
   - 保持量の上限で記録が破棄された後は同一位置の重複を比較できない (検出範囲が狭くなる known limitation)
   - @voluntas
 
+- [FIX] moqt-transport example が WebTransport の session ID 不正を H3_ID_ERROR で通知する
+  - draft-ietf-webtrans-http3-16 §4 (WebTransport Features) は、client-initiated bidirectional stream ID に対応しない
+    session ID を単方向 / 双方向ストリームで受信したエンドポイントに H3_ID_ERROR での接続クローズを MUST で要求するが、
+    従来はストリームヘッダーのデコードエラーを黙って捨てており違反を検知できなかった
+  - ルーティングの判定を純関数 (`decide_route`) に切り出し、`InvalidSessionId` / `SessionIdOutOfRange` は
+    `ErrorCode::IdError` (0x108) での接続クローズ、`BufferTooShort` は継続、形式不正は読み捨てとする
+  - 他セッションの session ID を持つ単方向 WebTransport ストリームを MOQT 層へ渡さず読み捨てる
+    (双方向は従来どおり HTTP/3 層へ渡す)。§4 の末尾により閉じたセッションの session ID は不正ではないため接続は閉じない
+  - 単方向ストリームのルーティングタスクは CONNECT より前に spawn されるため、session ID を `watch` で共有し
+    確定するまで照合を待つ。datagram 経路は対象外であり、依存する shiguredo_http3 が datagram の session ID 不正に
+    H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
