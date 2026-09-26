@@ -1,7 +1,7 @@
 # ObjectFieldTracker の保持量に上限を設ける
 
 - Created: 2026-09-22
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/fix-object-field-tracker-retention
 - Polished: 2026-09-25
 
@@ -89,4 +89,25 @@
 
 ## 解決方法
 
-未着手。
+`ObjectFieldTracker` の保持量を group の変化に応じた prune と記録数の上限で有界にした。
+
+- `src/object_properties.rs`
+  - `ObjectFieldTracker` に「直前の観測 group (`last_group`)」と「実効 group 順序 (`ascending`)」を持たせ、`observe_object_fields_with_content` が比較を確定させた後に group の変化を検出して `prune_past_groups` を呼ぶ。prune は group が変わったときだけ実行する
+  - 記録数の上限 `ObjectFieldTracker::MAX_RECORDS = 1_000` を追加した。1 レコードは IMMUTABLE_PROPERTIES の生バイト列
+    (最大 65535 バイト) を保持するため、datagram の `MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION` (100_000) と
+    同じ値は使えない (最悪 6.5 GB)。1_000 件なら最悪約 65.5 MB に収まり、30 fps の映像では約 33 秒分の検出窓になる
+  - 超過時は最も古い group (ascending なら最小の group_id、そうでなければ最大の group_id) を group 単位でまとめて破棄し、1 group しか無い場合は古い object_id から超過分を破棄する。破棄の前に比較結果を確定させるため、破棄によって新たな不一致が生まれることはない (見逃し側に倒す)
+  - `ObjectFieldTracker::new(ascending: bool)` に変更し (`Default` は Ascending のまま)、診断用の `#[cfg(test)] pub(crate) fn len` / `is_ascending` を追加した
+  - 保持量・破棄規則・known limitation (§12.1 条件 6 と §7.1 の重複検出が及ばない範囲) を doc に書いた
+- `src/session/data.rs`
+  - `Session::is_ascending_group_order` を追加し、draft-ietf-moq-transport-21 §5.1.1 の優先順位
+    (`GROUP_ORDER` parameter (§9.20.9) → `DEFAULT_PUBLISHER_GROUP_ORDER` Track Property (§10.5) → Ascending) で
+    実効順序を解決する。`Subscription::effective_publisher_group_order` は publisher の選好だけを返すため、
+    parameter を含めた実効順序は Session 側で解決する (issue の設計方針は `effective_publisher_group_order` を
+    前提にしていたが、§5.1.1 に合わせて parameter を優先する形にした)
+  - subgroup 経路 (`accept_subgroup_object`) と datagram 経路 (`recv_object_datagram`) の tracker 生成時にこの値を渡す
+- 追加したテスト
+  - `src/object_properties.rs` の `#[cfg(test)] mod tests`: 1 group での上限、最新 group だけで上限を超える場合 (他 group の破棄に続く同一 group 内の破棄)、最も古い group の破棄 (ascending / descending)、group 変化時の prune (両方向)
+  - `src/session/tests.rs`: peer から PUBLISH を受けた subscriber で、未宣言 / Track Property のみ / `GROUP_ORDER` parameter のみ / parameter が Track Property に優先する 4 ケースを subgroup 経路で、`GROUP_ORDER` = Descending を datagram 経路で固定する
+- `tests/test_object_properties.rs` / `pbt/tests/prop_object_tracker.rs` / `fuzz/fuzz_targets/fuzz_object_trackers.rs` を `new(true)` に追従させた
+- `CHANGES.md` の `## develop` に `[CHANGE]` (引数追加の破壊的変更) と `[FIX]` を追加し、既存エントリの「Session は prune を呼ばない」記述を更新した
