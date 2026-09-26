@@ -1,7 +1,7 @@
 # WT-Protocol を検証して WT_ALPN_ERROR を送る
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-26
 - Branch: feature/fix-webtransport-protocol-header
 - Polished: 2026-09-22
 
@@ -57,3 +57,47 @@ draft-ietf-moq-transport-21 §6.2 (Session establishment) は、この仕組み�
     WebTransport セッションの確立自体は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消待ちであるため、実機確認は draft-15 相当の peer または 0094 の解消後に行う
 - 正しい `WT-Protocol` (`moqt-21`) を返すサーバーでは従来どおり MOQT セッションが確立すること
 - プロトコル交渉失敗の variant が `ConnectFailed { status }` と区別でき、`WT_ALPN_ERROR` で接続を閉じる経路が example 側の数値直書きを含まないこと (`WtErrorCode::AlpnError as u64` を `s2n_quic::application::Error::new` に渡す)
+
+## 解決方法
+
+- `examples/moqt-transport/src/webtransport.rs`
+  - `connect_outcome` は `Event::HeadersEnd` で早期確定せず、`ConnectObservation` に `:status` / ヘッダー終端 /
+    `SessionEstablished` / `SessionClosed` / 1xx 中間レスポンスを蓄積して判定する。優先順位は
+    「h3 イベントで観測したセッション終了 > 確立 > 共有状態で観測した終了 > drain > ヘッダー終端での接続失敗」
+  - `WT-Protocol` の検証は h3 層 (`handle_wt_connect_response`) が行い、example は
+    `SessionClosed { error_code: AlpnError }` の観測で交渉失敗を判別する (再実装しない)。1xx は h3 と同じ定義で
+    中間レスポンスとして扱い、確定に使わない
+  - 接続クローズは `wt_alpn_error()` が返す `s2n_quic::application::Error::new(WtErrorCode::AlpnError as u64)` を
+    `s2n_quic::connection::Handle::close` に渡す (example に数値を直書きしない)。§3.3 の MUST を feed の
+    二次的エラーで飛ばさないよう、1 バッチ分の操作列 (`connect_actions`) として「クローズ → エラー返却 →
+    feed 結果の伝播」の順序を値で固定し、`run_connect_actions` がその順に実行する
+  - 確立前に GOAWAY / `WT_DRAIN_SESSION` を観測した場合 (h3 は `Pending` のセッションを `Draining` にして
+    `SessionEstablished` を発行しない) と、CONNECT stream の close / RESET_STREAM を観測した場合は
+    セッションを確立しない。制御ストリームを処理するルーティングタスクがイベントを drain するため、
+    共有するセッション状態 (`watch`) からも観測する
+  - `TransportError::ProtocolNegotiationFailed { error_code }` を追加し、2xx 以外の応答による `ConnectFailed` と
+    区別する。`Display` は error_code を `{:#010x}` で含む
+- テスト (`webtransport.rs` の `#[cfg(test)] mod tests`、14 件)
+  - 確立判定: `connect_outcome_waits_for_session_established_after_two_xx_status` /
+    `connect_outcome_accumulates_status_across_batches` / `connect_outcome_keeps_connect_failed_for_non_success_status` /
+    `connect_outcome_keeps_first_status_header` / `connect_outcome_ignores_informational_status`
+  - 交渉失敗と確立前終了: `connect_outcome_reports_protocol_negotiation_failure` /
+    `connect_outcome_separates_other_session_closed_from_protocol_negotiation_failure` /
+    `connect_outcome_ends_wait_when_session_drains_before_establishment` /
+    `connect_outcome_observes_shared_session_state`
+  - MUST の実行: `closes_with_wt_alpn_error_only_for_protocol_negotiation_failure` /
+    `connect_actions_close_before_returning_protocol_negotiation_failure` /
+    `connect_actions_never_close_for_other_outcomes` /
+    `connect_actions_prefers_connect_failed_over_secondary_feed_error` /
+    `wt_alpn_error_carries_the_registered_error_code` /
+    `protocol_negotiation_failed_message_includes_registered_error_code`
+  - `examples/moqt-publisher/src/pipeline.rs` / `examples/moqt-subscriber/src/pipeline.rs` の
+    `is_transport_session_end_only_matches_connection_closed` に、交渉失敗がセッション終了ではないことを追加
+- 補足: 本 issue の「現状」「設計方針」にある「h3 は交渉失敗時に `Event::Header` / `Event::HeadersEnd` を push せずに
+  `SessionClosed` を発火する」は事実と異なる。依存 `shiguredo_http3` (2026.1.0-canary.9) は交渉失敗でも
+  `SessionClosed` の後にヘッダーのイベントを push するため、`HeadersEnd` で早期確定せず、確立前の
+  `SessionClosed` を優先して失敗と判定する
+- 実機確認 (relay が `WT-Protocol` を返さない / 申告外を返す構成で `RUST_LOG=debug` のログを確認する) は、
+  WebTransport セッションの確立自体が `issues/pending/0094` (s2n-quic の RESET_STREAM_AT 非対応) で
+  塞がれているため未実施である。`Handle::close` は CONNECTION_CLOSE の送出をキューに積むだけで実送出は
+  endpoint のタスクが行うため、実機確認では relay 側で `WT_ALPN_ERROR` を観測する必要がある
