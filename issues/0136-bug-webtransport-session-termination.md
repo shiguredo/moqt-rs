@@ -1,7 +1,7 @@
 # WebTransport セッション終了の検知と WT_SESSION_GONE での中断
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-26
 - Branch: feature/fix-webtransport-session-termination
 - Polished: 2026-09-22
 
@@ -69,3 +69,48 @@ A WebTransport session over HTTP/3 is terminated when either of the following co
 - セッション終了・drain の検知後に新しい stream を open せず、datagram も送らないこと
 - CONNECT stream の受信半を feed し続けることで `SessionClosed` が発火すること (h3 層へ feed しないと発火しない) を実装で確認し、コメントに残す
 - 32 ビットに収まらない close code が切り捨てられないこと (`moqt_close_code` の単体テストで `u64::MAX` がエラーになること)
+
+## 解決方法
+
+- `examples/moqt-transport/src/webtransport.rs`
+  - セッション状態 `WtSessionState` (Active / Draining / ClosedByPeer / ClosedLocally) と、状態から動作
+    (新規ストリーム・datagram の拒否 / 全ストリームの中断) を決める純関数 `session_policy` を追加する。状態は
+    `tokio::sync::watch` で各タスクへ配り、`update_session_state` により終了方向へしか遷移させない
+  - `wait_until_terminated` を `tokio::select!` の分岐に使い、`WtSendStream::send` と `WtRecvStream::recv_chunk` は
+    終了を観測したら `WT_SESSION_GONE` で中断して `TransportError::ConnectionClosed` を返す。
+    `WtSession::open_uni_stream` / `open_bi_stream` / `send_datagram` は `session_policy` を見て拒否する
+  - CONNECT stream の受信半を専用タスクで h3 層へ feed し続け、FIN / RESET_STREAM / WT_CLOSE_SESSION / GOAWAY を
+    `SessionClosed` / `SessionDraining` としてセッション状態へ反映する。h3 層のイベント処理は
+    `process_h3_events` の 1 経路に集約し、route タスクの feed も含めて feed がエラーでも
+    同じ feed で発行されたイベントを取りこぼさない (`H3FeedOutcome` / `feed_stream_to_h3`)
+  - §4.7 の drain は終了と同一視せず、既存ストリームを中断しない (純関数とテストで固定する)
+  - `WT_SESSION_GONE` を §4.4 のアプリケーションエラーコードの remap に通さないための
+    `StreamErrorCode` (Application / Protocol) を追加する。`WtSession::close` の Application Error Code は
+    `moqt_close_code` で `u32` に変換し、32 ビットに収まらない値は切り捨てずエラーにする
+  - セッション終了を検知しても、そのバッチで取り出した datagram は返し、次の呼び出しで `ConnectionClosed` を返す
+    (`resolve_buffered_datagrams`)
+- `examples/moqt-transport/src/transport.rs`
+  - `StreamAcceptor` / `BidiStreamAcceptor` の WebTransport 分岐がセッション状態を観測し、接続クローズと
+    セッション終了を `TransportError::ConnectionClosed` として返す。`StreamHandle::close` は
+    `moqt_close_code` を通す
+- `examples/moqt-publisher/src/pipeline.rs` / `examples/moqt-subscriber/src/pipeline.rs`
+  - 受信経路の `ConnectionClosed` をセッション終了として扱い、終了時の後始末
+    (PUBLISH_DONE / GOAWAY / `close(0, "")`) まで到達させる。data plane の送信経路も同じ扱いにするため、
+    分岐本体を async ブロックに閉じ込めて `?` が `run` を抜けないようにする
+  - 判定は純関数 `is_transport_session_end` に切り出し、`Error::ConnectionClosed` variant を追加して
+    表示文字列に依存しない判定にする
+- 追加・更新したテスト
+  - `webtransport.rs`: `session_policy_separates_termination_from_draining` /
+    `update_session_state_never_goes_backwards` / `session_termination_is_observable_and_aborts_with_session_gone` /
+    `wait_until_terminated_returns_when_sender_is_dropped` / `process_h3_events_terminates_session_and_keeps_datagrams` /
+    `process_h3_events_marks_draining_without_terminating` / `stream_application_error_keeps_protocol_codes_as_is` /
+    `resolve_buffered_datagrams_keeps_datagrams_received_before_termination` /
+    `moqt_close_code_accepts_values_within_32_bits` / `moqt_close_code_rejects_values_beyond_32_bits`
+  - `examples/moqt-publisher/src/pipeline.rs` / `examples/moqt-subscriber/src/pipeline.rs`:
+    `is_transport_session_end_only_matches_connection_closed`
+  - `examples/moqt-publisher/src/error.rs` / `examples/moqt-subscriber/src/error.rs`:
+    `transport_error_mapping_uses_connection_closed_variant`
+- 実機確認 (relay からの `WT_CLOSE_SESSION` 送出 / CONNECT stream の close) は、WebTransport セッションの
+  確立自体が `issues/pending/0094` (s2n-quic の RESET_STREAM_AT 非対応) で塞がれているため未実施である。
+  代替として、イベント→状態→中断コードの経路をすべて単体テストで固定し、中断実行時に `debug` ログを追加して
+  実機で観測できるようにした
