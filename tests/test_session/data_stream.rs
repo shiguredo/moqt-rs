@@ -2128,11 +2128,14 @@ fn open_incoming_subgroup(
         .expect("subgroup header の通知に成功すること");
 }
 
-/// Object Status 0x3 (End of Group) 以降の同 Group Object は拒否される
+/// End of Group を宣言した位置より後ろの同 Group Object は拒否される
 ///
-/// draft-ietf-moq-transport-21 §11.1.2 (Object Status): "Indicates that no objects with the
-/// specified Group ID and the Object ID that is greater than or equal to the one specified exist
-/// in the group identified by the Group ID."
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4: "An Object is received in a Group
+/// whose Object ID is larger than the final Object in the Group. The final Object in a Group is the
+/// Object with Status END_OF_GROUP, ..." であるため、終端を宣言した Object 自身 (同一位置) は
+/// Malformed にせず、条件 6 の内容比較に委ねる (§11.1.2 の "greater than or equal to" は、宣言後に
+/// 存在しない Object を述べたものと解釈する。§2.1 も、存在しないと記録した後に Object が届くことは
+/// protocol error ではないと定める)。
 #[test]
 fn object_after_end_of_group_status_is_rejected() {
     let alias = 700;
@@ -2151,14 +2154,14 @@ fn object_after_end_of_group_status_is_rejected() {
             .expect("subscription が存在する")
             .ended_groups
             .get(&3),
-        Some(&5),
-        "存在しない最小 Object ID として 5 が記録されること"
+        Some(&6),
+        "終端を宣言した Object 自身は存在するものとして 1 つ先の 6 が記録されること"
     );
 
-    // 別 stream で同 Group の object_id >= 5 を送る
+    // 別 stream で同 Group の object_id >= 6 を送る
     open_incoming_subgroup(&mut client, DataStreamId(81), alias, 3, 1, false);
     let err = client
-        .recv_subgroup_object(DataStreamId(81), &normal_object(5))
+        .recv_subgroup_object(DataStreamId(81), &normal_object(6))
         .expect_err("End of Group 以降の object は拒否される");
     assert_eq!(err.reason, "object received after End of Group");
     assert_eq!(
@@ -2174,6 +2177,160 @@ fn object_after_end_of_group_status_is_rejected() {
         SessionState::Established,
         "セッションは閉じない"
     );
+}
+
+/// End of Group を宣言した Object 自身を同一内容で再受信しても Malformed にしない
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4 は "larger than the final Object" だけを
+/// Malformed とするため、final Object 自身の重複は条件 6 の内容比較 (同一内容なら受理) に委ねる。
+#[test]
+fn duplicate_object_at_end_of_group_position_is_accepted() {
+    let alias = 704;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    open_incoming_subgroup(&mut client, DataStreamId(88), alias, 3, 0, false);
+
+    client
+        .recv_subgroup_object(DataStreamId(88), &status_object(5, 0x3))
+        .expect("End of Group マーカーは受理される");
+    // 同じ stream / 同じ Subgroup で同一内容の End of Group status を再送する
+    client
+        .recv_subgroup_object(DataStreamId(88), &status_object(5, 0x3))
+        .expect("同一内容の重複は Malformed にしない");
+
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "同一内容の重複で subscription を終端しないこと"
+    );
+    let (cancels, resets, terminated) = drain_malformed_events(&mut client, rid, None);
+    assert_eq!(
+        (cancels.len(), resets, terminated),
+        (0, 0, 0),
+        "Malformed Track のイベントを発行しないこと"
+    );
+}
+
+/// End of Group を宣言した位置で内容が異なる重複は Malformed Track になる (条件 6)
+///
+/// 別 Subgroup から同じ位置へ届いた同一 Object は `ObjectFieldTracker` が Subgroup ID の差異を
+/// 検出する (draft-ietf-moq-transport-21 §7.1 (Caching Relays))。
+#[test]
+fn duplicate_object_at_end_of_group_position_from_different_subgroup_is_rejected() {
+    let alias = 705;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    open_incoming_subgroup(&mut client, DataStreamId(89), alias, 3, 0, false);
+    client
+        .recv_subgroup_object(DataStreamId(89), &status_object(5, 0x3))
+        .expect("End of Group マーカーは受理される");
+
+    // 同じ位置を別 Subgroup から送る (Subgroup ID が異なる重複)
+    open_incoming_subgroup(&mut client, DataStreamId(90), alias, 3, 1, false);
+    let err = client
+        .recv_subgroup_object(DataStreamId(90), &status_object(5, 0x3))
+        .expect_err("内容が異なる同一位置の重複は拒否される");
+    assert_eq!(
+        err.reason,
+        "malformed track: duplicate Object with different Subgroup ID"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// 終端宣言と同じ位置に通常 Object が先に到着してから終端宣言が届く順序も Malformed になる
+///
+/// 条件 6 が status の有無 (payload の比較キー) の差異として検出する。
+#[test]
+fn data_object_then_end_of_group_status_at_same_position_is_rejected() {
+    let alias = 706;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    open_incoming_subgroup(&mut client, DataStreamId(91), alias, 3, 0, false);
+    client
+        .recv_subgroup_object(DataStreamId(91), &normal_object(5))
+        .expect("通常 Object は受理される");
+
+    // 同じ位置に End of Group status が届く (status の有無が異なる重複)
+    let err = client
+        .recv_subgroup_object(DataStreamId(91), &status_object(5, 0x3))
+        .expect_err("同一位置で内容が異なる Object は拒否される");
+    assert_eq!(
+        err.reason,
+        "malformed track: duplicate Object with different Payload"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// 終端宣言の後に同じ位置へ通常 Object が届く順序も Malformed になる
+///
+/// 条件 6 が status の有無 (payload の比較キー) の差異として検出する。
+#[test]
+fn end_of_group_status_then_data_object_at_same_position_is_rejected() {
+    let alias = 708;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    open_incoming_subgroup(&mut client, DataStreamId(94), alias, 3, 0, false);
+    client
+        .recv_subgroup_object(DataStreamId(94), &status_object(5, 0x3))
+        .expect("End of Group マーカーは受理される");
+
+    // 同じ位置に通常 Object が届く (status の有無が異なる重複)
+    let err = client
+        .recv_subgroup_object(DataStreamId(94), &normal_object(5))
+        .expect_err("同一位置で内容が異なる Object は拒否される");
+    assert_eq!(
+        err.reason,
+        "malformed track: duplicate Object with different Payload"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// End of Track を宣言した Object 自身を同一内容で再受信しても Malformed にしない
+///
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 5 も "larger than the final Object" である。
+#[test]
+fn duplicate_object_at_end_of_track_position_is_accepted() {
+    let alias = 707;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    open_incoming_subgroup(&mut client, DataStreamId(92), alias, 3, 0, false);
+    client
+        .recv_subgroup_object(DataStreamId(92), &status_object(7, 0x4))
+        .expect("End of Track マーカーは受理される");
+    client
+        .recv_subgroup_object(DataStreamId(92), &status_object(7, 0x4))
+        .expect("同一内容の重複は Malformed にしない");
+
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "同一内容の重複で subscription を終端しないこと"
+    );
+    // 宣言位置より後ろは従来どおり拒否される
+    open_incoming_subgroup(&mut client, DataStreamId(93), alias, 3, 1, false);
+    let err = client
+        .recv_subgroup_object(DataStreamId(93), &normal_object(8))
+        .expect_err("End of Track 以降の object は拒否される");
+    assert_eq!(err.reason, "object received after End of Track");
 }
 
 /// End of Group より小さい Object ID は引き続き受理される (境界)
@@ -2192,10 +2349,12 @@ fn object_before_end_of_group_is_accepted() {
         .expect("End of Group より小さい Object ID は受理される");
 }
 
-/// Object Status 0x4 (End of Track) 以降の Object は拒否される
+/// End of Track を宣言した位置より後ろの Object は拒否される
 ///
-/// draft-ietf-moq-transport-21 §11.1.2 (Object Status): "Indicates that no objects with the
-/// location that is equal to or greater than the one specified exist."
+/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 5: "An Object is received whose Group
+/// and Object ID are larger than the final Object in the Track. The final Object in a Track is the
+/// Object with Status END_OF_TRACK, ..." であるため、終端を宣言した Object 自身 (同一位置) は
+/// Malformed にしない (同じ位置の重複は条件 6 の内容比較に委ねる)。
 #[test]
 fn object_after_end_of_track_status_is_rejected() {
     let alias = 702;

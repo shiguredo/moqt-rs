@@ -1251,21 +1251,35 @@ pub struct Subscription {
     /// 値は「その Group に存在しない最小の Object ID」。この値以上の Object ID を持つ
     /// Object を受信したら §12.1 (Malformed Tracks) の条件 4 に該当する。
     ///
-    /// 登録契機は 3 つあり、いずれも同じ表現に正規化する。
-    /// - Object Status 0x3 (End of Group) を位置 (G, N) で受信 → `N`
-    ///   (§11.1.2 は "Object ID that is greater than or equal to the one specified" と
-    ///   その位置自身を含めて存在しないと述べる)
+    /// 登録契機は 3 つあり、いずれも同じ表現に正規化する。終端を宣言した Object 自身は
+    /// §12.1 条件 4 の "the final Object in the Group" として存在するものとして扱うため、
+    /// その位置は「存在しない」に含めない (同一位置の重複は条件 6 の内容比較に委ねる)。
+    ///
+    /// - Object Status 0x3 (End of Group) を位置 (G, N) で受信 → `N + 1`
+    ///   (§11.1.2 は "Object ID that is greater than or equal to the one specified" と述べるが、
+    ///   §12.1 条件 4 は宣言した Object を final Object と定義し "larger than" だけを Malformed と
+    ///   するため、宣言位置の 1 つ先を「存在しない最小」とする)
     /// - datagram の END_OF_GROUP bit を位置 (G, N) で受信 → `N + 1`
     ///   (§11.2.1 は "an Object ID greater than the Object ID in this datagram" と
     ///   その位置より大きいものが存在しないと述べる)
     /// - ヘッダの END_OF_GROUP bit が立った subgroup stream が FIN で終わった → 最終 Object ID + 1
     ///   (§12.1 の "the last Object before a FIN in a Subgroup which has the END_OF_GROUP bit set")
+    ///
+    /// 上記のうち Object ID から 1 つ先を計算する経路は `saturating_add` を使うため、
+    /// Object ID が `u64::MAX` の場合は境界を進められず、終端を宣言した Object 自身の再受信も
+    /// Malformed のままになる (有効な Object ID 1 点だけの既知の限界)。
+    /// Object 0 個の Subgroup は `record_group_end_after` を通らず 0 を直接記録するため、
+    /// この限界の対象外である。
     pub ended_groups: HashMap<u64, u64>,
     /// Track の終端位置 (draft §11.1.2 (Object Status))
     ///
-    /// 値は「Track に存在しない最小の Location」。Object Status 0x4 (End of Track) を
-    /// 位置 L で受信したら `L` を格納する (§11.1.2 は "location that is equal to or greater
-    /// than the one specified" とその位置自身を含めて存在しないと述べる)。
+    /// 値は終端を宣言した Object 自身の Location (存在しない最小の Location ではない)。
+    /// Object Status 0x4 (End of Track) を位置 L で受信したら `L` を格納し、`L` より大きい
+    /// Location の Object を §12.1 (Malformed Tracks) 条件 5 として拒否する。
+    /// §12.1 条件 5 は "whose Group and Object ID are larger than the final Object in the Track"
+    /// と定め、final Object (End of Track を宣言した Object 自身) は Malformed にしない
+    /// (§11.1.2 の "location that is equal to or greater than the one specified" との差は、
+    /// 宣言した Object 自身を存在するものとして扱うことで解消する)。
     pub end_of_track: Option<Location>,
     /// 合体された REQUEST_UPDATE の累積パラメータ (draft §9.5.1 (Updating Subscriptions))
     ///

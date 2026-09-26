@@ -2611,14 +2611,24 @@ impl Session {
         location: &Location,
     ) -> Option<&'static str> {
         let subscription = self.subscriptions.get(&request_id)?;
-        // §11.1.2: End of Track は "location that is equal to or greater than the one
-        // specified" が存在しないことを宣言する
+        // draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 5: "An Object is received
+        // whose Group and Object ID are larger than the final Object in the Track. The final
+        // Object in a Track is the Object with Status END_OF_TRACK, or the last Object sent in a
+        // FETCH whose response indicated End of Track" であるため、終端を宣言した Object 自身
+        // (同一 Location) は Malformed にしない。同一位置の重複は §12.1 条件 6 の内容比較
+        // (`ObjectFieldTracker`) に委ねる。FETCH 応答内の Object は本判定の対象外である
+        // (`recv_fetch_entry` は位置検証を行わず、`Fetch::end_of_track` は位置を保持しない)。
+        // `Location` は group_id → object_id の辞書順なので、厳密な `>` が条件 5 の
+        // "larger than" と一致する (桁溢れも起きない)。
         if let Some(end) = subscription.end_of_track.as_ref()
-            && location >= end
+            && location > end
         {
             return Some("object received after End of Track");
         }
-        // Group 終端は「存在しない最小の Object ID」として正規化済み
+        // draft §12.1 条件 4: "An Object is received in a Group whose Object ID is larger than
+        // the final Object in the Group" であるため、Group 終端も宣言した Object 自身は
+        // Malformed にしない。`ended_groups` は「存在しない最小の Object ID」であり、
+        // 終端を宣言した Object 自身は存在するものとして正規化済み (`object_id + 1`)。
         if let Some(&end_object_id) = subscription.ended_groups.get(&location.group_id)
             && location.object_id >= end_object_id
         {
@@ -2629,11 +2639,17 @@ impl Session {
 
     /// Object Status から End of Group / End of Track を状態へ記録する
     ///
-    /// draft-ietf-moq-transport-21 §11.1.2 (Object Status):
-    /// - 0x3 (End of Group): "no objects with the specified Group ID and the Object ID that is
-    ///   greater than or equal to the one specified exist" → その位置自身が存在しない最小 ID
-    /// - 0x4 (End of Track): "no objects with the location that is equal to or greater than the
-    ///   one specified exist" → その位置自身が存在しない最小 Location
+    /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4/5 は「final Object より
+    /// **larger than**」な Object だけを Malformed とし、final Object は終端を宣言した Object
+    /// 自身である。§11.1.2 (Object Status) の "greater than or equal to" は宣言後に存在しない
+    /// Object を述べたものと解釈し、§2.1 ("an endpoint can receive an Object after it has already
+    /// recorded that the Object does not exist ... This is not a protocol error and the Track is
+    /// not malformed.") と整合させる。宣言した Object 自身は存在するものとして記録する。
+    ///
+    /// - 0x3 (End of Group): `ended_groups` に「存在しない最小の Object ID」として宣言位置の
+    ///   1 つ先 (`object_id + 1`) を記録する。同一位置の重複は §12.1 条件 6 の内容比較に委ねる
+    /// - 0x4 (End of Track): `end_of_track` に宣言 Location 自身を格納し、判定は
+    ///   `location > end` の厳密比較にする (`object_after_track_end`)
     pub(super) fn record_object_status_end(
         &mut self,
         request_id: u64,
@@ -2647,12 +2663,19 @@ impl Session {
         };
         match status {
             OBJECT_STATUS_END_OF_GROUP => {
+                // draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4 は終端を宣言した
+                // Object 自身を "the final Object in the Group" として扱い、"larger than" な
+                // Object だけを Malformed とする。`ended_groups` は「存在しない最小の Object ID」
+                // を保持するため、宣言した Object 自身を存在するものとして 1 つ先を記録する
+                // (§11.1.2 の "greater than or equal to" は、宣言後に存在しない Object を
+                // 述べたものと解釈する。§2.1 も、存在しないと記録した後に Object が届くことは
+                // protocol error ではないと定める)。
+                // `u64::MAX` では境界を 1 つ先へ進められず、宣言した Object 自身の再受信も
+                // Malformed のままになる既知の限界がある (`Subscription::ended_groups` の doc)。
+                let end = object_id.saturating_add(1);
                 // 既にもっと手前で終端宣言されている場合は狭い方 (小さい方) を残す
-                let entry = subscription
-                    .ended_groups
-                    .entry(group_id)
-                    .or_insert(object_id);
-                *entry = (*entry).min(object_id);
+                let entry = subscription.ended_groups.entry(group_id).or_insert(end);
+                *entry = (*entry).min(end);
             }
             OBJECT_STATUS_END_OF_TRACK => {
                 let location = Location {

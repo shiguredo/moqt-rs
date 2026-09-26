@@ -364,6 +364,17 @@
   - 併せて記録数の上限 `ObjectFieldTracker::MAX_RECORDS` (1_000) を設け、超過時は最も古い group を group 単位で、1 group しか無い場合は古い object_id から破棄する。破棄した Object の重複は検出しない (§12.1 条件 6 と §7.1 の重複検出が及ばない範囲がある known limitation)
   - @voluntas
 
+- [FIX] 終端を宣言した Object 自身を同一内容で再受信しても Malformed Track にしない
+  - draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4/5 は「final Object より larger than」な Object だけを Malformed とし、
+    final Object は End of Group / End of Track を宣言した Object 自身である。従来は終端を宣言した位置そのものを「存在しない」として扱っていたため、
+    同一内容の重複で subscription を cancel していた (§2.1 は、存在しないと記録した後に Object が届くことは protocol error ではないと定める)
+  - `Subscription::ended_groups` は Object Status 0x3 (End of Group) の位置 N に対して `N + 1` を記録する (`N` から変更)。
+    `Subscription::end_of_track` は宣言された Location をそのまま保持し、判定を `location > end` の厳密比較にする (`location >= end` から変更)
+  - 宣言した位置より後ろの Object は従来どおり Malformed Track になる。同じ位置の重複は §12.1 条件 6 と §7.1 の内容比較
+    (`ObjectFieldTracker`) に委ね、内容が同じなら受理、異なれば Malformed になる
+  - 保持量の上限で記録が破棄された後は同一位置の重複を比較できない (検出範囲が狭くなる known limitation)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

@@ -580,7 +580,8 @@ fn malformed_after_publish_done_sends_reset_without_request_terminated() {
             },
         )
         .expect("drain 中の End of Track 宣言は受理されること");
-    // 終端宣言後の Object は Malformed Track にあたる (draft §12.1 条件 4/5)
+    // 終端宣言と同じ位置で内容が異なる Object は Malformed Track にあたる
+    // (draft §12.1 条件 5 の "larger than" ではなく、条件 6 の内容比較で検出される)
     let err = client
         .recv_subgroup_object(stream_id, &object(4))
         .unwrap_err();
