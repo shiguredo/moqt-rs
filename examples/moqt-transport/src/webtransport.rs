@@ -2031,7 +2031,6 @@ fn close_connection_with_h3_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// WT_APPLICATION_ERROR 範囲外のプロトコルエラーコード (draft-ietf-webtrans-http3-16 §9.5)
     const WT_SESSION_GONE: u64 = shiguredo_http3::webtransport::ErrorCode::SessionGone as u64;
@@ -2046,13 +2045,16 @@ mod tests {
         base.next_multiple_of(0x1f) + 0x21
     }
 
-    /// `tracing::warn!` の回数とメッセージを記録するテスト用サブスクライバ
+    /// `tracing::warn!` のメッセージを記録するテスト用サブスクライバ
     ///
     /// 観測専用であり、変換関数の処理や戻り値には関与しない (テスト対象を置き換えない)。
-    struct WarnRecorder {
-        count: Arc<AtomicUsize>,
-        messages: Arc<StdMutex<Vec<String>>>,
-    }
+    /// 記録した warn はスレッドごとに分けて取り出すため、他のテストと並行して実行しても
+    /// 干渉しない。
+    struct WarnRecorder;
+
+    /// 記録した warn (どのスレッドが記録したかとメッセージ)
+    static WARN_MESSAGES: StdMutex<Vec<(std::thread::ThreadId, String)>> =
+        StdMutex::new(Vec::new());
 
     impl tracing::Subscriber for WarnRecorder {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
@@ -2068,15 +2070,15 @@ mod tests {
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                let mut collector = MessageCollector::default();
-                event.record(&mut collector);
-                self.messages
-                    .lock()
-                    .expect("warn のメッセージを記録できること")
-                    .push(collector.message);
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
             }
+            let mut collector = MessageCollector::default();
+            event.record(&mut collector);
+            WARN_MESSAGES
+                .lock()
+                .expect("warn のメッセージを記録できること")
+                .push((std::thread::current().id(), collector.message));
         }
 
         fn enter(&self, _span: &tracing::span::Id) {}
@@ -2098,20 +2100,49 @@ mod tests {
         }
     }
 
-    /// warn を記録するサブスクライバを設定して関数を実行し、結果と記録内容を返す
-    fn with_warn_recorder<T>(f: impl FnOnce() -> T) -> (T, usize, Vec<String>) {
-        let count = Arc::new(AtomicUsize::new(0));
-        let messages = Arc::new(StdMutex::new(Vec::new()));
-        let recorder = WarnRecorder {
-            count: Arc::clone(&count),
-            messages: Arc::clone(&messages),
-        };
-        let returned = tracing::subscriber::with_default(recorder, f);
-        let recorded = messages
+    /// 記録用のサブスクライバをプロセスに 1 度だけ設置する
+    ///
+    /// `tracing` は callsite ごとの interest をプロセス全体でキャッシュする。購読者が居ない
+    /// スレッドが同じ callsite に到達するとその callsite の interest が `never` になり、
+    /// 以降その callsite のイベントは配送されない。スコープ付きサブスクライバ
+    /// (`tracing::subscriber::with_default`) では、並行実行される他のテストが同じ callsite を
+    /// 通るたびにこの状態が作り直されるため、warn を取りこぼして実行のたびに結果が変わる。
+    /// プロセスに 1 度だけグローバルなサブスクライバを設置し、interest が `never` に
+    /// ならないようにする。
+    fn install_warn_recorder() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            // 既にグローバルなサブスクライバがある場合は記録できないため、そのまま進める
+            let _ = tracing::subscriber::set_global_default(WarnRecorder);
+        });
+    }
+
+    /// 現在のスレッドが記録した warn を取り出す
+    fn take_recorded_warns() -> Vec<String> {
+        let thread_id = std::thread::current().id();
+        let mut recorded = WARN_MESSAGES
             .lock()
-            .expect("warn のメッセージを取得できること")
-            .clone();
-        (returned, count.load(Ordering::SeqCst), recorded)
+            .expect("warn のメッセージを取得できること");
+        let mut taken = Vec::new();
+        recorded.retain(|(id, message)| {
+            if *id == thread_id {
+                taken.push(message.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    /// warn を記録するサブスクライバを設置して関数を実行し、結果と記録内容を返す
+    fn with_warn_recorder<T>(f: impl FnOnce() -> T) -> (T, usize, Vec<String>) {
+        install_warn_recorder();
+        // 呼び出し前に残った記録を捨て、この実行で出た warn だけを対象にする
+        let _ = take_recorded_warns();
+        let returned = f();
+        let messages = take_recorded_warns();
+        (returned, messages.len(), messages)
     }
 
     /// 1024 バイト以下はそのまま返す
