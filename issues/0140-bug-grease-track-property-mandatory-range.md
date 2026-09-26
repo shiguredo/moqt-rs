@@ -1,7 +1,7 @@
 # GREASE 値が Mandatory Track Property 範囲に入る場合に unknown mandatory としない
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/fix-grease-track-property-mandatory-range
 - Polished: 2026-09-22
 
@@ -35,3 +35,16 @@ GREASE 値のうち N = 128〜256 (0x401D〜0x7F9D の 129 値) はこの範囲�
 - 偶奇両方の GREASE 値 (varint 型と長さ付きバイト列型) を覆っていること
 - Object scope 側 ([issues/0121](../issues/0121-bug-grease-property-mandatory-range.md)) と同じ解釈で実装されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`TrackProperties::has_unknown_mandatory` の判定に GREASE 値の除外を追加し、GREASE 値を Track Property に載せた PUBLISH / SUBSCRIBE_OK / FETCH_OK を unknown mandatory として拒否しないようにした。
+
+- `src/track_properties.rs`: 判定クロージャに `!crate::grease::is_grease(prop_type)` を追加した (mutable リストと IMMUTABLE_PROPERTIES 内側の両方に適用される)。doc には §3.6 の字面 (範囲全体を Mandatory とする) と §16.8 Table 14 の GREASE 行 (Scope Any) が衝突することを明記し、§13 (Grease) の
+  "Endpoints MUST NOT close the session solely because they received an unknown value." と §16.8 の "Endpoints MUST ignore unknown Property types, skipping them according to the Key-Value-Pair encoding" を根拠に Table 14 を優先する解釈を書いた。Object scope (`src/object_properties.rs`) も同じ解釈であり、相互参照を doc に残した
+- 追加したテスト
+  - `tests/test_track_properties.rs`: GREASE の境界 (0x401D / 0x409C / 0x7F9D) を前提 assert 付きで固定、0x4000-0x7FFF 全域のスキャンで「GREASE 値だけを除外する」ことを固定、GREASE 値を encode / decode して往復後も unknown mandatory にならないこと、IMMUTABLE_PROPERTIES 内側の GREASE 値、GREASE 以外の未知 Mandatory の非退行
+  - `tests/test_session/parameter_rules.rs`: GREASE 値の Track Property を含む PUBLISH が REQUEST_ERROR (UNSUPPORTED_EXTENSION) にならず Pending(Publisher) として受理されること
+  - `tests/test_session/subscription/handshake.rs`: GREASE 値の Track Property を含む SUBSCRIBE_OK が購読キャンセルにならないこと
+  - `tests/test_session/fetch/validation.rs`: GREASE 値の track property を含む FETCH_OK が fetch キャンセルにならないこと
+- `CHANGES.md` の `## develop` に `[FIX]` エントリを追加した
