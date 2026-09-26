@@ -1954,3 +1954,171 @@ fn publisher_request_update_error_defers_publish_done_until_streams_close() {
     assert_eq!(publish_done_count, 1);
     assert_eq!(publish_done, Some((PUBLISH_DONE_UPDATE_FAILED, 1, true)));
 }
+
+/// `Session` は subscription の実効 group 順序を `ObjectFieldTracker` の生成時に渡す
+///
+/// draft-ietf-moq-transport-21 §5.1.1: `GROUP_ORDER` parameter (§9.20.9) が優先され、
+/// 指定が無ければ `DEFAULT_PUBLISHER_GROUP_ORDER` Track Property (§10.5)、どちらも無ければ
+/// Ascending (0x1)。順序は group の変化に応じた prune と、保持量の上限超過時の破棄方向に使う。
+#[test]
+fn peer_object_fields_tracker_uses_subscription_group_order() {
+    use crate::message::{ControlMessage, Publish, Setup};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER};
+    use crate::parameter::SetupOptions;
+    use crate::stream::decoder::DecodedSubgroupObject;
+    use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
+    use crate::track_properties::{
+        PROP_DEFAULT_PUBLISHER_GROUP_ORDER, TrackProperties, TrackProperty, TrackPropertyValue,
+    };
+
+    // draft-ietf-moq-transport-21 §5.1.1: GROUP_ORDER parameter (§9.20.9) が優先され、
+    // 指定が無ければ DEFAULT_PUBLISHER_GROUP_ORDER Track Property (§10.5)、
+    // どちらも無ければ Ascending (0x1) になる。0x2 は Descending。
+    for (track_property, parameter, expected_ascending) in [
+        (None, None, true),
+        (Some(0x2), None, false),
+        (None, Some(0x2), false),
+        (Some(0x1), Some(0x2), false),
+    ] {
+        let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        client
+            .recv_control(ControlMessage::Setup(Setup {
+                options: SetupOptions::new(),
+            }))
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        // peer publisher からの PUBLISH を受けて subscriber 役になる (server 側の採番は奇数)
+        let mut track_properties = TrackProperties::new();
+        if let Some(value) = track_property {
+            track_properties.push(TrackProperty {
+                prop_type: PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
+                value: TrackPropertyValue::VarInt(value),
+            });
+        }
+        let mut parameters = MessageParameters::new();
+        if let Some(value) = parameter {
+            parameters.push(MessageParameter {
+                param_type: PARAM_GROUP_ORDER,
+                value: MessageParameterValue::Uint8(value),
+            });
+        }
+        let rid = 1_u64;
+        client
+            .recv_request(ControlMessage::Publish(Publish {
+                request_id: rid,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                track_name: b"cam".to_vec(),
+                track_alias: 1,
+                parameters,
+                track_properties,
+            }))
+            .expect("PUBLISH の受理に成功すること");
+        client
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+            .expect("PUBLISH_OK の送信に成功すること");
+
+        // peer から subgroup 経由で Object が届く
+        let stream_id = DataStreamId(11);
+        let header = SubgroupHeader {
+            track_alias: 1,
+            group_id: 0,
+            subgroup_id: SubgroupIdMode::Explicit(0),
+            publisher_priority: Some(128),
+            has_properties: false,
+            end_of_group: false,
+            first_object: false,
+        };
+        client
+            .recv_data_stream_type(stream_id, header.encode()[0] as u64)
+            .expect("subgroup stream type の通知に成功すること");
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("subgroup header の受理に成功すること");
+        client
+            .recv_subgroup_object(
+                stream_id,
+                &DecodedSubgroupObject {
+                    object_id: 0,
+                    payload_length: 1,
+                    status: None,
+                    properties_bytes: None,
+                },
+            )
+            .expect("Object の受理に成功すること");
+
+        let tracker = client
+            .peer_object_fields
+            .get(&rid)
+            .expect("tracker が生成されること");
+        assert_eq!(
+            tracker.is_ascending(),
+            expected_ascending,
+            "GROUP_ORDER {parameter:?} / Track Property {track_property:?} の実効順序が tracker に反映されること"
+        );
+    }
+}
+
+/// datagram 経路でも subscription の実効 group 順序が `ObjectFieldTracker` に渡る
+///
+/// draft-ietf-moq-transport-21 §5.1.1: `GROUP_ORDER` parameter (§9.20.9) が `DEFAULT_PUBLISHER_GROUP_ORDER`
+/// Track Property (§10.5) より優先されるため、datagram のみを受信する subscription でも同じ順序になる。
+#[test]
+fn peer_object_fields_tracker_uses_subscription_group_order_on_datagram_path() {
+    use crate::message::{ControlMessage, Publish, Setup};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER};
+    use crate::parameter::SetupOptions;
+    use crate::stream::datagram::ObjectDatagram;
+    use crate::track_properties::TrackProperties;
+
+    let mut client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(0x2),
+    });
+    let rid = 1_u64;
+    client
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: rid,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("テストフィクスチャの前提条件を満たす"),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters,
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("PUBLISH の受理に成功すること");
+    client
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("PUBLISH_OK の送信に成功すること");
+
+    client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: 1,
+            group_id: 0,
+            object_id: 0,
+            publisher_priority: Some(128),
+            properties_data: None,
+            end_of_group: false,
+            status: None,
+        })
+        .expect("datagram の受理に成功すること");
+
+    assert!(
+        !client
+            .peer_object_fields
+            .get(&rid)
+            .expect("tracker が生成されること")
+            .is_ascending(),
+        "datagram 経路でも GROUP_ORDER = 0x2 (Descending) が tracker に反映されること"
+    );
+}

@@ -93,7 +93,7 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
             )
         };
 
-        let mut tracker = ObjectFieldTracker::new();
+        let mut tracker = ObjectFieldTracker::new(true);
         tracker
             .observe_object_fields(group_id, object_id, first.0, first.1, first.2)
             .expect("初回の観測は成功する");
@@ -168,7 +168,7 @@ fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestRes
         // 3 回目の比較相手は常に 1 回目である
         let (third_immutables, third_payload_key) = (sample_content(ctx), sample_content(ctx));
 
-        let mut tracker = ObjectFieldTracker::new();
+        let mut tracker = ObjectFieldTracker::new(true);
         tracker
             .observe_object_fields_with_content(
                 group_id,

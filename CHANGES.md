@@ -61,6 +61,9 @@
   - `SubgroupTracker::open` / `record_priority` / `mark_fin` の戻り値型を `SessionError` から `MessageError` に変更する (破壊的変更)
   - `MessageError::reason()` / `MessageError::malformed_track_reason()` を追加する
   - @voluntas
+- [CHANGE] `ObjectFieldTracker::new` が subscription の実効 group 順序 (`ascending: bool`) を受け取るようにする
+  - tracker が group の変化に応じた prune と保持量の上限超過時の破棄方向に順序を使うため、順序を引数で受け取る (引数追加のため破壊的変更)。順序が不明な場合は `Default` (Ascending) を使う
+  - @voluntas
 - [ADD] TRACK_STATUS の受信側 (自側 publisher) を実装し、peer から受信した TRACK_STATUS に TRACK_STATUS_OK / REQUEST_ERROR で応答する
   - draft-ietf-moq-transport-21 §6.3 (Session initialization) は TRACK_STATUS を request stream の開始メッセージとして許可するため、受信しても `PROTOCOL_VIOLATION` でセッションを閉じない
   - 受信側は subscription state も Track Alias も作らず Objects も送らず、応答の送信後に bidi stream を FIN で閉じる (§9.13)
@@ -235,7 +238,7 @@
   - 内容が食い違えば `ObjectFieldMismatch` を返し (一致する重複は従来どおり受理する)、Session はこれを Malformed Track として該当 subscription だけを cancel する
   - 検出できるのは Session が保持する情報の範囲に限る。payload の内容は保持しないため同じ長さで内容だけが異なる payload は payload を持つ層が比較し、片方でも `None` なら比較しない (見逃し側に倒す)。これらの見逃しと、datagram の payload 長・片側だけ IMMUTABLE_PROPERTIES を持つ重複の見逃しは既知の制約である
   - 対象は受信した subgroup Object と datagram であり、FETCH 応答の Object は対象外である
-  - `ObjectFieldTracker` の 1 レコードが immutables 長 (最大 65535 バイト) と payload_key 長を保持する。`records` は Session が subscription を forget するか `prune_past_groups` を呼ぶまで減らず、`Session` は現状 `prune_past_groups` を呼ばない (prune 配線は未実装)
+  - `ObjectFieldTracker` の 1 レコードが immutables 長 (最大 65535 バイト) と payload_key 長を保持する (保持量は group の変化に応じた prune と記録数の上限で有界である)
   - @voluntas
 
 - [FIX] publisher example が Subgroup の終端方法を Start Location で選ぶ
@@ -353,6 +356,12 @@
     §16.8 (Properties) の "Endpoints MUST ignore unknown Property types, skipping them according to the Key-Value-Pair encoding" に従い、
     GREASE 値は unknown mandatory として扱わない (§3.6 の字面は範囲全体を Mandatory とするため解釈が割れるが、Table 14 の Scope Any を優先する)
   - Object scope の同じ衝突は先に対応済みであり、Track scope でも同じ解釈に揃える (受信挙動の変更)
+  - @voluntas
+
+- [FIX] `ObjectFieldTracker` の保持量を group の変化に応じた prune と記録数の上限で有界にする
+  - 従来は subscription を forget するまで記録が増え続け、1 レコードが IMMUTABLE_PROPERTIES の生バイト列 (最大 65535 バイト) を保持するため、peer の送信量に比例してメモリが増えていた
+  - `ObjectFieldTracker` が直前の group を保持し、group が変わった時点で `prune_past_groups` を呼ぶ。順序は `GROUP_ORDER` parameter (draft-ietf-moq-transport-21 §9.20.9) を優先し、無ければ `DEFAULT_PUBLISHER_GROUP_ORDER` Track Property (§10.5)、どちらも無ければ Ascending (§5.1.1) の実効値を tracker の生成時に渡す
+  - 併せて記録数の上限 `ObjectFieldTracker::MAX_RECORDS` (1_000) を設け、超過時は最も古い group を group 単位で、1 group しか無い場合は古い object_id から破棄する。破棄した Object の重複は検出しない (§12.1 条件 6 と §7.1 の重複検出が及ばない範囲がある known limitation)
   - @voluntas
 
 ### misc

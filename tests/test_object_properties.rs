@@ -491,7 +491,7 @@ fn find_varint_returns_none_for_corrupted_immutable_inner() {
 fn object_field_mismatch_converts_into_boxed_error() {
     /// 不一致の検出を `?` で伝播させる
     fn observe_mismatch() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut tracker = ObjectFieldTracker::new();
+        let mut tracker = ObjectFieldTracker::new(true);
         // 初回受信は記録される
         tracker.observe_object_fields(3, 7, true, Some(1), 0)?;
         // 同じ (group_id, object_id) を datagram 経由で再受信する

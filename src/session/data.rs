@@ -11,7 +11,7 @@ use crate::error::{
     is_local_error_code,
 };
 use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
-use crate::object_properties::ObjectProperties;
+use crate::object_properties::{ObjectFieldTracker, ObjectProperties};
 use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, OBJECT_STATUS_NORMAL,
     PADDING_DATAGRAM_TYPE, classify_data_stream_type,
@@ -31,10 +31,10 @@ use super::subscription::validation::{
     ObjectFilterInput, header_passes_filters, object_passes_filters,
 };
 use super::types::{
-    DataStreamId, DataStreamResetReason, DatagramAcceptance, FetchState,
-    PUBLISHER_PRIORITY_DEFAULT, RecvDataStreamError, RequestKind, RequestStreamEnd,
-    SendRequestError, SessionError, SessionEvent, SessionState, Subscription, SubscriptionState,
-    TerminationReason, TrackDataAcceptance, TrackRole,
+    DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DataStreamResetReason,
+    DatagramAcceptance, FetchState, PUBLISHER_PRIORITY_DEFAULT, RecvDataStreamError, RequestKind,
+    RequestStreamEnd, SendRequestError, SessionError, SessionEvent, SessionState, Subscription,
+    SubscriptionState, TerminationReason, TrackDataAcceptance, TrackRole,
 };
 
 /// subscription がキャンセル由来 `Terminated` かどうかを判定する
@@ -815,6 +815,27 @@ impl Session {
         Some(request_id)
     }
 
+    /// subscription の実効 group 順序が Ascending かどうかを返す
+    ///
+    /// draft-ietf-moq-transport-21 §5.1.1: 購読者の group order の指定 (`GROUP_ORDER` parameter、
+    /// §9.20.9) が優先され、指定が無ければ publisher の選好 (`DEFAULT_PUBLISHER_GROUP_ORDER`
+    /// Track Property、§10.5) を使い、どちらも無ければ Ascending (0x1) である。
+    /// `Subscription::effective_publisher_group_order` は publisher の選好だけを解決するため、
+    /// parameter を含めた実効順序はここで解決する。
+    /// `ObjectFieldTracker` の生成時に渡し、group の変化に応じた prune と保持量の上限超過時の
+    /// 破棄方向に使う。subscription が見つからない場合は既定の Ascending として扱う。
+    fn is_ascending_group_order(&self, request_id: u64) -> bool {
+        self.subscriptions
+            .get(&request_id)
+            .map(|s| {
+                s.group_order
+                    .or(s.default_publisher_group_order)
+                    .unwrap_or(DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING)
+                    == DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING
+            })
+            .unwrap_or(true)
+    }
+
     /// 保留中の PUBLISH_DONE (UPDATE_FAILED) を全 stream 終端後に自動送信する
     ///
     /// draft-ietf-moq-transport-21 §9.9 (PUBLISH_DONE) の MUST NOT (全 stream を閉じるまで
@@ -1586,10 +1607,15 @@ impl Session {
             .as_ref()
             .and_then(ObjectProperties::immutable_properties);
         let payload_key = payload_key_of(object.status, Some(object.payload_length));
+        // group 順序は subscription の実効値 (draft-ietf-moq-transport-21 §5.1.1。GROUP_ORDER
+        // parameter を優先し、無ければ DEFAULT_PUBLISHER_GROUP_ORDER Track Property (§10.5)) を
+        // tracker の生成時に渡す。tracker は group の変化に応じた prune と上限超過時の破棄方向に
+        // これを使う。
+        let ascending = self.is_ascending_group_order(object_request_id);
         if let Err(mismatch) = self
             .peer_object_fields
             .entry(object_request_id)
-            .or_default()
+            .or_insert_with(|| ObjectFieldTracker::new(ascending))
             .observe_object_fields_with_content(
                 group_id,
                 object.object_id,
@@ -2545,10 +2571,13 @@ impl Session {
                 .as_ref()
                 .and_then(ObjectProperties::immutable_properties);
             let payload_key = payload_key_of(datagram.status, None);
+            // subgroup 経路と同じく、group 順序は subscription の実効値 (§5.1.1) を tracker の
+            // 生成時に渡す
+            let ascending = self.is_ascending_group_order(request_id);
             if let Err(mismatch) = self
                 .peer_object_fields
                 .entry(request_id)
-                .or_default()
+                .or_insert_with(|| ObjectFieldTracker::new(ascending))
                 .observe_object_fields_with_content(
                     datagram.group_id,
                     datagram.object_id,

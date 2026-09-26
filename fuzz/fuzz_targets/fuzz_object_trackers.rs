@@ -32,8 +32,8 @@ fuzz_target!(|observes: Vec<Observe>| {
     let mut properties = ObjectPropertyTracker::new();
     // 5 引数 API と内容込み API は別の tracker に観測させる。同じ tracker に順に観測させると
     // 内容込み API が常に 2 回目以降の観測になり、初回記録の分岐に到達しない。
-    let mut fields = ObjectFieldTracker::new();
-    let mut fields_with_content = ObjectFieldTracker::new();
+    let mut fields = ObjectFieldTracker::new(true);
+    let mut fields_with_content = ObjectFieldTracker::new(true);
     for observe in &observes {
         // 重複 Object の比較分岐に到達させるため、ID 空間を小さく畳む
         let group_id = observe.group_id % FIELD_ID_SPACE;

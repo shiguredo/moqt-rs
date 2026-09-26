@@ -642,16 +642,35 @@ fn decode_kv_pairs(
 /// 見逃し側に倒す)。記録は初回受信時の値のまま更新しないため、初回に `None` だった Object は
 /// 以後も内容比較の対象にならない。
 ///
-/// **保持量**: 1 レコードは immutables 長 (最大 65535 バイト) と payload_key 長を保持する。
-/// [`prune_past_groups`](Self::prune_past_groups) を呼ぶか tracker 自体を破棄するまで減らないため
-/// (同じ group 内の記録は prune でも残る)、`Session` のように prune を呼ばない利用者では
-/// 受信 Object 数 × 上記サイズまで増え続ける。
+/// 保持量: 1 レコードは immutables 長 (最大 65535 バイト) と payload_key 長を保持する。
+/// [`ObjectFieldTracker::observe_object_fields_with_content`] が group の変化を検出した時点で
+/// [`prune_past_groups`](Self::prune_past_groups) を呼び、さらに
+/// [`ObjectFieldTracker::MAX_RECORDS`] を超えた分を古い記録から破棄するため、
+/// 1 subscription あたりの保持量は有界である (破棄した Object の重複は検出しない)。
 ///
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ObjectFieldTracker {
     /// (group_id, object_id) → 初回受信時のフィールド値
     records: HashMap<(u64, u64), ObjectFieldRecord>,
+    /// 直前に観測した group (group の変化を検出して prune するために保持する)
+    last_group: Option<u64>,
+    /// 実効 group 順序 (true = Ascending)。prune と上限超過時の破棄方向に使う
+    ascending: bool,
+}
+
+impl Default for ObjectFieldTracker {
+    /// group 順序を Ascending (draft-ietf-moq-transport-21 §10.5 (DEFAULT PUBLISHER GROUP ORDER) の既定) として作る
+    ///
+    /// 順序が不明な文脈向けの既定であり、subscription の実効順序が分かる場合は
+    /// [`ObjectFieldTracker::new`] を使うこと。
+    fn default() -> Self {
+        Self {
+            records: HashMap::new(),
+            last_group: None,
+            ascending: true,
+        }
+    }
 }
 
 /// 初回受信時に記録する Object のフィールド値
@@ -697,9 +716,40 @@ impl core::fmt::Display for ObjectFieldMismatch {
 impl core::error::Error for ObjectFieldMismatch {}
 
 impl ObjectFieldTracker {
+    /// 保持する記録数の上限
+    ///
+    /// 1 レコードは IMMUTABLE_PROPERTIES の生バイト列 (最大 65535 バイト。draft-ietf-moq-transport-21
+    /// §8.3 (Key-Value-Pair Structure) の "The maximum length of a value is 2^16-1 bytes") と
+    /// payload_key を保持するため、datagram の
+    /// [`MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION`](crate::session::core::MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION)
+    /// (100_000) と同じ値は使えない (最悪 6.5 GB)。1_000 件なら最悪約 65.5 MB に収まり、
+    /// 30 fps の映像では約 33 秒分の検出窓になる。
+    /// 超過時は [`ObjectFieldTracker::observe_object_fields_with_content`] が古い記録から破棄する。
+    pub const MAX_RECORDS: usize = 1_000;
+
     /// 空のトラッカーを作成する
-    pub fn new() -> Self {
-        Self::default()
+    ///
+    /// `ascending` は subscription の実効 group 順序 (draft-ietf-moq-transport-21 §5.1.1) を
+    /// `true` = Ascending (0x1) / `false` = Descending (0x2) で渡す。順序が不明な場合は
+    /// [`ObjectFieldTracker::default`] (Ascending) を使ってよい。
+    pub fn new(ascending: bool) -> Self {
+        Self {
+            records: HashMap::new(),
+            last_group: None,
+            ascending,
+        }
+    }
+
+    /// 記録している Object 数を返す (診断用)
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// 実効 group 順序が Ascending かどうかを返す (診断用)
+    #[cfg(test)]
+    pub(crate) fn is_ascending(&self) -> bool {
+        self.ascending
     }
 
     /// Object のフィールドを記録し、重複受信時に一貫性を検証する
@@ -733,6 +783,12 @@ impl ObjectFieldTracker {
     ///
     /// 初回受信時は記録して `Ok(())` を返す。判定規則と保持量は [`ObjectFieldTracker`] の
     /// doc を参照。
+    ///
+    /// 比較を確定させた後に、group が変化していれば
+    /// [`prune_past_groups`](Self::prune_past_groups) で過去 group の記録を破棄し、
+    /// [`ObjectFieldTracker::MAX_RECORDS`] を超えていれば古い記録を破棄する。破棄された Object の
+    /// 重複は検出しない (known limitation: §12.1 (Malformed Tracks) 条件 6 と §7.1 (Caching Relays)
+    /// の重複検出が及ばない範囲がある)。
     ///
     /// `immutable_properties` は IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列
     /// (`ObjectProperties::immutable_properties` の戻り値)。`payload_key` は呼び出し側が算出した
@@ -773,57 +829,113 @@ impl ObjectFieldTracker {
                     payload_key: payload_key.map(<[u8]>::to_vec),
                 },
             );
+            // 観測を確定させた後に group の変化へ追随し、上限を超えた分を破棄する
+            self.prune_on_group_change(group_id);
             return Ok(());
         };
-        // draft §7.1: Forwarding Preference / Subgroup ID / Priority の比較
-        if prev.is_subgroup != is_subgroup {
-            return Err(ObjectFieldMismatch {
+        // 比較結果は保持量の調整より先に確定させる (破棄した Object は以後比較されない。
+        // 見逃し側に倒すため、破棄で不一致が消えることはあっても新たな不一致は生まれない)
+        let mismatch = if prev.is_subgroup != is_subgroup {
+            // draft §7.1: Forwarding Preference の比較
+            Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
                 reason: "malformed track: duplicate Object with different Forwarding Preference",
-            });
-        }
-        if prev.subgroup_id != subgroup_id {
-            return Err(ObjectFieldMismatch {
+            })
+        } else if prev.subgroup_id != subgroup_id {
+            // draft §7.1: Subgroup ID の比較
+            Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
                 reason: "malformed track: duplicate Object with different Subgroup ID",
-            });
-        }
-        if prev.publisher_priority != publisher_priority {
-            return Err(ObjectFieldMismatch {
+            })
+        } else if prev.publisher_priority != publisher_priority {
+            // draft §7.1: Priority の比較
+            Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
                 reason: "malformed track: duplicate Object with different Priority",
-            });
-        }
-        // draft §12.1 (Malformed Tracks) 条件 6: Payload / immutable properties の差異
-        if let (Some(prev_immutables), Some(immutables)) =
+            })
+        } else if let (Some(prev_immutables), Some(immutables)) =
             (prev.immutable_properties.as_deref(), immutable_properties)
             && prev_immutables != immutables
         {
-            return Err(ObjectFieldMismatch {
+            // draft §12.1 (Malformed Tracks) 条件 6: immutable properties の差異
+            Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
                 reason: "malformed track: duplicate Object with different immutable properties",
-            });
-        }
-        if let (Some(prev_key), Some(key)) = (prev.payload_key.as_deref(), payload_key)
+            })
+        } else if let (Some(prev_key), Some(key)) = (prev.payload_key.as_deref(), payload_key)
             && prev_key != key
         {
-            return Err(ObjectFieldMismatch {
+            // draft §12.1 (Malformed Tracks) 条件 6 / §7.1 (Caching Relays): Payload の差異
+            Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
                 reason: "malformed track: duplicate Object with different Payload",
-            });
+            })
+        } else {
+            None
+        };
+        self.prune_on_group_change(group_id);
+        match mismatch {
+            Some(mismatch) => Err(mismatch),
+            None => Ok(()),
         }
-        Ok(())
+    }
+
+    /// group が変化していれば過去 group の記録を破棄し、その後で件数上限を適用する
+    ///
+    /// prune は group が変わったときだけ実行する (同じ group 内の観測で毎回走査しない)。
+    fn prune_on_group_change(&mut self, group_id: u64) {
+        if self.last_group != Some(group_id) {
+            self.last_group = Some(group_id);
+            self.prune_past_groups(self.ascending, group_id);
+        }
+        self.enforce_record_cap();
+    }
+
+    /// 記録数が [`ObjectFieldTracker::MAX_RECORDS`] を超えている間、古い記録を破棄する
+    ///
+    /// 1. group が複数あるときは最も古い group (`ascending` なら最小の group_id、そうでなければ
+    ///    最大の group_id) の記録を group 単位でまとめて破棄する
+    /// 2. 1 group しか無いときは、その group の最も古い object_id から超過分を破棄する
+    ///
+    /// 破棄した Object の重複は検出しない (見逃し側に倒す)。
+    fn enforce_record_cap(&mut self) {
+        while self.records.len() > Self::MAX_RECORDS {
+            let Some(oldest_group) = self.oldest_group() else {
+                return;
+            };
+            if self.records.keys().all(|&(g, _)| g == oldest_group) {
+                // 1 group しか無い: 古い object_id から超過分をまとめて破棄する
+                let mut keys: Vec<(u64, u64)> = self.records.keys().copied().collect();
+                keys.sort_unstable_by_key(|&(_, object_id)| object_id);
+                let excess = self.records.len() - Self::MAX_RECORDS;
+                for key in keys.into_iter().take(excess) {
+                    self.records.remove(&key);
+                }
+            } else {
+                self.records.retain(|&(g, _), _| g != oldest_group);
+            }
+        }
+    }
+
+    /// 最も古い group の group_id を返す (`ascending` なら最小、そうでなければ最大)
+    fn oldest_group(&self) -> Option<u64> {
+        if self.ascending {
+            self.records.keys().map(|&(g, _)| g).min()
+        } else {
+            self.records.keys().map(|&(g, _)| g).max()
+        }
     }
 
     /// group 境界での prune: 指定 group より過去のエントリを削除する
     ///
     /// `ObjectPropertyTracker::prune_past_groups` と同じセマンティクス。
-    /// 保持量を抑えたい呼び出し側が group 前進ごとに呼ぶ。保持量の詳細は
+    /// [`ObjectFieldTracker::observe_object_fields_with_content`] が group の変化を検出した時点で
+    /// 自動的に呼ぶため、通常は呼び出し側が明示的に呼ぶ必要はない。保持量の詳細は
     /// [`ObjectFieldTracker`] の doc を参照。
     pub fn prune_past_groups(&mut self, ascending: bool, current_group: u64) {
         if ascending {
@@ -831,5 +943,165 @@ impl ObjectFieldTracker {
         } else {
             self.records.retain(|&(g, _), _| g <= current_group);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ObjectFieldTracker の上限と破棄の規則 (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) の
+    // 重複検出を有界の保持量で行うための best-effort な破棄) を検証する。
+    //
+    // `records` は private のため、件数は `len` で検査する (`tests/` は公開 API にだけ書く規約)。
+
+    /// 1 group に上限を超える Object を観測すると、古い object_id から破棄されて上限に収まる
+    #[test]
+    fn single_group_records_are_capped() {
+        let mut tracker = ObjectFieldTracker::new(true);
+        let newest = ObjectFieldTracker::MAX_RECORDS as u64 + 9;
+        for object_id in 0..=newest {
+            tracker
+                .observe_object_fields(0, object_id, true, Some(0), 0)
+                .expect("重複ではない Object は受理されること");
+        }
+        assert_eq!(tracker.len(), ObjectFieldTracker::MAX_RECORDS);
+        // 残っている記録は比較され、破棄された古い記録は比較されない (見逃し側)
+        assert!(
+            tracker
+                .observe_object_fields(0, newest, true, Some(0), 1)
+                .is_err(),
+            "上限内に残っている Object は比較されること"
+        );
+        assert!(
+            tracker
+                .observe_object_fields(0, 0, true, Some(0), 9)
+                .is_ok(),
+            "破棄された Object は比較されないこと"
+        );
+    }
+
+    /// 最新 group だけで上限を超え、かつ他 group も存在する場合は、
+    /// 他 group の破棄 (1 段階目) に続いて最新 group の古い記録が破棄される (2 段階目)
+    #[test]
+    fn newest_group_over_cap_evicts_other_group_then_own_oldest() {
+        let mut tracker = ObjectFieldTracker::new(true);
+        let excess = 50_u64;
+        let newest_group = 5_u64;
+        // 新しい group を上限 + 超過分まで埋める
+        for object_id in 0..(ObjectFieldTracker::MAX_RECORDS as u64 + excess) {
+            tracker
+                .observe_object_fields(newest_group, object_id, true, Some(0), 0)
+                .expect("重複ではない Object は受理されること");
+        }
+        // ascending の prune では残る古い group を 1 件だけ観測する
+        tracker
+            .observe_object_fields(3, 0, true, Some(0), 0)
+            .expect("重複ではない Object は受理されること");
+        assert_eq!(
+            tracker.len(),
+            ObjectFieldTracker::MAX_RECORDS,
+            "他 group の破棄後も最新 group だけで上限を超えるため、最新 group の古い記録も破棄されること"
+        );
+        // 古い group は破棄されている
+        assert!(
+            tracker
+                .observe_object_fields(3, 0, true, Some(0), 9)
+                .is_ok(),
+            "破棄された group の Object は比較されないこと"
+        );
+        // 最新 group の新しい記録は残り、古い記録は破棄されている
+        let newest_object = ObjectFieldTracker::MAX_RECORDS as u64 + excess - 1;
+        assert!(
+            tracker
+                .observe_object_fields(newest_group, newest_object, true, Some(0), 9)
+                .is_err(),
+            "最新 group の新しい Object は比較されること"
+        );
+        assert!(
+            tracker
+                .observe_object_fields(newest_group, 0, true, Some(0), 9)
+                .is_ok(),
+            "最新 group の古い Object は破棄されること"
+        );
+    }
+
+    /// 上限超過時は最も古い group が group 単位で破棄される
+    ///
+    /// ascending では group_id が最小の group が、descending では最大の group が最も古い
+    /// (descending では group_id が大きい group から先に届くため)。
+    #[test]
+    fn eviction_drops_oldest_group() {
+        for (ascending, oldest_group, newest_group) in [(true, 3_u64, 5_u64), (false, 7_u64, 5_u64)]
+        {
+            let mut tracker = ObjectFieldTracker::new(ascending);
+            // 先に新しい group を上限まで埋め、後から最も古い group を観測する。
+            // prune は両方を残すため、上限判定で最も古い group が破棄される
+            for object_id in 0..(ObjectFieldTracker::MAX_RECORDS as u64) {
+                tracker
+                    .observe_object_fields(newest_group, object_id, true, Some(0), 0)
+                    .expect("重複ではない Object は受理されること");
+            }
+            tracker
+                .observe_object_fields(oldest_group, 0, true, Some(0), 0)
+                .expect("重複ではない Object は受理されること");
+            assert_eq!(tracker.len(), ObjectFieldTracker::MAX_RECORDS);
+            assert!(
+                tracker
+                    .observe_object_fields(oldest_group, 0, true, Some(0), 9)
+                    .is_ok(),
+                "ascending = {ascending} で最も古い group ({oldest_group}) は破棄されること"
+            );
+            assert!(
+                tracker
+                    .observe_object_fields(newest_group, 0, true, Some(0), 9)
+                    .is_err(),
+                "ascending = {ascending} で新しい group ({newest_group}) は残ること"
+            );
+        }
+    }
+
+    /// group が変化した時点で過去 group の記録が破棄される (ascending / descending)
+    #[test]
+    fn group_change_prunes_past_groups() {
+        // ascending: current 未満の group を破棄する
+        let mut ascending = ObjectFieldTracker::new(true);
+        ascending
+            .observe_object_fields(1, 0, true, Some(0), 0)
+            .expect("重複ではない Object は受理されること");
+        ascending
+            .observe_object_fields(2, 0, true, Some(0), 0)
+            .expect("重複ではない Object は受理されること");
+        assert_eq!(
+            ascending.len(),
+            1,
+            "ascending では過去 group が破棄されること"
+        );
+        assert!(
+            ascending
+                .observe_object_fields(1, 0, true, Some(0), 9)
+                .is_ok(),
+            "破棄された過去 group の Object は比較されないこと"
+        );
+
+        // descending: current 超過の group を破棄する
+        let mut descending = ObjectFieldTracker::new(false);
+        descending
+            .observe_object_fields(2, 0, true, Some(0), 0)
+            .expect("重複ではない Object は受理されること");
+        descending
+            .observe_object_fields(1, 0, true, Some(0), 0)
+            .expect("重複ではない Object は受理されること");
+        assert_eq!(
+            descending.len(),
+            1,
+            "descending では過去 group が破棄されること"
+        );
+        assert!(
+            descending
+                .observe_object_fields(2, 0, true, Some(0), 9)
+                .is_ok(),
+            "破棄された過去 group の Object は比較されないこと"
+        );
     }
 }
