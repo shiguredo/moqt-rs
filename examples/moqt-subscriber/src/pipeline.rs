@@ -2296,6 +2296,10 @@ mod tests {
             TransportError::StreamClosed,
             TransportError::Quic("connection failed".to_string()),
             TransportError::ConnectFailed { status: Some(404) },
+            // プロトコル交渉の失敗は通信の前提が揃わなかった異常終了であり、セッション終了ではない
+            TransportError::ProtocolNegotiationFailed {
+                error_code: shiguredo_http3::webtransport::ErrorCode::AlpnError as u64,
+            },
             TransportError::InvalidState("invalid state".to_string()),
             TransportError::Internal("internal".to_string()),
         ] {

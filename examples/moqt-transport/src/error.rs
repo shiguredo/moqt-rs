@@ -22,6 +22,13 @@ pub enum TransportError {
     /// CONNECT レスポンスが 2xx 以外、または :status ヘッダー不在でセッション確立に失敗した
     /// (draft-ietf-webtrans-http3-16 §3.2)
     ConnectFailed { status: Option<u16> },
+    /// アプリケーションプロトコル交渉に失敗した (draft-ietf-webtrans-http3-16 §3.3)
+    ///
+    /// 成功応答の `WT-Protocol` が無い / 不正 / `WT-Available-Protocols` に無い値だったことを
+    /// 表す。h3 層が `WebTransportEvent::SessionClosed` で通知した終了コードを保持し、
+    /// 2xx 以外の応答を表す [`Self::ConnectFailed`] と区別する。
+    /// 交渉失敗では `error_code` は `WT_ALPN_ERROR` になる。
+    ProtocolNegotiationFailed { error_code: u64 },
     /// ストリームがクローズ済み
     StreamClosed,
     /// 無効な状態
@@ -50,6 +57,10 @@ impl std::fmt::Display for TransportError {
                 Some(s) => write!(f, "CONNECT failed with status {s}"),
                 None => write!(f, "CONNECT failed with no :status header"),
             },
+            Self::ProtocolNegotiationFailed { error_code } => write!(
+                f,
+                "application protocol negotiation failed (error code {error_code:#010x})"
+            ),
             Self::StreamClosed => write!(f, "stream closed"),
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),

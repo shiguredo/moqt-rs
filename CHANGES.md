@@ -408,6 +408,18 @@
     切り捨てずエラーにする
   - @voluntas
 
+- [FIX] moqt-transport example が WT-Protocol の交渉結果を h3 層から受け取り、WT_ALPN_ERROR で接続を閉じる
+  - draft-ietf-webtrans-http3-16 §3.3 (Application Protocol Negotiation) は、交渉を要求したクライアントが成功応答に
+    `WT-Protocol` が無い / 不正 / 申告していない値だった場合に `WT_ALPN_ERROR` でセッションを閉じる MUST を定めるが、
+    従来は 2xx だけで確立とみなしていたため、サーバーがプロトコルを選ばなかった場合もバージョン不一致のまま MOQT を続行していた
+  - 判定は h3 層 (`handle_wt_connect_response`) が行い、example は `SessionEstablished` / `SessionClosed` の観測で結果を受け取る。
+    `TransportError::ProtocolNegotiationFailed` を追加して 2xx 以外の応答による `ConnectFailed` と区別し、交渉失敗時は
+    `s2n_quic::application::Error::new(WtErrorCode::AlpnError as u64)` で接続を閉じる (example 側に数値は直書きしない)
+  - `connect_outcome` は `HeadersEnd` で早期確定せず、`:status` / ヘッダー終端 / `SessionEstablished` / `SessionClosed` /
+    1xx 中間レスポンスを蓄積して判定する。確立前に GOAWAY / `WT_DRAIN_SESSION` (drain) や CONNECT stream の close を
+    観測した場合はセッションを確立しない
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

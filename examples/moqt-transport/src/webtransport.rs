@@ -439,15 +439,174 @@ fn feed_stream_to_h3(
 // CONNECT レスポンス判定
 // ---------------------------------------------------------------------------
 
-/// CONNECT レスポンスのイベント列を処理した結果
-#[derive(Debug, Clone, Copy)]
+/// CONNECT レスポンスの観測から確定した判定結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectOutcome {
-    /// HeadersEnd 未受信。判定はまだ確定していない
+    /// 判定はまだ確定していない
     Pending,
-    /// 2xx を受信しセッション確立
+    /// 2xx の `:status` を受信し、h3 層がセッション確立を通知した
     Established,
-    /// HeadersEnd を受信したが :status が 2xx でない、または :status 不在
+    /// ヘッダー終端までに 2xx の `:status` が無い (2xx 以外、または `:status` 不在)
+    ///
+    /// draft-ietf-webtrans-http3-16 §3.2: 2xx 以外の応答ではセッションは確立しない。
     Failed { status: Option<u16> },
+    /// 確立前にプロトコル交渉の失敗でセッションが閉じられた (draft-ietf-webtrans-http3-16 §3.3)
+    ///
+    /// h3 層は失敗の理由 (`WT-Protocol` 無し / 不正 / `WT-Available-Protocols` に無い値) を
+    /// 区別せず終了コードだけを通知するため、example は理由を切り分けない。
+    ProtocolNegotiationFailed { error_code: u64 },
+    /// 確立前にセッションが閉じられた (§6)
+    ///
+    /// CONNECT stream の close (FIN / RESET_STREAM) や `WT_CLOSE_SESSION` の送受信で h3 層が
+    /// `WebTransportEvent::SessionClosed` を発行した場合と、h3 層のイベントを取りこぼした場合に
+    /// 共有しているセッション状態から終了を観測した場合である。どちらもセッションは確立して
+    /// いないため、確立待ちループは [`TransportError::ConnectionClosed`] を返す。
+    ///
+    /// 終了コードは判定に使わないため持たない。観測した終了コードは h3 層のイベント処理
+    /// (`process_h3_events`) が `session_id` と合わせてログに残す。
+    ConnectionClosed,
+    /// 確立前にセッションの drain を観測した (§4.7)
+    ///
+    /// h3 層は HTTP/3 GOAWAY または `WT_DRAIN_SESSION` を受けると `Pending` のセッションを
+    /// `Draining` に遷移させ、`WebTransportEvent::SessionDraining` を発行する。drain では
+    /// `WebTransportEvent::SessionEstablished` が発行されないため、確立待ちを終える。
+    SessionDraining,
+}
+
+/// CONNECT レスポンスの観測状態
+///
+/// h3 層はイベントを複数のバッチに分けて発行し得るため、判定に必要な観測をバッチをまたいで
+/// 蓄積する。h3 層は `SessionEstablished` をヘッダーのイベントより先に発行するため、
+/// `:status` とヘッダー終端を蓄積しても、同じバッチの最後まで観測するまで確立は確定しない。
+#[derive(Debug, Default)]
+struct ConnectObservation {
+    /// 最初に観測した最終レスポンスの `:status` のパース結果
+    ///
+    /// 観測していない場合とパースできない `:status` を観測した場合のどちらも `None` になる
+    /// (観測の有無は `status_taken` で分かる)。1xx 中間レスポンスの `:status` は入れない。
+    status: Option<u16>,
+    /// 最終レスポンスの `:status` を採用済みかどうか
+    ///
+    /// パースできない `:status` も採用済みとして扱い、後続の `:status` で上書きしない
+    /// (h3 層はパースできない値を非 2xx として扱う)。
+    status_taken: bool,
+    /// 現在観測中のヘッダーブロックが 1xx 中間レスポンスかどうか
+    informational: bool,
+    /// 確定レスポンスの `Event::HeadersEnd` を受信したか
+    ///
+    /// 1xx 中間レスポンスの `Event::HeadersEnd` では立てない (最終レスポンスが続くため)。
+    headers_end: bool,
+    /// `WebTransportEvent::SessionEstablished` を観測したか
+    established: bool,
+    /// 観測した `WebTransportEvent::SessionClosed` の終了コード
+    ///
+    /// 観測したら必ず失敗として確定する。h3 層は同じバッチに `SessionClosed` と 2xx の
+    /// `:status` / `SessionEstablished` を積むことがあり、その場合は確立ではなく失敗として
+    /// 扱う (交渉失敗では `SessionClosed` のあとにヘッダーのイベントを、flow control 違反では
+    /// `SessionEstablished` のあとに `SessionClosed` を積む)。
+    session_closed: Option<u64>,
+    /// 確立を確定させる前に `WebTransportEvent::SessionDraining` を観測したか
+    session_draining: bool,
+    /// 確立前に終了を (イベントではなく) 共有状態から観測したか
+    session_gone: bool,
+}
+
+impl ConnectObservation {
+    /// h3 層のイベント列を観測に取り込む
+    ///
+    /// 本 example は 1 接続 1 CONNECT リクエストであり、イベントの `stream_id` は照合しない
+    /// (h3 層は自セッションに関わるイベントだけを発火する。`process_h3_events` と同じ前提)。
+    /// 複数の CONNECT リクエストを扱う場合は、判定対象の `connect_stream_id` を渡して
+    /// `stream_id` を照合する必要がある。
+    fn observe_events(&mut self, events: &[Event]) {
+        for event in events {
+            match event {
+                Event::HeadersBegin { .. } => {
+                    // ヘッダーブロックの先頭で中間レスポンスの判定を戻す
+                    self.informational = false;
+                }
+                Event::Header { name, value, .. } if name == b":status" => {
+                    // h3 層は `:status` を `find` で先頭だけ見るため、2 つ目以降の `:status` で
+                    // 上書きすると h3 層の判定とずれる。h3 層は重複した `:status` を malformed
+                    // (`H3_MESSAGE_ERROR`) として拒否するため通常は届かないが、届いた場合も
+                    // 先頭を採用する
+                    if self.status_taken {
+                        continue;
+                    }
+                    match parse_status(value) {
+                        // RFC 9114 §4.1: 1xx は中間レスポンスであり、最終レスポンスが続く。
+                        // h3 層は中間レスポンスにもヘッダーのイベント (`HeadersEnd` を含む) を
+                        // 発行するため、1xx を確定に使うと 2xx の最終レスポンスを受け取る前に
+                        // 接続失敗として確定してしまう。1xx は判定に使わない
+                        Some(status) if is_informational_status(status) => {
+                            self.informational = true;
+                        }
+                        // パースできない `:status` は不在と同じ `None` として採用し、後続の
+                        // `:status` では上書きしない。h3 層もパースできない値を非 2xx として
+                        // 扱い、そもそもヘッダーの検証で拒否するため、届いた場合の防御である
+                        parsed => {
+                            self.status = parsed;
+                            self.status_taken = true;
+                            self.informational = false;
+                        }
+                    }
+                }
+                Event::HeadersEnd { .. } => {
+                    // 1xx 中間レスポンスのヘッダー終端は最終レスポンスの終端ではない
+                    if !self.informational {
+                        self.headers_end = true;
+                    }
+                }
+                Event::WebTransport(WebTransportEvent::SessionEstablished { .. }) => {
+                    self.established = true;
+                }
+                Event::WebTransport(WebTransportEvent::SessionClosed { error_code, .. }) => {
+                    self.session_closed = Some(*error_code);
+                }
+                Event::WebTransport(WebTransportEvent::SessionDraining { .. }) => {
+                    self.session_draining = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 共有しているセッション状態を観測に取り込む
+    ///
+    /// h3 層のイベントは 1 つのタスクが drain すると他のタスクには届かない。制御ストリームを
+    /// 処理するルーティングタスクは GOAWAY 由来の `SessionDraining` を自分で drain して
+    /// セッション状態へ反映するため、確立待ちループはイベント列だけを見ていると drain や終了を
+    /// 取りこぼして待機を終えられない。`process_h3_events` が配る watch からも観測する。
+    fn observe_session_state(&mut self, state: WtSessionState) {
+        match state {
+            WtSessionState::Active => {}
+            WtSessionState::Draining => self.session_draining = true,
+            // 終了の通知を観測しているが、このループでは終了コードを観測できていない
+            WtSessionState::ClosedByPeer | WtSessionState::ClosedLocally => {
+                self.session_gone = true
+            }
+        }
+    }
+}
+
+/// `:status` が 2xx かどうか (draft-ietf-webtrans-http3-16 §3.2)
+///
+/// §3.2 はクライアントの視点でセッションが確立するのは 2xx 応答を受信したときと定める。
+fn is_success_status(status: Option<u16>) -> bool {
+    matches!(status, Some(s) if (200..=299).contains(&s))
+}
+
+/// `:status` が 1xx 中間レスポンスかどうか (RFC 9114 §4.1)
+///
+/// h3 層と同じ判定 (101 を除く中間レスポンス) にする。h3 層は informational な応答で
+/// ストリーム状態を最終レスポンスの受信前へ戻し、続く最終レスポンスを処理する。
+///
+/// 101 (Switching Protocols) は RFC 9114 §4.5 により HTTP/3 でサポートされないため、h3 層は
+/// 受信したヘッダーを `validate_response_headers` で malformed (`H3_MESSAGE_ERROR`) として
+/// 拒否する。101 のヘッダーはイベントとして発行されないためこの判定には届かないが、届いた
+/// 場合も h3 層と同じ結果になるように中間レスポンスから除いておく。
+fn is_informational_status(status: u16) -> bool {
+    status < 200 && status != 101
 }
 
 /// WT_CLOSE_SESSION の Application Error Message 最大長 (バイト)
@@ -476,27 +635,182 @@ fn parse_status(value: &[u8]) -> Option<u16> {
     std::str::from_utf8(value).ok()?.parse().ok()
 }
 
-/// CONNECT レスポンスのイベント列を走査する
+/// CONNECT レスポンスの観測から判定を確定する
 ///
-/// `:status` ヘッダーを受信したら `status` に蓄積し (HeadersEnd と別バッチで届く場合に備える)、
-/// HeadersEnd を受信した時点で蓄積した status が 2xx かどうかで結果を確定する。
+/// 優先順位は「h3 層のイベントで観測したセッション終了 > 確立 > 共有状態で観測したセッション
+/// 終了 > drain > ヘッダー終端での接続失敗」であり、前のものを観測していれば後のものを
+/// 観測していても前の判定で確定する。
+///
+/// `Event::HeadersEnd` だけでは確定させず、`:status` とヘッダー終端、`SessionEstablished` /
+/// `SessionClosed` / `SessionDraining` の観測を合わせて判定する。h3 層は `SessionEstablished`
+/// をヘッダーのイベントより先に発行するため、`:status` を確認してから確立を確定するには
+/// バッチの最後まで観測する必要がある。
+///
 /// draft-ietf-webtrans-http3-16 §3.2: クライアントは 2xx 応答受信時のみセッション確立とみなす。
-fn connect_outcome(events: &[Event], status: &mut Option<u16>) -> ConnectOutcome {
-    for event in events {
-        match event {
-            Event::Header { name, value, .. } if name == b":status" => {
-                *status = parse_status(value);
-            }
-            Event::HeadersEnd { .. } => {
-                return match *status {
-                    Some(s) if (200..=299).contains(&s) => ConnectOutcome::Established,
-                    other => ConnectOutcome::Failed { status: other },
-                };
-            }
-            _ => {}
-        }
+/// §3.3 (Application Protocol Negotiation) の `WT-Protocol` の検証は h3 層
+/// (`handle_wt_connect_response`) が行い、example は再実装しない。交渉に失敗した場合、h3 層は
+/// `WT_ALPN_ERROR` の `SessionClosed` を発行し `SessionEstablished` は発行しないため、
+/// 観測した終了コードで交渉失敗を判別する。
+fn connect_outcome(observation: &ConnectObservation) -> ConnectOutcome {
+    // h3 層のイベントでセッション終了を観測していれば、同じバッチで確立の通知を観測していても
+    // 失敗として確定する (h3 層は交渉失敗では `SessionClosed` のあとにヘッダーのイベントを、
+    // flow control 違反では `SessionEstablished` のあとに `SessionClosed` を積む)
+    if let Some(error_code) = observation.session_closed {
+        return if error_code == WtErrorCode::AlpnError as u64 {
+            ConnectOutcome::ProtocolNegotiationFailed { error_code }
+        } else {
+            ConnectOutcome::ConnectionClosed
+        };
+    }
+
+    // 2xx の `:status` を確認したうえで h3 層がセッション確立を通知していれば確立として確定する。
+    // 確立後に届く drain (§4.7) や終了 (§6) は、確立待ちを終えたあとの受信経路が扱う
+    if observation.established && is_success_status(observation.status) {
+        return ConnectOutcome::Established;
+    }
+
+    // ここから下は、h3 層のイベントを取りこぼした場合に共有しているセッション状態から観測した
+    // 結果で確定する経路である。終了を drain より先に見るのは、終了したセッションを drain と
+    // して扱わないため
+    if observation.session_gone {
+        return ConnectOutcome::ConnectionClosed;
+    }
+
+    // draft-ietf-webtrans-http3-16 §4.7: drain (HTTP/3 GOAWAY / `WT_DRAIN_SESSION`) の通知後に
+    // 新しいストリームを open しない方針 (`session_policy` の `reject_new_streams`) と整合する
+    // ため、確立前に drain を観測したらセッションを確立しない。h3 層は `Pending` のセッションを
+    // `Draining` に遷移させて `SessionEstablished` を発行しないため、待機を続けても確立しない。
+    // §4.7 は drain の通知後もセッションの利用を MAY とするが、ここでは確立していないため
+    // 中断する既存ストリームも無い
+    if observation.session_draining {
+        return ConnectOutcome::SessionDraining;
+    }
+
+    // ヘッダー終端までに 2xx の `:status` が無ければ従来どおりの接続失敗である。
+    // 2xx を確認済みで `SessionEstablished` を待っている間は確定させない
+    if observation.headers_end && !is_success_status(observation.status) {
+        return ConnectOutcome::Failed {
+            status: observation.status,
+        };
     }
     ConnectOutcome::Pending
+}
+
+/// 判定結果が §3.3 の `WT_ALPN_ERROR` での接続クローズを要求するか
+///
+/// draft-ietf-webtrans-http3-16 §3.3 はアプリケーションプロトコル交渉を要求するクライアントに、
+/// 交渉の失敗を `WT_ALPN_ERROR` で閉じる MUST を定める。交渉失敗以外の判定では接続を閉じない。
+///
+/// 2xx 以外の応答はサーバーが応答した接続失敗である。確立前の終了には、peer が CONNECT
+/// stream を閉じたことを h3 層の `SessionClosed` で観測した場合と、h3 層のイベントを
+/// 取りこぼして自側の受信経路が終了を検知した場合 (共有状態からの観測) があり、どちらも
+/// 閉じるべきセッションが既に終了している。
+///
+/// h3 層は交渉失敗だけでなくプロトコルエラーでも `SessionClosed` を発行し、フロー制御違反では
+/// §5.6.2 が `WT_FLOW_CONTROL_ERROR` でのクローズを MUST とする。本 example が送る
+/// `webtransport::Settings` は `wt_enabled` だけを設定し、宣言に使う
+/// `wt_initial_max_streams_uni` / `wt_initial_max_streams_bidi` / `wt_initial_max_data` と
+/// `wt_max_sessions_draft14` は 0 / `None` のままにするためフロー制御を宣言しない。§5.1 は
+/// フロー制御を両端点が宣言した場合に有効と定めるため、依存 crate (shiguredo_http3) の
+/// `flow_control_enabled_with_peer` は偽になり、`check_received_data` /
+/// `check_received_stream` が常に受信可を返してこの経路には到達しない。
+fn closes_with_wt_alpn_error(outcome: ConnectOutcome) -> bool {
+    matches!(outcome, ConnectOutcome::ProtocolNegotiationFailed { .. })
+}
+
+/// CONNECT レスポンスの判定結果を MOQT 層へ返すエラーへ変換する
+///
+/// セッションを確立した場合と判定中はエラーにしない (`None`)。
+///
+/// h3 層の `SessionClosed` は交渉失敗以外にもプロトコルエラー (フロー制御違反) で発行され得る
+/// が、本 example はフロー制御を宣言しないため [`closes_with_wt_alpn_error`] の doc に書いた
+/// とおりその経路には到達しない。
+fn connect_error(outcome: ConnectOutcome) -> Option<TransportError> {
+    match outcome {
+        ConnectOutcome::Established | ConnectOutcome::Pending => None,
+        // 2xx 以外 / :status 不在の応答は従来どおりの接続失敗である (§3.2)
+        ConnectOutcome::Failed { status } => Some(TransportError::ConnectFailed { status }),
+        // 交渉失敗は 2xx 以外の接続失敗と区別できる variant にする (§3.3)
+        ConnectOutcome::ProtocolNegotiationFailed { error_code } => {
+            Some(TransportError::ProtocolNegotiationFailed { error_code })
+        }
+        // 確立前の終了と drain は、セッション終了を表す既存の variant に畳む
+        // (観測した終了コードは h3 層のイベント処理がログに残す)
+        ConnectOutcome::ConnectionClosed | ConnectOutcome::SessionDraining => {
+            Some(TransportError::ConnectionClosed)
+        }
+    }
+}
+
+/// 確立待ちループが 1 バッチ分の判定に従って実行する操作
+///
+/// [`connect_actions`] が実行順に並べて返す。並び順そのものが仕様の要求であり、交渉失敗では
+/// `WT_ALPN_ERROR` でのクローズがエラーの返却より先に来る。
+#[derive(Debug)]
+enum ConnectAction {
+    /// `WT_ALPN_ERROR` で接続を閉じる (draft-ietf-webtrans-http3-16 §3.3 の MUST)
+    CloseWithWtAlpnError,
+    /// セッションの確立を反映する
+    Established,
+    /// 呼び出し元へエラーを返す
+    ReturnError(TransportError),
+}
+
+/// 1 バッチ分の判定と feed の結果を、確立待ちループが実行する操作の並びへ変換する
+///
+/// 戻り値は実行順に並んだ操作であり、空なら判定は保留である。呼び出し側は
+/// [`run_connect_actions`] で「接続を閉じる → エラーを返す → feed のエラーを伝播する」の順に
+/// 実行する。判定で確定したエラーは同じ feed が返した二次的なエラーより優先するため、交渉失敗
+/// では返すエラーが `ProtocolNegotiationFailed` になり、二次的なエラーは伝播しない (交渉失敗
+/// では h3 層が `SessionClosed` を積んだあとに、終了済みセッションへの追加 DATA を
+/// H3_MESSAGE_ERROR にする経路があり、二次的なエラーを先に返すと §3.3 の MUST である
+/// `WT_ALPN_ERROR` の通知が飛んでしまう)。伝播しない二次的なエラーは、切り分けの情報を失わない
+/// ように捨てた事実と内容を warn に残す。判定が保留のときと確立したときは、feed がエラーなら
+/// その結果を伝播する (feed がエラーなら待機を続けない)。
+fn connect_actions(
+    outcome: ConnectOutcome,
+    feed_error: Option<TransportError>,
+) -> Vec<ConnectAction> {
+    let mut actions = Vec::new();
+
+    if closes_with_wt_alpn_error(outcome) {
+        actions.push(ConnectAction::CloseWithWtAlpnError);
+    }
+    if let Some(error) = connect_error(outcome) {
+        if let Some(feed_error) = feed_error {
+            tracing::warn!(
+                "Discarding the secondary feed error because the CONNECT outcome is already determined ({outcome:?}): {feed_error}"
+            );
+        }
+        actions.push(ConnectAction::ReturnError(error));
+        return actions;
+    }
+
+    if matches!(outcome, ConnectOutcome::Established) {
+        actions.push(ConnectAction::Established);
+    }
+    if let Some(error) = feed_error {
+        actions.push(ConnectAction::ReturnError(error));
+    }
+    actions
+}
+
+/// 判定に従って確立待ちループの操作を実行する
+///
+/// 戻り値はセッションが確立したかどうか。[`connect_actions`] が返した並びの順に実行する。
+fn run_connect_actions(
+    actions: Vec<ConnectAction>,
+    handle: &s2n_quic::connection::Handle,
+) -> Result<bool> {
+    let mut established = false;
+    for action in actions {
+        match action {
+            ConnectAction::CloseWithWtAlpnError => close_connection_with_wt_alpn_error(handle),
+            ConnectAction::Established => established = true,
+            ConnectAction::ReturnError(error) => return Err(error),
+        }
+    }
+    Ok(established)
 }
 
 // ---------------------------------------------------------------------------
@@ -766,9 +1080,11 @@ impl WtClient {
         // draft-ietf-webtrans-http3-16 §3.2: クライアントは 2xx 応答受信時のみセッション確立とみなす。
         // :status を見ず HeadersEnd だけで判定すると 4xx/5xx エラーレスポンスを成功と誤認するため、
         // connect_outcome で :status を確認する。
+        // §3.3 (Application Protocol Negotiation) の `WT-Protocol` の検証は h3 層が行い、
+        // connect_outcome はその結果 (`SessionEstablished` / `SessionClosed`) を観測して受け取る。
         // サーバが非対応リソースに返す推奨ステータスは -16 で 404 から 405 に変わったが、
         // クライアントは 2xx 以外を一律失敗として扱うため追加の分岐は不要。
-        let mut connect_status: Option<u16> = None;
+        let mut observation = ConnectObservation::default();
         let mut session_established = false;
         while !session_established {
             tokio::select! {
@@ -776,6 +1092,21 @@ impl WtClient {
                     let (data, fin) = match received {
                         Ok(Some(data)) => (data.to_vec(), false),
                         Ok(None) => (vec![], true),
+                        Err(s2n_quic::stream::Error::StreamReset { error, .. }) => {
+                            // draft-ietf-webtrans-http3-16 §6: CONNECT stream の RESET_STREAM は
+                            // セッション終了である。確立後の CONNECT stream の受信タスクと同じ
+                            // 経路で h3 層へ通知する (h3 層は `SessionClosed` を発行し、
+                            // セッション状態も終了へ進む)
+                            reset_connect_stream(
+                                &state,
+                                &session_state_tx,
+                                connect_stream_id,
+                                error.into(),
+                            );
+                            // 確立前に終了したため確立待ちを終える (ループのあとの判定が
+                            // セッション終了のエラーを返す)
+                            break;
+                        }
                         Err(e) => return Err(TransportError::transport(e)),
                     };
                     let outcome = {
@@ -785,31 +1116,24 @@ impl WtClient {
                         let mut s = state.lock().expect("connection state mutex must not be poisoned");
                         s.feed_stream_and_drain(connect_stream_id, &data, fin)
                     };
-                    let connect_result = connect_outcome(&outcome.events, &mut connect_status);
-                    // セッション終了 (§6) が 2xx と同じバッチで届く場合があるため、
-                    // イベントは CONNECT の判定だけでなくセッション状態へも反映する。
-                    // feed がエラーでもイベントは処理済みである
-                    process_h3_outcome(outcome, &session_state_tx)?;
-                    match connect_result {
-                        ConnectOutcome::Established => session_established = true,
-                        ConnectOutcome::Failed { status } => {
-                            return Err(TransportError::ConnectFailed { status });
-                        }
-                        ConnectOutcome::Pending => {}
-                    }
+                    observation.observe_events(&outcome.events);
+                    // イベントは CONNECT の判定だけでなくセッション状態へも反映する
+                    // (feed がエラーでもイベントは処理済みである)
+                    let feed_result = process_h3_outcome(outcome, &session_state_tx);
+                    // 他のタスクが drain したイベントはこの関数には届かないため、
+                    // 共有しているセッション状態からも drain / 終了を観測する
+                    observation.observe_session_state(*session_state_tx.borrow());
+                    let actions = connect_actions(connect_outcome(&observation), feed_result.err());
+                    session_established = run_connect_actions(actions, &handle)?;
                     if fin { break; }
                 }
                 _ = unblock_notify.notified() => {
                     let events = state.lock().expect("connection state mutex must not be poisoned").drain_events()?;
-                    let outcome = connect_outcome(&events, &mut connect_status);
+                    observation.observe_events(&events);
                     let _ = process_h3_events(events, &session_state_tx);
-                    match outcome {
-                        ConnectOutcome::Established => session_established = true,
-                        ConnectOutcome::Failed { status } => {
-                            return Err(TransportError::ConnectFailed { status });
-                        }
-                        ConnectOutcome::Pending => {}
-                    }
+                    observation.observe_session_state(*session_state_tx.borrow());
+                    let actions = connect_actions(connect_outcome(&observation), None);
+                    session_established = run_connect_actions(actions, &handle)?;
                 }
             }
         }
@@ -2028,6 +2352,49 @@ fn close_connection_with_h3_error(
     handle.close(error);
 }
 
+/// プロトコル交渉の失敗を `WT_ALPN_ERROR` で peer へ通知する (draft-ietf-webtrans-http3-16 §3.3)
+///
+/// §3.3 はアプリケーションプロトコル交渉を要求するクライアントに対し、成功応答の
+/// `WT-Protocol` が無い / 不正 / `WT-Available-Protocols` に無い値だった場合に、
+/// `WT_ALPN_ERROR` でセッションを閉じる MUST を定める。判定は h3 層
+/// (`handle_wt_connect_response`) が行い、example は `SessionClosed` の観測で結果を受け取る。
+///
+/// h3 層は Sans I/O であり CONNECTION_CLOSE の送出 API を持たないため、I/O 層である
+/// example が接続を閉じる。`WtSendStream::reset` と同じく `s2n_quic::application::Error` 経由で
+/// プロトコルコードを渡す。
+///
+/// `Handle::close` は CONNECTION_CLOSE の送出をキューに積むだけであり、実送出は endpoint の
+/// タスクが行う (s2n-quic の `application_close` は接続にアプリケーションエラーを記録して
+/// wakeup するだけで、フレームの組み立てと送信は endpoint のイベントループが行う)。そのため
+/// 送出は非同期の best-effort であり、交渉失敗では直後にエラーが呼び出し元へ伝播して example が
+/// 終了するため、peer が `WT_ALPN_ERROR` を観測できない可能性がある。実機確認では example 側の
+/// ログだけでなく、relay 側で `WT_ALPN_ERROR` を観測して確かめること。
+///
+/// 送出完了は待たない。`Handle` にクローズの完了を待つ API が無く、endpoint のイベントループは
+/// 接続を追跡している間は `Client` を drop しても止まらない (止まるのは追跡する接続が無くなり、
+/// かつ接続を開く手段も無くなったときと、`Client::wait_idle` で閉じたとき) ため、待機を挟まなくても
+/// 送出は試みられる。ただし example が終了してランタイムが止まれば送出されないため、待つなら
+/// endpoint のイベントを購読する仕組みが要る。そこまではしない。
+fn close_connection_with_wt_alpn_error(handle: &s2n_quic::connection::Handle) {
+    let error = wt_alpn_error();
+    tracing::warn!(
+        code = u64::from(error),
+        "closing connection with WT_ALPN_ERROR after application protocol negotiation failure"
+    );
+    handle.close(error);
+}
+
+/// `WT_ALPN_ERROR` を載せた s2n-quic のアプリケーションエラーを作る
+///
+/// `WT_ALPN_ERROR` は WebTransport / HTTP/3 のプロトコルコード (draft-ietf-webtrans-http3-16 §9.5) で
+/// あり、MOQT のアプリケーションエラーコードではない。§4.4 の remap
+/// (`StreamErrorCode::Application`) はアプリケーションエラーコード専用であるため通さず、
+/// wire の値のまま渡す。数値は example 側で再定義せず依存 crate の定義を使う。
+fn wt_alpn_error() -> s2n_quic::application::Error {
+    s2n_quic::application::Error::new(WtErrorCode::AlpnError as u64)
+        .expect("WT_ALPN_ERROR fits in the QUIC application error code range")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2862,5 +3229,634 @@ mod tests {
                 "{code:#x} のエラーメッセージに元のコードが含まれること: {error}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CONNECT レスポンスの判定 (draft-ietf-webtrans-http3-16 §3.2 / §3.3)
+    // -----------------------------------------------------------------------
+
+    /// 判定に使う CONNECT stream の ID (= session ID)
+    const CONNECT_STREAM_ID: u64 = 0;
+
+    /// CONNECT レスポンスの `:status` ヘッダーのイベントを作る
+    fn status_header_event(status: u16) -> Event {
+        Event::Header {
+            stream_id: CONNECT_STREAM_ID,
+            name: b":status".to_vec(),
+            value: status.to_string().into_bytes(),
+        }
+    }
+
+    /// CONNECT stream の ID (= session ID) のヘッダーブロック先頭のイベントを作る
+    fn headers_begin_event() -> Event {
+        Event::HeadersBegin {
+            stream_id: CONNECT_STREAM_ID,
+        }
+    }
+
+    /// ヘッダー終端のイベントを作る
+    fn headers_end_event() -> Event {
+        Event::HeadersEnd {
+            stream_id: CONNECT_STREAM_ID,
+        }
+    }
+
+    /// h3 層が 2xx 応答で発行するセッション確立のイベントを作る
+    ///
+    /// フィールドは h3 層の公開 variant / 公開フィールドをそのまま使う。
+    fn session_established_event() -> Event {
+        Event::WebTransport(WebTransportEvent::SessionEstablished {
+            session_id: CONNECT_STREAM_ID,
+            flow_control_enabled: false,
+        })
+    }
+
+    /// h3 層がセッション終了で発行するイベントを作る
+    ///
+    /// 交渉失敗では `error_code` が `WT_ALPN_ERROR`、それ以外の終了では h3 層が
+    /// 通知する終了コードが入る。
+    fn session_closed_event(error_code: u64) -> Event {
+        Event::WebTransport(WebTransportEvent::SessionClosed {
+            session_id: CONNECT_STREAM_ID,
+            reset_streams: Vec::new(),
+            error_code,
+            close_error_code: 0,
+            close_message: String::new(),
+        })
+    }
+
+    /// h3 層が GOAWAY / `WT_DRAIN_SESSION` で発行するセッション drain のイベントを作る
+    fn session_draining_event() -> Event {
+        Event::WebTransport(WebTransportEvent::SessionDraining {
+            session_id: CONNECT_STREAM_ID,
+        })
+    }
+
+    /// 2xx の `:status` を確認しても `SessionEstablished` を観測するまで確立しない
+    ///
+    /// h3 層は `SessionEstablished` をヘッダーのイベントより先に発行するため、
+    /// `Event::HeadersEnd` で早期に確定させると `:status` を確認できないまま確立とみなすか、
+    /// 逆に `SessionEstablished` を取りこぼす。どちらの順序でも確立になることを固定する。
+    #[test]
+    fn connect_outcome_waits_for_session_established_after_two_xx_status() {
+        // h3 層が実際に発行する順序 (確立の通知がヘッダーより先)
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            session_established_event(),
+            headers_begin_event(),
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Established,
+            "2xx の :status と SessionEstablished を同じバッチで観測したら確立になること"
+        );
+        assert_eq!(observation.status, Some(200), "観測した :status が残ること");
+
+        // ヘッダーのイベントが先に届き、確立の通知が次のバッチになる順序
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Pending,
+            "2xx の :status だけでは確立と確定しないこと (SessionEstablished を待つこと)"
+        );
+        observation.observe_events(&[session_established_event()]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Established,
+            "SessionEstablished を観測したら確立になること"
+        );
+    }
+
+    /// ヘッダー終端に達するまでは判定しない
+    ///
+    /// `:status` は `HeadersEnd` と別のバッチで届き得るため、バッチをまたいで蓄積する。
+    #[test]
+    fn connect_outcome_accumulates_status_across_batches() {
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[status_header_event(500)]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Pending,
+            "ヘッダー終端の前は判定しないこと"
+        );
+        observation.observe_events(&[headers_end_event()]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: Some(500) },
+            "別のバッチで届いた :status を蓄積して判定すること"
+        );
+    }
+
+    /// 1xx 中間レスポンスは判定に使わない
+    ///
+    /// h3 層は informational status でもヘッダーのイベント (`HeadersBegin` / `Header` /
+    /// `HeadersEnd`) を発行し、ストリーム状態を最終レスポンスの受信前へ戻して続く最終レスポンスを
+    /// 処理する (RFC 9114 §4.1)。1xx の `HeadersEnd` を最終レスポンスの終端として扱うと、
+    /// 2xx の最終レスポンスを受け取る前に接続失敗として確定してしまうため、1xx は判定に使わない。
+    #[test]
+    fn connect_outcome_ignores_informational_status() {
+        // 1xx だけでは判定を確定しない
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(103),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Pending,
+            "1xx のヘッダー終端では確定しないこと"
+        );
+        assert_eq!(
+            observation.status, None,
+            "1xx を確定レスポンスの :status として蓄積しないこと"
+        );
+        assert!(
+            !observation.headers_end,
+            "1xx のヘッダー終端を最終レスポンスの終端にしないこと"
+        );
+
+        // 1xx のあとに届いた 2xx の最終レスポンスで確立する
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(200),
+            headers_end_event(),
+            session_established_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Established,
+            "1xx のあとに届いた 2xx で確立すること"
+        );
+
+        // 1xx のあとに届いた 2xx 以外の最終レスポンスは失敗として確定する
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(100),
+            headers_end_event(),
+            headers_begin_event(),
+            status_header_event(503),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: Some(503) },
+            "1xx のあとに届いた 2xx 以外の最終レスポンスで失敗にすること"
+        );
+    }
+
+    /// 2xx 以外の応答は従来どおり `ConnectFailed` の判定になる
+    #[test]
+    fn connect_outcome_keeps_connect_failed_for_non_success_status() {
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(500),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: Some(500) },
+            "2xx 以外の :status は接続失敗になること"
+        );
+
+        // `:status` が届かない場合も接続失敗である
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[headers_end_event()]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: None },
+            ":status が無い場合は接続失敗になること"
+        );
+
+        // 呼び出し元へ返るエラーは従来どおり `ConnectFailed` である
+        for status in [Some(500), None] {
+            assert!(
+                matches!(
+                    connect_error(ConnectOutcome::Failed { status }),
+                    Some(TransportError::ConnectFailed { status: actual }) if actual == status
+                ),
+                "{status:?} が ConnectFailed のまま返ること"
+            );
+        }
+    }
+
+    /// 確立前に届いたプロトコル交渉失敗の `SessionClosed` は確立にしない
+    ///
+    /// draft-ietf-webtrans-http3-16 §3.3 の判定は h3 層 (`handle_wt_connect_response`) が行い、
+    /// 交渉に失敗すると `WT_ALPN_ERROR` の `SessionClosed` を発行して `SessionEstablished` は
+    /// 発行しない。h3 層は `SessionClosed` を発行したあとにもヘッダーのイベント (`:status` を含む) を
+    /// 発行するため、同じバッチに 2xx の `:status` と `HeadersEnd` があっても失敗として扱う。
+    #[test]
+    fn connect_outcome_reports_protocol_negotiation_failure() {
+        let alpn_error = WtErrorCode::AlpnError as u64;
+
+        // h3 層が交渉失敗時に発行するイベント列 (`SessionClosed` のあとにヘッダーが続く)
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            session_closed_event(alpn_error),
+            headers_begin_event(),
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::ProtocolNegotiationFailed {
+                error_code: alpn_error
+            },
+            "2xx の :status が同じバッチにあっても交渉失敗として確定すること"
+        );
+
+        // ヘッダーのイベントを発行せず `SessionClosed` だけを届ける経路でも失敗になる
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[session_closed_event(alpn_error)]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::ProtocolNegotiationFailed {
+                error_code: alpn_error
+            },
+            "ヘッダーのイベントが無くても交渉失敗として確定すること"
+        );
+
+        // 交渉失敗を観測した後に確立の通知が届いても確立にしない (防御)
+        observation.observe_events(&[session_established_event()]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::ProtocolNegotiationFailed {
+                error_code: alpn_error
+            },
+            "交渉失敗の後に SessionEstablished が届いても確立にしないこと"
+        );
+
+        // 呼び出し元へ返るエラーが交渉失敗の variant になる
+        assert!(
+            matches!(
+                connect_error(connect_outcome(&observation)),
+                Some(TransportError::ProtocolNegotiationFailed { error_code }) if error_code == alpn_error
+            ),
+            "交渉失敗が ProtocolNegotiationFailed として返ること"
+        );
+    }
+
+    /// 確立前のセッション終了は交渉失敗と区別して扱う
+    ///
+    /// §3.3 の交渉失敗以外の理由 (CONNECT stream の close など) で h3 層が `SessionClosed` を
+    /// 発行した場合もセッションを確立しないが、プロトコル交渉失敗とは別の結果にする。
+    /// 終了コードは h3 層のイベント処理がログに残すため、判定結果は持たない。
+    #[test]
+    fn connect_outcome_separates_other_session_closed_from_protocol_negotiation_failure() {
+        let session_gone = WtErrorCode::SessionGone as u64;
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[session_closed_event(session_gone)]);
+        let outcome = connect_outcome(&observation);
+        assert_eq!(
+            outcome,
+            ConnectOutcome::ConnectionClosed,
+            "交渉失敗以外の終了は接続エラーとして扱うこと"
+        );
+
+        // 呼び出し元へ返るエラーは交渉失敗ではない
+        assert!(
+            matches!(
+                connect_error(outcome),
+                Some(TransportError::ConnectionClosed)
+            ),
+            "交渉失敗以外の確立前終了は ConnectionClosed として返ること"
+        );
+    }
+
+    /// `:status` が複数届いた場合は先頭だけを採用する
+    ///
+    /// h3 層は `:status` を `find` で先頭だけ見るため、2 つ目以降の `:status` で上書きすると
+    /// h3 層の判定とずれる。h3 層は重複した `:status` を malformed (`H3_MESSAGE_ERROR`) として
+    /// 拒否するため通常は届かないが、届いた場合も先頭に合わせる。パースできない `:status` も
+    /// 先頭の値として採用し、不在と同じ `None` として扱う。
+    #[test]
+    fn connect_outcome_keeps_first_status_header() {
+        // 先頭が 2xx 以外なら、後続に 2xx があっても接続失敗である
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            status_header_event(500),
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: Some(500) },
+            "先頭の :status で判定すること"
+        );
+
+        // 先頭がパースできない場合は :status 不在と同じ扱いになる
+        let invalid_status = Event::Header {
+            stream_id: CONNECT_STREAM_ID,
+            name: b":status".to_vec(),
+            value: b"abc".to_vec(),
+        };
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            headers_begin_event(),
+            invalid_status,
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Failed { status: None },
+            "パースできない :status を不在と同じ扱いにすること"
+        );
+    }
+
+    /// 確立前に drain を観測したら待機を終える
+    ///
+    /// h3 層は HTTP/3 GOAWAY / `WT_DRAIN_SESSION` を受けると `Pending` のセッションを
+    /// `Draining` へ遷移させ、`SessionDraining` を発行して `SessionEstablished` は発行しない。
+    /// 2xx の `:status` を受け取っていても確立しないため、drain を観測したら待機を終える (§4.7)。
+    #[test]
+    fn connect_outcome_ends_wait_when_session_drains_before_establishment() {
+        // GOAWAY が先に観測され、そのあとに 2xx のレスポンスが届く順序
+        let mut observation = ConnectObservation::default();
+        observation.observe_events(&[
+            session_draining_event(),
+            headers_begin_event(),
+            status_header_event(200),
+            headers_end_event(),
+        ]);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::SessionDraining,
+            "2xx の :status を受け取っていても drain では確立しないこと"
+        );
+        assert!(
+            matches!(
+                connect_error(connect_outcome(&observation)),
+                Some(TransportError::ConnectionClosed)
+            ),
+            "drain は既存の接続エラーとして返ること"
+        );
+    }
+
+    /// 共有しているセッション状態からも drain / 終了を観測する
+    ///
+    /// h3 層のイベントは 1 つのタスクが drain すると他のタスクには届かない。制御ストリームを
+    /// 処理するルーティングタスクは GOAWAY 由来の `SessionDraining` を自分で drain して
+    /// セッション状態へ反映するため、イベント列を観測できない場合でも共有状態から観測して
+    /// 待機を終える。
+    #[test]
+    fn connect_outcome_observes_shared_session_state() {
+        // drain を共有状態から観測する
+        let mut observation = ConnectObservation::default();
+        observation.observe_session_state(WtSessionState::Draining);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::SessionDraining,
+            "共有状態の drain でも確立しないこと"
+        );
+
+        // 終了を共有状態から観測した場合は終了コードが分からない
+        for state in [WtSessionState::ClosedByPeer, WtSessionState::ClosedLocally] {
+            let mut observation = ConnectObservation::default();
+            observation.observe_session_state(state);
+            assert_eq!(
+                connect_outcome(&observation),
+                ConnectOutcome::ConnectionClosed,
+                "{state:?} を観測したら確立しないこと"
+            );
+            assert!(
+                matches!(
+                    connect_error(connect_outcome(&observation)),
+                    Some(TransportError::ConnectionClosed)
+                ),
+                "{state:?} は既存の接続エラーとして返ること"
+            );
+        }
+
+        // 確立していなければ何も起きない (判定は保留のまま)
+        let mut observation = ConnectObservation::default();
+        observation.observe_session_state(WtSessionState::Active);
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Pending,
+            "Active の観測だけでは判定しないこと"
+        );
+    }
+
+    /// `WT_ALPN_ERROR` で閉じるのはプロトコル交渉失敗の判定だけである
+    ///
+    /// draft-ietf-webtrans-http3-16 §3.3 の MUST はアプリケーションプロトコル交渉の失敗に対する
+    /// ものであり、2xx 以外の応答 (§3.2) や確立前の終了 (§6) では接続を閉じない。
+    #[test]
+    fn closes_with_wt_alpn_error_only_for_protocol_negotiation_failure() {
+        assert!(
+            closes_with_wt_alpn_error(ConnectOutcome::ProtocolNegotiationFailed {
+                error_code: WtErrorCode::AlpnError as u64
+            }),
+            "交渉失敗では WT_ALPN_ERROR で接続を閉じること"
+        );
+
+        for outcome in [
+            ConnectOutcome::Pending,
+            ConnectOutcome::Established,
+            ConnectOutcome::Failed { status: Some(500) },
+            ConnectOutcome::Failed { status: None },
+            ConnectOutcome::ConnectionClosed,
+            ConnectOutcome::SessionDraining,
+        ] {
+            assert!(
+                !closes_with_wt_alpn_error(outcome),
+                "交渉失敗以外では WT_ALPN_ERROR で接続を閉じないこと: {outcome:?}"
+            );
+        }
+    }
+
+    /// 二次的な feed エラー (H3_MESSAGE_ERROR) を作る
+    ///
+    /// h3 層は交渉失敗で `SessionClosed` を積んだあと、終了済みセッションへの追加 DATA を
+    /// H3_MESSAGE_ERROR にすることがある。この二次的なエラーが交渉失敗の判定より先に
+    /// 返らないことを固定するために使う。
+    fn secondary_feed_error() -> TransportError {
+        TransportError::Http3(shiguredo_http3::Error::StreamError(
+            shiguredo_http3::ErrorCode::MessageError,
+        ))
+    }
+
+    /// 交渉失敗のバッチは「クローズ → 交渉失敗のエラー返却」の順になる
+    ///
+    /// draft-ietf-webtrans-http3-16 §3.3 の MUST はセッションを `WT_ALPN_ERROR` で閉じることで
+    /// あり、同じ feed が返した二次的なエラー (終了済みセッションへの追加 DATA に対する
+    /// H3_MESSAGE_ERROR など) を先に返すと MUST の通知が飛ぶ。呼び出し側はこの並びの順に
+    /// 実行するため、順序を入れ替えるとこのテストが落ちる。
+    #[test]
+    fn connect_actions_close_before_returning_protocol_negotiation_failure() {
+        let alpn_error = WtErrorCode::AlpnError as u64;
+        let outcome = ConnectOutcome::ProtocolNegotiationFailed {
+            error_code: alpn_error,
+        };
+
+        // クローズは feed の結果に依存しないため、二次的なエラーの有無で並びは変わらない
+        for feed_error in [Some(secondary_feed_error()), None] {
+            let actions = connect_actions(outcome, feed_error);
+            assert_eq!(
+                actions.len(),
+                2,
+                "交渉失敗ではクローズとエラー返却の 2 操作になること"
+            );
+            assert!(
+                matches!(actions[0], ConnectAction::CloseWithWtAlpnError),
+                "WT_ALPN_ERROR でのクローズが先に来ること"
+            );
+            assert!(
+                matches!(
+                    &actions[1],
+                    ConnectAction::ReturnError(TransportError::ProtocolNegotiationFailed { error_code })
+                        if *error_code == alpn_error
+                ),
+                "返すエラーが交渉失敗の variant であること (二次的なエラーより優先される)"
+            );
+            assert!(
+                !actions.iter().any(|action| matches!(
+                    action,
+                    ConnectAction::ReturnError(TransportError::Http3(_))
+                )),
+                "二次的なエラーは伝播しないこと"
+            );
+        }
+    }
+
+    /// 2xx 以外の応答では feed のエラーが重なっても判定由来の `ConnectFailed` が優先される
+    ///
+    /// 判定が確定した場合は同じ feed が返した二次的なエラーを伝播せず、捨てた事実と内容を warn に
+    /// 残す。交渉失敗で並びを固定するテストと対にして、`Failed` でも同じ優先順位になることを
+    /// 固定する。
+    #[test]
+    fn connect_actions_prefers_connect_failed_over_secondary_feed_error() {
+        let status = Some(500);
+        let outcome = ConnectOutcome::Failed { status };
+        let (actions, count, messages) =
+            with_warn_recorder(|| connect_actions(outcome, Some(secondary_feed_error())));
+
+        assert_eq!(
+            actions.len(),
+            1,
+            "接続失敗では feed のエラーが重なってもエラー返却の 1 操作になること"
+        );
+        assert!(
+            matches!(
+                &actions[0],
+                ConnectAction::ReturnError(TransportError::ConnectFailed { status: actual })
+                    if *actual == status
+            ),
+            "判定由来の ConnectFailed が返ること: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                ConnectAction::ReturnError(TransportError::Http3(_))
+            )),
+            "二次的な feed のエラーは伝播しないこと"
+        );
+        assert_eq!(count, 1, "捨てた二次的なエラーの warn が 1 回だけ出ること");
+        assert_eq!(
+            messages,
+            [format!(
+                "Discarding the secondary feed error because the CONNECT outcome is already determined ({outcome:?}): {}",
+                secondary_feed_error()
+            )],
+            "捨てた事実と二次的なエラーの内容が warn に残ること"
+        );
+    }
+
+    /// 交渉失敗以外のバッチでは接続を閉じず、保留のときは feed の結果を伝播する
+    #[test]
+    fn connect_actions_never_close_for_other_outcomes() {
+        // 2xx 以外の応答 / 確立前の終了 / drain は、いずれもエラー返却の 1 操作になる
+        for outcome in [
+            ConnectOutcome::Failed { status: Some(500) },
+            ConnectOutcome::Failed { status: None },
+            ConnectOutcome::ConnectionClosed,
+            ConnectOutcome::SessionDraining,
+        ] {
+            let actions = connect_actions(outcome, None);
+            assert_eq!(
+                actions.len(),
+                1,
+                "{outcome:?} ではエラー返却の 1 操作になること"
+            );
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, ConnectAction::CloseWithWtAlpnError)),
+                "{outcome:?} では接続を閉じないこと"
+            );
+        }
+
+        // 確立は確立の反映だけ、保留は何もしない (待機を続ける)
+        let actions = connect_actions(ConnectOutcome::Established, None);
+        assert_eq!(actions.len(), 1, "確立では 1 操作になること");
+        assert!(
+            matches!(actions[0], ConnectAction::Established),
+            "確立を反映すること"
+        );
+        assert!(
+            connect_actions(ConnectOutcome::Pending, None).is_empty(),
+            "保留では何もしないこと"
+        );
+
+        // feed がエラーを返した場合は判定が確定していなければ伝播する
+        for outcome in [ConnectOutcome::Pending, ConnectOutcome::Established] {
+            let actions = connect_actions(outcome, Some(secondary_feed_error()));
+            assert!(
+                actions.iter().any(|action| matches!(
+                    action,
+                    ConnectAction::ReturnError(TransportError::Http3(_))
+                )),
+                "{outcome:?} では feed のエラーを伝播すること"
+            );
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, ConnectAction::CloseWithWtAlpnError)),
+                "{outcome:?} では接続を閉じないこと"
+            );
+        }
+    }
+
+    /// 交渉失敗の接続クローズには WT_ALPN_ERROR をそのまま載せる
+    ///
+    /// draft-ietf-webtrans-http3-16 §3.3 は交渉失敗時に `WT_ALPN_ERROR` でセッションを閉じる
+    /// MUST を定める。数値は依存 crate の定義を使い、example 側に直書きしない (§9.5 の登録値で固定する)。
+    #[test]
+    fn wt_alpn_error_carries_the_registered_error_code() {
+        assert_eq!(
+            WtErrorCode::AlpnError as u64,
+            0x0817b3dd,
+            "WT_ALPN_ERROR が §9.5 の登録値であること"
+        );
+        assert_eq!(
+            u64::from(wt_alpn_error()),
+            WtErrorCode::AlpnError as u64,
+            "接続クローズに載せる値が WT_ALPN_ERROR であること"
+        );
+    }
+
+    /// 交渉失敗の表示には §9.5 の登録値と同じ桁数の終了コードが含まれる
+    #[test]
+    fn protocol_negotiation_failed_message_includes_registered_error_code() {
+        let error = TransportError::ProtocolNegotiationFailed {
+            error_code: WtErrorCode::AlpnError as u64,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("{:#010x}", WtErrorCode::AlpnError as u64)),
+            "表示に §9.5 の登録値と同じ桁数の終了コードが含まれること: {message}"
+        );
     }
 }
