@@ -123,9 +123,13 @@ impl ClientConfig {
 /// (CONNECT stream に `WT_CLOSE_SESSION` の DATA と、終了後の追加 DATA が同じチャンクで
 /// 届くと、`SessionClosed` を積んだ後に H3_MESSAGE_ERROR を返す)。
 /// そのためエラーとイベントを別々に運び、エラーでもイベントを処理できるようにする。
+///
+/// エラーは `TransportError` に畳まず h3 層の [`shiguredo_http3::Error`] のまま運ぶ。
+/// RFC 9114 §8 の接続エラー (接続を閉じる) とストリームエラー (そのストリームだけを
+/// 止める) を variant で切り分ける必要があるためである (`connection_error_code`)。
 struct H3FeedOutcome {
     /// h3 層へ入力を流した結果
-    result: Result<()>,
+    result: std::result::Result<(), shiguredo_http3::Error>,
     /// h3 層が発行したイベント (drain に失敗した場合は空)
     events: Vec<Event>,
 }
@@ -145,10 +149,7 @@ impl ClientConnectionState {
     ///
     /// feed がエラーでも drain する (理由は [`H3FeedOutcome`] を参照)。
     fn feed_stream_and_drain(&mut self, id: u64, data: &[u8], fin: bool) -> H3FeedOutcome {
-        let result = self
-            .h3_conn
-            .feed_stream(id, data, fin)
-            .map_err(TransportError::from);
+        let result = self.h3_conn.feed_stream(id, data, fin);
         self.drain_after(result)
     }
 
@@ -160,23 +161,34 @@ impl ClientConnectionState {
     /// `stream_reset` の `final_size` (RFC 9000 §19.4 の Final Size) は、s2n-quic の
     /// ストリームエラーが値を運ばないため常に 0 を渡す (セッション終了の判定には使われない)。
     fn process_stream_reset(&mut self, id: u64, error_code: u64) -> H3FeedOutcome {
-        let result = self
-            .h3_conn
-            .stream_reset(id, error_code, 0)
-            .map_err(TransportError::from);
+        let result = self.h3_conn.stream_reset(id, error_code, 0);
         self.drain_after(result)
     }
 
     /// h3 層へ入力を流した結果を保ったままイベントを取り出す
     ///
-    /// 入力がエラーでもイベントは取り出す。drain 自体がエラーになった場合は
-    /// イベントを取得できないため、原因をログに残して空を返す (呼び出し側の分岐は
-    /// 入力の成否だけを見る)。
-    fn drain_after(&mut self, result: Result<()>) -> H3FeedOutcome {
+    /// 入力がエラーでもイベントは取り出す。drain 自体がエラーになった場合もイベントを
+    /// 取得できないため空を返すが、そのエラーは接続エラーであり得る (`drain_events` は
+    /// QPACK のブロック解除を試み、その過程で `Error::ConnectionError` を返す) ため捨てない。
+    ///
+    /// drain のエラーが接続エラーなら、入力側のエラーより優先して結果にする。接続エラーを
+    /// 見落とすと接続を閉じないままクローズ判断を落とすためであり、入力のストリームエラーを
+    /// 返すより目的に合う。依存 crate は接続エラーを記録すると以降の入力を処理しないため、
+    /// 入力が先にエラーになっている場合がほとんどであり、この優先は通常到達しない防御である。
+    fn drain_after(
+        &mut self,
+        result: std::result::Result<(), shiguredo_http3::Error>,
+    ) -> H3FeedOutcome {
         match self.drain_events() {
             Ok(events) => H3FeedOutcome { result, events },
-            Err(e) => {
-                tracing::warn!("Failed to drain HTTP/3 events: {e}");
+            Err(drain_error) => {
+                tracing::warn!("Failed to drain HTTP/3 events: {drain_error}");
+                // 接続エラーは接続を閉じる判断に必要なので、入力側のエラーより優先する
+                let result = if connection_error_code(&drain_error).is_some() {
+                    Err(drain_error)
+                } else {
+                    result.or(Err(drain_error))
+                };
                 H3FeedOutcome {
                     result,
                     events: Vec::new(),
@@ -185,18 +197,38 @@ impl ClientConnectionState {
         }
     }
 
-    fn drain_events(&mut self) -> Result<Vec<Event>> {
-        Ok(self.h3_conn.drain_events()?)
+    /// h3 層のイベントを取り出す
+    ///
+    /// 失敗は h3 層のエラーをそのまま返す。`Error::ConnectionError` であり得るため、呼び出し側は
+    /// 接続エラーとして切り分けられる (`connection_error_code`)。
+    fn drain_events(&mut self) -> std::result::Result<Vec<Event>, shiguredo_http3::Error> {
+        self.h3_conn.drain_events()
+    }
+
+    /// h3 層のイベントを入力なしで取り出し、結果を [`H3FeedOutcome`] の形に揃える
+    ///
+    /// h3 層へ入力を流さずにイベントを取り出す経路 (セッション確立時の CONNECT レスポンス
+    /// 待ち) が使う。`drain_events` のエラーは入力のエラーと同じく接続エラーであり得る
+    /// (h3 層は接続エラーを記録すると以降の drain でも同じエラーを返す) ため、入力の結果と
+    /// 同じ形にして [`process_h3_outcome`] へ通せるようにする。
+    fn drain_events_outcome(&mut self) -> H3FeedOutcome {
+        match self.drain_events() {
+            Ok(events) => H3FeedOutcome {
+                result: Ok(()),
+                events,
+            },
+            Err(error) => H3FeedOutcome {
+                result: Err(error),
+                events: Vec::new(),
+            },
+        }
     }
 
     /// QUIC DATAGRAM のペイロードを h3 層へ流し、流した結果と drain したイベントを返す
     ///
     /// 扱いは `feed_stream_and_drain` と同じである。
     fn feed_datagram(&mut self, data: &[u8]) -> H3FeedOutcome {
-        let result = self
-            .h3_conn
-            .feed_datagram(data)
-            .map_err(TransportError::from);
+        let result = self.h3_conn.feed_datagram(data);
         self.drain_after(result)
     }
 }
@@ -207,9 +239,14 @@ impl ClientConnectionState {
 
 /// WebTransport セッションの状態 (draft-ietf-webtrans-http3-16 §6 / §4.7)
 ///
-/// `tokio::sync::watch` で各タスクへ配る。ストリームを所有するタスクはこの値の変化を
-/// 観測し、終了を検知したら自分のストリームを `WT_SESSION_GONE` で中断する (§6 の MUST)。
-/// 状態は `Active` から終了方向にしか進まない。
+/// `tokio::sync::watch` で各タスクへ配る値であり、セッション状態の唯一の置き場所である。
+/// ストリームを所有するタスクはこの値の変化を観測し、終了を検知したら自分のストリームを
+/// `WT_SESSION_GONE` で中断する (§6 の MUST)。状態は `Active` から終了方向にしか進まない。
+///
+/// セッションの終了 (§6) も接続エラー (RFC 9114 §8) も受信経路 (ストリームの accept /
+/// datagram の受信 / ストリームの受信待ち) が同じように観測するため、1 つの `watch` に
+/// 載せる。接続エラーを別のスロット (`Option<u64>` など) に分けると、読み出し側が 2 つの
+/// 状態を突き合わせる必要が生じ、片方の更新を観測し損ねる余地が残る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WtSessionState {
     /// セッションが確立し、通常どおり使える
@@ -220,6 +257,16 @@ pub enum WtSessionState {
     ClosedByPeer,
     /// 自側が WT_CLOSE_SESSION を送ってセッションを終了した (§6)
     ClosedLocally,
+    /// h3 層の接続エラー、または datagram 受信 API のエラーで、受信を継続できない終了
+    ///
+    /// h3 層の `Error::ConnectionError(code)` は RFC 9114 §8 の接続エラーである。RFC 9114 §5.3
+    /// はアプリケーション層が直ちに接続を閉じることを認めるにとどまるが、依存 crate
+    /// (shiguredo_http3) は接続エラーを記録した接続を回復不能として扱い、以後のデータ処理・
+    /// イベント生成・送信 API の呼び出しを拒否する。datagram 受信 API のエラーも以後 datagram を
+    /// 読めないため、購読を静かに止めないよう同じ終了として扱う。どちらの場合も
+    /// `WT_CLOSE_SESSION` は送らない (接続自体を閉じるため `WebTransportEvent::SessionClosed`
+    /// は発火しない)。
+    ConnectionFailed,
 }
 
 impl WtSessionState {
@@ -227,11 +274,13 @@ impl WtSessionState {
     ///
     /// セッションが終了したかどうかの判断は [`session_policy`] の `abort_streams` に
     /// 一本化しており、この型は状態の表現だけを持つ (述語は持たない)。
+    /// `ConnectionFailed` はセッション終了 (`ClosedByPeer` / `ClosedLocally`) と同じ段階に
+    /// 置く。どちらも新しい作業を始められない終了状態だからである。
     fn stage(self) -> u8 {
         match self {
             Self::Active => 0,
             Self::Draining => 1,
-            Self::ClosedByPeer | Self::ClosedLocally => 2,
+            Self::ClosedByPeer | Self::ClosedLocally | Self::ConnectionFailed => 2,
         }
     }
 }
@@ -245,7 +294,7 @@ impl WtSessionState {
 /// 定め、§4.7 は drain (GOAWAY / `WT_DRAIN_SESSION`) の後もセッションの利用を MAY としつつ、
 /// 本 example は「できるだけ早く終了する」合図として新規の作業を始めない方針を取る。
 /// 将来 drain の間だけ datagram を許可する判断があり得るため、判定を 1 つに畳まない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct SessionPolicy {
     /// 新しいストリームの open を拒否する
     reject_new_streams: bool,
@@ -255,7 +304,7 @@ struct SessionPolicy {
     abort_streams: bool,
 }
 
-/// セッション状態から動作を決める純関数
+/// セッションの状態から動作を決める純関数
 ///
 /// draft-ietf-webtrans-http3-16 §6 (Session Termination) は、セッション終了を検知したら
 /// 関連する全 uni / bidi ストリームを `WT_SESSION_GONE` で中断する MUST と、新しい datagram の
@@ -265,6 +314,10 @@ struct SessionPolicy {
 /// "an endpoint MAY continue using the session" である。drain を終了と同一視すると
 /// 既存ストリームを不必要に中断してこの MAY を潰すため、drain ではストリームを中断せず、
 /// 新規ストリームの open と datagram の送信だけを拒否する。
+///
+/// 接続エラー (RFC 9114 §8) や datagram 受信 API のエラーを検知した場合は drain 中でも
+/// 既存ストリームを中断する。接続そのものが閉じるため、既存ストリームを継続することは
+/// できない (drain の MAY は接続が生きていることを前提とする)。
 ///
 /// セッションが終了したかどうかの判断は `abort_streams` に一本化する。`WtSessionState` は
 /// 状態の表現だけを持ち、終了を表す述語を別に持たない (二重表現を作らない)。
@@ -280,7 +333,9 @@ fn session_policy(state: WtSessionState) -> SessionPolicy {
             reject_datagrams: true,
             abort_streams: false,
         },
-        WtSessionState::ClosedByPeer | WtSessionState::ClosedLocally => SessionPolicy {
+        WtSessionState::ClosedByPeer
+        | WtSessionState::ClosedLocally
+        | WtSessionState::ConnectionFailed => SessionPolicy {
             reject_new_streams: true,
             reject_datagrams: true,
             abort_streams: true,
@@ -288,7 +343,7 @@ fn session_policy(state: WtSessionState) -> SessionPolicy {
     }
 }
 
-/// セッション状態を進める
+/// セッションの状態を進める
 ///
 /// 状態は `Active` → `Draining` → 終了 の順にしか進まない。終了後に遅れて届いた drain の
 /// 通知で状態を戻すと中断済みストリームの扱いが変わるため無視する。同じ状態の再通知でも
@@ -303,22 +358,112 @@ fn update_session_state(session_state: &watch::Sender<WtSessionState>, next: WtS
     });
 }
 
+/// h3 層へ入力を流した結果が接続エラーかどうかを切り分ける純関数
+///
+/// RFC 9114 §8 は接続エラー (接続を直ちに閉じる。§5.3) とストリームエラー (そのストリーム
+/// だけを終了する) を区別し、wire のエラーコードは §8.1 の登録簿が定める。h3 層はこの 2 つを
+/// `Error` の variant で区別するため、example は variant で切り分けて接続を閉じるかどうかを
+/// 決める。
+///
+/// `Error::ConnectionError` だけが接続を閉じる対象であり、`Error::StreamError` などの
+/// 接続エラーでないものは接続を閉じない。エラーコードは h3 層の
+/// [`shiguredo_http3::ErrorCode`] が持つ wire の値をそのまま返し、example 側で数値を
+/// 再定義しない。
+fn connection_error_code(error: &shiguredo_http3::Error) -> Option<u64> {
+    match error {
+        shiguredo_http3::Error::ConnectionError(code) => Some(code.code()),
+        _ => None,
+    }
+}
+
+/// h3 層へ入力を流した結果を判定し、接続エラーなら接続を閉じる
+///
+/// 戻り値は入力の処理を継続してよいかどうか (`Err` なら呼び出し側はその入力の処理を
+/// 止める)。接続エラーは [`TransportError::ConnectionClosed`] として返し、接続エラー以外は
+/// 具体コードを保持できる [`TransportError::Http3`] として返す。
+///
+/// 接続エラーを検知した場合は、接続を閉じる前に共有状態を [`WtSessionState::ConnectionFailed`]
+/// へ進める。先に進めるのは、接続を閉じると route タスクと datagram タスクが終了して
+/// チャネルが閉じ、読み出し側が「チャネルが閉じた」ことだけを観測して原因 (h3 層の
+/// 接続エラー) を失うためである。
+///
+/// `stream_kind` はログに出す入力の種別である。h3 層へストリームを流す 2 つのルーティング
+/// タスク (単方向 / 双方向) はどちらも `feed_stream_to_h3` を通り、同関数が
+/// `"HTTP/3 stream"` を渡すため、この値では両者を区別できない。
+fn process_h3_result(
+    result: std::result::Result<(), shiguredo_http3::Error>,
+    session_state: &watch::Sender<WtSessionState>,
+    handle: &s2n_quic::connection::Handle,
+    stream_kind: &str,
+) -> Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    // 接続エラーかどうかの判定は 1 回だけ行う (判定とエラーコードの取り出しを分けると、
+    // 同じ variant を 2 回評価することになる)
+    match connection_error_code(&error) {
+        Some(error_code) => {
+            update_session_state(session_state, WtSessionState::ConnectionFailed);
+            tracing::warn!(
+                stream_kind,
+                "Closing the connection because the HTTP/3 layer reported a connection error: {error}"
+            );
+            close_connection_with_h3_error(handle, error_code, stream_kind);
+            Err(TransportError::ConnectionClosed)
+        }
+        None => {
+            // 接続エラー以外のエラーは接続を閉じない。h3 層は `Error::StreamError` を
+            // 「そのストリームを reset すべき」と定義するが、本 example が h3 層へ流すのは
+            // 他セッション向けの双方向ストリームと制御 / QPACK ストリームであり、自前で
+            // reset すべきストリームを所有していない。そのため、その入力の処理を止めると
+            // ログにとどめる
+            tracing::warn!(
+                stream_kind,
+                "Stopping the input because the HTTP/3 layer reported an error that is not a connection error: {error}"
+            );
+            Err(TransportError::Http3(error))
+        }
+    }
+}
+
+/// h3 層へ入力を流した結果をセッション状態へ反映し、流した結果を返す
+///
+/// h3 層へ入力を流す経路 (セッション確立時の CONNECT レスポンス待ち / CONNECT stream の
+/// 受信タスク / 制御・QPACK ストリームのルーティングタスク / datagram 受信タスク) が
+/// 共通で使う。feed がエラーでも drain したイベントは必ず `process_h3_events` へ渡す
+/// (取りこぼすとセッション終了を検知できず、MOQT 層の受信ループが待ち続ける)。
+/// 戻り値の datagram payload はこの経路では使わないため捨てる。
+///
+/// エラーの切り分けと接続クローズは [`process_h3_result`] に集約する。接続エラーは
+/// この関数の中で接続を閉じて共有状態を [`WtSessionState::ConnectionFailed`] へ進めるところまで
+/// 終わるため、呼び出し側に接続を閉じる責任は残らない。戻り値は「その入力を流し続けるか
+/// どうか」だけを表す。
+fn process_h3_outcome(
+    outcome: H3FeedOutcome,
+    session_state: &watch::Sender<WtSessionState>,
+    handle: &s2n_quic::connection::Handle,
+    stream_kind: &str,
+) -> Result<()> {
+    let _ = process_h3_events(outcome.events, session_state);
+    process_h3_result(outcome.result, session_state, handle, stream_kind)
+}
+
 /// セッションの終了を待つ
 ///
 /// I/O を待つ `tokio::select!` の分岐として使う。終了かどうかの判断は純関数
 /// `session_policy` の `abort_streams` に一本化しており、production でストリームを
 /// 中断するかどうかはこの関数の待機が起点になる。drain (§4.7) では中断しないため返らず、
-/// 状態が変わるたびに `session_policy` を評価し直す。
+/// `abort_streams` が真になる状態へ遷移するまで待ち続ける。
 ///
 /// `watch::Receiver::wait_for` は待機に入るときに現在値で述語を評価するため、呼び出し時点で
 /// 既に終了していれば待たずに返る。戻り値は待機が終わったことだけを表し、観測した状態は
 /// 呼び出し側が `borrow()` で読む (`ClosedByPeer` と `ClosedLocally` を区別できる)。
 ///
-/// 状態を配る sender が drop された場合も `wait_for` が `Err` を返すため、状態を観測できない
-/// ものとして待ち続けずに終了として扱う (防御)。この経路は production では通常到達しない。
-/// sender の clone を保持するのは `WtSession::session_state`、ストリームのルーティングタスクが
-/// 持つ `RouteContext::session_state`、CONNECT stream の受信タスク、datagram 受信タスク
-/// (`ClientConfig::receive_datagrams` が true のときだけ起動する) である。
+/// 状態を配る sender がすべて drop された場合も `wait_for` が `Err` を返すため、状態を
+/// 観測できないものとして待ち続けずに終了として扱う (防御)。この経路は production では
+/// 通常到達しない。sender の clone を保持するのは `WtSession::session_state`、ストリームの
+/// ルーティングタスクが持つ `RouteContext::session_state`、CONNECT stream の受信タスク、
+/// datagram 受信タスク (`ClientConfig::receive_datagrams` が true のときだけ起動する) である。
 pub(crate) async fn wait_until_terminated(session_state: &mut watch::Receiver<WtSessionState>) {
     let _ = session_state
         .wait_for(|state| session_policy(*state).abort_streams)
@@ -385,21 +530,6 @@ fn process_h3_events(
     datagrams
 }
 
-/// h3 層へ入力を流した結果をセッション状態へ反映し、流した結果を返す
-///
-/// h3 層へ入力を流す経路 (セッション確立時の CONNECT レスポンス待ち / CONNECT stream の
-/// 受信タスク / 制御・QPACK ストリームのルーティングタスク / datagram 受信タスク) が
-/// 共通で使う。feed がエラーでも drain したイベントは必ず `process_h3_events` へ渡す
-/// (取りこぼすとセッション終了を検知できず、MOQT 層の受信ループが待ち続ける)。
-/// 戻り値の datagram payload はこの経路では使わないため捨てる。
-fn process_h3_outcome(
-    outcome: H3FeedOutcome,
-    session_state: &watch::Sender<WtSessionState>,
-) -> Result<()> {
-    let _ = process_h3_events(outcome.events, session_state);
-    outcome.result
-}
-
 /// h3 層へストリームデータを流し、生じたイベントをセッション状態へ反映する
 ///
 /// セッション確立後に h3 層へストリームデータを流す経路 (CONNECT stream の受信タスク /
@@ -422,6 +552,7 @@ fn process_h3_outcome(
 fn feed_stream_to_h3(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    handle: &s2n_quic::connection::Handle,
     stream_id: u64,
     data: &[u8],
     fin: bool,
@@ -432,7 +563,7 @@ fn feed_stream_to_h3(
             .expect("connection state mutex must not be poisoned");
         s.feed_stream_and_drain(stream_id, data, fin)
     };
-    process_h3_outcome(outcome, session_state)
+    process_h3_outcome(outcome, session_state, handle, "HTTP/3 stream")
 }
 
 // ---------------------------------------------------------------------------
@@ -571,20 +702,21 @@ impl ConnectObservation {
         }
     }
 
-    /// 共有しているセッション状態を観測に取り込む
+    /// 共有しているセッションの状態を観測に取り込む
     ///
     /// h3 層のイベントは 1 つのタスクが drain すると他のタスクには届かない。制御ストリームを
     /// 処理するルーティングタスクは GOAWAY 由来の `SessionDraining` を自分で drain して
     /// セッション状態へ反映するため、確立待ちループはイベント列だけを見ていると drain や終了を
     /// 取りこぼして待機を終えられない。`process_h3_events` が配る watch からも観測する。
+    /// 接続エラーで接続を閉じた場合もセッションが終了するため、確立しない。
     fn observe_session_state(&mut self, state: WtSessionState) {
         match state {
             WtSessionState::Active => {}
             WtSessionState::Draining => self.session_draining = true,
             // 終了の通知を観測しているが、このループでは終了コードを観測できていない
-            WtSessionState::ClosedByPeer | WtSessionState::ClosedLocally => {
-                self.session_gone = true
-            }
+            WtSessionState::ClosedByPeer
+            | WtSessionState::ClosedLocally
+            | WtSessionState::ConnectionFailed => self.session_gone = true,
         }
     }
 }
@@ -909,9 +1041,10 @@ impl WtClient {
         // CONNECT の stream id (= session ID) を単方向ストリームのルーティングタスクへ共有する。
         // 単方向ストリームのタスクは CONNECT より前に spawn されるため、確定値を watch で配る。
         let (session_id_tx, session_id_rx) = watch::channel(None::<u64>);
-        // セッション状態 (§6 の終了 / §4.7 の drain) をストリームと受信経路へ配る。
-        // 各タスクは spawn 済みで `WtSession` を参照できないため、watch で共有する。
-        // 初期値の receiver は受け取らず、必要とするタスクが `subscribe()` で作る。
+        // セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) をストリームと
+        // 受信経路へ配る。各タスクは spawn 済みで `WtSession` を参照できないため watch で共有し、
+        // 初期値の receiver は受け取らず必要とするタスクが `subscribe()` で作る。理由は
+        // [`WtSessionState`] を参照する。
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
         // ルーティングタスクが共有するハンドル (ストリームごとのタスクへ clone して渡す)
         let route_context = RouteContext {
@@ -957,7 +1090,12 @@ impl WtClient {
         // encoder/decoder は初期データだけ送れば良い (ストリーム自体は保持不要)
 
         // peer の SETTINGS を待ってから CONNECT を送る
-        wait_for_peer_settings(&state, &unblock_notify).await?;
+        //
+        // 待機中にセッションの終了や接続エラーを観測した場合は、SETTINGS が届かないまま
+        // 待ち続けずに `ConnectionClosed` で失敗する (受信タスクが検知した接続エラーは
+        // 共有するセッション状態で伝わる)
+        let mut settings_session_state = session_state_tx.subscribe();
+        wait_for_peer_settings(&state, &unblock_notify, &mut settings_session_state).await?;
 
         // CONNECT リクエスト (双方向ストリーム) を開く
         let connect_stream = handle.open_bidirectional_stream().await?;
@@ -1045,21 +1183,39 @@ impl WtClient {
                             };
                             // このタスクは s2n-quic の datagram 受信バッファを空にする
                             // ために起動しており、payload はここでは使わない。セッション
-                            // 状態の反映 (`SessionClosed` / `SessionDraining`) だけを行う。
-                            // feed がエラーでもイベントは処理済みである。
-                            match process_h3_outcome(outcome, &session_state_for_datagram) {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    tracing::warn!("Failed to feed datagram: {e}");
-                                    break;
-                                }
+                            // 状態の反映 (`SessionClosed` / `SessionDraining`) と、h3 層が
+                            // 返したエラーの切り分けだけを行う。feed がエラーでも
+                            // イベントは処理済みである。
+                            //
+                            // エラーならこのタスクは止まる。接続エラーは
+                            // `process_h3_outcome` が接続を閉じて共有状態を終了へ進めるため、
+                            // MOQT 層へは共有状態を観測した読み出し側が伝える (エラーの内容は
+                            // `process_h3_result` が warn へ残している)
+                            if process_h3_outcome(
+                                outcome,
+                                &session_state_for_datagram,
+                                &handle_for_datagram,
+                                "HTTP/3 datagram",
+                            )
+                            .is_err()
+                            {
+                                break;
                             }
                         }
                         Ok(None) => {
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
                         Err(e) => {
+                            // datagram の受信 API のエラーは datagram を読めないことを意味する
+                            // ためこのタスクは止まる。購読を静かに止めないよう、MOQT 層の
+                            // 受信ループを待たせないセッション終了として共有状態へ進める
+                            // (h3 層の接続エラーで既に終了していれば、この遷移は
+                            // `update_session_state` が同じ段階として無視する)
                             tracing::warn!("Datagram query error: {e}");
+                            update_session_state(
+                                &session_state_for_datagram,
+                                WtSessionState::ConnectionFailed,
+                            );
                             break;
                         }
                     }
@@ -1100,6 +1256,7 @@ impl WtClient {
                             reset_connect_stream(
                                 &state,
                                 &session_state_tx,
+                                &handle,
                                 connect_stream_id,
                                 error.into(),
                             );
@@ -1119,7 +1276,12 @@ impl WtClient {
                     observation.observe_events(&outcome.events);
                     // イベントは CONNECT の判定だけでなくセッション状態へも反映する
                     // (feed がエラーでもイベントは処理済みである)
-                    let feed_result = process_h3_outcome(outcome, &session_state_tx);
+                    let feed_result = process_h3_outcome(
+                        outcome,
+                        &session_state_tx,
+                        &handle,
+                        "WebTransport CONNECT stream",
+                    );
                     // 他のタスクが drain したイベントはこの関数には届かないため、
                     // 共有しているセッション状態からも drain / 終了を観測する
                     observation.observe_session_state(*session_state_tx.borrow());
@@ -1128,11 +1290,26 @@ impl WtClient {
                     if fin { break; }
                 }
                 _ = unblock_notify.notified() => {
-                    let events = state.lock().expect("connection state mutex must not be poisoned").drain_events()?;
-                    observation.observe_events(&events);
-                    let _ = process_h3_events(events, &session_state_tx);
+                    // このループは h3 層へ入力を流さないが、drain も接続エラーを返し得る。
+                    // 他の経路と同じく `process_h3_outcome` に通し、接続エラーなら接続を
+                    // 閉じて共有状態を終了へ進めてから返す
+                    let outcome = {
+                        let mut s = state
+                            .lock()
+                            .expect("connection state mutex must not be poisoned");
+                        s.drain_events_outcome()
+                    };
+                    observation.observe_events(&outcome.events);
+                    // CONNECT stream を流れない datagram は確立待ちでは使わないため捨てる。
+                    // エラーの切り分け (`process_h3_outcome`) は他の経路と同じである
+                    let feed_result = process_h3_outcome(
+                        outcome,
+                        &session_state_tx,
+                        &handle,
+                        "WebTransport CONNECT setup",
+                    );
                     observation.observe_session_state(*session_state_tx.borrow());
-                    let actions = connect_actions(connect_outcome(&observation), None);
+                    let actions = connect_actions(connect_outcome(&observation), feed_result.err());
                     session_established = run_connect_actions(actions, &handle)?;
                 }
             }
@@ -1152,6 +1329,7 @@ impl WtClient {
         // `SessionClosed` が永久に発火しなかった)。
         let state_for_connect = Arc::clone(&state);
         let session_state_for_connect = session_state_tx.clone();
+        let handle_for_connect = handle.clone();
         tokio::spawn(async move {
             // セッション状態の変化も待つ。自発 close (`WtSession::close`) では peer が
             // CONNECT stream を閉じるまで `receive()` が返らないため、状態を観測しないと
@@ -1164,6 +1342,7 @@ impl WtClient {
                             if !feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &handle_for_connect,
                                 connect_stream_id,
                                 &data,
                                 false,
@@ -1175,7 +1354,9 @@ impl WtClient {
                                 // 新しいストリームの open と datagram の送信を許可し続けるため、
                                 // 受信エラーの分岐と同じく終了として扱ってから抜ける。
                                 // このタスクは `recv_stream` の drop で終わるため、ここで状態を
-                                // 移さないと以降 `SessionClosed` は永久に発火しない
+                                // 移さないと以降 `SessionClosed` は永久に発火しない。
+                                // 接続エラーの場合は `process_h3_result` が既に接続を閉じて
+                                // 状態を進めているため、この遷移は無視される (状態は戻らない)
                                 update_session_state(
                                     &session_state_for_connect,
                                     WtSessionState::ClosedByPeer,
@@ -1189,6 +1370,7 @@ impl WtClient {
                             if !feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &handle_for_connect,
                                 connect_stream_id,
                                 &[],
                                 true,
@@ -1207,6 +1389,7 @@ impl WtClient {
                             reset_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
+                                &handle_for_connect,
                                 connect_stream_id,
                                 error.into(),
                             );
@@ -1258,33 +1441,34 @@ impl WtClient {
 
 /// CONNECT stream から読んだデータを h3 層へ流し、イベントをセッション状態へ反映する
 ///
-/// 戻り値は CONNECT stream を読み続けるかどうか (h3 層がエラーを返した場合は false)。
-/// feed がエラーでも `feed_stream_to_h3` が drain したイベントを処理してから返るため、
+/// 戻り値はその入力のあとも CONNECT stream を読み続けるかどうか (h3 層がエラーを返した場合は
+/// false)。feed がエラーでも `feed_stream_to_h3` が drain したイベントを処理してから返るため、
 /// 同じチャンクで届いたセッション終了 (§6) を取りこぼさない。
 /// datagram は CONNECT stream を流れないため、`process_h3_events` の戻り値は捨てる。
+///
+/// h3 層が返した接続エラーは [`process_h3_result`] が接続を閉じて共有状態を終了へ進める。
+/// エラーの内容はここではログに出さない (`process_h3_result` が経路の種別とともに warn へ
+/// 残している)。
 fn feed_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    handle: &s2n_quic::connection::Handle,
     stream_id: u64,
     data: &[u8],
     fin: bool,
 ) -> bool {
-    match feed_stream_to_h3(state, session_state, stream_id, data, fin) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("Failed to feed CONNECT stream: {e}");
-            false
-        }
-    }
+    feed_stream_to_h3(state, session_state, handle, stream_id, data, fin).is_ok()
 }
 
 /// CONNECT stream の RESET_STREAM を h3 層へ伝え、イベントをセッション状態へ反映する
 ///
 /// s2n-quic のストリームエラーは RFC 9000 §19.4 の Final Size を運ばないため、h3 層へは
 /// 0 を渡す (`ClientConnectionState::process_stream_reset`)。
+/// 戻り値を使わないのは、接続エラーの扱いが `process_h3_outcome` の中で完結しているためである。
 fn reset_connect_stream(
     state: &Arc<StdMutex<ClientConnectionState>>,
     session_state: &watch::Sender<WtSessionState>,
+    handle: &s2n_quic::connection::Handle,
     stream_id: u64,
     error_code: u64,
 ) {
@@ -1294,9 +1478,12 @@ fn reset_connect_stream(
             .expect("connection state mutex must not be poisoned");
         s.process_stream_reset(stream_id, error_code)
     };
-    if let Err(e) = process_h3_outcome(outcome, session_state) {
-        tracing::warn!("Failed to reset CONNECT stream: {e}");
-    }
+    let _ = process_h3_outcome(
+        outcome,
+        session_state,
+        handle,
+        "WebTransport CONNECT stream RESET_STREAM",
+    );
 }
 
 /// CONNECT stream の受信半を `WT_SESSION_GONE` で中断する (draft-ietf-webtrans-http3-16 §6)
@@ -1329,9 +1516,15 @@ fn abort_connect_stream_read(recv_stream: &mut ReceiveStream) {
 /// `WtSetupError::PeerSettingsNotReceived` で失敗する。
 /// peer の SETTINGS はサーバーの制御ストリーム (単方向) で届き、受信タスクが
 /// HTTP/3 状態へ流し込むたびに `notify` で通知する。
+///
+/// 共有するセッション状態が終了へ進んだ場合も待機を終える。peer の制御ストリームが SETTINGS
+/// 以外のフレームで始まると h3 層は接続エラー (`H3_MISSING_SETTINGS`) を記録し、以後の入力を
+/// 処理しないため SETTINGS は永久に届かない。待ち続けると接続を閉じた原因と無関係な
+/// タイムアウトのエラーになり、接続エラーの原因が分からなくなる。
 async fn wait_for_peer_settings(
     state: &Arc<StdMutex<ClientConnectionState>>,
     notify: &Notify,
+    session_state: &mut watch::Receiver<WtSessionState>,
 ) -> Result<()> {
     /// peer SETTINGS を待つ上限 (ms)
     ///
@@ -1356,6 +1549,12 @@ async fn wait_for_peer_settings(
         }
         tokio::select! {
             _ = &mut notified => {}
+            // セッションの終了 (§6) や接続エラーを観測した場合は SETTINGS を待たない。
+            // 接続を閉じた原因は `process_h3_result` の warn に残っており、ここでは
+            // 「このセッションではもう受信できない」ことだけを呼び出し元へ返す
+            _ = wait_until_terminated(session_state) => {
+                return Err(TransportError::ConnectionClosed);
+            }
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(TransportError::Internal(
                     "peer SETTINGS not received before WebTransport CONNECT".to_string(),
@@ -1375,9 +1574,9 @@ async fn wait_for_peer_settings(
 /// 共有する。datagram 受信タスクと各ストリーム操作が並行して状態を更新するため
 /// `Mutex` で保護するが、各操作は await をまたがず短時間で完結する。
 ///
-/// `session_state` は §6 の終了 / §4.7 の drain を各タスクへ配る `watch` である。
-/// ストリームを所有するタスクは自分では状態を更新せず、この watch の変化を観測して
-/// 自分のストリームを中断する (`wait_until_terminated` を参照)。
+/// `session_state` は §6 の終了 / §4.7 の drain / h3 層が返した接続エラーを各タスクへ
+/// 配る `watch` である。ストリームを所有するタスクは自分では状態を更新せず、この watch の
+/// 変化を観測して自分のストリームを中断する (`wait_until_terminated` を参照)。
 pub struct WtSession {
     session_id: u64,
     handle: s2n_quic::connection::Handle,
@@ -1387,12 +1586,12 @@ pub struct WtSession {
     /// 双方向受信ストリームの receiver。`take_bi_receiver` で取り出すと None になる
     bi_rx: Option<mpsc::Receiver<(WtSendStream, WtRecvStream)>>,
     state: Arc<StdMutex<ClientConnectionState>>,
-    /// セッション状態 (§6 の終了 / §4.7 の drain) を配る sender
+    /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
 }
 
 impl WtSession {
-    /// 現在のセッション状態を返す
+    /// 現在のセッションの状態を返す
     ///
     /// 状態を配る sender から直接読む。読み取りロックはこの式の中だけで解放されるため、
     /// 待機中のタスクに影響しない。
@@ -1480,15 +1679,6 @@ impl WtSession {
         rx.recv().await.ok_or(TransportError::StreamClosed)
     }
 
-    /// サーバーが開始した双方向ストリームを受け付ける
-    ///
-    /// WT の双方向ストリームヘッダーは受信タスクが読み捨て済みである。
-    /// `take_bi_receiver` で receiver を取り出した後は `StreamClosed` を返す。
-    pub async fn accept_bi_stream(&mut self) -> Result<(WtSendStream, WtRecvStream)> {
-        let rx = self.bi_rx.as_mut().ok_or(TransportError::StreamClosed)?;
-        rx.recv().await.ok_or(TransportError::StreamClosed)
-    }
-
     /// 単方向受信ストリームの receiver を取り出す
     ///
     /// `accept_uni_stream` は `&mut self` の await であり、`Arc<Mutex<WtSession>>` を
@@ -1570,16 +1760,30 @@ impl WtSession {
     /// WebTransport セッションにバッファリングされた datagram を取り出す (subscriber 側で使用)
     ///
     /// h3 層のイベントを `process_h3_events` に通すため、イベントに `SessionClosed` /
-    /// `SessionDraining` が含まれていても取りこぼさない。セッション終了を検知している場合は
-    /// MOQT 層の受信ループを待たせないよう `ConnectionClosed` を返すが、同じバッチで
+    /// `SessionDraining` が含まれていても取りこぼさない。受信を継続できない終了を検知している
+    /// 場合は MOQT 層の受信ループを待たせないよう `ConnectionClosed` を返すが、同じバッチで
     /// 取り出した datagram は捨てない (`resolve_buffered_datagrams` を参照)。
+    ///
+    /// `drain_events` は h3 層が接続エラーを返した接続では同じエラーを返す (`process_h3_result`
+    /// が接続エラーの発生源であり、この関数はその接続エラーを観測する経路の 1 つ)。イベントを
+    /// 1 つも取り出せないため datagram は空で返り、接続エラーは他の受信経路と同じ
+    /// `ConnectionClosed` に畳んで返す。
     pub fn take_buffered_datagrams(&self) -> Result<Vec<Vec<u8>>> {
         let events = {
             let mut s = self
                 .state
                 .lock()
                 .expect("connection state mutex must not be poisoned");
-            s.drain_events()?
+            // 接続エラーは接続を閉じた終了であり、読み出し側には「このセッションではもう受信
+            // できない」ことだけを伝える (接続エラーの内容は `process_h3_result` が warn に
+            // 残している)。それ以外のエラーは原因を保持したまま返し、購読を静かに止めない
+            match s.drain_events() {
+                Ok(events) => events,
+                Err(e) if connection_error_code(&e).is_some() => {
+                    return Err(TransportError::ConnectionClosed);
+                }
+                Err(e) => return Err(TransportError::Http3(e)),
+            }
         };
         let datagrams = process_h3_events(events, &self.session_state);
         resolve_buffered_datagrams(datagrams, self.session_state())
@@ -1613,12 +1817,15 @@ impl WtSession {
     }
 }
 
-/// 取り出した datagram とセッション状態から `take_buffered_datagrams` の戻り値を決める純関数
+/// 取り出した datagram とセッションの状態から `take_buffered_datagrams` の戻り値を決める純関数
 ///
 /// セッション終了 (§6) を検知しても、同じバッチで取り出した datagram は捨てない
 /// (終了直前の datagram を落とすと、peer が送った最後の object が届かない)。
 /// 次回の呼び出しでは取り出せるイベントが無いため、datagram が空で終了を検知している
 /// 場合だけ `ConnectionClosed` を返し、MOQT 層の受信ループを待たせない。
+///
+/// h3 層の接続エラーを検知した場合 (`ConnectionFailed`) も同じ扱いである (接続を閉じるため、
+/// 以後 datagram は取り出せない)。drain (§4.7) は終了ではないため、空でも返さない。
 fn resolve_buffered_datagrams(
     datagrams: Vec<Vec<u8>>,
     state: WtSessionState,
@@ -1805,7 +2012,8 @@ fn wt_recv_end(error: s2n_quic::stream::Error) -> Result<RecvChunk> {
 
 /// WebTransport の単方向送信ストリーム
 ///
-/// `session_state` はセッション状態 (§6 の終了 / §4.7 の drain) の観測用である。
+/// `session_state` はセッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー)
+/// の観測用である。
 /// 送信待ちの間に終了を観測したら、送信方向を `WT_SESSION_GONE` で中断する (§6 の MUST)。
 pub struct WtSendStream {
     stream_id: u64,
@@ -1884,7 +2092,8 @@ impl WtSendStream {
 /// ストリームタイプ判定で読みすぎたバイトを `pending` に保持し、
 /// `recv_chunk` の初回呼び出しで返す。
 ///
-/// `session_state` はセッション状態 (§6 の終了 / §4.7 の drain) の観測用である。
+/// `session_state` はセッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー)
+/// の観測用である。
 /// 受信待ちの間に終了を観測したら、受信方向を `WT_SESSION_GONE` で中断する (§6 の MUST)。
 pub struct WtRecvStream {
     stream_id: u64,
@@ -2110,7 +2319,7 @@ struct RouteContext {
     notify: Arc<Notify>,
     /// 接続を HTTP/3 のエラーコードで閉じるためのハンドル
     handle: s2n_quic::connection::Handle,
-    /// セッション状態 (§6 の終了 / §4.7 の drain) を配る sender
+    /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     ///
     /// ルーティングタスクは自分が h3 層へ流したイベントを `process_h3_events` で処理し、
     /// MOQT 層へ渡す `WtSendStream` / `WtRecvStream` には `subscribe()` で作った receiver を
@@ -2174,9 +2383,16 @@ async fn route_uni_stream(
             }
             Ok(None) => {
                 // 種別判定の途中で FIN したストリーム (制御 / QPACK など) も h3 層へ伝える。
-                // h3 層は FIN を処理してイベントを発行することがある
-                let _ =
-                    feed_stream_to_h3(&context.state, &context.session_state, stream_id, &[], true);
+                // h3 層は FIN を処理してイベントを発行することがある。戻り値を使わないのは、
+                // 接続エラーの扱いが `process_h3_outcome` の中で完結しているためである
+                let _ = feed_stream_to_h3(
+                    &context.state,
+                    &context.session_state,
+                    &context.handle,
+                    stream_id,
+                    &[],
+                    true,
+                );
                 context.notify.notify_one();
                 return;
             }
@@ -2199,26 +2415,56 @@ async fn route_uni_stream(
         RouteAction::ForwardToH3 => {
             // 制御 / QPACK ストリームは h3 層の管轄である。feed のあとは必ず drain して
             // イベントを処理する (drain しないと GOAWAY 由来の SessionDraining が
-            // キューに残り、publisher では誰も取り出さない)
-            let _ = feed_stream_to_h3(
+            // キューに残り、publisher では誰も取り出さない)。
+            //
+            // `notify` は feed の成否にかかわらず起こす。これは「h3 層へ入力を流した」ことの
+            // 通知であり、peer の SETTINGS の到着を `wait_for_peer_settings` に確実に観測させる
+            // 手段である。エラーで通知を飛ばすと、SETTINGS 以外のフレームで始まる制御ストリームを
+            // 受けた接続 (h3 層が `H3_MISSING_SETTINGS` を返して接続を閉じる) では、SETTINGS が
+            // 届かないまま確立待ちが 10 秒のタイムアウトまで待ち、接続を閉じた原因と無関係な
+            // `TransportError::Internal` で失敗する (`wait_for_peer_settings` は共有状態の終了でも
+            // 待機を終えるが、SETTINGS の到着はこの通知でしか観測できない)。
+            //
+            // feed がエラーならこのストリームの処理を止める。接続エラーなら
+            // `feed_stream_to_h3` が接続を閉じて共有状態を終了へ進める (詳細は
+            // `process_h3_outcome` を参照)
+            let fed = feed_stream_to_h3(
                 &context.state,
                 &context.session_state,
+                &context.handle,
                 stream_id,
                 &type_buf,
                 false,
             );
             context.notify.notify_one();
+            if fed.is_err() {
+                return;
+            }
             while let Ok(Some(data)) = recv_stream.receive().await {
-                let _ = feed_stream_to_h3(
+                let fed = feed_stream_to_h3(
                     &context.state,
                     &context.session_state,
+                    &context.handle,
                     stream_id,
                     &data,
                     false,
                 );
                 context.notify.notify_one();
+                if fed.is_err() {
+                    return;
+                }
             }
-            let _ = feed_stream_to_h3(&context.state, &context.session_state, stream_id, &[], true);
+            // ここへ来た時点で直前までの feed はすべて成功しており、h3 層は入力を処理している。
+            // FIN も流してストリームの終端を伝える (h3 層は終端を処理して `SessionClosed` などの
+            // イベントを発行することがある)
+            let _ = feed_stream_to_h3(
+                &context.state,
+                &context.session_state,
+                &context.handle,
+                stream_id,
+                &[],
+                true,
+            );
             context.notify.notify_one();
         }
         RouteAction::Discard => {
@@ -2227,7 +2473,7 @@ async fn route_uni_stream(
             while let Ok(Some(_)) = recv_stream.receive().await {}
         }
         RouteAction::CloseConnection(code) => {
-            close_connection_with_h3_error(&context.handle, code, "unidirectional stream");
+            close_connection_with_h3_error(&context.handle, code.code(), "unidirectional stream");
         }
         // `decide_route` が `Continue` を返すのはデコード途中のみであり、この時点では返らない
         RouteAction::Continue => {}
@@ -2300,11 +2546,15 @@ async fn route_bi_stream(
             let _ = bi_tx.send((wt_send, wt_recv)).await;
         }
         RouteAction::ForwardToH3 => {
-            // 他 session の双方向ストリームは HTTP/3 層の管轄である。feed のあとは必ず
-            // drain してイベントを処理する (`route_uni_stream` と同じ理由)
+            // 他 session の双方向ストリームは HTTP/3 層の管轄である。feed のあとは必ず drain して
+            // イベントを処理する (`route_uni_stream` と同じ理由)。h3 層は Sans I/O であり、
+            // この経路は受け取ったヘッダーを流すところまでで、続きの受信は h3 層ではなく
+            // I/O 層 (s2n-quic) が行う。戻り値を使わないのは、接続エラーの扱いが
+            // `process_h3_outcome` の中で完結しているためである
             let _ = feed_stream_to_h3(
                 &context.state,
                 &context.session_state,
+                &context.handle,
                 stream_id,
                 &header_buf,
                 false,
@@ -2312,7 +2562,7 @@ async fn route_bi_stream(
             context.notify.notify_one();
         }
         RouteAction::CloseConnection(code) => {
-            close_connection_with_h3_error(&context.handle, code, "bidirectional stream");
+            close_connection_with_h3_error(&context.handle, code.code(), "bidirectional stream");
         }
         // 双方向の形式不正は MOQT 層へ渡さず drop する (従来動作)。追加受信待ちはループ内で
         // 消化されるためこの時点では残らない
@@ -2333,21 +2583,30 @@ async fn wait_for_session_id(mut session_id: watch::Receiver<Option<u64>>) -> Op
 /// 接続を HTTP/3 のエラーコードで閉じる
 ///
 /// h3 層は Sans I/O のため CONNECTION_CLOSE の送出は I/O 層 (s2n-quic) が行う。application
-/// error code に HTTP/3 のエラーコードを渡す。draft-ietf-webtrans-http3-16 §4 の H3_ID_ERROR は
-/// `ErrorCode::IdError` であり、数値は example 側で再定義しない。
+/// error code に HTTP/3 のエラーコードの wire の値を渡す。draft-ietf-webtrans-http3-16 §4 の
+/// H3_ID_ERROR と RFC 9114 §8 の接続エラー (wire の値は §8.1 の登録簿) はどちらもこの関数を
+/// 通り、数値は example 側で再定義せず依存 crate の定義 (`ErrorCode`) から得る。
+///
+/// ここでは example が接続を閉じた事実を構造化フィールドで残す。理由 (h3 層が返したエラー) を
+/// 説明する warn は、h3 層のエラーを検知した `process_h3_result` が出す。
+/// `RouteAction::CloseConnection` の経路は h3 層のエラーではなく example の判定
+/// (`decide_route`) で閉じるため、その warn は出ない。
 fn close_connection_with_h3_error(
     handle: &s2n_quic::connection::Handle,
-    code: H3ErrorCode,
+    error_code: u64,
     stream_kind: &str,
 ) {
+    // エラーコードの登録名 (`ErrorCode` の `Display`) は `process_h3_result` が出す warn に
+    // 含まれる。ここで `from_code` を通すと、登録外のコードでも panic し得る判定を新たに作る
+    // ことになる
     tracing::warn!(
-        code = code.code(),
+        code = error_code,
         stream_kind,
         "closing connection with HTTP/3 error code"
     );
     // HTTP/3 のエラーコードは QUIC の application error code の範囲に収まるため失敗しない。
     // 失敗時に別のコードで閉じると MUST の通知が変わってしまうため、ここで止める
-    let error = s2n_quic::application::Error::new(code.code())
+    let error = s2n_quic::application::Error::new(error_code)
         .expect("HTTP/3 error code fits in the QUIC application error code range");
     handle.close(error);
 }
@@ -2544,6 +2803,309 @@ mod tests {
         assert_eq!(truncated.len(), 1022);
         assert!(truncated.is_char_boundary(truncated.len()));
         assert!(!truncated.contains('あ'));
+    }
+
+    // -----------------------------------------------------------------------
+    // h3 層が返す接続エラーの切り分け (RFC 9114 §8 / §6.2.1 / RFC 9297 §2.1)
+    // -----------------------------------------------------------------------
+
+    /// テストが h3 層へ流す制御ストリームの ID (server-initiated unidirectional)
+    ///
+    /// クライアントが開始する単方向ストリームは 0x02、サーバーが開始するものは 0x03 である
+    /// (RFC 9000 §2.1)。
+    const SERVER_CONTROL_STREAM_ID: u64 = 3;
+
+    /// テストが使う WebTransport セッション ID
+    ///
+    /// session ID はセッションを確立した CONNECT stream の ID である (draft-ietf-webtrans-http3-16
+    /// §4.5)。0x00 は client-initiated bidirectional stream の最小の ID である。
+    const TEST_SESSION_ID: u64 = 0;
+
+    /// テストが使うローカル設定を作る
+    ///
+    /// `is_wt_fully_negotiated()` はローカルとピアの双方が WebTransport と H3 Datagram を
+    /// 有効にしていることを要求するため、本番と同じ `enable_webtransport_client` を使う。
+    fn test_local_settings() -> H3Settings {
+        H3Settings::default().enable_webtransport_client(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+        )
+    }
+
+    /// テストが peer (サーバー) として流す SETTINGS を作る
+    ///
+    /// サーバーは `ENABLE_CONNECT_PROTOCOL` を広告し、draft-15 では `SETTINGS_WT_ENABLED` も
+    /// 広告する (draft-ietf-webtrans-http3-16 §3.1 / §7.1)。h3 層と同じ
+    /// `enable_webtransport_server` で構築する。
+    fn test_peer_settings() -> H3Settings {
+        H3Settings::default().enable_webtransport_server(
+            shiguredo_http3::webtransport::Settings::new()
+                .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+        )
+    }
+
+    /// peer の制御ストリームとして流すバイト列を作る
+    ///
+    /// 制御ストリームはストリームタイプ 0x00 で始まり、最初のフレームが SETTINGS でなければ
+    /// ならない (RFC 9114 §6.2.1)。フレームは依存 crate の公開エンコーダで組み立てる
+    /// (テストのために wire 表現を手書きしない)。
+    fn peer_control_stream_bytes(settings: &H3Settings) -> Vec<u8> {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&frame_bytes(&shiguredo_http3::Frame::Settings(
+            shiguredo_http3::frame::SettingsPayload::from_settings(settings),
+        )));
+        data
+    }
+
+    /// SETTINGS 以外のフレーム 1 つだけを流す制御ストリームのバイト列を作る
+    ///
+    /// RFC 9114 §6.2.1: 制御ストリームの最初のフレームが SETTINGS 以外なら
+    /// H3_MISSING_SETTINGS の接続エラーである。GOAWAY は制御ストリームで送受信できる
+    /// フレームであり (RFC 9114 §7.2.6)、形式が不正なフレームと区別できる。
+    fn control_stream_with_non_settings_frame() -> Vec<u8> {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&frame_bytes(&shiguredo_http3::Frame::Goaway(
+            shiguredo_http3::frame::GoawayPayload::new(shiguredo_http3::VarInt::from_static(0)),
+        )));
+        data
+    }
+
+    /// `ClientConnectionState` の h3 層へ入力を流した結果だけを取り出す
+    ///
+    /// `feed_stream_and_drain` はイベントも返すため、切り分けの対象である結果だけを見る。
+    fn feed_error(
+        state: &mut ClientConnectionState,
+        stream_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> shiguredo_http3::Error {
+        state
+            .feed_stream_and_drain(stream_id, data, fin)
+            .result
+            .expect_err("接続エラーになること")
+    }
+
+    /// datagram を h3 層へ流した結果だけを取り出す
+    fn feed_datagram_error(
+        state: &mut ClientConnectionState,
+        data: &[u8],
+    ) -> shiguredo_http3::Error {
+        state
+            .feed_datagram(data)
+            .result
+            .expect_err("接続エラーになること")
+    }
+
+    /// フレームを wire のバイト列にする
+    fn frame_bytes(frame: &shiguredo_http3::Frame) -> Vec<u8> {
+        let mut buf = vec![
+            0u8;
+            shiguredo_http3::frame::encoded_frame_len(frame)
+                .expect("長さが求まること")
+        ];
+        let written =
+            shiguredo_http3::frame::encode_frame(&mut buf, frame).expect("符号化できること");
+        buf.truncate(written);
+        buf
+    }
+
+    /// draft-15 相当の peer と交渉済みの h3 接続状態を作る
+    ///
+    /// `feed_datagram` は WebTransport の交渉が完了するまで入力を `Ok(())` で捨てるため、
+    /// peer の SETTINGS を流して交渉を完了させてから datagram のテストへ進む。
+    ///
+    /// QUIC transport parameter の検証結果は h3 層が「検証済み」とみなす値
+    /// (datagram あり / RESET_STREAM_AT 対応) を注入する。draft-15 は `reset_stream_at` を
+    /// 必須とする (draft-ietf-webtrans-http3-16 §3.1) ため、これが偽だと
+    /// `is_wt_fully_negotiated()` が偽になり `feed_datagram` が入力を捨ててしまう。
+    /// 本番の example は RESET_STREAM_AT を送出しないため偽を渡しており、draft-15 の peer とは
+    /// 交渉が完了しない (この状態を作れるのは交渉の前提を注入したテストだけである)。
+    fn negotiated_connection_state() -> ClientConnectionState {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state
+            .h3_conn
+            .set_webtransport_transport_verified(true, true)
+            .expect("transport parameter の注入に成功すること");
+        state
+            .h3_conn
+            .feed_stream(
+                SERVER_CONTROL_STREAM_ID,
+                &peer_control_stream_bytes(&test_peer_settings()),
+                false,
+            )
+            .expect("peer の SETTINGS を流せること");
+        assert!(
+            state.h3_conn.peer_settings().is_some(),
+            "peer の SETTINGS を受信した状態になること"
+        );
+        state
+    }
+
+    /// h3 層の接続エラーだけが接続を閉じる判断になる (RFC 9114 §8)
+    ///
+    /// 接続エラーは「接続を直ちに閉じる」(§5.3)、ストリームエラーは「そのストリームだけを
+    /// 終了する」である。example は variant で切り分け、接続エラーの場合だけ接続を閉じる。
+    #[test]
+    fn connection_error_code_only_matches_connection_errors() {
+        // 接続を閉じる判断になるエラーと、その HTTP/3 エラーコード
+        for code in [
+            H3ErrorCode::MissingSettings,
+            H3ErrorCode::StreamCreationError,
+            H3ErrorCode::ClosedCriticalStream,
+            H3ErrorCode::H3DatagramError,
+        ] {
+            let error = shiguredo_http3::Error::ConnectionError(code);
+            assert_eq!(
+                connection_error_code(&error),
+                Some(code.code()),
+                "{code} は接続エラーとして切り分けられること"
+            );
+        }
+
+        // 接続を閉じないエラー (ストリームエラーなど)
+        for error in [
+            shiguredo_http3::Error::StreamError(H3ErrorCode::MessageError),
+            shiguredo_http3::Error::StreamError(H3ErrorCode::FrameUnexpected),
+            shiguredo_http3::Error::StreamNotFound(0),
+            shiguredo_http3::Error::StreamClosed(0),
+            shiguredo_http3::Error::WtSessionDraining(TEST_SESSION_ID),
+        ] {
+            assert_eq!(
+                connection_error_code(&error),
+                None,
+                "{error} は接続エラーではないこと"
+            );
+        }
+    }
+
+    /// 接続エラーのエラーコードは仕様側の登録値である (RFC 9114 §8.1)
+    ///
+    /// example は数値を再定義せず依存 crate の `ErrorCode` を使う。ここでは切り分けが
+    /// 参照する値そのものを固定する。
+    #[test]
+    fn connection_error_codes_match_registered_values() {
+        assert_eq!(H3ErrorCode::MissingSettings.code(), 0x10a);
+        assert_eq!(H3ErrorCode::StreamCreationError.code(), 0x103);
+        assert_eq!(H3ErrorCode::ClosedCriticalStream.code(), 0x104);
+        assert_eq!(H3ErrorCode::H3DatagramError.code(), 0x33);
+    }
+
+    /// Quarter Stream ID が上限を超える datagram は接続エラーになる (RFC 9297 §2.1)
+    ///
+    /// "Receipt of an HTTP/3 Datagram that includes a larger value MUST be treated as an
+    /// HTTP/3 connection error of type H3_DATAGRAM_ERROR (0x33)." を固定する。
+    /// 交渉済みの状態を作ってから流す (未交渉の間 `feed_datagram` は入力を捨てる)。
+    #[test]
+    fn feed_datagram_reports_connection_error_for_oversized_quarter_stream_id() {
+        let mut state = negotiated_connection_state();
+
+        // 8 バイト長の varint で Quarter Stream ID の最大値 (2^62-1) を表す。これは上限の
+        // 2^60-1 を超える (上限は Quarter Stream ID を 4 倍した CONNECT stream ID が
+        // QUIC のストリーム ID の上限 2^62-1 に収まるように決まっている)
+        let oversized = [0xff_u8; 8];
+        let error = feed_datagram_error(&mut state, &oversized);
+        assert_eq!(
+            error,
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::H3DatagramError),
+            "上限を超える Quarter Stream ID が H3_DATAGRAM_ERROR になること"
+        );
+        assert_eq!(
+            connection_error_code(&error),
+            Some(0x33),
+            "接続を閉じるコードが H3_DATAGRAM_ERROR であること"
+        );
+    }
+
+    /// Quarter Stream ID を解析できない短い datagram も接続エラーになる (RFC 9297 §2.1)
+    ///
+    /// "Receipt of a QUIC DATAGRAM frame whose payload is too short to allow parsing the
+    /// Quarter Stream ID field MUST be treated as an HTTP/3 connection error of type
+    /// H3_DATAGRAM_ERROR (0x33)." を固定する。
+    #[test]
+    fn feed_datagram_reports_connection_error_for_truncated_payload() {
+        let mut state = negotiated_connection_state();
+
+        let error = feed_datagram_error(&mut state, &[]);
+        assert_eq!(
+            error,
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::H3DatagramError),
+            "Quarter Stream ID を解析できない datagram が H3_DATAGRAM_ERROR になること"
+        );
+    }
+
+    /// SETTINGS 以外のフレームで始まる制御ストリームは接続エラーになる (RFC 9114 §6.2.1)
+    ///
+    /// "If the first frame of the control stream is any other frame type, this MUST be
+    /// treated as a connection error of type H3_MISSING_SETTINGS." を固定する。
+    /// この経路は交渉済みの状態を必要としない。
+    #[test]
+    fn feed_stream_reports_connection_error_for_control_stream_without_settings() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+
+        let error = feed_error(
+            &mut state,
+            SERVER_CONTROL_STREAM_ID,
+            &control_stream_with_non_settings_frame(),
+            false,
+        );
+        assert_eq!(
+            error,
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::MissingSettings),
+            "SETTINGS 以外で始まる制御ストリームが H3_MISSING_SETTINGS になること"
+        );
+        assert_eq!(
+            connection_error_code(&error),
+            Some(0x10a),
+            "接続を閉じるコードが H3_MISSING_SETTINGS であること"
+        );
+    }
+
+    /// 交渉済みの接続では SETTINGS で始まる制御ストリームを受け付ける
+    ///
+    /// 上のテストが「SETTINGS 以外だから失敗した」ことを確かめる対照である。SETTINGS を
+    /// 流した後に GOAWAY を流しても接続エラーにならない (RFC 9114 §7.2.6)。
+    #[test]
+    fn feed_stream_accepts_control_stream_starting_with_settings() {
+        let mut state = negotiated_connection_state();
+
+        let goaway = frame_bytes(&shiguredo_http3::Frame::Goaway(
+            shiguredo_http3::frame::GoawayPayload::new(shiguredo_http3::VarInt::from_static(0)),
+        ));
+        let outcome = state.feed_stream_and_drain(SERVER_CONTROL_STREAM_ID, &goaway, false);
+        outcome
+            .result
+            .expect("SETTINGS の後に届いた GOAWAY を受け付けること");
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::GoawayReceived { .. })),
+            "SETTINGS で始まる制御ストリームでは GOAWAY がイベントとして発行されること"
+        );
+    }
+
+    /// 接続を閉じるコードは example 側で再定義しない
+    ///
+    /// 接続エラーの数値は依存 crate の `ErrorCode` から得る (h3 層が返す値と一致する)。
+    #[test]
+    fn connection_error_close_code_uses_the_h3_registry() {
+        for code in [
+            H3ErrorCode::MissingSettings,
+            H3ErrorCode::StreamCreationError,
+            H3ErrorCode::ClosedCriticalStream,
+            H3ErrorCode::H3DatagramError,
+        ] {
+            let error = shiguredo_http3::Error::ConnectionError(code);
+            let error_code = connection_error_code(&error).expect("接続エラーであること");
+            assert_eq!(
+                H3ErrorCode::from_code(error_code),
+                Some(code),
+                "{code} の数値が登録値から往復して戻ること"
+            );
+            // QUIC の application error code の範囲に収まるため CONNECTION_CLOSE に載る
+            s2n_quic::application::Error::new(error_code)
+                .expect("QUIC の application error code として扱えること");
+        }
     }
 
     /// MOQT の登録コードを remap すると往復して元の値に戻る (draft-ietf-webtrans-http3-16 §4.4)
@@ -2913,6 +3475,8 @@ mod tests {
     /// §6 の終了 (peer からの終了通知 / 自発 close) は全ストリームの中断と新規拒否、
     /// §4.7 の drain は新規拒否のみである。drain でストリームを中断すると
     /// "an endpoint MAY continue using the session" を潰す。
+    /// 接続エラーで接続を閉じた場合 (`ConnectionFailed`) も既存ストリームを継続できないため、
+    /// 終了と同じ動作になる。
     #[test]
     fn session_policy_separates_termination_from_draining() {
         assert_eq!(
@@ -2933,7 +3497,11 @@ mod tests {
             },
             "drain では新規ストリームと datagram だけを拒否し、既存ストリームは中断しないこと"
         );
-        for state in [WtSessionState::ClosedByPeer, WtSessionState::ClosedLocally] {
+        for state in [
+            WtSessionState::ClosedByPeer,
+            WtSessionState::ClosedLocally,
+            WtSessionState::ConnectionFailed,
+        ] {
             assert_eq!(
                 session_policy(state),
                 SessionPolicy {
@@ -2946,7 +3514,130 @@ mod tests {
         }
     }
 
+    /// h3 層の接続エラーを検知した状態は終了として扱う (RFC 9114 §8)
+    ///
+    /// 接続そのものが閉じるため、既存ストリームを継続することはできない。接続エラーは
+    /// 状態 (`ConnectionFailed`) として表れるため、`Active` や drain 中に接続エラーだけを
+    /// 持つ組み合わせは作れない (状態機械が接続エラーを終了として扱う)。
+    ///
+    /// 接続を閉じる `Handle` は実際の接続からしか作れないため、このテストは接続エラーの
+    /// 判定 (`connection_error_code`) と、`process_h3_result` が検知時に呼ぶ状態遷移
+    /// (`update_session_state`) を直接呼んで固定する。`process_h3_result` 自体は通らない
+    /// (接続クローズの配線は実機確認で確かめる)。
+    #[test]
+    fn connection_error_marks_the_session_as_failed() {
+        let connection_error =
+            shiguredo_http3::Error::ConnectionError(H3ErrorCode::MissingSettings);
+        assert_eq!(
+            connection_error_code(&connection_error),
+            Some(H3ErrorCode::MissingSettings.code()),
+            "接続エラーは接続を閉じる対象として切り分けられること"
+        );
+
+        // 接続エラーを検知した状態機械の動作は、終了と同じ (中断 + 新規拒否) になる
+        let (state_tx, state_rx) = watch::channel(WtSessionState::Active);
+        assert!(
+            !session_policy(*state_rx.borrow()).abort_streams,
+            "接続エラーを検知する前は中断しないこと"
+        );
+        update_session_state(&state_tx, WtSessionState::ConnectionFailed);
+        assert_eq!(
+            *state_rx.borrow(),
+            WtSessionState::ConnectionFailed,
+            "接続エラーを検知したら終了の状態になること"
+        );
+        assert_eq!(
+            session_policy(*state_rx.borrow()),
+            SessionPolicy {
+                reject_new_streams: true,
+                reject_datagrams: true,
+                abort_streams: true,
+            },
+            "接続エラーを検知したら新規拒否と既存ストリームの中断を行うこと"
+        );
+
+        // ストリームエラーは接続を閉じる対象ではない (接続は生きたままである)
+        let stream_error = shiguredo_http3::Error::StreamError(H3ErrorCode::MessageError);
+        assert_eq!(
+            connection_error_code(&stream_error),
+            None,
+            "ストリームエラーは接続を閉じる対象ではないこと"
+        );
+
+        // 接続エラーを検知した後は、状態を戻す遷移が無い (終了の段階を共有する)
+        update_session_state(&state_tx, WtSessionState::Active);
+        assert_eq!(
+            *state_rx.borrow(),
+            WtSessionState::ConnectionFailed,
+            "接続エラーの後に状態を戻さないこと"
+        );
+    }
+
+    /// peer の SETTINGS を待つ間に接続エラーを観測したら、待機を終えて接続終了を返す
+    ///
+    /// peer の制御ストリームが SETTINGS 以外のフレームで始まると、h3 層は `H3_MISSING_SETTINGS`
+    /// を返して接続を閉じ、SETTINGS は永久に届かない。受信タスクの通知だけでは待機は終わらず
+    /// (peer_settings() が Some にならないため)、確立待ちが 10 秒のタイムアウトまで待って
+    /// 接続を閉じた原因と無関係な `TransportError::Internal` で失敗する。
+    ///
+    /// 待機は `ClientConnectionState` と `Notify` と状態の watch だけで構築でき、s2n-quic の
+    /// ハンドルを必要としない。
+    #[tokio::test]
+    async fn wait_for_peer_settings_ends_when_the_session_is_gone() {
+        let state = Arc::new(StdMutex::new(ClientConnectionState::new(
+            test_local_settings(),
+        )));
+        let notify = Notify::new();
+        let (state_tx, mut state_rx) = watch::channel(WtSessionState::Active);
+        // 接続エラーを検知した状態を先に配っておく (受信タスクが検知した直後に相当する)
+        update_session_state(&state_tx, WtSessionState::ConnectionFailed);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await
+        .expect("SETTINGS のタイムアウトを待たずに待機が終わること");
+        assert!(
+            matches!(result, Err(TransportError::ConnectionClosed)),
+            "接続エラーを観測したら ConnectionClosed で失敗すること: {result:?}"
+        );
+    }
+
+    /// peer の SETTINGS を受信済みなら待たずに成功する
+    ///
+    /// 上のテストの対照である。SETTINGS を受信した接続では接続を待たずに CONNECT を送れる。
+    #[tokio::test]
+    async fn wait_for_peer_settings_succeeds_after_settings_arrive() {
+        let mut state = ClientConnectionState::new(test_local_settings());
+        state
+            .h3_conn
+            .feed_stream(
+                SERVER_CONTROL_STREAM_ID,
+                &peer_control_stream_bytes(&test_peer_settings()),
+                false,
+            )
+            .expect("peer の SETTINGS を流せること");
+        let state = Arc::new(StdMutex::new(state));
+        let notify = Notify::new();
+        let (_state_tx, mut state_rx) = watch::channel(WtSessionState::Active);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_peer_settings(&state, &notify, &mut state_rx),
+        )
+        .await
+        .expect("SETTINGS を受信済みなら待たずに終わること");
+        assert!(
+            result.is_ok(),
+            "SETTINGS を受信していれば成功すること: {result:?}"
+        );
+    }
+
     /// 状態は終了方向にしか進まず、終了後に届いた drain で戻らない
+    ///
+    /// 同じ状態の再通知でも watch の値を変えない (`send_if_modified` は変更があるときだけ
+    /// 通知する) ため、受け手が無駄に起きない。
     #[test]
     fn update_session_state_never_goes_backwards() {
         let (state_tx, state_rx) = watch::channel(WtSessionState::Active);
@@ -2977,6 +3668,12 @@ mod tests {
             *state_rx.borrow(),
             WtSessionState::ClosedByPeer,
             "同じ段階の終了で上書きしないこと"
+        );
+        update_session_state(&state_tx, WtSessionState::ConnectionFailed);
+        assert_eq!(
+            *state_rx.borrow(),
+            WtSessionState::ClosedByPeer,
+            "接続エラーで終了の段階を戻さないこと"
         );
     }
 
@@ -3030,13 +3727,17 @@ mod tests {
             "終了へ遷移したことを待機中のタスクが観測できること"
         );
         assert!(
-            session_policy(observed).abort_streams,
+            session_policy(*state_tx.borrow()).abort_streams,
             "終了を観測したらストリームを中断すること"
         );
 
-        // drain の通知を受け取った後でも、終了 (peer からの終了通知 / 自発 close) へ遷移すれば
-        // 待機が終わり、その状態を観測できる
-        for state in [WtSessionState::ClosedByPeer, WtSessionState::ClosedLocally] {
+        // drain の通知を受け取った後でも、終了 (peer からの終了通知 / 自発 close / 接続エラー)
+        // へ遷移すれば待機が終わり、その状態を観測できる
+        for state in [
+            WtSessionState::ClosedByPeer,
+            WtSessionState::ClosedLocally,
+            WtSessionState::ConnectionFailed,
+        ] {
             let (state_tx, state_rx) = watch::channel(WtSessionState::Active);
             update_session_state(&state_tx, WtSessionState::Draining);
             update_session_state(&state_tx, state);
@@ -3181,6 +3882,8 @@ mod tests {
             WtSessionState::Draining,
             WtSessionState::ClosedByPeer,
             WtSessionState::ClosedLocally,
+            // 接続エラーで接続を閉じた場合も、同じバッチの datagram は捨てない
+            WtSessionState::ConnectionFailed,
         ] {
             assert_eq!(
                 resolve_buffered_datagrams(datagrams.clone(), state).expect("datagram を返すこと"),
@@ -3191,7 +3894,11 @@ mod tests {
 
         // 取り出せる datagram が無い場合は、セッション終了を検知していれば受信ループを
         // 待たせない (drain は終了ではないため返さない。§4.7 は datagram の送受信を許す)
-        for state in [WtSessionState::ClosedByPeer, WtSessionState::ClosedLocally] {
+        for state in [
+            WtSessionState::ClosedByPeer,
+            WtSessionState::ClosedLocally,
+            WtSessionState::ConnectionFailed,
+        ] {
             assert!(
                 matches!(
                     resolve_buffered_datagrams(Vec::new(), state),
@@ -3604,12 +4311,12 @@ mod tests {
         );
     }
 
-    /// 共有しているセッション状態からも drain / 終了を観測する
+    /// 共有しているセッションの状態からも drain / 終了を観測する
     ///
     /// h3 層のイベントは 1 つのタスクが drain すると他のタスクには届かない。制御ストリームを
     /// 処理するルーティングタスクは GOAWAY 由来の `SessionDraining` を自分で drain して
     /// セッション状態へ反映するため、イベント列を観測できない場合でも共有状態から観測して
-    /// 待機を終える。
+    /// 待機を終える。接続エラーで接続を閉じた場合もセッションが終了するため確立しない。
     #[test]
     fn connect_outcome_observes_shared_session_state() {
         // drain を共有状態から観測する
@@ -3622,7 +4329,12 @@ mod tests {
         );
 
         // 終了を共有状態から観測した場合は終了コードが分からない
-        for state in [WtSessionState::ClosedByPeer, WtSessionState::ClosedLocally] {
+        for state in [
+            WtSessionState::ClosedByPeer,
+            WtSessionState::ClosedLocally,
+            // 接続エラーで接続を閉じた場合も終了である
+            WtSessionState::ConnectionFailed,
+        ] {
             let mut observation = ConnectObservation::default();
             observation.observe_session_state(state);
             assert_eq!(

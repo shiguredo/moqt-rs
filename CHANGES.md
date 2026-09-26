@@ -420,6 +420,18 @@
     観測した場合はセッションを確立しない
   - @voluntas
 
+- [FIX] moqt-transport example が h3 層の connection error を伝播して CONNECTION_CLOSE を送る
+  - RFC 9114 §6.2.1 (Control Streams) は制御ストリームの違反 (H3_MISSING_SETTINGS / H3_STREAM_CREATION_ERROR /
+    H3_CLOSED_CRITICAL_STREAM) を connection error として扱う MUST を、RFC 9297 §2.1 は HTTP/3 Datagram の
+    Quarter Stream ID の不正を H3_DATAGRAM_ERROR とする MUST を定めるが、従来は h3 層が返すエラーを捨てていたため
+    違反を検知しても接続を閉じず、datagram 経路では購読が静かに止まっていた
+  - h3 層へ入力を流す経路 (route の単方向 / 双方向ストリーム、datagram、CONNECT stream の feed と RESET_STREAM) の
+    戻り値を判定し、`Error::ConnectionError(code)` は `code.code()` を載せた CONNECTION_CLOSE で接続を閉じる。
+    接続エラーでない `Error::StreamError` は接続を閉じず、そのストリームの処理だけを止めてログに残す
+  - 接続エラーの発生は共有するセッション状態 (`watch`) に記録し、受信経路 (`accept_recv_stream` / `accept_bidi_stream` /
+    `recv_datagrams` / `receive_chunk`) が `TransportError::ConnectionClosed` を返して MOQT 層の受信ループを待たせない
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
