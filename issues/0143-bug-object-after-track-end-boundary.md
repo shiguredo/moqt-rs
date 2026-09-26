@@ -1,7 +1,7 @@
 # 終端宣言と同じ位置の Object を Malformed にしない
 
 - Created: 2026-09-22
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/fix-object-after-track-end-boundary
 - Polished: 2026-09-25
 
@@ -71,4 +71,21 @@ cancel する。宣言した Object 自身は final Object として存在する
 
 ## 解決方法
 
-未着手。
+draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 4/5 の "larger than the final Object" を採り、終端を宣言した Object 自身は存在するものとして扱うようにした。
+
+- `src/session/data.rs`
+  - `object_after_track_end` の End of Track 判定を `location >= end` から `location > *end` の厳密比較にした (`Location` は group_id → object_id の辞書順なので、これが条件 5 の "Group and Object ID are larger than" と一致し、桁溢れも起きない)
+  - `record_object_status_end` の OBJECT_STATUS_END_OF_GROUP を `object_id.saturating_add(1)` に正規化した (`ended_groups` は「存在しない最小の Object ID」のまま、終端を宣言した Object 自身は存在するものとして扱う)。END_OF_GROUP bit 経路 (`record_group_end_after`) と Object 0 個の Subgroup (空 Group) は従来どおり
+  - 2 つの判定の doc/コメントに、条件 4/5 の引用、§11.1.2 の "greater than or equal to" の解釈、§2.1 ("This is not a protocol error and the Track is not malformed.")、FETCH 側が対象外であることを書いた
+- `src/session/types.rs`
+  - `Subscription::ended_groups` / `Subscription::end_of_track` の doc を新しい正規化と比較規則に書き換え、Object ID が `u64::MAX` のときは境界を進められない既知の限界 (空 Subgroup は対象外) を明記した
+- テスト
+  - `tests/test_session/data_stream.rs`: `object_after_end_of_group_status_is_rejected` を新しい境界 (`Some(&6)`、object_id 6 の拒否) に更新し、End of Group / End of Track の宣言位置より後ろの拒否を条件 4/5 の "larger than" を根拠に書き換えた
+  - 追加: 宣言位置の同一内容重複の受理 (End of Group / End of Track)、宣言位置の内容が異なる重複の拒否 (別 Subgroup の Subgroup ID 差異)、status と data Object が同一位置で交差する両順序の拒否
+  - `tests/test_session/subscription/terminated_discard.rs`: 終端宣言位置の重複が条件 6 の内容比較で検出されることをコメントに反映
+- `CHANGES.md` の `## develop` に `[FIX]` を追加した (公開フィールドの型は変わらないため `[FIX]` のまま、`end_of_track` の値の意味と `ended_groups` の正規化が変わることを本文に記載)
+
+## 限界
+
+- 記録が保持量の上限や group 前進の prune で破棄された後は、同一位置の重複を比較できず受理される (検出範囲が従来より狭くなる known limitation)
+- FETCH 応答内の Object (条件 5 の後半) は位置検証の対象外のままである
