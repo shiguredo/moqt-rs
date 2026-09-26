@@ -192,6 +192,49 @@ fn request_update_request_id(message: &ControlMessage) -> u64 {
     }
 }
 
+/// `server` が PUBLISH を送り、`client` の PUBLISH_OK で `server` 側を Established にする
+///
+/// PUBLISH 起点で自側が PUBLISH を送った側 (publisher 役) の subscription を作る前準備。
+/// 戻り値は `server` 側の Request ID。peer FIN の注入や fill fetch stream の開設は
+/// 呼び出し側で行う。
+fn establish_publish_sender_as_established(
+    client: &mut Session,
+    server: &mut Session,
+    track_alias: u64,
+) -> u64 {
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            track_alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(server);
+    client
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "PUBLISH_OK の受信で Established になること"
+    );
+    rid
+}
+
 /// `send_goaway` が control stream に積む `Goaway` を取り出す
 ///
 /// `take_send_control` は `SendControl` 以外のイベント (受信通知や終端通知) を読み飛ばし、

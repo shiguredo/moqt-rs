@@ -298,8 +298,9 @@ pub enum SessionEvent {
     ///
     /// `PeerStreamFin` は相手側の FIN の到着と同時に発行されるとは限らない。bidi request
     /// stream は方向ごとに独立に閉じるため (draft §6.4.2.2 (Graceful Request Stream
-    /// Closure))、自側が SUBSCRIBE / FETCH の responder の場合は peer の FIN と自側が最終
-    /// メッセージとともに送る FIN の両方が揃った時点で発行される (FIN の到着順に依存しない)。
+    /// Closure))、自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を
+    /// 送った側 (publisher 役) で `Established` の場合は peer の FIN と自側が最終メッセージと
+    /// ともに送る FIN の両方が揃った時点で発行される (FIN の到着順に依存しない)。
     RequestTerminated {
         /// 対象 request の Request ID
         request_id: u64,

@@ -4,9 +4,10 @@
 //! 終端として定義し、cancel (§6.4.2.3 (Request Cancellation and Rejection)) と区別する。
 //!
 //! - 自側が requester のとき peer FIN で request が終端する
-//! - 自側が SUBSCRIBE / FETCH の responder のとき peer FIN では終端しない
+//! - 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder のとき peer FIN では終端しない
 //! - peer RESET_STREAM (cancel) は役割にかかわらず終端する
-//! - PUBLISH 起点の responder が受ける peer FIN は従来どおり終端する
+//! - PUBLISH 起点でも PUBLISH を受けた側 (subscriber 役) と `Pending(Publisher)` は
+//!   peer FIN で終端し、PUBLISH を送った側 (publisher 役) は最終メッセージを送るまで終端しない
 //! - responder の終端は両方向が閉じた時点で確定し、FIN の到着順に依存しない
 //! - TRACK_STATUS の responder は peer FIN で終端せず、応答の FIN で終端する
 //!
@@ -375,11 +376,12 @@ fn fetch_responder_terminates_only_on_reset() -> TestResult {
     Ok(())
 }
 
-/// PUBLISH 起点の subscription では peer FIN の扱いが従来どおりである
+/// PUBLISH を受けた側 (subscriber 役) の subscription では peer FIN の扱いが従来どおりである
 ///
 /// §6.4.2.2 は PUBLISH の送信者を「メッセージ送信直後の FIN」の例外とする。したがって
 /// PUBLISH を受けた側 (responder) が受け取る peer FIN は PUBLISH_DONE 受信後の完了通知で
-/// あり、従来どおり終端する (requester 側の組合せは本 API の未対応範囲)。
+/// あり、従来どおり終端する。PUBLISH を送った側 (publisher 役) の peer FIN は PUBLISH_DONE を
+/// 送るまで遅延させる。
 #[test]
 fn publish_responder_terminates_on_peer_fin() -> TestResult {
     let mut runner = test_runner()?;

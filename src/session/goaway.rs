@@ -244,8 +244,10 @@ impl Session {
     ///
     /// request の終端が確定した後、または自側が送信方向を FIN / RESET_STREAM で閉じた後に
     /// 呼ぶ。以後 reset を送る意味がなくなるため deadline を破棄する。
-    /// 自側が responder のときに peer の FIN を受けただけの場合 (`RequestStreamEnd::Fin`) は
-    /// 解除しない。応答を送るまで送信方向が開いており reset の必要が残るためである。
+    /// `Session::defers_peer_fin` が true を返す経路 (SUBSCRIBE / FETCH / TRACK_STATUS の
+    /// responder、および PUBLISH を送った側 (publisher 役) の `Established`) で peer の FIN を
+    /// 受けただけの場合は解除しない。終端メッセージを送るまで送信方向が開いており reset の
+    /// 必要が残るためである。
     /// peer の RESET_STREAM は request を即時終端するので終端経路で解除される。
     pub(super) fn clear_request_stream_goaway_deadline(&mut self, request_id: u64) {
         self.goaway.request_stream_deadlines.remove(&request_id);

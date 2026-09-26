@@ -260,7 +260,10 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
 
-bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure))。`RequestTerminated { reason: PeerStreamFin }` は peer の FIN の到着と同時に発行されるとは限らず、自側が SUBSCRIBE / FETCH の responder の場合は peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で発行される。
+bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure))。
+`RequestTerminated { reason: PeerStreamFin }` は peer の FIN の到着と同時に発行されるとは限らず、
+自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で
+最終メッセージを未送信の場合は peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で発行される。
 
 ### 受信 API
 
@@ -306,8 +309,9 @@ fn report_mid_object_fin(&mut self, stream_id: DataStreamId) -> Result<(), Sessi
 `FilteredOut` / `Discarded` の Object は Application へ渡さないが、wire 上の payload は
 デコーダから読み出して消費する必要がある。
 
-`recv_request_stream_closed(rid, RequestStreamEnd::Fin)` は、自側が SUBSCRIBE / FETCH の
-responder のとき request を終端しない。この場合 `RequestTerminated` は自側が最終メッセージを
+`recv_request_stream_closed(rid, RequestStreamEnd::Fin)` は、自側が SUBSCRIBE / FETCH /
+TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で `Established` のとき
+request を終端しない。この場合 `RequestTerminated` は自側が最終メッセージを
 `fin: true` で送った時点 (PUBLISH_DONE、単独の REQUEST_ERROR) で発行される。
 `RequestStreamEnd::Reset` は cancel として即時に終端する
 (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))。

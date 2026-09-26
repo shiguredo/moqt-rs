@@ -47,14 +47,18 @@ impl Session {
     /// (Request Cancellation and Rejection): FIN はその方向に送るメッセージが終わったこと
     /// だけを示し、cancel は RESET_STREAM / STOP_SENDING で表現される。
     ///
-    /// 自側が SUBSCRIBE の responder のときに peer の FIN を受けた場合は、応答
-    /// (SUBSCRIBE_OK / REQUEST_ERROR) と確立後の data 送信を塞がないよう request を
-    /// 終端しない。呼び出し側 (`recv_request_stream_closed`) が peer FIN の受信だけを記録して
-    /// 本関数を呼ばないため、ここに到達するのは次のいずれかである。
+    /// 自側が終端メッセージをまだ送っていない役割 (SUBSCRIBE / FETCH / TRACK_STATUS の
+    /// responder、および PUBLISH を送った側 (publisher 役) の `Established`) で peer の FIN を
+    /// 受けた場合は、送信経路を塞がないよう request を終端しない。呼び出し側
+    /// (`recv_request_stream_closed` の `Session::defers_peer_fin`) が peer FIN の受信だけを
+    /// 記録して本関数を呼ばないため、ここに到達するのは次のいずれかである。
     ///
     /// - `RequestStreamEnd::Reset` (cancel)
     /// - 自側が requester のときの responder の FIN (要求の完了通知)
-    /// - PUBLISH 起点の responder が受けた peer FIN (PUBLISH_DONE 受信後の完了通知)
+    /// - PUBLISH を受けた側 (subscriber 役) が受けた peer FIN (PUBLISH_DONE 受信後の完了通知)
+    /// - PUBLISH を送った側 (publisher 役) で `Pending(Publisher)` のときの peer FIN (要求未完)
+    /// - PUBLISH を送った側 (publisher 役) が PUBLISH_DONE を送信済みの後に届いた peer FIN
+    ///   (遅延が解けており、購読は既に `Terminated` である)
     ///
     /// state を `Terminated` にし、`request_streams` から除去することで、以降の close 通知が
     /// 重複処理されないようにする。
@@ -637,6 +641,12 @@ impl Session {
     /// 確定したときのみ消費される (検証失敗で送信されない場合は消費されない。
     /// "A REQUEST_UPDATE is considered outstanding from when it is sent until the sender
     /// receives the corresponding REQUEST_OK or REQUEST_ERROR response.")。
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN を
+    /// 受信済みの request への送信は `SESSION_PROTOCOL_VIOLATION` を返す。FIN は「その方向に
+    /// もうメッセージを送らない」表明であり応答が届かないため、応答待ちのまま
+    /// `CONTROL_MESSAGE_TIMEOUT` でセッションを閉じることを防ぐ送信側ローカルの拒否である
+    /// (セッションは閉じない)。
     pub fn send_request_update(
         &mut self,
         request_id: u64,
@@ -782,6 +792,16 @@ impl Session {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "request_update requires Established subscription",
+            ));
+        }
+        // draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): peer の FIN は
+        // 「その方向にもうメッセージを送らない」表明であり、同節は REQUEST_UPDATE に応答する
+        // 必要が無い場合の FIN を想定している。peer FIN を受信済みの request へ送ると応答が
+        // 届かず、CONTROL_MESSAGE_TIMEOUT でセッションを閉じることになるため送信を拒否する。
+        if self.peer_fin_received.contains(&request_id) {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "request_update cannot be sent after peer FIN",
             ));
         }
         // 値の検証をパラメータの適用より前に実行する。検証エラー時は `Err` のみを返し、

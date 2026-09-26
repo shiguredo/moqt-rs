@@ -44,7 +44,8 @@ use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::types::{
     DataStreamId, DeadlineTimer, Fetch, PeerGoawayInfo, RecvRequestError, RequestKind,
     RequestStreamEnd, Role, SendRequestError, SessionError, SessionEvent, SessionState,
-    Subscription, SubscriptionState, TerminationReason, TrackRole, TrackStatusEntry, Transport,
+    Subscription, SubscriptionInitiator, SubscriptionState, TerminationReason, TrackRole,
+    TrackStatusEntry, Transport,
 };
 
 /// 1 本の `MOQT Transport Session` に閉じた sans-I/O 状態機械
@@ -399,12 +400,14 @@ pub struct Session {
     /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): "A FIN only
     /// indicates that an endpoint will send no further messages in that direction; it is not
     /// a request cancellation." また §6.4.2.3 (Request Cancellation and Rejection) は cancel を
-    /// RESET_STREAM / STOP_SENDING と定める。したがって自側が responder の SUBSCRIBE / FETCH で
-    /// peer の FIN を受けても request は終端せず、応答 (SUBSCRIBE_OK / FETCH_OK /
-    /// REQUEST_ERROR) の送信経路を塞がない。この節番号・規則は draft 由来であり将来 draft
-    /// 改定で変わる可能性がある。
+    /// RESET_STREAM / STOP_SENDING と定める。したがって自側が responder の SUBSCRIBE / FETCH /
+    /// TRACK_STATUS で peer の FIN を受けても request は終端せず、応答 (SUBSCRIBE_OK /
+    /// FETCH_OK / TRACK_STATUS_OK / REQUEST_ERROR) の送信経路を塞がない。
+    /// PUBLISH を送った側 (publisher 役) も PUBLISH_DONE を送るまで終端しない。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     ///
-    /// 記録するのは SUBSCRIBE と FETCH の responder である。bidi stream は方向ごとに独立に
+    /// 記録するのは SUBSCRIBE / FETCH / TRACK_STATUS の responder と、PUBLISH を送った側
+    /// (publisher 役) の `Established` である。bidi stream は方向ごとに独立に
     /// 閉じるため、request の終端は両方向が閉じた時点、すなわち本集合と
     /// `local_fin_sent` の両方に id が入った時点で [`Session::finish_request_on_fin_exchange`]
     /// が確定させる (順序に依存しない)。`Session::send_fetch_ok` は送信方向を閉じない
@@ -1089,29 +1092,26 @@ impl Session {
     /// - 自側が requester のとき: responder の FIN は「応答とそれに続くメッセージを送り
     ///   終えた」通知なので従来どおり終端する。送信方向を閉じるための
     ///   [`SessionEvent::FinishRequestStream`] も発行する。
-    /// - 自側が SUBSCRIBE の responder のとき: FIN は requester がもうメッセージを
-    ///   送らないことしか意味せず、request は終端しない。応答の MUST
-    ///   (§3.1 (Subscriptions)) を果たす送信経路を塞がないよう、peer FIN の受信だけを
-    ///   `peer_fin_received` に記録して `Terminated` へは遷移させない。自側が送信方向を
-    ///   最後に閉じる時点で `RequestTerminated { reason: PeerStreamFin }` を発行する。
-    /// - 自側が FETCH の responder のとき: 同じく終端せず、peer FIN の受信も記録する。
-    ///   ただし `Session::send_fetch_ok` が送信方向を閉じないため終端イベントは発行されず、
-    ///   記録は `forget_fetch` まで残る。
-    /// - 自側が PUBLISH 起点の responder のとき: PUBLISH の送信者は §6.4.2.2 の例外であり
-    ///   PUBLISH_DONE を送る前に FIN できないため、peer FIN は PUBLISH_DONE 受信後の
-    ///   完了通知である。従来どおり終端する。
-    /// - 自側が TRACK_STATUS の responder のとき: SUBSCRIBE / FETCH と同じく終端しない。
-    ///   応答 (TRACK_STATUS_OK / REQUEST_ERROR) は `Session::send_request_ok` /
-    ///   `Session::emit_request_error` が `fin: true` で送るため、peer FIN を受信済みなら
-    ///   その送信時点で終端が確定する。
+    /// - 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder のとき: FIN は requester がもう
+    ///   メッセージを送らないことしか意味せず、request は終端しない。応答の MUST
+    ///   (SUBSCRIBE は §3.1 (Subscriptions)、FETCH は §3.2.1 (Fetch State Management)、
+    ///   TRACK_STATUS は §9.13 (TRACK_STATUS)) を果たす送信経路を塞がないよう、
+    ///   peer FIN の受信だけを `peer_fin_received` に記録して `Terminated` へは遷移させない。
+    ///   自側が送信方向を最後に閉じる時点で `RequestTerminated { reason: PeerStreamFin }` を
+    ///   発行する (FETCH は `Session::send_fetch_ok` が送信方向を閉じないため、自側の
+    ///   最終メッセージが単独 REQUEST_ERROR のときにだけ終端する)。
+    /// - 自側が PUBLISH を送った側 (publisher 役) で `Established` のとき: §3.1 は Established の
+    ///   購読の終端手段を subscriber の STOP_SENDING と publisher の PUBLISH_DONE として
+    ///   規定するため、subscriber の FIN は購読の終端ではない。PUBLISH_DONE を送る経路を
+    ///   塞がないよう終端を遅延させ、PUBLISH_DONE (`fin: true`) の送信時点で終端が確定する。
+    /// - 自側が PUBLISH を受けた側 (subscriber 役) のとき: peer publisher の FIN は
+    ///   PUBLISH_DONE を送った後の完了通知であるため、従来どおり終端する。
+    /// - 自側が PUBLISH を送った側でも `Pending(Publisher)` (REQUEST_OK 未受信) のとき:
+    ///   §6.4.2.2 "An endpoint that receives a FIN before all required messages have arrived
+    ///   treats the request as failed." に従い、従来どおり終端する。
     ///
-    /// PUBLISH 起点で自側が PUBLISH を送った側 (publisher 役) の組合せは、本 API が peer FIN を
-    /// 一律に終端として扱うため未対応である。§3.1 (Subscriptions) は購読の終端を publisher の
-    /// PUBLISH_DONE と subscriber の STOP_SENDING に限るため、subscriber の FIN で終端して
-    /// しまうと publisher はその後の PUBLISH_DONE を送れなくなる。PUBLISH を受けた側
-    /// (subscriber 役) は PUBLISH_DONE を送る立場にないため、peer FIN での終端は
-    /// PUBLISH_DONE 受信後の完了通知として妥当である。節番号・規則は draft 由来であり
-    /// 将来 draft 改定で変わる可能性がある。
+    /// 遅延させるかどうかの判定は `Session::defers_peer_fin` に集約する。節番号・規則は
+    /// draft 由来であり将来 draft 改定で変わる可能性がある。
     ///
     /// 呼び出し側は後続で `forget_*` を呼んでマップから除去する責務を持つ。
     ///
@@ -1127,8 +1127,9 @@ impl Session {
     /// REQUEST_ERROR (REQUEST_UPDATE 拒否等) のクローズは `request_streams` 経由で処理され、
     /// `RequestTerminated` が発行される。
     /// 終端済み request への 2 回目以降の close 通知は原則 unknown id として
-    /// `PROTOCOL_VIOLATION` になるが、responder が peer FIN を `peer_fin_received` に
-    /// 記録して return する経路 (SUBSCRIBE / FETCH) だけは冪等な no-op になる。
+    /// `PROTOCOL_VIOLATION` になるが、`Session::defers_peer_fin` が true を返す経路
+    /// (SUBSCRIBE / FETCH / TRACK_STATUS の responder と、PUBLISH を送った側 (publisher 役) の
+    /// `Established`) だけは冪等な no-op になる。
     /// 将来 draft が変更される可能性がある。
     pub fn recv_request_stream_closed(
         &mut self,
@@ -1160,15 +1161,9 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        // 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder なら、peer FIN の受信だけを
-        // 記録して return する (終端の確定は `finish_request_on_fin_exchange` が担う)。
-        if matches!(end, RequestStreamEnd::Fin)
-            && matches!(
-                kind,
-                RequestKind::Subscribe | RequestKind::Fetch | RequestKind::TrackStatus
-            )
-            && !self.is_local_requester(request_id, kind)
-        {
+        // peer FIN を終端として扱わない役割 (`Session::defers_peer_fin`) では、peer FIN の
+        // 受信だけを記録して return する (終端の確定は `finish_request_on_fin_exchange` が担う)。
+        if matches!(end, RequestStreamEnd::Fin) && self.defers_peer_fin(request_id, kind) {
             self.peer_fin_received.insert(request_id);
             // 自側が既に最終メッセージを送っていれば両方向が閉じたため、request の終端を
             // 確定する。まだ送っていなければ、送信時 (fin: true) に確定する。
@@ -1216,11 +1211,12 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
     /// 方向ごとの終端であり、cancel (§6.4.2.3 (Request Cancellation and Rejection)) とは
-    /// 区別される。自側が responder の SUBSCRIBE / FETCH では peer の FIN を受信しても
-    /// 応答の経路を塞がないよう request を終端しないため、終端は
-    /// 「peer FIN を受信済み」と「自側が最終メッセージを送信済み」の両方が揃った時点で
-    /// 確定する。呼び出し側は先に `peer_fin_received` または `local_fin_sent` へ
-    /// `request_id` を記録してから本関数を呼ぶこと。
+    /// 区別される。自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を
+    /// 送った側 (publisher 役) で `Established` のときは peer の FIN を受信しても送信経路を
+    /// 塞がないよう request を終端しないため、終端は「peer FIN を受信済み」と「自側が
+    /// 最終メッセージを送信済み」の両方が揃った時点で確定する。呼び出し側は先に
+    /// `peer_fin_received` または `local_fin_sent` へ `request_id` を記録してから本関数を
+    /// 呼ぶこと。
     ///
     /// 両方が揃っていなければ何もしない (request は継続中で、後から届く peer の
     /// FIN / RESET_STREAM で従来どおり終端する)。両方が揃ったときに発行する
@@ -1298,6 +1294,58 @@ impl Session {
                 .track_status_requests
                 .get(&request_id)
                 .is_some_and(|e| e.my_role == TrackRole::Subscriber),
+        }
+    }
+
+    /// peer FIN の受信で request を終端せず、両方向の FIN が揃うまで遅延させるかを返す
+    ///
+    /// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
+    /// 方向ごとの終端であり cancel (§6.4.2.3 (Request Cancellation and Rejection)) ではない。
+    /// §3.1 (Subscriptions) は Established の購読の終端手段を subscriber の STOP_SENDING と
+    /// publisher の PUBLISH_DONE として規定するため、自側がまだ終端メッセージを送っていない
+    /// 役割では peer FIN で request を終端しない。終端の確定は
+    /// [`Session::finish_request_on_fin_exchange`] が担う。
+    ///
+    /// - SUBSCRIBE / FETCH / TRACK_STATUS の responder は、応答の MUST
+    ///   (SUBSCRIBE は §3.1、FETCH は §3.2.1 (Fetch State Management)、
+    ///   TRACK_STATUS は §9.13 (TRACK_STATUS)) を送る経路を塞がないよう遅延させる
+    /// - PUBLISH を送った側 (publisher 役) は、自側の最終メッセージである PUBLISH_DONE を
+    ///   送るまで遅延させる。`Session::is_local_requester` は `RequestKind::Publish` で常に
+    ///   false を返すため responder 判定では publisher 役と subscriber 役を区別できない。
+    ///   そのため `Subscription::initiator` と `Subscription::my_role` を明示的に見る。
+    ///   `Pending(Publisher)` (PUBLISH_OK 未受信) は要求が未完のため遅延させない。
+    ///   §9.9 (PUBLISH_DONE) の MUST NOT により open 中の outgoing stream がある間は
+    ///   PUBLISH_DONE を保留するため、購読が `Terminated` でも保留が残っている間は
+    ///   終端させない (先に終端するとアプリが購読を破棄でき、§9.5.1 (Updating Subscriptions) の
+    ///   MUST を果たせない)
+    ///
+    /// 次の場合は遅延させない。
+    ///
+    /// - 自側が PUBLISH を受けた側 (subscriber 役): peer publisher の FIN は PUBLISH_DONE を
+    ///   送った後の完了通知である
+    /// - PUBLISH を送った側でも `Pending(Publisher)` (REQUEST_OK 未受信): §6.4.2.2 "An
+    ///   endpoint that receives a FIN before all required messages have arrived treats the
+    ///   request as failed." に従い、要求が未完のまま終端する
+    fn defers_peer_fin(&self, request_id: u64, kind: RequestKind) -> bool {
+        match RequestTable::from_kind(kind) {
+            RequestTable::Subscription => match kind {
+                RequestKind::Subscribe => !self.is_local_requester(request_id, kind),
+                // PUBLISH 起点で自側が PUBLISH を送った側だけを遅延させる。PUBLISH を受けた側
+                // (subscriber 役) は `my_role` が Subscriber になるため該当しない。
+                // state は `Pending(Publisher)` (要求未完) だけを除外する: `Terminated` でも
+                // PUBLISH_DONE を保留している間は自側の最終メッセージが未送信であるため
+                // (§9.9 の MUST NOT による保留)、終端させない。
+                RequestKind::Publish => self.subscriptions.get(&request_id).is_some_and(|s| {
+                    s.state != SubscriptionState::Pending
+                        && s.initiator == SubscriptionInitiator::Publisher
+                        && s.my_role == TrackRole::Publisher
+                        && !self.local_fin_sent.contains(&request_id)
+                }),
+                _ => false,
+            },
+            RequestTable::Fetch | RequestTable::TrackStatus => {
+                !self.is_local_requester(request_id, kind)
+            }
         }
     }
 

@@ -334,6 +334,17 @@
   - QUIC 経路 (`moqt://`) は QUIC のコード空間のため remap しない
   - @voluntas
 
+- [FIX] PUBLISH の送信側が subscriber の FIN を受信しても購読を終端せず、PUBLISH_DONE を送れるようにする
+  - draft-ietf-moq-transport-21 §3.1 (Subscriptions) は購読の終端を publisher の PUBLISH_DONE と subscriber の STOP_SENDING に限り、
+    §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの終端で cancel ではない。subscriber の FIN で購読を Terminated にしていたため、
+    publisher は "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN." の MUST を果たせなかった
+  - PUBLISH を送った側 (publisher 役) の Established では peer FIN の受信だけを記録して終端を遅延し、PUBLISH_DONE (`fin: true`) の送信時点で `RequestTerminated { reason: PeerStreamFin }` を発行する。`Pending(Publisher)` と PUBLISH を受けた側 (subscriber 役) は従来どおり終端する
+  - open 中の fill fetch stream は peer FIN では reset しない (§3.4.1 の reset の MUST は cancel に対するものであり、購読が継続する限り fill の配送も継続する)。§9.9 の MUST NOT により open 中の outgoing stream がある間は PUBLISH_DONE を送れない挙動は維持する
+  - REQUEST_UPDATE 失敗応答 (受信した REQUEST_ERROR) で購読を終端する経路でも、open 中の fill fetch stream を §3.4.1 の MUST により reset する。自側が失敗応答を送る経路と対称にし、§9.9 の MUST NOT で保留した PUBLISH_DONE が fill fetch stream の終端では送られないまま残るのを防ぐ
+  - peer FIN を受信済みの subscription への REQUEST_UPDATE 送信を `SESSION_PROTOCOL_VIOLATION` で拒否する (§6.4.2.2 の FIN は「今後の REQUEST_UPDATE に応答しない」表明であり、応答待ちのまま `CONTROL_MESSAGE_TIMEOUT` でセッションを閉じないため)
+  - 従来は peer FIN の時点で `Terminated` になっていた PUBLISH 送信側の subscription が `Established` のまま維持され、`RequestTerminated { reason: PeerStreamFin }` は PUBLISH_DONE の送信時点まで遅延する (受信挙動の変更)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

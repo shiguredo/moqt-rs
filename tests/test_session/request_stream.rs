@@ -1071,6 +1071,268 @@ fn publish_done_before_requester_fin_terminates_request() {
     );
 }
 
+/// PUBLISH を送った側 (publisher 役) は peer subscriber の FIN を受けても購読を終端せず、
+/// PUBLISH_DONE を送れる
+///
+/// draft-ietf-moq-transport-21 §3.1 (Subscriptions) は購読の終端を publisher の PUBLISH_DONE と
+/// subscriber の STOP_SENDING に限る。§6.4.2.2 (Graceful Request Stream Closure) の FIN は
+/// 方向ごとの終端であり cancel ではないため、subscriber の FIN で購読を終端すると publisher は
+/// "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN."
+/// の MUST を果たせなくなる。
+#[test]
+fn publish_sender_survives_peer_fin_and_sends_publish_done() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 11);
+
+    // peer (subscriber) が REQUEST_UPDATE を送らない意思を示して FIN する
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "PUBLISH を送った側は peer FIN で Terminated にならないこと"
+    );
+
+    // FIN だけでは終端イベントを発行しない (PUBLISH_DONE を送る余地を残す)
+    let mut terminated = false;
+    let mut finish_request_stream = false;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::RequestTerminated { .. } => terminated = true,
+            SessionEvent::FinishRequestStream { .. } => finish_request_stream = true,
+            _ => {}
+        }
+    }
+    assert!(
+        !terminated,
+        "peer FIN だけでは RequestTerminated を発行しないこと"
+    );
+    assert!(
+        !finish_request_stream,
+        "PUBLISH の送信側は FIN を返す対象ではないこと"
+    );
+
+    // peer は FIN で「今後の REQUEST_UPDATE に応答しない」ことを示しているため、
+    // 応答が来ないまま CONTROL_MESSAGE_TIMEOUT でセッションを閉じないよう送信を拒否する
+    let err = server
+        .send_request_update(rid, MessageParameters::new())
+        .expect_err("peer FIN 後の REQUEST_UPDATE は拒否されること");
+    assert_eq!(
+        err.code,
+        shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
+        "拒否理由は SESSION_PROTOCOL_VIOLATION であること"
+    );
+
+    // PUBLISH_DONE の送信で両方向が閉じ、request の終端が確定する
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            ReasonPhrase::new("ended").expect("正当な reason phrase である"),
+        )
+        .expect("peer FIN の後でも PUBLISH_DONE を送れること");
+    let (_, done_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(done_msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            got = true;
+        }
+    }
+    assert!(
+        got,
+        "PUBLISH_DONE の送信時点で RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}
+
+/// PUBLISH を送った側が先に PUBLISH_DONE を送り、後から peer FIN を受けても終端する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
+/// 終端であるため、どちらの方向が先に閉じても両方向が閉じた時点で終端が確定しなければならない。
+#[test]
+fn publish_sender_publish_done_before_peer_fin_terminates_request() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 12);
+
+    // 自側 (publisher) が先に最終メッセージを送る
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            ReasonPhrase::new("ended").expect("正当な reason phrase である"),
+        )
+        .expect("PUBLISH_DONE を送れること");
+    let (_, done_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(done_msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    let mut terminated_on_send = false;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::RequestTerminated { .. }) {
+            terminated_on_send = true;
+        }
+    }
+    assert!(
+        !terminated_on_send,
+        "自側の送信方向を閉じただけでは RequestTerminated を発行しないこと"
+    );
+
+    // 後から peer (subscriber) の FIN が届く
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            got = true;
+        }
+    }
+    assert!(
+        got,
+        "自側の FIN が先でも peer FIN の到着で RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}
+
+/// peer FIN で遅延している間に peer の RESET_STREAM (cancel) が届いたら即時に終端する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure) の FIN は方向ごとの
+/// 終端であり cancel ではないため遅延するが、§6.4.2.3 (Request Cancellation and Rejection) の
+/// cancel (RESET_STREAM / STOP_SENDING) は即時に終端する。
+#[test]
+fn publish_sender_peer_reset_during_deferral_terminates_request() {
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 14);
+
+    // peer FIN では終端しない
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "peer FIN では終端しないこと"
+    );
+
+    // 遅延中に cancel (RESET_STREAM) が届いたら即時に終端する
+    server
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: 42,
+                reliable_size: None,
+            },
+        )
+        .expect("peer の cancel を受理すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Terminated,
+        "cancel では遅延せず即時に終端すること"
+    );
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamReset { error_code },
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(error_code, 42);
+            got = true;
+        }
+    }
+    assert!(got, "RequestTerminated(PeerStreamReset) が発行されること");
+}
+
+/// PUBLISH を送った直後 (Pending(Publisher)) の peer FIN は要求未完として終端する
+///
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): "An endpoint that
+/// receives a FIN before all required messages have arrived treats the request as failed."
+#[test]
+fn publish_sender_pending_peer_fin_terminates_subscription() {
+    use shiguredo_moqt::session::types::RequestStreamEnd;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            13,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut server);
+    client
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Pending,
+        "PUBLISH_OK 未受信では Pending であること"
+    );
+
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Terminated,
+        "PUBLISH_OK 未受信の peer FIN は要求未完として終端すること"
+    );
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            got = true;
+        }
+    }
+    assert!(got, "RequestTerminated(PeerStreamFin) が発行されること");
+}
+
 /// FETCH の responder が peer FIN を受信済みのまま REQUEST_ERROR を送ると終端する
 ///
 /// `Session::send_fetch_ok` は送信方向を閉じない (`fin: false`) ため、FETCH の responder が

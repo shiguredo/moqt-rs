@@ -615,54 +615,126 @@ fn cancel_subscription_resets_open_fill_streams() {
     assert!(saw_reset, "open 中の fill stream は reset されること");
 }
 
-/// PUBLISH 起点で自側が publisher の subscription でも、peer の終端で
-/// open 中の fill fetch stream を reset する
+/// PUBLISH 起点で自側が publisher の subscription は、peer の終端 (FIN) で終端せず
+/// open 中の fill fetch stream も reset しない
 ///
-/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
-/// subscription is cancelled, the publisher MUST reset any open fill fetch streams."
-/// 自側が PUBLISH を送った側 (publisher 役) は peer の終端で購読が Terminated になるため、
-/// 残った fill fetch stream を reset して追跡から除去する。
+/// draft-ietf-moq-transport-21 §6.4.2.2 (Graceful Request Stream Closure): "A FIN only indicates
+/// that an endpoint will send no further messages in that direction; it is not a request
+/// cancellation." §3.4.1 (Opening and Closing Fill Fetch Streams) の reset の MUST は cancel
+/// (STOP_SENDING / RESET_STREAM) に対するものであり、購読が継続する限り fill の配送も継続する。
+/// open 中の outgoing stream が残っている間は §9.9 (PUBLISH_DONE) の MUST NOT により
+/// PUBLISH_DONE を送れないため、stream を閉じた後に PUBLISH_DONE を送る。
 #[test]
-fn publish_origin_peer_fin_resets_open_fill_streams() {
+fn publish_origin_peer_fin_keeps_open_fill_streams() {
     let (mut client, mut server) = establish_pair();
-    // server が PUBLISH を送り、client が受信して subscriber 役になる
-    let pub_rid = server
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            910,
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, pub_msg) = take_send_request(&mut server);
-    client
-        .recv_request(pub_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    // client の REQUEST_OK で server 側の購読が Established になる
+    let pub_rid = establish_publish_sender_as_established(&mut client, &mut server, 910);
+    let (subgroup_stream, fill_stream) = open_fill_for_publish_sender(&mut server, pub_rid, 910);
+
+    // peer (subscriber) の FIN では購読を終端せず、open 中の fill stream も reset しない
     server
-        .recv_stream_message(
-            pub_rid,
-            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
-                parameters: MessageParameters::new(),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
+        .recv_request_stream_closed(pub_rid, RequestStreamEnd::Fin)
+        .expect("peer の終端通知を受理すること");
     assert_eq!(
         server
             .subscription(pub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
             .state,
-        shiguredo_moqt::session::types::SubscriptionState::Established
+        shiguredo_moqt::session::types::SubscriptionState::Established,
+        "PUBLISH を送った側は peer FIN で Terminated にならないこと"
     );
-    // fill の開設判定には観測済み Largest Object が要るため、publisher が 1 件公開する
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(pub_rid),
+        1,
+        "peer FIN では open 中の fill stream を reset しないこと"
+    );
+    let mut saw_reset = false;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::ResetDataStream { .. }) {
+            saw_reset = true;
+        }
+    }
+    assert!(!saw_reset, "peer FIN では ResetDataStream を発行しないこと");
+
+    // open 中の outgoing stream が残っている間は PUBLISH_DONE を送れない (§9.9 の MUST NOT)
+    let err = server
+        .send_publish_done(
+            pub_rid,
+            0x2,
+            2,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("正当な reason phrase である"),
+        )
+        .expect_err("open 中の outgoing stream がある間は PUBLISH_DONE を送れないこと");
+    assert_eq!(
+        err.code, SESSION_PROTOCOL_VIOLATION,
+        "拒否理由は SESSION_PROTOCOL_VIOLATION であること"
+    );
+    assert_eq!(
+        server
+            .subscription(pub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        shiguredo_moqt::session::types::SubscriptionState::Established,
+        "拒否された PUBLISH_DONE の送信で subscription の状態を変えないこと"
+    );
+
+    // subgroup stream と fill fetch stream を閉じた後に PUBLISH_DONE を送れる
+    server
+        .send_data_stream_closed(subgroup_stream, RequestStreamEnd::Fin)
+        .expect("subgroup stream を終端できること");
+    server
+        .send_fetch_data_stream_closed(fill_stream)
+        .expect("fill fetch stream を終端できること");
+    assert_eq!(server.open_outgoing_fill_stream_count(pub_rid), 0);
+    // published_count は subgroup と fill fetch の 2 本である
+    server
+        .send_publish_done(
+            pub_rid,
+            0x2,
+            2,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("正当な reason phrase である"),
+        )
+        .expect("全 outgoing stream の終端後は PUBLISH_DONE を送れること");
+    let (_, done_msg, fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(done_msg, ControlMessage::PublishDone(_)));
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    let mut got_terminated = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, pub_rid);
+            got_terminated = true;
+        }
+    }
+    assert!(
+        got_terminated,
+        "PUBLISH_DONE の送信時点で RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}
+
+/// PUBLISH 起点 publisher 役の subscription で fill fetch stream を 1 本開く
+///
+/// 戻り値は (subgroup stream の DataStreamId, fill fetch stream の DataStreamId)。
+/// fill の開設判定には観測済み Largest Object が要るため、publisher が 1 件公開してから
+/// REQUEST_UPDATE (FILL_PARAMETERS) を注入する。購読は `Established` であること。
+fn open_fill_for_publish_sender(
+    server: &mut Session,
+    pub_rid: u64,
+    track_alias: u64,
+) -> (DataStreamId, DataStreamId) {
+    let subgroup_stream = DataStreamId(401);
+    let fill_stream = DataStreamId(400);
     server
         .send_subgroup_header(
-            DataStreamId(401),
+            subgroup_stream,
             pub_rid,
             &SubgroupHeader {
-                track_alias: 910,
+                track_alias,
                 group_id: 0,
                 subgroup_id: SubgroupIdMode::Explicit(0),
                 publisher_priority: Some(128),
@@ -673,46 +745,188 @@ fn publish_origin_peer_fin_resets_open_fill_streams() {
         )
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_subgroup_object(DataStreamId(401), 0, None)
+        .send_subgroup_object(subgroup_stream, 0, None)
         .expect("テストフィクスチャの前提条件を満たす");
-
-    // peer (subscriber) が REQUEST_UPDATE で fill を要求する。PUBLISH 起点では
-    // 購読を確立した側が publisher であるため、subscriber 側は Pending のまま送る
-    // (ワイヤ上のメッセージとして注入する。fill の開設は state に依存しない)
-    let mut update = MessageParameters::new();
-    update.push(MessageParameter {
-        param_type: PARAM_FILL_PARAMETERS,
-        value: MessageParameterValue::FillParameters(MessageParameters::new()),
-    });
-    // client (subscriber) 側の採番は偶数である (draft-ietf-moq-transport-21 §6.4.2.1 (Request ID))
+    // PUBLISH 起点の REQUEST_UPDATE は subscriber 側の採番で届く (§6.4.2.1 (Request ID))
     let update_rid = pub_rid + 1;
     server
         .recv_stream_message(
             pub_rid,
             ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
                 request_id: update_rid,
-                parameters: update,
+                parameters: fill_params(MessageParameters::new()),
             }),
         )
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+    assert_eq!(drain_open_fill_events(server), vec![update_rid]);
     server
-        .send_fill_fetch_header(DataStreamId(400), update_rid)
+        .send_fill_fetch_header(fill_stream, update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
-    assert_eq!(server.open_outgoing_fill_stream_count(pub_rid), 1);
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(pub_rid),
+        1,
+        "fill fetch stream が 1 本開いていること"
+    );
+    (subgroup_stream, fill_stream)
+}
 
-    // peer (subscriber) の終端で購読が Terminated になり、open 中の fill stream を reset する
+/// PUBLISH 起点 publisher 役で自側 REQUEST_UPDATE の失敗応答を受けると open 中の
+/// fill fetch stream を reset し、残る subgroup stream の終端で PUBLISH_DONE を送る
+///
+/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams) は
+/// subscription の終了時に open 中の fill fetch stream の reset を MUST とする。
+/// §9.9 (PUBLISH_DONE) の MUST NOT (全 stream を閉じるまで送ってはならない) により
+/// PUBLISH_DONE は保留され、最後の outgoing stream の終端で送られる (§9.5.1 の MUST)。
+#[test]
+fn publish_origin_update_failed_resets_open_fill_streams_and_flushes_publish_done() {
+    use shiguredo_moqt::error::{PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER};
+    use shiguredo_moqt::message::RequestError;
+
+    let (mut client, mut server) = establish_pair();
+    let pub_rid = establish_publish_sender_as_established(&mut client, &mut server, 404);
+    let (subgroup_stream, fill_stream) = open_fill_for_publish_sender(&mut server, pub_rid, 404);
+
+    // 自側 REQUEST_UPDATE を送り、その失敗応答 (REQUEST_ERROR) で購読が終端する。
+    // open 中の fill fetch stream は §3.4.1 の MUST により reset される
     server
-        .recv_request_stream_closed(pub_rid, RequestStreamEnd::Fin)
-        .expect("peer の終端通知を受理すること");
+        .send_request_update(pub_rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE を送れること");
+    let (_, update_msg, _) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(update_msg, ControlMessage::RequestUpdate(_)));
+    server
+        .recv_stream_message(
+            pub_rid,
+            ControlMessage::RequestError(RequestError {
+                error_code: REQUEST_INVALID_FILTER,
+                retry_interval: 0,
+                reason: ReasonPhrase::new("rejected").expect("正当な reason phrase である"),
+                redirect: None,
+            }),
+        )
+        .expect("REQUEST_ERROR を受理すること");
     assert_eq!(
         server
             .subscription(pub_rid)
             .expect("テストフィクスチャの前提条件を満たす")
             .state,
-        shiguredo_moqt::session::types::SubscriptionState::Terminated
+        shiguredo_moqt::session::types::SubscriptionState::Terminated,
+        "REQUEST_ERROR の受信で Terminated になること"
     );
-    assert_eq!(server.open_outgoing_fill_stream_count(pub_rid), 0);
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(pub_rid),
+        0,
+        "open 中の fill fetch stream を reset すること"
+    );
+    let mut saw_fill_reset = false;
+    let mut flushed_early = false;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::ResetDataStream { stream_id, .. } if stream_id == fill_stream => {
+                saw_fill_reset = true;
+            }
+            SessionEvent::SendOnStream {
+                request_id,
+                message: ControlMessage::PublishDone(_),
+                ..
+            } if request_id == pub_rid => flushed_early = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_fill_reset,
+        "fill fetch stream の ResetDataStream が発行されること"
+    );
+    // subgroup stream が open のため PUBLISH_DONE は保留される (§9.9 の MUST NOT)
+    assert!(
+        !flushed_early,
+        "subgroup stream が open の間は PUBLISH_DONE を送らないこと"
+    );
+    assert!(
+        server
+            .subscription(pub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_publish_done
+            .is_some(),
+        "PUBLISH_DONE が保留されていること"
+    );
+
+    // peer (subscriber) の FIN では終端しない (自側の PUBLISH_DONE が未送信のため)
+    server
+        .recv_request_stream_closed(pub_rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    let mut terminated_before_publish_done = false;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::RequestTerminated { .. }) {
+            terminated_before_publish_done = true;
+        }
+    }
+    assert!(
+        !terminated_before_publish_done,
+        "保留 PUBLISH_DONE が残っている間は peer FIN で終端しないこと"
+    );
+
+    // 最後の outgoing stream を閉じた時点で保留 PUBLISH_DONE が flush され、
+    // peer FIN と揃って request の終端が確定する
+    server
+        .send_data_stream_closed(subgroup_stream, RequestStreamEnd::Fin)
+        .expect("subgroup stream を終端できること");
+    let (_, msg, fin) = take_send_on_stream_with_fin(&mut server);
+    let ControlMessage::PublishDone(done) = msg else {
+        panic!("PUBLISH_DONE が送られること");
+    };
+    assert_eq!(done.status_code, PUBLISH_DONE_UPDATE_FAILED);
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    let mut got_terminated = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, pub_rid);
+            got_terminated = true;
+        }
+    }
+    assert!(
+        got_terminated,
+        "保留 PUBLISH_DONE の flush で RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}
+
+/// PUBLISH 起点 publisher 役でも peer の RESET_STREAM (cancel) では open 中の
+/// fill fetch stream を reset する
+///
+/// draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams): "When the
+/// subscription is cancelled, the publisher MUST reset any open fill fetch streams."
+#[test]
+fn publish_origin_peer_reset_resets_open_fill_streams() {
+    let (mut client, mut server) = establish_pair();
+    let pub_rid = establish_publish_sender_as_established(&mut client, &mut server, 403);
+    let (_subgroup_stream, fill_stream) = open_fill_for_publish_sender(&mut server, pub_rid, 403);
+
+    server
+        .recv_request_stream_closed(
+            pub_rid,
+            RequestStreamEnd::Reset {
+                error_code: 42,
+                reliable_size: None,
+            },
+        )
+        .expect("peer の cancel を受理すること");
+    assert_eq!(
+        server
+            .subscription(pub_rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        shiguredo_moqt::session::types::SubscriptionState::Terminated,
+        "cancel では subscription を終端すること"
+    );
+    assert_eq!(
+        server.open_outgoing_fill_stream_count(pub_rid),
+        0,
+        "cancel では open 中の fill stream を reset すること"
+    );
     let mut saw_reset = false;
     while let Some(e) = server.poll_event() {
         if let SessionEvent::ResetDataStream {
@@ -721,14 +935,14 @@ fn publish_origin_peer_fin_resets_open_fill_streams() {
             ..
         } = e
         {
-            assert_eq!(stream_id, DataStreamId(400));
+            assert_eq!(stream_id, fill_stream);
             assert_eq!(error_code, STREAM_CANCELLED);
             saw_reset = true;
         }
     }
     assert!(
         saw_reset,
-        "publisher 役の subscription でも open 中の fill stream は reset されること"
+        "cancel では open 中の fill stream を reset すること"
     );
 }
 

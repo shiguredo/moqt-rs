@@ -1612,3 +1612,88 @@ fn pending_publish_done_flush_terminates_request_after_requester_fin() {
         "保留 PUBLISH_DONE の flush でも RequestTerminated(PeerStreamFin) が発行されること"
     );
 }
+
+/// PUBLISH 起点 publisher 役で自側 REQUEST_UPDATE の失敗応答を受けた後、peer FIN が届いても
+/// PUBLISH_DONE(UPDATE_FAILED) と request の終端が失われない
+///
+/// QUIC の FIN はその方向の最終データであるため (RFC 9000 §4.5)、peer から届く順序は
+/// 「REQUEST_ERROR → FIN」に限られる。draft-ietf-moq-transport-21 §9.5.1 (Updating
+/// Subscriptions): "When a REQUEST_UPDATE is unsuccessful, the publisher MUST also terminate
+/// the subscription by sending a PUBLISH_DONE with error code UPDATE_FAILED." この経路は
+/// `Session::handle_err_for_subscription` が PUBLISH_DONE を直接 push し、その送信で自側の
+/// 送信方向が閉じる。peer FIN は遅延対象ではないため (§6.4.2.2 (Graceful Request Stream
+/// Closure) の FIN は方向ごとの終端)、到着時点で request の終端が確定する。
+#[test]
+fn update_failed_publish_done_then_peer_fin_terminates_request() {
+    use shiguredo_moqt::error::{PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER};
+    use shiguredo_moqt::message::{ReasonPhrase, RequestError};
+
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 21);
+
+    // 自側 REQUEST_UPDATE を送り、その失敗応答 (REQUEST_ERROR) を受ける
+    server
+        .send_request_update(rid, MessageParameters::new())
+        .expect("REQUEST_UPDATE を送れること");
+    let (_, update_msg, _) = take_send_on_stream_with_fin(&mut server);
+    assert!(matches!(update_msg, ControlMessage::RequestUpdate(_)));
+    // このテストは open 中の outgoing stream を作っていないため、PUBLISH_DONE(UPDATE_FAILED) は
+    // 保留されず直接 push される
+    server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestError(RequestError {
+                error_code: REQUEST_INVALID_FILTER,
+                retry_interval: 0,
+                reason: ReasonPhrase::new("rejected").expect("正当な reason phrase である"),
+                redirect: None,
+            }),
+        )
+        .expect("REQUEST_ERROR を受理すること");
+    let (_, msg, fin) = take_send_on_stream_with_fin(&mut server);
+    let ControlMessage::PublishDone(done) = msg else {
+        panic!("PUBLISH_DONE が送られること");
+    };
+    assert_eq!(done.status_code, PUBLISH_DONE_UPDATE_FAILED);
+    assert!(fin, "PUBLISH_DONE は FIN で送られること");
+    // この時点では peer FIN を受信していないため終端は確定しない
+    let mut terminated_early = false;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::RequestTerminated { .. }) {
+            terminated_early = true;
+        }
+    }
+    assert!(
+        !terminated_early,
+        "自側の送信方向を閉じただけでは RequestTerminated を発行しないこと"
+    );
+
+    // 後から peer (subscriber) の FIN が届くと request の終端が確定する
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("peer の FIN を受理すること");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Terminated,
+        "終端済み subscription は Terminated のままであること"
+    );
+    let mut got = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamFin,
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            got = true;
+        }
+    }
+    assert!(
+        got,
+        "peer FIN の到着で RequestTerminated(PeerStreamFin) が発行されること"
+    );
+}

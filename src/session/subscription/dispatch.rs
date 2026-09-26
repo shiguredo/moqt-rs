@@ -464,6 +464,9 @@ impl Session {
                     subscription.state = SubscriptionState::Terminated;
                     // draft-ietf-moq-transport-21 §3.1.1: REQUEST_ERROR → 即時破棄 (drain timer 不要)
                     subscription.publish_done = None;
+                    // 自側が失敗応答を送る `send_err_for_subscription` と対称に、open 中の
+                    // fill fetch stream を reset する (§3.4.1 の MUST)
+                    self.reset_open_fill_streams(request_id);
                 }
                 SubscriptionState::Established => {
                     // draft §3.1.1: REQUEST_ERROR の受信で subscription state を終える。
@@ -486,6 +489,15 @@ impl Session {
                         publish_done_stream_count =
                             Some(subscription.stream_counts.published_count);
                     }
+                    // draft-ietf-moq-transport-21 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                    // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
+                    // 自側が失敗応答を送る `send_err_for_subscription` と対称にする。片方だけ
+                    // reset しないと、§9.9 (PUBLISH_DONE) の MUST NOT で保留した PUBLISH_DONE が
+                    // fill fetch stream の終端通知では flush されず (§9.9 により fill の終端だけでは
+                    // 送れない)、§9.5.1 の MUST を果たせないまま残る。
+                    // ここで reset すれば、保留中に open であり続ける stream は subgroup stream だけになり、
+                    // その終端 (`Session::send_data_stream_closed`) が flush 契機になる。
+                    self.reset_open_fill_streams(request_id);
                 }
                 SubscriptionState::Terminated => {
                     let err = SessionError::new(
@@ -523,9 +535,9 @@ impl Session {
                     // PUBLISH_DONE が最終メッセージのため送信後に FIN する (§9.9)
                     fin: true,
                 });
-                // PUBLISH 起点 (自側が PUBLISH を送った側) の request は peer FIN を
-                // `peer_fin_received` に記録しないため、ここで request の終端が確定することは
-                // ない (`finish_request_on_fin_exchange` は早期 return する)。
+                // 保留側 (`Session::maybe_flush_pending_publish_done`) と揃えて、送信方向が
+                // 閉じた事実を記録する。
+                self.mark_send_direction_closed_with_fin(request_id);
             }
         }
         Ok(())

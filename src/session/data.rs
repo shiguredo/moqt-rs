@@ -823,11 +823,14 @@ impl Session {
     /// (subgroup / fill fetch) が閉じた時点で送信する (§9.5.1 の MUST)。
     /// 条件は「全 stream 終端 (open なし) + subscription が Terminated + 保留あり」。
     /// `take()` で取り出すため二重 push は起きない。
-    /// 保留の発生源 (`send_request_error` の失敗応答) は subscription を Terminated にする際に
-    /// `send_err_for_subscription` が open 中の fill fetch stream を §3.4.1 の MUST で reset
-    /// するため、保留中に open であり続ける stream は subgroup stream だけになる
-    /// (fill fetch stream の終端でも本関数は呼ばれるが、`send_fetch_data_stream_closed` 経由の
-    /// 終端通知は保留中に open であり得ないため flush 契機にはならない)。
+    /// 保留の発生源は自側 REQUEST_UPDATE の失敗応答を送る `send_err_for_subscription` と、
+    /// 受信した REQUEST_ERROR を処理する `handle_err_for_subscription` の 2 つであり、
+    /// どちらも subscription を Terminated にする際に open 中の fill fetch stream を
+    /// §3.4.1 の MUST で reset する。そのため保留を設定した時点で open の fill fetch stream は
+    /// 残らず、保留中に open であり続ける stream は subgroup stream だけになる。
+    /// fill fetch stream の終端通知 (`send_fetch_data_stream_closed`) が本関数の契機にならない
+    /// のはこのためである (同じ fill fetch stream でも `Session::recv_data_stream_stop_sending` と
+    /// `Session::reset_outgoing_data_stream_at_with_code` は本関数を呼ぶ)。
     /// delivery timeout によるリセット経路 (`tick_subscription_timeouts`) は outgoing から
     /// 除去しないため open が残り、本関数は発火しない (アプリの終端通知まで保留される。
     /// ワイヤ順序は RESET_STREAM 先行で違反にはならない)。
