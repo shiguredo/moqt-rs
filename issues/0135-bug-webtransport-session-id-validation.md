@@ -1,7 +1,7 @@
 # WebTransport ストリームの session ID 不正で H3_ID_ERROR を送る
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-25
 - Branch: feature/fix-webtransport-session-id-validation
 - Polished: 2026-09-22
 
@@ -46,3 +46,32 @@ draft-ietf-webtrans-http3-16 §4 (WebTransport Features) は、session ID が cl
   - 実機: `session_id % 4 != 0` の WebTransport 単方向 / 双方向ストリームを送るテストクライアントを用意し、example 側の接続が閉じることを `RUST_LOG=debug` のログで確認する。WebTransport セッションの確立自体は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消待ちであるため、実機確認は draft-15 相当の peer または 0094 の解消後に行う
 - 他セッション向けの単方向ストリームが MOQT 層 (`uni_tx`) へ渡らないこと (単体テストまたは再現手順で確認)
 - 正常な session ID のストリームの扱いが変わらないこと (既存のルーティングが通ること)
+
+## 解決方法
+
+draft-ietf-webtrans-http3-16 §4 (WebTransport Features) の MUST に従い、client-initiated bidirectional stream ID に
+対応しない session ID を受けたときに H3_ID_ERROR で接続を閉じるようにした。
+
+- `examples/moqt-transport/src/webtransport.rs`
+  - ルーティングの判定を純関数 `decide_route(StreamDirection, RouteInput) -> RouteAction` に切り出した。
+    `RouteInput` は `WebTransport { own_session }` / `Http3` / `BufferTooShort` / `InvalidSessionId` /
+    `SessionIdOutOfRange` / `InvalidFormat`、`RouteAction` は `ForwardToMoqt` / `ForwardToH3` / `Discard` /
+    `Continue` / `CloseConnection(ErrorCode)` である
+  - `InvalidSessionId` / `SessionIdOutOfRange` は `shiguredo_http3::ErrorCode::IdError` (0x108。
+    数値は example 側で再定義しない) を `s2n_quic` の application error code として `Handle::close` に渡す。
+    h3 層は Sans I/O のため CONNECTION_CLOSE の送出は I/O 層が行う
+  - `route_uni_stream` / `route_bi_stream` を判定駆動に書き換えた。単方向は WebTransport 以外を HTTP/3 層へ流し、
+    他セッションの WebTransport ストリームを MOQT 層へ渡さず FIN まで読み捨てる (双方向は従来どおり HTTP/3 層へ)
+  - 単方向ストリームのルーティングタスクは CONNECT より前に spawn されるため、session ID を `watch` で共有し、
+    確定するまで照合を待つ (`wait_for_session_id`)。確定前に届いたストリームを他セッション扱いしない
+  - 追加したテスト: `InvalidSessionId` / `SessionIdOutOfRange` が両方向で H3_ID_ERROR の接続クローズになること
+    (0x108 の数値も固定)、`BufferTooShort` は継続、`InvalidFormat` は読み捨て、`Http3` は HTTP/3 層へ、
+    自セッションは MOQT 層へ、他セッションの単方向は MOQT 層へ渡さず読み捨て・双方向は HTTP/3 層へ
+- `CHANGES.md` の `## develop` に `[FIX]` を追加した (datagram 経路が対象外である理由も併記)
+
+## 対象外 (別 issue 候補)
+
+- datagram 経路の §4 対応: 依存する `shiguredo_http3` が datagram の session ID 不正に H3_DATAGRAM_ERROR を
+  返すため、H3_ID_ERROR にするには crate 側の変更が要る
+- 実機確認: WebTransport セッションの確立自体が [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md)
+  の解消待ちであるため、実 peer での確認は行っていない (単体テストで判定を固定)
