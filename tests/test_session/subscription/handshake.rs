@@ -483,6 +483,77 @@ fn subscribe_ok_with_unknown_mandatory_property_cancels_subscription() {
     );
 }
 
+/// GREASE の Track Property を含む SUBSCRIBE_OK は購読をキャンセルしない
+///
+/// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+/// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
+/// 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
+/// IANA 登録された Property ではないため §3.6 の対象外とし、§8.4 (Track and Object Properties)
+/// に従い未知 Property として受理する (§13 (Grease) の "Endpoints MUST NOT close the session
+/// solely because they received an unknown value.")。
+#[test]
+fn subscribe_ok_with_grease_property_in_mandatory_range_keeps_subscription() {
+    use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam2".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 上限側の GREASE 値 (N = 256) は奇数型のため長さ付きバイト列で符号化する
+    assert!(
+        shiguredo_moqt::grease::is_grease(0x7F9D),
+        "テストフィクスチャの前提条件を満たす"
+    );
+    let mut tp = TrackProperties::new();
+    tp.push(TrackProperty {
+        prop_type: 0x7F9D,
+        value: TrackPropertyValue::Bytes(vec![0xAB]),
+    });
+    server
+        .send_subscribe_ok(rid, 501, MessageParameters::new(), tp)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("GREASE 値の Track Property を含む SUBSCRIBE_OK は拒否されないこと");
+
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "GREASE 値の SUBSCRIBE_OK で購読をキャンセルしないこと"
+    );
+    let mut saw_cancel = false;
+    while let Some(e) = client.poll_event() {
+        match e {
+            SessionEvent::RequestTerminated {
+                request_id: terminated_rid,
+                ..
+            } if terminated_rid == rid => saw_cancel = true,
+            SessionEvent::StopSendingRequestStream {
+                request_id: stop_rid,
+                ..
+            } if stop_rid == rid => saw_cancel = true,
+            SessionEvent::ResetRequestStream {
+                request_id: reset_rid,
+                ..
+            } if reset_rid == rid => saw_cancel = true,
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_cancel,
+        "GREASE 値では購読 {rid} の cancel を発行しないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
 /// send_subscribe に FORWARD=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
 /// (draft-ietf-moq-transport-21 §9.20.19 (FORWARD Parameter): 許容値は 0/1 のみ)
 #[test]

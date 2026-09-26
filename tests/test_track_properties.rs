@@ -291,6 +291,116 @@ mod mandatory_properties {
         });
         assert!(props.has_unknown_mandatory());
     }
+
+    /// GREASE の Property Type は 0x4000-0x7FFF に入っていても unknown mandatory にしない
+    ///
+    /// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+    /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
+    /// 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
+    /// IANA 登録された Property ではないため必須トラックプロパティとして扱わない
+    /// (§13 (Grease) の "Endpoints MUST NOT close the session solely because they received an
+    /// unknown value.")。
+    #[test]
+    fn grease_values_in_mandatory_range_not_detected() {
+        // 範囲の下限 (0x401D) と上限 (0x7F9D) は奇数型、間の 0x409C は偶数型である
+        for prop_type in [0x401D, 0x409C, 0x7F9D] {
+            assert!(
+                shiguredo_moqt::grease::is_grease(prop_type),
+                "テストフィクスチャの前提条件を満たす ({prop_type:#x} は GREASE 値)"
+            );
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty {
+                prop_type,
+                // 奇数型は長さ付きバイト列、偶数型は varint
+                // (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))
+                value: if prop_type % 2 == 0 {
+                    TrackPropertyValue::VarInt(1)
+                } else {
+                    TrackPropertyValue::Bytes(vec![0xAB])
+                },
+            });
+            assert!(
+                !props.has_unknown_mandatory(),
+                "GREASE 値 {prop_type:#x} を unknown mandatory として扱わないこと"
+            );
+        }
+    }
+
+    /// 0x4000-0x7FFF 全域で、unknown mandatory の判定が GREASE 除外とだけ一致する
+    ///
+    /// GREASE 値の除外漏れ (一部の N だけ除外する実装ミス) と、GREASE 以外の未知
+    /// Mandatory Track Property の検出漏れ (非退行) を同時に固定する。
+    /// この等式は 0x4000-0x7FFF に既知の必須トラックプロパティが無い前提に依存するため、
+    /// 将来 `TrackProperties::is_known_mandatory` に既知値を追加した場合は期待値を更新すること。
+    #[test]
+    fn mandatory_range_scan_matches_grease_exclusion() {
+        for prop_type in MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX {
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty {
+                prop_type,
+                value: if prop_type % 2 == 0 {
+                    TrackPropertyValue::VarInt(1)
+                } else {
+                    TrackPropertyValue::Bytes(vec![0xAB])
+                },
+            });
+            assert_eq!(
+                props.has_unknown_mandatory(),
+                !shiguredo_moqt::grease::is_grease(prop_type),
+                "{prop_type:#x} の判定が GREASE 除外と一致すること"
+            );
+        }
+    }
+
+    /// GREASE の Track Property は encode / decode を通しても unknown mandatory にならない
+    ///
+    /// 奇数型 (長さ付きバイト列) と偶数型 (varint) の両方で wire 表現を往復させる
+    /// (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) / §16.8 (Properties) の
+    /// Table 14)。
+    #[test]
+    fn grease_property_roundtrip_keeps_unknown_mandatory_false() {
+        for (prop_type, value) in [
+            (0x401D, TrackPropertyValue::Bytes(vec![0xAB])),
+            (0x409C, TrackPropertyValue::VarInt(7)),
+        ] {
+            assert!(
+                shiguredo_moqt::grease::is_grease(prop_type),
+                "テストフィクスチャの前提条件を満たす ({prop_type:#x} は GREASE 値)"
+            );
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty { prop_type, value });
+            let mut buf = Vec::new();
+            props
+                .encode(&mut buf)
+                .expect("GREASE 値は encode できること");
+            let decoded = TrackProperties::decode(&buf).expect("GREASE 値は decode できること");
+            assert!(
+                !decoded.has_unknown_mandatory(),
+                "decode 後も {prop_type:#x} を unknown mandatory として扱わないこと"
+            );
+        }
+    }
+
+    /// GREASE 以外の未知 Mandatory Track Property は従来どおり検出する (非退行)
+    #[test]
+    fn non_grease_unknown_mandatory_still_detected() {
+        // 0x401E / 0x7F9E は GREASE 値の隣接値である (どちらも偶数型のため varint で符号化する)
+        for prop_type in [0x401E, 0x7F9E] {
+            assert!(
+                !shiguredo_moqt::grease::is_grease(prop_type),
+                "テストフィクスチャの前提条件を満たす ({prop_type:#x} は GREASE 値ではない)"
+            );
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty {
+                prop_type,
+                value: TrackPropertyValue::VarInt(1),
+            });
+            assert!(
+                props.has_unknown_mandatory(),
+                "GREASE ではない {prop_type:#x} は必須トラックプロパティとして検出すること"
+            );
+        }
+    }
 }
 
 /// draft-ietf-moq-transport-21 §10.7 (Immutable Properties): IMMUTABLE_PROPERTIES (0x0B) の Track scope 対応。
@@ -420,6 +530,26 @@ mod immutable_properties {
         let inner = encode_inner(&[(0x4000, TrackPropertyValue::VarInt(1))]);
         let props = with_immutable(inner);
         assert!(props.has_unknown_mandatory());
+    }
+
+    /// IMMUTABLE_PROPERTIES 内側の GREASE 値は unknown mandatory にしない
+    ///
+    /// draft-ietf-moq-transport-21 §10.7 (Immutable Properties) の「MUST search both」で
+    /// 内側も探索するが、§16.8 (Properties) の Table 14 が GREASE の Property Type
+    /// (`0x7f * N + 0x9D`) を Scope Any として予約しているため、内側でも unknown mandatory
+    /// として扱わない。
+    #[test]
+    fn grease_inside_immutable_not_detected() {
+        assert!(
+            shiguredo_moqt::grease::is_grease(0x401D),
+            "テストフィクスチャの前提条件を満たす"
+        );
+        let inner = encode_inner(&[(0x401D, TrackPropertyValue::Bytes(vec![0xAB]))]);
+        let props = with_immutable(inner);
+        assert!(
+            !props.has_unknown_mandatory(),
+            "IMMUTABLE 内側の GREASE 値を unknown mandatory として扱わないこと"
+        );
     }
 
     #[test]

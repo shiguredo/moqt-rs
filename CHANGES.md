@@ -345,6 +345,16 @@
   - 従来は peer FIN の時点で `Terminated` になっていた PUBLISH 送信側の subscription が `Established` のまま維持され、`RequestTerminated { reason: PeerStreamFin }` は PUBLISH_DONE の送信時点まで遅延する (受信挙動の変更)
   - @voluntas
 
+- [FIX] GREASE の Property Type を Mandatory Track Property 範囲 (0x4000-0x7FFF) でも unknown mandatory から除外する
+  - draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type (`0x7f * N + 0x9D`) を Scope Any として予約しており、
+    N = 128 の 0x401D から N = 256 の 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る
+  - GREASE 値を Track Property に載せた peer の PUBLISH は REQUEST_ERROR (UNSUPPORTED_EXTENSION)、SUBSCRIBE_OK は購読キャンセル、
+    FETCH_OK は fetch キャンセルになっていた。§13 (Grease) の "Endpoints MUST NOT close the session solely because they received an unknown value." と
+    §16.8 (Properties) の "Endpoints MUST ignore unknown Property types, skipping them according to the Key-Value-Pair encoding" に従い、
+    GREASE 値は unknown mandatory として扱わない (§3.6 の字面は範囲全体を Mandatory とするため解釈が割れるが、Table 14 の Scope Any を優先する)
+  - Object scope の同じ衝突は先に対応済みであり、Track scope でも同じ解釈に揃える (受信挙動の変更)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

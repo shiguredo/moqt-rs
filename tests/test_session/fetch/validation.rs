@@ -440,6 +440,83 @@ fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
     );
 }
 
+/// GREASE の track property を含む FETCH_OK は fetch をキャンセルしない
+///
+/// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+/// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
+/// 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
+/// IANA 登録された Property ではないため §3.6 の対象外とし、§8.4 (Track and Object Properties)
+/// に従い未知 Property として受理する (§13 (Grease) の "Endpoints MUST NOT close the session
+/// solely because they received an unknown value.")。
+#[test]
+fn fetch_ok_with_grease_property_in_mandatory_range_does_not_cancel() {
+    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 奇数型の GREASE 値 (N = 128) を長さ付きバイト列で載せた FETCH_OK を直接構築する
+    assert!(
+        shiguredo_moqt::grease::is_grease(0x401D),
+        "テストフィクスチャの前提条件を満たす"
+    );
+    let mut tp = TrackProperties::new();
+    tp.push(TrackProperty {
+        prop_type: 0x401D,
+        value: TrackPropertyValue::Bytes(vec![0xAB]),
+    });
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::FetchOk(WireFetchOk {
+                end_of_track: 0,
+                end_location: Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                parameters: MessageParameters::new(),
+                track_properties: tp,
+            }),
+        )
+        .expect("GREASE 値の track property を含む FETCH_OK は拒否されないこと");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        shiguredo_moqt::session::types::FetchState::Established,
+        "GREASE 値の FETCH_OK で fetch を Established にすること"
+    );
+    let cancels = drain_fetch_cancel_events(&mut client, rid);
+    assert!(
+        cancels.is_empty(),
+        "GREASE 値では cancel を発行しないこと: {cancels:?}"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "GREASE 値の FETCH_OK でセッションを閉じないこと"
+    );
+}
+
 /// 必須範囲外の track property のみを含む FETCH_OK は通常どおり Established に遷移する
 /// (draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties) の非回帰)
 #[test]

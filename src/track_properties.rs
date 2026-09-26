@@ -248,16 +248,33 @@ impl TrackProperties {
         false
     }
 
-    /// 未知の必須プロパティ (0x4000-0x7FFF で未定義のもの) を含むかどうかを返す
+    /// 未知の必須プロパティを含むかどうかを返す
     ///
     /// draft-ietf-moq-transport-21 §3.6 (Mandatory Track Properties): 未知の必須プロパティを受信したエンドポイントは
     /// PUBLISH なら REQUEST_ERROR (UNSUPPORTED_EXTENSION)、SUBSCRIBE_OK なら購読キャンセルを行う。
     /// draft-ietf-moq-transport-21 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに加えて
     /// IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
+    ///
+    /// ただし §16.8 (Properties) の Table 14 が GREASE の Property Type (`0x7f * N + 0x9D`) を
+    /// Scope Any として予約しており、その一部 (N = 128 の 0x401D から N = 256 の 0x7F9D まで) は
+    /// この範囲に入る。GREASE 値は IANA に登録された Property ではないため、§3.6 の
+    /// 「Mandatory Track Property」は登録された必須トラックプロパティを指し、予約値である
+    /// GREASE を含まないと解釈する (§3.6 の字面は範囲全体を Mandatory とするため衝突するが、
+    /// Table 14 が GREASE の Scope を Any と定めていることを優先する)。
+    /// この解釈は §13 (Grease) の
+    /// "Endpoints MUST NOT close the session solely because they received an unknown value."
+    /// と §16.8 (Properties) の "Endpoints MUST ignore unknown Property types, skipping them
+    /// according to the Key-Value-Pair encoding" に整合する。
+    /// GREASE 値は未知 Property として §16.8 に従い無視する (decode 直後の `TrackProperties` は値を
+    /// 保持するが、Session は未知の Track Property を保持する場所を持たない。本実装は endpoint で
+    /// あり relay と違って転送しない)。
+    /// Object scope の同じ衝突 (`crate::object_properties`) も同じ解釈で扱う。
+    /// draft 内部の登録ポリシーと予約値の関係は将来の draft 改版で変わりうる。
     pub fn has_unknown_mandatory(&self) -> bool {
         let is_unknown_mandatory = |prop_type: u64| {
             (MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX).contains(&prop_type)
                 && !Self::is_known_mandatory(prop_type)
+                && !crate::grease::is_grease(prop_type)
         };
         if self.0.iter().any(|p| is_unknown_mandatory(p.prop_type)) {
             return true;

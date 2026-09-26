@@ -544,6 +544,63 @@ fn publish_with_unknown_mandatory_property_rejected() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
+/// GREASE の Track Property を含む PUBLISH は unknown mandatory として拒否しない
+///
+/// draft-ietf-moq-transport-21 §16.8 (Properties) の Table 14 は GREASE の Property Type
+/// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
+/// 0x7F9D までは §3.6 (Mandatory Track Properties) の 0x4000-0x7FFF に入る。GREASE 値は
+/// IANA 登録された Property ではないため §3.6 の対象外とし、§8.4 (Track and Object Properties)
+/// に従い未知 Property として受理する (§13 (Grease) の "Endpoints MUST NOT close the session
+/// solely because they received an unknown value.")。
+#[test]
+fn publish_with_grease_property_in_mandatory_range_accepted() {
+    use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+    let (mut client, mut server) = establish_pair();
+    // 奇数型の GREASE 値 (N = 128) は長さ付きバイト列で符号化する
+    assert!(
+        shiguredo_moqt::grease::is_grease(0x401D),
+        "テストフィクスチャの前提条件を満たす"
+    );
+    let mut tp = TrackProperties::new();
+    tp.push(TrackProperty {
+        prop_type: 0x401D,
+        value: TrackPropertyValue::Bytes(vec![0xAB]),
+    });
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            101,
+            MessageParameters::new(),
+            tp,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("GREASE 値の Track Property を含む PUBLISH は拒否されないこと");
+    let mut got_error = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::SendOnStream {
+            message: ControlMessage::RequestError(_),
+            ..
+        } = e
+        {
+            got_error = true;
+        }
+    }
+    assert!(!got_error, "GREASE 値では REQUEST_ERROR を返さないこと");
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("GREASE 値の PUBLISH は購読として登録されること")
+            .state,
+        SubscriptionState::Pending,
+        "GREASE 値の PUBLISH は Pending(Publisher) として受理すること"
+    );
+    assert_eq!(server.state(), SessionState::Established);
+}
+
 // ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ────
 //
 // REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK が
