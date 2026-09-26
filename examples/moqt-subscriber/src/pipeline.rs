@@ -55,6 +55,7 @@ struct FrameSink<'a> {
 /// 飢えて受信パケットが落ちる (moqt-rs 0101)。
 const MAX_CONCURRENT_STREAMS: usize = 4;
 use moqt_example_transport::Transport;
+use moqt_example_transport::error::TransportError;
 use moqt_example_transport::host_from_authority;
 use moqt_example_transport::moqt_client::{ClientEvent, DataPlaneHandle, MoqtClient, StreamRead};
 use moqt_example_transport::quic;
@@ -486,7 +487,13 @@ pub async fn run(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Datagram receive error: {e}");
+                    // セッション終了 (§6) と接続クローズは期待される終了であるため、
+                    // 異常 (warn) ではなく info に揃える
+                    if matches!(e, TransportError::ConnectionClosed) {
+                        tracing::info!("Datagram receive error: {e}");
+                    } else {
+                        tracing::warn!("Datagram receive error: {e}");
+                    }
                     break;
                 }
             }
@@ -572,7 +579,16 @@ pub async fn run(
                         break 'main;
                     }
                     Err(e) => {
-                        tracing::error!("Failed to accept data stream: {e}");
+                        // WebTransport のセッション終了 (§6 の CONNECT stream の close /
+                        // WT_CLOSE_SESSION) と接続クローズは期待される終了であるため、
+                        // QUIC の `Ok(None)` ("No more data streams") と同じ info に揃える。
+                        // この分岐は変換前の `TransportError` を持つため、variant で直接判定して
+                        // 他の accept 失敗のエラーメッセージを変えない
+                        if matches!(e, TransportError::ConnectionClosed) {
+                            tracing::info!("Session closed by transport");
+                        } else {
+                            tracing::error!("Failed to accept data stream: {e}");
+                        }
                         peer_ended = true;
                         break 'main;
                     }
@@ -580,62 +596,94 @@ pub async fn run(
                 pending_streams.push_back(stream);
             }
             notable = client.next_event() => {
-                // transport 自体のエラーは `?` で `run` を終える。接続が死んでいるため
-                // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
-                // (既知の限界)。
-                match notable? {
-                    Some(ClientEvent::Session(SessionEvent::GoawayReceived { timeout, .. })) => {
-                        tracing::info!("Received GOAWAY (timeout={timeout})");
-                        peer_ended = true;
-                        break 'main;
-                    }
-                    Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
-                        status_code,
-                        stream_count,
-                        ..
-                    })) => {
-                        tracing::info!(
-                            "Received PUBLISH_DONE (status_code={status_code}, stream_count={stream_count})"
-                        );
-                        peer_ended = true;
-                        break 'main;
-                    }
-                    Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
-                        tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
-                        peer_ended = true;
-                        break 'main;
-                    }
-                    Some(ClientEvent::Request(request)) => {
-                        // subscriber は relay からの要求を受けない。届いた場合は
-                        // NOT_SUPPORTED で拒否してハングを避ける。
-                        tracing::warn!(
-                            "Rejecting unexpected peer request: request_id={}",
-                            request.request_id
-                        );
-                        client
-                            .send_request_error(
-                                request.request_id,
-                                shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
-                                "subscriber does not serve requests",
-                            )
-                            .await?;
-                    }
-                    Some(ClientEvent::RequestUpdate(update)) => {
-                        // draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE):
-                        // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
-                        // 本 example が受信する更新は、publisher から PUBLISH で確立した
-                        // 購読に対するものであり (SUBSCRIBE 起点の購読では publisher は
-                        // REQUEST_UPDATE を送れない)、session 層の検証を通った更新は
-                        // 購読状態へ反映済みである。
-                        tracing::info!("Received REQUEST_UPDATE: request_id={}", update.request_id);
-                        if let Err(e) = client.send_request_ok(update.request_id).await {
+                // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
+                // `client.next_event()` の結果とピア要求への応答 (`send_request_error`) は
+                // どちらも transport I/O を行い、セッション終了後は
+                // `TransportError::ConnectionClosed` を返す。`?` を `run` まで通すと
+                // `Fatal: session closed` で異常終了し、終了時の後始末 (`close(0, "")` が
+                // 送る CONNECT stream の送信側の FIN) に到達しない。
+                // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
+                // 抜けられない) ため、ブロックは「受信ループを抜けるか」を返す。
+                let outcome: Result<bool> = async {
+                    match notable? {
+                        Some(ClientEvent::Session(SessionEvent::GoawayReceived {
+                            timeout, ..
+                        })) => {
+                            tracing::info!("Received GOAWAY (timeout={timeout})");
+                            Ok(true)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
+                            status_code,
+                            stream_count,
+                            ..
+                        })) => {
+                            tracing::info!(
+                                "Received PUBLISH_DONE (status_code={status_code}, stream_count={stream_count})"
+                            );
+                            Ok(true)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
+                            tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
+                            Ok(true)
+                        }
+                        Some(ClientEvent::Request(request)) => {
+                            // subscriber は relay からの要求を受けない。届いた場合は
+                            // NOT_SUPPORTED で拒否してハングを避ける。
                             tracing::warn!(
-                                "Failed to send REQUEST_OK for request {}: {e}",
+                                "Rejecting unexpected peer request: request_id={}",
+                                request.request_id
+                            );
+                            client
+                                .send_request_error(
+                                    request.request_id,
+                                    shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
+                                    "subscriber does not serve requests",
+                                )
+                                .await?;
+                            Ok(false)
+                        }
+                        Some(ClientEvent::RequestUpdate(update)) => {
+                            // draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE):
+                            // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
+                            // 本 example が受信する更新は、publisher から PUBLISH で確立した
+                            // 購読に対するものであり (SUBSCRIBE 起点の購読では publisher は
+                            // REQUEST_UPDATE を送れない)、session 層の検証を通った更新は
+                            // 購読状態へ反映済みである。
+                            tracing::info!(
+                                "Received REQUEST_UPDATE: request_id={}",
                                 update.request_id
                             );
+                            if let Err(e) = client.send_request_ok(update.request_id).await {
+                                tracing::warn!(
+                                    "Failed to send REQUEST_OK for request {}: {e}",
+                                    update.request_id
+                                );
+                            }
+                            Ok(false)
                         }
+                        _ => Ok(false),
                     }
-                    _ => {}
+                }
+                .await;
+                match outcome {
+                    // peer が subscription / session を終了させた
+                    Ok(true) => {
+                        peer_ended = true;
+                        break 'main;
+                    }
+                    Ok(false) => {}
+                    // transport がセッション終了 (§6) や接続クローズを検知した。accept 経路と
+                    // 同じ正常終了として扱う (`is_transport_session_end`)。
+                    // session_terminated は立てないため、GOAWAY と `close(0, "")` は送られる
+                    Err(e) if is_transport_session_end(&e) => {
+                        tracing::info!("Session closed by transport");
+                        peer_ended = true;
+                        break 'main;
+                    }
+                    // transport 自体のエラーは `?` で `run` を終える。接続が死んでいるため
+                    // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
+                    // (既知の限界)。
+                    Err(e) => return Err(e),
                 }
             }
             Some(termination) = termination_rx.recv() => {
@@ -711,6 +759,23 @@ pub async fn run(
 
     tracing::info!("Pipeline stopped: {total_streams} streams received");
     Ok(())
+}
+
+/// transport がセッション終了 (WebTransport の CONNECT stream の close / WT_CLOSE_SESSION) や
+/// 接続クローズを検知したことを表すエラーか
+///
+/// セッション終了は異常ではなく期待される終了である。`client.next_event()` の中の要求応答
+/// (`send_request_error` / `send_request_ok`) も transport I/O を行い、セッション終了後は
+/// `TransportError::ConnectionClosed` を返すため、`?` で `run` まで通すと
+/// `Fatal: session closed` で異常終了し、終了時の後始末に到達しない。WebTransport で
+/// §6 が求めるのは `close(0, "")` が送る CONNECT stream の FIN であり、終了検知後の GOAWAY は
+/// 失敗しうる (warn ログになる)。
+///
+/// `From<TransportError> for Error` が `TransportError::ConnectionClosed` を
+/// `Error::ConnectionClosed` に振り分けるため、variant だけで判定できる (表示文字列には
+/// 依存しない)。
+fn is_transport_session_end(error: &Error) -> bool {
+    matches!(error, Error::ConnectionClosed)
 }
 
 async fn receive_registered_stream_data(
@@ -2213,6 +2278,46 @@ mod tests {
             !should_close_gracefully(true),
             "両方が終了した場合は GOAWAY と正常 close を送らないこと"
         );
+    }
+
+    /// 接続クローズだけをセッション終了として扱い、他のエラーは異常として扱う
+    ///
+    /// セッション終了として扱わないエラーは `?` で `run` を抜ける (終了コード 1)。
+    /// 判定は `Error` の variant で行うため、`WebTransport` に畳まれる他の transport エラーが
+    /// 混ざらないことを固定する。
+    #[test]
+    fn is_transport_session_end_only_matches_connection_closed() {
+        assert!(
+            is_transport_session_end(&Error::from(TransportError::ConnectionClosed)),
+            "接続クローズはセッション終了として扱うこと"
+        );
+
+        for error in [
+            TransportError::StreamClosed,
+            TransportError::Quic("connection failed".to_string()),
+            TransportError::ConnectFailed { status: Some(404) },
+            TransportError::InvalidState("invalid state".to_string()),
+            TransportError::Internal("internal".to_string()),
+        ] {
+            let error = Error::from(error);
+            assert!(
+                !is_transport_session_end(&error),
+                "transport の他のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
+
+        for error in [
+            // `WebTransport` に畳まれるエラーはセッション終了ではない
+            Error::WebTransport("stream closed".to_string()),
+            Error::Other("other".to_string()),
+            Error::Io(std::io::Error::other("io failed")),
+            Error::Moqt(MessageError::UnexpectedEof),
+        ] {
+            assert!(
+                !is_transport_session_end(&error),
+                "transport 以外のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
     }
 
     /// LOC の decode 失敗がセッション終了コードへ写ること

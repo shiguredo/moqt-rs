@@ -388,6 +388,26 @@
     H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る
   - @voluntas
 
+- [FIX] moqt-transport example が WebTransport のセッション終了を検知し、全ストリームを WT_SESSION_GONE で中断する
+  - draft-ietf-webtrans-http3-16 §6 (Session Termination) は CONNECT stream の close (clean / abrupt) と WT_CLOSE_SESSION の
+    送受信をセッション終了の条件とし、終了を検知した端点に全 uni / bidi ストリームの `WT_SESSION_GONE` での中断と、
+    新しい datagram の送信・新しいストリームの open の禁止を MUST で要求する。従来は CONNECT stream の受信半を
+    セッション確立時に drop していたため終了を検知できず、MOQT 層の受信ループが待ち続けていた
+  - セッション状態を `watch` で各タスクへ配り、ストリームを所有するタスクが状態変化を観測して自分の送信方向を reset、
+    受信方向を stop_sending する。新規ストリームの open と datagram の送信は `WtSession` が状態を見て拒否する。
+    CONNECT stream の受信半は専用タスクで h3 層へ feed し続け、FIN / RESET_STREAM / WT_CLOSE_SESSION を
+    `WebTransportEvent::SessionClosed` として受け取る。h3 層のイベント処理は 1 経路に集約し、feed がエラーでも
+    同じ feed で発行されたイベントを取りこぼさない
+  - §4.7 (GOAWAY / WT_DRAIN_SESSION) の drain は終了と同一視せず、新しいストリームの open と datagram の送信だけを
+    拒否して既存ストリームを中断しない
+  - セッション終了は MOQT 層の受信経路 (`accept_recv_stream` / `accept_bidi_stream` / `recv_datagrams` /
+    `receive_chunk`) が `TransportError::ConnectionClosed` として返し、publisher / subscriber は終了として扱う
+    (data plane の送信経路も同じ扱いにし、終了時の後始末まで到達させる)
+  - `WT_SESSION_GONE` は HTTP/3 のプロトコルコードであり §4.4 のアプリケーションエラーコードの remap を通さない。
+    `WT_CLOSE_SESSION` の Application Error Code は 32 ビットのため、収まらない MOQT の close code は `as u32` で
+    切り捨てずエラーにする
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moqt-publisher のカタログ構築を build_catalog に分離し単体テストを追加する

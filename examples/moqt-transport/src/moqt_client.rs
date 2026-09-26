@@ -708,7 +708,9 @@ impl MoqtClient {
         let handle = StreamHandle::WebTransport(shared.clone());
         // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
         // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
-        let (wt_uni_rx, wt_bi_rx) = {
+        // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
+        // accept の待機中に観測し、受信ループを待たせないため)。
+        let (wt_uni_rx, wt_bi_rx, session_state) = {
             let mut s = shared.lock().await;
             let uni_rx = s.take_uni_receiver().ok_or_else(|| {
                 TransportError::Internal("uni stream receiver already taken".into())
@@ -716,7 +718,8 @@ impl MoqtClient {
             let bi_rx = s.take_bi_receiver().ok_or_else(|| {
                 TransportError::Internal("bidi stream receiver already taken".into())
             })?;
-            (uni_rx, bi_rx)
+            let session_state = s.session_state_receiver();
+            (uni_rx, bi_rx, session_state)
         };
 
         let wt_send = {
@@ -756,6 +759,7 @@ impl MoqtClient {
             BidiStreamAcceptor::WebTransport {
                 session: shared.clone(),
                 bi_rx: wt_bi_rx,
+                session_state: session_state.clone(),
             },
             task_monitor,
         )
@@ -765,6 +769,7 @@ impl MoqtClient {
             StreamAcceptor::WebTransport {
                 session: shared,
                 uni_rx: wt_uni_rx,
+                session_state,
             },
         ))
     }

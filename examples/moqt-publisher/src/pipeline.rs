@@ -342,62 +342,83 @@ pub async fn run(
                     tracing::info!("Video capture channel closed");
                     break;
                 };
-                let encoder = video_encoder.as_mut().expect("video encoder enabled");
-                let timescale = video_timescale.expect("video timescale enabled");
-                let encoded_frames = encoder.encode(&video_frame)?;
-                for ef in encoded_frames {
-                    if ef.is_keyframe {
-                        // datagram モードと Subgroup モードの両方で使うため、ここで request_id を
-                        // 確定させる (`.expect()` の重複も避ける)
-                        let video_request_id = video_request_id.expect("video request_id enabled");
-                        if config.use_datagram {
-                            // datagram モード: 前の writer は特に finalize しない
-                            current_video_datagram_writer = Some(
-                                DatagramWriter::new(
+                // エンコードとフレーム送信を async ブロックに閉じ込め、`?` が `run` を
+                // 抜けないようにする。フレーム送信経路 (`SubgroupWriter::new` /
+                // `SubgroupWriter::write_object` / `DatagramWriter::write_object` など) は
+                // セッション終了後に `TransportError::ConnectionClosed` を返すため、`?` を
+                // `run` まで通すと終了時の後始末 (`PUBLISH_DONE` / `close(0, "")`) に到達しない。
+                // ループを抜ける制御 (`let Some(..) = .. else { break }`) はブロックの
+                // 外に出す (ブロックの中では外側のループを抜けられない)。
+                let outcome: Result<()> = async {
+                    let encoder = video_encoder.as_mut().expect("video encoder enabled");
+                    let timescale = video_timescale.expect("video timescale enabled");
+                    let encoded_frames = encoder.encode(&video_frame)?;
+                    for ef in encoded_frames {
+                        if ef.is_keyframe {
+                            // datagram モードと Subgroup モードの両方で使うため、ここで request_id を
+                            // 確定させる (`.expect()` の重複も避ける)
+                            let video_request_id =
+                                video_request_id.expect("video request_id enabled");
+                            if config.use_datagram {
+                                // datagram モード: 前の writer は特に finalize しない
+                                current_video_datagram_writer = Some(DatagramWriter::new(
                                     &handle,
                                     &data_plane,
                                     video_request_id,
                                     VIDEO_TRACK_ALIAS,
                                     video_group_id,
                                     DEFAULT_PUBLISHER_PRIORITY,
-                                ),
-                            );
-                        } else {
-                            if let Some(writer) = current_video_writer.take() {
-                                writer
-                                    .finish(client.subscription_filter_start(video_request_id))?;
+                                ));
+                            } else {
+                                if let Some(writer) = current_video_writer.take() {
+                                    writer.finish(
+                                        client.subscription_filter_start(video_request_id),
+                                    )?;
+                                }
+                                // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+                                // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+                                // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+                                current_video_writer = Some(
+                                    SubgroupWriter::new(
+                                        &handle,
+                                        &data_plane,
+                                        video_request_id,
+                                        VIDEO_TRACK_ALIAS,
+                                        video_group_id,
+                                        DEFAULT_PUBLISHER_PRIORITY,
+                                        true,
+                                        client.subscription_filter_start(video_request_id),
+                                    )
+                                    .await?,
+                                );
                             }
-                            // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
-                            // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-                            current_video_writer = Some(
-                                SubgroupWriter::new(
-                                    &handle,
-                                    &data_plane,
-                                    video_request_id,
-                                    VIDEO_TRACK_ALIAS,
-                                    video_group_id,
-                                    DEFAULT_PUBLISHER_PRIORITY,
-                                    true,
-                                    client.subscription_filter_start(video_request_id),
-                                )
-                                .await?,
-                            );
+                            tracing::debug!("Started new video group {}", video_group_id);
+                            video_group_id += 1;
                         }
-                        tracing::debug!("Started new video group {}", video_group_id);
-                        video_group_id += 1;
-                    }
-                    let properties = build_video_loc_properties(&ef, timescale);
-                    if config.use_datagram {
-                        if let Some(writer) = current_video_datagram_writer.as_mut() {
-                            // video はオブジェクト単位で独立のため、Skip の結果は無視してよい
-                            let _ = writer.write_object(&ef.data, &properties).await?;
-                        }
-                    } else {
-                        if let Some(writer) = current_video_writer.as_mut() {
-                            let _ = writer.write_object(&ef.data, &properties).await?;
+                        let properties = build_video_loc_properties(&ef, timescale);
+                        if config.use_datagram {
+                            if let Some(writer) = current_video_datagram_writer.as_mut() {
+                                // video はオブジェクト単位で独立のため、Skip の結果は無視してよい
+                                let _ = writer.write_object(&ef.data, &properties).await?;
+                            }
+                        } else {
+                            if let Some(writer) = current_video_writer.as_mut() {
+                                let _ = writer.write_object(&ef.data, &properties).await?;
+                            }
                         }
                     }
+                    Ok(())
+                }
+                .await;
+                // セッション終了は異常ではなく期待される終了である (`is_transport_session_end`)。
+                // `?` で `run` を抜けず、終了時の後始末へ進む
+                match outcome {
+                    Ok(()) => {}
+                    Err(e) if is_transport_session_end(&e) => {
+                        tracing::info!("Session closed by transport");
+                        break 'main;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             audio_frame = audio_frame_rx.recv(), if config.audio_enabled => {
@@ -405,105 +426,145 @@ pub async fn run(
                     tracing::info!("Audio capture channel closed");
                     break;
                 };
-                let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
-                let samples_per_frame = audio_samples_per_frame
-                    .expect("audio samples_per_frame enabled");
-                let timescale = audio_timescale.expect("audio timescale enabled");
-                let pcm = extract_pcm_i16(&audio_frame)?;
-                audio_pcm_buf.extend_from_slice(&pcm);
-                while audio_pcm_buf.len() >= samples_per_frame {
-                    let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
-                    let encoded = encoder.encode(&chunk)?;
-                    let timestamp = audio_frame_count * samples_per_frame as u64;
-                    // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
-                    // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
-                    // (Skip 時に audio_config_sent を立てると OpusHead が永遠に届かず、
-                    // フィルタを通過する後続フレームが Opus デコード不能になる)。
-                    let audio_config = if audio_config_sent {
-                        None
-                    } else {
-                        audio_opus_head.as_deref()
-                    };
-                    let properties = build_audio_loc_properties(timestamp, timescale, audio_config);
-                    // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
-                    if config.use_datagram {
-                        let mut writer = DatagramWriter::new(
-                            &handle,
-                            &data_plane,
-                            audio_request_id.expect("audio request_id enabled"),
-                            AUDIO_TRACK_ALIAS,
-                            audio_group_id,
-                            DEFAULT_PUBLISHER_PRIORITY,
-                        );
-                        let outcome = writer.write_object(&encoded, &properties).await?;
-                        if outcome == ObjectFilterOutcome::Pass {
-                            audio_config_sent = true;
+                // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
+                // セッション終了後に `SubgroupWriter::new` が `ConnectionClosed` を返す経路に
+                // 入りやすい。
+                let outcome: Result<()> = async {
+                    let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
+                    let samples_per_frame =
+                        audio_samples_per_frame.expect("audio samples_per_frame enabled");
+                    let timescale = audio_timescale.expect("audio timescale enabled");
+                    let pcm = extract_pcm_i16(&audio_frame)?;
+                    audio_pcm_buf.extend_from_slice(&pcm);
+                    while audio_pcm_buf.len() >= samples_per_frame {
+                        let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
+                        let encoded = encoder.encode(&chunk)?;
+                        let timestamp = audio_frame_count * samples_per_frame as u64;
+                        // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
+                        // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
+                        // (Skip 時に audio_config_sent を立てると OpusHead が永遠に届かず、
+                        // フィルタを通過する後続フレームが Opus デコード不能になる)。
+                        let audio_config = if audio_config_sent {
+                            None
+                        } else {
+                            audio_opus_head.as_deref()
+                        };
+                        let properties =
+                            build_audio_loc_properties(timestamp, timescale, audio_config);
+                        // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
+                        if config.use_datagram {
+                            let mut writer = DatagramWriter::new(
+                                &handle,
+                                &data_plane,
+                                audio_request_id.expect("audio request_id enabled"),
+                                AUDIO_TRACK_ALIAS,
+                                audio_group_id,
+                                DEFAULT_PUBLISHER_PRIORITY,
+                            );
+                            let outcome = writer.write_object(&encoded, &properties).await?;
+                            if outcome == ObjectFilterOutcome::Pass {
+                                audio_config_sent = true;
+                            }
+                        } else {
+                            // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
+                            // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+                            let audio_request_id =
+                                audio_request_id.expect("audio request_id enabled");
+                            let mut writer = SubgroupWriter::new(
+                                &handle,
+                                &data_plane,
+                                audio_request_id,
+                                AUDIO_TRACK_ALIAS,
+                                audio_group_id,
+                                DEFAULT_PUBLISHER_PRIORITY,
+                                true,
+                                client.subscription_filter_start(audio_request_id),
+                            )
+                            .await?;
+                            let outcome = writer.write_object(&encoded, &properties).await?;
+                            if outcome == ObjectFilterOutcome::Pass {
+                                audio_config_sent = true;
+                            }
+                            writer.finish(client.subscription_filter_start(audio_request_id))?;
                         }
-                    } else {
-                        // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-                        // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-21 §11.3.1 (Subgroup Header))
-                        // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-                        let audio_request_id = audio_request_id.expect("audio request_id enabled");
-                        let mut writer = SubgroupWriter::new(
-                            &handle,
-                            &data_plane,
-                            audio_request_id,
-                            AUDIO_TRACK_ALIAS,
-                            audio_group_id,
-                            DEFAULT_PUBLISHER_PRIORITY,
-                            true,
-                            client.subscription_filter_start(audio_request_id),
-                        )
-                        .await?;
-                        let outcome = writer.write_object(&encoded, &properties).await?;
-                        if outcome == ObjectFilterOutcome::Pass {
-                            audio_config_sent = true;
-                        }
-                        writer.finish(client.subscription_filter_start(audio_request_id))?;
+                        audio_group_id += 1;
+                        audio_frame_count += 1;
                     }
-                    audio_group_id += 1;
-                    audio_frame_count += 1;
+                    Ok(())
+                }
+                .await;
+                match outcome {
+                    Ok(()) => {}
+                    Err(e) if is_transport_session_end(&e) => {
+                        tracing::info!("Session closed by transport");
+                        break 'main;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             notable = client.next_event() => {
-                match notable? {
-                    Some(ClientEvent::Session(SessionEvent::GoawayReceived { timeout, .. })) => {
-                        tracing::info!("Received GOAWAY (timeout={timeout})");
-                        break 'main;
-                    }
-                    Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
-                        tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
-                        break 'main;
-                    }
-                    Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
-                        request_id,
-                        ..
-                    })) => {
-                        tracing::info!("Peer sent PUBLISH_DONE for request {request_id}");
-                    }
-                    Some(ClientEvent::Request(request)) => {
-                        serve_peer_request(
-                            &mut client,
-                            request,
-                            &config,
-                            &catalog_json,
-                        )
-                        .await?;
-                    }
-                    Some(ClientEvent::RequestUpdate(update)) => {
-                        // draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE):
-                        // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
-                        // FORWARD / LOCATION_FILTER / Range Filters の検証と購読状態への
-                        // 反映は session 層が受信時に済ませているため、ここでは受理する。
-                        tracing::info!("Received REQUEST_UPDATE: request_id={}", update.request_id);
-                        if let Err(e) = client.send_request_ok(update.request_id).await {
-                            tracing::warn!(
-                                "Failed to send REQUEST_OK for request {}: {e}",
+                // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
+                // `client.next_event()` の結果とピア要求への応答 (`serve_peer_request`) は
+                // どちらも transport I/O を行い、セッション終了後は
+                // `TransportError::ConnectionClosed` を返す。
+                // `break 'main` はブロックの外に出す (ブロックの中では外側のループを
+                // 抜けられない) ため、ブロックは「ループを抜けるか」を返す。
+                let outcome: Result<bool> = async {
+                    match notable? {
+                        Some(ClientEvent::Session(SessionEvent::GoawayReceived {
+                            timeout, ..
+                        })) => {
+                            tracing::info!("Received GOAWAY (timeout={timeout})");
+                            Ok(true)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
+                            tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
+                            Ok(true)
+                        }
+                        Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
+                            request_id,
+                            ..
+                        })) => {
+                            tracing::info!("Peer sent PUBLISH_DONE for request {request_id}");
+                            Ok(false)
+                        }
+                        Some(ClientEvent::Request(request)) => {
+                            serve_peer_request(&mut client, request, &config, &catalog_json)
+                                .await?;
+                            Ok(false)
+                        }
+                        Some(ClientEvent::RequestUpdate(update)) => {
+                            // draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE):
+                            // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
+                            // FORWARD / LOCATION_FILTER / Range Filters の検証と購読状態への
+                            // 反映は session 層が受信時に済ませているため、ここでは受理する。
+                            tracing::info!(
+                                "Received REQUEST_UPDATE: request_id={}",
                                 update.request_id
                             );
+                            if let Err(e) = client.send_request_ok(update.request_id).await {
+                                tracing::warn!(
+                                    "Failed to send REQUEST_OK for request {}: {e}",
+                                    update.request_id
+                                );
+                            }
+                            Ok(false)
                         }
+                        _ => Ok(false),
                     }
-                    _ => {}
+                }
+                .await;
+                match outcome {
+                    // セッションが終了した (peer 起点の終了通知 / 自側で検出した違反の双方)。
+                    // 終了時の後始末へ進む
+                    Ok(true) => break 'main,
+                    Ok(false) => {}
+                    Err(e) if is_transport_session_end(&e) => {
+                        tracing::info!("Session closed by transport");
+                        break 'main;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             _ = tick_interval.tick() => {
@@ -567,6 +628,23 @@ pub async fn run(
 
     tracing::info!("Pipeline stopped");
     Ok(())
+}
+
+/// transport がセッション終了 (WebTransport の CONNECT stream の close / WT_CLOSE_SESSION) や
+/// 接続クローズを検知したことを表すエラーか
+///
+/// セッション終了は異常ではなく期待される終了である。data plane の送信経路
+/// (`SubgroupWriter::new` / `SubgroupWriter::write_object` / `DatagramWriter::write_object`
+/// など) はセッション終了後に `TransportError::ConnectionClosed` を返すため、`?` で `run` まで
+/// 通すと `Fatal: session closed` で異常終了し、終了時の後始末 (`PUBLISH_DONE` /
+/// `close(0, "")`) に到達しない。WebTransport で §6 が求めるのは `close(0, "")` が送る
+/// CONNECT stream の FIN であり、終了検知後の GOAWAY は失敗しうる (warn ログになる)。
+///
+/// `From<TransportError> for Error` が `TransportError::ConnectionClosed` を
+/// `Error::ConnectionClosed` に振り分けるため、variant だけで判定できる (表示文字列には
+/// 依存しない)。
+fn is_transport_session_end(error: &Error) -> bool {
+    matches!(error, Error::ConnectionClosed)
 }
 
 /// MOQT relay が転送してきた要求 (SUBSCRIBE / FETCH) に応答する
@@ -772,6 +850,8 @@ fn extract_pcm_i16(frame: &AudioFrameOwned) -> Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // セッション終了の判定は `Error` の variant で行うため、`TransportError` はテストでのみ使う
+    use moqt_example_transport::error::TransportError;
 
     /// keyframe の映像 LOC プロパティ: Video Frame Marking / Timestamp / Timescale / Video Config が付与され encode できること
     #[test]
@@ -895,5 +975,45 @@ mod tests {
             "Audio Config は付与されないこと"
         );
         props.encode().expect("LOC プロパティは encode できること");
+    }
+
+    /// 接続クローズだけをセッション終了として扱い、他のエラーは異常として扱う
+    ///
+    /// セッション終了として扱わないエラーは `?` で `run` を抜ける (終了コード 1)。
+    /// 判定は `Error` の variant で行うため、`WebTransport` に畳まれる他の transport エラーが
+    /// 混ざらないことを固定する。
+    #[test]
+    fn is_transport_session_end_only_matches_connection_closed() {
+        assert!(
+            is_transport_session_end(&Error::from(TransportError::ConnectionClosed)),
+            "接続クローズはセッション終了として扱うこと"
+        );
+
+        for error in [
+            TransportError::StreamClosed,
+            TransportError::Quic("connection failed".to_string()),
+            TransportError::ConnectFailed { status: Some(404) },
+            TransportError::InvalidState("invalid state".to_string()),
+            TransportError::Internal("internal".to_string()),
+        ] {
+            let error = Error::from(error);
+            assert!(
+                !is_transport_session_end(&error),
+                "transport の他のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
+
+        for error in [
+            // `WebTransport` に畳まれるエラーはセッション終了ではない
+            Error::WebTransport("stream closed".to_string()),
+            Error::Other("other".to_string()),
+            Error::Io(std::io::Error::other("io failed")),
+            Error::Moqt(shiguredo_moqt::error::MessageError::UnexpectedEof),
+        ] {
+            assert!(
+                !is_transport_session_end(&error),
+                "transport 以外のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
     }
 }

@@ -24,6 +24,8 @@ pub enum Error {
     Io(std::io::Error),
     /// WebTransport エラー
     WebTransport(String),
+    /// トランスポートがセッション終了を検知した
+    ConnectionClosed,
     /// その他のエラー
     Other(String),
 }
@@ -33,6 +35,7 @@ impl fmt::Display for Error {
         match self {
             Self::Quic(msg) => write!(f, "QUIC: {msg}"),
             Self::WebTransport(msg) => write!(f, "WebTransport: {msg}"),
+            Self::ConnectionClosed => write!(f, "session closed"),
             Self::Moqt(e) => write!(f, "MoQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
@@ -94,7 +97,8 @@ impl From<moqt_example_transport::error::TransportError> for Error {
     fn from(e: moqt_example_transport::error::TransportError) -> Self {
         // Quic だけを app の Quic variant に振り分ける。トランスポート種別に依存しない
         // 失敗 (Internal / InvalidAuthority / ResolutionFailed) は Other にして
-        // `QUIC:` を付けない。それ以外は WebTransport variant に畳む。
+        // `QUIC:` を付けない。セッション終了は専用の ConnectionClosed に分け、
+        // それ以外は WebTransport variant に畳む。
         match e {
             moqt_example_transport::error::TransportError::Quic(msg) => Self::Quic(msg),
             // 統合した MoqtClient 由来の内部エラーは従来の Other 表示に合わせる
@@ -103,6 +107,10 @@ impl From<moqt_example_transport::error::TransportError> for Error {
             moqt_example_transport::error::TransportError::InvalidAuthority(msg)
             | moqt_example_transport::error::TransportError::ResolutionFailed(msg) => {
                 Self::Other(msg)
+            }
+            // セッション終了は表示文字列ではなく variant で判定できるように専用にする
+            moqt_example_transport::error::TransportError::ConnectionClosed => {
+                Self::ConnectionClosed
             }
             other => Self::WebTransport(other.to_string()),
         }
@@ -150,5 +158,16 @@ mod tests {
             "Quic に振り分けられること: {err}"
         );
         assert_eq!(err.to_string(), "QUIC: connection failed");
+    }
+
+    /// セッション終了は専用の `ConnectionClosed` variant になり `WebTransport:` を付けない
+    #[test]
+    fn transport_error_mapping_uses_connection_closed_variant() {
+        let err = Error::from(TransportError::ConnectionClosed);
+        assert!(
+            matches!(err, Error::ConnectionClosed),
+            "ConnectionClosed に振り分けられること: {err}"
+        );
+        assert_eq!(err.to_string(), "session closed");
     }
 }

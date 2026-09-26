@@ -11,9 +11,12 @@ use bytes::Bytes;
 use shiguredo_moqt::session::types::RequestStreamEnd;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::error::TransportError;
-use crate::webtransport::{WtRecvStream, WtSendStream, WtSession};
+use crate::webtransport::{
+    WtRecvStream, WtSendStream, WtSession, WtSessionState, moqt_close_code, wait_until_terminated,
+};
 
 /// 受信ストリームから取り出した 1 要素
 pub enum RecvChunk {
@@ -196,6 +199,10 @@ impl StreamHandle {
     /// 接続をクローズする
     ///
     /// QUIC では application error code を、WebTransport では CLOSE_SESSION capsule を送信する。
+    /// WebTransport の Application Error Code は 32 ビットのため、収まらない MOQT のコードは
+    /// 切り捨てずエラーにする (`moqt_close_code`)。
+    /// セッション状態を終了へ移すため、以降は新しいストリームの open と datagram の送信が
+    /// 拒否される (§6)。
     pub async fn close(&self, code: u64, reason: &str) -> Result<(), TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
@@ -205,8 +212,9 @@ impl StreamHandle {
                 Ok(())
             }
             StreamHandle::WebTransport(session) => {
+                let code = moqt_close_code(code)?;
                 let mut session = session.lock().await;
-                session.close(code as u32, reason).await
+                session.close(code, reason).await
             }
         }
     }
@@ -239,6 +247,8 @@ impl StreamHandle {
     ///
     /// QUIC では `s2n-quic` の datagram プロバイダーから、WebTransport では
     /// `WtSession::take_buffered_datagrams` から取得する。
+    /// WebTransport ではセッション終了を検知した場合に `ConnectionClosed` を返し、
+    /// MOQT 層の受信ループを待たせない。
     pub async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>, TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
@@ -269,13 +279,17 @@ pub enum StreamAcceptor {
         session: Arc<Mutex<WtSession>>,
         /// 単方向受信ストリームの receiver (ロック外で待つ)
         uni_rx: mpsc::Receiver<WtRecvStream>,
+        /// セッション状態 (§6 の終了) の観測用 (ロック外で待つ)
+        session_state: watch::Receiver<WtSessionState>,
     },
 }
 
 impl StreamAcceptor {
     /// 単方向ストリーム (data stream) を 1 つ受け入れる
     ///
-    /// 接続が閉じた場合は `Ok(None)` を返す。
+    /// QUIC では接続が閉じた場合に `Ok(None)` を返す。WebTransport では接続が閉じた場合も
+    /// セッションが終了した場合も `ConnectionClosed` を返す (MOQT 層の受信ループを
+    /// 待たせないため)。
     pub async fn accept_recv_stream(&mut self) -> Result<Option<RecvStream>, TransportError> {
         match self {
             StreamAcceptor::Quic(acceptor) => {
@@ -288,12 +302,20 @@ impl StreamAcceptor {
             StreamAcceptor::WebTransport {
                 session: _session,
                 uni_rx,
+                session_state,
             } => {
                 // ロックを保持せずに待つ。解放後も session は
                 // `open_send_stream` / `send_datagram` / `close` で使える
-                match uni_rx.recv().await {
-                    Some(s) => Ok(Some(RecvStream::WebTransport(s))),
-                    None => Ok(None),
+                tokio::select! {
+                    received = uni_rx.recv() => match received {
+                        Some(s) => Ok(Some(RecvStream::WebTransport(s))),
+                        // ルーティングタスクが終了した = QUIC 接続が閉じた
+                        None => Err(TransportError::ConnectionClosed),
+                    },
+                    // セッション終了 (§6) を検知したら accept を待ち続けない
+                    _ = wait_until_terminated(session_state) => {
+                        Err(TransportError::ConnectionClosed)
+                    }
                 }
             }
         }
@@ -312,13 +334,16 @@ pub enum BidiStreamAcceptor {
         session: Arc<Mutex<WtSession>>,
         /// 双方向受信ストリームの receiver (ロック外で待つ)
         bi_rx: mpsc::Receiver<(WtSendStream, WtRecvStream)>,
+        /// セッション状態 (§6 の終了) の観測用 (ロック外で待つ)
+        session_state: watch::Receiver<WtSessionState>,
     },
 }
 
 impl BidiStreamAcceptor {
     /// 双方向ストリーム (peer 起動 request stream) を 1 つ受け入れる
     ///
-    /// 接続が閉じた場合は `Ok(None)` を返す。
+    /// QUIC では接続が閉じた場合に `Ok(None)` を返す。WebTransport では接続が閉じた場合も
+    /// セッションが終了した場合も `ConnectionClosed` を返す (`accept_recv_stream` と同じ)。
     /// WebTransport では WT の双方向ストリームヘッダーを読み捨てた後の
     /// payload 部分が返る (`WtSession::accept_bi_stream` を参照)。
     pub async fn accept_bidi_stream(
@@ -338,14 +363,22 @@ impl BidiStreamAcceptor {
             BidiStreamAcceptor::WebTransport {
                 session: _session,
                 bi_rx,
+                session_state,
             } => {
                 // ロックを保持せずに待つ
-                match bi_rx.recv().await {
-                    Some((send, recv)) => Ok(Some((
-                        SendStream::WebTransport(send),
-                        RecvStream::WebTransport(recv),
-                    ))),
-                    None => Ok(None),
+                tokio::select! {
+                    received = bi_rx.recv() => match received {
+                        Some((send, recv)) => Ok(Some((
+                            SendStream::WebTransport(send),
+                            RecvStream::WebTransport(recv),
+                        ))),
+                        // ルーティングタスクが終了した = QUIC 接続が閉じた
+                        None => Err(TransportError::ConnectionClosed),
+                    },
+                    // セッション終了 (§6) を検知したら accept を待ち続けない
+                    _ = wait_until_terminated(session_state) => {
+                        Err(TransportError::ConnectionClosed)
+                    }
                 }
             }
         }
