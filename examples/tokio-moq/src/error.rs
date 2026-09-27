@@ -17,6 +17,10 @@ pub enum TransportError {
     Transport(Box<dyn std::error::Error + Send + Sync>),
     /// HTTP/3 プロトコルエラー
     Http3(shiguredo_http3::Error),
+    /// HTTP/2 プロトコルエラー
+    Http2(shiguredo_http2::Error),
+    /// WebTransport over HTTP/2 のセッション / ストリームエラー
+    WtH2(shiguredo_http2::webtransport::WtError),
     /// 接続がクローズ済み
     ConnectionClosed,
     /// CONNECT レスポンスが 2xx 以外、または :status ヘッダー不在でセッション確立に失敗した
@@ -52,6 +56,8 @@ impl std::fmt::Display for TransportError {
             Self::InvalidAuthority(msg) | Self::ResolutionFailed(msg) => write!(f, "{msg}"),
             Self::Transport(e) => write!(f, "transport error: {e}"),
             Self::Http3(e) => write!(f, "http3 error: {e}"),
+            Self::Http2(e) => write!(f, "http2 error: {e}"),
+            Self::WtH2(e) => write!(f, "webtransport over http2 error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
             Self::ConnectFailed { status } => match status {
                 Some(s) => write!(f, "CONNECT failed with status {s}"),
@@ -73,6 +79,18 @@ impl std::error::Error for TransportError {}
 impl From<shiguredo_http3::Error> for TransportError {
     fn from(e: shiguredo_http3::Error) -> Self {
         Self::Http3(e)
+    }
+}
+
+impl From<shiguredo_http2::Error> for TransportError {
+    fn from(e: shiguredo_http2::Error) -> Self {
+        Self::Http2(e)
+    }
+}
+
+impl From<shiguredo_http2::webtransport::WtError> for TransportError {
+    fn from(e: shiguredo_http2::webtransport::WtError) -> Self {
+        Self::WtH2(e)
     }
 }
 

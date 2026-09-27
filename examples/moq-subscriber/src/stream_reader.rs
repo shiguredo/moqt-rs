@@ -1,13 +1,13 @@
 //! data stream の種別判定ヘルパー
 //!
-//! `ControlStream` / `StreamRead` は `moq::moqt_client` が提供する。
+//! `ControlStream` / `StreamRead` は `tokio_moq::moqt_client` が提供する。
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::stream::{DataStreamType, classify_data_stream_type};
 
 use crate::error::Result;
-use moq::moqt_client::StreamRead;
-use moq::transport;
+use tokio_moq::moqt_client::StreamRead;
+use tokio_moq::transport;
 
 /// 受信ストリームの種別 (data stream 用)
 #[derive(Debug, Clone, Copy)]

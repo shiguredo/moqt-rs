@@ -11,9 +11,9 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 
 [workspace]
 members = [
-  "examples/moq",
   "examples/moq-publisher",
   "examples/moq-subscriber",
+  "examples/tokio-moq",
   "pbt",
 ]
 exclude = ["fuzz"]

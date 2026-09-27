@@ -2,6 +2,8 @@
 #
 # - secrets.TEST_MOQT_URI に設定した relay へ moq-publisher を接続し、SETUP と
 #   PUBLISH (video / catalog) が受理されて疑似キャプチャの映像が配信されることを検証する
+# - secrets.TEST_MOQT_URI は moqt:// を指定する。接続経路は vars.TEST_MOQT_TRANSPORT
+#   (quic / wt-h3 / wt-h2) で選び、未設定なら quic を使う
 # - secrets.TEST_MOQT_URI が未設定の場合 (fork からの PR など) はテストを実行しない
 # - examples が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
 #   持つため macos-15 を使う (ci.yml と同じ理由)
@@ -26,6 +28,7 @@ jobs:
     runs-on: macos-15
     env:
       TEST_MOQT_URI: ${{ secrets.TEST_MOQT_URI }}
+      TEST_MOQT_TRANSPORT: ${{ vars.TEST_MOQT_TRANSPORT }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,6 +69,7 @@ jobs:
           # MOQT_PUBLISH_DIAG=1 は publish ループの進み具合をログに出す診断スイッチ。
           RUST_LOG=info MOQT_PUBLISH_DIAG=1 ./target/debug/moq-publisher \
             --url "$TEST_MOQT_URI" \
+            --transport "${TEST_MOQT_TRANSPORT:-quic}" \
             --fake-capture-device \
             --no-audio \
             > "$log" 2>&1 &

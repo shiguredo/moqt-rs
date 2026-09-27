@@ -1,7 +1,8 @@
 //! examples 共有トランスポート crate
 //!
 //! `moq-publisher` / `moq-subscriber` の両バイナリが共通で利用する
-//! QUIC / WebTransport over HTTP/3 のトランスポート層を提供する。
+//! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 のトランスポート層を提供する。
+//! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //!
 //! publisher は能動的に送信ストリームを open する側、subscriber は受動的に
 //! 受信ストリームを accept する側という非対称があるため、両者の union API を
@@ -85,17 +86,41 @@ pub mod moqt_client;
 pub mod quic;
 pub mod transport;
 pub mod webtransport;
+pub mod webtransport_h2;
+pub mod webtransport_h3;
 
-// 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport::...` / `quic::...`) 経由で
+// 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport_h3::...` / `quic::...`) 経由で
 // 参照する。最上位再エクスポートは設けない。
 
 /// トランスポート種別
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// URL の scheme は `moqt://` に統一されており、接続経路はこの値で選ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
-    /// QUIC 直接接続 (moqt:// スキーム)
+    /// QUIC 直接接続 (ALPN `moqt-21`)
     Quic,
-    /// WebTransport over HTTP/3 (https:// スキーム)
-    WebTransport,
+    /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
+    WtH3,
+    /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
+    WtH2,
+}
+
+impl Transport {
+    /// `--transport` の値からトランスポート種別を解決する
+    ///
+    /// # Errors
+    ///
+    /// `quic` / `wt-h3` / `wt-h2` 以外の値はエラーになる。
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "quic" => Ok(Self::Quic),
+            "wt-h3" => Ok(Self::WtH3),
+            "wt-h2" => Ok(Self::WtH2),
+            other => Err(format!(
+                "unknown transport '{other}' (expected quic, wt-h3, or wt-h2)"
+            )),
+        }
+    }
 }
 
 /// moqt URI の fragment (`<type>:<value>`)
@@ -105,10 +130,9 @@ pub enum Transport {
 /// `:path` / PATH option / SNI には渡さない。
 ///
 /// `type` は [`parse_url`] が §6.1.1 の文字種の MUST に一致するかを検証する。
-/// `https://` (WebTransport) の URI は §6.2.1 が moqt URI の scheme 置換として定め、
 /// §16.2 (Media Type Registration) が application/moqt の fragment を §6.1.1 に従わせるため、
-/// `https://` の fragment も同じ規則で検証する。§16.3 の "MOQT URI Fragment Types" registry は初期状態で空で、
-/// 登録済みの type かどうかは検証しない。
+/// `moqt://` の fragment を同じ規則で検証する。§16.3 の "MOQT URI Fragment Types" registry は
+/// 初期状態で空で、登録済みの type かどうかは検証しない。
 /// `type` が `msf` のときだけ、[`parse_url`] が value を
 /// `shiguredo_moqt::msf::uri::parse_msf_fragment` で MSF fragment として検証し、
 /// 予約パラメータ `c4m` の認可トークンを取り出す ([`ServerUrl::c4m_tokens`])。
@@ -125,10 +149,11 @@ pub struct MoqtFragment {
 }
 
 /// パース済みの接続先情報
+///
+/// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は URL ではなく
+/// [`Transport`] (`--transport`) で選ぶため、ここには持たない。
 #[derive(Debug, Clone)]
 pub struct ServerUrl {
-    /// トランスポート種別
-    pub transport: Transport,
     /// ホスト名または IP アドレス (ポートを含む場合がある)
     ///
     /// URL でポートを省略した場合はポートを含まない。接続先の決定では
@@ -157,21 +182,19 @@ pub struct ServerUrl {
     pub c4m_tokens: Vec<Vec<u8>>,
 }
 
-/// URL をパースしてトランスポート種別・ authority ・ path ・ fragment ・ C4M 認可トークンを取得する
+/// URL をパースして authority ・ path ・ fragment ・ C4M 認可トークンを取得する
 ///
-/// scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない。正規化するのは scheme だけで、
-/// authority / path / query / fragment は入力の文字列をそのまま保持する (RFC 3986 §6.2.2.1 は
-/// scheme と host を大文字小文字非区別とするが、host を入力のまま使うのは DNS / SNI の
-/// 非区別性に依存する設計判断である)。
+/// scheme は `moqt://` だけを受け付ける (`MOQT://` も受理する。RFC 3986 §3.1 に従い
+/// scheme は大文字小文字を区別しない)。接続経路は URL では選ばず [`Transport`] で選ぶ。
+/// 正規化するのは scheme だけで、authority / path / query / fragment は入力の文字列を
+/// そのまま保持する (RFC 3986 §6.2.2.1 は scheme と host を大文字小文字非区別とするが、
+/// host を入力のまま使うのは DNS / SNI の非区別性に依存する設計判断である)。
 ///
 /// fragment は `:path` と PATH option には含めない。draft-ietf-moq-transport-21 §6.1.1
 /// (Fragment Identifiers) の `<type>:<value>` として解釈し、同節の文字種の MUST に
-/// 一致しない場合はエラーにする。同 draft §6.2.1 は WebTransport の `https://` URI を
-/// moqt URI の scheme 置換として定め、§16.2 (Media Type Registration) は
+/// 一致しない場合はエラーにする。同 draft §16.2 (Media Type Registration) は
 /// "Fragment identifiers for application/moqt follow the syntax defined in Section 6.1.1."
-/// と定め、RFC 3986 §3.5 は "Fragment identifier semantics are independent of the URI scheme"
-/// と定めるため、scheme が moqt:// でも https:// でも同じ規則を適用する。
-/// この仕様は将来 draft 改訂で変更される可能性がある。
+/// と定める。この仕様は将来 draft 改訂で変更される可能性がある。
 ///
 /// `type` が `msf` の場合は value を MSF fragment (`track-identifier [ "&" parameter-list ]`)
 /// として検証し、予約パラメータ `c4m` を Base64 デコードして [`ServerUrl::c4m_tokens`] に
@@ -179,31 +202,23 @@ pub struct ServerUrl {
 ///
 /// # Errors
 ///
-/// - 未対応 scheme / authority の欠落: `unsupported URL scheme` / `requires authority`
+/// - `moqt://` 以外の scheme / authority の欠落: `unsupported URL scheme` / `requires authority`
 /// - fragment が `<type>:<value>` でない / type の文字種が §6.1.1 に一致しない: `invalid moqt URI fragment`
 /// - `msf` fragment が MSF §11.1 の ABNF に一致しない: `invalid MSF fragment`
 /// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
 pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     let Some((scheme, rest)) = url.split_once("://") else {
-        return Err(format!(
-            "unsupported URL scheme: {url} (use moqt:// or https://)"
-        ));
+        return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
     };
     let scheme = scheme.to_ascii_lowercase();
-    let transport = match scheme.as_str() {
-        "moqt" => Transport::Quic,
-        "https" => Transport::WebTransport,
-        _ => {
-            return Err(format!(
-                "unsupported URL scheme: {url} (use moqt:// or https://)"
-            ));
-        }
-    };
+    if scheme != "moqt" {
+        return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
+    }
     let (before_fragment, raw_fragment) = split_fragment(rest);
     let (authority, path) = split_authority_path(before_fragment);
     if authority.is_empty() {
         return Err(format!(
-            "{scheme}:// URL requires authority: {url} (e.g. {scheme}://localhost:4443)"
+            "moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)"
         ));
     }
     let fragment = match raw_fragment {
@@ -218,7 +233,6 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         _ => Vec::new(),
     };
     Ok(ServerUrl {
-        transport,
         authority,
         path,
         fragment,
@@ -421,7 +435,7 @@ pub fn host_from_authority(authority: &str) -> &str {
 ///
 /// draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) は
 /// "If the port is omitted in the URI, a default port of 443 is used." と定める。
-/// `https://` (WebTransport) も同じ 443 を既定値として使う。
+/// QUIC 直結と WebTransport (HTTP/3 / HTTP/2) のどの経路でも同じ 443 を既定値として使う。
 /// この仕様は将来 draft 改訂で変更される可能性がある。
 const DEFAULT_MOQT_PORT: u16 = 443;
 
@@ -598,29 +612,64 @@ mod tests {
         );
     }
 
-    /// moqt:// URL は QUIC としてパースされ query が path に残る
+    /// moqt:// URL は query が path に残る
     #[test]
     fn parse_url_parses_moqt_scheme_with_query() {
         let url = parse_url("moqt://127.0.0.1:4443/path?x=1").expect("URL のパースに成功すること");
-        assert_eq!(url.transport, Transport::Quic);
         assert_eq!(url.authority, "127.0.0.1:4443");
         assert_eq!(url.path, "/path?x=1");
     }
 
-    /// https:// URL は WebTransport としてパースされ query が path に残る
-    #[test]
-    fn parse_url_parses_https_scheme_with_query() {
-        let url =
-            parse_url("https://example.com:443/foo?bar=baz").expect("URL のパースに成功すること");
-        assert_eq!(url.transport, Transport::WebTransport);
-        assert_eq!(url.authority, "example.com:443");
-        assert_eq!(url.path, "/foo?bar=baz");
-    }
-
-    /// 未対応スキームはエラーになる
+    /// `moqt://` 以外の scheme はエラーになる (接続経路は --transport で選ぶ)
     #[test]
     fn parse_url_rejects_unknown_scheme() {
-        assert!(parse_url("ftp://127.0.0.1:4443").is_err());
+        for url in [
+            "ftp://127.0.0.1:4443",
+            "https://example.com:443/foo?bar=baz",
+        ] {
+            assert_eq!(
+                parse_url(url).expect_err("未対応 scheme がエラーになること"),
+                format!("unsupported URL scheme: {url} (use moqt://)")
+            );
+        }
+    }
+
+    /// `://` が無い URL も未対応 scheme としてエラーになる
+    #[test]
+    fn parse_url_rejects_url_without_scheme_delimiter() {
+        assert_eq!(
+            parse_url("example.com/app").expect_err("scheme が無い URL がエラーになること"),
+            "unsupported URL scheme: example.com/app (use moqt://)"
+        );
+    }
+
+    /// `--transport` の値からトランスポート種別を解決する
+    #[test]
+    fn transport_parses_supported_values() {
+        assert_eq!(
+            Transport::parse("quic").expect("quic は受理されること"),
+            Transport::Quic
+        );
+        assert_eq!(
+            Transport::parse("wt-h3").expect("wt-h3 は受理されること"),
+            Transport::WtH3
+        );
+        assert_eq!(
+            Transport::parse("wt-h2").expect("wt-h2 は受理されること"),
+            Transport::WtH2
+        );
+    }
+
+    /// 未対応の transport 名・表記ゆれ・空文字はエラーにする
+    #[test]
+    fn transport_rejects_unsupported_values() {
+        for value in ["wt_h3", "WT-H3", "h3", ""] {
+            let err = Transport::parse(value).expect_err("受理しないこと");
+            assert!(
+                err.contains("unknown transport"),
+                "エラーに理由が含まれること: {err}"
+            );
+        }
     }
 
     /// fragment は path に含めない (draft-21 §6.1.1)
@@ -639,37 +688,6 @@ mod tests {
             parse_url("moqt://example.com/app?x=1#type:value").expect("URL のパースに成功すること");
         assert_eq!(url.authority, "example.com");
         assert_eq!(url.path, "/app?x=1");
-    }
-
-    /// https (WebTransport) の :path にも fragment を含めない
-    #[test]
-    fn parse_url_excludes_fragment_from_https_path() {
-        let url =
-            parse_url("https://example.com/app#type:value").expect("URL のパースに成功すること");
-        assert_eq!(url.transport, Transport::WebTransport);
-        assert_eq!(url.authority, "example.com");
-        assert_eq!(url.path, "/app");
-        let fragment = url.fragment.expect("fragment が保持されること");
-        assert_eq!(fragment.fragment_type, "type");
-        assert_eq!(fragment.value, "value");
-    }
-
-    /// https (WebTransport) の fragment も §6.1.1 の規則で検証する (§16.2 が application/moqt に同節を適用する)
-    #[test]
-    fn parse_url_validates_https_fragment_as_moqt_fragment() {
-        assert_eq!(
-            parse_url("https://example.com/app#section-2")
-                .expect_err("`:` が無い https の fragment がエラーになること"),
-            "invalid moqt URI fragment: https://example.com/app#section-2 (must be '<type>:<value>')"
-        );
-        for url in [
-            // 大文字の type
-            "https://example.com/app#Section:2",
-            // fragment 内の 2 個目の `#`
-            "https://example.com/app#a:b#c",
-        ] {
-            assert!(parse_url(url).is_err(), "{url} がエラーになること");
-        }
     }
 
     /// fragment が付いても authority から SNI 用の host を取り出せる
@@ -698,7 +716,6 @@ mod tests {
     fn parse_url_splits_fragment_with_uppercase_scheme() {
         let url =
             parse_url("MOQT://example.com/app#type:value").expect("URL のパースに成功すること");
-        assert_eq!(url.transport, Transport::Quic);
         assert_eq!(url.path, "/app");
         let fragment = url.fragment.expect("fragment が保持されること");
         assert_eq!(fragment.fragment_type, "type");
@@ -745,10 +762,6 @@ mod tests {
         assert_eq!(
             parse_url("moqt://").expect_err("authority が無い moqt URL がエラーになること"),
             "moqt:// URL requires authority: moqt:// (e.g. moqt://localhost:4443)"
-        );
-        assert_eq!(
-            parse_url("https:///app").expect_err("authority が無い https URL がエラーになること"),
-            "https:// URL requires authority: https:///app (e.g. https://localhost:4443)"
         );
         // fragment の検証より前に authority の有無を判定する。
         // fragment 自体が不正でも authority のエラーになることを固定する
@@ -837,15 +850,9 @@ mod tests {
     /// 大文字 scheme を小文字 scheme と同じに解釈する (RFC 3986 §3.1)
     #[test]
     fn parse_url_accepts_uppercase_scheme() {
-        let quic = parse_url("MOQT://127.0.0.1:4443/path").expect("URL のパースに成功すること");
-        assert_eq!(quic.transport, Transport::Quic);
-        assert_eq!(quic.authority, "127.0.0.1:4443");
-        assert_eq!(quic.path, "/path");
-
-        let wt = parse_url("HTTPS://127.0.0.1:4443/path").expect("URL のパースに成功すること");
-        assert_eq!(wt.transport, Transport::WebTransport);
-        assert_eq!(wt.authority, "127.0.0.1:4443");
-        assert_eq!(wt.path, "/path");
+        let url = parse_url("MOQT://127.0.0.1:4443/path").expect("URL のパースに成功すること");
+        assert_eq!(url.authority, "127.0.0.1:4443");
+        assert_eq!(url.path, "/path");
     }
 
     /// scheme 以外の成分は大文字小文字を保持する (RFC 3986 §6.2.2.1 は host も非区別とするが入力を保持する)
@@ -863,7 +870,6 @@ mod tests {
     #[test]
     fn parse_url_keeps_scheme_delimiter_in_query() {
         let url = parse_url("moqt://example.com/app?x=a://b").expect("URL のパースに成功すること");
-        assert_eq!(url.transport, Transport::Quic);
         assert_eq!(url.authority, "example.com");
         assert_eq!(url.path, "/app?x=a://b");
     }
@@ -1079,7 +1085,7 @@ mod tests {
     /// ポート省略の IPv6 リテラルは既定ポート 443 を使い、接続先文字列はブラケットで囲む
     #[test]
     fn authority_parts_defaults_to_443_for_ipv6() {
-        // `https://[2001:db8::1]/app` の authority
+        // `moqt://[2001:db8::1]/app` の authority
         let parts = authority_parts("[2001:db8::1]").expect("authority の解釈に成功すること");
         assert_eq!(parts.host, "2001:db8::1");
         assert_eq!(parts.port, 443);
@@ -1172,7 +1178,7 @@ mod tests {
         assert_eq!(parts.port, 443);
         assert_eq!(parts.socket_addr_string(), "127.0.0.1:443");
 
-        let url = parse_url("https://[2001:db8::1]/app").expect("URL のパースに成功すること");
+        let url = parse_url("moqt://[2001:db8::1]/app").expect("URL のパースに成功すること");
         let parts = authority_parts(&url.authority).expect("authority の解釈に成功すること");
         assert_eq!(parts.host, "2001:db8::1");
         assert_eq!(parts.port, 443);

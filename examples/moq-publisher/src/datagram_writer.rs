@@ -7,8 +7,8 @@ use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 
 use crate::error::Result;
-use moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
-use moq::transport;
+use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
+use tokio_moq::transport;
 
 /// Object Datagram ライター
 ///

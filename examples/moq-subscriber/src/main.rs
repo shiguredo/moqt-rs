@@ -66,7 +66,7 @@ fn main() {
     std::thread::spawn(move || {
         rt.block_on(async move {
             // タスクメトリクスを定期的にログ出力する
-            moq::metrics::spawn_task_metrics_logger(task_monitor.clone());
+            tokio_moq::metrics::spawn_task_metrics_logger(task_monitor.clone());
 
             // Ctrl+C で graceful shutdown を起動する
             tokio::spawn(async move {

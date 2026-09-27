@@ -2,7 +2,7 @@
 //!
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
-use moq::ServerUrl;
+use tokio_moq::{ServerUrl, Transport};
 
 /// 映像コーデック種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,8 @@ impl VideoCodec {
 pub struct Config {
     /// 接続先 URL
     pub url: ServerUrl,
+    /// トランスポート種別
+    pub transport: Transport,
     /// TLS CA 証明書パス
     pub cert: Option<String>,
     /// カメラデバイス ID
@@ -80,15 +82,22 @@ pub fn parse() -> noargs::Result<Option<Config>> {
     let url: ServerUrl = noargs::opt("url")
         .short('u')
         .ty("URL")
-        .doc("Server URL (moqt:// or https://; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        .doc("Server URL (moqt://; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
         .take(&mut args)
         .then(|o| {
             let v = o.value();
             if v.is_empty() {
                 return Err("--url is required".to_string());
             }
-            moq::parse_url(v)
+            tokio_moq::parse_url(v)
         })?;
+
+    let transport: Transport = noargs::opt("transport")
+        .ty("TYPE")
+        .doc("Transport (quic | wt-h3 | wt-h2)")
+        .default("quic")
+        .take(&mut args)
+        .then(|o| Transport::parse(o.value()))?;
 
     let cert: Option<String> = noargs::opt("cert")
         .ty("PATH")
@@ -207,6 +216,7 @@ pub fn parse() -> noargs::Result<Option<Config>> {
 
     Ok(Some(Config {
         url,
+        transport,
         cert,
         device_id,
         width,

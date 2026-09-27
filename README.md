@@ -169,16 +169,16 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 ## サンプル
 
-サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs) を利用しています。
+サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs)、[shiguredo_http2](https://github.com/shiguredo/http2-rs) を利用しています。
 引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
 
-- `moq-publisher`：QUIC / WebTransport で relay に接続し、video / audio / `catalog` track を PUBLISH する
-- `moq-subscriber`：QUIC / WebTransport で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
-- `moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 トランスポート層 (ライブラリ)
+- `moq-publisher`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、video / audio / `catalog` track を PUBLISH する
+- `moq-subscriber`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
+- `tokio-moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.94 以降です。
 `moq-publisher` の依存が 1.94 を要求するためです。
-`moq-subscriber` / `moq` だけであれば 1.93 で構築できます。
+`moq-subscriber` / `tokio-moq` だけであれば 1.93 で構築できます。
 
 ```bash
 # publisher (疑似キャプチャ)
@@ -187,6 +187,8 @@ cargo run -p moq-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
 # subscriber
 cargo run -p moq-subscriber -- --url moqt://127.0.0.1:4443
 ```
+
+接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。
 
 URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP の AUTHORIZATION_TOKEN として送信できます。
 

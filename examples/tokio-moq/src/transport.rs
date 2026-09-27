@@ -1,6 +1,7 @@
 //! トランスポート抽象化層
 //!
-//! QUIC と WebTransport over HTTP/3 の両方を統一的に扱うための型を定義する。
+//! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 を統一的に扱うための型を
+//! 定義する。
 //!
 //! publisher (送信側) と subscriber (受信側) の双方が利用する union API を提供し、
 //! 各バイナリは必要なメソッドだけを呼び出す。
@@ -14,9 +15,9 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::error::TransportError;
-use crate::webtransport::{
-    WtRecvStream, WtSendStream, WtSession, WtSessionState, moqt_close_code, wait_until_terminated,
-};
+use crate::webtransport::{WtSessionState, moqt_close_code, wait_until_terminated};
+use crate::webtransport_h2::{WtH2RecvStream, WtH2SendStream, WtH2Session};
+use crate::webtransport_h3::{WtRecvStream, WtSendStream, WtSession};
 
 /// 受信ストリームから取り出した 1 要素
 pub enum RecvChunk {
@@ -27,7 +28,8 @@ pub enum RecvChunk {
 /// 送信ストリーム
 pub enum SendStream {
     Quic(s2n_quic::stream::SendStream),
-    WebTransport(WtSendStream),
+    WtH3(WtSendStream),
+    WtH2(WtH2SendStream),
 }
 
 impl SendStream {
@@ -38,7 +40,8 @@ impl SendStream {
                 .send(data)
                 .await
                 .map_err(|e| TransportError::Quic(format!("{e}"))),
-            SendStream::WebTransport(s) => s.send(&data).await,
+            SendStream::WtH3(s) => s.send(&data).await,
+            SendStream::WtH2(s) => s.send(&data).await,
         }
     }
 
@@ -46,7 +49,8 @@ impl SendStream {
     pub fn stream_id(&self) -> u64 {
         match self {
             SendStream::Quic(s) => s.id(),
-            SendStream::WebTransport(s) => s.stream_id(),
+            SendStream::WtH3(s) => s.stream_id(),
+            SendStream::WtH2(s) => s.stream_id(),
         }
     }
 
@@ -54,7 +58,8 @@ impl SendStream {
     pub fn finish(&mut self) -> Result<(), TransportError> {
         match self {
             SendStream::Quic(s) => s.finish().map_err(|e| TransportError::Quic(format!("{e}"))),
-            SendStream::WebTransport(s) => s.finish(),
+            SendStream::WtH3(s) => s.finish(),
+            SendStream::WtH2(s) => s.finish(),
         }
     }
 
@@ -69,7 +74,8 @@ impl SendStream {
                 s.reset(code)
                     .map_err(|e| TransportError::Quic(format!("{e}")))
             }
-            SendStream::WebTransport(s) => s.reset(error_code),
+            SendStream::WtH3(s) => s.reset(error_code),
+            SendStream::WtH2(s) => s.reset(error_code),
         }
     }
 }
@@ -77,7 +83,8 @@ impl SendStream {
 /// 受信ストリーム
 pub enum RecvStream {
     Quic(s2n_quic::stream::ReceiveStream),
-    WebTransport(crate::webtransport::WtRecvStream),
+    WtH3(WtRecvStream),
+    WtH2(WtH2RecvStream),
 }
 
 impl RecvStream {
@@ -95,11 +102,17 @@ impl RecvStream {
                 }
                 Err(e) => Err(TransportError::Quic(format!("{e}"))),
             },
-            RecvStream::WebTransport(s) => match s.recv_chunk().await? {
-                crate::webtransport::RecvChunk::Data(data) => {
+            RecvStream::WtH3(s) => match s.recv_chunk().await? {
+                crate::webtransport_h3::RecvChunk::Data(data) => {
                     Ok(RecvChunk::Data(Bytes::from(data)))
                 }
-                crate::webtransport::RecvChunk::End(end) => Ok(RecvChunk::End(end)),
+                crate::webtransport_h3::RecvChunk::End(end) => Ok(RecvChunk::End(end)),
+            },
+            RecvStream::WtH2(s) => match s.recv_chunk().await? {
+                crate::webtransport_h2::RecvChunk::Data(data) => {
+                    Ok(RecvChunk::Data(Bytes::from(data)))
+                }
+                crate::webtransport_h2::RecvChunk::End(end) => Ok(RecvChunk::End(end)),
             },
         }
     }
@@ -117,7 +130,8 @@ impl RecvStream {
                 s.stop_sending(code)
                     .map_err(|e| TransportError::Quic(format!("{e}")))
             }
-            RecvStream::WebTransport(s) => s.stop_sending(error_code),
+            RecvStream::WtH3(s) => s.stop_sending(error_code),
+            RecvStream::WtH2(s) => s.stop_sending(error_code),
         }
     }
 
@@ -125,7 +139,8 @@ impl RecvStream {
     pub fn stream_id(&self) -> u64 {
         match self {
             RecvStream::Quic(s) => s.id(),
-            RecvStream::WebTransport(s) => s.stream_id(),
+            RecvStream::WtH3(s) => s.stream_id(),
+            RecvStream::WtH2(s) => s.stream_id(),
         }
     }
 }
@@ -134,7 +149,7 @@ impl RecvStream {
 ///
 /// 将来の FETCH 等でデータストリームを開く際にも使用する。
 ///
-/// WebTransport では `WtSession` を `Arc<Mutex<...>>` で共有する。`StreamHandle` は
+/// WebTransport では session を `Arc<Mutex<...>>` で共有する。`StreamHandle` は
 /// 複数の非同期タスクから clone され、各操作は送信ストリームの open と 1 回の
 /// send のように await をまたいでも短時間で終わるため、チャネルで単一所有者へ
 /// 依頼する構成より `Mutex` の方が構成を単純にできる。
@@ -142,11 +157,12 @@ impl RecvStream {
 /// 一方、受信ループ (peer 起動ストリームの accept) は次の 1 件が届くまで待ち続ける。
 /// その待機をロック内で行うと `open_send_stream` / `send_datagram` / `close` が
 /// 待たされるため、受信側は receiver を acceptor が持ち、ロック外で待つ
-/// (`WtSession::take_uni_receiver` / `take_bi_receiver`)。
+/// (`WtSession::take_uni_receiver` / `WtH2Session::take_uni_receiver`)。
 #[derive(Clone)]
 pub enum StreamHandle {
     Quic(s2n_quic::connection::Handle),
-    WebTransport(Arc<Mutex<WtSession>>),
+    WtH3(Arc<Mutex<WtSession>>),
+    WtH2(Arc<Mutex<WtH2Session>>),
 }
 
 impl StreamHandle {
@@ -161,10 +177,15 @@ impl StreamHandle {
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
                 Ok(SendStream::Quic(stream))
             }
-            StreamHandle::WebTransport(session) => {
+            StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 let stream = session.open_uni_stream().await?;
-                Ok(SendStream::WebTransport(stream))
+                Ok(SendStream::WtH3(stream))
+            }
+            StreamHandle::WtH2(session) => {
+                let mut session = session.lock().await;
+                let stream = session.open_uni_stream().await?;
+                Ok(SendStream::WtH2(stream))
             }
         }
     }
@@ -184,14 +205,16 @@ impl StreamHandle {
                 let (recv, send) = stream.split();
                 Ok((SendStream::Quic(send), RecvStream::Quic(recv)))
             }
-            StreamHandle::WebTransport(session) => {
+            StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 let wt_bi = session.open_bi_stream().await?;
                 let (send, recv) = wt_bi.into_parts();
-                Ok((
-                    SendStream::WebTransport(send),
-                    RecvStream::WebTransport(recv),
-                ))
+                Ok((SendStream::WtH3(send), RecvStream::WtH3(recv)))
+            }
+            StreamHandle::WtH2(session) => {
+                let mut session = session.lock().await;
+                let (send, recv) = session.open_bi_stream().await?;
+                Ok((SendStream::WtH2(send), RecvStream::WtH2(recv)))
             }
         }
     }
@@ -211,7 +234,12 @@ impl StreamHandle {
                 handle.close(err);
                 Ok(())
             }
-            StreamHandle::WebTransport(session) => {
+            StreamHandle::WtH3(session) => {
+                let code = moqt_close_code(code)?;
+                let mut session = session.lock().await;
+                session.close(code, reason).await
+            }
+            StreamHandle::WtH2(session) => {
                 let code = moqt_close_code(code)?;
                 let mut session = session.lock().await;
                 session.close(code, reason).await
@@ -236,7 +264,11 @@ impl StreamHandle {
                     .map_err(|e| TransportError::Quic(format!("datagram send error: {e}")))?;
                 Ok(())
             }
-            StreamHandle::WebTransport(session) => {
+            StreamHandle::WtH3(session) => {
+                let session = session.lock().await;
+                session.send_datagram(data).await
+            }
+            StreamHandle::WtH2(session) => {
                 let session = session.lock().await;
                 session.send_datagram(data).await
             }
@@ -246,7 +278,8 @@ impl StreamHandle {
     /// datagram を受信する (subscriber 側で使用)
     ///
     /// QUIC では `s2n-quic` の datagram プロバイダーから、WebTransport では
-    /// `WtSession::take_buffered_datagrams` から取得する。
+    /// `WtSession::take_buffered_datagrams` / `WtH2Session::take_buffered_datagrams`
+    /// から取得する。
     /// WebTransport ではセッション終了を検知した場合に `ConnectionClosed` を返し、
     /// MOQT 層の受信ループを待たせない。
     pub async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>, TransportError> {
@@ -263,7 +296,11 @@ impl StreamHandle {
                 result.map_err(|e| TransportError::Quic(format!("datagram query error: {e}")))?;
                 Ok(datagrams)
             }
-            StreamHandle::WebTransport(session) => {
+            StreamHandle::WtH3(session) => {
+                let session = session.lock().await;
+                session.take_buffered_datagrams()
+            }
+            StreamHandle::WtH2(session) => {
                 let session = session.lock().await;
                 session.take_buffered_datagrams()
             }
@@ -274,12 +311,20 @@ impl StreamHandle {
 /// 単方向ストリーム (data stream) を受け入れるためのアクセプター (subscriber 側で使用)
 pub enum StreamAcceptor {
     Quic(s2n_quic::connection::ReceiveStreamAcceptor),
-    WebTransport {
+    WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
         /// 単方向受信ストリームの receiver (ロック外で待つ)
         uni_rx: mpsc::Receiver<WtRecvStream>,
         /// セッション状態 (§6 の終了 / h3 層が返した接続エラー) の観測用 (ロック外で待つ)
+        session_state: watch::Receiver<WtSessionState>,
+    },
+    WtH2 {
+        /// ストリームを開く側で使う session。accept ではロックを取らない
+        session: Arc<Mutex<WtH2Session>>,
+        /// 単方向受信ストリームの receiver (ロック外で待つ)
+        uni_rx: mpsc::UnboundedReceiver<WtH2RecvStream>,
+        /// セッション状態 (§6.12 の終了 / 接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
     },
 }
@@ -288,7 +333,7 @@ impl StreamAcceptor {
     /// 単方向ストリーム (data stream) を 1 つ受け入れる
     ///
     /// QUIC では接続が閉じた場合に `Ok(None)` を返す。WebTransport では接続が閉じた場合も
-    /// セッションが終了した場合も、h3 層が接続エラーを返して接続を閉じた場合も
+    /// セッションが終了した場合も、接続層が接続エラーを返して接続を閉じた場合も
     /// `ConnectionClosed` を返す (MOQT 層の受信ループを待たせないため)。
     pub async fn accept_recv_stream(&mut self) -> Result<Option<RecvStream>, TransportError> {
         match self {
@@ -299,7 +344,7 @@ impl StreamAcceptor {
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
                 Ok(stream.map(RecvStream::Quic))
             }
-            StreamAcceptor::WebTransport {
+            StreamAcceptor::WtH3 {
                 session: _session,
                 uni_rx,
                 session_state,
@@ -308,12 +353,32 @@ impl StreamAcceptor {
                 // `open_send_stream` / `send_datagram` / `close` で使える
                 tokio::select! {
                     received = uni_rx.recv() => match received {
-                        Some(s) => Ok(Some(RecvStream::WebTransport(s))),
+                        Some(s) => Ok(Some(RecvStream::WtH3(s))),
                         // ルーティングタスクが終了した = QUIC 接続が閉じた (h3 層の接続エラーを
                         // 検知して閉じた場合も含む)
                         None => Err(TransportError::ConnectionClosed),
                     },
                     // セッション終了 (§6) や h3 層の接続エラーを検知したら accept を待ち続けない
+                    _ = wait_until_terminated(session_state) => {
+                        Err(TransportError::ConnectionClosed)
+                    }
+                }
+            }
+            StreamAcceptor::WtH2 {
+                session: _session,
+                uni_rx,
+                session_state,
+            } => {
+                // ロックを保持せずに待つ。解放後も session は
+                // `open_send_stream` / `send_datagram` / `close` で使える
+                tokio::select! {
+                    received = uni_rx.recv() => match received {
+                        Some(s) => Ok(Some(RecvStream::WtH2(s))),
+                        // driver タスクが終了した = 接続が閉じた (接続エラーを
+                        // 検知して閉じた場合も含む)
+                        None => Err(TransportError::ConnectionClosed),
+                    },
+                    // セッション終了 (§6.12) や接続エラーを検知したら accept を待ち続けない
                     _ = wait_until_terminated(session_state) => {
                         Err(TransportError::ConnectionClosed)
                     }
@@ -330,12 +395,20 @@ impl StreamAcceptor {
 /// publisher はこのストリームを受理しなければ要求に応答できない。
 pub enum BidiStreamAcceptor {
     Quic(s2n_quic::connection::BidirectionalStreamAcceptor),
-    WebTransport {
+    WtH3 {
         /// ストリームを開く側で使う session。accept ではロックを取らない
         session: Arc<Mutex<WtSession>>,
         /// 双方向受信ストリームの receiver (ロック外で待つ)
         bi_rx: mpsc::Receiver<(WtSendStream, WtRecvStream)>,
         /// セッション状態 (§6 の終了 / h3 層が返した接続エラー) の観測用 (ロック外で待つ)
+        session_state: watch::Receiver<WtSessionState>,
+    },
+    WtH2 {
+        /// ストリームを開く側で使う session。accept ではロックを取らない
+        session: Arc<Mutex<WtH2Session>>,
+        /// 双方向受信ストリームの receiver (ロック外で待つ)
+        bi_rx: mpsc::UnboundedReceiver<(WtH2SendStream, WtH2RecvStream)>,
+        /// セッション状態 (§6.12 の終了 / 接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
     },
 }
@@ -344,11 +417,12 @@ impl BidiStreamAcceptor {
     /// 双方向ストリーム (peer 起動 request stream) を 1 つ受け入れる
     ///
     /// QUIC では接続が閉じた場合に `Ok(None)` を返す。WebTransport では接続が閉じた場合も
-    /// セッションが終了した場合も、h3 層が接続エラーを返して接続を閉じた場合も
+    /// セッションが終了した場合も、接続層が接続エラーを返して接続を閉じた場合も
     /// `ConnectionClosed` を返す (`accept_recv_stream` と同じ)。
-    /// WebTransport では WT の双方向ストリームヘッダーを読み捨てた後の
-    /// payload 部分が返る (`BidiStreamAcceptor::WebTransport` が受け取る `WtSendStream` /
-    /// `WtRecvStream` は `route_bi_stream` が作る)。
+    /// WebTransport over HTTP/3 では WT の双方向ストリームヘッダーを読み捨てた後の
+    /// payload 部分が返る (`BidiStreamAcceptor::WtH3` が受け取る `WtSendStream` /
+    /// `WtRecvStream` は `route_bi_stream` が作る)。WebTransport over HTTP/2 では
+    /// ストリームの区別が capsule にあるため、読み捨てるヘッダーは無い。
     pub async fn accept_bidi_stream(
         &mut self,
     ) -> Result<Option<(SendStream, RecvStream)>, TransportError> {
@@ -363,7 +437,7 @@ impl BidiStreamAcceptor {
                     (SendStream::Quic(send), RecvStream::Quic(recv))
                 }))
             }
-            BidiStreamAcceptor::WebTransport {
+            BidiStreamAcceptor::WtH3 {
                 session: _session,
                 bi_rx,
                 session_state,
@@ -372,14 +446,36 @@ impl BidiStreamAcceptor {
                 tokio::select! {
                     received = bi_rx.recv() => match received {
                         Some((send, recv)) => Ok(Some((
-                            SendStream::WebTransport(send),
-                            RecvStream::WebTransport(recv),
+                            SendStream::WtH3(send),
+                            RecvStream::WtH3(recv),
                         ))),
                         // ルーティングタスクが終了した = QUIC 接続が閉じた
                         // (`accept_recv_stream` と同じ扱い)
                         None => Err(TransportError::ConnectionClosed),
                     },
                     // セッション終了 (§6) や h3 層の接続エラーを検知したら accept を待ち続けない
+                    _ = wait_until_terminated(session_state) => {
+                        Err(TransportError::ConnectionClosed)
+                    }
+                }
+            }
+            BidiStreamAcceptor::WtH2 {
+                session: _session,
+                bi_rx,
+                session_state,
+            } => {
+                // ロックを保持せずに待つ
+                tokio::select! {
+                    received = bi_rx.recv() => match received {
+                        Some((send, recv)) => Ok(Some((
+                            SendStream::WtH2(send),
+                            RecvStream::WtH2(recv),
+                        ))),
+                        // driver タスクが終了した = 接続が閉じた
+                        // (`accept_recv_stream` と同じ扱い)
+                        None => Err(TransportError::ConnectionClosed),
+                    },
+                    // セッション終了 (§6.12) や接続エラーを検知したら accept を待ち続けない
                     _ = wait_until_terminated(session_state) => {
                         Err(TransportError::ConnectionClosed)
                     }

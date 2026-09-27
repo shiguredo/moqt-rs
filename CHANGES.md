@@ -11,7 +11,13 @@
 
 ## develop
 
-- [CHANGE] example の crate 名を moq-publisher / moq-subscriber / moq (transport crate) に変更する
+- [CHANGE] example の接続経路を `--transport` (quic / wt-h3 / wt-h2) で選ぶようにし、`--url` の scheme を `moqt://` に統一する
+  - `https://` による WebTransport over HTTP/3 の選択を廃止する
+  - @voluntas
+- [CHANGE] example の crate 名を moq-publisher / moq-subscriber / tokio-moq (transport crate) に変更する
+  - @voluntas
+- [ADD] example が WebTransport over HTTP/2 (TCP+TLS、ALPN h2) で relay に接続できるようにする
+  - shiguredo_http2 と tokio-rustls を追加する
   - @voluntas
 - [ADD] example が URL の MSF fragment (`#msf:<track-identifier>&c4m=<token>`) を MSF 仕様に従って検証し、`c4m` パラメータを SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する
   - @voluntas

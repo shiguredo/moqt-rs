@@ -39,7 +39,8 @@ use crate::error::{Result, TransportError};
 use crate::transport::{
     BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
 };
-use crate::webtransport::WtSession;
+use crate::webtransport_h2::WtH2Session;
+use crate::webtransport_h3::WtSession;
 
 /// デフォルトの Subscriber Priority
 const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
@@ -696,7 +697,7 @@ impl MoqtClient {
         Ok((client, StreamAcceptor::Quic(recv_acceptor)))
     }
 
-    /// WebTransport 接続で MoQT client を確立する
+    /// WebTransport over HTTP/3 接続で MoQT client を確立する
     ///
     /// draft-ietf-moq-transport-21 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
@@ -714,7 +715,7 @@ impl MoqtClient {
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
-        let handle = StreamHandle::WebTransport(shared.clone());
+        let handle = StreamHandle::WtH3(shared.clone());
         // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
         // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
         // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
@@ -735,7 +736,7 @@ impl MoqtClient {
             let mut s = shared.lock().await;
             s.open_uni_stream().await?
         };
-        let mut control_send = SendStream::WebTransport(wt_send);
+        let mut control_send = SendStream::WtH3(wt_send);
 
         let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
@@ -748,7 +749,7 @@ impl MoqtClient {
             let mut s = shared.lock().await;
             s.accept_uni_stream().await?
         };
-        let mut control_recv = ControlStream::new(RecvStream::WebTransport(wt_recv));
+        let mut control_recv = ControlStream::new(RecvStream::WtH3(wt_recv));
         let stream_type = match control_recv.read_stream_type().await? {
             StreamRead::Value(stream_type) => stream_type,
             StreamRead::Closed(end) => {
@@ -765,7 +766,7 @@ impl MoqtClient {
             control_send,
             handle,
             control_recv,
-            BidiStreamAcceptor::WebTransport {
+            BidiStreamAcceptor::WtH3 {
                 session: shared.clone(),
                 bi_rx: wt_bi_rx,
                 session_state: session_state.clone(),
@@ -775,7 +776,94 @@ impl MoqtClient {
         .await?;
         Ok((
             client,
-            StreamAcceptor::WebTransport {
+            StreamAcceptor::WtH3 {
+                session: shared,
+                uni_rx: wt_uni_rx,
+                session_state,
+            },
+        ))
+    }
+
+    /// WebTransport over HTTP/2 接続で MoQT client を確立する
+    ///
+    /// draft-ietf-moq-transport-21 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
+    /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
+    ///
+    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// SETUP の AUTHORIZATION_TOKEN として送る。
+    ///
+    /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
+    /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
+    /// publisher も本 API を使える。
+    pub async fn establish_wt_h2(
+        wt_session: WtH2Session,
+        impl_name: &str,
+        c4m_tokens: &[Vec<u8>],
+        task_monitor: &tokio_metrics::TaskMonitor,
+    ) -> Result<(Self, StreamAcceptor)> {
+        let shared = Arc::new(TokioMutex::new(wt_session));
+        let handle = StreamHandle::WtH2(shared.clone());
+        // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
+        // session のロックを保持しないようにする (`WtH2Session::take_uni_receiver`)。
+        // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
+        // accept の待機中に観測し、受信ループを待たせないため)。
+        let (wt_uni_rx, wt_bi_rx, session_state) = {
+            let mut s = shared.lock().await;
+            let uni_rx = s.take_uni_receiver().ok_or_else(|| {
+                TransportError::Internal("uni stream receiver already taken".into())
+            })?;
+            let bi_rx = s.take_bi_receiver().ok_or_else(|| {
+                TransportError::Internal("bidi stream receiver already taken".into())
+            })?;
+            let session_state = s.session_state_receiver();
+            (uni_rx, bi_rx, session_state)
+        };
+
+        let wt_send = {
+            let mut s = shared.lock().await;
+            s.open_uni_stream().await?
+        };
+        let mut control_send = SendStream::WtH2(wt_send);
+
+        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
+        let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
+
+        let setup_msg = pop_send_control(&mut session)?;
+        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        tracing::info!("Sent SETUP message");
+
+        let wt_recv = {
+            let mut s = shared.lock().await;
+            s.accept_uni_stream().await?
+        };
+        let mut control_recv = ControlStream::new(RecvStream::WtH2(wt_recv));
+        let stream_type = match control_recv.read_stream_type().await? {
+            StreamRead::Value(stream_type) => stream_type,
+            StreamRead::Closed(end) => {
+                let _ = session.recv_control_stream_closed(end);
+                return Err(TransportError::Internal(
+                    "control stream closed before stream type".into(),
+                ));
+            }
+        };
+        session.recv_control_stream_type(stream_type)?;
+
+        let client = Self::finish_handshake(
+            session,
+            control_send,
+            handle,
+            control_recv,
+            BidiStreamAcceptor::WtH2 {
+                session: shared.clone(),
+                bi_rx: wt_bi_rx,
+                session_state: session_state.clone(),
+            },
+            task_monitor,
+        )
+        .await?;
+        Ok((
+            client,
+            StreamAcceptor::WtH2 {
                 session: shared,
                 uni_rx: wt_uni_rx,
                 session_state,
