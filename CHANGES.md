@@ -449,6 +449,9 @@
 
 ### misc
 
+- [ADD] secrets.TEST_MOQT_URI の relay へ moq-publisher を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
+  - secrets.TEST_MOQT_URI が未設定の場合はテストを実行しない
+  - @voluntas
 - [UPDATE] moq-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
   - 送信経路から分離した `build_catalog` で、video / audio の codec と必須フィールドの組み合わせが `MsfCatalogDocument::encode` に成功することを固定する
   - @voluntas

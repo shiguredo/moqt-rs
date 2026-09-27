@@ -1,0 +1,131 @@
+# GitHub Actions による E2E テスト
+#
+# - secrets.TEST_MOQT_URI に設定した relay へ moq-publisher を接続し、SETUP と
+#   PUBLISH (video / catalog) が受理されて疑似キャプチャの映像が配信されることを検証する
+# - secrets.TEST_MOQT_URI が未設定の場合 (fork からの PR など) はテストを実行しない
+# - examples が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
+#   持つため macos-15 を使う (ci.yml と同じ理由)
+# - 公開ログに relay のホストやトークンを残さないよう、接続先 (authority) と fragment は
+#   ::add-mask:: でマスクする
+
+name: E2E Test
+
+on:
+  push:
+    branches:
+      - develop
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    timeout-minutes: 60
+    runs-on: macos-15
+    env:
+      TEST_MOQT_URI: ${{ secrets.TEST_MOQT_URI }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: TEST_MOQT_URI が未設定の場合はスキップする
+        if: env.TEST_MOQT_URI == ''
+        run: echo "TEST_MOQT_URI is not set; skipping the E2E test"
+
+      - name: moq-publisher をビルドする
+        if: env.TEST_MOQT_URI != ''
+        run: cargo build -p moq-publisher
+
+      - name: relay へ PUBLISH できることを確認する
+        if: env.TEST_MOQT_URI != ''
+        run: |
+          set -euo pipefail
+
+          # 接続先の host / authority と fragment をマスクする。secrets 全体は GitHub が
+          # 自動でマスクするが、ログには host や authority 単体で現れることがある。
+          authority="${TEST_MOQT_URI#*://}"
+          authority="${authority%%/*}"
+          authority="${authority%%[?#]*}"
+          if [ "${authority#\[}" != "$authority" ]; then
+            # IPv6 リテラルは `[...]` の中身を host とする
+            host="${authority#[}"
+            host="${host%%]*}"
+          else
+            host="${authority%%:*}"
+          fi
+          echo "::add-mask::$host"
+          echo "::add-mask::$authority"
+          if [ "${TEST_MOQT_URI#*#}" != "$TEST_MOQT_URI" ]; then
+            echo "::add-mask::${TEST_MOQT_URI#*#}"
+          fi
+
+          log="e2e-publisher.log"
+          # 疑似キャプチャを使い、映像 (AV1) と catalog を PUBLISH する。
+          # MOQT_PUBLISH_DIAG=1 は publish ループの進み具合をログに出す診断スイッチ。
+          RUST_LOG=info MOQT_PUBLISH_DIAG=1 ./target/debug/moq-publisher \
+            --url "$TEST_MOQT_URI" \
+            --fake-capture-device \
+            --no-audio \
+            > "$log" 2>&1 &
+          publisher_pid=$!
+
+          # ログにパターンが現れるまで最大 60 秒待つ。publisher が先に終了したら打ち切る
+          wait_for_log() {
+            pattern="$1"
+            for _ in $(seq 1 60); do
+              if grep -qE "$pattern" "$log"; then
+                return 0
+              fi
+              if ! kill -0 "$publisher_pid" 2>/dev/null; then
+                return 1
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
+          # 失敗時は publisher を止めてログを出し、異常終了する
+          fail() {
+            echo "E2E test failed: $1"
+            # ログには名前解決したアドレスも出るため、出力前にマスクする
+            resolved="$(grep -oE "to [0-9A-Fa-f:.]+" "$log" 2>/dev/null | cut -d" " -f2 | sort -u || true)"
+            for addr in $resolved; do
+              echo "::add-mask::$addr"
+            done
+            kill -KILL "$publisher_pid" 2>/dev/null || true
+            wait "$publisher_pid" 2>/dev/null || true
+            cat "$log"
+            exit 1
+          }
+
+          # video / catalog の PUBLISH が受理されて publish ループに入るまで待つ
+          if ! wait_for_log "Starting publish loop"; then
+            fail "PUBLISH did not complete"
+          fi
+
+          # 疑似キャプチャの映像がエンコードされて配信されるまで待つ
+          if ! wait_for_log "PUBDIAG .*video_groups=[1-9]"; then
+            fail "the publisher did not send any video group"
+          fi
+
+          # SIGINT で graceful shutdown を起動し、exit code 0 で終わることを確認する
+          kill -INT "$publisher_pid" 2>/dev/null || true
+          for _ in $(seq 1 15); do
+            if ! kill -0 "$publisher_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$publisher_pid" 2>/dev/null; then
+            fail "the publisher did not stop after SIGINT"
+          fi
+          if ! wait "$publisher_pid"; then
+            fail "the publisher exited with a non-zero status"
+          fi
+          if ! grep -q "Pipeline stopped" "$log"; then
+            fail "graceful shutdown did not complete"
+          fi
+
+          echo "E2E test passed"
