@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-url-whitespace
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
@@ -19,7 +19,7 @@
 - `moqt://127.0.0.1:4433/a b` は path `/a b` として受理され、
   SETUP の作成時に `Fatal: session error 0x9: PATH does not conform to RFC 3986` になる
 
-RFC 3986 §3.2 の host と §3.3 の path に空白は含まれない (`pchar` に空白は無い)。
+RFC 3986 §3.2.2 の host と §3.3 の path に空白は含まれない (`pchar` に空白は無い)。
 `src/parameter.rs` の `validate_path` / `validate_authority` は接続時に拒否するが、
 `parse_url` の時点で拒否すれば `--url` の検証として原因が伝わる。
 
