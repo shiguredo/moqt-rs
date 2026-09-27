@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moqt-example-help-flag
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
