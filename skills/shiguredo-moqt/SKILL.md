@@ -52,6 +52,9 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `object_properties` | Object-scoped Properties |
 | `track_properties` | Track Properties |
 | `msf` | MSF Catalog / Timeline / URI |
+| `c4m` | C4M (CAT / CWT) のトークン発行 / 検証と `moqt` クレームの認可 |
+| `c4m::cbor` / `c4m::cose` / `c4m::crypto` | CBOR / COSE のコーデックと暗号 trait |
+| `c4m::cat` / `c4m::jwk` / `c4m::jwt` / `c4m::dpop` | CAT / JWK / JWT / DPoP proof |
 | `varint` | 可変長整数 (vi64) |
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
@@ -907,6 +910,83 @@ fn parse_msf_fragment(fragment: &str) -> Result<MsfFragment, MessageError>
 
 `MsfFragment` は `parameter_values` / `connection_types` / `wallclock_ranges` / `mediatime_ranges` / `location_ranges` / `c4m_tokens` のアクセサを持つ。
 
+## C4M (`c4m`)
+
+draft-ietf-moq-c4m-01 (CAT-4-MOQT) の認可トークンを扱う。CBOR (RFC 8949) / COSE (RFC 9052) / CWT (RFC 8392) / CAT (CTA-5007-B) を含む。
+
+```rust,no_run
+# #[cfg(feature = "aws-lc-rs")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder};
+use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+use shiguredo_moqt::c4m::crypto::CoseKey;
+use shiguredo_moqt::c4m::{MoqtAction, MoqtClaim, MoqtScope};
+
+let crypto = AwsLcRsCrypto::new();
+let key = CoseKey::symmetric([0xab; 32]);
+
+// 発行 (認可サーバー側): compact 形式 / COSE 形式を選べる
+let token_text = CatTokenBuilder::new()
+    .issuer("https://auth.example.com")
+    .audience("https://relay.example.com")
+    .expiration(1_700_086_400.0)
+    .moqt(
+        MoqtClaim::new().scope(
+            MoqtScope::new([MoqtAction::Publish, MoqtAction::Fetch])
+                .namespace_match(shiguredo_moqt::c4m::NamespaceMatch::Match(
+                    shiguredo_moqt::c4m::Match::Exact(b"example.com".to_vec()),
+                )),
+        ),
+    )
+    .jwk_thumbprint([0x01; 32])
+    .catdpop(300.0, true)
+    .build_compact(&crypto, &key)?;
+
+// 検証 (relay / endpoint 側)
+let token = CatToken::decode(token_text.as_bytes())?;
+token.verify(&crypto, &key)?;
+token.claims().validate(&shiguredo_moqt::c4m::cat::ClaimValidationOptions {
+    reference_time_seconds: 1_700_000_000.0,
+    expected_issuers: &["https://auth.example.com"],
+    ..Default::default()
+})?;
+assert!(token
+    .claims()
+    .authorize(MoqtAction::Publish, &[b"example.com"], b"live"));
+# Ok(())
+# }
+```
+
+主な API:
+
+```rust
+// トークンの発行 / 検証
+use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder, CatClaims, ClaimValidationOptions, TokenFormat, VerifyOptions};
+fn CatTokenBuilder::build_compact(&self, crypto: &C, key: &CoseKey) -> Result<String, CatError>
+fn CatTokenBuilder::build_cose(&self, crypto: &C, key: &CoseKey) -> Result<Vec<u8>, CatError>
+fn CatToken::decode(input: &[u8]) -> Result<CatToken, CatError>
+fn CatToken::verify(&self, crypto: &C, key: &CoseKey) -> Result<(), CatError>
+fn CatToken::verify_with(&self, crypto: &C, key: &CoseKey, options: &VerifyOptions) -> Result<(), CatError>
+fn CatToken::decode_moqt_auth_token(token_type: u64, value: &[u8]) -> Result<CatToken, CatError>
+
+// moqt クレームの認可
+use shiguredo_moqt::c4m::{Match, MoqtAction, MoqtClaim, MoqtScope, NamespaceMatch};
+fn MoqtClaim::authorize(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool
+fn MoqtScope::allows(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool
+
+// 暗号 trait (feature "aws-lc-rs" で実装を提供する)
+use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey, EcCurve, OkpCurve};
+
+// DPoP proof
+use shiguredo_moqt::c4m::dpop::{DpopProof, DpopProofBuilder, DpopReplayCache, DpopVerification};
+fn DpopProof::decode(input: &str) -> Result<DpopProof, DpopError>
+fn DpopProof::verify_against_token(&self, crypto: &C, request: &DpopVerification<'_>, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
+```
+
+- 直列化は compact 形式 (draft 付録 A の `base64url(protected).base64url(claims).base64url(signature)`) と COSE 形式 (CWT タグ + COSE_Sign1 / COSE_Mac0) の両方を扱う
+- 暗号実装は `aws-lc-rs` feature でのみ提供する。既定ビルドは no_std のままで、`CoseCrypto` trait と鍵表現だけを持つ
+- 対応アルゴリズムは HMAC 256/384/512・ES256/384/512・EdDSA (Ed25519)。RSA は未対応
+
 ## その他
 
 ```rust
@@ -918,10 +998,17 @@ fn checked_len(len: u64, remaining: usize) -> Result<usize, MessageError>
 fn encoded_len(val: u64) -> usize
 
 // name
-use shiguredo_moqt::name::{parse_name, parse_name_with_percent_encoding, serialize_name};
+use shiguredo_moqt::name::{
+    parse_name, parse_name_with_percent_encoding, parse_namespace, parse_track_name,
+    serialize_name, serialize_namespace, serialize_track_name,
+};
 fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String
 fn parse_name(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError>
 fn parse_name_with_percent_encoding(s: &str) -> Result<(TrackNamespace, Vec<u8>), NameParseError>
+fn serialize_namespace(namespace: &TrackNamespace) -> String
+fn parse_namespace(s: &str) -> Result<TrackNamespace, NameParseError>
+fn serialize_track_name(track_name: &[u8]) -> String
+fn parse_track_name(s: &str) -> Result<Vec<u8>, NameParseError>
 
 // grease
 use shiguredo_moqt::grease::{generate, is_grease};
@@ -964,6 +1051,18 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04>
 - draft-ietf-moq-msf-01 - MOQT Streaming Format
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01>
+- draft-ietf-moq-c4m-01 - Authorization scheme for MOQT using Common Access Tokens
+  - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01>
+- draft-nandakumar-moq-generic-dpop-proof-00 - Application-Agnostic Demonstrating Proof-of-Possession
+  - <https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/>
+- RFC 8949 - Concise Binary Object Representation (CBOR)
+  - <https://www.rfc-editor.org/rfc/rfc8949>
+- RFC 9052 / RFC 9053 - CBOR Object Signing and Encryption (COSE)
+  - <https://www.rfc-editor.org/rfc/rfc9052>
+- RFC 8392 - CBOR Web Token (CWT)
+  - <https://www.rfc-editor.org/rfc/rfc8392>
+- CTA-5007-B - Common Access Token (CAT)
+  - <https://shop.cta.tech/products/cta-5007-b>
 
 ## 注意事項
 
@@ -972,4 +1071,6 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 - `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可
+- `c4m` の署名 / 検証には `aws-lc-rs` feature が必要。無効時は `CatToken::verify` / `DpopProof::verify_signature` などを呼べる実装が存在しない (trait と鍵表現だけがビルドされる)
+- `c4m` のトークン発行は HMAC-SHA256 に RFC 9053 の `5` を使う。draft-ietf-moq-c4m-01 付録 A のベクタが使う `-4` は検証でのみ HMAC-SHA256 として受理する
 - 開発中のライブラリであり、仕様は積極的に変更される場合がある

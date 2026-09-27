@@ -201,10 +201,58 @@ Public / Private の配置はアプリケーション層の責務です。
 - §9 / §10 (Log / Metrics track)：packaging 値のみで、payload は MOQLOG / MOQMETRICS 側の定義で未実装
 - §4.3 (Content protection)：catalog の signaling は扱うが、Secure Objects による暗号化と復号は未実装
 
+## C4M (Common Access Token)
+
+draft-ietf-moq-c4m-01 (Authorization scheme for MOQT using Common Access
+Tokens) と CTA-5007-B (Common Access Token) の実装状況です。
+
+### トークン
+
+- CBOR (RFC 8949) のコーデック (決定論的エンコード、definite / indefinite のデコード、深度制限)
+- COSE (RFC 9052) の COSE_Sign1 (タグ 18) / COSE_Mac0 (タグ 17) と CWT (タグ 61)
+- CAT のクレーム (RFC 8392 の `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `cti` / `cnf` と IANA 登録の CAT クレームキー)
+- 直列化は 2 形式
+  - compact: `base64url(protected).base64url(claims).base64url(signature)` (draft-ietf-moq-c4m-01 付録 A のテストベクタ)
+  - COSE: CWT タグ + COSE_Sign1 / COSE_Mac0
+- 発行 (署名) と検証。アルゴリズムは HMAC 256/384/512、ES256/384/512、EdDSA (Ed25519)
+- 付録 A のテストベクタ (CBOR エンコード / トークン構造 / DPoP バインディング / 認可マッチング / 検証) をテストで固定
+
+### moqt クレーム
+
+- `moqt` (claim key 327) のアクション / 名前空間 / トラックの exact / prefix / suffix マッチと `nil` の末尾固定
+- `moqt-reval` (claim key 328)
+- `CatClaims::authorize` による認可判定
+
+### DPoP
+
+- `cnf` の JWK サムプリント (`jkt`) と `catdpop` (ウィンドウ / jti)
+- JWT (JWS compact) の DPoP proof の検証 (署名 / 鍵バインディング / 鮮度 / `ath` / Authorization Context / リプレイ)
+- DPoP proof の発行 (`DpopProofBuilder`)
+
+### 暗号
+
+- `CoseCrypto` trait に署名 / 検証 / ハッシュを分離し、既定ビルドは暗号実装を一切リンクしない
+- `aws-lc-rs` feature で aws-lc-rs を使う実装を提供する (no_std ターゲットでは使えない)
+
+### 未対応
+
+- CWT 形式の DPoP proof (`dpop-proof+cwt`) は actx の claim label が TBD のため未実装
+- RSA (PS256 / RS256 など) のアルゴリズムは未実装
+- CTA-5007-B の `catu` / `catm` などの HTTP 向けクレームは意味論 (マッチ評価) を実装しない。クレームキーと値は保持する
+- CTA-5007-B 本体は有償仕様のため、クレームキーは IANA の CWT レジストリと draft-ietf-moq-c4m-01 のテストベクタに従う
+
 ## モジュール構成
 
 | モジュール | 概要 |
 | --- | --- |
+| `c4m` | C4M (CAT / CWT) のトークン発行 / 検証と `moqt` クレームの認可 |
+| `c4m::cbor` | CBOR (RFC 8949) の encode / decode |
+| `c4m::cose` | COSE (RFC 9052) の構造とアルゴリズム定義 |
+| `c4m::crypto` | 署名 / 検証 / ハッシュの trait と鍵表現 (aws-lc-rs 実装は feature) |
+| `c4m::cat` | CAT のクレーム / トークン / 発行ビルダー |
+| `c4m::jwk` | JWK (RFC 7517) と JWK サムプリント (RFC 7638) |
+| `c4m::jwt` | JWS compact (RFC 7515) の JWT |
+| `c4m::dpop` | DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof) |
 | `decoder` | バッファ付きインクリメンタル制御メッセージデコーダー |
 | `error` | コーデックエラー型とセッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset の各コード |
 | `grease` | GREASE 値の生成と判定ユーティリティ |
@@ -227,7 +275,7 @@ Public / Private の配置はアプリケーション層の責務です。
 
 | 層 | 主なモジュール | 概要 |
 | --- | --- | --- |
-| Codec / helper | `varint`, `message`, `name`, `message_parameter`, `parameter`, `decoder`, `stream`, `loc`, `msf`, `object_properties`, `track_properties`, `grease`, `error` | ワイヤーフォーマットの encode / decode と検証 |
+| Codec / helper | `varint`, `message`, `name`, `message_parameter`, `parameter`, `decoder`, `stream`, `loc`, `msf`, `object_properties`, `track_properties`, `grease`, `error`, `c4m` | ワイヤーフォーマットの encode / decode と検証 |
 | Stateful helper | `subgroup_tracker`, `session::auth_token_cache::AuthTokenCache`, `session::request_id::RequestIdGenerator`, `session::request_id::RequestIdTracker` | セッション実装で使う状態付き補助コンポーネント |
 | Session | `session` | 1 本の `MOQT Transport Session` に閉じた endpoint-local な protocol state を管理する |
 

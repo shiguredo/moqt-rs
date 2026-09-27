@@ -11,6 +11,11 @@
 
 ## develop
 
+- [ADD] MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `c4m` モジュールを追加する
+  - CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) のコーデックと、`moqt` / `moqt-reval` クレームの認可判定、JWT (JWS compact) の DPoP proof を扱う
+  - トークンは compact 形式 (draft-ietf-moq-c4m-01 付録 A) と COSE 形式 (CWT + COSE_Sign1 / COSE_Mac0) の両方を発行 / 検証できる
+  - 暗号処理は `CoseCrypto` trait に分離し、aws-lc-rs を使う実装を optional feature `aws-lc-rs` で提供する (既定ビルドは no_std のままで暗号実装をリンクしない)
+  - @voluntas
 - [CHANGE] relay 専用の namespace 発見・告知機構 (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS と NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) を削除し、endpoint の publisher / subscriber が直接使う機能に限定する
 - [CHANGE] 定義済みだが未実装の制御メッセージを表す `ControlMessage::Unsupported` を追加する
   - §9 Table 5 に定義済みの `PUBLISH_NAMESPACE` (0x06) / `SUBSCRIBE_NAMESPACE` (0x50) / `SUBSCRIBE_TRACKS` (0x51) / `NAMESPACE` (0x08) / `NAMESPACE_DONE` (0x0E) / `PUBLISH_SKIPPED` (0x0F) を decode できるようにする (公開 enum の variant 追加のため破壊的変更)
