@@ -3,7 +3,7 @@
 - Created: 2026-09-26
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-close-session-message-error-reset
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
@@ -22,6 +22,7 @@ draft-ietf-webtrans-http3-16 §6 (Session Termination) の MUST を満たす。
 
 - h3 層のエラーが「`WT_CLOSE_SESSION` 受信後の追加データ」によるものかを判別し、その場合は CONNECT stream の受信半へ `H3_MESSAGE_ERROR` で `stop_sending` を送る。
 - 判別は純関数に切り出す (`shiguredo_http3::Error` の variant と、セッションが終了しているかを入力にする)。
+- `H3_MESSAGE_ERROR` は HTTP/3 のプロトコルエラーコードであり、§4.4 のアプリケーションエラーコードの remap (`moqt_to_wt_code` / `ApplicationErrorCode::to_http3_code`) に通さない。既存の `WtRecvStream::stop_sending` は Application 経路で remap するため、既存の `session_gone_code` (`StreamErrorCode::Protocol`) と同じ扱いで wire の値をそのまま渡す。値は example 側で再定義せず `shiguredo_http3::ErrorCode::MessageError` を使う。
 - 接続は閉じない (ストリームの reset であり connection error ではない)。h3 の connection error の伝播は `issues/0138` が扱う。
 - 実機確認は `issues/pending/0094` の解消後に行う。
 
