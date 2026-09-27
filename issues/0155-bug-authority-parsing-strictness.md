@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-authority-parsing-strictness
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
@@ -20,10 +20,10 @@ URL の authority に含まれる不正な host と port を、名前解決や�
 
 ## 設計方針
 
-- `[` `]` の中身を `Ipv6Addr` として解釈できない authority は拒否する。`[example.com]` のような reg-name と `[::1]x` のような余分な文字を弾く
-- ポート 0 は拒否する。接続先として使えない
-- userinfo は受理しない。`@` を含む authority は専用のメッセージで拒否し、host として名前解決に回さない
-- zone id は `SocketAddr` として解釈できない。対応するか非対応を doc に明記するかを判断して実装し、`authority_parts` の doc と実装を一致させる
+- `[` `]` の中身を `Ipv6Addr` として解釈できない authority は拒否する。`[example.com]` のような reg-name や `[::1]x` のような余分な文字を弾く。IPvFuture (`[v1.fe80::]`) もこの判定で拒否される (RFC 3986 §3.2.2 は未知の version flag を持つ IP-literal を dereference するアプリケーションに 'address mechanism not supported' のエラーを返すことを推奨する)
+- ポート 0 は拒否する。接続先として使えない (RFC 3986 §3.2.3 の `port = *DIGIT` は 0 も許すが、接続の観点では意味を成さない)
+- userinfo は受理しない。`@` を含む authority は専用のメッセージで拒否し、host として名前解決に回さない。RFC 3986 §3.2 の authority 構文は userinfo を許すが、draft-ietf-moq-transport-21 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った reference 中の userinfo を reject する選択を許す ("Applications may choose to ignore or reject such data when it is received as part of a reference")
+- zone id 付き IPv6 リテラルは非対応とし、拒否する。`std::net::SocketAddr` / `Ipv6Addr` は zone id を解釈できず、接続層が `SocketAddr` 経由のため対応しない。RFC 3986 §3.2.2 も "This syntax does not support IPv6 scoped addressing zone identifiers." と明記する。非対応であることを `authority_parts` の doc に明記し、doc と実装を一致させる
 - 拒否はすべて `TransportError::InvalidAuthority` とし、利用者向けの表示に `QUIC:` を付けない方針を維持する
 
 ## 完了条件
@@ -31,6 +31,6 @@ URL の authority に含まれる不正な host と port を、名前解決や�
 - `[example.com]` と `[::1]x` のような不正な IP-literal の authority が拒否されること
 - ポート 0 の authority が拒否されること
 - `user@host` の authority が名前解決に回らずに拒否されること
-- zone id 付き IPv6 リテラルの扱い (対応または非対応の明記) が決まり、実装と doc が一致していること
+- zone id 付き IPv6 リテラルの authority が拒否され、非対応であることが `authority_parts` の doc に明記されていること
 - 正当な authority (`127.0.0.1` / `127.0.0.1:4443` / `[::1]` / `relay.example.com` / `relay.example.com:443`) が従来どおり受理されること
 - 追加した拒否ケースのテストが `examples/moqt-transport/src/lib.rs` にあること
