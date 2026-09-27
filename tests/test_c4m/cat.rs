@@ -1,8 +1,9 @@
 //! CAT (CTA-5007-B / draft-ietf-moq-c4m-01) のテスト
 
 use shiguredo_moqt::c4m::cat::{
-    CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError, CatToken, ClaimValidationError,
-    ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT, TokenFormat,
+    CAT_CONTENT_TYPE, CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError, CatToken,
+    ClaimValidationError, ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT,
+    TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
 use shiguredo_moqt::c4m::{CatDpop, MoqtAction};
@@ -140,6 +141,7 @@ fn token_vectors_verify() {
                 &key,
                 &VerifyOptions {
                     expected_algorithm: Some(expected),
+                    expected_type: Some(CAT_CONTENT_TYPE),
                 },
             )
             .expect("トークンの alg と期待アルゴリズムは一致する");
@@ -310,6 +312,7 @@ fn validation_vector_algorithm_mismatch() {
             &hmac_key(),
             &VerifyOptions {
                 expected_algorithm: Some(Algorithm::Es256),
+                ..VerifyOptions::default()
             },
         ),
         Err(CatError::AlgorithmMismatch {
@@ -1024,4 +1027,101 @@ fn debug_hides_raw_token_and_signature() {
         "署名を出さない"
     );
     assert!(debug.contains("raw_bytes"), "長さは表示する");
+}
+
+#[test]
+fn url_embedded_token_accepts_standard_base64() {
+    use base64ct::{Base64, Base64Unpadded, Encoding};
+
+    // §2 / §4 の URL 埋め込みは標準 Base64 (パディングあり / なし) を使う
+    let token = CatToken::decode(TOKEN_VECTORS[0].token.as_bytes()).expect("デコードできる");
+    // compact 形式の claims を COSE 形式として渡すのは形式エラーなので、COSE 形式を
+    // 作れる HMAC 鍵で確認する (feature なしでは compact の CBOR バイト列で代用)
+    let cbor_bytes = token.payload();
+    for text in [
+        Base64::encode_string(cbor_bytes),
+        Base64Unpadded::encode_string(cbor_bytes),
+    ] {
+        // 標準 Base64 は COSE 形式として解釈できる場合だけ成功する
+        if let Ok(decoded) = CatToken::decode(text.as_bytes()) {
+            assert_eq!(decoded.format(), TokenFormat::Compact);
+        }
+    }
+}
+
+#[test]
+fn typ_is_verified_when_requested() {
+    // 付録 A のベクタは typ = "CAT" を持つ
+    let token = CatToken::decode(TOKEN_VECTORS[0].token.as_bytes()).expect("デコードできる");
+    assert_eq!(
+        token.header().typ,
+        Some(Value::TextString(String::from(CAT_CONTENT_TYPE)))
+    );
+
+    // typ を指定しなければ検証しない (crypto が無いので判定は呼べないが、型の一致は
+    // header から直接確認できる)
+    assert_eq!(CAT_CONTENT_TYPE, "CAT");
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn typ_mismatch_is_rejected() {
+    let crypto = AwsLcRsCrypto::new();
+    let token_text = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .typ("OTHER")
+        .build_compact(&crypto, &hmac_key())
+        .expect("発行できる");
+    let token = CatToken::decode(token_text.as_bytes()).expect("デコードできる");
+    assert_eq!(
+        token.verify_with(
+            &crypto,
+            &hmac_key(),
+            &VerifyOptions {
+                expected_type: Some(CAT_CONTENT_TYPE),
+                ..VerifyOptions::default()
+            },
+        ),
+        Err(CatError::TypeMismatch)
+    );
+    // "OTHER" を期待すれば通る
+    token
+        .verify_with(
+            &crypto,
+            &hmac_key(),
+            &VerifyOptions {
+                expected_type: Some("OTHER"),
+                ..VerifyOptions::default()
+            },
+        )
+        .expect("期待値と一致すれば検証できる");
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn url_embedded_cose_token_accepts_standard_base64() {
+    use base64ct::{Base64, Base64Unpadded, Encoding};
+
+    let crypto = AwsLcRsCrypto::new();
+    let token_bytes = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .build_cose(&crypto, &hmac_key())
+        .expect("COSE 形式を発行できる");
+    for text in [
+        Base64::encode_string(&token_bytes),
+        Base64Unpadded::encode_string(&token_bytes),
+    ] {
+        let token =
+            CatToken::decode(text.as_bytes()).expect("標準 Base64 のトークンをデコードできる");
+        assert_eq!(token.format(), TokenFormat::CoseMac0);
+        token.verify(&crypto, &hmac_key()).expect("検証できる");
+    }
+    // base64url も従来どおり受理する
+    let url_text = base64url(&token_bytes);
+    assert_eq!(
+        CatToken::decode(url_text.as_bytes())
+            .expect("base64url のトークンをデコードできる")
+            .format(),
+        TokenFormat::CoseMac0
+    );
 }

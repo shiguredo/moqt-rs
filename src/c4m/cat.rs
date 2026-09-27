@@ -116,6 +116,12 @@ pub const CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT: i64 = 3;
 /// MOQT の Auth Token Type (CAT) (draft-ietf-moq-c4m-01 §7.1)
 pub const MOQT_AUTH_TOKEN_TYPE_CAT: u64 = 0x01;
 
+/// CAT の COSE ヘッダの `typ` の値
+///
+/// draft-ietf-moq-c4m-01 付録 A のテストベクタが protected ヘッダに置く値。
+/// [`VerifyOptions::expected_type`] に渡して検証できる。
+pub const CAT_CONTENT_TYPE: &str = "CAT";
+
 /// CAT のトークン直列化
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenFormat {
@@ -594,9 +600,15 @@ impl core::error::Error for ClaimValidationError {}
 
 /// 署名検証のオプション
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct VerifyOptions {
+pub struct VerifyOptions<'a> {
     /// トークンの `alg` に期待するアルゴリズム
     pub expected_algorithm: Option<Algorithm>,
+    /// トークンの `typ` に期待する値
+    ///
+    /// CAT では [`CAT_CONTENT_TYPE`] (`"CAT"`) を指定する。未指定の場合は `typ` を
+    /// 検証しない。`typ` がテキスト文字列でない場合と一致しない場合は
+    /// [`CatError::TypeMismatch`] を返す。
+    pub expected_type: Option<&'a str>,
 }
 
 /// CAT のトークン
@@ -633,7 +645,8 @@ impl CatToken {
     /// トークンをデコードする
     ///
     /// `.` で区切られた 3 分割の compact 形式、COSE 形式の CBOR、COSE 形式を
-    /// base64url で包んだテキストの順に判別する。
+    /// base64url または標準 Base64 で包んだテキストの順に判別する。標準 Base64 は
+    /// URL に埋め込む場合の表現 (draft-ietf-moq-c4m-01 §2 / §4) である。
     pub fn decode(input: &[u8]) -> Result<Self, CatError> {
         let mut token = if let Ok(text) = core::str::from_utf8(input)
             && text.matches('.').count() == 2
@@ -644,7 +657,7 @@ impl CatToken {
                 Ok(token) => token,
                 Err(error) => {
                     if let Ok(text) = core::str::from_utf8(input)
-                        && let Ok(bytes) = super::base64url::decode(text.trim())
+                        && let Ok(bytes) = super::base64url::decode_base64_or_url(text.trim())
                     {
                         Self::decode_cose(&bytes)?
                     } else {
@@ -797,7 +810,7 @@ impl CatToken {
         &self,
         crypto: &C,
         key: &CoseKey,
-        options: &VerifyOptions,
+        options: &VerifyOptions<'_>,
     ) -> Result<(), CatError> {
         let algorithm = self.header.algorithm.ok_or(CatError::MissingAlgorithm)?;
         if let Some(expected) = options.expected_algorithm
@@ -807,6 +820,15 @@ impl CatToken {
                 token: algorithm,
                 expected,
             });
+        }
+        if let Some(expected) = options.expected_type {
+            let actual = match &self.header.typ {
+                Some(Value::TextString(text)) => Some(text.as_str()),
+                _ => None,
+            };
+            if actual != Some(expected) {
+                return Err(CatError::TypeMismatch);
+            }
         }
         crypto.verify(algorithm, key, &self.signing_input, &self.signature)?;
         Ok(())
@@ -1070,6 +1092,8 @@ pub enum CatError {
     DuplicateClaim(i64),
     /// COSE ヘッダに `alg` が無い
     MissingAlgorithm,
+    /// トークンの `typ` が期待する値と一致しない
+    TypeMismatch,
     /// トークンの `alg` が期待するアルゴリズムと一致しない
     AlgorithmMismatch {
         /// トークンのアルゴリズム
@@ -1097,6 +1121,7 @@ impl fmt::Display for CatError {
             Self::UnexpectedType(expected) => write!(f, "expected {expected}"),
             Self::DuplicateClaim(key) => write!(f, "duplicate claim key: {key}"),
             Self::MissingAlgorithm => write!(f, "COSE header has no alg parameter"),
+            Self::TypeMismatch => write!(f, "token typ does not match the expected type"),
             Self::AlgorithmMismatch { token, expected } => write!(
                 f,
                 "token algorithm {:?} does not match expected {:?}",

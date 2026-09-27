@@ -434,7 +434,8 @@
 
 - [ADD] MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `c4m` モジュールを追加する
   - CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) のコーデックと、`moqt` / `moqt-reval` クレームの認可判定、JWT (JWS compact) の DPoP proof を扱う
-  - トークンは compact 形式 (draft-ietf-moq-c4m-01 付録 A) と COSE 形式 (CWT + COSE_Sign1 / COSE_Mac0) の両方を発行 / 検証できる
+  - トークンは compact 形式 (draft-ietf-moq-c4m-01 付録 A) と COSE 形式 (CWT + COSE_Sign1 / COSE_Mac0) の両方を発行 / 検証できる。URL 埋め込み用の標準 Base64 も受理する
+  - `typ` の検証 (`VerifyOptions::expected_type`) に対応する
   - 暗号処理は `CoseCrypto` trait に分離し、aws-lc-rs を使う実装を optional feature `aws-lc-rs` で提供する (既定ビルドは no_std のままで暗号実装をリンクしない)
   - @voluntas
 
