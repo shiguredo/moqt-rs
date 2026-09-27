@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-parse-url-missing-slashes
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
@@ -22,15 +22,16 @@ draft-ietf-moq-transport-21 §6.1 も `moqt-URI = "moqt" "://" authority path-ab
 
 ## 設計方針
 
-- `:` より前を scheme として取り出し、RFC 3986 §3.1 に従い大文字小文字非区別で比較する
-- scheme が `moqt` / `https` の場合に `//` が無ければ、authority の欠落として `{scheme}:// URL requires authority: {url} ...` を返す
+- `:` より前を scheme として取り出し、RFC 3986 §3.1 に従い大文字小文字非区別で比較する。`:` が 1 個も無い URL は scheme を取り出せないため、未対応 scheme と同じエラーにする
+- scheme が `moqt` / `https` の場合に `//` が無ければ、authority の欠落として `{scheme}:// URL requires authority: {url} ...` を返す (大文字 scheme でも同じ判定)
 - 未対応 scheme は従来どおり `unsupported URL scheme: {url} ...` を返す
 - エラーメッセージはすべて入力 URL を含む
 - scheme の比較と `Transport` の決定は既存の挙動 (大文字 scheme の受理、scheme だけを小文字化) を維持する
 
 ## 完了条件
 
-- `moqt:/app` と `moqt:example.com/app` が authority の欠落を示すエラーになり、メッセージに入力 URL が含まれること
-- `ftp://host/path` と `://host/path` は未対応 scheme のエラーのままであること
+- `moqt:/app` と `moqt:example.com/app` が authority の欠落を示すエラーになり、メッセージに入力 URL が含まれること (`MOQT:/app` のような大文字 scheme でも同じエラーになること)
+- `ftp://host/path` と `://host/path` と `:` を含まない URL は未対応 scheme のエラーのままであること
 - `parse_url("moqt://")` / `parse_url("https:///app")` の既存の authority エラーが変わらないこと
 - `moqt://` / `https://` / 大文字 scheme / query 内の `://` の既存テストが変わらないこと
+- 追加した拒否ケースのテストが `examples/moqt-transport/src/lib.rs` に追加されていること (エラーメッセージの完全一致で URL の含有も固定すること)
