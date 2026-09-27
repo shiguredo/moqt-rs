@@ -13,14 +13,14 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 - COSE (RFC 9052 / RFC 9053) の構造と、CAT (CTA-5007-B) のトークン / クレームを実装する
 - 暗号処理 (HMAC / ECDSA / EdDSA) は trait に切り出し、aws-lc-rs 実装を optional feature にする。既定ビルドは no_std のままで暗号実装を一切リンクしない
 - トークンの発行 (署名) と検証の両方を提供する。認可サーバー用途 (moqt-py など) では発行が必須になる
-- DPoP はトークン側の `cnf` (JWK サムプリント) と `catdpop` までを扱う。DPoP proof JWT 自体の検証は別 issue とする
+- DPoP はトークン側の `cnf` (JWK サムプリント) と `catdpop` に加え、JWT (JWS compact) の DPoP proof の検証と発行までを扱う。CWT 形式の DPoP proof (`dpop-proof+cwt`) は actx の claim label が TBD のため対象外とする
 
 ## 現状
 
 - `src/` に CBOR / COSE / CAT / C4M の実装は無い。`src/message_parameter.rs` の `AUTHORIZATION_TOKEN` は token type / value のバイト列を運ぶだけで、type 0x01 (CAT) の解釈はしていない
 - draft-ietf-moq-c4m-01 §7.1.1 は Auth Token Type 0x01 の Token Payload を「CBOR でエンコードした CWT としての CAT」と定義し、§2 で `moqt` (claim key 327) / `moqt-reval` (claim key 328) を定義する。付録 A に CBOR エンコード・トークン構造・DPoP バインディング・認可マッチング・検証のテストベクタがある
-- 参照仕様のうち RFC 8949 / RFC 9052 / RFC 9053 / RFC 8392 / RFC 8747 / RFC 4648 / RFC 7638 / RFC 8032 / RFC 9449 を `refs/cbor/` に追加した。CTA-5007-B (CAT 本体) は有償仕様で自由に取得できないため refs には置けない。claim key の値は IANA の CWT Claims レジストリと CWT Confirmation Methods レジストリで確認する
-- 仕様側の未解決事項が 2 つある。実装では以下として扱い、コメントに残す
+- 参照仕様のうち RFC 8949 / RFC 9052 / RFC 9053 / RFC 8392 / RFC 8747 / RFC 4648 / RFC 7638 / RFC 8032 / RFC 9449 / RFC 7515 / RFC 7517 / RFC 9596 を `refs/cbor/` に追加した。CTA-5007-B (CAT 本体) は有償仕様で自由に取得できないため refs には置けない。claim key の値は IANA の CWT Claims レジストリと CWT Confirmation Methods レジストリで確認する
+- 仕様側の未解決事項が 3 つある。実装では以下として扱い、コメントに残す
   - トークン直列化: §7.1.1 は CBOR の COSE_Sign1 / COSE_Mac0 (CWT) と読めるが、付録 A のベクタは `base64url(protected).base64url(claims).base64url(signature)` の 3 分割形式で、署名対象は ASCII の `protected.claims` である (HMAC-SHA256 で実測確認済み)。本実装は両形式を受理し、発行は形式を選べるようにする
   - HMAC-SHA256 の COSE アルゴリズム ID: 付録 A のベクタは -4 を使うが、IANA の COSE Algorithms レジストリで -4 は A192KW であり、HMAC 256/256 は 5 である (CTA-5007-B の実装である Akamai / Fastly の実装も 5 を使う)。検証は -4 と 5 の両方を受けて HMAC-SHA256 として扱い、compact / COSE のどちらの発行も RFC 9053 に合わせて 5 を書く
   - `cnf` の JWK サムプリント: §3.1.1 と付録 A のベクタは confirmation key 3 を使うが、IANA の CWT Confirmation Methods レジストリで 3 は kid であり、CTA 登録の jkt は 323 である。検証は 323 と 3 の両方を受ける。発行は 323 を既定とし、ドラフト準拠が必要な場合は 3 を選べるようにする
@@ -36,6 +36,9 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 | `c4m::cose` | RFC 9052 の COSE 構造。protected / unprotected ヘッダ、COSE_Sign1 (tag 18) / COSE_Mac0 (tag 17)、アルゴリズム定義 |
 | `c4m::crypto` | `CoseCrypto` trait、`CoseKey`、エラー型。aws-lc-rs 実装は feature 分岐 |
 | `c4m::cat` | CAT のクレーム (`CatClaims`) とトークン (`CatToken`) および発行ビルダー (`CatTokenBuilder`) |
+| `c4m::jwk` | JWK (RFC 7517) と JWK サムプリント (RFC 7638) |
+| `c4m::jwt` | JWS compact (RFC 7515) の JWT |
+| `c4m::dpop` | DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof) |
 
 - `mod.rs` は使わず `src/c4m.rs` + `src/c4m/*.rs` の構成にする
 - re-export はしない。利用側は `shiguredo_moqt::c4m::cat::CatToken` のように参照する
@@ -53,7 +56,7 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 - protected / unprotected ヘッダ、`alg` / `kid` / `typ` / `content type` を扱う。未知のヘッダは保持して決定論的 encode で再現する
 - `Sig_structure` (`"Signature1"`) と `MAC_structure` (`"MAC0"`) を組み立てる。CWT タグ 61 と COSE タグ 17 / 18 は decode で許容し、encode では付与する
 - `CoseCrypto` trait は `sign` / `verify` を持ち、`CoseKey` (Symmetric / Ec2 / Okp) と `Algorithm` (HMAC 256/384/512、ES256/384/512、EdDSA) を引数にする。trait は no_std のコアに置き、実装は `#[cfg(feature = "aws-lc-rs")]` に閉じる
-- `Cargo.toml` に `aws-lc-rs = { version = "1", optional = true }` と `base64ct = { version = "1", default-features = false, features = ["alloc"] }` を追加し、`aws-lc-rs` feature は `dep:aws-lc-rs` にする。既定ビルドと thumbv7em-none-eabihf ビルドは現状のまま通す
+- `Cargo.toml` に `aws-lc-rs = { version = "1.18", optional = true }` と `base64ct = { version = "1.8", default-features = false, features = ["alloc"] }` を追加し、`aws-lc-rs` feature は `dep:aws-lc-rs` にする。既定ビルドと thumbv7em-none-eabihf ビルドは現状のまま通す
 - ECDSA の署名は COSE の固定長 r||s (ES256 は 64 バイト) を使う。EdDSA は Ed25519 のみとする。RSA (PS256 など) は対象外とし、未知のアルゴリズムは `UnsupportedAlgorithm` を返す
 
 ### CAT
@@ -75,7 +78,7 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 
 - `tests/test_c4m.rs` + `tests/test_c4m/` に CBOR / COSE / CAT / C4M のテストを置き、付録 A のテストベクタを固定する
 - `pbt/tests/prop_c4m/` に CBOR のラウンドトリップと認可マッチングの PBT を置く。PBT は noprop を使う
-- `fuzz/fuzz_targets/` に CBOR decode / compact token decode / COSE token decode のターゲットを追加する
+- `fuzz/fuzz_targets/` に CBOR decode / compact token decode / COSE token decode / DPoP proof decode / DPoP actx 検証のターゲットを追加する
 - aws-lc-rs feature が必要なテストは `#[cfg(feature = "aws-lc-rs")]` で分岐し、CI の test ジョブに `cargo test -p shiguredo_moqt --features aws-lc-rs` を追加する
 - `docs/IMPLEMENTATION.md` のモジュール表と未対応節を更新する
 - `CHANGES.md` に追加を記載する
@@ -93,7 +96,7 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 ## 設計上の制約
 
 - CTA-5007-B 本体は有償仕様のため参照できない。IANA レジストリ・C4M ドラフト・公開実装 (Akamai / Fastly) で確認できた範囲を実装し、確認できないクレームの意味論 (catu のマッチ評価など) は実装しない
-- DPoP proof JWT の検証 (actx / jti / iat / jwk の検査) は扱わない。`cnf` と `catdpop` の表現と取得までとする
+- CWT 形式の DPoP proof (`dpop-proof+cwt`) の検証は actx の claim label が TBD のため扱わない。JWT 形式 (C4M §3.1.2 が参照する形式) は検証と発行を実装する
 
 ## 解決方法
 

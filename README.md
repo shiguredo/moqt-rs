@@ -24,13 +24,13 @@ Please read <https://github.com/shiguredo/oss> before use.
 ## 概要
 
 Rust で実装した Sans I/O かつ no_std 対応の Media over QUIC Transport (MOQT) ライブラリです。
-MOQT / LOC / MSF の codec と、1 本の Transport Session に閉じたセッション状態機械を提供します。
+MOQT / LOC / MSF / C4M の codec と、1 本の Transport Session に閉じたセッション状態機械を提供します。
 
 ## 特徴
 
 - Sans I/O
 - no_std 対応
-- 依存は `hashbrown` / `noflate` / `nojson` の 3 つのみ
+- 依存は `hashbrown` / `noflate` / `nojson` / `base64ct` の 4 つのみ (暗号処理は optional feature `aws-lc-rs`)
 - 1 本の Transport Session に閉じた endpoint-local な `Session` 状態機械
   - I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含まない
 - バッファ付きインクリメンタルデコーダー (`MessageDecoder` / `SubgroupStreamDecoder` / `FetchStreamDecoder`)
@@ -39,6 +39,7 @@ MOQT / LOC / MSF の codec と、1 本の Transport Session に閉じたセッ�
   - Media over QUIC Transport (MOQT) `draft-21`
   - Low Overhead Container (LOC) `draft-04`
   - MOQT Streaming Format (MSF) `draft-01`
+  - Authorization scheme for MOQT using Common Access Tokens (C4M) `draft-01`
 
 ## 使い方
 
@@ -157,7 +158,7 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 ## 実装状況
 
-MOQT / LOC / MSF の対応仕様、コントロールメッセージ、パラメータ、プロパティ、モジュール構成は [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) を参照してください。
+MOQT / LOC / MSF / C4M の対応仕様、コントロールメッセージ、パラメータ、プロパティ、モジュール構成は [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) を参照してください。
 
 ## サンプル
 
@@ -202,6 +203,9 @@ gh skill install shiguredo/moqt-rs shiguredo-moqt
 - [draft-ietf-moq-transport-21](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-21)：Media over QUIC Transport
 - [draft-ietf-moq-loc-04](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04)：Media over QUIC - Low Overhead Container
 - [draft-ietf-moq-msf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01)：MOQT Streaming Format
+- [draft-ietf-moq-c4m-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01)：Authorization scheme for MOQT using Common Access Tokens
+- [draft-nandakumar-moq-generic-dpop-proof-00](https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/)：Application-Agnostic Demonstrating Proof-of-Possession
+- [CTA-5007-B](https://shop.cta.tech/products/cta-5007-b)：Common Access Token (CAT)
 
 ## ビルドとテスト
 

@@ -2,7 +2,7 @@
 #
 # - prek ジョブ: prek.toml のフック (fmt / clippy / tombi 等) を実行する
 # - test ジョブ: cargo test --workspace を実行する (pre-push フックと同範囲)。
-#   C4M の暗号実装は optional feature のため、aws-lc-rs feature の clippy とテストも実行する
+#   C4M の暗号実装は optional feature のため、aws-lc-rs feature の clippy / test / rustdoc も実行する
 # - fuzz-build ジョブ: fuzz/ の fuzz ターゲットをビルド確認する
 #   (fuzz は独立 workspace のため test ジョブの cargo test --workspace では検出できない)
 # - no-std-doc ジョブ: no_std ビルドと rustdoc の警告を検査する
@@ -49,6 +49,8 @@ jobs:
         run: cargo clippy -p shiguredo_moqt --all-targets --features aws-lc-rs -- -D warnings
       - name: aws-lc-rs feature のテストを実行する
         run: cargo test -p shiguredo_moqt --features aws-lc-rs
+      - name: aws-lc-rs feature の rustdoc を検査する
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt --features aws-lc-rs
 
   fuzz-build:
     runs-on: macos-15

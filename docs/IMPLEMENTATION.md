@@ -1,6 +1,6 @@
 # 実装状況
 
-本ライブラリの Media over QUIC Transport (MOQT) / Low Overhead Container (LOC) / MOQT Streaming Format (MSF) の実装状況です。
+本ライブラリの Media over QUIC Transport (MOQT) / Low Overhead Container (LOC) / MOQT Streaming Format (MSF) / C4M (Common Access Token for MoQ) の実装状況です。
 
 ## Media over QUIC Transport
 
@@ -210,7 +210,7 @@ Tokens) と CTA-5007-B (Common Access Token) の実装状況です。
 
 - CBOR (RFC 8949) のコーデック (決定論的エンコード、definite / indefinite のデコード、深度制限)
 - COSE (RFC 9052) の COSE_Sign1 (タグ 18) / COSE_Mac0 (タグ 17) と CWT (タグ 61)
-- CAT のクレーム (RFC 8392 の `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `cti` / `cnf` と IANA 登録の CAT クレームキー)
+- CAT のクレーム (RFC 8392 の `iss` / `sub` / `aud` / `exp` / `nbf` / `iat` / `cti` と RFC 8747 の `cnf`、IANA 登録の CAT クレームキー)
 - 直列化は 2 形式
   - compact: `base64url(protected).base64url(claims).base64url(signature)` (draft-ietf-moq-c4m-01 付録 A のテストベクタ)
   - COSE: CWT タグ + COSE_Sign1 / COSE_Mac0
@@ -246,13 +246,13 @@ Tokens) と CTA-5007-B (Common Access Token) の実装状況です。
 | モジュール | 概要 |
 | --- | --- |
 | `c4m` | C4M (CAT / CWT) のトークン発行 / 検証と `moqt` クレームの認可 |
+| `c4m::cat` | CAT のクレーム / トークン / 発行ビルダー |
 | `c4m::cbor` | CBOR (RFC 8949) の encode / decode |
 | `c4m::cose` | COSE (RFC 9052) の構造とアルゴリズム定義 |
 | `c4m::crypto` | 署名 / 検証 / ハッシュの trait と鍵表現 (aws-lc-rs 実装は feature) |
-| `c4m::cat` | CAT のクレーム / トークン / 発行ビルダー |
 | `c4m::jwk` | JWK (RFC 7517) と JWK サムプリント (RFC 7638) |
 | `c4m::jwt` | JWS compact (RFC 7515) の JWT |
-| `c4m::dpop` | DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof) |
+| `c4m::dpop` | DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof-00) |
 | `decoder` | バッファ付きインクリメンタル制御メッセージデコーダー |
 | `error` | コーデックエラー型とセッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset の各コード |
 | `grease` | GREASE 値の生成と判定ユーティリティ |
@@ -260,7 +260,7 @@ Tokens) と CTA-5007-B (Common Access Token) の実装状況です。
 | `message` | 制御メッセージ、`TrackNamespace`、`Location` |
 | `message_parameter` | Message Parameters と `AUTHORIZATION_TOKEN` |
 | `msf` | MSF Catalog / Timeline / URI の encode / decode |
-| `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `parse_name_with_percent_encoding` / `serialize_name`) |
+| `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `parse_name_with_percent_encoding` / `serialize_name` / `parse_namespace` / `serialize_namespace` / `parse_track_name` / `serialize_track_name`) |
 | `object_properties` | Object-scoped Properties と `IMMUTABLE_PROPERTIES` 補助デコーダー |
 | `parameter` | SETUP Options の encode / decode |
 | `session` | 1 本の `MOQT Transport Session` に閉じた sans I/O な状態機械で、control plane に加えて request stream / data stream / datagram の state も扱う |

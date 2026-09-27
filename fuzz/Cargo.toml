@@ -180,6 +180,11 @@ doc = false
 name = "fuzz_decode_c4m_dpop_proof"
 path = "fuzz_targets/fuzz_decode_c4m_dpop_proof.rs"
 
+[[bin]]
+doc = false
+name = "fuzz_verify_c4m_dpop_context"
+path = "fuzz_targets/fuzz_verify_c4m_dpop_context.rs"
+
 [dependencies]
 # 構造化入力生成に使用 (Arbitrary derive)
 arbitrary = { version = "1.4", features = ["derive"] }

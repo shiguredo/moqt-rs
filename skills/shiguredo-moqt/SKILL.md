@@ -1,6 +1,6 @@
 ---
 name: shiguredo-moqt
-description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、encode / decode やセッション駆動の実装に関する質問時に使用。
+description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、encode / decode やセッション駆動の実装に関する質問時に使用。
 ---
 
 # shiguredo_moqt
@@ -11,10 +11,10 @@ draft-ietf-moq-transport-21 に基づく Sans I/O / no_std な Media over QUIC T
 
 - **Sans I/O**: I/O を完全に分離。Tokio / async-std / 同期 I/O など任意の環境で使用可能
 - **no_std 対応**: `alloc` のみ必要 (`std` 非依存)
-- **依存は 3 つのみ**: `hashbrown` / `noflate` / `nojson`
+- **依存は 4 つのみ**: `hashbrown` / `noflate` / `nojson` / `base64ct` (暗号処理は optional feature `aws-lc-rs`)
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
-- **対応仕様**: MOQT `draft-21` / LOC `draft-04` / MSF `draft-01`
+- **対応仕様**: MOQT `draft-21` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
 
@@ -961,7 +961,7 @@ assert!(token
 
 ```rust
 // トークンの発行 / 検証
-use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder, CatClaims, ClaimValidationOptions, TokenFormat, VerifyOptions};
+use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder, VerifyOptions};
 fn CatTokenBuilder::build_compact(&self, crypto: &C, key: &CoseKey) -> Result<String, CatError>
 fn CatTokenBuilder::build_cose(&self, crypto: &C, key: &CoseKey) -> Result<Vec<u8>, CatError>
 fn CatToken::decode(input: &[u8]) -> Result<CatToken, CatError>
@@ -981,6 +981,7 @@ use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey, EcCurve, OkpCurve};
 use shiguredo_moqt::c4m::dpop::{DpopProof, DpopProofBuilder, DpopReplayCache, DpopVerification};
 fn DpopProof::decode(input: &str) -> Result<DpopProof, DpopError>
 fn DpopProof::verify_against_token(&self, crypto: &C, request: &DpopVerification<'_>, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
+fn DpopProof::verify_against_cat_token(&self, crypto: &C, token: &CatToken, action: MoqtAction, namespace: &TrackNamespace, track_name: &[u8], reference_time_seconds: f64, default_window_seconds: f64, replay_cache: Option<&mut DpopReplayCache>) -> Result<(), DpopError>
 ```
 
 - 直列化は compact 形式 (draft 付録 A の `base64url(protected).base64url(claims).base64url(signature)`) と COSE 形式 (CWT タグ + COSE_Sign1 / COSE_Mac0) の両方を扱う
