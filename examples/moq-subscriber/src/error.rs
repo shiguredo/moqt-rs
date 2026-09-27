@@ -93,25 +93,21 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<moqt_example_transport::error::TransportError> for Error {
-    fn from(e: moqt_example_transport::error::TransportError) -> Self {
+impl From<moq::error::TransportError> for Error {
+    fn from(e: moq::error::TransportError) -> Self {
         // Quic だけを app の Quic variant に振り分ける。トランスポート種別に依存しない
         // 失敗 (Internal / InvalidAuthority / ResolutionFailed) は Other にして
         // `QUIC:` を付けない。セッション終了は専用の ConnectionClosed に分け、
         // それ以外は WebTransport variant に畳む。
         match e {
-            moqt_example_transport::error::TransportError::Quic(msg) => Self::Quic(msg),
+            moq::error::TransportError::Quic(msg) => Self::Quic(msg),
             // 統合した MoqtClient 由来の内部エラーは従来の Other 表示に合わせる
-            moqt_example_transport::error::TransportError::Internal(msg) => Self::Other(msg),
+            moq::error::TransportError::Internal(msg) => Self::Other(msg),
             // catch-all に落とすと WebTransport variant になり `WebTransport:` が付くため明示する
-            moqt_example_transport::error::TransportError::InvalidAuthority(msg)
-            | moqt_example_transport::error::TransportError::ResolutionFailed(msg) => {
-                Self::Other(msg)
-            }
+            moq::error::TransportError::InvalidAuthority(msg)
+            | moq::error::TransportError::ResolutionFailed(msg) => Self::Other(msg),
             // セッション終了は表示文字列ではなく variant で判定できるように専用にする
-            moqt_example_transport::error::TransportError::ConnectionClosed => {
-                Self::ConnectionClosed
-            }
+            moq::error::TransportError::ConnectionClosed => Self::ConnectionClosed,
             other => Self::WebTransport(other.to_string()),
         }
     }
@@ -123,7 +119,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moqt_example_transport::error::TransportError;
+    use moq::error::TransportError;
 
     /// トランスポート種別に依存しない失敗は `Other` になり `QUIC:` が付かない
     #[test]

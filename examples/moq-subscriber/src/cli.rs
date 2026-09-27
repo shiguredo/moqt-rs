@@ -2,7 +2,7 @@
 //!
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
-use moqt_example_transport::ServerUrl;
+use moq::ServerUrl;
 
 /// CLI オプション
 pub struct Config {
@@ -68,7 +68,7 @@ pub fn parse() -> noargs::Result<Option<Config>> {
             if v.is_empty() {
                 return Err("--url is required".to_string());
             }
-            moqt_example_transport::parse_url(v)
+            moq::parse_url(v)
         })?;
 
     let cert: Option<String> = noargs::opt("cert")

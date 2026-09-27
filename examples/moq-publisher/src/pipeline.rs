@@ -2,7 +2,7 @@
 //!
 //! カメラ/マイクキャプチャ → 映像/音声エンコード → MoQT 送信の流れを、
 //! sans-I/O な `shiguredo_moqt::session::core::Session` を駆動する
-//! [`moqt_example_transport::moqt_client::MoqtClient`] と結線する。
+//! [`moq::moqt_client::MoqtClient`] と結線する。
 
 use std::time::Instant;
 
@@ -35,13 +35,11 @@ use crate::error::{Error, Result};
 use crate::fake_audio_capture;
 use crate::fake_capture;
 use crate::stream_writer::SubgroupWriter;
-use moqt_example_transport::Transport;
-use moqt_example_transport::host_from_authority;
-use moqt_example_transport::moqt_client::{
-    ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome,
-};
-use moqt_example_transport::quic;
-use moqt_example_transport::resolve_socket_addr;
+use moq::Transport;
+use moq::host_from_authority;
+use moq::moqt_client::{ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome};
+use moq::quic;
+use moq::resolve_socket_addr;
 
 /// 映像キャプチャの寿命管理
 ///
@@ -126,14 +124,13 @@ pub async fn run(
             client
         }
         Transport::WebTransport => {
-            let mut client_config =
-                moqt_example_transport::webtransport::ClientConfig::new(socket_addr, server_name)
-                    // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
-                    .authority(&config.url.authority)
-                    .enable_webtransport(
-                        shiguredo_http3::webtransport::Settings::new()
-                            .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                    );
+            let mut client_config = moq::webtransport::ClientConfig::new(socket_addr, server_name)
+                // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
+                .authority(&config.url.authority)
+                .enable_webtransport(
+                    shiguredo_http3::webtransport::Settings::new()
+                        .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+                );
             if let Some(ref cert) = config.cert {
                 let pem = std::fs::read_to_string(cert)?;
                 client_config = client_config.ca_cert(pem);
@@ -142,11 +139,8 @@ pub async fn run(
                 tracing::warn!("TLS certificate verification is disabled (development mode)");
                 client_config = client_config.insecure();
             }
-            let wt_session = moqt_example_transport::webtransport::WtClient::connect(
-                client_config,
-                &config.url.path,
-            )
-            .await?;
+            let wt_session =
+                moq::webtransport::WtClient::connect(client_config, &config.url.path).await?;
             let (client, _acceptor) = MoqtClient::establish_wt(
                 wt_session,
                 "moq-publisher",
@@ -857,7 +851,7 @@ fn extract_pcm_i16(frame: &AudioFrameOwned) -> Result<Vec<i16>> {
 mod tests {
     use super::*;
     // セッション終了の判定は `Error` の variant で行うため、`TransportError` はテストでのみ使う
-    use moqt_example_transport::error::TransportError;
+    use moq::error::TransportError;
 
     /// keyframe の映像 LOC プロパティ: Video Frame Marking / Timestamp / Timescale / Video Config が付与され encode できること
     #[test]

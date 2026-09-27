@@ -2,7 +2,7 @@
 //!
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
-use moqt_example_transport::ServerUrl;
+use moq::ServerUrl;
 
 /// 映像コーデック種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,7 @@ pub fn parse() -> noargs::Result<Option<Config>> {
             if v.is_empty() {
                 return Err("--url is required".to_string());
             }
-            moqt_example_transport::parse_url(v)
+            moq::parse_url(v)
         })?;
 
     let cert: Option<String> = noargs::opt("cert")

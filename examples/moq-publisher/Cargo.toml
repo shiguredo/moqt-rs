@@ -23,7 +23,7 @@ shiguredo_opus = "2026.2"
 shiguredo_video_device = "2026.3"
 
 # examples 共有トランスポート crate (QUIC / WebTransport)
-moqt-example-transport = { path = "../moqt-transport" }
+moq = { path = "../moq" }
 
 # 外部クレート
 

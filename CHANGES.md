@@ -11,7 +11,7 @@
 
 ## develop
 
-- [CHANGE] example の crate 名を moq-publisher / moq-subscriber に変更する
+- [CHANGE] example の crate 名を moq-publisher / moq-subscriber / moq (transport crate) に変更する
   - @voluntas
 - [ADD] example が URL の MSF fragment (`#msf:<track-identifier>&c4m=<token>`) を MSF 仕様に従って検証し、`c4m` パラメータを SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する
   - @voluntas
@@ -136,7 +136,7 @@
   - @voluntas
 - [FIX] example が peer からの REQUEST_UPDATE に REQUEST_OK で応答する
   - draft-ietf-moq-transport-21 §9.5 (REQUEST_UPDATE) の「受信側は必ず 1 通の REQUEST_OK または REQUEST_ERROR で応答する」に従う
-  - `moqt-transport` の `ClientEvent` に `RequestUpdate` を追加し、`MoqtClient::send_request_ok` を追加して publisher / subscriber の両 example で応答する
+  - `moq` の `ClientEvent` に `RequestUpdate` を追加し、`MoqtClient::send_request_ok` を追加して publisher / subscriber の両 example で応答する
   - 応答しないと relay が下流へ応答を返せず、subscriber 側の control message 応答待ち (30 秒) が満了して CONTROL_MESSAGE_TIMEOUT (0x11) でセッションが閉じていた
   - @voluntas
 - [FIX] Malformed Track 検出時に subscription の bidi request stream を STOP_SENDING / RESET_STREAM で cancel する
@@ -183,7 +183,7 @@
   - @voluntas
 - [FIX] moq-publisher の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
   - @voluntas
-- [FIX] moqt-transport の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
+- [FIX] moq の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
   - @voluntas
 - [FIX] moq-subscriber の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
   - @voluntas
@@ -316,7 +316,7 @@
 
 - [FIX] ポート省略 URL で既定ポート 443 を使い、ホスト名を名前解決する
   - draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) はポート省略時に既定ポート 443 を使うと定めるが、authority を `SocketAddr` として直接パースしていたため `moqt://relay.example.com/app` のような URL で必ず接続に失敗していた
-  - `moqt-example-transport` に authority から host と port を取り出す純関数と、IP リテラル / ホスト名を解決する関数を追加し、QUIC と WebTransport の接続先決定を 1 箇所に集約する。IPv6 リテラルは接続先文字列を `[` `]` で囲む
+  - `moq` に authority から host と port を取り出す純関数と、IP リテラル / ホスト名を解決する関数を追加し、QUIC と WebTransport の接続先決定を 1 箇所に集約する。IPv6 リテラルは接続先文字列を `[` `]` で囲む
   - 接続先のアドレスファミリに合わせてローカルソケットを選ぶようにし、IPv6 に解決された接続先へも送信できるようにする
   - authority の host が空、ブラケット無しの IPv6 リテラル、数字でないポートは `invalid server address` として拒否する
   - authority の解釈失敗と名前解決失敗はトランスポート種別に依存しないため、利用者向けの表示から `QUIC:` が外れる
@@ -379,7 +379,7 @@
   - 保持量の上限で記録が破棄された後は同一位置の重複を比較できない (検出範囲が狭くなる known limitation)
   - @voluntas
 
-- [FIX] moqt-transport example が WebTransport の session ID 不正を H3_ID_ERROR で通知する
+- [FIX] example の moq が WebTransport の session ID 不正を H3_ID_ERROR で通知する
   - draft-ietf-webtrans-http3-16 §4 (WebTransport Features) は、client-initiated bidirectional stream ID に対応しない
     session ID を単方向 / 双方向ストリームで受信したエンドポイントに H3_ID_ERROR での接続クローズを MUST で要求するが、
     従来はストリームヘッダーのデコードエラーを黙って捨てており違反を検知できなかった
@@ -392,7 +392,7 @@
     H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る
   - @voluntas
 
-- [FIX] moqt-transport example が WebTransport のセッション終了を検知し、全ストリームを WT_SESSION_GONE で中断する
+- [FIX] example の moq が WebTransport のセッション終了を検知し、全ストリームを WT_SESSION_GONE で中断する
   - draft-ietf-webtrans-http3-16 §6 (Session Termination) は CONNECT stream の close (clean / abrupt) と WT_CLOSE_SESSION の
     送受信をセッション終了の条件とし、終了を検知した端点に全 uni / bidi ストリームの `WT_SESSION_GONE` での中断と、
     新しい datagram の送信・新しいストリームの open の禁止を MUST で要求する。従来は CONNECT stream の受信半を
@@ -412,7 +412,7 @@
     切り捨てずエラーにする
   - @voluntas
 
-- [FIX] moqt-transport example が WT-Protocol の交渉結果を h3 層から受け取り、WT_ALPN_ERROR で接続を閉じる
+- [FIX] example の moq が WT-Protocol の交渉結果を h3 層から受け取り、WT_ALPN_ERROR で接続を閉じる
   - draft-ietf-webtrans-http3-16 §3.3 (Application Protocol Negotiation) は、交渉を要求したクライアントが成功応答に
     `WT-Protocol` が無い / 不正 / 申告していない値だった場合に `WT_ALPN_ERROR` でセッションを閉じる MUST を定めるが、
     従来は 2xx だけで確立とみなしていたため、サーバーがプロトコルを選ばなかった場合もバージョン不一致のまま MOQT を続行していた
@@ -424,7 +424,7 @@
     観測した場合はセッションを確立しない
   - @voluntas
 
-- [FIX] moqt-transport example が h3 層の connection error を伝播して CONNECTION_CLOSE を送る
+- [FIX] example の moq が h3 層の connection error を伝播して CONNECTION_CLOSE を送る
   - RFC 9114 §6.2.1 (Control Streams) は制御ストリームの違反 (H3_MISSING_SETTINGS / H3_STREAM_CREATION_ERROR /
     H3_CLOSED_CRITICAL_STREAM) を connection error として扱う MUST を、RFC 9297 §2.1 は HTTP/3 Datagram の
     Quarter Stream ID の不正を H3_DATAGRAM_ERROR とする MUST を定めるが、従来は h3 層が返すエラーを捨てていたため
@@ -452,7 +452,7 @@
 - [UPDATE] moq-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
   - 送信経路から分離した `build_catalog` で、video / audio の codec と必須フィールドの組み合わせが `MsfCatalogDocument::encode` に成功することを固定する
   - @voluntas
-- [UPDATE] moqt-transport のセッション終了ログを終了コード付きにする
+- [UPDATE] moq のセッション終了ログを終了コード付きにする
   - `MoqtClient::close` は code 0 以外のとき `Session closed gracefully` ではなく `Session closed with code {code:#x} {reason}` を出す (エラー終了を正常終了と誤読しないため)
   - @voluntas
 - [UPDATE] moq-subscriber の LOC プロパティ抽出の単体テストを追加・更新する
@@ -542,7 +542,7 @@
 - [UPDATE] 削除済み SUBSCRIBE_TRACKS を参照するコメントを現行 draft に合わせ、未使用の prefix_overlaps を削除する
   - @voluntas
 - [FIX] example の publisher が relay から転送される SUBSCRIBE / FETCH に応答できるようにする
-  - moqt-transport が peer 起動の bidi request stream を受理し、`ClientEvent::Request` としてアプリへ渡す
+  - moq が peer 起動の bidi request stream を受理し、`ClientEvent::Request` としてアプリへ渡す
   - moq-publisher は SUBSCRIBE に SUBSCRIBE_OK、catalog の FETCH に FETCH_OK と FETCH 応答ストリームを返す
   - moq-subscriber のカタログ取得が fetch 応答ストリームの終端を二重に通知しないようにする
   - @voluntas

@@ -1009,7 +1009,7 @@ impl WtClient {
         //   接続しており、ピアが DATAGRAM (RFC 9221) を広告しない場合は以降の WebTransport
         //   datagram 送受信が成立しない。s2n-quic の公開 API にピアの
         //   max_datagram_frame_size を取得する手段が無いため、provider を有効にしていることを
-        //   根拠に true を渡す (moqt-example-transport は常に datagram を有効にして接続する)。
+        //   根拠に true を渡す (moq は常に datagram を有効にして接続する)。
         // - reset_stream_at: s2n-quic は RESET_STREAM_AT を送出しないため false を渡す。
         //   本 example が接続する draft (draft-15 相当) では必須ではない。
         {

@@ -18,7 +18,7 @@ shiguredo_moqt = { path = "../../" }
 shiguredo_opus = "2026.2"
 
 # examples 共有トランスポート crate (QUIC / WebTransport)
-moqt-example-transport = { path = "../moqt-transport" }
+moq = { path = "../moq" }
 
 # 外部クレート
 

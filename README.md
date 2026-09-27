@@ -174,11 +174,11 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 - `moq-publisher`：QUIC / WebTransport で relay に接続し、video / audio / `catalog` track を PUBLISH する
 - `moq-subscriber`：QUIC / WebTransport で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
-- `moqt-transport`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 トランスポート層 (ライブラリ)
+- `moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.94 以降です。
 `moq-publisher` の依存が 1.94 を要求するためです。
-`moq-subscriber` / `moqt-transport` だけであれば 1.93 で構築できます。
+`moq-subscriber` / `moq` だけであれば 1.93 で構築できます。
 
 ```bash
 # publisher (疑似キャプチャ)

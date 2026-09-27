@@ -2,7 +2,7 @@
 //!
 //! 接続 → SETUP → カタログ FETCH → ビデオ SUBSCRIBE → データストリーム受信
 //! → AV1 デコード → フレーム送出の流れを、`shiguredo_moqt::session::core::Session` を駆動する
-//! [`moqt_example_transport::moqt_client::MoqtClient`] と結線する。
+//! [`moq::moqt_client::MoqtClient`] と結線する。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,13 +54,13 @@ struct FrameSink<'a> {
 /// デコードが CPU を使い切り、同じ runtime で動く QUIC エンドポイントの I/O が
 /// 飢えて受信パケットが落ちる (moqt-rs 0101)。
 const MAX_CONCURRENT_STREAMS: usize = 4;
-use moqt_example_transport::Transport;
-use moqt_example_transport::error::TransportError;
-use moqt_example_transport::host_from_authority;
-use moqt_example_transport::moqt_client::{ClientEvent, DataPlaneHandle, MoqtClient, StreamRead};
-use moqt_example_transport::quic;
-use moqt_example_transport::resolve_socket_addr;
-use moqt_example_transport::transport;
+use moq::Transport;
+use moq::error::TransportError;
+use moq::host_from_authority;
+use moq::moqt_client::{ClientEvent, DataPlaneHandle, MoqtClient, StreamRead};
+use moq::quic;
+use moq::resolve_socket_addr;
+use moq::transport;
 
 /// 音声サンプルレートが取得できなかったときのフォールバック (publisher が 48 kHz で送信する前提)
 const AUDIO_FALLBACK_SAMPLE_RATE: u32 = 48_000;
@@ -275,16 +275,15 @@ pub async fn run(
             .await?
         }
         Transport::WebTransport => {
-            let mut client_config =
-                moqt_example_transport::webtransport::ClientConfig::new(socket_addr, server_name)
-                    // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
-                    .authority(&config.url.authority)
-                    .enable_webtransport(
-                        shiguredo_http3::webtransport::Settings::new()
-                            .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                    )
-                    // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
-                    .receive_datagrams();
+            let mut client_config = moq::webtransport::ClientConfig::new(socket_addr, server_name)
+                // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
+                .authority(&config.url.authority)
+                .enable_webtransport(
+                    shiguredo_http3::webtransport::Settings::new()
+                        .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+                )
+                // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
+                .receive_datagrams();
             if let Some(ref cert) = config.cert {
                 let pem = std::fs::read_to_string(cert)?;
                 client_config = client_config.ca_cert(pem);
@@ -293,11 +292,8 @@ pub async fn run(
                 tracing::warn!("TLS certificate verification is disabled (development mode)");
                 client_config = client_config.insecure();
             }
-            let wt_session = moqt_example_transport::webtransport::WtClient::connect(
-                client_config,
-                &config.url.path,
-            )
-            .await?;
+            let wt_session =
+                moq::webtransport::WtClient::connect(client_config, &config.url.path).await?;
             MoqtClient::establish_wt(
                 wt_session,
                 "moq-subscriber",

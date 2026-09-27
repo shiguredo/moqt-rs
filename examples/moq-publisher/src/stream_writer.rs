@@ -13,8 +13,8 @@ use shiguredo_moqt::{
 };
 
 use crate::error::Result;
-use moqt_example_transport::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
-use moqt_example_transport::transport;
+use moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
+use moq::transport;
 
 /// Subgroup Stream の終端方法 (sans I/O)
 ///
