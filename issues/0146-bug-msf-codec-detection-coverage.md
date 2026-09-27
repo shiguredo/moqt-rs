@@ -45,5 +45,5 @@ draft-ietf-moq-msf-01 §5.2.18 (Codec) / §5.2.22 (Maximum Bitrate) / §5.2.28 (
 - encode 経路 (`MsfCatalog` を手組みして `MsfCatalogDocument::encode`) でも同じ拒否になるテストが追加されていること
 - mimeType 由来の要求でもエラーメッセージに要求の根拠が含まれること
 - role と mimeType の判定が食い違う場合に両方の要求を満たす必要があるテストが追加されていること
-- `docs/IMPLEMENTATION.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること
+- `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること
 - `make test` / `make clippy` / `make fmt` が通ること

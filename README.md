@@ -158,7 +158,14 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 ## 実装状況
 
-MOQT / LOC / MSF / C4M の対応仕様、コントロールメッセージ、パラメータ、プロパティ、モジュール構成は [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) を参照してください。
+対応仕様ごとの実装状況です。
+
+- [Media over QUIC Transport (MOQT)](docs/moqt.md)
+- [MOQT Streaming Format (MSF)](docs/msf.md)
+- [Low Overhead Container (LOC)](docs/loc.md)
+- [C4M (Common Access Token for MoQ)](docs/c4m.md)
+
+モジュール構成とアーキテクチャは [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) を参照してください。
 
 ## サンプル
 
@@ -204,8 +211,6 @@ gh skill install shiguredo/moqt-rs shiguredo-moqt
 - [draft-ietf-moq-loc-04](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04)：Media over QUIC - Low Overhead Container
 - [draft-ietf-moq-msf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01)：MOQT Streaming Format
 - [draft-ietf-moq-c4m-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01)：Authorization scheme for MOQT using Common Access Tokens
-- [draft-nandakumar-moq-generic-dpop-proof-00](https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/)：Application-Agnostic Demonstrating Proof-of-Possession
-- [CTA-5007-B](https://shop.cta.tech/products/cta-5007-b)：Common Access Token (CAT)
 
 ## ビルドとテスト
 

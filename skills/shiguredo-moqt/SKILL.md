@@ -1054,16 +1054,12 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01>
 - draft-ietf-moq-c4m-01 - Authorization scheme for MOQT using Common Access Tokens
   - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01>
-- draft-nandakumar-moq-generic-dpop-proof-00 - Application-Agnostic Demonstrating Proof-of-Possession
-  - <https://datatracker.ietf.org/doc/draft-nandakumar-moq-generic-dpop-proof/>
 - RFC 8949 - Concise Binary Object Representation (CBOR)
   - <https://www.rfc-editor.org/rfc/rfc8949>
 - RFC 9052 / RFC 9053 - CBOR Object Signing and Encryption (COSE)
   - <https://www.rfc-editor.org/rfc/rfc9052>
 - RFC 8392 - CBOR Web Token (CWT)
   - <https://www.rfc-editor.org/rfc/rfc8392>
-- CTA-5007-B - Common Access Token (CAT)
-  - <https://shop.cta.tech/products/cta-5007-b>
 
 ## 注意事項
 
