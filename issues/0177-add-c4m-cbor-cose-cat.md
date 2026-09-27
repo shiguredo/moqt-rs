@@ -1,7 +1,7 @@
 # C4M の CBOR / COSE / CAT コーデックと認可を追加する
 
 - Created: 2026-09-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-27
 - Branch: feature/add-c4m-cbor-cose-cat
 - Polished: {YYYY-MM-DD}
 
@@ -100,4 +100,15 @@ MOQT の認可トークン (C4M: draft-ietf-moq-c4m-01) を扱う `src/c4m/` を
 
 ## 解決方法
 
-{実装完了時に記入する}
+`src/c4m/` に CBOR / COSE / CAT / C4M の実装を追加し、`CoseCrypto` trait と aws-lc-rs feature による署名・検証、トークンと DPoP proof の発行・検証、`moqt` クレームの認可判定を実装した。
+
+- `src/c4m/cbor.rs`: CBOR (RFC 8949)。決定論的エンコード、f16/f32/f64 の最短幅、definite / indefinite のデコード、深度制限、重複キー (NaN / -0.0 の等価を含む) の拒否
+- `src/c4m/cose.rs`: COSE_Sign1 / COSE_Mac0 / CWT タグ、protected / unprotected のバケット規則 (crit / alg / typ / 重複ラベル) と Sig_structure / MAC_structure
+- `src/c4m/crypto.rs` + `src/c4m/crypto/aws_lc_rs.rs`: `CoseCrypto` trait (署名 / 検証 / ハッシュ) と aws-lc-rs 実装 (HMAC 256/384/512、ES256/384/512、EdDSA)
+- `src/c4m/cat.rs` + `src/c4m/jwk.rs` + `src/c4m/jwt.rs` + `src/c4m/dpop.rs` + `src/c4m/json.rs`: CAT のクレームとトークンの発行 / 検証、JWK とサムプリント、JWS compact、DPoP proof の検証と発行 (`ath` の必須化、鍵バインディング、actx、鮮度、jti リプレイ保護)
+- `src/c4m.rs`: `MoqtAction` / `MoqtScope` / `MoqtClaim` の exact / prefix / suffix / nil マッチングと `catdpop`
+- `src/name.rs`: DPoP の `tns` / `tn` 用に namespace / track name 単体のシリアライズとパースを追加
+- テスト: 付録 A.2〜A.6 の全ベクタ (decode / 再エンコード / 署名検証 / 認可 / 検証結果)、発行と検証のラウンドトリップ (全対応アルゴリズム)、エラー経路、`pbt/tests/prop_c4m/` のラウンドトリップと認可のモデル検査、fuzz ターゲット 5 本
+- ドキュメント: `docs/IMPLEMENTATION.md`、`README.md`、`skills/shiguredo-moqt/SKILL.md`、`CHANGES.md`、CI (aws-lc-rs feature の clippy / test / rustdoc)、`refs/cbor/` の一次資料
+
+仕様側の未解決事項はコードコメントに残した (compact 形式の直列化、HMAC-SHA256 のアルゴリズム ID、`cnf` の jkt の claim key)。`/review-diff-code` を 3 周実行し、致命的・重要の指摘を全て修正した。
