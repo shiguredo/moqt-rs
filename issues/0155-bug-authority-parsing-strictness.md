@@ -22,7 +22,8 @@ URL の authority に含まれる不正な host と port を、名前解決や�
 
 - `[` `]` の中身を `Ipv6Addr` として解釈できない authority は拒否する。`[example.com]` のような reg-name や `[::1]x` のような余分な文字を弾く。IPvFuture (`[v1.fe80::]`) もこの判定で拒否される (RFC 3986 §3.2.2 は未知の version flag を持つ IP-literal を dereference するアプリケーションに 'address mechanism not supported' のエラーを返すことを推奨する)
 - ポート 0 は拒否する。接続先として使えない (RFC 3986 §3.2.3 の `port = *DIGIT` は 0 も許すが、接続の観点では意味を成さない)
-- userinfo は受理しない。`@` を含む authority は専用のメッセージで拒否し、host として名前解決に回さない。RFC 3986 §3.2 の authority 構文は userinfo を許すが、draft-ietf-moq-transport-21 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った reference 中の userinfo を reject する選択を許す ("Applications may choose to ignore or reject such data when it is received as part of a reference")
+- userinfo は受理しない。`@` を含む authority は専用のメッセージで拒否し、host として名前解決に回さない。RFC 3986 §3.2 の authority 構文は userinfo を許すが、draft-ietf-moq-transport-21 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った reference 中の
+  userinfo を reject する選択を許す ("Applications may choose to ignore or reject such data when it is received as part of a reference")
 - zone id 付き IPv6 リテラルは非対応とし、拒否する。`std::net::SocketAddr` / `Ipv6Addr` は zone id を解釈できず、接続層が `SocketAddr` 経由のため対応しない。RFC 3986 §3.2.2 も "This syntax does not support IPv6 scoped addressing zone identifiers." と明記する。非対応であることを `authority_parts` の doc に明記し、doc と実装を一致させる
 - 拒否はすべて `TransportError::InvalidAuthority` とし、利用者向けの表示に `QUIC:` を付けない方針を維持する
 

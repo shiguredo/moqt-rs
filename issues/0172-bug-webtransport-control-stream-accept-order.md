@@ -17,7 +17,8 @@
 - `WtSession::accept_uni_stream` は `self.uni_rx.as_mut().ok_or(TransportError::StreamClosed)?` で receiver を取るため、`take_uni_receiver` の後は必ず `Err(StreamClosed)` になる。
 - `establish_wt` はこの戻り値を `ControlStream::new` に渡して MOQT の制御ストリームを読む想定だが、`accept_uni_stream` の `?` が先に `TransportError::StreamClosed` を返すため、確立処理がこの段階で終了する。
 - `examples/moqt-transport/src/webtransport.rs` の `route_uni_stream` は自セッションの WebTransport 単方向ストリームを `ForwardToMoqt` で acceptor 側の receiver へ流す。relay の MOQT 制御ストリームはこの経路で届く。
-- `examples/moqt-subscriber/src/pipeline.rs` の受信ループは acceptor の receiver から届いたストリームを `peek_stream_type` で判別し、`classify_data_stream_type` が `None` を返す type (`SETUP_STREAM_TYPE` を含む) を `StreamType::Subgroup` にフォールバックする。制御ストリームがこの receiver に混ざると Subgroup (データストリーム) として扱われ、`recv_data_stream_type` が未知型として `PROTOCOL_VIOLATION` でセッションを閉じる。
+- `examples/moqt-subscriber/src/pipeline.rs` の受信ループは acceptor の receiver から届いたストリームを `peek_stream_type` で判別し、`classify_data_stream_type` が `None` を返す type (`SETUP_STREAM_TYPE` を含む) を
+  `StreamType::Subgroup` にフォールバックする。制御ストリームがこの receiver に混ざると Subgroup (データストリーム) として扱われ、`recv_data_stream_type` が未知型として `PROTOCOL_VIOLATION` でセッションを閉じる。
 
 ## 設計方針
 
