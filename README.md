@@ -165,7 +165,7 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 - [Low Overhead Container (LOC)](docs/loc.md)
 - [C4M (Common Access Token for MoQ)](docs/c4m.md)
 
-モジュール構成とアーキテクチャは [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) を参照してください。
+モジュール構成とアーキテクチャは [`docs/moqt.md`](docs/moqt.md) を参照してください。
 
 ## サンプル
 

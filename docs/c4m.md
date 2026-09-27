@@ -2,7 +2,7 @@
 
 MOQT の認可トークンを扱う `c4m` モジュールの解説です。
 [draft-ietf-moq-c4m-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01) が定義するトークンと、その基盤となる CBOR、COSE、CWT、CAT を実装しています。
-モジュール構成とアーキテクチャは [`IMPLEMENTATION.md`](IMPLEMENTATION.md)、他の仕様の実装状況は [`moqt.md`](moqt.md) / [`msf.md`](msf.md) / [`loc.md`](loc.md)、利用者向けの API 一覧は [`../skills/shiguredo-moqt/SKILL.md`](../skills/shiguredo-moqt/SKILL.md) を参照してください。
+モジュール構成とアーキテクチャは [`moqt.md`](moqt.md)、他の仕様の実装状況は [`msf.md`](msf.md) / [`loc.md`](loc.md)、利用者向けの API 一覧は [`../skills/shiguredo-moqt/SKILL.md`](../skills/shiguredo-moqt/SKILL.md) を参照してください。
 
 ## 概要
 
