@@ -1,16 +1,16 @@
 //! CAT (CTA-5007-B / draft-ietf-moq-c4m-01) のテスト
 
-use shiguredo_moqt::c4m::MoqtAction;
 use shiguredo_moqt::c4m::cat::{
     CLAIM_CAT_VERSION, CLAIM_CONFIRMATION, CatClaims, CatError, CatToken, ClaimValidationError,
     ClaimValidationOptions, Confirmation, MOQT_AUTH_TOKEN_TYPE_CAT, TokenFormat,
 };
 use shiguredo_moqt::c4m::cbor::Value;
+use shiguredo_moqt::c4m::{CatDpop, MoqtAction};
 
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::{CoseKey, EcCurve};
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::{CatDpop, MoqtClaim, MoqtScope};
+use shiguredo_moqt::c4m::{MoqtClaim, MoqtScope};
 
 use super::helpers::{decode_hex, encode_hex};
 use super::vectors::*;
@@ -20,9 +20,9 @@ use shiguredo_moqt::c4m::cat::{CatTokenBuilder, VerifyOptions};
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::cose::{Algorithm, CoseEncodingOptions, KeyId};
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::crypto::CryptoError;
-#[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+#[cfg(feature = "aws-lc-rs")]
+use shiguredo_moqt::c4m::crypto::{CoseCrypto, CryptoError};
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::jwk::Jwk;
 
@@ -675,4 +675,353 @@ fn cose_tag_option_is_honored() {
     let token = CatToken::decode(&token_bytes).expect("デコードできる");
     assert_eq!(token.format(), TokenFormat::CoseMac0);
     token.verify(&crypto, &hmac_key()).expect("検証できる");
+}
+
+/// ES384 / ES512 / HMAC 384 / HMAC 512 の署名と検証の往復
+///
+/// 付録 A のベクタは HMAC-SHA256 と ES256 だけなので、他の対応アルゴリズムは
+/// openssl で生成した固定の鍵で往復を固定する。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn round_trip_for_all_algorithms() {
+    let crypto = AwsLcRsCrypto::new();
+
+    // HMAC 384 / 512
+    for (algorithm, key) in [
+        (Algorithm::HmacSha384, CoseKey::symmetric(vec![0xcd; 48])),
+        (Algorithm::HmacSha512, CoseKey::symmetric(vec![0xef; 64])),
+    ] {
+        let token_bytes = CatTokenBuilder::new()
+            .issuer("https://auth.example.com")
+            .algorithm(algorithm)
+            .build_cose(&crypto, &key)
+            .expect("COSE 形式を発行できる");
+        let token = CatToken::decode(&token_bytes).expect("デコードできる");
+        assert_eq!(token.header().algorithm, Some(algorithm));
+        token.verify(&crypto, &key).expect("検証できる");
+    }
+
+    // ES384 / ES512 (鍵はテスト専用に生成した固定値)
+    for (algorithm, curve, x, y, d) in [
+        (
+            Algorithm::Es384,
+            EcCurve::P384,
+            "ce7de2ef769603fc91f4682efeedc9e415b221a79067153a31d8f2f62d14044e18be87058146596041b2148233ed4073",
+            "8a69f5b6b5bdb0200d39bf760420a3da5bf091b8e81557f5cb4d37f7ce36f7a07fb1119a736e2385d75e4c3f5ca604e7",
+            "e3129db6c869a183e6ed6abc233723f7339b94e38c38bdde7c19d4674c5c2730eca7680ac6afa8d660810a8adead31e2",
+        ),
+        (
+            Algorithm::Es512,
+            EcCurve::P521,
+            "00518dbde5592773706f05f885b3c70b5b55c8d5fb00ed301714176827b36464b3fa5547e2e5b39abb7addb9648f556ef5319d866a927de7cf9d127f0040a98601b9",
+            "010ddbdde03abcbad3ea82185af075133e30babc436411af7cdb4503127df46d82f828d4e91692a821886e7ddc614e476dd467d907691e0c2e7910660725f9999876",
+            "01d1498cdca88097c4f581b05475494b5676aeb926a07dbd26093f99f8136cc572fe9fc8d03238d42b2af0a5b9dce17e615534029fd358a848873aff02bb9a470f76",
+        ),
+    ] {
+        let private_key =
+            CoseKey::ec2_with_private_key(curve, decode_hex(x), decode_hex(y), decode_hex(d));
+        let public_key = CoseKey::ec2(curve, decode_hex(x), decode_hex(y));
+        let token_bytes = CatTokenBuilder::new()
+            .issuer("https://auth.example.com")
+            .build_cose(&crypto, &private_key)
+            .expect("COSE 形式を発行できる");
+        let token = CatToken::decode(&token_bytes).expect("デコードできる");
+        assert_eq!(token.header().algorithm, Some(algorithm));
+        token.verify(&crypto, &public_key).expect("検証できる");
+    }
+}
+
+/// 付録 A の全ベクタトークンの署名を検証する
+///
+/// A.3 以外 (A.4 / A.5 / A.6) のトークンの署名も固定し、ベクタのドリフトを検出する。
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn all_vector_tokens_verify_signatures() {
+    let crypto = AwsLcRsCrypto::new();
+    for vector in DPOP_VECTORS {
+        let token = CatToken::decode(vector.token.as_bytes())
+            .unwrap_or_else(|error| panic!("ベクタ {} のデコードに失敗した: {error}", vector.id));
+        let key = if vector.id == "dpop_es256_real_binding" {
+            es256_public_key()
+        } else {
+            hmac_key()
+        };
+        token
+            .verify(&crypto, &key)
+            .unwrap_or_else(|error| panic!("ベクタ {} の検証に失敗した: {error}", vector.id));
+    }
+    for vector in SCOPE_VECTORS {
+        let token = CatToken::decode(vector.token.as_bytes())
+            .unwrap_or_else(|error| panic!("ベクタ {} のデコードに失敗した: {error}", vector.id));
+        token
+            .verify(&crypto, &hmac_key())
+            .unwrap_or_else(|error| panic!("ベクタ {} の検証に失敗した: {error}", vector.id));
+    }
+    for vector in VALIDATION_VECTORS {
+        let token = CatToken::decode(vector.token.as_bytes())
+            .unwrap_or_else(|error| panic!("ベクタ {} のデコードに失敗した: {error}", vector.id));
+        // 改ざん・誤鍵のベクタは失敗することが期待値
+        if matches!(
+            vector.id,
+            "invalid_tampered_signature" | "invalid_wrong_key"
+        ) {
+            continue;
+        }
+        token
+            .verify(&crypto, &hmac_key())
+            .unwrap_or_else(|error| panic!("ベクタ {} の検証に失敗した: {error}", vector.id));
+    }
+}
+
+/// 付録 A.4 の cnf_jkt_source の記載を固定する
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn dpop_no_jti_thumbprint_source_matches() {
+    use shiguredo_moqt::c4m::crypto::DigestAlgorithm;
+
+    let crypto = AwsLcRsCrypto::new();
+    let vector = DPOP_VECTORS
+        .iter()
+        .find(|vector| vector.id == "dpop_no_jti")
+        .expect("ベクタがある");
+    let digest = crypto
+        .digest(DigestAlgorithm::Sha256, b"test-public-key-material")
+        .expect("ハッシュを計算できる");
+    assert_eq!(encode_hex(&digest), vector.cnf_jkt_hex);
+}
+
+#[test]
+fn non_finite_claim_numbers_are_rejected() {
+    for (claim, value, name) in [
+        (
+            shiguredo_moqt::c4m::cat::CLAIM_EXPIRATION,
+            Value::Float(f64::NAN),
+            "exp",
+        ),
+        (
+            shiguredo_moqt::c4m::cat::CLAIM_NOT_BEFORE,
+            Value::Float(f64::INFINITY),
+            "nbf",
+        ),
+        (
+            shiguredo_moqt::c4m::cat::CLAIM_ISSUED_AT,
+            Value::Float(f64::NEG_INFINITY),
+            "iat",
+        ),
+        (
+            shiguredo_moqt::c4m::CLAIM_MOQT_REVAL,
+            Value::Float(f64::NAN),
+            "moqt-reval",
+        ),
+    ] {
+        let claims = Value::Map(vec![(Value::integer(claim), value)]);
+        assert_eq!(
+            CatClaims::decode(&claims),
+            Err(CatError::NonFiniteNumber(name))
+        );
+    }
+}
+
+#[test]
+fn non_finite_reference_time_is_rejected() {
+    let claims = CatClaims {
+        expiration: Some(100.0),
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions {
+            reference_time_seconds: f64::NAN,
+            ..ClaimValidationOptions::default()
+        }),
+        Err(ClaimValidationError::InvalidReferenceTime)
+    );
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions {
+            reference_time_seconds: 1.0,
+            clock_tolerance_seconds: -1.0,
+            ..ClaimValidationOptions::default()
+        }),
+        Err(ClaimValidationError::InvalidReferenceTime)
+    );
+}
+
+#[test]
+fn typed_claim_keys_are_rejected_in_raw_even_when_unset() {
+    // 型付きフィールドが未設定でも raw に置くと decode と encode で解釈が曖昧になる
+    let claims = CatClaims {
+        raw: vec![(
+            Value::integer(shiguredo_moqt::c4m::cat::CLAIM_EXPIRATION),
+            Value::TextString(String::from("x")),
+        )],
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.encode(),
+        Err(CatError::DuplicateClaim(
+            shiguredo_moqt::c4m::cat::CLAIM_EXPIRATION
+        ))
+    );
+}
+
+#[test]
+fn validate_rejects_non_finite_claims_built_by_hand() {
+    let claims = CatClaims {
+        expiration: Some(f64::NAN),
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions::default()),
+        Err(ClaimValidationError::NonFiniteClaim("exp"))
+    );
+    let claims = CatClaims {
+        catdpop: Some(CatDpop {
+            window_seconds: Some(f64::INFINITY),
+            honor_jti: None,
+            raw: Vec::new(),
+        }),
+        ..CatClaims::default()
+    };
+    assert_eq!(
+        claims.validate(&ClaimValidationOptions::default()),
+        Err(ClaimValidationError::NonFiniteClaim("catdpop window"))
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn builder_rejects_non_finite_timestamps() {
+    let crypto = AwsLcRsCrypto::new();
+    assert_eq!(
+        CatTokenBuilder::new()
+            .expiration(f64::NAN)
+            .build_compact(&crypto, &hmac_key()),
+        Err(CatError::NonFiniteNumber("exp"))
+    );
+    assert_eq!(
+        CatTokenBuilder::new()
+            .not_before(f64::INFINITY)
+            .build_cose(&crypto, &hmac_key()),
+        Err(CatError::NonFiniteNumber("nbf"))
+    );
+    assert_eq!(
+        CatTokenBuilder::new()
+            .moqt_reval(f64::NAN)
+            .build_cose(&crypto, &hmac_key()),
+        Err(CatError::NonFiniteNumber("moqt-reval"))
+    );
+    assert_eq!(
+        CatTokenBuilder::new()
+            .catdpop(f64::NAN, true)
+            .build_cose(&crypto, &hmac_key()),
+        Err(CatError::C4m(
+            shiguredo_moqt::c4m::C4mError::NonFiniteNumber("catdpop window")
+        ))
+    );
+}
+
+#[test]
+fn cat_claim_keys_match_the_iana_registry() {
+    use shiguredo_moqt::c4m::cat::*;
+    assert_eq!(CLAIM_CAT_REPLAY, 308);
+    assert_eq!(CLAIM_CAT_PROBABILITY_OF_REJECTION, 309);
+    assert_eq!(CLAIM_CAT_VERSION, 310);
+    assert_eq!(CLAIM_CAT_NETWORK_IP, 311);
+    assert_eq!(CLAIM_CAT_URI, 312);
+    assert_eq!(CLAIM_CAT_METHOD, 313);
+    assert_eq!(CLAIM_CAT_ALPN, 314);
+    assert_eq!(CLAIM_CAT_HEADER, 315);
+    assert_eq!(CLAIM_CAT_GEO_ISO3166, 316);
+    assert_eq!(CLAIM_CAT_GEO_COORD, 317);
+    assert_eq!(CLAIM_CAT_GEO_ALT, 318);
+    assert_eq!(CLAIM_CAT_TLS_PUBLIC_KEY, 319);
+    assert_eq!(CLAIM_CAT_IF_DATA, 320);
+    assert_eq!(CLAIM_CAT_DPOP, 321);
+    assert_eq!(CLAIM_CAT_IF, 322);
+    assert_eq!(CLAIM_CAT_RENEWAL, 323);
+    assert_eq!(CLAIM_ISSUER, 1);
+    assert_eq!(CLAIM_SUBJECT, 2);
+    assert_eq!(CLAIM_AUDIENCE, 3);
+    assert_eq!(CLAIM_EXPIRATION, 4);
+    assert_eq!(CLAIM_NOT_BEFORE, 5);
+    assert_eq!(CLAIM_ISSUED_AT, 6);
+    assert_eq!(CLAIM_CWT_ID, 7);
+    assert_eq!(CLAIM_CONFIRMATION, 8);
+    assert_eq!(CONFIRMATION_JWK_THUMBPRINT, 323);
+    assert_eq!(CONFIRMATION_C4M_DRAFT_JWK_THUMBPRINT, 3);
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn builder_setters_are_covered() {
+    use shiguredo_moqt::c4m::cose::KeyId;
+
+    let crypto = AwsLcRsCrypto::new();
+    let claims = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .subject("user:alice")
+        .audience("https://relay.example.com")
+        .issued_at(1700000000.0)
+        .cwt_id(b"id-1".to_vec())
+        .c4m_draft_jwk_thumbprint(vec![0x01; 32])
+        .typ("CAT")
+        .key_id(KeyId::Text(String::from("key-1")))
+        .claim(
+            310,
+            shiguredo_moqt::c4m::cbor::Value::TextString(String::from("CAT-v1")),
+        )
+        .build_cose(&crypto, &hmac_key())
+        .expect("発行できる");
+    let token = CatToken::decode(&claims).expect("デコードできる");
+    let decoded = token.claims();
+    assert_eq!(decoded.subject.as_deref(), Some("user:alice"));
+    assert_eq!(decoded.issued_at, Some(1700000000.0));
+    assert_eq!(decoded.cwt_id.as_deref(), Some(&b"id-1"[..]));
+    assert_eq!(
+        decoded
+            .confirmation
+            .as_ref()
+            .and_then(|confirmation| confirmation.c4m_draft_jwk_thumbprint.as_deref()),
+        Some(&[0x01u8; 32][..])
+    );
+    assert_eq!(
+        decoded.get(shiguredo_moqt::c4m::cat::CLAIM_CAT_VERSION),
+        Some(&shiguredo_moqt::c4m::cbor::Value::TextString(String::from(
+            "CAT-v1"
+        )))
+    );
+    token.verify(&crypto, &hmac_key()).expect("検証できる");
+    assert_eq!(
+        token.header().typ,
+        Some(Value::TextString(String::from("CAT")))
+    );
+}
+
+#[test]
+fn cbor_auth_token_value_is_decoded() {
+    // MOQT の Token Value に CBOR (COSE 形式) を直接渡した場合もデコードできる
+    let token_text = TOKEN_VECTORS[0].token;
+    let compact = CatToken::decode(token_text.as_bytes()).expect("デコードできる");
+    // compact 形式の payload を COSE として渡すと形式エラーになる
+    assert!(CatToken::decode_moqt_auth_token(MOQT_AUTH_TOKEN_TYPE_CAT, compact.payload()).is_err());
+    assert_eq!(
+        CatToken::decode(compact.raw_token())
+            .expect("raw から再デコードできる")
+            .claims(),
+        compact.claims()
+    );
+}
+
+#[test]
+fn debug_hides_raw_token_and_signature() {
+    let token = CatToken::decode(TOKEN_VECTORS[0].token.as_bytes()).expect("デコードできる");
+    let debug = format!("{token:?}");
+    assert!(
+        !debug.contains(TOKEN_VECTORS[0].token),
+        "生トークンを出さない"
+    );
+    assert!(
+        !debug.contains(TOKEN_VECTORS[0].signature_hex),
+        "署名を出さない"
+    );
+    assert!(debug.contains("raw_bytes"), "長さは表示する");
 }

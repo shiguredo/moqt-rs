@@ -1,4 +1,4 @@
-//! DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof)
+//! DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof-00)
 //!
 //! C4M (draft-ietf-moq-c4m-01 §3.1.2) は [DPOP-PROOF] の JWT 形式の DPoP proof を
 //! 使う。proof の署名は埋め込まれた JWK で検証し、`cnf` の JWK サムプリントとの
@@ -25,10 +25,10 @@ use super::jwt::{JwsCompact, JwtError};
 use crate::message::common::TrackNamespace;
 use crate::name;
 
-/// DPoP proof の JWT の `typ` (draft-nandakumar-moq-generic-dpop-proof §4.3.1)
+/// DPoP proof の JWT の `typ` (draft-nandakumar-moq-generic-dpop-proof-00 §4.3.1)
 pub const DPOP_PROOF_JWT_TYPE: &str = "dpop-proof+jwt";
 
-/// MOQT の Authorization Context の `type` (draft-nandakumar-moq-generic-dpop-proof §5.1)
+/// MOQT の Authorization Context の `type` (draft-nandakumar-moq-generic-dpop-proof-00 §5.1)
 pub const MOQT_AUTHORIZATION_CONTEXT_TYPE: &str = "moqt";
 
 /// DPoP proof の JWT ヘッダ (§4.3.1)
@@ -59,15 +59,23 @@ pub struct AuthorizationContext {
     pub track_name: Option<String>,
     /// `resource` (任意)
     pub resource: Option<String>,
-    /// actx の生 JSON (拡張フィールドを保持する)
+    /// actx の生 JSON
+    ///
+    /// `parameters` などのプロトコル固有の拡張フィールドは型付きで扱わないため、
+    /// 解釈が必要な場合はこの文字列を nojson などで読む。
     pub raw: String,
 }
 
 impl AuthorizationContext {
     /// Authorization Context の JSON をデコードする
+    ///
+    /// メンバー名が重複している場合はエラーを返す。
     pub fn decode(text: &str) -> Result<Self, DpopError> {
         let json = RawJson::parse(text).map_err(json_error)?;
         let value = json.value();
+        if let Some(name) = super::json::find_duplicate_member(value).map_err(json_error)? {
+            return Err(DpopError::DuplicateMember(name));
+        }
         Ok(Self {
             context_type: required_string(value, "type")?,
             action: required_string(value, "action")?,
@@ -96,7 +104,7 @@ impl AuthorizationContext {
 
     /// `tns` / `tn` が対象の Full Track Name と一致するかどうかを検証する
     ///
-    /// `tns` / `tn` は draft-nandakumar-moq-generic-dpop-proof §5.1.3 の正規
+    /// `tns` / `tn` は draft-nandakumar-moq-generic-dpop-proof-00 §5.1.3 の正規
     /// シリアライズと比較する。`tn` が proof に無い場合はエラーを返す
     /// (draft-ietf-moq-c4m-01 §3.1.2 は `tn` を必須としている)。
     pub fn verify_target(
@@ -122,6 +130,9 @@ impl AuthorizationContext {
     /// `resource` は `moqt://<relay-endpoint>?tns=<namespace>&tn=<track>` の形式
     /// (draft-ietf-moq-c4m-01 §3.1.3) を前提とし、クエリパラメータを文字列として
     /// 比較する。パーセントエンコーディングは解釈しない。
+    ///
+    /// §3.1.3 が挙げる接続確立時の `moqt://<relay-endpoint>` (クエリ無し) は
+    /// `tns` を持たないため、この関数は整合しないものとして拒否する (fail-closed)。
     pub fn verify_resource_consistency(&self) -> Result<(), DpopError> {
         let Some(resource) = &self.resource else {
             return Ok(());
@@ -168,9 +179,14 @@ pub struct DpopProofClaims {
 
 impl DpopProofClaims {
     /// ペイロードの JSON をデコードする
+    ///
+    /// クレーム名が重複している場合はエラーを返す。
     pub fn decode(text: &str) -> Result<Self, DpopError> {
         let json = RawJson::parse(text).map_err(json_error)?;
         let value = json.value();
+        if let Some(name) = super::json::find_duplicate_member(value).map_err(json_error)? {
+            return Err(DpopError::DuplicateMember(name));
+        }
         let authorization_context = AuthorizationContext::decode(
             value
                 .to_member("actx")
@@ -213,6 +229,12 @@ pub struct DpopVerification<'a> {
     pub reference_time_seconds: f64,
     /// `catdpop` が無い / ウィンドウ未指定の場合に使う既定のウィンドウ (秒)
     pub default_window_seconds: f64,
+    /// proof と同時に送られたアクセストークン
+    ///
+    /// 送信された場合は `ath` の検証を必須にする (draft-nandakumar-moq-generic-dpop-proof-00
+    /// §4.3.2)。アクセストークンを伴わない proof (token endpoint など) では `None` を
+    /// 渡す。
+    pub access_token: Option<&'a [u8]>,
 }
 
 impl DpopProof {
@@ -280,26 +302,16 @@ impl DpopProof {
 
     /// proof の JWK がトークンの `cnf` の JWK サムプリントと一致するか検証する
     ///
-    /// `cnf` の confirmation key 323 (IANA 登録の `jkt`) と 3 (ドラフトのベクタ) の
-    /// どちらでも一致すればよい。
+    /// `cnf` の confirmation key 323 (IANA 登録の `jkt`) を優先し、323 が無い場合だけ
+    /// 3 (ドラフトのベクタが使う値。IANA では `kid`) と比較する。
     pub fn verify_key_binding<C: CoseCrypto>(
         &self,
         crypto: &C,
         confirmation: &Confirmation,
     ) -> Result<(), DpopError> {
         let thumbprint = self.header.jwk.thumbprint_sha256(crypto)?;
-        let matches = confirmation
-            .jwk_thumbprint
-            .as_deref()
-            .is_some_and(|expected| expected == thumbprint.as_slice())
-            || confirmation
-                .c4m_draft_jwk_thumbprint
-                .as_deref()
-                .is_some_and(|expected| expected == thumbprint.as_slice());
-        if !matches {
-            if confirmation.jkt().is_none() {
-                return Err(DpopError::MissingThumbprint);
-            }
+        let expected = confirmation.jkt().ok_or(DpopError::MissingThumbprint)?;
+        if expected != thumbprint.as_slice() {
             return Err(DpopError::KeyBindingMismatch);
         }
         Ok(())
@@ -308,12 +320,22 @@ impl DpopProof {
     /// `iat` が現在時刻からウィンドウ内にあるかどうかを検証する
     ///
     /// ウィンドウは `catdpop` の値を呼び出し側が渡す。未来方向のずれも同じウィンドウ
-    /// で制限する。
+    /// で制限する。現在時刻とウィンドウが有限でない場合はエラーにする (NaN は比較が
+    /// 常に偽になり検証を素通りさせるため)。
     pub fn verify_freshness(
         &self,
         reference_time_seconds: f64,
         window_seconds: f64,
     ) -> Result<(), DpopError> {
+        if !reference_time_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("reference time"));
+        }
+        if !window_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("freshness window"));
+        }
+        if !self.claims.issued_at.is_finite() {
+            return Err(DpopError::NonFiniteNumber("iat"));
+        }
         let delta = reference_time_seconds - self.claims.issued_at;
         if delta > window_seconds {
             return Err(DpopError::ProofExpired);
@@ -324,19 +346,33 @@ impl DpopProof {
         Ok(())
     }
 
-    /// `ath` をアクセストークンと照合する
+    /// `ath` をアクセストークン (文字列) と照合する
     ///
-    /// `ath` が proof に無い場合は何も行わない。
+    /// `ath` が proof に無い場合は何も行わない。一括検証 API
+    /// ([`DpopProof::verify_against_token`]) はアクセストークンを渡すと `ath` の
+    /// 存在と一致を必須にする。
     pub fn verify_access_token_hash<C: CoseCrypto>(
         &self,
         crypto: &C,
         access_token: &str,
     ) -> Result<(), DpopError> {
+        self.verify_access_token_hash_bytes(crypto, access_token.as_bytes())
+    }
+
+    /// `ath` をアクセストークン (バイト列) と照合する
+    ///
+    /// MOQT の AUTHORIZATION_TOKEN のように文字列ではないトークンに使う。`ath` が
+    /// proof に無い場合は何も行わない。
+    pub fn verify_access_token_hash_bytes<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        access_token: &[u8],
+    ) -> Result<(), DpopError> {
         let Some(expected) = &self.claims.access_token_hash else {
             return Ok(());
         };
         let digest = crypto
-            .digest(DigestAlgorithm::Sha256, access_token.as_bytes())
+            .digest(DigestAlgorithm::Sha256, access_token)
             .map_err(DpopError::Crypto)?;
         if expected != &base64url::encode(&digest) {
             return Err(DpopError::AccessTokenHashMismatch);
@@ -361,10 +397,49 @@ impl DpopProof {
         context.verify_target(namespace, track_name)
     }
 
+    /// CAT トークンと同時に送られた DPoP proof を一通り検証する
+    ///
+    /// MOQT の AUTHORIZATION_TOKEN と proof を同時に受けた場合の入口であり、トークンの
+    /// 生バイトを `ath` のアクセストークンとして扱う。アクセストークンを伴う proof に
+    /// `ath` を必須とする (draft-nandakumar-moq-generic-dpop-proof-00 §4.3.2) ため、
+    /// [`DpopProof::verify_against_token`] よりこちらを使うこと。
+    ///
+    /// 署名、`ath`、JWK サムプリントのバインディング、Authorization Context、
+    /// `catdpop` のウィンドウによる鮮度、jti によるリプレイ保護の順に検証する。
+    ///
+    /// `token` は `CatToken::decode` に渡した生バイト (`CatToken::raw_token`) を
+    /// `ath` に使う。発行側が別の表現 (base64url など) をハッシュしている場合は
+    /// [`DpopProof::verify_against_token`] にその表現を渡すこと。
+    #[expect(clippy::too_many_arguments)]
+    pub fn verify_against_cat_token<C: CoseCrypto>(
+        &self,
+        crypto: &C,
+        token: &crate::c4m::cat::CatToken,
+        action: MoqtAction,
+        namespace: &TrackNamespace,
+        track_name: &[u8],
+        reference_time_seconds: f64,
+        default_window_seconds: f64,
+        replay_cache: Option<&mut DpopReplayCache>,
+    ) -> Result<(), DpopError> {
+        let request = DpopVerification {
+            token_claims: token.claims(),
+            action,
+            namespace,
+            track_name,
+            reference_time_seconds,
+            default_window_seconds,
+            access_token: Some(token.raw_token()),
+        };
+        self.verify_against_token(crypto, &request, replay_cache)
+    }
+
     /// CAT トークンに束縛された DPoP proof を一通り検証する
     ///
-    /// 署名、JWK サムプリントのバインディング、Authorization Context、`catdpop` の
-    /// ウィンドウによる鮮度、jti によるリプレイ保護の順に検証する。
+    /// 署名、`ath` (アクセストークンを渡した場合)、JWK サムプリントのバインディング、
+    /// Authorization Context、`catdpop` のウィンドウによる鮮度、jti によるリプレイ
+    /// 保護の順に検証する。MOQT のようにアクセストークンと proof を同時に受ける場合は
+    /// [`DpopProof::verify_against_cat_token`] を使うこと。
     ///
     /// `catdpop` が jti の処理を要求している場合 (`honor_jti` が真) は
     /// `replay_cache` が必須である。
@@ -375,6 +450,18 @@ impl DpopProof {
         replay_cache: Option<&mut DpopReplayCache>,
     ) -> Result<(), DpopError> {
         self.verify_signature(crypto)?;
+        match (
+            request.access_token,
+            self.claims.access_token_hash.as_deref(),
+        ) {
+            (Some(access_token), Some(_)) => {
+                self.verify_access_token_hash_bytes(crypto, access_token)?;
+            }
+            // アクセストークンを伴う proof は `ath` が必須 (§4.3.2)
+            (Some(_), None) => return Err(DpopError::MissingAccessTokenHash),
+            (None, Some(_)) => return Err(DpopError::MissingAccessToken),
+            (None, None) => {}
+        }
         let confirmation = request
             .token_claims
             .confirmation
@@ -411,6 +498,9 @@ impl DpopProof {
 /// jti によるリプレイ保護のキャッシュ
 ///
 /// アプリケーションが 1 つの主体 (セッションやアクセストークン) ごとに保持する。
+/// エントリ数と jti 長の上限は持たないため、アプリケーションが主体ごとのレート制限や
+/// jti の長さ制限で肥大化を防ぐこと (RFC 9449 §11.1 は大きすぎる jti の拒否や
+/// ハッシュ化を推奨する)。
 #[derive(Debug, Clone, Default)]
 pub struct DpopReplayCache {
     entries: Vec<(String, f64)>,
@@ -433,6 +523,15 @@ impl DpopReplayCache {
         window_seconds: f64,
         reference_time_seconds: f64,
     ) -> Result<(), DpopError> {
+        if !issued_at.is_finite() {
+            return Err(DpopError::NonFiniteNumber("iat"));
+        }
+        if !window_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("freshness window"));
+        }
+        if !reference_time_seconds.is_finite() {
+            return Err(DpopError::NonFiniteNumber("reference time"));
+        }
         self.entries
             .retain(|(_, recorded_at)| reference_time_seconds - recorded_at <= window_seconds);
         if self.entries.iter().any(|(recorded, _)| recorded == jti) {
@@ -510,7 +609,11 @@ impl DpopProofBuilder {
 
     /// proof の JWT を発行する
     ///
-    /// `jwk` は埋め込む公開鍵で、`key` と同じ公開鍵でなければならない。
+    /// `jwk` は埋め込む公開鍵で、`key` と同じ公開鍵でなければならない。`iat` が
+    /// 有限でない場合はエラーを返す。
+    ///
+    /// `authorization_context` の `raw` にしか無い拡張フィールド (`parameters` など)
+    /// は出力に含まれない。型付きの 5 つのフィールドだけが出力される。
     pub fn build<C: CoseCrypto>(
         &self,
         crypto: &C,
@@ -523,6 +626,9 @@ impl DpopProofBuilder {
         }
         if !jwk.matches_public_key(key)? {
             return Err(DpopError::KeyMismatch);
+        }
+        if !self.issued_at.is_finite() {
+            return Err(DpopError::NonFiniteNumber("iat"));
         }
         let header = format!(
             "{}",
@@ -589,10 +695,12 @@ pub enum DpopError {
     Json(String),
     /// ヘッダに必須のメンバーが無い
     MissingHeader(&'static str),
-    /// クレームに必須のメンバーが無い
-    MissingClaim(&'static str),
     /// メンバーの型が期待と異なる
     UnexpectedType(&'static str),
+    /// メンバー名が重複している
+    DuplicateMember(String),
+    /// 数値が有限でない (NaN / 無限大)
+    NonFiniteNumber(&'static str),
     /// `typ` が "dpop-proof+jwt" ではない
     InvalidType(String),
     /// 対称鍵アルゴリズムは使えない
@@ -617,6 +725,10 @@ pub enum DpopError {
     ResourceInconsistent,
     /// `ath` がアクセストークンと一致しない
     AccessTokenHashMismatch,
+    /// アクセストークンを伴う proof に `ath` が無い
+    MissingAccessTokenHash,
+    /// proof に `ath` があるがアクセストークンが渡されていない
+    MissingAccessToken,
     /// `iat` が古すぎる
     ProofExpired,
     /// `iat` が未来すぎる
@@ -635,8 +747,9 @@ impl fmt::Display for DpopError {
             Self::Crypto(error) => write!(f, "crypto error: {error}"),
             Self::Json(message) => write!(f, "invalid DPoP JSON: {message}"),
             Self::MissingHeader(name) => write!(f, "DPoP header member is missing: {name}"),
-            Self::MissingClaim(name) => write!(f, "DPoP claim is missing: {name}"),
             Self::UnexpectedType(name) => write!(f, "unexpected DPoP member type: {name}"),
+            Self::DuplicateMember(name) => write!(f, "duplicate DPoP member: {name}"),
+            Self::NonFiniteNumber(name) => write!(f, "{name} must be finite"),
             Self::InvalidType(typ) => write!(f, "invalid DPoP typ: {typ}"),
             Self::UnsupportedAlgorithm => {
                 write!(f, "DPoP proof must use an asymmetric algorithm")
@@ -653,6 +766,15 @@ impl fmt::Display for DpopError {
                 write!(f, "actx.resource is inconsistent with tns or tn")
             }
             Self::AccessTokenHashMismatch => write!(f, "ath does not match the access token"),
+            Self::MissingAccessTokenHash => {
+                write!(
+                    f,
+                    "ath is required when an access token is sent with the proof"
+                )
+            }
+            Self::MissingAccessToken => {
+                write!(f, "the access token is required to verify the ath claim")
+            }
             Self::ProofExpired => write!(f, "DPoP proof is too old"),
             Self::ProofNotYetValid => write!(f, "DPoP proof is issued in the future"),
             Self::Replayed => write!(f, "DPoP proof jti was already used"),
@@ -718,9 +840,13 @@ fn required_number(value: RawJsonValue<'_, '_>, name: &'static str) -> Result<f6
         .map_err(json_error)?
         .required()
         .map_err(json_error)?;
-    member
+    let number = member
         .as_number_str()
         .map_err(json_error)?
         .parse::<f64>()
-        .map_err(|_| DpopError::UnexpectedType(name))
+        .map_err(|_| DpopError::UnexpectedType(name))?;
+    if !number.is_finite() {
+        return Err(DpopError::NonFiniteNumber(name));
+    }
+    Ok(number)
 }

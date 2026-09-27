@@ -3,11 +3,15 @@
 //! `tests/test_c4m.rs` のサブモジュールから共有する。値は refs/moq/draft-ietf-moq-c4m-01.txt
 //! の付録 A の JSON をそのまま定数化したもので、改変しない。
 
-#![allow(dead_code)]
-
 /// 付録 A.1 の HMAC-SHA256 鍵
+///
+/// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
+#[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
 pub const HMAC_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 /// 付録 A.1 の ES256 秘密鍵 (スカラー)
+///
+/// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
+#[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
 pub const ES256_PRIVATE_KEY_HEX: &str =
     "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
 /// 付録 A.1 の ES256 公開鍵の x 座標
@@ -151,6 +155,9 @@ pub struct DpopVector {
     /// `catdpop` の jti の扱い
     pub honor_jti: Option<bool>,
     /// サムプリント計算の入力となる正規化 JSON (ある場合)
+    ///
+    /// サムプリントのテスト (aws-lc-rs feature) でのみ使う。
+    #[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
     pub jwk_thumbprint_input: Option<&'static str>,
 }
 
@@ -386,8 +393,14 @@ pub struct ValidationVector {
     /// 期待するエラー (`None` は正常)
     pub expected_error: Option<&'static str>,
     /// 検証に使う鍵 (hex)
+    ///
+    /// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
+    #[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
     pub key_hex: Option<&'static str>,
     /// 検証側が期待するアルゴリズム id
+    ///
+    /// 署名 / 検証のテスト (aws-lc-rs feature) でのみ使う。
+    #[cfg_attr(not(feature = "aws-lc-rs"), expect(dead_code))]
     pub verifier_algorithm_id: Option<i64>,
 }
 

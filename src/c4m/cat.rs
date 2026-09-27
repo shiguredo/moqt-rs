@@ -225,11 +225,52 @@ pub struct CatClaims {
     /// `moqt` (draft-ietf-moq-c4m-01 §2.1)
     pub moqt: Option<MoqtClaim>,
     /// `moqt-reval` (draft-ietf-moq-c4m-01 §2.2) の再検証間隔 (秒)
+    ///
+    /// §2.2 は「再検証できない受信者は `moqt-reval` 付きトークンを拒否する MUST」
+    /// 「再検証間隔が自身の能力を下回る場合も拒否する MUST」を定める。本ライブラリは
+    /// Sans-I/O のため再検証の実行は行わず、この値の解釈と拒否の判断は利用側が行う。
     pub moqt_reval: Option<f64>,
     /// `catdpop` (draft-ietf-moq-c4m-01 §3.1.1)
     pub catdpop: Option<CatDpop>,
     /// 型付きで解釈しなかったクレーム
     pub raw: Vec<(Value, Value)>,
+}
+
+/// 型付きフィールドを持つ claim key かどうかを返す
+fn is_typed_claim_key(key: i64) -> bool {
+    matches!(
+        key,
+        CLAIM_ISSUER
+            | CLAIM_SUBJECT
+            | CLAIM_AUDIENCE
+            | CLAIM_EXPIRATION
+            | CLAIM_NOT_BEFORE
+            | CLAIM_ISSUED_AT
+            | CLAIM_CWT_ID
+            | CLAIM_CONFIRMATION
+            | CLAIM_MOQT
+            | CLAIM_MOQT_REVAL
+            | CLAIM_CAT_DPOP
+    )
+}
+
+/// 数値クレームを有限値として CBOR のデータ項目へエンコードする
+fn finite_number_value(number: f64, name: &'static str) -> Result<Value, CatError> {
+    if !number.is_finite() {
+        return Err(CatError::NonFiniteNumber(name));
+    }
+    Ok(number_value(number))
+}
+
+/// 数値クレームを有限の `f64` として取り出す
+///
+/// NaN / 無限大は期限判定を素通りさせるため、デコードの時点で拒否する。
+fn finite_claim_number(entry: &Value, name: &'static str) -> Result<f64, CatError> {
+    let number = entry.as_number().ok_or(CatError::UnexpectedType(name))?;
+    if !number.is_finite() {
+        return Err(CatError::NonFiniteNumber(name));
+    }
+    Ok(number)
 }
 
 impl CatClaims {
@@ -238,8 +279,17 @@ impl CatClaims {
         let entries = value.as_map().ok_or(CatError::UnexpectedType("claims"))?;
         let mut claims = Self::default();
         for (key, entry) in entries {
-            match key.as_int() {
-                Some(CLAIM_ISSUER) => {
+            // CWT の claim key は整数またはテキスト文字列 (RFC 8392 §3)。
+            // それ以外の型は意味を解釈できないため拒否する
+            let Some(key_int) = key.as_int() else {
+                if matches!(key, Value::TextString(_)) {
+                    claims.raw.push((key.clone(), entry.clone()));
+                    continue;
+                }
+                return Err(CatError::UnexpectedType("claim key"));
+            };
+            match key_int {
+                CLAIM_ISSUER => {
                     claims.issuer = Some(
                         entry
                             .as_text()
@@ -247,7 +297,7 @@ impl CatClaims {
                             .into(),
                     );
                 }
-                Some(CLAIM_SUBJECT) => {
+                CLAIM_SUBJECT => {
                     claims.subject = Some(
                         entry
                             .as_text()
@@ -255,7 +305,7 @@ impl CatClaims {
                             .into(),
                     );
                 }
-                Some(CLAIM_AUDIENCE) => match entry {
+                CLAIM_AUDIENCE => match entry {
                     Value::TextString(audience) => claims.audience.push(audience.clone()),
                     Value::Array(audiences) => {
                         for audience in audiences {
@@ -269,19 +319,16 @@ impl CatClaims {
                     }
                     _ => return Err(CatError::UnexpectedType("aud")),
                 },
-                Some(CLAIM_EXPIRATION) => {
-                    claims.expiration =
-                        Some(entry.as_number().ok_or(CatError::UnexpectedType("exp"))?);
+                CLAIM_EXPIRATION => {
+                    claims.expiration = Some(finite_claim_number(entry, "exp")?);
                 }
-                Some(CLAIM_NOT_BEFORE) => {
-                    claims.not_before =
-                        Some(entry.as_number().ok_or(CatError::UnexpectedType("nbf"))?);
+                CLAIM_NOT_BEFORE => {
+                    claims.not_before = Some(finite_claim_number(entry, "nbf")?);
                 }
-                Some(CLAIM_ISSUED_AT) => {
-                    claims.issued_at =
-                        Some(entry.as_number().ok_or(CatError::UnexpectedType("iat"))?);
+                CLAIM_ISSUED_AT => {
+                    claims.issued_at = Some(finite_claim_number(entry, "iat")?);
                 }
-                Some(CLAIM_CWT_ID) => {
+                CLAIM_CWT_ID => {
                     claims.cwt_id = Some(match entry {
                         Value::ByteString(id) => id.clone(),
                         // 付録 A.2 / A.3 のベクタはテキスト文字列を使う
@@ -289,20 +336,16 @@ impl CatClaims {
                         _ => return Err(CatError::UnexpectedType("cti")),
                     });
                 }
-                Some(CLAIM_CONFIRMATION) => {
+                CLAIM_CONFIRMATION => {
                     claims.confirmation = Some(Confirmation::decode(entry)?);
                 }
-                Some(CLAIM_MOQT) => {
+                CLAIM_MOQT => {
                     claims.moqt = Some(MoqtClaim::decode(entry)?);
                 }
-                Some(CLAIM_MOQT_REVAL) => {
-                    claims.moqt_reval = Some(
-                        entry
-                            .as_number()
-                            .ok_or(CatError::UnexpectedType("moqt-reval"))?,
-                    );
+                CLAIM_MOQT_REVAL => {
+                    claims.moqt_reval = Some(finite_claim_number(entry, "moqt-reval")?);
                 }
-                Some(CLAIM_CAT_DPOP) => {
+                CLAIM_CAT_DPOP => {
                     claims.catdpop = Some(CatDpop::decode(entry)?);
                 }
                 _ => claims.raw.push((key.clone(), entry.clone())),
@@ -313,8 +356,12 @@ impl CatClaims {
 
     /// クレームセットをエンコードする
     ///
-    /// 同じ claim key が型付きフィールドと [`CatClaims::raw`] の両方にある場合は
-    /// エラーを返す。
+    /// 型付きフィールドを持つ claim key を [`CatClaims::raw`] に置いた場合は、型付き
+    /// フィールドが未設定でもエラーを返す。非有限値の数値クレームもエラーを返す。
+    ///
+    /// デコードしたクレームを再エンコードすると表現が正規化される (`aud` の単一
+    /// テキストは配列になり、`cti` のテキストはバイト文字列になり、整数値の浮動
+    /// 小数点数は整数になる)。
     pub fn encode(&self) -> Result<Value, CatError> {
         let mut entries = Vec::new();
         if let Some(issuer) = &self.issuer {
@@ -341,13 +388,22 @@ impl CatClaims {
             ));
         }
         if let Some(expiration) = self.expiration {
-            entries.push((Value::integer(CLAIM_EXPIRATION), number_value(expiration)));
+            entries.push((
+                Value::integer(CLAIM_EXPIRATION),
+                finite_number_value(expiration, "exp")?,
+            ));
         }
         if let Some(not_before) = self.not_before {
-            entries.push((Value::integer(CLAIM_NOT_BEFORE), number_value(not_before)));
+            entries.push((
+                Value::integer(CLAIM_NOT_BEFORE),
+                finite_number_value(not_before, "nbf")?,
+            ));
         }
         if let Some(issued_at) = self.issued_at {
-            entries.push((Value::integer(CLAIM_ISSUED_AT), number_value(issued_at)));
+            entries.push((
+                Value::integer(CLAIM_ISSUED_AT),
+                finite_number_value(issued_at, "iat")?,
+            ));
         }
         if let Some(cwt_id) = &self.cwt_id {
             entries.push((
@@ -362,29 +418,22 @@ impl CatClaims {
             entries.push((Value::integer(CLAIM_MOQT), moqt.encode()?));
         }
         if let Some(moqt_reval) = self.moqt_reval {
-            entries.push((Value::integer(CLAIM_MOQT_REVAL), number_value(moqt_reval)));
+            entries.push((
+                Value::integer(CLAIM_MOQT_REVAL),
+                finite_number_value(moqt_reval, "moqt-reval")?,
+            ));
         }
         if let Some(catdpop) = &self.catdpop {
             entries.push((Value::integer(CLAIM_CAT_DPOP), catdpop.encode()?));
         }
         for (key, value) in &self.raw {
-            if key.as_int().is_some_and(|key| {
-                matches!(
-                    key,
-                    CLAIM_ISSUER
-                        | CLAIM_SUBJECT
-                        | CLAIM_AUDIENCE
-                        | CLAIM_EXPIRATION
-                        | CLAIM_NOT_BEFORE
-                        | CLAIM_ISSUED_AT
-                        | CLAIM_CWT_ID
-                        | CLAIM_CONFIRMATION
-                        | CLAIM_MOQT
-                        | CLAIM_MOQT_REVAL
-                        | CLAIM_CAT_DPOP
-                )
-            }) {
-                return Err(CatError::DuplicateClaim(key.as_int().unwrap_or_default()));
+            // 型付きフィールドを持つ claim key を raw に置くと、デコード時に型付き
+            // フィールドと raw のどちらが使われるかが曖昧になる。値の型も検証できない
+            // ため、設定の有無にかかわらず拒否する
+            if let Some(key) = key.as_int()
+                && is_typed_claim_key(key)
+            {
+                return Err(CatError::DuplicateClaim(key));
             }
             entries.push((key.clone(), value.clone()));
         }
@@ -409,6 +458,10 @@ impl CatClaims {
     ///
     /// `moqt` クレームが無い場合は常に `false` を返す (§2 の「明示的に許可された
     /// アクション以外はブロックする」)。
+    ///
+    /// 評価するのは `moqt` クレームだけである。`catu` / `catnip` / `cath` などの
+    /// CAT 固有クレームは保持するだけで評価しないため、必要に応じて [`CatClaims::get`]
+    /// で取り出して呼び出し側が検証すること。
     pub fn authorize(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool {
         self.moqt
             .as_ref()
@@ -418,11 +471,36 @@ impl CatClaims {
     /// 時刻と期待値に対するクレームの検証を行う
     ///
     /// 署名の検証は [`CatToken::verify`] が行う。ここでは `exp` / `nbf` / `iss` /
-    /// `aud` だけを検証する。
+    /// `aud` を検証し、加えて現在時刻 / 許容ずれの有限性と、手組みで入り得る非有限の
+    /// 数値クレームを拒否する。
     pub fn validate(
         &self,
         options: &ClaimValidationOptions<'_>,
     ) -> Result<(), ClaimValidationError> {
+        if !options.reference_time_seconds.is_finite()
+            || !options.clock_tolerance_seconds.is_finite()
+            || options.clock_tolerance_seconds < 0.0
+        {
+            return Err(ClaimValidationError::InvalidReferenceTime);
+        }
+        // フィールドは公開のため、デコード以外の経路で非有限値が入り得る
+        for (number, name) in [
+            (self.expiration, "exp"),
+            (self.not_before, "nbf"),
+            (self.issued_at, "iat"),
+            (self.moqt_reval, "moqt-reval"),
+        ] {
+            if number.is_some_and(|number| !number.is_finite()) {
+                return Err(ClaimValidationError::NonFiniteClaim(name));
+            }
+        }
+        if let Some(catdpop) = &self.catdpop
+            && catdpop
+                .window_seconds
+                .is_some_and(|window| !window.is_finite())
+        {
+            return Err(ClaimValidationError::NonFiniteClaim("catdpop window"));
+        }
         if let Some(expiration) = self.expiration
             && options.reference_time_seconds > expiration + options.clock_tolerance_seconds
         {
@@ -490,6 +568,10 @@ pub enum ClaimValidationError {
     IssuerMismatch,
     /// `aud` が期待する宛先と一致しない
     AudienceMismatch,
+    /// 検証に渡された現在時刻または許容ずれが有限でない / 負である
+    InvalidReferenceTime,
+    /// クレームの数値が有限でない (NaN / 無限大)
+    NonFiniteClaim(&'static str),
 }
 
 impl fmt::Display for ClaimValidationError {
@@ -499,6 +581,11 @@ impl fmt::Display for ClaimValidationError {
             Self::NotYetValid => write!(f, "token is not yet valid"),
             Self::IssuerMismatch => write!(f, "token issuer does not match"),
             Self::AudienceMismatch => write!(f, "token audience does not match"),
+            Self::InvalidReferenceTime => write!(
+                f,
+                "reference time must be finite and clock tolerance must be finite and non-negative"
+            ),
+            Self::NonFiniteClaim(name) => write!(f, "{name} must be finite"),
         }
     }
 }
@@ -513,9 +600,13 @@ pub struct VerifyOptions {
 }
 
 /// CAT のトークン
-#[derive(Debug, Clone, PartialEq)]
+///
+/// 生トークン (bearer クレデンシャル) と署名は [`Debug`] では長さだけを表示する。
+#[derive(Clone, PartialEq)]
 pub struct CatToken {
     format: TokenFormat,
+    /// `decode` に渡された生バイト (DPoP の `ath` に使う)
+    raw: Vec<u8>,
     protected: Vec<u8>,
     unprotected: Vec<(Value, Value)>,
     payload: Vec<u8>,
@@ -525,27 +616,46 @@ pub struct CatToken {
     claims: CatClaims,
 }
 
+impl core::fmt::Debug for CatToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CatToken")
+            .field("format", &self.format)
+            .field("header", &self.header)
+            .field("claims", &self.claims)
+            .field("raw_bytes", &self.raw.len())
+            .field("payload_bytes", &self.payload.len())
+            .field("signature_bytes", &self.signature.len())
+            .finish()
+    }
+}
+
 impl CatToken {
     /// トークンをデコードする
     ///
     /// `.` で区切られた 3 分割の compact 形式、COSE 形式の CBOR、COSE 形式を
     /// base64url で包んだテキストの順に判別する。
     pub fn decode(input: &[u8]) -> Result<Self, CatError> {
-        if let Ok(text) = core::str::from_utf8(input)
+        let mut token = if let Ok(text) = core::str::from_utf8(input)
             && text.matches('.').count() == 2
         {
-            return Self::decode_compact(text);
-        }
-        let byte_error = match Self::decode_cose(input) {
-            Ok(token) => return Ok(token),
-            Err(error) => error,
+            Self::decode_compact(text)?
+        } else {
+            match Self::decode_cose(input) {
+                Ok(token) => token,
+                Err(error) => {
+                    if let Ok(text) = core::str::from_utf8(input)
+                        && let Ok(bytes) = super::base64url::decode(text.trim())
+                    {
+                        Self::decode_cose(&bytes)?
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         };
-        if let Ok(text) = core::str::from_utf8(input)
-            && let Ok(bytes) = super::base64url::decode(text.trim())
-        {
-            return Self::decode_cose(&bytes);
-        }
-        Err(byte_error)
+        // `ath` は呼び出し側が decode に渡した表現をハッシュする
+        token.raw = input.to_vec();
+        Ok(token)
     }
 
     /// compact 形式 (`base64url(protected).base64url(claims).base64url(signature)`) をデコードする
@@ -557,7 +667,7 @@ impl CatToken {
         let protected = base64url_decode(parts[0])?;
         let payload = base64url_decode(parts[1])?;
         let signature = base64url_decode(parts[2])?;
-        let header = Header::decode(&cbor::decode(&protected)?)?;
+        let header = Header::decode_protected(&cbor::decode(&protected)?)?;
         if header.algorithm.is_none() {
             return Err(CatError::MissingAlgorithm);
         }
@@ -566,6 +676,7 @@ impl CatToken {
         let signing_input = format!("{}.{}", parts[0], parts[1]).into_bytes();
         Ok(Self {
             format: TokenFormat::Compact,
+            raw: text.as_bytes().to_vec(),
             protected,
             unprotected: Vec::new(),
             payload,
@@ -602,6 +713,7 @@ impl CatToken {
         };
         Ok(Self {
             format,
+            raw: bytes.to_vec(),
             protected,
             unprotected,
             payload,
@@ -626,6 +738,15 @@ impl CatToken {
     /// 直列化の形式を返す
     pub fn format(&self) -> TokenFormat {
         self.format
+    }
+
+    /// `decode` に渡された生バイトを返す
+    ///
+    /// compact 形式では ASCII のトークン文字列、COSE 形式では CBOR のバイト列、
+    /// base64url で包んだ入力を渡した場合はそのテキストである。DPoP の `ath` は
+    /// このバイト列をハッシュする (`DpopProof::verify_against_cat_token`)。
+    pub fn raw_token(&self) -> &[u8] {
+        &self.raw
     }
 
     /// protected / unprotected を統合したヘッダを返す
@@ -713,11 +834,6 @@ impl CatTokenBuilder {
         Self::default()
     }
 
-    /// クレームセットへの可変参照を返す
-    pub fn claims_mut(&mut self) -> &mut CatClaims {
-        &mut self.claims
-    }
-
     /// `iss` を設定する
     pub fn issuer(mut self, issuer: impl Into<String>) -> Self {
         self.claims.issuer = Some(issuer.into());
@@ -799,6 +915,10 @@ impl CatTokenBuilder {
     }
 
     /// 任意のクレームを追加する
+    ///
+    /// 型付きフィールドを持つ claim key (`iss` / `moqt` / `catdpop` など) には専用の
+    /// 設定メソッドを使うこと。ここに型付きキーを渡した場合は、型付きフィールドの
+    /// 設定有無にかかわらずエンコード時に [`CatError::DuplicateClaim`] を返す。
     pub fn claim(mut self, key: i64, value: Value) -> Self {
         self.claims.raw.push((Value::integer(key), value));
         self
@@ -930,7 +1050,7 @@ impl CatTokenBuilder {
 }
 
 /// CAT のエラー
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatError {
     /// CBOR のエラー
     Cbor(CborError),
@@ -961,6 +1081,8 @@ pub enum CatError {
     InvalidAuthTokenType(u64),
     /// detached payload は扱わない
     DetachedPayload,
+    /// 数値クレームが有限でない (NaN / 無限大)
+    NonFiniteNumber(&'static str),
 }
 
 impl fmt::Display for CatError {
@@ -984,6 +1106,7 @@ impl fmt::Display for CatError {
                 write!(f, "unsupported MOQT auth token type: {token_type:#x}")
             }
             Self::DetachedPayload => write!(f, "detached payload is not supported"),
+            Self::NonFiniteNumber(name) => write!(f, "{name} must be finite"),
         }
     }
 }

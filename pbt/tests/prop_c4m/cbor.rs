@@ -3,17 +3,62 @@
 use pbt::common::{sample_bytes, test_runner};
 use shiguredo_moqt::c4m::cbor::{Value, decode, encode};
 
+/// 整数のエンコード幅の境界
+const U64_BOUNDARIES: &[u64] = &[
+    0,
+    23,
+    24,
+    255,
+    256,
+    65535,
+    65536,
+    4294967295,
+    4294967296,
+    u64::MAX,
+];
+
+/// 浮動小数点数のエンコード幅 (半精度 / 単精度 / 倍精度) の境界
+const F64_BOUNDARIES: &[f64] = &[
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    65504.0,
+    65536.0,
+    // 2^-24 (半精度の最小非正規数)。const では powi が使えないためリテラルで書く
+    5.960_464_477_539_063e-8,
+    f32::MIN as f64,
+    f32::MAX as f64,
+    f64::MIN,
+    f64::MAX,
+    9_223_372_036_854_775_808.0,
+];
+
+/// エンコード幅の境界を混ぜて整数を生成する
+fn sample_integer(ctx: &mut noprop::TestCaseContext) -> u64 {
+    noprop::sample_with_boundaries(ctx, U64_BOUNDARIES, noprop::Ratio::one_nth(4), |ctx| {
+        noprop::sample_u64(ctx)
+    })
+}
+
+/// エンコード幅の境界を混ぜて浮動小数点数を生成する (NaN は生成しない)
+fn sample_float(ctx: &mut noprop::TestCaseContext) -> f64 {
+    noprop::sample_with_boundaries(ctx, F64_BOUNDARIES, noprop::Ratio::one_nth(4), |ctx| {
+        noprop::sample_f64(ctx)
+    })
+}
+
 /// 葉のデータ項目を生成する
 fn sample_leaf(ctx: &mut noprop::TestCaseContext) -> Value {
     match noprop::sample_weighted_index(ctx, &[3, 2, 2, 2, 2, 1, 1, 1]) {
-        0 => Value::Unsigned(noprop::sample_u64(ctx)),
-        1 => Value::Negative(noprop::sample_u64(ctx)),
+        0 => Value::Unsigned(sample_integer(ctx)),
+        1 => Value::Negative(sample_integer(ctx)),
         2 => Value::ByteString(sample_bytes(ctx, 8)),
         3 => {
             let len = noprop::sample_usize_in(ctx, 0..=8);
             Value::TextString(noprop::sample_ascii_printable_string(ctx, len))
         }
-        4 => Value::Float(noprop::sample_f64(ctx)),
+        4 => Value::Float(sample_float(ctx)),
         5 => Value::Bool(noprop::sample_bool(ctx)),
         6 => Value::Null,
         _ => {

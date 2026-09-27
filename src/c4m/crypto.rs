@@ -61,7 +61,7 @@ impl OkpCurve {
 /// COSE Key (RFC 9052 §7) と JWK (RFC 7517) を共通に扱う鍵表現
 ///
 /// 秘密鍵は署名にだけ使い、検証では公開鍵の部分だけを参照する。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CoseKey {
     /// 対称鍵 (`kty` = Symmetric)
     Symmetric {
@@ -141,13 +141,46 @@ impl CoseKey {
             private_key: Some(private_key.into()),
         }
     }
+}
 
-    /// 署名に使える秘密鍵を保持しているかどうかを返す
-    pub fn has_private_key(&self) -> bool {
+/// 秘密鍵の内容をログへ出さないための [`Debug`] 実装
+///
+/// 対称鍵の値と秘密鍵 (スカラー / 種) は伏せ、長さだけを表示する。
+impl fmt::Debug for CoseKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Symmetric { .. } => true,
-            Self::Ec2 { private_key, .. } => private_key.is_some(),
-            Self::Okp { private_key, .. } => private_key.is_some(),
+            Self::Symmetric { key } => f
+                .debug_struct("Symmetric")
+                .field("key_bytes", &key.len())
+                .finish(),
+            Self::Ec2 {
+                curve,
+                x,
+                y,
+                private_key,
+            } => f
+                .debug_struct("Ec2")
+                .field("curve", curve)
+                .field("x", x)
+                .field("y", y)
+                .field(
+                    "private_key",
+                    &private_key.as_ref().map(|private_key| private_key.len()),
+                )
+                .finish(),
+            Self::Okp {
+                curve,
+                public_key,
+                private_key,
+            } => f
+                .debug_struct("Okp")
+                .field("curve", curve)
+                .field("public_key", public_key)
+                .field(
+                    "private_key",
+                    &private_key.as_ref().map(|private_key| private_key.len()),
+                )
+                .finish(),
         }
     }
 }
@@ -213,7 +246,7 @@ pub fn default_signing_algorithm(key: &CoseKey) -> Algorithm {
 }
 
 /// 署名 / 検証のエラー
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
     /// 鍵の種別がアルゴリズムと一致しない
     UnsupportedKey,
@@ -227,8 +260,6 @@ pub enum CryptoError {
     SigningFailed,
     /// 署名の長さがアルゴリズムと一致しない
     InvalidSignatureLength,
-    /// ハッシュの計算に失敗した
-    DigestFailed,
 }
 
 impl fmt::Display for CryptoError {
@@ -240,7 +271,6 @@ impl fmt::Display for CryptoError {
             Self::SignatureVerificationFailed => write!(f, "signature verification failed"),
             Self::SigningFailed => write!(f, "signing failed"),
             Self::InvalidSignatureLength => write!(f, "invalid signature length"),
-            Self::DigestFailed => write!(f, "digest computation failed"),
         }
     }
 }

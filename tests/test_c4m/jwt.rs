@@ -38,7 +38,6 @@ fn decode_reads_header_payload_and_signing_input() {
     );
     let jws = JwsCompact::decode(&text).expect("デコードできる");
     assert_eq!(jws.header().algorithm, Algorithm::Es256);
-    assert_eq!(jws.header().algorithm_name, "ES256");
     assert_eq!(jws.header().typ.as_deref(), Some("dpop-proof+jwt"));
     assert_eq!(jws.header().key_id.as_deref(), Some("key-1"));
     assert_eq!(
@@ -154,4 +153,31 @@ fn verify_es256_jwt() {
     );
     let jws = JwsCompact::decode(&text).expect("デコードできる");
     jws.verify(&crypto, &public_key).expect("検証できる");
+}
+
+#[test]
+fn duplicate_header_members_are_rejected() {
+    // RFC 7515 §4 は JOSE ヘッダのメンバー名の一意性を MUST とする
+    assert_eq!(
+        JwsCompact::decode(&token(r#"{"alg":"ES256","alg":"ES256"}"#, "{}", &[0x01])),
+        Err(JwtError::DuplicateMember(String::from("alg")))
+    );
+}
+
+#[test]
+fn crit_is_rejected() {
+    // RFC 7515 §4.1.11: 理解できない拡張ヘッダを crit が指す JWS は無効
+    assert_eq!(
+        JwsCompact::decode(&token(
+            r#"{"alg":"ES256","crit":["custom-ext"],"custom-ext":true}"#,
+            "{}",
+            &[0x01]
+        )),
+        Err(JwtError::UnsupportedCriticalHeader)
+    );
+    // 空配列も RFC 7515 §4.1.11 が禁止する
+    assert_eq!(
+        JwsCompact::decode(&token(r#"{"alg":"ES256","crit":[]}"#, "{}", &[0x01])),
+        Err(JwtError::UnsupportedCriticalHeader)
+    );
 }

@@ -5,9 +5,9 @@
 //! の決定論的エンコード (Deterministically Encoded CBOR) に従う。
 //!
 //! - 整数と長さは最小の長さでエンコードする
-//! - マップのキーはキーのエンコード済みバイト列の昇順に並べる (§4.2.3)
+//! - マップのキーはキーのエンコード済みバイト列の昇順に並べる (§4.2.1)
 //! - 浮動小数点数は値を保つ最短の幅 (半精度 / 単精度 / 倍精度) を使い、NaN は
-//!   `f9 7e 00` にする
+//!   `f9 7e 00` にする (§4.2.1 / §4.2.2)
 //! - デコードは definite / indefinite の両方の長さ表現を受理する。マップの重複キー、
 //!   UTF-8 でないテキスト文字列、ネスト深度の上限超過はエラーにする
 
@@ -400,7 +400,13 @@ impl<'a> Decoder<'a> {
             }
             let length = self.read_argument_value(chunk_additional)?;
             let length = usize::try_from(length).map_err(|_| CborError::LengthOverflow)?;
-            out.extend_from_slice(self.read_exact(length)?);
+            let chunk = self.read_exact(length)?;
+            if expected_major == 3 {
+                // RFC 8949 §3.2.3: indefinite 長のテキスト文字列は、各チャンクが
+                // 個別に正しい UTF-8 でなければならない
+                core::str::from_utf8(chunk).map_err(|_| CborError::InvalidUtf8)?;
+            }
+            out.extend_from_slice(chunk);
         }
     }
 
@@ -453,16 +459,60 @@ impl<'a> Decoder<'a> {
 
 /// マップのキーが重複しているかどうかを判定する
 ///
-/// キー数はトークンサイズに収まるため、ソートせず線形に比較する。NaN をキーにした
-/// 浮動小数点数は自身と等しくならないため重複として検出できないが、RFC 8949 §5.6 の
-/// 一意性要求はキーが有限個の通常の値であることを前提とする。
+/// キーを決定論的エンコードのバイト列へ変換してソートし、隣接比較する (O(n log n))。
+/// 攻撃者入力の巨大なマップでも二次関数的な時間を使わない。RFC 8949 §5.6.1 は同じ
+/// 内容を持つ NaN のキーを同一視するため、`Value` の等価比較ではなくバイト列で判定する。
 fn has_duplicate_keys(entries: &[(Value, Value)]) -> bool {
-    for (index, (key, _)) in entries.iter().enumerate() {
-        if entries[index + 1..].iter().any(|(other, _)| other == key) {
-            return true;
+    let mut encoded_keys = Vec::new();
+    for (key, _) in entries {
+        let mut bytes = Vec::new();
+        let Some(normalized) = normalize_key(key, 0) else {
+            // 深さ制限を超えるキーは encode 側が別途拒否する
+            return false;
+        };
+        if encode_value(&normalized, 0, &mut bytes).is_err() {
+            // デコード済みのキーは必ずエンコードできる
+            return false;
         }
+        encoded_keys.push(bytes);
     }
-    false
+    encoded_keys.sort();
+    encoded_keys.windows(2).any(|pair| pair[0] == pair[1])
+}
+
+/// 重複キー検査用にキーを正規化する (RFC 8949 §5.6.1)
+///
+/// `-0.0` と `0.0` は数値として等しいため同一のキーになる。NaN は実装判断として
+/// すべて同一視する (safe side; 仕様は significand が同じ NaN だけを等価とする)。
+fn normalize_key(value: &Value, depth: usize) -> Option<Value> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    match value {
+        Value::Float(number) if *number == 0.0 => Some(Value::Float(0.0)),
+        Value::Array(items) => {
+            let mut normalized = Vec::new();
+            for item in items {
+                normalized.push(normalize_key(item, depth + 1)?);
+            }
+            Some(Value::Array(normalized))
+        }
+        Value::Map(entries) => {
+            let mut normalized = Vec::new();
+            for (key, value) in entries {
+                normalized.push((
+                    normalize_key(key, depth + 1)?,
+                    normalize_key(value, depth + 1)?,
+                ));
+            }
+            Some(Value::Map(normalized))
+        }
+        Value::Tag(tag, inner) => Some(Value::Tag(
+            *tag,
+            alloc::boxed::Box::new(normalize_key(inner, depth + 1)?),
+        )),
+        _ => Some(value.clone()),
+    }
 }
 
 fn encode_value(value: &Value, depth: usize, out: &mut Vec<u8>) -> Result<(), CborError> {
@@ -491,7 +541,10 @@ fn encode_value(value: &Value, depth: usize, out: &mut Vec<u8>) -> Result<(), Cb
             let mut encoded_keys = Vec::new();
             for (key, _) in entries {
                 let mut key_bytes = Vec::new();
-                encode_value(key, depth + 1, &mut key_bytes)?;
+                // -0.0 と 0.0 は同一のキーとして扱う (RFC 8949 §5.6.1)
+                let normalized =
+                    normalize_key(key, depth + 1).ok_or(CborError::DepthLimitExceeded)?;
+                encode_value(&normalized, depth + 1, &mut key_bytes)?;
                 encoded_keys.push(key_bytes);
             }
             let mut order: Vec<usize> = (0..entries.len()).collect();
@@ -548,7 +601,8 @@ fn write_head(major: u8, value: u64, out: &mut Vec<u8>) {
     }
 }
 
-/// 浮動小数点数を値を保つ最短の幅でエンコードする (RFC 8949 §4.2.2)
+/// 浮動小数点数を値を保つ最短の幅でエンコードする (RFC 8949 §4.2.1。NaN の
+/// 正規表現は §4.2.2)
 fn encode_float(number: f64, out: &mut Vec<u8>) {
     if number.is_nan() {
         // NaN は符号とペイロードによらず正規の表現に揃える
@@ -620,7 +674,7 @@ fn f16_to_f64(bits: u16) -> f64 {
 
 /// `f64` を IEEE 754 半精度 (binary16) のビット列に変換する
 ///
-/// 丸めは最近接への近似で行う。呼び出し側は [`f16_to_f64`] との往復で値が厳密に
+/// 仮数部は切り捨てる近似で行う。呼び出し側は [`f16_to_f64`] との往復で値が厳密に
 /// 保たれることを確認してから使う (決定論的エンコードは値を変える幅を使ってはならない)。
 fn f64_to_f16_bits(number: f64) -> u16 {
     let bits = number.to_bits();

@@ -15,10 +15,10 @@ use core::fmt;
 
 use super::cbor::{self, CborError, Value};
 
-/// CWT の CBOR タグ (RFC 8392 §7.1)
+/// CWT の CBOR タグ (RFC 8392 §6)
 pub const TAG_CWT: u64 = 61;
 
-/// COSE_Mac0 の CBOR タグ (RFC 9052 §8.2)
+/// COSE_Mac0 の CBOR タグ (RFC 9052 §6.2)
 pub const TAG_COSE_MAC0: u64 = 17;
 
 /// COSE_Sign1 の CBOR タグ (RFC 9052 §4.2)
@@ -225,15 +225,41 @@ pub struct Header {
     pub raw: Vec<(Value, Value)>,
 }
 
+/// ヘッダのバケット (RFC 9052 §3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderBucket {
+    /// 保護されるバケット。`crit` を置ける唯一のバケット
+    Protected,
+    /// 保護されないバケット
+    Unprotected,
+}
+
 impl Header {
-    /// ヘッダのマップからデコードする
+    /// protected ヘッダのマップからデコードする
     ///
-    /// `crit` に理解できないパラメータが含まれる場合、および解釈できない `alg` が
-    /// 含まれる場合はエラーを返す (RFC 9052 §3.1)。
-    pub fn decode(value: &Value) -> Result<Self, CoseError> {
+    /// `crit` の各ラベルが同じ protected ヘッダに存在し、かつ理解できることを検証する
+    /// (RFC 9052 §3.1 は「protected ヘッダに無いラベルを `crit` が指す場合は致命的
+    /// エラー」と定める)。解釈できない `alg` もエラーにする。
+    pub fn decode_protected(value: &Value) -> Result<Self, CoseError> {
         let entries = value
             .as_map()
             .ok_or(CoseError::UnexpectedType("header map"))?;
+        Self::decode_entries(entries, HeaderBucket::Protected)
+    }
+
+    /// unprotected ヘッダのマップからデコードする
+    ///
+    /// RFC 9052 §3.1 は `crit` を protected ヘッダに置くことを MUST、RFC 9596 §2 は
+    /// `typ` (ラベル 16) を unprotected ヘッダに置かないことを MUST とするため、
+    /// どちらもエラーにする。
+    pub fn decode_unprotected(value: &Value) -> Result<Self, CoseError> {
+        let entries = value
+            .as_map()
+            .ok_or(CoseError::UnexpectedType("unprotected header map"))?;
+        Self::decode_entries(entries, HeaderBucket::Unprotected)
+    }
+
+    fn decode_entries(entries: &[(Value, Value)], bucket: HeaderBucket) -> Result<Self, CoseError> {
         let mut header = Self::default();
         for (key, entry) in entries {
             match key.as_int() {
@@ -245,7 +271,13 @@ impl Header {
                     header.algorithm_identifier = Some(identifier);
                 }
                 Some(HEADER_CRITICAL) => {
+                    if bucket == HeaderBucket::Unprotected {
+                        return Err(CoseError::UnprotectedCriticalHeader);
+                    }
                     let labels = entry.as_array().ok_or(CoseError::UnexpectedType("crit"))?;
+                    if labels.is_empty() {
+                        return Err(CoseError::EmptyCriticalHeader);
+                    }
                     header.critical = labels.to_vec();
                 }
                 Some(HEADER_KEY_ID) => {
@@ -255,18 +287,35 @@ impl Header {
                         _ => return Err(CoseError::UnexpectedType("kid")),
                     });
                 }
-                Some(HEADER_TYPE) => header.typ = Some(entry.clone()),
+                Some(HEADER_TYPE) => {
+                    if bucket == HeaderBucket::Unprotected {
+                        return Err(CoseError::UnprotectedTypeHeader);
+                    }
+                    header.typ = Some(entry.clone());
+                }
                 Some(HEADER_CONTENT_TYPE) => header.content_type = Some(entry.clone()),
                 _ => header.raw.push((key.clone(), entry.clone())),
             }
         }
+        // `crit` のラベルは protected ヘッダに実在し、理解できる必要がある
         for label in &header.critical {
             let understood = matches!(
                 label.as_int(),
-                Some(HEADER_ALGORITHM | HEADER_KEY_ID | HEADER_TYPE | HEADER_CONTENT_TYPE)
+                Some(
+                    HEADER_ALGORITHM
+                        | HEADER_CRITICAL
+                        | HEADER_CONTENT_TYPE
+                        | HEADER_KEY_ID
+                        | HEADER_TYPE
+                )
             );
             if !understood {
+                // counter signature (ラベル 7) は RFC 9052 §3.1 が新実装の理解を求めるが、
+                // 本実装は検証しないため fail-closed として拒否する
                 return Err(CoseError::UnsupportedCriticalHeader);
+            }
+            if !entries.iter().any(|(key, _)| key == label) {
+                return Err(CoseError::CriticalHeaderNotPresent);
             }
         }
         Ok(header)
@@ -294,6 +343,29 @@ impl Header {
         }
         entries.extend(self.raw.iter().cloned());
         if !self.critical.is_empty() {
+            // デコード側と同じ規則: crit のラベルは理解でき、保護されるマップに実在
+            // すること (RFC 9052 §3.1)
+            for label in &self.critical {
+                let understood = matches!(
+                    label.as_int(),
+                    Some(
+                        HEADER_ALGORITHM
+                            | HEADER_CRITICAL
+                            | HEADER_CONTENT_TYPE
+                            | HEADER_KEY_ID
+                            | HEADER_TYPE
+                    )
+                );
+                if !understood {
+                    return Err(CoseError::UnsupportedCriticalHeader);
+                }
+                // crit 自身 (ラベル 2) はこの直後に追加される
+                if label.as_int() != Some(HEADER_CRITICAL)
+                    && !entries.iter().any(|(key, _)| key == label)
+                {
+                    return Err(CoseError::CriticalHeaderNotPresent);
+                }
+            }
             entries.push((
                 Value::integer(HEADER_CRITICAL),
                 Value::Array(self.critical.clone()),
@@ -361,6 +433,15 @@ impl CoseMessage {
         let mut cwt_tagged = false;
         let mut current = value;
         if let Value::Tag(TAG_CWT, inner) = current {
+            // RFC 8392 §6: CWT タグは COSE のタグ付きオブジェクトにだけ前置できる
+            if !matches!(
+                inner.as_ref(),
+                Value::Tag(TAG_COSE_SIGN1 | TAG_COSE_MAC0, _)
+            ) {
+                return Err(CoseError::InvalidStructure(
+                    "CWT tag must prefix a COSE tagged message (RFC 8392 §6)",
+                ));
+            }
             cwt_tagged = true;
             current = inner;
         }
@@ -400,8 +481,9 @@ impl CoseMessage {
 
     /// protected / unprotected を統合したヘッダを返す
     ///
-    /// protected ヘッダが空の場合は unprotected だけを返す。両方に同じパラメータが
-    /// ある場合は protected を優先する。
+    /// protected ヘッダが空の場合は unprotected だけを返す。`alg` は protected に
+    /// 必須で、同じラベルが両方のバケットにある場合は
+    /// [`CoseError::DuplicateHeaderParameter`] を返す。
     pub fn header(&self) -> Result<Header, CoseError> {
         let (protected, unprotected) = match self {
             Self::Sign1(message) => (&message.protected, &message.unprotected),
@@ -460,6 +542,12 @@ impl CoseMessage {
     }
 
     /// COSE メッセージをエンコードする
+    ///
+    /// タグの付与は「メッセージがデコード時に持っていたタグ」と
+    /// [`CoseEncodingOptions`] の OR で決まる。例えばタグ無しでデコードした
+    /// メッセージに [`CoseEncodingOptions::default`] を渡すと CWT タグ (61) と
+    /// COSE タグ (17 / 18) が付与される。CWT タグを付ける場合は COSE タグも
+    /// 必要になる (RFC 8392 §6)。
     pub fn encode(&self, options: &CoseEncodingOptions) -> Result<Vec<u8>, CoseError> {
         let tagged = match self {
             Self::Sign1(message) => message.cose_tagged || options.cose_tag,
@@ -469,6 +557,12 @@ impl CoseMessage {
             Self::Sign1(message) => message.cwt_tagged || options.cwt_tag,
             Self::Mac0(message) => message.cwt_tagged || options.cwt_tag,
         };
+        // RFC 8392 §6: CWT タグは COSE のタグ付きオブジェクトにだけ前置できる
+        if cwt && !tagged {
+            return Err(CoseError::InvalidStructure(
+                "CWT tag requires the COSE tag (RFC 8392 §6)",
+            ));
+        }
         let array = match self {
             Self::Sign1(message) => message.array_value(),
             Self::Mac0(message) => message.array_value(),
@@ -476,8 +570,8 @@ impl CoseMessage {
         let mut value = array;
         if tagged {
             let tag = match self {
-                Self::Sign1(_) => TAG_COSE_SIGN1,
-                Self::Mac0(_) => TAG_COSE_MAC0,
+                Self::Sign1(_) => AlgorithmClass::Signature.tag(),
+                Self::Mac0(_) => AlgorithmClass::Mac.tag(),
             };
             value = Value::Tag(tag, Box::new(value));
         }
@@ -508,7 +602,7 @@ impl Default for CoseEncodingOptions {
 }
 
 /// COSE の構造のエンコード / デコードエラー
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoseError {
     /// CBOR のデコードに失敗した
     Cbor(CborError),
@@ -522,6 +616,18 @@ pub enum CoseError {
     UnsupportedAlgorithm(i64),
     /// `crit` に理解できないヘッダパラメータがある
     UnsupportedCriticalHeader,
+    /// `crit` のラベルが protected ヘッダに無い (RFC 9052 §3.1)
+    CriticalHeaderNotPresent,
+    /// `crit` の配列が空である (RFC 9052 §3.1)
+    EmptyCriticalHeader,
+    /// `crit` が unprotected ヘッダにある (RFC 9052 §3.1)
+    UnprotectedCriticalHeader,
+    /// `typ` が unprotected ヘッダにある (RFC 9596 §2)
+    UnprotectedTypeHeader,
+    /// `alg` が unprotected ヘッダにしかない (RFC 9052 §3.1)
+    UnprotectedAlgorithm,
+    /// 同じヘッダパラメータが protected と unprotected の両方にある
+    DuplicateHeaderParameter(i64),
     /// タグとアルゴリズムの種別が一致しない
     AlgorithmClassMismatch,
     /// detached payload は扱わない
@@ -539,7 +645,29 @@ impl fmt::Display for CoseError {
                 write!(f, "unsupported COSE algorithm: {identifier}")
             }
             Self::UnsupportedCriticalHeader => {
-                write!(f, "crit lists a header parameter that is not understood")
+                write!(
+                    f,
+                    "crit lists a header parameter that is not understood (RFC 9052 §3.1)"
+                )
+            }
+            Self::CriticalHeaderNotPresent => {
+                write!(
+                    f,
+                    "crit lists a header parameter that is not in the protected header"
+                )
+            }
+            Self::EmptyCriticalHeader => write!(f, "crit array must not be empty"),
+            Self::UnprotectedCriticalHeader => {
+                write!(f, "crit must be in the protected header (RFC 9052 §3.1)")
+            }
+            Self::UnprotectedTypeHeader => {
+                write!(f, "typ must not be in the unprotected header (RFC 9596 §2)")
+            }
+            Self::UnprotectedAlgorithm => {
+                write!(f, "alg must be in the protected header (RFC 9052 §3.1)")
+            }
+            Self::DuplicateHeaderParameter(label) => {
+                write!(f, "header parameter {label} is present in both buckets")
             }
             Self::AlgorithmClassMismatch => {
                 write!(f, "COSE tag and algorithm class do not match")
@@ -559,28 +687,45 @@ impl From<CborError> for CoseError {
 
 /// protected ヘッダと unprotected ヘッダを統合してデコードする
 ///
-/// protected が空の場合は unprotected だけを解釈する。両方に同じパラメータがある
-/// 場合は protected を優先する。
+/// 同じラベルが両方のバケットにある場合は `DuplicateHeaderParameter` で拒否する
+/// (RFC 9052 §3 は「同じラベルが両方に現れないことを検証すること」を SHOULD とし、
+/// 拒否しない場合は protected を優先する MUST を定める)。
 fn decode_header(protected: &[u8], unprotected: &[(Value, Value)]) -> Result<Header, CoseError> {
-    let mut header = if protected.is_empty() {
-        Header::default()
+    let protected_value = if protected.is_empty() {
+        None
     } else {
-        Header::decode(&cbor::decode(protected)?)?
+        Some(cbor::decode(protected)?)
     };
-    let unprotected_header = Header::decode(&Value::Map(unprotected.to_vec()))?;
-    if header.algorithm.is_none() {
-        header.algorithm = unprotected_header.algorithm;
-        header.algorithm_identifier = unprotected_header.algorithm_identifier;
+    let mut header = match &protected_value {
+        Some(value) => Header::decode_protected(value)?,
+        None => Header::default(),
+    };
+    let empty: &[(Value, Value)] = &[];
+    let protected_entries = protected_value
+        .as_ref()
+        .and_then(Value::as_map)
+        .unwrap_or(empty);
+    for (key, _) in unprotected {
+        if protected_entries
+            .iter()
+            .any(|(protected_key, _)| protected_key == key)
+        {
+            if let Some(label) = key.as_int() {
+                return Err(CoseError::DuplicateHeaderParameter(label));
+            }
+            return Err(CoseError::InvalidStructure(
+                "the same header parameter label is present in both buckets",
+            ));
+        }
     }
-    if header.key_id.is_none() {
-        header.key_id = unprotected_header.key_id;
+    let unprotected_header = Header::decode_entries(unprotected, HeaderBucket::Unprotected)?;
+    // `alg` は protected ヘッダで認証されなければならない (RFC 9052 §3.1)
+    if unprotected_header.algorithm.is_some() {
+        return Err(CoseError::UnprotectedAlgorithm);
     }
-    if header.typ.is_none() {
-        header.typ = unprotected_header.typ;
-    }
-    if header.content_type.is_none() {
-        header.content_type = unprotected_header.content_type;
-    }
+    header.key_id = header.key_id.or(unprotected_header.key_id);
+    header.content_type = header.content_type.or(unprotected_header.content_type);
+    header.raw.extend(unprotected_header.raw);
     Ok(header)
 }
 
@@ -656,30 +801,37 @@ impl CoseArray {
     }
 }
 
+/// COSE_Sign1 / COSE_Mac0 の配列を組み立てる
+fn cose_array_value(
+    protected: &[u8],
+    unprotected: &[(Value, Value)],
+    payload: &Option<Vec<u8>>,
+    signature: &[u8],
+) -> Value {
+    Value::Array(vec![
+        Value::ByteString(protected.to_vec()),
+        Value::Map(unprotected.to_vec()),
+        match payload {
+            Some(payload) => Value::ByteString(payload.clone()),
+            None => Value::Null,
+        },
+        Value::ByteString(signature.to_vec()),
+    ])
+}
+
 impl CoseSign1 {
     fn array_value(&self) -> Value {
-        Value::Array(vec![
-            Value::ByteString(self.protected.clone()),
-            Value::Map(self.unprotected.clone()),
-            match &self.payload {
-                Some(payload) => Value::ByteString(payload.clone()),
-                None => Value::Null,
-            },
-            Value::ByteString(self.signature.clone()),
-        ])
+        cose_array_value(
+            &self.protected,
+            &self.unprotected,
+            &self.payload,
+            &self.signature,
+        )
     }
 }
 
 impl CoseMac0 {
     fn array_value(&self) -> Value {
-        Value::Array(vec![
-            Value::ByteString(self.protected.clone()),
-            Value::Map(self.unprotected.clone()),
-            match &self.payload {
-                Some(payload) => Value::ByteString(payload.clone()),
-                None => Value::Null,
-            },
-            Value::ByteString(self.tag.clone()),
-        ])
+        cose_array_value(&self.protected, &self.unprotected, &self.payload, &self.tag)
     }
 }

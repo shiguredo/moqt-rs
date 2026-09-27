@@ -10,7 +10,7 @@
 //! - [`cat`](crate::c4m::cat): CAT のクレームとトークンの発行 / 検証
 //! - [`jwk`](crate::c4m::jwk): JWK (RFC 7517) と JWK サムプリント (RFC 7638)
 //! - [`jwt`](crate::c4m::jwt): JWS compact (RFC 7515) の JWT
-//! - [`dpop`](crate::c4m::dpop): DPoP proof の検証 (draft-nandakumar-moq-generic-dpop-proof)
+//! - [`dpop`](crate::c4m::dpop): DPoP proof の検証と発行 (draft-nandakumar-moq-generic-dpop-proof)
 //!
 //! このモジュールは I/O も時計も持たない。時刻は検証 API の引数で渡す。
 
@@ -23,6 +23,7 @@ pub mod jwk;
 pub mod jwt;
 
 pub(crate) mod base64url;
+pub(crate) mod json;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -276,8 +277,19 @@ impl MoqtScope {
     ///
     /// `namespace` は Track Namespace のフィールド列、`track_name` は Track Name を
     /// 表す。マッチはバイト単位で行う (§2.1)。
+    ///
+    /// `namespace` が空で `track` だけを持つスコープは CDDL の位置指定で表現できない
+    /// ([`MoqtScope::encode`] は拒否する)。デコードで得たスコープには現れないが、
+    /// 直接構築した場合は任意の名前空間に対してトラックマッチだけを適用する。
     pub fn allows(&self, action: MoqtAction, namespace: &[&[u8]], track_name: &[u8]) -> bool {
         if !self.actions.contains(&action.key()) {
+            return false;
+        }
+        // nil は末尾にだけ置ける (末尾以外にあれば不正なスコープとして拒否する)
+        if self.namespace[..self.namespace.len().saturating_sub(1)]
+            .iter()
+            .any(|namespace_match| matches!(namespace_match, NamespaceMatch::End))
+        {
             return false;
         }
         let mut index = 0;
@@ -496,11 +508,13 @@ impl CatDpop {
         for (key, entry) in entries {
             match key.as_int() {
                 Some(0) => {
-                    catdpop.window_seconds = Some(
-                        entry
-                            .as_number()
-                            .ok_or(C4mError::UnexpectedType("catdpop window"))?,
-                    );
+                    let window = entry
+                        .as_number()
+                        .ok_or(C4mError::UnexpectedType("catdpop window"))?;
+                    if !window.is_finite() {
+                        return Err(C4mError::NonFiniteNumber("catdpop window"));
+                    }
+                    catdpop.window_seconds = Some(window);
                 }
                 Some(1) => {
                     catdpop.honor_jti = match entry {
@@ -520,10 +534,14 @@ impl CatDpop {
 
     /// `catdpop` をエンコードする
     ///
-    /// label 1 はドラフトの例に合わせて整数 (1 / 0) で書く。
+    /// label 1 はドラフトの例に合わせて整数 (1 / 0) で書く。ウィンドウが有限でない
+    /// 場合はエラーを返す (デコード側が拒否する値を持つトークンを発行しないため)。
     pub fn encode(&self) -> Result<Value, C4mError> {
         let mut entries = Vec::new();
         if let Some(window) = self.window_seconds {
+            if !window.is_finite() {
+                return Err(C4mError::NonFiniteNumber("catdpop window"));
+            }
             entries.push((Value::integer(0), number_value(window)));
         }
         if let Some(honor_jti) = self.honor_jti {
@@ -557,7 +575,10 @@ impl CatDpop {
 /// エンコードは値が同じでも整数と浮動小数点を区別するため、入力の表現をなるべく
 /// 保つ。
 pub(crate) fn number_value(number: f64) -> Value {
-    if number.is_finite() && number >= i64::MIN as f64 && number <= i64::MAX as f64 {
+    // i64::MAX as f64 は丸めで 2^63 になるため、上限は半開区間で比較する
+    const I64_MIN_EXACT: f64 = i64::MIN as f64;
+    const I64_MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if number.is_finite() && (I64_MIN_EXACT..I64_MAX_EXCLUSIVE).contains(&number) {
         let integer = number as i64;
         if integer as f64 == number {
             return Value::integer(integer);
@@ -567,7 +588,7 @@ pub(crate) fn number_value(number: f64) -> Value {
 }
 
 /// C4M のクレームのエンコード / デコードエラー
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum C4mError {
     /// CBOR のデコードに失敗した
     Cbor(CborError),
@@ -589,6 +610,8 @@ pub enum C4mError {
     InvalidScopeLength(usize),
     /// 名前空間マッチ無しでトラックマッチだけを持つスコープは表現できない
     TrackWithoutNamespace,
+    /// 数値が有限でない (NaN / 無限大)
+    NonFiniteNumber(&'static str),
 }
 
 impl fmt::Display for C4mError {
@@ -610,6 +633,7 @@ impl fmt::Display for C4mError {
             Self::TrackWithoutNamespace => {
                 write!(f, "moqt-scope has a track match without a namespace match")
             }
+            Self::NonFiniteNumber(name) => write!(f, "{name} must be finite"),
         }
     }
 }

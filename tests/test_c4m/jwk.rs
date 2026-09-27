@@ -140,10 +140,20 @@ fn matches_public_key_compares_coordinates() {
 
 #[test]
 fn jwk_errors() {
-    assert!(matches!(
+    // 対称鍵の k は秘密鍵メンバーとして拒否する (RFC 9449 §4.3)
+    assert_eq!(
         Jwk::decode(r#"{"kty":"oct","k":"AQAB"}"#),
-        Err(JwkError::UnsupportedKeyType(key_type)) if key_type == "oct"
-    ));
+        Err(JwkError::PrivateKeyNotAllowed(String::from("k")))
+    );
+    assert_eq!(
+        Jwk::decode(r#"{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ","d":"AQ"}"#),
+        Err(JwkError::PrivateKeyNotAllowed(String::from("d")))
+    );
+    // 秘密鍵メンバーが無ければ kty の判定に進む
+    assert_eq!(
+        Jwk::decode(r#"{"kty":"oct","x":"AQ"}"#),
+        Err(JwkError::UnsupportedKeyType(String::from("oct")))
+    );
     // 曲線の検証は COSE 鍵への変換時に行う
     let unsupported =
         Jwk::decode(r#"{"kty":"EC","crv":"P-999","x":"AQ","y":"AQ"}"#).expect("デコードできる");
@@ -175,5 +185,14 @@ fn jwk_errors() {
         }
         .to_cose_key(),
         Err(JwkError::UnsupportedOperation)
+    );
+}
+
+#[test]
+fn duplicate_members_are_rejected() {
+    // RFC 7517 §4 は JWK のメンバー名の一意性を MUST とする
+    assert_eq!(
+        Jwk::decode(r#"{"kty":"EC","kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}"#),
+        Err(JwkError::DuplicateMember(String::from("kty")))
     );
 }

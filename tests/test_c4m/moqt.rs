@@ -431,3 +431,48 @@ fn nil_end_still_applies_track_match() {
         b"t"
     ));
 }
+
+#[test]
+fn catdpop_non_finite_window_is_rejected() {
+    assert_eq!(
+        CatDpop::decode(&Value::Map(vec![(
+            Value::integer(0),
+            Value::Float(f64::NAN)
+        )])),
+        Err(C4mError::NonFiniteNumber("catdpop window"))
+    );
+}
+
+#[test]
+fn number_value_keeps_two_to_the_63() {
+    // 2^63 は i64 に収まらないため、静かに 2^63-1 へ丸めず浮動小数点数のまま扱う
+    let value = 2f64.powi(63);
+    let catdpop = CatDpop {
+        window_seconds: Some(value),
+        honor_jti: None,
+        raw: Vec::new(),
+    };
+    let encoded = catdpop.encode().expect("エンコードできる");
+    let decoded = CatDpop::decode(&encoded).expect("デコードできる");
+    assert_eq!(decoded.window_seconds, Some(value));
+}
+
+#[test]
+fn allows_rejects_nil_in_the_middle() {
+    // デコードでは弾かれるが、直接構築したスコープでも nil の位置異常は認可しない
+    let scope = MoqtScope {
+        actions: vec![MoqtAction::Publish.key()],
+        namespace: vec![
+            NamespaceMatch::Match(Match::Exact(b"a".to_vec())),
+            NamespaceMatch::End,
+            NamespaceMatch::Match(Match::Exact(b"b".to_vec())),
+        ],
+        track: None,
+    };
+    assert!(!scope.allows(
+        MoqtAction::Publish,
+        &[b"a".as_slice(), b"b".as_slice()],
+        b"t"
+    ));
+    assert!(!scope.allows(MoqtAction::Publish, &[b"a".as_slice()], b"t"));
+}

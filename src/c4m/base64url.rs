@@ -16,7 +16,9 @@ pub(crate) fn encode(bytes: &[u8]) -> String {
 
 /// base64url をデコードする
 ///
-/// パディング無しを優先し、失敗した場合はパディング付きとして再試行する。
+/// パディング無しを優先し、失敗した場合はパディング付きとして再試行する。JWK だけで
+/// なく、JWS compact (RFC 7515 §2 はパディング無しを前提とする) と CAT の compact
+/// 形式でもパディング付きを受理する。
 pub(crate) fn decode(text: &str) -> Result<Vec<u8>, ()> {
     if let Ok(bytes) = Base64UrlUnpadded::decode_vec(text) {
         return Ok(bytes);

@@ -142,7 +142,8 @@ pub fn serialize_namespace(namespace: &TrackNamespace) -> String {
 
 /// track name を draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の表現へ変換する
 ///
-/// DPoP の Authorization Context の `tn` (§5.1.3) に使う。
+/// DPoP の Authorization Context の `tn` (§5.1.3) に使う。単体の track name を
+/// 表すための関数であり、Full Track Name の長さ制約 (§8.7) は適用しない。
 pub fn serialize_track_name(track_name: &[u8]) -> String {
     let mut out = String::new();
     serialize_field(track_name, &mut out);
@@ -152,7 +153,8 @@ pub fn serialize_track_name(track_name: &[u8]) -> String {
 /// draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の track name 表現をバイト列へパースする
 ///
 /// `serialize_track_name` の逆変換であり、§8.8.1 (Parsing Serialized Names) の MUST を
-/// 適用する。
+/// 適用する。単体の track name を表すための関数であり、Full Track Name の長さ制約
+/// (§8.7) は適用しない。
 pub fn parse_track_name(s: &str) -> Result<Vec<u8>, NameParseError> {
     decode_field(s.as_bytes(), PercentEncoding::Forbidden)
 }

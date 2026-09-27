@@ -46,9 +46,19 @@ pub enum Jwk {
 
 impl Jwk {
     /// JWK の JSON をデコードする
+    ///
+    /// メンバー名が重複している場合はエラーを返す (RFC 7517 §4)。
     pub fn decode(text: &str) -> Result<Self, JwkError> {
         let json = RawJson::parse(text).map_err(json_error)?;
         let value = json.value();
+        if let Some(name) = super::json::find_duplicate_member(value).map_err(json_error)? {
+            return Err(JwkError::DuplicateMember(name));
+        }
+        // RFC 9449 §4.3 は DPoP proof の jwk に秘密鍵を含めることを禁止する。
+        // 本実装は公開鍵だけを扱うため、秘密鍵メンバーがあれば拒否する
+        if let Some(name) = find_private_member(value).map_err(json_error)? {
+            return Err(JwkError::PrivateKeyNotAllowed(name));
+        }
         let key_type = required_string(value, "kty")?;
         match key_type.as_str() {
             "EC" => Ok(Self::Ec {
@@ -205,10 +215,10 @@ impl DisplayJson for Jwk {
 pub enum JwkError {
     /// JSON のパースに失敗した
     Json(String),
-    /// 必須メンバーが無い
-    MissingMember(&'static str),
-    /// メンバーの値が不正である
-    InvalidValue(&'static str),
+    /// メンバー名が重複している (RFC 7517 §4)
+    DuplicateMember(String),
+    /// 秘密鍵のメンバーが含まれている (RFC 9449 §4.3)
+    PrivateKeyNotAllowed(String),
     /// 対応していない `kty` である
     UnsupportedKeyType(String),
     /// 対応していない `crv` である
@@ -225,8 +235,10 @@ impl fmt::Display for JwkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Json(message) => write!(f, "invalid JWK JSON: {message}"),
-            Self::MissingMember(name) => write!(f, "JWK member is missing: {name}"),
-            Self::InvalidValue(name) => write!(f, "invalid JWK member: {name}"),
+            Self::DuplicateMember(name) => write!(f, "duplicate JWK member: {name}"),
+            Self::PrivateKeyNotAllowed(name) => {
+                write!(f, "JWK member must not contain a private key: {name}")
+            }
             Self::UnsupportedKeyType(key_type) => {
                 write!(f, "unsupported JWK key type: {key_type}")
             }
@@ -248,6 +260,26 @@ impl From<CryptoError> for JwkError {
 
 fn json_error(error: nojson::JsonParseError) -> JwkError {
     JwkError::Json(error.to_string())
+}
+
+/// 秘密鍵を表す JWK メンバー名があれば返す
+///
+/// RFC 7517 §4 の秘密鍵メンバー (`d` / `p` / `q` / `dp` / `dq` / `qi` / `oth`) と
+/// 対称鍵の `k` を対象とする。
+fn find_private_member(
+    value: RawJsonValue<'_, '_>,
+) -> Result<Option<String>, nojson::JsonParseError> {
+    const PRIVATE_MEMBERS: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
+    let Ok(members) = value.to_object() else {
+        return Ok(None);
+    };
+    for (key, _) in members {
+        let name = key.to_unquoted_string_str()?.into_owned();
+        if PRIVATE_MEMBERS.contains(&name.as_str()) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
 }
 
 /// 必須の文字列メンバーを取り出す

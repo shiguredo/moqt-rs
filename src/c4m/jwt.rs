@@ -20,8 +20,6 @@ use super::jwk::{Jwk, JwkError};
 pub struct JwsHeader {
     /// `alg` を COSE のアルゴリズムへ変換したもの
     pub algorithm: Algorithm,
-    /// ヘッダに書かれていた `alg` 名 ("ES256" など)
-    pub algorithm_name: String,
     /// `typ`
     pub typ: Option<String>,
     /// `kid`
@@ -32,12 +30,27 @@ pub struct JwsHeader {
 
 impl JwsHeader {
     /// ヘッダの JSON をデコードする
+    ///
+    /// JOSE ヘッダのメンバー名が重複している場合はエラーを返す (RFC 7515 §4)。
     pub fn decode(text: &str) -> Result<Self, JwtError> {
         let json = RawJson::parse(text).map_err(json_error)?;
         let value = json.value();
+        if let Some(name) = super::json::find_duplicate_member(value).map_err(json_error)? {
+            return Err(JwtError::DuplicateMember(name));
+        }
         let algorithm_name = required_string(value, "alg")?;
         let algorithm = Algorithm::from_jose_name(&algorithm_name)
             .ok_or_else(|| JwtError::UnsupportedAlgorithm(algorithm_name.clone()))?;
+        // RFC 7515 §4.1.11: crit に挙げた拡張ヘッダを理解できない場合は JWS を無効とする。
+        // 本実装は拡張ヘッダを 1 つも解釈しないため、crit を持つ JWS は拒否する
+        if value
+            .to_member("crit")
+            .map_err(json_error)?
+            .optional()
+            .is_some()
+        {
+            return Err(JwtError::UnsupportedCriticalHeader);
+        }
         let typ = optional_string(value, "typ")?;
         let key_id = optional_string(value, "kid")?;
         let jwk = match value.to_member("jwk").map_err(json_error)?.optional() {
@@ -46,7 +59,6 @@ impl JwsHeader {
         };
         Ok(Self {
             algorithm,
-            algorithm_name,
             typ,
             key_id,
             jwk,
@@ -128,10 +140,10 @@ pub enum JwtError {
     InvalidBase64,
     /// JSON のパースに失敗した
     Json(String),
-    /// ヘッダに必須のメンバーが無い
-    MissingHeader(&'static str),
-    /// メンバーの型が期待と異なる
-    UnexpectedType(&'static str),
+    /// メンバー名が重複している (RFC 7515 §4)
+    DuplicateMember(String),
+    /// `crit` に理解できない拡張ヘッダがある (RFC 7515 §4.1.11)
+    UnsupportedCriticalHeader,
     /// 対応していない `alg` である
     UnsupportedAlgorithm(String),
     /// 署名 / 検証のエラー
@@ -146,8 +158,10 @@ impl fmt::Display for JwtError {
             Self::InvalidTokenFormat => write!(f, "JWT must have 3 dot-separated parts"),
             Self::InvalidBase64 => write!(f, "invalid base64url in JWT"),
             Self::Json(message) => write!(f, "invalid JWT JSON: {message}"),
-            Self::MissingHeader(name) => write!(f, "JWT header member is missing: {name}"),
-            Self::UnexpectedType(name) => write!(f, "unexpected JWT member type: {name}"),
+            Self::DuplicateMember(name) => write!(f, "duplicate JWT member: {name}"),
+            Self::UnsupportedCriticalHeader => {
+                write!(f, "crit lists an extension header that is not understood")
+            }
             Self::UnsupportedAlgorithm(name) => write!(f, "unsupported JWT algorithm: {name}"),
             Self::Crypto(error) => write!(f, "crypto error: {error}"),
             Self::Jwk(error) => write!(f, "JWK error: {error}"),

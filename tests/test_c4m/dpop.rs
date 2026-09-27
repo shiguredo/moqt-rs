@@ -14,7 +14,7 @@ use super::vectors::{
     ES256_PRIVATE_KEY_HEX, ES256_PUBLIC_KEY_X_HEX, ES256_PUBLIC_KEY_Y_HEX, HMAC_KEY_HEX,
 };
 #[cfg(feature = "aws-lc-rs")]
-use shiguredo_moqt::c4m::cat::{CatToken, CatTokenBuilder, Confirmation};
+use shiguredo_moqt::c4m::cat::{CatClaims, CatToken, CatTokenBuilder, Confirmation};
 #[cfg(feature = "aws-lc-rs")]
 use shiguredo_moqt::c4m::crypto::{CoseCrypto, CoseKey};
 #[cfg(feature = "aws-lc-rs")]
@@ -261,6 +261,7 @@ fn verify_against_token_with_replay_cache() {
         track_name: b"live",
         reference_time_seconds: 1700000010.0,
         default_window_seconds: 60.0,
+        access_token: None,
     };
     let mut cache = DpopReplayCache::new();
     proof
@@ -490,9 +491,318 @@ fn verify_against_token_detects_old_proof() {
         reference_time_seconds: 1700000031.0,
         // 既定値も 30 秒だが、catdpop の値が優先されることを確認する
         default_window_seconds: 300.0,
+        access_token: None,
     };
     assert_eq!(
         proof.verify_against_token(&crypto, &request, None),
         Err(DpopError::ProofExpired)
     );
+}
+
+#[test]
+fn duplicate_members_are_rejected() {
+    // RFC 7515 §4 は JWS ヘッダのメンバー名の一意性を MUST とする
+    let jws_error = DpopProof::decode(&unsigned_jwt(
+        r#"{"alg":"ES256","alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+        r#"{"jti":"id","iat":1,"actx":{"type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+    ));
+    assert_eq!(
+        jws_error,
+        Err(DpopError::Jwt(
+            shiguredo_moqt::c4m::jwt::JwtError::DuplicateMember(String::from("alg"))
+        ))
+    );
+
+    // ペイロードのクレーム名の重複も拒否する
+    let claims_error = DpopProof::decode(&unsigned_jwt(
+        r#"{"alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+        r#"{"jti":"id","jti":"other","iat":1,"actx":{"type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+    ));
+    assert_eq!(
+        claims_error,
+        Err(DpopError::DuplicateMember(String::from("jti")))
+    );
+
+    // actx のメンバー名の重複も拒否する
+    let actx_error = DpopProof::decode(&unsigned_jwt(
+        r#"{"alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+        r#"{"jti":"id","iat":1,"actx":{"type":"moqt","type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+    ));
+    assert_eq!(
+        actx_error,
+        Err(DpopError::DuplicateMember(String::from("type")))
+    );
+}
+
+#[test]
+fn non_finite_iat_is_rejected() {
+    // JSON の 1e999 は f64 では無限大になる
+    assert_eq!(
+        DpopProof::decode(&unsigned_jwt(
+            r#"{"alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+            r#"{"jti":"id","iat":1e999,"actx":{"type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+        )),
+        Err(DpopError::NonFiniteNumber("iat"))
+    );
+}
+
+#[test]
+fn non_finite_freshness_values_are_rejected() {
+    let proof = DpopProof::decode(&unsigned_jwt(
+        r#"{"alg":"ES256","typ":"dpop-proof+jwt","jwk":{"kty":"EC","crv":"P-256","x":"AQ","y":"AQ"}}"#,
+        r#"{"jti":"id","iat":1,"actx":{"type":"moqt","action":"PUB_NS","tns":"a","tn":"b"}}"#,
+    ))
+    .expect("デコードできる");
+    assert_eq!(
+        proof.verify_freshness(1.0, f64::NAN),
+        Err(DpopError::NonFiniteNumber("freshness window"))
+    );
+    assert_eq!(
+        proof.verify_freshness(f64::INFINITY, 10.0),
+        Err(DpopError::NonFiniteNumber("reference time"))
+    );
+
+    let mut cache = DpopReplayCache::new();
+    assert_eq!(
+        cache.check_and_record("id", 1.0, f64::NAN, 1.0),
+        Err(DpopError::NonFiniteNumber("freshness window"))
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn access_token_is_required_for_ath_binding() {
+    use shiguredo_moqt::c4m::crypto::DigestAlgorithm;
+    use shiguredo_moqt::c4m::crypto::EcCurve;
+    use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+
+    let crypto = AwsLcRsCrypto::new();
+    let jwk = es256_jwk();
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        decode_hex(ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(ES256_PUBLIC_KEY_Y_HEX),
+        decode_hex(ES256_PRIVATE_KEY_HEX),
+    );
+    let digest = crypto
+        .digest(DigestAlgorithm::Sha256, b"access-token")
+        .expect("ハッシュを計算できる");
+    let text = DpopProofBuilder::new("id-1", 1700000000.0, authorization_context())
+        .access_token_hash(base64url(&digest))
+        .build(&crypto, &key, &jwk)
+        .expect("proof を発行できる");
+    let proof = DpopProof::decode(&text).expect("proof をデコードできる");
+
+    let namespace = namespace();
+    let request = DpopVerification {
+        token_claims: &CatClaims::default(),
+        action: MoqtAction::PublishNamespace,
+        namespace: &namespace,
+        track_name: b"live",
+        reference_time_seconds: 1700000000.0,
+        default_window_seconds: 60.0,
+        access_token: None,
+    };
+    // ath があるのにアクセストークンを渡さない場合は検証しない (fail-closed)
+    assert_eq!(
+        proof.verify_against_token(&crypto, &request, None),
+        Err(DpopError::MissingAccessToken)
+    );
+
+    // アクセストークンを渡せば署名検証のあと ath が照合される
+    let request_with_token = DpopVerification {
+        access_token: Some(b"access-token"),
+        ..request
+    };
+    assert_eq!(
+        proof.verify_against_token(&crypto, &request_with_token, None),
+        Err(DpopError::MissingConfirmation)
+    );
+
+    // ath が無い proof にアクセストークンを渡すと必須違反になる
+    let text = DpopProofBuilder::new("id-2", 1700000000.0, authorization_context())
+        .build(&crypto, &key, &jwk)
+        .expect("proof を発行できる");
+    let proof = DpopProof::decode(&text).expect("proof をデコードできる");
+    assert_eq!(
+        proof.verify_against_token(&crypto, &request_with_token, None),
+        Err(DpopError::MissingAccessTokenHash)
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn verify_against_cat_token_uses_the_raw_token_for_ath() {
+    use shiguredo_moqt::c4m::crypto::DigestAlgorithm;
+    use shiguredo_moqt::c4m::crypto::EcCurve;
+    use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+
+    let crypto = AwsLcRsCrypto::new();
+    let jwk = es256_jwk();
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        decode_hex(ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(ES256_PUBLIC_KEY_Y_HEX),
+        decode_hex(ES256_PRIVATE_KEY_HEX),
+    );
+    let token_text = CatTokenBuilder::new()
+        .issuer("https://auth.example.com")
+        .moqt(MoqtClaim::new().scope(MoqtScope::new([MoqtAction::PublishNamespace])))
+        .jwk_thumbprint(
+            jwk.thumbprint_sha256(&crypto)
+                .expect("サムプリントを計算できる"),
+        )
+        .catdpop(300.0, true)
+        .build_compact(&crypto, &CoseKey::symmetric(decode_hex(HMAC_KEY_HEX)))
+        .expect("トークンを発行できる");
+    let token = CatToken::decode(token_text.as_bytes()).expect("トークンをデコードできる");
+
+    // アクセストークン = トークンの生バイト (compact ではトークン文字列)
+    let digest = crypto
+        .digest(DigestAlgorithm::Sha256, token.raw_token())
+        .expect("ハッシュを計算できる");
+    let text = DpopProofBuilder::new("id-1", 1700000000.0, authorization_context())
+        .access_token_hash(base64url(&digest))
+        .build(&crypto, &key, &jwk)
+        .expect("proof を発行できる");
+    let proof = DpopProof::decode(&text).expect("proof をデコードできる");
+
+    let namespace = namespace();
+    let mut cache = DpopReplayCache::new();
+    proof
+        .verify_against_cat_token(
+            &crypto,
+            &token,
+            MoqtAction::PublishNamespace,
+            &namespace,
+            b"live",
+            1700000010.0,
+            60.0,
+            Some(&mut cache),
+        )
+        .expect("CAT トークンに束縛された proof を検証できる");
+
+    // 別のトークン文字列に対しては ath が一致しない
+    let other_token = CatToken::decode(
+        CatTokenBuilder::new()
+            .issuer("https://other.example.com")
+            .moqt(MoqtClaim::new().scope(MoqtScope::new([MoqtAction::PublishNamespace])))
+            .jwk_thumbprint(
+                jwk.thumbprint_sha256(&crypto)
+                    .expect("サムプリントを計算できる"),
+            )
+            .catdpop(300.0, true)
+            .build_compact(&crypto, &CoseKey::symmetric(decode_hex(HMAC_KEY_HEX)))
+            .expect("トークンを発行できる")
+            .as_bytes(),
+    )
+    .expect("トークンをデコードできる");
+    assert_eq!(
+        proof.verify_against_cat_token(
+            &crypto,
+            &other_token,
+            MoqtAction::PublishNamespace,
+            &namespace,
+            b"live",
+            1700000010.0,
+            60.0,
+            None,
+        ),
+        Err(DpopError::AccessTokenHashMismatch)
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn dpop_builder_rejects_non_finite_iat() {
+    use shiguredo_moqt::c4m::crypto::EcCurve;
+    use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+
+    let crypto = AwsLcRsCrypto::new();
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        decode_hex(ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(ES256_PUBLIC_KEY_Y_HEX),
+        decode_hex(ES256_PRIVATE_KEY_HEX),
+    );
+    assert_eq!(
+        DpopProofBuilder::new("id-1", f64::NAN, authorization_context()).build(
+            &crypto,
+            &key,
+            &es256_jwk()
+        ),
+        Err(DpopError::NonFiniteNumber("iat"))
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn key_binding_prefers_the_iana_thumbprint() {
+    use shiguredo_moqt::c4m::crypto::EcCurve;
+    use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+
+    let crypto = AwsLcRsCrypto::new();
+    let jwk = es256_jwk();
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        decode_hex(ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(ES256_PUBLIC_KEY_Y_HEX),
+        decode_hex(ES256_PRIVATE_KEY_HEX),
+    );
+    let text = DpopProofBuilder::new("id-1", 1700000000.0, authorization_context())
+        .build(&crypto, &key, &jwk)
+        .expect("proof を発行できる");
+    let proof = DpopProof::decode(&text).expect("proof をデコードできる");
+    let thumbprint = jwk
+        .thumbprint_sha256(&crypto)
+        .expect("サムプリントを計算できる");
+
+    // 323 が一致すれば 3 の値は見ない
+    proof
+        .verify_key_binding(
+            &crypto,
+            &Confirmation {
+                jwk_thumbprint: Some(thumbprint.clone()),
+                c4m_draft_jwk_thumbprint: Some(vec![0xab; 32]),
+                raw: Vec::new(),
+            },
+        )
+        .expect("323 が一致すれば検証できる");
+
+    // 323 があって不一致なら、3 が一致していても拒否する
+    assert_eq!(
+        proof.verify_key_binding(
+            &crypto,
+            &Confirmation {
+                jwk_thumbprint: Some(vec![0xab; 32]),
+                c4m_draft_jwk_thumbprint: Some(thumbprint),
+                raw: Vec::new(),
+            }
+        ),
+        Err(DpopError::KeyBindingMismatch)
+    );
+}
+
+#[cfg(feature = "aws-lc-rs")]
+#[test]
+fn builder_nonce_and_proof_accessors() {
+    use shiguredo_moqt::c4m::crypto::EcCurve;
+    use shiguredo_moqt::c4m::crypto::aws_lc_rs::AwsLcRsCrypto;
+
+    let crypto = AwsLcRsCrypto::new();
+    let jwk = es256_jwk();
+    let key = CoseKey::ec2_with_private_key(
+        EcCurve::P256,
+        decode_hex(ES256_PUBLIC_KEY_X_HEX),
+        decode_hex(ES256_PUBLIC_KEY_Y_HEX),
+        decode_hex(ES256_PRIVATE_KEY_HEX),
+    );
+    let text = DpopProofBuilder::new("id-1", 1700000000.0, authorization_context())
+        .nonce("server-nonce")
+        .build(&crypto, &key, &jwk)
+        .expect("proof を発行できる");
+    let proof = DpopProof::decode(&text).expect("proof をデコードできる");
+    assert_eq!(proof.claims().nonce.as_deref(), Some("server-nonce"));
+    assert!(!proof.signing_input().is_empty());
+    assert_eq!(proof.signature().len(), 64);
 }

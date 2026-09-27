@@ -109,6 +109,12 @@ fn claims_roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let claims = sample_claims(ctx);
+        let value = claims.encode().expect("クレームをエンコードできる");
+        let encoded = cbor::encode(&value).expect("CBOR をエンコードできる");
+        let decoded = CatClaims::decode(&cbor::decode(&encoded).expect("CBOR をデコードできる"))
+            .expect("クレームをデコードできる");
+        assert_eq!(decoded, claims, "ラウンドトリップでクレームが変わる");
+        // 不変条件を評価したあとでカバレッジを数える
         if claims.moqt.is_some() {
             moqt_seen.set(moqt_seen.get() + 1);
         }
@@ -118,11 +124,6 @@ fn claims_roundtrip() -> noprop::TestResult {
         if !claims.raw.is_empty() {
             raw_seen.set(raw_seen.get() + 1);
         }
-        let value = claims.encode().expect("クレームをエンコードできる");
-        let encoded = cbor::encode(&value).expect("CBOR をエンコードできる");
-        let decoded = CatClaims::decode(&cbor::decode(&encoded).expect("CBOR をデコードできる"))
-            .expect("クレームをデコードできる");
-        assert_eq!(decoded, claims, "ラウンドトリップでクレームが変わる");
         Ok(())
     })?;
     assert!(

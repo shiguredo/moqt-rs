@@ -180,29 +180,137 @@ fn c4m_draft_hmac_alias_is_accepted() {
 
 #[test]
 fn crit_must_only_list_understood_parameters() {
+    // 存在して理解できるラベルだけを列挙する
     let header = Value::Map(vec![
         (Value::Unsigned(1), Value::integer(5)),
+        (Value::Unsigned(16), Value::TextString(String::from("CAT"))),
         (
             Value::Unsigned(2),
-            Value::Array(vec![
-                Value::Unsigned(1),
-                Value::Unsigned(4),
-                Value::Unsigned(16),
-                Value::Unsigned(3),
-            ]),
+            Value::Array(vec![Value::Unsigned(1), Value::Unsigned(16)]),
         ),
     ]);
-    let header = Header::decode(&header).expect("理解できるパラメータだけを列挙している");
-    assert_eq!(header.critical.len(), 4);
+    let header = Header::decode_protected(&header).expect("protected ヘッダとして妥当である");
+    assert_eq!(header.critical.len(), 2);
 
+    // 理解できないラベルは拒否する
     let header = Value::Map(vec![
         (Value::Unsigned(1), Value::integer(5)),
         (Value::Unsigned(2), Value::Array(vec![Value::Unsigned(99)])),
+        (Value::Unsigned(99), Value::Unsigned(1)),
     ]);
     assert_eq!(
-        Header::decode(&header),
+        Header::decode_protected(&header),
         Err(CoseError::UnsupportedCriticalHeader)
     );
+
+    // crit が指すラベルが protected ヘッダに無い場合は致命的エラー (RFC 9052 §3.1)
+    let header = Value::Map(vec![
+        (Value::Unsigned(1), Value::integer(5)),
+        (Value::Unsigned(2), Value::Array(vec![Value::Unsigned(16)])),
+    ]);
+    assert_eq!(
+        Header::decode_protected(&header),
+        Err(CoseError::CriticalHeaderNotPresent)
+    );
+
+    // crit の配列は 1 要素以上でなければならない (RFC 9052 §3.1)
+    let header = Value::Map(vec![
+        (Value::Unsigned(1), Value::integer(5)),
+        (Value::Unsigned(2), Value::Array(Vec::new())),
+    ]);
+    assert_eq!(
+        Header::decode_protected(&header),
+        Err(CoseError::EmptyCriticalHeader)
+    );
+
+    // crit は protected ヘッダに置かなければならない (RFC 9052 §3.1)
+    let header = Value::Map(vec![
+        (Value::Unsigned(1), Value::integer(5)),
+        (Value::Unsigned(2), Value::Array(vec![Value::Unsigned(1)])),
+    ]);
+    assert_eq!(
+        Header::decode_unprotected(&header),
+        Err(CoseError::UnprotectedCriticalHeader)
+    );
+}
+
+#[test]
+fn unprotected_header_must_not_carry_alg_or_typ() {
+    // alg は protected ヘッダで認証されなければならない (RFC 9052 §3.1)
+    let protected = cbor::encode(&Value::Map(vec![(
+        Value::Unsigned(16),
+        Value::TextString(String::from("CAT")),
+    )]))
+    .expect("エンコードできる");
+    let unprotected = vec![(Value::Unsigned(1), Value::integer(5))];
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected.clone()),
+        Value::Map(unprotected.clone()),
+        Value::ByteString(b"payload".to_vec()),
+        Value::ByteString(b"signature".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    assert_eq!(
+        CoseMessage::decode(&bytes).map(|_| ()),
+        Err(CoseError::UnprotectedAlgorithm)
+    );
+
+    // alg が両方にある場合はエラー
+    let protected = protected_header(5);
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected),
+        Value::Map(unprotected),
+        Value::ByteString(b"payload".to_vec()),
+        Value::ByteString(b"signature".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    assert_eq!(
+        CoseMessage::decode(&bytes).map(|_| ()),
+        Err(CoseError::DuplicateHeaderParameter(1))
+    );
+
+    // typ は unprotected ヘッダに置けない (RFC 9596 §2)
+    let protected = protected_header(5);
+    let unprotected = vec![(Value::Unsigned(16), Value::TextString(String::from("CAT")))];
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected),
+        Value::Map(unprotected),
+        Value::ByteString(b"payload".to_vec()),
+        Value::ByteString(b"signature".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    assert_eq!(
+        CoseMessage::decode(&bytes).map(|_| ()),
+        Err(CoseError::UnprotectedTypeHeader)
+    );
+}
+
+#[test]
+fn cwt_tag_requires_a_cose_tag() {
+    // RFC 8392 §6: CWT タグは COSE のタグ付きオブジェクトにだけ前置できる
+    let array = cose_array(&protected_header(5), Some(b"p"), b"s");
+    let bytes = cbor::encode(&Value::Tag(TAG_CWT, Box::new(array))).expect("エンコードできる");
+    assert!(matches!(
+        CoseMessage::decode(&bytes),
+        Err(CoseError::InvalidStructure(_))
+    ));
+
+    // CWT タグだけを付けてエンコードすることもできない
+    let message = CoseMessage::Mac0(CoseMac0 {
+        protected: protected_header(5),
+        unprotected: Vec::new(),
+        payload: Some(b"p".to_vec()),
+        tag: vec![0x01],
+        cose_tagged: false,
+        cwt_tagged: false,
+    });
+    assert!(matches!(
+        message.encode(&CoseEncodingOptions {
+            cose_tag: false,
+            cwt_tag: true,
+        }),
+        Err(CoseError::InvalidStructure(_))
+    ));
 }
 
 #[test]
@@ -217,12 +325,15 @@ fn header_round_trips_unknown_parameters() {
         raw: vec![(Value::Unsigned(99), Value::TextString(String::from("x")))],
     };
     let encoded = header.encode().expect("エンコードできる");
-    assert_eq!(Header::decode(&encoded).expect("デコードできる"), header);
+    assert_eq!(
+        Header::decode_protected(&encoded).expect("デコードできる"),
+        header
+    );
 }
 
 #[test]
 fn key_id_accepts_bytes_and_text() {
-    let header = Header::decode(&Value::Map(vec![(
+    let header = Header::decode_protected(&Value::Map(vec![(
         Value::Unsigned(4),
         Value::TextString(String::from("key-1")),
     )]))
@@ -233,7 +344,7 @@ fn key_id_accepts_bytes_and_text() {
         b"key-1"
     );
 
-    let header = Header::decode(&Value::Map(vec![(
+    let header = Header::decode_protected(&Value::Map(vec![(
         Value::Unsigned(4),
         Value::ByteString(vec![0xab]),
     )]))
@@ -244,11 +355,11 @@ fn key_id_accepts_bytes_and_text() {
 #[test]
 fn header_type_errors() {
     assert_eq!(
-        Header::decode(&Value::Unsigned(1)),
+        Header::decode_protected(&Value::Unsigned(1)),
         Err(CoseError::UnexpectedType("header map"))
     );
     assert_eq!(
-        Header::decode(&Value::Map(vec![(
+        Header::decode_protected(&Value::Map(vec![(
             Value::Unsigned(1),
             Value::TextString(String::from("ES256"))
         )]))
@@ -256,7 +367,8 @@ fn header_type_errors() {
         Err(CoseError::UnexpectedType("alg"))
     );
     assert_eq!(
-        Header::decode(&Value::Map(vec![(Value::Unsigned(4), Value::Unsigned(1))])).map(|_| ()),
+        Header::decode_protected(&Value::Map(vec![(Value::Unsigned(4), Value::Unsigned(1))]))
+            .map(|_| ()),
         Err(CoseError::UnexpectedType("kid"))
     );
 }
@@ -390,8 +502,128 @@ fn invalid_cose_arrays_are_rejected() {
 fn decode_from_known_bytes() {
     // 付録 A.3 の protected ヘッダ (alg = -4、typ = "CAT")
     let protected = decode_hex("a201231063434154");
-    let header =
-        Header::decode(&cbor::decode(&protected).expect("デコードできる")).expect("ヘッダを読める");
+    let header = Header::decode_protected(&cbor::decode(&protected).expect("デコードできる"))
+        .expect("ヘッダを読める");
     assert_eq!(header.algorithm, Some(Algorithm::HmacSha256));
     assert_eq!(header.typ, Some(Value::TextString(String::from("CAT"))));
+}
+
+#[test]
+fn duplicate_parameters_across_buckets_are_rejected() {
+    let protected = Value::Map(vec![
+        (Value::Unsigned(1), Value::integer(5)),
+        (Value::Unsigned(4), Value::ByteString(vec![1])),
+        (Value::Unsigned(3), Value::TextString(String::from("cat"))),
+    ]);
+    let protected_bytes = cbor::encode(&protected).expect("エンコードできる");
+
+    // kid の重複
+    let unprotected = vec![(Value::Unsigned(4), Value::ByteString(vec![2]))];
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected_bytes.clone()),
+        Value::Map(unprotected),
+        Value::ByteString(b"p".to_vec()),
+        Value::ByteString(b"s".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    assert_eq!(
+        CoseMessage::decode(&bytes).map(|_| ()),
+        Err(CoseError::DuplicateHeaderParameter(4))
+    );
+
+    // content type の重複
+    let unprotected = vec![(Value::Unsigned(3), Value::TextString(String::from("cat")))];
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected_bytes),
+        Value::Map(unprotected),
+        Value::ByteString(b"p".to_vec()),
+        Value::ByteString(b"s".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    assert_eq!(
+        CoseMessage::decode(&bytes).map(|_| ()),
+        Err(CoseError::DuplicateHeaderParameter(3))
+    );
+}
+
+#[test]
+fn kid_and_content_type_can_come_from_the_unprotected_bucket() {
+    let unprotected = vec![
+        (Value::Unsigned(4), Value::TextString(String::from("key-1"))),
+        (Value::Unsigned(3), Value::TextString(String::from("cat"))),
+    ];
+    let bytes = cbor::encode(&Value::Array(vec![
+        Value::ByteString(protected_header(5)),
+        Value::Map(unprotected),
+        Value::ByteString(b"p".to_vec()),
+        Value::ByteString(b"s".to_vec()),
+    ]))
+    .expect("エンコードできる");
+    let message = CoseMessage::decode(&bytes).expect("デコードできる");
+    let header = message.header().expect("ヘッダを読める");
+    assert_eq!(header.key_id, Some(KeyId::Text(String::from("key-1"))));
+    assert_eq!(
+        header.content_type,
+        Some(Value::TextString(String::from("cat")))
+    );
+}
+
+#[test]
+fn header_encode_checks_critical_labels() {
+    let header = Header {
+        algorithm: Some(Algorithm::HmacSha256),
+        algorithm_identifier: Some(5),
+        key_id: None,
+        typ: None,
+        content_type: None,
+        critical: vec![Value::Unsigned(16)],
+        raw: Vec::new(),
+    };
+    assert_eq!(header.encode(), Err(CoseError::CriticalHeaderNotPresent));
+}
+
+#[test]
+fn header_encode_accepts_present_and_understood_critical_labels() {
+    let header = Header {
+        algorithm: Some(Algorithm::HmacSha256),
+        algorithm_identifier: Some(5),
+        key_id: None,
+        typ: Some(Value::TextString(String::from("CAT"))),
+        content_type: None,
+        critical: vec![Value::Unsigned(1), Value::Unsigned(16)],
+        raw: Vec::new(),
+    };
+    let encoded = header.encode().expect("エンコードできる");
+    assert_eq!(
+        Header::decode_protected(&encoded).expect("デコードできる"),
+        header
+    );
+    // crit 自身の列挙は許す
+    let header = Header {
+        critical: vec![Value::Unsigned(2)],
+        ..header
+    };
+    assert!(header.encode().is_ok());
+    // 理解できないラベルは encode でも拒否する
+    let header = Header {
+        critical: vec![Value::Unsigned(99)],
+        raw: vec![(Value::Unsigned(99), Value::Unsigned(1))],
+        ..header
+    };
+    assert_eq!(header.encode(), Err(CoseError::UnsupportedCriticalHeader));
+}
+
+#[test]
+fn message_accessors_are_exposed() {
+    let message = CoseMessage::Sign1(CoseSign1 {
+        protected: protected_header(-7),
+        unprotected: Vec::new(),
+        payload: Some(b"p".to_vec()),
+        signature: vec![0x01, 0x02],
+        cose_tagged: false,
+        cwt_tagged: false,
+    });
+    assert_eq!(message.signature(), &[0x01, 0x02]);
+    assert_eq!(message.payload(), Some(&b"p"[..]));
+    assert!(message.signing_input().is_ok());
 }

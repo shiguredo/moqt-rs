@@ -160,9 +160,9 @@ fn floats_use_preferred_shortest_encoding() {
 
 #[test]
 fn floats_decode_from_every_width() {
+    // 付録 A.2 の catgeocoord の accuracy は f9 5640 (100.0) で書かれている
     assert_eq!(decode(&decode_hex("f95640")), Ok(Value::Float(100.0)));
-    // 付録 A.2 の catgeocoord は 100.0 を f9 5664 (102.25) で書いている。
-    // ベクタのバイト列をそのまま再現できることを確認する
+    // 半精度の別値 (0x5664 は 102.25) も正しく読める
     assert_eq!(decode(&decode_hex("f95664")), Ok(Value::Float(102.25)));
     assert_eq!(
         decode(&decode_hex("fa47c35000")),
@@ -402,4 +402,81 @@ fn negative_numbers_convert_with_single_rounding() {
         Value::Negative(u64::MAX).as_number(),
         Some((-(u64::MAX as i128) - 1) as f64)
     );
+}
+
+#[test]
+fn indefinite_text_chunks_must_each_be_valid_utf8() {
+    // チャンクを連結すると "€" (e2 82 ac) になるが、RFC 8949 §3.2.3 は
+    // 各チャンクが個別に正しい UTF-8 であることを要求する
+    assert_eq!(
+        decode(&decode_hex("7f62e28261acff")),
+        Err(CborError::InvalidUtf8)
+    );
+    // 1 チャンクに収まっていれば通る
+    assert_eq!(
+        decode(&decode_hex("7f63e282acff")),
+        Ok(Value::TextString(String::from("€")))
+    );
+}
+
+#[test]
+fn duplicate_nan_keys_are_rejected() {
+    // RFC 8949 §5.6.1 は同じ内容の NaN のキーを同一視する
+    let value = Value::Map(vec![
+        (Value::Float(f64::NAN), Value::Unsigned(1)),
+        (Value::Float(f64::NAN), Value::Unsigned(2)),
+    ]);
+    assert_eq!(encode(&value), Err(CborError::DuplicateMapKey));
+    assert_eq!(
+        decode(&decode_hex("a2f97e0001f97e0002")),
+        Err(CborError::DuplicateMapKey)
+    );
+}
+
+#[test]
+fn large_maps_are_checked_for_duplicates() {
+    // 重複検査が二次関数的な時間を使わないことを、大きなマップで確認する
+    let mut entries = Vec::new();
+    for index in 0..2000u64 {
+        entries.push((Value::Unsigned(index), Value::Unsigned(index)));
+    }
+    entries.push((Value::Unsigned(1000), Value::Unsigned(1000)));
+    assert_eq!(
+        encode(&Value::Map(entries)),
+        Err(CborError::DuplicateMapKey)
+    );
+}
+
+#[test]
+fn zero_and_negative_zero_keys_are_equivalent() {
+    // RFC 8949 §5.6.1: -0.0 と 0.0 は数値として等しいため同一のキー
+    let value = Value::Map(vec![
+        (Value::Float(0.0), Value::Unsigned(1)),
+        (Value::Float(-0.0), Value::Unsigned(2)),
+    ]);
+    assert_eq!(encode(&value), Err(CborError::DuplicateMapKey));
+    assert_eq!(
+        decode(&decode_hex("a2f9000001f9800002")),
+        Err(CborError::DuplicateMapKey)
+    );
+    // 片方だけなら通る
+    assert!(encode(&Value::Map(vec![(Value::Float(-0.0), Value::Unsigned(1))])).is_ok());
+}
+
+#[test]
+fn nested_keys_are_compared_after_normalization() {
+    // 入れ子のキーでも -0.0 と 0.0 は同一視する
+    let value = Value::Map(vec![
+        (Value::Array(vec![Value::Float(0.0)]), Value::Unsigned(1)),
+        (Value::Array(vec![Value::Float(-0.0)]), Value::Unsigned(2)),
+    ]);
+    assert_eq!(encode(&value), Err(CborError::DuplicateMapKey));
+
+    // 深すぎるキーは stack を壊さず DepthLimitExceeded になる
+    let mut key = Value::Unsigned(1);
+    for _ in 0..MAX_DEPTH + 2 {
+        key = Value::Array(vec![key]);
+    }
+    let value = Value::Map(vec![(key, Value::Unsigned(1))]);
+    assert_eq!(encode(&value), Err(CborError::DepthLimitExceeded));
 }
