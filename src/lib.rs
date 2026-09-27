@@ -24,6 +24,11 @@ struct ReadmeDoctests;
 /// sans I/O なセッション状態機械 [`session::core::Session`] を提供する。
 /// [`session::core::Session`] は peer / endpoint 視点の protocol state を扱い、relay 全体の
 /// routing / fan-out / cache / policy は対象外とする。
+/// MOQT の認可トークン (C4M) のコーデック (draft-ietf-moq-c4m-01)
+///
+/// CBOR (RFC 8949) / COSE (RFC 9052) / CAT (CTA-5007-B) のトークンを
+/// 発行・検証し、`moqt` クレームの認可判定を行う。
+pub mod c4m;
 pub mod decoder;
 /// エラー型と終了コード定義 (draft-ietf-moq-transport-21 §16.11 (Error Codes))
 pub mod error;

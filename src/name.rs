@@ -124,11 +124,12 @@ fn serialize_field(bytes: &[u8], out: &mut String) {
     }
 }
 
-/// namespace タプル + track name を draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) のシリアライズ文字列へ変換する
+/// namespace タプルを draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の表現へ変換する
 ///
-/// 0 フィールドの namespace は先頭が `--` の文字列になる。任意のバイト列を表現できるため infallible。
-/// `TrackNamespace` は構築時に `new` で検証済みのため、ここでは再検証しない。
-pub fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String {
+/// 各フィールドをハイフン (`-`) で連結する。`serialize_name` の namespace 部分と
+/// 同じ表現であり、DPoP の Authorization Context の `tns` (§5.1.3) に使う。
+/// 0 フィールドの namespace は空文字列になる。
+pub fn serialize_namespace(namespace: &TrackNamespace) -> String {
     let mut out = String::new();
     for (i, field) in namespace.fields().iter().enumerate() {
         if i > 0 {
@@ -136,11 +137,55 @@ pub fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String {
         }
         serialize_field(field, &mut out);
     }
+    out
+}
+
+/// track name を draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の表現へ変換する
+///
+/// DPoP の Authorization Context の `tn` (§5.1.3) に使う。
+pub fn serialize_track_name(track_name: &[u8]) -> String {
+    let mut out = String::new();
+    serialize_field(track_name, &mut out);
+    out
+}
+
+/// draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の track name 表現をバイト列へパースする
+///
+/// `serialize_track_name` の逆変換であり、§8.8.1 (Parsing Serialized Names) の MUST を
+/// 適用する。
+pub fn parse_track_name(s: &str) -> Result<Vec<u8>, NameParseError> {
+    decode_field(s.as_bytes(), PercentEncoding::Forbidden)
+}
+
+/// namespace タプル + track name を draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) のシリアライズ文字列へ変換する
+///
+/// 0 フィールドの namespace は先頭が `--` の文字列になる。任意のバイト列を表現できるため infallible。
+/// `TrackNamespace` は構築時に `new` で検証済みのため、ここでは再検証しない。
+pub fn serialize_name(namespace: &TrackNamespace, track_name: &[u8]) -> String {
+    let mut out = serialize_namespace(namespace);
     // namespace と track name の境界 (0 フィールドでも `--` を出力する)
     out.push('-');
     out.push('-');
     serialize_field(track_name, &mut out);
     out
+}
+
+/// draft-ietf-moq-transport-21 §8.8 (Representing Namespace and Track Names) の namespace 表現をタプルへパースする
+///
+/// `serialize_namespace` の逆変換であり、§8.8.1 (Parsing Serialized Names) の MUST を
+/// 適用する。空文字列は 0 フィールドの namespace になる。
+pub fn parse_namespace(s: &str) -> Result<TrackNamespace, NameParseError> {
+    let bytes = s.as_bytes();
+    let mut fields = Vec::new();
+    if !bytes.is_empty() {
+        for field_bytes in bytes.split(|&b| b == b'-') {
+            if field_bytes.is_empty() {
+                return Err(NameParseError::EmptyNamespaceField);
+            }
+            fields.push(decode_field(field_bytes, PercentEncoding::Forbidden)?);
+        }
+    }
+    TrackNamespace::new(fields).map_err(|_| NameParseError::InvalidNamespace)
 }
 
 /// フィールドのデコードで URI 層の `pct-encoded` を許容するか

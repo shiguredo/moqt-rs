@@ -100,6 +100,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1381,6 +1387,8 @@ checksum = "a2cf45c726f38acb9a236ea4ea1344cc3fadc64c6a8877a98ff51b01dd3bd837"
 name = "shiguredo_moqt"
 version = "2026.0.0"
 dependencies = [
+ "aws-lc-rs",
+ "base64ct",
  "hashbrown 0.17.1",
  "noflate",
  "nojson",

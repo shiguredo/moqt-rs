@@ -293,3 +293,93 @@ fn parse_name_with_percent_encoding_decodes_octets() {
         Err(NameParseError::InvalidEscape)
     );
 }
+
+/// namespace 単体と track name 単体のシリアライズ (DPoP の Authorization Context で使う)
+mod namespace_only {
+    use super::*;
+    use shiguredo_moqt::name::{
+        parse_namespace, parse_track_name, serialize_namespace, serialize_track_name,
+    };
+
+    #[test]
+    fn draft_example_serializes_namespace() {
+        // draft-nandakumar-moq-generic-dpop-proof §5.1.3.1 の例
+        let namespace = ns(&[b"example.net", b"team2", b"project_x"]);
+        assert_eq!(
+            serialize_namespace(&namespace),
+            "example.2enet-team2-project_x"
+        );
+        assert_eq!(
+            parse_namespace("example.2enet-team2-project_x").expect("パースできる"),
+            namespace
+        );
+        assert_eq!(
+            serialize_namespace(&ns(&[b"conference", b"room1"])),
+            "conference-room1"
+        );
+        // binary bytes [0xFF, 0x01] と [0x02]
+        let namespace = ns(&[&[0xff, 0x01], &[0x02]]);
+        assert_eq!(serialize_namespace(&namespace), ".ff.01-.02");
+        assert_eq!(
+            parse_namespace(".ff.01-.02").expect("パースできる"),
+            namespace
+        );
+        // 0 フィールドは空文字列
+        assert_eq!(serialize_namespace(&ns(&[])), "");
+        assert_eq!(parse_namespace("").expect("パースできる"), ns(&[]));
+    }
+
+    #[test]
+    fn track_name_serialization() {
+        // namespace ("conference", "room1") の track name "audio.opus"
+        assert_eq!(serialize_track_name(b"audio.opus"), "audio.2eopus");
+        assert_eq!(
+            parse_track_name("audio.2eopus").expect("パースできる"),
+            b"audio.opus"
+        );
+        assert_eq!(serialize_track_name(b""), "");
+        assert_eq!(
+            parse_track_name("").expect("パースできる"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn namespace_only_parse_errors() {
+        assert_eq!(
+            parse_namespace("-a"),
+            Err(NameParseError::EmptyNamespaceField)
+        );
+        // `-` で分割すると空フィールドになる
+        assert_eq!(
+            parse_namespace("a--b"),
+            Err(NameParseError::EmptyNamespaceField)
+        );
+        assert_eq!(parse_namespace("a.2E"), Err(NameParseError::UppercaseHex));
+        assert_eq!(
+            parse_namespace(".61"),
+            Err(NameParseError::RedundantEncoding)
+        );
+        assert_eq!(parse_namespace("a."), Err(NameParseError::InvalidEscape));
+        // 33 フィールド (> 32)
+        assert_eq!(
+            parse_namespace(&vec!["a"; 33].join("-")),
+            Err(NameParseError::InvalidNamespace)
+        );
+        assert_eq!(parse_track_name("-"), Err(NameParseError::InvalidEscape));
+        assert_eq!(parse_track_name("a.2E"), Err(NameParseError::UppercaseHex));
+    }
+
+    #[test]
+    fn serialize_name_is_composed_of_namespace_and_track_name() {
+        let namespace = ns(&[b"example.net"]);
+        assert_eq!(
+            serialize_name(&namespace, b"report"),
+            format!(
+                "{}--{}",
+                serialize_namespace(&namespace),
+                serialize_track_name(b"report")
+            )
+        );
+    }
+}

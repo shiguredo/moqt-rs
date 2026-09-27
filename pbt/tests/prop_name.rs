@@ -4,7 +4,8 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::{
     message::common::TrackNamespace, name::parse_name, name::parse_name_with_percent_encoding,
-    name::serialize_name,
+    name::parse_namespace, name::parse_track_name, name::serialize_name, name::serialize_namespace,
+    name::serialize_track_name,
 };
 
 /// 空でない namespace フィールド (1..=16 バイト、任意値)
@@ -91,5 +92,53 @@ fn percent_encoded_track_name_roundtrip() -> noprop::TestResult {
         assert_eq!(parsed, track_name);
         Ok(())
     })?;
+    Ok(())
+}
+
+/// namespace 単体の serialize -> parse -> serialize のラウンドトリップ (DPoP の actx の tns)
+#[test]
+fn namespace_only_roundtrip() -> noprop::TestResult {
+    let empty_namespace_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let namespace = sample_namespace(ctx);
+        if namespace.fields().is_empty() {
+            empty_namespace_seen.set(true);
+        }
+        let serialized = serialize_namespace(&namespace);
+        let parsed = parse_namespace(&serialized)
+            .expect("serialize_namespace の出力は parse_namespace で必ずパースできる");
+        assert_eq!(parsed, namespace);
+        assert_eq!(serialize_namespace(&parsed), serialized);
+        Ok(())
+    })?;
+    assert!(
+        empty_namespace_seen.get(),
+        "フィールド数 0 の namespace のケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// track name 単体の serialize -> parse -> serialize のラウンドトリップ (DPoP の actx の tn)
+#[test]
+fn track_name_only_roundtrip() -> noprop::TestResult {
+    let empty_track_name_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let track = sample_track_name(ctx);
+        if track.is_empty() {
+            empty_track_name_seen.set(true);
+        }
+        let serialized = serialize_track_name(&track);
+        let parsed = parse_track_name(&serialized)
+            .expect("serialize_track_name の出力は parse_track_name で必ずパースできる");
+        assert_eq!(parsed, track);
+        assert_eq!(serialize_track_name(&parsed), serialized);
+        Ok(())
+    })?;
+    assert!(
+        empty_track_name_seen.get(),
+        "長さ 0 の track name のケースが生成されなかった\n{runner}"
+    );
     Ok(())
 }
