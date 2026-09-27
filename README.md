@@ -172,21 +172,23 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs) を利用しています。
 引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
 
-- `moqt-publisher`：QUIC / WebTransport で relay に接続し、video / audio / `catalog` track を PUBLISH する
-- `moqt-subscriber`：QUIC / WebTransport で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
+- `moq-publisher`：QUIC / WebTransport で relay に接続し、video / audio / `catalog` track を PUBLISH する
+- `moq-subscriber`：QUIC / WebTransport で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
 - `moqt-transport`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.94 以降です。
-`moqt-publisher` の依存が 1.94 を要求するためです。
-`moqt-subscriber` / `moqt-transport` だけであれば 1.93 で構築できます。
+`moq-publisher` の依存が 1.94 を要求するためです。
+`moq-subscriber` / `moqt-transport` だけであれば 1.93 で構築できます。
 
 ```bash
 # publisher (疑似キャプチャ)
-cargo run -p moqt-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
+cargo run -p moq-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
 
 # subscriber
-cargo run -p moqt-subscriber -- --url moqt://127.0.0.1:4443
+cargo run -p moq-subscriber -- --url moqt://127.0.0.1:4443
 ```
+
+URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP の AUTHORIZATION_TOKEN として送信できます。
 
 接続先となる MoQT relay は別途用意してください。
 詳細なオプションは [`examples/README.md`](examples/README.md) と各クレートの `--help` を参照してください。

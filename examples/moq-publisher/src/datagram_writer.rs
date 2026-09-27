@@ -64,7 +64,7 @@ impl DatagramWriter {
     /// 検証 (手動): OBJECT_PROPERTY_FILTER 付きの subscription に対して、
     /// フィルタ外のオブジェクトが subscriber に届かず publisher が生存すること、
     /// フィルタを通過するオブジェクトの配信が従来どおり行われることを確認する。
-    /// リポジトリ内の moqt-subscriber はフィルタ付き SUBSCRIBE を発行する手段を
+    /// リポジトリ内の moq-subscriber はフィルタ付き SUBSCRIBE を発行する手段を
     /// 持たないため、 subscriber 側にフィルタを付与する改変が必要である。
     pub async fn write_object(
         &mut self,

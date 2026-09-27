@@ -268,7 +268,8 @@ pub async fn run(
                 connection,
                 &config.url.path,
                 &config.url.authority,
-                "moqt-subscriber",
+                "moq-subscriber",
+                &config.url.c4m_tokens,
                 &task_monitor,
             )
             .await?
@@ -297,7 +298,13 @@ pub async fn run(
                 &config.url.path,
             )
             .await?;
-            MoqtClient::establish_wt(wt_session, "moqt-subscriber", &task_monitor).await?
+            MoqtClient::establish_wt(
+                wt_session,
+                "moq-subscriber",
+                &config.url.c4m_tokens,
+                &task_monitor,
+            )
+            .await?
         }
     };
 
@@ -1955,7 +1962,7 @@ mod tests {
 
     /// テスト用: OpusHead を構築する (RFC 7845 §5.1 のフォーマット)
     ///
-    /// publisher 側 (examples/moqt-publisher の `build_opus_head`) と同じ形式。
+    /// publisher 側 (examples/moq-publisher の `build_opus_head`) と同じ形式。
     fn build_test_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
         let mut head = Vec::with_capacity(19);
         head.extend_from_slice(b"OpusHead");

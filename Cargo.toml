@@ -11,8 +11,8 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 
 [workspace]
 members = [
-  "examples/moqt-publisher",
-  "examples/moqt-subscriber",
+  "examples/moq-publisher",
+  "examples/moq-subscriber",
   "examples/moqt-transport",
   "pbt",
 ]

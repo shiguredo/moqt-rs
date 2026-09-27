@@ -80,7 +80,7 @@ pub fn parse() -> noargs::Result<Option<Config>> {
     let url: ServerUrl = noargs::opt("url")
         .short('u')
         .ty("URL")
-        .doc("Server URL (moqt://host[:port]/path[?query][#type:value] or https://host[:port]/path[?query][#type:value])")
+        .doc("Server URL (moqt:// or https://; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
         .take(&mut args)
         .then(|o| {
             let v = o.value();

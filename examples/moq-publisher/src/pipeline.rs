@@ -118,7 +118,8 @@ pub async fn run(
                 connection,
                 &config.url.path,
                 &config.url.authority,
-                "moqt-publisher",
+                "moq-publisher",
+                &config.url.c4m_tokens,
                 &task_monitor,
             )
             .await?;
@@ -146,8 +147,13 @@ pub async fn run(
                 &config.url.path,
             )
             .await?;
-            let (client, _acceptor) =
-                MoqtClient::establish_wt(wt_session, "moqt-publisher", &task_monitor).await?;
+            let (client, _acceptor) = MoqtClient::establish_wt(
+                wt_session,
+                "moq-publisher",
+                &config.url.c4m_tokens,
+                &task_monitor,
+            )
+            .await?;
             client
         }
     };

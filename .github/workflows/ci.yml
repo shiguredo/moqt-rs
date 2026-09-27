@@ -15,7 +15,7 @@
 #   - fuzz-build は fuzz workspace のみを対象にするが、既存ジョブと同じ macos-15 に揃えている
 #   - no-std-doc は shiguredo_moqt のみを対象にするため examples の macOS 専用依存を
 #     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
-# - MSRV 検証は含めない。moqt-publisher が rust-version 1.94 を要求するため
+# - MSRV 検証は含めない。moq-publisher が rust-version 1.94 を要求するため
 #   workspace 単位の 1.93 検証が構造的にできない
 
 name: CI

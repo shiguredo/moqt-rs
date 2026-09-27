@@ -15,6 +15,8 @@ shiguredo_moqt = { path = "../../" }
 
 # 外部クレート
 
+# Base64 デコード (MSF fragment の c4m パラメータ)
+base64ct = "1.8"
 # バイト列操作
 bytes = "1.12"
 # TLS バックエンド (s2n-quic provider 用)

@@ -764,21 +764,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moqt-example-transport"
-version = "2026.0.0"
-dependencies = [
- "bytes",
- "rustls",
- "s2n-quic",
- "shiguredo_http3",
- "shiguredo_moqt",
- "tokio",
- "tokio-metrics",
- "tracing",
-]
-
-[[package]]
-name = "moqt-publisher"
+name = "moq-publisher"
 version = "2026.0.0"
 dependencies = [
  "bytes",
@@ -801,7 +787,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moqt-subscriber"
+name = "moq-subscriber"
 version = "2026.0.0"
 dependencies = [
  "bytes",
@@ -819,6 +805,21 @@ dependencies = [
  "tokio-utils",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "moqt-example-transport"
+version = "2026.0.0"
+dependencies = [
+ "base64ct",
+ "bytes",
+ "rustls",
+ "s2n-quic",
+ "shiguredo_http3",
+ "shiguredo_moqt",
+ "tokio",
+ "tokio-metrics",
+ "tracing",
 ]
 
 [[package]]

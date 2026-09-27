@@ -278,7 +278,7 @@ impl SubgroupWriter {
     /// 検証 (手動): OBJECT_PROPERTY_FILTER 付きの subscription に対して、
     /// フィルタ外のオブジェクトが subscriber に届かず publisher が生存すること、
     /// フィルタを通過するオブジェクトの配信が従来どおり行われること (ID ギャップ後の
-    /// 絶対 ID 復元を含む) を確認する。リポジトリ内の moqt-subscriber はフィルタ付き
+    /// 絶対 ID 復元を含む) を確認する。リポジトリ内の moq-subscriber はフィルタ付き
     /// SUBSCRIBE を発行する手段を持たないため、 subscriber 側にフィルタを付与する
     /// 改変が必要である。
     pub async fn write_object(

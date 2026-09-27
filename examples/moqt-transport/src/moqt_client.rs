@@ -633,6 +633,9 @@ impl MoqtClient {
     /// QUIC 直接接続で MoQT client を確立する
     /// (draft-ietf-moq-transport-21 §6.2 (Session establishment) / §6.3 (Session initialization))
     ///
+    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// SETUP の AUTHORIZATION_TOKEN として送る。
+    ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
@@ -641,6 +644,7 @@ impl MoqtClient {
         path: &str,
         authority: &str,
         impl_name: &str,
+        c4m_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let (handle, acceptor) = connection.split();
@@ -651,7 +655,8 @@ impl MoqtClient {
         let mut control_send = handle.open_send_stream().await?;
 
         // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
-        let options = crate::build_setup_options(Some(path), Some(authority), impl_name);
+        let options =
+            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
         let mut session = Session::new_client(MoqtTransport::Quic, options)?;
 
         // SETUP を取り出して送信する
@@ -696,12 +701,16 @@ impl MoqtClient {
     /// draft-ietf-moq-transport-21 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
     ///
+    /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
+    /// SETUP の AUTHORIZATION_TOKEN として送る。
+    ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
     pub async fn establish_wt(
         wt_session: WtSession,
         impl_name: &str,
+        c4m_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
@@ -728,7 +737,7 @@ impl MoqtClient {
         };
         let mut control_send = SendStream::WebTransport(wt_send);
 
-        let options = crate::build_setup_options(None, None, impl_name);
+        let options = crate::build_setup_options(None, None, impl_name, c4m_tokens);
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
@@ -1217,7 +1226,7 @@ impl MoqtClient {
     /// 送出できなかった場合は未送出であることと理由を警告ログに残す。
     /// I/O 送出に失敗しても戻り値は `Ok(())` とし、呼び出し側はログで未送出を判断する。
     ///
-    /// 手動確認 (開発者向け): `examples/moqt-subscriber/src/pipeline.rs` の `client.close(0, "")` の直前に
+    /// 手動確認 (開発者向け): `examples/moq-subscriber/src/pipeline.rs` の `client.close(0, "")` の直前に
     /// `tokio::time::sleep(std::time::Duration::from_millis(100)).await` を一時的に入れて、
     /// GOAWAY / close の前に STOP_SENDING を flush させ、peer (publisher / relay) 側で
     /// 当該 bidi request stream が RESET_STREAM で停止することを `RUST_LOG=debug` のログで観測する。
