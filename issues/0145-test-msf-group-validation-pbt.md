@@ -3,7 +3,7 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-msf-group-validation-pbt
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-27
 
 ## 目的
 
@@ -21,14 +21,17 @@ MSF の renderGroup / altGroup のグループ内一致検証 (draft-ietf-moq-ms
 
 PBT のトラック生成にグループの一貫性を持たせ、グループ検証を性質として固定する。
 
-- カタログ全体でグループを先に決め、同じグループに属するトラックは同じ `targetLatency` / `buffers` を持つように生成する
+- カタログ全体で renderGroup / altGroup の ID を先に決め、同じグループに属するトラックは同じ `targetLatency` / `buffers` を持つように生成する (グループ ID は少数の値域から選び、トラック間の衝突を意図的に起こす)
+- グループの割当は `tracks` と `publishTracks` の両方に適用する (グループ検証は方向ごとに独立して実行されるため、片方だけでは成功経路・失敗経路のどちらかが未カバーになる)
 - グループ内で片方だけが値を宣言する形 (省略との混在) も生成対象に含める
-- 宣言値が異なるグループを意図的に生成し、encode / decode が拒否する性質を別のテストで固定する
+- 宣言値が異なるグループを意図的に生成し、`MsfCatalogDocument::decode` と `MsfCatalogDocument::encode` の両方が拒否する性質を別のテストで固定する
 - 生成カタログが常にグループ検証を通ることを前提にできるようにし、往復の性質テストがグループ衝突で偶発的に失敗しないようにする
+- delta 更新の add 操作は decode / encode 経路でグループ検証を実行しない (`src/msf.rs` の `decode_delta` / `validate_delta_for_encode`) ため対象外とする。delta 適用後の検証 (`MsfCatalog::validate_after_delta`) は単体テスト (`tests/test_msf/delta_apply.rs`) で固定済みのため PBT の対象外とする
+- 生成器の変更範囲が重なる [issues/0147](../issues/0147-test-msf-codec-pbt.md) とは役割分担し、本 issue はグループ生成のみを対象とする (0147 は codec / role)
 
 ## 完了条件
 
-- グループ内一致を満たすカタログの往復の性質テストが追加されていること
-- 宣言値が異なるグループを拒否する性質テストが追加されていること
+- グループ内一致を満たすカタログ (tracks と publishTracks の両方を含む) の往復の性質テストが追加されていること
+- 宣言値が異なるグループを `MsfCatalogDocument::decode` と `MsfCatalogDocument::encode` の両方が拒否する性質テストが追加されていること
 - 省略との混在を受理する性質が固定されていること
-- `make pbt` / `make clippy` / `make fmt` が通ること
+- `make pbt` / `make test` / `make clippy` / `make fmt` が通ること
