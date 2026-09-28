@@ -268,7 +268,7 @@ pub async fn run(
                 connection,
                 &config.url.path,
                 &config.url.authority,
-                "moq-subscriber",
+                "moq-sub",
                 &config.url.c4m_tokens,
                 &task_monitor,
             )
@@ -296,13 +296,8 @@ pub async fn run(
             let wt_session =
                 tokio_moq::webtransport_h3::WtClient::connect(client_config, &config.url.path)
                     .await?;
-            MoqtClient::establish_wt(
-                wt_session,
-                "moq-subscriber",
-                &config.url.c4m_tokens,
-                &task_monitor,
-            )
-            .await?
+            MoqtClient::establish_wt(wt_session, "moq-sub", &config.url.c4m_tokens, &task_monitor)
+                .await?
         }
         Transport::WtH2 => {
             let mut client_config =
@@ -324,7 +319,7 @@ pub async fn run(
                     .await?;
             MoqtClient::establish_wt_h2(
                 wt_session,
-                "moq-subscriber",
+                "moq-sub",
                 &config.url.c4m_tokens,
                 &task_monitor,
             )
@@ -1986,7 +1981,7 @@ mod tests {
 
     /// テスト用: OpusHead を構築する (RFC 7845 §5.1 のフォーマット)
     ///
-    /// publisher 側 (examples/moq-publisher の `build_opus_head`) と同じ形式。
+    /// publisher 側 (examples/moq-pub の `build_opus_head`) と同じ形式。
     fn build_test_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
         let mut head = Vec::with_capacity(19);
         head.extend_from_slice(b"OpusHead");

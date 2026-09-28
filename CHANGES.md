@@ -14,7 +14,7 @@
 - [CHANGE] example の接続経路を `--transport` (quic / wt-h3 / wt-h2) で選ぶようにし、`--url` の scheme を `moqt://` に統一する
   - `https://` による WebTransport over HTTP/3 の選択を廃止する
   - @voluntas
-- [CHANGE] example の crate 名を moq-publisher / moq-subscriber / tokio-moq (transport crate) に変更する
+- [CHANGE] example の crate 名を moq-pub / moq-sub / tokio-moq (transport crate) に変更する
   - @voluntas
 - [ADD] example が WebTransport over HTTP/2 (TCP+TLS、ALPN h2) で relay に接続できるようにする
   - shiguredo_http2 と tokio-rustls を追加する
@@ -33,7 +33,7 @@
   - @voluntas
 - [CHANGE] 公開 API `Session::validate_peer_request` を削除し、peer Request ID の検証は `recv_request` に一本化する
   - @voluntas
-- [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moq-publisher の datagram_writer が Properties Length を二重に書かなくなる
+- [CHANGE] `ObjectDatagram` と `send_object_datagram` の `properties_data` を Properties Length varint 込みの生バイト列に統一し、Properties Length = 0 と宣言長不一致を拒否する。これにより moq-pub の datagram_writer が Properties Length を二重に書かなくなる
   - @voluntas
 - [CHANGE] `send_subgroup_object` / `send_object_datagram` の戻り値を `SendRequestError` に変更し、`send_publish` のフィルタ不通過も `SendRequestError::LocalFilterMismatch` にする。wire コードを取る公開 API はローカル専用コードを各レジストリの `*_INTERNAL_ERROR` に置換する
   - @voluntas
@@ -96,11 +96,11 @@
   - clone の継承解決後の検証を `validate_media_track_fields` から `validate_full_track` に変え、add 経路と同じ範囲 (draft-ietf-moq-msf-01 §5.2.32 Language を含む) を検査する
   - これまで clone で不正な `lang` を設定すると `apply_delta` は成功し、encode 時まで気付けなかった
   - @voluntas
-- [FIX] moq-subscriber の tokio runtime 構築失敗で終了コード 0 にならないようにする
+- [FIX] moq-sub の tokio runtime 構築失敗で終了コード 0 にならないようにする
   - runtime の構築をメインスレッドへ移し、失敗時は英語ログと `std::process::exit(1)` で終了する
   - 別スレッドで構築すると、失敗時にそのスレッドだけが panic し、main がメディアチャネルの切断で終了コード 0 で終わっていた
   - @voluntas
-- [FIX] moq-subscriber のデコードが QUIC エンドポイントの I/O を飢えさせて受信が止まるのを緩和する
+- [FIX] moq-sub のデコードが QUIC エンドポイントの I/O を飢えさせて受信が止まるのを緩和する
   - AV1 / Opus のデコードを `tokio::task::block_in_place` で実行し、runtime のワーカーを長時間塞がない
   - 同時に処理する data stream 数を 4 に制限する (音声は 1 object = 1 stream、映像は 1 group = 1 stream で届くため)
   - 表示待ちの映像フレーム数が 20 を超えたら、古い group をまるごと捨てて受信を優先する
@@ -108,12 +108,12 @@
   - これらが無いとデコードが先行して待ちフレームが増え続け、QUIC エンドポイントの I/O が飢えて受信パケットが落ち、relay 側の輻輳ウィンドウが最小値まで崩壊して配送が止まる (moqt-rs 0101)
   - 90 秒運転での停止は減ったが完全には解消していない (機械全体の CPU は 500%/1400% で飽和しておらず、relay→subscriber のパケット損失が残る。relay 側の対応で継続調査)
   - @voluntas
-- [FIX] moq-subscriber が終了済み subscription へ STOP_SENDING を送って警告を出す
+- [FIX] moq-sub が終了済み subscription へ STOP_SENDING を送って警告を出す
   - PUBLISH_DONE / GOAWAY / session close で受信ループを抜けた場合は peer が subscription を終了させており、`Session` は `Terminated` に遷移済みで STOP_SENDING が拒否される
   - peer 由来で終了した場合は STOP_SENDING の後始末を行わず、graceful shutdown のシグナルでは従来どおり送る
   - @voluntas
 - [FIX] example の MoqtClient が PublishDoneReceived と GoawayReceived を捨てる
-  - `drain_events` が受信メッセージを契機に生成された notable イベントをアプリへ渡す前に消費していたため、`moq-subscriber` が PUBLISH_DONE と GOAWAY を観測できなかった
+  - `drain_events` が受信メッセージを契機に生成された notable イベントをアプリへ渡す前に消費していたため、`moq-sub` が PUBLISH_DONE と GOAWAY を観測できなかった
   - notable イベントは専用のキューへ移し、`take_notable_event` が最初に取り出すようにする
   - @voluntas
 - [FIX] recv_object_datagram の未知 status と不正な properties を wire 経路と同じく拒否する
@@ -187,11 +187,11 @@
   - @voluntas
 - [FIX] `SubgroupObject` / `FetchStreamObject` の encode で Properties Length と実データ長の不一致を `ProtocolViolation` として拒否し、不正ワイヤ生成を防止する
   - @voluntas
-- [FIX] moq-publisher の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
+- [FIX] moq-pub の SubgroupWriter が最初に送信する Object の時点で FIRST_OBJECT を確定し、フィルタ不通過で省略した Object がある場合は FIN ではなく reset で終端する
   - @voluntas
 - [FIX] moq の MoqtClient::stop_sending が bidi request stream に実際の STOP_SENDING を送出するようにする
   - @voluntas
-- [FIX] moq-subscriber の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
+- [FIX] moq-sub の run_raw_player が raw_player の初期化・プレイヤー生成・再生開始の失敗を panic ではなくエラーとして扱い、終了コード 1 で終了するようにする
   - @voluntas
 - [FIX] SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS の REQUEST_UPDATE で TRACK_NAMESPACE_PREFIX を予約名前空間 (`.` / `.session`) へ更新できないようにし、初回拒否を更新経路で迂回できないようにする
   - @voluntas
@@ -277,9 +277,9 @@
   - draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) の Fetch Object は Properties フィールドを持ち、その構造は §11.4.1.1 (Flags) の "The Object Properties structure is defined in Section 11.1.3." により §11.1.3 (Object Properties) と同じだが、`FetchStreamDecoder` が検証に使うだけで捨てていた
   - `DecodedFetchObject::properties_bytes` が Subgroup 経路と同じ「Properties Length varint + Properties データ」の生バイト列を保持するようになり、`LocProperties::decode` で LOC の Public Properties を取り出せる
   - Flags (draft-ietf-moq-transport-21 §11.4.1.1 Table 9) の bit `0x20` が 0 のときは `None`、1 のときは wire に現れた Properties Length varint と Properties データをそのまま保持した `Some` になる
-  - moq-subscriber の `handle_fetch_stream` が FETCH 経路でも LOC の Video Config を `decode_and_send` に渡す
+  - moq-sub の `handle_fetch_stream` が FETCH 経路でも LOC の Video Config を `decode_and_send` に渡す
   - @voluntas
-- [FIX] moq-subscriber が LOC の書式違反を検出したら KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じるようにする
+- [FIX] moq-sub が LOC の書式違反を検出したら KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じるようにする
   - draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は、理解している型の Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じる MUST を定めるが、example が `LocProperties::decode` の失敗を「プロパティ無し」に潰していた
   - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が `Result` を返し、書式違反 (`KeyValueFormattingError`) と切り詰めなどの decode 失敗 (`UnexpectedEof` / `ProtocolViolation`) を区別する。後者は PROTOCOL_VIOLATION (0x3) として扱う
   - stream task は検出時に main ループへ終了コードと理由を渡して処理を止め、close は I/O 層である main ループが行う (stream task から直接閉じると `Session closed: ...` のログが accept 分岐との競合で落ちるため)
@@ -455,21 +455,21 @@
 
 ### misc
 
-- [ADD] secrets.TEST_MOQT_URI の relay へ moq-publisher を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
+- [ADD] secrets.TEST_MOQT_URI の relay へ moq-pub を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
   - secrets.TEST_MOQT_URI が未設定の場合はテストを実行しない
   - @voluntas
-- [UPDATE] moq-publisher のカタログ構築を build_catalog に分離し単体テストを追加する
+- [UPDATE] moq-pub のカタログ構築を build_catalog に分離し単体テストを追加する
   - 送信経路から分離した `build_catalog` で、video / audio の codec と必須フィールドの組み合わせが `MsfCatalogDocument::encode` に成功することを固定する
   - @voluntas
 - [UPDATE] moq のセッション終了ログを終了コード付きにする
   - `MoqtClient::close` は code 0 以外のとき `Session closed gracefully` ではなく `Session closed with code {code:#x} {reason}` を出す (エラー終了を正常終了と誤読しないため)
   - @voluntas
-- [UPDATE] moq-subscriber の LOC プロパティ抽出の単体テストを追加・更新する
+- [UPDATE] moq-sub の LOC プロパティ抽出の単体テストを追加・更新する
   - `extract_video_config` / `extract_timestamp_timescale` / `extract_audio_config` が書式違反を `Err` として返し、プロパティ無し (`Ok(None)` / `Ok((None, None))`) と区別されることを固定する
   - @voluntas
 - [UPDATE] FETCH 経路の Object Properties の復元を PBT とテストで検証する
   - `pbt/tests/prop_stream/encoder.rs` の「`DecodedFetchEntry::Object` は Properties 生バイトを公開しないため復元検証しない」という扱いを、`has_properties` と `properties_bytes` の組み合わせを網羅する往復検証に置き換える
-  - `tests/test_stream/decoder.rs` に Properties あり / なし / 空 / 非最小形 varint / End of Range の 5 ケースを追加し、moq-subscriber に Video Config 抽出の単体テストを追加する
+  - `tests/test_stream/decoder.rs` に Properties あり / なし / 空 / 非最小形 varint / End of Range の 5 ケースを追加し、moq-sub に Video Config 抽出の単体テストを追加する
   - @voluntas
 - [UPDATE] 重複 Object の内容比較の PBT / fuzz / テストを追加する
   - `pbt/tests/prop_object_tracker.rs` に `object_field_tracker_content_comparison_matches_expected` を追加し、immutables と payload_key の比較が「両方 `Some` のときだけ」行われ、不一致の種類ごとに期待する `reason` が返ることを検証する (どちらの不一致も観測されたことをゲートする)
@@ -552,8 +552,8 @@
   - @voluntas
 - [FIX] example の publisher が relay から転送される SUBSCRIBE / FETCH に応答できるようにする
   - moq が peer 起動の bidi request stream を受理し、`ClientEvent::Request` としてアプリへ渡す
-  - moq-publisher は SUBSCRIBE に SUBSCRIBE_OK、catalog の FETCH に FETCH_OK と FETCH 応答ストリームを返す
-  - moq-subscriber のカタログ取得が fetch 応答ストリームの終端を二重に通知しないようにする
+  - moq-pub は SUBSCRIBE に SUBSCRIBE_OK、catalog の FETCH に FETCH_OK と FETCH 応答ストリームを返す
+  - moq-sub のカタログ取得が fetch 応答ストリームの終端を二重に通知しないようにする
   - @voluntas
 - [FIX] FIN で閉じた受信 data stream に後から届く RESET_STREAM を無視する
   - draft-ietf-moq-transport-21 §11.3.2 (Closing Subgroup Streams) が許容する順序でセッションを閉じていた
@@ -580,6 +580,6 @@
   - `recv_subgroup_object` を「stream 状態の取得」「subgroup_id の解決」「帰属判定」「受理後の状態更新」に分割し、`IncomingDataStream::Subgroup` のフィールド列挙は `IncomingSubgroupStream` とアクセサへ寄せる
   - 挙動・公開 API・テストの期待値は変えない
   - @voluntas
-- [ADD] moq-subscriber に `--audio-output-device` を追加し、`none` で音声を出力せずに受信とデコードだけを続ける
+- [ADD] moq-sub に `--audio-output-device` を追加し、`none` で音声を出力せずに受信とデコードだけを続ける
   - プレイヤー (raw_player) がデフォルト出力デバイスしか開けないため、受理する値は `default` と `none` に限る
   - @voluntas

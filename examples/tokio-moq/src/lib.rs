@@ -1,6 +1,6 @@
 //! examples 共有トランスポート crate
 //!
-//! `moq-publisher` / `moq-subscriber` の両バイナリが共通で利用する
+//! `moq-pub` / `moq-sub` の両バイナリが共通で利用する
 //! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 のトランスポート層を提供する。
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //!

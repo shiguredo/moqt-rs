@@ -1314,7 +1314,7 @@ impl MoqtClient {
     /// 送出できなかった場合は未送出であることと理由を警告ログに残す。
     /// I/O 送出に失敗しても戻り値は `Ok(())` とし、呼び出し側はログで未送出を判断する。
     ///
-    /// 手動確認 (開発者向け): `examples/moq-subscriber/src/pipeline.rs` の `client.close(0, "")` の直前に
+    /// 手動確認 (開発者向け): `examples/moq-sub/src/pipeline.rs` の `client.close(0, "")` の直前に
     /// `tokio::time::sleep(std::time::Duration::from_millis(100)).await` を一時的に入れて、
     /// GOAWAY / close の前に STOP_SENDING を flush させ、peer (publisher / relay) 側で
     /// 当該 bidi request stream が RESET_STREAM で停止することを `RUST_LOG=debug` のログで観測する。

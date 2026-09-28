@@ -1,6 +1,6 @@
 # GitHub Actions による E2E テスト
 #
-# - secrets.TEST_MOQT_URI に設定した relay へ moq-publisher を接続し、SETUP と
+# - secrets.TEST_MOQT_URI に設定した relay へ moq-pub を接続し、SETUP と
 #   PUBLISH (video / catalog) が受理されて疑似キャプチャの映像が配信されることを検証する
 # - secrets.TEST_MOQT_URI は moqt:// を指定する。接続経路は vars.TEST_MOQT_TRANSPORT
 #   (quic / wt-h3 / wt-h2) で選び、未設定なら quic を使う
@@ -37,9 +37,9 @@ jobs:
         if: env.TEST_MOQT_URI == ''
         run: echo "TEST_MOQT_URI is not set; skipping the E2E test"
 
-      - name: moq-publisher をビルドする
+      - name: moq-pub をビルドする
         if: env.TEST_MOQT_URI != ''
-        run: cargo build -p moq-publisher
+        run: cargo build -p moq-pub
 
       - name: relay へ PUBLISH できることを確認する
         if: env.TEST_MOQT_URI != ''
@@ -67,7 +67,7 @@ jobs:
           log="e2e-publisher.log"
           # 疑似キャプチャを使い、映像 (AV1) と catalog を PUBLISH する。
           # MOQT_PUBLISH_DIAG=1 は publish ループの進み具合をログに出す診断スイッチ。
-          RUST_LOG=info MOQT_PUBLISH_DIAG=1 ./target/debug/moq-publisher \
+          RUST_LOG=info MOQT_PUBLISH_DIAG=1 ./target/debug/moq-pub \
             --url "$TEST_MOQT_URI" \
             --transport "${TEST_MOQT_TRANSPORT:-quic}" \
             --fake-capture-device \

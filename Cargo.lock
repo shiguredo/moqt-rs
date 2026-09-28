@@ -849,7 +849,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-publisher"
+name = "moq-pub"
 version = "2026.0.0"
 dependencies = [
  "bytes",
@@ -872,7 +872,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-subscriber"
+name = "moq-sub"
 version = "2026.0.0"
 dependencies = [
  "bytes",

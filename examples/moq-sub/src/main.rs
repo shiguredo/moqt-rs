@@ -4,7 +4,7 @@
 //! draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
-//!   cargo run -p moq-subscriber -- --url moqt://127.0.0.1:4443
+//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
 mod cli;
 mod decoder;
 mod error;

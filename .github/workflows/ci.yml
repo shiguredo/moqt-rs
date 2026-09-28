@@ -12,7 +12,7 @@
 #     examples の単体テストは純粋なロジックのためヘッドレスでも実行できる
 #   - no-std-doc は shiguredo_moqt のみを対象にするため examples の macOS 専用依存を
 #     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
-# - MSRV 検証は含めない。moq-publisher が rust-version 1.94 を要求するため
+# - MSRV 検証は含めない。moq-pub が rust-version 1.94 を要求するため
 #   workspace 単位の 1.93 検証が構造的にできない
 # - fuzz ターゲットの確認は CI では行わない (fuzz/ は独立 workspace のため
 #   cargo test --workspace の対象外だが、必要なときにローカルで実行する)

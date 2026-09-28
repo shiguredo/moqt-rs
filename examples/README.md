@@ -6,8 +6,8 @@ draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 
 ## 構成
 
-- **moq-publisher**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する
-- **moq-subscriber**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する
+- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。
@@ -20,23 +20,23 @@ macOS ではカメラとマイクへのアクセス許可が必要 (H.264 / H.26
 ## ビルド
 
 ```bash
-cargo build -p moq-publisher -p moq-subscriber
+cargo build -p moq-pub -p moq-sub
 ```
 
 ## 実行例
 
 ```bash
 # QUIC で publisher を起動 (疑似キャプチャ)
-cargo run -p moq-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
 
 # QUIC で subscriber を起動
-cargo run -p moq-subscriber -- --url moqt://127.0.0.1:4443
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
 
 # WebTransport over HTTP/3 で publisher を起動
-cargo run -p moq-publisher -- --url moqt://127.0.0.1:4443 --transport wt-h3 --fake-capture-device
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --transport wt-h3 --fake-capture-device
 
 # WebTransport over HTTP/2 で subscriber を起動
-cargo run -p moq-subscriber -- --url moqt://127.0.0.1:4443 --transport wt-h2
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --transport wt-h2
 ```
 
 ## トランスポート
@@ -58,7 +58,7 @@ MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータ�
 
 ```bash
 # C4M トークン付きで QUIC 接続する (シェルでは `&` を引用符で囲む)
-cargo run -p moq-publisher -- 'moqt://127.0.0.1:4443#msf:kaki--video&c4m=<base64 token>' --fake-capture-device
+cargo run -p moq-pub -- 'moqt://127.0.0.1:4443#msf:kaki--video&c4m=<base64 token>' --fake-capture-device
 ```
 
 `<base64 token>` は C4M トークンのバイト列 (CBOR エンコードされた CWT) を Base64 (RFC 4648 §4) または base64url (§5) で表した文字列で、パディングは省略できる。`%XX` の percent-encoding もデコードする。トークンの検証 (署名 / クレーム / `moqt` クレームの認可判定) は relay が行い、example はデコードしたバイト列をそのまま送る。DPoP バインディング (`cnf` / `catdpop`) を使うトークンに必要な DPoP proof の送信には対応しない。
@@ -71,7 +71,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 
 全オプションは各クレートの `--help` で確認できる。主なものを以下に挙げる。
 
-### moq-publisher
+### moq-pub
 
 | オプション | 短縮 | デフォルト | 説明 |
 | --- | --- | --- | --- |
@@ -94,7 +94,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
 | `--use-datagram` | | | subgroup stream ではなく datagram で映像 / 音声オブジェクトを配信する (catalog は常に subgroup stream) |
 
-### moq-subscriber
+### moq-sub
 
 | オプション | 短縮 | デフォルト | 説明 |
 | --- | --- | --- | --- |
@@ -134,5 +134,5 @@ publisher / subscriber は `--cert` を省略すると証明書検証をスキ�
 環境変数 `RUST_LOG` でログレベルを制御できる。
 
 ```bash
-RUST_LOG=debug cargo run -p moq-publisher -- --url moqt://127.0.0.1:4443 --fake-capture-device
+RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
 ```
