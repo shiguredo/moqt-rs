@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-msf-fragment-second-hash
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-28
 
 ## 目的
 
