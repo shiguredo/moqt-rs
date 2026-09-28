@@ -13,15 +13,15 @@ MSF は `renderGroup` が同じ track を「同時に描画するよう設計さ
 
 ## 現状
 
-- `examples/moq-subscriber/src/main.rs` の `run_raw_player` は、映像の PTS に `start_time.elapsed()` を使う。`start_time` はプレイヤースレッド内の `Instant::now()` なので、これは**デキュー時刻**であり受信時刻でも LOC Timestamp でもない
-- `examples/moq-subscriber/src/decoder.rs` の `DecodedVideoFrame` は PTS を持たない
-- 音声は `examples/moq-subscriber/src/pipeline.rs` の `extract_timestamp_timescale` と `audio_pts_us` で LOC Timestamp から PTS を作る。ただし `audio_pts_us` は Timescale が無いとき `AUDIO_FALLBACK_SAMPLE_RATE` (48_000) を仮定する
+- `examples/moq-sub/src/main.rs` の `run_raw_player` は、映像の PTS に `start_time.elapsed()` を使う。`start_time` はプレイヤースレッド内の `Instant::now()` なので、これは**デキュー時刻**であり受信時刻でも LOC Timestamp でもない
+- `examples/moq-sub/src/decoder.rs` の `DecodedVideoFrame` は PTS を持たない
+- 音声は `examples/moq-sub/src/pipeline.rs` の `extract_timestamp_timescale` と `audio_pts_us` で LOC Timestamp から PTS を作る。ただし `audio_pts_us` は Timescale が無いとき `AUDIO_FALLBACK_SAMPLE_RATE` (48_000) を仮定する
 - カタログの `targetLatency` は未使用。`receive_catalog` が返す `VideoTrackInfo` / `AudioTrackInfo` にも受け口が無く、プレイヤースレッドへ渡す経路も無い
 - publisher 側が送る音声・映像の Timestamp が共通軸になるのは 0103 の完了後
 
 ### raw_player 側の前提
 
-`examples/moq-subscriber` は `raw_player` 2026.2.0 に再生を任せている。実装を確認した結果は次のとおり。
+`examples/moq-sub` は `raw_player` 2026.2.0 に再生を任せている。実装を確認した結果は次のとおり。
 
 - `raw_player::VideoPlayer` は内蔵の `AudioPlayer` を持ち、`VideoPlayer::enqueue_audio` で音声を積み、`VideoPlayer::play()` を呼ぶと `audio_started` が立つ。以降 `VideoPlayer::render_next_frame` が**音声クロックをマスター**にして映像の表示タイミングを決める (`video_pts` と音声クロックの差が `sync_threshold_us` = 40 ms を超えるとフレームを捨てるか繰り返す)
 - `audio_started` が立つのは `play()` (または再生中の `process()`) であって `enqueue_audio` ではない。音声クロックは `first_pts_us + 再生済みサンプル数` で、`first_pts_us` は最初に処理されたチャンクの PTS、再生済みサンプル数は `play()` で `resume()` してから増える
@@ -71,13 +71,13 @@ MSF は `renderGroup` が同じ track を「同時に描画するよう設計さ
 
 - `VideoPlayer::set_max_video_queue_size` を `targetLatency` に合わせて設定する。既定は 5 フレームで、30 fps / 200 ms では足りない (`targetLatency` ぶんのフレームを保持する必要がある)
 - 同期ずれは `VideoPlayerStats::sync_diff_us` を一定間隔でサンプリングし、その最大絶対値で判定する。自前の計測を実装しない
-- `examples/moq-subscriber/src/pipeline.rs` の `MAX_DISPLAY_BACKLOG` は映像 group を丸ごと捨てる経路であり、同期ずれの測定と干渉する。測定手順でこの経路が働いていないことを確認する
+- `examples/moq-sub/src/pipeline.rs` の `MAX_DISPLAY_BACKLOG` は映像 group を丸ごと捨てる経路であり、同期ずれの測定と干渉する。測定手順でこの経路が働いていないことを確認する
 
 ### 変更対象
 
-- `examples/moq-subscriber/src/pipeline.rs`: `extract_timestamp_timescale` を映像 Object にも適用して Timestamp を取り出す、`VideoTrackInfo` / `AudioTrackInfo` への `target_latency` 追加、`receive_catalog` の返り値 (`audio_pts_us` のフォールバック修正は 0103 が所掌のため本 issue の対象外)
-- `examples/moq-subscriber/src/decoder.rs` と `decoder/{av1,h264,h265}.rs`: `DecodedVideoFrame` への PTS 追加と `VideoDecoder::decode` のシグネチャ
-- `examples/moq-subscriber/src/main.rs`: `run_raw_player` の音声経路 (`VideoPlayer::enqueue_audio` へ載せ替え)、`targetLatency` の待ち合わせ、`set_max_video_queue_size`、`start_time.elapsed()` の削除
+- `examples/moq-sub/src/pipeline.rs`: `extract_timestamp_timescale` を映像 Object にも適用して Timestamp を取り出す、`VideoTrackInfo` / `AudioTrackInfo` への `target_latency` 追加、`receive_catalog` の返り値 (`audio_pts_us` のフォールバック修正は 0103 が所掌のため本 issue の対象外)
+- `examples/moq-sub/src/decoder.rs` と `decoder/{av1,h264,h265}.rs`: `DecodedVideoFrame` への PTS 追加と `VideoDecoder::decode` のシグネチャ
+- `examples/moq-sub/src/main.rs`: `run_raw_player` の音声経路 (`VideoPlayer::enqueue_audio` へ載せ替え)、`targetLatency` の待ち合わせ、`set_max_video_queue_size`、`start_time.elapsed()` の削除
 - FETCH 経路は本 example では映像に使われない (FETCH はカタログ取得のみで、映像は Subgroup 経由)。
   なお `DecodedFetchObject::properties_bytes` は 0124 で保持されるようになっており、`handle_fetch_stream` は
   Properties から LOC Timestamp を取り出せるが、映像 FETCH への PTS 付けは本 issue の対象外とする。
