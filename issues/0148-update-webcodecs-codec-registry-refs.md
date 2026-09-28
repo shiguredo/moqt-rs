@@ -3,7 +3,7 @@
 - Created: 2026-09-23
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-webcodecs-codec-registry-refs
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-28
 
 ## 目的
 
@@ -11,7 +11,7 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 が参照する WEBCODECS
 
 ## 現状
 
-`refs/` には moq / h3 / quic / webtrans の IETF draft と RFC のテキストが保存されている。WEBCODECS-CODEC-REGISTRY は保存されておらず、`src/msf.rs` の `is_audio_codec` / `is_video_codec` のコメントに URL と版 (`Registry Draft, 2026-02-12`) と節 (§3 / §4) を書くに留まる。
+`refs/` には moq / quic / h3 / webtrans / cbor のディレクトリに IETF draft と RFC のテキストが、`refs/` 直下にも個別の RFC (rfc8259.txt など) が保存されている。WEBCODECS-CODEC-REGISTRY のテキストは保存されておらず、`src/msf.rs` の `is_audio_codec` / `is_video_codec` のコメントには版 (`Registry Draft, 2026-02-12`) と節 (§3 / §4) を書くに留まる (`docs/msf.md` の該当記述も同じ)。コメントとドキュメントに版と節はあるがレジストリ本文が無いため、登録名の一致はリポジトリ内で検証できない。
 
 判定表が持つ登録名は次のとおり。
 
@@ -20,15 +20,16 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 が参照する WEBCODECS
 
 ## 設計方針
 
-- W3C の Registry Draft (2026-02-12 版) のテキストを取得し、`refs/` 配下の新しいディレクトリ (例: `refs/webcodecs/`) に保存する
-- ファイル名は他の refs に合わせ、版が分かる名前にする
+- W3C の Registry Draft (2026-02-12 版) のテキストを取得し、`refs/` 配下の新しいディレクトリ (`refs/webcodecs/`) に保存する
+  - 2026-09-28 時点の最新公開版は 2026-09-24 版であるが、§3 / §4 の登録表記は 2026-02-12 版と同一であることを確認済みである。`src/msf.rs` と `docs/msf.md` の版記述 (`Registry Draft, 2026-02-12`) に合わせ、2026-02-12 版を保存する
+- ファイル名は他の refs (draft-{name}-{version}.txt / rfc{nnnn}.txt) に合わせ、版が分かる名前にする (例: `refs/webcodecs/webcodecs-codec-registry-20260212.txt`)
 - `src/msf.rs` の判定表コメントから保存先を辿れるようにする
 - 保存したテキストの登録名と現行の判定表が一致することを確認する
-- レジストリは "Existing entries cannot be deleted or deprecated." と定めるため、将来の更新時は追記差分だけを確認する運用にする
+- レジストリは §2 (Registration Entry Requirements) が "Existing entries cannot be deleted or deprecated." と定めるため、将来の更新時は追記差分だけを確認する運用にする
 
 ## 完了条件
 
 - WEBCODECS-CODEC-REGISTRY のテキストが `refs/` 配下に保存されていること
 - `src/msf.rs` の判定表が保存したレジストリの登録名と一致することを確認し、解決方法に記録していること
-- 保存先と版がコードのコメントから辿れること
+- 保存先と版が `src/msf.rs` の判定表コメントから辿れること
 - `make test` / `make clippy` / `make fmt` が通ること
