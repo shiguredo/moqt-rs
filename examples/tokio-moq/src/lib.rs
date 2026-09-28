@@ -9,6 +9,7 @@
 //! ここに置き、各バイナリは必要なメソッドだけを呼び出す。
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
 
@@ -524,24 +525,59 @@ fn invalid_authority(authority: &str, reason: &str) -> TransportError {
     TransportError::InvalidAuthority(format!("invalid server address '{authority}': {reason}"))
 }
 
+/// 名前解決 (`getaddrinfo`) の待ち時間の上限
+///
+/// `tokio::net::lookup_host` は OS のリゾルバに委譲するため、リゾルバが応答しないと
+/// 数十秒から数分ブロックする。セッションのタイムアウトより前に解決を打ち切る。
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// authority を解決して接続先の `SocketAddr` を得る
 ///
 /// host が IP リテラルなら `SocketAddr` に直接パースし、ホスト名なら
 /// `tokio::net::lookup_host` で解決して最初の結果を使う。ポートが省略された
 /// authority は既定ポート 443 を使う
 /// (draft-ietf-moq-transport-21 §6.1.2)。解決したアドレスは接続前に info ログに出す。
-// テスト方針: IP リテラルの経路は単体テストで固定し、ホスト名の経路は名前解決に
-// 依存するため `localhost` の解決テストと実機確認で確認する。
+///
+/// 名前解決は [`RESOLVE_TIMEOUT`] で打ち切る。打ち切った場合は
+/// [`TransportError::ResolutionFailed`] になり、接続を試みずに終わる。
+/// IP リテラルは OS のリゾルバを通さないため、このタイムアウトの影響を受けない。
+///
+/// # Errors
+///
+/// authority を解釈できない場合は [`TransportError::InvalidAuthority`]、
+/// 名前解決が失敗した場合・[`RESOLVE_TIMEOUT`] を超えた場合・解決結果が
+/// 0 件の場合は [`TransportError::ResolutionFailed`] になる。
+// テスト方針: IP リテラルと `localhost` の経路は単体テストで固定し、タイムアウトの
+// 行使は短いタイムアウトを渡す単体テストと、タイムアウト値を一時的に縮めた実機確認で確認する。
 pub async fn resolve_socket_addr(authority: &str) -> Result<SocketAddr, TransportError> {
+    resolve_socket_addr_within(authority, RESOLVE_TIMEOUT).await
+}
+
+/// authority をタイムアウト付きで解決する
+///
+/// タイムアウト値を引数に取るのは、応答しないリゾルバを用意できない環境でも
+/// 打ち切りの経路を単体テストで固定できるようにするため。
+/// 公開 API は [`RESOLVE_TIMEOUT`] を渡す [`resolve_socket_addr`] だけにする。
+async fn resolve_socket_addr_within(
+    authority: &str,
+    timeout: Duration,
+) -> Result<SocketAddr, TransportError> {
     let parts = authority_parts(authority)?;
     let addr_text = parts.socket_addr_string();
 
     let addr = if let Ok(addr) = addr_text.parse::<SocketAddr>() {
         addr
     } else {
-        let mut resolved = tokio::net::lookup_host(addr_text.as_str())
-            .await
-            .map_err(|e| resolve_failed(authority, &e.to_string()))?;
+        let mut resolved =
+            tokio::time::timeout(timeout, tokio::net::lookup_host(addr_text.as_str()))
+                .await
+                .map_err(|_| {
+                    resolve_failed(
+                        authority,
+                        &format!("name resolution timed out after {timeout:?}"),
+                    )
+                })?
+                .map_err(|e| resolve_failed(authority, &e.to_string()))?;
         resolved
             .next()
             .ok_or_else(|| resolve_failed(authority, "no address"))?
@@ -1266,6 +1302,87 @@ mod tests {
                 "QUIC 由来の表示にならないこと: {err}"
             );
         }
+    }
+
+    /// 名前解決がタイムアウトで打ち切られる
+    ///
+    /// `example.invalid` は RFC 2606 §2 の予約 TLD `.invalid` のため必ず解決に失敗する。
+    /// `tokio::net::lookup_host` は OS のリゾルバを待つため、この名前の解決は待機中の future になる。
+    /// タイムアウトを 100 ナノ秒にして、成功し得ないことを固定する。
+    /// 同じ名前の解決がタイムアウト無しでは従来どおり失敗することも
+    /// [`resolve_socket_addr_reports_resolution_failure`] で固定する。
+    #[tokio::test]
+    async fn resolve_socket_addr_times_out_when_resolver_does_not_answer() {
+        let started = std::time::Instant::now();
+        let err = resolve_socket_addr_within("example.invalid", Duration::from_nanos(100))
+            .await
+            .expect_err("タイムアウトでエラーになること");
+        assert!(
+            matches!(err, TransportError::ResolutionFailed(_)),
+            "名前解決の失敗として返ること: {err}"
+        );
+        assert!(
+            err.to_string().contains("name resolution timed out"),
+            "打ち切りが理由として分かること: {err}"
+        );
+        assert!(
+            err.to_string().contains("100ns"),
+            "使ったタイムアウトが理由に含まれること: {err}"
+        );
+        assert!(
+            err.to_string().contains("example.invalid"),
+            "入力の authority が含まれること: {err}"
+        );
+        assert!(
+            !err.to_string().contains("QUIC"),
+            "QUIC 由来の表示にならないこと: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "タイムアウトで打ち切られること: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// タイムアウトを超えなければ名前解決の失敗はそのまま伝わる
+    ///
+    /// 打ち切り以外の失敗の扱いがタイムアウトを包んでも変わらないことを固定する。
+    #[tokio::test]
+    async fn resolve_socket_addr_reports_resolution_failure() {
+        let err = resolve_socket_addr_within("example.invalid", RESOLVE_TIMEOUT)
+            .await
+            .expect_err("名前解決に失敗すること");
+        assert!(
+            matches!(err, TransportError::ResolutionFailed(_)),
+            "名前解決の失敗として返ること: {err}"
+        );
+        assert!(
+            !err.to_string().contains("timed out"),
+            "打ち切りではないことが理由に現れないこと: {err}"
+        );
+        assert!(
+            err.to_string().contains("example.invalid"),
+            "入力の authority が含まれること: {err}"
+        );
+    }
+
+    /// タイムアウトが十分長ければ IP リテラルとホスト名の解決は従来どおり成功する
+    ///
+    /// タイムアウトを包んでも成功経路が変わらないことを固定する。
+    #[tokio::test]
+    async fn resolve_socket_addr_succeeds_within_timeout() {
+        let ipv4 = resolve_socket_addr_within("127.0.0.1", RESOLVE_TIMEOUT)
+            .await
+            .expect("IP リテラルの解決に成功すること");
+        assert_eq!(ipv4.to_string(), "127.0.0.1:443");
+
+        let hostname = resolve_socket_addr_within("localhost", RESOLVE_TIMEOUT)
+            .await
+            .expect("ホスト名の解決に成功すること");
+        assert!(
+            hostname.ip().is_loopback(),
+            "localhost はループバックに解決されること"
+        );
     }
 
     /// トランスポート種別に依存しない失敗の表示に `QUIC:` を付けない

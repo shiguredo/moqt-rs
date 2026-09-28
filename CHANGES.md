@@ -583,3 +583,6 @@
 - [ADD] moq-sub に `--audio-output-device` を追加し、`none` で音声を出力せずに受信とデコードだけを続ける
   - プレイヤー (raw_player) がデフォルト出力デバイスしか開けないため、受理する値は `default` と `none` に限る
   - @voluntas
+- [FIX] example の publisher / subscriber が接続先の名前解決に応答が無いときに起動し続けるのを止める
+  - 名前解決を 5 秒で打ち切り、`failed to resolve ...: name resolution timed out after 5s` を表示して終了する
+  - @voluntas
