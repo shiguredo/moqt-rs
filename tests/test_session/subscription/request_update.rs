@@ -1410,7 +1410,7 @@ fn pending_publish_done_flushed_on_data_stream_closed_reset() {
         .send_data_stream_closed(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code,
+                error_code: Some(error_code),
                 reliable_size: None,
             },
         )
@@ -1460,7 +1460,7 @@ fn pending_publish_done_flushed_once_after_last_stream_reset() {
         .send_data_stream_closed(
             stream_ids[0],
             RequestStreamEnd::Reset {
-                error_code,
+                error_code: Some(error_code),
                 reliable_size: None,
             },
         )
@@ -1484,7 +1484,7 @@ fn pending_publish_done_flushed_once_after_last_stream_reset() {
         .send_data_stream_closed(
             stream_ids[1],
             RequestStreamEnd::Reset {
-                error_code,
+                error_code: Some(error_code),
                 reliable_size: None,
             },
         )
@@ -1618,7 +1618,7 @@ fn pending_publish_done_flushed_after_delivery_timeout_reset() {
         .send_data_stream_closed(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code: DataStreamResetReason::DeliveryTimeout.error_code(),
+                error_code: Some(DataStreamResetReason::DeliveryTimeout.error_code()),
                 reliable_size: None,
             },
         )

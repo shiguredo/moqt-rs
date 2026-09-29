@@ -35,7 +35,7 @@ fn sample_end(ctx: &mut noprop::TestCaseContext) -> RequestStreamEnd {
         RequestStreamEnd::Fin
     } else {
         RequestStreamEnd::Reset {
-            error_code: noprop::sample_u64_in(ctx, 0..64),
+            error_code: Some(noprop::sample_u64_in(ctx, 0..64)),
             reliable_size: None,
         }
     }

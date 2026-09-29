@@ -433,7 +433,7 @@ fn goaway_rejected_request_stream_close_does_not_fail_session() {
         (
             2,
             RequestStreamEnd::Reset {
-                error_code: 0, // RESET_STREAM のアプリケーションエラーコード (値は検証対象外)
+                error_code: Some(0), // RESET_STREAM のアプリケーションエラーコード (値は検証対象外)
                 reliable_size: None,
             },
         ),
@@ -1840,7 +1840,7 @@ fn request_stream_goaway_deadline_is_cleared_by_peer_stream_reset() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )

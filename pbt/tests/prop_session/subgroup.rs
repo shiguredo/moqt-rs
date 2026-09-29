@@ -710,7 +710,7 @@ fn apply_operation(
             let stream = &mut streams[stream_index];
             let end = if reset {
                 RequestStreamEnd::Reset {
-                    error_code: 0,
+                    error_code: Some(0),
                     reliable_size: None,
                 }
             } else {
@@ -944,7 +944,7 @@ fn subgroup_receive_stream_accounting() -> noprop::TestResult {
                 RequestStreamEnd::Fin
             } else {
                 RequestStreamEnd::Reset {
-                    error_code: 0,
+                    error_code: Some(0),
                     reliable_size: None,
                 }
             };

@@ -977,8 +977,10 @@ impl WtH2RecvStream {
                     Some(StreamPacket::Reset { error_code }) => {
                         // over HTTP/2 の WT_RESET_STREAM は Reliable Size を運ぶが、
                         // `WtEvent::StreamReset` には現れないため `None` にする
+                        // over HTTP/2 の WT_RESET_STREAM は MOQT §12.5 のコードをそのまま運ぶため
+                        // 常にコードがある (HTTP/3 のような code space の remap は不要)
                         let end = RequestStreamEnd::Reset {
-                            error_code,
+                            error_code: Some(error_code),
                             reliable_size: None,
                         };
                         self.terminal = Some(end);

@@ -368,7 +368,7 @@ fn control_stream_reset_closes_established_session() {
     let (mut client, _) = establish_pair();
     let err = client
         .recv_control_stream_closed(RequestStreamEnd::Reset {
-            error_code: 42,
+            error_code: Some(42),
             reliable_size: None,
         })
         .unwrap_err();

@@ -318,6 +318,9 @@ request を終端しない。この場合 `RequestTerminated` は自側が最終
 `fin: true` で送った時点 (PUBLISH_DONE、単独の REQUEST_ERROR) で発行される。
 `RequestStreamEnd::Reset` は cancel として即時に終端する
 (draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection))。
+`error_code` は `Option<u64>` であり、`None` は「アプリケーションエラーコード無し」を表す
+(draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams)。WebTransport 経路で HTTP/3 の
+コードを MOQT のコードへ戻せない場合に `None` になる)。QUIC 経路は常にコードがあるため `Some`。
 
 ### 送信 API
 

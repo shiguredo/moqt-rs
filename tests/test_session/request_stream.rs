@@ -642,7 +642,7 @@ fn request_stream_closed_reset_terminates_publish() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 42,
+                error_code: Some(42),
                 reliable_size: None,
             },
         )
@@ -660,7 +660,60 @@ fn request_stream_closed_reset_terminates_publish() {
             break;
         }
     }
-    assert_eq!(got, Some(42));
+    assert_eq!(got, Some(Some(42)));
+}
+
+/// アプリケーションエラーコード無しの RESET_STREAM は `None` として通知される
+///
+/// draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は WT_APPLICATION_ERROR の
+/// 範囲外のコードで reset された場合に「アプリケーションエラーコード無し」として
+/// application へ届ける SHOULD を定める。WebTransport 経路でコードを remap できない場合に
+/// `None` が伝わることを固定する。
+#[test]
+fn request_stream_reset_without_error_code_is_terminated_with_none() {
+    use shiguredo_moqt::session::types::TerminationReason;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            12,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    server
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: None,
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut got = None;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id,
+            kind: RequestKind::Publish,
+            reason: TerminationReason::PeerStreamReset { error_code },
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            got = Some(error_code);
+            break;
+        }
+    }
+    assert_eq!(
+        got,
+        Some(None),
+        "アプリケーションエラーコード無しが None として伝わること"
+    );
 }
 
 /// FETCH の bidi request stream 終端で Fetch が Terminated に遷移
@@ -1247,7 +1300,7 @@ fn publish_sender_peer_reset_during_deferral_terminates_request() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 42,
+                error_code: Some(42),
                 reliable_size: None,
             },
         )
@@ -1269,7 +1322,7 @@ fn publish_sender_peer_reset_during_deferral_terminates_request() {
         } = e
         {
             assert_eq!(request_id, rid);
-            assert_eq!(error_code, 42);
+            assert_eq!(error_code, Some(42));
             got = true;
         }
     }
@@ -1418,7 +1471,7 @@ fn responder_terminates_subscription_on_peer_reset() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 7,
+                error_code: Some(7),
                 reliable_size: None,
             },
         )
@@ -1443,7 +1496,7 @@ fn responder_terminates_subscription_on_peer_reset() {
             got = Some(error_code);
         }
     }
-    assert_eq!(got, Some(7));
+    assert_eq!(got, Some(Some(7)));
 }
 
 /// 自側が requester のとき responder の FIN で FinishRequestStream が発行される

@@ -164,7 +164,7 @@ fn rejected_fetch_stream_close_does_not_fail_session() {
         (
             2,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         ),

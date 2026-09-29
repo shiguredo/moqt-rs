@@ -670,7 +670,7 @@ impl Session {
         if let Some(request_id) = self.close_outgoing_subgroup_stream(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code,
+                error_code: Some(error_code),
                 reliable_size,
             },
         ) {

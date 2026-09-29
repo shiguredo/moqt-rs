@@ -608,7 +608,16 @@ pub enum RequestStreamEnd {
     /// RESET_STREAM による打ち切り
     Reset {
         /// Stream Reset Error Code (§12.5)
-        error_code: u64,
+        ///
+        /// `None` は「アプリケーションエラーコード無し」を表す。
+        /// draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は
+        /// WT_APPLICATION_ERROR の範囲外のコードで RESET_STREAM / STOP_SENDING を受信した場合に
+        /// "The WebTransport implementation SHOULD deliver this to the application as a stream
+        /// reset with no application error code." と定めるため、WebTransport 経路で
+        /// HTTP/3 のコードを MOQT のコードへ戻せない場合は `None` になる。
+        /// QUIC 経路 (`moqt://`) は QUIC のコード空間であり常にコードがあるため `Some` になる。
+        /// この節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
+        error_code: Option<u64>,
         /// RESET_STREAM_AT の reliable size (`None` は RESET_STREAM)
         reliable_size: Option<u64>,
     },
@@ -637,7 +646,10 @@ pub enum TerminationReason {
     /// peer が RESET_STREAM で打ち切った
     PeerStreamReset {
         /// peer が載せた Stream Reset Error Code
-        error_code: u64,
+        ///
+        /// `None` は peer がアプリケーションエラーコードを載せなかったことを表す
+        /// ([`RequestStreamEnd::Reset`] と同じ表現)。
+        error_code: Option<u64>,
     },
     /// 自側が cancel / abort / close で打ち切った
     LocalCancel,

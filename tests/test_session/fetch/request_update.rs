@@ -630,7 +630,7 @@ fn terminated_fetch_absorbs_reset_via_recv_data_stream_closed() {
         .recv_data_stream_closed(
             stream_id,
             shiguredo_moqt::session::types::RequestStreamEnd::Reset {
-                error_code: 0x0d,
+                error_code: Some(0x0d),
                 reliable_size: None,
             },
         )

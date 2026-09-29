@@ -1380,7 +1380,7 @@ fn fill_fetch_stream_overrun_detected() {
         .recv_data_stream_closed(
             DataStreamId(320),
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )

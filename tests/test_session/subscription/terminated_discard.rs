@@ -305,7 +305,7 @@ fn stop_sending_then_peer_stream_close_is_absorbed() {
         .recv_data_stream_closed(
             stream_id2,
             RequestStreamEnd::Reset {
-                error_code: 0x6,
+                error_code: Some(0x6),
                 reliable_size: Some(0),
             },
         )
@@ -345,7 +345,7 @@ fn cancelled_stream_reset_allows_subgroup_reopen() {
         .recv_data_stream_closed(
             stream_a,
             RequestStreamEnd::Reset {
-                error_code: 0x1,
+                error_code: Some(0x1),
                 reliable_size: None,
             },
         )

@@ -122,7 +122,7 @@ fn decode_control(bytes: &[u8]) -> Option<ControlMessage> {
 fn stream_end(reset: bool, error_code: u64, reliable_size: Option<u64>) -> RequestStreamEnd {
     if reset {
         RequestStreamEnd::Reset {
-            error_code,
+            error_code: Some(error_code),
             reliable_size,
         }
     } else {

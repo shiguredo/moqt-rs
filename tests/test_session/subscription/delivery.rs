@@ -554,7 +554,7 @@ fn subgroup_delivery_timeout_not_tracked_on_reset() {
         .send_data_stream_closed(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code: STREAM_INTERNAL_ERROR,
+                error_code: Some(STREAM_INTERNAL_ERROR),
                 reliable_size: None,
             },
         )

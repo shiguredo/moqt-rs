@@ -589,7 +589,7 @@ fn cancel_subscription_resets_open_fill_streams() {
         .recv_request_stream_closed(
             sub_rid,
             RequestStreamEnd::Reset {
-                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                error_code: Some(shiguredo_moqt::error::STREAM_CANCELLED),
                 reliable_size: None,
             },
         )
@@ -909,7 +909,7 @@ fn publish_origin_peer_reset_resets_open_fill_streams() {
         .recv_request_stream_closed(
             pub_rid,
             RequestStreamEnd::Reset {
-                error_code: 42,
+                error_code: Some(42),
                 reliable_size: None,
             },
         )
@@ -1288,7 +1288,7 @@ fn cancel_subscription_resets_all_open_fill_streams() {
         .recv_request_stream_closed(
             sub_rid,
             RequestStreamEnd::Reset {
-                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                error_code: Some(shiguredo_moqt::error::STREAM_CANCELLED),
                 reliable_size: None,
             },
         )

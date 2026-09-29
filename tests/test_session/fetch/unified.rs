@@ -62,7 +62,7 @@ fn fetch_stream_reset_transitions_to_terminated() {
         .recv_fetch_data_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )
@@ -264,7 +264,7 @@ fn fetch_stream_reset_in_pending_transitions_to_terminated() {
         .recv_fetch_data_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )

@@ -756,7 +756,7 @@ fn outgoing_subgroup_reset_tracks_delivery_timeout_reason() {
         .send_data_stream_closed(
             DataStreamId(32),
             RequestStreamEnd::Reset {
-                error_code: STREAM_DELIVERY_TIMEOUT,
+                error_code: Some(STREAM_DELIVERY_TIMEOUT),
                 reliable_size: None,
             },
         )
@@ -800,7 +800,7 @@ fn incoming_subgroup_reset_tracks_delivery_timeout_reason() {
         .recv_data_stream_closed(
             DataStreamId(33),
             RequestStreamEnd::Reset {
-                error_code: STREAM_DELIVERY_TIMEOUT,
+                error_code: Some(STREAM_DELIVERY_TIMEOUT),
                 reliable_size: None,
             },
         )
@@ -2464,7 +2464,7 @@ fn end_of_group_header_bit_with_reset_does_not_set_group_end() {
         .recv_data_stream_closed(
             DataStreamId(90),
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )
@@ -4187,7 +4187,7 @@ fn stop_sending_then_reset_still_blocks_reopen_until_forward_0_to_1() {
         .send_data_stream_closed(
             DataStreamId(64),
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )
@@ -4462,7 +4462,7 @@ fn forget_subscription_discards_stopped_subgroups() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )
@@ -4548,7 +4548,7 @@ fn reset_after_fin_on_subgroup_stream_is_ignored() {
         .recv_data_stream_closed(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                error_code: Some(shiguredo_moqt::error::STREAM_CANCELLED),
                 reliable_size: None,
             },
         )
@@ -4589,7 +4589,7 @@ fn second_close_after_reset_is_still_protocol_violation() {
         .recv_data_stream_closed(
             stream_id,
             RequestStreamEnd::Reset {
-                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                error_code: Some(shiguredo_moqt::error::STREAM_CANCELLED),
                 reliable_size: None,
             },
         )

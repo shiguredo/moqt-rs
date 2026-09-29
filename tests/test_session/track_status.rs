@@ -372,7 +372,7 @@ fn responder_cannot_respond_after_requester_reset() {
         .recv_request_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: shiguredo_moqt::error::STREAM_CANCELLED,
+                error_code: Some(shiguredo_moqt::error::STREAM_CANCELLED),
                 reliable_size: None,
             },
         )

@@ -375,7 +375,7 @@ impl SubgroupWriter {
                 self.data_plane.send_data_stream_closed(
                     self.stream_id,
                     RequestStreamEnd::Reset {
-                        error_code,
+                        error_code: Some(error_code),
                         reliable_size: None,
                     },
                 )?;
@@ -416,7 +416,7 @@ impl SubgroupWriter {
         self.data_plane.send_data_stream_closed(
             self.stream_id,
             RequestStreamEnd::Reset {
-                error_code,
+                error_code: Some(error_code),
                 reliable_size: None,
             },
         )?;

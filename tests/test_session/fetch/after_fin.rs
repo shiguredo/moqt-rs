@@ -574,7 +574,7 @@ fn fetch_ok_after_reset_stream_accepted() {
         .recv_fetch_data_stream_closed(
             rid,
             RequestStreamEnd::Reset {
-                error_code: 0,
+                error_code: Some(0),
                 reliable_size: None,
             },
         )

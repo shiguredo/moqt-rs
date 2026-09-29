@@ -1745,21 +1745,17 @@ fn wt_to_moqt_code(http3_code: u64) -> Option<u32> {
 
 /// RESET_STREAM で受信した HTTP/3 のエラーコードを `RequestStreamEnd::Reset` へ入れる値に変換する
 ///
-/// remap できれば MOQT のエラーコードを返す。remap できない場合について §4.4 は
+/// remap できれば MOQT のエラーコードを `Some` で返す。remap できない場合は §4.4 の
 /// "the stream is still considered reset, but the error code is not mapped to a WebTransport
-/// application error code." と定めるが、`RequestStreamEnd::Reset` の `error_code` は必須の `u64` で
-/// 「アプリケーションエラーコード無し」を表す値を持たない (`Option<u64>` への型変更は
-/// `SessionEvent` / `TerminationReason` の公開 API とその構築サイトに波及するため行わない)。
-/// そのため wire の HTTP/3 コードをそのまま返し、生値を `tracing::warn!` でログに残す。
-/// 呼び出し元では「WT_APPLICATION_ERROR の範囲だったものを remap した MOQT コード」と
-/// 「範囲外の HTTP/3 コードをそのまま入れた値」の 2 種が区別されずに渡る。MOQT §12.5 のコードは
-/// 小さな値 (現行は 0x0-0x12) なので前者とは区別できるが、後者には MOQT のコードと
-/// 区別できない値もある。この扱いは `RequestStreamEnd::Reset` の型を変更するまでの暫定である。
+/// application error code." / "The WebTransport implementation SHOULD deliver this to the
+/// application as a stream reset with no application error code." に従い `None` を返し、
+/// wire の HTTP/3 コードは `tracing::warn!` でログに残す。
+/// 「アプリケーションエラーコード無し」は [`RequestStreamEnd::Reset`] の `error_code: None` で表す。
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-fn wt_reset_error_code(http3_code: u64) -> u64 {
+fn wt_reset_error_code(http3_code: u64) -> Option<u64> {
     match wt_to_moqt_code(http3_code) {
-        Some(code) => u64::from(code),
+        Some(code) => Some(u64::from(code)),
         None => {
             if ApplicationErrorCode::is_application_error(http3_code) {
                 // 数値上は WT_APPLICATION_ERROR の範囲内だが予約コードポイント (0x1f * N + 0x21)。
@@ -1775,7 +1771,7 @@ fn wt_reset_error_code(http3_code: u64) -> u64 {
                     "RESET_STREAM received with an HTTP/3 error code outside the WebTransport application error range: {http3_code:#x}"
                 );
             }
-            http3_code
+            None
         }
     }
 }
@@ -3085,8 +3081,8 @@ mod tests {
         });
         assert_eq!(
             returned,
-            [0x1, WT_SESSION_GONE, 0x12345678],
-            "remap できたコードは MOQT のコードになり、できないコードは wire の値のまま返ること"
+            [Some(0x1), None, None],
+            "remap できたコードは MOQT のコードになり、できないコードはコード無し (None) になること"
         );
         assert_eq!(
             count, 2,
@@ -3106,7 +3102,10 @@ mod tests {
     fn wt_reset_error_code_warns_reserved_code_points_separately() {
         let reserved = first_reserved_code_point_in_range();
         let (returned, count, messages) = with_warn_recorder(|| wt_reset_error_code(reserved));
-        assert_eq!(returned, reserved, "予約コードポイントが生値のまま返ること");
+        assert_eq!(
+            returned, None,
+            "予約コードポイントはコード無し (None) になること"
+        );
         assert_eq!(count, 1, "予約コードポイントで warn が 1 回出ること");
         assert_eq!(
             messages,
@@ -3124,7 +3123,7 @@ mod tests {
         assert_eq!(
             wt_reset_stream_end(http3_code),
             RequestStreamEnd::Reset {
-                error_code: 0x12,
+                error_code: Some(0x12),
                 reliable_size: None,
             },
             "remap できたコードが MOQT のコードとして入ること"
@@ -3132,10 +3131,10 @@ mod tests {
         assert_eq!(
             wt_reset_stream_end(WT_SESSION_GONE),
             RequestStreamEnd::Reset {
-                error_code: WT_SESSION_GONE,
+                error_code: None,
                 reliable_size: None,
             },
-            "remap できないコードが生値のまま入ること"
+            "remap できないコードはコード無し (None) になること"
         );
     }
 
@@ -3195,9 +3194,9 @@ mod tests {
         for (http3_code, expected) in [
             (
                 moqt_to_wt_code(0x12).expect("remap に成功すること"),
-                0x12_u64,
+                Some(0x12_u64),
             ),
-            (WT_SESSION_GONE, WT_SESSION_GONE),
+            (WT_SESSION_GONE, None),
         ] {
             let application_error =
                 s2n_quic::application::Error::new(http3_code).expect("varint に収まること");
@@ -3209,7 +3208,7 @@ mod tests {
                     error_code: expected,
                     reliable_size: None,
                 }),
-                "wire の {http3_code:#x} が {expected:#x} として入ること"
+                "wire の {http3_code:#x} の remap 結果が入ること"
             );
         }
     }

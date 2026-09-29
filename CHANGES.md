@@ -623,3 +623,6 @@
 - [FIX] example の publisher が `SessionEvent::ResetDataStream` を無視して保留 PUBLISH_DONE が送られないのを止める
   - 該当 stream を RESET_STREAM で閉じ、`send_data_stream_closed` で Session へ終端を通知する
   - @voluntas
+- [CHANGE] `RequestStreamEnd::Reset` の `error_code` と `TerminationReason::PeerStreamReset` の `error_code` を `Option<u64>` にする
+  - `None` は「アプリケーションエラーコード無し」を表し、WebTransport 経路で remap できないコードは生値を warn ログに残す (draft-ietf-webtrans-http3-16 §4.4)
+  - @voluntas
