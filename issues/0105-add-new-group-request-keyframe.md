@@ -14,7 +14,10 @@ draft-ietf-moq-transport-21 §3.5.1 / §9.20.20 の `NEW_GROUP_REQUEST` は、�
 - `examples/moq-pub/src/pipeline.rs` の `run` の `ClientEvent::RequestUpdate` 分岐は、受信した `REQUEST_UPDATE` に `REQUEST_OK` を返すだけである (`serve_peer_request` は SUBSCRIBE / FETCH を扱う関数であり、`REQUEST_UPDATE` はここでは扱わない)
 - `examples/tokio-moq/src/moqt_client.rs` の `publish_track` は空の `TrackProperties::new()` で PUBLISH するため、`DYNAMIC_GROUPS` (draft-ietf-moq-transport-21 §10.6) を告知できない
 - `ClientEvent::RequestUpdate` の `IncomingRequestUpdate` は `parameters: MessageParameters` を公開しており、`MessageParameters::new_group_request()` (draft-ietf-moq-transport-21 §9.20.20 のパラメータ型 0x32) で `NEW_GROUP_REQUEST` の有無と値を example 側で判定できる
-- session 層は `NEW_GROUP_REQUEST` と `DYNAMIC_GROUPS` の検証を実装済みである。受信側は `src/session/subscription/recv.rs` の `handle_update_for_subscription` が `DYNAMIC_GROUPS=1` でない Track への `NEW_GROUP_REQUEST` を、送信側は `src/session/subscription/send.rs` の `send_request_update` が同条件を拒否する。`DYNAMIC_GROUPS` の値域 (0 / 1 のみ) は `src/track_properties.rs` の `validate_track_property_value_range` が encode / decode の両方で検証する
+- session 層は `NEW_GROUP_REQUEST` と `DYNAMIC_GROUPS` の検証を実装済みである。受信側は `src/session/subscription/recv.rs` の
+  `handle_update_for_subscription` が `DYNAMIC_GROUPS=1` でない Track への `NEW_GROUP_REQUEST` を、送信側は
+  `src/session/subscription/send.rs` の `send_request_update` が同条件を拒否する。`DYNAMIC_GROUPS` の値域 (0 / 1 のみ) は
+  `src/track_properties.rs` の `validate_track_property_value_range` が encode / decode の両方で検証する
 - 任意フレームでキーフレームを要求する経路は 0102 で追加する。0102 は未完了であり、本 issue の実装は 0102 の完了を前提とする
 
 ## 設計方針

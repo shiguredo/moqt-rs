@@ -11,7 +11,10 @@
 
 ## 現状
 
-`build_catalog` を検証する `publisher_catalog_tracks_encode` / `publisher_alternate_video_codecs_encode` は `av01.0.08M.08` / `avc1.640028` / `hvc1.1.6.L120.B0` / `opus` をリテラルで持つ。送信に使う codec 文字列の元になるのは encoder モジュールの次の定数である。av1 / opus は常に定数の値そのものが送信される。h264 / h265 は最初のキーフレームまでは定数の値 (`new` 時点の既定値) が送信され、最初のキーフレームで SPS から再構築した値へ置き換わる。
+`build_catalog` を検証する `publisher_catalog_tracks_encode` / `publisher_alternate_video_codecs_encode` は
+`av01.0.08M.08` / `avc1.640028` / `hvc1.1.6.L120.B0` / `opus` をリテラルで持つ。送信に使う codec 文字列の元になるのは
+encoder モジュールの次の定数である。av1 / opus は常に定数の値そのものが送信される。h264 / h265 は最初のキーフレームまでは
+定数の値 (`new` 時点の既定値) が送信され、最初のキーフレームで SPS から再構築した値へ置き換わる。
 
 - `examples/moq-pub/src/encoder/av1.rs` の `AV1_CATALOG_CODEC_STRING`
 - `examples/moq-pub/src/encoder/h264.rs` の `DEFAULT_AVC_CATALOG_CODEC_STRING`

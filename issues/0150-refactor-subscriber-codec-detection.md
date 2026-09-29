@@ -11,7 +11,11 @@
 
 ## 現状
 
-`examples/moq-sub/src/pipeline.rs` の `receive_catalog` は `starts_with("av01")` / `starts_with("avc1")` / `starts_with("hvc1")` / `starts_with("hev1")` を満たす最初のトラックを video、`starts_with("opus")` を満たす最初のトラックを audio として選択する。同じファイルの `handle_incoming_stream` にも `audio_codec` に対する `starts_with("opus")` があり、OpusHead パースの要否判定に使っている。`decoder.rs` の `build_video_decoder` も `starts_with` で codec を分岐しているが、こちらはデコーダ選択であり audio / video の種別判定ではない。
+`examples/moq-sub/src/pipeline.rs` の `receive_catalog` は `starts_with("av01")` / `starts_with("avc1")` /
+`starts_with("hvc1")` / `starts_with("hev1")` を満たす最初のトラックを video、`starts_with("opus")` を満たす最初のトラックを
+audio として選択する。同じファイルの `handle_incoming_stream` にも `audio_codec` に対する `starts_with("opus")` があり、
+OpusHead パースの要否判定に使っている。`decoder.rs` の `build_video_decoder` も `starts_with` で codec を分岐しているが、
+こちらはデコーダ選択であり audio / video の種別判定ではない。
 
 library 側 (`src/msf.rs` の `is_audio_codec` / `is_video_codec`) は登録名の完全一致と区切り文字境界付き前方一致で判定し、対象も `avc3` / `vp8` / `vp09` / `flac` / `mp3` / `vorbis` / `ulaw` / `alaw` / `mp4a.*` / `pcm-*` を含む。両者の対象 codec と境界規則は一致していない。
 
