@@ -860,6 +860,7 @@ dependencies = [
  "shiguredo_audio_device",
  "shiguredo_http3",
  "shiguredo_moqt",
+ "shiguredo_mp4",
  "shiguredo_opus",
  "shiguredo_video_device",
  "shiguredo_video_toolbox",

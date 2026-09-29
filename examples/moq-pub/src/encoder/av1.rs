@@ -124,9 +124,11 @@ impl Av1Encoder {
 
 /// AV1 ビットストリームから Sequence Header OBU を抽出する
 ///
+/// MP4 パススルーのリーダーも、サンプルに Sequence Header が含まれるかの判定に使う。
+///
 /// 根拠: AV1 Bitstream and Decoding Process Specification §5.3
 /// (将来の改訂で OBU フォーマットが変更される可能性あり)
-fn extract_av1_sequence_header(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn extract_av1_sequence_header(data: &[u8]) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
     }

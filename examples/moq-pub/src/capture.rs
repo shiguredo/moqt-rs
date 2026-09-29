@@ -2,22 +2,18 @@
 //!
 //! `shiguredo_video_device` で入力デバイスを開き、NV12 フレームをチャネルへ送信する。
 
-use shiguredo_video_device::{
-    PixelFormat, VideoCapture, VideoCaptureConfig, VideoDeviceList, VideoFrameOwned,
-};
+use shiguredo_video_device::{PixelFormat, VideoCapture, VideoCaptureConfig, VideoDeviceList};
 use tokio::sync::mpsc;
 
 use crate::cli::Config;
 use crate::error::Result;
+use crate::pipeline::VideoInput;
 
 /// カメラキャプチャを開始する
 ///
 /// 指定されたデバイスからフレームをキャプチャし、チャネルに送信する。
 /// 返り値の VideoCapture を保持している間、キャプチャは継続する。
-pub fn start_capture(
-    config: &Config,
-    sender: mpsc::Sender<VideoFrameOwned>,
-) -> Result<VideoCapture> {
+pub fn start_capture(config: &Config, sender: mpsc::Sender<VideoInput>) -> Result<VideoCapture> {
     // デバイスを列挙する
     if config.device_id.is_none() {
         let devices = VideoDeviceList::enumerate()?;
@@ -40,7 +36,7 @@ pub fn start_capture(
     let mut capture = VideoCapture::new(capture_config, move |frame| {
         let owned = frame.to_owned();
         // チャネルが満杯の場合はフレームを破棄する
-        let _ = sender.try_send(owned);
+        let _ = sender.try_send(VideoInput::Raw(owned));
     })?;
 
     capture.start()?;

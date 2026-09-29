@@ -34,6 +34,7 @@ use crate::encoder::{self, EncodedFrame};
 use crate::error::{Error, Result};
 use crate::fake_audio_capture;
 use crate::fake_capture;
+use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
 use tokio_moq::Transport;
 use tokio_moq::host_from_authority;
@@ -57,6 +58,16 @@ enum VideoCaptureGuard {
 enum AudioCaptureGuard {
     Real(shiguredo_audio_device::AudioCapture),
     Fake(fake_audio_capture::FakeAudioCapture),
+}
+
+/// パイプラインへ渡す映像入力
+///
+/// カメラ / 疑似キャプチャは生フレームを渡し、MP4 パススルーはエンコード済みサンプルを渡す。
+pub(crate) enum VideoInput {
+    /// キャプチャした生フレーム (エンコード前)
+    Raw(VideoFrameOwned),
+    /// エンコード済みサンプル (MP4 パススルー)
+    Encoded(EncodedFrame),
 }
 
 /// カタログトラックの Track Alias
@@ -226,7 +237,14 @@ pub async fn run(
         .await?;
 
     // 3. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
-    let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled {
+    // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
+    let mp4_reader: Option<mp4::Mp4VideoReader> = match config.input_mp4.as_deref() {
+        Some(path) => Some(mp4::Mp4VideoReader::open(path)?),
+        None => None,
+    };
+    let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
+        && mp4_reader.is_none()
+    {
         let enc = match config.video_codec {
             VideoCodec::Av1 => encoder::VideoEncoder::Av1(Box::new(encoder::av1::Av1Encoder::new(
                 config.width,
@@ -253,22 +271,22 @@ pub async fn run(
             )?),
             #[cfg(not(target_os = "macos"))]
             VideoCodec::H264 => {
-                return Err(Error::Other(
-                    "H.264 encoder is only available on macOS; rebuild on macOS or specify --video-codec av1".to_string(),
-                ));
+                return Err(unsupported_macos_encoder("H.264"));
             }
             #[cfg(not(target_os = "macos"))]
             VideoCodec::H265 => {
-                return Err(Error::Other(
-                    "H.265 encoder is only available on macOS; rebuild on macOS or specify --video-codec av1".to_string(),
-                ));
+                return Err(unsupported_macos_encoder("H.265"));
             }
         };
         Some(enc)
     } else {
         None
     };
-    let video_timescale = video_encoder.as_ref().map(|e| e.timescale());
+    // MP4 パススルーでは MP4 のタイムスケールを、それ以外はエンコーダのタイムスケールを使う
+    let video_timescale = match &mp4_reader {
+        Some(reader) => Some(reader.info().timescale),
+        None => video_encoder.as_ref().map(|e| e.timescale()),
+    };
 
     let mut audio_encoder: Option<OpusEncoder> = if config.audio_enabled {
         Some(OpusEncoder::new(
@@ -295,15 +313,30 @@ pub async fn run(
         catalog_request_id,
         catalog_alias: CATALOG_TRACK_ALIAS,
         start_location: client.subscription_filter_start(catalog_request_id),
-        video: video_encoder.as_ref().map(|enc| catalog::VideoTrackParams {
-            track_name: &config.track_name,
-            namespace: &config.namespace,
-            codec: enc.catalog_codec_string(),
-            width: config.width,
-            height: config.height,
-            fps: config.fps,
-            bitrate: config.bitrate,
-        }),
+        video: match (&mp4_reader, video_encoder.as_ref()) {
+            (Some(reader), _) => {
+                let info = reader.info();
+                Some(catalog::VideoTrackParams {
+                    track_name: &config.track_name,
+                    namespace: &config.namespace,
+                    codec: &info.codec,
+                    width: info.width,
+                    height: info.height,
+                    fps: info.fps,
+                    bitrate: info.bitrate_kbps,
+                })
+            }
+            (None, Some(enc)) => Some(catalog::VideoTrackParams {
+                track_name: &config.track_name,
+                namespace: &config.namespace,
+                codec: enc.catalog_codec_string(),
+                width: config.width,
+                height: config.height,
+                fps: config.fps,
+                bitrate: config.bitrate,
+            }),
+            (None, None) => None,
+        },
         audio: audio_encoder.as_ref().map(|enc| catalog::AudioTrackParams {
             track_name: AUDIO_TRACK_NAME,
             namespace: &config.namespace,
@@ -315,17 +348,27 @@ pub async fn run(
     })
     .await?;
 
-    // 5. キャプチャ起動
-    let (video_frame_tx, mut video_frame_rx) = mpsc::channel::<VideoFrameOwned>(4);
+    // 5. 映像 / 音声入力を起動する
+    //
+    // MP4 リーダーの停止は Drop で行う。Drop は宣言と逆順に実行されるため、
+    // 受信側 (video_input_rx) を先に閉じてから join できるよう mp4_source を先に宣言する。
+    let mut mp4_source: Option<mp4::Mp4VideoSource> = None;
+    let (video_input_tx, mut video_input_rx) = mpsc::channel::<VideoInput>(4);
     let _video_capture: Option<VideoCaptureGuard> = if config.video_enabled {
-        Some(if config.fake_capture_device {
-            VideoCaptureGuard::Fake(fake_capture::start_capture(&config, video_frame_tx)?)
-        } else {
-            VideoCaptureGuard::Real(capture::start_capture(&config, video_frame_tx)?)
-        })
+        match mp4_reader {
+            Some(reader) => {
+                mp4_source = Some(reader.start(video_input_tx)?);
+                None
+            }
+            None => Some(if config.fake_capture_device {
+                VideoCaptureGuard::Fake(fake_capture::start_capture(&config, video_input_tx)?)
+            } else {
+                VideoCaptureGuard::Real(capture::start_capture(&config, video_input_tx)?)
+            }),
+        }
     } else {
         // 送信側を drop して受信側を閉じておく (select の分岐は cfg gate でスキップ)
-        drop(video_frame_tx);
+        drop(video_input_tx);
         None
     };
 
@@ -364,9 +407,9 @@ pub async fn run(
 
     'main: loop {
         tokio::select! {
-            video_frame = video_frame_rx.recv(), if config.video_enabled => {
-                let Some(video_frame) = video_frame else {
-                    tracing::info!("Video capture channel closed");
+            video_input = video_input_rx.recv(), if config.video_enabled => {
+                let Some(video_input) = video_input else {
+                    tracing::info!("Video input channel closed");
                     break;
                 };
                 // エンコードとフレーム送信を async ブロックに閉じ込め、`?` が `run` を
@@ -377,9 +420,16 @@ pub async fn run(
                 // ループを抜ける制御 (`let Some(..) = .. else { break }`) はブロックの
                 // 外に出す (ブロックの中では外側のループを抜けられない)。
                 let outcome: Result<()> = async {
-                    let encoder = video_encoder.as_mut().expect("video encoder enabled");
+                    // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
+                    // エンコード済みサンプルをそのまま送る
+                    let encoded_frames = match video_input {
+                        VideoInput::Raw(frame) => {
+                            let encoder = video_encoder.as_mut().expect("video encoder enabled");
+                            encoder.encode(&frame)?
+                        }
+                        VideoInput::Encoded(frame) => vec![frame],
+                    };
                     let timescale = video_timescale.expect("video timescale enabled");
-                    let encoded_frames = encoder.encode(&video_frame)?;
                     for ef in encoded_frames {
                         if ef.is_keyframe {
                             // datagram モードと Subgroup モードの両方で使うため、ここで request_id を
@@ -615,6 +665,9 @@ pub async fn run(
         }
     }
 
+    // MP4 リーダーのスレッドを停止する (Drop で停止要求と join を行う)
+    drop(mp4_source.take());
+
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
         // 省略があれば RESET 側に倒れる (安全側)
@@ -655,6 +708,14 @@ pub async fn run(
 
     tracing::info!("Pipeline stopped");
     Ok(())
+}
+
+/// macOS 以外で H.264 / H.265 のエンコーダを指定したときのエラーを作る
+#[cfg(not(target_os = "macos"))]
+fn unsupported_macos_encoder(codec: &str) -> Error {
+    Error::Other(format!(
+        "{codec} encoder is only available on macOS; rebuild on macOS or specify --video-codec av1"
+    ))
 }
 
 /// transport がセッション終了 (WebTransport の CONNECT stream の close / WT_CLOSE_SESSION) や

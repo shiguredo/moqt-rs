@@ -17,6 +17,8 @@ shiguredo_audio_device = "2026.3"
 shiguredo_http3 = "2026.1.0-canary.9"
 # MoQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
+# MP4 ファイルの demux (映像トラックのパススルー配信)
+shiguredo_mp4 = "2026.5"
 # Opus エンコーダ
 shiguredo_opus = "2026.2"
 # カメラキャプチャ

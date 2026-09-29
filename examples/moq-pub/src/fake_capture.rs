@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::cli::Config;
 use crate::error::{Error, Result};
+use crate::pipeline::VideoInput;
 
 /// ウェーブパターンの本数
 const NUM_WAVES: usize = 5;
@@ -58,10 +59,7 @@ pub(crate) fn sleep_interruptibly(stop: &AtomicBool, duration: Duration) -> bool
 }
 
 /// 疑似キャプチャを開始する
-pub fn start_capture(
-    config: &Config,
-    sender: mpsc::Sender<VideoFrameOwned>,
-) -> Result<FakeCapture> {
+pub fn start_capture(config: &Config, sender: mpsc::Sender<VideoInput>) -> Result<FakeCapture> {
     if config.width == 0 || config.height == 0 {
         return Err(Error::Other("width/height must be non-zero".to_string()));
     }
@@ -104,7 +102,7 @@ fn run_capture_loop(
     height: u32,
     fps: u32,
     stop: Arc<AtomicBool>,
-    sender: mpsc::Sender<VideoFrameOwned>,
+    sender: mpsc::Sender<VideoInput>,
 ) {
     let mut image = Image::new(width, height, RadenPixelFormat::Prgb32);
     let mut runtime = PipelineRuntime::new();
@@ -152,7 +150,7 @@ fn run_capture_loop(
         };
 
         // チャネルが満杯の場合はフレームを破棄する (実キャプチャと同じ挙動)
-        match sender.try_send(owned) {
+        match sender.try_send(VideoInput::Raw(owned)) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => break,

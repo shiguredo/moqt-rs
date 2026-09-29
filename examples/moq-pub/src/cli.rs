@@ -66,6 +66,37 @@ pub struct Config {
     pub audio_bitrate: u32,
     /// datagram 送信を使用するかどうか
     pub use_datagram: bool,
+    /// MP4 ファイルの映像トラックをパススルー配信する入力パス
+    pub input_mp4: Option<String>,
+}
+
+/// ユーザーが明示的に指定したオプションかどうかを判定する
+///
+/// noargs の `Opt::is_present()` は `default()` で埋めた値でも true を返すため、
+/// コマンドライン引数または環境変数で指定された (`Long` / `Short` / `Env`) 場合だけを
+/// 明示指定として扱う。
+fn is_explicit(opt: &noargs::Opt) -> bool {
+    matches!(
+        opt,
+        noargs::Opt::Long { .. } | noargs::Opt::Short { .. } | noargs::Opt::Env { .. }
+    )
+}
+
+/// u32 のオプションを取り出し、明示指定されたかどうかも返す
+fn take_u32(
+    args: &mut noargs::RawArgs,
+    name: &'static str,
+    ty: &'static str,
+    doc: &'static str,
+    default: &'static str,
+) -> noargs::Result<(u32, bool)> {
+    let opt = noargs::opt(name)
+        .ty(ty)
+        .doc(doc)
+        .default(default)
+        .take(args);
+    let explicit = is_explicit(&opt);
+    Ok((opt.then(|o| o.value().parse::<u32>())?, explicit))
 }
 
 pub fn parse() -> noargs::Result<Option<Config>> {
@@ -111,40 +142,27 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
-    let width: u32 = noargs::opt("width")
-        .ty("PX")
-        .doc("Video width")
-        .default("1280")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (width, width_explicit) = take_u32(&mut args, "width", "PX", "Video width", "1280")?;
 
-    let height: u32 = noargs::opt("height")
-        .ty("PX")
-        .doc("Video height")
-        .default("720")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (height, height_explicit) = take_u32(&mut args, "height", "PX", "Video height", "720")?;
 
-    let fps: u32 = noargs::opt("fps")
-        .ty("FPS")
-        .doc("Frame rate")
-        .default("30")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (fps, fps_explicit) = take_u32(&mut args, "fps", "FPS", "Frame rate", "30")?;
 
-    let bitrate: u32 = noargs::opt("bitrate")
-        .ty("KBPS")
-        .doc("Target bitrate in kbps")
-        .default("2000")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (bitrate, bitrate_explicit) = take_u32(
+        &mut args,
+        "bitrate",
+        "KBPS",
+        "Target bitrate in kbps",
+        "2000",
+    )?;
 
-    let keyframe_interval: u32 = noargs::opt("keyframe-interval")
-        .ty("FRAMES")
-        .doc("Keyframe interval in frames")
-        .default("60")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (keyframe_interval, keyframe_interval_explicit) = take_u32(
+        &mut args,
+        "keyframe-interval",
+        "FRAMES",
+        "Keyframe interval in frames",
+        "60",
+    )?;
 
     let namespace: String = noargs::opt("namespace")
         .ty("NS")
@@ -165,12 +183,13 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .is_present();
 
-    let video_codec: VideoCodec = noargs::opt("video-codec")
+    let video_codec_opt = noargs::opt("video-codec")
         .ty("CODEC")
         .doc("Video codec (av1 | h264 | h265). h264/h265 require macOS")
         .default("av1")
-        .take(&mut args)
-        .then(|o| VideoCodec::parse(o.value()))?;
+        .take(&mut args);
+    let video_codec_explicit = is_explicit(&video_codec_opt);
+    let video_codec: VideoCodec = video_codec_opt.then(|o| VideoCodec::parse(o.value()))?;
 
     let no_video: bool = noargs::flag("no-video")
         .doc("Disable video track publication")
@@ -200,13 +219,61 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .is_present();
 
+    let input_mp4: Option<String> = noargs::opt("input-mp4")
+        .ty("PATH")
+        .doc("Publish the video track of an MP4 file without re-encoding (audio is not published)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+
     let video_enabled = !no_video;
-    let audio_enabled = !no_audio;
-    if !args.metadata().help_mode && !video_enabled && !audio_enabled {
-        return Err(noargs::Error::other(
-            &args,
-            "at least one of audio or video must be enabled (do not pass both --no-video and --no-audio)",
-        ));
+    // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
+    let audio_enabled = !no_audio && input_mp4.is_none();
+    if !args.metadata().help_mode {
+        if let Some(path) = input_mp4.as_deref() {
+            if path.is_empty() {
+                return Err(noargs::Error::other(&args, "--input-mp4 must not be empty"));
+            }
+            if video_codec_explicit {
+                return Err(noargs::Error::other(
+                    &args,
+                    "--input-mp4 cannot be used with --video-codec (the codec is detected from the MP4)",
+                ));
+            }
+            if width_explicit || height_explicit || fps_explicit {
+                return Err(noargs::Error::other(
+                    &args,
+                    "--input-mp4 cannot be used with --width / --height / --fps (they are detected from the MP4)",
+                ));
+            }
+            if !video_enabled {
+                return Err(noargs::Error::other(
+                    &args,
+                    "--input-mp4 cannot be used with --no-video (the MP4 video track is the publishing source)",
+                ));
+            }
+            // 無視するオプションは黙って捨てずに警告する
+            if device_id.is_some() {
+                tracing::warn!("--device-id is ignored when --input-mp4 is set");
+            }
+            if fake_capture_device {
+                tracing::warn!("--fake-capture-device is ignored when --input-mp4 is set");
+            }
+            if keyframe_interval_explicit {
+                tracing::warn!(
+                    "--keyframe-interval is ignored when --input-mp4 is set (groups start at the keyframes in the MP4)"
+                );
+            }
+            if bitrate_explicit {
+                tracing::warn!(
+                    "--bitrate is ignored when --input-mp4 is set (the catalog bitrate is computed from the MP4)"
+                );
+            }
+        } else if !video_enabled && !audio_enabled {
+            return Err(noargs::Error::other(
+                &args,
+                "at least one of audio or video must be enabled (do not pass both --no-video and --no-audio)",
+            ));
+        }
     }
 
     if let Some(help) = args.finish()? {
@@ -233,5 +300,6 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         audio_device_id,
         audio_bitrate,
         use_datagram,
+        input_mp4,
     }))
 }

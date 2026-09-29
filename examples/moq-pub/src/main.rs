@@ -14,6 +14,7 @@ mod encoder;
 mod error;
 mod fake_audio_capture;
 mod fake_capture;
+mod mp4;
 mod pipeline;
 mod stream_writer;
 
