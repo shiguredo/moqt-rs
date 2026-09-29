@@ -7,7 +7,7 @@ draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 ## 構成
 
 - **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する
-- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。
@@ -37,6 +37,9 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --transport wt-h3 --fake-cap
 
 # WebTransport over HTTP/2 で subscriber を起動
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --transport wt-h2
+
+# QUIC で受信した映像 / 音声を MP4 に保存する (再生しない)
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --mp4 out.mp4 --no-play
 ```
 
 ## トランスポート
@@ -105,6 +108,8 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--no-video` | | | 映像トラックの購読を無効化する |
 | `--no-audio` | | | 音声トラックの購読を無効化する |
 | `--audio-output-device` | | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
+| `--mp4` | | | 受信した映像 / 音声を MP4 ファイルへ保存する (再エンコードせずに mux する。既存ファイルは上書きし、datagram 経由で届いたメディアは対象外) |
+| `--no-play` | | | 再生を行わない (SDL を初期化せず、デコードもしない) |
 
 ## URL スキーム
 

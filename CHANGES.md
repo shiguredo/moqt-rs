@@ -105,7 +105,7 @@
   - 同時に処理する data stream 数を 4 に制限する (音声は 1 object = 1 stream、映像は 1 group = 1 stream で届くため)
   - 表示待ちの映像フレーム数が 20 を超えたら、古い group をまるごと捨てて受信を優先する
     (途中のフレームを捨てると参照フレームを失って復号できないため、group 単位で捨てる)
-  - これらが無いとデコードが先行して待ちフレームが増え続け、QUIC エンドポイントの I/O が飢えて受信パケットが落ち、relay 側の輻輳ウィンドウが最小値まで崩壊して配送が止まる (moqt-rs 0101)
+  - これらが無いとデコードが先行して待ちフレームが増え続け、QUIC エンドポイントの I/O が飢えて受信パケットが落ち、relay 側の輻輳ウィンドウが最小値まで崩壊して配送が止まる
   - 90 秒運転での停止は減ったが完全には解消していない (機械全体の CPU は 500%/1400% で飽和しておらず、relay→subscriber のパケット損失が残る。relay 側の対応で継続調査)
   - @voluntas
 - [FIX] moq-sub が終了済み subscription へ STOP_SENDING を送って警告を出す
@@ -585,4 +585,10 @@
   - @voluntas
 - [FIX] example の publisher / subscriber が接続先の名前解決に応答が無いときに起動し続けるのを止める
   - 名前解決を 5 秒で打ち切り、`failed to resolve ...: name resolution timed out after 5s` を表示して終了する
+  - @voluntas
+- [ADD] moq-sub に `--mp4` と `--no-play` を追加し、受信した映像 / 音声を MP4 ファイルへ保存できるようにする
+  - 受信したエンコード済みサンプル (AV1 / H.264 / H.265 / Opus) を再エンコードせずに `shiguredo_mp4` の `Mp4FileMuxer` で mux する
+  - `--no-play` は再生を無効化し、SDL を初期化せずデコードも行わない (受信と録画だけを行う)
+  - 録画対象のサンプルが無い場合はファイルを作成せず、既存ファイルを指定した場合は上書きする
+  - datagram 経由で届いたメディアは録画対象外とする (subgroup stream と fetch 応答ストリームのみ対応)
   - @voluntas
