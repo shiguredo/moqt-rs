@@ -949,6 +949,8 @@ async fn serve_peer_request(
 ///
 /// 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を使う。
 /// 0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ。
+/// 現行のエンコーダは 1 入力 = 1 出力のため、入力より出力が多い場合は余ったフレームが
+/// エンコーダの採番のままになる。
 fn assign_input_timestamps(
     pending: &mut VecDeque<u64>,
     input_timestamp: Option<u64>,

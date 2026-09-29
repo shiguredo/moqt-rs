@@ -153,6 +153,14 @@ fn compute_pts(timestamp: u64, composition_time_offset: Option<i64>) -> u64 {
     pts.max(0) as u64
 }
 
+/// 周回オフセットを反映した表示順 PTS 列を作る
+fn display_pts_with_offset(display_pts: &[u64], loop_offset: u64) -> Vec<u64> {
+    display_pts
+        .iter()
+        .map(|pts| pts.saturating_add(loop_offset))
+        .collect()
+}
+
 /// デコード済みの映像フレームを表示順 (PTS) に並べ替えて供給する
 ///
 /// デコーダの出力順は codec によって異なる (dav1d は表示順、Video Toolbox は
@@ -211,12 +219,6 @@ impl VideoReorder {
         }
         self.next_index = self.display_pts.len();
         out
-    }
-
-    /// 次の周回に備えて状態を戻す
-    fn reset(&mut self) {
-        self.next_index = 0;
-        self.frames.clear();
     }
 }
 
@@ -304,6 +306,8 @@ impl Mp4ReencodeReader {
         let mut video_has_keyframe = false;
         let mut video_first_duration: Option<u32> = None;
         let mut video_variable_frame_rate = false;
+        let mut video_pre_keyframe_samples = 0u64;
+        let mut last_video_duration = 0u32;
         // 表示順 PTS 列の算出と AV1 の Sequence Header 検証に使う
         let mut video_pts: Vec<u64> = Vec::new();
         let mut first_keyframe_range: Option<(usize, usize)> = None;
@@ -338,6 +342,12 @@ impl Mp4ReencodeReader {
                     if first_keyframe_range.is_none() {
                         first_keyframe_range = Some((offset, end));
                     }
+                } else if !video_has_keyframe {
+                    // 最初のキーフレームより前のサンプルは配信しないため、
+                    // 表示順の対象からも除外する
+                    video_pre_keyframe_samples += 1;
+                    video_sample_count += 1;
+                    continue;
                 }
                 match video_first_duration {
                     Some(first) if first != sample.duration => video_variable_frame_rate = true,
@@ -349,6 +359,7 @@ impl Mp4ReencodeReader {
                     sample.timestamp,
                     sample.composition_time_offset,
                 ));
+                last_video_duration = sample.duration;
                 video_duration = sample
                     .timestamp
                     .checked_add(u64::from(sample.duration))
@@ -378,7 +389,7 @@ impl Mp4ReencodeReader {
                     path.display()
                 )));
             }
-            let Some((codec, config)) = video_codec_and_config(&entry)
+            let Some((codec, mut config)) = video_codec_and_config(&entry)
                 .map_err(|e| Error::Other(format!("MP4 file '{}': {e}", path.display())))?
             else {
                 let codec = shiguredo_mp4::codec_string::from_sample_entry(&entry)
@@ -388,7 +399,8 @@ impl Mp4ReencodeReader {
                     path.display()
                 )));
             };
-            validate_8bit_420(&entry)?;
+            validate_8bit_420(&entry)
+                .map_err(|e| Error::Other(format!("MP4 file '{}': {e}", path.display())))?;
             let (width, height) = entry.video_resolution().ok_or_else(|| {
                 Error::Other(format!(
                     "MP4 file '{}' has no video resolution",
@@ -398,28 +410,50 @@ impl Mp4ReencodeReader {
             // 4:2:0 はクロマが 2x2 単位のため偶数解像度を要求する
             if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
                 return Err(Error::Other(format!(
-                    "MP4 video resolution is not even ({}x{}); 4:2:0 requires even width and height",
-                    width, height
+                    "MP4 file '{}': video resolution is not even ({}x{}); 4:2:0 requires even width and height",
+                    path.display(),
+                    width,
+                    height,
                 )));
             }
             // AV1 は payload 内に Sequence Header が必要なため、av1C か最初のキーフレームの
             // どちらかに存在することを初期化時に確認する
             if codec == Mp4VideoCodec::Av1 {
-                let has_sequence_header = first_keyframe_range
-                    .and_then(|(offset, end)| {
-                        crate::encoder::av1::extract_av1_sequence_header(&data[offset..end])
-                    })
-                    .or_else(|| crate::encoder::av1::extract_av1_sequence_header(&config))
-                    .is_some();
-                if !has_sequence_header {
+                let keyframe_sequence_header = first_keyframe_range.and_then(|(offset, end)| {
+                    crate::encoder::av1::extract_av1_sequence_header(&data[offset..end])
+                });
+                let config_sequence_header =
+                    crate::encoder::av1::extract_av1_sequence_header(&config);
+                let Some(sequence_header) = keyframe_sequence_header.or(config_sequence_header)
+                else {
                     return Err(Error::Other(format!(
                         "MP4 file '{}' has no AV1 Sequence Header in the av1C box or the first keyframe",
                         path.display()
                     )));
+                };
+                // av1C に Sequence Header が無い場合はキーフレームのものを設定に使う
+                if crate::encoder::av1::extract_av1_sequence_header(&config).is_none() {
+                    config = sequence_header;
                 }
+            }
+            if video_pre_keyframe_samples > 0 {
+                tracing::warn!(
+                    "MP4 file '{}' has {} sample(s) before the first keyframe; they are skipped",
+                    path.display(),
+                    video_pre_keyframe_samples,
+                );
             }
             let timescale =
                 video_timescale.expect("video timescale is captured for the video track");
+            // 表示上の終端でも周回の周期が足りるようにする (B フレームでは PTS が
+            // DTS より後ろになることがある)
+            if let Some(max_pts) = video_pts.iter().copied().max() {
+                video_duration = video_duration.max(
+                    max_pts
+                        .checked_add(u64::from(last_video_duration))
+                        .ok_or_else(|| Error::Other("MP4 duration is out of range".to_string()))?,
+                );
+            }
             let fps = average_fps(video_sample_count, video_duration, timescale)?;
             if video_variable_frame_rate {
                 tracing::warn!(
@@ -643,11 +677,13 @@ fn run_reader(
 ) -> Result<()> {
     // デコード結果を表示順に供給するための PTS 待ち行列
     let mut pts_queue = PtsQueue::new();
-    // 表示順に並べ替えるバッファ (映像を配信しない場合は空のまま使わない)
+    // 表示順に並べ替えるバッファ (映像を配信しない場合は None)
+    //
+    // 期待値には周回オフセットを反映する (rewind のたびに作り直す)。
     let mut reorder = reader
         .video
         .as_ref()
-        .map(|video| VideoReorder::new(video.display_pts.clone()));
+        .map(|video| VideoReorder::new(display_pts_with_offset(&video.display_pts, 0)));
     // 20 ms 単位にバッファリングする PCM (S16 interleaved / mono)
     let mut pcm_buf: Vec<i16> = Vec::new();
     // pcm_buf の先頭のタイムスタンプ (トラックの timescale 単位)
@@ -681,14 +717,23 @@ fn run_reader(
             if let Some(decoder) = reader.video_decoder.as_mut() {
                 decoder.reset();
             }
-            if let Some(reorder) = reorder.as_mut() {
-                reorder.reset();
-            }
             reader.rewind()?;
+            // 表示順の期待値に新しい周回オフセットを反映する
+            if let Some(video) = reader.video.as_ref() {
+                reorder = Some(VideoReorder::new(display_pts_with_offset(
+                    &video.display_pts,
+                    reader.video_loop_offset,
+                )));
+            }
             // 端数は次の周回へ繰り越さない
             pts_queue.clear();
             pcm_buf.clear();
             pcm_buf_sent_samples = 0;
+            audio_skip_samples = reader
+                .audio
+                .as_ref()
+                .map(|audio| u64::from(audio.pre_skip))
+                .unwrap_or(0);
             continue;
         };
         if sample.is_video {
@@ -808,7 +853,12 @@ fn build_video_decoder(codec: Mp4VideoCodec) -> Result<VideoDecoder> {
 fn validate_8bit_420(entry: &SampleEntry) -> Result<()> {
     let (chroma_ok, depth_ok) = match entry {
         SampleEntry::Avc1(b) => (
-            b.avcc_box.chroma_format.is_none_or(|v| v.get() == 1),
+            match b.avcc_box.avc_profile_indication {
+                // プロファイル 66 / 77 / 88 は 4:2:0 固定で avcC にクロマ情報を持たない
+                66 | 77 | 88 => true,
+                // それ以外は chroma_format が必須 (ISO/IEC 14496-15 §5.2.4.1.1)
+                _ => b.avcc_box.chroma_format.is_some_and(|v| v.get() == 1),
+            },
             b.avcc_box
                 .bit_depth_luma_minus8
                 .is_none_or(|v| v.get() == 0)
@@ -1020,12 +1070,9 @@ mod tests {
         assert_eq!(queue.take_output(), None);
     }
 
-    /// 表示順の PTS 列に従ってフレームが並べ替えられること
-    ///
-    /// Video Toolbox はデコード順で出力するため、到着順ではなく表示順で供給する。
-    #[test]
-    fn video_reorder_supplies_frames_in_display_order() {
-        let frame = |id: u8| VideoFrameOwned {
+    /// テスト用の生フレームを構築する
+    fn test_video_frame(id: u8) -> VideoFrameOwned {
+        VideoFrameOwned {
             data: vec![id],
             uv_data: None,
             width: 0,
@@ -1035,35 +1082,63 @@ mod tests {
             pixel_format: VideoPixelFormat::Nv12,
             timestamp_us: 0,
             pixel_buffer: None,
-        };
+        }
+    }
+
+    /// 周回オフセットを反映した表示順 PTS 列で並べ替えられること
+    ///
+    /// 2 周目以降の PTS は生 PTS に周回オフセットを加算した値になる。
+    #[test]
+    fn video_reorder_accepts_loop_offset_pts() {
+        let display_pts = display_pts_with_offset(&[0, 1_000, 2_000], 3_000);
+        assert_eq!(display_pts, vec![3_000, 4_000, 5_000]);
+        let mut reorder = VideoReorder::new(display_pts);
+
+        // 周回の先頭は即座に確定する (周回内で供給される)
+        let ready = reorder.push(3_000, test_video_frame(0));
+        assert_eq!(ready.len(), 1, "周回の先頭で確定すること");
+        assert_eq!(ready[0].0, 3_000);
+        // デコード順 (3, 5, 4) でも表示順になる
+        assert!(reorder.push(5_000, test_video_frame(2)).is_empty());
+        let ready = reorder.push(4_000, test_video_frame(1));
+        let pts: Vec<u64> = ready.iter().map(|(pts, _)| *pts).collect();
+        assert_eq!(pts, vec![4_000, 5_000]);
+        assert!(reorder.drain().is_empty(), "残りが無いこと");
+    }
+
+    /// 表示順の PTS 列に従ってフレームが並べ替えられること
+    ///
+    /// Video Toolbox はデコード順で出力するため、到着順ではなく表示順で供給する。
+    #[test]
+    fn video_reorder_supplies_frames_in_display_order() {
         // 表示順は 0, 1000, 2000, 3000
         let mut reorder = VideoReorder::new(vec![0, 1_000, 2_000, 3_000]);
 
         // デコード順 (PTS 0, 3000, 1000, 2000) に到着しても表示順で取り出される
-        let ready = reorder.push(0, frame(0));
+        let ready = reorder.push(0, test_video_frame(0));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].0, 0);
-        assert!(reorder.push(3_000, frame(3)).is_empty());
-        let ready = reorder.push(1_000, frame(1));
+        assert!(reorder.push(3_000, test_video_frame(3)).is_empty());
+        let ready = reorder.push(1_000, test_video_frame(1));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].0, 1_000);
-        let ready = reorder.push(2_000, frame(2));
+        let ready = reorder.push(2_000, test_video_frame(2));
         let pts: Vec<u64> = ready.iter().map(|(pts, _)| *pts).collect();
         assert_eq!(pts, vec![2_000, 3_000], "表示順に確定した分が返ること");
         assert!(reorder.drain().is_empty(), "残りが無いこと");
 
         // 周回の末尾では到着済みのフレームを表示順に取り出す
-        reorder.reset();
-        assert!(reorder.push(3_000, frame(3)).is_empty());
+        let mut reorder = VideoReorder::new(vec![0, 1_000, 2_000, 3_000]);
+        assert!(reorder.push(3_000, test_video_frame(3)).is_empty());
         let drained: Vec<u64> = reorder.drain().iter().map(|(pts, _)| *pts).collect();
         assert_eq!(drained, vec![3_000]);
 
         // 同じ PTS のフレームは到着順に取り出される
         let mut reorder = VideoReorder::new(vec![0, 0]);
-        let ready = reorder.push(0, frame(1));
+        let ready = reorder.push(0, test_video_frame(1));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].1.data, vec![1]);
-        let ready = reorder.push(0, frame(2));
+        let ready = reorder.push(0, test_video_frame(2));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].1.data, vec![2]);
     }
@@ -1408,6 +1483,17 @@ mod tests {
         assert!(
             validate_8bit_420(&entry).is_err(),
             "10-bit の H.265 はエラーになること"
+        );
+
+        // H.265: 8-bit 4:2:0 は許容する
+        let SampleEntry::Hvc1(mut hvc1) = entry else {
+            panic!("H.265 サンプルエントリーであること");
+        };
+        hvc1.hvcc_box.bit_depth_luma_minus8 = Uint::new(0);
+        hvc1.hvcc_box.bit_depth_chroma_minus8 = Uint::new(0);
+        assert!(
+            validate_8bit_420(&SampleEntry::Hvc1(hvc1)).is_ok(),
+            "8-bit 4:2:0 の H.265 は許容されること"
         );
     }
 
