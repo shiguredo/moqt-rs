@@ -90,7 +90,7 @@ pub struct Mp4VideoReader {
     codec: PassthroughCodec,
     /// catalog 用のトラック情報
     info: VideoTrackInfo,
-    /// `PROP_VIDEO_CONFIG` に載せる設定データ (avcC / hvcC のレコード本体、AV1 は config OBUs)
+    /// `PROP_VIDEO_CONFIG` に載せる設定データ (avcC / hvcC のレコード本体、AV1 は Sequence Header OBU)
     video_config: Vec<u8>,
     /// 1 周分のメディア尺 (最終サンプルの timestamp + duration)
     loop_duration: u64,
@@ -112,6 +112,8 @@ impl Mp4VideoReader {
     /// - 対応していない映像コーデック (AV1 / H.264 / H.265 以外)
     /// - B フレームを含む (composition time offset が非ゼロのサンプルがある)
     /// - 映像トラックにキーフレームが 1 つも無い
+    /// - av1C の config OBUs にも最初のキーフレームにも AV1 の Sequence Header が無い
+    /// - 設定データに必要なパラメータセット (SPS / PPS / VPS) が無い
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let data = std::fs::read(path).map_err(|e| {
@@ -148,8 +150,8 @@ impl Mp4VideoReader {
         let mut metas: Vec<SampleMeta> = Vec::new();
         let mut sample_entry: Option<SampleEntry> = None;
         let mut first_keyframe_index: Option<usize> = None;
-        // 最初のキーフレームのファイル内位置 (AV1 の config OBUs が空の場合に
-        // payload から Sequence Header を取り出すために使う)
+        // 最初のキーフレームのファイル内位置 (AV1 の Sequence Header を
+        // payload から取り出すために使う)
         let mut first_keyframe_range: Option<(usize, usize)> = None;
         while let Some(sample) = demuxer
             .next_sample()
@@ -551,7 +553,7 @@ fn send_frame(sender: &mpsc::Sender<VideoInput>, stop: &AtomicBool, frame: Encod
 ///
 /// - H.264: AVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §5.2.4.1.1)
 /// - H.265: HEVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §8.3.3.1.2)
-/// - AV1: av1C の config OBUs
+/// - AV1: av1C の config OBUs (`open()` がキーフレーム優先で Sequence Header OBU に置き換える)
 ///
 /// avcC / hvcC は `Encode` がボックスヘッダを含めて出力するため、ヘッダを除いた本体を返す。
 /// moq-sub の MP4 保存はこの形式を前提にサンプルエントリーを再構築する。
@@ -616,16 +618,15 @@ fn strip_box_header(box_bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// AV1 のキーフレーム payload に Sequence Header を付与する
 ///
-/// AV1 ISOBMFF Binding は同期サンプルに Sequence Header OBU を要求するが、
-/// サンプル側に含まれない MP4 にも対応するため、含まれないときだけ av1C の config OBUs を
-/// 先頭に付与する。moq-sub の AV1 デコーダ (dav1d) は payload 内の Sequence Header を
-/// 前提とする。
-fn av1_payload_with_sequence_header(config_obus: &[u8], data: Vec<u8>) -> Vec<u8> {
+/// AV1 Codec ISO Media File Format Binding v1.3.0 §2.4 は同期サンプルに Sequence Header OBU を
+/// 要求するが、含まれない MP4 にも対応するため、含まれないときだけ先頭に付与する。
+/// moq-sub の AV1 デコーダ (dav1d) は payload 内の Sequence Header を前提とする。
+fn av1_payload_with_sequence_header(sequence_header: &[u8], data: Vec<u8>) -> Vec<u8> {
     if crate::encoder::av1::extract_av1_sequence_header(&data).is_some() {
         return data;
     }
     let mut payload = Vec::new();
-    payload.extend_from_slice(config_obus);
+    payload.extend_from_slice(sequence_header);
     payload.extend_from_slice(&data);
     payload
 }
@@ -1008,6 +1009,35 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// av1C の config OBUs とキーフレームの両方に Sequence Header がある場合は
+    /// キーフレームの Sequence Header を使うこと
+    #[test]
+    fn reader_prefers_sequence_header_from_keyframe() {
+        let path = temp_path("av1-prefer-keyframe");
+        // config OBUs の Sequence Header の後ろに Metadata OBU を付けて、
+        // どちらの Sequence Header を使ったかを区別できるようにする
+        let mut config_obus = AV1_CONFIG_OBUS.to_vec();
+        config_obus.extend_from_slice(&[0x2A, 0x00]);
+        let entry = build_test_av01_entry_with_config_obus(&config_obus);
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, AV1_CONFIG_OBUS)];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+        let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        let stop = AtomicBool::new(false);
+
+        let keyframe = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(
+            keyframe.video_config.as_deref(),
+            Some(AV1_CONFIG_OBUS),
+            "キーフレームの Sequence Header が使われること"
+        );
+        assert_eq!(keyframe.data, AV1_CONFIG_OBUS, "payload は変更されないこと");
+
+        std::fs::remove_file(&path).ok();
+    }
+
     /// av1C の config OBUs もキーフレームの Sequence Header も無い MP4 を拒否すること
     #[test]
     fn reader_rejects_av1_without_sequence_header() {
@@ -1054,6 +1084,11 @@ mod tests {
         assert!(
             average_fps(1, 0, 1_000).is_err(),
             "尺が 0 の場合はエラーになること"
+        );
+        // 四捨五入して 0 fps になる場合もエラー
+        assert!(
+            average_fps(1, 3_000, 1_000).is_err(),
+            "平均が 0 fps に丸められる場合はエラーになること"
         );
     }
 

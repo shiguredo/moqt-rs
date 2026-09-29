@@ -356,6 +356,13 @@ mod tests {
         }
     }
 
+    /// `--input-mp4` が空文字の場合はエラーになること
+    #[test]
+    fn input_mp4_rejects_empty_path() {
+        let args = [BASE_ARGS, &["--input-mp4", ""]].concat();
+        assert!(parse_args(&args).is_err(), "空のパスはエラーになること");
+    }
+
     /// `--input-mp4` では音声トラックを配信しないこと
     #[test]
     fn input_mp4_disables_audio_track() {

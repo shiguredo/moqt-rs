@@ -596,6 +596,6 @@
   - AV1 / H.264 / H.265 の MP4 に対応し、codec 文字列 / 解像度 / フレームレート / 最大ビットレートは MP4 から算出して catalog に載せる
   - 音声トラックは配信せず、catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)
   - B フレームを含む MP4 は拒否する
-  - 末尾に達したら先頭に戻り、ループ時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
+  - 末尾に達したら先頭に戻り、周回時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
   - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
   - @voluntas
