@@ -60,6 +60,18 @@ impl VideoDecoder {
         }
     }
 
+    /// デコーダが内部に保持している遅延フレームを吐き切る (周回の末尾で使う)
+    ///
+    /// AV1 (dav1d) だけが遅延フレームを持つ。Video Toolbox は各フレームを即座に出力するため
+    /// 常に空を返す。`reset` より前に呼ぶこと (`reset` は遅延フレームを破棄する)。
+    pub fn drain_delayed(&mut self) -> Result<Vec<DecodedVideoFrame>> {
+        match self {
+            VideoDecoder::Av1(d) => d.drain_delayed(),
+            #[cfg(target_os = "macos")]
+            VideoDecoder::H264(_) | VideoDecoder::H265(_) => Ok(Vec::new()),
+        }
+    }
+
     /// デコーダの内部状態をリセットする (周回の先頭で使う)
     ///
     /// dav1d は内部に保持している遅延フレームを破棄する。Video Toolbox は各フレームを

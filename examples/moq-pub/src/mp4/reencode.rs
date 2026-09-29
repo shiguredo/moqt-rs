@@ -130,6 +130,25 @@ impl PtsQueue {
         self.heap.pop().map(|Reverse(pts)| pts)
     }
 
+    /// 次に取り出される PTS を確認する (取り出さない)
+    ///
+    /// デコーダがサンプルの供給なしにフレームを吐き出したとき (遅延フレームの吐き出し) に、
+    /// そのフレームへ対応付ける PTS を決めるために使う。
+    fn peek_output(&self) -> Option<u64> {
+        self.heap.peek().map(|Reverse(pts)| *pts)
+    }
+
+    /// 指定した PTS が行列の先頭にあれば取り出す
+    ///
+    /// 表示順の保証は [`peek_output`](Self::peek_output) で確認したときに限る。
+    fn take_specific_output(&mut self, pts: u64) -> Option<u64> {
+        if self.peek_output() == Some(pts) {
+            self.take_output()
+        } else {
+            None
+        }
+    }
+
     /// 登録済みの PTS をすべて破棄する (周回の先頭で呼ぶ)
     fn clear(&mut self) {
         self.heap.clear();
@@ -701,8 +720,24 @@ fn run_reader(
             return Ok(());
         }
         let Some(sample) = reader.next_sample()? else {
-            // 周回の末尾: 表示順に確定できなかったフレームを供給してから先頭に戻る
-            if let Some(reorder) = reorder.as_mut()
+            // 周回の末尾: デコーダが内部に保持している遅延フレームを吐き切ってから、
+            // 表示順に確定できなかったフレームを供給する。吐き切る処理を `reorder.drain()`
+            // より後に置くと、吐き出したフレームは `next_index` が末尾のため積まれるだけで
+            // 供給されず、その後の `VideoReorder` の作り直しで破棄される
+            if let (Some(decoder), Some(sender)) =
+                (reader.video_decoder.as_mut(), video_sender.as_ref())
+            {
+                let delayed = decoder.drain_delayed()?;
+                if let Some(reorder) = reorder.as_mut() {
+                    drain_delayed_frames(delayed, reorder, &mut pts_queue, sender, &stop);
+                    for (timestamp, frame) in reorder.drain() {
+                        let input = VideoInput::Reencode { frame, timestamp };
+                        if !send_with_backpressure(sender, &stop, input) {
+                            return Ok(());
+                        }
+                    }
+                }
+            } else if let Some(reorder) = reorder.as_mut()
                 && let Some(sender) = video_sender.as_ref()
             {
                 for (timestamp, frame) in reorder.drain() {
@@ -893,6 +928,36 @@ fn validate_8bit_420(entry: &SampleEntry) -> Result<()> {
     Ok(())
 }
 
+/// デコーダが吐き出した遅延フレームを PTS に対応付けて並べ替えバッファへ流す
+///
+/// 遅延フレームの入力サンプルは前の周回で `PtsQueue` に登録済みである
+/// (`push_input` は出力の有無に関わらず呼ばれる)。ここで対応付けないと、
+/// 遅延フレームの PTS が失われたまま `pts_queue.clear()` で破棄される。
+/// 対応付けられないフレーム (PTS が余っていない) は供給せずに破棄する。
+/// 表示順に確定したフレームは [`VideoReorder::push`] の戻り値として供給する。
+fn drain_delayed_frames(
+    delayed: Vec<DecodedVideoFrame>,
+    reorder: &mut VideoReorder,
+    pts_queue: &mut PtsQueue,
+    sender: &mpsc::Sender<VideoInput>,
+    stop: &Arc<AtomicBool>,
+) {
+    for frame in delayed {
+        let Some(pts) = pts_queue.peek_output() else {
+            tracing::warn!("No pending PTS for a delayed decode frame; dropping the frame");
+            continue;
+        };
+        if let Some(pts) = pts_queue.take_specific_output(pts) {
+            for (timestamp, frame) in reorder.push(pts, into_video_frame(frame)) {
+                let input = VideoInput::Reencode { frame, timestamp };
+                if !send_with_backpressure(sender, stop, input) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// デコード済み I420 フレームを packed NV12 のフレームに変換する
 ///
 /// 既存のエンコーダは stride 付き入力を取らないため、パディングの無いバッファにする。
@@ -1067,6 +1132,44 @@ mod tests {
         queue.push_input(300);
         queue.clear();
         assert_eq!(queue.take_output(), None);
+    }
+
+    /// 遅延フレームへ対応付ける PTS を、表示順の最小値として確認してから取り出せること
+    ///
+    /// デコーダがサンプルの供給なしにフレームを吐き出したときは、残っている入力 PTS の
+    /// うち表示順で最小のものを対応付ける。`peek_output` と `take_specific_output` の
+    /// 組み合わせでその対応付けができることを固定する。
+    #[test]
+    fn pts_queue_peeks_and_takes_the_minimum_pts() {
+        let mut queue = PtsQueue::new();
+        queue.push_input(300);
+        queue.push_input(100);
+        queue.push_input(200);
+
+        assert_eq!(
+            queue.peek_output(),
+            Some(100),
+            "最小の PTS を確認できること"
+        );
+        assert_eq!(
+            queue.peek_output(),
+            Some(100),
+            "確認だけでは取り出さないこと"
+        );
+        assert_eq!(
+            queue.take_specific_output(200),
+            None,
+            "先頭でない PTS は取り出さないこと"
+        );
+        assert_eq!(queue.take_specific_output(100), Some(100));
+        assert_eq!(queue.peek_output(), Some(200));
+
+        assert_eq!(queue.take_specific_output(200), Some(200));
+        assert_eq!(queue.peek_output(), Some(300));
+
+        // PTS が余っていない場合は確認できない (遅延フレームを破棄する判断に使う)
+        assert_eq!(queue.take_specific_output(300), Some(300));
+        assert_eq!(queue.peek_output(), None);
     }
 
     /// テスト用の生フレームを構築する

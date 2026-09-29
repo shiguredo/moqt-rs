@@ -1,7 +1,7 @@
 # moq-pub の再エンコード配信で AV1 の遅延フレームが周回時に欠落する
 
 - Created: 2026-09-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-30
 - Branch: feature/fix-mp4-reencode-delayed-frames
 - Polished: 2026-09-29
 
@@ -31,4 +31,21 @@
 
 ## 解決方法
 
-{対応後に追記する}
+`examples/moq-pub/src/decoder/av1.rs` に `Av1Decoder::drain_delayed` を追加し、`examples/moq-pub/src/mp4/reencode.rs` の周回末尾で `reset` (dav1d の `flush`) より先に呼ぶようにした。
+
+- `Av1Decoder::drain_delayed`: `shiguredo_dav1d::Decoder::finish` を呼んだ後、`next_frame` の列挙が空になるまで繰り返してバッファ内のデコード済みフレームを取り出す。フレームの取り出しは `decode` と共通の `take_frames_until_eagain` に集約した (dav1d の NOTE は「`dav1d_get_picture` が EAGAIN を返した後にもう一度呼び出すと、強制的にバッファ内のデコード画像が取得される」と定める)
+- `VideoDecoder::drain_delayed`: AV1 は `Av1Decoder::drain_delayed` に委譲し、Video Toolbox (H.264 / H.265) はフレームを遅延させないため常に空を返す
+- `reencode.rs` の周回末尾 (`next_sample` が `None` を返した分岐) で、`reorder.drain()` より前に `decoder.drain_delayed()` を呼び、取得したフレームを `drain_delayed_frames` で PTS に対応付けて `VideoReorder` へ流す。`reorder.drain()` の後に置くと、吐き出したフレームは `next_index` が末尾のため積まれるだけで供給されず、その後の `VideoReorder` の作り直しで破棄される
+- `drain_delayed_frames`: 遅延フレームの入力サンプルは前の周回で `PtsQueue::push_input` に登録済みであるため、残っている PTS のうち表示順で最小のものを対応付ける。対応付けられないフレームは供給せずに破棄する (warn ログ)。対応付けのための `PtsQueue::peek_output` と `PtsQueue::take_specific_output` を追加した
+
+追加したテスト:
+
+- `pts_queue_peeks_and_takes_the_minimum_pts`: 遅延フレームへ対応付ける PTS を表示順の最小値として確認してから取り出せること、先頭でない PTS は取り出さないこと、PTS が余っていなければ確認できないことを固定した
+
+未実施の確認:
+
+- 実機確認は relay が必要なため行っていない。フレーム遅延のある AV1 (alt-ref を含む) を用意できれば、`--input-mp4-reencode` で 2 周させて供給フレーム数が入力サンプル数の 2 倍になることで確認できる
+- 手元で用意できた AV1 (SVT-AV1 で生成した MP4) は dav1d が各サンプルで 1 フレームを即座に出力する (遅延フレームが発生しない) ため、この入力では `drain_delayed` が空を返すこと (既存経路に影響しないこと) だけを確認した
+- 内蔵の AV1 エンコーダ (libaom realtime) は lookahead を持たないため、alt-ref を含むテスト入力をリポジトリ内で生成できない
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。

@@ -635,3 +635,6 @@
 - [FIX] WT_CLOSE_SESSION 受信後に CONNECT stream へ追加データが届いたとき、H3_MESSAGE_ERROR でストリームを reset する
   - セッション終了後の追加データだけを対象にし、セッション終了前の malformed capsule は従来どおりセッション終了として扱う
   - @voluntas
+- [FIX] `moq-pub --input-mp4-reencode` の AV1 で、デコーダが保持する遅延フレームを周回の末尾に吐き切る
+  - `flush` (reset) の前に吐き切ることで、フレーム遅延のある AV1 でも周回をまたいでフレームが欠落しない
+  - @voluntas
