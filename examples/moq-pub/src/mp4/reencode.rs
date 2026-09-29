@@ -72,7 +72,7 @@ struct VideoTrack {
     /// 平均フレームレート (四捨五入)
     fps: u32,
     timescale: u64,
-    /// トラックの尺 (最終サンプルの timestamp + duration)
+    /// トラックの尺 (DTS 順の最終サンプルと表示終端の大きい方)
     duration: u64,
     /// 1 周分の表示順 PTS 列 (昇順)
     display_pts: Vec<u64>,
@@ -307,7 +307,7 @@ impl Mp4ReencodeReader {
         let mut video_first_duration: Option<u32> = None;
         let mut video_variable_frame_rate = false;
         let mut video_pre_keyframe_samples = 0u64;
-        let mut last_video_duration = 0u32;
+        let mut max_display_end = 0u64;
         // 表示順 PTS 列の算出と AV1 の Sequence Header 検証に使う
         let mut video_pts: Vec<u64> = Vec::new();
         let mut first_keyframe_range: Option<(usize, usize)> = None;
@@ -355,11 +355,13 @@ impl Mp4ReencodeReader {
                     _ => {}
                 }
                 video_sample_count += 1;
-                video_pts.push(compute_pts(
-                    sample.timestamp,
-                    sample.composition_time_offset,
-                ));
-                last_video_duration = sample.duration;
+                let pts = compute_pts(sample.timestamp, sample.composition_time_offset);
+                video_pts.push(pts);
+                // 表示上の終端 (PTS + 尺) を追う (B フレームでは DTS の終端より後ろになる)
+                max_display_end = max_display_end.max(
+                    pts.checked_add(u64::from(sample.duration))
+                        .ok_or_else(|| Error::Other("MP4 duration is out of range".to_string()))?,
+                );
                 video_duration = sample
                     .timestamp
                     .checked_add(u64::from(sample.duration))
@@ -424,6 +426,7 @@ impl Mp4ReencodeReader {
                 });
                 let config_sequence_header =
                     crate::encoder::av1::extract_av1_sequence_header(&config);
+                let config_has_sequence_header = config_sequence_header.is_some();
                 let Some(sequence_header) = keyframe_sequence_header.or(config_sequence_header)
                 else {
                     return Err(Error::Other(format!(
@@ -432,7 +435,7 @@ impl Mp4ReencodeReader {
                     )));
                 };
                 // av1C に Sequence Header が無い場合はキーフレームのものを設定に使う
-                if crate::encoder::av1::extract_av1_sequence_header(&config).is_none() {
+                if !config_has_sequence_header {
                     config = sequence_header;
                 }
             }
@@ -447,13 +450,7 @@ impl Mp4ReencodeReader {
                 video_timescale.expect("video timescale is captured for the video track");
             // 表示上の終端でも周回の周期が足りるようにする (B フレームでは PTS が
             // DTS より後ろになることがある)
-            if let Some(max_pts) = video_pts.iter().copied().max() {
-                video_duration = video_duration.max(
-                    max_pts
-                        .checked_add(u64::from(last_video_duration))
-                        .ok_or_else(|| Error::Other("MP4 duration is out of range".to_string()))?,
-                );
-            }
+            video_duration = video_duration.max(max_display_end);
             let fps = average_fps(video_sample_count, video_duration, timescale)?;
             if video_variable_frame_rate {
                 tracing::warn!(
@@ -680,10 +677,12 @@ fn run_reader(
     // 表示順に並べ替えるバッファ (映像を配信しない場合は None)
     //
     // 期待値には周回オフセットを反映する (rewind のたびに作り直す)。
-    let mut reorder = reader
-        .video
-        .as_ref()
-        .map(|video| VideoReorder::new(display_pts_with_offset(&video.display_pts, 0)));
+    let mut reorder = reader.video.as_ref().map(|video| {
+        VideoReorder::new(display_pts_with_offset(
+            &video.display_pts,
+            reader.video_loop_offset,
+        ))
+    });
     // 20 ms 単位にバッファリングする PCM (S16 interleaved / mono)
     let mut pcm_buf: Vec<i16> = Vec::new();
     // pcm_buf の先頭のタイムスタンプ (トラックの timescale 単位)
