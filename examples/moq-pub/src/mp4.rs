@@ -28,7 +28,7 @@ use crate::fake_capture::sleep_interruptibly;
 use crate::pipeline::VideoInput;
 
 /// パススルー配信に必要な映像トラック情報
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VideoTrackInfo {
     /// RFC 6381 形式の codec 文字列 (例: `avc1.640028`)
     pub codec: String,
@@ -111,7 +111,9 @@ impl Mp4VideoReader {
     /// - 映像トラックにキーフレームが 1 つも無い
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let data = std::fs::read(path)?;
+        let data = std::fs::read(path).map_err(|e| {
+            Error::Other(format!("failed to read MP4 file '{}': {e}", path.display()))
+        })?;
         let mut demuxer = Mp4FileDemuxer::new();
         demuxer.handle_input(Input {
             position: 0,
@@ -322,7 +324,7 @@ impl Mp4VideoReader {
             .map_err(|e| Error::Other(format!("failed to spawn MP4 reader thread: {e}")))?;
 
         Ok(Mp4VideoSource {
-            stop,
+            stop_flag: stop,
             handle: Some(handle),
         })
     }
@@ -335,11 +337,40 @@ impl Mp4VideoReader {
     fn next_frame_paced(&mut self, stop: &AtomicBool) -> Result<Option<EncodedFrame>> {
         loop {
             let Some(sample) = self.next_video_sample()? else {
+                // 1 周分のメディア尺 (最終サンプルの尺を含む) が経過するまで待ってから
+                // 次の周回へ入る。待たずに再開すると、周回ごとに最終サンプルの尺だけ
+                // 実時間より速く進んでしまう。
+                let loop_end = self
+                    .loop_start
+                    .checked_add(media_time_to_duration(
+                        self.loop_duration,
+                        self.info.timescale,
+                    ))
+                    .ok_or_else(|| {
+                        Error::Other("MP4 pacing deadline is out of range".to_string())
+                    })?;
+                let now = Instant::now();
+                if loop_end > now {
+                    if sleep_interruptibly(stop, loop_end - now) {
+                        return Ok(None);
+                    }
+                    // ペーシングの基準を 1 周分だけ進め、周回をまたいでも平均速度を保つ
+                    self.loop_start = loop_end;
+                } else {
+                    // 送信が遅れて周回の終端を過ぎている場合は、追い上げ送信を避けるため
+                    // 基準を現在時刻に戻す
+                    self.loop_start = now;
+                }
                 self.rewind()?;
                 continue;
             };
-            let deadline =
-                self.loop_start + media_time_to_duration(sample.timestamp, self.info.timescale);
+            let deadline = self
+                .loop_start
+                .checked_add(media_time_to_duration(
+                    sample.timestamp,
+                    self.info.timescale,
+                ))
+                .ok_or_else(|| Error::Other("MP4 pacing deadline is out of range".to_string()))?;
             let now = Instant::now();
             if deadline > now && sleep_interruptibly(stop, deadline - now) {
                 return Ok(None);
@@ -406,6 +437,8 @@ impl Mp4VideoReader {
     }
 
     /// 次の周回の先頭に戻る
+    ///
+    /// ペーシングの基準時刻 (`loop_start`) は呼び出し側が周回の境界で進める。
     fn rewind(&mut self) -> Result<()> {
         self.loop_offset = self
             .loop_offset
@@ -414,7 +447,6 @@ impl Mp4VideoReader {
         self.demuxer
             .seek(Duration::ZERO)
             .map_err(|e| Error::Other(format!("failed to seek MP4 file: {e}")))?;
-        self.loop_start = Instant::now();
         self.need_keyframe = true;
         Ok(())
     }
@@ -422,15 +454,30 @@ impl Mp4VideoReader {
 
 /// MP4 リーダースレッドの生存管理
 ///
-/// Drop 時に停止要求を出してスレッドを join する。
+/// Drop 時に停止要求を出してスレッドを join する。実行時エラーを確認したい場合は
+/// [`Mp4VideoSource::stop`] を呼ぶ。
 pub struct Mp4VideoSource {
-    stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    stop_flag: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<Result<()>>>,
+}
+
+impl Mp4VideoSource {
+    /// 停止要求を出してスレッドを join し、リーダーの実行結果を返す
+    pub fn stop(mut self) -> Result<()> {
+        self.stop_flag.store(true, Ordering::Release);
+        match self.handle.take() {
+            Some(handle) => handle
+                .join()
+                .map_err(|_| Error::Other("MP4 reader thread panicked".to_string()))?,
+            None => Ok(()),
+        }
+    }
 }
 
 impl Drop for Mp4VideoSource {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        // 明示的に stop() されなかった場合はここで停止する (実行結果は破棄する)
+        self.stop_flag.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -438,20 +485,21 @@ impl Drop for Mp4VideoSource {
 }
 
 /// リーダースレッドの本体
-fn run_reader(mut reader: Mp4VideoReader, stop: Arc<AtomicBool>, sender: mpsc::Sender<VideoInput>) {
+fn run_reader(
+    mut reader: Mp4VideoReader,
+    stop: Arc<AtomicBool>,
+    sender: mpsc::Sender<VideoInput>,
+) -> Result<()> {
     loop {
         match reader.next_frame_paced(&stop) {
             Ok(Some(frame)) => {
                 if !send_frame(&sender, &stop, frame) {
-                    break;
+                    return Ok(());
                 }
             }
             // 停止要求
-            Ok(None) => break,
-            Err(e) => {
-                tracing::error!("MP4 reader stopped: {e}");
-                break;
-            }
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(e),
         }
     }
 }
@@ -507,9 +555,11 @@ fn video_config_from_sample_entry(entry: &SampleEntry) -> Result<Vec<u8>> {
                 .map_err(|e| Error::Other(format!("failed to encode hvcC box: {e}")))?,
         ),
         SampleEntry::Av01(b) => {
+            // av1C の configOBUs は 0 個も許容されるが、PROP_VIDEO_CONFIG が空だと受信側で
+            // トラックを構成できないため、設定 OBU の無い MP4 は拒否する
             if b.av1c_box.config_obus.is_empty() {
                 return Err(Error::Other(
-                    "av1C box has no config OBUs; the Sequence Header is required for AV1 decoding"
+                    "av1C box has no config OBUs; they are required to publish the AV1 track"
                         .to_string(),
                 ));
             }
@@ -530,9 +580,10 @@ fn strip_box_header(box_bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// AV1 のキーフレーム payload に Sequence Header を付与する
 ///
-/// av1C の config OBUs には Sequence Header が含まれるが、MP4 のサンプル側には
-/// 含まれない場合がある。moq-sub の AV1 デコーダ (dav1d) は payload 内の Sequence Header を
-/// 前提とするため、含まれないときだけ config OBUs を先頭に付与する。
+/// AV1 ISOBMFF Binding は同期サンプルに Sequence Header OBU を要求するが、
+/// サンプル側に含まれない MP4 にも対応するため、含まれないときだけ av1C の config OBUs を
+/// 先頭に付与する。moq-sub の AV1 デコーダ (dav1d) は payload 内の Sequence Header を
+/// 前提とする。
 fn av1_payload_with_sequence_header(config_obus: &[u8], data: Vec<u8>) -> Vec<u8> {
     if crate::encoder::av1::extract_av1_sequence_header(&data).is_some() {
         return data;
@@ -616,11 +667,14 @@ mod tests {
     use std::num::NonZeroU32;
     use std::path::PathBuf;
 
+    use shiguredo_mp4::Uint;
     use shiguredo_mp4::bitstream::av1::{Av1SampleEntryConfig, build_av01_box_from_config_obus};
     use shiguredo_mp4::bitstream::h264::{H264SampleEntryConfig, LengthSize, build_avc1_box};
     use shiguredo_mp4::bitstream::h265::{
         H265ConstantFrameRate, H265SampleEntryConfig, build_hvc1_box,
     };
+    use shiguredo_mp4::bitstream::opus::{ChannelCount, OpusSampleEntryConfig, build_opus_box};
+    use shiguredo_mp4::boxes::{VisualSampleEntryFields, Vp09Box, VpccBox};
     use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
 
     use super::*;
@@ -683,10 +737,11 @@ mod tests {
 
     /// テスト用の MP4 ファイルを書き出す
     ///
-    /// 全サンプルは映像トラックに属し、`samples` は (キーフレームかどうか, 尺, データ) の列である。
+    /// `samples` は (キーフレームかどうか, 尺, データ) の列である。
     fn write_test_mp4(
         path: &Path,
         entry: &SampleEntry,
+        track_kind: TrackKind,
         timescale: u32,
         composition_time_offsets: &[i64],
         samples: &[(bool, u32, &[u8])],
@@ -702,7 +757,7 @@ mod tests {
             file.write_all(data)
                 .expect("サンプルデータを書き込めること");
             let sample = Sample {
-                track_kind: TrackKind::Video,
+                track_kind,
                 sample_entry: (i == 0).then(|| entry.clone()),
                 keyframe: *keyframe,
                 timescale: NonZeroU32::new(timescale).expect("timescale は非ゼロであること"),
@@ -801,15 +856,7 @@ mod tests {
     /// AV1 の av1C から config OBUs を取り出せること
     #[test]
     fn video_config_from_av01_sample_entry() {
-        let entry = SampleEntry::Av01(
-            build_av01_box_from_config_obus(
-                AV1_CONFIG_OBUS,
-                &Av1SampleEntryConfig {
-                    initial_presentation_delay_minus_one: None,
-                },
-            )
-            .expect("AV1 サンプルエントリーを構築できること"),
-        );
+        let entry = build_test_av01_entry();
         let config = video_config_from_sample_entry(&entry).expect("config OBUs を取り出せること");
         assert_eq!(config, AV1_CONFIG_OBUS, "config OBUs がそのまま返ること");
     }
@@ -920,7 +967,7 @@ mod tests {
             (false, 3_000, &[0x06, 0x07]),
             (false, 3_000, &[0x08]),
         ];
-        write_test_mp4(&path, &entry, 90_000, &[], samples);
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
 
         let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
         let info = reader.info();
@@ -977,7 +1024,14 @@ mod tests {
         let path = temp_path("b-frames");
         let entry = build_test_avc1_entry();
         let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, &[0x01]), (false, 3_000, &[0x02])];
-        write_test_mp4(&path, &entry, 90_000, &[0, 3_000], samples);
+        write_test_mp4(
+            &path,
+            &entry,
+            TrackKind::Video,
+            90_000,
+            &[0, 3_000],
+            samples,
+        );
 
         let Err(error) = Mp4VideoReader::open(&path) else {
             panic!("B フレームがあるとエラーになること");
@@ -985,6 +1039,236 @@ mod tests {
         assert!(
             error.to_string().contains("B frames"),
             "B フレームが原因であることが分かること: {error}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// テスト用の VP9 サンプルエントリーを構築する (未対応コーデックの検証用)
+    fn build_test_vp09_entry() -> SampleEntry {
+        SampleEntry::Vp09(Vp09Box {
+            visual: VisualSampleEntryFields {
+                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+                width: 640,
+                height: 480,
+                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+            },
+            vpcc_box: VpccBox {
+                profile: 0,
+                level: 31,
+                bit_depth: Uint::new(8),
+                chroma_subsampling: Uint::new(1),
+                video_full_range_flag: Uint::new(0),
+                colour_primaries: 1,
+                transfer_characteristics: 1,
+                matrix_coefficients: 1,
+                codec_initialization_data: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        })
+    }
+
+    /// テスト用の AV1 サンプルエントリーを構築する
+    fn build_test_av01_entry() -> SampleEntry {
+        SampleEntry::Av01(
+            build_av01_box_from_config_obus(
+                AV1_CONFIG_OBUS,
+                &Av1SampleEntryConfig {
+                    initial_presentation_delay_minus_one: None,
+                },
+            )
+            .expect("AV1 サンプルエントリーを構築できること"),
+        )
+    }
+
+    /// 周回は 1 周分のメディア尺 (最終サンプルの尺を含む) 以上かかること
+    ///
+    /// 最終サンプルの尺を待たずに次の周回へ入ると、周回ごとにその分だけ実時間より速く進む。
+    #[test]
+    fn reader_loop_takes_the_whole_media_duration() {
+        let path = temp_path("loop-timing");
+        let entry = build_test_avc1_entry();
+        // timescale 1000、500 ms のサンプル 2 個で 1 秒のクリップ
+        let samples: &[(bool, u32, &[u8])] = &[(true, 500, &[0x01]), (false, 500, &[0x02])];
+        write_test_mp4(&path, &entry, TrackKind::Video, 1_000, &[], samples);
+        let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        let stop = AtomicBool::new(false);
+
+        let started = Instant::now();
+        let first = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(first.timestamp, 0);
+        let second = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(second.timestamp, 500);
+
+        // 2 周目の先頭は 1 周分の尺 (1000 ms) が経過するまで返らない。
+        // 負荷による遅延を見込んで 800 ms を下限にする (最終サンプルの尺を待たない
+        // 実装では 500 ms 程度で返ってしまう)。
+        let looped = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(looped.timestamp, 1_000);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "周回は 1 周分のメディア尺 (1000 ms) 以上かかること: {elapsed:?}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 映像トラックを持たない MP4 を拒否すること
+    #[test]
+    fn reader_rejects_mp4_without_video_track() {
+        let path = temp_path("audio-only");
+        let entry = SampleEntry::Opus(build_opus_box(&OpusSampleEntryConfig {
+            channel_count: ChannelCount::Mono,
+            pre_skip: 0,
+            input_sample_rate: 48_000,
+            output_gain: 0,
+        }));
+        let samples: &[(bool, u32, &[u8])] = &[(true, 960, &[0x01, 0x02])];
+        write_test_mp4(&path, &entry, TrackKind::Audio, 48_000, &[], samples);
+
+        let Err(error) = Mp4VideoReader::open(&path) else {
+            panic!("映像トラックが無い場合はエラーになること");
+        };
+        assert!(
+            error.to_string().contains("has no video track"),
+            "映像トラックが無いことが分かること: {error}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 対応していない映像コーデックの MP4 を拒否すること
+    #[test]
+    fn reader_rejects_unsupported_video_codec() {
+        let path = temp_path("vp9");
+        let entry = build_test_vp09_entry();
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, &[0x01])];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+
+        let Err(error) = Mp4VideoReader::open(&path) else {
+            panic!("未対応コーデックの場合はエラーになること");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("unsupported video codec") && message.contains("vp09"),
+            "未対応コーデックであることが分かること: {error}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 先頭のキーフレームより前のサンプルを読み飛ばすこと
+    #[test]
+    fn reader_skips_samples_before_the_first_keyframe() {
+        let path = temp_path("leading-non-keyframe");
+        let entry = build_test_avc1_entry();
+        let samples: &[(bool, u32, &[u8])] = &[
+            (false, 3_000, &[0x01]),
+            (true, 3_000, &[0x02]),
+            (false, 3_000, &[0x03]),
+        ];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+        let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        let stop = AtomicBool::new(false);
+
+        let first = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert!(first.is_keyframe, "最初のキーフレームから始まること");
+        assert_eq!(first.timestamp, 3_000);
+
+        let second = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(second.timestamp, 6_000);
+
+        // 周回時は 1 周分の尺 (9000) と先頭キーフレームの時刻 (3000) の和になる
+        let looped = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(looped.timestamp, 12_000);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// AV1 はキーフレームに Sequence Header を付与し、設定を LOC プロパティ用に返すこと
+    #[test]
+    fn reader_publishes_av1_with_sequence_header() {
+        let path = temp_path("av1");
+        let entry = build_test_av01_entry();
+        // キーフレームのサンプルには Sequence Header を含めない (付与を確認する)
+        let samples: &[(bool, u32, &[u8])] = &[
+            (true, 3_000, &[0x32, 0x00]),
+            (false, 3_000, &[0x32, 0x01, 0xAA]),
+        ];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+        let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        assert!(
+            reader.info().codec.starts_with("av01"),
+            "codec は av01 であること"
+        );
+        let stop = AtomicBool::new(false);
+
+        let keyframe = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        let mut expected = AV1_CONFIG_OBUS.to_vec();
+        expected.extend_from_slice(&[0x32, 0x00]);
+        assert_eq!(
+            keyframe.data, expected,
+            "config OBUs が先頭に付与されること"
+        );
+        assert_eq!(
+            keyframe.video_config.as_deref(),
+            Some(AV1_CONFIG_OBUS),
+            "キーフレームに設定が付与されること"
+        );
+
+        let non_keyframe = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(
+            non_keyframe.data,
+            vec![0x32, 0x01, 0xAA],
+            "非キーフレームは変更されないこと"
+        );
+        assert!(non_keyframe.video_config.is_none());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// MP4 として解釈できないファイルを拒否すること
+    #[test]
+    fn reader_rejects_invalid_mp4() {
+        let path = temp_path("invalid");
+        std::fs::write(&path, b"this is not an MP4 file")
+            .expect("テスト用ファイルを書き込めること");
+
+        let Err(error) = Mp4VideoReader::open(&path) else {
+            panic!("MP4 として解釈できない場合はエラーになること");
+        };
+        assert!(
+            error.to_string().contains("failed to read MP4 file"),
+            "MP4 の読み込みに失敗したことが分かること: {error}"
         );
 
         std::fs::remove_file(&path).ok();

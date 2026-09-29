@@ -665,8 +665,13 @@ pub async fn run(
         }
     }
 
-    // MP4 リーダーのスレッドを停止する (Drop で停止要求と join を行う)
-    drop(mp4_source.take());
+    // MP4 リーダーのスレッドを停止して実行時エラーを拾う
+    // (open 時に全サンプルを検証しているため通常は到達しないが、異常終了を正常終了と
+    // 混同しないようにする)
+    let mp4_reader_result = match mp4_source.take() {
+        Some(source) => source.stop(),
+        None => Ok(()),
+    };
 
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
@@ -707,7 +712,7 @@ pub async fn run(
     }
 
     tracing::info!("Pipeline stopped");
-    Ok(())
+    mp4_reader_result
 }
 
 /// macOS 以外で H.264 / H.265 のエンコーダを指定したときのエラーを作る

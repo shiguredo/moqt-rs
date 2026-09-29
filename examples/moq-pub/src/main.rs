@@ -1,6 +1,8 @@
 //! MoQT パブリッシャークライアント
 //!
 //! カメラ / マイクから取得した映像・音声をエンコードし、MoQT relay へ PUBLISH する。
+//! `--input-mp4` を指定した場合はカメラ / マイクを使わず、MP4 ファイルの映像トラックを
+//! 再エンコードせずに PUBLISH する。
 //! draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
