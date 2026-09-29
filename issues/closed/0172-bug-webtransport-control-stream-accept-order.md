@@ -1,7 +1,7 @@
 # WebTransport 経路で制御ストリームの受信が take_uni_receiver の後に accept するため確立できない
 
 - Created: 2026-09-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-30
 - Branch: feature/fix-webtransport-control-stream-accept-order
 - Polished: 2026-09-27
 
@@ -33,3 +33,19 @@
 - 制御ストリームの判別 (先頭の stream type が `SETUP_STREAM_TYPE` か) は既存の純関数と単体テスト (`Session::recv_control_stream_type` と `tests/test_session/timeout_api.rs`) にあり、新規に導入される判定があれば単体テストで固定すること。変更される take / accept の順序と待機中のロックの扱いは I/O ハンドルが必要な範囲であり、レビューで確認すること
 - 0094 の解消後に `https://` の relay へ接続して MOQT の SETUP が成立することを実機で確認すること
 - `make test` / `make clippy` / `make fmt` が通ること
+
+## 解決方法
+
+`examples/tokio-moq/src/moqt_client.rs` の `MoqtClient::establish_wt` で、制御ストリームを単方向受信ストリームの receiver より先に受け取るように順序を直した。
+
+- 変更前は `WtSession::take_uni_receiver` で receiver を取り出した後に `WtSession::accept_uni_stream` を呼んでいた。`accept_uni_stream` は `self.uni_rx.as_mut().ok_or(TransportError::StreamClosed)?` で receiver を取るため、receiver を取り出した後は必ず `Err(StreamClosed)` になり、WebTransport 経路の確立処理がこの段階で終了していた
+- 変更後は session のロックを取った中で `accept_uni_stream` → `take_uni_receiver` → `take_bi_receiver` → `session_state_receiver` の順に呼ぶ。受け取ったストリームは acceptor へ流さず、そのまま制御ストリームとして読む (従来の `wt_recv` と同じ扱い)
+- ロックの保持範囲は制御ストリームの到着を待つ間だけになった。以降は従来どおり receiver を取り出してロック外で待つ
+- 制御ストリームの判別 (先頭の stream type が SETUP_STREAM_TYPE か) は既存の `Session::recv_control_stream_type` をそのまま使う (変更なし)
+
+未実施の確認:
+
+- 実機確認 (0094 の解消後に `https://` の relay へ接続して MOQT の SETUP が成立すること) は、WebTransport セッションの確立が `issues/pending/0094` (s2n-quic の RESET_STREAM_AT 非対応) の解消待ちであるため行っていない
+- take / accept の順序と待機中のロックの扱いは I/O ハンドルが必要で単体テストから構築できないため、レビューで確認した。制御ストリームが acceptor の receiver に流れないことは、`accept_uni_stream` で受け取ったストリームを従来どおり `ControlStream` に渡す (acceptor へは渡さない) 構造で担保している
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。

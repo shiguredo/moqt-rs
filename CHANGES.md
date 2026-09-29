@@ -629,3 +629,6 @@
 - [FIX] WebTransport over HTTP/3 で 32 ビットに収まらない MOQT の close code でも接続を閉じられるようにする
   - 収まらない値は `WT_CLOSE_SESSION` capsule ではなく QUIC の `CONNECTION_CLOSE` に元のコードを載せ、varint の上限を超える値は `Error::UNKNOWN` に落とす
   - @voluntas
+- [FIX] WebTransport over HTTP/3 の接続確立で制御ストリームを単方向受信ストリームの receiver より先に受け取る
+  - `take_uni_receiver` の後に `accept_uni_stream` を呼ぶと `StreamClosed` になり接続確立が必ず失敗していた
+  - @voluntas

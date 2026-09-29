@@ -720,12 +720,18 @@ impl MoqtClient {
     ) -> Result<(Self, StreamAcceptor)> {
         let shared = Arc::new(TokioMutex::new(wt_session));
         let handle = StreamHandle::WtH3(shared.clone());
-        // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
-        // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
-        // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
-        // accept の待機中に観測し、受信ループを待たせないため)。
-        let (wt_uni_rx, wt_bi_rx, session_state) = {
+        // 制御ストリームは単方向受信ストリームの receiver から受け取るため、
+        // `take_uni_receiver` で receiver を acceptor へ渡すより先に accept する。
+        // 逆順にすると `accept_uni_stream` が receiver を取れず `StreamClosed` になる。
+        // session のロックは制御ストリームの到着を待つ間だけ保持する (以降は receiver を
+        // 取り出してロック外で待つ)。
+        let (wt_uni_rx, wt_bi_rx, session_state, wt_recv) = {
             let mut s = shared.lock().await;
+            let wt_recv = s.accept_uni_stream().await?;
+            // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
+            // session のロックを保持しないようにする (`WtSession::take_uni_receiver`)。
+            // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
+            // accept の待機中に観測し、受信ループを待たせないため)。
             let uni_rx = s.take_uni_receiver().ok_or_else(|| {
                 TransportError::Internal("uni stream receiver already taken".into())
             })?;
@@ -733,7 +739,7 @@ impl MoqtClient {
                 TransportError::Internal("bidi stream receiver already taken".into())
             })?;
             let session_state = s.session_state_receiver();
-            (uni_rx, bi_rx, session_state)
+            (uni_rx, bi_rx, session_state, wt_recv)
         };
 
         let wt_send = {
@@ -749,10 +755,8 @@ impl MoqtClient {
         send_control_stream_setup(&mut control_send, &setup_msg).await?;
         tracing::info!("Sent SETUP message");
 
-        let wt_recv = {
-            let mut s = shared.lock().await;
-            s.accept_uni_stream().await?
-        };
+        // 制御ストリームを受け取る順序は `take_uni_receiver` より前である (上記)。
+        // 受け取ったストリームは acceptor へ流さず、ここで制御ストリームとして読む
         let mut control_recv = ControlStream::new(RecvStream::WtH3(wt_recv));
         let stream_type = match control_recv.read_stream_type().await? {
             StreamRead::Value(stream_type) => stream_type,
