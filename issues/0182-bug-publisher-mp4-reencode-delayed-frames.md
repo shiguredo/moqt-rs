@@ -17,7 +17,9 @@
 
 ## 設計方針
 
-- 周回の末尾 (サンプルが尽きた分岐) の `reorder.drain()` より前に、dav1d の遅延フレームを吐き切る処理を追加する。`VideoDecoder::reset` (dav1d の `flush`) はこの直後に呼ばれるため「reset の前」でもあるが、`reorder.drain()` の後に置くと、吐き出したフレームは `VideoReorder` の `next_index` が末尾のため積まれるだけで供給されず、その後の `VideoReorder` の作り直しで破棄される (`pts_queue.clear()` も `reset` の後)。`next_frame()` を `None` の後にもう一度呼ぶ挙動を crate の NOTE に従って使い、取得したフレームは既存の PTS 待ち行列と表示順の並べ替え (`VideoReorder`) に流してから供給する。
+- 周回の末尾 (サンプルが尽きた分岐) の `reorder.drain()` より前に、dav1d の遅延フレームを吐き切る処理を追加する。
+  `VideoDecoder::reset` (dav1d の `flush`) はこの直後に呼ばれるため「reset の前」でもあるが、`reorder.drain()` の後に置くと、吐き出したフレームは `VideoReorder` の `next_index` が末尾のため積まれるだけで供給されず、その後の `VideoReorder` の作り直しで破棄される (`pts_queue.clear()` も `reset` の後)。
+  `next_frame()` を `None` の後にもう一度呼ぶ挙動を crate の NOTE に従って使い、取得したフレームは既存の PTS 待ち行列と表示順の並べ替え (`VideoReorder`) に流してから供給する。
 - 吐き切る処理は `Av1Decoder` にメソッドを追加し、`VideoDecoder` 経由で呼ぶ。Video Toolbox はフレームを遅延させないため何もしない。
 - 遅延フレームが取得できることは、遅延のある AV1 (alt-ref を含むストリーム) を入力にした実機確認で固定する。テスト用の遅延入力を用意できる場合は単体テストでも固定する。
 

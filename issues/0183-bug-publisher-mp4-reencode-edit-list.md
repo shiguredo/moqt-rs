@@ -7,12 +7,16 @@
 
 ## 目的
 
-`moq-pub --input-mp4-reencode` は編集リスト (elst) を適用せず、映像はトラック内 0 起点の DTS と composition_time_offset から求めた PTS をそのまま LOC の Timestamp にする。B フレームを含む映像トラックを持つ MP4 (例: ffmpeg が生成した H.264 + Opus) では、編集リストの `media_time` (先頭フレームの表示オフセット) 分だけ映像が音声より遅れて提示され、A/V がずれる。なお、ffmpeg が生成した AV1 + Opus のように映像の `media_time` が 0 の MP4 では実際にはずれない (後述の実測)。
+`moq-pub --input-mp4-reencode` は編集リスト (elst) を適用せず、映像はトラック内 0 起点の DTS と composition_time_offset から求めた PTS をそのまま LOC の Timestamp にする。
+B フレームを含む映像トラックを持つ MP4 (例: ffmpeg が生成した H.264 + Opus) では、編集リストの `media_time` (先頭フレームの表示オフセット) 分だけ映像が音声より遅れて提示され、A/V がずれる。
+なお、ffmpeg が生成した AV1 + Opus のように映像の `media_time` が 0 の MP4 では実際にはずれない (後述の実測)。
 
 ## 現状
 
 - `examples/moq-pub/src/mp4/reencode.rs` の `compute_pts` はサンプルの `timestamp` と `composition_time_offset` から PTS を求め、編集リストは考慮しない。音声も先頭サンプルのタイムスタンプを起点にするだけである。
-- `shiguredo_mp4` 2026.5.0 の `Mp4FileDemuxer` は編集リストを公開しない。トラック情報の `duration` (mdhd) も編集リストを含まない。一方、編集リストそのものの型 (`MoovBox` / `TrakBox.edts_box` / `EdtsBox.elst_box` / `ElstEntry`) は `shiguredo_mp4::boxes` で公開されている (ただし `ElstEntry.media_time` は media timescale 単位、`edit_duration` は movie timescale 単位の二重 timescale である)。
+- `shiguredo_mp4` 2026.5.0 の `Mp4FileDemuxer` は編集リストを公開しない。
+  トラック情報の `duration` (mdhd) も編集リストを含まない。
+  一方、編集リストそのものの型 (`MoovBox` / `TrakBox.edts_box` / `EdtsBox.elst_box` / `ElstEntry`) は `shiguredo_mp4::boxes` で公開されている (ただし `ElstEntry.media_time` は media timescale 単位、`edit_duration` は movie timescale 単位の二重 timescale である)。
 - 実測 (ffmpeg 6.1.1、libaom-av1 / libsvtav1 + libopus):
   - 生成した AV1 + Opus の MP4 にはトラックごとに 1 エントリの `elst` が入る。映像は `media_time=0`、音声は `media_time=312` (= `dOps` の pre_skip 312、48 kHz 単位)。moq-pub は音声の pre_skip を読み飛ばして先頭タイムスタンプを 0 にし、映像も PTS 0 起点になるため、この MP4 では A/V はずれない。
   - B フレームを含む H.264 + Opus (x264 + libopus) の MP4 では映像の `elst` が `media_time=1024` (timescale 15360、約 66.7 ms、先頭フレームの cts offset と一致) になる。moq-pub は映像の先頭 PTS にこの 1024 をそのまま使い、音声は 0 起点のため、映像が約 66.7 ms 遅れて A/V がずれる。B フレームを含む H.265 も同様である。
