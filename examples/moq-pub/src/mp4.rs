@@ -56,7 +56,9 @@ enum PassthroughCodec {
     H265,
 }
 
-/// ビットレート算出に使うサンプルのメタデータ
+/// MP4 全体を走査して集計するサンプルのメタデータ
+///
+/// 1 周分の尺・平均フレームレート・最大ビットレートの算出に使う。
 struct SampleMeta {
     /// サンプルのタイムスタンプ (トラックの timescale 単位)
     timestamp: u64,
@@ -146,6 +148,9 @@ impl Mp4VideoReader {
         let mut metas: Vec<SampleMeta> = Vec::new();
         let mut sample_entry: Option<SampleEntry> = None;
         let mut first_keyframe_index: Option<usize> = None;
+        // 最初のキーフレームのファイル内位置 (AV1 の config OBUs が空の場合に
+        // payload から Sequence Header を取り出すために使う)
+        let mut first_keyframe_range: Option<(usize, usize)> = None;
         while let Some(sample) = demuxer
             .next_sample()
             .map_err(|e| Error::Other(format!("failed to read MP4 sample: {e}")))?
@@ -172,14 +177,17 @@ impl Mp4VideoReader {
             }
             // 再生時に読めないサンプルがあれば、開始前にエラーとして報告する
             let offset = sample.data_offset as usize;
-            if offset
+            let Some(end) = offset
                 .checked_add(sample.data_size)
-                .is_none_or(|end| end > data.len())
-            {
+                .filter(|end| *end <= data.len())
+            else {
                 return Err(Error::Other(format!(
                     "MP4 file '{}' has a sample outside the file bounds",
                     path.display()
                 )));
+            };
+            if sample.keyframe && first_keyframe_range.is_none() {
+                first_keyframe_range = Some((offset, end));
             }
             metas.push(SampleMeta {
                 timestamp: sample.timestamp,
@@ -221,12 +229,32 @@ impl Mp4VideoReader {
                 path.display()
             ))
         })?;
-        let Some((passthrough_codec, video_config)) = passthrough_codec_and_config(&entry)? else {
+        let Some((passthrough_codec, mut video_config)) = passthrough_codec_and_config(&entry)
+            .map_err(|e| Error::Other(format!("MP4 file '{}': {e}", path.display())))?
+        else {
             return Err(Error::Other(format!(
                 "unsupported video codec in MP4 file '{}': {codec} (supported: AV1 / H.264 / H.265)",
                 path.display()
             )));
         };
+        // AV1 の Video Config はカメラ経路と同じく Sequence Header OBU だけを送る。
+        // av1C の config OBUs に Sequence Header が無い適合ファイルもあるため、最初の
+        // キーフレームの payload から取り出して使う (AV1 Codec ISO Media File Format
+        // Binding v1.3.0 §2.4 は同期サンプルに Sequence Header OBU を要求する)
+        if passthrough_codec == PassthroughCodec::Av1 {
+            let sequence_header = first_keyframe_range
+                .and_then(|(offset, end)| {
+                    crate::encoder::av1::extract_av1_sequence_header(&data[offset..end])
+                })
+                .or_else(|| crate::encoder::av1::extract_av1_sequence_header(&video_config))
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "MP4 file '{}' has no AV1 Sequence Header in the av1C box or the first keyframe",
+                        path.display()
+                    ))
+                })?;
+            video_config = sequence_header;
+        }
         let (width, height) = entry.video_resolution().ok_or_else(|| {
             Error::Other(format!(
                 "MP4 file '{}' has no video resolution",
@@ -334,15 +362,7 @@ impl Mp4VideoReader {
                 // 1 周分のメディア尺 (最終サンプルの尺を含む) が経過するまで待ってから
                 // 次の周回へ入る。待たずに再開すると、周回ごとに最終サンプルの尺だけ
                 // 実時間より速く進んでしまう。
-                let loop_end = self
-                    .loop_start
-                    .checked_add(media_time_to_duration(
-                        self.loop_duration,
-                        self.info.timescale,
-                    ))
-                    .ok_or_else(|| {
-                        Error::Other("MP4 pacing deadline is out of range".to_string())
-                    })?;
+                let loop_end = self.pacing_deadline(self.loop_duration)?;
                 let now = Instant::now();
                 if loop_end > now {
                     if sleep_interruptibly(stop, loop_end - now) {
@@ -358,13 +378,7 @@ impl Mp4VideoReader {
                 self.rewind()?;
                 continue;
             };
-            let deadline = self
-                .loop_start
-                .checked_add(media_time_to_duration(
-                    sample.timestamp,
-                    self.info.timescale,
-                ))
-                .ok_or_else(|| Error::Other("MP4 pacing deadline is out of range".to_string()))?;
+            let deadline = self.pacing_deadline(sample.timestamp)?;
             let now = Instant::now();
             if deadline > now && sleep_interruptibly(stop, deadline - now) {
                 return Ok(None);
@@ -391,6 +405,13 @@ impl Mp4VideoReader {
                 video_config,
             }));
         }
+    }
+
+    /// メディア時刻に対応するペーシング期限を返す
+    fn pacing_deadline(&self, media_time: u64) -> Result<Instant> {
+        self.loop_start
+            .checked_add(media_time_to_duration(media_time, self.info.timescale))
+            .ok_or_else(|| Error::Other("MP4 pacing deadline is out of range".to_string()))
     }
 
     /// 先頭のキーフレームまで読み飛ばして次の映像サンプルを返す
@@ -553,20 +574,10 @@ fn passthrough_codec_and_config(
         }
         SampleEntry::Hvc1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
         SampleEntry::Hev1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
-        SampleEntry::Av01(b) => {
-            // av1C の configOBUs は 0 個も許容されるが、PROP_VIDEO_CONFIG が空だと受信側で
-            // トラックを構成できないため、設定 OBU の無い MP4 は拒否する
-            if b.av1c_box.config_obus.is_empty() {
-                return Err(Error::Other(
-                    "av1C box has no config OBUs; they are required to publish the AV1 track"
-                        .to_string(),
-                ));
-            }
-            Ok(Some((
-                PassthroughCodec::Av1,
-                b.av1c_box.config_obus.clone(),
-            )))
-        }
+        SampleEntry::Av01(b) => Ok(Some((
+            PassthroughCodec::Av1,
+            b.av1c_box.config_obus.clone(),
+        ))),
         _ => Ok(None),
     }
 }
@@ -965,30 +976,53 @@ mod tests {
         );
     }
 
-    /// config OBUs を持たない av1C を拒否すること
+    /// av1C の config OBUs が空でも、キーフレームに Sequence Header があれば配信できること
     #[test]
-    fn passthrough_codec_rejects_av1c_without_config_obus() {
-        let entry = SampleEntry::Av01(Av01Box {
-            visual: test_visual_fields(640, 480),
-            av1c_box: Av1cBox {
-                seq_profile: Uint::new(0),
-                seq_level_idx_0: Uint::new(0),
-                seq_tier_0: Uint::new(0),
-                high_bitdepth: Uint::new(0),
-                twelve_bit: Uint::new(0),
-                monochrome: Uint::new(0),
-                chroma_subsampling_x: Uint::new(1),
-                chroma_subsampling_y: Uint::new(1),
-                chroma_sample_position: Uint::new(0),
-                initial_presentation_delay_minus_one: None,
-                config_obus: Vec::new(),
-            },
-            unknown_boxes: Vec::new(),
-        });
+    fn reader_accepts_av1_without_config_obus_when_keyframe_has_sequence_header() {
+        let path = temp_path("av1-empty-config");
+        let entry = build_test_av01_entry_with_config_obus(&[]);
+        // キーフレームのサンプルに Sequence Header を含める
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, AV1_CONFIG_OBUS)];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+        let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
         assert!(
-            passthrough_codec_and_config(&entry).is_err(),
-            "config OBUs が無い av1C はエラーになること"
+            reader.info().codec.starts_with("av01"),
+            "codec は av01 であること"
         );
+        let stop = AtomicBool::new(false);
+
+        let keyframe = reader
+            .next_frame_paced(&stop)
+            .expect("フレームを読めること")
+            .expect("フレームがあること");
+        assert_eq!(keyframe.data, AV1_CONFIG_OBUS, "payload は変更されないこと");
+        assert_eq!(
+            keyframe.video_config.as_deref(),
+            Some(AV1_CONFIG_OBUS),
+            "キーフレームから取り出した Sequence Header が設定になること"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// av1C の config OBUs もキーフレームの Sequence Header も無い MP4 を拒否すること
+    #[test]
+    fn reader_rejects_av1_without_sequence_header() {
+        let path = temp_path("av1-no-sequence-header");
+        let entry = build_test_av01_entry_with_config_obus(&[]);
+        // Sequence Header を含まないキーフレーム (OBU type 6 の frame OBU のみ)
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, &[0x32, 0x00])];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+
+        let Err(error) = Mp4VideoReader::open(&path) else {
+            panic!("Sequence Header が無い場合はエラーになること");
+        };
+        assert!(
+            error.to_string().contains("no AV1 Sequence Header"),
+            "Sequence Header が無いことが分かること: {error}"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// AV1 のキーフレーム: Sequence Header が無いサンプルには config OBUs を先頭に付与すること
@@ -1108,7 +1142,7 @@ mod tests {
         );
     }
 
-    /// MP4 を読み込んで映像トラック情報を集計し、ループ時にタイムスタンプを加算すること
+    /// MP4 を読み込んで映像トラック情報を集計し、周回時にタイムスタンプを加算すること
     #[test]
     fn reader_reads_video_track_and_loops() {
         let path = temp_path("loop");
@@ -1243,6 +1277,30 @@ mod tests {
         )
     }
 
+    /// config OBUs を直接指定した AV1 サンプルエントリーを構築する
+    ///
+    /// `build_av01_box_from_config_obus` は Sequence Header を要求するため、
+    /// config OBUs が空のファイルを再現するにはこちらを使う。
+    fn build_test_av01_entry_with_config_obus(config_obus: &[u8]) -> SampleEntry {
+        SampleEntry::Av01(Av01Box {
+            visual: test_visual_fields(320, 240),
+            av1c_box: Av1cBox {
+                seq_profile: Uint::new(0),
+                seq_level_idx_0: Uint::new(0),
+                seq_tier_0: Uint::new(0),
+                high_bitdepth: Uint::new(0),
+                twelve_bit: Uint::new(0),
+                monochrome: Uint::new(0),
+                chroma_subsampling_x: Uint::new(1),
+                chroma_subsampling_y: Uint::new(1),
+                chroma_sample_position: Uint::new(0),
+                initial_presentation_delay_minus_one: None,
+                config_obus: config_obus.to_vec(),
+            },
+            unknown_boxes: Vec::new(),
+        })
+    }
+
     /// 周回は 1 周分のメディア尺 (最終サンプルの尺を含む) 以上かかること
     ///
     /// 最終サンプルの尺を待たずに次の周回へ入ると、周回ごとにその分だけ実時間より速く進む。
@@ -1254,6 +1312,8 @@ mod tests {
         let samples: &[(bool, u32, &[u8])] = &[(true, 500, &[0x01]), (false, 500, &[0x02])];
         write_test_mp4(&path, &entry, TrackKind::Video, 1_000, &[], samples);
         let mut reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        // 計測起点のずれでテストが不安定にならないよう、ペーシング基準を計測直前に合わせる
+        reader.loop_start = Instant::now();
         let stop = AtomicBool::new(false);
 
         let started = Instant::now();

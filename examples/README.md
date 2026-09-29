@@ -101,6 +101,8 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
 | `--use-datagram` | | | subgroup stream ではなく datagram で映像 / 音声オブジェクトを配信する (catalog は常に subgroup stream) |
 
+`--input-mp4` を指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視され、警告ログが出る。
+
 ### moq-sub
 
 | オプション | 短縮 | デフォルト | 説明 |

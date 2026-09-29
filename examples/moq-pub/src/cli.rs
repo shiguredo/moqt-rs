@@ -100,7 +100,13 @@ fn take_u32(
 }
 
 pub fn parse() -> noargs::Result<Option<Config>> {
-    let mut args = noargs::raw_args();
+    parse_from(noargs::raw_args())
+}
+
+/// 生の引数から設定をパースする
+///
+/// `--version` / `--help` の場合は `Ok(None)` を返す。
+fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     args.metadata_mut().app_name = env!("CARGO_PKG_NAME");
     args.metadata_mut().app_description = env!("CARGO_PKG_DESCRIPTION");
 
@@ -313,4 +319,64 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         use_datagram,
         input_mp4,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 引数リストをパースする (先頭はプログラム名として扱われる)
+    fn parse_args(args: &[&str]) -> noargs::Result<Option<Config>> {
+        let mut all = vec![env!("CARGO_PKG_NAME").to_string()];
+        all.extend(args.iter().map(|arg| arg.to_string()));
+        parse_from(noargs::RawArgs::new(all.into_iter()))
+    }
+
+    /// テスト用の必須引数
+    const BASE_ARGS: &[&str] = &["--url", "moqt://127.0.0.1:4443"];
+
+    /// `--input-mp4` と明示指定した映像オプションの併用がエラーになること
+    #[test]
+    fn input_mp4_rejects_explicit_video_options() {
+        let cases: &[&[&str]] = &[
+            &["--video-codec", "h264"],
+            &["--width", "640"],
+            &["--height", "480"],
+            &["--fps", "60"],
+            &["--no-video"],
+        ];
+        for extra in cases {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--input-mp4", "input.mp4"]);
+            args.extend_from_slice(extra);
+            assert!(
+                parse_args(&args).is_err(),
+                "併用はエラーになること: {args:?}"
+            );
+        }
+    }
+
+    /// `--input-mp4` では音声トラックを配信しないこと
+    #[test]
+    fn input_mp4_disables_audio_track() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--input-mp4", "input.mp4"]);
+        let config = parse_args(&args)
+            .expect("パースできること")
+            .expect("設定が返ること");
+        assert_eq!(config.input_mp4.as_deref(), Some("input.mp4"));
+        assert!(config.video_enabled, "映像トラックは有効であること");
+        assert!(!config.audio_enabled, "音声トラックは配信しないこと");
+    }
+
+    /// `--input-mp4` を指定しない場合は映像 / 音声の既定が変わらないこと
+    #[test]
+    fn without_input_mp4_keeps_audio_enabled() {
+        let config = parse_args(BASE_ARGS)
+            .expect("パースできること")
+            .expect("設定が返ること");
+        assert!(config.input_mp4.is_none());
+        assert!(config.video_enabled, "映像トラックは有効であること");
+        assert!(config.audio_enabled, "音声トラックは有効であること");
+    }
 }

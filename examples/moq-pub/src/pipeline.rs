@@ -243,7 +243,7 @@ pub async fn run(
         )
         .await?;
 
-    // 3. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
+    // 4. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
     // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
     let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
         && mp4_reader.is_none()
@@ -308,7 +308,7 @@ pub async fn run(
         .as_ref()
         .map(|_| build_opus_head(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS));
 
-    // 4. MSF カタログを送信する
+    // 5. MSF カタログを送信する
     let handle = client.handle();
     let catalog_json = catalog::send_catalog(catalog::CatalogParams {
         handle: &handle,
@@ -351,7 +351,7 @@ pub async fn run(
     })
     .await?;
 
-    // 5. 映像 / 音声入力を起動する
+    // 6. 映像 / 音声入力を起動する
     //
     // MP4 リーダーの停止は Drop で行う。Drop は宣言と逆順に実行されるため、
     // 受信側 (video_input_rx) を先に閉じてから join できるよう mp4_source を先に宣言する。
@@ -387,7 +387,7 @@ pub async fn run(
         None
     };
 
-    // 6. データループ
+    // 7. データループ
     let start = Instant::now();
     let mut video_group_id: u64 = 0;
     let mut audio_group_id: u64 = 0;
