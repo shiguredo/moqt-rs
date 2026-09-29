@@ -453,6 +453,28 @@
   - DPoP の Authorization Context の `tns` / `tn` の表現に使う
   - @voluntas
 
+- [ADD] moq-sub に `--mp4` と `--no-play` を追加し、受信した映像 / 音声を MP4 ファイルへ保存できるようにする
+  - 受信したエンコード済みサンプル (AV1 / H.264 / H.265 / Opus) を再エンコードせずに `shiguredo_mp4` の `Mp4FileMuxer` で mux する
+  - `--no-play` は再生を無効化し、SDL を初期化せずデコードも行わない (受信と録画だけを行う)
+  - 録画対象のサンプルが無い場合はファイルを作成せず、既存ファイルを指定した場合は上書きする
+  - datagram 経由で届いたメディアは録画対象外とする (subgroup stream と fetch 応答ストリームのみ対応)
+  - @voluntas
+- [ADD] moq-pub に `--input-mp4` を追加し、MP4 ファイルの映像トラックを再エンコードせずに配信できるようにする
+  - AV1 / H.264 / H.265 の MP4 に対応し、codec 文字列 / 解像度 / フレームレート / 最大ビットレートは MP4 から算出して catalog に載せる
+  - 音声トラックは配信せず、catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)
+  - B フレームを含む MP4 は拒否する
+  - 末尾に達したら先頭に戻り、周回時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
+  - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
+  - @voluntas
+- [ADD] moq-pub に `--input-mp4-reencode` を追加し、MP4 ファイルの映像 / 音声をデコードして再エンコード配信できるようにする
+  - 映像は AV1 / H.264 / H.265 をデコードして `--video-codec` (既定 av1) で再エンコードし、音声は Opus を 48 kHz / 1ch にデコードして `--audio-bitrate` で再エンコードする
+  - 解像度とフレームレートは MP4 から自動検出し、`--bitrate` / `--keyframe-interval` は再エンコードの設定として使う
+  - B フレームを含む MP4 に対応し、デコード順 (DTS) でデコードして表示順 (PTS) でエンコードへ供給する。入力サンプルのタイムスタンプを LOC Timestamp に使い、`PROP_TIMESCALE` は入力トラックの timescale を使う
+  - ループの周期は映像と音声のトラック尺の最大値とし、各トラックは周期の先頭から再開する (周期より短いトラックは残りを送信しない)
+  - 8-bit 4:2:0 以外の映像はエラーにし、Opus 以外の音声は警告して対象外にする
+  - `--input-mp4` との同時指定と `--width` / `--height` / `--fps` の併用はエラーにし、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視して警告する
+  - @voluntas
+
 ### misc
 
 - [ADD] secrets.TEST_MOQT_URI の relay へ moq-pub を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
@@ -585,25 +607,4 @@
   - @voluntas
 - [FIX] example の publisher / subscriber が接続先の名前解決に応答が無いときに起動し続けるのを止める
   - 名前解決を 5 秒で打ち切り、`failed to resolve ...: name resolution timed out after 5s` を表示して終了する
-  - @voluntas
-- [ADD] moq-sub に `--mp4` と `--no-play` を追加し、受信した映像 / 音声を MP4 ファイルへ保存できるようにする
-  - 受信したエンコード済みサンプル (AV1 / H.264 / H.265 / Opus) を再エンコードせずに `shiguredo_mp4` の `Mp4FileMuxer` で mux する
-  - `--no-play` は再生を無効化し、SDL を初期化せずデコードも行わない (受信と録画だけを行う)
-  - 録画対象のサンプルが無い場合はファイルを作成せず、既存ファイルを指定した場合は上書きする
-  - datagram 経由で届いたメディアは録画対象外とする (subgroup stream と fetch 応答ストリームのみ対応)
-  - @voluntas
-- [ADD] moq-pub に `--input-mp4` を追加し、MP4 ファイルの映像トラックを再エンコードせずに配信できるようにする
-  - AV1 / H.264 / H.265 の MP4 に対応し、codec 文字列 / 解像度 / フレームレート / 最大ビットレートは MP4 から算出して catalog に載せる
-  - 音声トラックは配信せず、catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)
-  - B フレームを含む MP4 は拒否する
-  - 末尾に達したら先頭に戻り、周回時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
-  - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
-  - @voluntas
-- [ADD] moq-pub に `--input-mp4-reencode` を追加し、MP4 ファイルの映像 / 音声をデコードして再エンコード配信できるようにする
-  - 映像は AV1 / H.264 / H.265 をデコードして `--video-codec` (既定 av1) で再エンコードし、音声は Opus を 48 kHz / 1ch にデコードして `--audio-bitrate` で再エンコードする
-  - 解像度とフレームレートは MP4 から自動検出し、`--bitrate` / `--keyframe-interval` は再エンコードの設定として使う
-  - B フレームを含む MP4 に対応し、デコード順 (DTS) でデコードして表示順 (PTS) でエンコードへ供給する。入力サンプルのタイムスタンプを LOC Timestamp に使い、`PROP_TIMESCALE` は入力トラックの timescale を使う
-  - ループの周期は映像と音声のトラック尺の最大値とし、各トラックは周期の先頭から再開する (周期より短いトラックは残りを送信しない)
-  - 8-bit 4:2:0 以外の映像はエラーにし、Opus 以外の音声は警告して対象外にする
-  - `--input-mp4` との同時指定と `--width` / `--height` / `--fps` の併用はエラーにし、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視して警告する
   - @voluntas

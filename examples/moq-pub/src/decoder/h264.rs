@@ -14,7 +14,6 @@ const AVC_CONFIG_MIN_LEN: usize = 7;
 /// avcC の到着時に初期化する H.264 デコーダ
 pub struct H264Decoder {
     decoder: Option<Decoder>,
-    nalu_len_bytes: u32,
     last_config: Vec<u8>,
 }
 
@@ -23,7 +22,6 @@ impl H264Decoder {
     pub fn new() -> Result<Self> {
         Ok(Self {
             decoder: None,
-            nalu_len_bytes: 4,
             last_config: Vec::new(),
         })
     }
@@ -50,7 +48,6 @@ impl H264Decoder {
                 self.decoder = Some(Decoder::new(cfg)?);
             }
         }
-        self.nalu_len_bytes = nalu_len_bytes;
         self.last_config = config.to_vec();
         Ok(())
     }

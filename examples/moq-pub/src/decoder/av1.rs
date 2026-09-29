@@ -45,4 +45,11 @@ impl Av1Decoder {
         }
         Ok(frames)
     }
+
+    /// デコーダの内部状態をリセットする (周回の先頭で使う)
+    ///
+    /// 未消費のデータやバッファ中のフレームは破棄される。
+    pub fn reset(&mut self) {
+        self.decoder.flush();
+    }
 }

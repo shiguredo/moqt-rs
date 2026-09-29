@@ -158,7 +158,7 @@ pub async fn run(
     {
         if !config.video_enabled {
             return Err(Error::Other(
-                "MP4 file has no publishable track (video is disabled and the audio track is not Opus)"
+                "MP4 file has no publishable track (video is disabled and no supported audio track)"
                     .to_string(),
             ));
         }
@@ -519,14 +519,11 @@ pub async fn run(
                     };
                     // 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を
                     // 使う。0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ
-                    if let Some(timestamp) = input_timestamp {
-                        pending_video_timestamps.push_back(timestamp);
-                    }
-                    for ef in &mut encoded_frames {
-                        if let Some(timestamp) = pending_video_timestamps.pop_front() {
-                            ef.timestamp = timestamp;
-                        }
-                    }
+                    assign_input_timestamps(
+                        &mut pending_video_timestamps,
+                        input_timestamp,
+                        &mut encoded_frames,
+                    );
                     let timescale = video_timescale.expect("video timescale enabled");
                     for ef in encoded_frames {
                         if ef.is_keyframe {
@@ -610,18 +607,25 @@ pub async fn run(
                         audio_samples_per_frame.expect("audio samples_per_frame enabled");
                     let timescale = audio_timescale.expect("audio timescale enabled");
                     // 再エンコードでは入力サンプルのタイムスタンプをそのまま使う
-                    let (pcm, mut input_timestamp) = match audio_input {
+                    let (pcm, input_timestamp) = match audio_input {
                         AudioInput::Raw(frame) => (extract_pcm_i16(&frame)?, None),
                         AudioInput::Reencode { frame, timestamp } => {
                             (extract_pcm_i16(&frame)?, Some(timestamp))
                         }
                     };
                     audio_pcm_buf.extend_from_slice(&pcm);
+                    // 再エンコードでは 1 つの入力から複数チャンクを取り出しても入力の
+                    // タイムスケールで 20 ms ずつ進める
+                    let mut next_chunk_timestamp = input_timestamp;
                     while audio_pcm_buf.len() >= samples_per_frame {
                         let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
                         let encoded = encoder.encode(&chunk)?;
-                        let timestamp = match input_timestamp.take() {
-                            Some(timestamp) => timestamp,
+                        let timestamp = match next_chunk_timestamp {
+                            Some(timestamp) => {
+                                let step = samples_per_frame as u64 * timescale / (AUDIO_SAMPLE_RATE as u64);
+                                next_chunk_timestamp = Some(timestamp.saturating_add(step));
+                                timestamp
+                            }
                             None => audio_frame_count * samples_per_frame as u64,
                         };
                         // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
@@ -941,6 +945,25 @@ async fn serve_peer_request(
     Ok(())
 }
 
+/// 出力フレームに入力サンプルの PTS を割り当てる
+///
+/// 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を使う。
+/// 0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ。
+fn assign_input_timestamps(
+    pending: &mut VecDeque<u64>,
+    input_timestamp: Option<u64>,
+    frames: &mut [EncodedFrame],
+) {
+    if let Some(timestamp) = input_timestamp {
+        pending.push_back(timestamp);
+    }
+    for frame in frames {
+        if let Some(timestamp) = pending.pop_front() {
+            frame.timestamp = timestamp;
+        }
+    }
+}
+
 /// 映像 LOC プロパティを構築する
 fn build_video_loc_properties(frame: &EncodedFrame, timescale: u64) -> LocProperties {
     let mut props = LocProperties::new();
@@ -1223,5 +1246,36 @@ mod tests {
                 "transport 以外のエラーはセッション終了として扱わないこと: {error}"
             );
         }
+    }
+
+    /// テスト用のエンコード済みフレームを構築する
+    fn test_encoded_frame(timestamp: u64) -> EncodedFrame {
+        EncodedFrame {
+            data: vec![0x01],
+            is_keyframe: false,
+            timestamp,
+            video_config: None,
+        }
+    }
+
+    /// 再エンコードの入力 PTS が出力フレームへ引き継がれること
+    ///
+    /// 0 フレームを返した入力の PTS は次に出力されたフレームへ割り当てる。
+    #[test]
+    fn assign_input_timestamps_follows_input_pts() {
+        let mut pending = VecDeque::new();
+        assign_input_timestamps(&mut pending, Some(1_000), &mut []);
+        assert_eq!(pending.len(), 1, "0 フレームでも PTS が残ること");
+
+        let mut frames = vec![test_encoded_frame(10), test_encoded_frame(20)];
+        assign_input_timestamps(&mut pending, Some(2_000), &mut frames);
+        assert_eq!(frames[0].timestamp, 1_000, "引き継いだ PTS が使われること");
+        assert_eq!(frames[1].timestamp, 2_000, "入力の PTS が使われること");
+        assert!(pending.is_empty(), "割り当て後は空になること");
+
+        // 入力タイムスタンプが無い場合はエンコーダのタイムスタンプを保持する
+        let mut frames = vec![test_encoded_frame(30)];
+        assign_input_timestamps(&mut pending, None, &mut frames);
+        assert_eq!(frames[0].timestamp, 30, "エンコーダの採番が残ること");
     }
 }

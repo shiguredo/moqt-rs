@@ -447,7 +447,7 @@ mod tests {
             "--input-mp4-reencode",
             "input.mp4",
             "--video-codec",
-            "av1",
+            "h264",
             "--audio-bitrate",
             "96",
         ]);

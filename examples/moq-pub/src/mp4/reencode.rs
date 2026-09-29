@@ -9,7 +9,7 @@
 //! ループの周期は映像と音声のトラック尺の最大値とし、各トラックは周期の先頭から再開する。
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,7 @@ use std::time::Duration;
 use shiguredo_audio_device::{AudioFormat, AudioFrameOwned};
 use shiguredo_mp4::TrackKind;
 use shiguredo_mp4::boxes::SampleEntry;
-use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
+use shiguredo_mp4::demux::Mp4FileDemuxer;
 use shiguredo_video_device::{PixelFormat as VideoPixelFormat, VideoFrameOwned};
 use tokio::sync::mpsc;
 
@@ -74,6 +74,8 @@ struct VideoTrack {
     timescale: u64,
     /// トラックの尺 (最終サンプルの timestamp + duration)
     duration: u64,
+    /// 1 周分の表示順 PTS 列 (昇順)
+    display_pts: Vec<u64>,
 }
 
 /// 音声トラックの内部情報 (Opus のみ)
@@ -82,6 +84,8 @@ struct AudioTrack {
     timescale: u64,
     /// トラックの尺 (最終サンプルの timestamp + duration)
     duration: u64,
+    /// 先頭で読み飛ばすサンプル数 (RFC 7845 §4.2 Pre-skip)
+    pre_skip: u32,
 }
 
 /// demux した 1 サンプル分の供給データ
@@ -137,8 +141,82 @@ impl ReencodeSample {
     ///
     /// 編集リストは適用しないため、PTS が負になる場合は 0 に丸める。
     fn pts(&self) -> u64 {
-        let pts = (self.timestamp as i64).saturating_add(self.composition_time_offset.unwrap_or(0));
-        pts.max(0) as u64
+        compute_pts(self.timestamp, self.composition_time_offset)
+    }
+}
+
+/// タイムスタンプとコンポジション時間オフセットから PTS を求める
+///
+/// 編集リストは適用しないため、PTS が負になる場合は 0 に丸める。
+fn compute_pts(timestamp: u64, composition_time_offset: Option<i64>) -> u64 {
+    let pts = (timestamp as i64).saturating_add(composition_time_offset.unwrap_or(0));
+    pts.max(0) as u64
+}
+
+/// デコード済みの映像フレームを表示順 (PTS) に並べ替えて供給する
+///
+/// デコーダの出力順は codec によって異なる (dav1d は表示順、Video Toolbox は
+/// デコード順)。1 周分の表示順 PTS 列をあらかじめ求めておき、デコード済みフレームを
+/// PTS で保持して表示順に確定したものから供給する。
+struct VideoReorder {
+    /// 1 周分の表示順 PTS 列 (昇順)
+    display_pts: Vec<u64>,
+    /// 次に供給する `display_pts` の位置
+    next_index: usize,
+    /// デコード済みフレーム (PTS ごと。同じ PTS は到着順)
+    frames: BTreeMap<u64, VecDeque<VideoFrameOwned>>,
+}
+
+impl VideoReorder {
+    /// 表示順 PTS 列から並べ替えバッファを作る
+    fn new(display_pts: Vec<u64>) -> Self {
+        Self {
+            display_pts,
+            next_index: 0,
+            frames: BTreeMap::new(),
+        }
+    }
+
+    /// デコード済みフレームを追加し、表示順に確定したフレームを返す
+    fn push(&mut self, pts: u64, frame: VideoFrameOwned) -> Vec<(u64, VideoFrameOwned)> {
+        self.frames.entry(pts).or_default().push_back(frame);
+        let mut ready = Vec::new();
+        while let Some(&expected) = self.display_pts.get(self.next_index) {
+            let Some(queue) = self.frames.get_mut(&expected) else {
+                break;
+            };
+            let Some(frame) = queue.pop_front() else {
+                break;
+            };
+            if queue.is_empty() {
+                self.frames.remove(&expected);
+            }
+            ready.push((expected, frame));
+            self.next_index += 1;
+        }
+        ready
+    }
+
+    /// 残っているフレームを表示順に取り出す (周回の末尾で呼ぶ)
+    ///
+    /// デコーダが出力しなかったフレームがあると後続が確定できないため、周回の末尾では
+    /// 到着済みのフレームをそのまま表示順に供給する。
+    fn drain(&mut self) -> Vec<(u64, VideoFrameOwned)> {
+        let frames = std::mem::take(&mut self.frames);
+        let mut out = Vec::new();
+        for (pts, mut queue) in frames {
+            for frame in queue.drain(..) {
+                out.push((pts, frame));
+            }
+        }
+        self.next_index = self.display_pts.len();
+        out
+    }
+
+    /// 次の周回に備えて状態を戻す
+    fn reset(&mut self) {
+        self.next_index = 0;
+        self.frames.clear();
     }
 }
 
@@ -178,28 +256,13 @@ impl Mp4ReencodeReader {
     /// 警告して無視する。
     pub fn open<P: AsRef<Path>>(path: P, video_enabled: bool, audio_enabled: bool) -> Result<Self> {
         let path = path.as_ref();
-        let data = std::fs::read(path).map_err(|e| {
-            Error::Other(format!("failed to read MP4 file '{}': {e}", path.display()))
-        })?;
-        let mut demuxer = Mp4FileDemuxer::new();
-        demuxer.handle_input(Input {
-            position: 0,
-            data: &data,
-        });
-        // ファイル全体を渡しているため、正常なファイルなら追加の入力は要求されない
-        if let Some(required) = demuxer.required_input() {
-            return Err(Error::Other(format!(
-                "failed to read MP4 file '{}': need more data at position {}",
-                path.display(),
-                required.position,
-            )));
-        }
+        let (data, mut demuxer) = super::read_mp4_file(path)?;
 
-        let (video_track_id, audio_track_id) = {
+        let (video_track_id, video_timescale, audio_track_id, audio_timescale) = {
             let tracks = demuxer.tracks().map_err(|e| {
                 Error::Other(format!("failed to read MP4 file '{}': {e}", path.display()))
             })?;
-            let video_track_id = if video_enabled {
+            let video_track = if video_enabled {
                 Some(
                     tracks
                         .iter()
@@ -209,25 +272,26 @@ impl Mp4ReencodeReader {
                                 "MP4 file '{}' has no video track",
                                 path.display()
                             ))
-                        })?
-                        .track_id,
+                        })?,
                 )
             } else {
                 None
             };
-            let audio_track_id = if audio_enabled {
-                tracks
-                    .iter()
-                    .find(|t| t.kind == TrackKind::Audio)
-                    .map(|t| t.track_id)
+            let audio_track = if audio_enabled {
+                tracks.iter().find(|t| t.kind == TrackKind::Audio)
             } else {
                 None
             };
-            (video_track_id, audio_track_id)
+            (
+                video_track.map(|t| t.track_id),
+                video_track.map(|t| u64::from(t.timescale.get())),
+                audio_track.map(|t| t.track_id),
+                audio_track.map(|t| u64::from(t.timescale.get())),
+            )
         };
         if audio_enabled && audio_track_id.is_none() {
             tracing::warn!(
-                "MP4 file '{}' has no audio track; publishing video only",
+                "MP4 file '{}' has no audio track; publishing without audio",
                 path.display()
             );
         }
@@ -238,25 +302,58 @@ impl Mp4ReencodeReader {
         let mut video_sample_count: u64 = 0;
         let mut video_duration: u64 = 0;
         let mut video_has_keyframe = false;
+        let mut video_first_duration: Option<u32> = None;
+        let mut video_variable_frame_rate = false;
+        // 表示順 PTS 列の算出と AV1 の Sequence Header 検証に使う
+        let mut video_pts: Vec<u64> = Vec::new();
+        let mut first_keyframe_range: Option<(usize, usize)> = None;
         let mut audio_duration: u64 = 0;
         while let Some(sample) = demuxer
             .next_sample()
             .map_err(|e| Error::Other(format!("failed to read MP4 sample: {e}")))?
         {
             let track_id = sample.track.track_id;
-            if Some(track_id) == video_track_id {
+            let is_video = Some(track_id) == video_track_id;
+            let is_audio = Some(track_id) == audio_track_id;
+            if !is_video && !is_audio {
+                continue;
+            }
+            // 再生時に読めないサンプルがあれば、開始前にエラーとして報告する
+            let offset = sample.data_offset as usize;
+            let Some(end) = offset
+                .checked_add(sample.data_size)
+                .filter(|end| *end <= data.len())
+            else {
+                return Err(Error::Other(format!(
+                    "MP4 file '{}' has a sample outside the file bounds",
+                    path.display()
+                )));
+            };
+            if is_video {
                 if video_entry.is_none() {
                     video_entry = sample.sample_entry.cloned();
                 }
                 if sample.keyframe {
                     video_has_keyframe = true;
+                    if first_keyframe_range.is_none() {
+                        first_keyframe_range = Some((offset, end));
+                    }
+                }
+                match video_first_duration {
+                    Some(first) if first != sample.duration => video_variable_frame_rate = true,
+                    None => video_first_duration = Some(sample.duration),
+                    _ => {}
                 }
                 video_sample_count += 1;
+                video_pts.push(compute_pts(
+                    sample.timestamp,
+                    sample.composition_time_offset,
+                ));
                 video_duration = sample
                     .timestamp
                     .checked_add(u64::from(sample.duration))
                     .ok_or_else(|| Error::Other("MP4 duration is out of range".to_string()))?;
-            } else if Some(track_id) == audio_track_id {
+            } else {
                 if audio_entry.is_none() {
                     audio_entry = sample.sample_entry.cloned();
                 }
@@ -264,19 +361,6 @@ impl Mp4ReencodeReader {
                     .timestamp
                     .checked_add(u64::from(sample.duration))
                     .ok_or_else(|| Error::Other("MP4 duration is out of range".to_string()))?;
-            } else {
-                continue;
-            }
-            // 再生時に読めないサンプルがあれば、開始前にエラーとして報告する
-            let offset = sample.data_offset as usize;
-            if offset
-                .checked_add(sample.data_size)
-                .is_none_or(|end| end > data.len())
-            {
-                return Err(Error::Other(format!(
-                    "MP4 file '{}' has a sample outside the file bounds",
-                    path.display()
-                )));
             }
         }
 
@@ -311,18 +395,42 @@ impl Mp4ReencodeReader {
                     path.display()
                 ))
             })?;
-            let timescale = {
-                let tracks = demuxer
-                    .tracks()
-                    .map_err(|e| Error::Other(format!("failed to read MP4 tracks: {e}")))?;
-                let track = tracks
-                    .iter()
-                    .find(|t| t.track_id == track_id)
-                    .ok_or_else(|| Error::Other("MP4 video track is missing".to_string()))?;
-                u64::from(track.timescale.get())
-            };
+            // 4:2:0 はクロマが 2x2 単位のため偶数解像度を要求する
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(Error::Other(format!(
+                    "MP4 video resolution is not even ({}x{}); 4:2:0 requires even width and height",
+                    width, height
+                )));
+            }
+            // AV1 は payload 内に Sequence Header が必要なため、av1C か最初のキーフレームの
+            // どちらかに存在することを初期化時に確認する
+            if codec == Mp4VideoCodec::Av1 {
+                let has_sequence_header = first_keyframe_range
+                    .and_then(|(offset, end)| {
+                        crate::encoder::av1::extract_av1_sequence_header(&data[offset..end])
+                    })
+                    .or_else(|| crate::encoder::av1::extract_av1_sequence_header(&config))
+                    .is_some();
+                if !has_sequence_header {
+                    return Err(Error::Other(format!(
+                        "MP4 file '{}' has no AV1 Sequence Header in the av1C box or the first keyframe",
+                        path.display()
+                    )));
+                }
+            }
+            let timescale =
+                video_timescale.expect("video timescale is captured for the video track");
             let fps = average_fps(video_sample_count, video_duration, timescale)?;
+            if video_variable_frame_rate {
+                tracing::warn!(
+                    "MP4 file '{}' has variable frame durations; re-encoding at the average frame rate {} fps",
+                    path.display(),
+                    fps,
+                );
+            }
             let decoder = build_video_decoder(codec)?;
+            // 表示順の PTS 列 (昇順) を求めておく
+            video_pts.sort_unstable();
             tracing::info!(
                 "MP4 video track: codec={:?} size={}x{} fps={} timescale={} samples={}",
                 codec,
@@ -342,6 +450,7 @@ impl Mp4ReencodeReader {
                     fps,
                     timescale,
                     duration: video_duration,
+                    display_pts: video_pts,
                 }),
                 Some(decoder),
             )
@@ -359,27 +468,22 @@ impl Mp4ReencodeReader {
                     path.display()
                 ))
             })?;
-            if matches!(entry, SampleEntry::Opus(_)) {
-                let timescale = {
-                    let tracks = demuxer
-                        .tracks()
-                        .map_err(|e| Error::Other(format!("failed to read MP4 tracks: {e}")))?;
-                    let track = tracks
-                        .iter()
-                        .find(|t| t.track_id == track_id)
-                        .ok_or_else(|| Error::Other("MP4 audio track is missing".to_string()))?;
-                    u64::from(track.timescale.get())
-                };
+            if let SampleEntry::Opus(opus) = &entry {
+                let timescale =
+                    audio_timescale.expect("audio timescale is captured for the audio track");
+                let pre_skip = u32::from(opus.dops_box.pre_skip);
                 let decoder = OpusDecoder::new(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)?;
                 tracing::info!(
-                    "MP4 audio track: codec=opus timescale={} duration={}",
+                    "MP4 audio track: codec=opus timescale={} duration={} pre_skip={}",
                     timescale,
                     audio_duration,
+                    pre_skip,
                 );
                 audio = Some(AudioTrack {
                     track_id,
                     timescale,
                     duration: audio_duration,
+                    pre_skip,
                 });
                 audio_decoder = Some(decoder);
             } else {
@@ -387,28 +491,17 @@ impl Mp4ReencodeReader {
                 let codec = shiguredo_mp4::codec_string::from_sample_entry(&entry)
                     .unwrap_or_else(|_| "unknown".to_string());
                 tracing::warn!(
-                    "MP4 file '{}' has an unsupported audio codec ({codec}); publishing video only",
+                    "MP4 file '{}' has an unsupported audio codec ({codec}); publishing without audio",
                     path.display()
                 );
             }
         }
 
         // ループの周期は映像と音声のトラック尺の最大値にする
-        let mut period_us = 0u64;
-        if let Some(v) = &video {
-            period_us = period_us.max(duration_us(v.duration, v.timescale));
-        }
-        if let Some(a) = &audio {
-            period_us = period_us.max(duration_us(a.duration, a.timescale));
-        }
-        let video_period_units = video
-            .as_ref()
-            .map(|v| period_units(period_us, v.timescale))
-            .unwrap_or(0);
-        let audio_period_units = audio
-            .as_ref()
-            .map(|a| period_units(period_us, a.timescale))
-            .unwrap_or(0);
+        let (_, video_period_units, audio_period_units) = loop_period(
+            video.as_ref().map(|v| (v.duration, v.timescale)),
+            audio.as_ref().map(|a| (a.duration, a.timescale)),
+        );
 
         demuxer.seek(Duration::ZERO).map_err(|e| {
             Error::Other(format!("failed to seek MP4 file '{}': {e}", path.display()))
@@ -550,18 +643,47 @@ fn run_reader(
 ) -> Result<()> {
     // デコード結果を表示順に供給するための PTS 待ち行列
     let mut pts_queue = PtsQueue::new();
+    // 表示順に並べ替えるバッファ (映像を配信しない場合は空のまま使わない)
+    let mut reorder = reader
+        .video
+        .as_ref()
+        .map(|video| VideoReorder::new(video.display_pts.clone()));
     // 20 ms 単位にバッファリングする PCM (S16 interleaved / mono)
     let mut pcm_buf: Vec<i16> = Vec::new();
     // pcm_buf の先頭のタイムスタンプ (トラックの timescale 単位)
     let mut pcm_buf_timestamp: u64 = 0;
     // pcm_buf の先頭から送信済みのサンプル数
     let mut pcm_buf_sent_samples: u64 = 0;
+    // Opus の pre-skip で読み飛ばす残りサンプル数 (RFC 7845 §4.2)
+    let mut audio_skip_samples = reader
+        .audio
+        .as_ref()
+        .map(|audio| u64::from(audio.pre_skip))
+        .unwrap_or(0);
 
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
         let Some(sample) = reader.next_sample()? else {
+            // 周回の末尾: 表示順に確定できなかったフレームを供給してから先頭に戻る
+            if let Some(reorder) = reorder.as_mut()
+                && let Some(sender) = video_sender.as_ref()
+            {
+                for (timestamp, frame) in reorder.drain() {
+                    let input = VideoInput::Reencode { frame, timestamp };
+                    if !send_with_backpressure(sender, &stop, input) {
+                        return Ok(());
+                    }
+                }
+            }
+            // 遅延しているフレームを破棄してデコーダの内部状態を戻す
+            if let Some(decoder) = reader.video_decoder.as_mut() {
+                decoder.reset();
+            }
+            if let Some(reorder) = reorder.as_mut() {
+                reorder.reset();
+            }
             reader.rewind()?;
             // 端数は次の周回へ繰り越さない
             pts_queue.clear();
@@ -582,8 +704,9 @@ fn run_reader(
                 .pts()
                 .checked_add(reader.video_loop_offset)
                 .ok_or_else(|| Error::Other("MP4 timestamp is out of range".to_string()))?;
-            // AV1 は payload 側に Sequence Header が必要なため、無ければ config OBUs を付与する
-            let payload = if video.codec == Mp4VideoCodec::Av1 {
+            // AV1 のキーフレームは payload 側に Sequence Header が必要なため、含まれない
+            // 場合だけ config OBUs を先頭に付与する
+            let payload = if video.codec == Mp4VideoCodec::Av1 && sample.keyframe {
                 av1_payload_with_sequence_header(&video.config, sample.data)
             } else {
                 sample.data
@@ -598,6 +721,12 @@ fn run_reader(
             // 1 サンプル = 1 フレームのため、デコード順に入力した PTS を表示順に取り出す
             // (0 フレームを返した入力の PTS も登録しておく)
             pts_queue.push_input(pts);
+            let sender = video_sender
+                .as_ref()
+                .expect("video sender is enabled when the video track is published");
+            let reorder = reorder
+                .as_mut()
+                .expect("video reorder is enabled when the video track is published");
             for frame in frames {
                 let Some(frame_pts) = pts_queue.take_output() else {
                     tracing::warn!(
@@ -605,16 +734,11 @@ fn run_reader(
                     );
                     continue;
                 };
-                let frame = into_video_frame(frame);
-                let Some(sender) = video_sender.as_ref() else {
-                    continue;
-                };
-                let input = VideoInput::Reencode {
-                    frame,
-                    timestamp: frame_pts,
-                };
-                if !send_with_backpressure(sender, &stop, input) {
-                    return Ok(());
+                for (timestamp, frame) in reorder.push(frame_pts, into_video_frame(frame)) {
+                    let input = VideoInput::Reencode { frame, timestamp };
+                    if !send_with_backpressure(sender, &stop, input) {
+                        return Ok(());
+                    }
                 }
             }
         } else {
@@ -626,7 +750,15 @@ fn run_reader(
                 .audio_decoder
                 .as_mut()
                 .expect("audio decoder enabled in start");
-            let pcm = decoder.decode(&sample.data)?;
+            let decoded = decoder.decode(&sample.data)?;
+            // Opus の pre-skip 分を先頭から読み飛ばす
+            let pcm: Vec<i16> = if audio_skip_samples > 0 {
+                let skip = (audio_skip_samples as usize).min(decoded.len());
+                audio_skip_samples -= skip as u64;
+                decoded[skip..].to_vec()
+            } else {
+                decoded
+            };
             if pcm_buf.is_empty() {
                 pcm_buf_timestamp = sample
                     .timestamp
@@ -643,9 +775,9 @@ fn run_reader(
                     .checked_add(elapsed)
                     .ok_or_else(|| Error::Other("MP4 timestamp is out of range".to_string()))?;
                 let frame = build_audio_frame(&chunk, timestamp, audio.timescale);
-                let Some(sender) = audio_sender.as_ref() else {
-                    continue;
-                };
+                let sender = audio_sender
+                    .as_ref()
+                    .expect("audio sender is enabled when the audio track is published");
                 let input = AudioInput::Reencode { frame, timestamp };
                 if !send_with_backpressure(sender, &stop, input) {
                     return Ok(());
@@ -761,6 +893,27 @@ fn period_units(period_us: u64, timescale: u64) -> u64 {
     (u128::from(period_us) * u128::from(timescale) / 1_000_000) as u64
 }
 
+/// 映像と音声のトラック尺 (timescale 単位) から周回の周期を求める
+///
+/// 戻り値は (周期 (マイクロ秒), 映像トラック単位の周期, 音声トラック単位の周期)。
+/// 配信しないトラックの周期は 0 になる。
+fn loop_period(video: Option<(u64, u64)>, audio: Option<(u64, u64)>) -> (u64, u64, u64) {
+    let mut period_us = 0u64;
+    if let Some((duration, timescale)) = video {
+        period_us = period_us.max(duration_us(duration, timescale));
+    }
+    if let Some((duration, timescale)) = audio {
+        period_us = period_us.max(duration_us(duration, timescale));
+    }
+    let video_units = video
+        .map(|(_, timescale)| period_units(period_us, timescale))
+        .unwrap_or(0);
+    let audio_units = audio
+        .map(|(_, timescale)| period_units(period_us, timescale))
+        .unwrap_or(0);
+    (period_us, video_units, audio_units)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::File;
@@ -867,6 +1020,238 @@ mod tests {
         assert_eq!(queue.take_output(), None);
     }
 
+    /// 表示順の PTS 列に従ってフレームが並べ替えられること
+    ///
+    /// Video Toolbox はデコード順で出力するため、到着順ではなく表示順で供給する。
+    #[test]
+    fn video_reorder_supplies_frames_in_display_order() {
+        let frame = |id: u8| VideoFrameOwned {
+            data: vec![id],
+            uv_data: None,
+            width: 0,
+            height: 0,
+            stride: 0,
+            stride_uv: 0,
+            pixel_format: VideoPixelFormat::Nv12,
+            timestamp_us: 0,
+            pixel_buffer: None,
+        };
+        // 表示順は 0, 1000, 2000, 3000
+        let mut reorder = VideoReorder::new(vec![0, 1_000, 2_000, 3_000]);
+
+        // デコード順 (PTS 0, 3000, 1000, 2000) に到着しても表示順で取り出される
+        let ready = reorder.push(0, frame(0));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, 0);
+        assert!(reorder.push(3_000, frame(3)).is_empty());
+        let ready = reorder.push(1_000, frame(1));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, 1_000);
+        let ready = reorder.push(2_000, frame(2));
+        let pts: Vec<u64> = ready.iter().map(|(pts, _)| *pts).collect();
+        assert_eq!(pts, vec![2_000, 3_000], "表示順に確定した分が返ること");
+        assert!(reorder.drain().is_empty(), "残りが無いこと");
+
+        // 周回の末尾では到着済みのフレームを表示順に取り出す
+        reorder.reset();
+        assert!(reorder.push(3_000, frame(3)).is_empty());
+        let drained: Vec<u64> = reorder.drain().iter().map(|(pts, _)| *pts).collect();
+        assert_eq!(drained, vec![3_000]);
+
+        // 同じ PTS のフレームは到着順に取り出される
+        let mut reorder = VideoReorder::new(vec![0, 0]);
+        let ready = reorder.push(0, frame(1));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].1.data, vec![1]);
+        let ready = reorder.push(0, frame(2));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].1.data, vec![2]);
+    }
+
+    /// 映像と音声の尺が異なる場合、周回の周期が最大尺になり、短いトラックは残りを送らないこと
+    #[test]
+    fn reader_loops_with_the_longest_track_period() {
+        use crate::encoder::opus::OpusEncoder;
+        use shiguredo_mp4::bitstream::av1::{
+            Av1SampleEntryConfig, build_av01_box_from_config_obus,
+        };
+        use shiguredo_mp4::bitstream::opus::{ChannelCount, OpusSampleEntryConfig, build_opus_box};
+
+        const VIDEO_TIMESCALE: u32 = 30_000;
+        const VIDEO_DURATION: u32 = 1_000;
+        const AUDIO_TIMESCALE: u32 = 48_000;
+
+        // 映像 0.1 秒 (3 フレーム) と音声 0.06 秒 (3 パケット) を用意する
+        let mut video_encoder = crate::encoder::av1::Av1Encoder::new(64, 64, 30, 500, 60)
+            .expect("AV1 エンコーダを作成できること");
+        let frame = VideoFrameOwned {
+            data: vec![128u8; 64 * 64],
+            uv_data: Some(vec![128u8; 64 * 64 / 2]),
+            width: 64,
+            height: 64,
+            stride: 64,
+            stride_uv: 64,
+            pixel_format: VideoPixelFormat::Nv12,
+            timestamp_us: 0,
+            pixel_buffer: None,
+        };
+        let mut video_samples = Vec::new();
+        for _ in 0..3 {
+            video_samples.extend(video_encoder.encode(&frame).expect("エンコードできること"));
+        }
+        let mut audio_encoder =
+            OpusEncoder::new(AUDIO_TIMESCALE, 1, 64_000).expect("Opus エンコーダを作成できること");
+        let pcm = vec![0i16; audio_encoder.samples_per_frame()];
+        let packets: Vec<Vec<u8>> = (0..3)
+            .map(|_| audio_encoder.encode(&pcm).expect("エンコードできること"))
+            .collect();
+
+        let video_entry = SampleEntry::Av01(
+            build_av01_box_from_config_obus(
+                video_samples[0]
+                    .video_config
+                    .as_deref()
+                    .expect("Sequence Header があること"),
+                &Av1SampleEntryConfig {
+                    initial_presentation_delay_minus_one: None,
+                },
+            )
+            .expect("av01 サンプルエントリーを構築できること"),
+        );
+        let audio_entry = SampleEntry::Opus(build_opus_box(&OpusSampleEntryConfig {
+            channel_count: ChannelCount::Mono,
+            pre_skip: 0,
+            input_sample_rate: AUDIO_TIMESCALE,
+            output_gain: 0,
+        }));
+
+        // 2 トラックをタイムスタンプ順に mux する
+        let entries = [video_entry, audio_entry];
+        let kinds = [TrackKind::Video, TrackKind::Audio];
+        let timescales = [VIDEO_TIMESCALE, AUDIO_TIMESCALE];
+        let ordered: Vec<(usize, bool, u32, &[u8])> = vec![
+            (
+                0,
+                video_samples[0].is_keyframe,
+                VIDEO_DURATION,
+                &video_samples[0].data,
+            ),
+            (1, true, 960, &packets[0]),
+            (1, true, 960, &packets[1]),
+            (
+                0,
+                video_samples[1].is_keyframe,
+                VIDEO_DURATION,
+                &video_samples[1].data,
+            ),
+            (1, true, 960, &packets[2]),
+            (
+                0,
+                video_samples[2].is_keyframe,
+                VIDEO_DURATION,
+                &video_samples[2].data,
+            ),
+        ];
+        let path = temp_path("loop-period");
+        let mut muxer = Mp4FileMuxer::new().expect("MP4 muxer を作成できること");
+        let initial_bytes = muxer.initial_boxes_bytes().to_vec();
+        let mut file = File::create(&path).expect("MP4 ファイルを作成できること");
+        file.write_all(&initial_bytes)
+            .expect("初期ボックスを書き込めること");
+        let mut position = initial_bytes.len() as u64;
+        let mut entry_written = [false, false];
+        for (track_index, keyframe, duration, data) in &ordered {
+            file.write_all(data)
+                .expect("サンプルデータを書き込めること");
+            muxer
+                .append_sample(&Sample {
+                    track_kind: kinds[*track_index],
+                    sample_entry: (!entry_written[*track_index])
+                        .then(|| entries[*track_index].clone()),
+                    keyframe: *keyframe,
+                    timescale: NonZeroU32::new(timescales[*track_index])
+                        .expect("timescale は非ゼロであること"),
+                    duration: *duration,
+                    composition_time_offset: None,
+                    data_offset: position,
+                    data_size: data.len(),
+                })
+                .expect("サンプルを追加できること");
+            entry_written[*track_index] = true;
+            position += data.len() as u64;
+        }
+        let finalized = muxer.finalize().expect("MP4 をファイナライズできること");
+        for (offset, bytes) in finalized.offset_and_bytes_pairs() {
+            file.seek(SeekFrom::Start(offset))
+                .expect("ファイナライズ後の位置へ移動できること");
+            file.write_all(bytes)
+                .expect("ファイナライズ後のボックスを書き込めること");
+        }
+        file.flush().expect("MP4 ファイルを書き込めること");
+
+        // 2 周分 (映像 6 フレーム / 音声 6 パケット) を収集する
+        let reader = Mp4ReencodeReader::open(&path, true, true).expect("MP4 を開けること");
+        let (video_sender, mut video_receiver) = mpsc::channel::<VideoInput>(4);
+        let (audio_sender, mut audio_receiver) = mpsc::channel::<AudioInput>(4);
+        let source = reader
+            .start(Some(video_sender), Some(audio_sender))
+            .expect("スレッドを開始できること");
+        let audio_handle = std::thread::spawn(move || {
+            let mut timestamps = Vec::new();
+            while timestamps.len() < 6 {
+                match audio_receiver.blocking_recv() {
+                    Some(AudioInput::Reencode { timestamp, .. }) => timestamps.push(timestamp),
+                    Some(AudioInput::Raw(_)) => panic!("再エンコードでは Reencode が届くこと"),
+                    None => break,
+                }
+            }
+            timestamps
+        });
+        let mut video_timestamps = Vec::new();
+        while video_timestamps.len() < 6 {
+            match video_receiver.blocking_recv() {
+                Some(VideoInput::Reencode { timestamp, .. }) => video_timestamps.push(timestamp),
+                Some(_) => panic!("再エンコードでは Reencode が届くこと"),
+                None => break,
+            }
+        }
+        let audio_timestamps = audio_handle.join().expect("収集スレッドが終了すること");
+        source.stop().expect("停止できること");
+
+        // 周期は映像の 0.1 秒。音声は 0.06 秒で終わり、次の周回で +0.1 秒される
+        assert_eq!(video_timestamps, vec![0, 1_000, 2_000, 3_000, 4_000, 5_000]);
+        assert_eq!(
+            audio_timestamps,
+            vec![0, 960, 1_920, 4_800, 5_760, 6_720],
+            "音声は周期 (4800 units) ごとに先頭から再開すること"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 周回の周期は映像と音声のトラック尺の最大値になること
+    #[test]
+    fn loop_period_selects_the_longest_track() {
+        // 映像 1 秒 (90000 units @ 90000)、音声 2 秒 (96000 units @ 48000)
+        let (period_us, video_units, audio_units) =
+            loop_period(Some((90_000, 90_000)), Some((96_000, 48_000)));
+        assert_eq!(period_us, 2_000_000);
+        assert_eq!(video_units, 180_000, "映像は 2 秒分になること");
+        assert_eq!(audio_units, 96_000);
+
+        // 映像のみの場合
+        let (period_us, video_units, audio_units) = loop_period(Some((90_000, 90_000)), None);
+        assert_eq!(period_us, 1_000_000);
+        assert_eq!(video_units, 90_000);
+        assert_eq!(audio_units, 0);
+
+        // 音声のみの場合
+        let (period_us, video_units, audio_units) = loop_period(None, Some((48_000, 48_000)));
+        assert_eq!(period_us, 1_000_000);
+        assert_eq!(video_units, 0);
+        assert_eq!(audio_units, 48_000);
+    }
+
     /// PTS はタイムスタンプとコンポジション時間オフセットの和になること
     #[test]
     fn sample_pts_adds_composition_time_offset() {
@@ -955,6 +1340,74 @@ mod tests {
         assert!(
             validate_8bit_420(&entry).is_ok(),
             "8-bit 4:2:0 の AV1 は許容されること"
+        );
+    }
+
+    /// 8-bit 4:2:0 以外の H.264 / H.265 を拒否すること
+    #[test]
+    fn validate_8bit_420_rejects_h264_and_h265() {
+        use shiguredo_mp4::Uint;
+        use shiguredo_mp4::boxes::{Avc1Box, AvccBox, Hvc1Box, HvccBox};
+
+        // H.264: 4:2:2 (chroma_format = 2) は拒否する
+        let entry = SampleEntry::Avc1(Avc1Box {
+            visual: test_visual_fields(),
+            avcc_box: AvccBox {
+                avc_profile_indication: 100,
+                profile_compatibility: 0,
+                avc_level_indication: 40,
+                length_size_minus_one: Uint::new(3),
+                sps_list: vec![vec![0x67]],
+                pps_list: vec![vec![0x68]],
+                chroma_format: Some(Uint::new(2)),
+                bit_depth_luma_minus8: Some(Uint::new(0)),
+                bit_depth_chroma_minus8: Some(Uint::new(0)),
+                sps_ext_list: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        });
+        assert!(
+            validate_8bit_420(&entry).is_err(),
+            "4:2:2 の H.264 はエラーになること"
+        );
+
+        // H.264: 8-bit 4:2:0 (chroma_format = 1) は許容する
+        let SampleEntry::Avc1(mut avc1) = entry else {
+            panic!("H.264 サンプルエントリーであること");
+        };
+        avc1.avcc_box.chroma_format = Some(Uint::new(1));
+        assert!(
+            validate_8bit_420(&SampleEntry::Avc1(avc1)).is_ok(),
+            "8-bit 4:2:0 の H.264 は許容されること"
+        );
+
+        // H.265: 10-bit は拒否する
+        let entry = SampleEntry::Hvc1(Hvc1Box {
+            visual: test_visual_fields(),
+            hvcc_box: HvccBox {
+                general_profile_space: Uint::new(0),
+                general_tier_flag: Uint::new(0),
+                general_profile_idc: Uint::new(1),
+                general_profile_compatibility_flags: 0,
+                general_constraint_indicator_flags: Uint::new(0),
+                general_level_idc: 120,
+                min_spatial_segmentation_idc: Uint::new(0),
+                parallelism_type: Uint::new(0),
+                chroma_format_idc: Uint::new(1),
+                bit_depth_luma_minus8: Uint::new(2),
+                bit_depth_chroma_minus8: Uint::new(2),
+                avg_frame_rate: 0,
+                constant_frame_rate: Uint::new(0),
+                num_temporal_layers: Uint::new(1),
+                temporal_id_nested: Uint::new(1),
+                length_size_minus_one: Uint::new(3),
+                nalu_arrays: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        });
+        assert!(
+            validate_8bit_420(&entry).is_err(),
+            "10-bit の H.265 はエラーになること"
         );
     }
 

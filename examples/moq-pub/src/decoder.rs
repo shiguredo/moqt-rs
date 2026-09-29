@@ -59,6 +59,18 @@ impl VideoDecoder {
             VideoDecoder::H265(d) => d.decode(payload, video_config),
         }
     }
+
+    /// デコーダの内部状態をリセットする (周回の先頭で使う)
+    ///
+    /// dav1d は内部に保持している遅延フレームを破棄する。Video Toolbox は各フレームを
+    /// 即座に出力するため何もしない (次のキーフレームで状態がリセットされる)。
+    pub fn reset(&mut self) {
+        match self {
+            VideoDecoder::Av1(d) => d.reset(),
+            #[cfg(target_os = "macos")]
+            VideoDecoder::H264(_) | VideoDecoder::H265(_) => {}
+        }
+    }
 }
 
 /// I420 の U / V プレーンを NV12 のインターリーブ UV プレーンに変換する
@@ -88,7 +100,9 @@ pub(crate) fn copy_plane(src: &[u8], stride: usize, width: usize, height: usize)
 
 /// `u16 length + NAL` を読み出す
 ///
+/// H.264 / H.265 の設定レコード (avcC / hvcC) のパースでのみ使う。
 /// `codec_label` はエラーメッセージ用 (例: "AVCDecoderConfigurationRecord")。
+#[cfg(target_os = "macos")]
 pub(crate) fn read_ps_nal(buf: &[u8], pos: &mut usize, codec_label: &str) -> Result<Vec<u8>> {
     if buf.len() < *pos + 2 {
         return Err(Error::Other(format!("{codec_label}: truncated NAL length")));

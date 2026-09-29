@@ -19,7 +19,7 @@ shiguredo_dav1d = "2026.2"
 shiguredo_http3 = "2026.1.0-canary.9"
 # MoQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
-# MP4 ファイルの demux (映像トラックのパススルー配信)
+# MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
 shiguredo_mp4 = "2026.5"
 # Opus エンコーダ
 shiguredo_opus = "2026.2"

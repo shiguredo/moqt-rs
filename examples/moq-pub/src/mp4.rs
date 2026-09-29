@@ -8,6 +8,9 @@
 //!
 //! B フレーム (composition time offset が非ゼロのサンプル) を含む MP4 は拒否する。
 //! パススルーではサンプルをデコード順のまま送るため、表示順とのずれを表現できない。
+//!
+//! 再エンコード配信 (`reencode` サブモジュール) では同じ demux 処理を使い、映像 / 音声を
+//! デコードしてからパイプラインへ供給する。
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -30,6 +33,28 @@ use crate::pipeline::VideoInput;
 
 pub(crate) mod reencode;
 
+/// MP4 ファイルを読み込んで demux を初期化する
+///
+/// ファイル全体をメモリに読み込んで `Mp4FileDemuxer` に渡す。正常なファイルなら
+/// 追加の入力は要求されない。
+fn read_mp4_file(path: &Path) -> Result<(Vec<u8>, Mp4FileDemuxer)> {
+    let data = std::fs::read(path)
+        .map_err(|e| Error::Other(format!("failed to read MP4 file '{}': {e}", path.display())))?;
+    let mut demuxer = Mp4FileDemuxer::new();
+    demuxer.handle_input(Input {
+        position: 0,
+        data: &data,
+    });
+    if let Some(required) = demuxer.required_input() {
+        return Err(Error::Other(format!(
+            "failed to read MP4 file '{}': need more data at position {}",
+            path.display(),
+            required.position,
+        )));
+    }
+    Ok((data, demuxer))
+}
+
 /// パススルー配信に必要な映像トラック情報
 #[derive(Debug)]
 pub struct VideoTrackInfo {
@@ -47,7 +72,9 @@ pub struct VideoTrackInfo {
     pub timescale: u64,
 }
 
-/// パススルー対象の映像コーデック
+/// 入力 MP4 の映像コーデック
+///
+/// パススルー配信と再エンコード配信で共有する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mp4VideoCodec {
     /// AV1
@@ -118,22 +145,7 @@ impl Mp4VideoReader {
     /// - 設定データに必要なパラメータセット (SPS / PPS / VPS) が無い
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let data = std::fs::read(path).map_err(|e| {
-            Error::Other(format!("failed to read MP4 file '{}': {e}", path.display()))
-        })?;
-        let mut demuxer = Mp4FileDemuxer::new();
-        demuxer.handle_input(Input {
-            position: 0,
-            data: &data,
-        });
-        // ファイル全体を渡しているため、正常なファイルなら追加の入力は要求されない
-        if let Some(required) = demuxer.required_input() {
-            return Err(Error::Other(format!(
-                "failed to read MP4 file '{}': need more data at position {}",
-                path.display(),
-                required.position,
-            )));
-        }
+        let (data, mut demuxer) = read_mp4_file(path)?;
 
         let (track_id, timescale) = {
             let tracks = demuxer.tracks().map_err(|e| {
@@ -538,9 +550,8 @@ fn run_reader(
 pub(crate) fn send_with_backpressure<T>(
     sender: &mpsc::Sender<T>,
     stop: &AtomicBool,
-    value: T,
+    mut value: T,
 ) -> bool {
-    let mut value = value;
     loop {
         match sender.try_send(value) {
             Ok(()) => return true,
@@ -555,10 +566,11 @@ pub(crate) fn send_with_backpressure<T>(
     }
 }
 
-/// サンプルエントリーからパススルー用のコーデックと `PROP_VIDEO_CONFIG` を取り出す
+/// サンプルエントリーから入力 MP4 の映像コーデックと設定データを取り出す
 ///
 /// 対応していないサンプルエントリーの場合は `Ok(None)` を返す。設定データに必要な
 /// パラメータセットが無い場合は、受信側でトラックを構成できないためエラーにする。
+/// パススルー配信 (`PROP_VIDEO_CONFIG`) と再エンコード配信 (デコーダ設定) で共有する。
 ///
 /// - H.264: AVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §5.2.4.1.1)
 /// - H.265: HEVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §8.3.3.1.2)
