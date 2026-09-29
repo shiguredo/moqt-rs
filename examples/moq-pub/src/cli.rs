@@ -122,7 +122,11 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let url: ServerUrl = noargs::opt("url")
         .short('u')
         .ty("URL")
-        .doc("Server URL (moqt://; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
+        // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
+        // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
+        .example("moqt://relay.example.com:4433/app")
         .take(&mut args)
         .then(|o| {
             let v = o.value();
@@ -367,6 +371,33 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--help` / `-h` は必須オプションを要求せずヘルプを返す
+    ///
+    /// 必須オプションに `.example()` を与えていないと、help モードでも `Opt::None` に
+    /// なって `then()` が `MissingOpt` を返し、ヘルプが表示されない。
+    #[test]
+    fn help_flag_prints_help_without_required_url() {
+        for flag in ["--help", "-h"] {
+            assert!(
+                parse_args(&[flag])
+                    .expect("ヘルプはエラーにならないこと")
+                    .is_none(),
+                "ヘルプ表示は設定を返さないこと: {flag}"
+            );
+        }
+    }
+
+    /// `--url` を省略した通常の実行は従来どおりエラーになる
+    ///
+    /// ヘルプ表示用の `.example()` が必須オプションの検証を緩めないことを固定する。
+    #[test]
+    fn missing_url_is_still_an_error() {
+        assert!(
+            parse_args(&[]).is_err(),
+            "必須オプションの欠如はエラーになること"
+        );
+    }
 
     /// 引数リストをパースする (先頭はプログラム名として扱われる)
     fn parse_args(args: &[&str]) -> noargs::Result<Option<Config>> {

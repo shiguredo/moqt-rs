@@ -1,7 +1,7 @@
 # publisher / subscriber の --help がヘルプを表示しない
 
 - Created: 2026-09-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-30
 - Branch: feature/fix-moqt-example-help-flag
 - Polished: 2026-09-27
 
@@ -30,3 +30,25 @@
 - ヘルプに `--url` の説明 (`moqt://host[:port]/path or https://host[:port]/path`) が表示されること
 - `--url` を省略した通常の実行では `missing '--url' option` でエラーになること
 - `examples/README.md` の「全オプションは各クレートの `--help` で確認できる」という記述と実装が一致すること
+
+## 解決方法
+
+`examples/moq-pub/src/cli.rs` と `examples/moq-sub/src/cli.rs` の `--url` に `.example("moqt://relay.example.com:4433/app")` を追加した。
+
+- noargs は help モードでも `default` / `example` を持たない必須オプションを `Opt::None` にし、`then()` が `MissingOpt` を返すため `args.finish()` に到達しなかった。`.example()` を与えると help モードでは `Opt::Example` になるため、`--url` の検証を通過して `finish()` がヘルプを返す
+- 例は `parse_url` を通るため、正当な `moqt://` URL を使う。通常の実行では例は使われず、`--url` の省略は従来どおり `MissingOpt` になる
+- `--url` の doc を `Server URL (moqt://host[:port]/path; ...)` に変更し、ヘルプに URL の形式が表示されるようにした
+
+追加したテスト:
+
+- `examples/moq-pub/tests/test_cli.rs` と `examples/moq-sub/tests/test_cli.rs` (実行ファイル経由)
+  - `help_prints_help_and_exits_successfully`: `--help` / `-h` が終了コード 0 で `Usage:` と `--url` の説明と `moqt://` を出力し、`missing '--url' option` を出さないこと
+  - `missing_url_is_reported_as_an_error`: `--url` を省略した実行が終了コード 1 と `--url` を含むエラーになること
+
+実機確認:
+
+- `moq-pub --help` / `moq-sub -h` が `Usage: ... --url <URL>`、`Example: $ ... --url moqt://relay.example.com:4433/app`、`--url, -u <URL> Server URL (moqt://host[:port]/path; ...)` を表示して exit 0
+- `moq-pub` (`--url` なし) は `missing '--url' option` を表示して exit 1
+- `examples/README.md` の「全オプションは各クレートの `--help` で確認できる」という記述と実装が一致するようになった
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。

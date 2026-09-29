@@ -614,3 +614,6 @@
 - [FIX] example の publisher / subscriber が RFC 3986 の host の規則に合わない authority を受理するのを止める
   - `[example.com]` や IPvFuture、zone id 付き IPv6 リテラル、ポート 0、userinfo を名前解決の前に拒否する
   - @voluntas
+- [FIX] moq-pub / moq-sub の `--help` がヘルプを表示せず必須オプション欠如のエラーで終了するのを止める
+  - 必須オプション `--url` にヘルプ表示用の例を与え、`--help` / `-h` が `moqt://host[:port]/path` を案内して正常終了するようにする
+  - @voluntas

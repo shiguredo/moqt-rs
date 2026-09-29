@@ -68,7 +68,11 @@ pub fn parse() -> noargs::Result<Option<Config>> {
     let url: ServerUrl = noargs::opt("url")
         .short('u')
         .ty("URL")
-        .doc("Server URL (moqt://; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
+        // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
+        // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
+        // 例は使われず、`--url` の省略は従来どおり MissingOpt になる)
+        .example("moqt://relay.example.com:4433/app")
         .take(&mut args)
         .then(|o| {
             let v = o.value();
