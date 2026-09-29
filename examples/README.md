@@ -128,6 +128,8 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 
 `port` を省略すると 443 を使う (draft-ietf-moq-transport-21 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
 
+RFC 3986 §3.2.2 の host に一致しない authority は名前解決の前に拒否する。`[` `]` の中身は IPv6 アドレスに限るため `[example.com]` や IPvFuture (`[v1.fe80::]`)、zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) はエラーになる。ポート 0 と userinfo (`user@host`) もエラーになる。エラーメッセージには拒否理由と入力した authority が含まれる。
+
 DNS 名が複数のアドレスに解決される場合は、解決順に接続を試し、確立できたアドレスを採用する。IPv4 と IPv6 の両方に解決される `localhost` などで、先頭の接続先が待ち受けていない場合にも次のアドレスへ進む。接続の試行は `--transport` で選んだ経路の確立までを単位とし、確立後の SETUP の失敗では次のアドレスを試さない。接続先のアドレスファミリに合わせてローカルソケットを選ぶため、IPv6 の接続先にも送信できる。
 
 query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` にそのまま引き継がれる。

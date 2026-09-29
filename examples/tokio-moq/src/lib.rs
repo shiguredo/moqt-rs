@@ -469,19 +469,42 @@ impl AuthorityParts<'_> {
 /// まで)。port が省略されている場合は [`DEFAULT_MOQT_PORT`] にする
 /// (draft-ietf-moq-transport-21 §6.1.2)。
 ///
+/// 受理する host は RFC 3986 §3.2.2 (Host) の `IP-literal / IPv4address / reg-name` のうち
+/// IPv6 リテラル・IPv4 リテラル・reg-name である。IPvFuture は受け付けない。
+/// RFC 3986 §3.2.2 は未知の version flag を持つ IP-literal を dereference する
+/// アプリケーションに 'address mechanism not supported' のエラーを返すことを推奨する。
+/// RFC 6874 の zone id 付き IPv6 リテラル (`[fe80::1%25en0]`) も受け付けない。
+/// RFC 3986 §3.2.2 は "This syntax does not support IPv6 scoped addressing zone identifiers."
+/// と定め、[`std::net::SocketAddr`] も zone id を解釈できない。
+///
 /// 次の authority はエラーにする。draft-ietf-moq-transport-21 §6.1 (MOQT URI Scheme) は
 /// "The authority portion MUST NOT contain an empty host portion." と定める
 /// (この仕様は将来 draft 改訂で変更される可能性がある)。
 ///
 /// IPv6 リテラルを `[` `]` で囲む規則は RFC 3986 §3.2.2 (Host)、ポートを数字にする
-/// 規則は RFC 3986 §3.2.3 (Port) による。
+/// 規則は RFC 3986 §3.2.3 (Port) による。ポート 0 は RFC 3986 §3.2.3 の `port = *DIGIT`
+/// としては妥当だが接続先として使えないため受け付けない。
 ///
-/// - host が空 (`""` / `":4443"`)
+/// userinfo も受け付けない。RFC 3986 §3.2 の authority 構文は userinfo を許すが、
+/// draft-ietf-moq-transport-21 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は受け取った
+/// reference 中の userinfo を reject する選択を許す
+/// ("Applications may choose to ignore or reject such data when it is received as part of a reference")。
+///
+/// - host が空 (`""` / `":4443"` / `"[]"`)
+/// - `[` `]` の中身が IPv6 アドレスでない (`[example.com]` / `[v1.fe80::]` / `[fe80::1%25en0]`)
 /// - IPv6 リテラルの `]` が無い、または `]` の直後がポート区切りでない (`[::1` / `[::1]x`)
 /// - ブラケット無しの host に `:` が残る (裸の IPv6 リテラル `2001:db8::1`)
 /// - ポートの区切りがあるのに数字が続かない (`127.0.0.1:` / `127.0.0.1:abc`)
+/// - ポートが 0 (`127.0.0.1:0`)
+/// - userinfo を含む (`user@127.0.0.1`)
 fn authority_parts(authority: &str) -> Result<AuthorityParts<'_>, TransportError> {
     let host = host_from_authority(authority);
+    // `@` を含む authority は userinfo として拒否し、host として名前解決に回さない。
+    // port の解釈より先に判定し、`user:pass@host` を port のエラーとして報告しない
+    if authority.contains('@') {
+        return Err(invalid_authority(authority, "userinfo is not supported"));
+    }
+
     let port_text = if authority.starts_with('[') {
         // IPv6 リテラルは `]` の後ろだけがポート部分になる
         let end = authority
@@ -502,6 +525,13 @@ fn authority_parts(authority: &str) -> Result<AuthorityParts<'_>, TransportError
     if host.is_empty() {
         return Err(invalid_authority(authority, "empty host"));
     }
+    // `[` `]` の中身は IPv6 アドレスに限る (RFC 3986 §3.2.2 の IP-literal)
+    if authority.starts_with('[') && host.parse::<std::net::Ipv6Addr>().is_err() {
+        return Err(invalid_authority(
+            authority,
+            "the host in '[' and ']' must be an IPv6 address",
+        ));
+    }
     if !authority.starts_with('[') && host.contains(':') {
         return Err(invalid_authority(
             authority,
@@ -512,9 +542,15 @@ fn authority_parts(authority: &str) -> Result<AuthorityParts<'_>, TransportError
     let port = match port_text {
         None => DEFAULT_MOQT_PORT,
         Some("") => return Err(invalid_authority(authority, "empty port")),
-        Some(text) => text
-            .parse::<u16>()
-            .map_err(|e| invalid_authority(authority, &e.to_string()))?,
+        Some(text) => {
+            let port = text
+                .parse::<u16>()
+                .map_err(|e| invalid_authority(authority, &e.to_string()))?;
+            if port == 0 {
+                return Err(invalid_authority(authority, "port 0 cannot be used"));
+            }
+            port
+        }
     };
 
     Ok(AuthorityParts { host, port })
@@ -1215,6 +1251,103 @@ mod tests {
     #[test]
     fn authority_parts_rejects_text_after_ipv6_literal() {
         assert!(authority_parts("[::1]x").is_err());
+    }
+
+    /// `[` `]` の中身が IPv6 アドレスでない authority はエラーになる
+    ///
+    /// RFC 3986 §3.2.2 の IP-literal は IPv6address または IPvFuture に限られる。
+    /// `[example.com]` を reg-name として受理すると、無関係な外部ホストへの接続になる。
+    /// IPvFuture は受け付けない (既知の version flag を持たないアドレス機構は非対応)。
+    /// エラーメッセージに理由が含まれることも固定する。
+    #[test]
+    fn authority_parts_rejects_non_ipv6_ip_literal() {
+        for authority in [
+            "[example.com]",
+            "[example.com]:4443",
+            "[v1.fe80::]",
+            "[::1x]",
+        ] {
+            let err = authority_parts(authority).expect_err("エラーになること");
+            assert!(
+                matches!(err, TransportError::InvalidAuthority(_)),
+                "authority の解釈失敗として返ること: {err}"
+            );
+            assert!(
+                err.to_string().contains("must be an IPv6 address"),
+                "理由が含まれること: {err}"
+            );
+        }
+    }
+
+    /// ポート 0 の authority はエラーになる
+    ///
+    /// RFC 3986 §3.2.3 の `port = *DIGIT` は 0 も許すが、接続先として使えない。
+    #[test]
+    fn authority_parts_rejects_port_zero() {
+        for authority in ["127.0.0.1:0", "[::1]:0", "relay.example.com:0"] {
+            let err = authority_parts(authority).expect_err("エラーになること");
+            assert!(
+                err.to_string().contains("port 0 cannot be used"),
+                "理由が含まれること: {err}"
+            );
+        }
+    }
+
+    /// userinfo を含む authority は名前解決に回さずエラーになる
+    ///
+    /// draft-ietf-moq-transport-21 §6.1 は userinfo に言及せず、RFC 3986 §3.2.1 は
+    /// reference 中の userinfo を reject する選択を許す。
+    #[test]
+    fn authority_parts_rejects_userinfo() {
+        for authority in [
+            "user@127.0.0.1:4433",
+            "user:pass@relay.example.com",
+            "user@[::1]:4433",
+        ] {
+            let err = authority_parts(authority).expect_err("エラーになること");
+            assert!(
+                matches!(err, TransportError::InvalidAuthority(_)),
+                "authority の解釈失敗として返ること: {err}"
+            );
+            assert!(
+                err.to_string().contains("userinfo is not supported"),
+                "理由が含まれること: {err}"
+            );
+        }
+    }
+
+    /// zone id 付き IPv6 リテラルは非対応として拒否する
+    ///
+    /// RFC 3986 §3.2.2 は "This syntax does not support IPv6 scoped addressing zone
+    /// identifiers." と定め、`std::net::SocketAddr` も zone id を解釈できない。
+    #[test]
+    fn authority_parts_rejects_ipv6_zone_id() {
+        for authority in ["[fe80::1%25en0]:4433", "[fe80::1%en0]"] {
+            let err = authority_parts(authority).expect_err("エラーになること");
+            assert!(
+                err.to_string().contains("must be an IPv6 address"),
+                "理由が含まれること: {err}"
+            );
+        }
+    }
+
+    /// 正当な authority は従来どおり受理される
+    ///
+    /// 拒否の追加で接続可能な入力が減っていないことを固定する。
+    #[test]
+    fn authority_parts_accepts_valid_authorities() {
+        for (authority, host, port) in [
+            ("127.0.0.1", "127.0.0.1", 443),
+            ("127.0.0.1:4443", "127.0.0.1", 4443),
+            ("[::1]", "::1", 443),
+            ("[2001:db8::1]:4443", "2001:db8::1", 4443),
+            ("relay.example.com", "relay.example.com", 443),
+            ("relay.example.com:443", "relay.example.com", 443),
+        ] {
+            let parts = authority_parts(authority).expect("authority の解釈に成功すること");
+            assert_eq!(parts.host, host, "host: {authority}");
+            assert_eq!(parts.port, port, "port: {authority}");
+        }
     }
 
     /// 閉じ括弧が無い IPv6 リテラルはエラーになる

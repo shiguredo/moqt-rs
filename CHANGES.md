@@ -611,3 +611,6 @@
 - [FIX] example の publisher / subscriber が DNS 名の解決結果の先頭のアドレスに接続できないとき、残りのアドレスを試さないのを止める
   - 解決結果を順に試し、IPv4 のみ待ち受ける relay へ `moqt://localhost:4433/app` でも接続できるようにする
   - @voluntas
+- [FIX] example の publisher / subscriber が RFC 3986 の host の規則に合わない authority を受理するのを止める
+  - `[example.com]` や IPvFuture、zone id 付き IPv6 リテラル、ポート 0、userinfo を名前解決の前に拒否する
+  - @voluntas
