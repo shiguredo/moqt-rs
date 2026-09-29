@@ -3,20 +3,18 @@
 //! `shiguredo_audio_device` で入力デバイスを開き、48 kHz / 1ch のフレームを
 //! チャネルへ送信する。
 
-use shiguredo_audio_device::{AudioCapture, AudioCaptureConfig, AudioDeviceList, AudioFrameOwned};
+use shiguredo_audio_device::{AudioCapture, AudioCaptureConfig, AudioDeviceList};
 use tokio::sync::mpsc;
 
 use crate::cli::Config;
 use crate::error::Result;
+use crate::pipeline::AudioInput;
 
 /// 音声キャプチャを開始する
 ///
 /// 指定されたデバイスからフレームをキャプチャし、チャネルに送信する。
 /// 返り値の AudioCapture を保持している間、キャプチャは継続する。
-pub fn start_capture(
-    config: &Config,
-    sender: mpsc::Sender<AudioFrameOwned>,
-) -> Result<AudioCapture> {
+pub fn start_capture(config: &Config, sender: mpsc::Sender<AudioInput>) -> Result<AudioCapture> {
     if config.audio_device_id.is_none() {
         let devices = AudioDeviceList::enumerate_input()?;
         tracing::info!("Available audio input devices:");
@@ -36,7 +34,7 @@ pub fn start_capture(
     let mut capture = AudioCapture::new(capture_config, move |frame| {
         let owned = frame.to_owned();
         // チャネルが満杯の場合はフレームを破棄する
-        let _ = sender.try_send(owned);
+        let _ = sender.try_send(AudioInput::Raw(owned));
     })?;
 
     capture.start()?;

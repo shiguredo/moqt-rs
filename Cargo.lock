@@ -858,6 +858,7 @@ dependencies = [
  "s2n-quic",
  "shiguredo_aom",
  "shiguredo_audio_device",
+ "shiguredo_dav1d",
  "shiguredo_http3",
  "shiguredo_moqt",
  "shiguredo_mp4",

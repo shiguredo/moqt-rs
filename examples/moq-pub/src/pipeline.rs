@@ -4,6 +4,7 @@
 //! sans-I/O な `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use shiguredo_audio_device::AudioFrameOwned;
@@ -62,12 +63,36 @@ enum AudioCaptureGuard {
 
 /// パイプラインへ渡す映像入力
 ///
-/// カメラ / 疑似キャプチャは生フレームを渡し、MP4 パススルーはエンコード済みサンプルを渡す。
+/// カメラ / 疑似キャプチャは生フレームを渡し、MP4 パススルーはエンコード済みサンプルを、
+/// MP4 再エンコードは入力のメディア時刻付きの生フレームを渡す。
 pub(crate) enum VideoInput {
     /// キャプチャした生フレーム (エンコード前)
     Raw(VideoFrameOwned),
     /// エンコード済みサンプル (MP4 パススルー)
     Encoded(EncodedFrame),
+    /// デコード済みの生フレーム (MP4 再エンコード)
+    Reencode {
+        /// 生フレーム
+        frame: VideoFrameOwned,
+        /// 入力トラックの timescale 単位のタイムスタンプ (PTS)
+        timestamp: u64,
+    },
+}
+
+/// パイプラインへ渡す音声入力
+///
+/// カメラ / 疑似キャプチャは生フレームを渡し、MP4 再エンコードは入力のメディア時刻付きの
+/// PCM フレームを渡す。
+pub(crate) enum AudioInput {
+    /// キャプチャした音声フレーム
+    Raw(AudioFrameOwned),
+    /// デコード済みの PCM フレーム (MP4 再エンコード)
+    Reencode {
+        /// PCM フレーム
+        frame: AudioFrameOwned,
+        /// 入力トラックの timescale 単位のタイムスタンプ
+        timestamp: u64,
+    },
 }
 
 /// カタログトラックの Track Alias
@@ -106,7 +131,7 @@ fn publish_diag_enabled() -> bool {
 /// `task_monitor` は生成されるタスクのメトリクスを収集する。
 /// `shutdown_monitor` は graceful shutdown の契機を受信する。
 pub async fn run(
-    config: Config,
+    mut config: Config,
     task_monitor: tokio_metrics::TaskMonitor,
     mut shutdown_monitor: tokio_utils::ShutdownMonitor,
 ) -> Result<()> {
@@ -116,6 +141,30 @@ pub async fn run(
         Some(path) => Some(mp4::Mp4VideoReader::open(path)?),
         None => None,
     };
+    // MP4 再エンコードも接続前にファイルを読み込んで検証する
+    let reencode_reader: Option<mp4::reencode::Mp4ReencodeReader> =
+        match config.input_mp4_reencode.as_deref() {
+            Some(path) => Some(mp4::reencode::Mp4ReencodeReader::open(
+                path,
+                config.video_enabled,
+                config.audio_enabled,
+            )?),
+            None => None,
+        };
+    // 再エンコードで映像を配信しない場合、配信できるトラックが無ければエラーにする
+    if config.input_mp4_reencode.is_some()
+        && let Some(reader) = reencode_reader.as_ref()
+        && reader.audio_info().is_none()
+    {
+        if !config.video_enabled {
+            return Err(Error::Other(
+                "MP4 file has no publishable track (video is disabled and the audio track is not Opus)"
+                    .to_string(),
+            ));
+        }
+        // Opus 以外の音声トラックは警告済みのため、catalog に audio を載せない
+        config.audio_enabled = false;
+    }
 
     // TLS の SNI / 証明書検証に使う server_name はポートを含めない。
     // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
@@ -245,30 +294,36 @@ pub async fn run(
 
     // 4. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
     // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
+    // --input-mp4-reencode の場合は解像度とフレームレートを MP4 から自動検出する
+    let reencode_video_info = reencode_reader.as_ref().and_then(|r| r.video_info());
+    let (encode_width, encode_height, encode_fps) = match &reencode_video_info {
+        Some(info) => (info.width, info.height, info.fps),
+        None => (config.width, config.height, config.fps),
+    };
     let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
         && mp4_reader.is_none()
     {
         let enc = match config.video_codec {
             VideoCodec::Av1 => encoder::VideoEncoder::Av1(Box::new(encoder::av1::Av1Encoder::new(
-                config.width,
-                config.height,
-                config.fps,
+                encode_width,
+                encode_height,
+                encode_fps,
                 config.bitrate,
                 config.keyframe_interval,
             )?)),
             #[cfg(target_os = "macos")]
             VideoCodec::H264 => encoder::VideoEncoder::H264(encoder::h264::H264Encoder::new(
-                config.width,
-                config.height,
-                config.fps,
+                encode_width,
+                encode_height,
+                encode_fps,
                 config.bitrate,
                 config.keyframe_interval,
             )?),
             #[cfg(target_os = "macos")]
             VideoCodec::H265 => encoder::VideoEncoder::H265(encoder::h265::H265Encoder::new(
-                config.width,
-                config.height,
-                config.fps,
+                encode_width,
+                encode_height,
+                encode_fps,
                 config.bitrate,
                 config.keyframe_interval,
             )?),
@@ -285,10 +340,12 @@ pub async fn run(
     } else {
         None
     };
-    // MP4 パススルーでは MP4 のタイムスケールを、それ以外はエンコーダのタイムスケールを使う
-    let video_timescale = match &mp4_reader {
-        Some(reader) => Some(reader.info().timescale),
-        None => video_encoder.as_ref().map(|e| e.timescale()),
+    // MP4 パススルーでは MP4 のタイムスケールを、再エンコードでは入力映像トラックの
+    // タイムスケールを、それ以外はエンコーダのタイムスケールを使う
+    let video_timescale = match (&mp4_reader, &reencode_video_info) {
+        (Some(reader), _) => Some(reader.info().timescale),
+        (None, Some(info)) => Some(info.timescale),
+        (None, None) => video_encoder.as_ref().map(|e| e.timescale()),
     };
 
     let mut audio_encoder: Option<OpusEncoder> = if config.audio_enabled {
@@ -301,7 +358,15 @@ pub async fn run(
         None
     };
     let audio_samples_per_frame = audio_encoder.as_ref().map(|e| e.samples_per_frame());
-    let audio_timescale = audio_encoder.as_ref().map(|e| e.timescale());
+    // PROP_TIMESCALE は再エンコードでは入力音声トラックのタイムスケールを使う
+    let audio_timescale = if config.audio_enabled {
+        match reencode_reader.as_ref().and_then(|r| r.audio_info()) {
+            Some(info) => Some(info.timescale),
+            None => audio_encoder.as_ref().map(|e| e.timescale()),
+        }
+    } else {
+        None
+    };
     // Opus の configuration bytes (OpusHead) を事前に構築する
     // Audio Config プロパティとして最初の audio object にだけ付与する
     let audio_opus_head = audio_encoder
@@ -333,9 +398,9 @@ pub async fn run(
                 track_name: &config.track_name,
                 namespace: &config.namespace,
                 codec: enc.catalog_codec_string(),
-                width: config.width,
-                height: config.height,
-                fps: config.fps,
+                width: encode_width,
+                height: encode_height,
+                fps: encode_fps,
                 bitrate: config.bitrate,
             }),
             (None, None) => None,
@@ -354,37 +419,50 @@ pub async fn run(
     // 6. 映像 / 音声入力を起動する
     //
     // MP4 リーダーの停止は Drop で行う。Drop は宣言と逆順に実行されるため、
-    // 受信側 (video_input_rx) を先に閉じてから join できるよう mp4_source を先に宣言する。
-    let mut mp4_source: Option<mp4::Mp4VideoSource> = None;
+    // 受信側 (video_input_rx / audio_input_rx) を先に閉じてから join できるよう
+    // リーダーの生存管理を先に宣言する。
+    let mut mp4_source: Option<mp4::ReaderGuard> = None;
+    let mut reencode_source: Option<mp4::ReaderGuard> = None;
     let (video_input_tx, mut video_input_rx) = mpsc::channel::<VideoInput>(4);
-    let _video_capture: Option<VideoCaptureGuard> = if config.video_enabled {
-        match mp4_reader {
-            Some(reader) => {
-                mp4_source = Some(reader.start(video_input_tx)?);
-                None
+    let (audio_input_tx, mut audio_input_rx) = mpsc::channel::<AudioInput>(8);
+    let _video_capture: Option<VideoCaptureGuard>;
+    let _audio_capture: Option<AudioCaptureGuard>;
+    if let Some(reader) = reencode_reader {
+        // MP4 再エンコード: リーダーが映像と音声の両方を供給する
+        let video_input_tx = config.video_enabled.then_some(video_input_tx);
+        let audio_input_tx = config.audio_enabled.then_some(audio_input_tx);
+        reencode_source = Some(reader.start(video_input_tx, audio_input_tx)?);
+        _video_capture = None;
+        _audio_capture = None;
+    } else {
+        _video_capture = if config.video_enabled {
+            match mp4_reader {
+                Some(reader) => {
+                    mp4_source = Some(reader.start(video_input_tx)?);
+                    None
+                }
+                None => Some(if config.fake_capture_device {
+                    VideoCaptureGuard::Fake(fake_capture::start_capture(&config, video_input_tx)?)
+                } else {
+                    VideoCaptureGuard::Real(capture::start_capture(&config, video_input_tx)?)
+                }),
             }
-            None => Some(if config.fake_capture_device {
-                VideoCaptureGuard::Fake(fake_capture::start_capture(&config, video_input_tx)?)
-            } else {
-                VideoCaptureGuard::Real(capture::start_capture(&config, video_input_tx)?)
-            }),
-        }
-    } else {
-        // 送信側を drop して受信側を閉じておく (select の分岐は cfg gate でスキップ)
-        drop(video_input_tx);
-        None
-    };
-
-    let (audio_frame_tx, mut audio_frame_rx) = mpsc::channel::<AudioFrameOwned>(8);
-    let _audio_capture: Option<AudioCaptureGuard> = if config.audio_enabled {
-        Some(if config.fake_capture_device {
-            AudioCaptureGuard::Fake(fake_audio_capture::start_capture(audio_frame_tx)?)
         } else {
-            AudioCaptureGuard::Real(audio_capture::start_capture(&config, audio_frame_tx)?)
-        })
-    } else {
-        drop(audio_frame_tx);
-        None
+            // 送信側を drop して受信側を閉じておく (select の分岐は cfg gate でスキップ)
+            drop(video_input_tx);
+            None
+        };
+
+        _audio_capture = if config.audio_enabled {
+            Some(if config.fake_capture_device {
+                AudioCaptureGuard::Fake(fake_audio_capture::start_capture(audio_input_tx)?)
+            } else {
+                AudioCaptureGuard::Real(audio_capture::start_capture(&config, audio_input_tx)?)
+            })
+        } else {
+            drop(audio_input_tx);
+            None
+        };
     };
 
     // 7. データループ
@@ -395,6 +473,8 @@ pub async fn run(
     let mut current_video_writer: Option<SubgroupWriter> = None;
     let mut current_video_datagram_writer: Option<DatagramWriter> = None;
     let mut audio_pcm_buf: Vec<i16> = Vec::new();
+    // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
+    let mut pending_video_timestamps: VecDeque<u64> = VecDeque::new();
     // Audio Config (OpusHead) を送信済みかどうかのフラグ
     // Opus は全フレームが独立してデコード可能なため、最初の audio object だけでよい
     let mut audio_config_sent = false;
@@ -424,14 +504,29 @@ pub async fn run(
                 // 外に出す (ブロックの中では外側のループを抜けられない)。
                 let outcome: Result<()> = async {
                     // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
-                    // エンコード済みサンプルをそのまま送る
-                    let encoded_frames = match video_input {
+                    // エンコード済みサンプルをそのまま送り、MP4 再エンコードはデコード済みの
+                    // 生フレームをエンコードする
+                    let (mut encoded_frames, input_timestamp) = match video_input {
                         VideoInput::Raw(frame) => {
                             let encoder = video_encoder.as_mut().expect("video encoder enabled");
-                            encoder.encode(&frame)?
+                            (encoder.encode(&frame)?, None)
                         }
-                        VideoInput::Encoded(frame) => vec![frame],
+                        VideoInput::Encoded(frame) => (vec![frame], None),
+                        VideoInput::Reencode { frame, timestamp } => {
+                            let encoder = video_encoder.as_mut().expect("video encoder enabled");
+                            (encoder.encode(&frame)?, Some(timestamp))
+                        }
                     };
+                    // 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を
+                    // 使う。0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ
+                    if let Some(timestamp) = input_timestamp {
+                        pending_video_timestamps.push_back(timestamp);
+                    }
+                    for ef in &mut encoded_frames {
+                        if let Some(timestamp) = pending_video_timestamps.pop_front() {
+                            ef.timestamp = timestamp;
+                        }
+                    }
                     let timescale = video_timescale.expect("video timescale enabled");
                     for ef in encoded_frames {
                         if ef.is_keyframe {
@@ -501,9 +596,9 @@ pub async fn run(
                     Err(e) => return Err(e),
                 }
             }
-            audio_frame = audio_frame_rx.recv(), if config.audio_enabled => {
-                let Some(audio_frame) = audio_frame else {
-                    tracing::info!("Audio capture channel closed");
+            audio_input = audio_input_rx.recv(), if config.audio_enabled => {
+                let Some(audio_input) = audio_input else {
+                    tracing::info!("Audio input channel closed");
                     break;
                 };
                 // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
@@ -514,12 +609,21 @@ pub async fn run(
                     let samples_per_frame =
                         audio_samples_per_frame.expect("audio samples_per_frame enabled");
                     let timescale = audio_timescale.expect("audio timescale enabled");
-                    let pcm = extract_pcm_i16(&audio_frame)?;
+                    // 再エンコードでは入力サンプルのタイムスタンプをそのまま使う
+                    let (pcm, mut input_timestamp) = match audio_input {
+                        AudioInput::Raw(frame) => (extract_pcm_i16(&frame)?, None),
+                        AudioInput::Reencode { frame, timestamp } => {
+                            (extract_pcm_i16(&frame)?, Some(timestamp))
+                        }
+                    };
                     audio_pcm_buf.extend_from_slice(&pcm);
                     while audio_pcm_buf.len() >= samples_per_frame {
                         let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
                         let encoded = encoder.encode(&chunk)?;
-                        let timestamp = audio_frame_count * samples_per_frame as u64;
+                        let timestamp = match input_timestamp.take() {
+                            Some(timestamp) => timestamp,
+                            None => audio_frame_count * samples_per_frame as u64,
+                        };
                         // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
                         // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
                         // (Skip 時に audio_config_sent を立てると OpusHead が永遠に届かず、
@@ -675,6 +779,10 @@ pub async fn run(
         Some(source) => source.stop(),
         None => Ok(()),
     };
+    let reencode_result = match reencode_source.take() {
+        Some(source) => source.stop(),
+        None => Ok(()),
+    };
 
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
@@ -715,7 +823,7 @@ pub async fn run(
     }
 
     tracing::info!("Pipeline stopped");
-    mp4_reader_result
+    mp4_reader_result.and(reencode_result)
 }
 
 /// macOS 以外で H.264 / H.265 のエンコーダを指定したときのエラーを作る

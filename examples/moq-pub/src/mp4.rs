@@ -28,6 +28,8 @@ use crate::error::{Error, Result};
 use crate::fake_capture::sleep_interruptibly;
 use crate::pipeline::VideoInput;
 
+pub(crate) mod reencode;
+
 /// パススルー配信に必要な映像トラック情報
 #[derive(Debug)]
 pub struct VideoTrackInfo {
@@ -47,7 +49,7 @@ pub struct VideoTrackInfo {
 
 /// パススルー対象の映像コーデック
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassthroughCodec {
+enum Mp4VideoCodec {
     /// AV1
     Av1,
     /// H.264
@@ -87,7 +89,7 @@ pub struct Mp4VideoReader {
     /// 配信する映像トラックの Track ID
     track_id: u32,
     /// 映像コーデック
-    codec: PassthroughCodec,
+    codec: Mp4VideoCodec,
     /// catalog 用のトラック情報
     info: VideoTrackInfo,
     /// `PROP_VIDEO_CONFIG` に載せる設定データ (avcC / hvcC のレコード本体、AV1 は Sequence Header OBU)
@@ -231,7 +233,7 @@ impl Mp4VideoReader {
                 path.display()
             ))
         })?;
-        let Some((passthrough_codec, mut video_config)) = passthrough_codec_and_config(&entry)
+        let Some((video_codec, mut video_config)) = video_codec_and_config(&entry)
             .map_err(|e| Error::Other(format!("MP4 file '{}': {e}", path.display())))?
         else {
             return Err(Error::Other(format!(
@@ -243,7 +245,7 @@ impl Mp4VideoReader {
         // av1C の config OBUs に Sequence Header が無い適合ファイルもあるため、最初の
         // キーフレームの payload から取り出して使う (AV1 Codec ISO Media File Format
         // Binding v1.3.0 §2.4 は同期サンプルに Sequence Header OBU を要求する)
-        if passthrough_codec == PassthroughCodec::Av1 {
+        if video_codec == Mp4VideoCodec::Av1 {
             let sequence_header = first_keyframe_range
                 .and_then(|(offset, end)| {
                     crate::encoder::av1::extract_av1_sequence_header(&data[offset..end])
@@ -302,7 +304,7 @@ impl Mp4VideoReader {
             data,
             demuxer,
             track_id,
-            codec: passthrough_codec,
+            codec: video_codec,
             info: VideoTrackInfo {
                 codec,
                 width: u32::from(width),
@@ -327,7 +329,7 @@ impl Mp4VideoReader {
     /// 実時間ペーシングでフレームを供給する専用スレッドを開始する
     ///
     /// 戻り値を drop すると停止要求を出してスレッドを join する。
-    pub fn start(self, sender: mpsc::Sender<VideoInput>) -> Result<Mp4VideoSource> {
+    pub fn start(self, sender: mpsc::Sender<VideoInput>) -> Result<ReaderGuard> {
         tracing::info!(
             "MP4 passthrough reader starting: codec={} size={}x{} fps={}",
             self.info.codec,
@@ -347,10 +349,7 @@ impl Mp4VideoReader {
             .spawn(move || run_reader(reader, stop_thread, sender))
             .map_err(|e| Error::Other(format!("failed to spawn MP4 reader thread: {e}")))?;
 
-        Ok(Mp4VideoSource {
-            stop_flag: stop,
-            handle: Some(handle),
-        })
+        Ok(ReaderGuard::new(stop, handle))
     }
 
     /// 次の映像フレームを実時間ペーシングで返す
@@ -390,7 +389,7 @@ impl Mp4VideoReader {
                 .timestamp
                 .checked_add(self.loop_offset)
                 .ok_or_else(|| Error::Other("MP4 timestamp is out of range".to_string()))?;
-            let data = if sample.keyframe && self.codec == PassthroughCodec::Av1 {
+            let data = if sample.keyframe && self.codec == Mp4VideoCodec::Av1 {
                 av1_payload_with_sequence_header(&self.video_config, sample.data)
             } else {
                 sample.data
@@ -472,15 +471,26 @@ impl Mp4VideoReader {
 /// MP4 リーダースレッドの生存管理
 ///
 /// Drop 時に停止要求を出してスレッドを join する。実行時エラーを確認したい場合は
-/// [`Mp4VideoSource::stop`] を呼ぶ。
-pub struct Mp4VideoSource {
+/// [`ReaderGuard::stop`] を呼ぶ。
+pub(crate) struct ReaderGuard {
     stop_flag: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
-impl Mp4VideoSource {
+impl ReaderGuard {
+    /// 停止要求つき専用スレッドの生存管理を作る
+    pub(crate) fn new(
+        stop_flag: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<Result<()>>,
+    ) -> Self {
+        Self {
+            stop_flag,
+            handle: Some(handle),
+        }
+    }
+
     /// 停止要求を出してスレッドを join し、リーダーの実行結果を返す
-    pub fn stop(mut self) -> Result<()> {
+    pub(crate) fn stop(mut self) -> Result<()> {
         self.stop_flag.store(true, Ordering::Release);
         match self.handle.take() {
             Some(handle) => handle
@@ -491,7 +501,7 @@ impl Mp4VideoSource {
     }
 }
 
-impl Drop for Mp4VideoSource {
+impl Drop for ReaderGuard {
     fn drop(&mut self) {
         // 明示的に stop() されなかった場合はここで停止する (実行結果は破棄する)
         self.stop_flag.store(true, Ordering::Release);
@@ -510,7 +520,7 @@ fn run_reader(
     loop {
         match reader.next_frame_paced(&stop) {
             Ok(Some(frame)) => {
-                if !send_frame(&sender, &stop, frame) {
+                if !send_with_backpressure(&sender, &stop, VideoInput::Encoded(frame)) {
                     return Ok(());
                 }
             }
@@ -521,22 +531,21 @@ fn run_reader(
     }
 }
 
-/// フレームを送信する
+/// チャネルが満杯の場合は停止要求を見ながら再試行して送信する
 ///
-/// チャネルが満杯の場合は停止要求を見ながら再試行する。`blocking_send` は停止要求を
-/// 確認できないままブロックしうるため使わない (Drop 時の join がハングする)。
-/// 停止要求または受信側の終了で `false` を返す。
-fn send_frame(sender: &mpsc::Sender<VideoInput>, stop: &AtomicBool, frame: EncodedFrame) -> bool {
-    let mut frame = frame;
+/// `blocking_send` は停止要求を確認できないままブロックしうるため使わない
+/// (Drop 時の join がハングする)。停止要求または受信側の終了で `false` を返す。
+pub(crate) fn send_with_backpressure<T>(
+    sender: &mpsc::Sender<T>,
+    stop: &AtomicBool,
+    value: T,
+) -> bool {
+    let mut value = value;
     loop {
-        match sender.try_send(VideoInput::Encoded(frame)) {
+        match sender.try_send(value) {
             Ok(()) => return true,
             Err(mpsc::error::TrySendError::Full(returned)) => {
-                // このチャネルには Encoded しか送らないため、返ってくる値も Encoded である
-                let VideoInput::Encoded(returned) = returned else {
-                    return false;
-                };
-                frame = returned;
+                value = returned;
                 if sleep_interruptibly(stop, Duration::from_millis(20)) {
                     return false;
                 }
@@ -557,9 +566,7 @@ fn send_frame(sender: &mpsc::Sender<VideoInput>, stop: &AtomicBool, frame: Encod
 ///
 /// avcC / hvcC は `Encode` がボックスヘッダを含めて出力するため、ヘッダを除いた本体を返す。
 /// moq-sub の MP4 保存はこの形式を前提にサンプルエントリーを再構築する。
-fn passthrough_codec_and_config(
-    entry: &SampleEntry,
-) -> Result<Option<(PassthroughCodec, Vec<u8>)>> {
+fn video_codec_and_config(entry: &SampleEntry) -> Result<Option<(Mp4VideoCodec, Vec<u8>)>> {
     match entry {
         SampleEntry::Avc1(b) => {
             if b.avcc_box.sps_list.is_empty() || b.avcc_box.pps_list.is_empty() {
@@ -572,20 +579,17 @@ fn passthrough_codec_and_config(
                 .avcc_box
                 .encode_to_vec()
                 .map_err(|e| Error::Other(format!("failed to encode avcC box: {e}")))?;
-            Ok(Some((PassthroughCodec::H264, strip_box_header(&bytes)?)))
+            Ok(Some((Mp4VideoCodec::H264, strip_box_header(&bytes)?)))
         }
         SampleEntry::Hvc1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
         SampleEntry::Hev1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
-        SampleEntry::Av01(b) => Ok(Some((
-            PassthroughCodec::Av1,
-            b.av1c_box.config_obus.clone(),
-        ))),
+        SampleEntry::Av01(b) => Ok(Some((Mp4VideoCodec::Av1, b.av1c_box.config_obus.clone()))),
         _ => Ok(None),
     }
 }
 
 /// hvcC から H.265 の設定データ (HEVCDecoderConfigurationRecord 本体) を組み立てる
-fn hevc_codec_config(hvcc: &HvccBox) -> Result<(PassthroughCodec, Vec<u8>)> {
+fn hevc_codec_config(hvcc: &HvccBox) -> Result<(Mp4VideoCodec, Vec<u8>)> {
     if !has_hevc_parameter_sets(hvcc) {
         return Err(Error::Other(
             "hvcC box has no VPS/SPS/PPS; they are required to publish the H.265 track".to_string(),
@@ -594,7 +598,7 @@ fn hevc_codec_config(hvcc: &HvccBox) -> Result<(PassthroughCodec, Vec<u8>)> {
     let bytes = hvcc
         .encode_to_vec()
         .map_err(|e| Error::Other(format!("failed to encode hvcC box: {e}")))?;
-    Ok((PassthroughCodec::H265, strip_box_header(&bytes)?))
+    Ok((Mp4VideoCodec::H265, strip_box_header(&bytes)?))
 }
 
 /// hvcC に VPS / SPS / PPS が揃っているかどうか
@@ -842,10 +846,10 @@ mod tests {
         let SampleEntry::Avc1(avc1) = &entry else {
             panic!("H.264 サンプルエントリーが構築されること");
         };
-        let (codec, config) = passthrough_codec_and_config(&entry)
+        let (codec, config) = video_codec_and_config(&entry)
             .expect("avcC を取り出せること")
             .expect("対応コーデックであること");
-        assert_eq!(codec, PassthroughCodec::H264);
+        assert_eq!(codec, Mp4VideoCodec::H264);
 
         // ボックスヘッダを含まない AVCDecoderConfigurationRecord であること
         let avcc = &avc1.avcc_box;
@@ -897,10 +901,10 @@ mod tests {
             )
             .expect("H.265 サンプルエントリーを構築できること"),
         );
-        let (codec, config) = passthrough_codec_and_config(&entry)
+        let (codec, config) = video_codec_and_config(&entry)
             .expect("hvcC を取り出せること")
             .expect("対応コーデックであること");
-        assert_eq!(codec, PassthroughCodec::H265);
+        assert_eq!(codec, Mp4VideoCodec::H265);
 
         // configurationVersion から始まり、ボックスヘッダを含まないこと
         assert_eq!(config[0], 1, "configurationVersion は 1 であること");
@@ -916,16 +920,16 @@ mod tests {
     #[test]
     fn video_config_from_av01_sample_entry() {
         let entry = build_test_av01_entry();
-        let (codec, config) = passthrough_codec_and_config(&entry)
+        let (codec, config) = video_codec_and_config(&entry)
             .expect("config OBUs を取り出せること")
             .expect("対応コーデックであること");
-        assert_eq!(codec, PassthroughCodec::Av1);
+        assert_eq!(codec, Mp4VideoCodec::Av1);
         assert_eq!(config, AV1_CONFIG_OBUS, "config OBUs がそのまま返ること");
     }
 
     /// SPS / PPS を持たない avcC を拒否すること
     #[test]
-    fn passthrough_codec_rejects_avcc_without_parameter_sets() {
+    fn video_codec_rejects_avcc_without_parameter_sets() {
         let entry = SampleEntry::Avc1(Avc1Box {
             visual: test_visual_fields(640, 480),
             avcc_box: AvccBox {
@@ -943,14 +947,14 @@ mod tests {
             unknown_boxes: Vec::new(),
         });
         assert!(
-            passthrough_codec_and_config(&entry).is_err(),
+            video_codec_and_config(&entry).is_err(),
             "SPS / PPS が無い avcC はエラーになること"
         );
     }
 
     /// VPS / SPS / PPS を持たない hvcC を拒否すること
     #[test]
-    fn passthrough_codec_rejects_hvcc_without_parameter_sets() {
+    fn video_codec_rejects_hvcc_without_parameter_sets() {
         let entry = SampleEntry::Hvc1(Hvc1Box {
             visual: test_visual_fields(640, 480),
             hvcc_box: HvccBox {
@@ -975,7 +979,7 @@ mod tests {
             unknown_boxes: Vec::new(),
         });
         assert!(
-            passthrough_codec_and_config(&entry).is_err(),
+            video_codec_and_config(&entry).is_err(),
             "VPS / SPS / PPS が無い hvcC はエラーになること"
         );
     }

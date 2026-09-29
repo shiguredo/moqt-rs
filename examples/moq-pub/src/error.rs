@@ -15,6 +15,8 @@ pub enum Error {
     Capture(shiguredo_video_device::Error),
     /// AV1 エンコードエラー
     Encode(shiguredo_aom::Error),
+    /// AV1 デコードエラー
+    Decode(shiguredo_dav1d::Error),
     /// Video Toolbox エンコードエラー (macOS)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
@@ -41,6 +43,7 @@ impl fmt::Display for Error {
             Self::Moqt(e) => write!(f, "MoQT: {e}"),
             Self::Capture(e) => write!(f, "capture: {e:?}"),
             Self::Encode(e) => write!(f, "encode: {e}"),
+            Self::Decode(e) => write!(f, "decode: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
@@ -74,6 +77,12 @@ impl From<shiguredo_video_device::Error> for Error {
 impl From<shiguredo_aom::Error> for Error {
     fn from(e: shiguredo_aom::Error) -> Self {
         Self::Encode(e)
+    }
+}
+
+impl From<shiguredo_dav1d::Error> for Error {
+    fn from(e: shiguredo_dav1d::Error) -> Self {
+        Self::Decode(e)
     }
 }
 

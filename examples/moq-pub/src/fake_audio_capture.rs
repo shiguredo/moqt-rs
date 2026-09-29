@@ -13,6 +13,7 @@ use shiguredo_audio_device::{AudioFormat, AudioFrameOwned};
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
+use crate::pipeline::AudioInput;
 
 /// サンプリングレート (Hz)
 const SAMPLE_RATE: i32 = 48_000;
@@ -47,7 +48,7 @@ impl Drop for FakeAudioCapture {
 }
 
 /// 疑似音声キャプチャを開始する
-pub fn start_capture(sender: mpsc::Sender<AudioFrameOwned>) -> Result<FakeAudioCapture> {
+pub fn start_capture(sender: mpsc::Sender<AudioInput>) -> Result<FakeAudioCapture> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
 
@@ -71,7 +72,7 @@ pub fn start_capture(sender: mpsc::Sender<AudioFrameOwned>) -> Result<FakeAudioC
 }
 
 /// 生成ループ本体
-fn run_capture_loop(stop: Arc<AtomicBool>, sender: mpsc::Sender<AudioFrameOwned>) {
+fn run_capture_loop(stop: Arc<AtomicBool>, sender: mpsc::Sender<AudioInput>) {
     let frame_interval =
         Duration::from_micros((SAMPLES_PER_FRAME as u64 * 1_000_000) / SAMPLE_RATE as u64);
     let mut sample_index: u64 = 0;
@@ -108,7 +109,7 @@ fn run_capture_loop(stop: Arc<AtomicBool>, sender: mpsc::Sender<AudioFrameOwned>
         };
 
         // チャネルが満杯の場合はフレームを破棄する (実キャプチャと同じ挙動)
-        match sender.try_send(owned) {
+        match sender.try_send(AudioInput::Raw(owned)) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => break,

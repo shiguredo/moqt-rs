@@ -13,6 +13,8 @@ publish = false
 shiguredo_aom = "2026.2"
 # 音声キャプチャ
 shiguredo_audio_device = "2026.3"
+# AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
+shiguredo_dav1d = "2026.2"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.9"
 # MoQT 本体 (ローカル参照)

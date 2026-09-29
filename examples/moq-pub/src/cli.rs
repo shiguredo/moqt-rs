@@ -68,6 +68,8 @@ pub struct Config {
     pub use_datagram: bool,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
     pub input_mp4: Option<String>,
+    /// MP4 ファイルを再エンコードして配信する入力パス
+    pub input_mp4_reencode: Option<String>,
 }
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
@@ -232,10 +234,22 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
+    let input_mp4_reencode: Option<String> = noargs::opt("input-mp4-reencode")
+        .ty("PATH")
+        .doc("Decode and re-encode the video and audio tracks of an MP4 file")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+
     let video_enabled = !no_video;
     // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
     let audio_enabled = !no_audio && input_mp4.is_none();
     if !args.metadata().help_mode {
+        if input_mp4.is_some() && input_mp4_reencode.is_some() {
+            return Err(noargs::Error::other(
+                &args,
+                "--input-mp4 and --input-mp4-reencode cannot be used together",
+            ));
+        }
         if let Some(path) = input_mp4.as_deref() {
             if path.is_empty() {
                 return Err(noargs::Error::other(&args, "--input-mp4 must not be empty"));
@@ -285,7 +299,34 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
                     "--audio-bitrate is ignored when --input-mp4 is set (audio is not published)"
                 );
             }
-        } else if !video_enabled && !audio_enabled {
+        }
+        if let Some(path) = input_mp4_reencode.as_deref() {
+            if path.is_empty() {
+                return Err(noargs::Error::other(
+                    &args,
+                    "--input-mp4-reencode must not be empty",
+                ));
+            }
+            if width_explicit || height_explicit || fps_explicit {
+                return Err(noargs::Error::other(
+                    &args,
+                    "--input-mp4-reencode cannot be used with --width / --height / --fps (they are detected from the MP4)",
+                ));
+            }
+            // 無視するオプションは黙って捨てずに警告する
+            if device_id.is_some() {
+                tracing::warn!("--device-id is ignored when --input-mp4-reencode is set");
+            }
+            if fake_capture_device {
+                tracing::warn!("--fake-capture-device is ignored when --input-mp4-reencode is set");
+            }
+            if audio_device_id.is_some() {
+                tracing::warn!(
+                    "--audio-device-id is ignored when --input-mp4-reencode is set (audio is decoded from the MP4)"
+                );
+            }
+        }
+        if !video_enabled && !audio_enabled {
             return Err(noargs::Error::other(
                 &args,
                 "at least one of audio or video must be enabled (do not pass both --no-video and --no-audio)",
@@ -318,6 +359,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_bitrate,
         use_datagram,
         input_mp4,
+        input_mp4_reencode,
     }))
 }
 
@@ -361,6 +403,58 @@ mod tests {
     fn input_mp4_rejects_empty_path() {
         let args = [BASE_ARGS, &["--input-mp4", ""]].concat();
         assert!(parse_args(&args).is_err(), "空のパスはエラーになること");
+    }
+
+    /// `--input-mp4-reencode` の併用エラーと音声有効のテスト
+    #[test]
+    fn input_mp4_reencode_validations() {
+        // --input-mp4 との同時指定はエラー
+        let args = [
+            BASE_ARGS,
+            &["--input-mp4", "a.mp4", "--input-mp4-reencode", "b.mp4"],
+        ]
+        .concat();
+        assert!(
+            parse_args(&args).is_err(),
+            "--input-mp4 との同時指定はエラーになること"
+        );
+
+        // --width / --height / --fps の明示指定はエラー
+        for extra in [["--width", "640"], ["--height", "480"], ["--fps", "60"]] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--input-mp4-reencode", "input.mp4"]);
+            args.extend_from_slice(&extra);
+            assert!(
+                parse_args(&args).is_err(),
+                "解像度 / フレームレートの指定はエラーになること: {args:?}"
+            );
+        }
+
+        // --no-video / --no-audio は指定できる
+        for extra in [&["--no-video"][..], &["--no-audio"][..]] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--input-mp4-reencode", "input.mp4"]);
+            args.extend_from_slice(extra);
+            assert!(
+                parse_args(&args).is_ok(),
+                "トラック単位の無効化はエラーにならないこと: {args:?}"
+            );
+        }
+
+        // --audio-bitrate / --video-codec は再エンコードの設定として使う (エラーにならない)
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&[
+            "--input-mp4-reencode",
+            "input.mp4",
+            "--video-codec",
+            "av1",
+            "--audio-bitrate",
+            "96",
+        ]);
+        let config = parse_args(&args)
+            .expect("パースできること")
+            .expect("設定が返ること");
+        assert!(config.audio_enabled, "音声トラックは既定で有効であること");
     }
 
     /// `--input-mp4` では音声トラックを配信しないこと
