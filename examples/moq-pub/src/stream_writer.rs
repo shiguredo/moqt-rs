@@ -334,6 +334,14 @@ impl SubgroupWriter {
         Ok(ObjectFilterOutcome::Pass)
     }
 
+    /// このストリームの ID を返す
+    ///
+    /// Session が指示する reset (`SessionEvent::ResetDataStream`) の対象かどうかを
+    /// 照合するために使う。
+    pub fn stream_id(&self) -> DataStreamId {
+        self.stream_id
+    }
+
     /// ストリームを終了する
     ///
     /// 終端方法は `SubgroupObjectState::termination` が決める (sans I/O)。RESET 側の場合は
@@ -378,6 +386,40 @@ impl SubgroupWriter {
                     .send_data_stream_closed(self.stream_id, RequestStreamEnd::Fin)?;
             }
         }
+        Ok(())
+    }
+
+    /// Session の指示でストリームを reset して終了する
+    ///
+    /// `SessionEvent::ResetDataStream` を受けたときに呼ぶ。I/O 層は当該 stream を
+    /// RESET_STREAM で閉じた後に [`DataPlaneHandle::send_data_stream_closed`] で終端を通知する契約
+    /// (`src/session/types.rs` のイベント doc)。この通知が `Subscription::pending_publish_done` の
+    /// flush 条件 (全 outgoing stream の終端) を満たすため、ワイヤ reset と通知を 1 箇所で行う。
+    ///
+    /// Session 側で stream 追跡を除去済みの reset 経路 (`Session::reset_outgoing_data_stream_*` /
+    /// fill fetch stream の reset / malformed 検出) では本メソッドを呼ばない。呼ぶと
+    /// `send_data_stream_closed` が未知 stream id で `SESSION_PROTOCOL_VIOLATION` になる。
+    /// 呼び出し側が「Session が追跡を残す経路」と「除去済みの経路」を見分ける。
+    ///
+    /// draft は RESET_STREAM_AT も認めるが、example の transport API に RESET_STREAM_AT が無いため
+    /// `reliable_size` は使わず RESET_STREAM で代替する (`Session` 自身も自動発火の reset では
+    /// `reliable_size: None` を渡す)。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn reset_by_session(mut self, error_code: u64) -> Result<()> {
+        tracing::debug!(
+            "reset subgroup stream by session: stream_id={}, group_id={}, error_code={:#x}",
+            self.stream_id.0,
+            self.group_id,
+            error_code,
+        );
+        self.stream.reset(error_code)?;
+        self.data_plane.send_data_stream_closed(
+            self.stream_id,
+            RequestStreamEnd::Reset {
+                error_code,
+                reliable_size: None,
+            },
+        )?;
         Ok(())
     }
 }

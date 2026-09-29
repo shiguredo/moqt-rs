@@ -620,3 +620,6 @@
 - [FIX] example が URL の authority と path に含まれる空白 / 制御文字を接続の前に拒否する
   - 名前解決の失敗や SETUP の `PATH does not conform to RFC 3986` ではなく、`--url` の検証で原因を示す
   - @voluntas
+- [FIX] example の publisher が `SessionEvent::ResetDataStream` を無視して保留 PUBLISH_DONE が送られないのを止める
+  - 該当 stream を RESET_STREAM で閉じ、`send_data_stream_closed` で Session へ終端を通知する
+  - @voluntas

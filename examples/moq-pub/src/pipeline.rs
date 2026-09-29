@@ -19,6 +19,7 @@ use shiguredo_moqt::{
     message::common::TrackNamespace,
     message_parameter::MessageParameters,
     msf::MSF_CATALOG_TRACK_NAME,
+    session::types::DataStreamId,
     session::types::SessionEvent,
     track_properties::TrackProperties,
 };
@@ -126,8 +127,68 @@ fn publish_diag_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("MOQT_PUBLISH_DIAG").is_ok_and(|v| v == "1"))
 }
 
-/// パイプラインを実行する
+/// Session が指示した reset の対象が、この example が開いたままの subgroup stream かを返す
 ///
+/// Session は delivery timeout による reset で stream 追跡を残し、I/O 層からの
+/// `send_data_stream_closed` を待つ。一方で app 発の reset (`reset_outgoing_data_stream_*`)
+/// や fill fetch stream の reset、malformed 検出では追跡を除去済みであり、通知すると
+/// 未知 stream id でセッションを閉じてしまう。追跡が残る経路と除去済みの経路は
+/// イベントから区別できないため、「自分が開いたままの subgroup stream に一致するか」で
+/// 通知の要否を決める。
+fn reset_targets_open_subgroup(
+    current_video_writer: Option<&SubgroupWriter>,
+    stream_id: DataStreamId,
+) -> bool {
+    current_video_writer.is_some_and(|writer| writer.stream_id() == stream_id)
+}
+
+/// Session が指示した data stream の reset を I/O 層として実施する
+///
+/// この example が保持する subgroup stream のうち `stream_id` に一致するものを
+/// RESET_STREAM で閉じ、Session へ終端を通知する。一致しない場合 (既に閉じた stream や
+/// fill fetch stream) は何もしない。Session 側で追跡を除去済みの reset 経路では
+/// `send_data_stream_closed` が未知 stream id でセッションを閉じるため、
+/// 自分が開いたままの stream にだけ通知する。
+///
+/// 戻り値は「publish ループを抜けるか」。transport の終了 (`ConnectionClosed`) は
+/// セッション終了として扱い、それ以外のエラーは呼び出し元へ伝播させる。
+fn reset_open_subgroup_stream(
+    current_video_writer: &mut Option<SubgroupWriter>,
+    stream_id: DataStreamId,
+    error_code: u64,
+) -> Result<bool> {
+    // Session 側で追跡を除去済みの reset 経路 (app 発の reset / fill fetch stream /
+    // malformed 検出) では send_data_stream_closed が未知 stream id でセッションを閉じる。
+    // 自分が開いたままの stream にだけ通知する
+    let applies = reset_targets_open_subgroup(current_video_writer.as_ref(), stream_id);
+    if !applies {
+        tracing::debug!(
+            "ResetDataStream is not for an open subgroup stream of this example: stream_id={}",
+            stream_id.0
+        );
+        return Ok(false);
+    }
+    let writer = current_video_writer
+        .take()
+        .expect("applies is true only when an open subgroup stream matches");
+    match writer.reset_by_session(error_code) {
+        Ok(()) => {
+            tracing::info!(
+                "Reset subgroup stream on session request: stream_id={}, error_code={:#x}",
+                stream_id.0,
+                error_code
+            );
+            Ok(false)
+        }
+        Err(e) if is_transport_session_end(&e) => {
+            tracing::info!("Session closed by transport");
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// パイプラインを実行する
 /// `task_monitor` は生成されるタスクのメトリクスを収集する。
 /// `shutdown_monitor` は graceful shutdown の契機を受信する。
 pub async fn run(
@@ -737,6 +798,21 @@ pub async fn run(
                             tracing::info!("Peer sent PUBLISH_DONE for request {request_id}");
                             Ok(false)
                         }
+                        Some(ClientEvent::Session(SessionEvent::ResetDataStream {
+                            stream_id,
+                            error_code,
+                            ..
+                        })) => {
+                            // I/O 層 (この example) が当該 uni data stream を RESET_STREAM で閉じ、
+                            // その後に Session へ終端を通知する。通知が保留 PUBLISH_DONE の
+                            // flush 条件 (全 outgoing stream の終端) を満たす
+                            // (draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability))。
+                            reset_open_subgroup_stream(
+                                &mut current_video_writer,
+                                stream_id,
+                                error_code,
+                            )
+                        }
                         Some(ClientEvent::Request(request)) => {
                             serve_peer_request(&mut client, request, &config, &catalog_json)
                                 .await?;
@@ -1101,6 +1177,20 @@ mod tests {
     use super::*;
     // セッション終了の判定は `Error` の variant で行うため、`TransportError` はテストでのみ使う
     use tokio_moq::error::TransportError;
+
+    /// Session の reset 指示が open 中の subgroup stream に一致するかを判定できること
+    ///
+    /// `SubgroupWriter` は I/O ハンドルを必要とするためテストから構築できないが、
+    /// 判定は `Option<&SubgroupWriter>` の `None` 側で固定できる。
+    /// 一致する場合の判定は実機確認 (delivery timeout の発火) で確認する。
+    #[test]
+    fn reset_targets_open_subgroup_without_open_stream() {
+        let stream_id = DataStreamId(7);
+        assert!(
+            !reset_targets_open_subgroup(None, stream_id),
+            "open 中の stream が無ければ通知しないこと"
+        );
+    }
 
     /// keyframe の映像 LOC プロパティ: Video Frame Marking / Timestamp / Timescale / Video Config が付与され encode できること
     #[test]

@@ -754,6 +754,23 @@ pub async fn run(
                             tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
                             Ok(true)
                         }
+                        Some(ClientEvent::Session(SessionEvent::ResetDataStream {
+                            stream_id,
+                            error_code,
+                            ..
+                        })) => {
+                            // subscriber は outgoing data stream (subgroup / fill fetch) を
+                            // 開かないため、reset すべき stream を持たない。届いた場合は
+                            // 観測できるようにログだけ残す (draft-ietf-moq-transport-21
+                            // §5.2 (Delivery Timeouts and Data Reliability))。
+                            tracing::debug!(
+                                "Ignoring ResetDataStream for a stream this example does not own: \
+                                 stream_id={}, error_code={:#x}",
+                                stream_id.0,
+                                error_code
+                            );
+                            Ok(false)
+                        }
                         Some(ClientEvent::Request(request)) => {
                             // subscriber は relay からの要求を受けない。届いた場合は
                             // NOT_SUPPORTED で拒否してハングを避ける。

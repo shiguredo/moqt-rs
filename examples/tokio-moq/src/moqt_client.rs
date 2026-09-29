@@ -446,6 +446,10 @@ fn is_notable_event(event: &SessionEvent) -> bool {
         SessionEvent::GoawayReceived { .. }
             | SessionEvent::CloseSession(_)
             | SessionEvent::PublishDoneReceived { .. }
+            // ResetDataStream は「I/O 層が当該 uni data stream を RESET_STREAM で閉じる」指示であり、
+            // ワイヤを閉じるのも Session へ終端を通知するのも I/O 層 (example) の責務である。
+            // ここで捨てると保留 PUBLISH_DONE の flush 条件が満たされないため、アプリへ届ける
+            | SessionEvent::ResetDataStream { .. }
     )
 }
 
@@ -1653,7 +1657,8 @@ impl MoqtClient {
                     });
                 }
                 ev @ (SessionEvent::GoawayReceived { .. }
-                | SessionEvent::PublishDoneReceived { .. }) => {
+                | SessionEvent::PublishDoneReceived { .. }
+                | SessionEvent::ResetDataStream { .. }) => {
                     // アプリ (next_event) が観測する notable イベント。
                     // ここで捨てると take_notable_event が取り出せなくなる
                     // (受信メッセージを契機に生成されたイベントは、この drain が
@@ -1665,16 +1670,12 @@ impl MoqtClient {
                 | SessionEvent::RequestTerminated { .. }
                 | SessionEvent::RequestOkReceived { .. }
                 | SessionEvent::PublishStateNotifyReceived { .. }
-                | SessionEvent::ResetDataStream { .. }
                 | SessionEvent::FetchOkReceived { .. }
                 | SessionEvent::SendPaddingStream { .. }
                 | SessionEvent::OpenFillFetchStream { .. }
                 | SessionEvent::SendPaddingDatagram { .. } => {
-                    // GoawayReceived / PublishDoneReceived はメインループが take_notable_event で拾う。
-                    // ResetDataStream は OBJECT_DELIVERY_TIMEOUT / SUBGROUP_DELIVERY_TIMEOUT を
-                    // 設定した subscription や malformed 検出時に発火する (draft-ietf-moq-transport-21
-                    // §5.2 (Delivery Timeouts and Data Reliability) / §12.1 (Malformed Tracks))。
-                    // 本 example は受信 data stream の reset を行わないため無視する。
+                    // GoawayReceived / PublishDoneReceived / ResetDataStream は
+                    // メインループが take_notable_event で拾う。
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
                     // (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY))。
@@ -1763,6 +1764,20 @@ mod tests {
             new_session_uri: Vec::new(),
             timeout: 5000,
             on_request_stream: None,
+        };
+        assert!(is_notable_event(&event));
+    }
+
+    /// ResetDataStream はアプリが観測する notable イベントである
+    ///
+    /// I/O 層 (example) がワイヤの RESET_STREAM と Session への終端通知を行うため、
+    /// アプリまで届ける必要がある。
+    #[test]
+    fn reset_data_stream_is_notable_event() {
+        let event = SessionEvent::ResetDataStream {
+            stream_id: shiguredo_moqt::session::types::DataStreamId(3),
+            error_code: 0x2,
+            reliable_size: None,
         };
         assert!(is_notable_event(&event));
     }
