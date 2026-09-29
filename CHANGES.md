@@ -617,3 +617,6 @@
 - [FIX] moq-pub / moq-sub の `--help` がヘルプを表示せず必須オプション欠如のエラーで終了するのを止める
   - 必須オプション `--url` にヘルプ表示用の例を与え、`--help` / `-h` が `moqt://host[:port]/path` を案内して正常終了するようにする
   - @voluntas
+- [FIX] example が URL の authority と path に含まれる空白 / 制御文字を接続の前に拒否する
+  - 名前解決の失敗や SETUP の `PATH does not conform to RFC 3986` ではなく、`--url` の検証で原因を示す
+  - @voluntas

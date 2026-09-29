@@ -204,6 +204,7 @@ pub struct ServerUrl {
 /// # Errors
 ///
 /// - `moqt://` 以外の scheme / authority の欠落: `unsupported URL scheme` / `requires authority`
+/// - authority または path に空白 / 制御文字を含む: `invalid URL`
 /// - fragment が `<type>:<value>` でない / type の文字種が §6.1.1 に一致しない: `invalid moqt URI fragment`
 /// - `msf` fragment が MSF §11.1 の ABNF に一致しない: `invalid MSF fragment`
 /// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
@@ -220,6 +221,17 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     if authority.is_empty() {
         return Err(format!(
             "moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)"
+        ));
+    }
+    // RFC 3986 §2 (Characters) の `pchar` は `unreserved` / `pct-encoded` / sub-delims /
+    // ":" / "@" であり、空白 (SP / HTAB) と制御文字を含まない。path に残った空白は SETUP の
+    // PATH option で `PATH does not conform to RFC 3986` になり、authority に残った空白は
+    // 名前解決の失敗になる。原因が分かるように、接続の前に URL として拒否する。
+    // fragment は解釈する仕様が意味を定めるため対象外にし、percent-encoding された
+    // `%20` は RFC 3986 §2.1 の `pct-encoded` として正当なので拒否しない。
+    if let Some((component, index)) = first_url_whitespace(&authority, &path) {
+        return Err(format!(
+            "invalid URL: {url} ('{component}' contains a whitespace or control character at byte {index})"
         ));
     }
     let fragment = match raw_fragment {
@@ -253,6 +265,25 @@ fn split_fragment(rest: &str) -> (&str, Option<&str>) {
         Some(hash) => (&rest[..hash], Some(&rest[hash + 1..])),
         None => (rest, None),
     }
+}
+
+/// authority と path のうち、空白または制御文字を最初に含む成分を返す
+///
+/// 戻り値は成分名 (`authority` / `path`) と、その成分の先頭からのバイト位置。
+/// ASCII の空白 (SP / HTAB / LF / CR 等) と制御文字 (0x00-0x1F / 0x7F) を対象にする。
+/// RFC 3986 §2 (Characters) は `host` / `path` にこれらを含めない。
+/// 非 ASCII の空白 (全角スペース等) は `pct-encoded` ではないが、UTF-8 のままでも
+/// 接続層で意味を持たないため、ここでは ASCII の空白と制御文字だけを拒否する。
+fn first_url_whitespace<'a>(authority: &'a str, path: &'a str) -> Option<(&'a str, usize)> {
+    for (name, component) in [("authority", authority), ("path", path)] {
+        if let Some(index) = component
+            .bytes()
+            .position(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Some((name, index));
+        }
+    }
+    None
 }
 
 /// moqt URI の fragment を `<type>:<value>` として解釈する
@@ -726,6 +757,74 @@ mod tests {
         let url = parse_url("moqt://127.0.0.1:4443/path?x=1").expect("URL のパースに成功すること");
         assert_eq!(url.authority, "127.0.0.1:4443");
         assert_eq!(url.path, "/path?x=1");
+    }
+
+    /// authority と path に含まれる空白と制御文字は拒否する
+    ///
+    /// RFC 3986 §2 (Characters) は `host` と `path` に空白を含めない。受理すると
+    /// 名前解決の失敗や SETUP の `PATH does not conform to RFC 3986` という
+    /// 原因の分かりにくいエラーになるため、URL の検証で拒否する。
+    #[test]
+    fn parse_url_rejects_whitespace_in_authority_and_path() {
+        for url in [
+            "moqt://exa mple.com/app",
+            "moqt://127.0.0.1:4443/a b",
+            "moqt://127.0.0.1:4443/a\tb",
+            "moqt://example.com/a\nb",
+            "moqt://example.com/a\u{0}b",
+        ] {
+            let err = parse_url(url).expect_err("空白 / 制御文字はエラーになること");
+            assert!(
+                err.contains("invalid URL"),
+                "URL の検証エラーとして返ること: {err}"
+            );
+            assert!(
+                err.contains(url),
+                "入力の URL がエラーに含まれること: {err}"
+            );
+        }
+    }
+
+    /// 空白のエラーは原因の成分を報告する
+    #[test]
+    fn parse_url_reports_whitespace_component() {
+        let err = parse_url("moqt://exa mple.com/app").expect_err("エラーになること");
+        assert!(
+            err.contains("'authority' contains a whitespace or control character at byte 3"),
+            "authority の位置を報告すること: {err}"
+        );
+
+        let err = parse_url("moqt://127.0.0.1:4443/a b").expect_err("エラーになること");
+        assert!(
+            err.contains("'path' contains a whitespace or control character at byte 2"),
+            "path の位置を報告すること: {err}"
+        );
+    }
+
+    /// percent-encoding された空白は path として受理する
+    ///
+    /// RFC 3986 §2.1 の `pct-encoded` は正当な表現であり、空白そのものではない。
+    #[test]
+    fn parse_url_accepts_percent_encoded_space_in_path() {
+        let url = parse_url("moqt://example.com/a%20b").expect("URL のパースに成功すること");
+        assert_eq!(url.authority, "example.com");
+        assert_eq!(url.path, "/a%20b");
+    }
+
+    /// fragment の空白は URL の検証では拒否しない
+    ///
+    /// fragment は解釈する仕様が意味を定めるため、authority / path と同じ規則を課さない。
+    #[test]
+    fn parse_url_keeps_whitespace_in_fragment() {
+        let url = parse_url("moqt://example.com/app#type:a b")
+            .expect("fragment の空白は URL の検証で拒否しないこと");
+        assert_eq!(url.authority, "example.com");
+        assert_eq!(url.path, "/app");
+        assert_eq!(
+            url.fragment.as_ref().map(|f| f.value.as_str()),
+            Some("a b"),
+            "fragment の値はそのまま保持すること"
+        );
     }
 
     /// `moqt://` 以外の scheme はエラーになる (接続経路は --transport で選ぶ)
