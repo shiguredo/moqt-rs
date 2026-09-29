@@ -531,12 +531,11 @@ fn invalid_authority(authority: &str, reason: &str) -> TransportError {
 /// 数十秒から数分ブロックする。セッションのタイムアウトより前に解決を打ち切る。
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// authority を解決して接続先の `SocketAddr` を得る
+/// authority を解決して接続先の `SocketAddr` の列を得る
 ///
-/// host が IP リテラルなら `SocketAddr` に直接パースし、ホスト名なら
-/// `tokio::net::lookup_host` で解決して最初の結果を使う。ポートが省略された
-/// authority は既定ポート 443 を使う
-/// (draft-ietf-moq-transport-21 §6.1.2)。解決したアドレスは接続前に info ログに出す。
+/// host が IP リテラルなら `SocketAddr` に直接パースして 1 件の列にし、ホスト名なら
+/// `tokio::net::lookup_host` で解決した結果を解決順のまま列にする。ポートが省略された
+/// authority は既定ポート 443 を使う (draft-ietf-moq-transport-21 §6.1.2)。
 ///
 /// 名前解決は [`RESOLVE_TIMEOUT`] で打ち切る。打ち切った場合は
 /// [`TransportError::ResolutionFailed`] になり、接続を試みずに終わる。
@@ -549,42 +548,79 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 0 件の場合は [`TransportError::ResolutionFailed`] になる。
 // テスト方針: IP リテラルと `localhost` の経路は単体テストで固定し、タイムアウトの
 // 行使は短いタイムアウトを渡す単体テストと、タイムアウト値を一時的に縮めた実機確認で確認する。
-pub async fn resolve_socket_addr(authority: &str) -> Result<SocketAddr, TransportError> {
-    resolve_socket_addr_within(authority, RESOLVE_TIMEOUT).await
+pub async fn resolve_socket_addrs(authority: &str) -> Result<Vec<SocketAddr>, TransportError> {
+    resolve_socket_addrs_within(authority, RESOLVE_TIMEOUT).await
 }
 
 /// authority をタイムアウト付きで解決する
 ///
 /// タイムアウト値を引数に取るのは、応答しないリゾルバを用意できない環境でも
 /// 打ち切りの経路を単体テストで固定できるようにするため。
-/// 公開 API は [`RESOLVE_TIMEOUT`] を渡す [`resolve_socket_addr`] だけにする。
-async fn resolve_socket_addr_within(
+/// 公開 API は [`RESOLVE_TIMEOUT`] を渡す [`resolve_socket_addrs`] だけにする。
+async fn resolve_socket_addrs_within(
     authority: &str,
     timeout: Duration,
-) -> Result<SocketAddr, TransportError> {
+) -> Result<Vec<SocketAddr>, TransportError> {
     let parts = authority_parts(authority)?;
     let addr_text = parts.socket_addr_string();
 
-    let addr = if let Ok(addr) = addr_text.parse::<SocketAddr>() {
-        addr
+    let addrs = if let Ok(addr) = addr_text.parse::<SocketAddr>() {
+        vec![addr]
     } else {
-        let mut resolved =
-            tokio::time::timeout(timeout, tokio::net::lookup_host(addr_text.as_str()))
-                .await
-                .map_err(|_| {
-                    resolve_failed(
-                        authority,
-                        &format!("name resolution timed out after {timeout:?}"),
-                    )
-                })?
-                .map_err(|e| resolve_failed(authority, &e.to_string()))?;
-        resolved
-            .next()
-            .ok_or_else(|| resolve_failed(authority, "no address"))?
+        let resolved = tokio::time::timeout(timeout, tokio::net::lookup_host(addr_text.as_str()))
+            .await
+            .map_err(|_| {
+                resolve_failed(
+                    authority,
+                    &format!("name resolution timed out after {timeout:?}"),
+                )
+            })?
+            .map_err(|e| resolve_failed(authority, &e.to_string()))?;
+        let addrs: Vec<SocketAddr> = resolved.collect();
+        if addrs.is_empty() {
+            return Err(resolve_failed(authority, "no address"));
+        }
+        addrs
     };
 
-    tracing::info!("Resolved {authority} to {addr}");
-    Ok(addr)
+    tracing::info!("Resolved {authority} to {addrs:?}");
+    Ok(addrs)
+}
+
+/// 解決した接続先の列を順に試して接続を確立する
+///
+/// 名前解決の結果は環境依存の順序で返るため、先頭のアドレスへの接続が失敗したら
+/// 次のアドレスを試す。`localhost` が IPv6 と IPv4 の両方に解決される環境では、
+/// IPv4 のみ待ち受ける relay へ接続するために必要になる。
+///
+/// 並行接続 (Happy Eyeballs) と再解決は行わず、解決結果の順序どおりに順次試行する。
+/// `connect` は各試行で 1 回呼ばれ、試行したアドレスは常に info ログに残す。
+/// すべての試行が失敗した場合は最後の失敗を返す。
+///
+/// # Errors
+///
+/// 名前解決に失敗した場合と、`connect` がすべてのアドレスで失敗した場合はエラーになる。
+pub async fn connect_with_fallback<T, E, F, Fut>(authority: &str, mut connect: F) -> Result<T, E>
+where
+    E: From<TransportError> + std::fmt::Display,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let addrs = resolve_socket_addrs(authority).await?;
+    let mut last: Option<E> = None;
+    for addr in addrs {
+        tracing::info!("Connecting to {addr} (authority {authority})");
+        match connect(addr).await {
+            Ok(connected) => return Ok(connected),
+            Err(error) => {
+                // 失敗した試行もログに残し、次に試すアドレスがあることを分かるようにする
+                tracing::warn!("Failed to connect to {addr}: {error}");
+                last = Some(error);
+            }
+        }
+    }
+    // 解決結果が 0 件の場合は resolve_socket_addrs が失敗するため last は必ず埋まる
+    Err(last.expect("resolve_socket_addrs must return at least one address"))
 }
 
 /// 名前解決に失敗したことを表すエラーを作る
@@ -1241,56 +1277,63 @@ mod tests {
         assert_eq!(local_bind_addr(remote), "[::]:0");
     }
 
-    /// IP リテラルの authority は既定ポートを補って解決される
+    /// IP リテラルの authority は 1 件の列に解決され、既定ポートを補う
     #[tokio::test]
-    async fn resolve_socket_addr_defaults_ipv4_port_to_443() {
-        let addr = resolve_socket_addr("127.0.0.1")
+    async fn resolve_socket_addrs_defaults_ipv4_port_to_443() {
+        let addrs = resolve_socket_addrs("127.0.0.1")
             .await
             .expect("解決に成功すること");
-        assert_eq!(addr.to_string(), "127.0.0.1:443");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].to_string(), "127.0.0.1:443");
     }
 
-    /// IP リテラルの authority は明示ポートを維持して解決される
+    /// IP リテラルの authority は明示ポートを維持して 1 件の列に解決される
     #[tokio::test]
-    async fn resolve_socket_addr_keeps_explicit_port() {
-        let addr = resolve_socket_addr("127.0.0.1:4443")
+    async fn resolve_socket_addrs_keeps_explicit_port() {
+        let addrs = resolve_socket_addrs("127.0.0.1:4443")
             .await
             .expect("解決に成功すること");
-        assert_eq!(addr.to_string(), "127.0.0.1:4443");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].to_string(), "127.0.0.1:4443");
     }
 
-    /// IPv6 リテラルの authority は既定ポートを補って解決される
+    /// IPv6 リテラルの authority は既定ポートを補って 1 件の列に解決される
     #[tokio::test]
-    async fn resolve_socket_addr_defaults_ipv6_port_to_443() {
-        let addr = resolve_socket_addr("[::1]")
+    async fn resolve_socket_addrs_defaults_ipv6_port_to_443() {
+        let addrs = resolve_socket_addrs("[::1]")
             .await
             .expect("解決に成功すること");
-        assert_eq!(addr.to_string(), "[::1]:443");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].to_string(), "[::1]:443");
     }
 
-    /// ホスト名の authority は名前解決してポートを補う
+    /// ホスト名の authority は名前解決し、解決順のまま列にしてポートを補う
     ///
     /// `localhost` は名前解決を必要とするため、`lookup_host` を通ることを固定する。
-    /// 解決先は環境によって IPv4 / IPv6 のどちらかになるため、ファミリは検証しない。
+    /// 解決するアドレスとその順序は環境に依存するため (IPv4 のみ / IPv6 のみ / 両方)、
+    /// 件数と順序は検証せず、解決した全アドレスがループバックであることだけを検証する。
     #[tokio::test]
-    async fn resolve_socket_addr_resolves_hostname() {
-        let addr = resolve_socket_addr("localhost")
+    async fn resolve_socket_addrs_resolves_hostname() {
+        let addrs = resolve_socket_addrs("localhost")
             .await
             .expect("解決に成功すること");
-        assert_eq!(addr.port(), 443);
-        assert!(
-            addr.ip().is_loopback(),
-            "localhost はループバックに解決されること"
-        );
+        assert!(!addrs.is_empty(), "localhost は 1 件以上に解決されること");
+        for addr in &addrs {
+            assert_eq!(addr.port(), 443);
+            assert!(
+                addr.ip().is_loopback(),
+                "localhost はループバックに解決されること: {addr}"
+            );
+        }
     }
 
     /// 不正な authority は解決せず、QUIC 由来でないエラーになる
     ///
     /// 利用者向けの表示に `QUIC:` を付けない設計方針を固定する。
     #[tokio::test]
-    async fn resolve_socket_addr_rejects_invalid_authority() {
+    async fn resolve_socket_addrs_rejects_invalid_authority() {
         for authority in ["::1", "127.0.0.1:abc"] {
-            let err = resolve_socket_addr(authority)
+            let err = resolve_socket_addrs(authority)
                 .await
                 .expect_err("エラーになること");
             assert!(
@@ -1310,11 +1353,11 @@ mod tests {
     /// `tokio::net::lookup_host` は OS のリゾルバを待つため、この名前の解決は待機中の future になる。
     /// タイムアウトを 100 ナノ秒にして、成功し得ないことを固定する。
     /// 同じ名前の解決がタイムアウト無しでは従来どおり失敗することも
-    /// [`resolve_socket_addr_reports_resolution_failure`] で固定する。
+    /// [`resolve_socket_addrs_reports_resolution_failure`] で固定する。
     #[tokio::test]
-    async fn resolve_socket_addr_times_out_when_resolver_does_not_answer() {
+    async fn resolve_socket_addrs_times_out_when_resolver_does_not_answer() {
         let started = std::time::Instant::now();
-        let err = resolve_socket_addr_within("example.invalid", Duration::from_nanos(100))
+        let err = resolve_socket_addrs_within("example.invalid", Duration::from_nanos(100))
             .await
             .expect_err("タイムアウトでエラーになること");
         assert!(
@@ -1348,8 +1391,8 @@ mod tests {
     ///
     /// 打ち切り以外の失敗の扱いがタイムアウトを包んでも変わらないことを固定する。
     #[tokio::test]
-    async fn resolve_socket_addr_reports_resolution_failure() {
-        let err = resolve_socket_addr_within("example.invalid", RESOLVE_TIMEOUT)
+    async fn resolve_socket_addrs_reports_resolution_failure() {
+        let err = resolve_socket_addrs_within("example.invalid", RESOLVE_TIMEOUT)
             .await
             .expect_err("名前解決に失敗すること");
         assert!(
@@ -1366,22 +1409,139 @@ mod tests {
         );
     }
 
+    /// 名前解決の結果は接続に成功するまで解決順に試される
+    ///
+    /// I/O ハンドルを必要としない QUIC クライアントの接続で確かめる。IPv4 のみを
+    /// 待ち受ける QUIC サーバーを立て、解決に IPv6 が含まれていれば先頭の試行は失敗し、
+    /// 2 回目の試行で接続が確立する。IPv6 のアドレスが含まれない環境では 1 回目で
+    /// 確立するため、試行回数の期待値を環境に依存させない。
+    #[tokio::test]
+    async fn connect_with_fallback_tries_resolved_addrs_in_order() {
+        // IPv4 のみを待ち受ける QUIC サーバーを立てる。`with_rx_socket` に
+        // `127.0.0.1` で bind したソケットを渡し、IPv6 では待ち受けないようにする。
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").expect("IPv4 で bind できること");
+        let port = listener
+            .local_addr()
+            .expect("ローカルアドレスを取得できること")
+            .port();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("自己署名証明書を生成できること");
+        let server_tls = s2n_quic::provider::tls::rustls::Server::builder()
+            .with_certificate(
+                vec![certified.cert.der().to_vec()],
+                certified.signing_key.serialize_der(),
+            )
+            .expect("サーバー証明書を設定できること")
+            // クライアントは ALPN で MOQT_PROTOCOL を広告する。既定の `h3` のままだと
+            // ハンドシェイクが HANDSHAKE_FAILURE で失敗する
+            .with_application_protocols([MOQT_PROTOCOL].into_iter())
+            .expect("ALPN を設定できること")
+            .build()
+            .expect("サーバー TLS を構築できること");
+        let server_io = s2n_quic::provider::io::tokio::Builder::default()
+            .with_rx_socket(listener)
+            .expect("受信ソケットを設定できること")
+            .build()
+            .expect("サーバー I/O を構築できること");
+        let mut server = s2n_quic::Server::builder()
+            .with_tls(server_tls)
+            .expect("TLS を設定できること")
+            .with_io(server_io)
+            .expect("I/O を設定できること")
+            .start()
+            .expect("サーバーを起動できること");
+
+        // 解決に IPv6 が含まれる環境では先頭の試行が失敗する。含まれない環境では 1 回で成功する
+        let addrs = resolve_socket_addrs_within("localhost", RESOLVE_TIMEOUT)
+            .await
+            .expect("localhost を解決できること");
+        let first_is_ipv6 = addrs.first().is_some_and(std::net::SocketAddr::is_ipv6);
+
+        let server_task = tokio::spawn(async move {
+            let connection = server.accept().await.expect("接続を受け付けられること");
+            connection
+                .remote_addr()
+                .expect("接続元アドレスを取得できること")
+                .ip()
+        });
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&attempts);
+        let authority = format!("localhost:{port}");
+        let _connection = connect_with_fallback(&authority, move |addr| {
+            let counted = std::sync::Arc::clone(&counted);
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::quic::connect(addr, "localhost", None).await
+            }
+        })
+        .await
+        .expect("IPv4 の待ち受けへ接続できること");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            if first_is_ipv6 { 2 } else { 1 },
+            "最初のアドレスが IPv6 のときだけ 2 回目の試行が行われること"
+        );
+
+        let accepted_ip = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("サーバーが接続を受け付けること")
+            .expect("サーバータスクがパニックしないこと");
+        assert_eq!(
+            accepted_ip,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            "IPv4 の待ち受けで接続を受け付けること"
+        );
+    }
+
+    /// すべての接続先が失敗した場合は最後の失敗を返す
+    ///
+    /// どのアドレスでも接続が確立しない場合に、試行を繰り返したうえで最後の失敗が
+    /// 呼び出し元へ伝わることを固定する。`127.0.0.1:9` (discard) は待ち受けが無い前提とする。
+    #[tokio::test]
+    async fn connect_with_fallback_returns_last_failure() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&attempts);
+        let error: TransportError = connect_with_fallback("127.0.0.1:9", move |_addr| {
+            let counted = std::sync::Arc::clone(&counted);
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), TransportError>(TransportError::Quic("connection failed".to_string()))
+            }
+        })
+        .await
+        .expect_err("すべて失敗した場合はエラーになること");
+        assert!(
+            matches!(error, TransportError::Quic(_)),
+            "最後の失敗が返ること: {error}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "IP リテラルは 1 件に解決されるため 1 回だけ試行すること"
+        );
+    }
+
     /// タイムアウトが十分長ければ IP リテラルとホスト名の解決は従来どおり成功する
     ///
     /// タイムアウトを包んでも成功経路が変わらないことを固定する。
     #[tokio::test]
-    async fn resolve_socket_addr_succeeds_within_timeout() {
-        let ipv4 = resolve_socket_addr_within("127.0.0.1", RESOLVE_TIMEOUT)
+    async fn resolve_socket_addrs_succeeds_within_timeout() {
+        let ipv4 = resolve_socket_addrs_within("127.0.0.1", RESOLVE_TIMEOUT)
             .await
             .expect("IP リテラルの解決に成功すること");
-        assert_eq!(ipv4.to_string(), "127.0.0.1:443");
+        assert_eq!(ipv4.len(), 1);
+        assert_eq!(ipv4[0].to_string(), "127.0.0.1:443");
 
-        let hostname = resolve_socket_addr_within("localhost", RESOLVE_TIMEOUT)
+        let hostname = resolve_socket_addrs_within("localhost", RESOLVE_TIMEOUT)
             .await
             .expect("ホスト名の解決に成功すること");
         assert!(
-            hostname.ip().is_loopback(),
-            "localhost はループバックに解決されること"
+            !hostname.is_empty(),
+            "localhost は 1 件以上に解決されること"
+        );
+        assert!(
+            hostname.iter().all(|addr| addr.ip().is_loopback()),
+            "localhost はループバックに解決されること: {hostname:?}"
         );
     }
 

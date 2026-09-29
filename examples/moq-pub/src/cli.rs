@@ -29,6 +29,7 @@ impl VideoCodec {
 }
 
 /// CLI オプション
+#[derive(Clone)]
 pub struct Config {
     /// 接続先 URL
     pub url: ServerUrl,

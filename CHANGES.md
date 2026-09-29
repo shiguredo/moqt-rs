@@ -608,3 +608,6 @@
 - [FIX] example の publisher / subscriber が接続先の名前解決に応答が無いときに起動し続けるのを止める
   - 名前解決を 5 秒で打ち切り、`failed to resolve ...: name resolution timed out after 5s` を表示して終了する
   - @voluntas
+- [FIX] example の publisher / subscriber が DNS 名の解決結果の先頭のアドレスに接続できないとき、残りのアドレスを試さないのを止める
+  - 解決結果を順に試し、IPv4 のみ待ち受ける relay へ `moqt://localhost:4433/app` でも接続できるようにする
+  - @voluntas

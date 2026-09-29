@@ -38,10 +38,10 @@ use crate::fake_capture;
 use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
 use tokio_moq::Transport;
+use tokio_moq::connect_with_fallback;
 use tokio_moq::host_from_authority;
 use tokio_moq::moqt_client::{ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome};
 use tokio_moq::quic;
-use tokio_moq::resolve_socket_addr;
 
 /// 映像キャプチャの寿命管理
 ///
@@ -172,79 +172,99 @@ pub async fn run(
 
     // 接続先の解決は QUIC / WebTransport で共通にする。ポートが省略された URL は
     // 既定ポート 443 を使い、ホスト名は名前解決する (draft-ietf-moq-transport-21 §6.1.2)。
-    let socket_addr = resolve_socket_addr(&config.url.authority).await?;
+    // 解決結果が複数の場合は順に試し、確立できたアドレスを採用する。
+    // 確立後の SETUP 以降の失敗はアドレスに依存しないため、次のアドレスは試さない。
+    // `socket_addr` は試行ごとに変わるため、試行の中で接続先を組み立てる。
 
     // 1. 接続確立と SETUP ハンドシェイク
-    let mut client = match config.transport {
-        Transport::Quic => {
-            let connection =
-                quic::connect(socket_addr, server_name, config.cert.as_deref()).await?;
-            let (client, _acceptor) = MoqtClient::establish_quic(
-                connection,
-                &config.url.path,
-                &config.url.authority,
-                "moq-pub",
-                &config.url.c4m_tokens,
-                &task_monitor,
-            )
-            .await?;
-            client
-        }
-        Transport::WtH3 => {
-            let mut client_config =
-                tokio_moq::webtransport_h3::ClientConfig::new(socket_addr, server_name)
-                    // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
-                    .authority(&config.url.authority)
-                    .enable_webtransport(
-                        shiguredo_http3::webtransport::Settings::new()
-                            .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                    );
-            if let Some(ref cert) = config.cert {
-                let pem = std::fs::read_to_string(cert)?;
-                client_config = client_config.ca_cert(pem);
-            } else {
-                // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                tracing::warn!("TLS certificate verification is disabled (development mode)");
-                client_config = client_config.insecure();
-            }
-            let wt_session =
-                tokio_moq::webtransport_h3::WtClient::connect(client_config, &config.url.path)
+    let connect_monitor = task_monitor.clone();
+    let connection_config = config.clone();
+    let mut client = connect_with_fallback(&config.url.authority, move |socket_addr| {
+        // 試行ごとに接続を組み立てるため、設定は複製して `move` で取り込む
+        let cfg = connection_config.clone();
+        let connect_monitor = connect_monitor.clone();
+        let authority_url = cfg.url.authority.clone();
+        async move {
+            let client = match cfg.transport {
+                Transport::Quic => {
+                    let connection =
+                        quic::connect(socket_addr, server_name, cfg.cert.as_deref()).await?;
+                    let (client, _acceptor) = MoqtClient::establish_quic(
+                        connection,
+                        &cfg.url.path,
+                        &authority_url,
+                        "moq-pub",
+                        &cfg.url.c4m_tokens,
+                        &connect_monitor,
+                    )
                     .await?;
-            let (client, _acceptor) = MoqtClient::establish_wt(
-                wt_session,
-                "moq-pub",
-                &config.url.c4m_tokens,
-                &task_monitor,
-            )
-            .await?;
-            client
-        }
-        Transport::WtH2 => {
-            let mut client_config =
-                tokio_moq::webtransport_h2::ClientConfig::new(socket_addr, server_name)
-                    // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http2-15 §3.2)
-                    .authority(&config.url.authority);
-            if let Some(ref cert) = config.cert {
-                let pem = std::fs::read_to_string(cert)?;
-                client_config = client_config.ca_cert(pem);
-            } else {
-                // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                tracing::warn!("TLS certificate verification is disabled (development mode)");
-                client_config = client_config.insecure();
-            }
-            let wt_session =
-                tokio_moq::webtransport_h2::WtH2Client::connect(client_config, &config.url.path)
+                    client
+                }
+                Transport::WtH3 => {
+                    let mut client_config =
+                        tokio_moq::webtransport_h3::ClientConfig::new(socket_addr, server_name)
+                            // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
+                            .authority(&authority_url)
+                            .enable_webtransport(
+                                shiguredo_http3::webtransport::Settings::new()
+                                    .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+                            );
+                    if let Some(ref cert) = cfg.cert {
+                        let pem = std::fs::read_to_string(cert)?;
+                        client_config = client_config.ca_cert(pem);
+                    } else {
+                        // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
+                        tracing::warn!(
+                            "TLS certificate verification is disabled (development mode)"
+                        );
+                        client_config = client_config.insecure();
+                    }
+                    let wt_session =
+                        tokio_moq::webtransport_h3::WtClient::connect(client_config, &cfg.url.path)
+                            .await?;
+                    let (client, _acceptor) = MoqtClient::establish_wt(
+                        wt_session,
+                        "moq-pub",
+                        &cfg.url.c4m_tokens,
+                        &connect_monitor,
+                    )
                     .await?;
-            let (client, _acceptor) = MoqtClient::establish_wt_h2(
-                wt_session,
-                "moq-pub",
-                &config.url.c4m_tokens,
-                &task_monitor,
-            )
-            .await?;
-            client
+                    client
+                }
+                Transport::WtH2 => {
+                    let mut client_config =
+                        tokio_moq::webtransport_h2::ClientConfig::new(socket_addr, server_name)
+                            // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http2-15 §3.2)
+                            .authority(&authority_url);
+                    if let Some(ref cert) = cfg.cert {
+                        let pem = std::fs::read_to_string(cert)?;
+                        client_config = client_config.ca_cert(pem);
+                    } else {
+                        // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
+                        tracing::warn!(
+                            "TLS certificate verification is disabled (development mode)"
+                        );
+                        client_config = client_config.insecure();
+                    }
+                    let wt_session = tokio_moq::webtransport_h2::WtH2Client::connect(
+                        client_config,
+                        &cfg.url.path,
+                    )
+                    .await?;
+                    let (client, _acceptor) = MoqtClient::establish_wt_h2(
+                        wt_session,
+                        "moq-pub",
+                        &cfg.url.c4m_tokens,
+                        &connect_monitor,
+                    )
+                    .await?;
+                    client
+                }
+            };
+            Ok::<_, Error>(client)
         }
-    };
+    })
+    .await?;
 
     // 2. タイムアウト設定
     client.set_control_message_timeout_ms(Some(30000));

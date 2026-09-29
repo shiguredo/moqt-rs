@@ -5,6 +5,7 @@
 use tokio_moq::{ServerUrl, Transport};
 
 /// CLI オプション
+#[derive(Clone)]
 pub struct Config {
     /// 接続先 URL
     pub url: ServerUrl,

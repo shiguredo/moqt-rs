@@ -93,7 +93,8 @@ fn packet_diag_enabled() -> bool {
 
 /// QUIC クライアント接続を確立する
 ///
-/// `socket_addr` は呼び出し側が [`crate::resolve_socket_addr`] で解決した接続先を使う。
+/// `socket_addr` は呼び出し側が [`crate::resolve_socket_addrs`] で解決した接続先の
+/// 1 件を使う。複数に解決された場合の試行順は [`crate::connect_with_fallback`] が決める。
 pub async fn connect(
     socket_addr: std::net::SocketAddr,
     server_name: &str,
