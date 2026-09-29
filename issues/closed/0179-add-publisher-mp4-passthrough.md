@@ -1,7 +1,7 @@
 # moq-pub に MP4 ファイルのパススルー配信機能を追加する
 
 - Created: 2026-09-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-29
 - Branch: feature/add-publisher-mp4-passthrough
 - Polished: 2026-09-29
 
@@ -59,4 +59,15 @@
 
 ## 解決方法
 
-{対応後に追記する}
+- `examples/moq-pub/src/mp4.rs` を追加し、`shiguredo_mp4 = "2026.5"` の `Mp4FileDemuxer` でファイル全体を demux する `Mp4VideoReader` を実装した。`open()` で映像トラックの検証・catalog 用メタデータ (codec 文字列 / 解像度 / 平均 fps / 最大ビットレート) の算出・`PROP_VIDEO_CONFIG` の取り出しを行い、`start()` で実時間ペーシングを行う専用スレッド (`mp4-reader`) を起動する。
+- パイプラインは既存のキャプチャ経路と共通の `VideoInput` enum (`Raw` / `Encoded`) を受け取るようにし、MP4 パススルーではエンコード済みサンプルをそのまま `SubgroupWriter` / `DatagramWriter` へ流す。group は MP4 のキーフレームで開始し、各周回の先頭は最初のキーフレームまで読み飛ばす。末尾に達したら先頭に戻り、タイムスタンプに 1 周分の尺 (`最終サンプルの timestamp + duration`) を加算して単調増加させる。
+- ペーシングは `loop_start` を周回ごとに 1 周分進める方式にし、最終サンプルの尺も実時間として待つ。送信が遅れて周回の終端を過ぎた場合は追い上げ送信を避けるため基準を現在時刻に戻す。
+- 検証は `open()` で全サンプルを走査して行う。B フレーム (composition time offset が非ゼロ)、映像トラック / キーフレーム / 映像サンプルの不在、ファイル外を指すサンプル、未対応コーデック (AV1 / H.264 / H.265 以外)、avcC / hvcC のパラメータセット不在、AV1 の Sequence Header 不在を分かりやすいエラーで拒否する。
+- `PROP_VIDEO_CONFIG` は avcC / hvcC のレコード本体 (ボックスヘッダを除く) を送る。AV1 はカメラ経路と同じく Sequence Header OBU だけを送り、av1C の config OBUs に Sequence Header が無い適合ファイルにも対応するため、最初のキーフレーム payload の Sequence Header を優先して使う。キーフレーム payload に Sequence Header が含まれない場合は付与する。
+- CLI に `--input-mp4 <PATH>` を追加し、`--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにした。
+  `--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する。
+  音声トラックは配信せず catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)。MP4 の読み込みは接続前に済ませ、不正な入力を relay の接続可否に依存せず報告する。
+- MSF catalog の値は `codec_string::from_sample_entry` の codec 文字列、サンプルエントリーの解像度、サンプル数と尺から四捨五入した平均 fps、1 秒幅の半開区間 `(t - 1 秒, t]` のスライディングウィンドウの最大値 (周回境界も考慮) を切り上げた kbps を使う。
+- テストは moq-pub に 57 件 (うち mp4 モジュール 25 件) を追加し、サンプルエントリーから `PROP_VIDEO_CONFIG` への変換 (avcC / hvcC / av1C)、タイムスタンプの実時間変換と周回時の加算、周回長の下限、最大ビットレート (境界値・周回境界)、平均 fps の丸め、AV1 の Sequence Header の取り出しと付与、各エラーパス、CLI の併用エラーと音声無効化を固定した。
+- 実機確認として ffmpeg で生成した MP4 (H.264 (B フレームあり / なし)、H.265 (hvc1)、AV1 (SVT-AV1)、VP9、AAC のみ) を `--input-mp4` で読み込ませ、対応コーデックは catalog 値付きで受理され、B フレーム・未対応コーデック・映像トラック無しは期待どおり拒否されることを確認した。relay と接続した moq-sub での再生確認 (H.264 / H.265 は macOS の Video Toolbox 使用) は未実施である。
+- `/review-diff-code` を 3 周 + 検証 1 周実行し、致命的・重要の指摘はすべて修正済み (最終的に 0 件)。
