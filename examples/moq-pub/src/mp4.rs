@@ -643,20 +643,23 @@ fn average_fps(sample_count: u64, duration_units: u64, timescale: u64) -> Result
     let fps = u32::try_from(fps)
         .map_err(|_| Error::Other(format!("computed frame rate is out of range: {fps}")))?;
     if fps == 0 {
-        return Err(Error::Other(
-            "computed frame rate is zero; the MP4 video track has too few samples".to_string(),
-        ));
+        let seconds = duration_units as f64 / timescale as f64;
+        return Err(Error::Other(format!(
+            "average frame rate rounds to 0 fps ({sample_count} samples over {seconds:.3} seconds); at least 1 fps is required"
+        )));
     }
     Ok(fps)
 }
 
 /// サンプルの最大ビットレート (kbps) を求める
 ///
-/// draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate) は audio / video track への記載を
-/// MUST とするため、1 秒幅のスライディングウィンドウ内の最大バイト数から bps を算出する。
-/// 全尺が 1 秒未満の場合は全尺で平均する。周回配信ではウィンドウがファイル末尾と先頭を
-/// またぐため、先頭サンプルを 1 周分ずらした列も評価する。kbps は過小報告を避けるため
-/// 切り上げる。サンプルは DTS 昇順であることを前提とする。
+/// draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate) は audio / video track への
+/// 記載を MUST とするため、1 秒幅のスライディングウィンドウ内の最大バイト数から bps を
+/// 算出する。ウィンドウはサンプルのタイムスタンプを右端とする半開区間 `(t - 1 秒, t]`
+/// で評価する (ちょうど 1 秒前のサンプルは含めない)。全尺が 1 秒未満の場合は全尺で
+/// 平均する。周回配信ではウィンドウがファイル末尾と先頭をまたぐため、先頭サンプルを
+/// 1 周分ずらした列も評価する。kbps は過小報告を避けるため切り上げる。
+/// サンプルは DTS 昇順であることを前提とする。
 fn max_bitrate_kbps(metas: &[SampleMeta], timescale: u64, duration_units: u64) -> Result<u32> {
     if metas.is_empty() || duration_units == 0 {
         return Err(Error::Other(
@@ -1106,6 +1109,29 @@ mod tests {
         assert_eq!(
             max_bitrate_kbps(&metas, 1_000, 500).expect("算出できること"),
             32
+        );
+    }
+
+    /// スライディングウィンドウは左境界を含めないこと
+    #[test]
+    fn max_bitrate_window_excludes_the_left_boundary() {
+        // timescale 1000 でちょうど 1 秒間隔の 2 サンプルは同じウィンドウに入らない
+        let metas = vec![
+            SampleMeta {
+                timestamp: 0,
+                duration: 1_000,
+                size: 1_000,
+            },
+            SampleMeta {
+                timestamp: 1_000,
+                duration: 1_000,
+                size: 1_000,
+            },
+        ];
+        // 1000 バイト / 1 秒 = 8000 bps → 8 kbps
+        assert_eq!(
+            max_bitrate_kbps(&metas, 1_000, 2_000).expect("算出できること"),
+            8
         );
     }
 
