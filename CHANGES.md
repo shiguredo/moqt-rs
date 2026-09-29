@@ -632,3 +632,6 @@
 - [FIX] WebTransport over HTTP/3 の接続確立で制御ストリームを単方向受信ストリームの receiver より先に受け取る
   - `take_uni_receiver` の後に `accept_uni_stream` を呼ぶと `StreamClosed` になり接続確立が必ず失敗していた
   - @voluntas
+- [FIX] WT_CLOSE_SESSION 受信後に CONNECT stream へ追加データが届いたとき、H3_MESSAGE_ERROR でストリームを reset する
+  - セッション終了後の追加データだけを対象にし、セッション終了前の malformed capsule は従来どおりセッション終了として扱う
+  - @voluntas

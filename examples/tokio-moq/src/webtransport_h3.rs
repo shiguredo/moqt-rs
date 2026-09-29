@@ -1202,7 +1202,7 @@ impl WtClient {
                 tokio::select! {
                     received = recv_stream.receive() => match received {
                         Ok(Some(data)) => {
-                            if !feed_connect_stream(
+                            if let Err(e) = feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
                                 &handle_for_connect,
@@ -1210,6 +1210,16 @@ impl WtClient {
                                 &data,
                                 false,
                             ) {
+                                // draft-ietf-webtrans-http3-16 §6: WT_CLOSE_SESSION 受信後の
+                                // 追加データは CONNECT stream を H3_MESSAGE_ERROR で reset する MUST。
+                                // 接続は閉じない (ストリームの reset であり connection error ではない)
+                                if is_close_session_extra_data_error(
+                                    &e,
+                                    *session_state_for_connect.borrow(),
+                                ) {
+                                    abort_connect_stream_with_message_error(&mut recv_stream);
+                                    break;
+                                }
                                 // 依存 shiguredo_http3 には `SessionClosed` を発行せずにエラーを
                                 // 返す CONNECT stream の経路がある (malformed capsule / 未完成の
                                 // capsule を残した FIN)。状態を `Active` のまま break すると
@@ -1230,14 +1240,16 @@ impl WtClient {
                         Ok(None) => {
                             // FIN (CONNECT stream の clean な close)。h3 層がセッション終了として
                             // 扱い `SessionClosed` を発火する (§6)
-                            if !feed_connect_stream(
+                            if feed_connect_stream(
                                 &state_for_connect,
                                 &session_state_for_connect,
                                 &handle_for_connect,
                                 connect_stream_id,
                                 &[],
                                 true,
-                            ) {
+                            )
+                            .is_err()
+                            {
                                 // FIN の feed が失敗した場合も上と同じ理由で終了として扱う
                                 update_session_state(
                                     &session_state_for_connect,
@@ -1319,8 +1331,50 @@ fn feed_connect_stream(
     stream_id: u64,
     data: &[u8],
     fin: bool,
+) -> Result<()> {
+    feed_stream_to_h3(state, session_state, handle, stream_id, data, fin)
+}
+
+/// CONNECT stream がセッション終了後の追加データで `H3_MESSAGE_ERROR` になったかを返す
+///
+/// draft-ietf-webtrans-http3-16 §6 (Session Termination) は
+/// "If any additional stream data is received on the CONNECT stream after receiving a
+/// WT_CLOSE_SESSION capsule, the stream MUST be reset with code H3_MESSAGE_ERROR." と定める。
+/// 依存 shiguredo_http3 は malformed capsule と WT_CLOSE_SESSION 後の追加データの
+/// どちらでも `Error::StreamError(MessageError)` を返すため、セッションが終了しているかで
+/// 判別する。判別を純関数に切り出し、I/O ハンドルを持たないテストから固定できるようにする。
+fn is_close_session_extra_data_error(
+    error: &TransportError,
+    session_state: WtSessionState,
 ) -> bool {
-    feed_stream_to_h3(state, session_state, handle, stream_id, data, fin).is_ok()
+    session_policy(session_state).abort_streams
+        && matches!(
+            error,
+            TransportError::Http3(shiguredo_http3::Error::StreamError(
+                H3ErrorCode::MessageError
+            ))
+        )
+}
+
+/// CONNECT stream の受信半を `H3_MESSAGE_ERROR` で中断する (§6)
+///
+/// `H3_MESSAGE_ERROR` は HTTP/3 のプロトコルエラーコードであり、§4.4 のアプリケーション
+/// エラーコードの remap (`moqt_to_wt_code`) を通さない (`StreamErrorCode::Protocol`)。
+/// 数値は example 側で再定義せず依存 crate の定義を使う。
+fn abort_connect_stream_with_message_error(recv_stream: &mut ReceiveStream) {
+    let error =
+        stream_application_error(StreamErrorCode::Protocol(H3ErrorCode::MessageError as u64))
+            .expect("H3_MESSAGE_ERROR fits in the QUIC application error code range");
+    match recv_stream.stop_sending(error) {
+        Ok(()) => {
+            tracing::debug!("Reset the WebTransport CONNECT stream with H3_MESSAGE_ERROR");
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to reset the WebTransport CONNECT stream with H3_MESSAGE_ERROR: {e}"
+            );
+        }
+    }
 }
 
 /// CONNECT stream の RESET_STREAM を h3 層へ伝え、イベントをセッション状態へ反映する
@@ -2742,6 +2796,55 @@ mod tests {
 
     /// `ClientConnectionState` の h3 層へ入力を流した結果だけを取り出す
     ///
+    /// WT_CLOSE_SESSION 受信後の追加データだけを `H3_MESSAGE_ERROR` reset の対象にする
+    ///
+    /// draft-ietf-webtrans-http3-16 §6 (Session Termination) の MUST は、セッション終了を
+    /// 検知した後 (WT_CLOSE_SESSION 受信後) の追加データに対するものなので、セッションが
+    /// 終了していない malformed capsule のエラーは対象にしない。
+    /// 他の `StreamError` と接続エラーも対象にしない。
+    #[test]
+    fn close_session_extra_data_error_is_detected_by_state_and_error() {
+        let message_error = TransportError::Http3(shiguredo_http3::Error::StreamError(
+            H3ErrorCode::MessageError,
+        ));
+        assert!(
+            is_close_session_extra_data_error(&message_error, WtSessionState::ClosedByPeer),
+            "終了済みセッションの MessageError は対象になること"
+        );
+        assert!(
+            is_close_session_extra_data_error(&message_error, WtSessionState::ClosedLocally),
+            "自側で閉じた後も対象になること"
+        );
+        assert!(
+            !is_close_session_extra_data_error(&message_error, WtSessionState::Active),
+            "セッションが終了していない malformed capsule は対象にしないこと"
+        );
+        assert!(
+            !is_close_session_extra_data_error(&message_error, WtSessionState::Draining),
+            "drain 中はセッション終了ではないため対象にしないこと"
+        );
+
+        // 他のストリームエラーは reset しない
+        for error in [
+            TransportError::Http3(shiguredo_http3::Error::StreamError(
+                H3ErrorCode::FrameUnexpected,
+            )),
+            TransportError::Http3(shiguredo_http3::Error::StreamNotFound(0)),
+        ] {
+            assert!(
+                !is_close_session_extra_data_error(&error, WtSessionState::ClosedByPeer),
+                "他のストリームエラーは対象にしないこと: {error:?}"
+            );
+        }
+
+        // セッションが終了していない間は、同じ MessageError でも reset の対象にしない
+        // (接続エラーの扱いは `process_h3_outcome` の経路が担う)
+        assert!(
+            !is_close_session_extra_data_error(&message_error, WtSessionState::Active),
+            "セッションが Active の間は対象外であること"
+        );
+    }
+
     /// `feed_stream_and_drain` はイベントも返すため、切り分けの対象である結果だけを見る。
     fn feed_error(
         state: &mut ClientConnectionState,
