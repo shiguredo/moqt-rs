@@ -597,5 +597,5 @@
   - 音声トラックは配信せず、catalog にも含めない (`--no-audio` の指定有無にかかわらず同じ)
   - B フレームを含む MP4 は拒否する
   - 末尾に達したら先頭に戻り、ループ時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
-  - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` は無視して警告する
+  - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
   - @voluntas

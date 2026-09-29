@@ -207,12 +207,13 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
-    let audio_bitrate: u32 = noargs::opt("audio-bitrate")
-        .ty("KBPS")
-        .doc("Audio target bitrate in kbps")
-        .default("64")
-        .take(&mut args)
-        .then(|o| o.value().parse::<u32>())?;
+    let (audio_bitrate, audio_bitrate_explicit) = take_u32(
+        &mut args,
+        "audio-bitrate",
+        "KBPS",
+        "Audio target bitrate in kbps",
+        "64",
+    )?;
 
     let use_datagram: bool = noargs::flag("use-datagram")
         .doc("Use datagram for object delivery instead of subgroup streams")
@@ -266,6 +267,16 @@ pub fn parse() -> noargs::Result<Option<Config>> {
             if bitrate_explicit {
                 tracing::warn!(
                     "--bitrate is ignored when --input-mp4 is set (the catalog bitrate is computed from the MP4)"
+                );
+            }
+            if audio_device_id.is_some() {
+                tracing::warn!(
+                    "--audio-device-id is ignored when --input-mp4 is set (audio is not published)"
+                );
+            }
+            if audio_bitrate_explicit {
+                tracing::warn!(
+                    "--audio-bitrate is ignored when --input-mp4 is set (audio is not published)"
                 );
             }
         } else if !video_enabled && !audio_enabled {

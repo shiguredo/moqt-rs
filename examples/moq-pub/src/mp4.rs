@@ -9,6 +9,7 @@
 //! B フレーム (composition time offset が非ゼロのサンプル) を含む MP4 は拒否する。
 //! パススルーではサンプルをデコード順のまま送るため、表示順とのずれを表現できない。
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 use shiguredo_mp4::Decode;
 use shiguredo_mp4::Encode;
 use shiguredo_mp4::TrackKind;
-use shiguredo_mp4::boxes::SampleEntry;
+use shiguredo_mp4::boxes::{HvccBox, SampleEntry};
 use shiguredo_mp4::codec_string;
 use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 use tokio::sync::mpsc;
@@ -220,13 +221,7 @@ impl Mp4VideoReader {
                 path.display()
             ))
         })?;
-        let passthrough_codec = if codec.starts_with("av01") {
-            PassthroughCodec::Av1
-        } else if codec.starts_with("avc1") {
-            PassthroughCodec::H264
-        } else if codec.starts_with("hvc1") || codec.starts_with("hev1") {
-            PassthroughCodec::H265
-        } else {
+        let Some((passthrough_codec, video_config)) = passthrough_codec_and_config(&entry)? else {
             return Err(Error::Other(format!(
                 "unsupported video codec in MP4 file '{}': {codec} (supported: AV1 / H.264 / H.265)",
                 path.display()
@@ -238,7 +233,6 @@ impl Mp4VideoReader {
                 path.display()
             ))
         })?;
-        let video_config = video_config_from_sample_entry(&entry)?;
 
         let sample_count = metas.len() as u64;
         let fps = average_fps(sample_count, loop_duration, timescale)?;
@@ -253,7 +247,7 @@ impl Mp4VideoReader {
         }
         if metas.iter().any(|m| m.duration != metas[0].duration) {
             tracing::warn!(
-                "MP4 file '{}' has variable frame durations; publishing at the average frame rate {} fps",
+                "MP4 file '{}' has variable frame durations; the catalog framerate is the average {} fps",
                 path.display(),
                 fps,
             );
@@ -529,7 +523,10 @@ fn send_frame(sender: &mpsc::Sender<VideoInput>, stop: &AtomicBool, frame: Encod
     }
 }
 
-/// サンプルエントリーから `PROP_VIDEO_CONFIG` を取り出す
+/// サンプルエントリーからパススルー用のコーデックと `PROP_VIDEO_CONFIG` を取り出す
+///
+/// 対応していないサンプルエントリーの場合は `Ok(None)` を返す。設定データに必要な
+/// パラメータセットが無い場合は、受信側でトラックを構成できないためエラーにする。
 ///
 /// - H.264: AVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §5.2.4.1.1)
 /// - H.265: HEVCDecoderConfigurationRecord 本体 (ISO/IEC 14496-15 §8.3.3.1.2)
@@ -537,23 +534,25 @@ fn send_frame(sender: &mpsc::Sender<VideoInput>, stop: &AtomicBool, frame: Encod
 ///
 /// avcC / hvcC は `Encode` がボックスヘッダを含めて出力するため、ヘッダを除いた本体を返す。
 /// moq-sub の MP4 保存はこの形式を前提にサンプルエントリーを再構築する。
-fn video_config_from_sample_entry(entry: &SampleEntry) -> Result<Vec<u8>> {
+fn passthrough_codec_and_config(
+    entry: &SampleEntry,
+) -> Result<Option<(PassthroughCodec, Vec<u8>)>> {
     match entry {
-        SampleEntry::Avc1(b) => strip_box_header(
-            &b.avcc_box
+        SampleEntry::Avc1(b) => {
+            if b.avcc_box.sps_list.is_empty() || b.avcc_box.pps_list.is_empty() {
+                return Err(Error::Other(
+                    "avcC box has no SPS/PPS; they are required to publish the H.264 track"
+                        .to_string(),
+                ));
+            }
+            let bytes = b
+                .avcc_box
                 .encode_to_vec()
-                .map_err(|e| Error::Other(format!("failed to encode avcC box: {e}")))?,
-        ),
-        SampleEntry::Hvc1(b) => strip_box_header(
-            &b.hvcc_box
-                .encode_to_vec()
-                .map_err(|e| Error::Other(format!("failed to encode hvcC box: {e}")))?,
-        ),
-        SampleEntry::Hev1(b) => strip_box_header(
-            &b.hvcc_box
-                .encode_to_vec()
-                .map_err(|e| Error::Other(format!("failed to encode hvcC box: {e}")))?,
-        ),
+                .map_err(|e| Error::Other(format!("failed to encode avcC box: {e}")))?;
+            Ok(Some((PassthroughCodec::H264, strip_box_header(&bytes)?)))
+        }
+        SampleEntry::Hvc1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
+        SampleEntry::Hev1(b) => Ok(Some(hevc_codec_config(&b.hvcc_box)?)),
         SampleEntry::Av01(b) => {
             // av1C の configOBUs は 0 個も許容されるが、PROP_VIDEO_CONFIG が空だと受信側で
             // トラックを構成できないため、設定 OBU の無い MP4 は拒否する
@@ -563,12 +562,38 @@ fn video_config_from_sample_entry(entry: &SampleEntry) -> Result<Vec<u8>> {
                         .to_string(),
                 ));
             }
-            Ok(b.av1c_box.config_obus.clone())
+            Ok(Some((
+                PassthroughCodec::Av1,
+                b.av1c_box.config_obus.clone(),
+            )))
         }
-        other => Err(Error::Other(format!(
-            "unsupported MP4 sample entry: {other:?} (supported: AV1 / H.264 / H.265)"
-        ))),
+        _ => Ok(None),
     }
+}
+
+/// hvcC から H.265 の設定データ (HEVCDecoderConfigurationRecord 本体) を組み立てる
+fn hevc_codec_config(hvcc: &HvccBox) -> Result<(PassthroughCodec, Vec<u8>)> {
+    if !has_hevc_parameter_sets(hvcc) {
+        return Err(Error::Other(
+            "hvcC box has no VPS/SPS/PPS; they are required to publish the H.265 track".to_string(),
+        ));
+    }
+    let bytes = hvcc
+        .encode_to_vec()
+        .map_err(|e| Error::Other(format!("failed to encode hvcC box: {e}")))?;
+    Ok((PassthroughCodec::H265, strip_box_header(&bytes)?))
+}
+
+/// hvcC に VPS / SPS / PPS が揃っているかどうか
+///
+/// 受信側は hvcC から 3 つすべてを取り出す前提のため、欠けている MP4 は拒否する。
+/// NAL ユニット種別は ITU-T H.265 §7.4.2.2 Table 7-1 の VPS / SPS / PPS。
+fn has_hevc_parameter_sets(hvcc: &HvccBox) -> bool {
+    [32u8, 33, 34].iter().all(|nal_type| {
+        hvcc.nalu_arrays
+            .iter()
+            .any(|array| array.nal_unit_type.get() == *nal_type && !array.nalus.is_empty())
+    })
 }
 
 /// ボックスのバイト列からボックスヘッダを除いた本体を返す
@@ -616,10 +641,11 @@ fn average_fps(sample_count: u64, duration_units: u64, timescale: u64) -> Result
 
 /// サンプルの最大ビットレート (kbps) を求める
 ///
-/// draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate) は video track に MUST のため、
-/// 1 秒幅のスライディングウィンドウ内の最大バイト数から bps を算出する。
-/// 全尺が 1 秒未満の場合は全尺で平均する。kbps は過小報告を避けるため切り上げる。
-/// サンプルは DTS 昇順であることを前提とする。
+/// draft-ietf-moq-msf-01 §5.2.22 (Maximum Bitrate) は audio / video track への記載を
+/// MUST とするため、1 秒幅のスライディングウィンドウ内の最大バイト数から bps を算出する。
+/// 全尺が 1 秒未満の場合は全尺で平均する。周回配信ではウィンドウがファイル末尾と先頭を
+/// またぐため、先頭サンプルを 1 周分ずらした列も評価する。kbps は過小報告を避けるため
+/// 切り上げる。サンプルは DTS 昇順であることを前提とする。
 fn max_bitrate_kbps(metas: &[SampleMeta], timescale: u64, duration_units: u64) -> Result<u32> {
     if metas.is_empty() || duration_units == 0 {
         return Err(Error::Other(
@@ -632,17 +658,27 @@ fn max_bitrate_kbps(metas: &[SampleMeta], timescale: u64, duration_units: u64) -
         return Ok(kbps_from_bps(bps));
     }
 
+    let mut window: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut window_bytes: u128 = 0;
     let mut max_bytes: u128 = 0;
-    let mut bytes: u128 = 0;
-    let mut start = 0usize;
-    for meta in metas {
-        bytes += u128::from(meta.size);
+    let samples = metas.iter().map(|m| (m.timestamp, m.size)).chain(
+        metas
+            .iter()
+            .map(|m| (m.timestamp.saturating_add(duration_units), m.size)),
+    );
+    for (timestamp, size) in samples {
+        window.push_back((timestamp, size));
+        window_bytes += u128::from(size);
         // ウィンドウ先頭から 1 秒以上離れたサンプルを落とす
-        while meta.timestamp.saturating_sub(metas[start].timestamp) >= timescale {
-            bytes -= u128::from(metas[start].size);
-            start += 1;
+        while let Some(&(front_timestamp, front_size)) = window.front() {
+            if timestamp.saturating_sub(front_timestamp) >= timescale {
+                window.pop_front();
+                window_bytes -= u128::from(front_size);
+            } else {
+                break;
+            }
         }
-        max_bytes = max_bytes.max(bytes);
+        max_bytes = max_bytes.max(window_bytes);
     }
     Ok(kbps_from_bps(max_bytes * 8))
 }
@@ -674,7 +710,9 @@ mod tests {
         H265ConstantFrameRate, H265SampleEntryConfig, build_hvc1_box,
     };
     use shiguredo_mp4::bitstream::opus::{ChannelCount, OpusSampleEntryConfig, build_opus_box};
-    use shiguredo_mp4::boxes::{VisualSampleEntryFields, Vp09Box, VpccBox};
+    use shiguredo_mp4::boxes::{
+        Av01Box, Av1cBox, Avc1Box, AvccBox, Hvc1Box, VisualSampleEntryFields, Vp09Box, VpccBox,
+    };
     use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
 
     use super::*;
@@ -789,7 +827,10 @@ mod tests {
         let SampleEntry::Avc1(avc1) = &entry else {
             panic!("H.264 サンプルエントリーが構築されること");
         };
-        let config = video_config_from_sample_entry(&entry).expect("avcC を取り出せること");
+        let (codec, config) = passthrough_codec_and_config(&entry)
+            .expect("avcC を取り出せること")
+            .expect("対応コーデックであること");
+        assert_eq!(codec, PassthroughCodec::H264);
 
         // ボックスヘッダを含まない AVCDecoderConfigurationRecord であること
         let avcc = &avc1.avcc_box;
@@ -841,7 +882,10 @@ mod tests {
             )
             .expect("H.265 サンプルエントリーを構築できること"),
         );
-        let config = video_config_from_sample_entry(&entry).expect("hvcC を取り出せること");
+        let (codec, config) = passthrough_codec_and_config(&entry)
+            .expect("hvcC を取り出せること")
+            .expect("対応コーデックであること");
+        assert_eq!(codec, PassthroughCodec::H265);
 
         // configurationVersion から始まり、ボックスヘッダを含まないこと
         assert_eq!(config[0], 1, "configurationVersion は 1 であること");
@@ -857,8 +901,94 @@ mod tests {
     #[test]
     fn video_config_from_av01_sample_entry() {
         let entry = build_test_av01_entry();
-        let config = video_config_from_sample_entry(&entry).expect("config OBUs を取り出せること");
+        let (codec, config) = passthrough_codec_and_config(&entry)
+            .expect("config OBUs を取り出せること")
+            .expect("対応コーデックであること");
+        assert_eq!(codec, PassthroughCodec::Av1);
         assert_eq!(config, AV1_CONFIG_OBUS, "config OBUs がそのまま返ること");
+    }
+
+    /// SPS / PPS を持たない avcC を拒否すること
+    #[test]
+    fn passthrough_codec_rejects_avcc_without_parameter_sets() {
+        let entry = SampleEntry::Avc1(Avc1Box {
+            visual: test_visual_fields(640, 480),
+            avcc_box: AvccBox {
+                avc_profile_indication: 66,
+                profile_compatibility: 0,
+                avc_level_indication: 30,
+                length_size_minus_one: Uint::new(3),
+                sps_list: Vec::new(),
+                pps_list: Vec::new(),
+                chroma_format: None,
+                bit_depth_luma_minus8: None,
+                bit_depth_chroma_minus8: None,
+                sps_ext_list: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        });
+        assert!(
+            passthrough_codec_and_config(&entry).is_err(),
+            "SPS / PPS が無い avcC はエラーになること"
+        );
+    }
+
+    /// VPS / SPS / PPS を持たない hvcC を拒否すること
+    #[test]
+    fn passthrough_codec_rejects_hvcc_without_parameter_sets() {
+        let entry = SampleEntry::Hvc1(Hvc1Box {
+            visual: test_visual_fields(640, 480),
+            hvcc_box: HvccBox {
+                general_profile_space: Uint::new(0),
+                general_tier_flag: Uint::new(0),
+                general_profile_idc: Uint::new(1),
+                general_profile_compatibility_flags: 0,
+                general_constraint_indicator_flags: Uint::new(0),
+                general_level_idc: 120,
+                min_spatial_segmentation_idc: Uint::new(0),
+                parallelism_type: Uint::new(0),
+                chroma_format_idc: Uint::new(1),
+                bit_depth_luma_minus8: Uint::new(0),
+                bit_depth_chroma_minus8: Uint::new(0),
+                avg_frame_rate: 0,
+                constant_frame_rate: Uint::new(0),
+                num_temporal_layers: Uint::new(1),
+                temporal_id_nested: Uint::new(1),
+                length_size_minus_one: Uint::new(3),
+                nalu_arrays: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        });
+        assert!(
+            passthrough_codec_and_config(&entry).is_err(),
+            "VPS / SPS / PPS が無い hvcC はエラーになること"
+        );
+    }
+
+    /// config OBUs を持たない av1C を拒否すること
+    #[test]
+    fn passthrough_codec_rejects_av1c_without_config_obus() {
+        let entry = SampleEntry::Av01(Av01Box {
+            visual: test_visual_fields(640, 480),
+            av1c_box: Av1cBox {
+                seq_profile: Uint::new(0),
+                seq_level_idx_0: Uint::new(0),
+                seq_tier_0: Uint::new(0),
+                high_bitdepth: Uint::new(0),
+                twelve_bit: Uint::new(0),
+                monochrome: Uint::new(0),
+                chroma_subsampling_x: Uint::new(1),
+                chroma_subsampling_y: Uint::new(1),
+                chroma_sample_position: Uint::new(0),
+                initial_presentation_delay_minus_one: None,
+                config_obus: Vec::new(),
+            },
+            unknown_boxes: Vec::new(),
+        });
+        assert!(
+            passthrough_codec_and_config(&entry).is_err(),
+            "config OBUs が無い av1C はエラーになること"
+        );
     }
 
     /// AV1 のキーフレーム: Sequence Header が無いサンプルには config OBUs を先頭に付与すること
@@ -942,6 +1072,29 @@ mod tests {
         assert_eq!(
             max_bitrate_kbps(&metas, 1_000, 500).expect("算出できること"),
             32
+        );
+    }
+
+    /// 周回でファイル末尾と先頭をまたぐウィンドウも最大ビットレートに含めること
+    #[test]
+    fn max_bitrate_considers_loop_boundary() {
+        // timescale 1000、尺 2000 のクリップ。ts=0 と ts=1500 に 1000 バイトずつ
+        let metas = vec![
+            SampleMeta {
+                timestamp: 0,
+                duration: 1_500,
+                size: 1_000,
+            },
+            SampleMeta {
+                timestamp: 1_500,
+                duration: 500,
+                size: 1_000,
+            },
+        ];
+        // 周回をまたぐ [1000, 2000] の窓に 2 サンプルが入るため 2000 バイト → 16000 bps
+        assert_eq!(
+            max_bitrate_kbps(&metas, 1_000, 2_000).expect("算出できること"),
+            16
         );
     }
 
@@ -1044,19 +1197,24 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// テスト用の映像サンプルエントリー共通フィールドを構築する
+    fn test_visual_fields(width: u16, height: u16) -> VisualSampleEntryFields {
+        VisualSampleEntryFields {
+            data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+            width,
+            height,
+            horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+            vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+            frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+            compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+            depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+        }
+    }
+
     /// テスト用の VP9 サンプルエントリーを構築する (未対応コーデックの検証用)
     fn build_test_vp09_entry() -> SampleEntry {
         SampleEntry::Vp09(Vp09Box {
-            visual: VisualSampleEntryFields {
-                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
-                width: 640,
-                height: 480,
-                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
-                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
-                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
-                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
-                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
-            },
+            visual: test_visual_fields(640, 480),
             vpcc_box: VpccBox {
                 profile: 0,
                 level: 31,
@@ -1270,6 +1428,45 @@ mod tests {
             error.to_string().contains("failed to read MP4 file"),
             "MP4 の読み込みに失敗したことが分かること: {error}"
         );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// リーダースレッドを開始し、フレームを受信した後に停止できること
+    #[test]
+    fn reader_source_stops_after_receiving_frames() {
+        let path = temp_path("start-stop");
+        let entry = build_test_avc1_entry();
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, &[0x01]), (false, 3_000, &[0x02])];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+
+        let reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        let (sender, mut receiver) = mpsc::channel::<VideoInput>(4);
+        let source = reader.start(sender).expect("スレッドを開始できること");
+        let frame = receiver.blocking_recv().expect("フレームを受信できること");
+        let VideoInput::Encoded(frame) = frame else {
+            panic!("パススルーではエンコード済みフレームが届くこと");
+        };
+        assert_eq!(frame.timestamp, 0, "先頭フレームのタイムスタンプであること");
+        source.stop().expect("停止できること");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 受信側が閉じている場合でもリーダースレッドを停止できること
+    #[test]
+    fn reader_source_stops_when_receiver_is_closed() {
+        let path = temp_path("start-stop-closed");
+        let entry = build_test_avc1_entry();
+        let samples: &[(bool, u32, &[u8])] = &[(true, 3_000, &[0x01])];
+        write_test_mp4(&path, &entry, TrackKind::Video, 90_000, &[], samples);
+
+        let reader = Mp4VideoReader::open(&path).expect("MP4 を開けること");
+        let (sender, receiver) = mpsc::channel::<VideoInput>(4);
+        // 受信側を閉じてから開始する (送信できないことを検出してスレッドが終了する)
+        drop(receiver);
+        let source = reader.start(sender).expect("スレッドを開始できること");
+        source.stop().expect("停止できること");
 
         std::fs::remove_file(&path).ok();
     }

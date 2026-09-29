@@ -110,6 +110,13 @@ pub async fn run(
     task_monitor: tokio_metrics::TaskMonitor,
     mut shutdown_monitor: tokio_utils::ShutdownMonitor,
 ) -> Result<()> {
+    // MP4 パススルーは接続前にファイルを読み込んで検証する
+    // (不正な入力を relay の接続可否に依存せず報告するため)
+    let mp4_reader: Option<mp4::Mp4VideoReader> = match config.input_mp4.as_deref() {
+        Some(path) => Some(mp4::Mp4VideoReader::open(path)?),
+        None => None,
+    };
+
     // TLS の SNI / 証明書検証に使う server_name はポートを含めない。
     // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
     let server_name = host_from_authority(&config.url.authority);
@@ -238,10 +245,6 @@ pub async fn run(
 
     // 3. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
     // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
-    let mp4_reader: Option<mp4::Mp4VideoReader> = match config.input_mp4.as_deref() {
-        Some(path) => Some(mp4::Mp4VideoReader::open(path)?),
-        None => None,
-    };
     let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
         && mp4_reader.is_none()
     {
