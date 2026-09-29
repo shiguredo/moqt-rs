@@ -6,7 +6,7 @@ draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 
 ## 構成
 
-- **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信する
+- **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
 - **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
@@ -43,6 +43,9 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --mp4 out.mp4 --no-play
 
 # QUIC で MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265)
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --input-mp4 input.mp4
+
+# QUIC で MP4 ファイルの映像 / 音声を再エンコードして配信する (音声は Opus のみ対応)
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --input-mp4-reencode input.mp4
 ```
 
 ## トランスポート
@@ -94,6 +97,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--track-name` | | `video` | Track Name |
 | `--fake-capture-device` | | | 実デバイスの代わりに raden 生成の疑似映像と 440 Hz サイン波音声を使う |
 | `--input-mp4` | | | MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265。音声は配信せず、B フレームを含む MP4 は拒否する。`--video-codec` / `--width` / `--height` / `--fps` / `--no-video` とは併用不可) |
+| `--input-mp4-reencode` | | | MP4 ファイルの映像 / 音声をデコードして再エンコード配信する (映像は AV1 / H.264 / H.265、音声は Opus のみ。解像度 / フレームレートは MP4 から自動検出する。`--input-mp4` / `--width` / `--height` / `--fps` とは併用不可) |
 | `--video-codec` | | `av1` | 映像コーデック (av1 / h264 / h265。h264 / h265 は macOS 限定) |
 | `--no-video` | | | 映像トラックの送信を無効化する |
 | `--no-audio` | | | 音声トラックの送信を無効化する |
@@ -102,6 +106,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--use-datagram` | | | subgroup stream ではなく datagram で映像 / 音声オブジェクトを配信する (catalog は常に subgroup stream) |
 
 `--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視され、警告ログが出る。
+`--input-mp4-reencode` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視され、警告ログが出る。
 
 ### moq-sub
 

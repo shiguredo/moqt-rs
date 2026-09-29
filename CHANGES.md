@@ -599,3 +599,11 @@
   - 末尾に達したら先頭に戻り、周回時のタイムスタンプは 1 周分のメディア尺を加算して単調増加させる
   - `--video-codec` / `--width` / `--height` / `--fps` / `--no-video` との併用はエラーにし、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視して警告する
   - @voluntas
+- [ADD] moq-pub に `--input-mp4-reencode` を追加し、MP4 ファイルの映像 / 音声をデコードして再エンコード配信できるようにする
+  - 映像は AV1 / H.264 / H.265 をデコードして `--video-codec` (既定 av1) で再エンコードし、音声は Opus を 48 kHz / 1ch にデコードして `--audio-bitrate` で再エンコードする
+  - 解像度とフレームレートは MP4 から自動検出し、`--bitrate` / `--keyframe-interval` は再エンコードの設定として使う
+  - B フレームを含む MP4 に対応し、デコード順 (DTS) でデコードして表示順 (PTS) でエンコードへ供給する。入力サンプルのタイムスタンプを LOC Timestamp に使い、`PROP_TIMESCALE` は入力トラックの timescale を使う
+  - ループの周期は映像と音声のトラック尺の最大値とし、各トラックは周期の先頭から再開する (周期より短いトラックは残りを送信しない)
+  - 8-bit 4:2:0 以外の映像はエラーにし、Opus 以外の音声は警告して対象外にする
+  - `--input-mp4` との同時指定と `--width` / `--height` / `--fps` の併用はエラーにし、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視して警告する
+  - @voluntas
