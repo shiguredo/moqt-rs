@@ -14,6 +14,8 @@ shiguredo_dav1d = "2026.2"
 shiguredo_http3 = "2026.1.0-canary.9"
 # MoQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
+# MP4 mux (録画)
+shiguredo_mp4 = "2026.5"
 # Opus デコーダ
 shiguredo_opus = "2026.2"
 

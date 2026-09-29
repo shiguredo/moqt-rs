@@ -882,6 +882,7 @@ dependencies = [
  "shiguredo_dav1d",
  "shiguredo_http3",
  "shiguredo_moqt",
+ "shiguredo_mp4",
  "shiguredo_opus",
  "shiguredo_video_toolbox",
  "tokio",
@@ -1524,6 +1525,12 @@ dependencies = [
  "noflate",
  "nojson",
 ]
+
+[[package]]
+name = "shiguredo_mp4"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82e773aead88d11a806c8b78dbc2577afb3a20fcc80108aafb3724f6dbb9fbe0"
 
 [[package]]
 name = "shiguredo_opus"

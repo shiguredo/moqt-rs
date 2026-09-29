@@ -20,6 +20,10 @@ pub struct Config {
     pub audio_enabled: bool,
     /// 音声の出力先
     pub audio_output_device: AudioOutputDevice,
+    /// 受信した映像・音声を保存する MP4 ファイルのパス
+    pub mp4: Option<String>,
+    /// 再生を行わないかどうか
+    pub no_play: bool,
 }
 
 /// 音声の出力先
@@ -110,6 +114,20 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .then(|o| AudioOutputDevice::parse(o.value()))?;
 
+    let mp4: Option<String> = noargs::opt("mp4")
+        .ty("PATH")
+        .doc("Save received video and audio to an MP4 file (overwritten if it exists)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+    if mp4.as_deref() == Some("") {
+        return Err(noargs::Error::other(&args, "--mp4 must not be empty"));
+    }
+
+    let no_play: bool = noargs::flag("no-play")
+        .doc("Disable playback (do not initialize SDL and do not decode media)")
+        .take(&mut args)
+        .is_present();
+
     let video_enabled = !no_video;
     let audio_enabled = !no_audio;
     if !args.metadata().help_mode && !video_enabled && !audio_enabled {
@@ -132,6 +150,8 @@ pub fn parse() -> noargs::Result<Option<Config>> {
         video_enabled,
         audio_enabled,
         audio_output_device,
+        mp4,
+        no_play,
     }))
 }
 

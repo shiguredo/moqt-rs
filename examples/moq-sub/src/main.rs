@@ -1,13 +1,17 @@
 //! MoQT サブスクライバークライアント
 //!
 //! リレーサーバーに接続し、指定トラックを SUBSCRIBE してデータを受信・デコード・再生する。
+//! `--mp4` を指定すると受信した映像 / 音声を MP4 ファイルへ保存し、`--no-play` を併せて
+//! 指定すると再生せずに受信と保存だけを行う。
 //! draft-ietf-moq-transport-21、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
 //!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
+//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --mp4 out.mp4 --no-play
 mod cli;
 mod decoder;
 mod error;
+mod mp4;
 mod pipeline;
 mod stream_reader;
 
@@ -30,26 +34,32 @@ fn main() {
         }
     };
 
+    // 音声出力と再生の指定はメインスレッド (プレイヤー) が使うため、config を
+    // tokio ランタイムへ move する前に取り出しておく
+    let audio_output_device = config.audio_output_device;
+    let no_play = config.no_play;
+    if no_play && config.mp4.is_none() {
+        tracing::warn!("--no-play is specified without --mp4; received media will be discarded");
+    }
+
     let task_monitor = tokio_metrics::TaskMonitor::new();
     let shutdown = tokio_utils::ShutdownController::new();
     let shutdown_monitor = shutdown.subscribe();
-
-    // 音声出力の指定はプレイヤー (メインスレッド) が使うため、config を
-    // tokio ランタイムへ move する前に取り出しておく
-    let audio_output_device = config.audio_output_device;
 
     // デコード済みフレーム用チャネル (映像 / 音声)
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<DecodedVideoFrame>();
     let (audio_tx, audio_rx) = std::sync::mpsc::channel::<DecodedAudioFrame>();
 
+    // プレイヤーの終了 (ウィンドウを閉じた等) を pipeline へ伝える。--no-play では送信せず、
+    // pipeline が Ctrl+C や切断で終わるまで sender を保持する。
+    let (player_stop_tx, player_stop_rx) = tokio::sync::oneshot::channel::<()>();
+
     // 表示待ちの映像フレーム数。デコードが表示より速いと増え続け、CPU を飽和させて
-    // QUIC エンドポイントの I/O を飢えさせる (moqt-rs 0101)。受信側はこれを見て
+    // QUIC エンドポイントの I/O を飢えさせる。受信側はこれを見て
     // 古い group を捨てる。
     let display_backlog = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
     let display_backlog_for_pipeline = std::sync::Arc::clone(&display_backlog);
 
-    // カタログから取得した fps をスレッド間で共有する
-    let shared_fps = pipeline::new_shared_fps();
     // tokio runtime の構築はメインスレッドで行う。
     //
     // 別スレッドで構築すると、失敗時にそのスレッドだけが panic し、main は
@@ -61,10 +71,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // pipeline の終了結果はメインスレッドが受け取る。録画の finalize は pipeline 内で
+    // 完了するため、この結果を受け取った時点で MP4 は確定している。
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<error::Result<()>>();
     // macOS では SDL のウィンドウ操作をメインスレッドで行う必要がある。
     // MoQT 処理は別スレッドの tokio ランタイムで動かす。
     std::thread::spawn(move || {
-        rt.block_on(async move {
+        let result = rt.block_on(async move {
             // タスクメトリクスを定期的にログ出力する
             tokio_moq::metrics::spawn_task_metrics_logger(task_monitor.clone());
 
@@ -72,29 +85,57 @@ fn main() {
             tokio::spawn(async move {
                 tokio::signal::ctrl_c().await.ok();
                 tracing::info!("Received Ctrl+C, initiating graceful shutdown");
-                shutdown.shutdown().await;
+                // shutdown が完了しない場合 (peer が stream を閉じない等) に備え、
+                // 2 回目の Ctrl+C を待ちながら graceful shutdown する
+                tokio::select! {
+                    _ = shutdown.shutdown() => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::warn!("Received second Ctrl+C, forcing exit");
+                        std::process::exit(130);
+                    }
+                }
             });
 
-            if let Err(e) = pipeline::run(
+            pipeline::run(
                 config,
                 frame_tx,
                 audio_tx,
-                shared_fps,
                 task_monitor,
                 shutdown_monitor,
                 display_backlog_for_pipeline,
+                player_stop_rx,
             )
             .await
-            {
-                tracing::error!("Fatal: {e}");
-                std::process::exit(1);
-            }
         });
+        let _ = result_tx.send(result);
     });
 
-    // メインスレッドで raw_player を動かす
-    if let Err(e) = run_raw_player(frame_rx, audio_rx, display_backlog, audio_output_device) {
-        tracing::error!("Fatal: {e}");
+    let mut failed = false;
+    if no_play {
+        // プレイヤーを動かさず、pipeline の終了 (Ctrl+C / relay からの切断) を待つ
+        tracing::info!("Playback is disabled, waiting for the session to finish");
+    } else {
+        // メインスレッドで raw_player を動かす
+        if let Err(e) = run_raw_player(frame_rx, audio_rx, display_backlog, audio_output_device) {
+            tracing::error!("Fatal: {e}");
+            failed = true;
+        }
+        // プレイヤーの終了を pipeline へ伝え、録画の finalize を待つ
+        let _ = player_stop_tx.send(());
+    }
+
+    match result_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!("Fatal: {e}");
+            failed = true;
+        }
+        Err(_) => {
+            tracing::error!("Pipeline thread terminated unexpectedly");
+            failed = true;
+        }
+    }
+    if failed {
         std::process::exit(1);
     }
 }

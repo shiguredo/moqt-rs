@@ -1,12 +1,17 @@
 //! subscriber の全体パイプライン
 //!
-//! 接続 → SETUP → カタログ FETCH → ビデオ SUBSCRIBE → データストリーム受信
-//! → AV1 デコード → フレーム送出の流れを、`shiguredo_moqt::session::core::Session` を駆動する
+//! 接続 → SETUP → カタログ FETCH → ビデオ / オーディオ SUBSCRIBE → データストリーム受信
+//! → デコード (AV1 / H.264 / H.265 / Opus) → フレーム送出の流れを、
+//! `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
+//!
+//! `--mp4` 指定時は受信したエンコード済みサンプルを [`crate::mp4`] の writer へ渡して
+//! MP4 ファイルへ保存する。`--mp4` と `--no-play` を併用した場合はデコードをスキップして
+//! 保存だけを行う。
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -15,7 +20,7 @@ use shiguredo_moqt::error::{
 };
 use shiguredo_moqt::loc::{
     LocProperties, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_TIMESTAMP,
-    PROP_VIDEO_CONFIG,
+    PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
 use shiguredo_moqt::{
@@ -30,15 +35,19 @@ use crate::cli::Config;
 use crate::decoder::opus::OpusDecoder;
 use crate::decoder::{self, DecodedAudioFrame, DecodedVideoFrame};
 use crate::error::{Error, Result};
+use crate::mp4::{
+    self, AudioSample, AudioSetup, Recorder, RecorderSender, Setup, VideoSample, VideoSetup,
+};
 use crate::stream_reader::{self, StreamType};
 
 /// 表示待ちの映像フレーム数の上限
 ///
 /// これを超えたら映像の group をまるごと捨てる。デコードは表示より速く進むため、
 /// 上限が無いと待ちフレームが増え続けて CPU を飽和させ、同じ runtime で動く
-/// QUIC エンドポイントの I/O が飢えて受信パケットが落ちる (moqt-rs 0101)。
+/// QUIC エンドポイントの I/O が飢えて受信パケットが落ちる。
 /// 捨てる単位を group (stream) にするのは、途中のフレームを捨てると
 /// 後続のフレームが参照フレームを失って復号できないためである。
+/// 録画中 (`--mp4`) は group を捨てずにデコードだけをスキップし、録画を継続する。
 const MAX_DISPLAY_BACKLOG: i64 = 20;
 
 /// デコード済み映像フレームの送り先
@@ -48,11 +57,17 @@ struct FrameSink<'a> {
     display_backlog: &'a std::sync::atomic::AtomicI64,
 }
 
+/// stream task の終了を待つ上限
+///
+/// STOP_SENDING を送っても peer が data stream を reset しない場合に、shutdown の完了
+/// (録画中は finalize) に到達できなくならないようにするための保険。
+const STREAM_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// 同時に処理する data stream 数の上限
 ///
 /// 音声は 1 object = 1 stream、映像は 1 group = 1 stream で届く。制限しないと
 /// デコードが CPU を使い切り、同じ runtime で動く QUIC エンドポイントの I/O が
-/// 飢えて受信パケットが落ちる (moqt-rs 0101)。
+/// 飢えて受信パケットが落ちる。
 const MAX_CONCURRENT_STREAMS: usize = 4;
 use tokio_moq::Transport;
 use tokio_moq::error::TransportError;
@@ -82,14 +97,6 @@ struct AudioTrackInfo {
     channel_config: String,
 }
 
-/// カタログから取得した fps をスレッド間で共有する
-pub type SharedFps = Arc<AtomicU32>;
-
-/// SharedFps を生成する (デフォルト 30fps)
-pub fn new_shared_fps() -> SharedFps {
-    Arc::new(AtomicU32::new(30))
-}
-
 /// 停滞の切り分け用の診断ログを出すかどうか。
 ///
 /// `MOQT_STREAM_DIAG=1` を設定したときだけ有効にする。100ms ごとに
@@ -116,9 +123,11 @@ async fn close_session(client: &mut MoqtClient, termination: SessionError) {
 
 /// 正常終了の後始末で STOP_SENDING を送るか
 ///
-/// peer が subscription / session を終了させた場合 (購読は既に Terminated) と、
-/// 自側で終了コード付きに閉じた場合 (session が Closing / Closed で状態機械に拒否される)
-/// は送らない。
+/// peer が subscription / session を終了させた場合 (購読は既に Terminated で、
+/// draft-ietf-moq-transport-21 §6.4.2.3 (Request Cancellation and Rejection) により
+/// STOP_SENDING は拒否される) と、自側で終了コード付きに閉じた場合 (session が
+/// Closing / Closed で状態機械に拒否される) は送らない。
+/// GOAWAY は subscription state に影響しないため、この条件には含めない。
 fn should_stop_sending(peer_ended: bool, session_terminated: bool) -> bool {
     !peer_ended && !session_terminated
 }
@@ -198,6 +207,8 @@ fn spawn_stream_task(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    playback: bool,
+    recorder: Option<&RecorderSender>,
 ) {
     let track_map = track_map.clone();
     let data_plane = data_plane.clone();
@@ -209,6 +220,7 @@ fn spawn_stream_task(
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let termination_tx = termination_tx.clone();
+    let recorder = recorder.cloned();
     join_set.spawn(task_monitor.clone().instrument(async move {
         handle_incoming_stream(
             stream,
@@ -224,6 +236,8 @@ fn spawn_stream_task(
             audio_decoder.as_ref(),
             &audio_config_handled,
             &termination_tx,
+            playback,
+            recorder.as_ref(),
         )
         .await;
         // stream の処理が終わるまで枠を保持する
@@ -246,11 +260,17 @@ pub async fn run(
     config: Config,
     frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
     audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
-    shared_fps: SharedFps,
     task_monitor: tokio_metrics::TaskMonitor,
     mut shutdown_monitor: tokio_utils::ShutdownMonitor,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    mut player_stop: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
+    // 再生を行わない場合はデコードをスキップし、録画だけを行う
+    let playback = !config.no_play;
+    // 録画は専用スレッドが所有する。run の早期 return でも Recorder の Drop が finalize する。
+    // 録画対象のトラック情報はカタログ取得後に確定するため、起動はその時点で行う。
+    let recording_requested = config.mp4.is_some();
+
     // TLS の SNI / 証明書検証に使う server_name はポートを含めない。
     // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
     let server_name = host_from_authority(&config.url.authority);
@@ -389,9 +409,6 @@ pub async fn run(
             a.channel_config,
         );
     }
-    if let Some(ref v) = video_info {
-        shared_fps.store(v.fps, Ordering::Relaxed);
-    }
 
     // 3. トラックを SUBSCRIBE する (cli で無効化されたトラックは skip)
     let subscribe_video = config.video_enabled && video_info.is_some();
@@ -438,10 +455,22 @@ pub async fn run(
             tracing::warn!("Failed to send REQUEST_UPDATE for video subscription: {e}");
         }
 
-        // ビデオデコーダの初期化確認
-        let _probe = decoder::build_video_decoder(&v.codec)?;
-        drop(_probe);
-        tracing::info!("Video decoder available (codec={})", v.codec);
+        // ビデオデコーダの初期化確認 (再生を行わない場合はデコードしないため省略する)。
+        // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
+        if playback {
+            match decoder::build_video_decoder(&v.codec) {
+                Ok(_probe) => {
+                    drop(_probe);
+                    tracing::info!("Video decoder available (codec={})", v.codec);
+                }
+                Err(e) if recording_requested => {
+                    tracing::warn!(
+                        "Video decoder is unavailable; recording without video playback: {e}"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
         video_codec = Some(v.codec.clone());
     }
 
@@ -467,15 +496,6 @@ pub async fn run(
                 )));
             }
         };
-        // Opus デコーダの初期化確認
-        let _probe = OpusDecoder::new(a.samplerate, channels)?;
-        drop(_probe);
-        tracing::info!(
-            "Audio decoder available (codec={}, sample_rate={}, channels={})",
-            a.codec,
-            a.samplerate,
-            channels
-        );
         Some((a.samplerate, channels))
     } else {
         None
@@ -483,15 +503,57 @@ pub async fn run(
     // Audio Config の検証 (codec 判定) に使う catalog の audio codec
     let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
 
+    // 録画対象のトラック情報を確定してライタースレッドを起動する。stream task が動き出す前に
+    // 起動するため、最初のサンプルより先にセットアップが反映される。
+    let video_setup = if subscribe_video {
+        let v = video_info.as_ref().expect("video_info is Some");
+        Some(VideoSetup {
+            codec: v.codec.clone(),
+            fps: v.fps,
+        })
+    } else {
+        None
+    };
+    let audio_setup = audio_params.map(|(sample_rate, channels)| AudioSetup {
+        sample_rate,
+        channels,
+    });
+    let recorder = match config.mp4.as_deref() {
+        Some(path) => Some(Recorder::start(
+            path,
+            Setup {
+                video: video_setup,
+                audio: audio_setup,
+            },
+        )?),
+        None => None,
+    };
+    let recorder_sender = recorder.as_ref().map(|recorder| recorder.sender());
+
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-04 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
-    // フレーム境界で波形が不連続になってノイズになる (moqt-rs 0101)。
+    // フレーム境界で波形が不連続になってノイズになる。
     // subscription で 1 つのデコーダを共有し、Audio Config の処理済みフラグも共有する。
-    let audio_decoder = match audio_params {
-        Some((sample_rate, channels)) => Some(std::sync::Arc::new(tokio::sync::Mutex::new(
-            OpusDecoder::new(sample_rate, channels)?,
-        ))),
-        None => None,
+    // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
+    let audio_decoder = match (playback, audio_params) {
+        (true, Some((sample_rate, channels))) => match OpusDecoder::new(sample_rate, channels) {
+            Ok(decoder) => {
+                tracing::info!(
+                    "Audio decoder available (sample_rate={}, channels={})",
+                    sample_rate,
+                    channels
+                );
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(decoder)))
+            }
+            Err(e) if recording_requested => {
+                tracing::warn!(
+                    "Audio decoder is unavailable; recording without audio playback: {e}"
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        },
+        _ => None,
     };
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -537,7 +599,7 @@ pub async fn run(
     //
     // 制限しないと AV1 / Opus のデコードが CPU を使い切り、同じ runtime で動く
     // QUIC エンドポイントの I/O が飢えて受信パケットが落ちる。落ちたパケットで
-    // relay 側の輻輳ウィンドウが最小値まで崩壊し、配送が止まる (moqt-rs 0101)。
+    // relay 側の輻輳ウィンドウが最小値まで崩壊し、配送が止まる。
     //
     // 枠が埋まっている間は新しく accept した stream を `pending_streams` に積み、
     // ループの先頭で枠が空いた分だけ流し込む。`select!` の分岐の中で permit を
@@ -556,10 +618,16 @@ pub async fn run(
     // peer が subscription / session を終了させて受信ループを抜けたか。
     // この場合の subscription は Terminated であり、STOP_SENDING は不要である
     let mut peer_ended = false;
+    // GOAWAY を受信したか。GOAWAY は subscription state に影響しないため、peer_ended とは
+    // 分けて扱う (購読は Established のままなので cleanup で STOP_SENDING を送れる)
+    let mut goaway_received = false;
     // 自側の判断 (LOC の書式違反など) でセッションを閉じて受信ループを抜けたか。
     // 閉じた session への GOAWAY / 正常 close は状態機械に拒否され、誤解を招く
     // 警告ログになるため送らない
     let mut session_terminated = false;
+    // transport 自体のエラーで受信ループを抜けたか。後始末 (stream task の join と録画の
+    // finalize) を終えてから `run` の戻り値として返す
+    let mut fatal_error: Option<Error> = None;
 
     'main: loop {
         // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ
@@ -588,6 +656,8 @@ pub async fn run(
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &termination_tx,
+                playback,
+                recorder_sender.as_ref(),
             );
         }
 
@@ -635,7 +705,11 @@ pub async fn run(
                         Some(ClientEvent::Session(SessionEvent::GoawayReceived {
                             timeout, ..
                         })) => {
+                            // draft-ietf-moq-transport-21 §9.2 (GOAWAY): GOAWAY は
+                            // subscription state に影響しないため、購読を個別に終了する
+                            // STOP_SENDING は送れる
                             tracing::info!("Received GOAWAY (timeout={timeout})");
+                            goaway_received = true;
                             Ok(true)
                         }
                         Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
@@ -694,7 +768,11 @@ pub async fn run(
                 match outcome {
                     // peer が subscription / session を終了させた
                     Ok(true) => {
-                        peer_ended = true;
+                        // GOAWAY は subscription state に影響しないため peer_ended にしない
+                        // (cleanup で STOP_SENDING を送り、peer に stream を reset させる)
+                        if !goaway_received {
+                            peer_ended = true;
+                        }
                         break 'main;
                     }
                     Ok(false) => {}
@@ -706,10 +784,14 @@ pub async fn run(
                         peer_ended = true;
                         break 'main;
                     }
-                    // transport 自体のエラーは `?` で `run` を終える。接続が死んでいるため
+                    // transport 自体のエラーは後始末 (stream task の join と録画の
+                    // finalize) を終えてから `run` の戻り値として返す。接続が死んでいるため
                     // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
                     // (既知の限界)。
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        fatal_error = Some(e);
+                        break 'main;
+                    }
                 }
             }
             Some(termination) = termination_rx.recv() => {
@@ -740,25 +822,38 @@ pub async fn run(
                 tracing::info!("Shutdown signal received");
                 break 'main;
             }
+            _ = &mut player_stop => {
+                // プレイヤーの終了 (ウィンドウを閉じた等) でも録画を finalize するため、
+                // pipeline を止めて run の後始末 (Recorder の join) へ進む
+                tracing::info!("Player stopped, stopping pipeline");
+                break 'main;
+            }
         }
     }
 
     // select! で別の終了要因 (accept の終了 / GOAWAY / PUBLISH_DONE / peer の close /
     // shutdown など) が先に成立していても、既に届いている終了依頼があればそのコードで閉じる
     // (draft-ietf-moq-transport-21 §8.3 の MUST を終了コード 0x0 で上書きしない)。
-    if !session_terminated && let Ok(termination) = termination_rx.try_recv() {
+    if fatal_error.is_none()
+        && !session_terminated
+        && let Ok(termination) = termination_rx.try_recv()
+    {
         close_session(&mut client, termination).await;
         session_terminated = true;
     }
 
-    while let Some(result) = join_set.join_next().await {
-        if let Err(e) = result {
-            tracing::warn!("Stream task panicked: {e}");
-        }
-    }
+    // transport 自体のエラーで抜けた場合は接続が死んでいるため、GOAWAY / 正常 close は送らない
+    let session_alive = fatal_error.is_none();
 
     // peer が subscription を終了させた場合は送信先の購読が既に Terminated であり、
-    // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-21 §6.4.2.3)
+    // STOP_SENDING は state machine に拒否される (draft-ietf-moq-transport-21 §3.1
+    // (Subscriptions) は Pending / Established のみ STOP_SENDING を認める)。
+    // stream task の join より先に送るのは、受信待ちの live stream で join が終わらない
+    // ことを防ぐためである。
+    // transport 自体のエラーで抜けた場合も接続が生存している可能性があるため、
+    // 接続死活の判定と独立に best-effort で送る。
+    // GOAWAY 起因の停止に GOING_AWAY (§12.5) ではなく CANCELLED を使うのは、
+    // tokio-moq の stop_sending API がコードを指定できないためである。
     if should_stop_sending(peer_ended, session_terminated) {
         if let Some(rid) = video_request_id
             && let Err(e) = client.stop_sending(rid).await
@@ -772,8 +867,31 @@ pub async fn run(
         }
     }
 
+    // transport 自体のエラーで抜けた場合は、live stream の FIN を待たずにタスクを打ち切る
+    if fatal_error.is_some() {
+        join_set.abort_all();
+    }
+    // peer が STOP_SENDING に従わない場合でも録画の finalize に到達できるよう上限を設ける
+    let join_deadline = tokio::time::Instant::now() + STREAM_JOIN_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(join_deadline, join_set.join_next()).await {
+            Ok(Some(Ok(()))) => {}
+            // abort による打ち切りは異常ではない
+            Ok(Some(Err(e))) if e.is_cancelled() => {}
+            Ok(Some(Err(e))) => tracing::warn!("Stream task panicked: {e}"),
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!(
+                    "Timed out waiting for stream tasks; aborting them to complete shutdown"
+                );
+                join_set.abort_all();
+                break;
+            }
+        }
+    }
+
     // 自側で終了コード付きに閉じた場合は、閉じた session へ GOAWAY / 正常 close を送らない
-    if should_close_gracefully(session_terminated) {
+    if session_alive && should_close_gracefully(session_terminated) {
         if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
             tracing::warn!("Failed to send GOAWAY: {e}");
         }
@@ -781,6 +899,21 @@ pub async fn run(
         if let Err(e) = client.close(0, "").await {
             tracing::warn!("Failed to close session gracefully: {e}");
         }
+    }
+
+    // 録画を finalize してライタースレッドの終了を待つ。ここまでで stream task はすべて
+    // 終了している
+    if let Some(recorder) = recorder
+        && let Err(e) = recorder.finish()
+    {
+        tracing::error!("Failed to finalize MP4 recording: {e}");
+        if fatal_error.is_none() {
+            fatal_error = Some(e);
+        }
+    }
+
+    if let Some(e) = fatal_error {
+        return Err(e);
     }
 
     tracing::info!("Pipeline stopped: {total_streams} streams received");
@@ -1041,6 +1174,8 @@ async fn handle_incoming_stream(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    playback: bool,
+    recorder: Option<&RecorderSender>,
 ) {
     let started = Instant::now();
     let raw_stream_id = stream.stream_id();
@@ -1061,6 +1196,8 @@ async fn handle_incoming_stream(
         audio_decoder,
         audio_config_handled,
         termination_tx,
+        playback,
+        recorder,
     )
     .await;
     // 診断時は stream ごとの滞在時間を残す。枠を長時間占有する stream を特定する
@@ -1069,6 +1206,35 @@ async fn handle_incoming_stream(
             "STREAMDIAG stream #{stream_num} exit: stream_id={raw_stream_id} elapsed_ms={}",
             started.elapsed().as_millis()
         );
+    }
+}
+
+/// video stream の decoder を必要に応じて生成する
+///
+/// 再生しない場合と、表示待ちの超過でデコードをスキップする場合は `None` を返す。
+/// 録画中は decoder が使えなくても録画を継続するため `None` を返して警告する。
+fn build_stream_video_decoder(
+    playback: bool,
+    skip_decode: bool,
+    codec: &str,
+    stream_num: u64,
+    recording: bool,
+) -> Result<Option<decoder::VideoDecoder>> {
+    if !playback || skip_decode {
+        if skip_decode {
+            tracing::debug!("Stream #{stream_num}: skipping video decode (recording continues)");
+        }
+        return Ok(None);
+    }
+    match decoder::build_video_decoder(codec) {
+        Ok(decoder) => Ok(Some(decoder)),
+        Err(e) if recording => {
+            tracing::warn!(
+                "Stream #{stream_num}: failed to create video decoder; recording without video playback: {e}"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -1091,6 +1257,8 @@ async fn handle_stream_body(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    playback: bool,
+    recorder: Option<&RecorderSender>,
 ) {
     let stream_id = DataStreamId(stream.stream_id());
     let mut buf = Vec::new();
@@ -1112,7 +1280,9 @@ async fn handle_stream_body(
     }
     match stream_type {
         StreamType::Fetch => {
-            if display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG {
+            // 録画中は group を破棄せず、デコードだけをスキップして録画する
+            let skip_decode = display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
+            if skip_decode && recorder.is_none() {
                 tracing::debug!(
                     "Stream #{stream_num}: dropping fetch stream (display backlog={})",
                     display_backlog.load(Ordering::Relaxed)
@@ -1128,8 +1298,14 @@ async fn handle_stream_body(
                 let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
                 return;
             };
-            let mut decoder = match decoder::build_video_decoder(codec) {
-                Ok(d) => d,
+            let mut decoder = match build_stream_video_decoder(
+                playback,
+                skip_decode,
+                codec,
+                stream_num,
+                recorder.is_some(),
+            ) {
+                Ok(decoder) => decoder,
                 Err(e) => {
                     tracing::warn!("Stream #{stream_num}: failed to create video decoder: {e}");
                     let _ = data_plane.send_data_stream_stop_sending(stream_id);
@@ -1142,13 +1318,14 @@ async fn handle_stream_body(
                 &data_plane,
                 stream_id,
                 &buf,
-                &mut decoder,
+                decoder.as_mut(),
                 &FrameSink {
                     frame_tx,
                     display_backlog: &display_backlog,
                 },
                 stream_num,
                 termination_tx,
+                recorder,
             )
             .await;
         }
@@ -1183,9 +1360,11 @@ async fn handle_stream_body(
                     }
                 }
             };
-            if track_map.get(&header.track_alias) == Some(&TrackKind::Video)
-                && display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG
-            {
+            // 再生の間引きで video group を破棄するのは録画していない場合だけにする。
+            // 録画中は group を読み切って録画し、デコードだけをスキップする。
+            let skip_decode = track_map.get(&header.track_alias) == Some(&TrackKind::Video)
+                && display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
+            if skip_decode && recorder.is_none() {
                 tracing::debug!(
                     "Stream #{stream_num}: dropping video group (display backlog={})",
                     display_backlog.load(Ordering::Relaxed)
@@ -1249,8 +1428,14 @@ async fn handle_stream_body(
                             drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
                         return;
                     };
-                    let mut decoder = match decoder::build_video_decoder(codec) {
-                        Ok(d) => d,
+                    let mut decoder = match build_stream_video_decoder(
+                        playback,
+                        skip_decode,
+                        codec,
+                        stream_num,
+                        recorder.is_some(),
+                    ) {
+                        Ok(decoder) => decoder,
                         Err(e) => {
                             tracing::warn!(
                                 "Stream #{stream_num}: failed to create video decoder: {e}"
@@ -1266,11 +1451,12 @@ async fn handle_stream_body(
                         &data_plane,
                         stream_id,
                         &mut sg_decoder,
-                        &mut decoder,
+                        decoder.as_mut(),
                         &FrameSink {
                             frame_tx,
                             display_backlog: &display_backlog,
                         },
+                        recorder,
                         termination_tx,
                     )
                     .await;
@@ -1290,17 +1476,12 @@ async fn handle_stream_body(
                         return;
                     };
                     // デコーダは subscription で共有する。stream ごとに作ると 20 ms ごとに
-                    // 状態が失われ、フレーム境界で波形が不連続になる (moqt-rs 0101)
-                    let Some(decoder) = audio_decoder else {
-                        tracing::warn!(
-                            "Stream #{stream_num}: audio stream arrived but audio is not configured"
-                        );
-                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        let _ =
-                            drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                        return;
+                    // 状態が失われ、フレーム境界で波形が不連続になる。
+                    // 再生を行わない場合はロックを取らずに録画だけを行う。
+                    let mut decoder = match audio_decoder {
+                        Some(decoder) => Some(decoder.lock().await),
+                        None => None,
                     };
-                    let mut decoder = decoder.lock().await;
                     // Audio Config の中身はコーデック依存 (LOC draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) のため、
                     // catalog の codec が opus の場合のみ OpusHead として解釈する。
                     // 処理済みフラグは subscription で共有する: decode_audio_stream は
@@ -1316,12 +1497,13 @@ async fn handle_stream_body(
                         &data_plane,
                         stream_id,
                         &mut sg_decoder,
-                        &mut decoder,
+                        decoder.as_deref_mut(),
                         audio_tx,
                         &mut handled,
                         is_opus_codec,
                         sample_rate,
                         channels,
+                        recorder,
                         termination_tx,
                     )
                     .await;
@@ -1351,10 +1533,11 @@ async fn handle_fetch_stream(
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     buf: &[u8],
-    video_decoder: &mut decoder::VideoDecoder,
+    mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     stream_num: u64,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    recorder: Option<&RecorderSender>,
 ) {
     let mut decoder = FetchStreamDecoder::new();
     decoder.push(buf);
@@ -1465,6 +1648,20 @@ async fn handle_fetch_stream(
                     return;
                 }
             };
+            if let Some(recorder) = recorder
+                && let Err(e) = record_video_object(
+                    recorder,
+                    obj.properties_bytes.as_deref(),
+                    video_config.as_deref(),
+                    &payload,
+                )
+            {
+                request_session_termination(termination_tx, &e);
+                return;
+            }
+            let Some(video_decoder) = video_decoder.as_deref_mut() else {
+                continue;
+            };
             frames += tokio::task::block_in_place(|| {
                 decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
             });
@@ -1472,13 +1669,15 @@ async fn handle_fetch_stream(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn decode_video_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     sg_decoder: &mut SubgroupStreamDecoder,
-    video_decoder: &mut decoder::VideoDecoder,
+    mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
+    recorder: Option<&RecorderSender>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) -> u64 {
     let mut frames: u64 = 0;
@@ -1550,6 +1749,20 @@ async fn decode_video_stream(
                 request_session_termination(termination_tx, &e);
                 return frames;
             }
+        };
+        if let Some(recorder) = recorder
+            && let Err(e) = record_video_object(
+                recorder,
+                obj.properties_bytes.as_deref(),
+                video_config.as_deref(),
+                &payload,
+            )
+        {
+            request_session_termination(termination_tx, &e);
+            return frames;
+        }
+        let Some(video_decoder) = video_decoder.as_deref_mut() else {
+            continue;
         };
         frames += tokio::task::block_in_place(|| {
             decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
@@ -1641,6 +1854,77 @@ fn extract_timestamp_timescale(
     Ok((ts, tscale))
 }
 
+/// object の properties バイト列から PROP_VIDEO_FRAME_MARKING の I ビットを取り出す
+///
+/// `Ok(None)` は「Properties が無い、または PROP_VIDEO_FRAME_MARKING を持たない」を意味する。
+/// RFC 9626 §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式は
+/// `|S|E|I|D|0 0 0 0|` であり、I ビット (0x20) が独立フレーム (キーフレーム) を表す。
+/// この節番号・ビット割当は RFC 由来であり将来変更される可能性がある。
+fn extract_video_keyframe(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<bool>> {
+    let Some(bytes) = properties_bytes else {
+        return Ok(None);
+    };
+    let (props, _) = LocProperties::decode(bytes)?;
+    for p in props.iter() {
+        if p.prop_id == PROP_VIDEO_FRAME_MARKING
+            && let LocPropertyValue::Bytes(ref b) = p.value
+        {
+            return Ok(Some(b.first().is_some_and(|v| v & 0x20 != 0)));
+        }
+    }
+    Ok(None)
+}
+
+/// video object を録画用に writer へ送る
+///
+/// キーフレーム判定は PROP_VIDEO_FRAME_MARKING を使い、プロパティが無い場合は
+/// PROP_VIDEO_CONFIG の有無で代用する。Timestamp / Timescale の書式違反は `Err` で返し、
+/// 呼び出し側がセッションを閉じる。
+fn record_video_object(
+    recorder: &RecorderSender,
+    properties_bytes: Option<&[u8]>,
+    video_config: Option<&[u8]>,
+    payload: &[u8],
+) -> ExtractResult<()> {
+    let keyframe = match extract_video_keyframe(properties_bytes)? {
+        Some(keyframe) => keyframe,
+        None => video_config.is_some(),
+    };
+    let (timestamp, timescale) = extract_timestamp_timescale(properties_bytes)?;
+    recorder.video(VideoSample {
+        timestamp,
+        timescale,
+        keyframe,
+        config: video_config.map(<[u8]>::to_vec),
+        data: payload.to_vec(),
+    });
+    Ok(())
+}
+
+/// audio object を録画用に writer へ送る
+///
+/// Audio Config (OpusHead) は opus codec の場合のみ解釈する (中身はコーデック依存のため)。
+fn record_audio_object(
+    recorder: &RecorderSender,
+    timestamp: Option<u64>,
+    timescale: Option<u64>,
+    audio_config: Option<&[u8]>,
+    is_opus_codec: bool,
+    payload: &[u8],
+) {
+    let config = if is_opus_codec {
+        audio_config.and_then(parse_opus_head)
+    } else {
+        None
+    };
+    recorder.audio(AudioSample {
+        timestamp,
+        timescale,
+        config,
+        data: payload.to_vec(),
+    });
+}
+
 /// LOC の Timestamp と Timescale から音声 PTS (マイクロ秒) を計算する
 ///
 /// Timestamp は `u64` 全域を取りうるため、`as i64` キャストや `* 1_000_000` の乗算で
@@ -1657,14 +1941,6 @@ fn audio_pts_us(timestamp: Option<u64>, timescale: Option<u64>) -> i64 {
     }
 }
 
-/// OpusHead (RFC 7845 §5.1) のパース結果
-struct ParsedOpusHead {
-    /// Channel Count (バイト 9)
-    channel_count: u8,
-    /// Input Sample Rate (バイト 12-15, little-endian)。0 は unspecified
-    input_sample_rate: u32,
-}
-
 /// OpusHead (RFC 7845 §5.1) をパースする
 ///
 /// magic "OpusHead"・ version 1 ・ 19 バイト以上・ Channel Count > 0 を検証する。
@@ -1673,7 +1949,7 @@ struct ParsedOpusHead {
 /// RFC 7845 §5.1 は "SHOULD accept any stream with a version number of '15' or less" と
 /// 後方互換受理を推奨するが、現行 publisher は version 1 のみ送信するため、ここでは
 /// version ≠ 1 をパース失敗として扱う (厳格化)。
-fn parse_opus_head(bytes: &[u8]) -> Option<ParsedOpusHead> {
+fn parse_opus_head(bytes: &[u8]) -> Option<mp4::OpusHeadConfig> {
     if bytes.len() < 19 || &bytes[0..8] != b"OpusHead" || bytes[8] != 1 {
         return None;
     }
@@ -1681,10 +1957,14 @@ fn parse_opus_head(bytes: &[u8]) -> Option<ParsedOpusHead> {
     if channel_count == 0 {
         return None;
     }
+    let pre_skip = u16::from_le_bytes([bytes[10], bytes[11]]);
     let input_sample_rate = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-    Some(ParsedOpusHead {
+    let output_gain = i16::from_le_bytes([bytes[16], bytes[17]]);
+    Some(mp4::OpusHeadConfig {
         channel_count,
+        pre_skip,
         input_sample_rate,
+        output_gain,
     })
 }
 
@@ -1718,7 +1998,7 @@ fn extract_audio_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option
 /// - Channel Count の不一致: libopus が自動でチャンネル変換して再生を継続するため
 ///   エラーにはならないが、原因不明の音質変化になるため警告で知らせる
 fn validate_audio_config(
-    head: &ParsedOpusHead,
+    head: &mp4::OpusHeadConfig,
     catalog_sample_rate: u32,
     catalog_channels: u8,
 ) -> Vec<String> {
@@ -1759,12 +2039,13 @@ async fn decode_audio_stream(
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     sg_decoder: &mut SubgroupStreamDecoder,
-    opus_decoder: &mut OpusDecoder,
+    mut opus_decoder: Option<&mut OpusDecoder>,
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     audio_config_handled: &mut bool,
     is_opus_codec: bool,
     catalog_sample_rate: u32,
     catalog_channels: u8,
+    recorder: Option<&RecorderSender>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
 ) -> u64 {
     let mut chunks: u64 = 0;
@@ -1841,6 +2122,24 @@ async fn decode_audio_stream(
                 return chunks;
             }
         };
+        let (timestamp, timescale) =
+            match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
+                Ok(ts) => ts,
+                Err(e) => {
+                    request_session_termination(termination_tx, &e);
+                    return chunks;
+                }
+            };
+        if let Some(recorder) = recorder {
+            record_audio_object(
+                recorder,
+                timestamp,
+                timescale,
+                audio_config.as_deref(),
+                is_opus_codec,
+                &payload,
+            );
+        }
         // Audio Config (OpusHead) を含むオブジェクトを受信した最初の 1 回のみ検証する
         // (途中参加で OpusHead を受信しない場合はスキップされる)
         if !*audio_config_handled && let Some(config_bytes) = audio_config {
@@ -1866,14 +2165,9 @@ async fn decode_audio_stream(
                 tracing::debug!("Audio Config received but codec is not opus; skipped validation");
             }
         }
-        let (timestamp, timescale) =
-            match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
-                Ok(ts) => ts,
-                Err(e) => {
-                    request_session_termination(termination_tx, &e);
-                    return chunks;
-                }
-            };
+        let Some(opus_decoder) = opus_decoder.as_deref_mut() else {
+            continue;
+        };
         let decoded = tokio::task::block_in_place(|| opus_decoder.decode(&payload));
         let pcm = match decoded {
             Ok(p) => p,
@@ -2051,15 +2345,84 @@ mod tests {
     /// OpusHead パース: 19 バイト超 (Channel Mapping Family = 1 等) は受理される
     ///
     /// RFC 7845 §5.1 のヘッダは 19 バイト以上であり、拡張フィールドは無視してよい。
-    /// (テストデータの拡張部は Channel Mapping Family = 1 の想定で、形式は不問の
-    /// 追加バイトとして扱う)
+    /// (テストデータの拡張部は Channel Mapping Family = 1 の想定で、Stream Count 1 /
+    /// Coupled Count 1 / Channel Mapping [0, 1] の 4 バイトを追加している)
     #[test]
     fn parse_opus_head_accepts_longer_head() {
         let mut head = build_test_opus_head(48_000, 2);
-        head.extend_from_slice(&[1, 0, 0, 0]); // Channel Mapping Family = 1 + mapping (C=2 で 4 バイト)
+        head.extend_from_slice(&[1, 1, 0, 1]); // Channel Mapping Family = 1 + mapping (C=2 で 4 バイト)
         let parsed = parse_opus_head(&head).expect("19 バイト超の OpusHead は受理されること");
         assert_eq!(parsed.input_sample_rate, 48_000);
         assert_eq!(parsed.channel_count, 2);
+    }
+
+    /// OpusHead パース: Pre-skip / Output Gain を取り出せる (RFC 7845 §5.1)
+    #[test]
+    fn parse_opus_head_extracts_pre_skip_and_output_gain() {
+        let mut head = Vec::with_capacity(19);
+        head.extend_from_slice(b"OpusHead");
+        head.push(1);
+        head.push(2);
+        head.extend_from_slice(&312u16.to_le_bytes()); // Pre-skip
+        head.extend_from_slice(&48_000u32.to_le_bytes()); // Input Sample Rate
+        head.extend_from_slice(&(-512i16).to_le_bytes()); // Output Gain
+        head.push(0);
+        let parsed = parse_opus_head(&head).expect("正しい OpusHead はパースできること");
+        assert_eq!(parsed.pre_skip, 312, "Pre-skip が取り出せること");
+        assert_eq!(parsed.output_gain, -512, "Output Gain が取り出せること");
+    }
+
+    /// PROP_VIDEO_FRAME_MARKING の I ビットでキーフレームを判定できる (RFC 9626 §3.2)
+    #[test]
+    fn extract_video_keyframe_reads_i_bit() {
+        use shiguredo_moqt::loc::LocProperty;
+
+        // 1 octet 形式は |S|E|I|D|0 0 0 0| であり、I ビット (0x20) が独立フレームを表す
+        for (marking, expected) in [
+            (0xE0u8, true),
+            (0xC0, false),
+            (0x20, true),
+            (0x00, false),
+            (0xA0, true),
+        ] {
+            let mut props = LocProperties::new();
+            props.push(LocProperty {
+                prop_id: PROP_VIDEO_FRAME_MARKING,
+                value: LocPropertyValue::Bytes(vec![marking]),
+            });
+            let bytes = props
+                .encode()
+                .expect("テストフィクスチャの前提条件を満たす");
+            assert_eq!(
+                extract_video_keyframe(Some(&bytes)),
+                Ok(Some(expected)),
+                "marking={marking:#04x} の I ビット判定"
+            );
+        }
+    }
+
+    /// PROP_VIDEO_FRAME_MARKING が無ければ Ok(None)、切り詰めはエラー
+    #[test]
+    fn extract_video_keyframe_handles_absent_and_truncated() {
+        let props = LocProperties::new();
+        let bytes = props
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            extract_video_keyframe(Some(&bytes)),
+            Ok(None),
+            "持たなければ Ok(None) であること"
+        );
+        assert_eq!(
+            extract_video_keyframe(None),
+            Ok(None),
+            "properties 自体が無ければ Ok(None) であること"
+        );
+        assert_eq!(
+            extract_video_keyframe(Some(&[0xFF, 0xFF, 0xFF])),
+            Err(MessageError::UnexpectedEof),
+            "切り詰められた properties は UnexpectedEof であること"
+        );
     }
 
     /// PROP_AUDIO_CONFIG の抽出: 付与されていればバイト列が取り出せる
@@ -2308,7 +2671,8 @@ mod tests {
 
     /// 接続クローズだけをセッション終了として扱い、他のエラーは異常として扱う
     ///
-    /// セッション終了として扱わないエラーは `?` で `run` を抜ける (終了コード 1)。
+    /// セッション終了として扱わないエラーは後始末 (stream task の join と録画の finalize) を
+    /// 終えてから `run` の戻り値として返る (終了コード 1)。
     /// 判定は `Error` の variant で行うため、`WebTransport` に畳まれる他の transport エラーが
     /// 混ざらないことを固定する。
     #[test]
@@ -2407,9 +2771,11 @@ mod tests {
     /// 検証: 整合する場合は警告が 0 件
     #[test]
     fn validate_audio_config_matching_values_no_warnings() {
-        let head = ParsedOpusHead {
+        let head = mp4::OpusHeadConfig {
             channel_count: 1,
             input_sample_rate: 48_000,
+            pre_skip: 0,
+            output_gain: 0,
         };
         let warnings = validate_audio_config(&head, 48_000, 1);
         assert!(
@@ -2421,9 +2787,11 @@ mod tests {
     /// 検証: Input Sample Rate 不一致で警告が出ること (値 0 は unspecified のため不一致としない)
     #[test]
     fn validate_audio_config_sample_rate_mismatch_warns() {
-        let head = ParsedOpusHead {
+        let head = mp4::OpusHeadConfig {
             channel_count: 1,
             input_sample_rate: 44_100,
+            pre_skip: 0,
+            output_gain: 0,
         };
         let warnings = validate_audio_config(&head, 48_000, 1);
         assert_eq!(
@@ -2439,9 +2807,11 @@ mod tests {
             warnings[0],
         );
         // unspecified (0) は不一致としない
-        let head_zero = ParsedOpusHead {
+        let head_zero = mp4::OpusHeadConfig {
             channel_count: 1,
             input_sample_rate: 0,
+            pre_skip: 0,
+            output_gain: 0,
         };
         assert!(
             validate_audio_config(&head_zero, 48_000, 1).is_empty(),
@@ -2452,9 +2822,11 @@ mod tests {
     /// 検証: Channel Count 不一致で警告が出ること
     #[test]
     fn validate_audio_config_channel_mismatch_warns() {
-        let head = ParsedOpusHead {
+        let head = mp4::OpusHeadConfig {
             channel_count: 2,
             input_sample_rate: 48_000,
+            pre_skip: 0,
+            output_gain: 0,
         };
         let warnings = validate_audio_config(&head, 48_000, 1);
         assert_eq!(
@@ -2472,9 +2844,11 @@ mod tests {
     /// 検証: Sample Rate と Channel Count の両方が不一致なら警告が 2 件
     #[test]
     fn validate_audio_config_both_mismatch_warns_twice() {
-        let head = ParsedOpusHead {
+        let head = mp4::OpusHeadConfig {
             channel_count: 2,
             input_sample_rate: 44_100,
+            pre_skip: 0,
+            output_gain: 0,
         };
         let warnings = validate_audio_config(&head, 48_000, 1);
         assert_eq!(
