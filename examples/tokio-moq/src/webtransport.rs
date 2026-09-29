@@ -153,29 +153,55 @@ pub(crate) async fn wait_until_terminated(session_state: &mut watch::Receiver<Wt
         .await;
 }
 
-/// MOQT の close code を `WT_CLOSE_SESSION` の Application Error Code (`u32`) へ変換する
+/// MOQT の close code をどの経路で接続へ伝えるか
 ///
-/// draft-ietf-webtrans-http3-16 §6 (Session Termination) と
-/// draft-ietf-webtrans-http2-15 §6.12 の `WT_CLOSE_SESSION` capsule の
-/// Application Error Code は 32 ビットである。
+/// MOQT §13 (Grease) の greasing 値は `0x7f * N + 0x9D` で 32 ビットを超える
+/// (`0x9D, 0x11C, ..., 0x3fffffffffffffde` を取り得る) ため、`WT_CLOSE_SESSION` capsule では
+/// 運べない値がある。切り捨てると別のコードに化けるため、運べない値は接続レベルの close に
+/// 切り替える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoqtCloseCode {
+    /// `WT_CLOSE_SESSION` capsule の Application Error Code として送る
+    ///
+    /// capsule の Application Error Code は 32 ビットである
+    /// (draft-ietf-webtrans-http3-16 §6 / draft-ietf-webtrans-http2-15 §6.12)。
+    Capsule(u32),
+    /// QUIC の `CONNECTION_CLOSE` で接続を閉じ、application error code に元のコードを載せる
+    ///
+    /// `WT_CLOSE_SESSION` の詳細メッセージは送れないが、接続は閉じる。
+    /// draft-ietf-webtrans-http3-16 §6 は CONNECT stream の close もセッション終了の条件とする。
+    ConnectionClose(u64),
+    /// varint の上限 (2^62-1) を超えるため `CONNECTION_CLOSE` にコードを載せられない
+    ///
+    /// QUIC の application error code は varint であり、上限を超える値は送れない。
+    /// 既存の QUIC 経路 (`StreamHandle::close` の QUIC 分岐) と同じく `Error::UNKNOWN` に
+    /// 落として接続を閉じる (コードは伝わらない)。
+    ConnectionCloseUnknown,
+}
+
+/// MOQT の close code から接続を閉じる経路を決める
 ///
-/// MOQT のコードは `u64` で、§13 (Grease) の greasing 値は 32 ビットを超える
-/// (`0x7f * N + 0x9D`。`0x9D, 0x11C, ..., 0x3fffffffffffffde` を取り得る)。
-/// `as u32` で切り捨てると別のコードに化けるため、収まらない場合はエラーにする。
-/// `Session` の公開 API は任意の `u64` を受け付けるため、この値が到達し得る。
-pub(crate) fn moqt_close_code(code: u64) -> crate::error::Result<u32> {
-    u32::try_from(code).map_err(|_| {
-        crate::error::TransportError::Internal(format!(
-            "MOQT close code {code:#x} does not fit in the WT_CLOSE_SESSION application error code (0x00000000-0xffffffff)"
-        ))
-    })
+/// `WT_CLOSE_SESSION` capsule の Application Error Code は 32 ビットのため収まる値は capsule で
+/// 送り、収まらない値は接続レベルの close に切り替える。`Session` の公開 API は任意の `u64` を
+/// 受け付けるため、32 ビットを超える値が到達し得る。
+pub fn moqt_close_code(code: u64) -> MoqtCloseCode {
+    match u32::try_from(code) {
+        Ok(code) => MoqtCloseCode::Capsule(code),
+        Err(_) => {
+            // RFC 9000 §19.19: application error code は varint (最大 2^62-1)
+            const MAX_VARINT: u64 = (1 << 62) - 1;
+            if code <= MAX_VARINT {
+                MoqtCloseCode::ConnectionClose(code)
+            } else {
+                MoqtCloseCode::ConnectionCloseUnknown
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::error::TransportError;
 
     /// 状態は進む方向にだけ遷移し、終了後の drain 通知では戻らない
     #[test]
@@ -220,20 +246,57 @@ mod tests {
         }
     }
 
-    /// 32 ビットに収まる MOQT の close code をそのまま通す
+    /// 32 ビットに収まる MOQT の close code は capsule で送る
+    ///
+    /// 期待値は実装 (`u32::try_from`) の写しにせず、リテラルで固定する。
     #[test]
     fn moqt_close_code_accepts_32_bit_values() {
-        assert_eq!(moqt_close_code(0).expect("0 は通ること"), 0);
-        assert_eq!(
-            moqt_close_code(0xffff_ffff).expect("u32::MAX は通ること"),
-            u32::MAX
-        );
+        for (code, expected) in [
+            (0_u64, 0_u32),
+            (0x1, 0x1),
+            (0x12, 0x12),
+            (0xffff_ffff, u32::MAX),
+        ] {
+            assert_eq!(
+                moqt_close_code(code),
+                MoqtCloseCode::Capsule(expected),
+                "{code:#x} が切り捨てられずに capsule で送られること"
+            );
+        }
     }
 
-    /// 32 ビットを超える greasing 値は切り捨てずエラーにする
+    /// 32 ビットを超える greasing 値は接続レベルの close に切り替える
+    ///
+    /// MOQT §13 (Grease) の greasing 値 `0x7f * N + 0x9D` は 32 ビットを超え得る。
+    /// `WT_CLOSE_SESSION` の Application Error Code は 32 ビットのため capsule では運べない。
     #[test]
-    fn moqt_close_code_rejects_values_over_32_bits() {
-        let err = moqt_close_code(0x1_0000_0000).expect_err("32 ビット超はエラーになること");
-        assert!(matches!(err, TransportError::Internal(_)));
+    fn moqt_close_code_falls_back_to_connection_close_over_32_bits() {
+        for code in [
+            u64::from(u32::MAX) + 1,
+            0x1_0000_009d,
+            // greasing 値の上限 (0x7f * N + 0x9D の最大)
+            0x3fff_ffff_ffff_ffde,
+        ] {
+            assert_eq!(
+                moqt_close_code(code),
+                MoqtCloseCode::ConnectionClose(code),
+                "{code:#x} が元のコードのまま接続レベルの close になること"
+            );
+        }
+    }
+
+    /// varint の上限を超える値はコードを載せずに接続を閉じる
+    ///
+    /// RFC 9000 §19.19 の application error code は varint (最大 2^62-1) のため、
+    /// 超える値は `CONNECTION_CLOSE` にも載せられない。
+    #[test]
+    fn moqt_close_code_uses_unknown_over_varint_limit() {
+        for code in [(1_u64 << 62), u64::MAX] {
+            assert_eq!(
+                moqt_close_code(code),
+                MoqtCloseCode::ConnectionCloseUnknown,
+                "{code:#x} はコードを載せずに接続を閉じること"
+            );
+        }
     }
 }

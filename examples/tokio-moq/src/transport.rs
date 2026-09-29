@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::error::TransportError;
-use crate::webtransport::{WtSessionState, moqt_close_code, wait_until_terminated};
+use crate::webtransport::{MoqtCloseCode, WtSessionState, moqt_close_code, wait_until_terminated};
 use crate::webtransport_h2::{WtH2RecvStream, WtH2SendStream, WtH2Session};
 use crate::webtransport_h3::{WtRecvStream, WtSendStream, WtSession};
 
@@ -224,7 +224,7 @@ impl StreamHandle {
     ///
     /// QUIC では application error code を、WebTransport では CLOSE_SESSION capsule を送信する。
     /// WebTransport の Application Error Code は 32 ビットのため、収まらない MOQT のコードは
-    /// 切り捨てずエラーにする (`moqt_close_code`)。
+    /// 切り捨てず、接続レベルの close に切り替える (`moqt_close_code` の判定)。
     /// セッション状態を終了へ移すため、以降は新しいストリームの open と datagram の送信が
     /// 拒否される (§6)。
     pub async fn close(&self, code: u64, reason: &str) -> Result<(), TransportError> {
@@ -236,12 +236,24 @@ impl StreamHandle {
                 Ok(())
             }
             StreamHandle::WtH3(session) => {
-                let code = moqt_close_code(code)?;
+                let code = moqt_close_code(code);
                 let mut session = session.lock().await;
                 session.close(code, reason).await
             }
             StreamHandle::WtH2(session) => {
-                let code = moqt_close_code(code)?;
+                // over HTTP/2 の `WT_CLOSE_SESSION` の Application Error Code も実装は 32 ビットで
+                // 扱う (`WtH2Session::close` の引数)。32 ビットを超える値は capsule で運べないため、
+                // ここでは 32 ビットに収まらないことを利用者へ明示して失敗させる。
+                // 接続レベルの close へのフォールバックは WebTransport over HTTP/3 のみ実装する。
+                let original = code;
+                let code = match moqt_close_code(code) {
+                    MoqtCloseCode::Capsule(code) => code,
+                    MoqtCloseCode::ConnectionClose(_) | MoqtCloseCode::ConnectionCloseUnknown => {
+                        return Err(TransportError::Internal(format!(
+                            "MOQT close code {original:#x} does not fit in the WT_CLOSE_SESSION application error code over HTTP/2 (0x00000000-0xffffffff)"
+                        )));
+                    }
+                };
                 let mut session = session.lock().await;
                 session.close(code, reason).await
             }

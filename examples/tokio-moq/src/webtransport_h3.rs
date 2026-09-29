@@ -33,7 +33,7 @@ use tokio::sync::watch;
 
 use crate::error::{Result, TransportError};
 use crate::webtransport::{
-    WtSessionState, session_policy, update_session_state, wait_until_terminated,
+    MoqtCloseCode, WtSessionState, session_policy, update_session_state, wait_until_terminated,
 };
 
 /// WebTransport over HTTP/3 の ALPN プロトコル識別子 (RFC 9114 §3.1)
@@ -1590,19 +1590,46 @@ impl WtSession {
 
     /// セッションをクローズする (draft-ietf-webtrans-http3-16 §6)
     ///
-    /// `WT_CLOSE_SESSION` を送り、直後に CONNECT stream へ FIN を送る (MUST)。
-    /// Application Error Message が 1024 バイトを超える場合は UTF-8 境界で truncate する (MUST)。
-    /// `code` は 32 ビットの Application Error Code である (`moqt_close_code` で変換する)。
+    /// 32 ビットに収まる close code は `WT_CLOSE_SESSION` を送り、直後に CONNECT stream へ
+    /// FIN を送る (MUST)。Application Error Message が 1024 バイトを超える場合は UTF-8 境界で
+    /// truncate する (MUST)。
+    ///
+    /// 32 ビットに収まらない close code は QUIC の `CONNECTION_CLOSE` で接続を閉じる
+    /// ([`MoqtCloseCode::ConnectionClose`])。`WT_CLOSE_SESSION` capsule の Application Error Code は
+    /// 32 ビットであり (draft-ietf-webtrans-http3-16 §6)、MOQT §13 (Grease) の greasing 値は
+    /// 32 ビットを超え得る。同じ §6 は CONNECT stream の close もセッション終了の条件とするため、
+    /// 詳細メッセージは送れないが接続レベルの close に切り替える。varint の上限 (2^62-1) を
+    /// 超える値は `Error::UNKNOWN` に落とす (コードは伝わらない)。
     ///
     /// 送信の前にセッション状態を終了へ移す。§6 はセッション終了を検知したら関連する
     /// 全 uni / bidi ストリームを `WT_SESSION_GONE` で中断する MUST を定めるが、中断は
     /// ストリームを所有するタスクが状態変化を観測して行う (この関数はストリームを保持しない)。
+    /// 接続レベルの close でも状態を終了へ移すため、新規ストリーム / datagram の拒否と
+    /// 既存ストリームの中断は同じように効く。
     ///
     /// 非対応:
     /// - CONNECT stream の受信半への `STOP_SENDING` with `WT_SESSION_GONE` (§6 MAY)
     /// - `WT_CLOSE_SESSION` 受信後に追加データを受信した場合の `H3_MESSAGE_ERROR` reset (§6)
-    pub async fn close(&mut self, code: u32, reason: &str) -> Result<()> {
+    pub async fn close(&mut self, code: MoqtCloseCode, reason: &str) -> Result<()> {
         update_session_state(&self.session_state, WtSessionState::ClosedLocally);
+        let code = match code {
+            MoqtCloseCode::Capsule(code) => code,
+            MoqtCloseCode::ConnectionClose(code) => {
+                // RFC 9000 §19.19: application error code は varint。`moqt_close_code` が
+                // 上限を判定済みのため `Error::new` は成功する
+                let error = s2n_quic::application::Error::new(code).map_err(|e| {
+                    TransportError::Internal(format!(
+                        "MOQT close code {code:#x} cannot be sent as a CONNECTION_CLOSE application error code: {e}"
+                    ))
+                })?;
+                self.handle.close(error);
+                return Ok(());
+            }
+            MoqtCloseCode::ConnectionCloseUnknown => {
+                self.handle.close(s2n_quic::application::Error::UNKNOWN);
+                return Ok(());
+            }
+        };
         let capsule = Capsule::CloseSession {
             error_code: code,
             message: truncate_close_session_message(reason).to_string(),
@@ -3709,9 +3736,9 @@ mod tests {
             (u64::from(u32::MAX), u32::MAX),
         ] {
             assert_eq!(
-                moqt_close_code(code).expect("変換に成功すること"),
-                expected,
-                "{code:#x} が {expected:#x} のまま渡ること"
+                moqt_close_code(code),
+                MoqtCloseCode::Capsule(expected),
+                "{code:#x} が {expected:#x} のまま capsule で渡ること"
             );
         }
     }
@@ -3764,22 +3791,26 @@ mod tests {
         }
     }
 
-    /// 32 ビットに収まらない MOQT の close code は切り捨てずエラーにする
+    /// 32 ビットに収まらない MOQT の close code は接続レベルの close に切り替える
     ///
     /// `WT_CLOSE_SESSION` capsule の Application Error Code は 32 ビットである (§6)。
-    /// `as u32` で切り捨てると別のコードに化けるため、収まらない場合はエラーにする。
-    /// エラーメッセージの全文は実装の写しになるため固定せず、種別と元のコードだけを見る。
+    /// `as u32` で切り捨てると別のコードに化けるため、収まらない場合は `CONNECTION_CLOSE` で
+    /// 元のコードを載せて接続を閉じる。varint の上限を超える値はコードを載せられないため
+    /// `Error::UNKNOWN` に落とす。
     #[test]
-    fn moqt_close_code_rejects_values_beyond_32_bits() {
-        for code in [u64::from(u32::MAX) + 1, u64::MAX] {
-            let error = moqt_close_code(code).expect_err("エラーになること");
-            assert!(
-                matches!(error, TransportError::Internal(_)),
-                "内部エラーとして返ること: {error:?}"
+    fn moqt_close_code_falls_back_to_connection_close_beyond_32_bits() {
+        for code in [u64::from(u32::MAX) + 1, 0x3fff_ffff_ffff_ffde] {
+            assert_eq!(
+                moqt_close_code(code),
+                MoqtCloseCode::ConnectionClose(code),
+                "{code:#x} が元のコードのまま接続レベルの close になること"
             );
-            assert!(
-                error.to_string().contains(&format!("{code:#x}")),
-                "{code:#x} のエラーメッセージに元のコードが含まれること: {error}"
+        }
+        for code in [(1_u64 << 62), u64::MAX] {
+            assert_eq!(
+                moqt_close_code(code),
+                MoqtCloseCode::ConnectionCloseUnknown,
+                "{code:#x} はコードを載せずに接続を閉じること"
             );
         }
     }

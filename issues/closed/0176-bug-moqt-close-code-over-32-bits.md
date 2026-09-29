@@ -1,7 +1,7 @@
 # 32 ビットに収まらない close code で WebTransport セッションを閉じられない
 
 - Created: 2026-09-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-30
 - Branch: feature/fix-moqt-close-code-over-32-bits
 - Polished: 2026-09-27
 
@@ -42,3 +42,28 @@
 - `WtSession` が `Handle::close` を呼ぶ配線とセッション状態の遷移は s2n-quic の I/O ハンドルが必要で単体テストでは構築できないため、レビューで確認する。接続が実際に閉じることの実機確認は WebTransport セッションの確立自体が [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消待ちであるため、その解消後に行う。
 - 採用した方針と理由がコメントに残っていること。
 - `make test` / `make clippy` / `make fmt` が通ること。
+
+## 解決方法
+
+`examples/tokio-moq/src/webtransport.rs` の `moqt_close_code` を「どの経路で接続へ伝えるか」を決める関数に変え、32 ビットに収まらない値は接続レベルの close に切り替えるようにした。
+
+- `MoqtCloseCode` を追加し、`moqt_close_code(code: u64) -> MoqtCloseCode` が次の 3 つを返す
+  - `Capsule(u32)`: 32 ビットに収まる。`WT_CLOSE_SESSION` capsule の Application Error Code として送る
+  - `ConnectionClose(u64)`: varint の上限 (2^62-1) 以内。QUIC の `CONNECTION_CLOSE` に元のコードを載せる
+  - `ConnectionCloseUnknown`: varint の上限を超える。`s2n_quic::application::Error::UNKNOWN` で接続を閉じる (コードは伝わらない)
+- `examples/tokio-moq/src/webtransport_h3.rs` の `WtSession::close` は `MoqtCloseCode` を受け取り、`ConnectionClose` / `ConnectionCloseUnknown` では `s2n_quic::connection::Handle::close` で接続を閉じる。
+  `WT_CLOSE_SESSION` の詳細メッセージは送れないが、draft-ietf-webtrans-http3-16 §6 は CONNECT stream の close もセッション終了の条件とするため接続レベルの close に切り替える。セッション状態は従来どおり送信前に終了へ移すため、
+  新規ストリーム / datagram の拒否と既存ストリームの `WT_SESSION_GONE` での中断は同じように効く
+- `examples/tokio-moq/src/transport.rs` の `StreamHandle::close` は判定結果を各経路へ渡す。WebTransport over HTTP/2 は接続レベルの close へのフォールバックを実装していないため、32 ビットに収まらない値は元のコードを含むエラーとして報告する (既存の挙動と同じ。`WtH2Session::close` の doc に明記した)
+
+追加・更新したテスト:
+
+- `examples/tokio-moq/src/webtransport.rs`: `moqt_close_code_accepts_32_bit_values` (`0` / `0x1` / `0x12` / `u32::MAX` が `Capsule` になる)、`moqt_close_code_falls_back_to_connection_close_over_32_bits` (`u32::MAX + 1` と greasing 値の上限が元のコードのまま `ConnectionClose` になる)
+  、`moqt_close_code_uses_unknown_over_varint_limit` (`2^62` と `u64::MAX` が `ConnectionCloseUnknown` になる)
+- `examples/tokio-moq/src/webtransport_h3.rs`: `moqt_close_code_accepts_values_within_32_bits` と `moqt_close_code_rejects_values_beyond_32_bits` を新しい判定に合わせて更新した
+
+未実施の確認:
+
+- `WtSession` が `Handle::close` を呼ぶ配線とセッション状態の遷移は s2n-quic の I/O ハンドルが必要で単体テストから構築できないため、レビューで確認した。接続が実際に閉じることの実機確認は WebTransport セッションの確立が `issues/pending/0094` の解消待ちであるため行っていない
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。

@@ -773,7 +773,11 @@ impl WtH2Session {
     ///
     /// `WT_CLOSE_SESSION` を送り、直後に CONNECT ストリームを END_STREAM で half-close する
     /// (MUST)。`code` は 32 ビットの Application Error Code である
-    /// (`moqt_close_code` で変換する)。
+    /// (`moqt_close_code` で判定する)。
+    ///
+    /// 32 ビットを超える MOQT の close code は capsule で運べない。over HTTP/2 は接続レベルの
+    /// close へのフォールバックを実装していないため、呼び出し元 (`StreamHandle::close`) が
+    /// エラーとして報告する。
     pub async fn close(&mut self, code: u32, reason: &str) -> Result<()> {
         update_session_state(&self.session_state, WtSessionState::ClosedLocally);
         let (reply, rx) = oneshot::channel();

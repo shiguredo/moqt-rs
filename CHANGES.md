@@ -626,3 +626,6 @@
 - [CHANGE] `RequestStreamEnd::Reset` の `error_code` と `TerminationReason::PeerStreamReset` の `error_code` を `Option<u64>` にする
   - `None` は「アプリケーションエラーコード無し」を表し、WebTransport 経路で remap できないコードは生値を warn ログに残す (draft-ietf-webtrans-http3-16 §4.4)
   - @voluntas
+- [FIX] WebTransport over HTTP/3 で 32 ビットに収まらない MOQT の close code でも接続を閉じられるようにする
+  - 収まらない値は `WT_CLOSE_SESSION` capsule ではなく QUIC の `CONNECTION_CLOSE` に元のコードを載せ、varint の上限を超える値は `Error::UNKNOWN` に落とす
+  - @voluntas
