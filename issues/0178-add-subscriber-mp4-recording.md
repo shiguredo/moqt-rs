@@ -1,7 +1,7 @@
 # moq-sub に受信メディアの MP4 保存機能を追加する
 
 - Created: 2026-09-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-29
 - Branch: feature/add-subscriber-mp4-recording
 - Polished: 2026-09-29
 
@@ -72,4 +72,25 @@
 
 ## 解決方法
 
-{対応後に追記する}
+`examples/moq-sub` に受信したエンコード済みサンプルを MP4 へ保存する仕組みを追加した。
+
+- `shiguredo_mp4 = "2026.5"` を依存に追加し、`examples/moq-sub/src/mp4.rs` に録画モジュールを新設する
+  - `Recorder` が専用 OS スレッドを起動し、`Mp4FileMuxer` とファイル I/O を所有する。終了は Finish メッセージで確定するため、`RecorderSender` の clone が残っていてもハングしない
+  - ファイルは最初のサンプルを書き出す時点で作成し、録画対象のサンプルが無い場合は作成しない (既存ファイルも変更しない)。`--mp4` を指定した場合は既存ファイルを上書きする
+  - サンプルエントリーは AV1 (av1C の config OBUs)、H.264 (avcC)、H.265 (hvcC、codec に応じて hvc1 / hev1)、Opus (OpusHead または catalog 値) から構築する
+  - 破棄した audio サンプルの OpusHead も保持し `dOps` に反映する
+- `examples/moq-sub/src/cli.rs` に `--mp4 <PATH>` と `--no-play` を追加する
+- `examples/moq-sub/src/main.rs` は `--no-play` で SDL を初期化せず、プレイヤー終了時に pipeline の終了 (録画の finalize を含む) を待つ。2 回目の Ctrl+C で強制終了する
+- `examples/moq-sub/src/pipeline.rs` は subgroup stream と fetch 応答ストリームの object をデコード前に録画モジュールへ渡す。`--no-play` と表示待ち超過時はデコードだけをスキップして録画を継続し、decoder が使えない場合も録画を継続する
+- タイムスタンプは LOC の Timestamp / Timescale をマイクロ秒へ変換する (Timescale を未観測のトラックは Unix エポックからのマイクロ秒として扱う)
+- 実装時に設計方針から次の点を変更した
+  - 到着順の並べ替えは 1 秒 window で確定する方式ではなく、「期待尺の 1.5 倍を超える後続サンプルは到着を待ち、wall-clock で 1 秒経過したら実際のギャップとして確定する」方式にした (window 1 秒では GOP 2 秒 + 並行 4 stream の到着順の入れ替わりを吸収できず、duration が膨張するため)
+  - 同一 timestamp のサンプルは直前の duration (期待尺に clamp) を使う
+  - 破棄は「書き出し済みサンプルが覆うメディア時刻より前の遅着」に限定した (到着順の入れ替わりで正当なサンプルを破棄しないため)
+  - トラック開始時刻の差が 60 秒を超える場合は Timescale の混在などとみなし、オフセット 0 で録画する
+  - 録画の失敗はサンプルエントリー構築失敗のみ該当トラックを停止し、I/O / finalize 失敗は `run` のエラーとして終了コード 1 にする (セッション動作中は再生を継続する)
+- datagram 経由のメディアは対象外とした (現行の受信 API では payload を取得できないため)
+- 録画モジュールの単体テストを追加し、一時ファイルへ書き出した MP4 を `Mp4FileDemuxer` で読み戻してトラック数・timestamp・duration・サンプルエントリーを検証する
+- `CHANGES.md` と `examples/README.md` を更新する
+
+relay と macOS 環境を使った実機確認 (ffprobe による 2 トラックの尺・同期、H.264 / H.265 の実出力、Ctrl+C / relay 切断 / ウィンドウ終了の各経路、`display_backlog` 超過中の録画) は環境が無いため未実施である。
