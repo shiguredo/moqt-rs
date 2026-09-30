@@ -638,3 +638,6 @@
 - [FIX] `moq-pub --input-mp4-reencode` の AV1 で、デコーダが保持する遅延フレームを周回の末尾に吐き切る
   - `flush` (reset) の前に吐き切ることで、フレーム遅延のある AV1 でも周回をまたいでフレームが欠落しない
   - @voluntas
+- [FIX] `moq-pub --input-mp4-reencode` が映像トラックの編集リスト (`elst`) を PTS に適用する
+  - `media_time` を差し引くことで、B フレームを含む MP4 で映像と音声の開始位置が揃い A/V のずれが解消する
+  - @voluntas

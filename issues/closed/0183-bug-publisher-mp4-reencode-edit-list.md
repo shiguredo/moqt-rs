@@ -1,7 +1,7 @@
 # moq-pub の再エンコード配信で編集リスト (elst) を適用しないため A/V がずれる
 
 - Created: 2026-09-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-30
 - Branch: feature/fix-mp4-reencode-edit-list
 - Polished: 2026-09-29
 
@@ -40,4 +40,23 @@ B フレームを含む映像トラックを持つ MP4 (例: ffmpeg が生成し
 
 ## 解決方法
 
-{対応後に追記する}
+`examples/moq-pub/src/mp4/reencode.rs` で映像トラックの編集リスト (`elst`) を読み、`media_time` を映像の PTS から差し引くようにした。moq-pub の実装のみで完結し、shiguredo_mp4 の変更は行っていない。
+
+- `read_video_edit_media_time`: ファイル全体から `moov` を直接デコードし、映像トラックの `edts` / `elst` の先頭エントリーの `media_time` (media timescale 単位) を取り出す。`Mp4FileDemuxer` は編集リストを公開しないため、`UnknownBox::decode_top_level` でトップレベルのボックスを走査して `MoovBox::decode` する。`media_time` が負 (メディア無しの空白) または 0 のときは補正しない。複数エントリーの編集リストは先頭だけを適用し、警告する
+- `edit_media_time_from_entries`: エントリー列から補正値を決める純関数
+- `ReencodeSample::pts(edit_media_time)`: PTS は `timestamp + composition_time_offset` で求めた後、映像トラックのときだけ `media_time` を差し引く。DTS (`timestamp`) 側から差し引くと B フレームの composition time offset が残り先頭フレームの PTS が 0 にならないため、合成後の値から差し引く
+- 音声トラックは補正しない。Opus の pre-skip の読み飛ばし (RFC 7845 §4.2) で `media_time` (= `dOps` の pre_skip) と同等の補正が済んでおり、二重にシフトしないため
+- 表示順 PTS 列 (`display_pts`) の算出にも同じ補正を適用し、供給する PTS と一致させた
+
+追加したテスト:
+
+- `edit_list_media_time_is_read_from_entries`: `media_time` が正なら補正値になり、0 / 負 / エントリー無しなら 0 になること、複数エントリーは先頭だけを適用することを固定した
+- `edit_list_offset_shifts_video_pts`: `timestamp + composition_time_offset` から `media_time` を差し引くと先頭フレームの PTS が 0 になること、編集リストが無ければ補正しないこと、音声は補正しないことを固定した
+- `moov_scan_returns_none_without_moov`: `moov` が無いデータでは走査が `None` を返すことを固定した
+
+実機確認:
+
+- ffmpeg で生成した B フレーム付き H.264 + Opus の MP4 (`elst` は `media_time=1024`、timescale 15360) を `Mp4ReencodeReader` で開き、編集リストが `1024` として読めることと、供給される映像の先頭 PTS が `0, 512, 1024, 1536, 2048` になることを確認した (補正前は先頭が 1024 になり、約 66.7 ms 映像が遅れていた)
+- moq-sub での再生による往復確認は relay が必要なため行っていない
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。

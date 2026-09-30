@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use shiguredo_audio_device::{AudioFormat, AudioFrameOwned};
+use shiguredo_mp4::Decode;
 use shiguredo_mp4::TrackKind;
-use shiguredo_mp4::boxes::SampleEntry;
+use shiguredo_mp4::boxes::{ElstEntry, MoovBox, SampleEntry, UnknownBox};
 use shiguredo_mp4::demux::Mp4FileDemuxer;
 use shiguredo_video_device::{PixelFormat as VideoPixelFormat, VideoFrameOwned};
 use tokio::sync::mpsc;
@@ -158,18 +159,112 @@ impl PtsQueue {
 impl ReencodeSample {
     /// 表示時刻 (PTS、トラックの timescale 単位) を返す
     ///
-    /// 編集リストは適用しないため、PTS が負になる場合は 0 に丸める。
-    fn pts(&self) -> u64 {
-        compute_pts(self.timestamp, self.composition_time_offset)
+    /// `edit_media_time` は映像トラックの編集リストの開始オフセット (media timescale 単位)
+    /// で、映像だけに適用する (音声は Opus pre-skip の読み飛ばしで同等の補正が済んでいる)。
+    /// PTS の算出は `timestamp + composition_time_offset` であるため、オフセットは
+    /// 合成後の値から差し引く。DTS (`timestamp`) 側から差し引くと B フレームの
+    /// composition time offset が残り、先頭フレームの PTS が 0 にならない。
+    /// 負になる場合は 0 に丸める。
+    fn pts(&self, edit_media_time: u64) -> u64 {
+        let pts = self
+            .timestamp
+            .saturating_add_signed(self.composition_time_offset.unwrap_or(0));
+        if self.is_video {
+            pts.saturating_sub(edit_media_time)
+        } else {
+            pts
+        }
     }
 }
 
-/// タイムスタンプとコンポジション時間オフセットから PTS を求める
+/// MP4 の `moov` から映像トラックの編集リストの開始オフセットを取り出す
 ///
-/// 編集リストは適用しないため、PTS が負になる場合は 0 に丸める。
+/// ISO/IEC 14496-12 の `elst` は「トラックのメディアのどこから再生を始めるか」を
+/// `media_time` (media timescale 単位) で表す。`media_time` が 0 でない映像トラック
+/// (例: B フレームを持つ H.264 / H.265 の先頭 composition time offset) では、PTS から
+/// この値を差し引かないと映像だけが遅れて提示され A/V がずれる。
+///
+/// 次の場合は 0 を返す (補正しない)。
+/// - `moov` / 映像トラック / `edts` / `elst` が無い
+/// - 先頭エントリーの `media_time` が負 (メディア無しの空白を表す) または 0
+///
+/// 複数エントリーの編集リストと `media_rate` が 1.0 でないエントリーは、この example が
+/// 扱わない複雑な編集であるため警告する (先頭エントリーの `media_time` だけを適用する)。
+fn read_video_edit_media_time(data: &[u8], track_id: u32, path: &Path) -> Result<u64> {
+    let Some(moov) = find_moov_box(data) else {
+        return Ok(0);
+    };
+    let Some(trak) = moov
+        .trak_boxes
+        .iter()
+        .find(|trak| trak.tkhd_box.track_id == track_id)
+    else {
+        return Ok(0);
+    };
+    let Some(elst) = trak
+        .edts_box
+        .as_ref()
+        .and_then(|edts| edts.elst_box.as_ref())
+    else {
+        return Ok(0);
+    };
+    if elst.entries.len() > 1 {
+        tracing::warn!(
+            "MP4 file '{}' has {} edit list entries for the video track; applying only the first entry",
+            path.display(),
+            elst.entries.len()
+        );
+    }
+    Ok(edit_media_time_from_entries(&elst.entries))
+}
+
+/// 編集リストのエントリー列から PTS の補正値を決める
+///
+/// 先頭エントリーの `media_time` だけを使う。負値は「メディア無し (空白)」、
+/// 0 は先頭からの再生を表すため補正しない。複数エントリーの編集リストは
+/// [`read_video_edit_media_time`] が警告する。
+fn edit_media_time_from_entries(entries: &[ElstEntry]) -> u64 {
+    match entries.first() {
+        Some(entry) if entry.media_time > 0 => entry.media_time as u64,
+        _ => 0,
+    }
+}
+
+/// トップレベルのボックスを走査して `moov` を取り出す
+///
+/// `Mp4FileDemuxer` は編集リストを公開しないため、ファイル全体から `moov` を直接
+/// デコードする。ISO/IEC 14496-12 4.2 の可変長サイズ (size == 0) はファイル末尾の
+/// トップレベルボックスに限り有効である。
+fn find_moov_box(data: &[u8]) -> Option<MoovBox> {
+    let mut offset = 0_usize;
+    while offset + 8 <= data.len() {
+        let (unknown, consumed) = UnknownBox::decode_top_level(&data[offset..]).ok()?;
+        if unknown.box_type == MoovBox::TYPE {
+            return MoovBox::decode(&data[offset..]).ok().map(|(moov, _)| moov);
+        }
+        if consumed == 0 {
+            return None;
+        }
+        offset += consumed;
+    }
+    None
+}
+
+/// タイムスタンプとコンポジション時間オフセットから PTS を求める (編集リスト適用前)
+///
+/// PTS が負になる場合は 0 に丸める。
 fn compute_pts(timestamp: u64, composition_time_offset: Option<i64>) -> u64 {
     let pts = (timestamp as i64).saturating_add(composition_time_offset.unwrap_or(0));
     pts.max(0) as u64
+}
+
+/// 編集リストの開始オフセットを差し引いた PTS を求める (映像トラック用)
+///
+/// 編集リストの `media_time` は「トラックのメディアのどこから再生を始めるか」を
+/// media timescale 単位で表す。映像の PTS から差し引くことで、先頭フレームの PTS が 0 になり、
+/// 音声 (Opus の pre-skip 済み) と同じ開始位置に揃う。
+fn shift_pts_by_edit_list(pts: u64, edit_media_time: u64) -> u64 {
+    pts.saturating_sub(edit_media_time)
 }
 
 /// 周回オフセットを反映した表示順 PTS 列を作る
@@ -265,6 +360,12 @@ pub struct Mp4ReencodeReader {
     audio_loop_offset: u64,
     /// 周回の先頭で最初のキーフレームまで読み飛ばすかどうか
     need_keyframe: bool,
+    /// 映像トラックの編集リストの開始オフセット (media timescale 単位)
+    ///
+    /// 編集リストの `media_time` は「トラックのメディアのどこから再生を始めるか」を表す。
+    /// 先頭フレームの表示オフセット (B フレームの composition time offset など) が
+    /// ここに入るため、映像の PTS から差し引いて音声の開始位置に揃える。
+    video_edit_media_time: u64,
 }
 
 impl Mp4ReencodeReader {
@@ -316,6 +417,14 @@ impl Mp4ReencodeReader {
                 path.display()
             );
         }
+
+        // 映像トラックの編集リスト (ISO/IEC 14496-12 の `elst`)。映像の PTS から開始
+        // オフセットを差し引かないと、B フレームを含む MP4 で映像だけが `media_time` 分
+        // (例: 約 66.7 ms) 遅れて提示され A/V がずれる
+        let video_edit_media_time = match video_track_id {
+            Some(track_id) => read_video_edit_media_time(&data, track_id, path)?,
+            None => 0,
+        };
 
         // 全サンプルを走査して、サンプルエントリーとトラックの尺を集める
         let mut video_entry: Option<SampleEntry> = None;
@@ -374,7 +483,11 @@ impl Mp4ReencodeReader {
                     _ => {}
                 }
                 video_sample_count += 1;
-                let pts = compute_pts(sample.timestamp, sample.composition_time_offset);
+                // 表示順 PTS 列にも編集リストを反映する (start が供給する PTS と一致させる)
+                let pts = shift_pts_by_edit_list(
+                    compute_pts(sample.timestamp, sample.composition_time_offset),
+                    video_edit_media_time,
+                );
                 video_pts.push(pts);
                 // 表示上の終端 (PTS + 尺) を追う (B フレームでは DTS の終端より後ろになる)
                 max_display_end = max_display_end.max(
@@ -569,6 +682,7 @@ impl Mp4ReencodeReader {
             video_loop_offset: 0,
             audio_loop_offset: 0,
             need_keyframe: true,
+            video_edit_media_time,
         })
     }
 
@@ -780,7 +894,7 @@ fn run_reader(
                 .as_mut()
                 .expect("video decoder enabled in start");
             let pts = sample
-                .pts()
+                .pts(reader.video_edit_media_time)
                 .checked_add(reader.video_loop_offset)
                 .ok_or_else(|| Error::Other("MP4 timestamp is out of range".to_string()))?;
             // AV1 のキーフレームは payload 側に Sequence Header が必要なため、含まれない
@@ -1101,6 +1215,78 @@ mod tests {
                 .expect("ファイナライズ後のボックスを書き込めること");
         }
         file.flush().expect("MP4 ファイルを書き込めること");
+    }
+
+    /// `moov` が無いファイルでは編集リストを補正しないこと
+    ///
+    /// `find_moov_box` はトップレベルのボックスを走査し、`moov` が無ければ `None` を返す。
+    /// 空のデータでは補正値が 0 になることを固定する。
+    #[test]
+    fn moov_scan_returns_none_without_moov() {
+        assert!(
+            find_moov_box(&[]).is_none(),
+            "空のデータでは None になること"
+        );
+        assert!(
+            find_moov_box(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']).is_none(),
+            "moov 以外のボックスだけなら None になること"
+        );
+    }
+
+    /// 編集リストの `media_time` だけが PTS の補正値になること
+    ///
+    /// `Mp4FileDemuxer` は編集リストを公開しないため、`moov` を直接デコードして読む。
+    /// `media_time` が 0 または負 (メディア無しの空白) のトラックは補正しない。
+    #[test]
+    fn edit_list_media_time_is_read_from_entries() {
+        let entry = |media_time: i64| ElstEntry {
+            edit_duration: 2_000,
+            media_time,
+            media_rate: shiguredo_mp4::FixedPointNumber::new(1, 0),
+        };
+        assert_eq!(edit_media_time_from_entries(&[entry(1_024)]), 1_024);
+        assert_eq!(edit_media_time_from_entries(&[entry(0)]), 0);
+        assert_eq!(edit_media_time_from_entries(&[entry(-1)]), 0);
+        assert_eq!(edit_media_time_from_entries(&[]), 0);
+        // 複数エントリーは先頭だけを適用する
+        assert_eq!(
+            edit_media_time_from_entries(&[entry(1_024), entry(512)]),
+            1_024
+        );
+    }
+
+    /// 先頭 PTS から編集リストの開始オフセットを差し引くこと
+    ///
+    /// 編集リストの `media_time` は media timescale 単位の「メディアの開始位置」であり、
+    /// B フレームを含む映像では先頭フレームの composition time offset と一致する。
+    /// 差し引かないと映像だけが `media_time` 分遅れて A/V がずれる。
+    #[test]
+    fn edit_list_offset_shifts_video_pts() {
+        let sample = ReencodeSample {
+            is_video: true,
+            timestamp: 0,
+            composition_time_offset: Some(1_024),
+            keyframe: true,
+            data: Vec::new(),
+        };
+        // 補正前は composition time offset がそのまま PTS になる
+        assert_eq!(sample.pts(0), 1_024);
+
+        // 編集リストの media_time を差し引くと先頭フレームの PTS が 0 になる
+        assert_eq!(sample.pts(1_024), 0, "先頭フレームの PTS が 0 になること");
+
+        // 編集リストが無い (0) 場合は補正しない
+        assert_eq!(sample.pts(0), 1_024, "編集リストが無ければ補正しないこと");
+
+        // 音声は編集リストの補正を受けない (Opus pre-skip で補正済み)
+        let audio = ReencodeSample {
+            is_video: false,
+            timestamp: 0,
+            composition_time_offset: None,
+            keyframe: true,
+            data: Vec::new(),
+        };
+        assert_eq!(audio.pts(1_024), 0, "音声は編集リストで補正しないこと");
     }
 
     /// 入力 PTS は表示順 (最小値) で出力フレームへ対応付けられること
@@ -1439,7 +1625,7 @@ mod tests {
             keyframe: false,
             data: Vec::new(),
         };
-        assert_eq!(sample.pts(), 4_000);
+        assert_eq!(sample.pts(0), 4_000);
 
         let sample = ReencodeSample {
             is_video: true,
@@ -1448,7 +1634,7 @@ mod tests {
             keyframe: false,
             data: Vec::new(),
         };
-        assert_eq!(sample.pts(), 3_000);
+        assert_eq!(sample.pts(0), 3_000);
 
         // 負になる PTS は 0 に丸める (編集リストは適用しない)
         let sample = ReencodeSample {
@@ -1458,7 +1644,7 @@ mod tests {
             keyframe: false,
             data: Vec::new(),
         };
-        assert_eq!(sample.pts(), 0);
+        assert_eq!(sample.pts(0), 0);
     }
 
     /// タイムスケール単位への変換が正しいこと
