@@ -3,7 +3,7 @@
 - Created: 2026-10-01
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-playout-stretch-fuzz
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-01
 
 ## 目的
 
