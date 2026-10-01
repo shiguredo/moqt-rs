@@ -1,7 +1,7 @@
 # 到着の遅れの分布から音声の目標遅延を決め、A/V 同期の遅延制御を追加する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-01
 - Branch: feature/add-playout-delay-and-sync
 - Polished: 2026-10-01
 
@@ -67,4 +67,7 @@
 
 ## 解決方法
 
-{未着手}
+- `src/playout/delay.rs` を追加した。到着の遅れの分布 (2 秒の窓、20 ms バケット 100 個、忘れ係数 0.983) の 0.95 分位から目標遅延を決め、観測が無いときは 80 ms を返す。TIMESTAMP が窓より大きく戻ったときは履歴を作り直す
+- `src/playout/sync.rs` を追加した。相対遅延の範囲判定、ずれの平滑化、30 ms の不感帯、片側だけを 1 回 80 ms まで動かす制御、基準の遅延から 10 秒以内のクランプを実装した
+- 公開 API テストを `tests/test_playout/delay.rs` と `tests/test_playout/sync.rs` に、PBT を `pbt/tests/prop_playout/delay.rs` と `pbt/tests/prop_playout/sync.rs` に追加した (区間最大の学習、forget factor、窓の破棄と逆行、不感帯、±80 ms、片側移動、トリム、上限)
+- `docs/moqt.md` と `skills/shiguredo-moqt/SKILL.md` のモジュール構成と API を更新し、`CHANGES.md` に `[ADD]` を追加した

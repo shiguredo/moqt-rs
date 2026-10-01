@@ -46,7 +46,7 @@ pub mod name;
 pub mod object_properties;
 /// SETUP 用の Setup Options (draft-ietf-moq-transport-21 §9.1 (SETUP))
 pub mod parameter;
-/// 音声の再生に関する処理 (時間圧縮・伸長など)
+/// 音声の再生に関する処理 (時間圧縮・伸長、目標遅延の学習、A/V 同期)
 pub mod playout;
 pub mod session;
 pub mod stream;
