@@ -15,3 +15,7 @@
 - MOQT draft の issue は draft 番号を含めて {SEQUENCE}-draft-{NUM}-{short-description}.md という命名規則で作成すること
   - 例: `0001-draft-18-support-for-joins.md`
 - **`sora-moq` について書いてよいのは「Sora の Media over QUIC 実装であり、リレー機能を提供する」ということだけである**
+
+## ルール
+
+- この指示がなくなるまでは Pull-Request を作らずブランチ作成して対応して、CI 通ったら develop にスカッシュマージしていくこと
