@@ -15,7 +15,11 @@ CHANGES.md の develop セクションに、リポジトリに存在しない `d
   - エントリ行: 「catalog (MSF) と LOC の relay での扱いを docs に明記する」
   - サブバレット: 「relay は payload と Properties を opaque として扱い、`moqt_msf` / `moqt_loc` を production 経路に配線しない理由を `docs/MOQT-RELAY.md` に記載する」
 - `docs/MOQT-RELAY.md` はリポジトリに存在しない (`docs/` は c4m.md / loc.md / moqt.md / msf.md のみ)。`git log --all -- docs/MOQT-RELAY.md` も空であり、どのブランチにも一度もコミットされていない
-- 上記の理由 (payload と Properties の opaque 扱い、`moqt_msf` / `moqt_loc` の production 経路への非配線) は `docs/moqt.md` の「未対応」節にも、`docs/msf.md` / `docs/loc.md` にも記述がない。「未対応」節が述べるのは relay 専用メッセージ (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` / `NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) と `RENDEZVOUS_TIMEOUT` の扱いのみである
+- 上記の理由 (payload と Properties の opaque 扱い、`moqt_msf` / `moqt_loc` の production 経路への
+  非配線) は `docs/moqt.md` の「未対応」節にも、`docs/msf.md` / `docs/loc.md` にも記述がない。
+  「未対応」節が述べるのは relay 専用メッセージ (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` /
+  `SUBSCRIBE_TRACKS` / `NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) と
+  `RENDEZVOUS_TIMEOUT` の扱いのみである
 - `moqt_msf` / `moqt_loc` という識別子はリポジトリのどこにも存在しない (CHANGES.md の当該サブバレット以外に出現しない)
 - 本ライブラリ (moqt-rs) は Sans I/O のクライアント / サーバー向けライブラリであり relay の実装を含まない (README の「I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含まない」と `docs/moqt.md` の「アーキテクチャ」節)。relay の production 経路についての文書化は本リポジトリの対象外である
 - `## develop` セクションはまだリリースされておらず (CHANGES.md に `## develop` 以外の見出しが無い)、公開前に直せる
