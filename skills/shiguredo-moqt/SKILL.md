@@ -1,6 +1,6 @@
 ---
 name: shiguredo-moqt
-description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、encode / decode やセッション駆動の実装に関する質問時に使用。
+description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の時間圧縮・伸長 (playout)、encode / decode やセッション駆動の実装に関する質問時に使用。
 ---
 
 # shiguredo_moqt
@@ -14,6 +14,7 @@ draft-ietf-moq-transport-21 に基づく Sans I/O / no_std な Media over QUIC T
 - **依存は 4 つのみ**: `hashbrown` / `noflate` / `nojson` / `base64ct` (暗号処理は optional feature `aws-lc-rs`)
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
+- **音声の時間圧縮・伸長**: 波形の周期を使った時間伸縮 (no_std / Sans I/O)
 - **対応仕様**: MOQT `draft-21` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
@@ -59,6 +60,7 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証 |
+| `playout` | 音声の波形の周期による時間圧縮・伸長 |
 | `error` | エラー型とエラーコード定数 |
 
 ## クイックスタート
@@ -1044,6 +1046,15 @@ fn check_object_after_fin(
 ) -> Option<&'static str>
 fn SubgroupStreamState::can_reopen(&self) -> bool
 ```
+
+```rust
+// playout::stretch
+use shiguredo_moqt::playout::stretch::{compress, expand};
+fn compress(channels: &mut [&mut [f32]], sample_rate: u32) -> isize
+fn expand(channels: &[&[f32]], output: &mut [&mut [f32]], sample_rate: u32) -> isize
+```
+
+`playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する。戻り値は長さの変化 (圧縮は負、伸長は正、0 は操作なし)。`expand` の `output` には元の長さ + 60 × 間引き率 (2 / 4 / 8 / 12) 以上の長さを用意する。
 
 `MessageError` は `Clone` 不可。後段へ持ち回る場合は再構築を検討する。
 
