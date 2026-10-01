@@ -1,6 +1,6 @@
 ---
 name: shiguredo-moqt
-description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 時間伸縮・目標遅延・A/V 同期)、encode / decode やセッション駆動の実装に関する質問時に使用。
+description: 時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-21 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 時間伸縮・目標遅延・鳴らす時刻・A/V 同期)、encode / decode やセッション駆動の実装に関する質問時に使用。
 ---
 
 # shiguredo_moqt
@@ -14,7 +14,7 @@ draft-ietf-moq-transport-21 に基づく Sans I/O / no_std な Media over QUIC T
 - **依存は 4 つのみ**: `hashbrown` / `noflate` / `nojson` / `base64ct` (暗号処理は optional feature `aws-lc-rs`)
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
-- **音声の再生補助**: 時間伸縮、目標遅延の学習、A/V 同期の遅延制御 (no_std / Sans I/O)
+- **音声の再生補助**: 時間伸縮、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御 (no_std / Sans I/O)
 - **対応仕様**: MOQT `draft-21` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
@@ -60,7 +60,7 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証 |
-| `playout` | 時間伸縮、目標遅延の学習、A/V 同期の遅延制御 |
+| `playout` | 時間伸縮、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御 |
 | `error` | エラー型とエラーコード定数 |
 
 ## クイックスタート
@@ -1077,9 +1077,27 @@ fn compute_delays(
 ) -> Option<SyncDelays>
 ```
 
+```rust
+// playout::scheduler
+use shiguredo_moqt::playout::scheduler::{
+    AudioPlayoutDecision, AudioPlayoutInput, AudioPlayoutScheduler,
+};
+fn new() -> AudioPlayoutScheduler
+fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision
+fn confirm_stretch(&mut self, applied_us: i64)
+fn rebases(&self) -> u64
+fn drops(&self) -> u64
+fn compressed_us(&self) -> i64
+fn lateness_us(&self) -> i64
+fn reset(&mut self)
+fn reset_stats(&mut self)
+```
+
 `playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する。戻り値は長さの変化 (圧縮は負、伸長は正、0 は操作なし)。`expand` の `output` には元の長さ + 60 × 間引き率 (2 / 4 / 8 / 12) 以上の長さを用意する。
 
 `playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。`playout::sync` の `compute_delays` は 1 秒ごとに 1 回の呼び出しを想定する。
+
+`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`compress_us` を実際に適用したら `confirm_stretch` へ実測を返す。
 
 `MessageError` は `Clone` 不可。後段へ持ち回る場合は再構築を検討する。
 

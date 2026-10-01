@@ -5,6 +5,8 @@
 
 #[path = "test_playout/delay.rs"]
 mod delay;
+#[path = "test_playout/scheduler.rs"]
+mod scheduler;
 #[path = "test_playout/stretch.rs"]
 mod stretch;
 #[path = "test_playout/sync.rs"]

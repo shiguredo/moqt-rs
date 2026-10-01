@@ -1,7 +1,7 @@
 # 音声を鳴らす時刻を決めるスケジューラと再生の統計を追加する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-01
 - Branch: feature/add-playout-scheduler
 - Polished: 2026-10-01
 
@@ -82,4 +82,7 @@
 
 ## 解決方法
 
-{未着手}
+- `src/playout/scheduler.rs` を追加した。目標ありの並べ方 (ずらして鳴らす・時間圧縮で目標へ戻す・並べすぎと 500 ms 超の破棄) と到着基準の並べ方 (基準の取り直し・並べ直し・破棄)、`confirm_stretch`、統計 (取り直し / 破棄 / 圧縮 / 遅れ) を実装した
+- 前の音の確認が来ていない詰める要求は、両方の並べ方の入口で適用されなかったものとして扱い、前の音の終わりへ戻す
+- 公開 API テストを `tests/test_playout/scheduler.rs` に、PBT を `pbt/tests/prop_playout/scheduler.rs` に追加した (境界、経路の切り替え、未確認の要求、負の長さ、統計)
+- `docs/moqt.md` と `skills/shiguredo-moqt/SKILL.md` のモジュール構成と API を更新し、`CHANGES.md` に `[ADD]` を追加した
