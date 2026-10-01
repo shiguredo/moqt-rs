@@ -1,7 +1,7 @@
 # 波形の周期による音声の時間圧縮・伸長を追加する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-01
 - Branch: feature/add-playout-time-stretch
 - Polished: 2026-10-01
 
@@ -70,4 +70,7 @@ moqt-rs には音声の時間伸縮が無く、examples は復号済みの音声
 
 ## 解決方法
 
-{未着手}
+- `src/playout.rs` (親モジュール) と `src/playout/stretch.rs` を追加し、`src/lib.rs` に `pub mod playout` を追加した
+- 4 kHz へ間引く FIR (サンプルレートごとの係数 / 間引き率 / 遅延補正)、自己相関によるピッチ周期の探索 (ずらし幅 10 から 60、上限は `min(60, 間引いた長さ - 50)`)、二乗比較の相関判定 (sqrt 不使用)、無音の例外、周期 1 つ分の削除 / 挿入とクロスフェードを実装した
+- 公開 API テストを `tests/test_playout.rs` + `tests/test_playout/stretch.rs` に、PBT を `pbt/tests/prop_playout/` に追加した (クロスフェードの重み、解析の受理境界、探索上限、エラーパス、置換の構造不変条件)
+- `docs/moqt.md` と `skills/shiguredo-moqt/SKILL.md` にモジュール構成を追記し、`CHANGES.md` に `[ADD]` を追加した
