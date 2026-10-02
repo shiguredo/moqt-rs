@@ -19,6 +19,11 @@ pub const TIMELINE_DISCONTINUITY_US: i64 = 2_000_000;
 /// 同期の制御を行う間隔 (マイクロ秒)
 pub const TIMELINE_SYNC_INTERVAL_US: i64 = 1_000_000;
 
+/// 同期の制御が動かないときに、学習した目標遅延へ向けて下げる速さ (マイクロ秒/秒)
+///
+/// 学習した目標遅延が下がっても、すぐに下げると音が途切れる。少しずつ下げる。
+pub const TIMELINE_DELAY_DECAY_US_PER_SECOND: i64 = 20_000;
+
 /// 再生・表示の対象にするトラック
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {
@@ -219,16 +224,33 @@ impl PlayoutTimeline {
         let current_audio_delay_ms = self.tracks[Track::Audio.index()].playout_delay_us / 1_000;
         let current_video_delay_ms = self.tracks[Track::Video.index()].playout_delay_us / 1_000;
         self.last_sync_us = Some(now_us);
-        let delays = self.sync.compute_delays(
+        let Some(delays) = self.sync.compute_delays(
             relative_delay_ms,
             current_audio_delay_ms,
             current_video_delay_ms,
-        )?;
+        ) else {
+            // ずれが不感帯の中では制御しない。学習した目標遅延が下がっている場合は、
+            // 音が途切れないように少しずつ下げる
+            self.decay_delays();
+            return None;
+        };
         self.tracks[Track::Audio.index()].playout_delay_us =
             delays.audio_delay_ms.saturating_mul(1_000);
         self.tracks[Track::Video.index()].playout_delay_us =
             delays.video_delay_ms.saturating_mul(1_000);
         Some(delays)
+    }
+
+    /// 学習した目標遅延へ向けて遅延を少しずつ下げる
+    fn decay_delays(&mut self) {
+        for index in 0..self.tracks.len() {
+            let minimum_us = self.tracks[index].minimum_delay_us();
+            let current_us = self.tracks[index].playout_delay_us;
+            if current_us > minimum_us {
+                self.tracks[index].playout_delay_us =
+                    (current_us - TIMELINE_DELAY_DECAY_US_PER_SECOND).max(minimum_us);
+            }
+        }
     }
 
     /// 基準と学習を消す (購読のやり直し)。張り直しの回数は残す
@@ -398,6 +420,46 @@ mod tests {
         assert!(
             timeline.sync(now_us + TIMELINE_SYNC_INTERVAL_US).is_some(),
             "間隔を空ければ制御する"
+        );
+    }
+
+    /// 制御が動かないときは学習した目標遅延へ向けて下がること
+    #[test]
+    fn delays_decay_toward_the_learned_target() {
+        let mut timeline = PlayoutTimeline::new();
+        // 揺らぎが無い観測を続けて学習を 20 ms まで下げる
+        for index in 0..40i64 {
+            let capture_us = 1_000_000 + index * 20_000;
+            observe_audio(&mut timeline, capture_us, capture_us);
+            timeline.observe(Track::Video, capture_us, capture_us);
+        }
+        // 最初の遅延は既定の 80 ms である
+        assert_eq!(timeline.playout_delay_us(Track::Audio), 80_000);
+        assert_eq!(timeline.learned_delay_us(Track::Audio), 20_000);
+        // 制御が動かない状態で 1 秒ごとに呼ぶと、20 ms ずつ下がる
+        timeline.sync(10_000_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            60_000,
+            "20 ms 下がる"
+        );
+        timeline.sync(11_000_000);
+        timeline.sync(12_000_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            20_000,
+            "学習した目標遅延で止まる"
+        );
+        timeline.sync(13_000_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            20_000,
+            "目標より下げない"
+        );
+        assert_eq!(
+            timeline.playout_delay_us(Track::Video),
+            20_000,
+            "映像も同じように下がる"
         );
     }
 
