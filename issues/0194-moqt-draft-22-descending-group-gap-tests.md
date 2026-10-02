@@ -3,7 +3,7 @@
 - Created: 2026-10-02
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-descending-group-gap
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-02
 
 ## 目的
 
@@ -11,21 +11,24 @@ draft-22 §3.2.2 は Fetch のギャップを明文化し、Descending Group Ord
 
 ## 現状
 
-- `src/stream/decoder.rs` の `FetchStreamDecoder` は descending を group = prior - (delta + 1)、同 group の object_id = prior + delta として解決し、group 降順と同 group 内 object 昇順を検証する。
-- `tests/test_stream/encoder.rs` / `tests/test_stream/decoder.rs` の descending テストは隣接 2 group のみで、複数 group のスキップ (例: 10 → 3) や End of Range (0x8C / 0x10C / 0x20C) を混在させた順序を検証していない。
-- ギャップの意味解釈 (Range Filter の有無による「非存在」/「不明」の区別、末尾ギャップの FIN 検出) はアプリ責務であり、decoder は絶対 Location と End of Range を提供するのみである。この責務境界もテストで固定されていない。
+- `src/stream/decoder.rs` の `FetchStreamDecoder` は descending を group = prior - (delta + 1)、同 group の object_id = prior + delta として解決し、group 降順と同 group 内 object 昇順を検証する。`src/stream/encoder.rs` の `FetchStreamEncoder` も同式で descending のデルタを計算する。
+- `tests/test_stream/encoder.rs` の `test_descending_group_order_roundtrip` は隣接 2 group (5 → 4) の roundtrip のみで、複数 group のスキップ (例: 10 → 3) や group 変化時の object_id 絶対値と同 group 内デルタの混在を検証していない。
+- `tests/test_stream/decoder.rs` の descending に関するテストは、昇順 group を descending モードが拒否するテストのみで、正例の roundtrip が無い。また End of Range (0x8C / 0x10C / 0x20C) を descending に混在させた順序を検証するテストは無い。
+- `pbt/tests/prop_stream/encoder.rs` の `encoder_decoder_roundtrip` は ascending 固定 (`FetchStreamEncoder::new`) で、descending の往復を性質として固定していない。
+- ギャップの意味解釈 (Range Filter の有無による「非存在」/「不明」の区別、End Location に対する末尾ギャップの FIN 検出) はアプリ責務であり、decoder は絶対 Location と End of Range を提供するのみである (End Location は bidi request stream 上の FETCH_OK で運ばれ、`FetchStreamDecoder` はそれを知らない)。この責務境界もライブラリ側のテストで固定されていない。
 - relay の Fill Timeout 予算管理 (§3.2.3) は relay 非対応のため対象外である。
 
 ## 設計方針
 
-- `tests/test_stream/encoder.rs` / `tests/test_stream/decoder.rs` に Descending Group Order のテストを追加する。対象は複数 group のスキップを含む roundtrip、group 変化時の object_id 絶対値と同 group 内デルタの混在、End of Range 後の順序、`FetchStreamDecoder::finish` による FIN 時の末尾ギャップ検出 (header のみ / partial) とする。
-- ギャップの「非存在 / 不明」分類はアプリ責務のためライブラリ API では検証しない。decoder が返す絶対位置と End of Range が仕様どおりであることだけを固定する。
+- roundtrip は性質テストの責務であるため、`pbt/tests/prop_stream/encoder.rs` の `encoder_decoder_roundtrip` を descending 対応にする。group を降順にも生成し、`FetchStreamEncoder::new_with_group_order` / `FetchStreamDecoder::new_with_group_order` の両順序で encode → decode の往復が絶対値を保存することを固定する。
+- `tests/test_stream/encoder.rs` / `tests/test_stream/decoder.rs` に固定値の単体テストを追加する。対象は複数 group のスキップ (例: 10 → 3) の roundtrip、group 変化時の object_id 絶対値と同 group 内デルタの混在、End of Range (0x8C / 0x10C / 0x20C) を混在させた順序とする。`FetchStreamDecoder::finish` は group order に依存しないため、FIN 時の受容は End of Range を混在させたテストに含めて確認する。
+- ギャップの「非存在 / 不明」分類と End Location に対する末尾ギャップの判定はアプリ責務のためライブラリ API では検証しない。decoder が返す絶対位置と End of Range が仕様どおりであることだけを固定する。
 - 実装の挙動は変えない。テストの追加で実装の不足が見つかった場合のみ、別 issue として切り出す。
 
 ## 完了条件
 
-- Descending Group Order で複数 group をスキップする encode / decode roundtrip テストが追加されていること
-- End of Range と FIN 判定を含む順序テストが追加されていること
+- `pbt/tests/prop_stream/encoder.rs` の roundtrip PBT が ascending / descending の両方を検証していること
+- `tests/test_stream/encoder.rs` / `tests/test_stream/decoder.rs` に、複数 group のスキップ (例: 10 → 3)、group 変化時の object_id 絶対値と同 group 内デルタの混在、End of Range (0x8C / 0x10C / 0x20C) を混在させた順序 (FIN 時の受容を含む) を固定するテストが追加されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通ること
 
 ## 解決方法
