@@ -8,3 +8,4 @@ pub mod delay;
 pub mod scheduler;
 pub mod stretch;
 pub mod sync;
+pub mod timeline;

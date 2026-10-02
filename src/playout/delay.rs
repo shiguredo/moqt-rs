@@ -43,6 +43,7 @@ const AUDIO_DELAY_MAX_ARRIVALS: usize = 512;
 ///
 /// バケットの合計は常に 1 で、追加のたびに全体を忘れ係数倍し、観測したバケットへ
 /// `1 - 忘れ係数` を足す。最初の数回は忘れ方を速くし、目標を観測へすぐ合わせる。
+#[derive(Debug)]
 struct DelayHistogram {
     buckets: [f64; AUDIO_DELAY_BUCKETS],
     forget_factor: f64,
@@ -110,7 +111,8 @@ struct Arrival {
 /// トラックごとに 1 つ持つ。`observe` に「復号の出力の時刻」と「そのデータの
 /// TIMESTAMP」をマイクロ秒で渡し、目標遅延は [`AudioDelayManager::target_delay_ms`]
 /// で読む。
-pub struct AudioDelayManager {
+#[derive(Debug)]
+pub struct JitterDelayManager {
     histogram: DelayHistogram,
     /// 直近の観測。窓より古いものは捨てる
     arrivals: VecDeque<Arrival>,
@@ -124,7 +126,7 @@ pub struct AudioDelayManager {
     optimal_delay_ms: Option<i64>,
 }
 
-impl AudioDelayManager {
+impl JitterDelayManager {
     /// 観測の無い状態で作る
     pub fn new() -> Self {
         Self {
@@ -211,6 +213,27 @@ impl AudioDelayManager {
 
     /// 直近の窓で最も早く届いた観測を基準にした相対遅延 (マイクロ秒)
     fn relative_delay_us(&self, arrival_us: i64, capture_us: i64) -> i64 {
+        let Some(best) = self.earliest_arrival_in_window(capture_us) else {
+            return 0;
+        };
+        arrival_us
+            .saturating_sub(best.arrival_us)
+            .saturating_sub(capture_us.saturating_sub(best.capture_us))
+            .max(0)
+    }
+
+    /// 直近の窓で最も早く届いた観測の (到着時刻, TIMESTAMP) (マイクロ秒)
+    ///
+    /// 送受信の時計のずれと経路の最小遅延を含んだ基準である。TIMESTAMP から鳴らす時刻や
+    /// 表示する時刻を求めるときは、この基準に TIMESTAMP の差と遅延を足す。
+    pub fn earliest_arrival(&self) -> Option<(i64, i64)> {
+        let latest_capture_us = self.latest_capture_us?;
+        let best = self.earliest_arrival_in_window(latest_capture_us)?;
+        Some((best.arrival_us, best.capture_us))
+    }
+
+    /// 窓の中で最も早く届いた観測を求める
+    fn earliest_arrival_in_window(&self, capture_us: i64) -> Option<Arrival> {
         let oldest_us = capture_us.saturating_sub(AUDIO_DELAY_HISTORY_WINDOW_MS * 1_000);
         let mut best: Option<Arrival> = None;
         for entry in &self.arrivals {
@@ -228,13 +251,7 @@ impl AudioDelayManager {
                 best = Some(*entry);
             }
         }
-        let Some(best) = best else {
-            return 0;
-        };
-        arrival_us
-            .saturating_sub(best.arrival_us)
-            .saturating_sub(capture_us.saturating_sub(best.capture_us))
-            .max(0)
+        best
     }
 
     /// 窓より古い観測を捨て、件数の上限も守る
@@ -247,11 +264,17 @@ impl AudioDelayManager {
     }
 }
 
-impl Default for AudioDelayManager {
+impl Default for JitterDelayManager {
     fn default() -> Self {
         Self::new()
     }
 }
+
+/// 音声用の別名
+///
+/// 学習の仕方は音声でも映像でも同じであるため、実体は [`JitterDelayManager`] にある。
+/// 音声の目標遅延として使うときの既定値や分位点は `AUDIO_DELAY_*` の定数である。
+pub type AudioDelayManager = JitterDelayManager;
 
 #[cfg(test)]
 mod tests {
@@ -260,7 +283,7 @@ mod tests {
     #[test]
     fn old_arrivals_are_pruned() {
         // 2 秒の窓より古い観測が残り続けないこと
-        let mut manager = AudioDelayManager::new();
+        let mut manager = JitterDelayManager::new();
         for index in 0..10_000i64 {
             let time_us = index * 1_000;
             manager.observe(time_us, time_us);
@@ -268,7 +291,7 @@ mod tests {
         assert!(manager.arrivals.len() <= AUDIO_DELAY_HISTORY_WINDOW_MS as usize + 1);
 
         // 同じ時刻の観測が繰り返し届いても件数の上限を超えないこと
-        let mut manager = AudioDelayManager::new();
+        let mut manager = JitterDelayManager::new();
         for _ in 0..10_000 {
             manager.observe(1_000_000, 1_000_000);
         }
@@ -277,7 +300,7 @@ mod tests {
 
     #[test]
     fn backward_capture_jump_restarts_the_history() {
-        let mut manager = AudioDelayManager::new();
+        let mut manager = JitterDelayManager::new();
         // 大きな TIMESTAMP で 100 ms の揺らぎを入れて目標遅延を上げる
         for index in 0..80i64 {
             let capture_us = (1_000_000 + index * 20) * 1_000;
@@ -296,7 +319,7 @@ mod tests {
 
     #[test]
     fn reset_clears_the_learning() {
-        let mut manager = AudioDelayManager::new();
+        let mut manager = JitterDelayManager::new();
         for index in 0..40i64 {
             let capture_us = (1_000 + index * 20) * 1_000;
             manager.observe(capture_us, capture_us);
