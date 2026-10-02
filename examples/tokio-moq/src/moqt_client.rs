@@ -23,11 +23,12 @@ use shiguredo_moqt::session::types::{
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
-    message::ControlMessage, message::ReasonPhrase, message::common::Location,
-    message::common::TrackNamespace, message_parameter::MessageParameter,
+    c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT, message::ControlMessage, message::ReasonPhrase,
+    message::common::Location, message::common::TrackNamespace,
+    message_parameter::AuthorizationToken, message_parameter::MessageParameter,
     message_parameter::MessageParameterValue, message_parameter::MessageParameters,
-    message_parameter::PARAM_SUBSCRIBER_PRIORITY, session::core::Session,
-    session::types::DataStreamId, session::types::DataStreamResetReason,
+    message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+    session::core::Session, session::types::DataStreamId, session::types::DataStreamResetReason,
     session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
     session::types::Transport as MoqtTransport, stream::decoder::DecodedSubgroupObject,
     stream::fetch::FetchHeader, stream::fetch::FetchPriorContext, stream::fetch::FetchStreamEntry,
@@ -414,6 +415,11 @@ impl DataPlaneHandle {
 
 /// publisher / subscriber 共通の MoQT クライアント (Session ドライバ)
 pub struct MoqtClient {
+    /// URL の MSF fragment (`#msf:...&c4m=...`) から取り出した認可トークン
+    ///
+    /// SETUP (draft-ietf-moq-transport-21 §9.1) だけでなく、SUBSCRIBE / PUBLISH などの
+    /// メッセージにも AUTHORIZATION_TOKEN (0x03) として載せる (§9.20.3)。
+    auth_tokens: Vec<AuthorizationToken>,
     session: Arc<StdMutex<Session>>,
     control_send: SendStream,
     handle: StreamHandle,
@@ -634,6 +640,22 @@ fn request_id_of(message: &ControlMessage) -> Option<u64> {
     }
 }
 
+/// 認可トークンをメッセージパラメータ (0x03) として組み立てる
+///
+/// URL の MSF fragment (`#msf:...&c4m=...`) のトークンを、SETUP だけでなく
+/// SUBSCRIBE / PUBLISH / FETCH などのメッセージにも載せる
+/// (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter))。
+pub fn auth_message_parameters(tokens: &[AuthorizationToken]) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    for token in tokens {
+        parameters.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(token.clone()),
+        });
+    }
+    parameters
+}
+
 impl MoqtClient {
     /// QUIC 直接接続で MoQT client を確立する
     /// (draft-ietf-moq-transport-21 §6.2 (Session establishment) / §6.3 (Session initialization))
@@ -695,6 +717,7 @@ impl MoqtClient {
             handle,
             control_recv,
             BidiStreamAcceptor::Quic(bidi_acceptor),
+            c4m_tokens,
             task_monitor,
         )
         .await?;
@@ -779,6 +802,7 @@ impl MoqtClient {
                 bi_rx: wt_bi_rx,
                 session_state: session_state.clone(),
             },
+            c4m_tokens,
             task_monitor,
         )
         .await?;
@@ -866,6 +890,7 @@ impl MoqtClient {
                 bi_rx: wt_bi_rx,
                 session_state: session_state.clone(),
             },
+            c4m_tokens,
             task_monitor,
         )
         .await?;
@@ -885,6 +910,7 @@ impl MoqtClient {
         handle: StreamHandle,
         mut control_recv: ControlStream,
         bidi_acceptor: BidiStreamAcceptor,
+        c4m_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<Self> {
         // peer SETUP 受信
@@ -924,6 +950,13 @@ impl MoqtClient {
         let task_monitor = task_monitor.clone();
 
         Ok(Self {
+            auth_tokens: c4m_tokens
+                .iter()
+                .map(|token| AuthorizationToken::UseValue {
+                    token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
+                    token_value: token.clone(),
+                })
+                .collect(),
             session,
             control_send,
             handle,
@@ -950,6 +983,15 @@ impl MoqtClient {
         DataPlaneHandle::new(Arc::clone(&self.session))
     }
 
+    /// 認可トークンをメッセージパラメータ (0x03) として組み立てる
+    ///
+    /// URL の MSF fragment (`#msf:...&c4m=...`) のトークンを、SETUP だけでなく
+    /// SUBSCRIBE / PUBLISH などのメッセージにも載せる
+    /// (draft-ietf-moq-transport-21 §9.20.3 (AUTHORIZATION TOKEN Parameter))。
+    fn auth_parameters(&self) -> MessageParameters {
+        auth_message_parameters(&self.auth_tokens)
+    }
+
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
     pub async fn publish_track(
         &mut self,
@@ -964,7 +1006,7 @@ impl MoqtClient {
                     namespace,
                     track_name,
                     track_alias,
-                    MessageParameters::new(),
+                    self.auth_parameters(),
                     TrackProperties::new(),
                 )
                 .map_err(|e| TransportError::Internal(format!("send_publish: {e}")))?
@@ -1017,7 +1059,7 @@ impl MoqtClient {
         namespace: TrackNamespace,
         track_name: Vec<u8>,
     ) -> Result<SubscribeResult> {
-        let mut parameters = MessageParameters::new();
+        let mut parameters = self.auth_parameters();
         parameters.push(MessageParameter {
             param_type: PARAM_SUBSCRIBER_PRIORITY,
             value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
@@ -1748,6 +1790,38 @@ async fn send_control_stream_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 認可トークンが AUTHORIZATION_TOKEN (0x03) のメッセージパラメータになること
+    #[test]
+    fn auth_tokens_become_message_parameters() {
+        let tokens = vec![AuthorizationToken::UseValue {
+            token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
+            token_value: vec![0x01, 0x02, 0x03],
+        }];
+        let parameters = auth_message_parameters(&tokens);
+        assert_eq!(parameters.len(), 1, "トークン 1 件につき 1 パラメータ");
+        let parameter = &parameters.as_slice()[0];
+        assert_eq!(
+            parameter.param_type, PARAM_AUTHORIZATION_TOKEN,
+            "パラメータ種別は AUTHORIZATION_TOKEN"
+        );
+        match &parameter.value {
+            MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+                token_type,
+                token_value,
+            }) => {
+                assert_eq!(*token_type, MOQT_AUTH_TOKEN_TYPE_CAT, "Token Type は CAT");
+                assert_eq!(
+                    token_value,
+                    &vec![0x01, 0x02, 0x03],
+                    "トークンの値はそのまま"
+                );
+            }
+            other => panic!("UseValue でない: {other:?}"),
+        }
+        // 空のときはパラメータを載せない
+        assert!(auth_message_parameters(&[]).is_empty());
+    }
 
     /// PUBLISH_DONE はアプリが観測する notable イベントである
     #[test]
