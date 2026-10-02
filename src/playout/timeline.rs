@@ -19,6 +19,13 @@ pub const TIMELINE_DISCONTINUITY_US: i64 = 2_000_000;
 /// 同期の制御を行う間隔 (マイクロ秒)
 pub const TIMELINE_SYNC_INTERVAL_US: i64 = 1_000_000;
 
+/// 同期の制御の間隔とみなす許容 (マイクロ秒)
+///
+/// 呼び出し側のタイマーが 1 秒よりわずかに早く来ることがあるため、この分は同じ間隔と
+/// みなす。これが無いと、1 秒ごとの呼び出しが毎回「間隔が空いていない」と判定され、
+/// 学習した目標遅延へ下げる処理も動かない。
+pub const TIMELINE_SYNC_TOLERANCE_US: i64 = 50_000;
+
 /// 同期の制御が動かないときに、学習した目標遅延へ向けて下げる速さ (マイクロ秒/秒)
 ///
 /// 学習した目標遅延が下がっても、すぐに下げると音が途切れる。少しずつ下げる。
@@ -208,13 +215,17 @@ impl PlayoutTimeline {
     /// [`PlayoutTimeline::playout_delay_us`] に反映済みである。
     pub fn sync(&mut self, now_us: i64) -> Option<SyncDelays> {
         if let Some(last_sync_us) = self.last_sync_us
-            && now_us.saturating_sub(last_sync_us) < TIMELINE_SYNC_INTERVAL_US
+            && now_us.saturating_sub(last_sync_us)
+                < TIMELINE_SYNC_INTERVAL_US - TIMELINE_SYNC_TOLERANCE_US
         {
             return None;
         }
-        let audio = self.tracks[Track::Audio.index()].measurement()?;
-        let video = self.tracks[Track::Video.index()].measurement()?;
-        let relative_delay_ms = compute_relative_delay(audio, video)?;
+        // 観測が足りない、時刻が大きく離れているなどで制御できないときも、学習した
+        // 目標遅延へ向けた減衰だけは進める
+        let Some(relative_delay_ms) = self.relative_delay_ms() else {
+            self.decay_delays();
+            return None;
+        };
         // 基準の遅延は、学習した目標遅延の大きい方に合わせる (両方が少なくともその分遅れる)
         let base_delay_ms = self.tracks[Track::Audio.index()]
             .minimum_delay_us()
@@ -239,6 +250,15 @@ impl PlayoutTimeline {
         self.tracks[Track::Video.index()].playout_delay_us =
             delays.video_delay_ms.saturating_mul(1_000);
         Some(delays)
+    }
+
+    /// 音声と映像の経路の相対遅延 (ミリ秒) を求める
+    ///
+    /// 片方の観測がまだ無いときと、極端に離れているときは None。
+    fn relative_delay_ms(&self) -> Option<i64> {
+        let audio = self.tracks[Track::Audio.index()].measurement()?;
+        let video = self.tracks[Track::Video.index()].measurement()?;
+        compute_relative_delay(audio, video)
     }
 
     /// 学習した目標遅延へ向けて遅延を少しずつ下げる
@@ -460,6 +480,61 @@ mod tests {
             timeline.playout_delay_us(Track::Video),
             20_000,
             "映像も同じように下がる"
+        );
+    }
+
+    /// 1 秒よりわずかに早い呼び出しでも間隔が空いたとみなすこと
+    #[test]
+    fn sync_tolerates_a_slightly_early_tick() {
+        let mut timeline = PlayoutTimeline::new();
+        for index in 0..40i64 {
+            let capture_us = 1_000_000 + index * 20_000;
+            observe_audio(&mut timeline, capture_us, capture_us);
+            timeline.observe(Track::Video, capture_us, capture_us);
+        }
+        assert_eq!(timeline.playout_delay_us(Track::Audio), 80_000);
+        // 990 ms 後でも下がる (タイマーの揺れを許す)
+        timeline.sync(10_000_000);
+        assert_eq!(timeline.playout_delay_us(Track::Audio), 60_000);
+        timeline.sync(10_990_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            40_000,
+            "990 ms でも間隔が空いたとみなす"
+        );
+        // 500 ms では動かない
+        timeline.sync(11_490_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            40_000,
+            "間隔が短ければ動かない"
+        );
+    }
+
+    /// 相対遅延が極端なときも学習した目標遅延へ向けて下がること
+    #[test]
+    fn delays_decay_even_when_the_relative_delay_is_out_of_range() {
+        let mut timeline = PlayoutTimeline::new();
+        // 音声と映像で TIMESTAMP の起点が大きく違う (別の時計で符号化された配信)
+        for index in 0..40i64 {
+            let capture_us = 1_000_000 + index * 20_000;
+            observe_audio(&mut timeline, capture_us, capture_us);
+        }
+        for index in 0..40i64 {
+            let capture_us = 60_000_000 + index * 100_000;
+            timeline.observe(Track::Video, 60_000_000 + index * 100_000, capture_us);
+        }
+        assert_eq!(timeline.playout_delay_us(Track::Audio), 80_000);
+        timeline.sync(100_000_000);
+        assert_eq!(
+            timeline.playout_delay_us(Track::Audio),
+            60_000,
+            "制御できないときも減衰する"
+        );
+        assert_eq!(
+            timeline.playout_delay_us(Track::Video),
+            60_000,
+            "映像も減衰する"
         );
     }
 
