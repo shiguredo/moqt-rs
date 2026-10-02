@@ -431,6 +431,11 @@ pub struct MoqtClient {
     incoming_requests: VecDeque<IncomingRequest>,
     /// peer から届いた未処理の REQUEST_UPDATE
     incoming_updates: VecDeque<IncomingRequestUpdate>,
+    /// peer が返した REQUEST_ERROR の理由 (request_id ごと)
+    ///
+    /// REQUEST_ERROR はセッションの状態としては Terminated にしか見えないため、拒否の
+    /// 理由をアプリへ伝えるために保持する (draft-ietf-moq-transport-21 §9.4.2)。
+    request_errors: HashMap<u64, (u64, String)>,
     /// drain_events が Session から取り出した notable イベント
     ///
     /// `drain_events` は受信メッセージを契機に生成されたイベントも一緒に poll するため、
@@ -965,6 +970,7 @@ impl MoqtClient {
             closed_request_streams: HashSet::new(),
             incoming_requests: VecDeque::new(),
             incoming_updates: VecDeque::new(),
+            request_errors: HashMap::new(),
             notable_events: VecDeque::new(),
             control_rx,
             bidi_tx,
@@ -1127,8 +1133,14 @@ impl MoqtClient {
             match state {
                 Some(SubscriptionState::Established) => return Ok(()),
                 Some(SubscriptionState::Terminated) => {
+                    // 拒否の理由が分かっていれば添える (relay 側の判断を調べるため)
+                    let detail = self
+                        .request_errors
+                        .get(&request_id)
+                        .map(|(code, reason)| format!(": code={code} reason={reason}"))
+                        .unwrap_or_default();
                     return Err(TransportError::Internal(format!(
-                        "request {request_id} rejected"
+                        "request {request_id} rejected{detail}"
                     )));
                 }
                 _ => {}
@@ -1711,8 +1723,18 @@ impl MoqtClient {
                     //  next_event の次の take_notable_event より先に poll する)。
                     self.notable_events.push_back(ev);
                 }
+                SessionEvent::RequestErrorReceived {
+                    request_id,
+                    error_code,
+                    reason,
+                    ..
+                } => {
+                    // 拒否の理由を保持し、request の失敗をアプリへ伝えるときに添える
+                    // (draft-ietf-moq-transport-21 §9.4.2 (REQUEST_ERROR Message Format))。
+                    self.request_errors
+                        .insert(request_id, (error_code, reason.as_str().to_string()));
+                }
                 SessionEvent::Established
-                | SessionEvent::RequestErrorReceived { .. }
                 | SessionEvent::RequestTerminated { .. }
                 | SessionEvent::RequestOkReceived { .. }
                 | SessionEvent::PublishStateNotifyReceived { .. }
