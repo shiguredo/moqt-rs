@@ -1,7 +1,7 @@
 # Object Forwarding Preference を Delivery Mode に追従する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/change-delivery-mode
 - Polished: 2026-10-02
 
@@ -43,4 +43,16 @@ draft-ietf-moq-transport-22 は「Object Forwarding Preference」を「Delivery 
 
 ## 解決方法
 
-{未着手}
+- `src/object_properties.rs` に `DeliveryMode` enum (`Subgroup` / `Datagram`) を新設し、`ObjectFieldRecord` の `is_subgroup: bool` を `delivery_mode: DeliveryMode` に置き換えた。
+  `ObjectFieldTracker::observe_object_fields` / `observe_object_fields_with_content` の引数も `DeliveryMode` に変更した (公開 API の破壊的変更)。
+- 重複 Object の Malformed 理由文字列を "malformed track: duplicate Object with different Delivery Mode" に変更した。比較順序と検出挙動は変えていない (bool と 2 variant の全単射置換)。
+- `src/session/data.rs` の subgroup 経路は `DeliveryMode::Subgroup`、datagram 経路は `DeliveryMode::Datagram` を渡すようにした。
+- 用語と引用を draft-22 に更新した (§2.1 (Objects) / §2.1.1 (Object Fields) / §5.1.2 (Scheduling Algorithm) / §7.1 (Caching Relays) / §12.1 (Malformed Tracks) 条件 6/7)。
+  同一 Track 内で Object ごとに Delivery Mode が異なることを許容する根拠も doc に明記し、送信側で確定済み mode と異なる送信を強制しない方針を `DeliveryMode` / `ObjectFieldTracker` の doc に書いた。
+- `DeliveryMode::Datagram` のときは `subgroup_id` に `None` を渡す契約を公開メソッドの doc に追記した。
+- `pbt/tests/prop_object_tracker.rs` を新 API に追随させ、Delivery Mode のみが異なる入力を生成する分岐とその観測ゲートを追加した (Delivery Mode 比較を消す退行を検出できる)。
+  `fuzz/fuzz_targets/fuzz_object_trackers.rs` も bool から `DeliveryMode` への写像で追随させ、fuzz 独立 workspace の rustfmt 非準拠も解消した。
+- `tests/test_object_properties.rs` の assert 文字列、`tests/test_session/data_stream.rs` のテスト名・コメント・assert 文字列を新用語に更新した。
+- `CHANGES.md` の `## develop` に `[CHANGE]` を追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` / `prek run --all-files` /
+  fuzz 独立 workspace の `cargo check`・`cargo clippy`・`cargo fmt --check` が通ることを確認した。

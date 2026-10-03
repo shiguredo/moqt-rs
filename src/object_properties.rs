@@ -2,6 +2,7 @@
 //!
 //! SUBGROUP_OBJECT / ObjectDatagram のヘッダに含まれる Object 単位の Properties を扱う。
 //! Track-scoped Properties は `track_properties` モジュールを参照。
+//! 重複 Object の検出で使う [`DeliveryMode`] と [`ObjectFieldTracker`] も本モジュールに置く。
 //!
 //! # ワイヤーフォーマット
 //!
@@ -608,19 +609,42 @@ fn decode_kv_pairs(
     Ok(props)
 }
 
-// ─── 重複 Object のフィールド一貫性追跡 (draft §12.1 条件 6/7, §7.1) ─────────────────
+// ─── 重複 Object のフィールド一貫性追跡 (draft-ietf-moq-transport-22 §12.1 条件 6/7, §7.1) ───
+
+/// Object の Delivery Mode (draft-ietf-moq-transport-22 §2.1.1 (Object Fields))
+///
+/// Object を Subgroup で送ったか Datagram で送ったかを表す。Original Publisher が
+/// 初回送信の方法で Object の Delivery Mode を確定し、購読では Object を Delivery Mode に
+/// 従って送らなければならない (MUST)。同一 Track 内で Object ごとに異なってよい
+/// (§2.1: "An Original Publisher MAY use both Subgroups and Datagrams within a Group or Track")。
+///
+/// この用語と規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+/// Subgroup ID は Delivery Mode とは別の Object フィールドであり、本 enum は保持しない
+/// (Subgroup ID は `observe_object_fields` 系の別引数で渡す)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryMode {
+    /// Subgroup 経由で送られた
+    Subgroup,
+    /// Datagram 経由で送られた
+    Datagram,
+}
 
 /// 重複受信した Object のフィールド一貫性を追跡するトラッカー
 ///
-/// draft-ietf-moq-transport-21 §7.1 (Caching Relays):
-/// "An endpoint that receives a duplicate Object with a different Forwarding Preference,
+/// draft-ietf-moq-transport-22 §7.1 (Caching Relays):
+/// "An endpoint that receives a duplicate Object with a different Delivery Mode,
 /// Subgroup ID, Priority or Payload MUST treat the track as Malformed."
 ///
-/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6/7 の検出に使う。
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6/7 の検出に使う。
 /// 判定単位は Object 単位 (Group ID, Object ID)。同一 Track 内で Object ごとに
-/// Forwarding Preference が異なるだけの正当な Track を Malformed 扱いしない
-/// (draft §11.1.1: "Object Forwarding Preference is a property of an individual Object
-/// and can vary among Objects in the same Track")。
+/// Delivery Mode が異なるだけの正当な Track を Malformed 扱いしない
+/// (§2.1 の "An Original Publisher MAY use both Subgroups and Datagrams within a Group or
+/// Track" と §5.1.2 (Scheduling Algorithm) の "If the two objects have different Delivery
+/// Modes the datagram is sent first")。
+///
+/// **送信側の強制は行わない。** §2.1.1 は Original Publisher の初回送信が Delivery Mode を
+/// 確定すると定めるが、本トラッカーは受信側の重複検出専用であり、確定済みの Delivery Mode と
+/// 異なる送信を禁止する追跡は持たない (relay 非対応のため、初回送信そのものが確定行為になる)。
 ///
 /// **payload の内容そのものは本トラッカーでは比較できない。** Session は Sans I/O で Object の
 /// payload バイト列を受け取らないため、呼び出し側が算出した比較キー (`payload_key`) を渡す。
@@ -678,8 +702,8 @@ impl Default for ObjectFieldTracker {
 /// 比較はフィールド単位で行うため、構造体全体の等価比較は導出しない。
 #[derive(Debug, Clone)]
 struct ObjectFieldRecord {
-    /// Object Forwarding Preference: subgroup stream 経由なら `true`、datagram 経由なら `false`
-    is_subgroup: bool,
+    /// Object の Delivery Mode (Subgroup 経由 / Datagram 経由)
+    delivery_mode: DeliveryMode,
     /// Subgroup ID (datagram 経由の場合は `None`)
     subgroup_id: Option<u64>,
     /// Publisher Priority
@@ -755,20 +779,23 @@ impl ObjectFieldTracker {
     /// Object のフィールドを記録し、重複受信時に一貫性を検証する
     ///
     /// 初回受信時は記録して `Ok(())` を返す。同一 (group_id, object_id) の再受信時に
-    /// Forwarding Preference / Subgroup ID / Priority のいずれかが異なれば
+    /// Delivery Mode / Subgroup ID / Priority のいずれかが異なれば
     /// `Err(ObjectFieldMismatch)` を返す。
+    ///
+    /// `delivery_mode` が [`DeliveryMode::Datagram`] の場合は `subgroup_id` に `None` を渡す
+    /// (draft-ietf-moq-transport-22 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
     pub fn observe_object_fields(
         &mut self,
         group_id: u64,
         object_id: u64,
-        is_subgroup: bool,
+        delivery_mode: DeliveryMode,
         subgroup_id: Option<u64>,
         publisher_priority: u8,
     ) -> Result<(), ObjectFieldMismatch> {
         self.observe_object_fields_with_content(
             group_id,
             object_id,
-            is_subgroup,
+            delivery_mode,
             subgroup_id,
             publisher_priority,
             None,
@@ -778,7 +805,7 @@ impl ObjectFieldTracker {
 
     /// 重複受信した Object を、immutable properties と payload の比較キーも含めて追跡する
     ///
-    /// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is
+    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6: "The same Object is
     /// received more than once with different Payload or other immutable properties."
     ///
     /// 初回受信時は記録して `Ok(())` を返す。判定規則と保持量は [`ObjectFieldTracker`] の
@@ -789,6 +816,9 @@ impl ObjectFieldTracker {
     /// [`ObjectFieldTracker::MAX_RECORDS`] を超えていれば古い記録を破棄する。破棄された Object の
     /// 重複は検出しない (known limitation: §12.1 (Malformed Tracks) 条件 6 と §7.1 (Caching Relays)
     /// の重複検出が及ばない範囲がある)。
+    ///
+    /// `delivery_mode` が [`DeliveryMode::Datagram`] の場合は `subgroup_id` に `None` を渡す
+    /// (draft-ietf-moq-transport-22 §2.1.1: "Objects sent in Datagrams do not have a Subgroup ID.")。
     ///
     /// `immutable_properties` は IMMUTABLE_PROPERTIES (0x0B) の内側の生バイト列
     /// (`ObjectProperties::immutable_properties` の戻り値)。`payload_key` は呼び出し側が算出した
@@ -803,13 +833,13 @@ impl ObjectFieldTracker {
     /// `ObjectFieldMismatch` を返す。
     #[expect(
         clippy::too_many_arguments,
-        reason = "Forwarding Preference / Subgroup ID / Priority と条件 6 の内容比較を 1 回の観測で渡すため"
+        reason = "Delivery Mode / Subgroup ID / Priority と条件 6 の内容比較を 1 回の観測で渡すため"
     )]
     pub fn observe_object_fields_with_content(
         &mut self,
         group_id: u64,
         object_id: u64,
-        is_subgroup: bool,
+        delivery_mode: DeliveryMode,
         subgroup_id: Option<u64>,
         publisher_priority: u8,
         immutable_properties: Option<&[u8]>,
@@ -822,7 +852,7 @@ impl ObjectFieldTracker {
             self.records.insert(
                 key,
                 ObjectFieldRecord {
-                    is_subgroup,
+                    delivery_mode,
                     subgroup_id,
                     publisher_priority,
                     immutable_properties: immutable_properties.map(<[u8]>::to_vec),
@@ -835,12 +865,12 @@ impl ObjectFieldTracker {
         };
         // 比較結果は保持量の調整より先に確定させる (破棄した Object は以後比較されない。
         // 見逃し側に倒すため、破棄で不一致が消えることはあっても新たな不一致は生まれない)
-        let mismatch = if prev.is_subgroup != is_subgroup {
-            // draft §7.1: Forwarding Preference の比較
+        let mismatch = if prev.delivery_mode != delivery_mode {
+            // draft §7.1: Delivery Mode の比較
             Some(ObjectFieldMismatch {
                 group_id,
                 object_id,
-                reason: "malformed track: duplicate Object with different Forwarding Preference",
+                reason: "malformed track: duplicate Object with different Delivery Mode",
             })
         } else if prev.subgroup_id != subgroup_id {
             // draft §7.1: Subgroup ID の比較
@@ -962,20 +992,20 @@ mod tests {
         let newest = ObjectFieldTracker::MAX_RECORDS as u64 + 9;
         for object_id in 0..=newest {
             tracker
-                .observe_object_fields(0, object_id, true, Some(0), 0)
+                .observe_object_fields(0, object_id, DeliveryMode::Subgroup, Some(0), 0)
                 .expect("重複ではない Object は受理されること");
         }
         assert_eq!(tracker.len(), ObjectFieldTracker::MAX_RECORDS);
         // 残っている記録は比較され、破棄された古い記録は比較されない (見逃し側)
         assert!(
             tracker
-                .observe_object_fields(0, newest, true, Some(0), 1)
+                .observe_object_fields(0, newest, DeliveryMode::Subgroup, Some(0), 1)
                 .is_err(),
             "上限内に残っている Object は比較されること"
         );
         assert!(
             tracker
-                .observe_object_fields(0, 0, true, Some(0), 9)
+                .observe_object_fields(0, 0, DeliveryMode::Subgroup, Some(0), 9)
                 .is_ok(),
             "破棄された Object は比較されないこと"
         );
@@ -991,12 +1021,12 @@ mod tests {
         // 新しい group を上限 + 超過分まで埋める
         for object_id in 0..(ObjectFieldTracker::MAX_RECORDS as u64 + excess) {
             tracker
-                .observe_object_fields(newest_group, object_id, true, Some(0), 0)
+                .observe_object_fields(newest_group, object_id, DeliveryMode::Subgroup, Some(0), 0)
                 .expect("重複ではない Object は受理されること");
         }
         // ascending の prune では残る古い group を 1 件だけ観測する
         tracker
-            .observe_object_fields(3, 0, true, Some(0), 0)
+            .observe_object_fields(3, 0, DeliveryMode::Subgroup, Some(0), 0)
             .expect("重複ではない Object は受理されること");
         assert_eq!(
             tracker.len(),
@@ -1006,7 +1036,7 @@ mod tests {
         // 古い group は破棄されている
         assert!(
             tracker
-                .observe_object_fields(3, 0, true, Some(0), 9)
+                .observe_object_fields(3, 0, DeliveryMode::Subgroup, Some(0), 9)
                 .is_ok(),
             "破棄された group の Object は比較されないこと"
         );
@@ -1014,13 +1044,19 @@ mod tests {
         let newest_object = ObjectFieldTracker::MAX_RECORDS as u64 + excess - 1;
         assert!(
             tracker
-                .observe_object_fields(newest_group, newest_object, true, Some(0), 9)
+                .observe_object_fields(
+                    newest_group,
+                    newest_object,
+                    DeliveryMode::Subgroup,
+                    Some(0),
+                    9
+                )
                 .is_err(),
             "最新 group の新しい Object は比較されること"
         );
         assert!(
             tracker
-                .observe_object_fields(newest_group, 0, true, Some(0), 9)
+                .observe_object_fields(newest_group, 0, DeliveryMode::Subgroup, Some(0), 9)
                 .is_ok(),
             "最新 group の古い Object は破棄されること"
         );
@@ -1039,22 +1075,28 @@ mod tests {
             // prune は両方を残すため、上限判定で最も古い group が破棄される
             for object_id in 0..(ObjectFieldTracker::MAX_RECORDS as u64) {
                 tracker
-                    .observe_object_fields(newest_group, object_id, true, Some(0), 0)
+                    .observe_object_fields(
+                        newest_group,
+                        object_id,
+                        DeliveryMode::Subgroup,
+                        Some(0),
+                        0,
+                    )
                     .expect("重複ではない Object は受理されること");
             }
             tracker
-                .observe_object_fields(oldest_group, 0, true, Some(0), 0)
+                .observe_object_fields(oldest_group, 0, DeliveryMode::Subgroup, Some(0), 0)
                 .expect("重複ではない Object は受理されること");
             assert_eq!(tracker.len(), ObjectFieldTracker::MAX_RECORDS);
             assert!(
                 tracker
-                    .observe_object_fields(oldest_group, 0, true, Some(0), 9)
+                    .observe_object_fields(oldest_group, 0, DeliveryMode::Subgroup, Some(0), 9)
                     .is_ok(),
                 "ascending = {ascending} で最も古い group ({oldest_group}) は破棄されること"
             );
             assert!(
                 tracker
-                    .observe_object_fields(newest_group, 0, true, Some(0), 9)
+                    .observe_object_fields(newest_group, 0, DeliveryMode::Subgroup, Some(0), 9)
                     .is_err(),
                 "ascending = {ascending} で新しい group ({newest_group}) は残ること"
             );
@@ -1067,10 +1109,10 @@ mod tests {
         // ascending: current 未満の group を破棄する
         let mut ascending = ObjectFieldTracker::new(true);
         ascending
-            .observe_object_fields(1, 0, true, Some(0), 0)
+            .observe_object_fields(1, 0, DeliveryMode::Subgroup, Some(0), 0)
             .expect("重複ではない Object は受理されること");
         ascending
-            .observe_object_fields(2, 0, true, Some(0), 0)
+            .observe_object_fields(2, 0, DeliveryMode::Subgroup, Some(0), 0)
             .expect("重複ではない Object は受理されること");
         assert_eq!(
             ascending.len(),
@@ -1079,7 +1121,7 @@ mod tests {
         );
         assert!(
             ascending
-                .observe_object_fields(1, 0, true, Some(0), 9)
+                .observe_object_fields(1, 0, DeliveryMode::Subgroup, Some(0), 9)
                 .is_ok(),
             "破棄された過去 group の Object は比較されないこと"
         );
@@ -1087,10 +1129,10 @@ mod tests {
         // descending: current 超過の group を破棄する
         let mut descending = ObjectFieldTracker::new(false);
         descending
-            .observe_object_fields(2, 0, true, Some(0), 0)
+            .observe_object_fields(2, 0, DeliveryMode::Subgroup, Some(0), 0)
             .expect("重複ではない Object は受理されること");
         descending
-            .observe_object_fields(1, 0, true, Some(0), 0)
+            .observe_object_fields(1, 0, DeliveryMode::Subgroup, Some(0), 0)
             .expect("重複ではない Object は受理されること");
         assert_eq!(
             descending.len(),
@@ -1099,7 +1141,7 @@ mod tests {
         );
         assert!(
             descending
-                .observe_object_fields(2, 0, true, Some(0), 9)
+                .observe_object_fields(2, 0, DeliveryMode::Subgroup, Some(0), 9)
                 .is_ok(),
             "破棄された過去 group の Object は比較されないこと"
         );

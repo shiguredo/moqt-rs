@@ -87,7 +87,7 @@ pub fn extract_forward_state(parameters: &MessageParameters) -> u8 {
 
 /// パラメータから Object 系 Range Filter を取り出して型付き状態にする
 ///
-/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): 0x25-0x28 が Object 判定に使われる。
+/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): 0x25-0x28 が Object 判定に使われる。
 /// TRACK_PROPERTY_FILTER (0x29) は PUBLISH 選別用なので含めない。
 pub fn extract_range_filters(parameters: &MessageParameters) -> SubscriptionRangeFilters {
     SubscriptionRangeFilters {
@@ -121,9 +121,9 @@ pub fn resolve_location_filter(
 
 /// Object の Pass 評価に必要な値
 ///
-/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters) が対象とする
+/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) が対象とする
 /// "Subgroup ID, Object ID, and Publisher Priority" と Object Properties に対応する。
-/// `subgroup_id` が `None` の場合は datagram (Object Forwarding Preference = Datagram) で、
+/// `subgroup_id` が `None` の場合は datagram (Delivery Mode = Datagram) で、
 /// §11.2.1 のワイヤ構造に Subgroup ID フィールドが存在しないため SUBGROUP_FILTER は
 /// 評価対象外になる。
 #[derive(Debug, Clone)]
@@ -139,7 +139,7 @@ pub struct ObjectFilterInput<'a> {
 
 /// SetID ごとの AND / SetID 間の OR で Range Filter を評価する
 ///
-/// draft-ietf-moq-transport-21 §3.3.2 (Range Filters): "Filter parameters with the same SetID
+/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "Filter parameters with the same SetID
 /// are AND'd; distinct SetIDs are OR'd. The final result is SetID=0 OR SetID=1 OR ... SetID=255,
 /// where each SetID=i is the AND of all filter parameters carrying that SetID."
 fn range_filters_pass(

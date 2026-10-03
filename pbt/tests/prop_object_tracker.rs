@@ -3,16 +3,33 @@
 //! - `ObjectPropertyTracker`: PRIOR_GROUP_ID_GAP が示す欠落 Group を再受信したら拒否する
 //!   (draft-ietf-moq-transport-21 §10.8 (Prior Group ID Gap))
 //! - `ObjectFieldTracker`: 同一 Object の再受信は全フィールド一致のときのみ成功する
-//!   (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks))
+//!   (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6/7、§7.1 (Caching Relays))
 //! - `ObjectFieldTracker::observe_object_fields_with_content`: immutables / payload_key は
-//!   両方 `Some` のときだけ比較する (draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6)
+//!   両方 `Some` のときだけ比較する (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6)
 
 use pbt::common::test_runner;
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::object_properties::{
-    ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
+    DeliveryMode, ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
     ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP,
 };
+
+/// Delivery Mode を等確率で生成する
+fn sample_delivery_mode(ctx: &mut noprop::TestCaseContext) -> DeliveryMode {
+    if noprop::sample_bool(ctx) {
+        DeliveryMode::Subgroup
+    } else {
+        DeliveryMode::Datagram
+    }
+}
+
+/// もう一方の Delivery Mode を返す
+fn other_delivery_mode(mode: DeliveryMode) -> DeliveryMode {
+    match mode {
+        DeliveryMode::Subgroup => DeliveryMode::Datagram,
+        DeliveryMode::Datagram => DeliveryMode::Subgroup,
+    }
+}
 
 /// PRIOR_GROUP_ID_GAP が示す欠落 Group に属する Object は拒否され、欠落外は受理される
 #[test]
@@ -64,13 +81,16 @@ fn prior_group_id_gap_rejects_group_in_gap() -> noprop::TestResult {
 fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
     let match_seen = std::cell::Cell::new(false);
     let mismatch_seen = std::cell::Cell::new(false);
+    // Delivery Mode のみが異なるケースは他のフィールドの一致も必要で偶然にはまず生成されないため、
+    // そのケースを高確率で生成し、比較を消す退行を検出できるようにする
+    let delivery_mode_only_mismatch_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
         let object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
 
         let first = (
-            noprop::sample_bool(ctx),
+            sample_delivery_mode(ctx),
             if noprop::sample_bool(ctx) {
                 Some(noprop::sample_u64_in(ctx, 0..=1_000_000))
             } else {
@@ -81,9 +101,12 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
         // 一致ケースを確実に観測するため、一定確率で first をそのまま使う
         let second = if noprop::sample_bool(ctx) {
             first
+        } else if noprop::sample_bool(ctx) {
+            // Delivery Mode のみを反転し、Subgroup ID / Priority は first のまま使う
+            (other_delivery_mode(first.0), first.1, first.2)
         } else {
             (
-                noprop::sample_bool(ctx),
+                sample_delivery_mode(ctx),
                 if noprop::sample_bool(ctx) {
                     Some(noprop::sample_u64_in(ctx, 0..=1_000_000))
                 } else {
@@ -110,6 +133,9 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
         } else {
             mismatch_seen.set(true);
         }
+        if second.0 != first.0 && second.1 == first.1 && second.2 == first.2 {
+            delivery_mode_only_mismatch_seen.set(true);
+        }
         Ok(())
     })?;
     assert!(
@@ -120,12 +146,16 @@ fn object_field_tracker_accepts_iff_fields_match() -> noprop::TestResult {
         mismatch_seen.get(),
         "フィールド不一致のケースが観測されなかった\n{runner}"
     );
+    assert!(
+        delivery_mode_only_mismatch_seen.get(),
+        "Delivery Mode のみが異なるケースが観測されなかった\n{runner}"
+    );
     Ok(())
 }
 
 /// 内容込みの再観測は「全フィールド一致」かつ「比較可能な内容が一致」のときのみ成功する
 ///
-/// draft-ietf-moq-transport-21 §12.1 (Malformed Tracks) 条件 6: "The same Object is received
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 6: "The same Object is received
 /// more than once with different Payload or other immutable properties."
 /// `immutable_properties` と `payload_key` の比較は**両方** `Some` のときだけ行い、片方でも
 /// `None` なら比較しない (見逃し側に倒す)。この規則を全入力の組み合わせで固定する。
@@ -139,7 +169,7 @@ fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestRes
     runner.run(256, |ctx| {
         let group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
         let object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
-        let is_subgroup = noprop::sample_bool(ctx);
+        let delivery_mode = sample_delivery_mode(ctx);
         let subgroup_id = if noprop::sample_bool(ctx) {
             Some(noprop::sample_u64_in(ctx, 0..=1_000_000))
         } else {
@@ -173,7 +203,7 @@ fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestRes
             .observe_object_fields_with_content(
                 group_id,
                 object_id,
-                is_subgroup,
+                delivery_mode,
                 subgroup_id,
                 publisher_priority,
                 first_immutables.as_deref(),
@@ -184,7 +214,7 @@ fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestRes
         let result = tracker.observe_object_fields_with_content(
             group_id,
             object_id,
-            is_subgroup,
+            delivery_mode,
             subgroup_id,
             publisher_priority,
             second_immutables.as_deref(),
@@ -229,7 +259,7 @@ fn object_field_tracker_content_comparison_matches_expected() -> noprop::TestRes
         let third = tracker.observe_object_fields_with_content(
             group_id,
             object_id,
-            is_subgroup,
+            delivery_mode,
             subgroup_id,
             publisher_priority,
             third_immutables.as_deref(),

@@ -9,7 +9,8 @@ fuzz_target!(|data: &[u8]| {
     {
         let context = &proof.claims().authorization_context;
         let _ = context.verify_resource_consistency();
-        let _ = context.verify_context_type(shiguredo_moqt::c4m::dpop::MOQT_AUTHORIZATION_CONTEXT_TYPE);
+        let _ =
+            context.verify_context_type(shiguredo_moqt::c4m::dpop::MOQT_AUTHORIZATION_CONTEXT_TYPE);
         let _ = context.verify_action(shiguredo_moqt::c4m::MoqtAction::Publish);
         // 生 JSON はアクセス可能なことだけ確認する
         assert!(!context.raw.is_empty());

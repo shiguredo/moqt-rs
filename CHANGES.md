@@ -57,6 +57,11 @@
   - 0x21 の値表現を `MessageParameterValue::LengthPrefixed` から `MessageParameterValue::LocationFilter` に変更し、生バイト API `MessageParameters::location_filter()` を削除する。公開 enum への variant 追加 (`MessageParameterValue::LocationFilter` / `LocationFilter::NoFilter`) を伴うため、網羅 `match` を書いている利用側は壊れる
   - `location_filter_typed()` / `location_filter_update()` は値の形式不一致と StartGroup + EndGroupDelta のオーバーフローで `ProtocolViolation` を返し、decode は未知の Location Filter Type を `ProtocolViolation`、必須フィールドの欠落を `UnexpectedEof` として返す (旧: フィールド数 0 または 5 以上は `KeyValueFormattingError`)
   - @voluntas
+- [CHANGE] Object Forwarding Preference を Delivery Mode に改名し、`ObjectFieldTracker` の公開 API を `DeliveryMode` ベースにする
+  - draft-ietf-moq-transport-22 §2.1.1 (Object Fields) の改名に追従する。Original Publisher が初回送信の方法で Delivery Mode を確定し、購読では Object を Delivery Mode に従って送る MUST は実装の doc に明記する
+  - `ObjectFieldTracker` の内部表現を `DeliveryMode` に置き換え、`observe_object_fields` / `observe_object_fields_with_content` の引数も `DeliveryMode` にする (公開 API の破壊的変更)
+  - 重複 Object の Malformed 理由文字列を "different Delivery Mode" に変更する (§7.1 / §12.1 条件 7)。受信側の重複検出の挙動は変えない
+  - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
 - [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する

@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use shiguredo_moqt::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
+use shiguredo_moqt::object_properties::{DeliveryMode, ObjectFieldTracker, ObjectPropertyTracker};
 
 /// Object ID / Group ID を畳む空間の大きさ
 ///
@@ -11,6 +11,8 @@ use shiguredo_moqt::object_properties::{ObjectFieldTracker, ObjectPropertyTracke
 const FIELD_ID_SPACE: u64 = 8;
 
 /// 1 オブジェクト分の観測
+///
+/// `DeliveryMode` は `Arbitrary` を導出していないため、bool から写像して生成する。
 #[derive(Arbitrary, Debug)]
 struct Observe {
     group_id: u64,
@@ -27,6 +29,15 @@ struct Observe {
     payload_key: Option<Vec<u8>>,
 }
 
+/// `Observe` の bool から Delivery Mode を写像する
+fn delivery_mode(observe: &Observe) -> DeliveryMode {
+    if observe.is_subgroup {
+        DeliveryMode::Subgroup
+    } else {
+        DeliveryMode::Datagram
+    }
+}
+
 // 任意の Object 列で ObjectPropertyTracker / ObjectFieldTracker が panic しない
 fuzz_target!(|observes: Vec<Observe>| {
     let mut properties = ObjectPropertyTracker::new();
@@ -38,15 +49,11 @@ fuzz_target!(|observes: Vec<Observe>| {
         // 重複 Object の比較分岐に到達させるため、ID 空間を小さく畳む
         let group_id = observe.group_id % FIELD_ID_SPACE;
         let object_id = observe.object_id % FIELD_ID_SPACE;
-        let _ = properties.observe_object(
-            group_id,
-            object_id,
-            Some(observe.properties.as_slice()),
-        );
+        let _ = properties.observe_object(group_id, object_id, Some(observe.properties.as_slice()));
         let _ = fields.observe_object_fields(
             group_id,
             object_id,
-            observe.is_subgroup,
+            delivery_mode(observe),
             observe.subgroup_id,
             observe.publisher_priority,
         );
@@ -54,7 +61,7 @@ fuzz_target!(|observes: Vec<Observe>| {
         let _ = fields_with_content.observe_object_fields_with_content(
             group_id,
             object_id,
-            observe.is_subgroup,
+            delivery_mode(observe),
             observe.subgroup_id,
             observe.publisher_priority,
             observe.immutable_properties.as_deref(),

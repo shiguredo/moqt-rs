@@ -5,7 +5,7 @@
 /// `ObjectFieldMismatch` が `core::error::Error` を実装していることを検証する。
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::object_properties::{
-    ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
+    DeliveryMode, ObjectFieldTracker, ObjectProperties, ObjectProperty, ObjectPropertyTracker,
     ObjectPropertyValue, PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP,
 };
 use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
@@ -493,18 +493,17 @@ fn object_field_mismatch_converts_into_boxed_error() {
     fn observe_mismatch() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut tracker = ObjectFieldTracker::new(true);
         // 初回受信は記録される
-        tracker.observe_object_fields(3, 7, true, Some(1), 0)?;
+        tracker.observe_object_fields(3, 7, DeliveryMode::Subgroup, Some(1), 0)?;
         // 同じ (group_id, object_id) を datagram 経由で再受信する
         // (datagram は Subgroup ID を持たないため None を渡す)
-        tracker.observe_object_fields(3, 7, false, None, 0)?;
+        tracker.observe_object_fields(3, 7, DeliveryMode::Datagram, None, 0)?;
         Ok(())
     }
 
-    let err = observe_mismatch()
-        .expect_err("Forwarding Preference が異なる重複 Object はエラーになること");
+    let err = observe_mismatch().expect_err("Delivery Mode が異なる重複 Object はエラーになること");
     assert_eq!(
         err.to_string(),
-        "object field mismatch (group_id=3, object_id=7): malformed track: duplicate Object with different Forwarding Preference",
+        "object field mismatch (group_id=3, object_id=7): malformed track: duplicate Object with different Delivery Mode",
         "Display が不一致の内容を表すこと"
     );
     assert!(err.source().is_none(), "内包するエラーは無いこと");

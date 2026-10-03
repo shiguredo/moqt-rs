@@ -121,23 +121,23 @@ pub enum FetchStreamEntry {
 pub struct FetchStreamObject {
     /// Group ID Delta (None の場合は前のオブジェクトの Group ID を継承)
     ///
-    /// draft-ietf-moq-transport-21 §11.4.1.1 (Flags): 値はデルタエンコードされる。
+    /// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): 値はデルタエンコードされる。
     /// 最初のオブジェクトでは絶対値として解釈される。
     pub group_id: Option<u64>,
     /// Subgroup ID のエンコードモード (変更なし)
     pub subgroup_id: FetchSubgroupIdMode,
     /// Object ID (None の場合は前の Object ID + 1)
     ///
-    /// draft-ietf-moq-transport-21 §11.4.1.1 (Flags): Group が変更された場合は絶対値、
+    /// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group が変更された場合は絶対値、
     /// 同じ Group 内ではデルタエンコードされる。
     pub object_id: Option<u64>,
     /// Publisher Priority (None の場合は前のオブジェクトの Priority を継承)
     pub publisher_priority: Option<u8>,
     /// Properties フィールドが存在するか
     pub has_properties: bool,
-    /// Datagram 起源のオブジェクトか (draft-ietf-moq-transport-21 §11.4.1.1 (Flags): bit 0x40)
+    /// Datagram 起源のオブジェクトか (draft-ietf-moq-transport-22 §11.4.1.1 (Flags): bit 0x40)
     ///
-    /// true の場合、元の Forwarding Preference が Datagram であり Subgroup ID を持たない。
+    /// true の場合、元の Delivery Mode が Datagram であり Subgroup ID を持たない。
     pub is_datagram_origin: bool,
     /// ペイロード長
     pub payload_length: u64,

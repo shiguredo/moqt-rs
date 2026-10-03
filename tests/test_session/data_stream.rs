@@ -2901,13 +2901,13 @@ fn condition1_priority_mismatch_terminates_subscription() {
 // ─── 条件 6/7: 重複 Object のフィールド不一致 ─────────────────
 
 /// 同一 (Group ID, Object ID) を subgroup stream と datagram の両方で受信すると
-/// Forwarding Preference 不一致で Malformed Track (条件 7)
+/// Delivery Mode 不一致で Malformed Track (条件 7)
 ///
-/// draft-ietf-moq-transport-21 §7.1 (Caching Relays):
-/// "An endpoint that receives a duplicate Object with a different Forwarding Preference,
+/// draft-ietf-moq-transport-22 §7.1 (Caching Relays):
+/// "An endpoint that receives a duplicate Object with a different Delivery Mode,
 /// Subgroup ID, Priority or Payload MUST treat the track as Malformed."
 #[test]
-fn condition7_forwarding_preference_mismatch_terminates_subscription() {
+fn condition7_delivery_mode_mismatch_terminates_subscription() {
     let alias = 820u64;
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2954,7 +2954,7 @@ fn condition7_forwarding_preference_mismatch_terminates_subscription() {
         )
         .expect("object の受信に成功すること");
 
-    // datagram で同一 (group=0, object=0) を受信 → Forwarding Preference 不一致
+    // datagram で同一 (group=0, object=0) を受信 → Delivery Mode 不一致
     let err = client
         .recv_object_datagram(&ObjectDatagram {
             track_alias: alias,
@@ -2965,7 +2965,7 @@ fn condition7_forwarding_preference_mismatch_terminates_subscription() {
             end_of_group: false,
             status: None,
         })
-        .expect_err("条件 7: Forwarding Preference 不一致は Malformed Track");
+        .expect_err("条件 7: Delivery Mode 不一致は Malformed Track");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(
         client.state(),
@@ -2984,11 +2984,11 @@ fn condition7_forwarding_preference_mismatch_terminates_subscription() {
 
 /// 同一 Track / 同一 Group 内で別々の Object を subgroup と datagram に分けても Malformed にならない
 ///
-/// draft-ietf-moq-transport-21 §11.1.1 (Object Header):
-/// "Object Forwarding Preference is a property of an individual Object and can vary among
-/// Objects in the same Track."
-/// draft-ietf-moq-transport-21 §11 (Data Streams and Datagrams):
-/// "the Original Publisher MAY use both Subgroups and Datagrams within a Group or Track."
+/// draft-ietf-moq-transport-22 §2.1.1 (Object Fields):
+/// "The Original Publisher establishes an Object's Delivery Mode by how it first transmits
+/// the Object."
+/// draft-ietf-moq-transport-22 §2.1 (Objects):
+/// "An Original Publisher MAY use both Subgroups and Datagrams within a Group or Track."
 #[test]
 fn different_objects_mixed_subgroup_and_datagram_is_not_malformed() {
     let alias = 821u64;
@@ -3741,7 +3741,7 @@ fn first_object_id_subgroup_reopen_with_different_priority_terminates_subscripti
 /// 同一 (group, object) を異なる Subgroup ID で受信すると §7.1 (Caching Relays) の
 /// Malformed として subscription が終端される
 ///
-/// `observe_object_fields_with_content` は Forwarding Preference → Subgroup ID → Priority の順に比較する。
+/// `observe_object_fields_with_content` は Delivery Mode → Subgroup ID → Priority の順に比較する。
 #[test]
 fn duplicate_object_with_different_subgroup_id_terminates_subscription() {
     let alias = 832u64;

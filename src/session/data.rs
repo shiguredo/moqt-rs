@@ -11,7 +11,7 @@ use crate::error::{
     is_local_error_code,
 };
 use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
-use crate::object_properties::{ObjectFieldTracker, ObjectProperties};
+use crate::object_properties::{DeliveryMode, ObjectFieldTracker, ObjectProperties};
 use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, OBJECT_STATUS_NORMAL,
     PADDING_DATAGRAM_TYPE, classify_data_stream_type,
@@ -287,7 +287,7 @@ impl Session {
     ///
     /// 返り値: (subgroup_delivery_timeout_ms, object_delivery_timeout_ms)
     ///
-    /// 計算規則 (draft-ietf-moq-transport-21 §5.2):
+    /// 計算規則 (draft-ietf-moq-transport-22 §5.2):
     /// - publisher's value = Object Property (先頭 object に存在する場合) or Track Property
     /// - effective = min(publisher's value, subscriber's value) (両方 non-zero の場合)
     pub fn subgroup_effective_delivery_timeout(
@@ -312,7 +312,7 @@ impl Session {
             Some(v) => Some(v),
             None => subscription.delivery_timeouts.publisher_object_ms,
         };
-        // effective = min(publisher, subscriber) (draft-ietf-moq-transport-21 §5.2)
+        // effective = min(publisher, subscriber) (draft-ietf-moq-transport-22 §5.2)
         let effective_subgroup =
             super::subscription::delivery::compute_effective_delivery_timeout_ms(
                 subscription.delivery_timeouts.subscriber_subgroup_ms,
@@ -570,7 +570,7 @@ impl Session {
                 subscription.record_largest_received_location(published_location);
                 // delivery_timeouts.effective_object_ms が Some かつ未記録の場合のみ記録。
                 // last_tick_ms が None の場合は None で挿入し、最初の tick で確定する。
-                // draft-ietf-moq-transport-21 §5.2: object 単位で object header 提供完了時刻を保持する (MUST)。
+                // draft-ietf-moq-transport-22 §5.2: object 単位で object header 提供完了時刻を保持する (MUST)。
                 // `send_subgroup_object` 呼び出し tick が last header byte 提供時刻の近似になる。
                 if subscription.delivery_timeouts.effective_object_ms.is_some() {
                     self.timing
@@ -783,7 +783,7 @@ impl Session {
             ..
         } = stream;
         // SUBGROUP_DELIVERY_TIMEOUT: subgroup stream の FIN 検出時にタイマーを開始する
-        // draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream が
+        // draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability): subgroup stream が
         // FIN で終了した場合、SUBGROUP_DELIVERY_TIMEOUT のタイマーを開始し、
         // 期限内に全てのデータがコミットされなければ DELIVERY_TIMEOUT でリセットする (MUST)
         if matches!(end, RequestStreamEnd::Fin)
@@ -1597,9 +1597,9 @@ impl Session {
             return Err(err);
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
-        // 重複 Object の Forwarding Preference / Subgroup ID / Priority と、条件 6 の
+        // 重複 Object の Delivery Mode / Subgroup ID / Priority と、条件 6 の
         // Payload / immutable properties の一貫性を検証する。
-        // subgroup stream 経由なので is_subgroup = true。Priority は stream が header 時点で
+        // subgroup stream 経由なので DeliveryMode::Subgroup。Priority は stream が header 時点で
         // 保持した Subgroup 単位の解決値を使う (購読単位の直近値は並行 Subgroup の header で
         // 上書きされるため、別 Subgroup の header 受信後に同一 Subgroup の Object を再受信すると
         // 直近値では priority 不一致を誤検出する)。
@@ -1619,7 +1619,7 @@ impl Session {
             .observe_object_fields_with_content(
                 group_id,
                 object.object_id,
-                true,
+                DeliveryMode::Subgroup,
                 resolved_subgroup_id,
                 stream.resolved_publisher_priority,
                 immutables,
@@ -2225,10 +2225,10 @@ impl Session {
             )
             .into());
         }
-        // draft-ietf-moq-transport-21 §5.2 (Delivery Timeouts and Data Reliability):
+        // draft-ietf-moq-transport-22 §5.2 (Delivery Timeouts and Data Reliability):
         // "For datagrams, the implementation MUST drop the datagrams if the time elapsed
         // exceeds OBJECT_DELIVERY_TIMEOUT." 起点は object header の最終バイト。
-        // "For objects whose Object Forwarding Preference is Datagram, the SUBGROUP_DELIVERY_TIMEOUT
+        // "For objects whose Object Delivery Mode is Datagram, the SUBGROUP_DELIVERY_TIMEOUT
         // acts the same way as OBJECT_DELIVERY_TIMEOUT; if both are non-zero, the smaller of the
         // two is used."
         {
@@ -2546,9 +2546,9 @@ impl Session {
             return Err(err);
         }
         // draft §12.1 (Malformed Tracks) 条件 6/7, §7.1 (Caching Relays):
-        // 重複 Object の Forwarding Preference / Subgroup ID / Priority と、条件 6 の
+        // 重複 Object の Delivery Mode / Subgroup ID / Priority と、条件 6 の
         // Payload / immutable properties の一貫性を検証する。
-        // datagram 経由なので is_subgroup = false、subgroup_id = None。
+        // datagram 経由なので DeliveryMode::Datagram、subgroup_id = None。
         {
             // DEFAULT_PRIORITY bit が立っている場合の継承元は、直近 SUBGROUP_HEADER ではなく
             // 購読を確立した制御メッセージの DEFAULT_PUBLISHER_PRIORITY である
@@ -2581,7 +2581,7 @@ impl Session {
                 .observe_object_fields_with_content(
                     datagram.group_id,
                     datagram.object_id,
-                    false,
+                    DeliveryMode::Datagram,
                     None,
                     publisher_priority,
                     immutables,
