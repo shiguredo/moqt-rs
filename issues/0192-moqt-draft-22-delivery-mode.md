@@ -21,7 +21,11 @@ draft-ietf-moq-transport-22 は「Object Forwarding Preference」を「Delivery 
 
 - `DeliveryMode` enum (`Subgroup` / `Datagram`) を新設し、`ObjectFieldRecord` の `is_subgroup: bool` と `observe_object_fields` / `observe_object_fields_with_content` の引数を置き換える (公開 API の破壊的変更)。
 - reason 文字列を "different Delivery Mode" に変更し、テストの assert 文字列も追従する。
-- 引用を draft-22 の正しい節へ更新する。用語と確定規則は §2.1.1 (Delivery Mode / Original Publisher が初回送信で確定 / 購読では Delivery Mode に従って送る MUST)、重複検出は §7.1 と §12.1 条件 7 (content 比較を根拠づける条件 6 はそのまま維持する)。同一 Track 内の mode 混在の許容は §2.1 の "An Original Publisher MAY use both Subgroups and Datagrams within a Group or Track" と、§5.1.2 (Scheduling Algorithm) の "If the two objects have different Delivery Modes the datagram is sent first" を根拠にする。draft-22 本文の §2.2 と §11.4.1.1 にある "see Section 11.1.2" は Object Properties を指す参照ミスなので Delivery Mode の根拠には使わない。
+- 引用を draft-22 の正しい節へ更新する。用語と確定規則は §2.1.1 (Delivery Mode / Original Publisher が初回送信で確定 / 購読では Delivery Mode に従って送る MUST)、
+  重複検出は §7.1 と §12.1 条件 7 (content 比較を根拠づける条件 6 はそのまま維持する)。
+  同一 Track 内の mode 混在の許容は §2.1 の "An Original Publisher MAY use both Subgroups and Datagrams within a Group or Track" と、
+  §5.1.2 (Scheduling Algorithm) の "If the two objects have different Delivery Modes the datagram is sent first" を根拠にする。
+  draft-22 本文の §2.2 と §11.4.1.1 にある "see Section 11.1.2" は Object Properties を指す参照ミスなので Delivery Mode の根拠には使わない。
 - 用語と引用の更新は本 issue の範囲に限定し、Delivery Mode に関わらない draft-21 の節番号・引用文面の同期は 0195 が扱う (0195 は本 issue と重複する箇所は本 issue の修正を優先すると明記している)。
 - 受信側の Malformed 検出挙動は変えない。送信側で「確定済み mode と異なる送信」を強制する追跡は追加しない (relay 非対応であり、Original Publisher 自身の初回送信が確定行為であるため)。この規約を doc に明記する。
 - 公開 API の破壊的変更のため `CHANGES.md` の `## develop` に `[CHANGE]` として記載する。
@@ -29,7 +33,10 @@ draft-ietf-moq-transport-22 は「Object Forwarding Preference」を「Delivery 
 ## 完了条件
 
 - `DeliveryMode` が導入され、`ObjectFieldTracker` の公開 API と内部表現が Delivery Mode ベースになっていること
-- 旧用語 (Forwarding Preference) が `src/object_properties.rs`・`src/session/data.rs`・`src/session/subscription/validation.rs`・`src/stream/fetch.rs` のコード・doc・reason 文字列・コメントと、`tests/test_object_properties.rs`・`tests/test_session/data_stream.rs`・`pbt/tests/prop_object_tracker.rs`・`fuzz/fuzz_targets/fuzz_object_trackers.rs` の呼び出し元・テスト名・assert 文字列から消え、draft-22 の用語と節 (§2.1 / §2.1.1 / §5.1.2 / §7.1 / §12.1 条件 6/7) が引用されていること
+- 旧用語 (Forwarding Preference) が `src/object_properties.rs`・`src/session/data.rs`・`src/session/subscription/validation.rs`・`src/stream/fetch.rs` の
+  コード・doc・reason 文字列・コメントと、`tests/test_object_properties.rs`・`tests/test_session/data_stream.rs`・
+  `pbt/tests/prop_object_tracker.rs`・`fuzz/fuzz_targets/fuzz_object_trackers.rs` の呼び出し元・テスト名・assert 文字列から消え、
+  draft-22 の用語と節 (§2.1 / §2.1.1 / §5.1.2 / §7.1 / §12.1 条件 6/7) が引用されていること
 - 受信側の重複 Object 検出の挙動が変わらないこと (既存テストが通ること)
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通ること
 - `CHANGES.md` の `## develop` に `[CHANGE]` エントリが追加されていること
