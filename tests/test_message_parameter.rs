@@ -143,13 +143,13 @@ mod error_cases {
     #[test]
     fn location_filter_end_group_delta_overflow_is_protocol_violation() {
         // StartGroup + EndGroupDelta が 2^64 - 1 を超えたら PROTOCOL_VIOLATION
-        // (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
-        // 3 フィールド [group=1, object=0, delta=u64::MAX]: 1 + (2^64 - 1) が溢出する。
-        // vi64 の u64::MAX は 9 バイト (0xFF x 9) で表す。
+        // (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+        // Type 0x03 (Absolute Start, Group End) で [group=1, object=0, delta=u64::MAX] を
+        // 与えると 1 + (2^64 - 1) がオーバーフローする。vi64 の u64::MAX は 9 バイト (0xFF x 9)。
         let buf = vec![
             0x01, // count = 1
             0x21, // delta = PARAM_LOCATION_FILTER
-            0x0B, // length = 11
+            0x03, // Location Filter Type = 0x03 (Absolute Start, Group End)
             0x01, // StartGroup = 1
             0x00, // StartObject = 0
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // EndGroupDelta = u64::MAX
@@ -162,14 +162,56 @@ mod error_cases {
     }
 
     #[test]
-    fn malformed_location_filter_is_key_value_formatting_error() {
-        // 5 フィールドは定義された serialization と一致しないため KEY_VALUE_FORMATTING_ERROR
+    fn unknown_location_filter_type_is_protocol_violation() {
+        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+        // "Any other Location Filter Type is a PROTOCOL_VIOLATION."
         let buf = vec![
             0x01, // count = 1
             0x21, // delta = PARAM_LOCATION_FILTER
-            0x05, // length = 5
-            0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, // Location Filter Type = 0x06 (未定義)
         ];
+
+        assert!(matches!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn location_filter_missing_field_is_unexpected_eof() {
+        // Type 0x01 (Relative Start) は StartGroup を必須とするため、
+        // Type の直後でバッファが終わると UnexpectedEof になる
+        let buf = vec![
+            0x01, // count = 1
+            0x21, // delta = PARAM_LOCATION_FILTER
+            0x01, // Location Filter Type = 0x01 (Relative Start) のみで StartGroup が無い
+        ];
+
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn location_filter_trailing_bytes_in_fill_parameters_is_key_value_formatting_error() {
+        use shiguredo_moqt::message_parameter::PARAM_FILL_PARAMETERS;
+        use shiguredo_moqt::varint;
+
+        // Length 境界を持つ FILL_PARAMETERS の内側では、Location Filter Type が定める
+        // フィールド数を読み切ったあとの余剰バイトを検出できる
+        // (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))
+        let inner = vec![
+            0x01, // Number of Parameters = 1
+            0x21, // delta = PARAM_LOCATION_FILTER
+            0x00, // Location Filter Type = 0x00 (None)
+            0x00, // 余剰バイト
+        ];
+        let mut buf = Vec::new();
+        varint::encode(1, &mut buf); // count = 1
+        varint::encode(PARAM_FILL_PARAMETERS, &mut buf);
+        varint::encode(inner.len() as u64, &mut buf);
+        buf.extend_from_slice(&inner);
 
         assert!(matches!(
             MessageParameters::decode(&buf),
@@ -178,26 +220,34 @@ mod error_cases {
     }
 
     #[test]
-    fn encode_rejects_malformed_location_filter() {
+    fn encode_rejects_location_filter_end_group_delta_overflow() {
+        // in-memory 構築した filter のオーバーフローも encode 側で拒否する
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end_group_delta: u64::MAX,
+                end_object: 0,
+            }),
         });
         let mut buf = Vec::new();
 
         assert!(matches!(
             params.encode(&mut buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::ProtocolViolation(_))
         ));
     }
 }
 
 /// 型ごとに許可する variant の厳密性を検証する。
 ///
-/// LengthPrefixed を共有する型 (0x03 / 0x21 / 0x23) を取り違えて encode すると、
-/// decode 側が別 variant へ解釈したり拒否したりしてラウンドトリップが壊れるため、
-/// encode 側で variant を厳密に拒否することを固定する。
+/// LengthPrefixed を共有する型 (0x03 / 0x23) や、専用のエンコーディングを持つ型 (0x21) で
+/// variant を取り違えて encode すると、decode 側が別 variant へ解釈したり拒否したりして
+/// ラウンドトリップが壊れるため、encode 側で variant を厳密に拒否することを固定する。
 mod param_encoding_strictness {
     use super::*;
     use shiguredo_moqt::message_parameter::{
@@ -266,19 +316,34 @@ mod param_encoding_strictness {
     }
 
     #[test]
-    fn location_filter_type_accepts_length_prefixed() {
-        // 0x21 は LengthPrefixed のみを受け付ける
+    fn location_filter_type_rejects_length_prefixed() {
+        // 0x21 に生の LengthPrefixed を encode することはできない
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LengthPrefixed(vec![0x00]),
+        });
+        let mut buf = Vec::new();
+
+        assert_eq!(
+            params.encode(&mut buf),
+            Err(MessageError::InvalidParameter),
+            "LOCATION_FILTER に LengthPrefixed は許可されないこと"
+        );
+    }
+
+    #[test]
+    fn location_filter_type_accepts_location_filter() {
+        // 0x21 は LocationFilter variant のみを受け付け、ラウンドトリップする
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
         let mut buf = Vec::new();
         params
             .encode(&mut buf)
-            .expect("LOCATION_FILTER の LengthPrefixed encode は成功する");
+            .expect("LOCATION_FILTER の LocationFilter encode は成功する");
         let (decoded, _) =
             MessageParameters::decode(&buf).expect("encode した LOCATION_FILTER は decode できる");
         assert_eq!(
@@ -413,7 +478,7 @@ mod accessors {
         assert_eq!(params.largest_object(), None);
         assert_eq!(params.forward(), None);
         assert_eq!(params.subscriber_priority(), None);
-        assert_eq!(params.location_filter(), None);
+        assert_eq!(params.location_filter_typed(), Ok(None));
         assert_eq!(params.group_order(), None);
         assert_eq!(params.new_group_request(), None);
         assert_eq!(params.fill_timeout(), None);
@@ -497,19 +562,19 @@ mod accessors {
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+            value: MessageParameterValue::LocationFilter(filter),
         });
 
         assert_eq!(params.location_filter_typed(), Ok(Some(filter)));
     }
 
-    /// 空の LOCATION_FILTER (Length 0 = no filter) は typed では None になる
+    /// Location Filter Type 0x00 (None) は typed では None になる
     #[test]
-    fn typed_location_filter_empty_is_none() {
+    fn typed_location_filter_no_filter_is_none() {
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(Vec::new()),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
         });
 
         assert_eq!(params.location_filter_typed(), Ok(None));
@@ -579,7 +644,7 @@ mod accessors {
     }
 }
 
-/// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): `location_filter_update` の 3 状態。
+/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): `location_filter_update` の 3 状態。
 mod location_filter_update {
     use super::*;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
@@ -594,12 +659,13 @@ mod location_filter_update {
     }
 
     #[test]
-    fn empty_is_removed() {
-        // Length 0 は no filter であり、REQUEST_UPDATE ではフィルタ削除になる
+    fn no_filter_is_removed() {
+        // Location Filter Type 0x00 (None) は no filter であり、
+        // REQUEST_UPDATE ではフィルタ削除になる
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(Vec::new()),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
         });
 
         assert_eq!(
@@ -610,13 +676,11 @@ mod location_filter_update {
 
     #[test]
     fn present_is_set() {
-        // 非空の正当値は typed filter として返る
+        // 正当な filter 値は typed filter として返る
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
 
         assert_eq!(
@@ -626,27 +690,48 @@ mod location_filter_update {
     }
 
     #[test]
-    fn malformed_is_err() {
-        // 5 フィールドは定義された serialization と一致しない
+    fn non_location_filter_value_is_err() {
+        // 公開 API による in-memory 構築でのみ起こりうる型不一致を拒否する
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
+            value: MessageParameterValue::LengthPrefixed(vec![0x00]),
         });
 
         assert!(matches!(
             params.location_filter_update(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::ProtocolViolation(_))
         ));
     }
 
     #[test]
-    fn empty_survives_encode_decode_round_trip() {
-        // Length 0 の削除指示が wire 往復で保たれること
+    fn overflow_is_err() {
+        // StartGroup + EndGroupDelta が 2^64 - 1 を超える値は拒否する
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(Vec::new()),
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end_group_delta: u64::MAX,
+            }),
+        });
+
+        assert!(matches!(
+            params.location_filter_update(),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn no_filter_survives_encode_decode_round_trip() {
+        // Location Filter Type 0x00 の削除指示が wire 往復で保たれること
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
         });
         let mut buf = Vec::new();
         params
@@ -661,7 +746,8 @@ mod location_filter_update {
     }
 }
 
-/// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): LocationFilter の実効 Start / End Location 導出。
+/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+/// LocationFilter の符号化 (golden バイト列とエラー分類) と実効 Start / End Location の導出。
 mod location_filter_derivation {
     use super::*;
     use shiguredo_moqt::message_parameter::LocationFilterContext;
@@ -675,7 +761,8 @@ mod location_filter_derivation {
 
     // RelativeGroup / NextObject の通常導出 (group/object の関係) は
     // pbt/tests/prop_message_parameter.rs の property で網羅する。ここでは PBT が生成しない
-    // 境界・特異値 (未配信 None、クランプ、overflow、open-ended / Fetch 終端、{0, 0} 正規化) を検証する。
+    // 境界・特異値 (未配信 None、クランプ、オーバーフロー、open-ended / Fetch 終端、
+    // Type 0x02 と Type 0x05 の区別) を検証する。
 
     #[test]
     fn undelivered_falls_back_to_zero() {
@@ -746,13 +833,154 @@ mod location_filter_derivation {
     }
 
     #[test]
-    fn absolute_start_zero_normalizes_to_next_object() {
-        // 2 フィールドとも 0 は wire 上区別できないため NextObject に正規化される
-        let bytes = LocationFilter::AbsoluteStart { start: loc(0, 0) }.encode_to_bytes();
+    fn absolute_start_zero_is_distinct_from_next_object() {
+        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は
+        // Type 0x02 (Absolute Start) と Type 0x05 (Next Object) を別の符号化として
+        // 定義するため、AbsoluteStart {0, 0} は NextObject に正規化されない
+        let filter = LocationFilter::AbsoluteStart { start: loc(0, 0) };
+        let bytes = filter.encode_to_bytes();
         assert_eq!(
             LocationFilter::decode(&bytes),
-            Ok(LocationFilter::NextObject)
+            Ok(LocationFilter::AbsoluteStart { start: loc(0, 0) })
         );
+        assert_eq!(
+            LocationFilter::NextObject.encode_to_bytes(),
+            vec![0x05],
+            "Next Object は Type 0x05 単独で符号化される"
+        );
+        assert_eq!(
+            filter.encode_to_bytes(),
+            vec![0x02, 0x00, 0x00],
+            "Absolute Start {{0, 0}} は Type 0x02 で符号化される"
+        );
+    }
+
+    #[test]
+    fn location_filter_type_bytes_are_fixed() {
+        // Type 0x00 / 0x05 はフィールドを持たず、Type 0x01〜0x04 は Type が定める数の
+        // vi64 フィールドを持つ (draft-ietf-moq-transport-22 §9.20.9)
+        //
+        // 6 形式すべてについて golden バイト列との encode / decode 双方向の一致を固定する。
+        // encode 側だけでは Type 0x01 の decode が StartGroup を読むことや消費バイト数を
+        // 検証できないため、decode 側も同じ表で突き合わせる。
+        let cases: [(Vec<u8>, LocationFilter); 6] = [
+            (vec![0x00], LocationFilter::NoFilter),
+            (
+                vec![0x01, 0x02],
+                LocationFilter::RelativeGroup { start_group: 2 },
+            ),
+            (
+                vec![0x02, 0x03, 0x04],
+                LocationFilter::AbsoluteStart { start: loc(3, 4) },
+            ),
+            (
+                vec![0x03, 0x03, 0x04, 0x05],
+                LocationFilter::AbsoluteRange {
+                    start: loc(3, 4),
+                    end_group_delta: 5,
+                },
+            ),
+            (
+                vec![0x04, 0x03, 0x04, 0x05, 0x06],
+                LocationFilter::AbsoluteRangeWithEnd {
+                    start: loc(3, 4),
+                    end_group_delta: 5,
+                    end_object: 6,
+                },
+            ),
+            (vec![0x05], LocationFilter::NextObject),
+        ];
+        for (bytes, filter) in cases {
+            assert_eq!(
+                filter.encode_to_bytes(),
+                bytes,
+                "golden バイト列 {bytes:?} への encode"
+            );
+            assert_eq!(
+                LocationFilter::decode(&bytes),
+                Ok(filter),
+                "golden バイト列 {bytes:?} からの decode"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        // 単体のバイト列を渡す decode は Location Filter 1 つ分の消費を要求する
+        let bytes = vec![0x00, 0x01];
+        assert!(matches!(
+            LocationFilter::decode(&bytes),
+            Err(MessageError::KeyValueFormattingError(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_unknown_location_filter_type() {
+        // Type 0x06 以上は PROTOCOL_VIOLATION (draft-ietf-moq-transport-22 §9.20.9)
+        assert!(matches!(
+            LocationFilter::decode(&[0x06]),
+            Err(MessageError::ProtocolViolation(_))
+        ));
+    }
+
+    #[test]
+    fn decode_missing_field_is_unexpected_eof() {
+        // Type 0x04 は 4 フィールドを要求するため、途中で切れた入力は UnexpectedEof
+        assert_eq!(
+            LocationFilter::decode(&[0x04, 0x01, 0x02]),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn no_filter_covers_whole_track() {
+        // Location Filter Type 0x00 (None) はフィルタなしであり、track 全体を通す
+        let largest = loc(5, 9);
+        assert_eq!(
+            LocationFilter::NoFilter.effective_start_location(Some(&largest)),
+            Some(loc(0, 0))
+        );
+        assert_eq!(
+            LocationFilter::NoFilter.effective_start_location(None),
+            Some(loc(0, 0))
+        );
+        assert_eq!(
+            LocationFilter::NoFilter
+                .effective_end_location(Some(&largest), LocationFilterContext::Subscription),
+            None
+        );
+        assert_eq!(
+            LocationFilter::NoFilter
+                .effective_end_location(Some(&largest), LocationFilterContext::Fetch),
+            Some(largest)
+        );
+        assert_eq!(
+            LocationFilter::NoFilter.effective_end_location(None, LocationFilterContext::Fetch),
+            None
+        );
+    }
+
+    #[test]
+    fn end_group_delta_boundary_at_max_is_valid() {
+        // StartGroup + EndGroupDelta == 2^64 - 1 は仕様上正当であり、拒否条件が
+        // 「2^64 - 1 を超える」から「2^64 - 1 以上」へ退行していないことを固定する
+        // (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+        let filter = LocationFilter::AbsoluteRange {
+            start: loc(1, 0),
+            end_group_delta: u64::MAX - 1,
+        };
+        let bytes = filter.encode_to_bytes();
+        assert_eq!(LocationFilter::decode(&bytes), Ok(filter));
+
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(filter),
+        });
+        let mut buf = Vec::new();
+        params.encode(&mut buf).expect("境界値の encode は成功する");
+        let (decoded, _) = MessageParameters::decode(&buf).expect("境界値の decode は成功する");
+        assert_eq!(decoded.location_filter_typed(), Ok(Some(filter)));
     }
 
     #[test]
@@ -841,7 +1069,7 @@ mod kvp_value_length_limit {
     #[test]
     fn length_prefixed_65536_bytes_encode_error() {
         use shiguredo_moqt::message_parameter::PARAM_SUBGROUP_FILTER;
-        // LOCATION_FILTER は encode 前の値形式検証 (validate_param_encoding) で先に落ちるため、
+        // 0x21 は Length を持たない Location Filter 符号化であり値長検証の対象外のため、
         // 値長検証だけを固定できる型を使う
         let param = MessageParameter {
             param_type: PARAM_SUBGROUP_FILTER,
@@ -862,12 +1090,12 @@ mod kvp_value_length_limit {
     /// デコード側で 65536 バイト長の LengthPrefixed 値は ProtocolViolation
     #[test]
     fn decode_length_prefixed_65536_bytes_error() {
-        use shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER;
+        use shiguredo_moqt::message_parameter::PARAM_SUBGROUP_FILTER;
         use shiguredo_moqt::varint;
-        // カウント=1, delta_key=PARAM_LOCATION_FILTER, length=65536
+        // カウント=1, delta_key=PARAM_SUBGROUP_FILTER, length=65536
         let mut buf = Vec::new();
         varint::encode(1, &mut buf); // count=1
-        varint::encode(PARAM_LOCATION_FILTER, &mut buf); // delta_key
+        varint::encode(PARAM_SUBGROUP_FILTER, &mut buf); // delta_key
         varint::encode(65536, &mut buf); // length=65536 (over limit)
         buf.push(0); // dummy data byte
         let err = MessageParameters::decode(&buf).unwrap_err();
@@ -1302,6 +1530,7 @@ mod validate_range_filters {
 /// PBT で表現できないワイヤバイト列の断定と、重複判定キーの境界だけを扱う。
 mod range_filter_multiple_appearance {
     use super::*;
+    use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
     use shiguredo_moqt::varint;
 
     /// Property Type を持たない Range Filter (0x25-0x27) の 1 Range 分のバイト列を作る
@@ -1512,9 +1741,9 @@ mod range_filter_multiple_appearance {
 
     /// `range_filters()` が同一型の全インスタンスを出現順に返すこと
     ///
-    /// 非 Range Filter 型に対するガードは、LengthPrefixed でありながら Range Filter ではない
-    /// LOCATION_FILTER (0x21) を実際に積んで検証する。値の型で弾かれる型 (EXPIRES 等) では
-    /// ガードを外しても素通りしてしまい、検証にならない。
+    /// 非 Range Filter 型に対するガードは、LengthPrefixed 値を持ちながら Range Filter ではない
+    /// AUTHORIZATION_TOKEN (0x03) を実際に積んで検証する。値の型でも弾かれる型 (EXPIRES 等や
+    /// LocationFilter 値を持つ 0x21) ではガードを外しても素通りしてしまい、検証にならない。
     #[test]
     fn range_filters_returns_all_instances_in_order() {
         let mut params = MessageParameters::new();
@@ -1522,10 +1751,8 @@ mod range_filter_multiple_appearance {
         params.push(filter_param(PARAM_OBJECTID_FILTER, filter_bytes(0, 1)));
         params.push(filter_param(PARAM_SUBGROUP_FILTER, filter_bytes(2, 7)));
         params.push(MessageParameter {
-            param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x01]),
         });
 
         let expected: Vec<&[u8]> = vec![&[0x00, 0x03], &[0x02, 0x07]];
@@ -1536,8 +1763,8 @@ mod range_filter_multiple_appearance {
         );
 
         assert!(
-            params.range_filters(PARAM_LOCATION_FILTER).is_empty(),
-            "LengthPrefixed でも Range Filter 型でなければ空の Vec を返さなければならない"
+            params.range_filters(PARAM_AUTHORIZATION_TOKEN).is_empty(),
+            "Range Filter 型でなければ空の Vec を返さなければならない"
         );
         assert!(
             params.range_filters(PARAM_PRIORITY_FILTER).is_empty(),
@@ -1547,7 +1774,7 @@ mod range_filter_multiple_appearance {
 
     /// `has_range_filters()` が Range Filter 型以外を数えないこと
     ///
-    /// LOCATION_FILTER (0x21) は LengthPrefixed だが Range Filter ではない。
+    /// LOCATION_FILTER (0x21) は Range Filter 型ではない。
     /// 判定が「パラメータが空でないか」に退化すると true を返してしまい、
     /// Range Filter を含まないメッセージにまで §3.3.2 の検証が走る。
     #[test]
@@ -1560,9 +1787,7 @@ mod range_filter_multiple_appearance {
 
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
         params.push(MessageParameter {
             param_type: PARAM_EXPIRES,
@@ -1608,7 +1833,7 @@ mod fill_parameters {
         PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT, PARAM_GROUP_ORDER, PARAM_SUBSCRIBER_PRIORITY,
     };
 
-    /// FILL 内側パラメータ群を作る (Table 6 の正当な組み合わせ)
+    /// FILL 内側パラメータ群を作る (Table 7 の正当な組み合わせ)
     fn sample_inner() -> MessageParameters {
         let mut inner = MessageParameters::new();
         inner.push(MessageParameter {
@@ -1621,15 +1846,12 @@ mod fill_parameters {
         });
         inner.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::AbsoluteStart {
-                    start: Location {
-                        group_id: 1,
-                        object_id: 2,
-                    },
-                }
-                .encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+                start: Location {
+                    group_id: 1,
+                    object_id: 2,
+                },
+            }),
         });
         inner.push(MessageParameter {
             param_type: PARAM_GROUP_ORDER,
@@ -1655,9 +1877,7 @@ mod fill_parameters {
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
         params.push(fill_param(sample_inner()));
 
@@ -1669,7 +1889,10 @@ mod fill_parameters {
             MessageParameters::decode(&buf).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, buf.len());
         // 外側 LOCATION_FILTER と内側は別スコープで両方保持される
-        assert!(decoded.location_filter().is_some());
+        assert_eq!(
+            decoded.location_filter_typed(),
+            Ok(Some(LocationFilter::NextObject))
+        );
         let inner = decoded
             .fill_parameters()
             .expect("FILL_PARAMETERS が保持されること");
@@ -1689,7 +1912,7 @@ mod fill_parameters {
     fn empty_inner_parameters_are_encoded_with_count_zero() {
         // 内側 0 個の FILL_PARAMETERS は Number of Parameters = 0 の 1 バイト (`0x00`) で表す。
         // 値が空バイト列になるのではなく、その外側の Length varint が 1 (`0x01`) になる。
-        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の値は
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) の値は
         // 各メッセージ形式の `Number of Parameters (vi64), Parameters (..)` として符号化する。
         let mut params = MessageParameters::new();
         params.push(fill_param(MessageParameters::new()));
@@ -1763,8 +1986,8 @@ mod fill_parameters {
     }
 
     #[test]
-    fn table6_violation_on_decode_is_protocol_violation() {
-        // 内側に Table 6 外 (AUTHORIZATION_TOKEN) を含むと PROTOCOL_VIOLATION
+    fn table7_violation_on_decode_is_protocol_violation() {
+        // 内側に Table 7 外 (AUTHORIZATION_TOKEN) を含むと PROTOCOL_VIOLATION
         // 内側: count=1, delta=0x03, len=3, USE_VALUE(token_type=1, value=[9])
         let inner = vec![0x01, 0x03, 0x03, 0x03, 0x01, 0x09];
         // 外側: count=1, delta=0x23, len=inner.len(), inner...
@@ -1776,7 +1999,7 @@ mod fill_parameters {
             Err(MessageError::ProtocolViolation(
                 "message parameter not allowed in this message type"
             )),
-            "Table 6 外の内側パラメータは PROTOCOL_VIOLATION であること"
+            "Table 7 外の内側パラメータは PROTOCOL_VIOLATION であること"
         );
     }
 
@@ -1868,9 +2091,9 @@ mod fill_parameters {
     }
 
     #[test]
-    fn known_type_outside_table6_and_trailing_bytes_prefer_formatting_error() {
+    fn known_type_outside_table7_and_trailing_bytes_prefer_formatting_error() {
         // 内側の余剰バイトの検査は `validate_scope` より先に行う。
-        // 内側: count=1, delta=0x10 (FORWARD は Table 6 に無い) + 値 0x00 + 余剰 0xFF
+        // 内側: count=1, delta=0x10 (FORWARD は Table 7 に無い) + 値 0x00 + 余剰 0xFF
         let inner = vec![0x01, 0x10, 0x00, 0xFF];
         let mut buf = vec![0x01, 0x23, inner.len() as u8];
         buf.extend_from_slice(&inner);
@@ -1879,10 +2102,10 @@ mod fill_parameters {
             Err(MessageError::KeyValueFormattingError(
                 "FILL_PARAMETERS has trailing bytes"
             )),
-            "Table 6 外のパラメータと余剰バイトが同時にある場合は余剰バイトを優先すること"
+            "Table 7 外のパラメータと余剰バイトが同時にある場合は余剰バイトを優先すること"
         );
 
-        // 余剰バイトが無ければ Table 6 外として PROTOCOL_VIOLATION になる (対照)
+        // 余剰バイトが無ければ Table 7 外として PROTOCOL_VIOLATION になる (対照)
         let inner = vec![0x01, 0x10, 0x00];
         let mut buf = vec![0x01, 0x23, inner.len() as u8];
         buf.extend_from_slice(&inner);
@@ -1891,7 +2114,7 @@ mod fill_parameters {
             Err(MessageError::ProtocolViolation(
                 "message parameter not allowed in this message type"
             )),
-            "Table 6 外のパラメータだけがある場合は PROTOCOL_VIOLATION であること"
+            "Table 7 外のパラメータだけがある場合は PROTOCOL_VIOLATION であること"
         );
     }
 
@@ -2041,7 +2264,7 @@ mod fill_parameters {
 
     #[test]
     fn fill_inner_track_property_filter_rejected_on_decode() {
-        // TRACK_PROPERTY_FILTER (0x29) は Table 6 外のため decode で PROTOCOL_VIOLATION
+        // TRACK_PROPERTY_FILTER (0x29) は Table 7 外のため decode で PROTOCOL_VIOLATION
         // 内側: count=1, delta=0x29, len=0
         let inner = vec![0x01, 0x29, 0x00];
         let mut buf = vec![0x01, 0x23, inner.len() as u8];
@@ -2052,7 +2275,7 @@ mod fill_parameters {
                 MessageParameters::decode(&buf),
                 Err(MessageError::ProtocolViolation(_))
             ),
-            "Table 6 外の 0x29 は PROTOCOL_VIOLATION であること"
+            "Table 7 外の 0x29 は PROTOCOL_VIOLATION であること"
         );
     }
 }
@@ -2094,9 +2317,7 @@ mod resulting_publish_parameters {
         });
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
         params.push(MessageParameter {
             param_type: PARAM_OBJECT_DELIVERY_TIMEOUT,

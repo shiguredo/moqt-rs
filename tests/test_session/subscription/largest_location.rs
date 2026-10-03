@@ -717,7 +717,7 @@ fn subscribe_establishment_resolves_relative_filter_with_publisher_largest() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(LocationFilter::NextObject.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
     });
     let rid2 = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params)

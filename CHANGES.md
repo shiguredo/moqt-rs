@@ -51,6 +51,12 @@
   - 公開構造体へのフィールド追加 (構造体リテラル構築と全フィールドを列挙する構造体パターンが壊れる) を伴う破壊的変更である
   - `PartialEq` / `Debug` は削除履歴も対象になる。JSON が同一でも削除履歴が異なれば不一致になり、`Debug` には削除済みトラックも現れる
   - @voluntas
+- [CHANGE] LOCATION_FILTER (0x21) を draft-ietf-moq-transport-22 §9.20.9 の Location Filter Type 符号化に変更する
+  - length-prefixed 符号化を廃止し、先頭の Location Filter Type (vi64) が後続フィールドを定める自己境界の符号化にする (ワイヤ非互換)
+  - フィルタなしを `LocationFilter::NoFilter` (Type 0x00)、Next Object を `LocationFilter::NextObject` (Type 0x05) として区別し、`AbsoluteStart {0, 0}` の Next Object への正規化を廃止する
+  - 0x21 の値表現を `MessageParameterValue::LengthPrefixed` から `MessageParameterValue::LocationFilter` に変更し、生バイト API `MessageParameters::location_filter()` を削除する。公開 enum への variant 追加 (`MessageParameterValue::LocationFilter` / `LocationFilter::NoFilter`) を伴うため、網羅 `match` を書いている利用側は壊れる
+  - `location_filter_typed()` / `location_filter_update()` は値の形式不一致と StartGroup + EndGroupDelta のオーバーフローで `ProtocolViolation` を返し、decode は未知の Location Filter Type を `ProtocolViolation`、必須フィールドの欠落を `UnexpectedEof` として返す (旧: フィールド数 0 または 5 以上は `KeyValueFormattingError`)
+  - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
 - [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する

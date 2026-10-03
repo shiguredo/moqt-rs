@@ -116,23 +116,20 @@ fn notify_forward_round_trip_updates_forward_state() {
 }
 
 /// LOCATION_FILTER と LARGEST_OBJECT が subscriber 側状態に反映される
-/// (draft-ietf-moq-transport-21 §9.10 / §9.20.10 / §9.20.18)
+/// (draft-ietf-moq-transport-22 §9.10 / §9.20.9 / §9.20.17)
 #[test]
 fn notify_filter_and_largest_reflected() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+        }),
     });
     params.push(MessageParameter {
         param_type: PARAM_LARGEST_OBJECT,
@@ -467,8 +464,8 @@ fn notify_with_invalid_forward_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// zero-length LOCATION_FILTER の通知で filter が削除される
-/// (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+/// Location Filter Type 0x00 (None) の LOCATION_FILTER の通知で filter が削除される
+/// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))
 #[test]
 fn notify_with_removed_filter_clears_filter() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object(0, 0);
@@ -476,16 +473,13 @@ fn notify_with_removed_filter_clears_filter() {
     let mut upd = MessageParameters::new();
     upd.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+        }),
     });
     client
         .send_request_update(sub_rid, upd)
@@ -509,11 +503,11 @@ fn notify_with_removed_filter_clears_filter() {
             .filter
             .is_some()
     );
-    // zero-length 通知で削除する
+    // Type 0x00 (None) の通知で削除する
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
     });
     server
         .send_publish_state_notify(sub_rid, params)
@@ -535,7 +529,7 @@ fn notify_with_removed_filter_clears_filter() {
             .expect("テストフィクスチャの前提条件を満たす")
             .filter
             .is_none(),
-        "zero-length 通知で filter が削除されること"
+        "Type 0x00 (None) の通知で filter が削除されること"
     );
 }
 
@@ -548,16 +542,13 @@ fn notify_omitted_fields_stay_unchanged() {
     let mut upd = MessageParameters::new();
     upd.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+        }),
     });
     client
         .send_request_update(sub_rid, upd)
@@ -598,16 +589,13 @@ fn notify_omitted_fields_stay_unchanged() {
     let mut filter_only = MessageParameters::new();
     filter_only.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+        }),
     });
     server
         .send_publish_state_notify(sub_rid, filter_only)
@@ -717,21 +705,26 @@ fn notify_send_with_invalid_forward_rejected_without_side_effects() {
     }
 }
 
-/// 不正形式 filter の通知送信は送信前に拒否し副作用を残さない
+/// EndGroupDelta がオーバーフローする filter の通知送信は送信前に拒否し副作用を残さない
+/// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 #[test]
-fn notify_send_with_malformed_filter_rejected_without_side_effects() {
+fn notify_send_with_filter_end_group_overflow_rejected_without_side_effects() {
     let (_client, mut server, sub_rid) = establish_sub_with_object(0, 0);
     // EndGroupDelta 溢出の LOCATION_FILTER (Start {1, 0} + Delta MAX は溢出する)
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![
-            0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        ]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = server
         .send_publish_state_notify(sub_rid, params)
-        .expect_err("不正形式 filter の通知は送信前に拒否されること");
+        .expect_err("オーバーフローする filter の通知は送信前に拒否されること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert!(
         server
@@ -743,17 +736,22 @@ fn notify_send_with_malformed_filter_rejected_without_side_effects() {
     );
 }
 
-/// 不正形式 filter の通知受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// EndGroupDelta がオーバーフローする filter の通知受信は PROTOCOL_VIOLATION で
+/// セッションを閉じる (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 #[test]
-fn notify_with_malformed_filter_closes_session() {
+fn notify_with_filter_end_group_overflow_closes_session() {
     let (mut _client, mut server, sub_rid) = establish_sub_with_object(0, 0);
-    // decode 層を迂回して不正形式 filter を直接受信させる
+    // decode 層を迂回してオーバーフローする filter を直接受信させる
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![
-            0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        ]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = server
         .recv_stream_message(

@@ -102,10 +102,10 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
         }
         PARAM_LOCATION_FILTER => MessageParameter {
             param_type,
-            value: MessageParameterValue::LengthPrefixed(sample_location_filter_bytes(ctx)),
+            value: MessageParameterValue::LocationFilter(sample_location_filter(ctx)),
         },
-        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-        // 内側は Table 6 の別スコープとして生成する (再帰なし)。
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // 内側は Table 7 の別スコープとして生成する (再帰なし)。
         // decode 時に typed variant に変換されるため、往復には typed variant を使う。
         PARAM_FILL_PARAMETERS => MessageParameter {
             param_type,
@@ -208,31 +208,27 @@ fn sample_location(ctx: &mut noprop::TestCaseContext) -> Location {
     }
 }
 
-fn sample_location_filter_bytes(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
-    // 重み付きで 6 通りを生成する。空バイト列は Length 0 (no filter) の削除指示であり、
-    // encode/decode 往復可能として受け付ける。
+fn sample_location_filter(ctx: &mut noprop::TestCaseContext) -> LocationFilter {
+    // 重み付きで 6 通りを生成する。Location Filter Type 0x00 (None) も
+    // encode/decode 往復可能な値として受け付ける。
     match noprop::sample_weighted_index(ctx, &[2, 2, 2, 2, 2, 1]) {
         0 => LocationFilter::RelativeGroup {
             start_group: sample_small_varint(ctx),
-        }
-        .encode_to_bytes(),
-        1 => LocationFilter::NextObject.encode_to_bytes(),
+        },
+        1 => LocationFilter::NextObject,
         2 => LocationFilter::AbsoluteStart {
             start: sample_location(ctx),
-        }
-        .encode_to_bytes(),
+        },
         3 => LocationFilter::AbsoluteRange {
             start: sample_location(ctx),
             end_group_delta: sample_small_varint(ctx),
-        }
-        .encode_to_bytes(),
+        },
         4 => LocationFilter::AbsoluteRangeWithEnd {
             start: sample_location(ctx),
             end_group_delta: sample_small_varint(ctx),
             end_object: sample_small_varint(ctx),
-        }
-        .encode_to_bytes(),
-        _ => Vec::new(),
+        },
+        _ => LocationFilter::NoFilter,
     }
 }
 
@@ -306,7 +302,7 @@ const SUBSCRIBE_PARAMS: &[u64] = &[
     PARAM_PRIORITY_FILTER,
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
-// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) Table 6:
+// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) Table 7:
 // FILL_PARAMETERS 内側スコープ。`src/message_parameter.rs` の
 // `FILL_PARAMETERS_ALLOWED_PARAMS` と一致させること。
 const FILL_INNER_PARAMS: &[u64] = &[
@@ -378,7 +374,7 @@ const FETCH_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 const FETCH_OK_PARAMS: &[u64] = &[];
-// draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY) / §9.20.10 / §9.20.18 / §9.20.19:
+// draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) / §9.20.9 / §9.20.17 / §9.20.18:
 // `src/message.rs::PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` と一致させること。
 const PUBLISH_STATE_NOTIFY_PARAMS: &[u64] =
     &[PARAM_FORWARD, PARAM_LOCATION_FILTER, PARAM_LARGEST_OBJECT];
@@ -516,6 +512,36 @@ fn roundtrip() -> noprop::TestResult {
     assert!(
         notify_seen.get(),
         "PublishStateNotify のケースが 1 つも観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// LOCATION_FILTER の sampler が 6 形式すべてを生成すること (roundtrip のカバレッジゲート)
+///
+/// `roundtrip` は sampler が生成した値だけを往復させるため、sampler が特定の Location
+/// Filter Type を生成しないとその形式の往復が検証されない。重み付き抽選の結果に依存せず
+/// 6 形式すべてが現れることをここで固定する (draft-ietf-moq-transport-22 §9.20.9)。
+#[test]
+fn sample_location_filter_covers_all_types() -> noprop::TestResult {
+    let seen = std::cell::Cell::new(0u8);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let filter = sample_location_filter(ctx);
+        let bit = match filter {
+            LocationFilter::NoFilter => 0b000001,
+            LocationFilter::RelativeGroup { .. } => 0b000010,
+            LocationFilter::AbsoluteStart { .. } => 0b000100,
+            LocationFilter::AbsoluteRange { .. } => 0b001000,
+            LocationFilter::AbsoluteRangeWithEnd { .. } => 0b010000,
+            LocationFilter::NextObject => 0b100000,
+        };
+        seen.set(seen.get() | bit);
+        Ok(())
+    })?;
+    assert_eq!(
+        seen.get(),
+        0b111111,
+        "LOCATION_FILTER の 6 形式すべてが生成されること\n{runner}"
     );
     Ok(())
 }

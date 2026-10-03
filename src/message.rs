@@ -212,9 +212,9 @@ pub(crate) const PUBLISH_ALLOWED_PARAMS: &[u64] = &[
 ];
 
 /// PUBLISH_STATE_NOTIFY で許可されるパラメータ型
-/// (draft-ietf-moq-transport-21 §9.10 (PUBLISH_STATE_NOTIFY) /
-/// §9.20.10 (LOCATION FILTER Parameter) / §9.20.18 (LARGEST OBJECT Parameter) /
-/// §9.20.19 (FORWARD Parameter) の MAY appear 列挙)
+/// (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) /
+/// §9.20.9 (LOCATION FILTER Parameter) / §9.20.17 (LARGEST OBJECT Parameter) /
+/// §9.20.18 (FORWARD Parameter) の MAY appear 列挙)
 ///
 /// 送信側の `send_publish_state_notify` (src/session/subscription/send.rs) が
 /// 状態遷移前にスコープ検証するために `pub(crate)` で公開している。

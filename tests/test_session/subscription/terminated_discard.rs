@@ -774,30 +774,24 @@ fn shared_alias_all_candidates_filtered_out_keeps_filtered_out() {
     let mut filtered_params = MessageParameters::new();
     filtered_params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 1,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+        }),
     });
     let _rid1 = establish_subscribe(&mut client, &mut server, 500, filtered_params);
     // rid2 は group 2 以降のみ通す Location Filter (キャンセル後は候補から除外される)
     let mut filtered_params2 = MessageParameters::new();
     filtered_params2.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 2,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 2,
+                object_id: 0,
+            },
+        }),
     });
     let rid2 = establish_subscribe(&mut client, &mut server, 500, filtered_params2);
     client
@@ -836,15 +830,12 @@ fn shared_alias_cancelled_subscription_does_not_poison_tracking() {
     let mut filtered_params = MessageParameters::new();
     filtered_params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 2,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 2,
+                object_id: 0,
+            },
+        }),
     });
     let rid1 = establish_subscribe(&mut client, &mut server, 500, filtered_params);
     client

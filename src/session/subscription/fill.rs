@@ -1,4 +1,4 @@
-//! FILL_PARAMETERS と fill fetch stream (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))
+//! FILL_PARAMETERS と fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
 //!
 //! Joining FETCH の廃止に伴い、SUBSCRIBE / REQUEST_UPDATE の FILL_PARAMETERS
 //! パラメータ (Type 0x23) が fill fetch stream を要求する。publisher は
@@ -11,11 +11,12 @@ use super::super::types::{SessionError, SessionEvent, SubscriptionState, TrackRo
 use crate::error::SESSION_PROTOCOL_VIOLATION;
 use crate::message::common::Location;
 use crate::message_parameter::{
-    FILL_PARAMETERS_ALLOWED_PARAMS, LocationFilter, LocationFilterContext, MessageParameters,
+    FILL_PARAMETERS_ALLOWED_PARAMS, LocationFilter, LocationFilterContext, LocationFilterUpdate,
+    MessageParameters,
 };
 
-/// 送信前の FILL_PARAMETERS 事前検証 (Table 6 スコープ + 内側 LOCATION_FILTER)
-/// (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))
+/// 送信前の FILL_PARAMETERS 事前検証 (Table 7 スコープ + 内側 LOCATION_FILTER)
+/// (draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter))
 ///
 /// 外側 scope と同様、request_id 発行・状態更新より前に検証し、不正 inner の
 /// 送出と孤児状態 (登録済みだが I/O 層 encode で失敗する) を防ぐ。
@@ -44,12 +45,13 @@ pub(super) fn validate_outgoing_fill_parameters(
 
 /// FILL_PARAMETERS 付きメッセージの fill fetch stream 開設要否を判定する
 ///
-/// draft-ietf-moq-transport-21 §3.4 (Fill Semantics) / §3.4.1 (Opening and
+/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1 (Opening and
 /// Closing Fill Fetch Streams):
 /// - fill range は FILL 内側の LOCATION_FILTER、省略時は `subscription_filter`
 ///   (subscription の Location filter)、どちらもなければ track 全体
 ///   (Largest Object まで) とする
-/// - FILL 内側の zero-length LOCATION_FILTER は track 全体を指す
+/// - FILL 内側の Location Filter Type 0x00 (None) は track 全体を指す
+///   (§3.4 の「zero-length」は旧符号化の名残であり、新符号化では Type 0x00 が対応する)
 /// - fill range が empty、または Largest Object より後に始まる場合は開設しない
 /// - Largest Object が未知 (`largest` が `None`) の場合は開設しない
 ///   (fill range は Largest Object を超えられず、送れる Object が確定しないため)
@@ -68,18 +70,19 @@ fn should_open_fill_stream(
     let Some(largest) = largest else {
         return false;
     };
-    // 内側 LOCATION_FILTER → subscription filter → track 全体の順で fill range を決める
-    let filter: Option<LocationFilter> = match fill.location_filter() {
+    // 内側 LOCATION_FILTER → subscription filter → track 全体の順で fill range を決める。
+    // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): 内側の Location Filter Type 0x00
+    // (None) は track 全体 (Largest Object まで) を指し、内側を省略した場合は
+    // subscription の Location filter を継承する。両者を区別するため 3 状態で判定する。
+    let filter: Option<LocationFilter> = match fill.location_filter_update() {
         // 内側省略時は subscription の filter を使う
-        None => subscription_filter.cloned(),
-        // 内側 zero-length は track 全体を指す
-        Some([]) => None,
-        Some(bytes) => match LocationFilter::decode(bytes) {
-            Ok(filter) => Some(filter),
-            // デコード済みメッセージでは到達しない (codec 層で検証済み)。
-            // API 経由の不正入力では安全側に倒して開設しない。
-            Err(_) => return false,
-        },
+        Ok(LocationFilterUpdate::Unchanged) => subscription_filter.copied(),
+        // 内側 Type 0x00 は track 全体を指す
+        Ok(LocationFilterUpdate::Removed) => None,
+        Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
+        // 0x21 が Location Filter 形式でない場合はデコード済みメッセージでは到達しない。
+        // API 経由の不正入力では安全側に倒して開設しない。
+        Err(_) => return false,
     };
     let (start, end) = match filter.as_ref() {
         // track 全体: 先頭から Largest Object まで

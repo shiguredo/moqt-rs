@@ -588,8 +588,8 @@ impl Session {
         }
         let track_ns = fetch.track_namespace;
         let track_name = fetch.track_name;
-        // draft-ietf-moq-transport-21 は値域 MUST (§9.20.10 (LOCATION FILTER Parameter) の
-        // StartGroup + EndGroupDelta 溢出や §9.20.9 (GROUP ORDER Parameter) 等) と
+        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.9 (LOCATION FILTER Parameter) の
+        // StartGroup + EndGroupDelta オーバーフローや §9.20.8 (GROUP ORDER Parameter) 等) と
         // 予約名前空間拒否の優先順位を規定しない。宛先自体が仕様上存在しない予約名前空間の拒否を
         // LOCATION_FILTER の decode より先に行う意図した選択である (値域 MUST は wire 経路では
         // decode 層がハンドラ到達前に発火するため、優先順位が観測されるのは API 経路で値域外の
@@ -618,9 +618,10 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_DOES_NOT_EXIST, reason);
             return Ok(());
         }
-        // draft-ietf-moq-transport-21 §9.11 (FETCH) / §3.3.1 (Location Filters):
-        // Fetch range は LOCATION_FILTER パラメータで指定する。省略時と Length 0 は
-        // unfiltered (先頭から Largest Object まで) として扱う。
+        // draft-ietf-moq-transport-22 §9.11 (FETCH) / §3.3.1 (Location Filters) /
+        // §9.20.9 (LOCATION FILTER Parameter):
+        // Fetch range は LOCATION_FILTER パラメータで指定する。省略時と Location Filter
+        // Type 0x00 (None) は unfiltered (先頭から Largest Object まで) として扱う。
         // 不正エンコーディングは wire 経路ではデコード層が検証するため到達せず、API 経路で
         // 手組みしたメッセージのみ到達する。安全側にセッションを閉じる (SUBSCRIBE 受信経路と対称)。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。

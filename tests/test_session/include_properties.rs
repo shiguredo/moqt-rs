@@ -171,17 +171,14 @@ fn fetch_include_properties_zero_empties_fetch_ok() {
     let mut params = include_properties_params(0);
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 5,
-                end_object: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 5,
+            end_object: 0,
+        }),
     });
     let rid = client
         .send_fetch(ns(&[b"live"]), b"cam".to_vec(), params)

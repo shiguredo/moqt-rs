@@ -2781,7 +2781,8 @@ fn send_request_update_rejects_invalid_forward_value() {
 #[test]
 fn send_request_update_rejects_invalid_location_filter() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        PARAM_LOCATION_FILTER,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2798,7 +2799,7 @@ fn send_request_update_rejects_invalid_location_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // delivery timeout + FORWARD=0 (正常値) + 5 フィールドの壊れた LOCATION_FILTER を混在させる
+    // delivery timeout + FORWARD=0 (正常値) + EndGroupDelta がオーバーフローする不正な LOCATION_FILTER を混在させる
     // (修正前は delivery timeout と forward_state=0 が先に適用され、
     // Location Filter 検証失敗後に両方が残留していた。forward_state は SUBSCRIBE 時点で
     // デフォルト 1 のため、適用されなければ 1 のまま残ることで判別できる)
@@ -2809,7 +2810,13 @@ fn send_request_update_rejects_invalid_location_filter() {
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = client.send_request_update(rid, params).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
@@ -2859,7 +2866,8 @@ fn send_request_update_rejects_invalid_location_filter() {
 #[test]
 fn send_request_update_applies_valid_location_filter() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        PARAM_LOCATION_FILTER,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2876,7 +2884,7 @@ fn send_request_update_applies_valid_location_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // delivery timeout + FORWARD=0 + NextObject ([0x00, 0x00]) の正常 filter を混在させる
+    // delivery timeout + FORWARD=0 + NextObject (Type 0x05) の正常 filter を混在させる
     let mut params = delivery_timeout_params(100);
     params.push(MessageParameter {
         param_type: PARAM_FORWARD,
@@ -2884,7 +2892,7 @@ fn send_request_update_applies_valid_location_filter() {
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
     });
     client
         .send_request_update(rid, params)
@@ -2908,13 +2916,13 @@ fn send_request_update_applies_valid_location_filter() {
     );
 }
 
-/// REQUEST_UPDATE の Length 0 (no filter) で Location Filter が削除されること
+/// REQUEST_UPDATE の Location Filter Type 0x00 (None) で Location Filter が削除されること
 ///
-/// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 は no filter であり、
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
 /// REQUEST_UPDATE ではフィルタ削除になる。パラメータ省略時は値 unchanged のため、
 /// フィルタなしの更新では既存フィルタが維持される。
 #[test]
-fn send_request_update_empty_location_filter_removes_filter() {
+fn send_request_update_no_filter_location_filter_removes_filter() {
     use shiguredo_moqt::message_parameter::{
         LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
         PARAM_LOCATION_FILTER,
@@ -2943,9 +2951,7 @@ fn send_request_update_empty_location_filter_removes_filter() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart { start }.encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart { start }),
     });
     client
         .send_request_update(rid, params)
@@ -2986,39 +2992,40 @@ fn send_request_update_empty_location_filter_removes_filter() {
         "LOCATION_FILTER 省略時は既存フィルタが維持されること"
     );
 
-    // Length 0 の更新でフィルタが削除される
+    // Type 0x00 (None) の更新でフィルタが削除される
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
     });
     client
         .send_request_update(rid, params)
-        .expect("Length 0 の REQUEST_UPDATE は送信できること");
+        .expect("Type 0x00 (None) の REQUEST_UPDATE は送信できること");
     let sub = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         sub.filter, None,
-        "Length 0 で Location Filter が削除されること"
+        "Type 0x00 (None) で Location Filter が削除されること"
     );
     assert_eq!(
         sub.filter_start, None,
-        "Length 0 で解決済みの Start Location が戻ること"
+        "Type 0x00 (None) で解決済みの Start Location が戻ること"
     );
     assert_eq!(
         sub.filter_end, None,
-        "Length 0 で解決済みの End Location が戻ること"
+        "Type 0x00 (None) で解決済みの End Location が戻ること"
     );
 }
 
-/// peer からの REQUEST_UPDATE (Set → Length 0) を REQUEST_OK で適用するとフィルタが削除されること
+/// peer からの REQUEST_UPDATE (Set → Location Filter Type 0x00) を REQUEST_OK で適用すると
+/// フィルタが削除されること
 ///
-/// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 は no filter であり、
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter であり、
 /// REQUEST_UPDATE ではフィルタ削除になる。受信側は pending_update_params に合体し、
 /// REQUEST_OK 応答時に適用する。
 #[test]
-fn recv_request_update_empty_filter_clears_on_request_ok() {
+fn recv_request_update_no_filter_clears_on_request_ok() {
     use shiguredo_moqt::message_parameter::{
         LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
     };
@@ -3038,7 +3045,7 @@ fn recv_request_update_empty_filter_clears_on_request_ok() {
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // AbsoluteStart {5, 0} を送り、Length 0 で削除する
+    // AbsoluteStart {5, 0} を送り、Type 0x00 (None) で削除する
     let start = Location {
         group_id: 5,
         object_id: 0,
@@ -3046,9 +3053,7 @@ fn recv_request_update_empty_filter_clears_on_request_ok() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart { start }.encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart { start }),
     });
     client
         .send_request_update(rid, params)
@@ -3072,7 +3077,7 @@ fn recv_request_update_empty_filter_clears_on_request_ok() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
     });
     client
         .send_request_update(rid, params)
@@ -3091,15 +3096,15 @@ fn recv_request_update_empty_filter_clears_on_request_ok() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         sub.filter, None,
-        "Set 後の Length 0 でフィルタが削除されること"
+        "Set 後の Type 0x00 (None) でフィルタが削除されること"
     );
     assert_eq!(
         sub.filter_start, None,
-        "Set 後の Length 0 で解決済み Start が戻ること"
+        "Set 後の Type 0x00 (None) で解決済み Start が戻ること"
     );
     assert_eq!(
         sub.filter_end, None,
-        "Set 後の Length 0 で解決済み End が戻ること"
+        "Set 後の Type 0x00 (None) で解決済み End が戻ること"
     );
 
     // LOCATION_FILTER 省略の追随更新では削除状態が維持される (unchanged)
@@ -3130,7 +3135,7 @@ fn recv_request_update_empty_filter_clears_on_request_ok() {
     );
 }
 
-/// peer からの REQUEST_UPDATE (Length 0 → Set) を REQUEST_OK で適用すると Set が勝つこと
+/// peer からの REQUEST_UPDATE (Type 0x00 (None) → Set) を REQUEST_OK で適用すると Set が勝つこと
 #[test]
 fn recv_request_update_set_after_removed_wins() {
     use shiguredo_moqt::message_parameter::{
@@ -3152,11 +3157,11 @@ fn recv_request_update_set_after_removed_wins() {
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
 
-    // Length 0 を送り、AbsoluteStart {5, 0} で上書きする
+    // Type 0x00 (None) を送り、AbsoluteStart {5, 0} で上書きする
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
     });
     client
         .send_request_update(rid, params)
@@ -3172,9 +3177,7 @@ fn recv_request_update_set_after_removed_wins() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart { start }.encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart { start }),
     });
     client
         .send_request_update(rid, params)
@@ -3194,7 +3197,7 @@ fn recv_request_update_set_after_removed_wins() {
     assert_eq!(
         sub.filter,
         Some(LocationFilter::AbsoluteStart { start }),
-        "Length 0 の後の Set が適用されること"
+        "Type 0x00 (None) の後の Set が適用されること"
     );
     assert_eq!(
         sub.filter_start,
@@ -3212,7 +3215,8 @@ fn recv_request_update_set_after_removed_wins() {
 #[test]
 fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD,
+        PARAM_LOCATION_FILTER,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -3229,7 +3233,7 @@ fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // FORWARD=2 (値域外) + 5 フィールドの壊れた LOCATION_FILTER の両方を混在させる
+    // FORWARD=2 (値域外) + EndGroupDelta がオーバーフローする不正な LOCATION_FILTER の両方を混在させる
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_FORWARD,
@@ -3237,7 +3241,13 @@ fn send_request_update_rejects_invalid_forward_before_invalid_filter() {
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = client.send_request_update(rid, params).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
@@ -3753,9 +3763,9 @@ fn request_update_relative_filter_resolves_with_current_largest() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::RelativeGroup { start_group: 0 }.encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 0,
+        }),
     });
     client
         .send_request_update(rid, params)

@@ -737,7 +737,7 @@ fn send_fetch_with_invalid_group_order_returns_error_without_closing() {
     });
     params.push(MessageParameter {
         param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
+        value: MessageParameterValue::LocationFilter(
             shiguredo_moqt::message_parameter::LocationFilter::AbsoluteRangeWithEnd {
                 start: Location {
                     group_id: 0,
@@ -745,8 +745,7 @@ fn send_fetch_with_invalid_group_order_returns_error_without_closing() {
                 },
                 end_group_delta: 1,
                 end_object: 0,
-            }
-            .encode_to_bytes(),
+            },
         ),
     });
     let err = client
@@ -831,27 +830,32 @@ fn fetch_reserved_namespace_precedes_parameter_range() {
     }
 }
 
-/// `.` / `.session` の拒否は LOCATION_FILTER の decode 失敗 (MUST close) より優先される (FETCH)
+/// `.` / `.session` の拒否は LOCATION_FILTER の値域 MUST 違反 (MUST close) より優先される (FETCH)
 ///
-/// draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure) は壊れた値を
-/// KEY_VALUE_FORMATTING_ERROR で閉じることを MUST とするが、本実装はセッション層で
-/// PROTOCOL_VIOLATION に畳む (§9.20.10 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta
-/// 溢出と同じ扱い)。同一メッセージが予約名前空間にも該当する場合、
-/// draft は優先順位を規定しないが予約名前空間の拒否を優先する意図した選択である (wire 経路では
-/// decode 層が先に拒否するため、この優先順位が観測されるのは API 経路で手組みしたメッセージのみ)。
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は StartGroup + EndGroupDelta が
+/// 2^64 - 1 を超えたら PROTOCOL_VIOLATION でセッションを閉じることを MUST とする。同一メッセージが
+/// 予約名前空間にも該当する場合、draft は優先順位を規定しないが予約名前空間の拒否を優先する
+/// 意図した選択である (wire 経路では decode 層が先に拒否するため、この優先順位が観測されるのは
+/// API 経路で手組みしたメッセージのみ)。
 #[test]
 fn fetch_reserved_namespace_precedes_invalid_location_filter() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
     use shiguredo_moqt::message::Fetch as WireFetch;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
     };
     for reserved in [ns(&[b"."]), ns(&[b".session"])] {
         let (_, mut server) = establish_pair();
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end_group_delta: u64::MAX,
+            }),
         });
         server
             .recv_request(ControlMessage::Fetch(WireFetch {
@@ -876,20 +880,26 @@ fn fetch_reserved_namespace_precedes_invalid_location_filter() {
     }
 }
 
-/// 予約名前空間でない FETCH の壊れた LOCATION_FILTER は従来どおりセッションを閉じる
+/// 予約名前空間でない FETCH の不正な LOCATION_FILTER は従来どおりセッションを閉じる
 ///
 /// 予約名前空間優先の判断で、非予約名前空間の MUST close が落ちていないことを固定する。
 #[test]
 fn fetch_invalid_location_filter_with_regular_namespace_closes_session() {
     use shiguredo_moqt::message::Fetch as WireFetch;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
     };
     let (_, mut server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = server
         .recv_request(ControlMessage::Fetch(WireFetch {
@@ -898,7 +908,7 @@ fn fetch_invalid_location_filter_with_regular_namespace_closes_session() {
             track_name: b"cam".to_vec(),
             parameters: params,
         }))
-        .expect_err("壊れた LOCATION_FILTER は PROTOCOL_VIOLATION になる");
+        .expect_err("不正な LOCATION_FILTER は PROTOCOL_VIOLATION になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")

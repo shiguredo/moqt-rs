@@ -1,7 +1,7 @@
 # LOCATION_FILTER を明示的な Location Filter Type 符号化に追従する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/change-location-filter-encoding
 - Polished: 2026-10-02
 
@@ -47,4 +47,15 @@ draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は、draft-21 
 
 ## 解決方法
 
-{未着手}
+- `src/message_parameter.rs` の `LocationFilter` を draft-ietf-moq-transport-22 §9.20.9 の Location Filter Type 符号化に変更した。Type 0x00 (None) を `NoFilter`、Type 0x05 (Next Object) を `NextObject` として `AbsoluteStart {0, 0}` の `NextObject` への正規化を廃止し、
+  Type 0x01〜0x04 は Type が定める必須フィールド数だけを読む自己境界デコードにした。Type 0x06 以上は `ProtocolViolation`、必須フィールドの欠落は `UnexpectedEof`、`StartGroup + EndGroupDelta` のオーバーフローは `ProtocolViolation` になる。
+- `PARAM_LOCATION_FILTER` を `ValueEncoding::LengthPrefixed` から `ValueEncoding::LocationFilter` に切り替え、`MessageParameterValue::LocationFilter(LocationFilter)` を新設した。生バイト API (`MessageParameters::location_filter()` / `validate_location_filter_bytes()` / `find_length_prefixed()`) は削除した。
+- `location_filter_update()` は `Unchanged` / `Removed` / `Set` の 3 状態 API を維持し、`Removed` の判定源を「空バイト」から「Type 0x00」に変更した。値の形式不一致とオーバーフローは `ProtocolViolation` を返す。
+- `src/session/subscription/fill.rs` の `should_open_fill_stream` は空バイト判定を 3 状態判定へ置き換え、内側 Type 0x00 を track 全体、内側省略を subscription filter の継承として扱うようにした (draft-22 §3.4)。
+- `tests/test_message_parameter.rs` に Type 0x00〜0x05 の golden バイト列の encode / decode 双方向一致、未知 Type の `ProtocolViolation`、必須フィールド欠落の `UnexpectedEof`、FILL_PARAMETERS 内側の余剰バイトの `KeyValueFormattingError`、`StartGroup + EndGroupDelta == 2^64 - 1` の境界、`NoFilter` の実効 Start / End 導出、
+  型不一致とオーバーフローの拒否を追加した。`tests/test_session/fetch/fill.rs` には内側 Type 0x00 が subscription filter を継承しないこと、内側省略が継承すること、Location Filter 形式でない内側値では開設しないことを追加した。
+- `pbt/tests/prop_message.rs` の sampler を typed 値 (`sample_location_filter`) に変更し、6 形式すべてが生成されることのカバレッジゲートを追加した。
+- 0x21 を LengthPrefixed の代表にしていたテスト (65536 バイト長の値長上限) は `PARAM_SUBGROUP_FILTER` へ移した。
+- `examples/moq-sub/src/pipeline.rs` の構築箇所と `skills/shiguredo-moqt/SKILL.md` の公開 API 一覧を追随させ、`CHANGES.md` の `## develop` に `[CHANGE]` を追加した。
+- LOCATION_FILTER / FILL_PARAMETERS に関わる節参照と表番号を draft-22 (§9.20.9 / §9.20.15 / Table 7) に更新した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` / `prek run --all-files` / aws-lc-rs feature の clippy・test・rustdoc / no_std ビルドが通ることを確認した。

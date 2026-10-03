@@ -150,15 +150,12 @@ fn location_filter_before_start_is_rejected() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 5,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 5,
+                object_id: 0,
+            },
+        }),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
     let stream_id = DataStreamId(61);
@@ -186,16 +183,13 @@ fn location_filter_after_end_group_is_rejected() {
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
         // End Group = start.group_id + end_group_delta = 2 + 1 = 3
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 2,
-                    object_id: 0,
-                },
-                end_group_delta: 1,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 2,
+                object_id: 0,
+            },
+            end_group_delta: 1,
+        }),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
@@ -226,16 +220,13 @@ fn location_filter_end_exceeded_keeps_subscription_established() {
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
         // End Group = start.group_id + end_group_delta = 2 + 1 = 3
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 2,
-                    object_id: 0,
-                },
-                end_group_delta: 1,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 2,
+                object_id: 0,
+            },
+            end_group_delta: 1,
+        }),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
@@ -269,17 +260,14 @@ fn location_filter_after_end_object_is_rejected() {
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
         // Start = {2, 0}、End = {2 + 0, 5} = {2, 5}
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start: Location {
-                    group_id: 2,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-                end_object: 5,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 2,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+            end_object: 5,
+        }),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
 
@@ -612,7 +600,7 @@ fn empty_location_filter_range_passes_nothing() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(filter),
     });
     let (_client, mut server, rid) = establish_with_filters(params);
     // 解決値が空範囲として保持されること

@@ -305,17 +305,14 @@ mod fetch {
         let mut parameters = MessageParameters::new();
         parameters.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::AbsoluteRangeWithEnd {
-                    start: Location {
-                        group_id: 2,
-                        object_id: 3,
-                    },
-                    end_group_delta: 4,
-                    end_object: 5,
-                }
-                .encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+                start: Location {
+                    group_id: 2,
+                    object_id: 3,
+                },
+                end_group_delta: 4,
+                end_object: 5,
+            }),
         });
         let msg = ControlMessage::Fetch(Fetch {
             request_id: 7,
@@ -713,7 +710,7 @@ mod error_cases {
 
     /// FILL_PARAMETERS の値が空 (Length = 0) の SUBSCRIBE は KEY_VALUE_FORMATTING_ERROR で拒否される
     ///
-    /// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) の値は各メッセージ形式が
+    /// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) の値は各メッセージ形式が
     /// 持つ `Number of Parameters (vi64), Parameters (..)` と解釈するため、Length = 0 は
     /// `Number of Parameters` を欠く不正形である (理由と返すコードの根拠はパラメータ層の
     /// `decode_fill_parameters` の doc を参照)。
@@ -819,7 +816,7 @@ mod error_cases {
                 ControlMessage::decode(&[0x04, 0x00, 0x05, 0x00, 0x01, 0x23, 0x01, 0x00]),
                 Err(MessageError::ProtocolViolation(_))
             ),
-            "値が空でなければ Table 6 外として PROTOCOL_VIOLATION になること"
+            "値が空でなければ Table 7 外として PROTOCOL_VIOLATION になること"
         );
     }
 
@@ -918,9 +915,7 @@ mod publish_state_notify {
         });
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::NextObject.encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
         });
         params
     }

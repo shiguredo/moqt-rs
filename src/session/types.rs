@@ -1224,10 +1224,10 @@ pub struct Subscription {
     /// 無関係) とは別フィールドであり、`cleanup_ready()` の判定に影響しない。
     /// push と同時に `None` に戻り (二重 push を防ぐ)、`forget_subscription` で除去される。
     pub pending_publish_done: Option<u64>,
-    /// Subscription Filter (draft-ietf-moq-transport-21 §3.3.1 (Location Filters), §9.20.10 (LOCATION FILTER Parameter))
+    /// Subscription Filter (draft-ietf-moq-transport-22 §3.3.1 (Location Filters), §9.20.9 (LOCATION FILTER Parameter))
     ///
     /// SUBSCRIBE / REQUEST_UPDATE に含まれる。
-    /// `None` は unfiltered subscription に相当する (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))。
+    /// `None` は unfiltered subscription に相当する (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))。
     pub filter: Option<LocationFilter>,
     /// Subscriber Priority (draft-ietf-moq-transport-21 §9.20.8 (SUBSCRIBER PRIORITY Parameter))
     ///

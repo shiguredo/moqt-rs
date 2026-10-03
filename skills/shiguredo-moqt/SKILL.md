@@ -664,7 +664,8 @@ Setup Option 型定数:
 
 ```rust
 use shiguredo_moqt::message_parameter::{
-    AuthorizationToken, MessageParameter, MessageParameters, MessageParameterValue,
+    AuthorizationToken, LocationFilter, LocationFilterUpdate, MessageParameter, MessageParameters,
+    MessageParameterValue,
 };
 
 pub struct MessageParameter {
@@ -677,6 +678,7 @@ pub enum MessageParameterValue {
     VarInt(u64),
     Location { group: u64, object: u64 },
     LengthPrefixed(Vec<u8>),
+    LocationFilter(LocationFilter),
     FillParameters(MessageParameters),
     AuthorizationToken(AuthorizationToken),
     TrackNamespacePrefix(TrackNamespace),
@@ -703,8 +705,8 @@ fn largest_object(&self) -> Option<(u64, u64)>              // 0x09
 fn fill_timeout(&self) -> Option<u64>                       // 0x0A
 fn forward(&self) -> Option<u8>                             // 0x10
 fn subscriber_priority(&self) -> Option<u8>                 // 0x20
-fn location_filter(&self) -> Option<&[u8]>                  // 0x21 (生バイト)
-fn location_filter_typed(&self) -> Result<Option<LocationFilter>, MessageError>
+fn location_filter_typed(&self) -> Result<Option<LocationFilter>, MessageError>  // 0x21
+fn location_filter_update(&self) -> Result<LocationFilterUpdate, MessageError>  // 0x21
 fn group_order(&self) -> Option<u8>                         // 0x22
 fn new_group_request(&self) -> Option<u64>                  // 0x32
 fn track_namespace_prefix(&self) -> Option<&TrackNamespace> // 0x34
@@ -737,6 +739,17 @@ fn include_properties(&self) -> Option<u8>                  // 0x35
 | `PARAM_INCLUDE_PROPERTIES` | `0x35` |
 
 `AuthorizationToken` は `Delete` / `Register` / `UseAlias` / `UseValue` の variant を持つ。各メソッドは `pub(crate)` のため、利用側は variant を直接構築して `MessageParameterValue` に格納する。
+
+`LocationFilter` は Location Filter Type (vi64) が後続フィールドを定める符号化の typed 表現で、次の variant を持つ。
+
+- `NoFilter` (Type 0x00)
+- `RelativeGroup { start_group }` (Type 0x01)
+- `AbsoluteStart { start }` (Type 0x02)
+- `AbsoluteRange { start, end_group_delta }` (Type 0x03)
+- `AbsoluteRangeWithEnd { start, end_group_delta, end_object }` (Type 0x04)
+- `NextObject` (Type 0x05)
+
+`MessageParameters::location_filter_update()` は `LocationFilterUpdate` の `Unchanged` (パラメータ省略) / `Removed` (Type 0x00 = フィルタなし) / `Set(filter)` を返す。
 
 ## LOC Properties (`loc`)
 

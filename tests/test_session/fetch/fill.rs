@@ -1,4 +1,4 @@
-//! fill fetch stream のテスト (draft-ietf-moq-transport-21 §3.4 (Fill Semantics))
+//! fill fetch stream のテスト (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
 //!
 //! FILL_PARAMETERS の送受信、fill fetch stream の開設条件 (Forward State /
 //! fill range / Largest Object)、複数 stream の同時存在、FETCH_HEADER の
@@ -27,7 +27,7 @@ fn inner_with_location_filter(filter: &LocationFilter) -> MessageParameters {
     let mut inner = MessageParameters::new();
     inner.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(*filter),
     });
     inner
 }
@@ -69,7 +69,7 @@ fn establish_filtered_sub_with_object(filter: &LocationFilter) -> (Session, Sess
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(*filter),
     });
     establish_sub_with_params_and_object(params, 0, 0)
 }
@@ -268,26 +268,54 @@ fn request_update_with_fill_opens_fill_stream() {
     );
 }
 
-/// FILL 内側の zero-length LOCATION_FILTER は track 全体を指し fill stream が開く
-/// (draft-ietf-moq-transport-21 §3.4)
+/// FILL 内側の Location Filter Type 0x00 (None) は subscription filter を継承せず
+/// track 全体を指す (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+///
+/// subscription filter を Next Group (`RelativeGroup { start_group: 0 }`) にすると
+/// Largest `{0, 0}` に対して fill range が空になり開設されないため、内側 Type 0x00 が
+/// subscription filter の継承 (`Unchanged`) ではなく track 全体 (`Removed`) として
+/// 扱われたことをこの対比で判別できる。
 #[test]
-fn request_update_with_fill_zero_length_inner_filter_opens_fill_stream() {
-    let (mut client, mut server, sub_rid) = establish_sub_with_object();
-    let mut inner = MessageParameters::new();
-    inner.push(MessageParameter {
-        param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
-    });
-    let update_rid = send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
+fn request_update_with_fill_no_filter_overrides_subscription_filter() {
+    let (mut client, mut server, sub_rid) =
+        establish_filtered_sub_with_object(&LocationFilter::RelativeGroup { start_group: 0 });
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(inner_with_location_filter(&LocationFilter::NoFilter)),
+    );
     assert_eq!(
         drain_open_fill_events(&mut server),
         vec![update_rid],
-        "zero-length 内側 filter は track 全体として fill stream を開くこと"
+        "内側 Type 0x00 は track 全体として fill stream を開くこと"
+    );
+}
+
+/// FILL 内側を省略した場合は subscription filter を継承する
+/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+///
+/// 直前のテストと同じ subscription filter で内側を省略すると、継承した Next Group が
+/// Largest `{0, 0}` より後ろになり開設されない。内側省略と Type 0x00 が別扱いであることを固定する。
+#[test]
+fn request_update_with_fill_omitted_inner_inherits_subscription_filter() {
+    let (mut client, mut server, sub_rid) =
+        establish_filtered_sub_with_object(&LocationFilter::RelativeGroup { start_group: 0 });
+    send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "内側省略時は subscription filter を継承し fill range が空なら開設しないこと"
     );
 }
 
 /// fill range が Largest Object より後に始まる場合は fill stream を開かない
-/// (draft-ietf-moq-transport-21 §3.4)
+/// (draft-ietf-moq-transport-22 §3.4)
 #[test]
 fn request_update_with_fill_start_after_largest_opens_nothing() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -390,7 +418,7 @@ fn publish_done_rejected_while_fill_stream_open() {
 }
 
 /// FILL_PARAMETERS は累積パラメータに保持されない (sticky 対象外)
-/// (draft-ietf-moq-transport-21 §9.20.16)
+/// (draft-ietf-moq-transport-22 §9.20.15)
 #[test]
 fn fill_not_retained_in_pending_update_params() {
     let (mut client, mut server, sub_rid) = establish_sub_with_object();
@@ -947,7 +975,7 @@ fn publish_origin_peer_reset_resets_open_fill_streams() {
 }
 
 /// FILL 内側の Range Filter 不正は INVALID_FILTER で拒否し fill を開かない
-/// (draft-ietf-moq-transport-21 §9.20.16 / §3.3.2)
+/// (draft-ietf-moq-transport-22 §9.20.15 / §3.3.2)
 #[test]
 fn fill_inner_range_filter_violation_rejected_with_invalid_filter() {
     use shiguredo_moqt::error::REQUEST_INVALID_FILTER;
@@ -1004,13 +1032,49 @@ fn fill_inner_range_filter_violation_rejected_with_invalid_filter() {
     );
 }
 
-/// Table 6 外の内側パラメータを持つ FILL の送信は送信前に拒否し副作用を残さない
-/// (draft-ietf-moq-transport-21 §9.20.16)
+/// FILL 内側の LOCATION_FILTER が Location Filter 形式でない場合は fill stream を開かない
+///
+/// API 経由で手組みしたメッセージのみ到達する防御である (wire 経路では decode 層が
+/// PROTOCOL_VIOLATION で拒否する)。不正値を fill range として解釈せず安全側に倒すことと、
+/// その場合もセッションを閉じないことを固定する。
+#[test]
+fn request_update_with_non_location_filter_inner_opens_nothing() {
+    use shiguredo_moqt::message::RequestUpdate;
+
+    let (_client, mut server, sub_rid) = establish_sub_with_object();
+    let mut inner = MessageParameters::new();
+    inner.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![0x00]),
+    });
+    server
+        .recv_stream_message(
+            sub_rid,
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: sub_rid + 2,
+                parameters: fill_params(inner),
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "Location Filter 形式でない内側 filter では fill stream を開かないこと"
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "API 経由の不正 filter でセッションは閉じないこと"
+    );
+}
+
+/// Table 7 外の内側パラメータを持つ FILL の送信は送信前に拒否し副作用を残さない
+/// (draft-ietf-moq-transport-22 §9.20.15)
 #[test]
 fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
     use shiguredo_moqt::message_parameter::PARAM_FORWARD as INNER_FORWARD;
 
-    // 内側に FORWARD (Table 6 外) を持つ FILL を作る
+    // 内側に FORWARD (Table 7 外) を持つ FILL を作る
     let mut inner = MessageParameters::new();
     inner.push(MessageParameter {
         param_type: INNER_FORWARD,
@@ -1022,7 +1086,7 @@ fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
     let (mut client, _server) = establish_pair();
     let err = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params.clone())
-        .expect_err("Table 6 外の内側パラメータは送信前に拒否されること");
+        .expect_err("Table 7 外の内側パラメータは送信前に拒否されること");
     assert_eq!(
         err.as_session_error()
             .expect("セッションエラーであること")
@@ -1048,7 +1112,7 @@ fn send_with_out_of_scope_inner_fill_rejected_without_side_effects() {
     let (mut client, _server, sub_rid) = establish_sub_with_object();
     let err = client
         .send_request_update(sub_rid, params)
-        .expect_err("Table 6 外の内側パラメータは送信前に拒否されること");
+        .expect_err("Table 7 外の内側パラメータは送信前に拒否されること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(
         client
@@ -1197,15 +1261,12 @@ fn fill_evaluated_with_updated_filter_in_same_update() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 5,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 5,
+                object_id: 0,
+            },
+        }),
     });
     params.push(MessageParameter {
         param_type: PARAM_FILL_PARAMETERS,

@@ -306,16 +306,13 @@ fn fetch_responder_terminates_only_on_reset() -> TestResult {
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(
-                LocationFilter::AbsoluteRange {
-                    start: Location {
-                        group_id: 0,
-                        object_id: 0,
-                    },
-                    end_group_delta: 5,
-                }
-                .encode_to_bytes(),
-            ),
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                end_group_delta: 5,
+            }),
         });
         let rid = client
             .send_fetch(

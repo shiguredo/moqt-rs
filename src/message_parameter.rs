@@ -1,4 +1,4 @@
-//! Message Parameters (draft-ietf-moq-transport-21 §9.20 (Control Message Parameters))
+//! Message Parameters (draft-ietf-moq-transport-22 §9.20 (Control Message Parameters))
 //!
 //! Message Parameters はカウントプレフィックス付きで、
 //! 型ごとに固有のエンコーディングを持つ。
@@ -15,6 +15,8 @@
 //!   - varint: vi64
 //!   - Location: vi64 (Group) + vi64 (Object)
 //!   - Length-prefixed: vi64 (length) + bytes
+//!   - Location Filter: Location Filter Type (vi64) + Type が定める vi64 フィールド列
+//!     (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 use crate::{
     error::MessageError,
     message::common::{Location, TrackNamespace},
@@ -47,13 +49,13 @@ pub const PARAM_FORWARD: u64 = 0x10;
 pub const PARAM_RENDEZVOUS_TIMEOUT: u64 = 0x04;
 /// SUBSCRIBER_PRIORITY (uint8)
 pub const PARAM_SUBSCRIBER_PRIORITY: u64 = 0x20;
-/// LOCATION_FILTER (length-prefixed)
+/// LOCATION_FILTER (Location Filter 形式, draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 pub const PARAM_LOCATION_FILTER: u64 = 0x21;
 /// GROUP_ORDER (uint8)
 pub const PARAM_GROUP_ORDER: u64 = 0x22;
 /// FILL_TIMEOUT (varint, draft-ietf-moq-transport-21 §9.20.6 (FILL TIMEOUT Parameter))
 pub const PARAM_FILL_TIMEOUT: u64 = 0x0A;
-/// FILL_PARAMETERS (length-prefixed, draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))
+/// FILL_PARAMETERS (length-prefixed, draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter))
 pub const PARAM_FILL_PARAMETERS: u64 = 0x23;
 /// NEW_GROUP_REQUEST (varint)
 pub const PARAM_NEW_GROUP_REQUEST: u64 = 0x32;
@@ -77,10 +79,10 @@ pub const PARAM_TRACK_PROPERTY_FILTER: u64 = 0x29;
 
 // ─── FILL_PARAMETERS 内側スコープ ──────────────────────────────
 
-/// FILL_PARAMETERS 内に出現可能なパラメータ型 (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter) Table 6)
+/// FILL_PARAMETERS 内に出現可能なパラメータ型 (draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter) Table 7)
 ///
 /// 外側メッセージとは別のパラメータスコープであり、同一型が外側と内側の両方に
-/// 現れても重複とみなさない。Table 6 外の受信時は PROTOCOL_VIOLATION で
+/// 現れても重複とみなさない。Table 7 外の受信時は PROTOCOL_VIOLATION で
 /// セッションを閉じなければならない (MUST)。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub(crate) const FILL_PARAMETERS_ALLOWED_PARAMS: &[u64] = &[
@@ -107,6 +109,11 @@ enum ValueEncoding {
     Location,
     /// vi64 (length) + bytes
     LengthPrefixed,
+    /// Location Filter: Location Filter Type (vi64) + Type が定める vi64 フィールド列
+    /// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+    ///
+    /// 値の詳細は [`MessageParameterValue::LocationFilter`] を参照。
+    LocationFilter,
     /// Track Namespace 形式: vi64 (count) + per-field (vi64 length + bytes)
     TrackNamespacePrefix,
 }
@@ -123,7 +130,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
         PARAM_LARGEST_OBJECT => Ok(ValueEncoding::Location),
         PARAM_FORWARD => Ok(ValueEncoding::Uint8),
         PARAM_SUBSCRIBER_PRIORITY => Ok(ValueEncoding::Uint8),
-        PARAM_LOCATION_FILTER => Ok(ValueEncoding::LengthPrefixed),
+        PARAM_LOCATION_FILTER => Ok(ValueEncoding::LocationFilter),
         PARAM_GROUP_ORDER => Ok(ValueEncoding::Uint8),
         PARAM_RENDEZVOUS_TIMEOUT => Ok(ValueEncoding::VarInt),
         PARAM_FILL_TIMEOUT => Ok(ValueEncoding::VarInt),
@@ -342,10 +349,26 @@ impl AuthorizationToken {
 
 // ─── LocationFilter ─────────────────────────────────────────
 
-/// LOCATION_FILTER の解決コンテキスト (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+// Location Filter Type (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+// 0x06 以上は PROTOCOL_VIOLATION であり、定数は定義しない。
+
+/// Type 0x00 (None): フィルタなし
+const LOCATION_FILTER_TYPE_NONE: u64 = 0x00;
+/// Type 0x01 (Relative Start): 相対 StartGroup が続く
+const LOCATION_FILTER_TYPE_RELATIVE_START: u64 = 0x01;
+/// Type 0x02 (Absolute Start): StartGroup と StartObject が続く
+const LOCATION_FILTER_TYPE_ABSOLUTE_START: u64 = 0x02;
+/// Type 0x03 (Absolute Start, Group End): StartGroup / StartObject / EndGroupDelta が続く
+const LOCATION_FILTER_TYPE_ABSOLUTE_START_GROUP_END: u64 = 0x03;
+/// Type 0x04 (Absolute Range): StartGroup / StartObject / EndGroupDelta / EndObject が続く
+const LOCATION_FILTER_TYPE_ABSOLUTE_RANGE: u64 = 0x04;
+/// Type 0x05 (Next Object): フィールドなし
+const LOCATION_FILTER_TYPE_NEXT_OBJECT: u64 = 0x05;
+
+/// LOCATION_FILTER の解決コンテキスト (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))
 ///
 /// End フィールド省略時の扱いが subscription と Fetch で異なる。subscription は
-/// open-ended (終端なし)、Fetch は End = Largest Object になる。
+/// open-ended (終端なし)、Fetch は End = Largest Object になる (§9.20.9)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationFilterContext {
     /// Subscription (SUBSCRIBE 由来の subscription / REQUEST_UPDATE)
@@ -355,50 +378,58 @@ pub enum LocationFilterContext {
     Fetch,
 }
 
-/// REQUEST_UPDATE における LOCATION_FILTER の更新指示 (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+/// REQUEST_UPDATE / PUBLISH_STATE_NOTIFY における LOCATION_FILTER の更新指示
+/// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 ///
-/// Length 0 は no filter を表し、REQUEST_UPDATE ではフィルタ削除になる。
-/// パラメータ省略 (値 unchanged) と区別するため 3 状態で返す。
+/// Location Filter Type 0x00 (None) は no filter を表し、REQUEST_UPDATE では
+/// フィルタ削除になる。パラメータ省略 (値 unchanged) と区別するため 3 状態で返す。
+///
+/// FILL_PARAMETERS の内側では `Removed` はフィルタ削除ではなく「フィルタなし
+/// (fill range = track 全体)」を意味し、`Unchanged` は subscription の Location filter の
+/// 継承を意味する (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationFilterUpdate {
-    /// パラメータ省略時は値 unchanged
+    /// パラメータ省略時は値 unchanged (§9.20.9: "If omitted from REQUEST_UPDATE or
+    /// PUBLISH_STATE_NOTIFY, the value is unchanged.")
     Unchanged,
-    /// Length 0 はフィルタ削除 (unfiltered に戻す)
+    /// Location Filter Type 0x00 (None): フィルタ削除 (unfiltered に戻す)
     Removed,
     /// 新しいフィルタに置き換える
     Set(LocationFilter),
 }
 
-/// LOCATION_FILTER の typed 表現 (draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter))
+/// LOCATION_FILTER の typed 表現 (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 ///
-/// ワイヤ形式は Length-prefixed な optional vi64 群であり、Length (バイト数) で
-/// フィールド数が決まる。フィールド数と意味の対応は次のとおり。
-/// - 1 フィールド: StartGroup (Largest Object 相対)
-/// - 2 フィールド: StartGroup + StartObject (両方 0 なら Next Object、そうでなければ absolute)
-/// - 3 フィールド: absolute Start + EndGroupDelta (End Group の全 Object を含む)
-/// - 4 フィールド: absolute Start + EndGroupDelta + EndObject
+/// ワイヤ形式は先頭の Location Filter Type (vi64) が後続の vi64 フィールドを
+/// 一意に定める符号化であり、Length フィールドを持たない。
+/// `Option<LocationFilter>` の `None` は「パラメータ省略」を表し、
+/// フィルタなし (Type 0x00) は [`LocationFilter::NoFilter`] で表す。
+///
+/// variant 名は本ライブラリ独自のものであり、draft の Type 名とは一対一で対応しない
+/// (例: Type 0x03 の draft 名は "Absolute Start, Group End" で variant 名は
+/// `AbsoluteRange`)。各 variant の doc に draft の Type 名を併記する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationFilter {
-    /// 相対 StartGroup のみ (1 フィールド)
+    /// Type 0x00 (None): フィルタなし
+    NoFilter,
+    /// Type 0x01 (Relative Start): 相対 StartGroup のみ
     RelativeGroup {
-        /// Largest Group からの相対オフセット (draft-ietf-moq-transport-21 §3.3.1)
+        /// Largest Object の Group からの相対オフセット (draft-ietf-moq-transport-22 §3.3.1)
         start_group: u64,
     },
-    /// Next Object (2 フィールドとも 0)
-    NextObject,
-    /// Absolute Start (2 フィールド。両方 0 の組み合わせは NextObject になる)
+    /// Type 0x02 (Absolute Start): 絶対 Start Location
     AbsoluteStart {
         /// 開始 Location (絶対値)
         start: Location,
     },
-    /// Absolute Range (3 フィールド。End Group の全 Object を含む)
+    /// Type 0x03 (Absolute Start, Group End): End Group の全 Object を含む
     AbsoluteRange {
         /// 開始 Location (絶対値)
         start: Location,
         /// 開始 Group からの End Group の差分
         end_group_delta: u64,
     },
-    /// Absolute Range (4 フィールド。EndObject までを含む)
+    /// Type 0x04 (Absolute Range): EndObject までを含む
     AbsoluteRangeWithEnd {
         /// 開始 Location (絶対値)
         start: Location,
@@ -407,27 +438,32 @@ pub enum LocationFilter {
         /// 終端 Group 内の終端 Object ID
         end_object: u64,
     },
+    /// Type 0x05 (Next Object): Next Object から open-ended
+    ///
+    /// 絶対指定の `{0, 0}` とは区別される (Type 0x02 と Type 0x05 は別の符号化)。
+    NextObject,
 }
 
 impl LocationFilter {
     /// typed filter を wire format のバイト列へエンコードする
     ///
-    /// AbsoluteStart {0, 0} は wire 上区別できないため NextObject と同一バイト列
-    /// ([0x00, 0x00]) になる。decode すると NextObject に正規化される。
-    /// absolute {0, 0} の open-ended は unfiltered と等価であり、購読側は
-    /// フィルタ省略で表す。
+    /// Location Filter Type を含む値そのもののバイト列を返す (パラメータの
+    /// Type Delta と Length は含まない)。
+    ///
+    /// `StartGroup + EndGroupDelta` が 2^64 - 1 を超える値は §9.20.9 が
+    /// PROTOCOL_VIOLATION を求める不正形であり、この関数は検証しない。
+    /// `MessageParameters::encode` が値域を検証して拒否する。
     pub fn encode_to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
+            // Type 0x00 は Type のみで、後続フィールドを持たない
+            Self::NoFilter => varint::encode(LOCATION_FILTER_TYPE_NONE, &mut buf),
             Self::RelativeGroup { start_group } => {
+                varint::encode(LOCATION_FILTER_TYPE_RELATIVE_START, &mut buf);
                 varint::encode(*start_group, &mut buf);
             }
-            // Next Object は StartGroup = 0 / StartObject = 0 の 2 フィールドで表す
-            Self::NextObject => {
-                varint::encode(0, &mut buf);
-                varint::encode(0, &mut buf);
-            }
             Self::AbsoluteStart { start } => {
+                varint::encode(LOCATION_FILTER_TYPE_ABSOLUTE_START, &mut buf);
                 varint::encode(start.group_id, &mut buf);
                 varint::encode(start.object_id, &mut buf);
             }
@@ -435,6 +471,7 @@ impl LocationFilter {
                 start,
                 end_group_delta,
             } => {
+                varint::encode(LOCATION_FILTER_TYPE_ABSOLUTE_START_GROUP_END, &mut buf);
                 varint::encode(start.group_id, &mut buf);
                 varint::encode(start.object_id, &mut buf);
                 varint::encode(*end_group_delta, &mut buf);
@@ -444,94 +481,122 @@ impl LocationFilter {
                 end_group_delta,
                 end_object,
             } => {
+                varint::encode(LOCATION_FILTER_TYPE_ABSOLUTE_RANGE, &mut buf);
                 varint::encode(start.group_id, &mut buf);
                 varint::encode(start.object_id, &mut buf);
                 varint::encode(*end_group_delta, &mut buf);
                 varint::encode(*end_object, &mut buf);
             }
+            // Type 0x05 は Type のみで、後続フィールドを持たない
+            Self::NextObject => varint::encode(LOCATION_FILTER_TYPE_NEXT_OBJECT, &mut buf),
         }
         buf
     }
 
     /// wire format のバイト列から typed filter をデコードする
     ///
-    /// draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter):
-    /// フィールド数が 0 / 5 以上の場合と壊れた varint は
-    /// KEY_VALUE_FORMATTING_ERROR、StartGroup + EndGroupDelta が 2^64 - 1 を
-    /// 超える場合は PROTOCOL_VIOLATION として扱う。
+    /// 公開 [`LocationFilter::encode_to_bytes`] の逆関数であり、Location Filter 単体の
+    /// バイト列を扱う利用者向けに公開する。バイト列は Location Filter 1 つ分とみなし、
+    /// 余剰バイトがあれば `KeyValueFormattingError` を返す。
     ///
-    /// 空バイト列 (Length 0 = no filter) はフィルタ値を持たないため受け付けない。
-    /// Length 0 の扱い (REQUEST_UPDATE での削除等) は呼び出し側が
-    /// `MessageParameters::location_filter_update` で判定する。
+    /// # Errors
     ///
-    /// 2 フィールドとも 0 の AbsoluteStart は wire 上区別できないため
-    /// NextObject に正規化される。absolute {0, 0} の open-ended は unfiltered と
-    /// 等価であり、購読側はフィルタ省略で表す。
-    pub fn decode(bytes: &[u8]) -> Result<Self, MessageError> {
-        let mut pos = 0;
-        let mut fields = [0u64; 4];
-        let mut field_count = 0;
-        while pos < bytes.len() {
-            if field_count == 4 {
-                return Err(MessageError::KeyValueFormattingError(
-                    "LOCATION_FILTER has more than 4 fields",
-                ));
-            }
-            let (value, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                MessageError::KeyValueFormattingError("failed to decode field in LOCATION_FILTER")
-            })?;
-            fields[field_count] = value;
-            field_count += 1;
-            pos += n;
+    /// - Location Filter Type が 0x06 以上: `ProtocolViolation` (§9.20.9)
+    /// - Type が要求するフィールドがバッファ終端で欠落: `UnexpectedEof`
+    /// - `StartGroup + EndGroupDelta` が 2^64 - 1 を超える: `ProtocolViolation` (§9.20.9)
+    /// - フィールドを読み切ったあとに余剰バイトがある: `KeyValueFormattingError`
+    pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
+        let (filter, consumed) = Self::decode_partial(buf)?;
+        if consumed != buf.len() {
+            return Err(MessageError::KeyValueFormattingError(
+                "LOCATION_FILTER has trailing bytes",
+            ));
         }
-
-        let filter = match field_count {
-            0 => {
-                return Err(MessageError::KeyValueFormattingError(
-                    "LOCATION_FILTER requires 1 to 4 fields",
-                ));
-            }
-            1 => Self::RelativeGroup {
-                start_group: fields[0],
-            },
-            2 if fields[0] == 0 && fields[1] == 0 => Self::NextObject,
-            2 => Self::AbsoluteStart {
-                start: Location {
-                    group_id: fields[0],
-                    object_id: fields[1],
-                },
-            },
-            3 => {
-                let start = Location {
-                    group_id: fields[0],
-                    object_id: fields[1],
-                };
-                check_end_group_overflow(start.group_id, fields[2])?;
-                Self::AbsoluteRange {
-                    start,
-                    end_group_delta: fields[2],
-                }
-            }
-            // ループ内ガードで 5 フィールド以上を弾いているため、ここでは 4 のみ到達する
-            _ => {
-                let start = Location {
-                    group_id: fields[0],
-                    object_id: fields[1],
-                };
-                check_end_group_overflow(start.group_id, fields[2])?;
-                Self::AbsoluteRangeWithEnd {
-                    start,
-                    end_group_delta: fields[2],
-                    end_object: fields[3],
-                }
-            }
-        };
-
         Ok(filter)
     }
 
+    /// 先頭の Location Filter Type と、その Type が定める必須フィールドだけを
+    /// デコードして `(filter, 消費バイト数)` を返す
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+    /// Type ごとの必須フィールド数は 0x00 / 0x05 が 0 個、0x01 が 1 個、
+    /// 0x02 が 2 個、0x03 が 3 個、0x04 が 4 個である。Type が一意にフィールド数を
+    /// 定めるため、フィールド数不一致を表すワイヤは存在しない。
+    ///
+    /// 欠落したフィールド (バッファ終端) は `UnexpectedEof`、Type 0x06 以上は
+    /// `ProtocolViolation`、`StartGroup + EndGroupDelta` のオーバーフローは
+    /// `ProtocolViolation` になる。
+    fn decode_partial(buf: &[u8]) -> Result<(Self, usize), MessageError> {
+        let (filter_type, mut pos) = varint::decode(buf)?;
+
+        let filter = match filter_type {
+            LOCATION_FILTER_TYPE_NONE => Self::NoFilter,
+            LOCATION_FILTER_TYPE_RELATIVE_START => {
+                let (start_group, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                Self::RelativeGroup { start_group }
+            }
+            LOCATION_FILTER_TYPE_ABSOLUTE_START => {
+                let start = decode_location(buf, &mut pos)?;
+                Self::AbsoluteStart { start }
+            }
+            LOCATION_FILTER_TYPE_ABSOLUTE_START_GROUP_END => {
+                let start = decode_location(buf, &mut pos)?;
+                let (end_group_delta, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                Self::AbsoluteRange {
+                    start,
+                    end_group_delta,
+                }
+            }
+            LOCATION_FILTER_TYPE_ABSOLUTE_RANGE => {
+                let start = decode_location(buf, &mut pos)?;
+                let (end_group_delta, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                let (end_object, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                Self::AbsoluteRangeWithEnd {
+                    start,
+                    end_group_delta,
+                    end_object,
+                }
+            }
+            LOCATION_FILTER_TYPE_NEXT_OBJECT => Self::NextObject,
+            // draft-ietf-moq-transport-22 §9.20.9: "Any other Location Filter Type is a
+            // PROTOCOL_VIOLATION."
+            _ => {
+                return Err(MessageError::ProtocolViolation(
+                    "unknown Location Filter Type",
+                ));
+            }
+        };
+
+        filter.validate()?;
+        Ok((filter, pos))
+    }
+
+    /// 値が §9.20.9 の制約を満たすか検証する
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.9: `StartGroup + EndGroupDelta` が
+    /// 2^64 - 1 を超える場合は PROTOCOL_VIOLATION でセッションを閉じなければならない。
+    /// public enum は decode を経ずに構築できるため、decode 側と encode 側の両方の検証に使う。
+    fn validate(&self) -> Result<(), MessageError> {
+        match self {
+            Self::AbsoluteRange {
+                start,
+                end_group_delta,
+            }
+            | Self::AbsoluteRangeWithEnd {
+                start,
+                end_group_delta,
+                ..
+            } => check_end_group_overflow(start.group_id, *end_group_delta),
+            _ => Ok(()),
+        }
+    }
+
     /// フィルタの実効 Start Location を Largest Object から導出する
-    /// (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+    /// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))
     ///
     /// `largest` は当該フィルタが相対参照する Largest Object。呼び出し側が役割に応じて
     /// 解決時点の値を渡す。未配信 (`None`) の相対フィルタは先頭 `{0, 0}` から始める。
@@ -547,8 +612,9 @@ impl LocationFilter {
     ///   `None` (下限なし・全通し) は返さない。
     ///   未配信の `Some({0, 0})` とは区別される
     /// - AbsoluteStart / AbsoluteRange / AbsoluteRangeWithEnd: 明示された `start` をそのまま返す
+    /// - NoFilter: フィルタなしのため track 全体の先頭 `{0, 0}` を返す
     ///
-    /// この節番号・規則は draft-ietf-moq-transport-21 由来であり将来の draft 改版で変わる可能性がある。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn effective_start_location(&self, largest: Option<&Location>) -> Option<Location> {
         match self {
             Self::RelativeGroup { start_group } => match largest {
@@ -582,16 +648,22 @@ impl LocationFilter {
             Self::AbsoluteStart { start }
             | Self::AbsoluteRange { start, .. }
             | Self::AbsoluteRangeWithEnd { start, .. } => Some(*start),
+            // NoFilter は track 全体を通すため、下限は先頭 `{0, 0}` になる
+            Self::NoFilter => Some(Location {
+                group_id: 0,
+                object_id: 0,
+            }),
         }
     }
 
     /// フィルタの実効 End Location を導出する
-    /// (draft-ietf-moq-transport-21 §3.3.1 (Location Filters))
+    /// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))
     ///
     /// End フィールド省略時の扱いはコンテキストで異なる。subscription は open-ended
     /// (終端なし) のため `None`、Fetch は End = Largest Object のため `largest` を返す。
     /// 未配信 (`None`) の Fetch は終端未定のため `None` を返し、呼び出し側
     /// (FETCH 要求処理) が INVALID_RANGE 等で扱う。
+    /// NoFilter も open-ended として同じ扱いになる。
     ///
     /// AbsoluteRange (EndObject 省略) は End Group の全 Object を含むため
     /// `{End Group, u64::MAX}` を返す。AbsoluteRangeWithEnd は
@@ -600,19 +672,20 @@ impl LocationFilter {
     /// `StartGroup + EndGroupDelta` のオーバーフローは decode 時に PROTOCOL_VIOLATION 化される
     /// ため wire 由来の値では起こらない。ただし `LocationFilter` は公開 enum で decode を経ず
     /// in-memory 構築もできるため、パニックを避けて `u64::MAX` に飽和させる。
-    /// この節番号・規則は draft-ietf-moq-transport-21 由来であり将来の draft 改版で変わる可能性がある。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn effective_end_location(
         &self,
         largest: Option<&Location>,
         context: LocationFilterContext,
     ) -> Option<Location> {
         match self {
-            Self::RelativeGroup { .. } | Self::NextObject | Self::AbsoluteStart { .. } => {
-                match context {
-                    LocationFilterContext::Subscription => None,
-                    LocationFilterContext::Fetch => largest.cloned(),
-                }
-            }
+            Self::RelativeGroup { .. }
+            | Self::NextObject
+            | Self::AbsoluteStart { .. }
+            | Self::NoFilter => match context {
+                LocationFilterContext::Subscription => None,
+                LocationFilterContext::Fetch => largest.cloned(),
+            },
             Self::AbsoluteRange {
                 start,
                 end_group_delta,
@@ -632,9 +705,25 @@ impl LocationFilter {
     }
 }
 
+/// Location Filter の StartGroup / StartObject をデコードし `pos` を進める
+///
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x02 以上が
+/// 持つ Start Location は vi64 (Group) + vi64 (Object) の絶対値である。
+/// バッファ終端でフィールドが欠落した場合は `UnexpectedEof` を返す。
+fn decode_location(buf: &[u8], pos: &mut usize) -> Result<Location, MessageError> {
+    let (group_id, n) = varint::decode(&buf[*pos..])?;
+    *pos += n;
+    let (object_id, n) = varint::decode(&buf[*pos..])?;
+    *pos += n;
+    Ok(Location {
+        group_id,
+        object_id,
+    })
+}
+
 /// LOCATION_FILTER の End Group 導出時のオーバーフローを検証する
 ///
-/// draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter): StartGroup + EndGroupDelta が
+/// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): StartGroup + EndGroupDelta が
 /// 2^64 - 1 を超えたら PROTOCOL_VIOLATION でセッションを閉じなければならない。
 /// Delta = 0 は当該 Group の残り全部であり常に正当。
 fn check_end_group_overflow(start_group: u64, end_group_delta: u64) -> Result<(), MessageError> {
@@ -664,7 +753,13 @@ pub enum MessageParameterValue {
     },
     /// Length-prefixed: vi64 (length) + bytes
     LengthPrefixed(Vec<u8>),
-    /// FILL_PARAMETERS の内側パラメータ群 (draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter))
+    /// Location Filter: Location Filter Type (vi64) + Type が定める vi64 フィールド列
+    /// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
+    ///
+    /// LOCATION_FILTER (0x21) 専用のエンコーディングである。Length フィールドを
+    /// 持たないため、値の長さは Location Filter Type が一意に定める。
+    LocationFilter(LocationFilter),
+    /// FILL_PARAMETERS の内側パラメータ群 (draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter))
     ///
     /// ワイヤ上は length-prefixed バイト列であり、内側は独立メッセージの Parameters として
     /// 各メッセージ形式が持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE)
@@ -761,10 +856,11 @@ impl MessageParameters {
     ///
     /// - 同一 Parameter Type の重複、型と値形式の不整合: `InvalidParameter`
     /// - 未知の Parameter Type、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
-    ///   FILL_PARAMETERS の内側スコープ違反、LOCATION_FILTER の EndGroup オーバーフロー、
+    ///   FILL_PARAMETERS の内側スコープ違反、
+    ///   LOCATION_FILTER の StartGroup + EndGroupDelta オーバーフロー
+    ///   (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))、
     ///   値長が 2^16-1 バイトを超える KVP (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
-    /// - 壊れた LOCATION_FILTER 値: `KeyValueFormattingError`
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // 同一 Parameter Type が複数ある場合、安定ソートにより push 順が保たれたまま隣接し、
         // 2 件目以降は delta=0 でエンコードされる
@@ -817,16 +913,18 @@ impl MessageParameters {
     ///
     /// # Errors
     ///
-    /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 6 外の
+    /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 7 外の
     ///   内側パラメータ、uint8 値域違反 (FORWARD / GROUP_ORDER / INCLUDE_PROPERTIES)、
-    ///   LOCATION_FILTER の EndGroup オーバーフロー、Track Namespace のデコード失敗
+    ///   LOCATION_FILTER の未知の Location Filter Type と StartGroup + EndGroupDelta
+    ///   オーバーフロー (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))、
+    ///   Track Namespace のデコード失敗
     ///   (フィールド数超過 / 空フィールド / 4096 バイト超過)、フレーミング違反 (KVP Type の delta
     ///   オーバーフロー、count がバッファ容量を超える場合、値長が 2^16-1 バイトを超える KVP
     ///   (draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure))): `ProtocolViolation`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     /// - 値の直列化 (Length/Value) が型の定義と一致しない場合 (FILL_PARAMETERS の値が空、内側の
-    ///   余剰バイト、壊れた LOCATION_FILTER / AUTHORIZATION_TOKEN): `KeyValueFormattingError`
-    /// - バッファが途中で切れている場合: `UnexpectedEof`
+    ///   余剰バイト、壊れた AUTHORIZATION_TOKEN): `KeyValueFormattingError`
+    /// - バッファが途中で切れている場合 (LOCATION_FILTER の必須フィールド欠落を含む): `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         Self::decode_inner(buf, true)
     }
@@ -887,14 +985,8 @@ impl MessageParameters {
                 value = MessageParameterValue::AuthorizationToken(token);
             }
 
-            if param_type == PARAM_LOCATION_FILTER
-                && let MessageParameterValue::LengthPrefixed(ref bytes) = value
-            {
-                validate_location_filter_bytes(bytes)?;
-            }
-
-            // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-            // 内側パラメータ群を別スコープとしてデコードし、Table 6 外は
+            // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+            // 内側パラメータ群を別スコープとしてデコードし、Table 7 外は
             // PROTOCOL_VIOLATION とする (MUST close the session)。
             // FILL_PARAMETERS の内側に FILL_PARAMETERS は出現し得ないため、
             // 再帰する前に拒否してスタックオーバーフローを防ぐ。
@@ -955,9 +1047,9 @@ impl MessageParameters {
 
     /// FILL_PARAMETERS (type 0x23) の内側パラメータ群を返す
     ///
-    /// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
+    /// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
     /// 存在しない場合は `None` を返す。内側は外側とは別のパラメータスコープ
-    /// (Table 6) であり、subscription 状態として保持されない。
+    /// (Table 7) であり、subscription 状態として保持されない。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn fill_parameters(&self) -> Option<&MessageParameters> {
         for p in &self.0 {
@@ -972,7 +1064,7 @@ impl MessageParameters {
 
     /// 指定型のパラメータをすべて除去する
     ///
-    /// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
+    /// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
     /// FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
     /// 保持されない (sticky 対象外) ため、累積パラメータ (`pending_update_params`)
     /// への保持から除外する用途に使う。
@@ -1049,16 +1141,16 @@ impl MessageParameters {
         self.find_uint8(PARAM_SUBSCRIBER_PRIORITY)
     }
 
-    /// LOCATION_FILTER (type 0x21) の値を返す
-    pub fn location_filter(&self) -> Option<&[u8]> {
-        self.find_length_prefixed(PARAM_LOCATION_FILTER)
-    }
-
     /// LOCATION_FILTER (type 0x21) を typed filter として返す
     ///
-    /// パラメータ省略時と Length 0 (no filter) のときは `None` を返す。
+    /// パラメータ省略時と Location Filter Type 0x00 (no filter) のときは `None` を返す。
     /// REQUEST_UPDATE での削除指示と省略の区別が必要な場合は
     /// `location_filter_update` を使う。
+    ///
+    /// # Errors
+    ///
+    /// 0x21 の値が Location Filter 形式でない、または `StartGroup + EndGroupDelta` が
+    /// 2^64 - 1 を超える場合は `ProtocolViolation` を返す。
     pub fn location_filter_typed(&self) -> Result<Option<LocationFilter>, MessageError> {
         match self.location_filter_update()? {
             LocationFilterUpdate::Set(filter) => Ok(Some(filter)),
@@ -1068,16 +1160,33 @@ impl MessageParameters {
 
     /// LOCATION_FILTER (type 0x21) の更新指示を返す
     ///
-    /// draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 は no filter であり、
-    /// REQUEST_UPDATE ではフィルタ削除になる。パラメータ省略 (値 unchanged) と区別する。
+    /// draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Location Filter
+    /// Type 0x00 (None) は no filter であり、REQUEST_UPDATE / PUBLISH_STATE_NOTIFY では
+    /// フィルタ削除になる。パラメータ省略 (値 unchanged) と区別する。
+    ///
+    /// # Errors
+    ///
+    /// 0x21 の値が Location Filter 形式でない (公開 API による in-memory 構築でのみ
+    /// 起こりうる)、または `StartGroup + EndGroupDelta` が 2^64 - 1 を超える場合は
+    /// `ProtocolViolation` を返す。
     pub fn location_filter_update(&self) -> Result<LocationFilterUpdate, MessageError> {
-        let Some(bytes) = self.location_filter() else {
-            return Ok(LocationFilterUpdate::Unchanged);
-        };
-        if bytes.is_empty() {
-            return Ok(LocationFilterUpdate::Removed);
+        for p in &self.0 {
+            if p.param_type != PARAM_LOCATION_FILTER {
+                continue;
+            }
+            let MessageParameterValue::LocationFilter(filter) = &p.value else {
+                return Err(MessageError::ProtocolViolation(
+                    "LOCATION_FILTER parameter has a non-Location Filter value",
+                ));
+            };
+            filter.validate()?;
+            return Ok(if *filter == LocationFilter::NoFilter {
+                LocationFilterUpdate::Removed
+            } else {
+                LocationFilterUpdate::Set(*filter)
+            });
         }
-        LocationFilter::decode(bytes).map(LocationFilterUpdate::Set)
+        Ok(LocationFilterUpdate::Unchanged)
     }
 
     /// GROUP_ORDER (type 0x22) の値を返す
@@ -1358,18 +1467,6 @@ impl MessageParameters {
         }
         None
     }
-
-    /// length-prefixed 型パラメータの値を検索する
-    fn find_length_prefixed(&self, param_type: u64) -> Option<&[u8]> {
-        for p in &self.0 {
-            if p.param_type == param_type
-                && let MessageParameterValue::LengthPrefixed(ref v) = p.value
-            {
-                return Some(v);
-            }
-        }
-        None
-    }
 }
 
 // ─── 値のエンコード/デコード ───────────────────────────────────
@@ -1405,7 +1502,7 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
     // エンコーディング種別が同じでも variant が異なる型があるため、
     // 型ごとに許可する variant を厳密に判定する。
     //   - 0x03 AUTHORIZATION_TOKEN: AuthorizationToken のみ
-    //   - 0x21 LOCATION_FILTER: LengthPrefixed のみ
+    //   - 0x21 LOCATION_FILTER: LocationFilter のみ
     //   - 0x23 FILL_PARAMETERS: FillParameters のみ
     // encoding の一致だけで受理すると、encode は通るのに decode が別 variant へ
     // 解釈したり拒否したりするラウンドトリップ不整合が生じる。
@@ -1419,6 +1516,10 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
                     param.param_type,
                     PARAM_AUTHORIZATION_TOKEN | PARAM_FILL_PARAMETERS
                 )
+        }
+        MessageParameterValue::LocationFilter(_) => {
+            matches!(expected, ValueEncoding::LocationFilter)
+                && param.param_type == PARAM_LOCATION_FILTER
         }
         MessageParameterValue::FillParameters(_) => {
             matches!(expected, ValueEncoding::LengthPrefixed)
@@ -1443,14 +1544,16 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
         validate_uint8_param_value(param.param_type, *v)?;
     }
 
-    if param.param_type == PARAM_LOCATION_FILTER
-        && let MessageParameterValue::LengthPrefixed(bytes) = &param.value
-    {
-        validate_location_filter_bytes(bytes)?;
+    // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+    // decode 側と同じ値域検証を行い、StartGroup + EndGroupDelta のオーバーフローを
+    // PROTOCOL_VIOLATION として拒否する (型 0x21 が LocationFilter variant のみを
+    // 受理することは上の match で保証済み)。
+    if let MessageParameterValue::LocationFilter(filter) = &param.value {
+        filter.validate()?;
     }
 
-    // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-    // encode 側でも内側スコープ (Table 6) を検証し、decode 側との非対称を防ぐ。
+    // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+    // encode 側でも内側スコープ (Table 7) を検証し、decode 側との非対称を防ぐ。
     // 型 0x23 が FillParameters variant のみを受理することは上の match で保証済み。
     // 内側の重複・値域検証は `encode_value` 側の `inner.encode()` が行う。
     if let MessageParameterValue::FillParameters(inner) = &param.value {
@@ -1460,21 +1563,9 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
     Ok(())
 }
 
-/// LOCATION_FILTER の値バイト列を検証する
-///
-/// 空バイト列 (Length 0 = no filter) はフィルタ値を持たない削除指示であり、
-/// `LocationFilter::decode` の対象外として受け付ける。
-fn validate_location_filter_bytes(bytes: &[u8]) -> Result<(), MessageError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    LocationFilter::decode(bytes)?;
-    Ok(())
-}
-
 /// FILL_PARAMETERS の値バイト列を内側パラメータ群としてデコードする
 ///
-/// draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter): "Its value is a sequence
+/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): "Its value is a sequence
 /// of Parameters that apply to the fill fetch stream (see Section 3.4), encoded as if they were
 /// Parameters for a separate message (see Section 16.7)." の "Parameters" を、各メッセージ形式が
 /// 持つ `Number of Parameters (vi64), Parameters (..)` (§9.6 (SUBSCRIBE) Figure 10 など) と
@@ -1483,13 +1574,13 @@ fn validate_location_filter_bytes(bytes: &[u8]) -> Result<(), MessageError> {
 /// パラメータ列が count で区切られる同じ構造を述べている。
 ///
 /// - 値が空 (Length = 0) は `Number of Parameters` を欠く不正形である。Type 0x23 を理解して
-///   いて Length/Value が §9.20.16 の直列化に一致しないため、§8.3 (Key-Value-Pair Structure)
+///   いて Length/Value が §9.20.15 の直列化に一致しないため、§8.3 (Key-Value-Pair Structure)
 ///   の MUST により KEY_VALUE_FORMATTING_ERROR を返す (内側の並びは KVP ではなく Parameters
 ///   であるが、外側の FILL_PARAMETERS 自身は Type と Length/Value を持つ Key-Value-Pair である)
 /// - 内側の末尾の余剰バイトも KEY_VALUE_FORMATTING_ERROR を返す。この検査を `validate_scope`
-///   より先に行うため、既知型だが Table 6 に無いパラメータが同時にある場合はこちらが優先になる。
+///   より先に行うため、既知型だが Table 7 に無いパラメータが同時にある場合はこちらが優先になる。
 ///   未知の型と入れ子の FILL_PARAMETERS は `decode_inner` の段階で先に PROTOCOL_VIOLATION になる
-/// - Table 6 外のパラメータだけがある場合は §9.20.16 の MUST に従い PROTOCOL_VIOLATION を返す
+/// - Table 7 外のパラメータだけがある場合は §9.20.15 の MUST に従い PROTOCOL_VIOLATION を返す
 /// - 値が途中で切れた場合と count がバッファ容量を超える場合は 1 番目 (値が空の場合) の規則の
 ///   対象外であり、フレーミング違反として外側のパラメータブロックと同じ分類 (`UnexpectedEof` /
 ///   `ProtocolViolation`) のまま扱う
@@ -1534,6 +1625,11 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
             varint::encode(bytes.len() as u64, buf);
             buf.extend_from_slice(bytes);
         }
+        MessageParameterValue::LocationFilter(filter) => {
+            // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+            // Length フィールドを持たず、Location Filter Type が後続フィールドを定める
+            buf.extend_from_slice(&filter.encode_to_bytes());
+        }
         MessageParameterValue::AuthorizationToken(token) => {
             // draft-ietf-moq-transport-21 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
             let bytes = token.encode_to_bytes();
@@ -1546,7 +1642,7 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
             buf.extend_from_slice(&bytes);
         }
         MessageParameterValue::FillParameters(inner) => {
-            // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
+            // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
             // 内側は独立メッセージの Parameters としてエンコードする。値は各メッセージ形式が
             // 持つ `Number of Parameters (vi64), Parameters (..)` と同じ構造になる
             // (decode 側の `decode_fill_parameters` の doc を参照)。
@@ -1601,6 +1697,14 @@ fn decode_value(
             let len_usize = varint::checked_len(len, buf[n..].len())?;
             let bytes = buf[n..n + len_usize].to_vec();
             Ok((MessageParameterValue::LengthPrefixed(bytes), n + len_usize))
+        }
+        ValueEncoding::LocationFilter => {
+            // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+            // Location Filter Type が必須フィールド数を定めるため、消費バイト数は
+            // Type から一意に決まる。余剰バイトの検出は Length 境界を持つスコープ
+            // (FILL_PARAMETERS の内側) の責務である。
+            let (filter, n) = LocationFilter::decode_partial(buf)?;
+            Ok((MessageParameterValue::LocationFilter(filter), n))
         }
         ValueEncoding::TrackNamespacePrefix => {
             // draft-ietf-moq-transport-21 §9.20.21 (TRACK_NAMESPACE_PREFIX Parameter): Track Namespace 形式でデコード

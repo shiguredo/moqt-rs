@@ -36,16 +36,13 @@ fn publish_with_subscription_parameters_round_trip() {
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRange {
-                start: Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+        }),
     });
     let rid = client
         .send_publish(
@@ -188,15 +185,12 @@ fn publish_recv_reflects_initial_parameters() {
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 3,
-                    object_id: 0,
-                },
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 3,
+                object_id: 0,
+            },
+        }),
     });
     params.push(MessageParameter {
         param_type: PARAM_LARGEST_OBJECT,
@@ -295,17 +289,22 @@ fn publish_recv_with_invalid_group_order_closes_session() {
     );
 }
 
-/// 不正形式 filter の PUBLISH 受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// EndGroupDelta がオーバーフローする filter の PUBLISH 受信は PROTOCOL_VIOLATION で
+/// セッションを閉じる (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 #[test]
-fn publish_recv_with_malformed_filter_closes_session() {
+fn publish_recv_with_filter_end_group_overflow_closes_session() {
     let (mut _client, mut server) = establish_pair();
     // EndGroupDelta 溢出の LOCATION_FILTER を直接受信させる
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![
-            0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        ]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = server
         .recv_request(ControlMessage::Publish(Publish {
@@ -331,16 +330,21 @@ fn publish_recv_with_malformed_filter_closes_session() {
     );
 }
 
-/// 不正形式 filter の PUBLISH 送信は送信前に拒否し副作用を残さない
+/// EndGroupDelta がオーバーフローする filter の PUBLISH 送信は送信前に拒否し
+/// 副作用を残さない (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))
 #[test]
-fn send_publish_with_malformed_filter_rejected_without_side_effects() {
+fn send_publish_with_filter_end_group_overflow_rejected_without_side_effects() {
     let (mut client, _server) = establish_pair();
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![
-            0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        ]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+            start: Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            end_group_delta: u64::MAX,
+        }),
     });
     let err = client
         .send_publish(
@@ -350,7 +354,7 @@ fn send_publish_with_malformed_filter_rejected_without_side_effects() {
             params,
             TrackProperties::new(),
         )
-        .expect_err("不正形式 filter の PUBLISH は送信前に拒否されること");
+        .expect_err("オーバーフローする filter の PUBLISH は送信前に拒否されること");
     assert_eq!(
         err.as_session_error()
             .expect("セッションエラーであること")

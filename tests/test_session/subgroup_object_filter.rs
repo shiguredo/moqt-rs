@@ -112,7 +112,7 @@ fn prior_object_id_gap_properties(value: u64) -> Vec<u8> {
 fn location_filter_parameter(filter: LocationFilter) -> MessageParameter {
     MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(filter),
     }
 }
 

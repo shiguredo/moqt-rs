@@ -135,7 +135,7 @@ impl Session {
                         subscription.forward_state = new_forward;
                     }
                     match pending_params.location_filter_update() {
-                        // 省略時は値 unchanged、Length 0 はフィルタ削除
+                        // 省略時は値 unchanged、Location Filter Type 0x00 (None) はフィルタ削除
                         Ok(LocationFilterUpdate::Unchanged) => {}
                         Ok(LocationFilterUpdate::Removed) => {
                             subscription.filter = None;
@@ -146,9 +146,10 @@ impl Session {
                             subscription.filter = Some(filter);
                         }
                         Err(_) => {
-                            // draft-ietf-moq-transport-21 §3.3.1 (Location Filters): End Group 溢出は
-                            // MUST close the session with PROTOCOL_VIOLATION。壊れた値は §8.3 の
-                            // KEY_VALUE_FORMATTING_ERROR だが、セッション層では同じく閉じる
+                            // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+                            // StartGroup + EndGroupDelta のオーバーフローは MUST close the session with
+                            // PROTOCOL_VIOLATION。受信メッセージでは decode 層が先に拒否するため
+                            // 到達せず、API 経由で手組みしたメッセージに対してのみ安全側に閉じる
                             let err = SessionError::new(
                                 SESSION_PROTOCOL_VIOLATION,
                                 "invalid subscription filter encoding in pending REQUEST_UPDATE",

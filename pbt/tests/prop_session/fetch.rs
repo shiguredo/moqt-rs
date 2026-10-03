@@ -31,14 +31,11 @@ fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start,
-                end_group_delta,
-                end_object: end.object_id,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start,
+            end_group_delta,
+            end_object: end.object_id,
+        }),
     });
     params
 }

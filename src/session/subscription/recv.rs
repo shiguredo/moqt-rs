@@ -166,12 +166,13 @@ impl Session {
             subscribe.parameters.subgroup_delivery_timeout();
         let filter = match subscribe.parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
-            // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
+            // 省略時と Location Filter Type 0x00 (None) はどちらも unfiltered として扱う
             Ok(_) => None,
             Err(_) => {
-                // draft-ietf-moq-transport-21 §3.3.1 (Location Filters): End Group 溢出は
-                // MUST close the session with PROTOCOL_VIOLATION。壊れた値は §8.3 の
-                // KEY_VALUE_FORMATTING_ERROR だが、セッション層では同じく閉じる
+                // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
+                // StartGroup + EndGroupDelta のオーバーフローは MUST close the session with
+                // PROTOCOL_VIOLATION。Location Filter 形式でない値は API 経由で手組みした
+                // メッセージでのみ起こり、wire 経路では decode 層が先に拒否するため到達しない
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "invalid subscription filter encoding",
@@ -401,14 +402,16 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-21 §9.8 (PUBLISH) / §9.20.10 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §9.20.9 (LOCATION FILTER Parameter):
         // PUBLISH の Parameters は initial subscription parameters として保持する。
-        // Length 0 と省略はどちらも unfiltered として扱う。新規 PUBLISH は解決時点の
+        // Location Filter Type 0x00 (None) と省略はどちらも unfiltered として扱う。新規 PUBLISH は解決時点の
         // largest を持たないため、相対フィルタは先頭から解決される。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let filter = match publish.parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             Ok(_) => None,
+            // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
+            // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
             Err(_) => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -934,7 +937,7 @@ impl Session {
             .subscriptions
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
-        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
         // FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
         // 保持されない (sticky 対象外) ため、累積パラメータへの保持から除外する。
         // アプリへ通知する累積表示 (`merged`) には残す。
@@ -947,7 +950,7 @@ impl Session {
         let post_forward = merged.forward().unwrap_or(subscription.forward_state);
         let post_filter: Option<LocationFilter> = match merged.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
-            // Length 0 はフィルタ削除、省略時は現 filter を使う
+            // Type 0x00 (None) はフィルタ削除、省略時は現 filter を使う
             Ok(LocationFilterUpdate::Removed) => None,
             Ok(LocationFilterUpdate::Unchanged) => subscription.filter,
             // デコード済みメッセージでは到達しない。安全側に現 filter を使う。
@@ -1023,6 +1026,8 @@ impl Session {
         // `SessionError` への `From` 実装はないため `?` では伝播できない。
         let filter_update = match notify.parameters.location_filter_update() {
             Ok(update) => update,
+            // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
+            // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
             Err(_) => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -1039,8 +1044,8 @@ impl Session {
         if let Some(f) = notify.parameters.forward() {
             subscription.forward_state = f;
         }
-        // draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 は
-        // フィルタ削除、省略時は値 unchanged。解決済み値もフィルタに追随させる。
+        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // Location Filter Type 0x00 (None) はフィルタ削除、省略時は値 unchanged。解決済み値もフィルタに追随させる。
         match filter_update {
             LocationFilterUpdate::Unchanged => {}
             LocationFilterUpdate::Removed => {

@@ -218,17 +218,14 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
     });
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start: Location {
-                    group_id: 3,
-                    object_id: 1,
-                },
-                end_group_delta: 2,
-                end_object: 4,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 3,
+                object_id: 1,
+            },
+            end_group_delta: 2,
+            end_object: 4,
+        }),
     });
     let err = client
         .send_request_update(rid, params)
@@ -1432,7 +1429,8 @@ fn request_ok_publish_with_forward_keeps_subscription_pending() {
 #[test]
 fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER, PARAM_SUBSCRIBER_PRIORITY,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        PARAM_SUBSCRIBER_PRIORITY,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -1448,12 +1446,14 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending() {
     server
         .recv_request(pub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // 未知の Filter Type (0x5) を含む REQUEST_OK。draft-20 では LOCATION_FILTER 自体が
-    // PUBLISH_OK スコープ外のため、スコープ検証で拒否される
+    // LOCATION_FILTER を含む REQUEST_OK。draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) は
+    // PUBLISH 応答 context に LOCATION_FILTER を許可しないため、スコープ検証で拒否される
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x05]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 5,
+        }),
     });
     ok_params.push(MessageParameter {
         param_type: PARAM_SUBSCRIBER_PRIORITY,
@@ -2413,7 +2413,7 @@ fn request_ok_publish_with_forward_keeps_subscription_pending_on_recv() {
 fn request_ok_publish_with_location_filter_keeps_subscription_pending_on_recv() {
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
     };
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -2433,7 +2433,9 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending_on_recv() 
     let mut ok_params = MessageParameters::new();
     ok_params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x05]),
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 5,
+        }),
     });
     let err = client
         .recv_stream_message(

@@ -391,7 +391,7 @@ pub async fn run(
     let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
     catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
         param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
-        value: shiguredo_moqt::message_parameter::MessageParameterValue::LengthPrefixed(
+        value: shiguredo_moqt::message_parameter::MessageParameterValue::LocationFilter(
             shiguredo_moqt::message_parameter::LocationFilter::AbsoluteRangeWithEnd {
                 start: shiguredo_moqt::message::common::Location {
                     group_id: 0,
@@ -399,8 +399,7 @@ pub async fn run(
                 },
                 end_group_delta: 0,
                 end_object: 1,
-            }
-            .encode_to_bytes(),
+            },
         ),
     });
     let catalog_fetch = client

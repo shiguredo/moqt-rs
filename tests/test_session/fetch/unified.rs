@@ -1046,17 +1046,14 @@ fn send_fetch_with_empty_filter_range_rejected() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start: Location {
-                    group_id: 5,
-                    object_id: 10,
-                },
-                end_group_delta: 0,
-                end_object: 3,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 5,
+                object_id: 10,
+            },
+            end_group_delta: 0,
+            end_object: 3,
+        }),
     });
     let err = client
         .send_fetch(ns(&[b"live"]), b"cam".to_vec(), params)
@@ -1127,17 +1124,14 @@ fn fetch_with_empty_filter_range_rejected_with_invalid_range() {
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(
-            LocationFilter::AbsoluteRangeWithEnd {
-                start: Location {
-                    group_id: 5,
-                    object_id: 10,
-                },
-                end_group_delta: 0,
-                end_object: 3,
-            }
-            .encode_to_bytes(),
-        ),
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 5,
+                object_id: 10,
+            },
+            end_group_delta: 0,
+            end_object: 3,
+        }),
     });
     server
         .recv_request(ControlMessage::Fetch(WireFetch {
@@ -1205,7 +1199,7 @@ fn send_fetch_with_disallowed_parameter_rejected_without_side_effects() {
 }
 
 /// LOCATION_FILTER 省略の FETCH は unfiltered として受理される
-/// (draft-ietf-moq-transport-21 §9.11 (FETCH) / §9.20.10)
+/// (draft-ietf-moq-transport-22 §9.11 (FETCH) / §9.20.9)
 #[test]
 fn fetch_without_location_filter_accepted_as_unfiltered() {
     use shiguredo_moqt::message::Fetch as WireFetch;
@@ -1263,13 +1257,13 @@ fn fetch_without_location_filter_accepted_as_unfiltered() {
     );
 }
 
-/// zero-length LOCATION_FILTER の FETCH は unfiltered として受理される
-/// (draft-ietf-moq-transport-21 §3.3.1 (Location Filters): Length 0 は no filter)
+/// Location Filter Type 0x00 (None) の LOCATION_FILTER を持つ FETCH は unfiltered として受理される
+/// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter): Type 0x00 は no filter)
 #[test]
-fn fetch_with_zero_length_location_filter_accepted_as_unfiltered() {
+fn fetch_with_no_filter_location_filter_accepted_as_unfiltered() {
     use shiguredo_moqt::message::Fetch as WireFetch;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
     };
     use shiguredo_moqt::{stream::subgroup::SubgroupHeader, stream::subgroup::SubgroupIdMode};
     // subscription を確立し {0, 0} を公開して Largest を確定させる
@@ -1307,11 +1301,11 @@ fn fetch_with_zero_length_location_filter_accepted_as_unfiltered() {
     server
         .send_subgroup_object(stream_id, 0, None)
         .expect("テストフィクスチャの前提条件を満たす");
-    // Length 0 の LOCATION_FILTER 付き FETCH は unfiltered として受理される
+    // Location Filter Type 0x00 (None) の LOCATION_FILTER 付き FETCH は unfiltered として受理される
     let mut params = MessageParameters::new();
     params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
     });
     server
         .recv_request(ControlMessage::Fetch(WireFetch {
@@ -1324,7 +1318,7 @@ fn fetch_with_zero_length_location_filter_accepted_as_unfiltered() {
     assert_eq!(
         server
             .fetch(2)
-            .expect("zero-length filter の FETCH は受理されること")
+            .expect("Type 0x00 (None) の filter の FETCH は受理されること")
             .state,
         shiguredo_moqt::session::types::FetchState::Pending
     );

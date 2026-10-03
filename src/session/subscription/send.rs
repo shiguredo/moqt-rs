@@ -147,7 +147,7 @@ impl Session {
         let subscriber_subgroup_delivery_timeout_ms = parameters.subgroup_delivery_timeout();
         let filter = match parameters.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
-            // 省略時と Length 0 (no filter) はどちらも unfiltered として扱う
+            // 省略時と Location Filter Type 0x00 (None) はどちらも unfiltered として扱う
             Ok(_) => None,
             Err(_) => {
                 return Err(SessionError::new(
@@ -157,8 +157,8 @@ impl Session {
                 .into());
             }
         };
-        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-        // FILL 内側の Table 6 スコープと LOCATION_FILTER も送信前に検証し、
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出と状態登録を防ぐ
         super::fill::validate_outgoing_fill_parameters(&parameters)?;
         // draft §3.3.1 / §3.3.2: 自側が送ったフィルタを保持する。自側は subscriber なので
@@ -324,7 +324,7 @@ impl Session {
         if let Some(order) = parameters.group_order() {
             validate_group_order(order)?;
         }
-        // draft-ietf-moq-transport-21 §9.20.10 (LOCATION FILTER Parameter):
+        // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
         // 不正形式の LOCATION_FILTER は送信前に拒否し、不正値の送出と状態登録を防ぐ
         // (request_id 発行より前に置き、エラー時に欠番を作らない)。
         // `location_filter_update()` は `Result<LocationFilterUpdate, MessageError>` を
@@ -820,8 +820,8 @@ impl Session {
                 ));
             }
         };
-        // draft-ietf-moq-transport-21 §9.20.16 (FILL PARAMETERS Parameter):
-        // FILL 内側の Table 6 スコープと LOCATION_FILTER も送信前に検証し、
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出を防ぐ (楽観的状態更新より前に置き、エラー時に更新済み状態を残さない)
         super::fill::validate_outgoing_fill_parameters(parameters)?;
         // draft-ietf-moq-transport-21 §9.20.20 (NEW GROUP REQUEST Parameter):
@@ -840,8 +840,8 @@ impl Session {
         if let Some(new_forward) = new_forward {
             subscription.forward_state = new_forward;
         }
-        // draft-ietf-moq-transport-21 §3.3.1 (Location Filters) / §9.20.10 (LOCATION FILTER Parameter):
-        // REQUEST_UPDATE に LOCATION_FILTER が含まれる場合は更新し、Length 0 なら削除する。
+        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // REQUEST_UPDATE に LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。
         // 省略時は値 unchanged。解決済み値もフィルタに追随させる。
         match filter_update {
             LocationFilterUpdate::Unchanged => {}
@@ -954,8 +954,8 @@ impl Session {
         if let Some(new_forward) = new_forward {
             subscription.forward_state = new_forward;
         }
-        // draft-ietf-moq-transport-21 §3.3.1 (Location Filters) / §9.20.10 (LOCATION FILTER Parameter):
-        // LOCATION_FILTER が含まれる場合は更新し、Length 0 なら削除する。
+        // draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter):
+        // LOCATION_FILTER が含まれる場合は更新し、Type 0x00 (None) なら削除する。
         // 省略時は値 unchanged。解決済み値もフィルタに追随させる。
         match filter_update {
             LocationFilterUpdate::Unchanged => {}

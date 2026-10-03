@@ -203,7 +203,7 @@ fn publish_ok_with_location_filter_rejected() {
     let mut location_params = MessageParameters::new();
     location_params.push(MessageParameter {
         param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LengthPrefixed(filter.encode_to_bytes()),
+        value: MessageParameterValue::LocationFilter(filter),
     });
 
     // 送信側: スコープ外で拒否され、状態は Pending のまま
@@ -962,16 +962,17 @@ fn publish_with_forward_sets_forward_state() {
 
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (SUBSCRIBE)
 ///
-/// draft-ietf-moq-transport-21 は §2.4.2 / §6.5 の予約名前空間拒否と §9.20.9 (GROUP ORDER Parameter) /
-/// §9.20.19 (FORWARD Parameter) / §9.20.22 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
-/// §9.20.10 (LOCATION FILTER Parameter) の decode 失敗の優先順位を規定しない。宛先自体が存在しない
-/// 予約名前空間の拒否を優先する意図した選択であり、API 経路で手組みしたメッセージで観測できる。
+/// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
+/// §9.20.18 (FORWARD Parameter) / §9.20.21 (INCLUDE_PROPERTIES Parameter) の値域 MUST、
+/// §9.20.9 (LOCATION FILTER Parameter) の StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の
+/// 優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択であり、
+/// API 経路で手組みしたメッセージで観測できる。
 #[test]
 fn subscribe_reserved_namespace_precedes_parameter_range() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
         PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER,
     };
     for reserved in [ns(&[b"."]), ns(&[b".session"])] {
@@ -991,7 +992,13 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
         });
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end_group_delta: u64::MAX,
+            }),
         });
         server
             .recv_request(ControlMessage::Subscribe(Subscribe {
@@ -1018,15 +1025,16 @@ fn subscribe_reserved_namespace_precedes_parameter_range() {
 
 /// 予約名前空間の拒否は値域外パラメータの MUST close より優先される (PUBLISH)
 ///
-/// draft-ietf-moq-transport-21 は §2.4.2 / §6.5 の予約名前空間拒否と §9.20.9 (GROUP ORDER Parameter) /
-/// §9.20.19 (FORWARD Parameter) の値域 MUST、§8.3 (Key-Value-Pair Structure) の LOCATION_FILTER
-/// decode 失敗の優先順位を規定しない。宛先自体が存在しない予約名前空間の拒否を優先する意図した選択である。
+/// draft-ietf-moq-transport-22 は §2.4.3 / §6.5 の予約名前空間拒否と §9.20.8 (GROUP ORDER Parameter) /
+/// §9.20.18 (FORWARD Parameter) の値域 MUST、§9.20.9 (LOCATION FILTER Parameter) の
+/// StartGroup + EndGroupDelta オーバーフロー (値域 MUST) の優先順位を規定しない。宛先自体が存在しない
+/// 予約名前空間の拒否を優先する意図した選択である。
 #[test]
 fn publish_reserved_namespace_precedes_parameter_range() {
     use shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST;
     use shiguredo_moqt::message::Publish;
     use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FORWARD, PARAM_GROUP_ORDER,
         PARAM_LOCATION_FILTER,
     };
     for (reserved, reason) in [
@@ -1045,7 +1053,13 @@ fn publish_reserved_namespace_precedes_parameter_range() {
         });
         params.push(MessageParameter {
             param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LengthPrefixed(vec![0xff]), // 途中で切れた varint
+            value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteRange {
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end_group_delta: u64::MAX,
+            }),
         });
         server
             .recv_request(ControlMessage::Publish(Publish {
