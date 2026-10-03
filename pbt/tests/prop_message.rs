@@ -316,22 +316,9 @@ const FILL_INNER_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 const SUBSCRIBE_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
-// draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) / §9.20.3 以降: REQUEST_OK では AUTHORIZATION_TOKEN は非許可。
-// `src/message.rs::REQUEST_OK_ALLOWED_PARAMS` と一致させる。
-const REQUEST_OK_PARAMS: &[u64] = &[
-    PARAM_OBJECT_DELIVERY_TIMEOUT,
-    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
-    PARAM_SUBSCRIBER_PRIORITY,
-    PARAM_LOCATION_FILTER,
-    PARAM_EXPIRES,
-    PARAM_LARGEST_OBJECT,
-    PARAM_FORWARD,
-    PARAM_NEW_GROUP_REQUEST,
-    PARAM_SUBGROUP_FILTER,
-    PARAM_OBJECTID_FILTER,
-    PARAM_PRIORITY_FILTER,
-    PARAM_OBJECT_PROPERTY_FILTER,
-];
+// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): 応答 context ごとの許可パラメータの和集合は
+// EXPIRES と LARGEST_OBJECT の 2 型。`src/message.rs::REQUEST_OK_ALLOWED_PARAMS` と一致させる。
+const REQUEST_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 // draft-ietf-moq-transport-21 §9.20.9 (GROUP ORDER Parameter): REQUEST_UPDATE では GROUP_ORDER は非許可。
 // `src/message.rs::REQUEST_UPDATE_ALLOWED_PARAMS` と一致させる。
 const REQUEST_UPDATE_PARAMS: &[u64] = &[
@@ -542,6 +529,35 @@ fn sample_location_filter_covers_all_types() -> noprop::TestResult {
         seen.get(),
         0b111111,
         "LOCATION_FILTER の 6 形式すべてが生成されること\n{runner}"
+    );
+    Ok(())
+}
+
+/// REQUEST_OK の sampler が和集合の 2 型 (EXPIRES / LARGEST_OBJECT) を生成すること
+///
+/// `roundtrip` は sampler が生成した値だけを往復させるため、sampler が特定の型を生成しないと
+/// その型の往復が検証されない。draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) の和集合は
+/// 2 型なので、両方が現れることをここで固定する。
+#[test]
+fn request_ok_params_cover_all_types() -> noprop::TestResult {
+    let expires_seen = std::cell::Cell::new(false);
+    let largest_object_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        for param in sample_scoped_parameters(ctx, REQUEST_OK_PARAMS).as_slice() {
+            if param.param_type == PARAM_EXPIRES {
+                expires_seen.set(true);
+            }
+            if param.param_type == PARAM_LARGEST_OBJECT {
+                largest_object_seen.set(true);
+            }
+        }
+        Ok(())
+    })?;
+    assert!(expires_seen.get(), "EXPIRES が生成されなかった\n{runner}");
+    assert!(
+        largest_object_seen.get(),
+        "LARGEST_OBJECT が生成されなかった\n{runner}"
     );
     Ok(())
 }

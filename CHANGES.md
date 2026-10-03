@@ -62,6 +62,12 @@
   - `ObjectFieldTracker` の内部表現を `DeliveryMode` に置き換え、`observe_object_fields` / `observe_object_fields_with_content` の引数も `DeliveryMode` にする (公開 API の破壊的変更)
   - 重複 Object の Malformed 理由文字列を "different Delivery Mode" に変更する (§7.1 / §12.1 条件 7)。受信側の重複検出の挙動は変えない
   - @voluntas
+- [CHANGE] REQUEST_OK の codec 層の許可パラメータを draft-ietf-moq-transport-22 §9.3 の和集合 (EXPIRES / LARGEST_OBJECT) に縮小する
+  - draft-21 時点の設計判断で 12 型を広く受理していたため、仕様が PROTOCOL_VIOLATION を求めるパラメータを codec 層が受理していた
+  - `REQUEST_OK_ALLOWED_PARAMS` を 2 型にし、それ以外のパラメータを含む REQUEST_OK の encode / decode を PROTOCOL_VIOLATION にする
+  - セッション層の応答 context 別検証 (PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK) は維持する
+  - examples は main ループに届く MOQT メッセージの encode / decode 失敗で PROTOCOL_VIOLATION (書式違反は KEY_VALUE_FORMATTING_ERROR) の close を送ってからエラー終了する。従来は終了コード付きの close を送っていなかった
+  - @voluntas
 - [ADD] peer が SETUP で宣言した MAX_AUTH_TOKEN_CACHE_SIZE を取得する `Session::peer_max_auth_token_cache_size()` を追加する
   - @voluntas
 - [FIX] GOAWAY 送信後の新規 request 拒否を publisher が応答する request 種別に限定する

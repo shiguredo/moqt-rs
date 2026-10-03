@@ -108,6 +108,9 @@ impl From<tokio_moq::error::TransportError> for Error {
             | tokio_moq::error::TransportError::ResolutionFailed(msg) => Self::Other(msg),
             // セッション終了は表示文字列ではなく variant で判定できるように専用にする
             tokio_moq::error::TransportError::ConnectionClosed => Self::ConnectionClosed,
+            // encode / decode 失敗は main ループが終了コード (PROTOCOL_VIOLATION など) を
+            // 決めるため MessageError の variant を保って伝える
+            tokio_moq::error::TransportError::Moqt(e) => Self::Moqt(e),
             other => Self::WebTransport(other.to_string()),
         }
     }
@@ -165,5 +168,21 @@ mod tests {
             "ConnectionClosed に振り分けられること: {err}"
         );
         assert_eq!(err.to_string(), "session closed");
+    }
+
+    /// encode / decode 失敗は `Moqt` variant になり、main ループが終了コードを決められる
+    #[test]
+    fn transport_error_mapping_keeps_message_error_variant() {
+        let err = Error::from(TransportError::Moqt(
+            shiguredo_moqt::error::MessageError::ProtocolViolation("out of scope parameter"),
+        ));
+        assert!(
+            matches!(err, Error::Moqt(_)),
+            "Moqt に振り分けられること: {err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "MoQT: protocol violation: out of scope parameter"
+        );
     }
 }

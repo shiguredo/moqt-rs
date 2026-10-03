@@ -1,7 +1,7 @@
 # REQUEST_OK codec の許可パラメータを draft-22 §9.3 に合わせる
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/change-request-ok-param-scope
 - Polished: 2026-10-02
 
@@ -35,4 +35,12 @@ draft-22 §9.3 (REQUEST_OK) は応答 context ごとの許可パラメータを�
 
 ## 解決方法
 
-{未着手}
+- `src/message.rs` の `REQUEST_OK_ALLOWED_PARAMS` を `[PARAM_EXPIRES, PARAM_LARGEST_OBJECT]` の 2 型に縮小し、draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) の context 別列挙の和集合に合わせた。
+  encode / decode の両経路で和集合外のパラメータを `PROTOCOL_VIOLATION` として拒否する (§9.20.1 (Parameter Scope) の MUST に対応)。
+- `tests/test_message.rs` に `mod request_ok` を追加し、和集合外の 10 型すべてで encode / decode が `ProtocolViolation` になることと、和集合内の 2 型が encode できることを固定した。
+- `pbt/tests/prop_message.rs` の `REQUEST_OK_PARAMS` を 2 型に追随させ、`request_ok_params_cover_all_types` で sampler が両型を生成すること (往復の網羅) を固定した。
+- `tests/test_session/parameter_rules.rs` のコメントを draft-22 の内容に更新し、和集合内で context 外になる `PUBLISH_OK` + `LARGEST_OBJECT` を受信側で拒否するテストを追加した。
+- codec の受理範囲が狭まることで、codec 層の decode 失敗が I/O 層へ直接届くようになったため、examples が decode 失敗を終了コード付きで閉じるようにした。
+  `examples/tokio-moq` に `TransportError::Moqt(MessageError)` を追加し、`examples/moq-sub` / `examples/moq-pub` が `session_error_code` で `PROTOCOL_VIOLATION` (書式違反は `KEY_VALUE_FORMATTING_ERROR`) に写してからエラー終了する。
+- `CHANGES.md` の `## develop` に `[CHANGE]` を追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` / `prek run --all-files` が通ることを確認した。

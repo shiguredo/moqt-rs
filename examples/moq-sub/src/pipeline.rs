@@ -149,6 +149,10 @@ fn should_close_gracefully(session_terminated: bool) -> bool {
 /// KEY_VALUE_FORMATTING_ERROR (0x6)、それ以外の decode 失敗 (`UnexpectedEof` /
 /// `ProtocolViolation` など) は PROTOCOL_VIOLATION (0x3) で閉じる
 /// (コードは §12.2 (Session Termination Codes))。
+///
+/// `MalformedAuthToken` は §8.9 (Malformed Auth Token) がメッセージ単位の reject を
+/// MUST で求めるが、decode を中断した時点で Request ID が得られずメッセージ単位の
+/// reject を送れないため、セッション終了として PROTOCOL_VIOLATION に写す。
 fn session_error_code(error: &MessageError) -> u64 {
     match error {
         MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
@@ -826,6 +830,20 @@ pub async fn run(
                     Err(e) if is_transport_session_end(&e) => {
                         tracing::info!("Session closed by transport");
                         peer_ended = true;
+                        break 'main;
+                    }
+                    // MOQT メッセージの encode / decode 失敗。§9 (Control Messages) と
+                    // §9.20.1 (Parameter Scope) は不正なメッセージの受信を PROTOCOL_VIOLATION で
+                    // 閉じることを MUST で要求する。decode は codec 層で完結し Session はこの
+                    // 違反を観測できないため、I/O 層である main ループが終了コードを決めて閉じる
+                    Err(Error::Moqt(e)) => {
+                        let code = session_error_code(&e);
+                        tracing::warn!("Closing session on MOQT message error: {code:#x} {e}");
+                        close_session(&mut client, SessionError::new(code, e.reason())).await;
+                        session_terminated = true;
+                        // 終了コード付きで閉じた後も `run` の戻り値はエラーとして返す
+                        // (moq-pub と同じ扱い。閉じた理由を呼び出し側が観測できるようにする)
+                        fatal_error = Some(Error::Moqt(e));
                         break 'main;
                     }
                     // transport 自体のエラーは後始末 (stream task の join と録画の

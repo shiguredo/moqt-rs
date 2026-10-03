@@ -598,14 +598,17 @@ fn publish_with_grease_property_in_mandatory_range_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-// ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope)) ────
+// ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK)) ────
 //
 // REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK が
 // 共有する単一ワイヤメッセージ。
-// encode/decode 層は全 context の和集合 (REQUEST_OK_ALLOWED_PARAMS) でしか検証
-// しないため、context ごとの許可集合外パラメータは受信側 (セッション層) で
-// PROTOCOL_VIOLATION として弾く必要がある。以下は意図的エラーパス (PBT では
-// 表現できない) のための単体テスト。
+// codec 層は全 context の和集合 (REQUEST_OK_ALLOWED_PARAMS = EXPIRES と
+// LARGEST_OBJECT の 2 型) でしか検証しないため、和集合内でも context ごとに
+// 許可されないパラメータ (PUBLISH_OK への LARGEST_OBJECT) は受信側 (セッション層) で
+// PROTOCOL_VIOLATION として弾く必要がある。和集合外のパラメータ (FORWARD など) は
+// codec 層が decode 時点で先に拒否するため wire からは到達せず、API 経由で手組みした
+// メッセージでのみセッション層の検証に到達する。以下は意図的エラーパス
+// (PBT では表現できない) のための単体テスト。
 
 /// PUBLISH_OK 応答に LARGEST_OBJECT を載せると送信側で PROTOCOL_VIOLATION
 /// (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter): LARGEST_OBJECT は
@@ -2454,6 +2457,64 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending_on_recv() 
     assert_eq!(sub.state, SubscriptionState::Pending);
     assert!(sub.is_pending_publisher());
     // セッションが PROTOCOL_VIOLATION で閉じること (Location Filter は fail + Err)
+    match drain_until_close(&mut client) {
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+    }
+}
+
+/// PUBLISH_OK 応答に LARGEST_OBJECT を載せると受信側で PROTOCOL_VIOLATION
+///
+/// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): PUBLISH_OK が許可するのは EXPIRES のみで、
+/// LARGEST_OBJECT は REQUEST_UPDATE_OK と TRACK_STATUS_OK の許可パラメータである。
+/// codec 層の許可集合は 3 context の和集合 (EXPIRES / LARGEST_OBJECT) のため codec は受理し、
+/// context 違反の検出はセッション層が行う。和集合内でも context 外になる組み合わせの 1 つであり
+/// (TRACK_STATUS_OK への EXPIRES も同じ)、wire からも到達しうる。
+#[test]
+fn request_ok_publish_with_largest_object_closes_session_on_recv() {
+    use shiguredo_moqt::message::RequestOk;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            102,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // LARGEST_OBJECT を含む REQUEST_OK を client (publisher 役) に直接流し込む
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 9,
+            object: 1,
+        },
+    });
+    let err = client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(RequestOk {
+                parameters: ok_params,
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect_err("LARGEST_OBJECT を含む PUBLISH_OK は PROTOCOL_VIOLATION になる");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // subscription は Pending(Publisher) のまま (状態不変)
+    let sub = client
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(sub.state, SubscriptionState::Pending);
+    assert!(sub.is_pending_publisher());
     match drain_until_close(&mut client) {
         SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
         other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),

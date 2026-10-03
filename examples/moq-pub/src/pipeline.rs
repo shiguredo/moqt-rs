@@ -9,7 +9,10 @@ use std::time::Instant;
 
 use shiguredo_audio_device::AudioFrameOwned;
 use shiguredo_moqt::{
-    error::{REQUEST_DOES_NOT_EXIST, REQUEST_NOT_SUPPORTED},
+    error::{
+        MessageError, REQUEST_DOES_NOT_EXIST, REQUEST_NOT_SUPPORTED,
+        SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
+    },
     loc::{
         LocProperties, LocProperty, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE,
         PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
@@ -671,7 +674,11 @@ pub async fn run(
                         tracing::info!("Session closed by transport");
                         break 'main;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+                        close_on_message_error(&mut client, &e).await;
+                        return Err(e);
+                    }
                 }
             }
             audio_input = audio_input_rx.recv(), if config.audio_enabled => {
@@ -769,7 +776,11 @@ pub async fn run(
                         tracing::info!("Session closed by transport");
                         break 'main;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+                        close_on_message_error(&mut client, &e).await;
+                        return Err(e);
+                    }
                 }
             }
             notable = client.next_event() => {
@@ -848,7 +859,11 @@ pub async fn run(
                         tracing::info!("Session closed by transport");
                         break 'main;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+                        close_on_message_error(&mut client, &e).await;
+                        return Err(e);
+                    }
                 }
             }
             _ = tick_interval.tick() => {
@@ -949,6 +964,42 @@ fn unsupported_macos_encoder(codec: &str) -> Error {
 /// 依存しない)。
 fn is_transport_session_end(error: &Error) -> bool {
     matches!(error, Error::ConnectionClosed)
+}
+
+/// MOQT メッセージの encode / decode 失敗なら終了コード付きで閉じる
+///
+/// draft-ietf-moq-transport-22 §9 (Control Messages) と §9.20.1 (Parameter Scope) は
+/// 不正なメッセージの受信を PROTOCOL_VIOLATION で閉じることを MUST で要求する。
+/// decode 失敗は codec 層で完結するため Session はこの違反を観測できず、I/O 層である
+/// main ループが終了コードを決める。encode 失敗はローカル要因だが、いずれにせよ致命的な
+/// 経路のため同じ写像で閉じる。`Error::Moqt` 以外は何もしない (呼び出し側が `run` の
+/// 戻り値として扱う)。
+async fn close_on_message_error(client: &mut MoqtClient, error: &Error) {
+    let Error::Moqt(e) = error else {
+        return;
+    };
+    let code = session_error_code(e);
+    tracing::warn!("Closing session on MOQT message error: {code:#x} {e}");
+    if let Err(close_err) = client.close(code, e.reason()).await {
+        tracing::warn!("Failed to close session: {close_err}");
+    }
+}
+
+/// decode 失敗を閉じる終了コード
+///
+/// library の data plane が使う `session_error_from_data_message` と同じ写像である
+/// (`src/session/data.rs`)。draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) が
+/// MUST を定める書式違反は KEY_VALUE_FORMATTING_ERROR (0x6)、それ以外の decode 失敗は
+/// PROTOCOL_VIOLATION (0x3) で閉じる (コードは §12.2 (Session Termination Codes))。
+///
+/// `MalformedAuthToken` は §8.9 (Malformed Auth Token) がメッセージ単位の reject を
+/// MUST で求めるが、decode を中断した時点で Request ID が得られずメッセージ単位の
+/// reject を送れないため、セッション終了として PROTOCOL_VIOLATION に写す。
+fn session_error_code(error: &MessageError) -> u64 {
+    match error {
+        MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
+        _ => SESSION_PROTOCOL_VIOLATION,
+    }
 }
 
 /// MOQT relay が転送してきた要求 (SUBSCRIBE / FETCH) に応答する
@@ -1373,6 +1424,32 @@ mod tests {
     /// 再エンコードの入力 PTS が出力フレームへ引き継がれること
     ///
     /// 0 フレームを返した入力の PTS は次に出力されたフレームへ割り当てる。
+    /// encode / decode 失敗がセッション終了コードへ写ること
+    ///
+    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
+    /// KEY_VALUE_FORMATTING_ERROR (0x6) と PROTOCOL_VIOLATION (0x3) を使い分ける。
+    #[test]
+    fn session_error_code_maps_message_failures() {
+        assert_eq!(
+            session_error_code(&MessageError::KeyValueFormattingError(
+                "test formatting error"
+            )),
+            SESSION_KEY_VALUE_FORMATTING_ERROR,
+            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+        );
+        assert_eq!(
+            session_error_code(&MessageError::ProtocolViolation("test violation")),
+            SESSION_PROTOCOL_VIOLATION,
+            "プロトコル違反は PROTOCOL_VIOLATION (0x3) であること"
+        );
+        // メッセージを持たない失敗も PROTOCOL_VIOLATION として扱う
+        assert_eq!(
+            session_error_code(&MessageError::UnexpectedEof),
+            SESSION_PROTOCOL_VIOLATION,
+            "切り詰めは PROTOCOL_VIOLATION (0x3) であること"
+        );
+    }
+
     #[test]
     fn assign_input_timestamps_follows_input_pts() {
         let mut pending = VecDeque::new();

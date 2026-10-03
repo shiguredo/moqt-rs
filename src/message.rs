@@ -78,57 +78,49 @@ pub(crate) const SUBSCRIBE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 
-/// SUBSCRIBE_OK で許可されるパラメータ型 (draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter) /
-/// §9.20.18 (LARGEST OBJECT Parameter) の MAY appear 列挙)
+/// SUBSCRIBE_OK で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) /
+/// §9.20.17 (LARGEST OBJECT Parameter) の MAY appear 列挙)
 ///
 /// 送信側の `send_subscribe_ok` (src/session/subscription/send.rs) が状態遷移前に
 /// スコープ検証するために `pub(crate)` で公開している。
 pub(crate) const SUBSCRIBE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
-/// REQUEST_OK で許可されるパラメータ型 (draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) /
-/// §9.20.3 以降の各 Parameter 節 "MAY appear in" 定義から導出: AUTHORIZATION_TOKEN は非許可)
+/// REQUEST_OK で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
 ///
 /// これは codec 層が REQUEST_OK のワイヤ妥当性検証に用いる許可集合である。
-/// draft-ietf-moq-transport-21 §9.20 の各 "MAY appear in" で REQUEST_OK に出現しうるのは
-/// `EXPIRES` / `LARGEST_OBJECT` のみだが、応答 context ごとの厳密な検証はセッション層が
-/// `*_OK_ALLOWED_PARAMS` で行うため、codec 層は REQUEST_UPDATE 系のパラメータも含めて
-/// 意図的に広く受理する。狭めるとデコード層エラーパスが変わる。
-const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[
-    PARAM_OBJECT_DELIVERY_TIMEOUT,
-    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
-    PARAM_SUBSCRIBER_PRIORITY,
-    PARAM_LOCATION_FILTER,
-    PARAM_EXPIRES,
-    PARAM_LARGEST_OBJECT,
-    PARAM_FORWARD,
-    PARAM_NEW_GROUP_REQUEST,
-    PARAM_SUBGROUP_FILTER,
-    PARAM_OBJECTID_FILTER,
-    PARAM_PRIORITY_FILTER,
-    PARAM_OBJECT_PROPERTY_FILTER,
-];
+/// §9.3 は応答 context ごとの許可パラメータを列挙し、その和集合は `EXPIRES` と
+/// `LARGEST_OBJECT` の 2 型になる。本ライブラリが実装する PUBLISH_OK / REQUEST_UPDATE_OK /
+/// TRACK_STATUS_OK では EXPIRES と LARGEST_OBJECT の 2 型で和集合が尽きる (実装しない
+/// SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK / PUBLISH_NAMESPACE_OK も EXPIRES のみ)。
+///
+/// 和集合外のパラメータの受信は §9.20.1 (Parameter Scope) の MUST により
+/// PROTOCOL_VIOLATION で閉じる。decode 側はこの MUST に対応する検証であり、encode 側の
+/// 同じ検証は非準拠のワイヤを生成しないためのライブラリの防御である。
+///
+/// 応答 context ごとの厳密な検証はセッション層が `*_OK_ALLOWED_PARAMS` で行う。
+const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
 // ─── REQUEST_OK の応答 context 別許可パラメータ集合 ─────────────────
 //
-// draft-ietf-moq-transport-21 §9.3 (REQUEST_OK): REQUEST_OK (Type 0x07) は PUBLISH_OK /
+// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): REQUEST_OK (Type 0x07) は PUBLISH_OK /
 // REQUEST_UPDATE_OK / TRACK_STATUS_OK が共有する単一ワイヤメッセージ。
-// draft-ietf-moq-transport-21 §9.20.1 (Parameter Scope) は許可されない context に出現したパラメータの受信を
-// PROTOCOL_VIOLATION でクローズすることを MUST で要求する。各集合は draft-ietf-moq-transport-21 §9.20.3 以降の各 Parameter 節の
-// "MAY appear in" スコープ定義から導出している (将来 draft 改版で変わりうる)。
+// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) は許可されない context に出現したパラメータの受信を
+// PROTOCOL_VIOLATION でクローズすることを MUST で要求する。各集合は §9.3 の context 別列挙と
+// 各 Parameter 節の "MAY appear in" から導出している (将来 draft 改版で変わりうる)。
 
-/// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter) の MAY appear 列挙)
+/// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) の MAY appear 列挙)
 ///
-/// draft-ietf-moq-transport-21 Appendix A.1 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK) により、subscription 更新用パラメータは
 /// REQUEST_UPDATE (要求) に出現し、PUBLISH_OK は EXPIRES のみとなる。
 pub(crate) const PUBLISH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES];
 
 /// REQUEST_UPDATE_OK context で許可されるパラメータ型 (subscription / fetch 共通)
 ///
-/// draft-ietf-moq-transport-21 §9.20.17 (EXPIRES Parameter) / draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) のみ許可。
+/// draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) / draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) のみ許可。
 pub(crate) const REQUEST_UPDATE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
-/// TRACK_STATUS_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-21 §9.20.18 (LARGEST OBJECT Parameter) LARGEST_OBJECT のみ)
+/// TRACK_STATUS_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) LARGEST_OBJECT のみ)
 pub(crate) const TRACK_STATUS_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_LARGEST_OBJECT];
 
 // ─── REQUEST_UPDATE の context 別許可パラメータ集合 ─────────────────
@@ -422,12 +414,12 @@ impl Goaway {
     }
 }
 
-/// REQUEST_OK メッセージ (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))
+/// REQUEST_OK メッセージ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestOk {
-    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))
+    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
     pub parameters: MessageParameters,
-    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))
+    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
     pub track_properties: TrackProperties,
 }
 
@@ -1050,7 +1042,7 @@ pub enum ControlMessage {
     Setup(Setup),
     /// GOAWAY メッセージ (draft-ietf-moq-transport-21 §9.2 (GOAWAY))
     Goaway(Goaway),
-    /// REQUEST_OK メッセージ (draft-ietf-moq-transport-21 §9.3 (REQUEST_OK))
+    /// REQUEST_OK メッセージ (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK))
     RequestOk(RequestOk),
     /// REQUEST_ERROR メッセージ (draft-ietf-moq-transport-21 §9.4 (REQUEST_ERROR))
     RequestError(RequestError),

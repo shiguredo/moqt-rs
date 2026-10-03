@@ -965,3 +965,138 @@ mod publish_state_notify {
         ));
     }
 }
+
+mod request_ok {
+    use super::*;
+    use shiguredo_moqt::message::RequestOk;
+    use shiguredo_moqt::message_parameter::LocationFilter;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
+        PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST,
+        PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER,
+        PARAM_PRIORITY_FILTER, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER,
+        PARAM_SUBSCRIBER_PRIORITY,
+    };
+
+    /// 和集合外のパラメータを含む REQUEST_OK は codec 層で PROTOCOL_VIOLATION になる
+    ///
+    /// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
+    /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.20.1 (Parameter Scope) の
+    /// MUST により PROTOCOL_VIOLATION で閉じる。encode と decode の両経路で同じ検証が働くことを
+    /// 固定する。和集合外の 10 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
+    #[test]
+    fn out_of_scope_params_are_protocol_violation() {
+        // (Parameter Type, typed 値, wire 上の値バイト列)
+        let out_of_scope: [(u64, MessageParameterValue, &[u8]); 10] = [
+            (
+                PARAM_OBJECT_DELIVERY_TIMEOUT,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+            (
+                PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+            (PARAM_FORWARD, MessageParameterValue::Uint8(1), &[0x01]),
+            (
+                PARAM_SUBSCRIBER_PRIORITY,
+                MessageParameterValue::Uint8(1),
+                &[0x01],
+            ),
+            (
+                PARAM_LOCATION_FILTER,
+                MessageParameterValue::LocationFilter(LocationFilter::NextObject),
+                // Location Filter Type 0x05 (Next Object) は Type のみの 1 バイト
+                &[0x05],
+            ),
+            (
+                PARAM_SUBGROUP_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                // Length 1 + 値 1 バイト
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_OBJECTID_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_PRIORITY_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_OBJECT_PROPERTY_FILTER,
+                MessageParameterValue::LengthPrefixed(vec![0x00]),
+                &[0x01, 0x00],
+            ),
+            (
+                PARAM_NEW_GROUP_REQUEST,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+        ];
+        for (param_type, value, value_bytes) in out_of_scope {
+            let mut params = MessageParameters::new();
+            params.push(MessageParameter { param_type, value });
+            let msg = ControlMessage::RequestOk(RequestOk {
+                parameters: params,
+                track_properties: TrackProperties::default(),
+            });
+            assert!(
+                matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+                "型 {param_type:#x} の encode は PROTOCOL_VIOLATION になること"
+            );
+
+            // decode 経路: 同じパラメータを wire 形式で手組みする
+            // (REQUEST_OK の Type は 0x07、Track Properties は空なのでペイロードは
+            // Parameters ブロックのみになる)
+            let mut payload = Vec::new();
+            shiguredo_moqt::varint::encode(1, &mut payload);
+            shiguredo_moqt::varint::encode(param_type, &mut payload);
+            payload.extend_from_slice(value_bytes);
+            let mut frame = Vec::new();
+            shiguredo_moqt::varint::encode(0x07, &mut frame);
+            frame.push((payload.len() >> 8) as u8);
+            frame.push(payload.len() as u8);
+            frame.extend_from_slice(&payload);
+            assert!(
+                matches!(
+                    ControlMessage::decode(&frame),
+                    Err(MessageError::ProtocolViolation(_))
+                ),
+                "型 {param_type:#x} の decode は PROTOCOL_VIOLATION になること"
+            );
+        }
+    }
+
+    /// 和集合内の 2 型 (EXPIRES / LARGEST_OBJECT) は codec 層で受理される
+    ///
+    /// 拒否側だけを固定すると、許可集合をさらに狭める退行 (正当なパラメータを拒否する) を
+    /// 検出できないため、encode の成功も確認する。往復の網羅は PBT が担う。
+    #[test]
+    fn allowed_params_are_accepted() {
+        for (param_type, value) in [
+            (PARAM_EXPIRES, MessageParameterValue::VarInt(300)),
+            (
+                PARAM_LARGEST_OBJECT,
+                MessageParameterValue::Location {
+                    group: 4,
+                    object: 5,
+                },
+            ),
+        ] {
+            let mut params = MessageParameters::new();
+            params.push(MessageParameter { param_type, value });
+            let msg = ControlMessage::RequestOk(RequestOk {
+                parameters: params,
+                track_properties: TrackProperties::default(),
+            });
+            assert!(
+                msg.encode().is_ok(),
+                "型 {param_type:#x} の encode は成功すること"
+            );
+        }
+    }
+}

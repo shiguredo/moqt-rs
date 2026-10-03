@@ -23,6 +23,13 @@ pub enum TransportError {
     WtH2(shiguredo_http2::webtransport::WtError),
     /// 接続がクローズ済み
     ConnectionClosed,
+    /// MOQT メッセージの encode / decode 失敗
+    ///
+    /// draft-ietf-moq-transport-22 §9 (Control Messages) と §9.20.1 (Parameter Scope) は
+    /// 不正なメッセージの受信を PROTOCOL_VIOLATION で閉じることを MUST で要求する。
+    /// どの終了コードで閉じるかは I/O 層 (アプリ) が決めるため、`MessageError` の
+    /// variant を保って伝える。
+    Moqt(shiguredo_moqt::error::MessageError),
     /// CONNECT レスポンスが 2xx 以外、または :status ヘッダー不在でセッション確立に失敗した
     /// (draft-ietf-webtrans-http3-16 §3.2)
     ConnectFailed { status: Option<u16> },
@@ -59,6 +66,7 @@ impl std::fmt::Display for TransportError {
             Self::Http2(e) => write!(f, "http2 error: {e}"),
             Self::WtH2(e) => write!(f, "webtransport over http2 error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::Moqt(e) => write!(f, "MOQT message error: {e}"),
             Self::ConnectFailed { status } => match status {
                 Some(s) => write!(f, "CONNECT failed with status {s}"),
                 None => write!(f, "CONNECT failed with no :status header"),
@@ -108,7 +116,9 @@ impl From<s2n_quic::stream::Error> for TransportError {
 
 impl From<shiguredo_moqt::error::MessageError> for TransportError {
     fn from(e: shiguredo_moqt::error::MessageError) -> Self {
-        Self::Internal(e.to_string())
+        // encode / decode の失敗はアプリが終了コード (PROTOCOL_VIOLATION など) を決めるため
+        // variant を保つ
+        Self::Moqt(e)
     }
 }
 
@@ -119,3 +129,27 @@ impl From<shiguredo_moqt::session::types::SessionError> for TransportError {
 }
 
 pub type Result<T> = std::result::Result<T, TransportError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MessageError` は variant を保って伝わる
+    ///
+    /// decode / encode 失敗の終了コードはアプリが決めるため、`Internal` に畳むと
+    /// 判別できなくなる。
+    #[test]
+    fn message_error_keeps_variant() {
+        let err = TransportError::from(shiguredo_moqt::error::MessageError::ProtocolViolation(
+            "out of scope parameter",
+        ));
+        assert!(
+            matches!(err, TransportError::Moqt(_)),
+            "Moqt に振り分けられること: {err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "MOQT message error: protocol violation: out of scope parameter"
+        );
+    }
+}
