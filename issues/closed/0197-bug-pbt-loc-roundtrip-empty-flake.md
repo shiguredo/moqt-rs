@@ -1,7 +1,7 @@
 # pbt の LOC ラウンドトリップがシードによって失敗するのを直す
 
 - Created: 2026-10-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/fix-pbt-loc-roundtrip-empty-flake
 - Polished: {YYYY-MM-DD}
 
@@ -19,7 +19,7 @@
 
 ## 設計方針
 
-- 空のプロパティの encode → decode は、PBT のサンプリングに依存させず、テストの先頭で明示的に 1 回検証する。`LocProperties::new()` を encode すると空のバイト列になり、decode で空に戻ることを確認する
+- 空のプロパティの encode → decode は、PBT のサンプリングに依存させず、テストの先頭で明示的に 1 回検証する。`LocProperties::new()` を encode すると Properties Length = 0 (varint の 1 バイト `0x00`) になり、decode で空に戻ることを確認する
 - 空・非空の観測を数える `empty_seen` / `non_empty_seen` とその assert は削除する。任意のプロパティ列のラウンドトリップ検証は PBT が担う
 - 他のテスト (`accessor_consistency` など) は変更しない
 
@@ -31,4 +31,6 @@
 
 ## 解決方法
 
-{未着手}
+- `pbt/tests/prop_loc.rs` の `roundtrip_including_empty` から、空・非空の観測数を数える `empty_seen` / `non_empty_seen` とその assert を削除した
+- 空の `LocProperties` の encode → decode をテストの先頭で明示的に検証するようにした (encode は varint 1 バイトの `0x00` になり、decode で空に戻る)。任意のプロパティ列のラウンドトリップは PBT が担う
+- CI で失敗したシード `0x18da512254f863c0` とシード 1 から 1000 までで成功することを確認した。`accessor_consistency` の観測 assert は 1 ケースあたりの確率が 1/3 以上で、256 ケースでの失敗確率は事実上無視できるため変更していない

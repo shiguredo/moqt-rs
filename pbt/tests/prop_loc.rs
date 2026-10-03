@@ -64,17 +64,23 @@ fn sample_loc_properties(ctx: &mut noprop::TestCaseContext) -> LocProperties {
 /// "Objects with no properties set Properties Length to 0"
 #[test]
 fn roundtrip_including_empty() -> noprop::TestResult {
-    // 空 (プロパティ 0 個) と非空の両方が観測されたかを数える
-    let empty_seen = std::cell::Cell::new(false);
-    let non_empty_seen = std::cell::Cell::new(false);
+    // 空 (プロパティ 0 個) は合法であり、サンプリングの分布に依存させずここで必ず検証する。
+    // 空のコレクションは Properties Length = 0 (varint の 1 バイト 0x00) としてエンコードされ、
+    // decode で空に戻る
+    let empty = LocProperties::new();
+    let encoded = empty
+        .encode()
+        .expect("空の LOC プロパティの encode は成功する");
+    assert_eq!(encoded, [0x00]);
+    let (decoded, consumed) =
+        LocProperties::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(consumed, encoded.len());
+    assert_eq!(decoded, empty);
+
+    // 任意のプロパティ列のラウンドトリップ
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let props = sample_loc_properties(ctx);
-        if props.is_empty() {
-            empty_seen.set(true);
-        } else {
-            non_empty_seen.set(true);
-        }
         let encoded = props
             .encode()
             .expect("正当なテスト入力の encode は成功する");
@@ -84,14 +90,6 @@ fn roundtrip_including_empty() -> noprop::TestResult {
         assert_eq!(decoded, props);
         Ok(())
     })?;
-    assert!(
-        empty_seen.get(),
-        "空の LOC プロパティのケースが生成されなかった\n{runner}"
-    );
-    assert!(
-        non_empty_seen.get(),
-        "非空の LOC プロパティのケースが生成されなかった\n{runner}"
-    );
     Ok(())
 }
 
