@@ -11,3 +11,5 @@ mod scheduler;
 mod stretch;
 #[path = "test_playout/sync.rs"]
 mod sync;
+#[path = "test_playout/timeline.rs"]
+mod timeline;

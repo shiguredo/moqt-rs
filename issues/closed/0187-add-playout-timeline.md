@@ -1,7 +1,7 @@
 # 音声と映像の共有の時間軸を追加する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/add-playout-timeline
 - Polished: 2026-10-01
 
@@ -85,4 +85,9 @@ MSF の `targetLatency` (draft-ietf-moq-msf-01 §5.2.8) を 2 つのトラック
 
 ## 解決方法
 
-{未着手}
+- `src/playout/timeline.rs` を仕様どおりに実装した。表示時刻 = TIMESTAMP + 基準の遅れ (直近 10 秒の最小値) + 表示の遅れであり、音声は `playout::delay` の目標遅延、映像は揺らぎの百分位を使う
+- 映像の表示の遅れは `max(0.95, 1 - フレーム間隔 (ms) / 1000)` の百分位とし、上限 (表示の遅れの上限と (キューの上限 − 余裕 4 枚) × フレーム間隔の小さい方) で切る。目標が下がるときは 20 ms / 秒で減衰させ、上限が下がったときは直ちに従う。追いつき中 (250 ms ごとの基準の下がり幅が 20 ms 以上) の観測は学習しない
+- A/V 同期の制御 (`playout::sync`) を 1 秒ごとに 1 回だけ、両方のトラックに新しい観測があるときだけ呼び、返った遅延の下限を表示の遅れの下限として保持する。基準の差が閾値 (上限 − 上限適用前の表示の遅れ、下限 100 ms) を超えたら遅れているトラックの表示時刻を返さず、ずれている間は制御を呼ばない
+- `targetLatency` を設定で受け、2 つのトラックの表示の遅れの下限にする (上限に収まらず切り下げた分は `limited_us` で読める)。TIMESTAMP が基準から 2 秒以上離れたら基準を取り直して世代 (`generation`) を進める。1 つのトラックだけのリセットとすべてのリセットを分けた
+- 表示した実績 (TIMESTAMP と表示時刻) を記録し、直近 1 秒以内の実績から A/V のずれ (`skew_us`) を返す
+- テストを `tests/test_playout/timeline.rs` (公開 API)、`pbt/tests/prop_playout/timeline.rs` (PBT)、`src/playout/timeline.rs` の単体テストに追加した。`docs/moqt.md` と `skills/shiguredo-moqt/SKILL.md` のモジュール構成と API を更新し、`CHANGES.md` に `[ADD]` を追加した
