@@ -623,16 +623,6 @@ fn test_subgroup_rejects_object_id_delta_overflow() {
 
 // ─── FetchStreamDecoder テスト ──────────────────────────────
 
-/// FetchStreamDecoder のバッファからペイロードを読み出して長さを検証するヘルパー
-fn drain_fetch_payload(decoder: &mut FetchStreamDecoder, expected_length: u64) {
-    let payload = decoder.try_read_payload().expect("payload が取れる");
-    assert_eq!(
-        payload.len() as u64,
-        expected_length,
-        "読み出したペイロード長が期待値と一致すること"
-    );
-}
-
 /// テスト用: FetchHeader + FetchStreamEntry 列をデコードし、最初のエントリを返す
 ///
 /// ヘッダーのデコードと最初のエントリの取得だけを行う (ペイロードは消費しない)。
@@ -1133,6 +1123,185 @@ fn test_fetch_rejects_ascending_group_in_descending_mode() {
         decoder.try_decode_entry(),
         Err(MessageError::ProtocolViolation(_))
     ));
+}
+
+/// Descending (0x02) テスト用の FetchStreamObject エントリを作る
+///
+/// `group_id` は Group ID Delta (None は prior と同じ Group)、`object_id` は Group が
+/// 変化した場合の絶対値 / 同 Group 内のデルタ (None は prior + 1) である。
+fn descending_fetch_object(group_id: Option<u64>, object_id: Option<u64>) -> FetchStreamEntry {
+    FetchStreamEntry::Object(FetchStreamObject {
+        group_id,
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id,
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 1,
+    })
+}
+
+/// Descending (0x02) で複数 Group をスキップしても絶対値が解決されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
+/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
+/// (absent なら prior + 1) になる。Group 変化時の Object ID がデルタ解釈では復元できない値
+/// (5001 → 1) を使い、絶対値として解決されることを固定する。
+#[test]
+fn test_fetch_descending_group_order_resolves_absolute_values() {
+    let header = FetchHeader { request_id: 1 };
+    // 最初の Object は絶対値。Group 変化時も Object ID は絶対値、同 Group 内はデルタ
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (
+                descending_fetch_object(Some(10), Some(5_000)),
+                None,
+                Some(b"a"),
+            ),
+            // 同 Group 内のデルタ: 5_000 + 1 = 5_001
+            (descending_fetch_object(None, Some(1)), None, Some(b"b")),
+            // Group のデルタ: 10 - (6 + 1) = 3、Group ID Delta が present なので Object ID は絶対値 1
+            (descending_fetch_object(Some(6), Some(1)), None, Some(b"c")),
+            // 同 Group 内のデルタ: 1 + 4 = 5
+            (descending_fetch_object(None, Some(4)), None, Some(b"d")),
+        ],
+    );
+
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut locations = Vec::new();
+    for _ in 0..4 {
+        let entry = decoder
+            .try_decode_entry()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .expect("テストフィクスチャに期待される内部値が入っている");
+        match entry {
+            DecodedFetchEntry::Object(object) => {
+                locations.push((object.group_id, object.object_id));
+                drain_fetch_payload(&mut decoder, 1);
+            }
+            other => panic!("Object が期待された: {other:?}"),
+        }
+    }
+    assert_eq!(
+        locations,
+        vec![(10, 5_000), (10, 5_001), (3, 1), (3, 5)],
+        "Group 降順と同 Group 内の Object ID 昇順が解決されること"
+    );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+}
+
+/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) が絶対位置として解決されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): End of Range の Group ID /
+/// Object ID は絶対値であり、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
+/// Group を直前 Object の Group と変え、直後の Object で End of Non-Existent Range /
+/// End of Unknown Range は Object ID Delta を省略し、End of Timed-Out Range は同 Group 内の
+/// デルタを使うことで、各 variant が prior を更新していること自体を検証する。
+/// エントリ境界で終端したストリームを `finish` が受容することも合わせて確認する。
+#[test]
+fn test_fetch_descending_end_of_range_entries_are_absolute() {
+    let header = FetchHeader { request_id: 1 };
+    let data = encode_fetch_stream(
+        &header,
+        &[
+            (descending_fetch_object(Some(10), Some(2)), None, Some(b"a")),
+            // 直前 Object の Group 10 とは異なる Group 9 を指す End of Range
+            (
+                FetchStreamEntry::EndOfNonExistentRange {
+                    group_id: 9,
+                    object_id: 5,
+                },
+                None,
+                None,
+            ),
+            // End of Range の prior (9, 5) を基準に Group のデルタ: 9 - (3 + 1) = 5
+            // Object ID Delta 省略は prior (End of Range の 5) + 1 = 6
+            (descending_fetch_object(Some(3), None), None, Some(b"b")),
+            // 同 Group (5) 内のデルタ: 6 + 2 = 8
+            (descending_fetch_object(None, Some(2)), None, Some(b"c")),
+            // 直前 Object の Group 5 とは異なる Group 4 を指す End of Range
+            (
+                FetchStreamEntry::EndOfUnknownRange {
+                    group_id: 4,
+                    object_id: 9,
+                },
+                None,
+                None,
+            ),
+            // End of Range の prior (4, 9) を基準に Group のデルタ: 4 - (1 + 1) = 2
+            // Object ID Delta 省略は prior (End of Range の 9) + 1 = 10
+            (descending_fetch_object(Some(1), None), None, Some(b"d")),
+            // 直前 Object の Group 2 とは異なる Group 1 を指す End of Range
+            (
+                FetchStreamEntry::EndOfTimedOutRange {
+                    group_id: 1,
+                    object_id: 11,
+                },
+                None,
+                None,
+            ),
+            // 同 Group (1) 内のデルタ: 11 + 5 = 16
+            (descending_fetch_object(None, Some(5)), None, Some(b"e")),
+        ],
+    );
+
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&data);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut entries = Vec::new();
+    while let Some(entry) = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+    {
+        match &entry {
+            DecodedFetchEntry::Object(_) => drain_fetch_payload(&mut decoder, 1),
+            DecodedFetchEntry::EndOfNonExistentRange { .. }
+            | DecodedFetchEntry::EndOfUnknownRange { .. }
+            | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+        }
+        entries.push(entry);
+    }
+    assert_eq!(
+        entries,
+        vec![
+            decoded_fetch_object(10, 2),
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id: 9,
+                object_id: 5
+            },
+            decoded_fetch_object(5, 6),
+            decoded_fetch_object(5, 8),
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id: 4,
+                object_id: 9
+            },
+            decoded_fetch_object(2, 10),
+            DecodedFetchEntry::EndOfTimedOutRange {
+                group_id: 1,
+                object_id: 11
+            },
+            decoded_fetch_object(1, 16),
+        ],
+        "End of Range が prior を更新し、絶対位置が解決されること"
+    );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
 }
 
 #[test]

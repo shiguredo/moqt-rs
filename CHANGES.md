@@ -674,3 +674,8 @@
   - TIMESTAMP に基準の遅れ (直近 10 秒の最小値) と表示の遅れ (音声は目標遅延、映像は揺らぎの百分位) を足した表示時刻を返す
   - A/V 同期の制御を 1 秒ごとに適用し、`targetLatency` の下限・世代 (取り直し)・実績のずれを読めるようにする
   - @voluntas
+- [UPDATE] Fetch の Descending Group Order のギャップ処理のテストを追加する
+  - `pbt/tests/prop_stream/encoder.rs` の roundtrip PBT を昇順 (0x01) と降順 (0x02) の両方に拡張し、`drive_fetch_with_group_order` で同じ Group Order のデコーダと往復させる (昇順 / 降順 / 降順で Group が変化するケースの観測をゲートする)
+  - 複数 Group のスキップ (10 → 3 → 1)、Group 変化時の Object ID 絶対値と同 Group 内デルタの混在、End of Range (0x8C / 0x10C / 0x20C) を Object と混在させた順序 (End of Range の Group が直前 Object と異なるケースと Object ID Delta 省略を含む) を `tests/test_stream/encoder.rs` と `tests/test_stream/decoder.rs` に固定する
+  - 実装の挙動は変えない
+  - @voluntas

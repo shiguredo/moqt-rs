@@ -6,11 +6,10 @@
 //!
 //! `src/stream/` はディレクトリモジュールのため、AGENTS.md が参照する shiguredo-rust スキル
 //! 「ディレクトリモジュールの場合は pbt/tests/prop_<module>/main.rs にサブモジュール対応で
-//! 分割」に従い、ソースの責務別ファイル (subgroup.rs / datagram.rs / fetch.rs) に対応する
-//! サブモジュールへ分割する。
+//! 分割」に従い、サブモジュール (subgroup.rs / datagram.rs / fetch.rs / decoder.rs / encoder.rs) に分ける。
 //!
-//! `FetchStreamEncoder` / `FetchStreamDecoder` はストリーミングデコーダであり、単純な
-//! ラウンドトリップ PBT とは異なるテスト戦略が必要なため、対象外とする。
+//! `FetchStreamDecoder` はチャンク分割の影響を受けないこと (分割不変式) を decoder.rs、
+//! `FetchStreamEncoder` は昇順 (0x01) / 降順 (0x02) のラウンドトリップを encoder.rs で扱う。
 
 mod datagram;
 mod decoder;

@@ -194,11 +194,23 @@ fn sample_fetch_stream(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
     bytes
 }
 
-/// Fetch バイト列を chunks で与えて、デコード済みエントリとペイロードを列挙する
-pub(crate) fn drive_fetch(
+/// Fetch バイト列を chunks で与えて、デコード済みエントリとペイロードを列挙する (昇順)
+fn drive_fetch(
     chunks: &[&[u8]],
 ) -> Result<Vec<(DecodedFetchEntry, Vec<u8>)>, shiguredo_moqt::error::MessageError> {
-    let mut decoder = FetchStreamDecoder::new();
+    drive_fetch_with_group_order(chunks, 0x01)
+}
+
+/// Group Order を指定して Fetch バイト列をデコードする
+///
+/// `0x01` は昇順、`0x02` は降順 (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))。
+/// エンコーダと同じ Group Order を渡さないとデルタ解決が一致しない。
+pub(crate) fn drive_fetch_with_group_order(
+    chunks: &[&[u8]],
+    group_order: u8,
+) -> Result<Vec<(DecodedFetchEntry, Vec<u8>)>, shiguredo_moqt::error::MessageError> {
+    let mut decoder = FetchStreamDecoder::new_with_group_order(group_order)
+        .expect("0x01 / 0x02 は有効な Group Order");
     let mut header_decoded = false;
     let mut pending: Option<DecodedFetchEntry> = None;
     let mut out = Vec::new();

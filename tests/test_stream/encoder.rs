@@ -752,6 +752,214 @@ fn test_descending_group_order_roundtrip() {
     assert_eq!(groups, vec![5, 4], "Group ID が復元されること");
 }
 
+/// Descending テスト用の FetchObjectInput を作る
+///
+/// `subgroup_id = 0` / `publisher_priority = 128` / Properties 無し / Datagram 起源でないことを
+/// 固定する。
+fn descending_input(group_id: u64, object_id: u64, payload_length: u64) -> FetchObjectInput {
+    FetchObjectInput {
+        group_id,
+        subgroup_id: 0,
+        object_id,
+        publisher_priority: 128,
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length,
+    }
+}
+
+/// Descending ストリームをデコードして (Group ID, Object ID) を列挙するヘルパー
+fn decode_descending_locations(stream: &[u8], count: usize) -> Vec<(u64, u64)> {
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(stream);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut locations = Vec::new();
+    for _ in 0..count {
+        let entry = decoder
+            .try_decode_entry()
+            .expect("テストフィクスチャの前提条件を満たす")
+            .expect("テストフィクスチャに期待される内部値が入っている");
+        match entry {
+            DecodedFetchEntry::Object(object) => {
+                locations.push((object.group_id, object.object_id));
+                // ペイロード長 0 の Object は読み出すペイロードが無い
+                if object.payload_length > 0 {
+                    drain_fetch_payload(&mut decoder, object.payload_length);
+                }
+            }
+            other => panic!("Object が期待された: {other:?}"),
+        }
+    }
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+    locations
+}
+
+/// Descending (0x02) で複数 Group をスキップしても絶対値が保存されること
+///
+/// draft-ietf-moq-transport-22 §3.2.2 (Gaps in a Fetch Stream) は Descending Group Order で
+/// Start と End Location が異なる Group にある場合のギャップの期待順序を定める。
+/// デコーダは絶対 Location を返すだけでギャップの意味解釈 (非存在 / 不明の区別や
+/// 末尾ギャップの FIN 判定) はアプリ責務であるため、ここではスキップした Group でも
+/// 絶対値が保存されることを固定する。
+#[test]
+fn test_descending_group_order_skips_multiple_groups() {
+    let mut encoder =
+        FetchStreamEncoder::new_with_group_order(1, 0x02).expect("Descending は有効な Group Order");
+    let mut stream = encoder.encode_header();
+
+    // 10 → 3 → 1 と大きくスキップし、Group 内では Object ID を増やす
+    let objects = [(10u64, 0u64), (10, 1), (3, 0), (3, 5), (1, 0)];
+    for (index, (group_id, object_id)) in objects.iter().enumerate() {
+        // ペイロードを持つ Object を 1 つ混ぜ、デコード側のペイロード読み出しも通す
+        let payload_length = if index == 2 { 1 } else { 0 };
+        encoder
+            .encode_object(
+                &descending_input(*group_id, *object_id, payload_length),
+                None,
+                &mut stream,
+            )
+            .expect("Descending 順のオブジェクトは encode できる");
+        if payload_length > 0 {
+            stream.push(b'x');
+        }
+    }
+
+    let locations = decode_descending_locations(&stream, objects.len());
+    assert_eq!(
+        locations,
+        vec![(10, 0), (10, 1), (3, 0), (3, 5), (1, 0)],
+        "Group をスキップしても絶対値が保存されること"
+    );
+}
+
+/// Descending (0x02) で Group が変わるとき Object ID が絶対値で符号化されること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Group ID Delta が present なら Object ID は
+/// Object ID Delta の値 (absent なら prior + 1)、not present なら prior Object ID + Object ID Delta
+/// (absent なら prior + 1) になる。Group 変化で Object ID が大きく減る入力 (5001 → 1) を使い、
+/// デルタ解釈では復元できない値であることを固定する。
+#[test]
+fn test_descending_group_change_uses_absolute_object_id() {
+    let mut encoder =
+        FetchStreamEncoder::new_with_group_order(1, 0x02).expect("Descending は有効な Group Order");
+    let mut stream = encoder.encode_header();
+
+    let objects = [(10u64, 5_000u64), (10, 5_001), (9, 1), (9, 2)];
+    for (group_id, object_id) in objects {
+        encoder
+            .encode_object(&descending_input(group_id, object_id, 0), None, &mut stream)
+            .expect("Descending 順のオブジェクトは encode できる");
+    }
+
+    let locations = decode_descending_locations(&stream, objects.len());
+    assert_eq!(
+        locations,
+        vec![(10, 5_000), (10, 5_001), (9, 1), (9, 2)],
+        "Group 変化時は Object ID が絶対値として復元されること"
+    );
+}
+
+/// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C) と Object を混在できること
+///
+/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range): End of Range の Group ID /
+/// Object ID は絶対値で、以後の prior 参照文脈はその値を使う。3 種すべての End of Range で
+/// Group を直前 Object の Group と変えることで、エンコーダが End of Range の値を prior として
+/// デルタを計算していることを検証する。エントリ境界で終端したストリームを `finish` が
+/// 受容することも合わせて確認する。
+#[test]
+fn test_descending_end_of_range_mixed_with_objects() {
+    let mut encoder =
+        FetchStreamEncoder::new_with_group_order(1, 0x02).expect("Descending は有効な Group Order");
+    let mut stream = encoder.encode_header();
+
+    // 10/2 Object → 9/5 End of Non-Existent Range → 5/0 Object → 5/3 Object
+    // → 4/9 End of Unknown Range → 2/0 Object → 1/11 End of Timed-Out Range → 1/12 Object
+    encoder
+        .encode_object(&descending_input(10, 2, 1), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"a");
+    encoder
+        .encode_end_of_non_existent_range(9, 5, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    encoder
+        .encode_object(&descending_input(5, 0, 1), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"b");
+    encoder
+        .encode_object(&descending_input(5, 3, 1), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"c");
+    encoder
+        .encode_end_of_unknown_range(4, 9, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    encoder
+        .encode_object(&descending_input(2, 0, 1), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"d");
+    encoder
+        .encode_end_of_timed_out_range(1, 11, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    encoder
+        .encode_object(&descending_input(1, 12, 1), None, &mut stream)
+        .expect("テストフィクスチャの前提条件を満たす");
+    stream.extend_from_slice(b"e");
+
+    let mut decoder =
+        FetchStreamDecoder::new_with_group_order(0x02).expect("Descending は有効な Group Order");
+    decoder.push(&stream);
+    decoder
+        .try_decode_header()
+        .expect("テストフィクスチャの前提条件を満たす")
+        .expect("テストフィクスチャに期待される内部値が入っている");
+
+    let mut entries = Vec::new();
+    while let Some(entry) = decoder
+        .try_decode_entry()
+        .expect("テストフィクスチャの前提条件を満たす")
+    {
+        match &entry {
+            DecodedFetchEntry::Object(_) => drain_fetch_payload(&mut decoder, 1),
+            DecodedFetchEntry::EndOfNonExistentRange { .. }
+            | DecodedFetchEntry::EndOfUnknownRange { .. }
+            | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+        }
+        entries.push(entry);
+    }
+    assert_eq!(
+        entries,
+        vec![
+            decoded_fetch_object(10, 2),
+            DecodedFetchEntry::EndOfNonExistentRange {
+                group_id: 9,
+                object_id: 5
+            },
+            decoded_fetch_object(5, 0),
+            decoded_fetch_object(5, 3),
+            DecodedFetchEntry::EndOfUnknownRange {
+                group_id: 4,
+                object_id: 9
+            },
+            decoded_fetch_object(2, 0),
+            DecodedFetchEntry::EndOfTimedOutRange {
+                group_id: 1,
+                object_id: 11
+            },
+            decoded_fetch_object(1, 12),
+        ],
+        "End of Range を混在させても絶対位置が解決されること"
+    );
+    decoder
+        .finish()
+        .expect("エントリ境界で終端したストリームは finish で受容される");
+}
+
 /// draft-ietf-moq-transport-21 §11.4.1 (Fetch Header) Table 7:
 /// End of Timed-Out Range の後に Object が正しくラウンドトリップすること
 /// (NoPriorActualObject 文脈の相互作用を検証する)

@@ -1,7 +1,7 @@
 # Descending Group Order の Fetch ギャップ処理のテストを追加する
 
 - Created: 2026-10-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-04
 - Branch: feature/test-descending-group-gap
 - Polished: 2026-10-02
 
@@ -33,4 +33,12 @@ draft-22 §3.2.2 は Fetch のギャップを明文化し、Descending Group Ord
 
 ## 解決方法
 
-{未着手}
+- `pbt/tests/prop_stream/encoder.rs` の `encoder_decoder_roundtrip` を昇順 (0x01) / 降順 (0x02) の両方に拡張した。
+  Group は `group_order` の向きに狭義単調に生成し、降順は減算で underflow しない初期値から始める。デコーダは `drive_fetch_with_group_order` で同じ Group Order を使い、昇順 / 降順 / 降順で Group が変化するケースの観測をゲートする。
+- `tests/test_stream/encoder.rs` に降順の固定値テストを追加した。複数 Group のスキップ (10 → 3 → 1)、Group 変化時の Object ID 絶対値 (5001 → 1) と同 Group 内デルタの混在、End of Range (0x8C / 0x10C / 0x20C) と Object の混在を固定する。
+- `tests/test_stream/decoder.rs` に降順の正例を追加した。Group デルタの解決 (10 → 3)、End of Range が prior を更新すること (3 種すべて)、End of Range 直後の Object ID Delta 省略が prior + 1 になることを生デルタのフィクスチャで固定する。
+- End of Range のテストは、3 種すべてで Group を直前 Object の Group と変えることで「End of Range が prior を更新しない退行」を検出できる。`update_prior_for_end_of_range` を no-op にすると encoder 側 / decoder 側のテストがそれぞれ落ちることを実測で確認した。
+- `tests/test_stream.rs` に共有ヘルパー (`drain_fetch_payload` / `decoded_fetch_object`) を置き、`tests/test_stream/decoder.rs` の重複定義を削除した。
+- ギャップの意味解釈 (非存在 / 不明の区別、End Location に対する末尾ギャップの FIN 判定) はアプリ責務のためライブラリ API では検証せず、decoder が返す絶対位置と End of Range が仕様どおりであることだけを固定した。実装の挙動は変えていない (src/ に差分なし)。
+- `CHANGES.md` の `### misc` に `[UPDATE]` を追加した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --all-files` が通ることを確認した。

@@ -1,9 +1,10 @@
 //! `FetchStreamEncoder` のデルタ圧縮エンコード → `FetchStreamDecoder` デコードの往復 PBT
 //!
 //! エンコーダは前回オブジェクトとの差分 (Group ID / Object ID / Subgroup ID / Priority) を
-//! 内部状態で判断する (draft-ietf-moq-transport-21 §11.4.1.1 (Flags))。任意の昇順オブジェクト列を
-//! エンコードしてデコードし直したとき、絶対値の group_id / subgroup_id / object_id /
-//! publisher_priority / payload_length が保存されることを検証する。
+//! 内部状態で判断する (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))。昇順 (0x01) と
+//! 降順 (0x02) の両方のオブジェクト列をエンコードしてデコードし直したとき、絶対値の
+//! group_id / subgroup_id / object_id / publisher_priority / payload_length が
+//! 保存されることを検証する。
 //! Datagram 起源 (0x40) の Object は Subgroup ID を運ばず 0 に解決されるため、
 //! subgroup_id の期待値は通常起源と Datagram 起源で分ける。
 //! Properties 付きの Object も混ぜ、delta 圧縮と Properties の組み合わせで
@@ -18,7 +19,7 @@ use shiguredo_moqt::track_properties::{
     PROP_OBJECT_DELIVERY_TIMEOUT, PROP_SUBGROUP_DELIVERY_TIMEOUT,
 };
 
-use crate::decoder::drive_fetch;
+use crate::decoder::drive_fetch_with_group_order;
 
 /// Subgroup ID のサンプル
 ///
@@ -65,12 +66,23 @@ fn sample_properties(ctx: &mut noprop::TestCaseContext) -> (bool, Vec<u8>) {
     (true, buf)
 }
 
-/// エンコーダの制約 (同一 Group 内の Object ID は狭義増加、Group は昇順、同一 Subgroup 内の
-/// Priority 不変) を満たす入力列と、各オブジェクトのペイロードを生成する
-fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, Vec<u8>, Vec<u8>)> {
+/// エンコーダの制約 (同一 Group 内の Object ID は狭義増加、Group は `group_order` の向きに
+/// 狭義単調、同一 Subgroup 内の Priority 不変) を満たす入力列と、各オブジェクトの
+/// ペイロードを生成する
+///
+/// `group_order` は 0x01 (昇順) または 0x02 (降順)。
+fn sample_objects(
+    ctx: &mut noprop::TestCaseContext,
+    group_order: u8,
+) -> Vec<(FetchObjectInput, Vec<u8>, Vec<u8>)> {
     let count = noprop::sample_usize_in(ctx, 1..=4);
-    // 加算で overflow しないよう小さい初期値から始める
-    let mut group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+    // 昇順は加算で overflow しないよう小さい初期値から、降順は減算で underflow しないよう
+    // 十分大きい初期値から始める (どちらも最大 4 Object、Group の増減は 1 回あたり 1001 以下)
+    let mut group_id = if group_order == 0x02 {
+        noprop::sample_u64_in(ctx, 5_000..=1_000_000)
+    } else {
+        noprop::sample_u64_in(ctx, 0..=1_000_000)
+    };
     let mut subgroup_id = sample_subgroup_id(ctx);
     let mut object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
     let mut publisher_priority = noprop::sample_u8(ctx);
@@ -78,8 +90,13 @@ fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, V
     for index in 0..count {
         if index > 0 {
             if noprop::sample_bool(ctx) {
-                // 新しい Group (昇順): 各フィールドを再抽選する
-                group_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
+                // 新しい Group (group_order の向きに狭義単調): 各フィールドを再抽選する
+                let delta = 1 + noprop::sample_u64_in(ctx, 0..=1000);
+                if group_order == 0x02 {
+                    group_id -= delta;
+                } else {
+                    group_id += delta;
+                }
                 subgroup_id = sample_subgroup_id(ctx);
                 object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
                 publisher_priority = noprop::sample_u8(ctx);
@@ -112,14 +129,33 @@ fn sample_objects(ctx: &mut noprop::TestCaseContext) -> Vec<(FetchObjectInput, V
 }
 
 /// エンコードしたオブジェクト列をデコードし直すと絶対値が保存される
+///
+/// 昇順 (0x01) と降順 (0x02) の両方を検証する。降順では Group が変化するケースまで
+/// 生成されないと Group デルタの解決が検証されないため、観測をゲートする。
 #[test]
 fn encoder_decoder_roundtrip() -> noprop::TestResult {
+    let ascending_seen = std::cell::Cell::new(false);
+    let descending_seen = std::cell::Cell::new(false);
+    let descending_group_change_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let request_id = sample_varint(ctx);
-        let objects = sample_objects(ctx);
+        let group_order = if noprop::sample_bool(ctx) { 0x01 } else { 0x02 };
+        let objects = sample_objects(ctx, group_order);
+        if group_order == 0x02 {
+            descending_seen.set(true);
+            if objects
+                .windows(2)
+                .any(|pair| pair[0].0.group_id != pair[1].0.group_id)
+            {
+                descending_group_change_seen.set(true);
+            }
+        } else {
+            ascending_seen.set(true);
+        }
 
-        let mut encoder = FetchStreamEncoder::new(request_id);
+        let mut encoder = FetchStreamEncoder::new_with_group_order(request_id, group_order)
+            .expect("0x01 / 0x02 は有効な Group Order");
         let mut bytes = encoder.encode_header();
         for (input, payload, properties_data) in &objects {
             let properties = if input.has_properties {
@@ -133,7 +169,8 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
             bytes.extend_from_slice(payload);
         }
 
-        let decoded = drive_fetch(&[&bytes]).expect("エンコーダ出力はデコードできる");
+        let decoded = drive_fetch_with_group_order(&[&bytes], group_order)
+            .expect("エンコーダ出力はデコードできる");
         assert_eq!(decoded.len(), objects.len());
 
         for ((entry, payload), (input, expected_payload, properties_data)) in
@@ -179,5 +216,17 @@ fn encoder_decoder_roundtrip() -> noprop::TestResult {
         }
         Ok(())
     })?;
+    assert!(
+        ascending_seen.get(),
+        "昇順のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        descending_seen.get(),
+        "降順のケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        descending_group_change_seen.get(),
+        "降順で Group が変化するケースが生成されなかった\n{runner}"
+    );
     Ok(())
 }
