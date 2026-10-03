@@ -21,10 +21,17 @@ draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) は、draft-21 
 ## 設計方針
 
 - `LocationFilter` を draft-22 の 6 形式に対応させる。no filter は Type 0x00 を表す variant として扱い、`Option<LocationFilter>` の `None` は「パラメータ省略」を表すように対応を整理する (REQUEST_UPDATE では Type 0x00 が `Removed`、省略が `Unchanged` になる)。
-- `PARAM_LOCATION_FILTER` を `LengthPrefixed` から専用の `ValueEncoding` と型付き値 (`MessageParameterValue::LocationFilter`) へ切り替え、生バイト API (`location_filter()` / `validate_location_filter_bytes()`) は `fill.rs` の空判定を 3 状態判定へ置き換えたうえで廃止または内部化する。`fill.rs` の空バイト (`Some([])`) が track 全体を指していた箇所は、`location_filter_update()` の `Unchanged` = subscription のフィルタ使用、`Removed` = track 全体、`Set` = そのフィルタ、に置き換える。
+- `PARAM_LOCATION_FILTER` を `LengthPrefixed` から専用の `ValueEncoding` と型付き値 (`MessageParameterValue::LocationFilter`) へ切り替え、
+  生バイト API (`location_filter()` / `validate_location_filter_bytes()`) は `fill.rs` の空判定を 3 状態判定へ置き換えたうえで廃止または内部化する。
+  `fill.rs` の空バイト (`Some([])`) が track 全体を指していた箇所は、`location_filter_update()` の
+  `Unchanged` = subscription のフィルタ使用、`Removed` = track 全体、`Set` = そのフィルタ、に置き換える。
 - `AbsoluteStart { start_group: 0, start_object: 0 }` の `NextObject` への正規化を廃止し、Type 0x02 と Type 0x05 を区別する。
 - `NextObject` は Type 0x05 単独で符号化する。
-- `decode` は先頭の数値を Location Filter Type として読み、Type 0x06 以上は `ProtocolViolation`、0x00〜0x05 は Type ごとの必須フィールド数 (0x00 / 0x05 は 0 個、0x01 は 1 個、0x02 は 2 個、0x03 は 3 個、0x04 は 4 個) だけ読み切る。新符号化には Length が無く値は自己境界のため、必須フィールド数を超える余剰バイトは次パラメータの Delta Type として解釈され、LOCATION_FILTER 単体では検出できない。検出できるのは FILL_PARAMETERS 内側のような Length 境界のあるスコープの余剰バイトであり、これは既存の内側スコープの扱いと同じく `KeyValueFormattingError` にする。必須フィールドの欠落 (バッファ終端) は `UnexpectedEof` で失敗する。
+- `decode` は先頭の数値を Location Filter Type として読み、Type 0x06 以上は `ProtocolViolation`、
+  0x00〜0x05 は Type ごとの必須フィールド数 (0x00 / 0x05 は 0 個、0x01 は 1 個、0x02 は 2 個、0x03 は 3 個、0x04 は 4 個) だけ読み切る。
+  新符号化には Length が無く値は自己境界のため、必須フィールド数を超える余剰バイトは次パラメータの Delta Type として解釈され、
+  LOCATION_FILTER 単体では検出できない。検出できるのは FILL_PARAMETERS 内側のような Length 境界のあるスコープの余剰バイトであり、
+  これは既存の内側スコープの扱いと同じく `KeyValueFormattingError` にする。必須フィールドの欠落 (バッファ終端) は `UnexpectedEof` で失敗する。
 - `location_filter_update()` の `Unchanged` / `Removed` / `Set` の 3 状態 API は維持し、`Removed` の判定源を「空バイト」から「Type 0x00」に変更する。
 - FILL_PARAMETERS 内の no filter は新符号化の Type 0x00 として実装し、コメントに draft-22 §9.20.15 / §3.4 を引用する (draft-22 §3.4 の「LOCATION_FILTER inside FILL_PARAMETERS is zero-length」は旧符号化の名残であり、新符号化では Type 0x00 が「fill range = track 全体」を指すと読み替える)。
 - `tests/test_message_parameter.rs` で 0x21 を LengthPrefixed の代表にしているテスト (65536 バイト長、range_filters ガードなど) は別の LengthPrefixed 型へ移す。PBT (`pbt/tests/prop_message.rs` の `sample_location_filter_bytes` など) と `examples/moq-sub/src/pipeline.rs` の構築箇所も型付き値に追従する。
