@@ -54,12 +54,12 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --input-mp4-reencode input.m
 
 | `--transport` | 接続経路 | 備考 |
 | --- | --- | --- |
-| `quic` | QUIC 直接接続 | ALPN は `moqt-21` |
+| `quic` | QUIC 直接接続 | ALPN は `moqt-22` |
 | `wt-h3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3` |
 | `wt-h2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
 
 WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。
-MOQT のプロトコル識別子 (`moqt-21`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-21 §6.2)。
+MOQT のプロトコル識別子 (`moqt-22`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-22 §6.2)。
 
 ## C4M 認可トークン
 

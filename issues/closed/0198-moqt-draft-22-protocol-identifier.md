@@ -1,7 +1,7 @@
 # QUIC / WebTransport のプロトコル識別子を moqt-22 に更新する
 
 - Created: 2026-10-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/change-moqt-protocol-22
 - Polished: {YYYY-MM-DD}
 
@@ -36,10 +36,13 @@ relay が draft-22 の識別子 (`moqt-22`) を要求するようになり、E2E
 ## 完了条件
 
 - `examples/tokio-moq` が提示する ALPN / `WT-Available-Protocols` が `moqt-22` になること (単体テストで固定する)
-- コードと利用者向けドキュメント (`examples/README.md`) から `moqt-21` が消えること (過去の issue は対象外)
+- `MOQT_PROTOCOL` を参照する経路と利用者向けドキュメント (`examples/README.md`) から `moqt-21` が消えること (別プロトコルとして拒否するテストのリテラルと過去の issue は対象外)
 - E2E (実 relay への PUBLISH) が成功すること
 - `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` が通ること
 
 ## 解決方法
 
-{未着手}
+- `examples/tokio-moq/src/lib.rs` の `MOQT_PROTOCOL` を `moqt-22` に変更した。ALPN / `WT-Available-Protocols` / `WT-Protocol` の検証は定数経由で追従する
+- `examples/tokio-moq/src/webtransport_h2.rs` のエラーメッセージとテスト (`verify_wt_protocol_accepts_moqt_22` など)、`examples/tokio-moq/src/quic.rs` の節参照、`examples/README.md` の伝送路の表と URL スキームの節を更新した
+- 別プロトコルとして拒否するテストのリテラル (`moqt-21`) は残している
+- feature ブランチの CI と E2E (実 relay への PUBLISH) が成功することを確認した。relay が `moqt-22` を要求していることが確認できた

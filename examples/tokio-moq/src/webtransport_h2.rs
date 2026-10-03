@@ -653,7 +653,7 @@ async fn wait_for_connect_response(
 fn verify_wt_protocol(headers: &[HeaderField]) -> Result<()> {
     let negotiation_failed = || {
         TransportError::InvalidState(
-            "WebTransport protocol negotiation failed: the response does not select moqt-21"
+            "WebTransport protocol negotiation failed: the response does not select moqt-22"
                 .to_string(),
         )
     };
@@ -1801,20 +1801,20 @@ mod tests {
             .map(HeaderField::value)
             .expect("WT-Available-Protocols が設定されること");
         // RFC 8941 の sf-string を 1 要素の List として送る
-        assert_eq!(available, br#""moqt-21""#);
+        assert_eq!(available, br#""moqt-22""#);
     }
 
-    /// 2xx 応答の WT-Protocol が moqt-21 なら受理する
+    /// 2xx 応答の WT-Protocol が moqt-22 なら受理する
     #[test]
-    fn verify_wt_protocol_accepts_moqt_21() {
-        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-21\"")];
-        verify_wt_protocol(&headers).expect("moqt-21 は受理されること");
+    fn verify_wt_protocol_accepts_moqt_22() {
+        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\"")];
+        verify_wt_protocol(&headers).expect("moqt-22 は受理されること");
     }
 
     /// WT-Protocol のパラメータは無視する (RFC 8941 / draft §3.3)
     #[test]
     fn verify_wt_protocol_ignores_parameters() {
-        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-21\";x=1")];
+        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\";x=1")];
         verify_wt_protocol(&headers).expect("パラメータ付きでも受理されること");
     }
 
@@ -1823,9 +1823,9 @@ mod tests {
     fn verify_wt_protocol_rejects_invalid_selection() {
         for value in [
             // 別のプロトコル
-            &b"\"moqt-20\""[..],
+            &b"\"moqt-21\""[..],
             // List (Item of String ではない)
-            &b"\"moqt-21\", \"moqt-20\""[..],
+            &b"\"moqt-22\", \"moqt-21\""[..],
             // 非 String
             &b"token"[..],
         ] {

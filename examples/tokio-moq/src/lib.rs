@@ -76,10 +76,10 @@ pub fn build_setup_options(
     options
 }
 
-/// MOQT のプロトコル識別子 (draft-ietf-moq-transport-21 §6.2 (Session establishment))
+/// MOQT のプロトコル識別子 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
 ///
-/// QUIC の ALPN と WebTransport の `WT-Available-Protocols` の双方で使う。draft-21 では `moqt-21`。
-pub const MOQT_PROTOCOL: &str = "moqt-21";
+/// QUIC の ALPN と WebTransport の `WT-Available-Protocols` の双方で使う。draft-22 では `moqt-22`。
+pub const MOQT_PROTOCOL: &str = "moqt-22";
 
 pub mod error;
 pub mod metrics;
@@ -98,7 +98,7 @@ pub mod webtransport_h3;
 /// URL の scheme は `moqt://` に統一されており、接続経路はこの値で選ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
-    /// QUIC 直接接続 (ALPN `moqt-21`)
+    /// QUIC 直接接続 (ALPN `moqt-22`)
     Quic,
     /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
     WtH3,

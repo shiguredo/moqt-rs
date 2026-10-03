@@ -11,7 +11,7 @@ use s2n_quic::provider::tls::rustls as s2n_rustls;
 
 use crate::error::{Result, TransportError};
 
-/// ALPN プロトコル識別子 (draft-ietf-moq-transport-21 §6.2 (Session establishment))
+/// ALPN プロトコル識別子 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
 ///
 /// WebTransport の `WT-Available-Protocols` と共通の定数を使う。
 const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
