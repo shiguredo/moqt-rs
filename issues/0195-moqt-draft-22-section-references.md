@@ -7,16 +7,25 @@
 
 ## 目的
 
-draft-21 から draft-22 で節構成・節番号が大きく変更された (例: LOCATION_FILTER は §9.20.10 → §9.20.9、Object Header は §11.1.1 → §2.1.1 (Object Fields)、Object Status は §11.1.2 → §11.1.1、Publisher Interactions は §7.5 → §7.6、Reserved Namespaces は §2.4.2 → §2.4.3。Forward Handling (§7.2) は番号不変のまま Paused Subscription Handling (§7.2) に改名されている)、引用文面も更新された。Rust コード内の `draft-ietf-moq-transport-21` 表記と節参照を一次資料 `refs/moq/draft-ietf-moq-transport-22.txt` と突合して同期し、仕様トレーサビリティを回復する。実装の挙動は変えない。
+draft-21 から draft-22 で節構成・節番号が大きく変更された (例: LOCATION_FILTER は §9.20.10 → §9.20.9、Object Header は §11.1.1 → §2.1.1 (Object Fields)、
+Object Status は §11.1.2 → §11.1.1、Publisher Interactions は §7.5 → §7.6、Reserved Namespaces は §2.4.2 → §2.4.3。
+Forward Handling (§7.2) は番号不変のまま Paused Subscription Handling (§7.2) に改名されている)、引用文面も更新された。
+Rust コード内の `draft-ietf-moq-transport-21` 表記と節参照を一次資料 `refs/moq/draft-ietf-moq-transport-22.txt` と突合して同期し、仕様トレーサビリティを回復する。実装の挙動は変えない。
 
 ## 現状
 
-- `draft-ietf-moq-transport-21` / `draft-21` の表記は多数ある (例: `src/message.rs` 119 行、`src/message_parameter.rs` 96 行、`src/track_properties.rs` 49 行、`src/object_properties.rs` 32 行、`src/name.rs` 23 行、`src/error.rs` 20 行、`src/subgroup_tracker.rs` 20 行)。付随する `§` の節参照も同じファイル群に多数あり、`tests/` / `pbt/` / `examples/` / `fuzz/` にも分布する。
+- `draft-ietf-moq-transport-21` / `draft-21` の表記は多数ある (例: `src/message.rs` 119 行、`src/message_parameter.rs` 96 行、`src/track_properties.rs` 49 行、
+  `src/object_properties.rs` 32 行、`src/name.rs` 23 行、`src/error.rs` 20 行、`src/subgroup_tracker.rs` 20 行)。付随する `§` の節参照も同じファイル群に多数あり、`tests/` / `pbt/` / `examples/` / `fuzz/` にも分布する。
 - `src/lib.rs` の crate doc と各モジュール doc にも「draft-ietf-moq-transport-21 に基づく」等の表記がある。
 - 節番号の移動 (draft-21 の節番号 → draft-22 の節番号):
   - §9.20.2 (Allowed Parameters By Control Message) は削除され、許可パラメータの規定は各コントロールメッセージの節 (例: §9.3 (REQUEST_OK)) へ移動した
-  - §9.20.3 (AUTHORIZATION TOKEN) → §9.20.2、§9.20.4 (SUBGROUP_DELIVERY_TIMEOUT) → §9.20.3、§9.20.5 (OBJECT_DELIVERY_TIMEOUT) → §9.20.4、§9.20.6 (FILL TIMEOUT) → §9.20.5、§9.20.7 (RENDEZVOUS TIMEOUT) → §9.20.6、§9.20.8 (SUBSCRIBER PRIORITY) → §9.20.7、§9.20.9 (GROUP ORDER) → §9.20.8、§9.20.10 (LOCATION FILTER) → §9.20.9
-  - §9.20.11 (SUBGROUP FILTER) → §9.20.10、§9.20.12 (OBJECTID FILTER) → §9.20.11、§9.20.13 (PRIORITY FILTER) → §9.20.12、§9.20.14 (OBJECT PROPERTY FILTER) → §9.20.13、§9.20.15 (TRACK PROPERTY FILTER) → §9.20.14、§9.20.16 (FILL PARAMETERS) → §9.20.15、§9.20.17 (EXPIRES) → §9.20.16、§9.20.18 (LARGEST OBJECT) → §9.20.17、§9.20.19 (FORWARD) → §9.20.18、§9.20.20 (NEW GROUP REQUEST) → §9.20.19、§9.20.21 (TRACK_NAMESPACE_PREFIX) → §9.20.20、§9.20.22 (INCLUDE_PROPERTIES) → §9.20.21
+  - §9.20.3 (AUTHORIZATION TOKEN) → §9.20.2、§9.20.4 (SUBGROUP_DELIVERY_TIMEOUT) → §9.20.3、§9.20.5 (OBJECT_DELIVERY_TIMEOUT) → §9.20.4、
+    §9.20.6 (FILL TIMEOUT) → §9.20.5、§9.20.7 (RENDEZVOUS TIMEOUT) → §9.20.6、§9.20.8 (SUBSCRIBER PRIORITY) → §9.20.7、
+    §9.20.9 (GROUP ORDER) → §9.20.8、§9.20.10 (LOCATION FILTER) → §9.20.9
+  - §9.20.11 (SUBGROUP FILTER) → §9.20.10、§9.20.12 (OBJECTID FILTER) → §9.20.11、§9.20.13 (PRIORITY FILTER) → §9.20.12、
+    §9.20.14 (OBJECT PROPERTY FILTER) → §9.20.13、§9.20.15 (TRACK PROPERTY FILTER) → §9.20.14、§9.20.16 (FILL PARAMETERS) → §9.20.15、
+    §9.20.17 (EXPIRES) → §9.20.16、§9.20.18 (LARGEST OBJECT) → §9.20.17、§9.20.19 (FORWARD) → §9.20.18、
+    §9.20.20 (NEW GROUP REQUEST) → §9.20.19、§9.20.21 (TRACK_NAMESPACE_PREFIX) → §9.20.20、§9.20.22 (INCLUDE_PROPERTIES) → §9.20.21
   - §11.1.1 (Object Header) → §2.1.1 (Object Fields)、§11.1.2 (Object Status) → §11.1.1、§11.1.3 (Object Properties) → §11.1.2
   - §7.2 (Forward Handling) は番号不変のまま §7.2 (Paused Subscription Handling) に改名。Publisher Interactions は §7.5 → §7.6、Relay Track Handling は §7.6 → §7.7、Relay Object Handling は §7.7 → §7.8 (relay 節のためコードからは参照されていない)
   - §2.4.2 (Reserved Namespaces) → §2.4.3 (§2.4.2 に Namespace Prefix Matching が新設されたため)
