@@ -8,10 +8,35 @@ use shiguredo_moqt::{
     session::types::SessionError, session::types::SessionEvent, session::types::SessionState,
 };
 
-// deadline 満了時の終端と遅延メッセージ / data stream の吸収はサブモジュールへ分割する
+// deadline 満了時の終端と、遅延メッセージ・data stream の吸収はサブモジュールへ分割する
 // (fetch の `#[path = "fetch/fill.rs"]` と同じ方式)
+#[path = "goaway/absorb.rs"]
+mod absorb;
 #[path = "goaway/deadline.rs"]
 mod deadline;
+
+/// GOAWAY の deadline 満了で request を終端させ、発行されたイベントを捨てる
+///
+/// `Session::tick` の基準時刻を 1_000 に固定し、timeout 100 ms の request stream GOAWAY を送る。
+/// `uri` は Client では空、Server では非空を渡す (draft-ietf-moq-transport-22 §9.2 (GOAWAY))。
+fn terminate_request_by_goaway_timeout(s: &mut Session, rid: u64, uri: Vec<u8>) {
+    s.tick(1_000);
+    s.send_goaway_on_request_stream(rid, uri, 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(s);
+    s.tick(1_100);
+    let mut resets = 0;
+    let mut terminations = 0;
+    while let Some(e) = s.poll_event() {
+        match e {
+            SessionEvent::ResetRequestStream { .. } => resets += 1,
+            SessionEvent::RequestTerminated { .. } => terminations += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
+    assert_eq!(terminations, 1, "期限到達で終端が 1 回だけ出ること");
+}
 
 /// server 起点の GOAWAY を送信して client に配送する (drain 前提作り)
 ///
