@@ -70,11 +70,25 @@ pub struct Config {
     /// 映像は 1 group = 1 unidirectional stream で送る (draft-ietf-moq-loc-04 §4.2)。
     /// datagram が示されているのは §4.1 の音声の例だけである。
     pub audio_datagram: bool,
+    /// object datagram の上限サイズ (bytes)
+    ///
+    /// 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
+    /// 上限を超える object は送らずに対処法を示すエラーにする。
+    pub datagram_max_size: usize,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
     pub input_mp4_reencode: Option<String>,
 }
+
+/// `--datagram-max-size` の既定値 (bytes)
+///
+/// RFC 9000 §14 (Datagram Size) は、経路が最低限支える datagram サイズを 1200 bytes
+/// (QUIC パケットヘッダと AEAD タグを含む UDP payload) と定める。判定するのは MOQT の
+/// OBJECT_DATAGRAM (ヘッダ + Properties + payload) の長さであり、QUIC のパケットヘッダと
+/// packet number、AEAD タグ、DATAGRAM frame の type / Length は含まれないため、その分の
+/// 余裕を引いた値を既定にする。
+pub(crate) const DEFAULT_DATAGRAM_MAX_SIZE: usize = 1160;
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
 ///
@@ -244,6 +258,29 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         "64",
     )?;
 
+    // `.default()` は `&'static str` しか取れないため、`DEFAULT_DATAGRAM_MAX_SIZE` と
+    // 一致する値を文字列で渡す (一致は単体テストで固定する)
+    let datagram_max_size_opt = noargs::opt("datagram-max-size")
+        .ty("BYTES")
+        .doc("Maximum size of an object datagram in bytes")
+        .default("1160")
+        .take(&mut args);
+    let datagram_max_size_explicit = is_explicit(&datagram_max_size_opt);
+    let datagram_max_size = datagram_max_size_opt.then(|o| {
+        let value = o.value();
+        let size = value
+            .parse::<usize>()
+            .map_err(|_| format!("invalid --datagram-max-size: {value}"))?;
+        // 上限は datagram frame の最大値 (RFC 9221 §3 の max_datagram_frame_size と同じ 65535) で足りる
+        if !(1..=65535).contains(&size) {
+            return Err(format!(
+                "--datagram-max-size must be between 1 and 65535 (default {}): {value}",
+                DEFAULT_DATAGRAM_MAX_SIZE
+            ));
+        }
+        Ok(size)
+    })?;
+
     let audio_datagram: bool = noargs::flag("audio-datagram")
         .doc("Use datagrams for the audio track instead of subgroup streams")
         .take(&mut args)
@@ -265,9 +302,14 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
     let audio_enabled = !no_audio && input_mp4.is_none();
 
-    // 音声トラックを送らない場合、datagram 配送の指定は意味を持たない (黙って捨てずに警告する)
+    // datagram 配送を使わない場合、上限の指定は意味を持たない (黙って捨てずに警告する)
     if audio_datagram && !audio_enabled {
         tracing::warn!("--audio-datagram is ignored because the audio track is not published");
+    }
+    if datagram_max_size_explicit && (!audio_datagram || !audio_enabled) {
+        tracing::warn!(
+            "--datagram-max-size is ignored because the audio track is not sent as datagrams"
+        );
     }
     if !args.metadata().help_mode {
         if input_mp4.is_some() && input_mp4_reencode.is_some() {
@@ -389,6 +431,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_device_id,
         audio_bitrate,
         audio_datagram,
+        datagram_max_size,
         input_mp4,
         input_mp4_reencode,
     }))
@@ -427,6 +470,38 @@ mod tests {
 
     /// テスト用の必須引数
     const BASE_ARGS: &[&str] = &["--url", "moqt://127.0.0.1:4443"];
+
+    /// `--datagram-max-size` は既定値を使い、指定で上書き、範囲外と数値でない値はエラーになる
+    ///
+    /// 既定値は RFC 9000 §14 (Datagram Size) が定める経路の最小 datagram サイズ (1200 = QUIC
+    /// パケットヘッダと AEAD タグを含む UDP payload) から、QUIC のパケットヘッダと
+    /// DATAGRAM frame のヘッダ分を引いた値である。
+    #[test]
+    fn datagram_max_size_is_configurable() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.datagram_max_size, DEFAULT_DATAGRAM_MAX_SIZE,
+            "既定は経路の最小 datagram サイズに収まる値であること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--datagram-max-size", "1400"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(config.datagram_max_size, 1400, "指定した上限が使われること");
+
+        for value in ["1x", "0", "65536"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--datagram-max-size", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "範囲外と数値でない上限はエラーになること: {value}"
+            );
+        }
+    }
 
     /// 削除した `--use-datagram` は未定義のオプションとしてエラーになる
     ///

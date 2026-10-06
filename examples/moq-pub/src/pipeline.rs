@@ -730,6 +730,7 @@ pub async fn run(
                                 AUDIO_TRACK_ALIAS,
                                 audio_group_id,
                                 DEFAULT_PUBLISHER_PRIORITY,
+                                config.datagram_max_size,
                             );
                             let outcome = writer.write_object(&encoded, &properties).await?;
                             if outcome == ObjectFilterOutcome::Pass {

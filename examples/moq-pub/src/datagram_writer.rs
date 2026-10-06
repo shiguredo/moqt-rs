@@ -6,14 +6,15 @@
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
 use tokio_moq::transport;
 
 /// Object Datagram ライター
 ///
-/// 1 つの Group (= GOP) に対応する datagram を送信する。
-/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram)
+/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の OBJECT_DATAGRAM を送信する。
+/// 上限サイズを超える object は送らずにエラーにする (datagram は 1 つの QUIC パケットに
+/// 収まる必要がある)。
 pub struct DatagramWriter {
     handle: transport::StreamHandle,
     data_plane: DataPlaneHandle,
@@ -21,6 +22,11 @@ pub struct DatagramWriter {
     track_alias: u64,
     group_id: u64,
     publisher_priority: u8,
+    /// object datagram の上限サイズ (bytes)
+    ///
+    /// datagram は 1 つの QUIC パケットに収まる必要がある (draft-ietf-moq-loc-04 §4.1)。
+    /// 上限を超える object は送らずにエラーにする。
+    max_size: usize,
     /// 次に書き込むオブジェクト ID
     next_object_id: u64,
 }
@@ -36,6 +42,7 @@ impl DatagramWriter {
         track_alias: u64,
         group_id: u64,
         publisher_priority: u8,
+        max_size: usize,
     ) -> Self {
         Self {
             handle: handle.clone(),
@@ -44,6 +51,7 @@ impl DatagramWriter {
             track_alias,
             group_id,
             publisher_priority,
+            max_size,
             next_object_id: 0,
         }
     }
@@ -113,10 +121,62 @@ impl DatagramWriter {
             return Ok(ObjectFilterOutcome::Skip);
         }
 
+        // RFC 9221 §3 は peer が広告した max_datagram_frame_size を超える DATAGRAM の送信を
+        // MUST NOT とし、受信側は PROTOCOL_VIOLATION で接続を閉じる MUST を負う。path MTU を
+        // 超えた datagram は s2n-quic が通知なく破棄し、draft-ietf-moq-transport-22 §11.2 も
+        // 「上限を超えた object は通知なく破棄される」と定める。送信前にサイズを判定して
+        // 原因と対処が分かるエラーにする。
+        check_datagram_size(buf.len(), self.max_size)?;
+
         self.handle.send_datagram(&buf).await?;
 
         self.next_object_id = object_id + 1;
 
         Ok(ObjectFilterOutcome::Pass)
+    }
+}
+
+/// object datagram のサイズが上限内かどうかを判定する
+///
+/// datagram は分割できず (RFC 9221 §5 "DATAGRAM frames cannot be fragmented")、1 つの QUIC
+/// パケットに収まる必要があるため、送信前にこの判定を行う。
+fn check_datagram_size(size: usize, max_size: usize) -> Result<()> {
+    if size > max_size {
+        return Err(Error::DatagramTooLarge { size, max_size });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 上限と等しいサイズは送信でき、上限を超えるとエラーになる
+    ///
+    /// datagram は 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
+    /// 境界 (上限未満 / 上限と等しい / 上限 + 1) を固定する。
+    #[test]
+    fn datagram_size_boundary() {
+        let max_size = crate::cli::DEFAULT_DATAGRAM_MAX_SIZE;
+        assert!(
+            check_datagram_size(max_size - 1, max_size).is_ok(),
+            "上限未満のサイズは送信できること"
+        );
+        assert!(
+            check_datagram_size(max_size, max_size).is_ok(),
+            "上限と等しいサイズは送信できること"
+        );
+
+        let error = check_datagram_size(max_size + 1, max_size)
+            .expect_err("上限を超えるとエラーになること");
+        assert!(
+            matches!(
+                error,
+                Error::DatagramTooLarge { size, max_size: limit }
+                    if size == crate::cli::DEFAULT_DATAGRAM_MAX_SIZE + 1
+                        && limit == crate::cli::DEFAULT_DATAGRAM_MAX_SIZE
+            ),
+            "実サイズと上限が保持されること: {error}"
+        );
     }
 }

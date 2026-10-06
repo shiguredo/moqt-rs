@@ -30,6 +30,13 @@ pub enum Error {
     WebTransport(String),
     /// トランスポートがセッション終了を検知した
     ConnectionClosed,
+    /// object datagram が上限サイズを超えた
+    DatagramTooLarge {
+        /// MOQT の OBJECT_DATAGRAM (ヘッダ + Properties + payload) の実サイズ (bytes)
+        size: usize,
+        /// 許容する上限 (bytes)
+        max_size: usize,
+    },
     /// その他のエラー
     Other(String),
 }
@@ -40,6 +47,11 @@ impl fmt::Display for Error {
             Self::Quic(msg) => write!(f, "QUIC: {msg}"),
             Self::WebTransport(msg) => write!(f, "WebTransport: {msg}"),
             Self::ConnectionClosed => write!(f, "session closed"),
+            Self::DatagramTooLarge { size, max_size } => write!(
+                f,
+                "object datagram is too large: {size} bytes (limit {max_size} bytes). \
+                 Disable --audio-datagram or increase --datagram-max-size"
+            ),
             Self::Moqt(e) => write!(f, "MoQT: {e}"),
             Self::Capture(e) => write!(f, "capture: {e:?}"),
             Self::Encode(e) => write!(f, "encode: {e}"),
@@ -142,6 +154,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
     use tokio_moq::error::TransportError;
+
+    /// datagram の上限超過は実サイズと上限と対処を表示する
+    ///
+    /// 原因不明の Fatal 終了にしないための情報が利用者に見えることを固定する。
+    #[test]
+    fn datagram_too_large_reports_size_limit_and_remedy() {
+        let message = Error::DatagramTooLarge {
+            size: 1161,
+            max_size: 1160,
+        }
+        .to_string();
+        assert_eq!(
+            message,
+            "object datagram is too large: 1161 bytes (limit 1160 bytes). \
+             Disable --audio-datagram or increase --datagram-max-size",
+            "実サイズと上限と対処が分かるメッセージであること"
+        );
+    }
 
     /// トランスポート種別に依存しない失敗は `Other` になり `QUIC:` が付かない
     #[test]

@@ -11,6 +11,11 @@
 
 ## develop
 
+- [FIX] moq-pub の datagram 配送が上限サイズを超える object で原因不明の Fatal 終了または通知なしの破棄になる
+  - `--datagram-max-size` を追加し、送信前に MOQT の object datagram の実サイズを判定する。既定は 1160 bytes (RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値)
+  - 上限を超える object は実サイズと上限と対処 (`--audio-datagram` を外す / 上限を上げる) を含むエラーで終了する
+  - @voluntas
+
 - [CHANGE] example の `--use-datagram` を削除し、音声トラックだけを datagram 配送にする `--audio-datagram` を追加する
   - 映像は 1 group = 1 unidirectional stream で送る (draft-ietf-moq-loc-04 §4.2)。datagram 配送が示されているのは同 §4.1 の音声の例だけで、datagram は 1 object が 1 QUIC datagram に収まる必要がある (RFC 9221 §3 の `max_datagram_frame_size` と path MTU)
   - 映像と catalog は常に subgroup stream で送る

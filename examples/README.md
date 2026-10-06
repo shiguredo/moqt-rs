@@ -103,9 +103,10 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--no-audio` | | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | | 音声入力デバイス ID |
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
-| `--audio-datagram` | | | 音声トラックを subgroup stream ではなく datagram で配信する (映像と catalog は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2) |
+| `--audio-datagram` | | | 音声トラックを subgroup stream ではなく datagram で配信する (映像と catalog は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2)。上限は `--datagram-max-size` で指定し、超える object はエラーになる |
+| `--datagram-max-size` | | `1160` | MOQT の object datagram (ヘッダ + Properties + payload) の上限サイズ (bytes)。上限を超える object は送信せず、実サイズと対処を示すエラーで終了する。既定は RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値である |
 
-`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` は無視され、警告ログが出る。
+`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` / `--datagram-max-size` は無視され、警告ログが出る。
 `--input-mp4-reencode` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視され、警告ログが出る。
 
 ### moq-sub
