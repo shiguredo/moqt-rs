@@ -926,12 +926,20 @@ pub async fn run(
         if let Some(rid) = video_request_id
             && let Err(e) = client.stop_sending(rid).await
         {
-            tracing::warn!("Failed to send STOP_SENDING for video: {e}");
+            // `should_stop_sending` のガードにより、ここでは peer_ended / session_terminated は
+            // どちらも偽である (peer 起点の終了では送らず、その他の失敗だけがここに来る)
+            log_failure(
+                format_args!("Failed to send STOP_SENDING for video: {e}"),
+                is_connection_closed(&e),
+            );
         }
         if let Some(rid) = audio_request_id
             && let Err(e) = client.stop_sending(rid).await
         {
-            tracing::warn!("Failed to send STOP_SENDING for audio: {e}");
+            log_failure(
+                format_args!("Failed to send STOP_SENDING for audio: {e}"),
+                is_connection_closed(&e),
+            );
         }
     }
 
@@ -961,11 +969,18 @@ pub async fn run(
     // 自側で終了コード付きに閉じた場合は、閉じた session へ GOAWAY / 正常 close を送らない
     if session_alive && should_close_gracefully(session_terminated) {
         if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
-            tracing::warn!("Failed to send GOAWAY: {e}");
+            // `should_close_gracefully` のガードにより session_terminated はここでは偽である
+            log_failure(
+                format_args!("Failed to send GOAWAY: {e}"),
+                peer_ended || is_connection_closed(&e),
+            );
         }
 
         if let Err(e) = client.close(0, "").await {
-            tracing::warn!("Failed to close session gracefully: {e}");
+            log_failure(
+                format_args!("Failed to close session gracefully: {e}"),
+                peer_ended || is_connection_closed(&e),
+            );
         }
     }
 
@@ -1003,6 +1018,29 @@ pub async fn run(
 /// 依存しない)。
 fn is_transport_session_end(error: &Error) -> bool {
     matches!(error, Error::ConnectionClosed)
+}
+
+/// transport エラーがセッション終了 (接続クローズ) を表すかどうか
+///
+/// MoqtClient の API は `Error` ではなく `TransportError` を直接返すものがある。
+/// セッション終了の判別は `Error::ConnectionClosed` と同じ variant で行う。
+fn is_connection_closed(error: &TransportError) -> bool {
+    matches!(error, TransportError::ConnectionClosed)
+}
+
+/// セッション終了に伴う失敗を `info!`、それ以外を `warn!` で出す
+///
+/// WebTransport のセッション終了 (draft-ietf-webtrans-http3-16 §6) は異常ではないため、
+/// 終了に伴う失敗を warn として出すとログから実際の異常を区別できない。受信ループの
+/// accept / datagram 経路と同じ扱いに揃える。`expected` はセッション終了に伴う失敗かどうかで、
+/// 後始末では `close` の送信失敗が接続クローズ以外に畳まれる経路もあるため、呼び出し側が
+/// 「セッション終了を観測して後始末に入った」ことも含めて渡す。
+fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
+    if expected {
+        tracing::info!("{message}");
+    } else {
+        tracing::warn!("{message}");
+    }
 }
 
 async fn receive_registered_stream_data(
@@ -1338,11 +1376,16 @@ async fn handle_stream_body(
                 return;
             }
             Err(e) => {
-                tracing::warn!("Stream #{stream_num}: failed to peek stream type: {e}");
+                log_failure(
+                    format_args!("Stream #{stream_num}: failed to peek stream type: {e}"),
+                    is_transport_session_end(&e),
+                );
                 return;
             }
         };
     if let Err(e) = data_plane.recv_data_stream_type(stream_id, stream_type_id) {
+        // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
+        // ここはセッション終了でも warn のままにする
         tracing::warn!("Stream #{stream_num}: failed to register data stream type: {e}");
         return;
     }
@@ -1413,8 +1456,11 @@ async fn handle_stream_body(
                             Ok(Some(data)) => sg_decoder.push(&data),
                             Ok(None) => return,
                             Err(e) => {
-                                tracing::warn!(
-                                    "Stream #{stream_num}: failed to read subgroup header: {e}"
+                                log_failure(
+                                    format_args!(
+                                        "Stream #{stream_num}: failed to read subgroup header: {e}"
+                                    ),
+                                    is_transport_session_end(&e),
                                 );
                                 return;
                             }
@@ -1475,6 +1521,8 @@ async fn handle_stream_body(
                     return;
                 }
                 Err(e) => {
+                    // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
+                    // ここはセッション終了でも warn のままにする
                     tracing::warn!("Stream #{stream_num}: failed to register subgroup header: {e}");
                     return;
                 }
@@ -1616,7 +1664,10 @@ async fn handle_fetch_stream(
                 Ok(Some(data)) => decoder.push(&data),
                 Ok(None) => return,
                 Err(e) => {
-                    tracing::warn!("Stream #{stream_num}: failed to read fetch header: {e}");
+                    log_failure(
+                        format_args!("Stream #{stream_num}: failed to read fetch header: {e}"),
+                        is_transport_session_end(&e),
+                    );
                     return;
                 }
             },
@@ -1657,7 +1708,10 @@ async fn handle_fetch_stream(
                         return;
                     }
                     Err(e) => {
-                        tracing::warn!("Stream #{stream_num}: stream error: {e}");
+                        log_failure(
+                            format_args!("Stream #{stream_num}: stream error: {e}"),
+                            is_transport_session_end(&e),
+                        );
                         return;
                     }
                 },
@@ -1700,7 +1754,10 @@ async fn handle_fetch_stream(
                         return;
                     }
                     Err(e) => {
-                        tracing::warn!("Stream #{stream_num}: stream error: {e}");
+                        log_failure(
+                            format_args!("Stream #{stream_num}: stream error: {e}"),
+                            is_transport_session_end(&e),
+                        );
                         return;
                     }
                 }
@@ -1775,7 +1832,10 @@ async fn decode_video_stream(
                         Ok(Some(data)) => sg_decoder.push(&data),
                         Ok(None) => return frames,
                         Err(e) => {
-                            tracing::warn!("Failed to read object: {e}");
+                            log_failure(
+                                format_args!("Failed to read object: {e}"),
+                                is_transport_session_end(&e),
+                            );
                             return frames;
                         }
                     }
@@ -1800,7 +1860,10 @@ async fn decode_video_stream(
                 Ok(Some(data)) => sg_decoder.push(&data),
                 Ok(None) => return frames,
                 Err(e) => {
-                    tracing::warn!("Failed to read object payload: {e}");
+                    log_failure(
+                        format_args!("Failed to read object payload: {e}"),
+                        is_transport_session_end(&e),
+                    );
                     return frames;
                 }
             }
@@ -2143,7 +2206,10 @@ async fn decode_audio_stream(
                         Ok(Some(data)) => sg_decoder.push(&data),
                         Ok(None) => return chunks,
                         Err(e) => {
-                            tracing::warn!("Failed to read audio object: {e}");
+                            log_failure(
+                                format_args!("Failed to read audio object: {e}"),
+                                is_transport_session_end(&e),
+                            );
                             return chunks;
                         }
                     }
@@ -2171,7 +2237,10 @@ async fn decode_audio_stream(
                 Ok(Some(data)) => sg_decoder.push(&data),
                 Ok(None) => return chunks,
                 Err(e) => {
-                    tracing::warn!("Failed to read audio payload: {e}");
+                    log_failure(
+                        format_args!("Failed to read audio payload: {e}"),
+                        is_transport_session_end(&e),
+                    );
                     return chunks;
                 }
             }
@@ -2735,6 +2804,35 @@ mod tests {
             !should_close_gracefully(true),
             "両方が終了した場合は GOAWAY と正常 close を送らないこと"
         );
+    }
+
+    /// `TransportError` の接続クローズだけをセッション終了として扱う
+    ///
+    /// MoqtClient の後始末 API は `Error` ではなく `TransportError` を返すため、`Error` 側の
+    /// 判定 (`is_transport_session_end`) とは別に variant を固定する。接続クローズ以外は
+    /// 異常として warn で出す。
+    #[test]
+    fn is_connection_closed_only_matches_connection_closed() {
+        assert!(
+            is_connection_closed(&TransportError::ConnectionClosed),
+            "接続クローズはセッション終了として扱うこと"
+        );
+
+        for error in [
+            TransportError::StreamClosed,
+            TransportError::Quic("connection failed".to_string()),
+            TransportError::ConnectFailed { status: Some(404) },
+            TransportError::ProtocolNegotiationFailed {
+                error_code: shiguredo_http3::webtransport::ErrorCode::AlpnError as u64,
+            },
+            TransportError::InvalidState("invalid state".to_string()),
+            TransportError::Internal("internal".to_string()),
+        ] {
+            assert!(
+                !is_connection_closed(&error),
+                "接続クローズ以外はセッション終了として扱わないこと: {error}"
+            );
+        }
     }
 
     /// 接続クローズだけをセッション終了として扱い、他のエラーは異常として扱う

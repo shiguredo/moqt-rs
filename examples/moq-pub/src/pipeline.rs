@@ -43,6 +43,7 @@ use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
 use tokio_moq::Transport;
 use tokio_moq::connect_with_fallback;
+use tokio_moq::error::TransportError;
 use tokio_moq::host_from_authority;
 use tokio_moq::moqt_client::{ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome};
 use tokio_moq::quic;
@@ -557,6 +558,10 @@ pub async fn run(
     let mut audio_group_id: u64 = 0;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
+    // セッション終了を観測してループを抜けたかどうか。後始末の失敗をセッション終了に伴う
+    // 失敗として扱うために使う (セッション終了後の `close` は CONNECT stream の送信失敗として
+    // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
+    let mut session_ended = false;
     let mut current_video_datagram_writer: Option<DatagramWriter> = None;
     let mut audio_pcm_buf: Vec<i16> = Vec::new();
     // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
@@ -674,6 +679,7 @@ pub async fn run(
                     Ok(()) => {}
                     Err(e) if is_transport_session_end(&e) => {
                         tracing::info!("Session closed by transport");
+                        session_ended = true;
                         break 'main;
                     }
                     Err(e) => {
@@ -776,6 +782,7 @@ pub async fn run(
                     Ok(()) => {}
                     Err(e) if is_transport_session_end(&e) => {
                         tracing::info!("Session closed by transport");
+                        session_ended = true;
                         break 'main;
                     }
                     Err(e) => {
@@ -855,10 +862,14 @@ pub async fn run(
                 match outcome {
                     // セッションが終了した (peer 起点の終了通知 / 自側で検出した違反の双方)。
                     // 終了時の後始末へ進む
-                    Ok(true) => break 'main,
+                    Ok(true) => {
+                        session_ended = true;
+                        break 'main;
+                    }
                     Ok(false) => {}
                     Err(e) if is_transport_session_end(&e) => {
                         tracing::info!("Session closed by transport");
+                        session_ended = true;
                         break 'main;
                     }
                     Err(e) => {
@@ -915,28 +926,43 @@ pub async fn run(
             .send_publish_done(rid, PUBLISH_DONE_GOING_AWAY, "")
             .await
     {
-        tracing::warn!("Failed to send PUBLISH_DONE for video: {e}");
+        log_failure(
+            format_args!("Failed to send PUBLISH_DONE for video: {e}"),
+            session_ended || is_connection_closed(&e),
+        );
     }
     if let Some(rid) = audio_request_id
         && let Err(e) = client
             .send_publish_done(rid, PUBLISH_DONE_GOING_AWAY, "")
             .await
     {
-        tracing::warn!("Failed to send PUBLISH_DONE for audio: {e}");
+        log_failure(
+            format_args!("Failed to send PUBLISH_DONE for audio: {e}"),
+            session_ended || is_connection_closed(&e),
+        );
     }
     if let Err(e) = client
         .send_publish_done(catalog_request_id, PUBLISH_DONE_GOING_AWAY, "")
         .await
     {
-        tracing::warn!("Failed to send PUBLISH_DONE for catalog: {e}");
+        log_failure(
+            format_args!("Failed to send PUBLISH_DONE for catalog: {e}"),
+            session_ended || is_connection_closed(&e),
+        );
     }
 
     if let Err(e) = client.send_goaway(Vec::new(), 5000).await {
-        tracing::warn!("Failed to send GOAWAY: {e}");
+        log_failure(
+            format_args!("Failed to send GOAWAY: {e}"),
+            session_ended || is_connection_closed(&e),
+        );
     }
 
     if let Err(e) = client.close(0, "").await {
-        tracing::warn!("Failed to close session gracefully: {e}");
+        log_failure(
+            format_args!("Failed to close session gracefully: {e}"),
+            session_ended || is_connection_closed(&e),
+        );
     }
 
     tracing::info!("Pipeline stopped");
@@ -966,6 +992,30 @@ fn unsupported_macos_encoder(codec: &str) -> Error {
 /// 依存しない)。
 fn is_transport_session_end(error: &Error) -> bool {
     matches!(error, Error::ConnectionClosed)
+}
+
+/// transport エラーがセッション終了 (接続クローズ) を表すかどうか
+///
+/// MoqtClient の後始末 API は `Error` ではなく `TransportError` を返す。
+/// セッション終了の判別は `Error::ConnectionClosed` と同じ variant で行う。
+fn is_connection_closed(error: &TransportError) -> bool {
+    matches!(error, TransportError::ConnectionClosed)
+}
+
+/// セッション終了に伴う失敗を `info!`、それ以外を `warn!` で出す
+///
+/// WebTransport のセッション終了 (draft-ietf-webtrans-http3-16 §6) は異常ではないため、
+/// 終了に伴う失敗を warn として出すとログから実際の異常を区別できない。
+///
+/// `expected` はセッション終了に伴う失敗かどうか。セッション終了後の後始末では `close` の
+/// 送信失敗がセッション終了以外のエラーに畳まれる経路もあるため、呼び出し側が「セッション終了を
+/// 観測して後始末に入った」ことも含めて渡す。
+fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
+    if expected {
+        tracing::info!("{message}");
+    } else {
+        tracing::warn!("{message}");
+    }
 }
 
 /// MOQT メッセージの encode / decode 失敗なら終了コード付きで閉じる
@@ -1367,6 +1417,35 @@ mod tests {
             "Audio Config は付与されないこと"
         );
         props.encode().expect("LOC プロパティは encode できること");
+    }
+
+    /// `TransportError` の接続クローズだけをセッション終了として扱う
+    ///
+    /// MoqtClient の後始末 API は `Error` ではなく `TransportError` を返すため、`Error` 側の
+    /// 判定 (`is_transport_session_end`) とは別に variant を固定する。接続クローズ以外は
+    /// 異常として warn で出す。
+    #[test]
+    fn is_connection_closed_only_matches_connection_closed() {
+        assert!(
+            is_connection_closed(&TransportError::ConnectionClosed),
+            "接続クローズはセッション終了として扱うこと"
+        );
+
+        for error in [
+            TransportError::StreamClosed,
+            TransportError::Quic("connection failed".to_string()),
+            TransportError::ConnectFailed { status: Some(404) },
+            TransportError::ProtocolNegotiationFailed {
+                error_code: shiguredo_http3::webtransport::ErrorCode::AlpnError as u64,
+            },
+            TransportError::InvalidState("invalid state".to_string()),
+            TransportError::Internal("internal".to_string()),
+        ] {
+            assert!(
+                !is_connection_closed(&error),
+                "接続クローズ以外はセッション終了として扱わないこと: {error}"
+            );
+        }
     }
 
     /// 接続クローズだけをセッション終了として扱い、他のエラーは異常として扱う

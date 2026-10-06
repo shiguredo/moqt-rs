@@ -11,6 +11,10 @@
 
 ## develop
 
+- [FIX] example が WebTransport のセッション終了に伴う失敗を warn ログとして出し、実際の異常と区別できない
+  - draft-ietf-webtrans-http3-16 §6 のセッション終了は異常ではないため、moq-pub / moq-sub の後始末 (PUBLISH_DONE / GOAWAY / close / STOP_SENDING) と、終了で停止したストリームの読み出し失敗を `info!` に落とす
+  - セッション終了以外の失敗 (decode 失敗やプロトコル違反など) は従来どおり `warn!` で出す
+  - @voluntas
 - [CHANGE] example の接続経路を `--transport` (quic / wt-h3 / wt-h2) で選ぶようにし、`--url` の scheme を `moqt://` に統一する
   - `https://` による WebTransport over HTTP/3 の選択を廃止する
   - @voluntas
