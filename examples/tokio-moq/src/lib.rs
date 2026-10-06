@@ -424,22 +424,33 @@ fn hex_digit(byte: u8) -> u8 {
 /// path には query (`?` 以降) を含める。draft-ietf-moq-transport-22 §9.1.2 (PATH) は
 /// query が存在する場合に `?` と query を PATH option へ連結することを MUST とするため。
 ///
-/// RFC 3986 §3.2 は authority が `#` でも終端すると定めるが、この関数は `#` を区切りに
-/// 含めない。呼び出し元の [`parse_url`] が先に fragment を分離してから渡す。
+/// RFC 3986 §3.2 は authority が `/` / `?` / `#` で終端すると定めるため、`#` 以降
+/// (fragment) は path に含めない。呼び出し元の [`parse_url`] は先に fragment を分離するが、
+/// この関数を単独で呼んでも fragment が path に混入しない。
+/// 例: `split_authority_path("example.com/path#type:value")` は
+/// `("example.com", "/path")`、`split_authority_path("example.com#type:value")` は
+/// `("example.com", "/")` を返す。
 /// path が空の場合は `/` を補う。RFC 3986 §6.2.3 は
 /// "a URI that uses the generic syntax for authority with an empty path should be normalized to
 /// a path of \"/\"" と定めるため、query のみの場合も `/` を補う。
 pub fn split_authority_path(rest: &str) -> (String, String) {
-    // authority は最初の `/` または `?` まで
-    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    // authority は最初の `/` / `?` / `#` まで (RFC 3986 §3.2)
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = rest[..end].to_string();
-    let path = if end == rest.len() {
+    // authority の終端が `/` または `?` のときは `#` がここに残るため切り落とす
+    // (RFC 3986 §3.2 の終端文字のうち `#` だけは authority の後ろに現れる)
+    let path_and_query = &rest[end..];
+    let path_and_query = match path_and_query.find('#') {
+        Some(fragment_start) => &path_and_query[..fragment_start],
+        None => path_and_query,
+    };
+    let path = if path_and_query.is_empty() {
         "/".to_string()
-    } else if rest.as_bytes()[end] == b'?' {
+    } else if path_and_query.starts_with('?') {
         // path が空で query のみの場合は `/` を補う
-        format!("/{}", &rest[end..])
+        format!("/{path_and_query}")
     } else {
-        rest[end..].to_string()
+        path_and_query.to_string()
     };
     (authority, path)
 }
@@ -748,6 +759,36 @@ mod tests {
         assert_eq!(
             split_authority_path("127.0.0.1:4443?x=1"),
             ("127.0.0.1:4443".to_string(), "/?x=1".to_string())
+        );
+    }
+
+    /// fragment (`#` 以降) は path に含めない (RFC 3986 §3.2)
+    #[test]
+    fn split_authority_path_stops_at_fragment() {
+        assert_eq!(
+            split_authority_path("example.com/path#type:value"),
+            ("example.com".to_string(), "/path".to_string()),
+            "path 付き URL でも fragment を path に含めないこと"
+        );
+        assert_eq!(
+            split_authority_path("example.com#type:value"),
+            ("example.com".to_string(), "/".to_string()),
+            "authority 直後の fragment は path を `/` にすること"
+        );
+        assert_eq!(
+            split_authority_path("example.com?x=1#type:value"),
+            ("example.com".to_string(), "/?x=1".to_string()),
+            "query の後の fragment も path に含めないこと"
+        );
+        assert_eq!(
+            split_authority_path("#type:value"),
+            (String::new(), "/".to_string()),
+            "`#` のみの入力は authority を空文字列、path を `/` にすること"
+        );
+        assert_eq!(
+            split_authority_path("example.com/path#type:value#extra"),
+            ("example.com".to_string(), "/path".to_string()),
+            "2 個目以降の `#` も fragment として path に含めないこと"
         );
     }
 
