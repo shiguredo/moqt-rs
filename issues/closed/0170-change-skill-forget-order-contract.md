@@ -1,7 +1,7 @@
 # forget の順序契約を SKILL.md と Session::forget_subscription の doc に追記する
 
 - Created: 2026-09-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/update-skill-forget-order-contract
 - Polished: 2026-09-28
 
@@ -37,6 +37,35 @@
 - `skills/shiguredo-moqt/SKILL.md` には forget の節を新設し、要旨 (保留中の PUBLISH_DONE がある間は
   `Session::forget_subscription` を呼ばないこと) と `Session::forget_subscription` の doc への参照を書く。
   契約本文は doc に置き、SKILL.md へ複製しない (doc と SKILL.md の二重管理を避ける)
+
+## 解決方法
+
+`Session::forget_subscription` の doc に forget の順序契約を追記し、
+`skills/shiguredo-moqt/SKILL.md` に `### forget API` の節を新設した。
+
+- `src/session/subscription.rs` の `Session::forget_subscription` の doc に次を明記した
+  - 保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) がある間は呼ばないこと。
+    呼ぶと `subscriptions` から entry が消えるため `Session::maybe_flush_pending_publish_done` は
+    PUBLISH_DONE を送信しない
+  - 根拠として draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) の MUST と、
+    §9.9 (PUBLISH_DONE) の "A sender MUST NOT destroy subscription state until it sends
+    PUBLISH_DONE" / "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will
+    ever open, and has no further datagrams to send" を引用した
+  - 呼ぶ順序 (全 outgoing stream を終端通知で閉じる → 保留中の PUBLISH_DONE の flush を待つ →
+    forget を呼ぶ) と、`cleanup_ready` が保留の有無を見ないこと、保留の確認方法
+    (`Session::subscription` の `Subscription::pending_publish_done`)
+  - 受信側の追跡状態 (`ObjectFieldTracker` / `ObjectPropertyTracker`) と受信 stream の帰属の扱い
+    (共有 Track alias で帰属先の生きた subscription が他にある場合は移管する)
+- `skills/shiguredo-moqt/SKILL.md` に `### forget API` を新設し、3 つの forget API のシグネチャ、
+  保留中の PUBLISH_DONE がある間は `Session::forget_subscription` を呼ばないこと、
+  `Session::forget_subscription` の doc への参照、前提条件が API ごとに異なることを書いた
+  (契約本文は doc に置き、SKILL.md には複製しない)
+- 検証: `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` / `cargo test --workspace` /
+  `prek run --all-files` が通ることを確認した
+- レビューで、example の `MoqtClient::cleanup_closed_requests` が `subscription_cleanup_ready` だけで
+  破棄しており、保留中の PUBLISH_DONE を破棄しうることが分かった。本 issue の対象外のため
+  別 issue (0201) として起票した
 
 ## 完了条件
 

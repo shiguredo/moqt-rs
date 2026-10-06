@@ -89,6 +89,33 @@ impl Session {
     /// 最後の帰属先が既に回収・キャンセル済みの場合は、同じ Track Alias の生きた他候補の
     /// 先頭へ移管する。移管対象は移管先の `incoming_subgroup_count` /
     /// `open_incoming_subgroup_count` に加算され、移管先の終端処理まで会計が維持される。
+    ///
+    /// # 呼ぶ順序
+    ///
+    /// 保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) がある間は本関数を呼ばないこと。
+    /// 本関数は `subscriptions` から entry を除去して `pending_publish_done` を破棄するため、
+    /// 呼ぶと全 outgoing stream を閉じても `Session::maybe_flush_pending_publish_done` は
+    /// (entry が無いため) PUBLISH_DONE を送信しない。
+    /// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) は REQUEST_UPDATE が失敗した場合に
+    /// publisher が PUBLISH_DONE を送ることを MUST とし、§9.9 (PUBLISH_DONE) は
+    /// "A sender MUST NOT destroy subscription state until it sends PUBLISH_DONE" と定める。
+    /// 同節の "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open,
+    /// and has no further datagrams to send" により、stream と datagram が残る間は送れないため、
+    /// 破棄すると §9.5.1 の MUST を果たせなくなる。
+    ///
+    /// したがって呼ぶ順序は次のとおり。
+    ///
+    /// 1. 全 outgoing stream を終端通知で閉じる (`Session::send_data_stream_closed` など)
+    /// 2. 保留中の PUBLISH_DONE が flush される
+    ///    (`Session::maybe_flush_pending_publish_done` が送信する) のを待つ
+    /// 3. 本関数を呼ぶ
+    ///
+    /// 保留の有無は `Session::subscription` が返す `Subscription::pending_publish_done` で確認できる。
+    /// なお `cleanup_ready` は保留の有無を見ないため、cleanup 可能でも保留中なら本関数を呼ばないこと。
+    ///
+    /// また本関数は受信側の追跡状態 (`ObjectFieldTracker` / `ObjectPropertyTracker`) を除去し、
+    /// 受信 stream の帰属も除去する (共有 Track Alias で帰属先の生きた subscription が他にある場合は
+    /// その subscription へ移管する)。同じ Track を再購読する場合は記録が無い前提で扱うこと。
     pub fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription> {
         let entry = self.subscriptions.get(&request_id)?;
         if !entry.cleanup_ready() {

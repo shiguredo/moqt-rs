@@ -474,6 +474,21 @@ fn reset_outgoing_data_stream(
 ) -> Result<(), SessionError>
 ```
 
+### forget API
+
+```rust
+fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription>
+fn forget_fetch(&mut self, request_id: u64) -> Option<Fetch>
+fn forget_track_status(&mut self, request_id: u64) -> Option<TrackStatusEntry>
+```
+
+`Session::forget_subscription` は、保留中の PUBLISH_DONE (`Subscription::pending_publish_done`) が
+ある間は呼ばないこと。呼ぶと PUBLISH_DONE が送信されず、draft-ietf-moq-transport-22 §9.5.1
+(Updating Subscriptions) の MUST を果たせない。順序契約と受信側の追跡状態の扱いの全文は
+`Session::forget_subscription` の doc を参照すること。前提条件は API ごとに異なる
+(`forget_subscription` は `cleanup_ready`、`forget_fetch` / `forget_track_status` はそれぞれの終端
+条件) ため、呼ぶ前に各 API の doc を確認すること。
+
 ### 公開定数
 
 | 定数 | 値 | 説明 |
