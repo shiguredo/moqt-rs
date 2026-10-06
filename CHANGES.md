@@ -11,6 +11,11 @@
 
 ## develop
 
+- [ADD] moq-sub に音声の jitter buffer を追加し、到着の揺らぎに合わせた遅延で再生する
+  - ライブラリの `playout::timeline` が LOC の TIMESTAMP と受信側の壁時計から鳴らす時刻を決める (目標遅延は `playout::delay` が学習する)
+  - 鳴らす時刻の 40 ms 手前まで音声を保持し、遅れすぎた音と上限を超えた音は捨てる
+  - @voluntas
+
 - [FIX] moq-pub の datagram 配送が上限サイズを超える object で原因不明の Fatal 終了または通知なしの破棄になる
   - `--datagram-max-size` を追加し、送信前に MOQT の object datagram の実サイズを判定する。既定は 1160 bytes (RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値)
   - 上限を超える object は実サイズと上限と対処 (`--audio-datagram` を外す / 上限を上げる) を含むエラーで終了する

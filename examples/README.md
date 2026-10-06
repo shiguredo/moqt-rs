@@ -7,7 +7,7 @@ draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 ## 構成
 
 - **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
-- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生する。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。

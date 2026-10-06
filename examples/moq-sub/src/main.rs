@@ -13,7 +13,17 @@
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの
 //! 準備、macOS の SDL プレイヤーの実行、終了コードの決定を行う。
 
+use moq_sub::jitter_buffer::AudioJitterBuffer;
 use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline};
+
+/// 音声を再生機器へ積むときに先行させる分 (マイクロ秒)
+///
+/// SDL のストリームが空になると音が途切れるため、Opus の 1 フレーム (20 ms) の
+/// 2 枚分を先行させて積む。目標遅延がこれより短いときは、到着した音をそのまま積む。
+const AUDIO_OUTPUT_LEAD_US: i64 = 40_000;
+
+/// jitter buffer の状態をログに出す間隔 (ミリ秒)
+const AUDIO_BUFFER_LOG_INTERVAL_MS: u128 = 5_000;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -146,7 +156,8 @@ fn main() {
 /// SDL の初期化やウィンドウ・レンダラー作成に失敗する環境でも panic せず、`Error::Player` として失敗を返す。
 ///
 /// `audio_output_device` が [`cli::AudioOutputDevice::None`] のときは SDL の音声出力デバイスを
-/// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。
+/// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。このときは
+/// 鳴らす時刻を決める必要が無いため、jitter buffer へも入れない。
 fn run_raw_player(
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
     audio_rx: std::sync::mpsc::Receiver<DecodedAudioFrame>,
@@ -169,6 +180,12 @@ fn run_raw_player(
     };
     let audio_output_enabled = audio_player.is_some();
     let mut audio_started = false;
+
+    // 音声は到着後すぐ鳴らさず、鳴らす時刻 (LOC の TIMESTAMP と学習した目標遅延から
+    // 決まる) まで保持する。到着の揺らぎがそのまま音の途切れにならないようにするためである
+    let mut audio_buffer = AudioJitterBuffer::new();
+    let mut released_audio: u64 = 0;
+    let mut last_audio_log = std::time::Instant::now();
 
     // wall-clock PTS: 再生開始からの経過時間を映像 PTS として使用する
     let start_time = std::time::Instant::now();
@@ -253,33 +270,14 @@ fn run_raw_player(
 
         match audio_rx.try_recv() {
             Ok(audio) => {
-                if let Some(audio_player) = audio_player.as_ref() {
-                    let pcm_bytes = pcm_i16_to_bytes(&audio.pcm);
-                    if let Err(e) = audio_player.enqueue_audio(
-                        &pcm_bytes,
-                        audio.pts_us,
-                        audio.sample_rate as i32,
-                        audio.channels as i32,
-                        raw_player::AudioFormat::S16,
-                    ) {
-                        tracing::warn!("Failed to enqueue audio chunk: {e}");
-                    }
-                    if !audio_started {
-                        if let Err(e) = audio_player.play() {
-                            tracing::warn!("Failed to start audio playback: {e}");
-                        } else {
-                            audio_started = true;
-                            tracing::info!("Audio playback started");
-                        }
-                    }
-                    if let Err(e) = audio_player.process() {
-                        tracing::warn!("Failed to process audio queue: {e}");
-                    }
+                // 音声出力を行わない指定では再生機器が無いため、保持も観測もしない
+                if audio_output_enabled {
+                    audio_buffer.push(audio, wall_clock_us());
                 }
                 audio_chunk_count += 1;
                 if audio_chunk_count.is_multiple_of(100) {
                     if audio_output_enabled {
-                        tracing::info!("Played {audio_chunk_count} audio chunks");
+                        tracing::info!("Received {audio_chunk_count} audio chunks");
                     } else {
                         tracing::info!(
                             "Decoded {audio_chunk_count} audio chunks (audio output disabled)"
@@ -292,7 +290,44 @@ fn run_raw_player(
                 if !audio_disconnected {
                     tracing::info!("Audio channel disconnected");
                     audio_disconnected = true;
+                    // 保持している音をすべて吐き出す。末尾の音を捨てないためである
+                    if let Some(audio_player) = audio_player.as_ref() {
+                        while let Some(audio) = audio_buffer.pop_oldest() {
+                            enqueue_decoded_audio(audio_player, &audio, &mut audio_started);
+                            released_audio += 1;
+                        }
+                    }
                 }
+            }
+        }
+
+        // 鳴らす時刻まで保持していた音声を再生機器へ渡す。遅れすぎた音は鳴らさずに捨てる
+        if let Some(audio_player) = audio_player.as_ref() {
+            let now_us = wall_clock_us();
+            let dropped_late = audio_buffer.drop_late(now_us);
+            if dropped_late > 0 {
+                tracing::warn!("Discarded {dropped_late} audio chunks that are too late to play");
+            }
+            while let Some(audio) = audio_buffer.pop_releasable(now_us, AUDIO_OUTPUT_LEAD_US) {
+                enqueue_decoded_audio(audio_player, &audio, &mut audio_started);
+                released_audio += 1;
+            }
+            if let Err(e) = audio_player.process() {
+                tracing::warn!("Failed to process audio queue: {e}");
+            }
+            if last_audio_log.elapsed().as_millis() >= AUDIO_BUFFER_LOG_INTERVAL_MS {
+                last_audio_log = std::time::Instant::now();
+                // player_buffer は再生機器へ積んだまま鳴っていない長さである。これが 0 に
+                // 近づくと音が途切れるため、目標遅延が足りているかをここで確認できる
+                tracing::info!(
+                    "Audio jitter buffer: target_delay={}ms pending={} player_buffer={:.0}ms released={} dropped_late={} dropped_overflow={}",
+                    audio_buffer.target_delay_us().unwrap_or(0) / 1000,
+                    audio_buffer.len(),
+                    audio_player.stats().audio_buffer_ms,
+                    released_audio,
+                    audio_buffer.dropped_late(),
+                    audio_buffer.dropped_overflow(),
+                );
             }
         }
 
@@ -312,6 +347,43 @@ fn run_raw_player(
     // SAFETY: プレイヤーループ終了後に一度だけ呼び出す
     unsafe { raw_player::quit() };
     Ok(())
+}
+
+/// デコード済みの音声を再生機器へ積み、最初の 1 枚で再生を開始する
+fn enqueue_decoded_audio(
+    audio_player: &raw_player::AudioPlayer,
+    audio: &DecodedAudioFrame,
+    audio_started: &mut bool,
+) {
+    let pcm_bytes = pcm_i16_to_bytes(&audio.pcm);
+    if let Err(e) = audio_player.enqueue_audio(
+        &pcm_bytes,
+        audio.pts_us,
+        audio.sample_rate as i32,
+        audio.channels as i32,
+        raw_player::AudioFormat::S16,
+    ) {
+        tracing::warn!("Failed to enqueue audio chunk: {e}");
+        return;
+    }
+    // 空のキューで play すると SDL のデバイスを開くだけで音は出ないため、積んでから呼ぶ
+    if !*audio_started {
+        match audio_player.play() {
+            Ok(()) => {
+                *audio_started = true;
+                tracing::info!("Audio playback started");
+            }
+            Err(e) => tracing::warn!("Failed to start audio playback: {e}"),
+        }
+    }
+}
+
+/// 現在時刻を Unix epoch からのマイクロ秒で返す
+fn wall_clock_us() -> i64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
 }
 
 /// `&[i16]` をリトルエンディアンのバイト列に変換する
