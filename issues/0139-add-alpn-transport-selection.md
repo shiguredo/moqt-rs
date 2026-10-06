@@ -1,7 +1,7 @@
 # ALPN で transport を選択できるようにする
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/add-alpn-transport-selection
 - Polished: 2026-09-22
 
@@ -63,3 +63,20 @@ draft-ietf-moq-transport-21 §6.1.2 (Dereferencing a MOQT URI) は、クライ�
 - `https://` の既存挙動 (WebTransport) が変わらないこと
 - 証明書検証を行う経路でも ALPN が明示され、s2n-quic-rustls の既定値に依存しないこと
 - `examples/README.md` の URL スキーム節が実装に合わせて更新されていること
+
+## 解決方法
+
+本 issue の前提である「ALPN の選択結果から経路を決める」方式は採用せず、接続経路を `--transport`
+(quic / wt-h3 / wt-h2) で明示的に選ぶ方式へ変更した。`--url` の scheme も `moqt://` に統一し、
+`https://` による WebTransport over HTTP/3 の選択は廃止した (CHANGES.md の `[CHANGE]` に記載)。
+
+- `examples/tokio-moq/src/lib.rs`: `Transport::{Quic, WtH3, WtH2}` を `--transport` の値から解決する。
+  URL の scheme は `moqt://` のみを受け付け、進む経路は `Transport` で確定する。ALPN の選択結果を
+  読む判定関数は持たない
+- `examples/moq-pub/src/cli.rs` / `examples/moq-sub/src/cli.rs`: `--transport` を追加し、
+  pipeline は `Transport` で分岐する。`examples/README.md` の URL スキーム節も追随させた
+- したがって「サーバーが `h3` を選んだときに `moqt://` から WebTransport 経路へフォールバックする」
+  機能は提供しない。証明書検証経路の ALPN は s2n-quic-rustls の既定 (`h3`) に依存したままであるが、
+  経路を `--transport` で確定する方式では ALPN による分岐を行わないため、本 issue の対象外とした
+- 完了条件のうち「ALPN から経路を決める純関数の単体テスト」「実機での ALPN ログ確認」
+  「`https://` の既存挙動の維持」は、上記の方式変更により対象外になった
