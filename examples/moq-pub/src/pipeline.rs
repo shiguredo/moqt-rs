@@ -584,6 +584,8 @@ pub async fn run(
     // 音声と映像 (さらにデバイスと OS) で異なるため、それぞれ別に持つ。
     let mut video_clock = WallClockMapper::new();
     let mut audio_clock = WallClockMapper::new();
+    // 換算の残差 (受信時刻 − 換算した TIMESTAMP) をトラックごとに溜め、定期的に要約を出す
+    let mut capture_residuals = CaptureClockResiduals::new();
     // live capture の音声バッファ先頭の時刻。1 つの capture フレームから複数の Opus
     // フレームを切り出すため、切り出し位置の時刻をサンプル数から進める。
     let mut audio_timeline = AudioCaptureTimeline::new();
@@ -635,6 +637,7 @@ pub async fn run(
                             let timestamp_us = map_capture_timestamp_us(
                                 "video",
                                 &mut video_clock,
+                                &mut capture_residuals,
                                 frame.timestamp_us,
                                 wall_clock_now_us()?,
                             )?;
@@ -742,6 +745,7 @@ pub async fn run(
                             let frame_epoch_us = map_capture_timestamp_us(
                                 "audio",
                                 &mut audio_clock,
+                                &mut capture_residuals,
                                 frame.timestamp_us,
                                 wall_clock_now_us()?,
                             )?;
@@ -1246,6 +1250,79 @@ fn wall_clock_now_us() -> Result<i64> {
         .map_err(|_| Error::Other("system clock is out of the supported range".to_string()))
 }
 
+/// 残差の要約を出す間隔 (マイクロ秒)
+const CAPTURE_RESIDUAL_REPORT_US: i64 = 5_000_000;
+
+/// 要約に使う残差の件数 (直近のこの件数だけを見る)
+const CAPTURE_RESIDUAL_SAMPLES: usize = 1_024;
+
+/// capture のメディア時刻と壁時計の差 (残差) を溜めて、定期的に要約を出す
+///
+/// 残差は「撮影から読むまでの遅れ」であり、[`WallClockMapper`] はその最小値を対応に使う
+/// ため 0 にはならない。0103 の完了条件は音声と映像の残差の中央値の差であるが、毎フレームの
+/// debug ログでは確認できないため、トラックごとに溜めて定期的に info で出す。
+struct CaptureClockResiduals {
+    /// トラックごとの直近の残差 (マイクロ秒)。添字は [`CaptureClockResiduals::record`] が決める
+    samples_us: [Vec<i64>; 2],
+    /// 直近に要約を出した時刻 (マイクロ秒)
+    last_report_us: i64,
+}
+
+/// 残差の要約 (最小値と中央値と件数)
+struct ResidualSummary {
+    min_us: i64,
+    median_us: i64,
+    samples: usize,
+}
+
+impl CaptureClockResiduals {
+    /// まだ 1 件も記録していない状態で作る
+    fn new() -> Self {
+        Self {
+            samples_us: [Vec::new(), Vec::new()],
+            last_report_us: 0,
+        }
+    }
+
+    /// 残差を記録し、要約を出す間隔が空いていればトラックごとの要約を返す
+    ///
+    /// `track` は `"video"` か `"audio"`。`now_us` は換算に使った壁時計である。両方の
+    /// トラックに 1 件以上あるときだけ要約を返す。
+    fn record(
+        &mut self,
+        track: &str,
+        difference_us: i64,
+        now_us: i64,
+    ) -> Option<[ResidualSummary; 2]> {
+        let index = if track == "audio" { 1 } else { 0 };
+        let samples = &mut self.samples_us[index];
+        if samples.len() >= CAPTURE_RESIDUAL_SAMPLES {
+            samples.remove(0);
+        }
+        samples.push(difference_us);
+        if now_us.saturating_sub(self.last_report_us) < CAPTURE_RESIDUAL_REPORT_US {
+            return None;
+        }
+        self.last_report_us = now_us;
+        Some([self.summary(0)?, self.summary(1)?])
+    }
+
+    /// 1 つのトラックの要約。まだ 1 件も無ければ `None`
+    fn summary(&self, index: usize) -> Option<ResidualSummary> {
+        let samples = self.samples_us.get(index)?;
+        if samples.is_empty() {
+            return None;
+        }
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        Some(ResidualSummary {
+            min_us: sorted[0],
+            median_us: sorted[sorted.len() / 2],
+            samples: sorted.len(),
+        })
+    }
+}
+
 /// capture のメディア時刻を Unix epoch マイクロ秒へ換算する
 ///
 /// `capture_timestamp_us` は capture フレームのメディア時刻、`wall_clock_us` はその
@@ -1260,6 +1337,7 @@ fn wall_clock_now_us() -> Result<i64> {
 fn map_capture_timestamp_us(
     track: &str,
     mapper: &mut WallClockMapper,
+    residuals: &mut CaptureClockResiduals,
     capture_timestamp_us: i64,
     wall_clock_us: i64,
 ) -> Result<u64> {
@@ -1270,13 +1348,28 @@ fn map_capture_timestamp_us(
         .ok_or_else(|| {
             Error::Other("failed to convert the capture timestamp to a wall clock".to_string())
         })?;
+    let difference_us = converted_us.saturating_sub(wall_clock_us);
     tracing::debug!(
         "Capture timestamp mapped to wall clock: track={}, capture_us={}, wall_clock_us={}, difference_us={}",
         track,
         capture_timestamp_us,
         wall_clock_us,
-        converted_us.saturating_sub(wall_clock_us),
+        difference_us,
     );
+    // 0103 の完了条件は「音声と映像の残差の中央値の差」である。毎フレームの debug ログでは
+    // 確認できないため、定期的に要約を出す
+    if let Some([video, audio]) = residuals.record(track, difference_us, wall_clock_us) {
+        tracing::info!(
+            "Capture clock residuals: video min={}us median={}us samples={}, audio min={}us median={}us samples={}, median_difference_us={}",
+            video.min_us,
+            video.median_us,
+            video.samples,
+            audio.min_us,
+            audio.median_us,
+            audio.samples,
+            video.median_us.saturating_sub(audio.median_us),
+        );
+    }
     // `WallClockMapper::to_wall_clock_us` は Unix epoch より前を 0 に丸めるため、
     // 負の値は返らない
     Ok(u64::try_from(converted_us).expect("converted timestamp is not negative"))
@@ -1669,6 +1762,41 @@ mod tests {
         props.encode().expect("LOC プロパティは encode できること");
     }
 
+    /// 残差の要約が、トラックごとの最小値と中央値を返すこと
+    #[test]
+    fn capture_clock_residuals_summarize_both_tracks() {
+        let mut residuals = CaptureClockResiduals::new();
+        // 要約を出す間隔の中では返さない
+        assert!(residuals.record("video", 30_000, 1_000_000).is_none());
+        assert!(residuals.record("audio", 10_000, 2_000_000).is_none());
+        assert!(residuals.record("video", 20_000, 3_000_000).is_none());
+        assert!(residuals.record("video", 40_000, 4_000_000).is_none());
+        // 5 秒ぶん経過すると、映像は 4 件の中央値、音声は 1 件の値になる
+        let [video, audio] = residuals
+            .record("video", 50_000, 6_000_000)
+            .expect("間隔が空けば要約を返すこと");
+        assert_eq!(video.min_us, 20_000, "映像の最小値");
+        assert_eq!(video.median_us, 40_000, "映像の中央値");
+        assert_eq!(video.samples, 4, "映像の件数");
+        assert_eq!(audio.min_us, 10_000, "音声の最小値");
+        assert_eq!(audio.median_us, 10_000, "音声の中央値");
+        assert_eq!(audio.samples, 1, "音声の件数");
+    }
+
+    /// 片方のトラックしか観測していなければ要約を出さないこと
+    #[test]
+    fn capture_clock_residuals_need_both_tracks() {
+        let mut residuals = CaptureClockResiduals::new();
+        assert!(
+            residuals.record("video", 30_000, 10_000_000).is_none(),
+            "音声が無ければ要約を出さないこと"
+        );
+        assert!(
+            residuals.record("audio", 10_000, 16_000_000).is_some(),
+            "両方そろえば要約を出すこと"
+        );
+    }
+
     /// capture のメディア時刻を epoch マイクロ秒へ換算できること
     ///
     /// fake capture のメディア時刻は 0 起点であり、読んだ壁時計を基準にした対応で写る。
@@ -1676,17 +1804,24 @@ mod tests {
     fn map_capture_timestamp_converts_zero_based_media_time() {
         let mut mapper = WallClockMapper::new();
         let wall_clock_us = 1_700_000_000_000_000;
-        let timestamp_us = map_capture_timestamp_us("video", &mut mapper, 0, wall_clock_us)
-            .expect("換算できること");
+        let mut residuals = CaptureClockResiduals::new();
+        let timestamp_us =
+            map_capture_timestamp_us("video", &mut mapper, &mut residuals, 0, wall_clock_us)
+                .expect("換算できること");
         assert_eq!(
             timestamp_us, wall_clock_us as u64,
             "0 起点のメディア時刻が読んだ壁時計へ写ること"
         );
 
         // 同じ間隔で進む次のフレームも壁時計に追随すること
-        let timestamp_us =
-            map_capture_timestamp_us("video", &mut mapper, 33_333, wall_clock_us + 33_333)
-                .expect("換算できること");
+        let timestamp_us = map_capture_timestamp_us(
+            "video",
+            &mut mapper,
+            &mut residuals,
+            33_333,
+            wall_clock_us + 33_333,
+        )
+        .expect("換算できること");
         assert_eq!(
             timestamp_us,
             (wall_clock_us + 33_333) as u64,
@@ -1704,6 +1839,7 @@ mod tests {
         let base_us: i64 = 1_700_000_000_000_000;
         let mut video_clock = WallClockMapper::new();
         let mut audio_clock = WallClockMapper::new();
+        let mut residuals = CaptureClockResiduals::new();
 
         // 映像は 0 起点のメディア時刻、音声は起動から 5 秒進んだ monotonic なメディア時刻
         let mut video_timestamps = Vec::new();
@@ -1714,6 +1850,7 @@ mod tests {
                 map_capture_timestamp_us(
                     "video",
                     &mut video_clock,
+                    &mut residuals,
                     video_media_us,
                     base_us + video_media_us,
                 )
@@ -1724,6 +1861,7 @@ mod tests {
                 map_capture_timestamp_us(
                     "audio",
                     &mut audio_clock,
+                    &mut residuals,
                     audio_media_us,
                     base_us + index * 20_000,
                 )
@@ -1771,8 +1909,10 @@ mod tests {
         let base = 1_700_000_000_000_000;
         let frame_interval_us: u64 = 33_333;
         // 1 フレーム目は 100 ms 遅れて読んだものとする
-        let mut previous = map_capture_timestamp_us("video", &mut mapper, 0, base + 100_000)
-            .expect("換算できること");
+        let mut residuals = CaptureClockResiduals::new();
+        let mut previous =
+            map_capture_timestamp_us("video", &mut mapper, &mut residuals, 0, base + 100_000)
+                .expect("換算できること");
         assert_eq!(
             previous,
             (base + 100_000) as u64,
@@ -1783,9 +1923,14 @@ mod tests {
         for index in 1..=10u64 {
             let media_us = i64::try_from(index * frame_interval_us).expect("範囲内であること");
             let wall_clock_us = base + 10_000 + media_us;
-            let timestamp_us =
-                map_capture_timestamp_us("video", &mut mapper, media_us, wall_clock_us)
-                    .expect("換算できること");
+            let timestamp_us = map_capture_timestamp_us(
+                "video",
+                &mut mapper,
+                &mut residuals,
+                media_us,
+                wall_clock_us,
+            )
+            .expect("換算できること");
             assert!(
                 timestamp_us > previous,
                 "収束の途中でも換算した時刻が戻らないこと: index={index}"
@@ -1809,8 +1954,10 @@ mod tests {
     #[test]
     fn map_capture_timestamp_is_never_negative() {
         let mut mapper = WallClockMapper::new();
-        let timestamp_us = map_capture_timestamp_us("audio", &mut mapper, -10_000, -5_000)
-            .expect("換算できること");
+        let mut residuals = CaptureClockResiduals::new();
+        let timestamp_us =
+            map_capture_timestamp_us("audio", &mut mapper, &mut residuals, -10_000, -5_000)
+                .expect("換算できること");
         assert_eq!(timestamp_us, 0, "Unix epoch より前は 0 にすること");
     }
 

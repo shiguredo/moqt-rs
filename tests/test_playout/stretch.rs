@@ -436,14 +436,37 @@ fn conceal_lowers_the_amplitude_towards_the_end() {
 }
 
 #[test]
-fn conceal_is_ignored_for_silence() {
-    // 無音に近い入力では相関が常に 0 になり周期が求まらないため埋めない
-    // (時間圧縮・時間伸長は無音でも操作するのとは扱いが異なる)
+fn conceal_fills_silence_with_zeros() {
+    // 無音に近い入力では相関が常に 0 になり周期が求まらない。周期の代わりに 0 を書き、
+    // 埋めた長さは要求どおりにする (時間圧縮・時間伸長は無音でも操作するのと同じ扱い)
     let silence = vec![0.0f32; 960];
     let mut output = vec![7.0f32; 1_920];
     let channels: [&[f32]; 1] = [silence.as_slice()];
     let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    // 48 kHz で 40 ms は 1_920 サンプル
+    assert_eq!(
+        conceal(&channels, &mut outputs, 48_000, 40_000),
+        1_920,
+        "無音でも要求ぶんを埋めること"
+    );
+    assert!(
+        output.iter().all(|sample| *sample == 0.0),
+        "無音の隙間は 0 で埋まること"
+    );
+}
+
+#[test]
+fn conceal_is_ignored_for_silence_with_a_short_output() {
+    // 出力の長さが足りないときは、無音でも書かない
+    let silence = vec![0.0f32; 960];
+    let mut output = vec![7.0f32; 1_919];
+    let channels: [&[f32]; 1] = [silence.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, 48_000, 40_000),
+        0,
+        "出力が足りなければ埋めないこと"
+    );
     assert!(output.iter().all(|sample| *sample == 7.0));
 }
 

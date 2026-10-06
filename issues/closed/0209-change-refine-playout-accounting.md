@@ -1,7 +1,7 @@
 # playout の再生制御の会計と測定を仕上げる
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/refine-playout-accounting
 - Polished: {YYYY-MM-DD}
 
@@ -59,3 +59,12 @@
 - `src/playout/stretch.rs` の `conceal`
 - `raw_player::AudioPlayerStats` の `total_samples_enqueued` / `total_samples_played`
 - draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.11 (Render group)
+
+## 解決方法
+
+- `src/playout/scheduler.rs` の `confirm_stretch` が、要求より長く詰められた分を「前の音の終わり」から引くようにした。要求より短く詰められた分を足す既存の扱いと対称であり、続く隙間を見落とさなくなる。`compressed_us` は実際に詰めた長さを記録する。
+- `src/playout/stretch.rs` の `conceal` が、無音の入力でも要求ぶんの 0 を書いてその長さを返すようにした。周期が求まらないだけで、隙間を埋めた事実は変わらないためである。出力が足りないときに書かない扱いは変えていない。
+- `examples/moq-sub` が、再生機器へ積んだ時点の (累積サンプル数, PTS) を記録し、`raw_player::AudioPlayerStats` の `total_samples_played` からいま鳴っているサンプルの PTS を求めて `record_presentation` へ渡すようにした。詰めたり補間したりした後の実際のサンプル数で記録するため、宣言した PTS の線形な外挿ではずれる場合でも正しく求まる。再生位置が戻ったときは対応を捨ててやり直す。
+- `examples/moq-sub` が、配信終了時の吐き出しを `enforce_target: false` で鳴らすようにした。目標に従う意味が無く、目標より先の音を捨てると末尾が欠けるためである。
+- `examples/moq-sub` が、映像の表示の実績に「実際に再生機器へ渡した時刻」を記録し、表示待ちの上限を `TimelineConfig::video_queue_limit` から取るようにした。
+- `examples/moq-pub` が、capture timestamp の残差 (受信時刻 − 換算した TIMESTAMP) をトラックごとに直近 1024 件だけ溜め、5 秒ごとに最小値と中央値、および中央値どうしの差を `info` で出すようにした。0103 の完了条件を生ログの目視ではなくこのログで確認できる。

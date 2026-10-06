@@ -448,9 +448,10 @@ fn conceal_samples(conceal_us: i64, sample_rate: u32) -> Option<usize> {
 ///
 /// 埋めた長さ (サンプル数)。0 のとき `output` には何も書かない。0 になるのは、対応外の
 /// サンプルレート、空または長さの揃わないチャンネル、`output` の長さが合わないか足りない
-/// とき、埋める長さが 0 以下のとき、無音に近いとき、末尾に周期が無いとき、末尾の相関が
+/// とき、埋める長さが 0 以下のとき、末尾に周期が無いとき、末尾の相関が
 /// [`TIME_STRETCH_CORRELATION_THRESHOLD`] 未満のとき、継ぎ目の段差が
-/// [`TIME_STRETCH_MAX_SEAM_STEP_RATIO`] を超えるとき。
+/// [`TIME_STRETCH_MAX_SEAM_STEP_RATIO`] を超えるとき。無音に近い入力では周期が求まらない
+/// ため、要求ぶんの 0 を書く (埋めた長さは要求どおりになる)。
 pub fn conceal(
     channels: &[&[f32]],
     output: &mut [&mut [f32]],
@@ -467,9 +468,16 @@ pub fn conceal(
     let Some(target) = conceal_samples(conceal_us, sample_rate) else {
         return 0;
     };
-    // 無音に近い入力では相関が常に 0 になり周期が求まらない。埋めても無音になるため埋めない
+    // 無音に近い入力では相関が常に 0 になり周期が求まらない。周期の代わりに 0 を書く。
+    // 埋める長さは要求どおりに揃え、隙間を埋めた事実は残す
     if is_silent(channels.iter().copied()) {
-        return 0;
+        if output.iter().any(|channel| channel.len() < target) {
+            return 0;
+        }
+        for destination in output.iter_mut() {
+            destination[..target].fill(0.0);
+        }
+        return target as isize;
     }
     let Some(filter) = downsample_filter(sample_rate) else {
         return 0;

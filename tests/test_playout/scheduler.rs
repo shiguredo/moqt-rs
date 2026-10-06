@@ -172,6 +172,41 @@ fn unapplied_compression_remains_as_lateness() {
 }
 
 #[test]
+fn over_applied_compression_moves_the_previous_end_earlier() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    // 目標 6 ms に対して 10 ms から鳴らすため、4 ms 詰める要求が出る
+    let first = scheduler.schedule(input(0, 0, 20_000, Some(6_000)));
+    assert_eq!(
+        first,
+        AudioPlayoutDecision::Play {
+            start_at_us: 10_000,
+            compress_us: 4_000,
+            gap_start_us: 0,
+            gap_us: 0,
+        }
+    );
+    // 波形の周期が要求より長く、10 ms 詰められた (要求より 6 ms 長く削れた)
+    scheduler.confirm_stretch(10_000);
+    assert_eq!(
+        scheduler.compressed_us(),
+        10_000,
+        "実際に詰めた長さを記録すること"
+    );
+    // 前の音の終わりが予定 (26 ms) より 6 ms 手前の 20 ms になるため、次の音 (目標 30 ms)
+    // との間に 10 ms の隙間ができる。詰めすぎた分を戻さないと 4 ms と見積もって補間しない
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(30_000)));
+    assert_eq!(
+        second,
+        AudioPlayoutDecision::Play {
+            start_at_us: 30_000,
+            compress_us: 0,
+            gap_start_us: 20_000,
+            gap_us: 10_000,
+        }
+    );
+}
+
+#[test]
 fn arrival_based_places_sounds_by_timestamp() {
     let mut scheduler = AudioPlayoutScheduler::new();
     let first = scheduler.schedule(input(0, 0, 20_000, None));

@@ -11,6 +11,15 @@
 
 ## develop
 
+- [CHANGE] 時間圧縮の会計と A/V のずれの測定を実態に合わせる
+  - `playout::scheduler` の `confirm_stretch` が、要求より長く詰められた分も前の音の終わりへ反映する (圧縮は波形の周期単位でしか削れないため起きる)
+  - `playout::stretch` の `conceal` が、無音の入力でも要求ぶんを 0 で埋めて長さを返す
+  - moq-sub が、再生機器へ積んだ音の累積サンプル数と `raw_player` の再生位置から実際に鳴っている PTS を求めて記録する (`skew_us` が計画ではなく実測になる)
+  - moq-sub が、配信終了時の吐き出しを目標に従わず到着順で鳴らし、末尾を捨てない
+  - moq-sub が、映像の表示待ちの上限を時間軸の設定から取る
+  - moq-pub が、capture timestamp の残差の最小値と中央値を 5 秒ごとにログへ出す
+  - @voluntas
+
 - [CHANGE] moq-pub の live capture の LOC Timestamp を Unix epoch マイクロ秒に統一する
   - 映像と音声で別々の `media_clock::WallClockMapper` を持ち、capture timestamp を「壁時計 − メディア時刻」の最小値で epoch へ換算する
   - live capture では `PROP_TIMESCALE` を付けない。`--input-mp4` / `--input-mp4-reencode` は入力ファイルのメディア時刻を送るため、入力トラックの timescale を付けたままにする

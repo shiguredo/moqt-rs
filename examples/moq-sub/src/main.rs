@@ -13,6 +13,8 @@
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの
 //! 準備、macOS の SDL プレイヤーの実行、終了コードの決定を行う。
 
+use std::collections::VecDeque;
+
 use moq_sub::jitter_buffer::AudioJitterBuffer;
 use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline};
 use shiguredo_moqt::playout::buffer::PlayoutBuffer;
@@ -30,12 +32,6 @@ const AUDIO_OUTPUT_LEAD_US: i64 = 40_000;
 
 /// jitter buffer の状態をログに出す間隔 (ミリ秒)
 const AUDIO_BUFFER_LOG_INTERVAL_MS: u128 = 5_000;
-
-/// 映像を表示待ちとして保持する上限 (枚)
-///
-/// 時間軸が表示の遅れの上限を決める `TimelineConfig::video_queue_limit` の既定値と同じ枚数
-/// にする。デコーダの出力は復号の並行度の分だけ揺らぐため、その分を吸収できる深さが要る。
-const VIDEO_QUEUED_FRAMES: usize = 24;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -203,7 +199,6 @@ fn run_raw_player(
         }
     };
     let audio_output_enabled = audio_player.is_some();
-    let mut audio_started = false;
 
     // 音声と映像で共有する時間軸。復号の出力を両方ともここへ観測し、表示時刻は
     // 「LOC の TIMESTAMP + 基準の遅れ + 表示の遅れ」で決まる。A/V 同期の制御も
@@ -211,17 +206,17 @@ fn run_raw_player(
     let mut timeline = PlayoutTimeline::new();
     // 映像は到着後すぐ表示せず、表示時刻まで保持して選ぶ。遅れて届いたフレームは
     // 追い越させず、表示時刻を過ぎた最新の 1 枚だけを表示する
-    let mut video_buffer =
-        PlayoutBuffer::<DecodedVideoFrame>::new(VIDEO_QUEUED_FRAMES, Track::Video);
+    // 保持する上限も時間軸の設定から取る。上限を変えると表示の遅れの切り下げと保持数の
+    // 両方へ同じ値が効く
+    let video_queue_limit = timeline.config().video_queue_limit;
+    let mut video_buffer = PlayoutBuffer::<DecodedVideoFrame>::new(video_queue_limit, Track::Video);
 
     // 音声は到着後すぐ鳴らさず、鳴らす時刻 (LOC の TIMESTAMP と学習した目標遅延から
     // 決まる) まで保持する。到着の揺らぎがそのまま音の途切れにならないようにするためである
     let mut audio_buffer = AudioJitterBuffer::new();
     // 保持から出した音をどの順でいつ鳴らすかは、スケジューラが決める。jitter buffer は
     // 鳴らす時刻まで保持する役割であり、順番・詰め・隙間はここへ集める
-    let mut audio_scheduler = AudioPlayoutScheduler::new();
-    // 直前に鳴らした音の波形。欠落した隙間をこの末尾の周期で埋める
-    let mut last_played_audio: Option<PlayedAudio> = None;
+    let mut audio_state = AudioPlaybackState::new();
     let mut released_audio: u64 = 0;
     let mut last_audio_log = std::time::Instant::now();
 
@@ -312,8 +307,6 @@ fn run_raw_player(
         {
             let now_us = wall_clock_us();
             let selection = video_buffer.select(now_us, &timeline);
-            // 描くことになったフレームの表示時刻。表示時刻を決められないフレームでは None
-            let draw_presentation_us = selection.draw_presentation_us;
             for late in selection.late {
                 tracing::debug!(
                     "Discarded a late video frame: {}x{}",
@@ -352,15 +345,10 @@ fn run_raw_player(
                     }
 
                     frame_count += 1;
-                    // 表示の実績を時間軸へ記録する。表示時刻は PlayoutBuffer が決めた値を
-                    // 使い、決められないフレーム (基準がまだ無い、基準がずれている) は
-                    // 実際に描いた時刻にする。TIMESTAMP の無いフレームは記録できない
+                    // 表示の実績を時間軸へ記録する。予定時刻ではなく、実際に再生機器へ
+                    // 渡した時刻を使う。TIMESTAMP の無いフレームは記録できない
                     if let Some(timestamp_us) = frame.timestamp_us {
-                        timeline.record_presentation(
-                            Track::Video,
-                            timestamp_us,
-                            draw_presentation_us.unwrap_or(now_us),
-                        );
+                        timeline.record_presentation(Track::Video, timestamp_us, now_us);
                     }
                     if frame_count.is_multiple_of(100) {
                         tracing::info!("Rendered {frame_count} video frames");
@@ -392,20 +380,19 @@ fn run_raw_player(
                     tracing::info!("Audio channel disconnected");
                     audio_disconnected = true;
                     // 保持している音をすべて吐き出す。末尾の音を捨てないためである。
-                    // 鳴らす時刻は保持から出すときと同じくスケジューラが決めるため、
-                    // 目標より先すぎる音は捨てられる (捨てた数はログに出る)
+                    // 配信が終わったあとは目標に従う意味が無く、目標より先の音を捨てると
+                    // 末尾が欠けるため、到着順に鳴らす
                     if let Some(audio_player) = audio_player.as_ref() {
                         let now_us = wall_clock_us();
                         while let Some(audio) = audio_buffer.pop_oldest() {
                             released_audio += 1;
                             play_decoded_audio(
                                 audio_player,
-                                &mut audio_started,
-                                &mut audio_scheduler,
-                                &mut last_played_audio,
+                                &mut audio_state,
                                 &mut timeline,
                                 &audio,
                                 now_us,
+                                false,
                             );
                         }
                     }
@@ -428,14 +415,16 @@ fn run_raw_player(
                 released_audio += 1;
                 play_decoded_audio(
                     audio_player,
-                    &mut audio_started,
-                    &mut audio_scheduler,
-                    &mut last_played_audio,
+                    &mut audio_state,
                     &mut timeline,
                     &audio,
                     now_us,
+                    true,
                 );
             }
+            // いま鳴っているサンプルの PTS を実績として記録する。予定時刻ではなく、再生機器が
+            // 鳴らし終えたサンプル数から求めるため、実際の再生位置に追従する
+            record_sounding_audio(audio_player, &mut audio_state, &mut timeline);
             if let Err(e) = audio_player.process() {
                 tracing::warn!("Failed to process audio queue: {e}");
             }
@@ -456,10 +445,10 @@ fn run_raw_player(
                     released_audio,
                     audio_buffer.dropped_late(),
                     audio_buffer.dropped_overflow(),
-                    audio_scheduler.drops(),
-                    audio_scheduler.concealed_us() / 1000,
-                    audio_scheduler.concealments(),
-                    audio_scheduler.compressed_us() / 1000,
+                    audio_state.scheduler.drops(),
+                    audio_state.scheduler.concealed_us() / 1000,
+                    audio_state.scheduler.concealments(),
+                    audio_state.scheduler.compressed_us() / 1000,
                     skew_us,
                 );
             }
@@ -491,6 +480,94 @@ struct PlayedAudio {
     sample_rate: u32,
 }
 
+/// 音声の再生状態 (再生機器へ積むときに持ち回る)
+struct AudioPlaybackState {
+    /// 最初の 1 枚で再生を開始したか
+    started: bool,
+    /// 鳴らす時刻・詰め・隙間を決める
+    scheduler: AudioPlayoutScheduler,
+    /// 直前に鳴らした音の波形。欠落した隙間をこの末尾の周期で埋める
+    last_played: Option<PlayedAudio>,
+    /// 再生機器へ積んだ音の位置の対応
+    position: AudioPlayoutPosition,
+}
+
+impl AudioPlaybackState {
+    /// 何も鳴らしていない状態で作る
+    fn new() -> Self {
+        Self {
+            started: false,
+            scheduler: AudioPlayoutScheduler::new(),
+            last_played: None,
+            position: AudioPlayoutPosition::new(),
+        }
+    }
+}
+
+/// 再生機器へ積んだ音の (累積サンプル数, PTS) の対応
+///
+/// `raw_player` の再生位置は「積んだ順に進むサンプル数」でしか分からない。積んだ時点の
+/// 累積サンプル数と PTS を残し、いま鳴っているサンプルの PTS をここから求める。詰めたり
+/// 補間したりした後の実際のサンプル数で記録するため、宣言した PTS を線形に外挿するより
+/// 正しく求まる。
+struct AudioPlayoutPosition {
+    /// まだ鳴り終わっていない音 (積んだ順)
+    pending: VecDeque<AudioPlayoutChunk>,
+}
+
+/// 再生機器へ積んだ音 1 つ分の位置
+struct AudioPlayoutChunk {
+    /// この音が鳴り始める累積サンプル数
+    start_samples: i64,
+    /// この音の PTS (マイクロ秒)
+    pts_us: i64,
+    /// この音のサンプル数 (チャンネルごと)
+    samples: i64,
+}
+
+impl AudioPlayoutPosition {
+    /// 何も積んでいない状態で作る
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+        }
+    }
+
+    /// 積んだ音を記録する
+    fn record(&mut self, start_samples: i64, pts_us: i64, samples: i64) {
+        self.pending.push_back(AudioPlayoutChunk {
+            start_samples,
+            pts_us,
+            samples,
+        });
+    }
+
+    /// いま鳴っているサンプルの PTS (マイクロ秒)
+    ///
+    /// `played_samples` は再生機器が鳴らし終えたサンプル数。鳴り終えた音は捨てる。すべて
+    /// 鳴り終えたときと、再生位置が積んだ範囲より前へ戻ったとき (デバイスの作り直し) は
+    /// `None` を返す。後者は対応が切れているため、記録を捨てて次の積み込みからやり直す。
+    fn sounding_pts_us(&mut self, played_samples: i64, sample_rate: u32) -> Option<i64> {
+        while self.pending.front().is_some_and(|chunk| {
+            chunk.start_samples.saturating_add(chunk.samples) <= played_samples
+        }) {
+            self.pending.pop_front();
+        }
+        let chunk = self.pending.front()?;
+        let elapsed_samples = played_samples.checked_sub(chunk.start_samples)?;
+        if elapsed_samples < 0 {
+            self.pending.clear();
+            return None;
+        }
+        let elapsed_samples = usize::try_from(elapsed_samples).ok()?;
+        Some(
+            chunk
+                .pts_us
+                .saturating_add(samples_to_us(elapsed_samples, sample_rate)),
+        )
+    }
+}
+
 /// デコード済みの音声を 1 つ、スケジューラの決めた時刻へ向けて再生機器へ積む
 ///
 /// 鳴らす時刻は [`AudioPlayoutScheduler`] が決める。`now_us` は今の時刻 (受信側の壁時計)。
@@ -501,12 +578,11 @@ struct PlayedAudio {
 /// 積むと、その分だけ音が遅れたままになる)。
 fn play_decoded_audio(
     audio_player: &raw_player::AudioPlayer,
-    audio_started: &mut bool,
-    audio_scheduler: &mut AudioPlayoutScheduler,
-    last_played_audio: &mut Option<PlayedAudio>,
+    state: &mut AudioPlaybackState,
     timeline: &mut PlayoutTimeline,
     audio: &DecodedAudioFrame,
     now_us: i64,
+    enforce_target: bool,
 ) {
     let channels = usize::from(audio.channels);
     let sample_rate = audio.sample_rate;
@@ -523,18 +599,18 @@ fn play_decoded_audio(
     let presentation_delay_us = timeline
         .presentation_delay_us(Track::Audio)
         .unwrap_or(AUDIO_PLAYOUT_DELAY_US);
-    let decision = audio_scheduler.schedule(AudioPlayoutInput {
+    let decision = state.scheduler.schedule(AudioPlayoutInput {
         now_us,
         timestamp_us: audio.pts_us,
         duration_us,
         target_start_us,
-        // 目標が決まっているときだけ目標を守る。無いときは到着基準で並べる
-        enforce_target: target_start_us.is_some(),
+        // 目標が決まっているときだけ目標を守る。無いときと、配信が終わったあとの吐き出し
+        // (`enforce_target` が false) では到着基準で並べる
+        enforce_target: enforce_target && target_start_us.is_some(),
         delay_us,
         presentation_delay_us,
     });
     let AudioPlayoutDecision::Play {
-        start_at_us,
         compress_us,
         gap_us,
         ..
@@ -542,7 +618,7 @@ fn play_decoded_audio(
     else {
         tracing::warn!(
             "Discarded an audio chunk the playout scheduler dropped (total {})",
-            audio_scheduler.drops(),
+            state.scheduler.drops(),
         );
         return;
     };
@@ -550,35 +626,47 @@ fn play_decoded_audio(
     // 隙間の補間と詰めを音声へ適用する。埋めた音は今回の音の直前へ積むため、再生機器の
     // キューでは前の音の直後、今回の音の直前になる (キューは積んだ順に鳴る)。隙間の開始
     // 時刻 (gap_start_us) は使わない。積む順で位置が決まるためである
-    let applied = apply_audio_playout(audio, last_played_audio.as_ref(), gap_us, compress_us);
+    let applied = apply_audio_playout(audio, state.last_played.as_ref(), gap_us, compress_us);
     if !applied.concealment.is_empty() {
         // 埋めた音は今回の TIMESTAMP の直前を占める。PTS は今回の音から埋めた長さだけ
         // 戻した値にする
         let pts_us = audio.pts_us.saturating_sub(applied.concealed_us);
         let enqueued = enqueue_pcm(
             audio_player,
-            audio_started,
+            &mut state.started,
             &applied.concealment,
             pts_us,
             sample_rate,
             audio.channels,
         );
         // 積めた長さだけを補間したものとして返す
-        audio_scheduler.confirm_concealment(if enqueued { applied.concealed_us } else { 0 });
+        state
+            .scheduler
+            .confirm_concealment(if enqueued { applied.concealed_us } else { 0 });
+        if enqueued {
+            let start_samples = audio_player.stats().total_samples_enqueued;
+            state.position.record(
+                start_samples,
+                pts_us,
+                (applied.concealment.len() / channels.max(1)) as i64,
+            );
+        }
     } else if gap_us > 0 {
-        // 無音や相関の不足で周期が求まらないと埋められない。無音のまま続ける
+        // 周期が求まらないと埋められない (無音のときは 0 で埋まる)。無音のまま続ける
         tracing::info!("Could not conceal the {gap_us}us gap in the audio");
-        audio_scheduler.confirm_concealment(0);
+        state.scheduler.confirm_concealment(0);
     }
-    audio_scheduler.confirm_stretch(applied.compressed_us);
+    state.scheduler.confirm_stretch(applied.compressed_us);
 
     let pcm = pcm_channels_to_f32(
         &applied.channels,
         applied.channels.first().map_or(0, Vec::len),
     );
+    let frames = pcm.len() / channels.max(1);
+    let start_samples = audio_player.stats().total_samples_enqueued;
     if !enqueue_pcm(
         audio_player,
-        audio_started,
+        &mut state.started,
         &pcm,
         audio.pts_us,
         sample_rate,
@@ -586,15 +674,40 @@ fn play_decoded_audio(
     ) {
         return;
     }
+    state
+        .position
+        .record(start_samples, audio.pts_us, frames as i64);
     // 直前に鳴らした音として保持する。次の隙間はこの音の末尾を繰り返して埋める
-    *last_played_audio = Some(PlayedAudio {
+    state.last_played = Some(PlayedAudio {
         channels: applied.channels,
         sample_rate,
     });
-    // 表示の実績を時間軸へ記録する。音声は再生機器のバッファへ先行して積むため、積んだ
-    // 時刻は実際に鳴る時刻より最大 AUDIO_OUTPUT_LEAD_US だけ早い。スケジューラの決めた
-    // 鳴らす時刻を、実際に鳴る時刻の推定として使う
-    timeline.record_presentation(Track::Audio, audio.pts_us, start_at_us);
+    // 表示の実績はここでは記録しない。実際に鳴っている位置は再生機器のサンプル数から
+    // しか分からないため、ループのたびに `record_sounding_audio` が記録する
+}
+
+/// いま鳴っているサンプルの PTS を実績として時間軸へ記録する
+///
+/// `raw_player` は積んだ順にサンプルを鳴らすため、鳴らし終えたサンプル数と「積んだ時点の
+/// 累積サンプル数」の対応から、いま鳴っているサンプルの PTS が求まる。予定時刻ではなく
+/// 実際の再生位置を使うことで、`skew_us` が計画ではなく実測になる。
+fn record_sounding_audio(
+    audio_player: &raw_player::AudioPlayer,
+    state: &mut AudioPlaybackState,
+    timeline: &mut PlayoutTimeline,
+) {
+    let stats = audio_player.stats();
+    if stats.sample_rate <= 0 {
+        return;
+    }
+    let played_samples = stats.total_samples_played;
+    let Some(pts_us) = state
+        .position
+        .sounding_pts_us(played_samples, stats.sample_rate as u32)
+    else {
+        return;
+    };
+    timeline.record_presentation(Track::Audio, pts_us, wall_clock_us());
 }
 
 /// スケジューラが決めた隙間の補間と詰めを音声へ適用した結果
@@ -1043,17 +1156,75 @@ mod tests {
         );
     }
 
+    /// 積んだ位置の対応から、いま鳴っているサンプルの PTS が求まること
+    #[test]
+    fn audio_playout_position_follows_the_played_samples() {
+        let mut position = AudioPlayoutPosition::new();
+        // 0 サンプル目から 20 ms (48 kHz で 960 サンプル) の音を PTS 1_000_000 で積む
+        position.record(0, 1_000_000, 960);
+        assert_eq!(
+            position.sounding_pts_us(0, 48_000),
+            Some(1_000_000),
+            "まだ鳴っていなければ積んだ先頭の PTS になること"
+        );
+        assert_eq!(
+            position.sounding_pts_us(480, 48_000),
+            Some(1_010_000),
+            "480 サンプル (10 ms) 鳴れば PTS も 10 ms 進むこと"
+        );
+        // 次の音を続けて積む
+        position.record(960, 1_020_000, 960);
+        assert_eq!(
+            position.sounding_pts_us(960, 48_000),
+            Some(1_020_000),
+            "次の音の先頭の PTS になること"
+        );
+        assert_eq!(
+            position.sounding_pts_us(1_440, 48_000),
+            Some(1_030_000),
+            "次の音の途中も追従すること"
+        );
+        assert_eq!(
+            position.sounding_pts_us(1_920, 48_000),
+            None,
+            "すべて鳴り終えたら分からないこと"
+        );
+    }
+
+    /// 再生位置が戻ったら対応を捨ててやり直すこと
+    #[test]
+    fn audio_playout_position_clears_when_the_play_position_goes_back() {
+        let mut position = AudioPlayoutPosition::new();
+        position.record(5_000, 2_000_000, 960);
+        // デバイスが作り直され、鳴らし終えたサンプル数が積んだ範囲より前へ戻った
+        assert_eq!(
+            position.sounding_pts_us(0, 48_000),
+            None,
+            "対応が切れたら分からないこと"
+        );
+        // 捨てたあとは次の積み込みからやり直す
+        position.record(0, 3_000_000, 960);
+        assert_eq!(
+            position.sounding_pts_us(0, 48_000),
+            Some(3_000_000),
+            "積み直した位置から求まること"
+        );
+    }
+
     /// 埋められないときは隙間を組み立てないこと
     #[test]
     fn conceal_gap_returns_none_when_it_cannot_fill() {
-        // 無音からは周期が求まらない
+        // 無音は周期が求まらないが、0 で埋まる (長さは要求どおり)
         let silent = PlayedAudio {
             channels: vec![vec![0.0f32; 4_800]],
             sample_rate: 48_000,
         };
+        let (pcm, concealed_us) =
+            conceal_gap(Some(&silent), 1, 48_000, 20_000).expect("無音でも長さは埋まること");
+        assert_eq!(concealed_us, 20_000, "要求どおりの長さを埋めること");
         assert!(
-            conceal_gap(Some(&silent), 1, 48_000, 20_000).is_none(),
-            "無音からは埋めないこと"
+            pcm.iter().all(|sample| *sample == 0.0),
+            "無音の隙間は 0 で埋まること"
         );
         // 直前の音が無ければ埋められない
         assert!(

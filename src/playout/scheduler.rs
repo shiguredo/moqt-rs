@@ -188,20 +188,28 @@ impl AudioPlayoutScheduler {
     /// 実際に詰めた長さを記録する (呼び出し側が時間圧縮を適用した後に呼ぶ)
     ///
     /// 要求した量より少なくしか詰められなかったとき (波形が繰り返していないとき) は、
-    /// 詰められなかった分だけ音が後ろへ伸び、遅れとして残る。
+    /// 詰められなかった分だけ音が後ろへ伸び、遅れとして残る。逆に要求より長く詰められた
+    /// とき ([`crate::playout::stretch::compress`] は波形の周期単位でしか削れないため、要求が
+    /// 周期より短いと起きる) は、その分だけ音が手前で終わる。どちらも前の音の終わりへ
+    /// 反映しないと、続く隙間を見落とす。
     pub fn confirm_stretch(&mut self, applied_us: i64) {
         let requested_us = self.requested_us;
         self.requested_us = 0;
         if requested_us == 0 {
             return;
         }
-        let applied_us = applied_us.clamp(0, requested_us);
+        let applied_us = applied_us.max(0);
+        // 実際に詰めた長さを記録する (要求値では切らない)
         self.compressed_us = self.compressed_us.saturating_add(applied_us);
-        if applied_us < requested_us
-            && let Some(last_end_us) = self.last_end_us.as_mut()
-        {
+        let Some(last_end_us) = self.last_end_us.as_mut() else {
+            return;
+        };
+        if applied_us < requested_us {
             // 詰められなかった分は音が後ろへ伸びる
             *last_end_us = last_end_us.saturating_add(requested_us - applied_us);
+        } else if applied_us > requested_us {
+            // 詰めすぎた分は音が手前で終わる
+            *last_end_us = last_end_us.saturating_sub(applied_us - requested_us);
         }
     }
 
