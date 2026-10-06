@@ -125,8 +125,10 @@ impl Session {
     ///
     /// publisher 側・データストリーム終端済みの fetch を破棄する場合は、peer が bidi
     /// request stream を閉じる前でも破棄できる。破棄後に届く bidi request stream close は
-    /// `rejected_request_ids` で no-op で吸収する。REQUEST_UPDATE は unknown request id
-    /// として PROTOCOL_VIOLATION で fail する (REQUEST_ERROR / REQUEST_OK も同様)
+    /// `rejected_request_ids` 経由で no-op で吸収する。応答 (REQUEST_OK / REQUEST_ERROR) と
+    /// REQUEST_UPDATE は、request 種別と状態が失われているため unknown request id として
+    /// PROTOCOL_VIOLATION で fail する
+    /// (アプリは peer が request stream を閉じるまで `forget_fetch` を待つこと)
     /// (draft §9.5 の "An endpoint that receives a REQUEST_UPDATE other than in the two
     /// cases above MUST close the session with a PROTOCOL_VIOLATION." に従う。
     /// 破棄済み request への REQUEST_UPDATE は「sender が同じ bidi stream に後から
@@ -745,6 +747,14 @@ impl Session {
         request_id: u64,
         parameters: MessageParameters,
     ) -> Result<(), SessionError> {
+        // ローカル終端済みの request (`rejected_request_ids` に記録) は送信方向を reset 済みだが、
+        // peer が reset を観測する前に送った REQUEST_UPDATE は正当に届く。その場合は
+        // 送信者の検証だけを行い、状態遷移とイベント発行はしない (Request ID /
+        // MAX_REQUEST_UPDATES / auth token / パラメータスコープの検証は
+        // 呼び出し元 `handle_peer_request_update` で済んでいる)。
+        // 破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は送信者を特定できないため
+        // 従来どおり違反になる。
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let fetch = self
             .fetches
             .get_mut(&request_id)
@@ -757,13 +767,17 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        if fetch.state != FetchState::Established {
+        if fetch.state != FetchState::Established && !locally_terminated {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE requires Established fetch",
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移しない
+        if locally_terminated {
+            return Ok(());
         }
         // draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter): REQUEST_UPDATE に SUBSCRIBER_PRIORITY が含まれる場合は更新
         if let Some(priority) = parameters.subscriber_priority() {
@@ -847,6 +861,12 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // ローカル終端済みの request はここまでの検証 (送信者・二重応答・End Location) だけを
+        // 行い、状態遷移とイベント発行はしない。draft §3.7 (Mandatory to Understand Track
+        // Properties) の cancel は送信方向を reset 済みのため不要である。
+        if self.is_locally_terminated_request(request_id) {
+            return Ok(());
         }
         // draft §3.7 (Mandatory to Understand Track Properties): 未知の必須プロパティを含む FETCH_OK は fetch をキャンセルする
         // FIN 後の `Terminated` でも一律スキップはしない (アプリが unknown mandatory による
@@ -973,6 +993,11 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // ローカル終端済みの request はここまでの検証 (送信者・state) だけを行い、
+        // イベント発行はしない (peer が reset を観測する前に送った正当な応答が遅延して届く)
+        if self.is_locally_terminated_request(request_id) {
+            return Ok(());
+        }
         // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK で新しい LARGEST_OBJECT が通知される
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,
@@ -1069,6 +1094,8 @@ impl Session {
     }
 
     pub(super) fn handle_err_for_fetch(&mut self, request_id: u64) -> Result<(), SessionError> {
+        // 借用の都合で可変借用より前に判定する
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let fetch = self
             .fetches
             .get_mut(&request_id)
@@ -1080,6 +1107,9 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        if locally_terminated {
+            return Ok(());
         }
         // draft-ietf-moq-transport-22 §3.2 (Fetch): REQUEST_ERROR は
         // FETCH データストリームの FIN 前後どちらでも届きうるため、state によらず受理する。

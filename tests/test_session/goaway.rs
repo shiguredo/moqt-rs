@@ -1,5 +1,5 @@
 use super::*;
-use shiguredo_moqt::error::REQUEST_GOING_AWAY;
+use shiguredo_moqt::error::{REQUEST_GOING_AWAY, STREAM_GOING_AWAY};
 use shiguredo_moqt::message::Goaway;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::session::types::RecvRequestError;
@@ -7,6 +7,11 @@ use shiguredo_moqt::{
     session::types::RequestStreamEnd, session::types::SendRequestError,
     session::types::SessionError, session::types::SessionEvent, session::types::SessionState,
 };
+
+// deadline 満了時の終端と遅延メッセージ / data stream の吸収はサブモジュールへ分割する
+// (fetch の `#[path = "fetch/fill.rs"]` と同じ方式)
+#[path = "goaway/deadline.rs"]
+mod deadline;
 
 /// server 起点の GOAWAY を送信して client に配送する (drain 前提作り)
 ///
@@ -1742,12 +1747,23 @@ fn request_stream_goaway_reset_discards_pending_publish_done() {
     // 期限到達で reset が出る
     server.tick(1_100);
     let mut resets = 0;
+    let mut terminated = 0;
     while let Some(e) = server.poll_event() {
-        if matches!(e, SessionEvent::ResetRequestStream { .. }) {
-            resets += 1;
+        match e {
+            SessionEvent::ResetRequestStream { .. } => resets += 1,
+            SessionEvent::RequestTerminated { .. } => terminated += 1,
+            SessionEvent::SendOnStream {
+                message: ControlMessage::PublishDone(_),
+                ..
+            } => panic!("reset 後に PUBLISH_DONE を送ってはいけない"),
+            _ => {}
         }
     }
     assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
+    assert_eq!(
+        terminated, 0,
+        "既に Terminated の request へ RequestTerminated を二重発行しないこと"
+    );
 
     // stream を閉じても reset 後に PUBLISH_DONE を送らない
     server

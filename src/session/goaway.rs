@@ -12,10 +12,11 @@ use crate::error::{
 use crate::message::{ControlMessage, Goaway};
 use alloc::vec::Vec;
 
-use super::core::Session;
+use super::core::{RequestTable, Session};
 use super::types::{
-    DeadlineTimer, GoawayDrainSnapshot, MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo, Role,
-    SessionError, SessionEvent, SessionState,
+    DeadlineTimer, FetchState, GoawayDrainSnapshot, MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo,
+    RequestKind, Role, SessionError, SessionEvent, SessionState, SubscriptionState,
+    TerminationReason,
 };
 
 /// GOAWAY URI の検証ヘルパー (送信側)
@@ -82,7 +83,12 @@ impl Session {
         snapshot.blocking_track_status_request_ids.extend(
             self.track_status_requests
                 .iter()
-                .filter_map(|(&request_id, ts)| ts.response.is_none().then_some(request_id)),
+                .filter_map(|(&request_id, ts)| {
+                    // subscription (`cleanup_ready`) / fetch (`fetch_cleanup_ready`) と同じく
+                    // 「破棄できない entry だけを blocker にする」。受理条件は
+                    // `forget_track_status` と共通の `is_track_status_discardable` に集約する。
+                    (!super::track_status::is_track_status_discardable(ts)).then_some(request_id)
+                }),
         );
         snapshot.blocking_subscription_request_ids.sort_unstable();
         snapshot.blocking_fetch_request_ids.sort_unstable();
@@ -150,7 +156,13 @@ impl Session {
     /// 時刻取得やタイマー発火を行うことはない。
     ///
     /// また request stream 上の GOAWAY の timeout が満了した場合は、セッションを閉じずに
-    /// 当該 request の `ResetRequestStream(STREAM_GOING_AWAY)` を積む。
+    /// 当該 request の `ResetRequestStream(STREAM_GOING_AWAY)` を積む。reset 時点で未終端の
+    /// request は終端し、`RequestTerminated` (`TerminationReason::GoawayTimeout`) も積む
+    /// (以後 1 回目の close 通知は拒否済み id として no-op で吸収される)。
+    /// 既に終端済みの request には reset イベントのみを積む。
+    ///
+    /// また subscription の delivery timeout と alias tombstone / 破棄対象 stream id の
+    /// 保持期間も同じ tick で進める。
     ///
     /// 既に Closing / Closed の場合は時刻の記録のみで何もしない。
     pub fn tick(&mut self, now_ms: u64) {
@@ -227,17 +239,123 @@ impl Session {
         // 同一 tick で複数が期限到達してもイベント順を決定的にする
         expired.sort_unstable();
         for request_id in expired {
+            // deadline は再発火させないため、終端処理より先にここで除去する
             self.goaway.request_stream_deadlines.remove(&request_id);
-            // request stream を reset するとローカル送信方向も閉じるため、reset 後に flush されると
-            // 矛盾する保留 PUBLISH_DONE を破棄する (PUBLISH_DONE の FIN より reset が先に確定した場合)
-            if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-                subscription.pending_publish_done = None;
-            }
+            // reset 時点を「PUBLISH_DONE を送れない終端」とみなし、まだ終端していない request を
+            // 終端する。1 回目の peer FIN / RESET_STREAM は拒否済み id として no-op で吸収される。
+            let kind = self.terminate_request_on_goaway_timeout(request_id);
             self.events.push_back(SessionEvent::ResetRequestStream {
                 request_id,
                 error_code: STREAM_GOING_AWAY,
             });
+            if let Some(kind) = kind {
+                self.events.push_back(SessionEvent::RequestTerminated {
+                    request_id,
+                    kind,
+                    reason: TerminationReason::GoawayTimeout,
+                });
+            }
         }
+    }
+
+    /// request stream 上の GOAWAY の reset deadline 満了で request の遅延状態を整理する
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender
+    /// SHOULD reset the stream with GOING_AWAY after the indicated timeout." の reset 時点で
+    /// まだ終端していない request を終端し、[`SessionEvent::RequestTerminated`] を 1 回だけ
+    /// 発行できるよう `RequestKind` を返す (既に終端済み・未登録なら `None`)。
+    ///
+    /// 終端方法は [`Session::terminate_malformed_track`] と同じ枠組みである。state を
+    /// `Terminated` にし、`request_streams` から除去して [`Session::rejected_request_ids`] へ
+    /// 移す。これにより 1 回目の peer FIN / RESET_STREAM と、peer が GOAWAY / reset を観測する
+    /// 前に送った応答が no-op に吸収され、`finish_request_on_fin_exchange` 経由の
+    /// `RequestTerminated` 二重発行と、未知 id の `SESSION_PROTOCOL_VIOLATION` を防ぐ。
+    ///
+    /// 保留中の PUBLISH_DONE は reset 後に bidi request stream へ書き込めないため常に破棄する
+    /// (既に `Terminated` の request でも破棄だけは行う)。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    fn terminate_request_on_goaway_timeout(&mut self, request_id: u64) -> Option<RequestKind> {
+        let Some(table) = self.locate_request(request_id) else {
+            // deadline は request の登録前後を問わず設定できる
+            // (`send_goaway_on_request_stream` は request の存在を要求しない) ため、
+            // 対象が見つからなければ何も終端しない。
+            return None;
+        };
+        // request stream を reset するとローカル送信方向も閉じるため、reset 後に flush されると
+        // 矛盾する保留 PUBLISH_DONE を破棄する (PUBLISH_DONE の FIN より reset が先に確定した場合)
+        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+            subscription.pending_publish_done = None;
+        }
+        let kind = match table {
+            RequestTable::Subscription => {
+                let subscription = self
+                    .subscriptions
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if subscription.state == SubscriptionState::Terminated {
+                    return None;
+                }
+                // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                // "When the subscription is cancelled, the publisher MUST reset any open fill
+                // fetch streams." 送信方向の reset は §6.4.2.3 (Request Cancellation and
+                // Rejection) の cancel の一部であり、購読を自側で終端する以上 open 中の
+                // fill fetch stream を reset する。
+                self.reset_open_fill_streams(request_id);
+                // 種別は request_streams の記録を優先する (SUBSCRIBE 起点と PUBLISH 起点を
+                // 区別するため)。非終端の subscription が entry を持つ不変条件は
+                // `close_subscription_on_stream_end` / `forget_subscription` /
+                // `terminate_malformed_track` と `recv_request_stream_closed` が保つため
+                // 通常この fallback には到達しない (防御コード)。
+                self.request_streams
+                    .get(&request_id)
+                    .copied()
+                    .unwrap_or(RequestKind::Subscribe)
+            }
+            RequestTable::Fetch => {
+                let fetch = self
+                    .fetches
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if fetch.state == FetchState::Terminated {
+                    return None;
+                }
+                RequestKind::Fetch
+            }
+            RequestTable::TrackStatus => {
+                let entry = self
+                    .track_status_requests
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence");
+                if entry.terminated {
+                    return None;
+                }
+                RequestKind::TrackStatus
+            }
+        };
+        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+            subscription.state = SubscriptionState::Terminated;
+        } else if let Some(fetch) = self.fetches.get_mut(&request_id) {
+            fetch.state = FetchState::Terminated;
+        } else if let Some(entry) = self.track_status_requests.get_mut(&request_id) {
+            // 自側の送信方向が閉じたため以後の応答は送れない (draft-ietf-moq-transport-22
+            // §6.4.2.3 (Request Cancellation and Rejection))。`terminated` を立てれば
+            // `forget_track_status` と GOAWAY drain の判定は成立するため、`response` は
+            // 変更しない。requester 側で応答待ちの entry に `Error` を合成すると、peer が
+            // GOAWAY / reset を観測する前に送った正当な応答と二重応答を区別できなくなる。
+            entry.terminated = true;
+        }
+        // 以後の close 通知を no-op で吸収できるよう、未終端の request_streams entry を
+        // 除去して rejected_request_ids に登録する (`terminate_malformed_track` と同じ手順)
+        if self.request_streams.remove(&request_id).is_some() {
+            self.rejected_request_ids.insert(request_id);
+        }
+        self.peer_fin_received.remove(&request_id);
+        self.local_fin_sent.remove(&request_id);
+        // 終端後は応答が来ないため control message 応答待ち deadline を解除する。
+        // request stream GOAWAY の reset deadline は呼び出し元 (`Session::tick`) が
+        // 再発火防止のために先に除去済みである。
+        self.clear_control_message_deadline(request_id);
+        Some(kind)
     }
 
     /// request stream 上の GOAWAY の reset deadline を解除する
@@ -257,8 +375,10 @@ impl Session {
     ///
     /// 個別リクエストストリームに GOAWAY を送信し、そのリクエストのマイグレーションを開始する。
     /// `timeout > 0` の場合は request 単位の reset deadline を設定し、期限到達時に
-    /// `ResetRequestStream(STREAM_GOING_AWAY)` を 1 回だけ発行する (control stream の GOAWAY と
-    /// 異なりセッションは閉じない)。timeout == 0 は deadline を設定しない。
+    /// `ResetRequestStream(STREAM_GOING_AWAY)` を 1 回だけ発行する (control stream の発行と
+    /// 異なりセッションは閉じない)。なお期限到達時には reset と併せて、まだ終端していない
+    /// request を終端して `RequestTerminated` (`TerminationReason::GoawayTimeout`) を 1 回発行する
+    /// (reset 後に PUBLISH_DONE を送れないため)。timeout == 0 は deadline を設定しない。
     /// peer の stream 終端やローカル FIN / RESET_STREAM で request が閉じた場合は解除され、
     /// reset は発行されない。
     ///

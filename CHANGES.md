@@ -91,6 +91,16 @@
 - [CHANGE] `ObjectFieldTracker::new` が subscription の実効 group 順序 (`ascending: bool`) を受け取るようにする
   - tracker が group の変化に応じた prune と保持量の上限超過時の破棄方向に順序を使うため、順序を引数で受け取る (引数追加のため破壊的変更)。順序が不明な場合は `Default` (Ascending) を使う
   - @voluntas
+- [CHANGE] `TerminationReason` に `GoawayTimeout` を追加し、request stream 上の GOAWAY の deadline 満了時に未終端の request を終端する
+  - draft-ietf-moq-transport-22 §9.2 (GOAWAY) の "SHOULD reset the stream with GOING_AWAY after the indicated timeout" を満たす reset の時点で、まだ終端していない request (SUBSCRIBE / PUBLISH 起点の subscription、fetch、TRACK_STATUS。応答待ちの例として PUBLISH 送信側が遅延していた subscription がある) を `Terminated` にする
+  - 終端した request には `RequestTerminated { reason: GoawayTimeout }` を 1 回だけ発行する
+  - 保留中の PUBLISH_DONE は reset 後に書き込めないため破棄し、1 回目の peer FIN / RESET_STREAM は拒否済み id として no-op で吸収する
+  - 送信方向のみを reset するため peer の送信方向は開いたままである
+  - peer が GOAWAY / reset を観測する前に送った応答 (SUBSCRIBE_OK 等) と REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、request が state テーブルに残っている間は各ハンドラの該当する MUST 検証 (送信者・Track Alias・パラメータスコープ等) を通したうえで状態遷移せず受理し、セッションを閉じない
+  - GOAWAY drain の blocker 判定 (`Session::goaway_drain_snapshot` / `goaway_drain_ready`) は、応答を送れなくなった (`terminated` の) TRACK_STATUS を blocker にしない
+  - peer が reset を観測する前に開いた遅延 data stream は、FETCH 応答は破棄対象 stream として吸収し、fill fetch stream は subscription への帰属を保ったまま受理する (破棄後の終端通知は no-op)
+  - 公開 enum への variant 追加 (網羅 match が壊れる) を伴う破壊的変更である (`TerminationReason` には `Copy` も追加する)
+  - @voluntas
 - [ADD] TRACK_STATUS の受信側 (自側 publisher) を実装し、peer から受信した TRACK_STATUS に TRACK_STATUS_OK / REQUEST_ERROR で応答する
   - draft-ietf-moq-transport-21 §6.3 (Session initialization) は TRACK_STATUS を request stream の開始メッセージとして許可するため、受信しても `PROTOCOL_VIOLATION` でセッションを閉じない
   - 受信側は subscription state も Track Alias も作らず Objects も送らず、応答の送信後に bidi stream を FIN で閉じる (§9.13)

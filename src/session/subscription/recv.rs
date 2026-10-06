@@ -527,6 +527,12 @@ impl Session {
         ok: SubscribeOk,
     ) -> Result<(), SessionError> {
         let now_ms = self.timing.last_tick_ms;
+        // ローカル終端済み (`rejected_request_ids` に記録済み) の request は送信方向を
+        // reset 済みだが、peer が reset を観測する前に送った SUBSCRIBE_OK は正当に届く。
+        // その場合は本関数の検証 (Track Alias の衝突) だけを行い、状態遷移とイベント発行は
+        // しない。draft §3.7 (Mandatory to Understand Track Properties) の cancel は
+        // 既に終端済みのため不要である。
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -535,7 +541,9 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         };
-        if subscription.my_role != TrackRole::Subscriber || !subscription.is_pending_subscriber() {
+        if subscription.my_role != TrackRole::Subscriber
+            || !(subscription.is_pending_subscriber() || locally_terminated)
+        {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "SUBSCRIBE_OK in unexpected subscription state",
@@ -564,6 +572,10 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移しない
+        if locally_terminated {
+            return Ok(());
         }
         let subscription = self
             .subscriptions
@@ -742,7 +754,12 @@ impl Session {
         // スコープ上正当な Range Filter に対してのみ内容検証を行う。
         // 自側 publisher の Established subscription では PUBLISH_DONE(UPDATE_FAILED) まで
         // 終端する (§9.5.1 の MUST)。subscriber 側は REQUEST_ERROR のみで従来どおり。
-        if let Err(reason) = self.check_incoming_range_filters(&update.parameters) {
+        // ローカル終端済みの request は送信方向を reset 済みで拒否応答 (REQUEST_ERROR) を
+        // 送れないため、拒否せず dispatch へ進む (送信者・NEW_GROUP_REQUEST・FORWARD の
+        // MUST 検証は各ハンドラで行い、状態遷移はしない)
+        if let Err(reason) = self.check_incoming_range_filters(&update.parameters)
+            && !self.is_locally_terminated_request(request_id)
+        {
             self.reject_request_update_range_filters(request_id, reason)?;
             return Ok(());
         }
@@ -787,6 +804,9 @@ impl Session {
     /// - Established かつ自側 subscriber: 従来どおり REQUEST_ERROR のみを送る。
     ///   PUBLISH_DONE の送出は publisher である peer の責務であり、state の終端は
     ///   peer の PUBLISH_DONE / bidi 終端処理に委ねる。
+    /// - ローカル終端済み (`rejected_request_ids` に記録済み) の request: 呼び出し元
+    ///   `handle_peer_request_update` が拒否応答を積まずに吸収する (送信方向を reset 済みで
+    ///   応答を送れないため)。本関数には到達しない。
     /// - Pending / Terminated: REQUEST_UPDATE は Established の self loop のみ
     ///   (draft-ietf-moq-transport-22 §3.1 (Subscriptions)) であり、受信は state machine の
     ///   違反である。valid な REQUEST_UPDATE に対する `handle_update_for_subscription` の
@@ -843,6 +863,15 @@ impl Session {
         fill_request_id: u64,
         parameters: MessageParameters,
     ) -> Result<(), SessionError> {
+        // ローカル終端済みの request (`rejected_request_ids` に記録。GOAWAY の deadline 満了や
+        // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
+        // REQUEST_UPDATE は正当に届く。その場合は本関数の残りの検証 (送信者・パラメータ・
+        // FORWARD) だけを行い、状態遷移とイベント発行はしない (Request ID /
+        // MAX_REQUEST_UPDATES / auth token / パラメータスコープの検証は
+        // 呼び出し元 `handle_peer_request_update` で済んでいる)。
+        // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
+        // 送信者を特定できないため従来どおり PROTOCOL_VIOLATION になる。
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let subscription = self
             .subscriptions
             .get_mut(&request_id)
@@ -850,7 +879,7 @@ impl Session {
         // draft §3.1 (Subscriptions) / state diagram:
         // REQUEST_UPDATE は Established の self loop。Pending* / Terminated で
         // 受信した場合は PROTOCOL_VIOLATION としてセッションを閉じる。
-        if subscription.state != SubscriptionState::Established {
+        if subscription.state != SubscriptionState::Established && !locally_terminated {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE requires Established subscription",
@@ -896,6 +925,11 @@ impl Session {
         {
             self.fail(err.clone());
             return Err(err);
+        }
+        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移と
+        // イベント発行 (pending_update_params / RequestUpdateReceived / fill stream 開設) はしない
+        if locally_terminated {
+            return Ok(());
         }
         // draft §9.5.1 (Updating Subscriptions): REQUEST_UPDATE のパラメータを合体 (coalesce)
         // する。後続の REQUEST_UPDATE が届くたびに pending_update_params へマージし
@@ -1006,8 +1040,13 @@ impl Session {
             return Err(err);
         }
         // draft §3.1 (Subscriptions): REQUEST_UPDATE と同様、確立済みの
-        // subscription に対する通知のみ受理する。
-        if subscription.state != SubscriptionState::Established {
+        // subscription に対する通知のみ受理する。ローカル終端済みの request
+        // (`rejected_request_ids` に記録) では、peer が reset を観測する前に送った通知が
+        // 正当に届くため、残りの検証 (FORWARD / LOCATION_FILTER) だけを行い状態遷移はしない。
+        // 破棄済み (`forget_*` 後) の request への通知は送信者を特定できないため
+        // 従来どおり PROTOCOL_VIOLATION になる。
+        let locally_terminated = self.is_locally_terminated_request(request_id);
+        if subscription.state != SubscriptionState::Established && !locally_terminated {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "PUBLISH_STATE_NOTIFY requires Established subscription",
@@ -1038,6 +1077,11 @@ impl Session {
                 return Err(err);
             }
         };
+        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移と
+        // イベント発行はしない
+        if locally_terminated {
+            return Ok(());
+        }
         let subscription = self
             .subscriptions
             .get_mut(&request_id)
@@ -1088,6 +1132,8 @@ impl Session {
         done: PublishDone,
     ) -> Result<(), SessionError> {
         let now_ms = self.timing.last_tick_ms;
+        // 借用の都合で可変借用より前に判定する
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -1103,6 +1149,9 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        if locally_terminated {
+            return Ok(());
         }
         // draft §3.1 (Subscriptions): publisher は Pending (Publisher) / Established
         // からしか PUBLISH_DONE を送れない。したがって peer が SUBSCRIBE の

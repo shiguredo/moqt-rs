@@ -295,12 +295,17 @@ pub enum SessionEvent {
     /// - `LocalCancel`: 自側から cancel した
     /// - `SupersededByPublish`: PUBLISH 受信で既存 Pending(Subscriber) が置き換えられた (draft §3.1 (Subscriptions))
     /// - `MalformedTrack`: Malformed Track 検出で該当 request を cancel した (draft §12.1 (Malformed Tracks))
+    /// - `GoawayTimeout`: request stream 上の GOAWAY の timeout 満了で自側が送信方向を
+    ///   reset し、request を終端した (draft §9.2 (GOAWAY))。既に終端済みの request には
+    ///   発行されない (reset イベントのみが発行される)
     ///
     /// `PeerStreamFin` は相手側の FIN の到着と同時に発行されるとは限らない。bidi request
     /// stream は方向ごとに独立に閉じるため (draft §6.4.2.2 (Graceful Request Stream
     /// Closure))、自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を
     /// 送った側 (publisher 役) で `Established` の場合は peer の FIN と自側が最終メッセージと
     /// ともに送る FIN の両方が揃った時点で発行される (FIN の到着順に依存しない)。
+    /// `GoawayTimeout` で終端した後に peer から届く応答 (SUBSCRIBE_OK 等) は Session が no-op で
+    /// 吸収するため、本イベントが再度発行されることはない。
     RequestTerminated {
         /// 対象 request の Request ID
         request_id: u64,
@@ -388,7 +393,9 @@ pub enum SessionEvent {
     /// Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信時
     /// (§3.7 (Mandatory to Understand Track Properties) の cancel、
     /// [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)) である。どちらも
-    /// `StopSendingRequestStream` と対で発行する。
+    /// `StopSendingRequestStream` と対で発行する。加えて、request stream 上の GOAWAY の
+    /// timeout 満了時 (§9.2 (GOAWAY)、[`STREAM_GOING_AWAY`](crate::error::STREAM_GOING_AWAY)) は
+    /// `StopSendingRequestStream` を伴わずに単独で発行する。
     /// 送信方向が既に FIN / RESET 済みの request に対する本イベントは I/O 層で無視する
     /// (送信方向を再度 reset しない。Session は送信方向の閉塞を追跡しないため、
     /// GOING_AWAY timeout reset と malformed cancel が重複して届きうる)。
@@ -412,6 +419,11 @@ pub enum SessionEvent {
     /// - 未知の Mandatory Track Property を含む SUBSCRIBE_OK / FETCH_OK の受信
     ///   (§3.7 (Mandatory to Understand Track Properties) の cancel)。`error_code` は
     ///   [`STREAM_CANCELLED`](crate::error::STREAM_CANCELLED)
+    ///
+    /// request stream 上の GOAWAY の deadline 満了による終端 (§9.2 (GOAWAY)) では本イベントを
+    /// 発行しない。§9.2 が求めるのは送信方向の reset であり、受信方向は peer が閉じるためである
+    /// ([`SessionEvent::ResetRequestStream`] の doc 参照)。この経路で終端後に届く応答は
+    /// `Session::recv_stream_message` が no-op で吸収する。
     ///
     /// 既に `Terminated` の経路 (アプリが先に cancel した / PUBLISH_DONE 受信済み) では
     /// 発行しない。節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
@@ -636,10 +648,10 @@ pub(crate) fn terminationreason_from_end(end: RequestStreamEnd) -> TerminationRe
     }
 }
 
-/// request が終端した原因 (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §12.1 (Malformed Tracks))
+/// request が終端した原因 (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / §6.4.2.3 (Request Cancellation and Rejection) / §9.2 (GOAWAY) / §12.1 (Malformed Tracks))
 ///
 /// `SessionEvent::RequestTerminated` の payload として使う。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationReason {
     /// peer が FIN で bidi request stream を閉じた
     PeerStreamFin,
@@ -684,6 +696,23 @@ pub enum TerminationReason {
         /// 検出内容の説明 (英語、静的文字列)
         reason: &'static str,
     },
+    /// request stream 上の GOAWAY の timeout 満了で自側が送信方向を reset し、request を終端した
+    /// (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    ///
+    /// §9.2: "When sent on a request stream, the sender SHOULD reset the stream with
+    /// GOING_AWAY after the indicated timeout." の reset 時点でまだ終端していなかった
+    /// request を Session がローカルで終端したことを表す。この終端は仕様が要求するものでは
+    /// なく、reset 後に最終メッセージ (PUBLISH_DONE 等) を送れないことから Session が
+    /// 終端を確定させる実装判断である。reset するのは送信方向だけなので peer の送信方向は
+    /// 開いたままであり、peer が GOAWAY / reset を観測する前に送った応答は Session が no-op で
+    /// 吸収する ([`Session::recv_stream_message`](crate::session::core::Session::recv_stream_message)
+    /// の doc 参照)。1 回目の peer FIN / RESET_STREAM も同じく no-op で吸収される。
+    /// peer の応答の受領は保証されないため、応答待ちだった requester 側の entry は応答を
+    /// 持たないまま残る (`Session::forget_*` で回収できる)。publisher 役 fetch の open 中の
+    /// outgoing FETCH data stream は Session が reset しないため、アプリが
+    /// `Session::send_fetch_data_stream_closed` で閉じること。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    GoawayTimeout,
 }
 
 /// `Session::recv_request` が返すエラー
@@ -814,7 +843,8 @@ pub enum SubscriptionState {
     Pending,
     /// 応答 OK 受信済み、Object 転送可能
     Established,
-    /// 終了 (REQUEST_ERROR / PUBLISH_DONE / STOP_SENDING / supersede で遷移)
+    /// 終了 (REQUEST_ERROR / PUBLISH_DONE / STOP_SENDING / supersede / request stream 上の
+    /// GOAWAY の deadline 満了 ([`TerminationReason::GoawayTimeout`]) で遷移)
     Terminated,
 }
 
@@ -1223,6 +1253,9 @@ pub struct Subscription {
     /// 既存の `publish_done` フィールド (受信側 drain timer 用。送信側 PUBLISH_DONE とは
     /// 無関係) とは別フィールドであり、`cleanup_ready()` の判定に影響しない。
     /// push と同時に `None` に戻り (二重 push を防ぐ)、`forget_subscription` で除去される。
+    /// request stream 上の GOAWAY の deadline 満了で送信方向を reset した場合も破棄される
+    /// (reset 後に bidi request stream へ書き込めないため。既に `Terminated` の subscription
+    /// でも破棄だけは行う)。
     pub pending_publish_done: Option<u64>,
     /// Subscription Filter (draft-ietf-moq-transport-22 §3.3.1 (Location Filters), §9.20.9 (LOCATION FILTER Parameter))
     ///
@@ -1462,7 +1495,8 @@ pub enum FetchState {
     /// 場合のみ。publisher 側は `send_fetch_ok` で `Established` になり、データストリームの
     /// FIN 送信後も維持される。
     Established,
-    /// REQUEST_ERROR / STOP_SENDING / FIN / RESET_STREAM で終了
+    /// REQUEST_ERROR / STOP_SENDING / FIN / RESET_STREAM、または request stream 上の
+    /// GOAWAY の deadline 満了 ([`TerminationReason::GoawayTimeout`]) で終了
     ///
     /// draft-ietf-moq-transport-22 §3.2 (Fetch) により、FIN 後に
     /// FETCH_OK / REQUEST_ERROR が届いても `Terminated` のまま受理する
@@ -1587,8 +1621,18 @@ pub struct TrackStatusEntry {
     pub response: Option<TrackStatusResponse>,
     /// 自側の送信方向が閉じたか
     ///
-    /// peer の RESET_STREAM (cancel) を受けた場合と、自側が応答を FIN で送った場合に
-    /// `true` になる。`true` の entry は応答を送れず、破棄できる。
+    /// `true` になるのは次の場合である。
+    ///
+    /// - 自側が requester のときに peer の FIN / RESET_STREAM を受けた場合
+    /// - 自側が responder のときに peer の RESET_STREAM (cancel) を受けた場合。responder は
+    ///   peer の FIN を終端として扱わず応答を送るまで遅延するため (`Session::defers_peer_fin`)、
+    ///   FIN だけでは `false` のまま
+    /// - request stream 上の GOAWAY の deadline 満了で Session が終端した場合
+    ///   ([`TerminationReason::GoawayTimeout`])
+    ///
+    /// 自側が応答を送った場合は `response` が `Some` になり、`terminated` は変化しない。
+    /// entry は `response` が `Some` か `terminated` が `true` なら破棄できる
+    /// (`Session::forget_track_status` の受理条件)。
     pub terminated: bool,
 }
 
@@ -1616,6 +1660,11 @@ pub struct GoawayDrainSnapshot {
     /// cleanup 未完了の fetch の Request ID 群
     pub blocking_fetch_request_ids: Vec<u64>,
     /// 応答未完了の track status (TRACK_STATUS) の Request ID 群
+    ///
+    /// 応答が `None` かつ破棄可能でない (`terminated` が `false`) entry のみを含む。
+    /// `terminated` の entry は応答を送れず `forget_track_status` で破棄できるため、
+    /// 応答未受領でも drain を妨げない。subscription / fetch の blocker と同じく
+    /// 「破棄可能な entry は blocker にしない」という本実装の判定である。
     pub blocking_track_status_request_ids: Vec<u64>,
 }
 

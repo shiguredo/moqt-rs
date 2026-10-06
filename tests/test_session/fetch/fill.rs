@@ -1431,3 +1431,143 @@ fn request_error_resets_fills_and_sends_publish_done() {
     assert!(saw_reset, "失敗応答で fill stream が reset されること");
     assert!(saw_publish_done, "失敗応答で PUBLISH_DONE が送られること");
 }
+
+/// GOAWAY の deadline 満了で終端した subscription への遅延 fill fetch stream は受理する
+///
+/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+/// (Graceful Request Stream Closure))、自側が送信方向を reset しても peer の送信方向は
+/// 開いたままである。peer が GOAWAY / reset を観測する前に開いた fill fetch stream は
+/// 正当に届くため、session を `PROTOCOL_VIOLATION` で閉じてはならない。
+#[test]
+fn subscriber_accepts_late_fill_fetch_header_after_goaway_timeout() {
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+
+    // subscriber (client) が request stream GOAWAY を送り、deadline 満了で終端する
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(sub_rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    client.tick(1_100);
+    let mut terminations = 0;
+    while let Some(e) = client.poll_event() {
+        if matches!(e, SessionEvent::RequestTerminated { .. }) {
+            terminations += 1;
+        }
+    }
+    assert_eq!(terminations, 1, "期限到達で subscription が終端すること");
+
+    // peer が reset を観測する前に開いた fill stream は遅延して届く
+    let stream_id = DataStreamId(210);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            stream_id,
+            &FetchHeader {
+                request_id: update_rid,
+            },
+        )
+        .expect("終端済み subscription への遅延 fill FETCH_HEADER が受理されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延 fill stream でセッションを閉じないこと"
+    );
+    // FIN での終端は subscription に影響せず吸収する
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("遅延 fill stream の終端通知が吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // アプリが先に subscription を破棄した場合も、遅延 fill stream の終端通知は
+    // unknown stream id のエラーにしない (破棄対象 stream として吸収する)。
+    // peer の close 通知後に受理した stream でも同じであることは、
+    // 後続の `subscriber_accepts_late_fill_fetch_header_after_peer_close` で確認する
+    let another = DataStreamId(211);
+    client
+        .recv_data_stream_type(another, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            another,
+            &FetchHeader {
+                request_id: update_rid,
+            },
+        )
+        .expect("遅延 fill FETCH_HEADER が受理されること");
+    assert!(
+        client.forget_subscription(sub_rid).is_some(),
+        "終端済み subscription を破棄できること"
+    );
+    client
+        .recv_data_stream_closed(another, RequestStreamEnd::Fin)
+        .expect("破棄後の遅延 fill stream の終端通知が吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// peer の bidi close 通知が先に届いても、遅延した fill fetch stream は受理する
+///
+/// fill fetch stream は uni stream であり、bidi request stream の close 通知との到着順に
+/// 保証がない。close 通知で `rejected_request_ids` から id が消えても、自側が request stream
+/// の GOAWAY を送った request への遅延 fill stream は受理する。
+#[test]
+fn subscriber_accepts_late_fill_fetch_header_after_peer_close() {
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(sub_rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    client.tick(1_100);
+    while client.poll_event().is_some() {}
+    // peer の bidi close 通知を先に処理する
+    client
+        .recv_request_stream_closed(sub_rid, RequestStreamEnd::Fin)
+        .expect("終端済み request の FIN が no-op で吸収されること");
+
+    let stream_id = DataStreamId(212);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            stream_id,
+            &FetchHeader {
+                request_id: update_rid,
+            },
+        )
+        .expect("close 通知後に届いた遅延 fill FETCH_HEADER が受理されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延 fill stream でセッションを閉じないこと"
+    );
+    // 受理した stream はアプリが subscription を破棄した後の終端通知も吸収する
+    assert!(
+        client.forget_subscription(sub_rid).is_some(),
+        "終端済み subscription を破棄できること"
+    );
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("破棄後の遅延 fill stream の終端通知が吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}

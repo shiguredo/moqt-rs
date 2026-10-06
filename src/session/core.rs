@@ -284,6 +284,12 @@ pub(super) struct DataStreamState {
 #[derive(Debug)]
 pub(super) struct GoawayState {
     pub(super) local_sent: bool,
+    /// 自側が request stream の GOAWAY を送った request id
+    ///
+    /// 送信済み判定 (再送の拒否) に加え、遅延して届く data stream を破棄対象として扱う
+    /// 判定 (`Session::tolerates_late_data_stream`) にも使う。後者の用途では peer の close
+    /// 通知後も必要になるため、request の破棄時にあわせて除去しない (request 数に比例する
+    /// 有界の集合であり、セッション寿命まで保持する)。
     pub(super) request_stream_sent: HashSet<u64>,
     pub(super) request_stream_received: HashSet<u64>,
     pub(super) peer: Option<PeerGoawayInfo>,
@@ -295,6 +301,10 @@ pub(super) struct GoawayState {
     /// 送信側が `GOING_AWAY` で stream を reset する SHOULD。control stream の単一スロット
     /// (`local_deadline_ms`) とは独立に request ごとに保持し、期限到達で 1 回だけ reset イベントを
     /// 発行してエントリを削除する。timeout == 0 の GOAWAY は登録しない。
+    /// 期限到達時は reset に加えて、まだ終端していない request を `Terminated` にして
+    /// [`SessionEvent::RequestTerminated`] (`TerminationReason::GoawayTimeout`) を 1 回発行し、
+    /// 保留中の PUBLISH_DONE を破棄する ([`Session::terminate_request_on_goaway_timeout`])。
+    /// 既に終端済みの request では reset イベントのみを発行する。
     /// tick 未経験で送信した場合は `DeadlineTimer::new(timeout, None)` として登録し、最初の
     /// `tick` で `since_ms` / `deadline_ms` を確定する。
     pub(super) request_stream_deadlines: HashMap<u64, super::types::DeadlineTimer>,
@@ -385,6 +395,8 @@ pub struct Session {
     /// GOAWAY 拒否 (draft §9.2) もこの共通経路で吸収される)。
     /// 登録済み request への REQUEST_ERROR (REQUEST_UPDATE 拒否等) は記録されない
     /// (クローズは `request_streams` 経由で処理される)。
+    /// request stream 上の GOAWAY の deadline 満了で終端した request は
+    /// `terminate_request_on_goaway_timeout` が `request_streams` を除去する際に記録する。
     /// なお登録済み request への拒否 (fetch を `Terminated` に遷移させた上での
     /// REQUEST_ERROR) やアプリ主導の `send_request_error` は登録済みのため記録されず、
     /// アプリが peer のクローズ通知前に `forget_*` を呼ぶと遅延クローズが unknown id で
@@ -392,7 +404,15 @@ pub struct Session {
     /// (publisher 側・データストリーム終端済み。FIN / RESET の両方の終端通知を含む)
     /// 破棄だけは `forget_fetch` が本集合へ記録して遅延クローズを吸収する。
     /// malformed 終端も同様に `terminate_malformed_track` が記録する。
-    /// クローズ通知の受信時に削除される。peer がクローズ通知を送らない場合は
+    /// 本集合への記録は close 通知の no-op 吸収だけでなく、各ハンドラが遅延メッセージを
+    /// 状態遷移せず受理する判定 (`Session::is_locally_terminated_request`) と、state
+    /// テーブルから破棄済みの request への応答の no-op 吸収にも使う。自側が送信方向を reset しても
+    /// peer の送信方向は開いたままなので、peer が GOAWAY / reset を観測する前に送った応答は
+    /// 正当に届き、状態検証に掛けるとセッションを閉じてしまうためである。
+    /// クローズ通知の受信時に削除される (2 回目以降の close 通知は unknown id として
+    /// `PROTOCOL_VIOLATION` になる。QUIC では FIN 後に RESET_STREAM が遅延して届きうるが、
+    /// 同一 request stream への 2 回目の close 通知を抑止する責務は I/O 層にある)。
+    /// peer がクローズ通知を送らない場合は
     /// セッション生存中に残り続ける (サイズは「拒否後・破棄済みのうち未クローズの id 数」に比例する)。
     pub(super) rejected_request_ids: HashSet<u64>,
     /// 自側が responder の request で peer の FIN を受信済みの request id の集合
@@ -1122,7 +1142,9 @@ impl Session {
     /// send a REQUEST_ERROR and FIN the stream." に従う拒否。control GOAWAY 送信後の
     /// GOING_AWAY 拒否 (draft §9.2) も含む) と、終端済み fetch の破棄
     /// (`forget_fetch` が記録する publisher 側・データストリーム終端済みの request id。
-    /// 詳細は `rejected_request_ids` のフィールド doc 参照) のストリームクローズは
+    /// 詳細は `rejected_request_ids` のフィールド doc 参照)、および request stream 上の
+    /// GOAWAY の deadline 満了で終端した request (`terminate_request_on_goaway_timeout` が
+    /// 記録する) のストリームクローズは
     /// 拒否済み・破棄済みのため state を持たず no-op で吸収する。登録済み request への
     /// REQUEST_ERROR (REQUEST_UPDATE 拒否等) のクローズは `request_streams` 経由で処理され、
     /// `RequestTerminated` が発行される。
@@ -1297,6 +1319,56 @@ impl Session {
         }
     }
 
+    /// 遅延して届く data stream を破棄対象として扱う request かを返す
+    ///
+    /// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+    /// (Graceful Request Stream Closure))、自側が request stream の送信方向を reset しても
+    /// peer が開いた data stream は正当に届く。対象は次のいずれかである。
+    ///
+    /// - ローカル終端済み (`rejected_request_ids` に記録済み) の request
+    /// - 自側が request stream の GOAWAY を送った request (`GoawayState::request_stream_sent`)。
+    ///   `rejected_request_ids` は peer の 1 回目の close 通知で消えるが、data stream は
+    ///   別 stream であり到着順に保証がないため、こちらも併せて見る
+    ///
+    /// FETCH 応答 data stream は `IncomingDataStream::Discarded` として登録し、以後の受信・
+    /// 終端を no-op で吸収する。fill fetch stream は subscription への帰属を保ったまま受理し
+    /// (破棄対象の保持集合へ移るのはアプリが subscription を破棄した時点)、終端通知は
+    /// 破棄後も no-op で吸収する。
+    pub(super) fn tolerates_late_data_stream(&self, request_id: u64) -> bool {
+        self.rejected_request_ids.contains(&request_id)
+            || self.goaway.request_stream_sent.contains(&request_id)
+    }
+
+    /// ローカル終端済み (`rejected_request_ids` に記録済み) の request かを返す
+    ///
+    /// GOAWAY の deadline 満了や malformed 終端で送信方向を reset した request には、
+    /// peer が reset を観測する前に送った応答・通知が遅延して届く。各ハンドラは本関数で判定し、
+    /// true なら MUST 検証を済ませた後に状態遷移とイベント発行を行わず `Ok` を返す。
+    pub(super) fn is_locally_terminated_request(&self, request_id: u64) -> bool {
+        self.rejected_request_ids.contains(&request_id)
+    }
+
+    /// draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure) の MUST を検証する
+    ///
+    /// "If a server receives a Redirect with a non-zero Connect URI Length it MUST close the
+    /// session with a PROTOCOL_VIOLATION." この検証は request の state に依存しないため、
+    /// 応答を通常処理する経路と、応答を吸収する経路の両方から呼ぶ。
+    /// 将来のドラフト改訂で変更される可能性がある。
+    fn validate_peer_redirect(&mut self, err: &RequestError) -> Result<(), SessionError> {
+        if self.role == Role::Server
+            && let Some(ref redirect) = err.redirect
+            && !redirect.connect_uri.is_empty()
+        {
+            let e = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "server received redirect with non-zero connect URI length",
+            );
+            self.fail(e.clone());
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// peer FIN の受信で request を終端せず、両方向の FIN が揃うまで遅延させるかを返す
     ///
     /// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
@@ -1352,6 +1424,23 @@ impl Session {
     /// 既存 bidi request stream 上の応答メッセージを受信する
     ///
     /// `request_id` は I/O 層が bidi stream に紐付けて記憶した値。
+    ///
+    /// ローカル終端済みの request (拒否した request、または request stream 上の GOAWAY の
+    /// deadline 満了で終端した request) へ遅延して届く peer メッセージは peer の違反ではない。
+    /// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+    /// (Graceful Request Stream Closure))、自側が送信方向を `RESET_STREAM` しても peer の
+    /// 送信方向は開いたままで、peer が GOAWAY / reset を観測する前に送ったメッセージは正当に届く。
+    ///
+    /// state テーブルに記録が残っている request へのメッセージは、各ハンドラがそのメッセージに
+    /// 該当する MUST 検証 (送信者・パラメータ・Track Alias・Track Properties 等) を済ませた
+    /// うえで状態遷移せず受理する (`Session::is_locally_terminated_request`)。
+    ///
+    /// state テーブルから既に破棄された request (`forget_*` 後) へのメッセージは、検証に必要な
+    /// request 種別と状態が失われているため受理しない。`forget_fetch` 後の REQUEST_UPDATE を
+    /// 違反として扱う既存契約と揃える。したがってアプリは、遅延メッセージの到着が止まってから
+    /// `forget_*` を呼ぶこと (peer の close 通知は `recv_request_stream_closed` が no-op で
+    /// 吸収するため、終端の完了はイベントとして通知されない)。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn recv_stream_message(
         &mut self,
         request_id: u64,
@@ -1694,22 +1783,11 @@ impl Session {
         self.clear_control_message_deadline(request_id);
         // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): 応答受信でクレジット回復
         self.restore_outgoing_request_update_credit(request_id);
-        // draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure):
-        // "If a server receives a Redirect with a non-zero Connect URI Length it MUST close
-        // the session with a PROTOCOL_VIOLATION."
-        // 将来のドラフト改訂で変更される可能性がある。
-        if self.role == Role::Server
-            && let Some(ref redirect) = err.redirect
-            && !redirect.connect_uri.is_empty()
-        {
-            let e = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "server received redirect with non-zero connect URI length",
-            );
-            self.fail(e.clone());
-            return Err(e);
-        }
+        self.validate_peer_redirect(&err)?;
         let kind = self.locate_request(request_id);
+        // `handle_err_for_*` はローカル終端済みの request では状態遷移せず `Ok` を返す
+        // (遅延した正当な応答を受理する)。この場合も `RequestErrorReceived` は
+        // イベントとして通知する (アプリは `Terminated` 済みの request として扱うこと)。
         let result = match kind {
             Some(RequestTable::Subscription) => self.handle_err_for_subscription(request_id),
             Some(RequestTable::Fetch) => self.handle_err_for_fetch(request_id),

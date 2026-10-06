@@ -4,14 +4,16 @@
 //! - GOAWAY URI の制限超過拒否
 //! - blocker 無し GOAWAY の timeout 非発火
 //! - blocker 残り GOAWAY の timeout 発火
+//! - request stream 上の GOAWAY の deadline 満了で reset と終端が request ごとに 1 回だけ発行される
 
 use pbt::common::test_runner;
 use shiguredo_moqt::message::common::TrackNamespace;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::session::types::MAX_NEW_SESSION_URI_LENGTH;
+use shiguredo_moqt::session::types::TerminationReason;
 use shiguredo_moqt::{session::types::SessionEvent, session::types::SessionState};
 
-use super::common::establish_pair;
+use super::common::{establish_pair, take_send_on_stream, take_send_request};
 
 // Server が 0..=MAX_NEW_SESSION_URI_LENGTH の URI で GOAWAY を送ると client が受信できる
 #[test]
@@ -145,5 +147,97 @@ fn goaway_timeout_expires_with_pending_subscription_blocker() -> noprop::TestRes
         open_seen.get(),
         "GOAWAY timeout が発火しないケースが 1 つも観測されなかった\n{runner}"
     );
+    Ok(())
+}
+
+// request stream 上の GOAWAY の deadline 満了で、reset と終端が request ごとに 1 回だけ発行され、
+// 期限到達後の tick で再発行されないこと
+//
+// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender SHOULD
+// reset the stream with GOING_AWAY after the indicated timeout." の reset と、それに伴う
+// `TerminationReason::GoawayTimeout` の終端は request ごとに 1 回だけであり、セッションは
+// 閉じない。時刻と timeout の任意の組合せで成立することを確認する。
+#[test]
+fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let base = noprop::sample_u64_in(ctx, 0..1_000_000);
+        let timeout = noprop::sample_u64_in(ctx, 1..10_000);
+        let extra = noprop::sample_u64_in(ctx, 0..20_000);
+        let (mut client, _server) = establish_pair();
+        let rid = client
+            .send_subscribe(
+                TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                b"video".to_vec(),
+                MessageParameters::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (sent_rid, _) = take_send_request(&mut client);
+        assert_eq!(sent_rid, rid);
+        client.tick(base);
+        client
+            .send_goaway_on_request_stream(rid, Vec::new(), timeout)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, _) = take_send_on_stream(&mut client);
+
+        // 期限前後の任意の時刻で tick し、その後で期限超過を確定させる。
+        // `tick(now_ms)` の契約は単調増加ミリ秒時刻なので、2 回目は必ず 1 回目以降にする。
+        let deadline = base.saturating_add(timeout);
+        let first_check = base.saturating_add(extra);
+        let second_check = first_check.max(deadline.saturating_add(1));
+        let mut resets = 0;
+        let mut terminated = 0;
+        for check_at in [first_check, second_check] {
+            client.tick(check_at);
+            while let Some(e) = client.poll_event() {
+                match e {
+                    SessionEvent::ResetRequestStream { request_id, .. } => {
+                        assert_eq!(
+                            request_id, rid,
+                            "対象 request の reset のみが発行されること"
+                        );
+                        resets += 1;
+                    }
+                    SessionEvent::RequestTerminated {
+                        request_id, reason, ..
+                    } => {
+                        assert_eq!(request_id, rid, "対象 request の終端のみが発行されること");
+                        assert_eq!(reason, TerminationReason::GoawayTimeout);
+                        terminated += 1;
+                    }
+                    SessionEvent::CloseSession(err) => {
+                        panic!(
+                            "request stream の deadline 満了でセッションを閉じてはいけない: {err:?}"
+                        )
+                    }
+                    _ => {}
+                }
+            }
+            // 期限前は発火せず、期限到達後は 1 回だけ発行される
+            if check_at < deadline {
+                assert_eq!(resets, 0, "期限未到達で reset を発行しないこと");
+                assert_eq!(terminated, 0, "期限未到達で終端を発行しないこと");
+            }
+        }
+        // 期限超過を確定させた後は reset が 1 回、終端も 1 回である
+        assert_eq!(resets, 1, "期限到達で reset が 1 回だけ出ること");
+        assert_eq!(terminated, 1, "期限到達で終端が 1 回だけ出ること");
+
+        // 期限到達後に再度 tick しても再発行しない
+        // (`tick(now_ms)` の契約は単調増加ミリ秒時刻なので、直前の tick 以降にする)
+        client.tick(second_check.max(deadline.saturating_add(1)));
+        while let Some(e) = client.poll_event() {
+            assert!(
+                !matches!(
+                    e,
+                    SessionEvent::ResetRequestStream { .. }
+                        | SessionEvent::RequestTerminated { .. }
+                ),
+                "期限到達後に reset / 終端を再発行しないこと"
+            );
+        }
+        Ok(())
+    })?;
     Ok(())
 }

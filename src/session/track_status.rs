@@ -28,6 +28,17 @@ use super::types::{
     TrackRole, TrackStatusEntry, TrackStatusResponse,
 };
 
+/// TRACK_STATUS entry を破棄できるか
+///
+/// 応答済み (`response` が `Some`) か、送信方向が閉じた (`terminated`) entry は破棄できる。
+/// [`Session::forget_track_status`] の受理条件であり、
+/// [`Session::goaway_drain_snapshot`](crate::session::core::Session::goaway_drain_snapshot) の
+/// blocker 判定も「破棄できない entry だけを blocker にする」という同じ条件を使う
+/// (条件を 2 箇所に手書きすると片方だけ更新されて乖離するため、本関数に集約する)。
+pub(super) fn is_track_status_discardable(entry: &TrackStatusEntry) -> bool {
+    entry.response.is_some() || entry.terminated
+}
+
 impl Session {
     // ─── クエリ API ─────────────────────────────────────────
 
@@ -48,10 +59,13 @@ impl Session {
     /// 呼ぶこと (終端前に除去すると、後から届く終端が unknown id となり
     /// `PROTOCOL_VIOLATION` で session が Closing になる)。応答前に stream が終端した
     /// 場合は `close_track_status_on_stream_end` が requester 側で `Error` を記録し、
-    /// responder 側では `terminated` を立てるため、どちらも除去できる。
+    /// responder 側では `terminated` を立てるため、どちらも除去できる。request stream 上の
+    /// GOAWAY の deadline 満了で終端した場合も requester 側で `terminated` を立てる
+    /// (送信方向を reset 済みで応答を送れないため `Error` は合成しない)。
+    /// 受理条件は内部の `is_track_status_discardable` に集約する。
     pub fn forget_track_status(&mut self, request_id: u64) -> Option<TrackStatusEntry> {
         let entry = self.track_status_requests.get(&request_id)?;
-        if entry.response.is_none() && !entry.terminated {
+        if !is_track_status_discardable(entry) {
             return None;
         }
         self.request_streams.remove(&request_id);
@@ -342,6 +356,8 @@ impl Session {
         request_id: u64,
         parameters: &MessageParameters,
     ) -> Result<(), SessionError> {
+        // 借用の都合で可変借用より前に判定する
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
@@ -363,6 +379,9 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        if locally_terminated {
+            return Ok(());
         }
         // draft §9.20.17 (LARGEST OBJECT Parameter): TRACK_STATUS への REQUEST_OK は LARGEST_OBJECT を含み得る
         let largest_location = parameters
@@ -386,6 +405,8 @@ impl Session {
         &mut self,
         request_id: u64,
     ) -> Result<(), SessionError> {
+        // 借用の都合で可変借用より前に判定する
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
@@ -407,6 +428,9 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        if locally_terminated {
+            return Ok(());
         }
         entry.response = Some(TrackStatusResponse::Error);
         Ok(())

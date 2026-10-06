@@ -1958,7 +1958,12 @@ impl Session {
     /// PUBLISH_DONE 受信後の drain 中 (`publish_done` 付きの `Terminated`) は
     /// late-opening stream として受理し、Stream Count 集計にも加算する
     /// (draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE))。
-    /// それ以外 (未知 ID / 非 subscriber 役 / キャンセル由来 `Terminated`) は
+    /// `Session::tolerates_late_data_stream` が true の request (ローカル終端済み、または
+    /// 自側が request stream の GOAWAY を送った request) へ遅延して届いた fill fetch stream は、
+    /// peer が reset を観測する前に開いた正当な stream のため受理する。
+    /// 同じく `Terminated` の fetch へ遅延して届いた FETCH 応答 stream も
+    /// 破棄対象 stream として吸収する。
+    /// それ以外 (未知 ID / 非 subscriber 役 / 上記以外の `Terminated`) は
     /// PROTOCOL_VIOLATION でセッションを閉じる。
     /// fill は複数本の同時存在を許すため `has_other_fetch_stream` 検証は行わない。
     /// なお FETCH と fill の判別は Session が行うため、アプリは request id 種別を
@@ -2034,6 +2039,14 @@ impl Session {
                 return Err(err);
             }
             if state == FetchState::Terminated {
+                // ローカル終端済みの request では、peer が reset を観測する前に開いた
+                // FETCH 応答データストリームが遅延して届く。正当な in-flight stream の
+                // ため、セッションを閉じずに破棄対象 stream として吸収する
+                // (fill fetch stream と同じ扱い)。
+                if self.tolerates_late_data_stream(header.request_id) {
+                    self.register_discarded_stream(stream_id, None);
+                    return Ok(());
+                }
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "FETCH_HEADER received for terminated fetch",
@@ -2089,6 +2102,22 @@ impl Session {
                 // Terminated) の fill fetch stream は subgroup と同じく受理する。
                 // キャンセル由来 Terminated (publish_done なし) は受理しない
                 (TrackRole::Subscriber, SubscriptionState::Terminated, true) => {}
+                // ローカル終端済み (`rejected_request_ids` に記録済み) の subscription では、
+                // peer が reset を観測する前に開いた fill fetch stream が遅延して届く。
+                // subgroup の遅延到着は `is_cancelled_terminated` により破棄対象
+                // (`TrackDataAcceptance::Discarded`) になるが、fill fetch stream は
+                // 開設済みの正当な in-flight stream であり、受理しないとセッションを
+                // 閉じてしまうため受理する (この差は意図的である)。
+                // 受理した stream はアプリが subscription を破棄しても終端通知を吸収できる
+                // よう、破棄時は破棄対象 stream として保持する
+                // (`remove_incoming_data_streams_for_request` 参照)。
+                // 判定は `Session::tolerates_late_data_stream` に集約する。
+                // なおアプリが先に `forget_subscription` を呼んだ場合は
+                // `resolve_fill_subscription` が subscription を解決できず、遅延 fill
+                // stream は拒否される (受理できるのは subscription を破棄する前のみ)。
+                (TrackRole::Subscriber, SubscriptionState::Terminated, false)
+                    if self.tolerates_late_data_stream(fill_subscription_request_id) => {}
+
                 (TrackRole::Subscriber, SubscriptionState::Terminated, false) => {
                     let err = SessionError::new(
                         SESSION_PROTOCOL_VIOLATION,
@@ -3351,9 +3380,16 @@ impl Session {
         }
         for id in removed_fetch_ids {
             self.timing.data_stream_last_activity_ms.remove(&id);
-            // fetch stream は破棄対象の保持集合へは移さない
+            // fetch stream は通常は破棄対象の保持集合へ移さない
             // (fetch は 1 request 1 stream で共有 alias がなく、Terminated 後の終端は
-            // 既存の no-op 吸収が担う。保持集合は subscription の破棄対象 stream 専用)
+            // 既存の no-op 吸収が担う。保持集合は subscription の破棄対象 stream 専用)。
+            // ただしローカル終端済み、または自側が request stream の GOAWAY を送った request
+            // に属する stream (遅延して開かれた fill fetch stream を含む) は、アプリが先に
+            // subscription / fetch を破棄した後も終端通知が届きうるため保持集合へ移し、
+            // unknown stream id のエラーにしない。
+            if self.tolerates_late_data_stream(request_id) {
+                self.retain_discarded_stream_id(id);
+            }
         }
         for id in removed_ids {
             self.timing.data_stream_last_activity_ms.remove(&id);

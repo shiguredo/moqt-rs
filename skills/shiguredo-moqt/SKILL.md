@@ -204,7 +204,14 @@ fn role(&self) -> Role
 fn transport(&self) -> Transport
 ```
 
-`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / data stream / GOAWAY のタイムアウトを評価し、満了時は `CloseSession` をキューへ積む。request stream 上の GOAWAY の timeout はセッションを閉じず、当該 request の `ResetRequestStream(GOING_AWAY)` を積む。
+`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / data stream / GOAWAY の
+セッション全体のタイムアウトを評価し、満了時は `CloseSession` をキューへ積む。あわせて
+subscription の delivery timeout は `ResetDataStream { error_code: STREAM_DELIVERY_TIMEOUT }` を積み、
+alias tombstone / 破棄対象 stream id の保持期間は期限切れの片付けだけを行う。
+request stream 上の GOAWAY の timeout はセッションを閉じず、
+当該 request の `ResetRequestStream { error_code: STREAM_GOING_AWAY }` を積む。さらに期限到達時には、
+まだ終端していない request を終端して `RequestTerminated { reason: GoawayTimeout }` を 1 回だけ積む
+(reset 後は PUBLISH_DONE を送れないため)。既に終端済みの request には reset イベントだけを積む。
 
 タイマーと Auth Token:
 
@@ -271,6 +278,24 @@ bidi request stream は方向ごとに独立して閉じる (draft-ietf-moq-tran
 `RequestTerminated { reason: PeerStreamFin }` は peer の FIN の到着と同時に発行されるとは限らず、
 自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で
 最終メッセージを未送信の場合は peer の FIN と自側が最終メッセージとともに送る FIN の両方が揃った時点で発行される。
+request stream 上の GOAWAY の timeout 満了で自側が終端した場合は
+`RequestTerminated { reason: GoawayTimeout }` が発行される (draft-ietf-moq-transport-22 §9.2 (GOAWAY) の
+"SHOULD reset the stream with GOING_AWAY" を送信方向のみで満たすため、PUBLISH_DONE は送れず保留分は破棄される)。
+reset するのは送信方向だけなので peer の送信方向は開いたままであり、終端済み request へ届く
+1 回目の peer FIN / RESET_STREAM は no-op で吸収される。peer が reset を観測する前に開いた
+FETCH 応答の遅延 data stream は破棄対象 stream として吸収し、
+fill fetch stream は subscription への帰属を保ったまま受理する (破棄後の終端通知は no-op)。peer が GOAWAY / reset を観測する前に
+送った応答 (SUBSCRIBE_OK / REQUEST_OK / REQUEST_ERROR / FETCH_OK / PUBLISH_DONE) と
+REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセージに該当する仕様の検証
+(送信者・種別・自側の役割・パラメータスコープ・FORWARD・Track Alias・Request ID・
+MAX_REQUEST_UPDATES・auth token・End Location) を行ったうえで、状態遷移せず受理する
+(subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.1 Redirect 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
+のみを通知する (他の応答は状態遷移もイベント発行もしない)。state テーブルから破棄済みの
+request (`forget_*` 後) へのメッセージは request 種別と状態が失われているため受理せず、
+従来どおりセッションを閉じる (遅延メッセージの到着が止まってから
+`forget_*` を呼ぶこと。peer の close 通知は no-op で吸収されるため通知されない)。
+メッセージ内容が仕様の MUST に反する場合や、それ以外のメッセージ (PUBLISH 等) は従来どおり
+セッションを閉じる。
 
 ### 受信 API
 
@@ -320,6 +345,10 @@ fn report_mid_object_fin(&mut self, stream_id: DataStreamId) -> Result<(), Sessi
 TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で `Established` のとき
 request を終端しない。この場合 `RequestTerminated` は自側が最終メッセージを
 `fin: true` で送った時点 (PUBLISH_DONE、単独の REQUEST_ERROR) で発行される。
+request stream 上の GOAWAY の timeout が満了した場合も request を終端し、
+`RequestTerminated { reason: GoawayTimeout }` が発行される (詳細は `RequestTerminated` の項を参照)。
+このとき publisher 役 fetch の open 中の outgoing FETCH data stream は Session が reset しないため、
+アプリが `send_fetch_data_stream_closed` で閉じること。
 `RequestStreamEnd::Reset` は cancel として即時に終端する
 (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
 `error_code` は `Option<u64>` であり、`None` は「アプリケーションエラーコード無し」を表す

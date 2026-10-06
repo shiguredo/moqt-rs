@@ -1597,3 +1597,50 @@ fn fetch_uses_larger_largest_observed_after_smaller_one() {
         },
     );
 }
+
+/// GOAWAY の deadline 満了で終端した fetch でも、遅延した FETCH 応答データストリームは受理する
+///
+/// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
+/// (Graceful Request Stream Closure))、自側が送信方向を reset しても peer が FETCH_OK の
+/// 直後に開いた data stream は正当に届く。セッションを閉じずに破棄対象 stream として扱う。
+#[test]
+fn subscriber_accepts_late_fetch_header_after_goaway_timeout() {
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    let (mut client, _server, rid) = establish_fetch();
+    client.tick(1_000);
+    client
+        .send_goaway_on_request_stream(rid, Vec::new(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut client);
+    client.tick(1_100);
+    let mut terminations = 0;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestTerminated { request_id, .. } = e {
+            assert_eq!(
+                request_id, rid,
+                "終端は対象の fetch の request id で通知されること"
+            );
+            terminations += 1;
+        }
+    }
+    assert_eq!(terminations, 1, "期限到達で fetch が終端すること");
+
+    let stream_id = DataStreamId(400);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("終端済み fetch への遅延 FETCH_HEADER が受理されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延 data stream でセッションを閉じないこと"
+    );
+    // 破棄対象 stream として終端 (FIN) も吸収する
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("破棄対象 stream の終端通知が吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}

@@ -315,6 +315,8 @@ impl Session {
         parameters: &MessageParameters,
     ) -> Result<(), SessionError> {
         let now_ms = self.timing.last_tick_ms;
+        // 借用の都合で判定を共有借用より前に済ませる
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let subscription = self
             .subscriptions
             .get(&request_id)
@@ -332,7 +334,15 @@ impl Session {
         // 外側の `!is_initiator_self()` により、この条件が真のとき自側は subscriber である。
         let established_publish_origin = subscription.state == SubscriptionState::Established
             && subscription.initiator == SubscriptionInitiator::Publisher;
-        if !subscription.is_initiator_self() && !established_publish_origin {
+        // ローカル終端済みの request では終端前の state が失われるため
+        // `established_publish_origin` を判定できない。自側が subscriber の場合は
+        // PUBLISH 起点 / SUBSCRIBE 起点のどちらでも自側から REQUEST_UPDATE を送れるため
+        // (`send_update_for_subscription` の送信条件)、遅延した REQUEST_UPDATE_OK は
+        // 正当な応答になりうる。自側が publisher の場合はガードを維持する。
+        if !subscription.is_initiator_self()
+            && !established_publish_origin
+            && !(locally_terminated && subscription.my_role == TrackRole::Subscriber)
+        {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_OK (subscription) received on responder side",
@@ -354,12 +364,32 @@ impl Session {
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update) parameter not allowed in this context",
             )),
+            // ローカル終端済みでは PUBLISH_OK / REQUEST_UPDATE_OK の区別が state から
+            // 失われるため、下の両 context 検証で判定する
             _ => None,
         };
         if let Some((allowed, message)) = context_allowed
             && parameters.validate_scope(allowed).is_err()
         {
             let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, message);
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §9.20.1 (Parameter Scope): ローカル終端済みの request は context を特定できない
+        // ため、どちらの context の許可集合にも含まれないパラメータだけを違反とする
+        // (和集合の定数に依存させず、両集合の変更に追随させる)。自側 publisher で initiator の
+        // 場合は PUBLISH_OK context でも LARGEST_OBJECT を許容する残差がある
+        // (終端で context を復元できないため)。
+        if context_allowed.is_none()
+            && locally_terminated
+            && ![PUBLISH_OK_ALLOWED_PARAMS, REQUEST_UPDATE_OK_ALLOWED_PARAMS]
+                .iter()
+                .any(|allowed| parameters.validate_scope(allowed).is_ok())
+        {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "REQUEST_OK parameter not allowed in any context",
+            );
             self.fail(err.clone());
             return Err(err);
         }
@@ -419,6 +449,13 @@ impl Session {
                 });
             }
             _ => {
+                // ローカル終端済みの request はここまでの検証 (送信者・パラメータスコープ)
+                // だけを行い、状態遷移とイベント発行はしない (peer が reset を観測する前に
+                // 送った正当な応答が遅延して届く)。context 別スコープの検証は上の両 context
+                // 検証で済んでいる。
+                if locally_terminated {
+                    return Ok(());
+                }
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
                     "REQUEST_OK for subscription requires Pending(Publisher) or Established state",
@@ -451,6 +488,12 @@ impl Session {
         &mut self,
         request_id: u64,
     ) -> Result<(), SessionError> {
+        // ローカル終端済みの request は検証 (呼び出し元の Redirect 検証) だけを行い、
+        // 状態遷移はしない (peer が reset を観測する前に送った正当な応答が遅延して届く)。
+        // `RequestErrorReceived` は呼び出し元 `handle_peer_request_error` が通知する
+        if self.is_locally_terminated_request(request_id) {
+            return Ok(());
+        }
         // 自側 publisher の PUBLISH 起点 subscription で REQUEST_UPDATE 失敗応答
         // (REQUEST_ERROR) を受信した場合に送る PUBLISH_DONE (UPDATE_FAILED) の
         // stream count。`None` は送らない。
