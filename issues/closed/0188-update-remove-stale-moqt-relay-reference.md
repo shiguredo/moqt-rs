@@ -1,7 +1,7 @@
 # CHANGES.md が存在しない docs/MOQT-RELAY.md を参照するエントリを削除する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/update-remove-stale-moqt-relay-reference
 - Polished: 2026-10-01
 
@@ -40,4 +40,14 @@ CHANGES.md の develop セクションに、リポジトリに存在しない `d
 
 ## 解決方法
 
-{未着手}
+`CHANGES.md` の `## develop` の `### misc` から、存在しない `docs/MOQT-RELAY.md` を参照する
+[UPDATE] エントリ 3 行 (エントリ行・サブバレット・`@voluntas` 行) を削除した。
+
+- 削除したのは「catalog (MSF) と LOC の relay での扱いを docs に明記する」のエントリである。
+  主張するドキュメント変更は `docs/` のどこにも反映されておらず、参照先も存在しないため、
+  変更履歴を事実と一致させる
+- 参照先の置き換えと新規ドキュメントの作成は行っていない。設計方針のとおり、relay の production 経路の
+  文書化は本リポジトリ (Sans I/O のクライアント / サーバー向けライブラリ) の対象外である
+- 他のエントリの文言・担当者行・順序は変更していない (diff は 3 行の削除のみ)。
+  `### misc` の並べ替えは別 issue の対象である
+- `prek run --files CHANGES.md` (markdownlint を含む) が通ることを確認した

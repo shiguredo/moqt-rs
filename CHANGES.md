@@ -570,9 +570,6 @@
 - [UPDATE] OBJECT_PROPERTY_FILTER の datagram 受信経路テストを追加する
   - 一致 / 不一致の判定、状態を更新しないこと、共有 alias で最初に通過した subscription へ紐づくこと、対象 Property の値で合否が決まることを固定する
   - @voluntas
-- [UPDATE] catalog (MSF) と LOC の relay での扱いを docs に明記する
-  - relay は payload と Properties を opaque として扱い、`moqt_msf` / `moqt_loc` を production 経路に配線しない理由を `docs/MOQT-RELAY.md` に記載する
-  - @voluntas
 - [UPDATE] LARGEST_OBJECT の集約ヘルパの配置と FETCH の INVALID_RANGE テストの重複を整理する
   - `Session::publisher_track_largest` の定義を fill モジュールから delivery モジュールへ移し、`effective_largest_object` / `update_largest_object_in_parameters` と同じ箇所に揃える (公開範囲と算出結果は変えない)
   - FETCH の INVALID_RANGE 応答検証を `assert_invalid_range_request_error` に集約し、4 テストに残っていた同型のインライン `match` を共通ヘルパへ置き換える
