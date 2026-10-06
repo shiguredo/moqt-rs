@@ -1028,6 +1028,9 @@ impl WtClient {
             let state_for_datagram = Arc::clone(&state);
             let handle_for_datagram = handle.clone();
             let session_state_for_datagram = session_state_tx.clone();
+            // セッション終了を観測するための receiver (タスクが終了すると、このタスクが持つ
+            // `watch::Sender` の clone も drop される)
+            let mut session_state_rx_for_datagram = session_state_tx.subscribe();
             tokio::spawn(async move {
                 loop {
                     let result = handle_for_datagram.datagram_mut(
@@ -1066,7 +1069,18 @@ impl WtClient {
                             }
                         }
                         Ok(None) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            // キューが空のときだけセッション終了 (§6) を観測する。キューに
+                            // datagram が残っている間は読み続けるため、終了直前に届いた
+                            // datagram を落とさず、終了後は受信を続けない。止めないと
+                            // `watch::Sender` の clone を保持し続けて他の待機側の sender drop
+                            // 経路も塞ぐ。MOQT 層は `take_buffered_datagrams` が返す
+                            // `ConnectionClosed` でセッション終了を検知する
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                                _ = wait_until_terminated(&mut session_state_rx_for_datagram) => {
+                                    break;
+                                }
+                            }
                         }
                         Err(e) => {
                             // datagram の受信 API のエラーは datagram を読めないことを意味する

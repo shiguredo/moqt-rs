@@ -1,7 +1,7 @@
 # WebTransport の datagram 受信タスクがセッション終了後も動き続ける
 
 - Created: 2026-09-26
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/fix-webtransport-datagram-task-lifetime
 - Polished: 2026-09-27
 
@@ -21,6 +21,25 @@ WebTransport の datagram 受信タスクがセッション終了を観測して
 - 抜けたあとは datagram を読まない (MOQT 層は `take_buffered_datagrams` が返す `ConnectionClosed` で終了を検知する)。
 - I/O ハンドルを持つためタスクの終了そのものは単体テストで固定できない。終了判定は既存の `session_policy` / `wait_until_terminated` に集約されており、本修正で新たに現れる純関数は無い。追加テストは要さず、配線はレビューと実機で確認する。
 - セッションが確立しないまま `WtClient::connect` がエラーを返した場合も、接続が生きている限りタスクは残る。この残存は本修正の対象外とし、接続が終了したときに `datagram_mut` のエラーで break する既存経路で終える。
+
+## 解決方法
+
+`examples/tokio-moq/src/webtransport_h3.rs` の datagram 受信タスクがセッション終了を観測して
+終了するようにした。
+
+- datagram の受信キューが空のときの待機を `tokio::select!` にし、`wait_until_terminated` が
+  返ったらループを抜けるようにした。セッション終了を観測したタスクは datagram を読まなくなり、
+  タスクが持つ `watch::Sender` の clone も drop されるため、他の待機側の sender drop 経路を
+  塞がなくなる
+- 終了の観測はキューが空のときだけ行う。キューに datagram が残っている間に抜けると、終了直前に
+  peer が送った Object Datagram を落とすことになり、`resolve_buffered_datagrams` の
+  「セッション終了を検知しても同じバッチで取り出した datagram は捨てない」という方針に反するため
+- datagram の受信内容の扱い (h3 層への feed と `process_h3_outcome`) は変えていない
+- I/O ハンドルを持つタスクのため終了そのものは単体テストで固定できない。終了判定はテスト済みの
+  `session_policy` / `wait_until_terminated` に集約されており、本修正で新たに現れる純関数は
+  無いため追加テストは置かず、配線をレビューで確認した
+- 検証: `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo test --workspace` / `prek run --all-files` が通ることを確認した
 
 ## 完了条件
 
