@@ -1961,6 +1961,8 @@ impl Session {
     /// `Session::tolerates_late_data_stream` が true の request (ローカル終端済み、または
     /// 自側が request stream の GOAWAY を送った request) へ遅延して届いた fill fetch stream は、
     /// peer が reset を観測する前に開いた正当な stream のため受理する。
+    /// ただし帰属先の subscription が state テーブルに残っていることが前提であり、
+    /// アプリが先に `forget_subscription` を呼んだ場合は解決できず拒否される。
     /// 同じく `Terminated` の fetch へ遅延して届いた FETCH 応答 stream も
     /// 破棄対象 stream として吸収する。
     /// それ以外 (未知 ID / 非 subscriber 役 / 上記以外の `Terminated`) は
@@ -2798,12 +2800,10 @@ impl Session {
                 return;
             }
             subscription.state = SubscriptionState::Terminated;
-            // subscription は SUBSCRIBE 由来と PUBLISH 由来がある。request_streams の
-            // 記録が正しい種別を持つのでそれを優先する。
-            self.request_streams
-                .get(&request_id)
-                .copied()
-                .unwrap_or(RequestKind::Subscribe)
+            // subscription は SUBSCRIBE 由来と PUBLISH 由来がある。`request_streams` の
+            // 記録が正しい種別を持つのでそれを優先する
+            // (詳細は `Session::request_kind_for_termination` の doc 参照)。
+            self.request_kind_for_termination(request_id)
         } else if let Some(fetch) = self.fetches.get_mut(&request_id) {
             // 既に `Terminated` の fetch には二重発行しない。
             // 現時点の呼び出し経路はすべて subscription 由来であり到達不能だが、
@@ -3573,6 +3573,10 @@ impl Session {
     /// 吸収し続けるのが設計であり (draft §3.1.3)、期限管理の対象は終端済み id を移す
     /// 保持集合 (`data_streams.discarded`) のみ。peer が終端を送らず放置した場合は
     /// I/O 層が STOP_SENDING を送って閉じることで初めて保持集合 (期限管理) に入る。
+    ///
+    /// ローカル終端済みの fetch へ遅延して届いた FETCH 応答 data stream も本関数で登録する
+    /// (peer が終端通知を送るまで `incoming` に残り、`forget_fetch` 等での除去時に
+    /// [`retain_discarded_stream_id`](Self::retain_discarded_stream_id) で保持集合へ移る)。
     ///
     /// 既存 `Subgroup` variant からの置き換えでは
     /// [`cleanup_discarded_subgroup_stream`](Self::cleanup_discarded_subgroup_stream) で

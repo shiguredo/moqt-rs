@@ -290,6 +290,11 @@ pub(super) struct GoawayState {
     /// 判定 (`Session::tolerates_late_data_stream`) にも使う。後者の用途では peer の close
     /// 通知後も必要になるため、request の破棄時にあわせて除去しない (request 数に比例する
     /// 有界の集合であり、セッション寿命まで保持する)。
+    ///
+    /// 遅延 data stream の許容は「GOAWAY を送った request」全体に及び、GOAWAY の deadline
+    /// 満了以外の理由で `Terminated` になった request も含む。どの理由であっても、reset を
+    /// 観測する前に peer が開いた stream は正当に届くため、個別に区別しない
+    /// (`RequestKind` ごとの終端理由は `TerminationReason` としてアプリへ通知される)。
     pub(super) request_stream_sent: HashSet<u64>,
     pub(super) request_stream_received: HashSet<u64>,
     pub(super) peer: Option<PeerGoawayInfo>,
@@ -404,11 +409,12 @@ pub struct Session {
     /// (publisher 側・データストリーム終端済み。FIN / RESET の両方の終端通知を含む)
     /// 破棄だけは `forget_fetch` が本集合へ記録して遅延クローズを吸収する。
     /// malformed 終端も同様に `terminate_malformed_track` が記録する。
-    /// 本集合への記録は close 通知の no-op 吸収だけでなく、各ハンドラが遅延メッセージを
-    /// 状態遷移せず受理する判定 (`Session::is_locally_terminated_request`) と、state
-    /// テーブルから破棄済みの request への応答の no-op 吸収にも使う。自側が送信方向を reset しても
-    /// peer の送信方向は開いたままなので、peer が GOAWAY / reset を観測する前に送った応答は
-    /// 正当に届き、状態検証に掛けるとセッションを閉じてしまうためである。
+    /// 本集合への記録は close 通知の no-op 吸収と、各ハンドラが遅延メッセージを状態遷移せず
+    /// 受理する判定 (`Session::is_locally_terminated_request`) に使う。自側が送信方向を reset
+    /// しても peer の送信方向は開いたままなので、peer が GOAWAY / reset を観測する前に送った
+    /// メッセージは正当に届き、状態検証に掛けるとセッションを閉じてしまうためである。
+    /// state テーブルから破棄済み (`forget_*` 後) の request へのメッセージは、request 種別と
+    /// 状態が失われているため受理しない (従来どおり違反)。
     /// クローズ通知の受信時に削除される (2 回目以降の close 通知は unknown id として
     /// `PROTOCOL_VIOLATION` になる。QUIC では FIN 後に RESET_STREAM が遅延して届きうるが、
     /// 同一 request stream への 2 回目の close 通知を抑止する責務は I/O 層にある)。
@@ -1337,6 +1343,21 @@ impl Session {
     pub(super) fn tolerates_late_data_stream(&self, request_id: u64) -> bool {
         self.rejected_request_ids.contains(&request_id)
             || self.goaway.request_stream_sent.contains(&request_id)
+    }
+
+    /// 終端通知に載せる request 種別を決める
+    ///
+    /// `request_streams` の記録 (SUBSCRIBE 起点と PUBLISH 起点の区別) を優先し、記録が無ければ
+    /// SUBSCRIBE 起点として扱う。`terminate_request_on_goaway_timeout` /
+    /// `terminate_malformed_track` は「非終端の subscription は `request_streams` に entry を持つ」
+    /// 不変条件の下で呼ばれるため、fallback は防御コードである (不変条件は
+    /// `close_subscription_on_stream_end` / `forget_subscription` / `recv_request_stream_closed` /
+    /// `terminate_malformed_track` が保つ)。
+    pub(super) fn request_kind_for_termination(&self, request_id: u64) -> RequestKind {
+        self.request_streams
+            .get(&request_id)
+            .copied()
+            .unwrap_or(RequestKind::Subscribe)
     }
 
     /// ローカル終端済み (`rejected_request_ids` に記録済み) の request かを返す

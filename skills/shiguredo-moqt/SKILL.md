@@ -290,7 +290,11 @@ REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセー
 (送信者・種別・自側の役割・パラメータスコープ・FORWARD・Track Alias・Request ID・
 MAX_REQUEST_UPDATES・auth token・End Location) を行ったうえで、状態遷移せず受理する
 (subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.1 Redirect 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
-のみを通知する (他の応答は状態遷移もイベント発行もしない)。state テーブルから破棄済みの
+のみを通知する (他の応答は状態遷移もイベント発行もしない)。ローカル終端済みの REQUEST_UPDATE では
+Range Filter の内容検証を省略する (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、
+送信方向を reset 済みで応答を送れないため満たせない)。終端で PUBLISH_OK / REQUEST_UPDATE_OK の
+区別が state から失われるため、REQUEST_OK のパラメータは両 context の許可集合で検証する
+(自側 publisher で initiator の場合、PUBLISH_OK context でも LARGEST_OBJECT を許容する残差がある)。state テーブルから破棄済みの
 request (`forget_*` 後) へのメッセージは request 種別と状態が失われているため受理せず、
 従来どおりセッションを閉じる (遅延メッセージの到着が止まってから
 `forget_*` を呼ぶこと。peer の close 通知は no-op で吸収されるため通知されない)。

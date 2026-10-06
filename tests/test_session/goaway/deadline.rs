@@ -1051,3 +1051,67 @@ fn request_stream_goaway_timeout_rejects_late_request_ok_for_responder_publisher
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
+
+/// 終端済みでも自側 publisher の遅延 REQUEST_OK を受理する (context 復元不能による残差)
+///
+/// 自側が PUBLISH を送った (publisher 役の initiator) subscription を GOAWAY の deadline 満了で
+/// 終端すると、draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) の context
+/// (PUBLISH_OK / REQUEST_UPDATE_OK) が state から失われる。どちらの context でも許可されない
+/// パラメータだけを違反とするため、PUBLISH_OK context では許可されない LARGEST_OBJECT でも
+/// 受理する (残差。詳細は `Session::handle_ok_for_subscription` のコメントを参照)。
+#[test]
+fn request_stream_goaway_timeout_absorbs_late_publish_ok_with_largest_object() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            900,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("PUBLISH の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("PUBLISH_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("PUBLISH_OK の受信に成功すること");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "PUBLISH_OK で subscription が確立すること"
+    );
+
+    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 1,
+            object: 2,
+        },
+    });
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: params,
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("終端済み request への遅延 REQUEST_OK が no-op で吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}

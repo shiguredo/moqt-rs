@@ -710,7 +710,10 @@ pub enum TerminationReason {
     /// peer の応答の受領は保証されないため、応答待ちだった requester 側の entry は応答を
     /// 持たないまま残る (`Session::forget_*` で回収できる)。publisher 役 fetch の open 中の
     /// outgoing FETCH data stream は Session が reset しないため、アプリが
-    /// `Session::send_fetch_data_stream_closed` で閉じること。
+    /// `Session::send_fetch_data_stream_closed` で閉じること。publisher 役 subscription の
+    /// open 中の outgoing subgroup stream も同様に Session が reset しないため、
+    /// アプリが `Session::send_data_stream_closed` で閉じること (subscription 側で Session が
+    /// reset するのは、購読の終端に伴い §3.4.1 の MUST が課る fill fetch stream だけである)。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     GoawayTimeout,
 }

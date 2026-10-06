@@ -301,15 +301,9 @@ impl Session {
                 // Rejection) の cancel の一部であり、購読を自側で終端する以上 open 中の
                 // fill fetch stream を reset する。
                 self.reset_open_fill_streams(request_id);
-                // 種別は request_streams の記録を優先する (SUBSCRIBE 起点と PUBLISH 起点を
-                // 区別するため)。非終端の subscription が entry を持つ不変条件は
-                // `close_subscription_on_stream_end` / `forget_subscription` /
-                // `terminate_malformed_track` と `recv_request_stream_closed` が保つため
-                // 通常この fallback には到達しない (防御コード)。
-                self.request_streams
-                    .get(&request_id)
-                    .copied()
-                    .unwrap_or(RequestKind::Subscribe)
+                // 種別は `request_streams` の記録を優先する (SUBSCRIBE 起点と PUBLISH 起点を
+                // 区別するため)。詳細は `Session::request_kind_for_termination` の doc 参照。
+                self.request_kind_for_termination(request_id)
             }
             RequestTable::Fetch => {
                 let fetch = self
@@ -319,6 +313,11 @@ impl Session {
                 if fetch.state == FetchState::Terminated {
                     return None;
                 }
+                // publisher 役 fetch の open 中の outgoing FETCH data stream は reset しない。
+                // §3.4.1 の「cancel 時に開いている fill fetch stream を reset する」MUST は
+                // subscription 側の話であり、fetch の data stream はアプリが
+                // `send_fetch_data_stream_closed` で閉じる (`TerminationReason::GoawayTimeout`
+                // と `skills/shiguredo-moqt/SKILL.md` にも記載がある)。
                 RequestKind::Fetch
             }
             RequestTable::TrackStatus => {

@@ -755,8 +755,10 @@ impl Session {
         // 自側 publisher の Established subscription では PUBLISH_DONE(UPDATE_FAILED) まで
         // 終端する (§9.5.1 の MUST)。subscriber 側は REQUEST_ERROR のみで従来どおり。
         // ローカル終端済みの request は送信方向を reset 済みで拒否応答 (REQUEST_ERROR) を
-        // 送れないため、拒否せず dispatch へ進む (送信者・NEW_GROUP_REQUEST・FORWARD の
-        // MUST 検証は各ハンドラで行い、状態遷移はしない)
+        // 送れないため、拒否せず dispatch へ進む。Range Filter の内容検証自体は省略され
+        // (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、応答を送れない以上
+        // 満たせない)、送信者・NEW_GROUP_REQUEST・FORWARD の MUST 検証は各ハンドラで行い、
+        // 状態遷移はしない
         if let Err(reason) = self.check_incoming_range_filters(&update.parameters)
             && !self.is_locally_terminated_request(request_id)
         {
@@ -769,6 +771,9 @@ impl Session {
         // fill fetch stream を開きうるのは FILL_PARAMETERS を持つ REQUEST_UPDATE だけなので、
         // その場合のみ登録する。
         if update.parameters.fill_parameters().is_some() {
+            // ローカル終端済みでも登録する。peer が reset を観測する前に開いた fill fetch
+            // stream を subscription へ解決できるようにするためである
+            // (`handle_update_for_subscription` はこの後に状態遷移せず return する)。
             self.register_fill_request_subscription(update.request_id, request_id);
         }
         match table {
