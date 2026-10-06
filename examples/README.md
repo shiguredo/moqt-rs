@@ -103,9 +103,9 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--no-audio` | | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | | 音声入力デバイス ID |
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
-| `--use-datagram` | | | subgroup stream ではなく datagram で映像 / 音声オブジェクトを配信する (catalog は常に subgroup stream) |
+| `--audio-datagram` | | | 音声トラックを subgroup stream ではなく datagram で配信する (映像と catalog は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2) |
 
-`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` は無視され、警告ログが出る。
+`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` は無視され、警告ログが出る。
 `--input-mp4-reencode` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視され、警告ログが出る。
 
 ### moq-sub

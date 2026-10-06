@@ -65,8 +65,11 @@ pub struct Config {
     pub audio_device_id: Option<String>,
     /// 音声ターゲットビットレート kbps
     pub audio_bitrate: u32,
-    /// datagram 送信を使用するかどうか
-    pub use_datagram: bool,
+    /// 音声トラックを datagram で送るかどうか
+    ///
+    /// 映像は 1 group = 1 unidirectional stream で送る (draft-ietf-moq-loc-04 §4.2)。
+    /// datagram が示されているのは §4.1 の音声の例だけである。
+    pub audio_datagram: bool,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
@@ -241,8 +244,8 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         "64",
     )?;
 
-    let use_datagram: bool = noargs::flag("use-datagram")
-        .doc("Use datagram for object delivery instead of subgroup streams")
+    let audio_datagram: bool = noargs::flag("audio-datagram")
+        .doc("Use datagrams for the audio track instead of subgroup streams")
         .take(&mut args)
         .is_present();
 
@@ -261,6 +264,11 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let video_enabled = !no_video;
     // --input-mp4 は映像トラックだけを配信するため、音声トラックは常に配信しない
     let audio_enabled = !no_audio && input_mp4.is_none();
+
+    // 音声トラックを送らない場合、datagram 配送の指定は意味を持たない (黙って捨てずに警告する)
+    if audio_datagram && !audio_enabled {
+        tracing::warn!("--audio-datagram is ignored because the audio track is not published");
+    }
     if !args.metadata().help_mode {
         if input_mp4.is_some() && input_mp4_reencode.is_some() {
             return Err(noargs::Error::other(
@@ -315,6 +323,11 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
             if audio_bitrate_explicit {
                 tracing::warn!(
                     "--audio-bitrate is ignored when --input-mp4 is set (audio is not published)"
+                );
+            }
+            if audio_datagram {
+                tracing::warn!(
+                    "--audio-datagram is ignored when --input-mp4 is set (audio is not published)"
                 );
             }
         }
@@ -375,7 +388,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_enabled,
         audio_device_id,
         audio_bitrate,
-        use_datagram,
+        audio_datagram,
         input_mp4,
         input_mp4_reencode,
     }))
@@ -414,6 +427,44 @@ mod tests {
 
     /// テスト用の必須引数
     const BASE_ARGS: &[&str] = &["--url", "moqt://127.0.0.1:4443"];
+
+    /// 削除した `--use-datagram` は未定義のオプションとしてエラーになる
+    ///
+    /// 映像と音声の一括指定に戻さないよう、削除を回帰から守る。
+    #[test]
+    fn use_datagram_is_rejected() {
+        let mut args = BASE_ARGS.to_vec();
+        args.push("--use-datagram");
+        assert!(
+            parse_args(&args).is_err(),
+            "削除した --use-datagram はエラーになること"
+        );
+    }
+
+    /// `--audio-datagram` は既定で無効、指定で有効になる
+    ///
+    /// datagram 配送は音声トラックだけに指定できる (映像は 1 group = 1 unidirectional stream。
+    /// draft-ietf-moq-loc-04 §4.2)。
+    #[test]
+    fn audio_datagram_flag_is_opt_in() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert!(
+            !config.audio_datagram,
+            "既定では音声トラックも subgroup stream で送ること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.push("--audio-datagram");
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert!(
+            config.audio_datagram,
+            "指定で音声トラックを datagram で送ること"
+        );
+    }
 
     /// `--input-mp4` と明示指定した映像オプションの併用がエラーになること
     #[test]

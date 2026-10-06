@@ -562,7 +562,6 @@ pub async fn run(
     // 失敗として扱うために使う (セッション終了後の `close` は CONNECT stream の送信失敗として
     // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
     let mut session_ended = false;
-    let mut current_video_datagram_writer: Option<DatagramWriter> = None;
     let mut audio_pcm_buf: Vec<i16> = Vec::new();
     // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
     let mut pending_video_timestamps: VecDeque<u64> = VecDeque::new();
@@ -573,10 +572,14 @@ pub async fn run(
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     tracing::info!(
-        "Starting publish loop (video={}, audio={}, datagram={})",
+        "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={})",
         config.video_enabled,
         config.audio_enabled,
-        config.use_datagram,
+        if config.audio_datagram {
+            "datagram"
+        } else {
+            "subgroup"
+        },
     );
 
     'main: loop {
@@ -618,56 +621,39 @@ pub async fn run(
                     let timescale = video_timescale.expect("video timescale enabled");
                     for ef in encoded_frames {
                         if ef.is_keyframe {
-                            // datagram モードと Subgroup モードの両方で使うため、ここで request_id を
+                            // writer の作成と終端で同じ値を使うため、ここで request_id を
                             // 確定させる (`.expect()` の重複も避ける)
                             let video_request_id =
                                 video_request_id.expect("video request_id enabled");
-                            if config.use_datagram {
-                                // datagram モード: 前の writer は特に finalize しない
-                                current_video_datagram_writer = Some(DatagramWriter::new(
+                            // 映像は 1 group = 1 unidirectional stream で送る
+                            // (draft-ietf-moq-loc-04 §4.2)。datagram 配送は音声トラックだけに
+                            // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
+                            // 映像では使わない。
+                            if let Some(writer) = current_video_writer.take() {
+                                writer.finish(client.subscription_filter_start(video_request_id))?;
+                            }
+                            // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
+                            // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+                            // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
+                            current_video_writer = Some(
+                                SubgroupWriter::new(
                                     &handle,
                                     &data_plane,
                                     video_request_id,
                                     VIDEO_TRACK_ALIAS,
                                     video_group_id,
                                     DEFAULT_PUBLISHER_PRIORITY,
-                                ));
-                            } else {
-                                if let Some(writer) = current_video_writer.take() {
-                                    writer.finish(
-                                        client.subscription_filter_start(video_request_id),
-                                    )?;
-                                }
-                                // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
-                                // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
-                                // 映像ストリームには毎フレーム LOC プロパティを付与するため true を渡す
-                                current_video_writer = Some(
-                                    SubgroupWriter::new(
-                                        &handle,
-                                        &data_plane,
-                                        video_request_id,
-                                        VIDEO_TRACK_ALIAS,
-                                        video_group_id,
-                                        DEFAULT_PUBLISHER_PRIORITY,
-                                        true,
-                                        client.subscription_filter_start(video_request_id),
-                                    )
-                                    .await?,
-                                );
-                            }
+                                    true,
+                                    client.subscription_filter_start(video_request_id),
+                                )
+                                .await?,
+                            );
                             tracing::debug!("Started new video group {}", video_group_id);
                             video_group_id += 1;
                         }
                         let properties = build_video_loc_properties(&ef, timescale);
-                        if config.use_datagram {
-                            if let Some(writer) = current_video_datagram_writer.as_mut() {
-                                // video はオブジェクト単位で独立のため、Skip の結果は無視してよい
-                                let _ = writer.write_object(&ef.data, &properties).await?;
-                            }
-                        } else {
-                            if let Some(writer) = current_video_writer.as_mut() {
-                                let _ = writer.write_object(&ef.data, &properties).await?;
-                            }
+                        if let Some(writer) = current_video_writer.as_mut() {
+                            let _ = writer.write_object(&ef.data, &properties).await?;
                         }
                     }
                     Ok(())
@@ -736,7 +722,7 @@ pub async fn run(
                         let properties =
                             build_audio_loc_properties(timestamp, timescale, audio_config);
                         // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
-                        if config.use_datagram {
+                        if config.audio_datagram {
                             let mut writer = DatagramWriter::new(
                                 &handle,
                                 &data_plane,
@@ -917,8 +903,6 @@ pub async fn run(
         // 省略があれば RESET 側に倒れる (安全側)
         writer.finish(video_request_id.and_then(|rid| client.subscription_filter_start(rid)))?;
     }
-    // datagram writer は明示的な finalize 不要
-    drop(current_video_datagram_writer);
 
     // PUBLISH_DONE を各 request に送信してストリームを閉じる
     if let Some(rid) = video_request_id

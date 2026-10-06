@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] example の `--use-datagram` を削除し、音声トラックだけを datagram 配送にする `--audio-datagram` を追加する
+  - 映像は 1 group = 1 unidirectional stream で送る (draft-ietf-moq-loc-04 §4.2)。datagram 配送が示されているのは同 §4.1 の音声の例だけで、datagram は 1 object が 1 QUIC datagram に収まる必要がある (RFC 9221 §3 の `max_datagram_frame_size` と path MTU)
+  - 映像と catalog は常に subgroup stream で送る
+  - @voluntas
 - [FIX] example が WebTransport のセッション終了に伴う失敗を warn ログとして出し、実際の異常と区別できない
   - draft-ietf-webtrans-http3-16 §6 のセッション終了は異常ではないため、moq-pub / moq-sub の後始末 (PUBLISH_DONE / GOAWAY / close / STOP_SENDING) と、終了で停止したストリームの読み出し失敗を `info!` に落とす
   - セッション終了以外の失敗 (decode 失敗やプロトコル違反など) は従来どおり `warn!` で出す
