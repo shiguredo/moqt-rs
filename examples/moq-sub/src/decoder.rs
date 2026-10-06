@@ -26,6 +26,11 @@ pub struct DecodedVideoFrame {
     pub width: i32,
     /// 映像の高さ (ピクセル)
     pub height: i32,
+    /// LOC の Timestamp から求めた時刻 (マイクロ秒)。無いときは None
+    ///
+    /// 0103 の完了後は epoch マイクロ秒、それまでは publisher が送った時間軸の値である。
+    /// None のときは、表示時刻を時間軸から決められないため到着順に表示する。
+    pub timestamp_us: Option<i64>,
 }
 
 /// デコード済み音声フレーム (S16 interleaved PCM)

@@ -37,6 +37,8 @@ pub mod grease;
 /// KVP (Key-Value-Pair) の delta-key 骨格を集約する内部モジュール (外部公開しない)
 pub(crate) mod kvp;
 pub mod loc;
+/// メディア時刻を Unix epoch の壁時計へ換算する処理 (draft-ietf-moq-loc-04 §2.3.1.1)
+pub mod media_clock;
 pub mod message;
 /// メッセージ パラメータ群 (draft-ietf-moq-transport-22 §9.20 (Control Message Parameters))
 pub mod message_parameter;

@@ -36,6 +36,8 @@ impl Av1Decoder {
                 v,
                 width: w as i32,
                 height: h as i32,
+                // Timestamp は Object の Properties から pipeline が載せる
+                timestamp_us: None,
             });
         }
         Ok(frames)

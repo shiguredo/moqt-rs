@@ -1,7 +1,7 @@
 # 映像の表示時刻に合わせてフレームを選ぶキューを追加する
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/complete-playout
 - Polished: {YYYY-MM-DD}
 
@@ -38,3 +38,10 @@
 - `src/playout/timeline.rs` の `PlayoutTimeline` / `Track`
 - draft-ietf-moq-loc-04 §2.3.1.1 (Timestamp)
 - draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.11 (Render group)
+
+## 解決方法
+
+- `src/playout/buffer.rs` に `PlayoutBuffer<T>` を追加した。`enqueue` で表示時刻と一緒に積み、`select(now_us, &timeline)` が表示時刻を過ぎたフレームのうち最新の 1 枚を `draw`、上限 (`MAX_PRESENTATION_LAG_US`) を超えた分を `late`、表示時刻を決められないフレームと世代の変わったフレームを到着順の 1 枚として返す。
+- 保持数の上限 (`JITTER_BUFFER_MAX_QUEUED_FRAMES`) を超えた分は `enqueue` が古い方から返し、呼び出し側が捨てる。
+- `tests/test_playout/buffer.rs` に 9 件、`pbt/tests/prop_playout/buffer.rs` に 1 件のテストを追加した。
+- `examples/moq-sub` の映像がこのキューを使うようになり、表示時刻に合わせて選ぶようになった (0104)。

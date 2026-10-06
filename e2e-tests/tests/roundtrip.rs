@@ -253,6 +253,8 @@ async fn start_subscriber(
         let shutdown = ShutdownController::new();
         // 表示側と同じようにテスト側でも減らすため、パイプラインと共有する
         let backlog = Arc::new(AtomicI64::new(0));
+        // 再生を行わないためカタログの targetLatency は使わない。-1 は「カタログに無い」
+        let target_latency_ms = Arc::new(AtomicI64::new(-1));
         let task = tokio::spawn(moq_sub::pipeline::run(
             config,
             frame_tx,
@@ -260,6 +262,7 @@ async fn start_subscriber(
             tokio_metrics::TaskMonitor::new(),
             shutdown.subscribe(),
             Arc::clone(&backlog),
+            target_latency_ms,
             player_stop_rx,
         ));
 

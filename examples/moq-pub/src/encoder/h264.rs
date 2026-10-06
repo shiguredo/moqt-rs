@@ -29,12 +29,10 @@ const AVCC_LENGTH_SIZE: u8 = 4;
 /// H.264 エンコーダ (Apple Video Toolbox)
 pub struct H264Encoder {
     encoder: Encoder,
-    /// タイムスケール (fps * 1000)
-    timescale: u64,
-    /// フレームカウンタ
-    frame_count: u64,
-    /// FPS
-    fps: u32,
+    /// 1 フレームの表示間隔 (マイクロ秒)
+    ///
+    /// 1 つの入力から複数の出力フレームが出たときに Timestamp を進める量。
+    frame_interval_us: u64,
     /// MSF catalog に載せる codec 文字列
     ///
     /// `new` 時点では既定値。最初のキーフレーム到来時に SPS から再構築する。
@@ -50,6 +48,11 @@ impl H264Encoder {
         bitrate: u32,
         keyframe_interval: u32,
     ) -> Result<Self> {
+        if fps == 0 {
+            return Err(Error::Other(
+                "fps must be non-zero to compute the frame interval".to_string(),
+            ));
+        }
         let config = EncoderConfig {
             width,
             height,
@@ -72,23 +75,21 @@ impl H264Encoder {
         };
 
         let encoder = Encoder::new(config)?;
-        let timescale = fps as u64 * 1000;
+        let frame_interval_us = 1_000_000 / u64::from(fps);
 
         tracing::info!(
-            "H.264 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval={}, timescale={})",
+            "H.264 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval={}, frame_interval_us={})",
             width,
             height,
             fps,
             bitrate,
             keyframe_interval,
-            timescale
+            frame_interval_us
         );
 
         Ok(Self {
             encoder,
-            timescale,
-            frame_count: 0,
-            fps,
+            frame_interval_us,
             catalog_codec_string: DEFAULT_AVC_CATALOG_CODEC_STRING.to_string(),
         })
     }
@@ -96,7 +97,14 @@ impl H264Encoder {
 
 impl H264Encoder {
     /// 1 フレームをエンコードして 0 個以上のエンコード済みフレームを返す
-    pub fn encode(&mut self, frame: &VideoFrameOwned) -> Result<Vec<EncodedFrame>> {
+    ///
+    /// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。先頭の出力フレームへ
+    /// そのまま載せ、複数の出力フレームがある場合は 1 フレームずつ進める。
+    pub fn encode(
+        &mut self,
+        frame: &VideoFrameOwned,
+        timestamp_us: u64,
+    ) -> Result<Vec<EncodedFrame>> {
         let data = FrameData::Nv12 {
             y: &frame.data,
             uv: frame.uv_data.as_deref().unwrap_or(&[]),
@@ -109,8 +117,10 @@ impl H264Encoder {
         self.encoder.encode(&data, &options)?;
 
         let mut frames = Vec::new();
+        let mut output_index: u64 = 0;
         while let Some(encoded) = self.encoder.next_frame()? {
-            let timestamp = self.frame_count * self.timescale / self.fps as u64;
+            let timestamp =
+                super::output_timestamp_us(timestamp_us, output_index, self.frame_interval_us);
             let is_keyframe = encoded.keyframe;
             let video_config = if is_keyframe {
                 if encoded.sps_list.is_empty() {
@@ -135,15 +145,10 @@ impl H264Encoder {
                 timestamp,
                 video_config,
             });
-            self.frame_count += 1;
+            output_index += 1;
         }
 
         Ok(frames)
-    }
-
-    /// 1 秒あたりの timestamp 単位数
-    pub fn timescale(&self) -> u64 {
-        self.timescale
     }
 
     /// MSF catalog に載せる RFC 6381 形式の codec 文字列

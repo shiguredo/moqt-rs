@@ -75,6 +75,11 @@ pub struct Config {
     /// 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
     /// 上限を超える object は送らずに対処法を示すエラーにする。
     pub datagram_max_size: usize,
+    /// MSF カタログのターゲットレイテンシ (ms)
+    ///
+    /// 受信側が符号化時刻からどれだけ遅らせて表示するかを示す
+    /// (draft-ietf-moq-msf-01 §5.2.8)。音声と映像で同じ値を使う。
+    pub target_latency_ms: u32,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
@@ -89,6 +94,12 @@ pub struct Config {
 /// packet number、AEAD タグ、DATAGRAM frame の type / Length は含まれないため、その分の
 /// 余裕を引いた値を既定にする。
 pub(crate) const DEFAULT_DATAGRAM_MAX_SIZE: usize = 1160;
+
+/// `--target-latency` の既定値 (ms)
+///
+/// live 配信の example としての値。音声と映像で同じ値を使うため、カタログの
+/// `targetLatency` にも同じ値を載せる (draft-ietf-moq-msf-01 §5.2.8)。
+pub(crate) const DEFAULT_TARGET_LATENCY_MS: u32 = 200;
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
 ///
@@ -286,6 +297,23 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .is_present();
 
+    // `.default()` は `&'static str` しか取れないため、`DEFAULT_TARGET_LATENCY_MS` と
+    // 一致する値を文字列で渡す (一致は単体テストで固定する)
+    let target_latency_opt = noargs::opt("target-latency")
+        .ty("MS")
+        .doc("Target latency in milliseconds for the catalog")
+        .default("200")
+        .take(&mut args);
+    let target_latency_ms = target_latency_opt.then(|o| {
+        let value = o.value();
+        value.parse::<u32>().map_err(|_| {
+            format!(
+                "--target-latency must be a non-negative integer in milliseconds (default {}): {value}",
+                DEFAULT_TARGET_LATENCY_MS
+            )
+        })
+    })?;
+
     let input_mp4: Option<String> = noargs::opt("input-mp4")
         .ty("PATH")
         .doc("Publish the video track of an MP4 file without re-encoding (audio is not published)")
@@ -432,6 +460,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_bitrate,
         audio_datagram,
         datagram_max_size,
+        target_latency_ms,
         input_mp4,
         input_mp4_reencode,
     }))
@@ -499,6 +528,37 @@ mod tests {
             assert!(
                 parse_args(&args).is_err(),
                 "範囲外と数値でない上限はエラーになること: {value}"
+            );
+        }
+    }
+
+    /// `--target-latency` は既定値を使い、指定で上書き、数値でない値はエラーになる
+    ///
+    /// 既定の 200 ms は live 配信の example としての値である。受信側はこの値ぶん
+    /// 遅らせて表示し、音声と映像で同じ値を使う (draft-ietf-moq-msf-01 §5.2.8)。
+    #[test]
+    fn target_latency_is_configurable() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.target_latency_ms, DEFAULT_TARGET_LATENCY_MS,
+            "既定は 200 ms であること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--target-latency", "500"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(config.target_latency_ms, 500, "指定した値が使われること");
+
+        for value in ["1x", "-1"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--target-latency", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "数値でない値と負の値はエラーになること: {value}"
             );
         }
     }

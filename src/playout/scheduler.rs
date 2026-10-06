@@ -1,8 +1,9 @@
 //! 復号した音声を鳴らす時刻を決める
 //!
 //! 目標の時刻に従って音を並べる。目標に間に合わない音も捨てず、今から鳴らせる最も
-//! 早い時刻へずらして鳴らし、ずらした分を時間圧縮で目標へ戻す。時刻はすべて呼び出し
-//! 側が引数で渡し、デバイス API やタイマーには触れない。
+//! 早い時刻へずらして鳴らし、ずらした分を時間圧縮で目標へ戻す。前の音の終わりと今回の
+//! 開始の間に空いた分は、呼び出し側が直前の音を時間伸長して埋められるよう隙間として
+//! 返す。時刻はすべて呼び出し側が引数で渡し、デバイス API やタイマーには触れない。
 
 /// 再生の遅れの下限 (マイクロ秒)
 ///
@@ -23,6 +24,18 @@ pub const AUDIO_PLAYOUT_MIN_LEAD_US: i64 = 10_000;
 /// なるため、一度捨てて目標へ戻す。
 pub const AUDIO_PLAYOUT_MAX_LATENESS_US: i64 = 500_000;
 
+/// 補間する隙間の下限 (マイクロ秒)
+///
+/// これ以下の隙間は補間の継ぎ目が耳につくため補間せず、無音のまま残す。
+pub const AUDIO_PLAYOUT_MIN_CONCEAL_US: i64 = 5_000;
+
+/// 補間する隙間の上限 (マイクロ秒)
+///
+/// これより長い欠落は補間で埋めきらず、超えた分は無音のまま残す。埋めた音の末尾の振幅を
+/// 下げきる長さ ([`crate::playout::stretch::TIME_STRETCH_MAX_CONCEAL_US`]) と同じにする。
+/// これより長く埋めても繰り返しの音を抑える効果が増えないためである。
+pub const AUDIO_PLAYOUT_MAX_CONCEAL_US: i64 = crate::playout::stretch::TIME_STRETCH_MAX_CONCEAL_US;
+
 /// 1 つの音を鳴らすかを決める入力 (すべてマイクロ秒)
 #[derive(Debug, Clone, Copy)]
 pub struct AudioPlayoutInput {
@@ -42,7 +55,7 @@ pub struct AudioPlayoutInput {
     pub presentation_delay_us: i64,
 }
 
-/// 鳴らす時刻と詰める長さ (マイクロ秒)、または捨てる
+/// 鳴らす時刻と詰める長さと補間する隙間 (マイクロ秒)、または捨てる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlayoutDecision {
     /// 鳴らす
@@ -51,6 +64,10 @@ pub enum AudioPlayoutDecision {
         start_at_us: i64,
         /// 波形の周期で詰める長さ (マイクロ秒)。0 なら詰めない
         compress_us: i64,
+        /// 補間する隙間の開始時刻 (今と同じ軸のマイクロ秒)。`gap_us` が 0 のときは使わない
+        gap_start_us: i64,
+        /// 補間する隙間の長さ (マイクロ秒)。上限で切った値であり、0 なら補間しない
+        gap_us: i64,
     },
     /// 捨てる
     Drop,
@@ -66,8 +83,8 @@ struct PlayoutAnchor {
 /// 音を鳴らす時刻を決める (音声トラックごとに 1 つ持つ)
 ///
 /// [`AudioPlayoutScheduler::schedule`] に入力を渡し、返ってきた命令を呼び出し側が
-/// 実行する。実際に詰められた長さは [`AudioPlayoutScheduler::confirm_stretch`] で
-/// 返す。
+/// 実行する。実際に詰められた長さは [`AudioPlayoutScheduler::confirm_stretch`] で、
+/// 実際に補間した長さは [`AudioPlayoutScheduler::confirm_concealment`] で返す。
 pub struct AudioPlayoutScheduler {
     anchor: Option<PlayoutAnchor>,
     /// 直前に鳴らすと決めた音の終わり
@@ -78,9 +95,15 @@ pub struct AudioPlayoutScheduler {
     lateness_us: i64,
     /// 前の音に要求した詰める量。`confirm_stretch` で置き換える
     requested_us: i64,
+    /// 前の音に要求した補間の長さ。`confirm_concealment` で置き換える
+    requested_conceal_us: i64,
     rebase_count: u64,
     drop_count: u64,
     compressed_us: i64,
+    /// 補間した合計
+    concealed_us: i64,
+    /// 補間した回数
+    conceal_count: u64,
 }
 
 impl AudioPlayoutScheduler {
@@ -92,20 +115,25 @@ impl AudioPlayoutScheduler {
             last_timestamp_us: None,
             lateness_us: 0,
             requested_us: 0,
+            requested_conceal_us: 0,
             rebase_count: 0,
             drop_count: 0,
             compressed_us: 0,
+            concealed_us: 0,
+            conceal_count: 0,
         }
     }
 
     /// 音を鳴らす時刻を決める
     ///
     /// `target_start_us` が無い、または `enforce_target` が false のときは
-    /// 到着基準の並べ方を使う。前の音に要求した詰める量が返ってきていなければ、
+    /// 到着基準の並べ方を使う。前の音に要求した詰める量と補間の長さが返ってきていなければ、
     /// 適用されなかったものとして扱う (どちらの並べ方でも同じ)。
     pub fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision {
         // 前の音に要求した詰める量が返ってきていなければ、適用されなかったものとして扱う
         self.confirm_stretch(0);
+        // 前の音に要求した補間の長さも同様に扱う
+        self.requested_conceal_us = 0;
         if !input.enforce_target {
             return self.schedule_by_arrival(input);
         }
@@ -124,6 +152,7 @@ impl AudioPlayoutScheduler {
         }
         // 目標を過ぎて届いた音も前の音と重なる音も捨てない。今から鳴らせる最も早い
         // 時刻へずらして鳴らし、ずらした分を時間圧縮で目標へ戻す
+        let previous_end_us = self.last_end_us;
         let earliest_us = input
             .now_us
             .saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US)
@@ -146,9 +175,13 @@ impl AudioPlayoutScheduler {
                 .saturating_sub(compress_us),
         );
         self.last_timestamp_us = Some(input.timestamp_us);
+        let (gap_start_us, gap_us) =
+            self.concealment_of(input.now_us, previous_end_us, start_at_us);
         AudioPlayoutDecision::Play {
             start_at_us,
             compress_us,
+            gap_start_us,
+            gap_us,
         }
     }
 
@@ -172,6 +205,24 @@ impl AudioPlayoutScheduler {
         }
     }
 
+    /// 実際に補間した長さを記録する (呼び出し側が隙間を埋めた後に呼ぶ)
+    ///
+    /// 要求した長さより長い分は要求までに切る。0 のときは数えない (末尾の相関が足りない、
+    /// 継ぎ目の段差が大きい、予約できないときは補間できていないため)。
+    pub fn confirm_concealment(&mut self, applied_us: i64) {
+        let requested_us = self.requested_conceal_us;
+        self.requested_conceal_us = 0;
+        if requested_us == 0 {
+            return;
+        }
+        let applied_us = applied_us.clamp(0, requested_us);
+        if applied_us == 0 {
+            return;
+        }
+        self.conceal_count += 1;
+        self.concealed_us = self.concealed_us.saturating_add(applied_us);
+    }
+
     /// 基準と前の音の終わりと現在の遅れを消す (購読のやり直し)。累積統計は消さない
     pub fn reset(&mut self) {
         self.anchor = None;
@@ -179,6 +230,7 @@ impl AudioPlayoutScheduler {
         self.last_timestamp_us = None;
         self.lateness_us = 0;
         self.requested_us = 0;
+        self.requested_conceal_us = 0;
     }
 
     /// 累積統計と現在の遅れを消す
@@ -186,6 +238,8 @@ impl AudioPlayoutScheduler {
         self.rebase_count = 0;
         self.drop_count = 0;
         self.compressed_us = 0;
+        self.concealed_us = 0;
+        self.conceal_count = 0;
         self.lateness_us = 0;
     }
 
@@ -204,11 +258,49 @@ impl AudioPlayoutScheduler {
         self.compressed_us
     }
 
+    /// 補間した合計 (マイクロ秒)
+    pub fn concealed_us(&self) -> i64 {
+        self.concealed_us
+    }
+
+    /// 補間した回数 (実際に埋められた音の数)
+    pub fn concealments(&self) -> u64 {
+        self.conceal_count
+    }
+
     /// 目標に対して今どれだけ遅れているか (マイクロ秒)
     ///
     /// 目標ありの並べ方で更新する。到着基準の間は最後の目標ありの値のまま。
     pub fn lateness_us(&self) -> i64 {
         self.lateness_us
+    }
+
+    /// 前の音の終わりと今回の開始の間から、補間する隙間を求める
+    ///
+    /// 下限 (`AUDIO_PLAYOUT_MIN_CONCEAL_US`) 以下の隙間と、開始 (`previous_end_us`) が
+    /// 今 + 余裕 (`AUDIO_PLAYOUT_MIN_LEAD_US`) より前の隙間 (予約できない。過去も含む) は
+    /// 補間しない。上限 (`AUDIO_PLAYOUT_MAX_CONCEAL_US`) を超える分は切り、残りは無音の
+    /// まま残す。見つかった隙間は `confirm_concealment` で実際に補間した長さを返す要求と
+    /// して記録する。補間しないときは開始も長さも 0 にする。
+    fn concealment_of(
+        &mut self,
+        now_us: i64,
+        previous_end_us: Option<i64>,
+        start_at_us: i64,
+    ) -> (i64, i64) {
+        let Some(previous_end_us) = previous_end_us else {
+            return (0, 0);
+        };
+        let gap_us = start_at_us.saturating_sub(previous_end_us);
+        if gap_us <= AUDIO_PLAYOUT_MIN_CONCEAL_US {
+            return (0, 0);
+        }
+        if previous_end_us < now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US) {
+            return (0, 0);
+        }
+        let capped_us = gap_us.min(AUDIO_PLAYOUT_MAX_CONCEAL_US);
+        self.requested_conceal_us = capped_us;
+        (previous_end_us, capped_us)
     }
 
     /// 目標を使わないときの決め方
@@ -217,6 +309,7 @@ impl AudioPlayoutScheduler {
     /// 基準を取り直し、並べすぎの音は捨てる。
     fn schedule_by_arrival(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision {
         let limit_us = input.delay_us.saturating_add(AUDIO_PLAYOUT_BACKLOG_US);
+        let previous_end_us = self.last_end_us;
         let mut start_at_us =
             self.expected_start_at(input.timestamp_us, input.now_us, input.delay_us);
         if start_at_us < input.now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US) {
@@ -239,9 +332,13 @@ impl AudioPlayoutScheduler {
         }
         self.last_end_us = Some(start_at_us.saturating_add(input.duration_us));
         self.last_timestamp_us = Some(input.timestamp_us);
+        let (gap_start_us, gap_us) =
+            self.concealment_of(input.now_us, previous_end_us, start_at_us);
         AudioPlayoutDecision::Play {
             start_at_us,
             compress_us: 0,
+            gap_start_us,
+            gap_us,
         }
     }
 

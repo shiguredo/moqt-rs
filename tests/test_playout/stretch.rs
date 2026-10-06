@@ -1,9 +1,10 @@
-//! 音声の波形の周期による時間圧縮・伸長のテスト
+//! 音声の波形の周期による時間圧縮・伸長と、欠落した区間の補間のテスト
 //!
-//! 公開 API (`compress` / `expand`) の契約を確認する。
+//! 公開 API (`compress` / `expand` / `conceal` / `concealment_end_gain`) の契約を確認する。
 
 use shiguredo_moqt::playout::stretch::{
-    TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, expand,
+    TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, conceal,
+    concealment_end_gain, expand,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -355,4 +356,246 @@ fn supported_sample_rates_are_stretched() {
             "sample_rate={sample_rate}"
         );
     }
+}
+
+#[test]
+fn conceal_repeats_the_tail_period() {
+    // 48 kHz、周期 240 サンプル (5 ms) の矩形波。40 ms の隙間を 1920 サンプルで埋める
+    let original = square_wave(960, 240, 0.5);
+    let mut output = vec![0.0f32; 1_928];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 1_920);
+    // 生成の先頭は、末尾の周期 1 つ分の先頭 (960 - 240) から始まる
+    let end_gain = concealment_end_gain(40_000);
+    for (index, sample) in output[..1_920].iter().enumerate() {
+        let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / 1_920.0);
+        let expected = original[720 + index % 240] * gain;
+        assert!((sample - expected).abs() < 1e-6, "index={index}");
+    }
+    // 埋める長さを超える範囲には書かない
+    assert!(output[1_920..].iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_uses_the_tail_period_when_the_earlier_part_differs() {
+    // 前半だけ周期が違っても、末尾の周期 (240 サンプル) で繰り返す
+    let mut original = square_wave(960, 240, 0.5);
+    // 置き換えるのは 400 サンプルまでにする。末尾の周期を求める範囲 (最後の 2 周期分) に
+    // 掛からない位置であり、間引きのフィルタの窓も越えない
+    let first_part = square_wave(400, 260, 0.5);
+    original[..400].copy_from_slice(&first_part);
+
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 1_920);
+    let end_gain = concealment_end_gain(40_000);
+    for (index, sample) in output.iter().enumerate() {
+        let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / 1_920.0);
+        let expected = original[720 + index % 240] * gain;
+        assert!((sample - expected).abs() < 1e-6, "index={index}");
+    }
+}
+
+#[test]
+fn conceal_fills_every_channel_from_its_own_tail() {
+    let left = square_wave(960, 240, 0.5);
+    let right = square_wave(960, 240, 0.25);
+    let mut output_left = vec![0.0f32; 960];
+    let mut output_right = vec![0.0f32; 960];
+    let channels: [&[f32]; 2] = [left.as_slice(), right.as_slice()];
+    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 20_000), 960);
+    // どちらのチャンネルも、自分の末尾の周期 1 つ分から埋める
+    let end_gain = concealment_end_gain(20_000);
+    let gain = 1.0 - (1.0 - end_gain) * (1.0 / 960.0);
+    assert!((output_left[0] - left[720] * gain).abs() < 1e-6);
+    assert!((output_right[0] - right[720] * gain).abs() < 1e-6);
+}
+
+#[test]
+fn conceal_lowers_the_amplitude_towards_the_end() {
+    let original = square_wave(960, 240, 0.5);
+    let mut output = vec![0.0f32; 4_800];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    // 上限 (100 ms) まで埋めると、埋めた音の末尾の振幅は下限 (0.5) まで下がる
+    assert_eq!(
+        conceal(&channels, &mut outputs, 48_000, TIME_STRETCH_MAX_CONCEAL_US),
+        4_800
+    );
+    let peak = |samples: &[f32]| {
+        samples
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    };
+    let first = peak(&output[..100]);
+    let last = peak(&output[4_700..]);
+    assert!(last < first * 0.6, "first={first} last={last}");
+}
+
+#[test]
+fn conceal_is_ignored_for_silence() {
+    // 無音に近い入力では相関が常に 0 になり周期が求まらないため埋めない
+    // (時間圧縮・時間伸長は無音でも操作するのとは扱いが異なる)
+    let silence = vec![0.0f32; 960];
+    let mut output = vec![7.0f32; 1_920];
+    let channels: [&[f32]; 1] = [silence.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 7.0));
+}
+
+#[test]
+fn conceal_is_ignored_for_noise() {
+    // 波形が繰り返していない音 (相関が足りない音) では埋めない
+    let original = noise(960);
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_is_ignored_for_an_inverted_tail() {
+    // 末尾の 1 周期だけ位相を反転した音では、末尾の相関が足りないため埋めない
+    let mut original = square_wave(960, 240, 0.5);
+    for sample in &mut original[720..] {
+        *sample = -*sample;
+    }
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_is_ignored_when_the_seam_step_is_too_large() {
+    // 単調なランプは末尾の相関が高いが、繰り返しの継ぎ目の段差が自然な段差より大きい
+    let mut original = vec![0.0f32; 960];
+    for (index, sample) in original.iter_mut().enumerate() {
+        *sample = (index as f32 / 960.0) * 0.9 - 0.45;
+    }
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_with_a_short_input_is_ignored() {
+    // 8 kHz: 間引き後 18 サンプルでは末尾の 2 周期分 (下限の 2 倍) が取れない
+    let original = square_wave(40, 20, 0.5);
+    let mut output = vec![0.0f32; 160];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 8_000, 20_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_with_unsupported_sample_rate_is_ignored() {
+    let original = square_wave(960, 240, 0.5);
+    let mut output = vec![0.0f32; 1_764];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 44_100, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_without_enough_output_is_ignored() {
+    let original = square_wave(960, 240, 0.5);
+    // 埋める長さ (1920) に 1 サンプル足りない出力では埋めない
+    let mut output = vec![0.0f32; 1_919];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_with_empty_or_mismatched_input_is_ignored() {
+    let no_channels: [&[f32]; 0] = [];
+    let mut no_outputs: [&mut [f32]; 0] = [];
+    assert_eq!(conceal(&no_channels, &mut no_outputs, 48_000, 40_000), 0);
+
+    let empty: Vec<f32> = Vec::new();
+    let mut output: Vec<f32> = Vec::new();
+    let channels: [&[f32]; 1] = [empty.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+
+    // 埋める長さが 0 以下では埋めない
+    let original = square_wave(960, 240, 0.5);
+    let mut output = vec![5.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 0), 0);
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, -1), 0);
+    assert!(output.iter().all(|sample| *sample == 5.0));
+
+    // チャンネルの長さが揃っていない
+    let short = square_wave(480, 240, 0.5);
+    let mut output_left = vec![0.0f32; 1_920];
+    let mut output_right = vec![0.0f32; 960];
+    let channels: [&[f32]; 2] = [original.as_slice(), short.as_slice()];
+    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output_left.iter().all(|sample| *sample == 0.0));
+    assert!(output_right.iter().all(|sample| *sample == 0.0));
+
+    // 出力の数が合わない
+    let mut output_left = vec![0.0f32; 1_920];
+    let mut output_right = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 0);
+    assert!(output_left.iter().all(|sample| *sample == 0.0));
+    assert!(output_right.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn supported_sample_rates_are_concealed() {
+    // (サンプルレート, 元の長さ, 周期, 埋めるサンプル数)
+    let cases = [
+        (8_000u32, 160usize, 40usize, 160usize),
+        (16_000, 320, 80, 320),
+        (32_000, 640, 160, 640),
+        (48_000, 960, 240, 960),
+    ];
+    for (sample_rate, length, period, expected) in cases {
+        let original = square_wave(length, period, 0.5);
+        let mut output = vec![0.0f32; expected];
+        let channels: [&[f32]; 1] = [original.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        // 20 ms の隙間を埋める
+        assert_eq!(
+            conceal(&channels, &mut outputs, sample_rate, 20_000),
+            expected as isize,
+            "sample_rate={sample_rate}"
+        );
+        // 生成の先頭は、末尾の周期 1 つ分の先頭
+        let end_gain = concealment_end_gain(20_000);
+        let gain = 1.0 - (1.0 - end_gain) * (1.0 / expected as f32);
+        assert!(
+            (output[0] - original[length - period] * gain).abs() < 1e-6,
+            "sample_rate={sample_rate}"
+        );
+    }
+}
+
+#[test]
+fn concealment_end_gain_ramps_to_the_end_gain() {
+    // 補間が長いほど末尾の振幅を下げる (上限の 100 ms で下限の 0.5 になる)
+    assert!((concealment_end_gain(0) - 1.0).abs() < 1e-6);
+    assert!((concealment_end_gain(-1) - 1.0).abs() < 1e-6);
+    assert!((concealment_end_gain(TIME_STRETCH_MAX_CONCEAL_US / 2) - 0.75).abs() < 1e-6);
+    assert!((concealment_end_gain(TIME_STRETCH_MAX_CONCEAL_US) - 0.5).abs() < 1e-6);
+    // 上限を超える長さでも下限より下げない
+    assert!((concealment_end_gain(TIME_STRETCH_MAX_CONCEAL_US * 2) - 0.5).abs() < 1e-6);
 }

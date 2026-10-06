@@ -1112,9 +1112,43 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 
 ```rust
 // playout::stretch
-use shiguredo_moqt::playout::stretch::{compress, expand};
+use shiguredo_moqt::playout::stretch::{compress, conceal, concealment_end_gain, expand};
 fn compress(channels: &mut [&mut [f32]], sample_rate: u32) -> isize
 fn expand(channels: &[&[f32]], output: &mut [&mut [f32]], sample_rate: u32) -> isize
+fn conceal(
+    channels: &[&[f32]],
+    output: &mut [&mut [f32]],
+    sample_rate: u32,
+    conceal_us: i64,
+) -> isize
+fn concealment_end_gain(conceal_us: i64) -> f32
+```
+
+```rust
+// playout::buffer
+use shiguredo_moqt::playout::buffer::{JITTER_BUFFER_MAX_QUEUED_FRAMES, PlayoutBuffer};
+fn new(max_queued_frames: usize, track: Track) -> PlayoutBuffer<T>
+fn enqueue(&mut self, item: T, timestamp_us: Option<i64>, timeline: &PlayoutTimeline) -> Vec<T>
+fn select(&mut self, now_us: i64, timeline: &PlayoutTimeline) -> PlayoutSelection<T>
+fn presentation_time_us(
+    &self,
+    timestamp_us: Option<i64>,
+    timeline: &PlayoutTimeline,
+) -> Option<i64>
+fn playout_delay_us(&self, timeline: &PlayoutTimeline) -> Option<i64>
+fn len(&self) -> usize
+fn is_empty(&self) -> bool
+fn clear(&mut self) -> Vec<T>
+```
+
+```rust
+// media_clock
+use shiguredo_moqt::media_clock::WallClockMapper;
+fn new() -> WallClockMapper
+fn observe(&mut self, media_us: i64, wall_clock_us: i64)
+fn to_wall_clock_us(&mut self, media_us: i64, fallback_wall_clock_us: Option<i64>) -> Option<i64>
+fn offset_us(&self) -> Option<i64>
+fn reset(&mut self)
 ```
 
 ```rust
@@ -1124,20 +1158,6 @@ fn new() -> AudioDelayManager
 fn observe(&mut self, arrival_us: i64, capture_us: i64)
 fn target_delay_ms(&self) -> i64
 fn reset(&mut self)
-
-// playout::sync
-use shiguredo_moqt::playout::sync::{
-    StreamSynchronization, SyncDelays, SyncMeasurement, compute_relative_delay,
-};
-fn compute_relative_delay(audio: SyncMeasurement, video: SyncMeasurement) -> Option<i64>
-fn StreamSynchronization::new() -> StreamSynchronization
-fn set_target_buffering_delay(&mut self, target_delay_ms: i64)
-fn compute_delays(
-    &mut self,
-    relative_delay_ms: i64,
-    current_audio_delay_ms: i64,
-    current_video_delay_ms: i64,
-) -> Option<SyncDelays>
 ```
 
 ```rust
@@ -1148,9 +1168,12 @@ use shiguredo_moqt::playout::scheduler::{
 fn new() -> AudioPlayoutScheduler
 fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision
 fn confirm_stretch(&mut self, applied_us: i64)
+fn confirm_concealment(&mut self, applied_us: i64)
 fn rebases(&self) -> u64
 fn drops(&self) -> u64
 fn compressed_us(&self) -> i64
+fn concealed_us(&self) -> i64
+fn concealments(&self) -> u64
 fn lateness_us(&self) -> i64
 fn reset(&mut self)
 fn reset_stats(&mut self)
@@ -1158,7 +1181,6 @@ fn reset_stats(&mut self)
 
 ```rust
 // playout::timeline
-use shiguredo_moqt::playout::sync::SyncDelays;
 use shiguredo_moqt::playout::timeline::{PlayoutTimeline, TimelineConfig, Track};
 fn new() -> PlayoutTimeline
 fn with_config(config: TimelineConfig) -> PlayoutTimeline
@@ -1167,7 +1189,6 @@ fn observe(&mut self, track: Track, wall_clock_us: i64, timestamp_us: i64)
 fn present_us(&self, track: Track, timestamp_us: i64) -> Option<i64>
 fn presentation_delay_us(&self, track: Track) -> Option<i64>
 fn learned_delay_us(&self, track: Track) -> i64
-fn sync(&mut self, now_us: i64) -> Option<SyncDelays>
 fn set_target_latency_ms(&mut self, target_latency_ms: i64)
 fn target_latency_ms(&self) -> i64
 fn limited_us(&self) -> i64
@@ -1180,13 +1201,18 @@ fn reset(&mut self)
 ```
 
 `playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する。戻り値は長さの変化 (圧縮は負、伸長は正、0 は操作なし)。`expand` の `output` には元の長さ + 60 × 間引き率 (2 / 4 / 8 / 12) 以上の長さを用意する。
+`conceal` は末尾の 2 周期分の相関から求めた周期で末尾を繰り返し、`conceal_us` 分を埋めた長さを返す (0 なら `output` に何も書かない)。利得は末尾へ向けて `concealment_end_gain` まで下げる。
 
-`playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。`playout::sync` の `compute_delays` は 1 秒ごとに 1 回の呼び出しを想定する。
+`playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。
 
-`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`compress_us` を実際に適用したら `confirm_stretch` へ実測を返す。
+`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`compress_us` を実際に適用したら `confirm_stretch` へ、隙間 (`gap_us`) を埋めたら `confirm_concealment` へ実測を返す。
+
+`playout::buffer` は復号したフレームを表示時刻に合わせて選ぶキューである。表示時刻を過ぎたフレームのうち最新の 1 枚を描き、`MAX_PRESENTATION_LAG_US` を超えて遅れたフレームは捨てる。表示時刻を決められないフレームと、積んだときの世代が今と違うフレームは届いた順に 1 枚ずつ描く。上限 (`JITTER_BUFFER_MAX_QUEUED_FRAMES`) を超えたフレームは `enqueue` が古い方から返す。
+
+`media_clock` はデバイスが返すメディア時刻を Unix epoch の壁時計へ換算する。`observe` で「壁時計 − メディア時刻」の最小値を目標にし、`to_wall_clock_us` でその目標へ向けて 1 回の換算につきメディア時刻の差の半分未満だけ動かす (換算した TIMESTAMP が戻らない)。
 
 `playout::timeline` は表示時刻 = TIMESTAMP + 基準の遅れ + 表示の遅れを返す。基準の遅れは直近 10 秒の (復号の出力の時刻 − TIMESTAMP) の最小値、音声の表示の遅れは `playout::delay` の目標遅延、映像は揺らぎの百分位 (`max(0.95, 1 - フレーム間隔 ms / 1000)`。上限は既定 500 ms と表示待ちのキューが吸収できる長さの小さい方) である。
-`observe` のたびに観測を足し、`present_us` で表示時刻を、`presentation_delay_us` でスケジューラへ渡す音声の遅れを読む。1 秒ごとに `sync` を呼ぶと A/V 同期の制御が動く。
+`observe` のたびに観測を足し、`present_us` で表示時刻を、`presentation_delay_us` でスケジューラへ渡す音声の遅れを読む。A/V 同期の制御も `observe` のたびに動く (音声と映像の両方に基準があり、基準の差が閾値の中にあるときだけ)。表示の遅れの差が `TIMELINE_SYNC_MIN_DELTA_US` を超えたら先行する側へ足して合わせ、足した分は毎秒 `TIMELINE_DELAY_DECAY_US_PER_SECOND` までで戻す。呼び出し側が別途 `sync` を呼ぶ必要はない。
 `targetLatency` は `TimelineConfig` か `set_target_latency_ms` で渡し、上限に収まらない分は `limited_us` で読める。`TimelineConfig` は `video_queue_limit` (映像の表示待ちのキューの上限、枚)・`max_presentation_delay_ms` (表示の遅れの上限、既定 500)・`target_latency_ms` を受ける。(復号の出力の時刻 − TIMESTAMP) が基準から 2 秒以上離れると基準を取り直して `generation` が進む。
 
 `MessageError` は `Clone` 不可。後段へ持ち回る場合は再構築を検討する。

@@ -5,7 +5,7 @@
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use shiguredo_audio_device::AudioFrameOwned;
 use shiguredo_moqt::{
@@ -17,6 +17,7 @@ use shiguredo_moqt::{
         LocProperties, LocProperty, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE,
         PROP_TIMESTAMP, PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
     },
+    media_clock::WallClockMapper,
     message::ControlMessage,
     message::common::Location,
     message::common::TrackNamespace,
@@ -121,6 +122,11 @@ const AUDIO_CHANNELS: u8 = 1;
 const AUDIO_CHANNEL_CONFIG: &str = "1";
 /// 音声トラック名
 const AUDIO_TRACK_NAME: &str = "audio";
+/// カタログのレンダーグループ
+///
+/// 音声と映像を同時に再生させるため、両トラックに同じ値を載せる
+/// (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
+const CATALOG_RENDER_GROUP: u64 = 1;
 
 /// 停滞の切り分け用の診断ログを出すかどうか。
 ///
@@ -427,13 +433,18 @@ pub async fn run(
     } else {
         None
     };
-    // MP4 パススルーでは MP4 のタイムスケールを、再エンコードでは入力映像トラックの
-    // タイムスケールを、それ以外はエンコーダのタイムスケールを使う
-    let video_timescale = match (&mp4_reader, &reencode_video_info) {
+    // PROP_TIMESCALE を載せる場合の値。MP4 パススルーでは MP4 のタイムスケールを、
+    // 再エンコードでは入力映像トラックのタイムスケールを使う。live capture は
+    // Unix epoch マイクロ秒 (LOC の既定) を送るため載せない (`None`)。
+    let video_timescale: Option<u64> = match (&mp4_reader, &reencode_video_info) {
         (Some(reader), _) => Some(reader.info().timescale),
         (None, Some(info)) => Some(info.timescale),
-        (None, None) => video_encoder.as_ref().map(|e| e.timescale()),
+        (None, None) => None,
     };
+    // 再エンコードの入力映像トラックのタイムスケール。デコード済みフレームの PTS を
+    // マイクロ秒へ換算するために使う。
+    let reencode_video_timescale: Option<u64> =
+        reencode_video_info.as_ref().map(|info| info.timescale);
 
     let mut audio_encoder: Option<OpusEncoder> = if config.audio_enabled {
         Some(OpusEncoder::new(
@@ -445,12 +456,13 @@ pub async fn run(
         None
     };
     let audio_samples_per_frame = audio_encoder.as_ref().map(|e| e.samples_per_frame());
-    // PROP_TIMESCALE は再エンコードでは入力音声トラックのタイムスケールを使う
-    let audio_timescale = if config.audio_enabled {
-        match reencode_reader.as_ref().and_then(|r| r.audio_info()) {
-            Some(info) => Some(info.timescale),
-            None => audio_encoder.as_ref().map(|e| e.timescale()),
-        }
+    // PROP_TIMESCALE は再エンコードでは入力音声トラックのタイムスケールを使う。
+    // live capture は Unix epoch マイクロ秒 (LOC の既定) を送るため載せない (`None`)。
+    let audio_timescale: Option<u64> = if config.audio_enabled {
+        reencode_reader
+            .as_ref()
+            .and_then(|r| r.audio_info())
+            .map(|info| info.timescale)
     } else {
         None
     };
@@ -468,6 +480,11 @@ pub async fn run(
         catalog_request_id,
         catalog_alias: CATALOG_TRACK_ALIAS,
         start_location: client.subscription_filter_start(catalog_request_id),
+        // 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる
+        sync: catalog::CatalogSyncParams {
+            render_group: CATALOG_RENDER_GROUP,
+            target_latency_ms: u64::from(config.target_latency_ms),
+        },
         video: match (&mp4_reader, video_encoder.as_ref()) {
             (Some(reader), _) => {
                 let info = reader.info();
@@ -563,6 +580,13 @@ pub async fn run(
     // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
     let mut session_ended = false;
     let mut audio_pcm_buf: Vec<i16> = Vec::new();
+    // live capture のメディア時刻を epoch マイクロ秒へ換算する。capture の時刻の起源は
+    // 音声と映像 (さらにデバイスと OS) で異なるため、それぞれ別に持つ。
+    let mut video_clock = WallClockMapper::new();
+    let mut audio_clock = WallClockMapper::new();
+    // live capture の音声バッファ先頭の時刻。1 つの capture フレームから複数の Opus
+    // フレームを切り出すため、切り出し位置の時刻をサンプル数から進める。
+    let mut audio_timeline = AudioCaptureTimeline::new();
     // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
     let mut pending_video_timestamps: VecDeque<u64> = VecDeque::new();
     // Audio Config (OpusHead) を送信済みかどうかのフラグ
@@ -600,15 +624,37 @@ pub async fn run(
                     // カメラ / 疑似キャプチャは生フレームをエンコードし、MP4 パススルーは
                     // エンコード済みサンプルをそのまま送り、MP4 再エンコードはデコード済みの
                     // 生フレームをエンコードする
-                    let (mut encoded_frames, input_timestamp) = match video_input {
+                    // `output_timescale` は、encoder が付けた Timestamp がマイクロ秒である
+                    // ことを示す。入力より出力が多いときに、その値を入力の単位へ戻すために使う
+                    let (mut encoded_frames, input_timestamp, output_timescale) = match video_input {
                         VideoInput::Raw(frame) => {
                             let encoder = video_encoder.as_mut().expect("video encoder enabled");
-                            (encoder.encode(&frame)?, None)
+                            // live capture の Timestamp は capture のメディア時刻を epoch
+                            // マイクロ秒へ換算する。起源はカメラとマイクで異なるため、
+                            // 換算は映像と音声で別々の mapper が持つ
+                            let timestamp_us = map_capture_timestamp_us(
+                                "video",
+                                &mut video_clock,
+                                frame.timestamp_us,
+                                wall_clock_now_us()?,
+                            )?;
+                            (encoder.encode(&frame, timestamp_us)?, None, None)
                         }
-                        VideoInput::Encoded(frame) => (vec![frame], None),
+                        VideoInput::Encoded(frame) => (vec![frame], None, None),
                         VideoInput::Reencode { frame, timestamp } => {
                             let encoder = video_encoder.as_mut().expect("video encoder enabled");
-                            (encoder.encode(&frame)?, Some(timestamp))
+                            // 入力サンプルの PTS (入力トラックの timescale 単位) をマイクロ秒へ
+                            // 換算して encoder へ渡す。encoder が載せた値は下の
+                            // `assign_input_timestamps` が入力の PTS で上書きするため、
+                            // 出力の Timestamp は入力トラックの timescale のままになる
+                            let timescale = reencode_video_timescale
+                                .expect("re-encode video input has a timescale");
+                            let media_us = media_time_to_micros(timestamp, timescale);
+                            (
+                                encoder.encode(&frame, media_us)?,
+                                Some(timestamp),
+                                Some(timescale),
+                            )
                         }
                     };
                     // 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を
@@ -616,9 +662,9 @@ pub async fn run(
                     assign_input_timestamps(
                         &mut pending_video_timestamps,
                         input_timestamp,
+                        output_timescale,
                         &mut encoded_frames,
                     );
-                    let timescale = video_timescale.expect("video timescale enabled");
                     for ef in encoded_frames {
                         if ef.is_keyframe {
                             // writer の作成と終端で同じ値を使うため、ここで request_id を
@@ -651,7 +697,7 @@ pub async fn run(
                             tracing::debug!("Started new video group {}", video_group_id);
                             video_group_id += 1;
                         }
-                        let properties = build_video_loc_properties(&ef, timescale);
+                        let properties = build_video_loc_properties(&ef, video_timescale);
                         if let Some(writer) = current_video_writer.as_mut() {
                             let _ = writer.write_object(&ef.data, &properties).await?;
                         }
@@ -687,10 +733,29 @@ pub async fn run(
                     let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
                     let samples_per_frame =
                         audio_samples_per_frame.expect("audio samples_per_frame enabled");
-                    let timescale = audio_timescale.expect("audio timescale enabled");
                     // 再エンコードでは入力サンプルのタイムスタンプをそのまま使う
                     let (pcm, input_timestamp) = match audio_input {
-                        AudioInput::Raw(frame) => (extract_pcm_i16(&frame)?, None),
+                        AudioInput::Raw(frame) => {
+                            // live capture の Timestamp は capture のメディア時刻を epoch
+                            // マイクロ秒へ換算する。起源はカメラとマイクで異なるため、
+                            // 換算は映像と音声で別々の mapper が持つ
+                            let frame_epoch_us = map_capture_timestamp_us(
+                                "audio",
+                                &mut audio_clock,
+                                frame.timestamp_us,
+                                wall_clock_now_us()?,
+                            )?;
+                            // バッファに残っているサンプルはこのフレームの直前のサンプルで
+                            // あるため、バッファ先頭の時刻はこのフレームの時刻から
+                            // サンプル数ぶん戻った位置になる。取りこぼしたフレームがあっても
+                            // その差をここで吸収でき、壁時計からずれない
+                            audio_timeline.observe_frame(
+                                frame_epoch_us,
+                                audio_pcm_buf.len() as u64,
+                                AUDIO_SAMPLE_RATE,
+                            );
+                            (extract_pcm_i16(&frame)?, None)
+                        }
                         AudioInput::Reencode { frame, timestamp } => {
                             (extract_pcm_i16(&frame)?, Some(timestamp))
                         }
@@ -704,11 +769,20 @@ pub async fn run(
                         let encoded = encoder.encode(&chunk)?;
                         let timestamp = match next_chunk_timestamp {
                             Some(timestamp) => {
+                                // 再エンコードの入力音声トラックのタイムスケール
+                                let timescale = audio_timescale
+                                    .expect("re-encode audio input has a timescale");
                                 let step = samples_per_frame as u64 * timescale / (AUDIO_SAMPLE_RATE as u64);
                                 next_chunk_timestamp = Some(timestamp.saturating_add(step));
                                 timestamp
                             }
-                            None => audio_frame_count * samples_per_frame as u64,
+                            // live capture はバッファ先頭の時刻から切り出し位置までを
+                            // サンプル数で進める。同じ capture フレーム由来の複数 Object が
+                            // 同じ Timestamp にならない
+                            None => audio_timeline.next_chunk_timestamp_us(
+                                samples_per_frame as u64,
+                                AUDIO_SAMPLE_RATE,
+                            ),
                         };
                         // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
                         // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
@@ -720,7 +794,7 @@ pub async fn run(
                             audio_opus_head.as_deref()
                         };
                         let properties =
-                            build_audio_loc_properties(timestamp, timescale, audio_config);
+                            build_audio_loc_properties(timestamp, audio_timescale, audio_config);
                         // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
                         if config.audio_datagram {
                             let mut writer = DatagramWriter::new(
@@ -1133,25 +1207,161 @@ async fn serve_peer_request(
 ///
 /// 再エンコードでは出力フレームのタイムスタンプに入力サンプルの PTS を使う。
 /// 0 フレームを返した入力の PTS は次に出力されたフレームへ引き継ぐ。
-/// 現行のエンコーダは 1 入力 = 1 出力のため、入力より出力が多い場合は余ったフレームが
-/// エンコーダの採番のままになる。
+///
+/// 入力より出力が多い場合、余ったフレームには encoder が付けたマイクロ秒の値が残る。
+/// そのまま送ると入力トラックの timescale 単位の値と混ざり、購読側が別の時刻として解釈する。
+/// `output_timescale` が `Some` のときは、余ったフレームの値を入力の単位へ戻す。
+/// `None` のとき (live capture と、エンコード済みサンプルをそのまま送る経路) は、encoder か
+/// 入力ファイルが付けた値がそのまま送る単位であるため、変換しない。
 fn assign_input_timestamps(
     pending: &mut VecDeque<u64>,
     input_timestamp: Option<u64>,
+    output_timescale: Option<u64>,
     frames: &mut [EncodedFrame],
 ) {
     if let Some(timestamp) = input_timestamp {
         pending.push_back(timestamp);
     }
     for frame in frames {
-        if let Some(timestamp) = pending.pop_front() {
-            frame.timestamp = timestamp;
+        match pending.pop_front() {
+            Some(timestamp) => frame.timestamp = timestamp,
+            None => {
+                if let Some(timescale) = output_timescale {
+                    frame.timestamp = media_time_from_micros(frame.timestamp, timescale);
+                }
+            }
         }
     }
 }
 
+/// フレームを読んだ時刻を Unix epoch マイクロ秒で返す
+///
+/// メディア時刻を壁時計へ換算する対応を取るために使う。システムの時計が Unix epoch
+/// より前を指している場合だけエラーになる。
+fn wall_clock_now_us() -> Result<i64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| Error::Other(format!("system clock is before the Unix epoch: {e}")))?;
+    i64::try_from(elapsed.as_micros())
+        .map_err(|_| Error::Other("system clock is out of the supported range".to_string()))
+}
+
+/// capture のメディア時刻を Unix epoch マイクロ秒へ換算する
+///
+/// `capture_timestamp_us` は capture フレームのメディア時刻、`wall_clock_us` はその
+/// フレームを読んだ壁時計 (epoch マイクロ秒)。対応は mapper が持つため、呼び出し側は
+/// トラックごとに 1 つの [`WallClockMapper`] を保持する。
+///
+/// 換算結果と読んだ壁時計の差を debug ログに出す。LOC は Timescale を載せないとき
+/// Timestamp を Unix epoch マイクロ秒として扱うため (draft-ietf-moq-loc-04 §2.3.1.1)、
+/// 実機でこの差が許容範囲に収まっていることを確認できるようにする。
+///
+/// `track` はログに出すトラック名。
+fn map_capture_timestamp_us(
+    track: &str,
+    mapper: &mut WallClockMapper,
+    capture_timestamp_us: i64,
+    wall_clock_us: i64,
+) -> Result<u64> {
+    // 読んだフレームを記録してから換算する。対応は遅れが最も小さいフレームで決まる
+    mapper.observe(capture_timestamp_us, wall_clock_us);
+    let converted_us = mapper
+        .to_wall_clock_us(capture_timestamp_us, Some(wall_clock_us))
+        .ok_or_else(|| {
+            Error::Other("failed to convert the capture timestamp to a wall clock".to_string())
+        })?;
+    tracing::debug!(
+        "Capture timestamp mapped to wall clock: track={}, capture_us={}, wall_clock_us={}, difference_us={}",
+        track,
+        capture_timestamp_us,
+        wall_clock_us,
+        converted_us.saturating_sub(wall_clock_us),
+    );
+    // `WallClockMapper::to_wall_clock_us` は Unix epoch より前を 0 に丸めるため、
+    // 負の値は返らない
+    Ok(u64::try_from(converted_us).expect("converted timestamp is not negative"))
+}
+
+/// サンプル数をマイクロ秒へ換算する
+///
+/// 音声は 1 つの capture フレームから複数の Opus フレームを切り出すため、切り出し位置の
+/// 時刻をサンプル数から求める。`sample_rate` は 0 にはならない (呼び出し元は 48 kHz 固定)。
+fn samples_to_micros(samples: u64, sample_rate: u32) -> u64 {
+    samples.saturating_mul(1_000_000) / u64::from(sample_rate)
+}
+
+/// マイクロ秒を timescale 単位のメディア時刻へ戻す
+///
+/// 再エンコードで入力より出力が多かったとき、encoder が付けたマイクロ秒の値を入力トラック
+/// の単位へ戻すために使う。`media_time_to_micros` の逆の換算であり、`timescale` は 0 には
+/// ならない (MP4 の timescale は NonZeroU32 由来)。`u64` に収まらない値は飽和させる。
+fn media_time_from_micros(micros: u64, timescale: u64) -> u64 {
+    let media_time = u128::from(micros) * u128::from(timescale) / 1_000_000;
+    u64::try_from(media_time).unwrap_or(u64::MAX)
+}
+
+/// timescale 単位のメディア時刻をマイクロ秒へ換算する
+///
+/// 再エンコードでは入力サンプルの PTS が入力トラックの timescale 単位で来るため、
+/// encoder へ渡すメディア時刻 (マイクロ秒) に換算する。`timescale` は 0 にはならない
+/// (MP4 の timescale は NonZeroU32 由来)。
+fn media_time_to_micros(timestamp: u64, timescale: u64) -> u64 {
+    let micros = u128::from(timestamp) * 1_000_000 / u128::from(timescale);
+    u64::try_from(micros).unwrap_or(u64::MAX)
+}
+
+/// live capture の音声へ載せる Timestamp を組み立てる状態
+///
+/// 音声は 1 つの capture フレームと 1 つの Object が 1:1 ではない。バッファに残った
+/// サンプルと次のフレームのサンプルを繋いで 20 ms ずつ切り出すため、切り出し位置の
+/// 時刻を「バッファ先頭の時刻 + 切り出し済みサンプル数」で求める。同じ capture
+/// フレームから複数の Object を切り出しても同じ Timestamp にはならない。
+struct AudioCaptureTimeline {
+    /// バッファ先頭のサンプルの時刻 (Unix epoch マイクロ秒)
+    head_epoch_us: u64,
+    /// バッファ先頭から切り出し済みのサンプル数
+    consumed_samples: u64,
+}
+
+impl AudioCaptureTimeline {
+    /// まだフレームを受け取っていない状態で作る
+    fn new() -> Self {
+        Self {
+            head_epoch_us: 0,
+            consumed_samples: 0,
+        }
+    }
+
+    /// capture フレームをバッファへ追加する時点で基準を取り直す
+    ///
+    /// `buffered_samples` はこのフレームを追加する前のバッファ長 (サンプル数)。
+    /// バッファに残っているサンプルはこのフレームより前のサンプルであるため、
+    /// バッファ先頭の時刻はこのフレームの時刻からそのサンプル数ぶん戻った位置になる。
+    /// capture フレームを取りこぼしてもその差をここで吸収でき、蓄積したずれが残らない。
+    fn observe_frame(&mut self, frame_epoch_us: u64, buffered_samples: u64, sample_rate: u32) {
+        self.head_epoch_us =
+            frame_epoch_us.saturating_sub(samples_to_micros(buffered_samples, sample_rate));
+        self.consumed_samples = 0;
+    }
+
+    /// バッファから `samples` サンプルを切り出したチャンクの Timestamp を返す
+    ///
+    /// 切り出したぶんだけ次のチャンクの時刻が進む。
+    fn next_chunk_timestamp_us(&mut self, samples: u64, sample_rate: u32) -> u64 {
+        let timestamp_us = self
+            .head_epoch_us
+            .saturating_add(samples_to_micros(self.consumed_samples, sample_rate));
+        self.consumed_samples = self.consumed_samples.saturating_add(samples);
+        timestamp_us
+    }
+}
+
 /// 映像 LOC プロパティを構築する
-fn build_video_loc_properties(frame: &EncodedFrame, timescale: u64) -> LocProperties {
+///
+/// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
+/// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
+/// (draft-ietf-moq-loc-04 §2.3.1.1 の既定)。
+fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> LocProperties {
     let mut props = LocProperties::new();
     // RFC 9626 §3.2 (Short Extension for Non-Scalable Streams) の 1 octet 形式は
     // |S|E|I|D|0 0 0 0| (bit 7: S, bit 6: E, bit 5: I, bit 4: D、下位 4 bit は送信時 0)。
@@ -1169,10 +1379,12 @@ fn build_video_loc_properties(frame: &EncodedFrame, timescale: u64) -> LocProper
         value: LocPropertyValue::VarInt(frame.timestamp),
     });
     if frame.is_keyframe {
-        props.push(LocProperty {
-            prop_id: PROP_TIMESCALE,
-            value: LocPropertyValue::VarInt(timescale),
-        });
+        if let Some(timescale) = timescale {
+            props.push(LocProperty {
+                prop_id: PROP_TIMESCALE,
+                value: LocPropertyValue::VarInt(timescale),
+            });
+        }
         if let Some(sh) = frame.video_config.as_deref() {
             props.push(LocProperty {
                 prop_id: PROP_VIDEO_CONFIG,
@@ -1210,15 +1422,15 @@ fn build_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
 
 /// 音声 LOC プロパティを構築する
 ///
-/// 音声には keyframe 概念が無いため、毎フレームに `PROP_TIMESCALE` を付与する。
-/// これにより、subscriber がどの group から再生開始しても `timestamp` を
-/// メディア時刻として解釈できる。
+/// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
+/// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
+/// (draft-ietf-moq-loc-04 §2.3.1.1 の既定)。
 ///
 /// `audio_config` に OpusHead バイト列を渡すと Audio Config プロパティ (0x0F) として付与する。
 /// Opus は全フレームが独立してデコード可能なため、最初の audio object だけに付与すればよい。
 fn build_audio_loc_properties(
     timestamp: u64,
-    timescale: u64,
+    timescale: Option<u64>,
     audio_config: Option<&[u8]>,
 ) -> LocProperties {
     let mut props = LocProperties::new();
@@ -1226,10 +1438,12 @@ fn build_audio_loc_properties(
         prop_id: PROP_TIMESTAMP,
         value: LocPropertyValue::VarInt(timestamp),
     });
-    props.push(LocProperty {
-        prop_id: PROP_TIMESCALE,
-        value: LocPropertyValue::VarInt(timescale),
-    });
+    if let Some(timescale) = timescale {
+        props.push(LocProperty {
+            prop_id: PROP_TIMESCALE,
+            value: LocPropertyValue::VarInt(timescale),
+        });
+    }
     if let Some(config) = audio_config {
         props.push(LocProperty {
             prop_id: PROP_AUDIO_CONFIG,
@@ -1281,6 +1495,9 @@ mod tests {
     }
 
     /// keyframe の映像 LOC プロパティ: Video Frame Marking / Timestamp / Timescale / Video Config が付与され encode できること
+    ///
+    /// MP4 の経路では入力ファイルのメディア時刻を入力トラックの timescale で送るため、
+    /// Timescale を載せる。
     #[test]
     fn build_video_loc_properties_keyframe() {
         let frame = EncodedFrame {
@@ -1289,7 +1506,7 @@ mod tests {
             timestamp: 3000,
             video_config: Some(vec![0x01, 0x02]),
         };
-        let props = build_video_loc_properties(&frame, 90_000);
+        let props = build_video_loc_properties(&frame, Some(90_000));
         // RFC 9626 §3.2: keyframe → S=1, E=1, I=1 → 0xE0
         assert_eq!(
             props.video_frame_marking(),
@@ -1300,12 +1517,38 @@ mod tests {
         assert_eq!(
             props.timescale(),
             Some(90_000),
-            "keyframe では Timescale が付与されること"
+            "MP4 の経路では keyframe に Timescale が付与されること"
         );
         assert_eq!(
             props.video_config(),
             Some([0x01u8, 0x02].as_slice()),
             "keyframe では Video Config が付与されること"
+        );
+        props.encode().expect("LOC プロパティは encode できること");
+    }
+
+    /// live capture の映像 LOC プロパティ: keyframe でも Timescale が付与されないこと
+    ///
+    /// LOC は Timescale が無ければ Timestamp を Unix epoch マイクロ秒として扱う
+    /// (draft-ietf-moq-loc-04 §2.3.1.1)。delta frame を単体で見ても同じ解釈になる。
+    #[test]
+    fn build_video_loc_properties_live_capture_has_no_timescale() {
+        let frame = EncodedFrame {
+            data: vec![0xAA, 0xBB],
+            is_keyframe: true,
+            timestamp: 1_700_000_000_000_000,
+            video_config: Some(vec![0x01, 0x02]),
+        };
+        let props = build_video_loc_properties(&frame, None);
+        assert_eq!(
+            props.timestamp(),
+            Some(1_700_000_000_000_000),
+            "Timestamp が付与されること"
+        );
+        assert_eq!(
+            props.timescale(),
+            None,
+            "live capture では keyframe でも Timescale を付与しないこと"
         );
         props.encode().expect("LOC プロパティは encode できること");
     }
@@ -1319,7 +1562,7 @@ mod tests {
             timestamp: 3033,
             video_config: None,
         };
-        let props = build_video_loc_properties(&frame, 90_000);
+        let props = build_video_loc_properties(&frame, Some(90_000));
         // RFC 9626 §3.2: 非 keyframe → S=1, E=1, I=0 → 0xC0
         assert_eq!(
             props.video_frame_marking(),
@@ -1367,15 +1610,17 @@ mod tests {
     }
 
     /// Audio Config 付きの音声 LOC プロパティ: Timestamp / Timescale / Audio Config が付与され encode できること
+    ///
+    /// MP4 の経路では入力ファイルのメディア時刻を入力トラックの timescale で送る。
     #[test]
     fn build_audio_loc_properties_with_audio_config() {
         let opus_head = build_opus_head(48_000, 1);
-        let props = build_audio_loc_properties(960, 48_000, Some(&opus_head));
+        let props = build_audio_loc_properties(960, Some(48_000), Some(&opus_head));
         assert_eq!(props.timestamp(), Some(960), "Timestamp が付与されること");
         assert_eq!(
             props.timescale(),
             Some(48_000),
-            "Timescale が付与されること"
+            "MP4 の経路では Timescale が付与されること"
         );
         // Audio Config が OpusHead バイト列であること
         assert_eq!(
@@ -1389,7 +1634,7 @@ mod tests {
     /// Audio Config なしの音声 LOC プロパティ: Timestamp / Timescale のみが付与され encode できること
     #[test]
     fn build_audio_loc_properties_without_audio_config() {
-        let props = build_audio_loc_properties(1920, 48_000, None);
+        let props = build_audio_loc_properties(1920, Some(48_000), None);
         assert_eq!(props.timestamp(), Some(1920), "Timestamp が付与されること");
         assert_eq!(
             props.timescale(),
@@ -1402,6 +1647,271 @@ mod tests {
             "Audio Config は付与されないこと"
         );
         props.encode().expect("LOC プロパティは encode できること");
+    }
+
+    /// live capture の音声 LOC プロパティ: Timestamp のみで Timescale が付与されないこと
+    ///
+    /// LOC は Timescale が無ければ Timestamp を Unix epoch マイクロ秒として扱う
+    /// (draft-ietf-moq-loc-04 §2.3.1.1)。
+    #[test]
+    fn build_audio_loc_properties_live_capture_has_no_timescale() {
+        let props = build_audio_loc_properties(1_700_000_000_000_000, None, None);
+        assert_eq!(
+            props.timestamp(),
+            Some(1_700_000_000_000_000),
+            "Timestamp が付与されること"
+        );
+        assert_eq!(
+            props.timescale(),
+            None,
+            "live capture では Timescale を付与しないこと"
+        );
+        props.encode().expect("LOC プロパティは encode できること");
+    }
+
+    /// capture のメディア時刻を epoch マイクロ秒へ換算できること
+    ///
+    /// fake capture のメディア時刻は 0 起点であり、読んだ壁時計を基準にした対応で写る。
+    #[test]
+    fn map_capture_timestamp_converts_zero_based_media_time() {
+        let mut mapper = WallClockMapper::new();
+        let wall_clock_us = 1_700_000_000_000_000;
+        let timestamp_us = map_capture_timestamp_us("video", &mut mapper, 0, wall_clock_us)
+            .expect("換算できること");
+        assert_eq!(
+            timestamp_us, wall_clock_us as u64,
+            "0 起点のメディア時刻が読んだ壁時計へ写ること"
+        );
+
+        // 同じ間隔で進む次のフレームも壁時計に追随すること
+        let timestamp_us =
+            map_capture_timestamp_us("video", &mut mapper, 33_333, wall_clock_us + 33_333)
+                .expect("換算できること");
+        assert_eq!(
+            timestamp_us,
+            (wall_clock_us + 33_333) as u64,
+            "次のフレームも読んだ壁時計へ写ること"
+        );
+    }
+
+    /// 起源の違う音声と映像の Timestamp が同じ epoch マイクロ秒軸に載ること
+    ///
+    /// capture のメディア時刻の起源は経路ごとに違う (mach 絶対時刻 / monotonic / 0 起点)。
+    /// トラックごとに別の mapper を持ち、それぞれフレームを読んだ壁時計へ写すため、
+    /// 起源が違っても同じ epoch マイクロ秒軸に載る。
+    #[test]
+    fn video_and_audio_timestamps_share_the_epoch_axis() {
+        let base_us: i64 = 1_700_000_000_000_000;
+        let mut video_clock = WallClockMapper::new();
+        let mut audio_clock = WallClockMapper::new();
+
+        // 映像は 0 起点のメディア時刻、音声は起動から 5 秒進んだ monotonic なメディア時刻
+        let mut video_timestamps = Vec::new();
+        let mut audio_timestamps = Vec::new();
+        for index in 0..30i64 {
+            let video_media_us = index * 33_333;
+            video_timestamps.push(
+                map_capture_timestamp_us(
+                    "video",
+                    &mut video_clock,
+                    video_media_us,
+                    base_us + video_media_us,
+                )
+                .expect("換算できること"),
+            );
+            let audio_media_us = 5_000_000 + index * 20_000;
+            audio_timestamps.push(
+                map_capture_timestamp_us(
+                    "audio",
+                    &mut audio_clock,
+                    audio_media_us,
+                    base_us + index * 20_000,
+                )
+                .expect("換算できること"),
+            );
+        }
+
+        assert!(
+            video_timestamps.windows(2).all(|pair| pair[0] < pair[1]),
+            "映像の Timestamp が単調に増加すること"
+        );
+        assert!(
+            audio_timestamps.windows(2).all(|pair| pair[0] < pair[1]),
+            "音声の Timestamp が単調に増加すること"
+        );
+        // 同じ時点のフレームが同じ epoch マイクロ秒になること
+        assert_eq!(
+            (video_timestamps[0], audio_timestamps[0]),
+            (base_us as u64, base_us as u64),
+            "起源の違う 2 トラックが同じ時点から始まること"
+        );
+        for (index, timestamp_us) in video_timestamps.iter().enumerate() {
+            assert_eq!(
+                *timestamp_us,
+                (base_us + index as i64 * 33_333) as u64,
+                "映像の Timestamp が読んだ壁時計に一致すること: index={index}"
+            );
+        }
+        for (index, timestamp_us) in audio_timestamps.iter().enumerate() {
+            assert_eq!(
+                *timestamp_us,
+                (base_us + index as i64 * 20_000) as u64,
+                "音声の Timestamp が読んだ壁時計に一致すること: index={index}"
+            );
+        }
+    }
+
+    /// 読み取りの遅れが小さいフレームに合わせて対応が収束すること
+    ///
+    /// 1 フレーム目を大きく遅れて読んでも、遅れの小さいフレームが届くにつれて換算した
+    /// Timestamp が読んだ壁時計へ一致していく。収束の途中でも前のフレームより戻らない。
+    #[test]
+    fn map_capture_timestamp_converges_to_wall_clock() {
+        let mut mapper = WallClockMapper::new();
+        let base = 1_700_000_000_000_000;
+        let frame_interval_us: u64 = 33_333;
+        // 1 フレーム目は 100 ms 遅れて読んだものとする
+        let mut previous = map_capture_timestamp_us("video", &mut mapper, 0, base + 100_000)
+            .expect("換算できること");
+        assert_eq!(
+            previous,
+            (base + 100_000) as u64,
+            "最初は記録した対応をそのまま使うこと"
+        );
+
+        // 以降は 10 ms 遅れで読み続ける (対応の目標が 10 ms 遅れへ小さくなる)
+        for index in 1..=10u64 {
+            let media_us = i64::try_from(index * frame_interval_us).expect("範囲内であること");
+            let wall_clock_us = base + 10_000 + media_us;
+            let timestamp_us =
+                map_capture_timestamp_us("video", &mut mapper, media_us, wall_clock_us)
+                    .expect("換算できること");
+            assert!(
+                timestamp_us > previous,
+                "収束の途中でも換算した時刻が戻らないこと: index={index}"
+            );
+            previous = timestamp_us;
+            if index == 10 {
+                assert_eq!(
+                    timestamp_us, wall_clock_us as u64,
+                    "対応が収束して読んだ壁時計と一致すること"
+                );
+            }
+        }
+        assert_eq!(
+            mapper.offset_us(),
+            Some(base + 10_000),
+            "対応が遅れの最も小さいフレームへ収束すること"
+        );
+    }
+
+    /// 桁あふれせず、Unix epoch より前を返さないこと
+    #[test]
+    fn map_capture_timestamp_is_never_negative() {
+        let mut mapper = WallClockMapper::new();
+        let timestamp_us = map_capture_timestamp_us("audio", &mut mapper, -10_000, -5_000)
+            .expect("換算できること");
+        assert_eq!(timestamp_us, 0, "Unix epoch より前は 0 にすること");
+    }
+
+    /// サンプル数をマイクロ秒へ換算できること
+    #[test]
+    fn samples_to_micros_converts_sample_counts() {
+        assert_eq!(samples_to_micros(960, 48_000), 20_000, "20 ms になること");
+        assert_eq!(samples_to_micros(0, 48_000), 0, "0 サンプルは 0 であること");
+        assert_eq!(
+            samples_to_micros(1, 48_000),
+            20,
+            "端数は切り捨てること (48 kHz の 1 サンプルは 20.8 us)"
+        );
+    }
+
+    /// timescale 単位のメディア時刻をマイクロ秒へ換算できること
+    #[test]
+    fn media_time_to_micros_converts_media_time() {
+        assert_eq!(
+            media_time_to_micros(90_000, 90_000),
+            1_000_000,
+            "1 秒になること"
+        );
+        assert_eq!(media_time_to_micros(0, 48_000), 0, "0 は 0 であること");
+        assert_eq!(
+            media_time_to_micros(u64::MAX, 1),
+            u64::MAX,
+            "桁あふれは飽和させること"
+        );
+    }
+
+    /// 1 つの capture フレームから複数の Object を切り出すと Timestamp が進むこと
+    ///
+    /// バッファ先頭の時刻から切り出し済みサンプル数ぶん進めるため、同じ capture
+    /// フレーム由来の複数 Object が同じ Timestamp にならない。
+    #[test]
+    fn audio_timeline_advances_timestamps_within_a_capture_frame() {
+        let mut timeline = AudioCaptureTimeline::new();
+        let head_epoch_us = 1_700_000_000_000_000;
+        timeline.observe_frame(head_epoch_us, 0, 48_000);
+
+        let timestamps: Vec<u64> = (0..3)
+            .map(|_| timeline.next_chunk_timestamp_us(960, 48_000))
+            .collect();
+        assert_eq!(
+            timestamps,
+            vec![
+                head_epoch_us,
+                head_epoch_us + 20_000,
+                head_epoch_us + 40_000
+            ],
+            "20 ms ずつ進むこと"
+        );
+        assert!(
+            timestamps.windows(2).all(|pair| pair[0] < pair[1]),
+            "Timestamp が単調に増加すること"
+        );
+    }
+
+    /// バッファに残ったサンプルの先頭時刻を capture フレームの時刻から逆算すること
+    #[test]
+    fn audio_timeline_derives_head_from_buffered_samples() {
+        let mut timeline = AudioCaptureTimeline::new();
+        // 前のフレームのサンプルが 480 (10 ms) 残っている状態で次のフレームが届く
+        let frame_epoch_us = 1_700_000_000_020_000;
+        timeline.observe_frame(frame_epoch_us, 480, 48_000);
+        assert_eq!(
+            timeline.next_chunk_timestamp_us(960, 48_000),
+            frame_epoch_us - 10_000,
+            "バッファ先頭はフレームの時刻から残りサンプル数ぶん前になること"
+        );
+        assert_eq!(
+            timeline.next_chunk_timestamp_us(960, 48_000),
+            frame_epoch_us + 10_000,
+            "切り出したぶんだけ次のチャンクが進むこと"
+        );
+    }
+
+    /// capture フレームを取りこぼしてもバッファ先頭の時刻が壁時計に追随すること
+    ///
+    /// 蓄積サンプル数だけで進めると取りこぼしたぶんがずれ続けるため、フレームを
+    /// 受け取るたびに基準を取り直す。
+    #[test]
+    fn audio_timeline_follows_wall_clock_across_dropped_frames() {
+        let mut timeline = AudioCaptureTimeline::new();
+        let first_epoch_us = 1_700_000_000_000_000;
+        timeline.observe_frame(first_epoch_us, 0, 48_000);
+        assert_eq!(
+            timeline.next_chunk_timestamp_us(960, 48_000),
+            first_epoch_us,
+            "最初のフレームはその時刻で切り出すこと"
+        );
+
+        // 200 ms ぶんのフレームを取りこぼして次のフレームが届く
+        let second_epoch_us = first_epoch_us + 200_000;
+        timeline.observe_frame(second_epoch_us, 0, 48_000);
+        assert_eq!(
+            timeline.next_chunk_timestamp_us(960, 48_000),
+            second_epoch_us,
+            "取りこぼしたぶんを蓄積せず、届いたフレームの時刻で切り出すこと"
+        );
     }
 
     /// `TransportError` の接続クローズだけをセッション終了として扱う
@@ -1487,9 +1997,6 @@ mod tests {
         }
     }
 
-    /// 再エンコードの入力 PTS が出力フレームへ引き継がれること
-    ///
-    /// 0 フレームを返した入力の PTS は次に出力されたフレームへ割り当てる。
     /// encode / decode 失敗がセッション終了コードへ写ること
     ///
     /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
@@ -1516,21 +2023,81 @@ mod tests {
         );
     }
 
+    /// 再エンコードの入力 PTS が出力フレームへ引き継がれること
+    ///
+    /// 0 フレームを返した入力の PTS は次に出力されたフレームへ割り当てる。
     #[test]
     fn assign_input_timestamps_follows_input_pts() {
         let mut pending = VecDeque::new();
-        assign_input_timestamps(&mut pending, Some(1_000), &mut []);
+        assign_input_timestamps(&mut pending, Some(1_000), Some(48_000), &mut []);
         assert_eq!(pending.len(), 1, "0 フレームでも PTS が残ること");
 
         let mut frames = vec![test_encoded_frame(10), test_encoded_frame(20)];
-        assign_input_timestamps(&mut pending, Some(2_000), &mut frames);
+        assign_input_timestamps(&mut pending, Some(2_000), Some(48_000), &mut frames);
         assert_eq!(frames[0].timestamp, 1_000, "引き継いだ PTS が使われること");
         assert_eq!(frames[1].timestamp, 2_000, "入力の PTS が使われること");
         assert!(pending.is_empty(), "割り当て後は空になること");
 
-        // 入力タイムスタンプが無い場合はエンコーダのタイムスタンプを保持する
+        // 入力タイムスタンプが無く、送る単位も encoder のものであれば、採番を保持する
         let mut frames = vec![test_encoded_frame(30)];
-        assign_input_timestamps(&mut pending, None, &mut frames);
+        assign_input_timestamps(&mut pending, None, None, &mut frames);
         assert_eq!(frames[0].timestamp, 30, "エンコーダの採番が残ること");
+    }
+
+    // 入力より出力が多いときは、余ったフレームを encoder のマイクロ秒から入力の単位へ戻す
+    #[test]
+    fn assign_input_timestamps_converts_extra_frames_to_the_input_timescale() {
+        let mut pending = VecDeque::new();
+        // 入力 1 つに対して 2 フレームが出た。encoder は先頭にマイクロ秒 (2_000)、
+        // 次に 1 フレーム間隔ぶん (35_000 = 29_000 + 6_000) を付ける
+        let mut frames = vec![test_encoded_frame(2_000), test_encoded_frame(35_000)];
+        assign_input_timestamps(&mut pending, Some(200), Some(1_000_000), &mut frames);
+        assert_eq!(frames[0].timestamp, 200, "入力の PTS が使われること");
+        assert_eq!(
+            frames[1].timestamp, 35_000,
+            "timescale が 1_000_000 ならマイクロ秒と同じ値になること"
+        );
+
+        // 48 kHz なら 35_000 マイクロ秒は 1_680 サンプル
+        let mut pending = VecDeque::new();
+        let mut frames = vec![test_encoded_frame(2_000), test_encoded_frame(35_000)];
+        assign_input_timestamps(&mut pending, Some(200), Some(48_000), &mut frames);
+        assert_eq!(frames[0].timestamp, 200, "入力の PTS が使われること");
+        assert_eq!(
+            frames[1].timestamp, 1_680,
+            "余ったフレームを入力の単位へ戻すこと"
+        );
+    }
+
+    // live capture とエンコード済みサンプルの経路では単位を変えない
+    #[test]
+    fn assign_input_timestamps_keeps_the_unit_without_a_timescale() {
+        let mut pending = VecDeque::new();
+        let mut frames = vec![test_encoded_frame(1_700_000_000_000_000)];
+        assign_input_timestamps(&mut pending, None, None, &mut frames);
+        assert_eq!(
+            frames[0].timestamp, 1_700_000_000_000_000,
+            "epoch マイクロ秒のまま送ること"
+        );
+    }
+
+    // マイクロ秒から入力の単位へ戻す換算
+    #[test]
+    fn media_time_from_micros_converts_and_saturates() {
+        assert_eq!(
+            media_time_from_micros(1_000_000, 48_000),
+            48_000,
+            "1 秒は timescale ぶんの値になること"
+        );
+        assert_eq!(
+            media_time_from_micros(20_000, 48_000),
+            960,
+            "20 ms は 960 サンプルになること"
+        );
+        assert_eq!(
+            media_time_from_micros(u64::MAX, u64::MAX),
+            u64::MAX,
+            "u64 に収まらない値は飽和すること"
+        );
     }
 }

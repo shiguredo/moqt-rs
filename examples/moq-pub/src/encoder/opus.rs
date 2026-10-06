@@ -19,8 +19,6 @@ const OPUS_FRAME_DURATION_MS: u32 = 20;
 /// Opus エンコーダ
 pub struct OpusEncoder {
     encoder: Encoder,
-    /// PROP_TIMESCALE に載せるサンプリングレート
-    sample_rate: u32,
 }
 
 impl OpusEncoder {
@@ -43,10 +41,7 @@ impl OpusEncoder {
             frame_samples,
         );
 
-        Ok(Self {
-            encoder,
-            sample_rate,
-        })
+        Ok(Self { encoder })
     }
 
     /// インターリーブ済み i16 PCM (`samples_per_frame * channels` サンプル) を
@@ -58,11 +53,6 @@ impl OpusEncoder {
     /// 1 フレームあたりのサンプル数 (チャンネル単位)
     pub fn samples_per_frame(&self) -> usize {
         self.encoder.frame_samples()
-    }
-
-    /// PROP_TIMESCALE に載せる値 (= サンプリングレート Hz)
-    pub fn timescale(&self) -> u64 {
-        self.sample_rate as u64
     }
 
     /// MSF catalog に載せる RFC 6381 形式の codec 文字列

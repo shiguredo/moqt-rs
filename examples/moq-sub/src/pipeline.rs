@@ -77,9 +77,6 @@ use tokio_moq::moqt_client::{ClientEvent, DataPlaneHandle, MoqtClient, StreamRea
 use tokio_moq::quic;
 use tokio_moq::transport;
 
-/// 音声サンプルレートが取得できなかったときのフォールバック (publisher が 48 kHz で送信する前提)
-const AUDIO_FALLBACK_SAMPLE_RATE: u32 = 48_000;
-
 /// カタログから取得したビデオトラック情報
 struct VideoTrackInfo {
     track_name: String,
@@ -266,6 +263,7 @@ enum TrackKind {
 /// `display_backlog` は表示待ちの映像フレーム数であり、閾値を超えると古い group を捨てる。
 /// 録画中は読み切って保存するため捨てない。
 /// `player_stop` は再生側の終了を伝える。sender が drop されるとパイプラインは停止する。
+#[expect(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
     frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
@@ -273,6 +271,7 @@ pub async fn run(
     task_monitor: tokio_metrics::TaskMonitor,
     mut shutdown_monitor: tokio_utils::ShutdownMonitor,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    target_latency_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
     mut player_stop: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     // 再生を行わない場合はデコードをスキップし、録画だけを行う
@@ -425,8 +424,17 @@ pub async fn run(
     );
 
     // カタログの FETCH 応答 data stream を受信
-    let (video_info, audio_info) =
+    let (video_info, audio_info, catalog_target_latency_ms) =
         receive_catalog(&mut recv_acceptor, &data_plane, catalog_fetch.request_id).await?;
+    // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの
+    // 下限として反映する (draft-ietf-moq-msf-01 §5.2.8)
+    if let Some(catalog_target_latency_ms) = catalog_target_latency_ms {
+        target_latency_ms.store(
+            catalog_target_latency_ms,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::info!("Using catalog targetLatency: {catalog_target_latency_ms}ms");
+    }
     if let Some(ref v) = video_info {
         tracing::info!(
             "Catalog video track: name={}, codec={}, {}x{} @ {} fps",
@@ -1077,7 +1085,7 @@ async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
     data_plane: &DataPlaneHandle,
     expected_request_id: u64,
-) -> Result<(Option<VideoTrackInfo>, Option<AudioTrackInfo>)> {
+) -> Result<(Option<VideoTrackInfo>, Option<AudioTrackInfo>, Option<i64>)> {
     // Padding stream が割り込んだ場合は読み捨てて次の stream を待つ。
     let (mut stream, stream_id, buf) = loop {
         let mut stream = recv_acceptor
@@ -1196,6 +1204,9 @@ async fn receive_catalog(
     // 「unknown stream id」「fetch stream event on terminated fetch」で失敗する。
     let catalog = catalog.ok_or_else(|| Error::Other("empty catalog fetch stream".to_string()))?;
     let tracks = &catalog.tracks;
+    // targetLatency は再生側の時間軸が表示の遅れの下限に使う。ここでは読むだけにして、
+    // 呼び出し側が共有セルへ入れる
+    let catalog_target_latency_ms = catalog_target_latency_ms(tracks);
     let video_info = tracks
         .iter()
         .find(|t| {
@@ -1218,7 +1229,20 @@ async fn receive_catalog(
             "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus)".to_string(),
         ));
     }
-    Ok((video_info, audio_info))
+    Ok((video_info, audio_info, catalog_target_latency_ms))
+}
+
+/// カタログの track から `targetLatency` (ミリ秒) を求める
+///
+/// 同じ `renderGroup` の track は同じ値でなければならない (draft-ietf-moq-msf-01 §5.2.8)。
+/// 値が無い track は無視し、複数の値があるときは安全側に倒して大きい方を採る。どの track も
+/// 持たないときは `None` (時間軸は自分の揺らぎから求めた遅れだけを使う)。
+fn catalog_target_latency_ms(tracks: &[MsfTrack]) -> Option<i64> {
+    tracks
+        .iter()
+        .filter_map(|track| track.target_latency)
+        .max()
+        .and_then(|value| i64::try_from(value).ok())
 }
 
 fn extract_video_info(track: &MsfTrack) -> Result<VideoTrackInfo> {
@@ -1766,6 +1790,13 @@ async fn handle_fetch_stream(
             // (draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
             // MOQT の Object Properties に載せると規定する)。H.264/H.265 はこの
             // AVCDecoderConfigurationRecord が無いと parameter set を適用できない。
+            let timestamp_us = match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
+                Ok((timestamp, timescale)) => loc_timestamp_us(timestamp, timescale),
+                Err(e) => {
+                    request_session_termination(termination_tx, &e);
+                    return;
+                }
+            };
             let video_config = match extract_video_config(obj.properties_bytes.as_deref()) {
                 Ok(config) => config,
                 Err(e) => {
@@ -1788,7 +1819,13 @@ async fn handle_fetch_stream(
                 continue;
             };
             frames += tokio::task::block_in_place(|| {
-                decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
+                decode_and_send(
+                    &payload,
+                    video_config.as_deref(),
+                    timestamp_us,
+                    video_decoder,
+                    sink,
+                )
             });
         }
     }
@@ -1874,6 +1911,15 @@ async fn decode_video_stream(
         if !deliver {
             continue;
         }
+        // 表示時刻を決めるために LOC の Timestamp も取り出す
+        // (書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出する)
+        let timestamp_us = match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
+            Ok((timestamp, timescale)) => loc_timestamp_us(timestamp, timescale),
+            Err(e) => {
+                request_session_termination(termination_tx, &e);
+                return frames;
+            }
+        };
         let video_config = match extract_video_config(obj.properties_bytes.as_deref()) {
             Ok(config) => config,
             Err(e) => {
@@ -1896,7 +1942,13 @@ async fn decode_video_stream(
             continue;
         };
         frames += tokio::task::block_in_place(|| {
-            decode_and_send(&payload, video_config.as_deref(), video_decoder, sink)
+            decode_and_send(
+                &payload,
+                video_config.as_deref(),
+                timestamp_us,
+                video_decoder,
+                sink,
+            )
         });
     }
 }
@@ -1904,6 +1956,7 @@ async fn decode_video_stream(
 fn decode_and_send(
     payload: &[u8],
     video_config: Option<&[u8]>,
+    timestamp_us: Option<i64>,
     decoder: &mut decoder::VideoDecoder,
     sink: &FrameSink<'_>,
 ) -> u64 {
@@ -1915,7 +1968,9 @@ fn decode_and_send(
         }
     };
     let mut frames: u64 = 0;
-    for frame in decoded {
+    for mut frame in decoded {
+        // 表示時刻を決めるのは時間軸であり、TIMESTAMP は Object からここで載せる
+        frame.timestamp_us = timestamp_us;
         frames += 1;
         if sink.frame_tx.send(frame).is_err() {
             return frames;
@@ -2056,20 +2111,25 @@ fn record_audio_object(
     });
 }
 
-/// LOC の Timestamp と Timescale から音声 PTS (マイクロ秒) を計算する
+/// LOC の Timestamp と Timescale から表示に使う時刻 (マイクロ秒) を計算する
 ///
 /// Timestamp は `u64` 全域を取りうるため、`as i64` キャストや `* 1_000_000` の乗算で
 /// オーバーフローしないよう `u128` で中間計算し、結果が `i64` に収まらない場合は
-/// `i64::MAX` に飽和させる。`timestamp` が無い、または `timescale` が 0 の場合は 0 を返す。
-fn audio_pts_us(timestamp: Option<u64>, timescale: Option<u64>) -> i64 {
-    let effective_scale = timescale.unwrap_or(u64::from(AUDIO_FALLBACK_SAMPLE_RATE));
-    match timestamp {
-        Some(ts) if effective_scale > 0 => {
-            let pts = u128::from(ts) * 1_000_000 / u128::from(effective_scale);
-            i64::try_from(pts).unwrap_or(i64::MAX)
+/// `i64::MAX` に飽和させる。
+///
+/// `Timescale` が無いときの Timestamp は Unix epoch からのマイクロ秒である
+/// (draft-ietf-moq-loc-04 §2.3.1.1)。音声のサンプル数でもフレーム数でもないため、
+/// サンプルレートを仮定した換算はしない。Timescale が 0 のときも同じ扱いにする。
+/// `timestamp` が無いときは `None` を返す。
+fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i64> {
+    let timestamp = timestamp?;
+    let micros = match timescale {
+        Some(timescale) if timescale > 0 => {
+            u128::from(timestamp) * 1_000_000 / u128::from(timescale)
         }
-        _ => 0,
-    }
+        _ => u128::from(timestamp),
+    };
+    Some(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 /// OpusHead (RFC 7845 §5.1) をパースする
@@ -2315,7 +2375,7 @@ async fn decode_audio_stream(
         };
         let sample_rate = opus_decoder.sample_rate();
         let channels = opus_decoder.channels();
-        let pts_us = audio_pts_us(timestamp, timescale);
+        let pts_us = loc_timestamp_us(timestamp, timescale).unwrap_or(0);
         let frame = DecodedAudioFrame {
             pcm,
             sample_rate,
@@ -2333,79 +2393,170 @@ async fn decode_audio_stream(
 mod tests {
     use super::*;
 
-    // timestamp が None なら PTS は 0 になる
+    /// テスト用: targetLatency 付きの track を作る
+    fn track_with_target_latency(target_latency: Option<u64>) -> MsfTrack {
+        let mut track = MsfTrack::new(
+            "video".to_string(),
+            shiguredo_moqt::msf::MsfPackaging::Loc,
+            true,
+        );
+        track.target_latency = target_latency;
+        track
+    }
+
+    // カタログの targetLatency をそのまま読む
     #[test]
-    fn audio_pts_us_returns_zero_when_timestamp_is_none() {
+    fn catalog_target_latency_reads_the_value() {
+        let tracks = [
+            track_with_target_latency(Some(200)),
+            track_with_target_latency(Some(200)),
+        ];
         assert_eq!(
-            audio_pts_us(None, Some(48_000)),
-            0,
-            "timestamp が None なら 0"
+            catalog_target_latency_ms(&tracks),
+            Some(200),
+            "同じ render group の track は同じ値を持つ"
         );
     }
 
-    // timescale が 0 ならゼロ除算を避けて PTS は 0 になる
+    // targetLatency を持つ track が 1 つだけでも読む
     #[test]
-    fn audio_pts_us_returns_zero_when_timescale_is_zero() {
-        assert_eq!(audio_pts_us(Some(100), Some(0)), 0, "timescale が 0 なら 0");
+    fn catalog_target_latency_ignores_tracks_without_the_value() {
+        let tracks = [
+            track_with_target_latency(None),
+            track_with_target_latency(Some(150)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks),
+            Some(150),
+            "値を持つ track だけを見る"
+        );
     }
 
-    // timescale が None ならフォールバック (48 kHz) で計算する
+    // どの track も targetLatency を持たなければ None になる
     #[test]
-    fn audio_pts_us_uses_fallback_sample_rate_when_timescale_is_none() {
-        // 48000 / 48000 * 1_000_000 = 1_000_000 (1 秒)
+    fn catalog_target_latency_is_none_without_the_value() {
+        let tracks = [track_with_target_latency(None)];
         assert_eq!(
-            audio_pts_us(Some(48_000), None),
-            1_000_000,
-            "timescale が None なら 48 kHz フォールバックで計算する"
+            catalog_target_latency_ms(&tracks),
+            None,
+            "値が無ければ時間軸は自分の遅れだけを使う"
+        );
+    }
+
+    // 値が食い違うときは大きい方を採る (表示の遅れを短くしないため)
+    #[test]
+    fn catalog_target_latency_takes_the_larger_value() {
+        let tracks = [
+            track_with_target_latency(Some(100)),
+            track_with_target_latency(Some(300)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks),
+            Some(300),
+            "食い違うときは大きい方を採る"
+        );
+    }
+
+    // i64 に収まらない値は targetLatency として扱わない
+    #[test]
+    fn catalog_target_latency_ignores_values_out_of_range() {
+        let tracks = [track_with_target_latency(Some(u64::MAX))];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks),
+            None,
+            "i64 に収まらない値は無いものとして扱う"
+        );
+    }
+
+    // timestamp が None なら時刻は決まらない
+    #[test]
+    fn loc_timestamp_us_returns_none_when_timestamp_is_none() {
+        assert_eq!(
+            loc_timestamp_us(None, Some(48_000)),
+            None,
+            "timestamp が None なら時刻は決まらない"
+        );
+    }
+
+    // timescale が 0 のときは Timescale が無いものとして扱い、Timestamp をマイクロ秒とする
+    #[test]
+    fn loc_timestamp_us_treats_zero_timescale_as_microseconds() {
+        assert_eq!(
+            loc_timestamp_us(Some(100), Some(0)),
+            Some(100),
+            "timescale が 0 なら Timestamp をそのままマイクロ秒として扱う"
+        );
+    }
+
+    // timescale が None のときは Timestamp を Unix epoch からのマイクロ秒として扱う
+    // (draft-ietf-moq-loc-04 §2.3.1.1)
+    #[test]
+    fn loc_timestamp_us_treats_missing_timescale_as_microseconds() {
+        assert_eq!(
+            loc_timestamp_us(Some(1_700_000_000_000_000), None),
+            Some(1_700_000_000_000_000),
+            "timescale が None なら Timestamp は epoch マイクロ秒である"
         );
     }
 
     // 通常の値で正しくマイクロ秒に変換する
     #[test]
-    fn audio_pts_us_converts_normal_values() {
+    fn loc_timestamp_us_converts_normal_values() {
         // 1_000_000 / 1_000_000 * 1_000_000 = 1_000_000
         assert_eq!(
-            audio_pts_us(Some(1_000_000), Some(1_000_000)),
-            1_000_000,
+            loc_timestamp_us(Some(1_000_000), Some(1_000_000)),
+            Some(1_000_000),
             "timestamp と timescale が等しければ 1 秒 (1_000_000 us)"
+        );
+        // 音声のサンプル数として解釈される例: 48_000 / 48_000 = 1 秒
+        assert_eq!(
+            loc_timestamp_us(Some(48_000), Some(48_000)),
+            Some(1_000_000),
+            "Timescale があるときはその時間軸の値として換算する"
         );
     }
 
     // 巨大な Timestamp でもオーバーフローせず i64::MAX に飽和する (旧実装は debug で panic した)
     #[test]
-    fn audio_pts_us_saturates_on_huge_timestamp() {
+    fn loc_timestamp_us_saturates_on_huge_timestamp() {
         // 1e13 * 1_000_000 = 1e19 > i64::MAX (約 9.2e18) なので飽和する
         assert_eq!(
-            audio_pts_us(Some(10_000_000_000_000), Some(1)),
-            i64::MAX,
+            loc_timestamp_us(Some(10_000_000_000_000), Some(1)),
+            Some(i64::MAX),
             "巨大な Timestamp は i64::MAX に飽和する"
         );
         // u64::MAX でも panic せず飽和する
         assert_eq!(
-            audio_pts_us(Some(u64::MAX), Some(1)),
-            i64::MAX,
+            loc_timestamp_us(Some(u64::MAX), Some(1)),
+            Some(i64::MAX),
             "u64::MAX でも panic せず飽和する"
+        );
+        // Timescale が無いときは換算しないため、そのまま飽和する
+        assert_eq!(
+            loc_timestamp_us(Some(u64::MAX), None),
+            Some(i64::MAX),
+            "Timescale が無いときも i64::MAX に飽和する"
         );
     }
 
     // 巨大な Timescale でも符号ラップせず正しく計算する
     #[test]
-    fn audio_pts_us_does_not_wrap_on_huge_timescale() {
+    fn loc_timestamp_us_does_not_wrap_on_huge_timescale() {
         // u64::MAX * 1_000_000 / u64::MAX = 1_000_000 (u128 中間計算でオーバーフローしない)
         assert_eq!(
-            audio_pts_us(Some(u64::MAX), Some(u64::MAX)),
-            1_000_000,
+            loc_timestamp_us(Some(u64::MAX), Some(u64::MAX)),
+            Some(1_000_000),
             "巨大な Timescale でも符号ラップせず正しく計算する"
         );
     }
 
     // i64 範囲に収まる大きな値は飽和せずそのまま返す
     #[test]
-    fn audio_pts_us_returns_large_value_without_saturation() {
+    fn loc_timestamp_us_returns_large_value_without_saturation() {
         // 9e12 * 1_000_000 = 9e18 < i64::MAX (約 9.223e18) なので飽和しない
         assert_eq!(
-            audio_pts_us(Some(9_000_000_000_000), Some(1)),
-            9_000_000_000_000_000_000,
+            loc_timestamp_us(Some(9_000_000_000_000), Some(1)),
+            Some(9_000_000_000_000_000_000),
             "i64 に収まる大きな値は飽和せずそのまま返す"
         );
     }

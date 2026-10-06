@@ -1459,8 +1459,13 @@ mod tests {
             pixel_buffer: None,
         };
         let mut video_samples = Vec::new();
-        for _ in 0..3 {
-            video_samples.extend(video_encoder.encode(&frame).expect("エンコードできること"));
+        for index in 0..3u64 {
+            // 30 fps のフレーム間隔で Timestamp を進める
+            video_samples.extend(
+                video_encoder
+                    .encode(&frame, index * 33_333)
+                    .expect("エンコードできること"),
+            );
         }
         let mut audio_encoder =
             OpusEncoder::new(AUDIO_TIMESCALE, 1, 64_000).expect("Opus エンコーダを作成できること");
@@ -1846,8 +1851,13 @@ mod tests {
             pixel_buffer: None,
         };
         let mut samples = Vec::new();
-        for _ in 0..3 {
-            samples.extend(encoder.encode(&frame).expect("エンコードできること"));
+        for index in 0..3u64 {
+            // 30 fps のフレーム間隔で Timestamp を進める
+            samples.extend(
+                encoder
+                    .encode(&frame, index * 33_333)
+                    .expect("エンコードできること"),
+            );
         }
         assert_eq!(samples.len(), 3, "3 フレームが生成されること");
 

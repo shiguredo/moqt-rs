@@ -11,6 +11,37 @@
 
 ## develop
 
+- [CHANGE] moq-pub の live capture の LOC Timestamp を Unix epoch マイクロ秒に統一する
+  - 映像と音声で別々の `media_clock::WallClockMapper` を持ち、capture timestamp を「壁時計 − メディア時刻」の最小値で epoch へ換算する
+  - live capture では `PROP_TIMESCALE` を付けない。`--input-mp4` / `--input-mp4-reencode` は入力ファイルのメディア時刻を送るため、入力トラックの timescale を付けたままにする
+  - カタログに音声と映像で同一の `renderGroup` と `targetLatency` (既定 200 ms、`--target-latency` で変更) を載せる
+  - @voluntas
+
+- [ADD] moq-sub が映像も共通の時間軸で選び、カタログの `targetLatency` を表示の遅れに反映する
+  - `DecodedVideoFrame` に LOC の Timestamp を載せ、音声と同じ `playout::timeline` で観測する
+  - 映像は `playout::buffer::PlayoutBuffer` が表示時刻に合わせて選び、遅れすぎたフレームは捨てる
+  - カタログの `targetLatency` を `PlayoutTimeline::set_target_latency_ms` へ渡す
+  - `Timescale` を持たない Timestamp を epoch マイクロ秒として扱い、48 kHz の仮定をやめる
+  - @voluntas
+
+- [CHANGE] A/V 同期の遅延制御を `playout::timeline` へ統合し、`playout::sync` を削除する
+  - 制御量を「基準の遅れ + 表示の遅れ」の差そのものにし、観測のたびに適用する (直近の観測から求めた経路の相対遅延は使わない)
+  - 公開 API の `StreamSynchronization` / `SyncMeasurement` / `SyncDelays` / `compute_relative_delay` / `PlayoutTimeline::sync` を削除する
+  - @voluntas
+
+- [ADD] `playout::buffer` に表示時刻に合わせてフレームを選ぶ `PlayoutBuffer` を追加する
+  - 表示時刻を過ぎたフレームのうち最新の 1 枚を描き、上限を超えて遅れたフレームは捨てる。表示時刻を決められないフレームは届いた順に描く
+  - @voluntas
+
+- [ADD] `playout::stretch` に欠落した区間を補間する `conceal` を追加し、`playout::scheduler` が隙間を知らせるようにする
+  - `AudioPlayoutDecision::Play` に `gap_start_us` / `gap_us` を追加し、`confirm_concealment` で実際に埋めた長さを返す
+  - 隙間は 5 ms 以下と、開始が今 + 余裕より前のものを除き、100 ms で切る
+  - @voluntas
+
+- [ADD] `media_clock` にメディア時刻を Unix epoch の壁時計へ換算する `WallClockMapper` を追加する
+  - 「壁時計 − メディア時刻」の最小値を対応にし、換算した TIMESTAMP が戻らないよう 1 回の換算で動かす量を制限する
+  - @voluntas
+
 - [ADD] moq-sub に音声の jitter buffer を追加し、到着の揺らぎに合わせた遅延で再生する
   - ライブラリの `playout::timeline` が LOC の TIMESTAMP と受信側の壁時計から鳴らす時刻を決める (目標遅延は `playout::delay` が学習する)
   - 鳴らす時刻の 40 ms 手前まで音声を保持し、遅れすぎた音と上限を超えた音は捨てる

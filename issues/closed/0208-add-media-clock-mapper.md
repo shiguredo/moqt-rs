@@ -1,7 +1,7 @@
 # 映像フレームのメディア時刻を壁時計へ換算する
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/complete-playout
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,10 @@
 
 - draft-ietf-moq-loc-04 §2.3.1.1 (Timestamp) / §2.3.1.2 (Timescale)
 - draft-ietf-moq-msf-01 §5.2.8 (Target latency)
+
+## 解決方法
+
+- `src/media_clock.rs` に `WallClockMapper` を追加した。`observe(media_us, wall_clock_us)` が「壁時計 − メディア時刻」の最小値を対応の目標にし、`to_wall_clock_us(media_us, fallback_wall_clock_us)` がその目標へ向けて 1 回の換算につき前回換算したメディア時刻との差の半分未満だけ動かす。換算した TIMESTAMP が戻らないための制限である。
+- 起源が Unix epoch でも monotonic でも同じ式で扱える。音声と映像で別々の mapper を持つ前提であり、共通の対応は仮定しない。
+- `tests/test_media_clock.rs` に 6 件、`pbt/tests/prop_media_clock.rs` に 1 件のテストを追加した。
+- `examples/moq-pub` の live capture の Timestamp がこの換算を使うようになった (0103)。

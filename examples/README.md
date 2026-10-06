@@ -7,7 +7,7 @@ draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 ## 構成
 
 - **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
-- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生する。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。
@@ -105,6 +105,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
 | `--audio-datagram` | | | 音声トラックを subgroup stream ではなく datagram で配信する (映像と catalog は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2)。上限は `--datagram-max-size` で指定し、超える object はエラーになる |
 | `--datagram-max-size` | | `1160` | MOQT の object datagram (ヘッダ + Properties + payload) の上限サイズ (bytes)。上限を超える object は送信せず、実サイズと対処を示すエラーで終了する。既定は RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値である |
+| `--target-latency` | | `200` | MSF カタログの `targetLatency` (ms)。受信側は符号化時刻からこの値ぶん遅らせて表示する (draft-ietf-moq-msf-01 §5.2.8)。音声と映像には同じ値を載せ、同じ `renderGroup` で同時に再生させる (同 §5.2.11) |
 
 `--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` / `--datagram-max-size` は無視され、警告ログが出る。
 `--input-mp4-reencode` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視され、警告ログが出る。

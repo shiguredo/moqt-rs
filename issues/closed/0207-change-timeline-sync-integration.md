@@ -1,7 +1,7 @@
 # A/V 同期の遅延制御を時間軸へ統合する
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/complete-playout
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,11 @@
 
 - `src/playout/timeline.rs` の `PlayoutTimeline` / `TrackState`
 - draft-ietf-moq-msf-01 §5.2.8 (Target latency) / §5.2.11 (Render group)
+
+## 解決方法
+
+- `PlayoutTimeline::observe` が観測のたびに A/V 同期の制御を行うようにした。呼び出し側が `sync` を呼ぶ必要はなくなった。
+- 制御量を「基準の遅れ + 表示の遅れ」の差そのものに変えた。直近の観測から求めた経路の相対遅延は、観測のたびに動く揺らぎがそのまま制御量に入るため使わない。
+- ずれが `TIMELINE_SYNC_MIN_DELTA_US` (30 ms) を超えたら先行する側へ足して合わせ、足した分は毎秒 `TIMELINE_DELAY_DECAY_US_PER_SECOND` までで戻す。観測の間隔で按分するため、観測が疎でも速さは変わらない。
+- 公開 API の `StreamSynchronization` / `SyncMeasurement` / `SyncDelays` / `compute_relative_delay` / `PlayoutTimeline::sync` と、モジュール `playout::sync` を削除した。
+- 実装中に、`saturating_sub` を「0 で止まる」と誤解していた箇所があり、同期の制御で足した遅延が負になり得るバグをテストで検出して直した。

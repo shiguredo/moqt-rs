@@ -3,7 +3,7 @@
 //! 公開 API (`PlayoutTimeline`) の契約を確認する。
 
 use shiguredo_moqt::playout::timeline::{
-    PlayoutTimeline, TIMELINE_SYNC_INTERVAL_US, TimelineConfig, Track,
+    PlayoutTimeline, TIMELINE_SYNC_MIN_DELTA_US, TimelineConfig, Track,
 };
 
 /// 映像の揺らぎを 40 ms、フレーム間隔を 33 ms にして観測を並べる
@@ -41,55 +41,54 @@ fn audio_delay_follows_the_learned_target() {
         let time_us = 1_000_000 + index * 20_000;
         timeline.observe(Track::Audio, time_us, time_us);
     }
-    // 目標遅延は分位点の最小 (20 ms) まで下がる
+    // 目標遅延は分位点の最小 (20 ms) まで下がり、表示の遅れもそこへ追随する
     assert_eq!(timeline.learned_delay_us(Track::Audio), 20_000);
-    // 表示の遅れは既定の 80 ms から、制御が動かない間に毎秒 20 ms ずつ下がる
-    let mut wall_us = 2_000_000;
-    for _ in 0..4 {
-        timeline.sync(wall_us);
-        wall_us += TIMELINE_SYNC_INTERVAL_US;
-        timeline.observe(Track::Audio, wall_us, wall_us);
-        timeline.observe(Track::Video, wall_us, wall_us);
-    }
     assert_eq!(
         timeline.presentation_delay_us(Track::Audio),
         Some(20_000),
-        "学習した目標遅延まで下がる"
+        "学習した目標遅延がそのまま表示の遅れになる"
     );
 }
 
 #[test]
-fn sync_keeps_the_lower_bounds_from_the_control() {
+fn sync_raises_the_leading_track_toward_the_late_one() {
     let mut timeline = PlayoutTimeline::new();
     // 音声は 10 ms で届き、映像は同じ TIMESTAMP で 300 ms 遅れて届く
     timeline.observe(Track::Audio, 10_010_000, 1_000_000);
     timeline.observe(Track::Video, 10_310_000, 1_000_000);
-    let delays = timeline.sync(10_500_000).expect("ずれが大きいので制御する");
-    // A/V 同期の制御が返した遅延の下限が表示の遅れとして保持される
+    // 先行する音声の遅れが上がり、表示時刻の差が不感帯に収まる
+    let audio_delay_us = timeline
+        .presentation_delay_us(Track::Audio)
+        .expect("基準があるので遅れが決まる");
     assert!(
-        timeline.presentation_delay_us(Track::Audio).unwrap_or(0) >= delays.audio_delay_ms * 1_000
+        audio_delay_us > timeline.learned_delay_us(Track::Audio),
+        "自分の遅れより上に足す: {audio_delay_us}"
     );
-    assert!(
-        timeline.presentation_delay_us(Track::Video).unwrap_or(0) >= delays.video_delay_ms * 1_000
+    let audio_present_us = timeline
+        .present_us(Track::Audio, 1_000_000)
+        .expect("基準がある");
+    let video_present_us = timeline
+        .present_us(Track::Video, 1_000_000)
+        .expect("基準がある");
+    assert_eq!(
+        video_present_us - audio_present_us,
+        TIMELINE_SYNC_MIN_DELTA_US,
+        "後行側から不感帯だけ手前へ寄せる"
     );
-    // 自分の揺らぎから求めた遅れ (音声 80 ms / 映像 0 ms) を下回らない
-    assert!(timeline.presentation_delay_us(Track::Audio).unwrap_or(0) >= 80_000);
 }
 
 #[test]
-fn sync_control_runs_once_per_second() {
+fn sync_control_runs_on_every_observation() {
     let mut timeline = PlayoutTimeline::new();
-    // 映像が 300 ms 遅れている状態を保ちながら、1 秒ごとに観測を足す
+    // 映像が 300 ms 遅れている状態を保ちながら、100 ms ごとに観測を足す
     for step in 0..3i64 {
-        let wall_us = 10_000_000 + step * TIMELINE_SYNC_INTERVAL_US;
-        let timestamp_us = 1_000_000 + step * TIMELINE_SYNC_INTERVAL_US;
+        let wall_us = 10_000_000 + step * 100_000;
+        let timestamp_us = 1_000_000 + step * 100_000;
         timeline.observe(Track::Audio, wall_us, timestamp_us);
         timeline.observe(Track::Video, wall_us + 300_000, timestamp_us);
-        let now_us = wall_us + 400_000;
-        assert!(timeline.sync(now_us).is_some(), "{step} 回目は制御する");
         assert!(
-            timeline.sync(now_us + 500_000).is_none(),
-            "間隔の中では制御しない"
+            timeline.presentation_delay_us(Track::Audio).unwrap_or(0) > 80_000,
+            "{step} 回目の観測で遅れを上げる"
         );
     }
 }

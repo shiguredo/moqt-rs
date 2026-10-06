@@ -42,6 +42,23 @@ pub struct AudioTrackParams<'a> {
     pub bitrate: u32,
 }
 
+/// publisher が音声・映像の両トラックへ共通で載せる同期用のメタデータ
+///
+/// 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる。
+/// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は同じ render group のトラックに
+/// 同一の targetLatency を MUST で求める。
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogSyncParams {
+    /// レンダーグループ
+    ///
+    /// 同じ値を持つトラックは同時に再生する (draft-ietf-moq-msf-01 §5.2.11)。
+    pub render_group: u64,
+    /// ターゲットレイテンシ (ms)
+    ///
+    /// 符号化した時刻から表示するまでのずれ (draft-ietf-moq-msf-01 §5.2.8)。
+    pub target_latency_ms: u64,
+}
+
 /// カタログ送信用パラメータ
 pub struct CatalogParams<'a> {
     pub handle: &'a transport::StreamHandle,
@@ -54,6 +71,8 @@ pub struct CatalogParams<'a> {
     /// `SUBGROUP_HEADER` 未送信で RESET、配送すれば FIN)。複数 Object を持つ Subgroup と同じ
     /// 形で呼び出し側から値を渡しておく。
     pub start_location: Option<Location>,
+    /// 音声・映像で共通の同期用メタデータ
+    pub sync: CatalogSyncParams,
     pub video: Option<VideoTrackParams<'a>>,
     pub audio: Option<AudioTrackParams<'a>>,
 }
@@ -66,6 +85,7 @@ pub struct CatalogParams<'a> {
 fn build_catalog(
     video: Option<&VideoTrackParams<'_>>,
     audio: Option<&AudioTrackParams<'_>>,
+    sync: CatalogSyncParams,
 ) -> Result<MsfCatalogDocument> {
     let mut tracks = Vec::new();
 
@@ -77,6 +97,8 @@ fn build_catalog(
         track.height = Some(v.height as u64);
         track.framerate = Some(v.fps as f64);
         track.bitrate = Some(v.bitrate as u64 * 1000);
+        track.target_latency = Some(sync.target_latency_ms);
+        track.render_group = Some(sync.render_group);
         tracks.push(track);
     }
 
@@ -87,6 +109,8 @@ fn build_catalog(
         track.samplerate = Some(a.samplerate as u64);
         track.channel_config = Some(a.channel_config.to_string());
         track.bitrate = Some(a.bitrate as u64 * 1000);
+        track.target_latency = Some(sync.target_latency_ms);
+        track.render_group = Some(sync.render_group);
         tracks.push(track);
     }
 
@@ -115,7 +139,7 @@ fn build_catalog(
 /// 呼び出し側で保持する。
 /// draft-ietf-moq-msf-01 §5 (Catalog)
 pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
-    let catalog = build_catalog(params.video.as_ref(), params.audio.as_ref())?;
+    let catalog = build_catalog(params.video.as_ref(), params.audio.as_ref(), params.sync)?;
 
     let catalog_json = catalog
         .encode()
@@ -157,6 +181,14 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// テストで使う同期用メタデータ
+    ///
+    /// 既定のターゲットレイテンシ (200 ms) と同じ値を使う。
+    const TEST_SYNC: CatalogSyncParams = CatalogSyncParams {
+        render_group: 1,
+        target_latency_ms: 200,
+    };
+
     /// publisher が生成する video / audio の構成のカタログが encode に成功すること
     ///
     /// codec 文字列が audio / video と判定されること自体は、library 側の登録名テストで
@@ -181,10 +213,80 @@ mod tests {
             channel_config: "2",
             bitrate: 128,
         };
-        let catalog = build_catalog(Some(&video), Some(&audio)).expect("カタログを構築できること");
+        let catalog =
+            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
         catalog
             .encode()
             .expect("publisher のカタログが encode に成功すること");
+    }
+
+    /// 音声と映像の renderGroup / targetLatency が同一値で載り、encode / decode を往復できること
+    ///
+    /// 受信側は同じ render group のトラックを同時に再生し、targetLatency ぶん遅らせて表示する。
+    /// draft-ietf-moq-msf-01 §5.2.8 (Target latency) は同じ render group のトラックに同一の
+    /// targetLatency を MUST で求める。§5.2.11 (Render group) は同じ値のトラックを
+    /// 同時に再生する SHOULD を定める。
+    #[test]
+    fn publisher_catalog_sets_sync_metadata_on_both_tracks() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+        };
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "1",
+            bitrate: 64,
+        };
+        let catalog =
+            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let encoded = catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+        let decoded =
+            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+        let MsfCatalogDocument::Full(full) = decoded else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(full.tracks.len(), 2, "音声と映像の 2 トラックを持つこと");
+
+        let video_track = &full.tracks[0];
+        let audio_track = &full.tracks[1];
+        assert_eq!(
+            video_track.render_group,
+            Some(TEST_SYNC.render_group),
+            "映像に renderGroup が載ること"
+        );
+        assert_eq!(
+            audio_track.render_group,
+            Some(TEST_SYNC.render_group),
+            "音声に renderGroup が載ること"
+        );
+        assert_eq!(
+            video_track.render_group, audio_track.render_group,
+            "音声と映像の renderGroup が同一値であること"
+        );
+        assert_eq!(
+            video_track.target_latency,
+            Some(TEST_SYNC.target_latency_ms),
+            "映像に targetLatency が載ること"
+        );
+        assert_eq!(
+            audio_track.target_latency,
+            Some(TEST_SYNC.target_latency_ms),
+            "音声に targetLatency が載ること"
+        );
+        assert_eq!(
+            video_track.target_latency, audio_track.target_latency,
+            "音声と映像の targetLatency が同一値であること"
+        );
     }
 
     /// `--video-codec h264` / `h265` の codec 文字列でも encode に成功すること
@@ -203,7 +305,8 @@ mod tests {
                 fps: 30,
                 bitrate: 5_000,
             };
-            let catalog = build_catalog(Some(&video), None).expect("カタログを構築できること");
+            let catalog =
+                build_catalog(Some(&video), None, TEST_SYNC).expect("カタログを構築できること");
             catalog
                 .encode()
                 .expect("代替の video codec でも encode に成功すること");
@@ -214,7 +317,7 @@ mod tests {
     #[test]
     fn empty_catalog_is_rejected() {
         assert!(
-            build_catalog(None, None).is_err(),
+            build_catalog(None, None, TEST_SYNC).is_err(),
             "トラックが 1 つも無い場合はエラーになること"
         );
     }

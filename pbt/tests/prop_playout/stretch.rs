@@ -1,11 +1,12 @@
-//! 波形の周期による時間圧縮・伸長のプロパティテスト
+//! 波形の周期による時間圧縮・伸長と、欠落した区間の補間のプロパティテスト
 //!
 //! 任意の音声サンプル列に対して、長さの変化の契約とバッファ操作の構造が
 //! 保たれることを検証する。
 
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::stretch::{
-    TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, expand,
+    TIME_STRETCH_CONCEAL_END_GAIN, TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, conceal,
+    concealment_end_gain, expand,
 };
 
 /// 対応しているサンプルレートと間引き率の組
@@ -71,6 +72,21 @@ fn sample_channels(
     (0..channel_count)
         .map(|_| sample_signal(ctx, length))
         .collect()
+}
+
+/// 補間する長さ (マイクロ秒) を選ぶ
+///
+/// 0 (埋めない)、1 サンプルに満たない長さ、隙間の下限の前後、上限、上限を超える長さを
+/// 混ぜて、補間の分岐をひととおり踏む。
+fn sample_conceal_us(ctx: &mut noprop::TestCaseContext) -> i64 {
+    match noprop::sample_usize_in(ctx, 0..6) {
+        0 => 0,
+        1 => 1,
+        2 => 4_999,
+        3 => 5_000,
+        4 => 100_000,
+        _ => noprop::sample_usize_in(ctx, 0..=200_000) as i64,
+    }
 }
 
 /// compress は 0 または負の長さの変化を返し、変更しなかった範囲と詰めた範囲が
@@ -170,6 +186,90 @@ fn expand_reports_length_change_and_keeps_buffers_consistent() -> noprop::TestRe
                 }
             }
         }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// conceal は 0 または要求した長さを返し、埋めた範囲は元の音の振幅に収まり、埋めなかった
+/// 範囲と埋めなかったときの出力は変えない
+#[test]
+fn conceal_reports_length_and_keeps_buffers_consistent() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let (sample_rate, _factor) = sample_supported_rate(ctx);
+        let length = sample_length(ctx);
+        let channel_count = noprop::sample_usize_in(ctx, 1..=2);
+        let channels = sample_channels(ctx, length, channel_count);
+        let conceal_us = sample_conceal_us(ctx);
+        // 要求する長さ (サンプル数、四捨五入)
+        let requested =
+            ((conceal_us * i64::from(sample_rate) + 500_000) / 1_000_000).max(0) as usize;
+        // 要求より 8 サンプル長い出力を用意し、書かなかった範囲が変わらないことも見る
+        let mut output = vec![vec![0.0f32; requested + 8]; channel_count];
+        let references: Vec<&[f32]> = channels.iter().map(|channel| channel.as_slice()).collect();
+        let mut outputs: Vec<&mut [f32]> = output
+            .iter_mut()
+            .map(|channel| channel.as_mut_slice())
+            .collect();
+        let change = conceal(&references, &mut outputs, sample_rate, conceal_us);
+        assert!(change >= 0);
+        if change == 0 {
+            // 埋めなかったときは出力へ何も書かない
+            assert!(
+                output
+                    .iter()
+                    .all(|channel| channel.iter().all(|sample| *sample == 0.0))
+            );
+        } else {
+            let generated = change as usize;
+            // 要求した長さちょうどを埋める
+            assert_eq!(generated, requested);
+            for (output_channel, channel) in output.iter().zip(channels.iter()) {
+                // 埋めた音は元の音の振幅の範囲に収まり、有限である
+                let peak = channel
+                    .iter()
+                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+                for sample in &output_channel[..generated] {
+                    assert!(sample.is_finite());
+                    assert!(sample.abs() <= peak);
+                }
+                // 埋めた長さを超える範囲は変えない
+                assert!(
+                    output_channel[generated..]
+                        .iter()
+                        .all(|sample| *sample == 0.0)
+                );
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 補間した音の末尾の振幅は、補間が長いほど下がり、下限と 1 の間に収まる
+#[test]
+fn concealment_end_gain_is_monotone_and_bounded() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let left = noprop::sample_usize_in(ctx, 0..=200_000) as i64;
+        let right = noprop::sample_usize_in(ctx, 0..=200_000) as i64;
+        // 短い方と長い方の組にする
+        let (shorter, longer) = if left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let end_gain_of_shorter = concealment_end_gain(shorter);
+        let end_gain_of_longer = concealment_end_gain(longer);
+        assert!(
+            end_gain_of_shorter >= end_gain_of_longer,
+            "shorter={shorter} longer={longer}"
+        );
+        assert!(
+            (TIME_STRETCH_CONCEAL_END_GAIN..=1.0).contains(&end_gain_of_longer),
+            "end_gain={end_gain_of_longer}"
+        );
         Ok(())
     })?;
     Ok(())
