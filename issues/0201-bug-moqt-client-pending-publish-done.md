@@ -3,6 +3,7 @@
 - Created: 2026-10-06
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moqt-client-pending-publish-done
+- Polished: 2026-10-06
 
 ## 目的
 
