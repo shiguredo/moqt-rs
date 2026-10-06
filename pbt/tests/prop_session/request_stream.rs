@@ -556,3 +556,191 @@ fn track_status_requester_terminates_on_responder_end() -> TestResult {
     })?;
     Ok(())
 }
+
+/// PUBLISH を送った側の peer FIN 遅延が state / 役割 / 最終メッセージ送信有無で決まる
+///
+/// draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure) は "the publisher of an
+/// Established subscription MUST send PUBLISH_DONE, before sending a FIN" と定め、§9.9 (PUBLISH_DONE)
+/// の MUST NOT ("A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open,
+/// and has no further datagrams to send, for a subscription.") により open 中の stream がある間は
+/// PUBLISH_DONE を送れない。そのため PUBLISH を送った側は最終メッセージ (PUBLISH_DONE) を送るまで
+/// 購読を終端できない。`Session::defers_peer_fin` が
+/// RequestKind::Publish で遅延するのは次のすべてを満たす場合で、1 つでも欠けると peer FIN の
+/// 到着で終端する。
+///
+/// - `state != Pending(Publisher)`: REQUEST_OK 未受信の要求は §6.4.2.2 (Graceful Request Stream
+///   Closure) の "An endpoint that receives a FIN before all required messages have arrived
+///   treats the request as failed." に従い終端する (この性質が検出する)
+/// - `my_role == Publisher`: 自側が PUBLISH を送った側であること (この性質が検出する)
+/// - `initiator == Publisher`: PUBLISH 起点であること。RequestKind::Publish の subscription は
+///   常に PUBLISH 起点 (`Session::send_publish` と `Session::handle_peer_publish` が Publisher を
+///   記録する) ため、この条件は防御であり単独では観測できない
+/// - 自側の最終メッセージ未送信 (`local_fin_sent` に無い) であること。自側が最終メッセージを
+///   送った後に peer FIN が届くと両方向が閉じるため、遅延しても FIN 交換の確定
+///   (`Session::finish_request_on_fin_exchange`) で同じ結果になり、この条件も単独では観測できない
+///
+/// サンプルする状態は `Pending(Publisher)` / `Established` (publisher 役・subscriber 役) /
+/// `Terminated` (最終メッセージ送信後) である。REQUEST_UPDATE 失敗応答で PUBLISH_DONE を保留した
+/// `Terminated` はこの性質では作らず、例示テスト (`tests/test_session/subscription/request_update.rs`)
+/// が固定する。
+///
+/// RESET_STREAM (cancel, §6.4.2.3) は役割にかかわらず終端する。
+#[test]
+fn publish_sender_defers_peer_fin_by_state_role_and_local_fin() -> TestResult {
+    let mut runner = test_runner()?;
+    let deferred_seen = std::cell::Cell::new(false);
+    let pending_seen = std::cell::Cell::new(false);
+    let final_sent_seen = std::cell::Cell::new(false);
+    let subscriber_seen = std::cell::Cell::new(false);
+    runner.run(256, |ctx| {
+        let end = sample_end(ctx);
+        // 遅延条件の次元を組み合わせる
+        let local_sender = noprop::sample_bool(ctx);
+        let responded = noprop::sample_bool(ctx);
+        let final_sent = responded && noprop::sample_bool(ctx);
+        let (mut client, mut server) = establish_pair();
+        let rid = if local_sender {
+            // 自側 (client) が PUBLISH を送る
+            let rid = client
+                .send_publish(
+                    TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("テストフィクスチャの前提条件を満たす"),
+                    b"cam".to_vec(),
+                    7,
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .expect("テストフィクスチャの前提条件を満たす");
+            let (_, pub_msg) = take_send_request(&mut client);
+            server
+                .recv_request(pub_msg)
+                .expect("テストフィクスチャの前提条件を満たす");
+            if responded {
+                // PUBLISH_OK (REQUEST_OK) で Established にする
+                server
+                    .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+                    .expect("テストフィクスチャの前提条件を満たす");
+                let (_, ok_msg) = take_send_on_stream(&mut server);
+                client
+                    .recv_stream_message(rid, ok_msg)
+                    .expect("テストフィクスチャの前提条件を満たす");
+                if final_sent {
+                    // 最終メッセージ (PUBLISH_DONE) を送って自側の送信方向を閉じる
+                    client
+                        .send_publish_done(
+                            rid,
+                            0x2,
+                            0,
+                            ReasonPhrase::new("ended").expect("正当な reason phrase である"),
+                        )
+                        .expect("PUBLISH_DONE を送れること");
+                }
+            }
+            rid
+        } else {
+            // peer (server) が PUBLISH を送り、自側 (client) は subscriber 役になる
+            let rid = server
+                .send_publish(
+                    TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("テストフィクスチャの前提条件を満たす"),
+                    b"cam".to_vec(),
+                    7,
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .expect("テストフィクスチャの前提条件を満たす");
+            let (_, pub_msg) = take_send_request(&mut server);
+            client
+                .recv_request(pub_msg)
+                .expect("テストフィクスチャの前提条件を満たす");
+            if responded {
+                // PUBLISH_OK を送って Established にする (送らなければ Pending(Subscriber))
+                client
+                    .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+                    .expect("テストフィクスチャの前提条件を満たす");
+            }
+            rid
+        };
+        if !local_sender {
+            subscriber_seen.set(true);
+        } else if !responded {
+            pending_seen.set(true);
+        } else if final_sent {
+            final_sent_seen.set(true);
+        }
+
+        client
+            .recv_request_stream_closed(rid, end)
+            .expect("peer の終端通知を受理すること");
+        let reason = take_termination_reason(&mut client);
+        let state = client
+            .subscription(rid)
+            .expect("subscription が残ること")
+            .state;
+        // 遅延するのは「自側が PUBLISH を送った側」「REQUEST_OK 受信済み」「最終メッセージ未送信」
+        // 「peer の FIN」がすべて成立する場合だけである
+        let defer =
+            local_sender && responded && !final_sent && matches!(end, RequestStreamEnd::Fin);
+        if defer {
+            deferred_seen.set(true);
+            assert_eq!(
+                state,
+                SubscriptionState::Established,
+                "遅延する場合は subscription が Established のまま残ること"
+            );
+            assert!(
+                reason.is_none(),
+                "遅延する場合は peer FIN で RequestTerminated を発行しないこと"
+            );
+            // 応答経路が塞がれていないことを、最終メッセージの送信で確認する
+            client
+                .send_publish_done(
+                    rid,
+                    0x2,
+                    0,
+                    ReasonPhrase::new("ended").expect("正当な reason phrase である"),
+                )
+                .expect("peer FIN の後でも PUBLISH_DONE を送れること");
+            assert_eq!(
+                take_termination_reason(&mut client),
+                Some(TerminationReason::PeerStreamFin),
+                "最終メッセージの送信で peer FIN による終端が確定すること"
+            );
+        } else {
+            assert_eq!(
+                state,
+                SubscriptionState::Terminated,
+                "遅延しない場合は peer の終端で subscription が終端すること"
+            );
+            let expected = match end {
+                RequestStreamEnd::Fin => TerminationReason::PeerStreamFin,
+                RequestStreamEnd::Reset { error_code, .. } => {
+                    TerminationReason::PeerStreamReset { error_code }
+                }
+            };
+            assert_eq!(
+                reason,
+                Some(expected),
+                "終端理由が peer の終端種別に対応すること"
+            );
+        }
+        Ok(())
+    })?;
+    assert!(
+        deferred_seen.get(),
+        "遅延する組み合わせ (Established / publisher 役 / 最終メッセージ未送信) がサンプルされること\n{runner}"
+    );
+    assert!(
+        pending_seen.get(),
+        "Pending(Publisher) がサンプルされること\n{runner}"
+    );
+    assert!(
+        final_sent_seen.get(),
+        "最終メッセージ送信後の Terminated がサンプルされること\n{runner}"
+    );
+    assert!(
+        subscriber_seen.get(),
+        "subscriber 役がサンプルされること\n{runner}"
+    );
+    Ok(())
+}
