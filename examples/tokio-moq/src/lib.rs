@@ -187,8 +187,8 @@ pub struct ServerUrl {
 ///
 /// scheme は `moqt://` だけを受け付ける (`MOQT://` も受理する。RFC 3986 §3.1 に従い
 /// scheme は大文字小文字を区別しない)。接続経路は URL では選ばず [`Transport`] で選ぶ。
-/// 正規化するのは scheme だけで、authority / path / query / fragment は入力の文字列を
-/// そのまま保持する (RFC 3986 §6.2.2.1 は scheme と host を大文字小文字非区別とするが、
+/// scheme は比較のみを大文字小文字非区別に行い、authority / path / query / fragment は入力の
+/// 文字列をそのまま保持する (RFC 3986 §6.2.2.1 は scheme と host を大文字小文字非区別とするが、
 /// host を入力のまま使うのは DNS / SNI の非区別性に依存する設計判断である)。
 ///
 /// fragment は `:path` と PATH option には含めない。draft-ietf-moq-transport-22 §6.1.1
@@ -203,25 +203,33 @@ pub struct ServerUrl {
 ///
 /// # Errors
 ///
-/// - `moqt://` 以外の scheme / authority の欠落: `unsupported URL scheme` / `requires authority`
+/// - `moqt://` 以外の scheme、または `:` を含まない URL: `unsupported URL scheme`
+/// - authority の欠落 (`//` が無い、または `//` の直後の authority が空): `requires authority`
 /// - authority または path に空白 / 制御文字を含む: `invalid URL`
 /// - fragment が `<type>:<value>` でない / type の文字種が §6.1.1 に一致しない: `invalid moqt URI fragment`
 /// - `msf` fragment が MSF §11.1 の ABNF に一致しない: `invalid MSF fragment`
 /// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
 pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
-    let Some((scheme, rest)) = url.split_once("://") else {
+    // RFC 3986 §3 (`URI = scheme ":" hier-part`) が scheme を `:` の前に置くことを定め、
+    // §3.1 (Scheme) が比較の大文字小文字非区別を定める。エラーメッセージの生成は 1 箇所に集約する。
+    let Some((scheme, rest)) = url.split_once(':') else {
         return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
     };
-    let scheme = scheme.to_ascii_lowercase();
-    if scheme != "moqt" {
+    if !scheme.eq_ignore_ascii_case("moqt") {
         return Err(format!("unsupported URL scheme: {url} (use moqt://)"));
     }
+    // RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-22
+    // §6.1 も `moqt-URI = "moqt" "://" authority ...` と `//` を必須にする。未対応 scheme と
+    // 区別できるよう、`//` の欠落は authority の欠落として報告する。
+    let requires_authority =
+        || format!("moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)");
+    let Some(rest) = rest.strip_prefix("//") else {
+        return Err(requires_authority());
+    };
     let (before_fragment, raw_fragment) = split_fragment(rest);
     let (authority, path) = split_authority_path(before_fragment);
     if authority.is_empty() {
-        return Err(format!(
-            "moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)"
-        ));
+        return Err(requires_authority());
     }
     // RFC 3986 §2 (Characters) の `pchar` は `unreserved` / `pct-encoded` / sub-delims /
     // ":" / "@" であり、空白 (SP / HTAB) と制御文字を含まない。path に残った空白は SETUP の
@@ -874,6 +882,7 @@ mod tests {
         for url in [
             "ftp://127.0.0.1:4443",
             "https://example.com:443/foo?bar=baz",
+            "://host/path",
         ] {
             assert_eq!(
                 parse_url(url).expect_err("未対応 scheme がエラーになること"),
@@ -882,7 +891,31 @@ mod tests {
         }
     }
 
-    /// `://` が無い URL も未対応 scheme としてエラーになる
+    /// `//` が無い、または `//` の直後の authority が空の URL は authority の欠落として報告する
+    ///
+    /// RFC 3986 §3 は `//` の有無で authority の有無が決まり、draft-ietf-moq-transport-22 §6.1 も
+    /// `moqt-URI = "moqt" "://" authority path-abempty [ "?" query ]` と `//` を必須にする。
+    /// scheme の比較は大文字小文字を区別しない (RFC 3986 §3.1)。
+    #[test]
+    fn parse_url_rejects_url_without_authority_prefix() {
+        for url in [
+            "moqt:/app",
+            "moqt:example.com/app",
+            "MOQT:/app",
+            "MOQT:foo",
+            "moqt:///app",
+        ] {
+            assert_eq!(
+                parse_url(url).expect_err("`//` が無い URL がエラーになること"),
+                format!("moqt:// URL requires authority: {url} (e.g. moqt://localhost:4443)")
+            );
+        }
+    }
+
+    /// `:` を含まない URL は scheme を取り出せないため未対応 scheme としてエラーになる
+    ///
+    /// `moqt:` のように scheme が取れて `//` が無い場合は authority の欠落として報告する
+    /// (テスト `parse_url_rejects_url_without_authority_prefix` を参照)。
     #[test]
     fn parse_url_rejects_url_without_scheme_delimiter() {
         assert_eq!(
