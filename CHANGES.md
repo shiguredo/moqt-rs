@@ -11,6 +11,18 @@
 
 ## develop
 
+- [CHANGE] moq-pub / moq-sub の `--namespace` を §8.8 表現にして複数フィールドへ対応する
+  - `--namespace moq-example` は 2 フィールドになる
+  - catalog の namespace は `serialize_namespace` で書く
+  - `/` などリテラル表現できないバイトは `.2f` として書く
+  - @voluntas
+
+- [CHANGE] moq-pub / moq-sub の `--namespace` を必須にし、既定値の `kaki` を削除する
+  - 指定を忘れると `kaki` へ配信 / `kaki` を購読していたため、配信先の取り違えを防ぐ
+  - 空文字の `--namespace` は CLI の時点でエラーにする
+  - moq-sub の再生ウィンドウのタイトルに購読中の namespace を出す
+  - @voluntas
+
 - [CHANGE] 時間圧縮の会計と A/V のずれの測定を実態に合わせる
   - `playout::scheduler` の `confirm_stretch` が、要求より長く詰められた分も前の音の終わりへ反映する (圧縮は波形の周期単位でしか削れないため起きる)
   - `playout::stretch` の `conceal` が、無音の入力でも要求ぶんを 0 で埋めて長さを返す

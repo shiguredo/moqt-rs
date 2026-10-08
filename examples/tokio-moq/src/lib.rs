@@ -1190,14 +1190,14 @@ mod tests {
     fn parse_url_extracts_c4m_token_from_msf_fragment() {
         let token = Base64::encode_string(&[0x01, 0x02, 0x03]);
         let url = parse_url(&format!(
-            "moqt://example.com/app#msf:kaki--video&c4m={token}"
+            "moqt://example.com/app#msf:moq-example--video&c4m={token}"
         ))
         .expect("URL のパースに成功すること");
         assert_eq!(url.c4m_tokens, vec![vec![0x01, 0x02, 0x03]]);
         // track-identifier は example が使わないが、MSF fragment として保持される
         let fragment = url.fragment.expect("fragment が保持されること");
         assert_eq!(fragment.fragment_type, "msf");
-        assert_eq!(fragment.value, format!("kaki--video&c4m={token}"));
+        assert_eq!(fragment.value, format!("moq-example--video&c4m={token}"));
     }
 
     /// パディング無しの標準 Base64 と base64url も c4m として受理する
@@ -1209,7 +1209,7 @@ mod tests {
             Base64UrlUnpadded::encode_string(&bytes),
         ] {
             let url = parse_url(&format!(
-                "moqt://example.com/app#msf:kaki--video&c4m={text}"
+                "moqt://example.com/app#msf:moq-example--video&c4m={text}"
             ))
             .unwrap_or_else(|e| panic!("{text} のパースに失敗した: {e}"));
             assert_eq!(url.c4m_tokens, vec![bytes.to_vec()], "{text}");
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn parse_url_decodes_percent_encoded_c4m_parameter() {
         // `%2B%2F8` は標準 Base64 の `+/8` (パディング無し) の percent-encoding
-        let url = parse_url("moqt://example.com/app#msf:kaki--video&c4m=%2B%2F8")
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&c4m=%2B%2F8")
             .expect("URL のパースに成功すること");
         assert_eq!(url.c4m_tokens, vec![vec![0xfb, 0xff]]);
     }
@@ -1231,7 +1231,7 @@ mod tests {
         let first = Base64UrlUnpadded::encode_string(&[0x01]);
         let second = Base64UrlUnpadded::encode_string(&[0x02]);
         let url = parse_url(&format!(
-            "moqt://example.com/app#msf:kaki--video&c4m={first}&c4m={second}&c4m={first}"
+            "moqt://example.com/app#msf:moq-example--video&c4m={first}&c4m={second}&c4m={first}"
         ))
         .expect("URL のパースに成功すること");
         assert_eq!(url.c4m_tokens, vec![vec![0x01], vec![0x02]]);
@@ -1240,7 +1240,7 @@ mod tests {
     /// c4m パラメータが無い msf fragment でもパースできる
     #[test]
     fn parse_url_accepts_msf_fragment_without_c4m() {
-        let url = parse_url("moqt://example.com/app#msf:kaki--video&connection=q")
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=q")
             .expect("URL のパースに成功すること");
         assert!(
             url.c4m_tokens.is_empty(),
@@ -1265,9 +1265,9 @@ mod tests {
             // track-identifier が無い
             "",
             // パラメータに `=` が無い
-            "kaki--video&c4m",
+            "moq-example--video&c4m",
             // `&` を含む値はパラメータ区切りとして解釈され、`=` の無いパラメータになる
-            "kaki--video&c4m=AQ&ID",
+            "moq-example--video&c4m=AQ&ID",
         ] {
             let url = format!("moqt://example.com/app#msf:{value}");
             let err = parse_url(&url).expect_err("エラーになること");
@@ -1279,7 +1279,7 @@ mod tests {
     #[test]
     fn parse_url_rejects_invalid_c4m_token() {
         for text in ["!!!", ""] {
-            let url = format!("moqt://example.com/app#msf:kaki--video&c4m={text}");
+            let url = format!("moqt://example.com/app#msf:moq-example--video&c4m={text}");
             let err = parse_url(&url).expect_err("エラーになること");
             assert!(err.contains("invalid c4m parameter"), "{url}: {err}");
         }
@@ -1288,7 +1288,7 @@ mod tests {
     /// SETUP に c4m トークンを AUTHORIZATION_TOKEN (Token Type CAT) として含める
     #[test]
     fn setup_options_include_c4m_authorization_tokens() {
-        let url = parse_url("moqt://example.com/app#msf:kaki--video&c4m=AQID")
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&c4m=AQID")
             .expect("URL のパースに成功すること");
         let options = build_setup_options(
             Some(&url.path),

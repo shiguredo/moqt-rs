@@ -182,10 +182,10 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 ```bash
 # publisher (疑似キャプチャ)
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
 
 # subscriber
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
 接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。

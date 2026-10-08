@@ -20,9 +20,9 @@ use shiguredo_moqt::{
     media_clock::WallClockMapper,
     message::ControlMessage,
     message::common::Location,
-    message::common::TrackNamespace,
     message_parameter::MessageParameters,
     msf::MSF_CATALOG_TRACK_NAME,
+    name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
     track_properties::TrackProperties,
@@ -350,7 +350,11 @@ pub async fn run(
 
     // 3. PUBLISH (video / audio / catalog)
     let data_plane = client.data_plane();
-    let namespace = TrackNamespace::new(vec![config.namespace.as_bytes().to_vec()])?;
+    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
+    let namespace = config.namespace.clone();
+    // カタログの namespace は §8.8 の表現で書く (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
+    // PUBLISH は `namespace` を move するため、先に文字列を作っておく
+    let namespace_text = serialize_namespace(&namespace);
     let video_request_id = if config.video_enabled {
         Some(
             client
@@ -490,7 +494,7 @@ pub async fn run(
                 let info = reader.info();
                 Some(catalog::VideoTrackParams {
                     track_name: &config.track_name,
-                    namespace: &config.namespace,
+                    namespace: &namespace_text,
                     codec: &info.codec,
                     width: info.width,
                     height: info.height,
@@ -500,7 +504,7 @@ pub async fn run(
             }
             (None, Some(enc)) => Some(catalog::VideoTrackParams {
                 track_name: &config.track_name,
-                namespace: &config.namespace,
+                namespace: &namespace_text,
                 codec: enc.catalog_codec_string(),
                 width: encode_width,
                 height: encode_height,
@@ -511,7 +515,7 @@ pub async fn run(
         },
         audio: audio_encoder.as_ref().map(|enc| catalog::AudioTrackParams {
             track_name: AUDIO_TRACK_NAME,
-            namespace: &config.namespace,
+            namespace: &namespace_text,
             codec: enc.catalog_codec_string(),
             samplerate: AUDIO_SAMPLE_RATE,
             channel_config: AUDIO_CHANNEL_CONFIG,

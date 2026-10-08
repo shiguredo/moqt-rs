@@ -7,7 +7,7 @@
 //! draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
-//!   cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
+//!   cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
 //!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。

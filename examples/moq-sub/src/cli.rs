@@ -2,6 +2,8 @@
 //!
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
+use shiguredo_moqt::message::common::TrackNamespace;
+use shiguredo_moqt::name;
 use tokio_moq::{ServerUrl, Transport};
 
 /// CLI オプション
@@ -13,8 +15,8 @@ pub struct Config {
     pub transport: Transport,
     /// TLS CA 証明書パス
     pub cert: Option<String>,
-    /// Track Namespace
-    pub namespace: String,
+    /// Track Namespace (draft-ietf-moq-transport-22 §8.8 表現をパースしたもの)
+    pub namespace: TrackNamespace,
     /// 映像トラックを受信するかどうか
     pub video_enabled: bool,
     /// 音声トラックを受信するかどうか
@@ -112,12 +114,30 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
-    let namespace: String = noargs::opt("namespace")
+    let namespace: TrackNamespace = noargs::opt("namespace")
         .ty("NS")
-        .doc("Track namespace")
-        .default("kaki")
+        .doc("Track namespace (draft-ietf-moq-transport-22 §8.8 form; '-' separates namespace fields, e.g. moq-example)")
+        // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
+        // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
+        // 例は使われず、`--namespace` の省略は MissingOpt になる)
+        .example("moq-example")
         .take(&mut args)
-        .then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+        .then(|o| {
+            // 空文字は §8.8 では 0 フィールドの namespace になるが、example は catalog を
+            // 持つ namespace を購読するため、必須オプションの欠如と同じく CLI の時点で
+            // エラーにする
+            let v = o.value();
+            if v.is_empty() {
+                return Err("--namespace must not be empty".to_string());
+            }
+            // §8.8 の正規形として解釈する。`-` は namespace フィールドの区切りであり、
+            // フィールド内のリテラルな `-` は `.2d` として書く
+            name::parse_namespace(v).map_err(|e| {
+                format!(
+                    "{e} ('-' separates namespace fields; use the draft-ietf-moq-transport-22 §8.8 form)"
+                )
+            })
+        })?;
 
     let no_video: bool = noargs::flag("no-video")
         .doc("Disable video track subscription")
@@ -180,6 +200,127 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト用の必須引数
+    const BASE_ARGS: &[&str] = &[
+        "--url",
+        "moqt://127.0.0.1:4443",
+        "--namespace",
+        "moq-example",
+    ];
+
+    /// `--help` / `-h` は必須オプションを要求せずヘルプを返す
+    ///
+    /// 必須オプションに `.example()` を与えていないと、help モードでも `Opt::None` に
+    /// なって `then()` が `MissingOpt` を返し、ヘルプが表示されない。
+    #[test]
+    fn help_flag_prints_help_without_required_options() {
+        for flag in ["--help", "-h"] {
+            assert!(
+                parse_args(&[flag])
+                    .expect("ヘルプはエラーにならないこと")
+                    .is_none(),
+                "ヘルプ表示は設定を返さないこと: {flag}"
+            );
+        }
+    }
+
+    /// `--namespace` は必須で、指定した値が設定に入る
+    ///
+    /// 以前は `kaki` を既定値にしていたため、指定を忘れると `kaki` を購読していた。
+    /// 購読先の取り違えを防ぐため既定値を持たせない。
+    #[test]
+    fn namespace_is_required() {
+        let args = ["--url", "moqt://127.0.0.1:4443"];
+        assert!(
+            parse_args(&args).is_err(),
+            "--namespace の欠如はエラーになること"
+        );
+
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            name::serialize_namespace(&config.namespace),
+            "moq-example",
+            "指定した namespace が使われること"
+        );
+    }
+
+    /// `--namespace` の空文字はエラーになる
+    ///
+    /// 空文字は §8.8 では 0 フィールドの namespace になるが、example は 1 つ以上のフィールドを
+    /// 持つ namespace を扱うため、CLI の時点で拒否する。
+    #[test]
+    fn namespace_rejects_empty_value() {
+        let args = ["--url", "moqt://127.0.0.1:4443", "--namespace", ""];
+        assert!(
+            parse_args(&args).is_err(),
+            "空の namespace はエラーになること"
+        );
+    }
+
+    /// `--namespace` は §8.8 表現として解釈し、`-` を namespace フィールドの区切りにする
+    ///
+    /// `-` は区切りなので、フィールド内のリテラルな `-` は `.2d` として書く。
+    #[test]
+    fn namespace_uses_the_section_8_8_form() {
+        let args = ["--url", "moqt://127.0.0.1:4443", "--namespace", "spam-egg"];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            name::serialize_namespace(&config.namespace),
+            "spam-egg",
+            "'-' が区切りとして往復すること"
+        );
+        assert_eq!(
+            config.namespace.fields().len(),
+            2,
+            "'spam-egg' は 2 フィールドになること"
+        );
+
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443",
+            "--namespace",
+            "spam.2degg",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.namespace.fields().to_vec(),
+            vec![b"spam-egg".to_vec()],
+            "'.2d' がリテラルの '-' として 1 フィールドになること"
+        );
+    }
+
+    /// §8.8 として不正な `--namespace` はエラーになる
+    ///
+    /// `/` はリテラル表現できないため `.2f` として書く必要があり、裸のままだとエラーになる。
+    #[test]
+    fn namespace_rejects_non_canonical_values() {
+        for value in [
+            // リテラル表現できないバイト
+            "moq/example",
+            // 連続ハイフンによる空フィールド
+            "moq--example",
+            // 先頭 / 末尾のハイフンによる空フィールド
+            "-moq",
+            "moq-",
+            // リテラル表現可能バイトの hex 化
+            ".61",
+            // 大文字 hex
+            "moq.2Et",
+        ] {
+            let args = ["--url", "moqt://127.0.0.1:4443", "--namespace", value];
+            assert!(
+                parse_args(&args).is_err(),
+                "§8.8 として不正な値はエラーになること: {value}"
+            );
+        }
+    }
 
     /// `default` と `none` だけを受理する
     #[test]

@@ -6,8 +6,8 @@
 //! draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01 に準拠。
 //!
 //! 使い方:
-//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
-//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --mp4 out.mp4 --no-play
+//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
+//!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --mp4 out.mp4 --no-play
 //!
 //! 受信とデコードの本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの
@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 
 use moq_sub::jitter_buffer::AudioJitterBuffer;
 use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline};
+use shiguredo_moqt::name::serialize_namespace;
 use shiguredo_moqt::playout::buffer::PlayoutBuffer;
 use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_DELAY_US, AudioPlayoutDecision, AudioPlayoutInput, AudioPlayoutScheduler,
@@ -54,6 +55,9 @@ fn main() {
     // tokio ランタイムへ move する前に取り出しておく
     let audio_output_device = config.audio_output_device;
     let no_play = config.no_play;
+    // 再生ウィンドウのタイトルに出す namespace も、同じ理由で先に取り出しておく。
+    // タイトルには §8.8 の表現 (例 `moq-example`) で出す
+    let namespace = serialize_namespace(&config.namespace);
     if no_play && config.mp4.is_none() {
         tracing::warn!("--no-play is specified without --mp4; received media will be discarded");
     }
@@ -138,6 +142,7 @@ fn main() {
     } else {
         // メインスレッドで raw_player を動かす
         if let Err(e) = run_raw_player(
+            &namespace,
             frame_rx,
             audio_rx,
             display_backlog,
@@ -167,6 +172,13 @@ fn main() {
     }
 }
 
+/// 再生ウィンドウのタイトルを組み立てる
+///
+/// 複数の namespace を同時に購読するときに取り違えないよう、購読中の namespace を出す。
+fn player_window_title(namespace: &str) -> String {
+    format!("{namespace} - MoQT Subscriber")
+}
+
 /// メインスレッドで raw_player のイベントループを実行する
 ///
 /// macOS では SDL のウィンドウ操作がメインスレッドでしか動作しないため、
@@ -174,10 +186,13 @@ fn main() {
 ///
 /// SDL の初期化やウィンドウ・レンダラー作成に失敗する環境でも panic せず、`Error::Player` として失敗を返す。
 ///
+/// `namespace` は購読中のトラック名前空間で、再生ウィンドウのタイトルに表示する。
+///
 /// `audio_output_device` が [`cli::AudioOutputDevice::None`] のときは SDL の音声出力デバイスを
 /// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。このときは
 /// 鳴らす時刻を決める必要が無いため、jitter buffer へも入れない。
 fn run_raw_player(
+    namespace: &str,
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
     audio_rx: std::sync::mpsc::Receiver<DecodedAudioFrame>,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
@@ -324,7 +339,7 @@ fn run_raw_player(
                     let player = raw_player::VideoPlayer::new(
                         frame.width,
                         frame.height,
-                        "kaki - MoQT Subscriber",
+                        &player_window_title(namespace),
                     )?;
                     player.play()?;
                     video_player = Some(player);
@@ -972,6 +987,23 @@ fn samples_to_us(samples: usize, sample_rate: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 再生ウィンドウのタイトルに購読中の namespace が出ること
+    ///
+    /// タイトルに固定の名前を出すと、どの namespace を購読しているか分からなくなる。
+    #[test]
+    fn player_window_title_includes_namespace() {
+        assert_eq!(
+            player_window_title("moq-example"),
+            "moq-example - MoQT Subscriber",
+            "指定した namespace がそのままタイトルへ出ること"
+        );
+        assert_eq!(
+            player_window_title("example.2ecom"),
+            "example.2ecom - MoQT Subscriber",
+            "エスケープを含む §8.8 表現でもそのままタイトルへ出ること"
+        );
+    }
 
     /// テスト用の周期のある音を作る
     ///

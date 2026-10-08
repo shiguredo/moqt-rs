@@ -27,25 +27,25 @@ cargo build -p moq-pub -p moq-sub
 
 ```bash
 # QUIC で publisher を起動 (疑似キャプチャ)
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
 
 # QUIC で subscriber を起動
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
 # WebTransport over HTTP/3 で publisher を起動
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --transport wt-h3 --fake-capture-device
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3 --fake-capture-device
 
 # WebTransport over HTTP/2 で subscriber を起動
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --transport wt-h2
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h2
 
 # QUIC で受信した映像 / 音声を MP4 に保存する (再生しない)
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --mp4 out.mp4 --no-play
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --mp4 out.mp4 --no-play
 
 # QUIC で MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265)
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --input-mp4 input.mp4
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --input-mp4 input.mp4
 
 # QUIC で MP4 ファイルの映像 / 音声を再エンコードして配信する (音声は Opus のみ対応)
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --input-mp4-reencode input.mp4
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --input-mp4-reencode input.mp4
 ```
 
 ## トランスポート
@@ -67,14 +67,14 @@ MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータ�
 
 ```bash
 # C4M トークン付きで QUIC 接続する (シェルでは `&` を引用符で囲む)
-cargo run -p moq-pub -- 'moqt://127.0.0.1:4443#msf:kaki--video&c4m=<base64 token>' --fake-capture-device
+cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=<base64 token>' --namespace moq-example --fake-capture-device
 ```
 
 `<base64 token>` は C4M トークンのバイト列 (CBOR エンコードされた CWT) を Base64 (RFC 4648 §4) または base64url (§5) で表した文字列で、パディングは省略できる。`%XX` の percent-encoding もデコードする。トークンの検証 (署名 / クレーム / `moqt` クレームの認可判定) は relay が行い、example はデコードしたバイト列をそのまま送る。DPoP バインディング (`cnf` / `catdpop`) を使うトークンに必要な DPoP proof の送信には対応しない。
 
 `c4m` は複数指定でき、すべてのトークンを SETUP に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`c4m` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
 
-example は `msf` fragment の track-identifier と `c4m` 以外のパラメータを使わない。Track Namespace と Track Name は `--namespace` / `--track-name` で指定する。
+example は `msf` fragment の track-identifier と `c4m` 以外のパラメータを使わない。Track Namespace は必須の `--namespace` で指定し、`-` で区切ると複数の namespace フィールドになる (§8.8 表現)。Track Name は `--track-name` (既定 `video`) で指定する。
 
 ## CLI オプション
 
@@ -93,7 +93,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--fps` | | `30` | フレームレート |
 | `--bitrate` | | `2000` | 映像ターゲットビットレート (kbps) |
 | `--keyframe-interval` | | `60` | キーフレーム間隔 (フレーム数) |
-| `--namespace` | | `kaki` | Track Namespace |
+| `--namespace` | | (必須) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--track-name` | | `video` | Track Name |
 | `--fake-capture-device` | | | 実デバイスの代わりに raden 生成の疑似映像と 440 Hz サイン波音声を使う |
 | `--input-mp4` | | | MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265。音声は配信せず、B フレームを含む MP4 は拒否する。`--video-codec` / `--width` / `--height` / `--fps` / `--no-video` とは併用不可) |
@@ -117,7 +117,7 @@ example は `msf` fragment の track-identifier と `c4m` 以外のパラメー�
 | `--url` | `-u` | (必須) | 接続先 URL (`moqt://`) |
 | `--transport` | | `quic` | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
 | `--cert` | | | TLS CA 証明書パス |
-| `--namespace` | | `kaki` | Track Namespace |
+| `--namespace` | | (必須) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | | 映像トラックの購読を無効化する |
 | `--no-audio` | | | 音声トラックの購読を無効化する |
 | `--audio-output-device` | | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
@@ -154,5 +154,5 @@ publisher / subscriber は `--cert` を省略すると証明書検証をスキ�
 環境変数 `RUST_LOG` でログレベルを制御できる。
 
 ```bash
-RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --fake-capture-device
+RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
 ```

@@ -1,7 +1,7 @@
 //! moq-sub の CLI のふるまいを実行ファイル経由で固定する
 //!
-//! `--help` / `-h` がヘルプを表示して正常終了することと、`--url` を省略した実行が
-//! 従来どおりエラーになることは、引数の解釈結果ではなくプロセスの終了コードと
+//! `--help` / `-h` がヘルプを表示して正常終了することと、`--url` / `--namespace` を
+//! 省略した実行がエラーになることは、引数の解釈結果ではなくプロセスの終了コードと
 //! 出力で確認する必要がある (実際の利用者の見え方と同じ経路で確かめる)。
 
 use std::process::Command;
@@ -34,12 +34,21 @@ fn help_prints_help_and_exits_successfully() {
             "--url の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("--namespace"),
+            "--namespace の説明が表示されること ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("moqt://"),
             "URL の形式が表示されること ({flag}): {stdout}"
         );
         assert!(
             !stderr.contains("missing '--url' option")
                 && !stdout.contains("missing '--url' option"),
+            "必須オプションのエラーにならないこと ({flag}): {stdout}{stderr}"
+        );
+        assert!(
+            !stderr.contains("missing '--namespace' option")
+                && !stdout.contains("missing '--namespace' option"),
             "必須オプションのエラーにならないこと ({flag}): {stdout}{stderr}"
         );
     }
@@ -55,5 +64,18 @@ fn missing_url_is_reported_as_an_error() {
     assert!(
         stderr.contains("--url"),
         "エラーに --url が含まれること: {stdout}{stderr}"
+    );
+}
+
+/// `--namespace` を省略した実行は必須オプション欠如のエラーになる
+///
+/// 既定値の `kaki` を持たせないことを、実際の実行ファイルのふるまいとして固定する。
+#[test]
+fn missing_namespace_is_reported_as_an_error() {
+    let (code, stdout, stderr) = run(&["--url", "moqt://127.0.0.1:4443"]);
+    assert_eq!(code, Some(1), "異常終了すること: {stdout}{stderr}");
+    assert!(
+        stderr.contains("--namespace"),
+        "エラーに --namespace が含まれること: {stdout}{stderr}"
     );
 }

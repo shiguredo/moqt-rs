@@ -24,9 +24,8 @@ use shiguredo_moqt::loc::{
 };
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
 use shiguredo_moqt::{
-    message::common::TrackNamespace, msf::MSF_CATALOG_TRACK_NAME, msf::MsfCatalog,
-    msf::MsfCatalogDocument, msf::MsfTrack, session::types::DataStreamId,
-    session::types::RequestStreamEnd, session::types::SessionEvent,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfTrack,
+    session::types::DataStreamId, session::types::RequestStreamEnd, session::types::SessionEvent,
     stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder,
 };
@@ -384,7 +383,8 @@ pub async fn run(
         })
         .await?;
 
-    let namespace = TrackNamespace::new(vec![config.namespace.as_bytes().to_vec()])?;
+    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
+    let namespace = config.namespace.clone();
     let data_plane = client.data_plane();
 
     // 2. タイムアウト設定
