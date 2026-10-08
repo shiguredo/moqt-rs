@@ -249,6 +249,9 @@ impl DataPlaneHandle {
     ///
     /// `SendRequestError::LocalFilterMismatch` (フィルタ不通過) は `Skip` として返し、
     /// 呼び出し側はワイヤ送信をスキップする。その他のエラーは伝播する。
+    ///
+    /// `end_of_group` は Object Datagram の END_OF_GROUP bit に対応する
+    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。
     pub fn send_object_datagram(
         &self,
         request_id: u64,
@@ -256,10 +259,17 @@ impl DataPlaneHandle {
         object_id: u64,
         properties_data: Option<Vec<u8>>,
         status: Option<u64>,
+        end_of_group: bool,
     ) -> Result<ObjectFilterOutcome> {
         let mut session = lock_session(&self.session);
-        match session.send_object_datagram(request_id, group_id, object_id, properties_data, status)
-        {
+        match session.send_object_datagram(
+            request_id,
+            group_id,
+            object_id,
+            properties_data,
+            status,
+            end_of_group,
+        ) {
             Ok(()) => Ok(ObjectFilterOutcome::Pass),
             Err(SendRequestError::LocalFilterMismatch) => Ok(ObjectFilterOutcome::Skip),
             Err(e) => Err(TransportError::Internal(format!(

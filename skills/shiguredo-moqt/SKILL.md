@@ -465,6 +465,7 @@ fn send_object_datagram(
     object_id: u64,
     properties_data: Option<Vec<u8>>,
     status: Option<u64>,
+    end_of_group: bool,
 ) -> Result<(), SendRequestError>
 fn send_data_stream_stop_sending(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn reset_outgoing_data_stream(
@@ -604,6 +605,8 @@ fn ObjectDatagram::decode(buf: &[u8]) -> Result<(ObjectDatagram, usize), Message
 ```
 
 `ObjectDatagram::properties_data` と `send_object_datagram` の `properties_data` は、Properties Length varint を含む生バイト列である (`SubgroupObject` / `FetchStreamObject` と同じ規約)。Datagram では Properties Length = 0 はプロトコル違反であり、encode / 送信 API が拒否する。
+
+`send_object_datagram` の `end_of_group` は Object Datagram の END_OF_GROUP bit に対応し、その位置より大きい Object ID の Object が同じ Group に存在しないことを宣言する。`status` を指定した datagram と END_OF_GROUP bit は同時に指定できず、encode / 送信 API が拒否する。
 
 ### デコーダ / エンコーダ
 

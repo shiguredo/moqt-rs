@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] `Session::send_object_datagram` に `end_of_group` 引数を追加し、Object Datagram で Group の終端を宣言できるようにする
+  - draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の END_OF_GROUP bit を指定できる。STATUS との同時指定は無効な Type 値であり `SESSION_PROTOCOL_VIOLATION` で拒否する
+  - @voluntas
+
 - [CHANGE] moq-pub / moq-sub の `--namespace` を §8.8 表現にして複数フィールドへ対応する
   - `--namespace moq-example` は 2 フィールドになる
   - catalog の namespace は `serialize_namespace` で書く

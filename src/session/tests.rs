@@ -182,7 +182,7 @@ fn forget_subscription_cleans_datagram_header_complete_entries() {
 
     // datagram を送信して object header 提供完了エントリを作る (timeout が設定されているため)
     client
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     // 他 request のエントリ (掃除対象外) も混在させる。tick 未確定 (None) のエントリも含める
     client
@@ -693,7 +693,7 @@ fn datagram_pending_entries_determined_on_tick() {
 
     // tick 前の送信は未確定 (None) で Pending 登録される
     client
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         client.timing.datagram_header_complete_ms.get(&(rid, 0, 0)),
@@ -719,7 +719,7 @@ fn datagram_pending_entries_determined_on_tick() {
 
     // tick 後の送信は直接確定時刻で Pending 登録なし
     client
-        .send_object_datagram(rid, 0, 1, None, None)
+        .send_object_datagram(rid, 0, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         client.timing.datagram_header_complete_ms.get(&(rid, 0, 1)),
@@ -734,7 +734,7 @@ fn datagram_pending_entries_determined_on_tick() {
     // 同一オブジェクトの再送は初回時刻を上書きしない (timeout=500 のため 200ms 後に再送)
     client.tick(1_200);
     client
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         client.timing.datagram_header_complete_ms.get(&(rid, 0, 0)),
@@ -809,7 +809,7 @@ fn datagram_tracking_evicts_oldest_group_over_subscription_cap() {
     // 新規 Group の送信で最古 Group が丸ごと破棄される
     let new_group = MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION as u64;
     client
-        .send_object_datagram(rid, new_group, 0, None, None)
+        .send_object_datagram(rid, new_group, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
         !client

@@ -2170,6 +2170,13 @@ impl Session {
     /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram では Properties Length = 0 は
     /// プロトコル違反)。
     ///
+    /// `end_of_group` は END_OF_GROUP bit を立てるかどうかを示す
+    /// (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))。この bit は
+    /// 「同じ Group ID で、この Object ID より大きい Object ID の Object は存在しない」ことを
+    /// 宣言する。STATUS (0x20) との同時指定は §11.2.1 が無効な Type 値と定めるため、
+    /// `SESSION_PROTOCOL_VIOLATION` で拒否する (判定条件は encoder の
+    /// [`ObjectDatagram::encode`](crate::stream::datagram::ObjectDatagram::encode) と同じ)。
+    ///
     /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): サブスクリプション経由で
     /// Object が公開または受信されたときに最大位置を更新する。status は問わず更新対象となる。
     /// 節番号・規定は draft 由来であり将来の draft 改版で変更される可能性がある。
@@ -2183,6 +2190,7 @@ impl Session {
         object_id: u64,
         properties_data: Option<Vec<u8>>,
         status: Option<u64>,
+        end_of_group: bool,
     ) -> Result<(), SendRequestError> {
         self.require_established()?;
         let subscription = self.subscriptions.get(&request_id).ok_or_else(|| {
@@ -2229,6 +2237,18 @@ impl Session {
             && let Err(err) = crate::stream::validate_object_status(status)
         {
             return Err(session_error_from_data_message(err).into());
+        }
+        // draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): STATUS (0x20) と
+        // END_OF_GROUP (0x02) の両方が立った Type 値は無効であり、受信側は
+        // PROTOCOL_VIOLATION でセッションを閉じる。wire を生成しないよう送信前にも拒否する。
+        // 判定は encoder (`ObjectDatagram::encode`) と同じ条件を使い、フィルタ評価と
+        // 最大位置更新より前に置いて拒否時に状態を汚染しない。
+        if status.is_some() && end_of_group {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "STATUS and END_OF_GROUP cannot both be set",
+            )
+            .into());
         }
         // draft §3.3.3 (Combining Filters): Pass = Forward AND Location Filters AND Range Filters。
         // datagram は §11.2.1 のワイヤ構造に Subgroup ID フィールドを持たないので

@@ -114,9 +114,29 @@ fn forward_zero_rejects_datagram() {
     let (_client, mut server, rid) = establish_with_filters(params);
 
     let err = server
-        .send_object_datagram(rid, 3, 0, None, None)
+        .send_object_datagram(rid, 3, 0, None, None, false)
         .expect_err("forward=0 では送信できない");
     assert_filter_mismatch(err, "forward=0 の datagram 経路");
+}
+
+/// END_OF_GROUP bit を立ててもフィルタ評価は迂回できない
+///
+/// draft-ietf-moq-transport-22 §3.3.3 (Combining Filters): "The publisher MUST forward only objects
+/// that pass all filters." END_OF_GROUP bit は Object の Location を変えないため、
+/// forward=0 の subscription では END_OF_GROUP 付き datagram も送れない。
+#[test]
+fn forward_zero_rejects_end_of_group_datagram() {
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_FORWARD,
+        value: MessageParameterValue::Uint8(0),
+    });
+    let (_client, mut server, rid) = establish_with_filters(params);
+
+    let err = server
+        .send_object_datagram(rid, 3, 0, None, None, true)
+        .expect_err("forward=0 では END_OF_GROUP 付き datagram も送信できない");
+    assert_filter_mismatch(err, "forward=0 の END_OF_GROUP datagram 経路");
 }
 
 /// 制御メッセージ (PUBLISH_DONE) は Forward State に影響されない
@@ -382,16 +402,16 @@ fn object_property_filter_uses_properties() {
 
     // datagram 経路 (properties を直接渡せる)
     server
-        .send_object_datagram(rid, 0, 0, Some(in_range.clone()), None)
+        .send_object_datagram(rid, 0, 0, Some(in_range.clone()), None, false)
         .expect("範囲内の Object Property は送れる");
     let err = server
-        .send_object_datagram(rid, 0, 1, Some(out_of_range.clone()), None)
+        .send_object_datagram(rid, 0, 1, Some(out_of_range.clone()), None, false)
         .expect_err("範囲外の Object Property は拒否される");
     assert_filter_mismatch(err, "OBJECT_PROPERTY_FILTER (datagram) の範囲外");
 
     // Object Properties が付いていない Object も条件を満たせないので拒否される
     let err = server
-        .send_object_datagram(rid, 0, 2, None, None)
+        .send_object_datagram(rid, 0, 2, None, None, false)
         .expect_err("Property が無いと OBJECT_PROPERTY_FILTER を満たせない");
     assert_filter_mismatch(err, "OBJECT_PROPERTY_FILTER (property なし)");
 
@@ -458,7 +478,7 @@ fn subgroup_filter_does_not_apply_to_datagram() {
     let (_client, mut server, rid) = establish_with_filters(params);
 
     server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("datagram に SUBGROUP_FILTER は適用されない");
 }
 
@@ -475,7 +495,7 @@ fn unfiltered_subscription_sends_everything() {
         .send_subgroup_object(stream_id, 999, None)
         .expect("フィルタなしなら任意の object を送れる");
     server
-        .send_object_datagram(rid, 12345, 678, None, None)
+        .send_object_datagram(rid, 12345, 678, None, None, false)
         .expect("フィルタなしなら任意の datagram を送れる");
 }
 
@@ -490,7 +510,7 @@ fn filter_mismatch_does_not_close_session() {
     let (_client, mut server, rid) = establish_with_filters(params);
 
     let _ = server
-        .send_object_datagram(rid, 3, 0, None, None)
+        .send_object_datagram(rid, 3, 0, None, None, false)
         .expect_err("forward=0 では送信できない");
     assert_eq!(
         server.state(),

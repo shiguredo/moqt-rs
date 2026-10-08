@@ -1,7 +1,7 @@
 # Datagram で END_OF_GROUP を送れるようにする
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/add-datagram-end-of-group
 - Polished: {YYYY-MM-DD}
 
@@ -49,3 +49,23 @@ moqt-rs の送信 API に引数が無い状態で moqt-py 側だけが bit を�
 - STATUS と END_OF_GROUP の同時指定が拒否されること。
 - publisher が送った END_OF_GROUP datagram を subscriber が受信すると、その Group の終端が記録され、
   宣言位置より大きい Object が Malformed Track として拒否されること。
+
+## 解決方法
+
+- `src/session/data.rs` の `Session::send_object_datagram` に `end_of_group: bool` を追加し、
+  Object Datagram の END_OF_GROUP bit を指定できるようにした。
+- STATUS (`status` が `Some`) と END_OF_GROUP の同時指定は、encoder の `ObjectDatagram::encode` と
+  同じ条件で `SESSION_PROTOCOL_VIOLATION` として拒否する。判定はフィルタ評価と最大位置更新より前に
+  置き、拒否時に状態を汚染しない。
+- END_OF_GROUP は Object の Location を変えないため、フィルタ評価 (`object_passes_filters`) の入力は
+  変更していない。END_OF_GROUP を立ててもフィルタ評価を迂回できないことをテストで固定した。
+- 受信側は既存の `record_group_end_after` が Group の終端を記録し、`object_after_track_end` が
+  宣言位置より大きい Object を Malformed Track として扱う。この一連の挙動をテストで固定した。
+- `tests/test_session/data_stream.rs` に送信の受理・STATUS との同時指定の拒否・受信側の Group 終端記録と
+  宣言位置より後ろの Malformed Track 検出を追加した。`tests/test_session/object_filter_pass.rs` に
+  forward=0 で END_OF_GROUP 付き datagram も拒否されることを追加した。
+  `pbt/tests/prop_session/datagram.rs` に受信側の Group 終端記録 (Object ID が `u64::MAX` の
+  saturating 境界を含む) のプロパティテストを追加した。
+- 呼び出し元 (example と既存テスト) を新しい引数へ追随させ、`skills/shiguredo-moqt/SKILL.md` と
+  `CHANGES.md` を更新した。moqt-py 側の native バインディング → `Runtime.send_object_datagram` →
+  `Publication.send_datagram` への引数の引き回しは moqt-py の issue で別途対応する。

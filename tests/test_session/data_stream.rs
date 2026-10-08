@@ -884,7 +884,7 @@ fn server_send_object_datagram_received_by_client() {
     let (mut client, mut server, rid) = establish_subscribe_track(alias);
     // Server (publisher) が datagram 送信を Session に通知する
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     // Client (subscriber) が同じ track alias の datagram を受信する
     let outcome = client
@@ -908,7 +908,7 @@ fn server_send_object_datagram_received_by_client() {
 fn send_object_datagram_updates_largest_received_location() {
     let (_, mut server, rid) = establish_subscribe_track(501);
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -925,10 +925,10 @@ fn send_object_datagram_updates_largest_received_location() {
 fn send_object_datagram_does_not_change_location_on_duplicate() {
     let (_, mut server, rid) = establish_subscribe_track(502);
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -945,10 +945,10 @@ fn send_object_datagram_does_not_change_location_on_duplicate() {
 fn send_object_datagram_max_location_from_small_to_large() {
     let (_, mut server, rid) = establish_subscribe_track(503);
     server
-        .send_object_datagram(rid, 1, 1, None, None)
+        .send_object_datagram(rid, 1, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_object_datagram(rid, 2, 1, None, None)
+        .send_object_datagram(rid, 2, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -965,10 +965,10 @@ fn send_object_datagram_max_location_from_small_to_large() {
 fn send_object_datagram_max_location_keeps_large_after_small() {
     let (_, mut server, rid) = establish_subscribe_track(504);
     server
-        .send_object_datagram(rid, 2, 1, None, None)
+        .send_object_datagram(rid, 2, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_object_datagram(rid, 1, 1, None, None)
+        .send_object_datagram(rid, 1, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -985,10 +985,10 @@ fn send_object_datagram_max_location_keeps_large_after_small() {
 fn send_object_datagram_max_location_uses_lexicographic_order() {
     let (_, mut server, rid) = establish_subscribe_track(505);
     server
-        .send_object_datagram(rid, 2, 10, None, None)
+        .send_object_datagram(rid, 2, 10, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -1006,7 +1006,7 @@ fn send_object_datagram_updates_location_with_non_normal_status() {
     let (_, mut server, rid) = establish_subscribe_track(506);
     // EndOfGroup = 0x3
     server
-        .send_object_datagram(rid, 3, 1, None, Some(3))
+        .send_object_datagram(rid, 3, 1, None, Some(3), false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -1024,7 +1024,7 @@ fn send_object_datagram_failure_does_not_update_location() {
     let (_, mut server, rid) = establish_subscribe_track(507);
     // 空スライス (Properties Length varint すら含まない) は契約違反として拒否される
     let err = server
-        .send_object_datagram(rid, 3, 1, Some(Vec::new()), None)
+        .send_object_datagram(rid, 3, 1, Some(Vec::new()), None, false)
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
@@ -1046,7 +1046,7 @@ fn send_object_datagram_rejects_invalid_properties_length() {
     ] {
         let (_, mut server, rid) = establish_subscribe_track(513);
         let err = server
-            .send_object_datagram(rid, 3, 1, properties_data, None)
+            .send_object_datagram(rid, 3, 1, properties_data, None, false)
             .unwrap_err();
         assert_eq!(
             err.as_session_error().map(|e| e.code),
@@ -1070,7 +1070,7 @@ fn send_object_datagram_rejects_invalid_properties_length() {
 fn send_object_datagram_mixed_with_subgroup_stream_updates_location() {
     let (_, mut server, rid) = establish_subscribe_track(508);
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .send_subgroup_header(
@@ -1120,7 +1120,7 @@ fn send_object_datagram_rejected_for_non_publisher_role() {
         .expect("テストフィクスチャの前提条件を満たす");
     // server は subscriber role なので send_object_datagram は拒否される
     let err = server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
@@ -1143,7 +1143,7 @@ fn send_object_datagram_rejected_before_established() {
         .expect("テストフィクスチャの前提条件を満たす");
     // SUBSCRIBE_OK 送信前は Pending 状態
     let err = server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
@@ -1164,7 +1164,7 @@ fn send_object_datagram_rejected_for_properties_with_non_normal_status() {
     });
     let properties_data = Some(props.encode().expect("正当な LOC properties である"));
     let err = server
-        .send_object_datagram(rid, 3, 1, properties_data, Some(0x3))
+        .send_object_datagram(rid, 3, 1, properties_data, Some(0x3), false)
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
@@ -1179,7 +1179,7 @@ fn send_object_datagram_rejected_for_properties_with_non_normal_status() {
 fn send_object_datagram_updates_location_with_end_of_track_status() {
     let (_, mut server, rid) = establish_subscribe_track(511);
     server
-        .send_object_datagram(rid, 3, 1, None, Some(0x4))
+        .send_object_datagram(rid, 3, 1, None, Some(0x4), false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -1202,7 +1202,7 @@ fn send_object_datagram_updates_location_with_non_empty_properties() {
     });
     let properties_data = Some(props.encode().expect("正当な LOC properties である"));
     server
-        .send_object_datagram(rid, 3, 1, properties_data, None)
+        .send_object_datagram(rid, 3, 1, properties_data, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(
@@ -1214,6 +1214,148 @@ fn send_object_datagram_updates_location_with_non_empty_properties() {
     );
 }
 
+/// END_OF_GROUP bit を立てた datagram の送信が受理され、最大位置も更新される
+///
+/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): END_OF_GROUP bit は
+/// 「同じ Group ID で、この Object ID より大きい Object ID の Object は存在しない」ことを宣言する。
+/// 送信 API では `end_of_group` 引数で指定する。
+#[test]
+fn send_object_datagram_with_end_of_group_is_accepted() {
+    let (_, mut server, rid) = establish_subscribe_track(514);
+    server
+        .send_object_datagram(rid, 3, 1, None, None, true)
+        .expect("END_OF_GROUP 付き datagram の送信は受理される");
+    let sub = server.subscription(rid).expect("subscription が存在する");
+    assert_eq!(
+        sub.largest_received_location,
+        Some(Location {
+            group_id: 3,
+            object_id: 1,
+        })
+    );
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// STATUS と END_OF_GROUP の同時指定は送信前に拒否され、最大位置は更新されない
+///
+/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) は STATUS (0x20) と END_OF_GROUP (0x02) の
+/// 両方が立った Type 値を無効とし、受信側は PROTOCOL_VIOLATION でセッションを閉じる。
+/// wire を生成しないよう送信 API でも同じ条件で拒否する。
+#[test]
+fn send_object_datagram_rejected_for_status_with_end_of_group() {
+    for status in [0x0u64, 0x3, 0x4] {
+        let (_, mut server, rid) = establish_subscribe_track(515);
+        let err = server
+            .send_object_datagram(rid, 3, 1, None, Some(status), true)
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error().map(|e| e.code),
+            Some(SESSION_PROTOCOL_VIOLATION),
+            "status={status}"
+        );
+        assert_eq!(
+            err.as_session_error().map(|e| e.reason),
+            Some("STATUS and END_OF_GROUP cannot both be set"),
+            "status={status}"
+        );
+        assert_eq!(
+            server
+                .subscription(rid)
+                .expect("subscription が存在する")
+                .largest_received_location,
+            None,
+            "status={status}: 拒否時に最大位置を更新しないこと"
+        );
+        assert_eq!(server.state(), SessionState::Established, "status={status}");
+    }
+}
+
+/// 受信した END_OF_GROUP bit 付き datagram で Group の終端が記録され、宣言位置より後ろは拒否される
+///
+/// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) の END_OF_GROUP bit は
+/// §12.1 (Malformed Tracks) 条件 4 の "the final Object in the Group" を宣言する。
+/// 受信側は宣言位置の 1 つ先を「存在しない最小の Object ID」として記録し、
+/// 宣言位置自身は存在するものとして扱う。
+#[test]
+fn end_of_group_datagram_marks_group_end_on_subscriber() {
+    let alias = 516;
+    let (mut client, mut server, rid) = establish_subscribe_track(alias);
+    // publisher 側は END_OF_GROUP bit を立てた datagram の送信を Session へ通知する
+    server
+        .send_object_datagram(rid, 3, 1, None, None, true)
+        .expect("END_OF_GROUP 付き datagram の送信は受理される");
+    // wire を組み立てて subscriber へ届ける (payload は Normal object なので必須)
+    let raw = [
+        ObjectDatagram {
+            track_alias: alias,
+            group_id: 3,
+            object_id: 1,
+            publisher_priority: Some(1),
+            properties_data: None,
+            end_of_group: true,
+            status: None,
+        }
+        .encode()
+        .expect("ObjectDatagram の encode に成功すること"),
+        vec![0xAA],
+    ]
+    .concat();
+    let outcome = client
+        .recv_datagram(&raw)
+        .expect("END_OF_GROUP 付き datagram は受理される");
+    assert_eq!(
+        outcome,
+        DatagramAcceptance::Object(TrackDataAcceptance::Accepted)
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .ended_groups
+            .get(&3),
+        Some(&2),
+        "宣言位置の 1 つ先が存在しない最小の Object ID として記録されること"
+    );
+    // 終端を宣言した Object 自身 (同一位置) の再受信は Malformed にしない
+    client
+        .recv_datagram(&raw)
+        .expect("宣言位置自身の再受信は Malformed にしない");
+
+    // 宣言位置より大きい Object ID は §12.1 条件 4 の Malformed Track になる
+    let after = [
+        ObjectDatagram {
+            track_alias: alias,
+            group_id: 3,
+            object_id: 2,
+            publisher_priority: Some(1),
+            properties_data: None,
+            end_of_group: false,
+            status: None,
+        }
+        .encode()
+        .expect("ObjectDatagram の encode に成功すること"),
+        vec![0xBB],
+    ]
+    .concat();
+    let err = client
+        .recv_datagram(&after)
+        .expect_err("End of Group より後ろの Object は拒否される");
+    assert_eq!(err.reason, "object received after End of Group");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "§12.1 の Malformed Track 経路で subscription が終端されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "セッションは閉じない"
+    );
+}
+
 /// datagram 送信後の REQUEST_UPDATE_OK に LARGEST_OBJECT パラメータが反映される
 #[test]
 fn send_object_datagram_reflected_in_request_update_ok() {
@@ -1222,7 +1364,7 @@ fn send_object_datagram_reflected_in_request_update_ok() {
 
     // publisher 側が datagram を送信
     server
-        .send_object_datagram(rid, 3, 1, None, None)
+        .send_object_datagram(rid, 3, 1, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
 
     // subscriber 側が REQUEST_UPDATE を送信
@@ -3455,20 +3597,20 @@ fn datagram_sent_before_first_tick_is_not_dropped_after_tick() {
     let (_client, mut server, rid) = establish_with_track_delivery_timeout(800);
     // tick を一切呼ばずに datagram を送信する (object header 提供完了時刻は未確定)
     server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     // 最初の tick が timeout (500ms) を大きく超える 60,000ms で到達する
     server.tick(60_000);
     // 再送は経過時間 0 と判定され、誤 drop されない
     server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("tick 前送信の datagram が最初の tick 後に誤 drop されないこと");
     assert_eq!(server.state(), SessionState::Established);
     // object header 提供完了時刻は最初の tick で確定したまま継続して経過時間が評価される
     // (成功送信でも object header 提供完了時刻はリセットされない)
     server.tick(60_500);
     let err = server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect_err("確定後の経過 500ms >= 500ms で drop されること");
     assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
 }
@@ -3486,17 +3628,17 @@ fn datagram_sent_after_tick_is_dropped_after_timeout() {
     let (_client, mut server, rid) = establish_with_track_delivery_timeout(801);
     server.tick(100);
     server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .expect("テストフィクスチャの前提条件を満たす");
     // 経過 500ms >= 500ms (境界): 再送は drop される
     server.tick(600);
     let err = server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .unwrap_err();
     assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
     // drop 後もエントリが残るため、再送は再度 drop される
     let err = server
-        .send_object_datagram(rid, 0, 0, None, None)
+        .send_object_datagram(rid, 0, 0, None, None, false)
         .unwrap_err();
     assert!(matches!(err, SendRequestError::LocalDatagramTimeout));
     // drop 時は送信されないため、最大位置は初回送信時のまま更新されない
@@ -4610,7 +4752,7 @@ fn second_close_after_reset_is_still_protocol_violation() {
 fn send_object_datagram_rejected_for_unknown_status() {
     let (_, mut server, rid) = establish_subscribe_track(512);
     let err = server
-        .send_object_datagram(rid, 3, 1, None, Some(0x5))
+        .send_object_datagram(rid, 3, 1, None, Some(0x5), false)
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
@@ -4627,7 +4769,7 @@ fn send_object_datagram_accepts_known_status_values() {
     for status in [None, Some(0x0), Some(0x3), Some(0x4)] {
         let (_, mut server, rid) = establish_subscribe_track(513);
         server
-            .send_object_datagram(rid, 3, 1, None, status)
+            .send_object_datagram(rid, 3, 1, None, status, false)
             .expect("既知 status は送信できる");
         let sub = server.subscription(rid).expect("subscription が存在する");
         assert_eq!(

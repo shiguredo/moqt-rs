@@ -110,6 +110,7 @@ impl DatagramWriter {
             object_id,
             datagram.properties_data,
             None,
+            datagram.end_of_group,
         )?;
         if outcome == ObjectFilterOutcome::Skip {
             tracing::debug!(

@@ -436,7 +436,7 @@ fn default_priority_datagram_send_filter_uses_track_property() {
     for (filter_priority, expect_ok) in [(42u64, true), (200u64, false)] {
         let (_client, mut server, rid) =
             establish_with_priority_filter(filter_priority, Some(42), 1);
-        let result = server.send_object_datagram(rid, 3, 0, None, None);
+        let result = server.send_object_datagram(rid, 3, 0, None, None, false);
         if expect_ok {
             result.expect("Track Property の 42 が PRIORITY_FILTER を通過すること");
         } else {
