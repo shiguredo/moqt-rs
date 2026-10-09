@@ -7,8 +7,8 @@
 - 最新ドラフトに準拠すること
 - 実 relay が必要な E2E テストは `#[ignore]` を付け、CI が `--ignored` を付けて必ず実行すること (`e2e-tests/`)。通常の `cargo test` では実行しない
 - 最小 Rust バージョン (MSRV) はクレートごとに実際の依存要求で宣言すること
-  - 既定は `shiguredo-rust` 規約どおり 1.93 とする (`shiguredo_moqt` / `tokio-moq` / `moq-sub`)
-  - `moq-pub` と、それに依存する `e2e-tests` は 1.94 に引き上げている (依存する `raden` と `cranelift-codegen` が 1.94 を要求するため)
+  - 既定は `shiguredo-rust` 規約どおり 1.93 とする (`shiguredo_moqt` / `pbt`)
+  - examples の `tokio-moq` / `moq-sub` / `moq-pub` と、それに依存する `e2e-tests` は 1.95 に引き上げている (依存する `s2n-quic` が 1.95 を要求するため)
   - 引き上げ要因のないクレートまで値を揃えないこと。ライブラリ本体の受け皿を狭めるため
   - `Cargo.toml` の `rust-version` を変えたらルート `README.md` と `examples/README.md` の前提条件が追従しているか確認すること
 - `Session` (State Machine) は 1 本の `MOQT Transport Session` に閉じた protocol state machine として設計すること
