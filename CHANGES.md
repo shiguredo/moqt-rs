@@ -681,6 +681,13 @@
   - `PlayoutTimeline::reset_track` と `reset` は jitter buffer の学習だけを消し、閉ループの目標は残す (購読のやり直しで目標を戻さない)
   - @voluntas
 
+- [UPDATE] moq-sub の音声再生の組み立てを、最新の再生制御 (時間軸・スケジューラ・計器・閉ループ) に追従する
+  - 目標の開始時刻の決定・スケジューラでの予約・欠落の補間と詰めの反映・計器への記録・閉ループへの観測の引き渡しを `AudioPlayoutAssembly` に集める (時間軸への到着の記録は受信側の jitter buffer が済ませている)
+  - 計器 (`AudioPlayoutTimingStats`) を使い、鳴るはずの時刻・到着から鳴り始めるまで・予定に対する余裕 (p50 / p95)・理由別の捨ての件数と長さ・閉ループが決めた目標遅延とその理由をログに出す。鳴らすと決めた音は実際に詰めた長さで記録する
+  - 並べすぎで鳴らさないと決めた音を `Backlog`、再生機器へ積めなかった音を `Error`、再生を止めて鳴らなかった音を `Stopped` として計器へ記録し、観測を閉ループへ渡す
+  - `AudioJitterBuffer::drop_late` を削除し、鳴り遅れた音をバッファ段で捨てない (鳴らすかどうかはスケジューラが決める)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する

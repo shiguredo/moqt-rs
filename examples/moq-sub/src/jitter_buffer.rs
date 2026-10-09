@@ -5,7 +5,6 @@
 
 use std::collections::VecDeque;
 
-use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_MAX_LATENESS_US;
 use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
 
 use crate::decoder::DecodedAudioFrame;
@@ -35,13 +34,14 @@ struct PendingAudio {
 /// 下がると、後から届いた音の方が鳴らす時刻が早くなり得るため、鳴らす時刻で並べ替えると
 /// 音の順が入れ替わる。
 ///
-/// 保持する件数には上限があり、超えた分は古い方から捨てる。再生が止まったあとに古い音を
-/// まとめて鳴らさないよう、[`AudioJitterBuffer::drop_late`] で閾値を超えて遅れた音も捨てる。
+/// 保持する件数には上限があり、超えた分は古い方から捨てる。鳴り遅れた音をここで捨てる
+/// ことはしない。鳴らすかどうか (遅れたまま順序と連続性を保って鳴らすか、音が途切れた
+/// ときに到着基準へ並べ直すか) は、鳴らす時点の遅れを知っているスケジューラ
+/// (`playout::scheduler`) が音ごとに決める。ここで遅れを理由に捨てると、目標から離れた
+/// 音が鳴らなくなり、語尾が切れる。
 pub struct AudioJitterBuffer {
     /// 保持中の音声 (届いた順)
     pending: VecDeque<PendingAudio>,
-    /// 遅れすぎて捨てた数
-    dropped_late: u64,
     /// 保持数の上限を超えて捨てた数
     dropped_overflow: u64,
 }
@@ -51,7 +51,6 @@ impl AudioJitterBuffer {
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
-            dropped_late: 0,
             dropped_overflow: 0,
         }
     }
@@ -80,34 +79,14 @@ impl AudioJitterBuffer {
     /// 鳴らす時刻の `lead_us` 手前まで来た最も古い音声を取り出す
     ///
     /// `lead_us` は再生機器のバッファが空にならないよう先行して積む分である。
-    /// まだ早い音しか無いときは `None` を返す。
+    /// まだ早い音しか無いときは `None` を返す。鳴らす時刻を大きく過ぎた音も、ここでは
+    /// 捨てずにそのまま返す。鳴らすかどうかはスケジューラが決める。
     pub fn pop_releasable(&mut self, now_us: i64, lead_us: i64) -> Option<DecodedAudioFrame> {
         let play_at_us = self.pending.front()?.play_at_us;
         if play_at_us.saturating_sub(lead_us) > now_us {
             return None;
         }
         self.pending.pop_front().map(|pending| pending.frame)
-    }
-
-    /// 閾値を超えて遅れた音声を捨てて、捨てた数を返す
-    ///
-    /// 閾値は `playout::scheduler` が使う値と同じものを使い、example 側で独自の値を
-    /// 決めない。
-    pub fn drop_late(&mut self, now_us: i64) -> u64 {
-        let mut dropped = 0;
-        while let Some(pending) = self.pending.front() {
-            if pending
-                .play_at_us
-                .saturating_add(AUDIO_PLAYOUT_MAX_LATENESS_US)
-                >= now_us
-            {
-                break;
-            }
-            self.pending.pop_front();
-            dropped += 1;
-        }
-        self.dropped_late += dropped;
-        dropped
     }
 
     /// 鳴らす時刻に関わらず最も早い音声を取り出す
@@ -127,11 +106,6 @@ impl AudioJitterBuffer {
         self.pending.is_empty()
     }
 
-    /// 遅れすぎて捨てた数
-    pub fn dropped_late(&self) -> u64 {
-        self.dropped_late
-    }
-
     /// 保持数の上限を超えて捨てた数
     pub fn dropped_overflow(&self) -> u64 {
         self.dropped_overflow
@@ -146,6 +120,8 @@ impl Default for AudioJitterBuffer {
 
 #[cfg(test)]
 mod tests {
+    use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_MAX_LATENESS_US;
+
     use super::*;
 
     /// テスト用の音声フレームを作る。`channels` は同一の TIMESTAMP を持つフレームを
@@ -204,14 +180,6 @@ mod tests {
 
         fn pop_oldest(&mut self) -> Option<DecodedAudioFrame> {
             self.buffer.pop_oldest()
-        }
-
-        fn drop_late(&mut self, now_us: i64) -> u64 {
-            self.buffer.drop_late(now_us)
-        }
-
-        fn dropped_late(&self) -> u64 {
-            self.buffer.dropped_late()
         }
 
         fn dropped_overflow(&self) -> u64 {
@@ -299,32 +267,23 @@ mod tests {
         );
     }
 
+    /// 鳴らす時刻を大きく過ぎた音も、バッファ段では捨てないこと
+    ///
+    /// 鳴らすかどうかはスケジューラが決める。遅れを理由にここで捨てると、鳴り遅れた音が
+    /// 鳴らなくなり語尾が切れる。スケジューラが到着基準へ並べ直す幅
+    /// (`AUDIO_PLAYOUT_MAX_LATENESS_US`) を超えて過ぎていても、保持している音はそのまま
+    /// 取り出せること。
     #[test]
-    fn drop_late_removes_unplayable_audio() {
+    fn pop_releasable_keeps_late_audio() {
         let mut buffer = Fixture::new();
         let now_us = 1_000_000;
         buffer.push_at(0, 1, now_us);
-        let delay_us = buffer
-            .target_delay_us()
-            .expect("観測したので目標遅延が決まること");
-        let play_at_us = now_us + delay_us;
-        assert_eq!(
-            buffer.drop_late(play_at_us),
-            0,
-            "鳴らす時刻ちょうどでは捨てないこと"
-        );
-        assert_eq!(
-            buffer.drop_late(play_at_us + AUDIO_PLAYOUT_MAX_LATENESS_US),
-            0,
-            "閾値ちょうどでは捨てないこと"
-        );
-        assert_eq!(
-            buffer.drop_late(play_at_us + AUDIO_PLAYOUT_MAX_LATENESS_US + 1),
-            1,
-            "閾値を超えて遅れた音は捨てること"
-        );
-        assert_eq!(buffer.dropped_late(), 1, "捨てた数を計上すること");
-        assert!(buffer.is_empty(), "捨てたら空になること");
+        let late_us = now_us + AUDIO_PLAYOUT_MAX_LATENESS_US * 2;
+        let frame = buffer
+            .pop_releasable(late_us, 0)
+            .expect("遅れても保持している音は取り出せること");
+        assert_eq!(frame.pts_us, 0, "鳴らす時刻を過ぎた音も捨てずに返すこと");
+        assert!(buffer.is_empty(), "取り出したら空になること");
     }
 
     #[test]
