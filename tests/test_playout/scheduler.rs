@@ -829,3 +829,158 @@ fn reset_keeps_the_concealment_stats() {
     assert_eq!(scheduler.concealments(), 0);
     assert_eq!(scheduler.concealed_us(), 0);
 }
+
+#[test]
+fn last_play_returns_the_decided_sound() {
+    // 鳴らすと決めた音の値は、決定と入力をそのまま写したものになる
+    let mut scheduler = AudioPlayoutScheduler::new();
+    assert_eq!(
+        scheduler.last_play(),
+        None,
+        "まだ鳴らすと決めていなければ None であること"
+    );
+
+    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    let play = scheduler.last_play().expect("鳴らすと決めた音の値がある");
+    assert_eq!(
+        play.start_at_us, 160_000,
+        "決定した鳴り始める時刻を返すこと"
+    );
+    assert_eq!(play.arrival_us, 150_000, "到着の基準を返すこと");
+    assert_eq!(
+        play.target_start_us,
+        Some(100_000),
+        "目標の開始時刻を返すこと"
+    );
+    assert_eq!(
+        play.basis,
+        AudioPlayoutBasis::Timestamp,
+        "鳴らす時刻を決めるのに使った計画を返すこと"
+    );
+    assert_eq!(
+        play.played_us, 10_000,
+        "要求した詰める長さ (10 ms) を引いた長さを返すこと"
+    );
+    let play_again = scheduler.last_play().expect("鳴らすと決めた音の値がある");
+    assert_eq!(play_again, play, "同じ値を何度でも読めること");
+}
+
+#[test]
+fn last_play_follows_the_applied_stretch() {
+    // 実際に詰めた長さが返ってきたら、鳴る長さをその分だけ直すこと
+    let mut scheduler = AudioPlayoutScheduler::new();
+    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    // 要求した 10 ms のうち 5 ms しか詰められなかった。残りの 5 ms は音が後ろへ伸びる
+    scheduler.confirm_stretch(5_000);
+    assert_eq!(
+        scheduler
+            .last_play()
+            .expect("鳴らすと決めた音の値がある")
+            .played_us,
+        15_000,
+        "詰められなかった分だけ鳴る長さが伸びること"
+    );
+
+    // 要求より長く詰められたときは、詰めすぎた分だけ手前で終わる
+    let mut scheduler = AudioPlayoutScheduler::new();
+    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    scheduler.confirm_stretch(12_000);
+    assert_eq!(
+        scheduler
+            .last_play()
+            .expect("鳴らすと決めた音の値がある")
+            .played_us,
+        8_000,
+        "詰めすぎた分だけ鳴る長さが短くなること"
+    );
+
+    // 確認が返ってこないまま次の音を並べたときは、適用されなかったものとして扱う
+    let mut scheduler = AudioPlayoutScheduler::new();
+    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    scheduler.schedule(input(150_000, 25_000, 20_000, Some(200_000)));
+    let previous = scheduler.last_play().expect("鳴らすと決めた音の値がある");
+    assert_eq!(
+        previous.played_us, 20_000,
+        "詰められなかった音は長さがそのままになること"
+    );
+    assert_eq!(previous.start_at_us, 200_000, "直近の決定で置き換わること");
+}
+
+#[test]
+fn last_play_is_kept_by_a_drop_and_cleared_by_reset() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
+    let play = scheduler.last_play().expect("鳴らすと決めた音の値がある");
+
+    // 並べすぎで捨てる決定では、直前に鳴らすと決めた音の値を残す
+    let dropped = scheduler.schedule(AudioPlayoutInput {
+        now_us: 0,
+        arrival_us: 0,
+        timestamp_us: 20_000,
+        duration_us: 20_000,
+        target_start_us: Some(1_000_000),
+        enforce_target: true,
+        delay_us: AUDIO_PLAYOUT_DELAY_US,
+        arrival_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
+    });
+    assert_eq!(
+        dropped,
+        AudioPlayoutDecision::Drop {
+            reason: AudioPlayoutDropReason::Backlog,
+        },
+        "並べすぎの音は捨てること"
+    );
+    assert_eq!(
+        scheduler.last_play(),
+        Some(play),
+        "捨てる決定では直前に鳴らすと決めた音の値を残すこと"
+    );
+
+    // 購読のやり直しでは消える
+    scheduler.reset();
+    assert_eq!(scheduler.last_play(), None, "購読のやり直しで消えること");
+}
+
+#[test]
+fn last_play_follows_the_arrival_basis() {
+    // 到着基準へ並べ直した音も、目標が渡されていればそのまま残すこと
+    let mut scheduler = AudioPlayoutScheduler::new();
+    let decision = scheduler.schedule(AudioPlayoutInput {
+        now_us: 500_000,
+        arrival_us: 500_000,
+        timestamp_us: 5_000,
+        duration_us: 20_000,
+        target_start_us: Some(0),
+        enforce_target: true,
+        delay_us: AUDIO_PLAYOUT_DELAY_US,
+        arrival_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
+    });
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 580_000,
+            basis: AudioPlayoutBasis::Arrival,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "目標から離れすぎた音は到着基準へ並べ直すこと"
+    );
+    let play = scheduler.last_play().expect("鳴らすと決めた音の値がある");
+    assert_eq!(
+        play.basis,
+        AudioPlayoutBasis::Arrival,
+        "到着基準へ並べ直したことを返すこと"
+    );
+    assert_eq!(
+        play.target_start_us,
+        Some(0),
+        "使えなかった目標もそのまま返すこと"
+    );
+    assert_eq!(
+        play.played_us, 20_000,
+        "到着基準では詰めないため音の長さがそのままになること"
+    );
+}

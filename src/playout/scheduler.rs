@@ -105,6 +105,29 @@ pub enum AudioPlayoutDropReason {
     Backlog,
 }
 
+/// 鳴らすと決めた音の値 (すべてマイクロ秒)
+///
+/// [`AudioPlayoutScheduler::last_play`] が返す。音声の再生の観測値
+/// ([`crate::playout::timing::AudioPlayoutTimingStats`]) へ渡す値であり、予定に対する
+/// 余裕 (再生予定時刻 - 到着) と到着から鳴り始めるまでの時間 (鳴り始める時刻 - 到着) は
+/// ここから求められる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioPlayoutPlay {
+    /// 到着した音がまだ鳴っていない位置 ([`AudioPlayoutInput::arrival_us`])
+    pub arrival_us: i64,
+    /// 目標の開始時刻 ([`AudioPlayoutInput::target_start_us`])。無いこともある
+    pub target_start_us: Option<i64>,
+    /// 鳴り始める時刻 ([`AudioPlayoutDecision::Play::start_at_us`])
+    pub start_at_us: i64,
+    /// 実際に鳴る長さ (詰めた分を引いた後、0 以上)
+    ///
+    /// 詰める長さを実際に適用した後 ([`AudioPlayoutScheduler::confirm_stretch`]) に読むと、
+    /// 適用した長さで直った値になる。
+    pub played_us: i64,
+    /// 鳴らす時刻を決めるのに使った計画
+    pub basis: AudioPlayoutBasis,
+}
+
 /// 鳴らす時刻と詰める長さと補間する隙間 (マイクロ秒)、または捨てる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlayoutDecision {
@@ -147,6 +170,8 @@ pub struct AudioPlayoutScheduler {
     last_end_us: Option<i64>,
     /// 直前に鳴らすと決めた音の TIMESTAMP
     last_timestamp_us: Option<i64>,
+    /// 直前に鳴らすと決めた音の値。まだ鳴らすと決めていなければ None
+    last_play: Option<AudioPlayoutPlay>,
     /// 目標に対して今どれだけ遅れているか
     lateness_us: i64,
     /// 前の音に要求した詰める量。`confirm_stretch` で置き換える
@@ -169,6 +194,7 @@ impl AudioPlayoutScheduler {
             anchor: None,
             last_end_us: None,
             last_timestamp_us: None,
+            last_play: None,
             lateness_us: 0,
             requested_us: 0,
             requested_conceal_us: 0,
@@ -246,6 +272,12 @@ impl AudioPlayoutScheduler {
         self.last_timestamp_us = Some(input.timestamp_us);
         let (gap_start_us, gap_us) =
             self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        self.remember_play(
+            &input,
+            start_at_us,
+            compress_us,
+            AudioPlayoutBasis::Timestamp,
+        );
         AudioPlayoutDecision::Play {
             start_at_us,
             basis: AudioPlayoutBasis::Timestamp,
@@ -271,6 +303,14 @@ impl AudioPlayoutScheduler {
         let applied_us = applied_us.max(0);
         // 実際に詰めた長さを記録する (要求値では切らない)
         self.compressed_us = self.compressed_us.saturating_add(applied_us);
+        // 直前に鳴らすと決めた音の長さも、実際に詰めた長さで直す。詰められなかった分は音が
+        // 後ろへ伸び、詰めすぎた分は手前で終わる (前の音の終わりと同じ直し方)
+        if let Some(last_play) = self.last_play.as_mut() {
+            last_play.played_us = last_play
+                .played_us
+                .saturating_add(requested_us.saturating_sub(applied_us))
+                .max(0);
+        }
         let Some(last_end_us) = self.last_end_us.as_mut() else {
             return;
         };
@@ -306,6 +346,7 @@ impl AudioPlayoutScheduler {
         self.anchor = None;
         self.last_end_us = None;
         self.last_timestamp_us = None;
+        self.last_play = None;
         self.lateness_us = 0;
         self.requested_us = 0;
         self.requested_conceal_us = 0;
@@ -351,6 +392,16 @@ impl AudioPlayoutScheduler {
     /// 目標ありの並べ方で更新する。到着基準の間は最後の目標ありの値のまま。
     pub fn lateness_us(&self) -> i64 {
         self.lateness_us
+    }
+
+    /// 直前に鳴らすと決めた音の値
+    ///
+    /// [`AudioPlayoutScheduler::schedule`] が [`AudioPlayoutDecision::Play`] を返したときに
+    /// 更新する。捨てる決定では更新しない (直前に鳴らすと決めた音の値が残る)。詰める長さを
+    /// 実際に適用した後 ([`AudioPlayoutScheduler::confirm_stretch`]) に読むと、実際に鳴る
+    /// 長さが得られる。購読のやり直し ([`AudioPlayoutScheduler::reset`]) で消える。
+    pub fn last_play(&self) -> Option<AudioPlayoutPlay> {
+        self.last_play
     }
 
     /// 前の音の終わりと今回の開始の間から、補間する隙間を求める
@@ -430,6 +481,7 @@ impl AudioPlayoutScheduler {
         self.last_timestamp_us = Some(input.timestamp_us);
         let (gap_start_us, gap_us) =
             self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        self.remember_play(&input, start_at_us, 0, AudioPlayoutBasis::Arrival);
         AudioPlayoutDecision::Play {
             start_at_us,
             basis: AudioPlayoutBasis::Arrival,
@@ -466,6 +518,7 @@ impl AudioPlayoutScheduler {
         self.requested_us = 0;
         let (gap_start_us, gap_us) =
             self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        self.remember_play(&input, start_at_us, 0, AudioPlayoutBasis::Arrival);
         AudioPlayoutDecision::Play {
             start_at_us,
             basis: AudioPlayoutBasis::Arrival,
@@ -513,6 +566,26 @@ impl AudioPlayoutScheduler {
             timestamp_us,
         });
         self.rebase_count += 1;
+    }
+
+    /// 鳴らすと決めた音の値を残す
+    ///
+    /// 鳴る長さは、要求した詰める長さを引いた値にする。実際に詰めた長さが返ってきたときは
+    /// [`AudioPlayoutScheduler::confirm_stretch`] が直す。
+    fn remember_play(
+        &mut self,
+        input: &AudioPlayoutInput,
+        start_at_us: i64,
+        compress_us: i64,
+        basis: AudioPlayoutBasis,
+    ) {
+        self.last_play = Some(AudioPlayoutPlay {
+            arrival_us: input.arrival_us,
+            target_start_us: input.target_start_us,
+            start_at_us,
+            played_us: input.duration_us.max(0).saturating_sub(compress_us.max(0)),
+            basis,
+        });
     }
 }
 

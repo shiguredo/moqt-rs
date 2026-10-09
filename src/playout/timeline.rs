@@ -264,7 +264,8 @@ impl Default for TimelineConfig {
 ///
 /// `numerator_milli` は百分位を 1000 分率で表した値 (950 なら 0.95)。添字は
 /// `ceil(numerator_milli * 個数 / 1000) - 1` を 0 以上 `count` 未満に切った値である。
-fn percentile_index(count: usize, numerator_milli: i64) -> usize {
+/// 映像の表示の遅れと音声の再生の観測 (`crate::playout::timing`) が同じ求め方を使う。
+pub(crate) fn percentile_index(count: usize, numerator_milli: i64) -> usize {
     if count == 0 {
         return 0;
     }

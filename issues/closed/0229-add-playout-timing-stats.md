@@ -1,7 +1,7 @@
 # 音声再生の計器 (鳴るはずの時刻・到着・鳴り始めと理由別の捨て) を追加する
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-playout-timing-stats
 - Polished: {YYYY-MM-DD}
 
@@ -46,4 +46,15 @@ moqt-rs の `src/playout/scheduler.rs` は `lateness_us` の直近値と `drops`
 
 ## 解決方法
 
-{未着手}
+- `src/playout/timing.rs` を追加し、moqt-js の `src/audioPlayoutTimingStats.ts` と `src/timingSummary.ts` を移植した。時刻はすべて引数で受ける (Sans-I/O)
+- 公開した: `AUDIO_PLAYOUT_TIMING_WINDOW_US` (10 秒)、`MAX_RECENT_AUDIO_MISSES` (30)、`AUDIO_DELAY_FEEDBACK_WINDOW_US` (1 秒)、`AudioMissReason` (`Backlog` / `CatchUp` / `Error` / `Stopped`)、`AudioMissTotal` / `AudioMissTotals`、`AudioPlayoutMiss`、`AudioMissEvent`、`TimingSummary` と `summarize_timings`、`AudioPlayoutTimingSnapshot`、`AudioDelayFeedbackObservation`、`AudioPlayoutTimingStats`
+- `AudioPlayoutTimingStats` は `record_play` / `record_miss` / `record_stopped` / `audio_delay_feedback` / `snapshot` / `reset` を持つ。分布は直近 10 秒の窓から求め、捨ての累積は窓に関係なく残す。直近のイベントは 30 件を上限とする
+- `record_stopped` は鳴り終わった音を数えず、鳴り始めている音は残りの長さだけを数える
+- `audio_delay_feedback` は閉ループ (後続の issue) が読む短い窓の分布と、累積の捨てた件数・長さを返す
+- `AudioPlayoutScheduler` に `AudioPlayoutPlay` と `last_play` を追加し、鳴らすと決めた音 (到着・目標・鳴り始める時刻・実際に鳴る長さ・計画) をそのまま計器へ渡せるようにした。`confirm_stretch` は実際に詰めた長さで鳴る長さを直す
+- `src/playout/timeline.rs` の `percentile_index` を `pub(crate)` にし、映像の表示の遅れと同じ nearest-rank 法を共用する
+- 表示のための整形 (moqt-js の `formatAudioMissEvent` の UTC ISO 8601) は移植しない。記録の時刻は呼び出し側が渡した軸のままとし、ログの整形は example 側の責務にする
+- テスト: `tests/test_playout/timing.rs` に 19 件 (記録と分布、窓の内外と境目、理由別の累積、直近一覧の上限、`record_stopped`、`audio_delay_feedback`、`reset`、nearest-rank、スケジューラ連携)、`tests/test_playout/scheduler.rs` に `last_play` の 4 件、`pbt/tests/prop_playout/timing.rs` に 2 件 (モデル照合と分岐のカバレッジゲート、短い窓の閉ループ観測) を追加した
+- 検証: `cargo fmt --check` / `make pbt` / `make test` / `cargo clippy --workspace --all-targets -- -D warnings` / `RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。`PBT_SEED` を 1 / 42 / 2026 に変えても property が成功する。`src/playout/timing.rs` の行カバレッジは 100% である
+- 検証: 9 種類の欠陥 (窓の prune の無効化 / 直近一覧の上限 / 停止時の長さの数え方 / 計画なしの判定の反転 / 閉ループの窓の取り違え / p95 の添字 / 詰めの反映 3 種) を入れて、追加したテストと property がそれぞれ検出することを確認した
+- 備考: `record_play` は `AudioPlayoutPlay` を 1 つ受け取る形にした。`played_us` は `confirm_stretch` を呼んだ後に読む契約であり、呼ばずに次の `schedule` を呼んだ場合は適用されなかったものとして音の長さ全体になる (doc に明記)
