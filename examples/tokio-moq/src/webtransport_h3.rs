@@ -10,6 +10,12 @@
 //! 本モジュールはクライアント例であり、サーバ側専用の要件 (非対応リソースへの 405 応答など)
 //! や、未実装の任意要件 (応答前の optimistic capsule 送信) は対象外とする。
 //! 対象外の詳細は `WtClient::connect` / `WtSession::close` のコメントを参照。
+//!
+//! 本モジュールの reset は s2n-quic が `RESET_STREAM_AT` を送出できないため `RESET_STREAM` に
+//! フォールバックする。draft-ietf-webtrans-http3-16 §4.4 は WebTransport のデータストリームを
+//! reset するとき、WebTransport ヘッダ以上の Reliable Size を持つ `RESET_STREAM_AT` を使う
+//! ことを MUST とするため、reset を伴う経路は relay によっては成立しない。この理由により
+//! WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};

@@ -6,6 +6,11 @@
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
 //! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
+//! WebTransport 経路 ([`Transport::WtH3`] / [`Transport::WtH2`]) は experimental である。
+//! s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きの
+//! データストリーム reset を行えないため (draft-ietf-webtrans-http3-16 §4.4)、reset を伴う経路は
+//! relay によっては成立しない。
+//!
 //! publisher は能動的に送信ストリームを open する側、subscriber は受動的に
 //! 受信ストリームを accept する側という非対称があるため、両者の union API を
 //! ここに置き、各バイナリは必要なメソッドだけを呼び出す。
@@ -104,8 +109,16 @@ pub enum Transport {
     /// QUIC 直接接続 (ALPN `moqt-22`)
     Quic,
     /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
+    ///
+    /// experimental。s2n-quic が `RESET_STREAM_AT` を送出できないため、WebTransport が
+    /// MUST とする Reliable Size 付きのデータストリーム reset を行えない
+    /// (draft-ietf-webtrans-http3-16 §4.4)。reset は `RESET_STREAM` へフォールバックし、
+    /// WebTransport ヘッダが確実に届く保証が無い。
     WtH3,
     /// WebTransport over HTTP/2 (TCP+TLS 上の ALPN `h2`)
+    ///
+    /// experimental。reset は `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は
+    /// 不要だが、relay の capsule 対応に依存する。
     WtH2,
 }
 

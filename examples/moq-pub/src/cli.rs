@@ -180,7 +180,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let transport: Transport = noargs::opt("transport")
         .ty("TYPE")
-        .doc("Transport (quic | wt-h3 | wt-h2)")
+        .doc("Transport (quic | wt-h3 | wt-h2; wt-h3 / wt-h2 (WebTransport) are experimental)")
         .default("quic")
         .take(&mut args)
         .then(|o| Transport::parse(o.value()))?;

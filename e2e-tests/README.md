@@ -29,7 +29,7 @@ test publish_and_subscribe_roundtrip ... ok
 | 変数 | 既定 | 内容 |
 | --- | --- | --- |
 | `MOQT_E2E_URL` | (必須) | 接続先 URL (`moqt://host[:port]/path`) |
-| `MOQT_E2E_TRANSPORT` | `quic` | トランスポート (`quic` / `wt-h3` / `wt-h2`) |
+| `MOQT_E2E_TRANSPORT` | `quic` | トランスポート (`quic` / `wt-h3` / `wt-h2`。`wt-h3` / `wt-h2` は experimental) |
 | `MOQT_E2E_KEEP` | (未設定) | `1` を指定すると受信した MP4 を残す (残した場所は `--nocapture` を付けたときに表示される) |
 
 `MOQT_E2E_URL` が未設定の場合は、何が必要かを示すメッセージでテストが失敗します。受信した MP4 は一時ディレクトリ (OS の一時ディレクトリ配下の `moqt-e2e-<PID>/subscriber.mp4`) に置き、終了時に削除します。

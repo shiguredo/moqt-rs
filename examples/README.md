@@ -59,11 +59,16 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | `--transport` | 接続経路 | 備考 |
 | --- | --- | --- |
 | `quic` | QUIC 直接接続 | ALPN は `moqt-22` |
-| `wt-h3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3` |
-| `wt-h2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2` |
+| `wt-h3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。experimental |
+| `wt-h2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2`。experimental |
 
 WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。
 MOQT のプロトコル識別子 (`moqt-22`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-22 §6.2)。
+
+WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。draft-ietf-webtrans-http3-16 §4.4 は WebTransport のデータストリームを reset するとき、WebTransport ヘッダ以上の Reliable Size を持つ `RESET_STREAM_AT` を使うことを MUST とする。
+ただし example が使う s2n-quic は `RESET_STREAM_AT` を送出できず、`reset_stream_at` transport parameter も広告しない。
+このため `wt-h3` の reset は `RESET_STREAM` へのフォールバックになり、WebTransport ヘッダが確実に届く保証が無い。`wt-h2` は `WT_RESET_STREAM` capsule で reset するため `RESET_STREAM_AT` は不要だが、relay の capsule 対応に依存する。
+reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) は relay によっては成立しない。
 
 ## C4M 認可トークン
 
