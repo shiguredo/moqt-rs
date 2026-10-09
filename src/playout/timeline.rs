@@ -9,7 +9,9 @@
 //! - 基準の遅れ: トラックごとの (復号の出力の時刻 − TIMESTAMP) の直近 10 秒の最小値。
 //!   受信側と送信側の時計のずれと、経路と復号の最小遅延を含む。遅れは到着ではなく
 //!   復号の出力の時刻で測る (表示できる時刻には復号の時間も含まれるため)
-//! - 表示の遅れ (音声): [`crate::playout::delay`] の目標遅延
+//! - 表示の遅れ (音声): [`crate::playout::delay`] の目標遅延 (揺らぎの学習) と、実際に
+//!   鳴った結果から決める閉ループの目標 ([`crate::playout::feedback`]) の大きい方。
+//!   明示された `targetLatency` は閉ループの目標の上限にだけ掛け、学習値には掛けない。
 //! - 表示の遅れ (映像): (遅れ − 基準の遅れ) の揺らぎの百分位。表示時刻の後に届く
 //!   フレームが 1 秒に [`TIMELINE_LATE_FRAMES_PER_SECOND`] 枚までになる値である
 //! - A/V 同期: 表示の遅れの差が [`TIMELINE_SYNC_MIN_DELTA_US`] を超えたら、先行する側へ
@@ -32,6 +34,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::playout::delay::AudioDelayManager;
+use crate::playout::feedback::{AudioDelayFeedback, AudioDelayFeedbackSnapshot};
+use crate::playout::timing::AudioDelayFeedbackObservation;
 
 /// 基準の遅れと揺らぎを求める直近の窓 (マイクロ秒)
 pub const TIMELINE_WINDOW_US: i64 = 10_000_000;
@@ -236,6 +240,13 @@ pub struct DelayBreakdown {
     pub base_drift_limit_us: i64,
     /// jitter buffer の遅延を切り下げる上限 (マイクロ秒)
     pub presentation_delay_cap_us: i64,
+    /// 音声の目標遅延を決める閉ループの状態
+    ///
+    /// 閉ループが決めた目標は音声の表示の遅れの一部であり、その目標がどう動いたかを
+    /// 読むために返す。実際に使う値 (揺らぎの学習値との大きい方) は
+    /// [`PlayoutTimeline::presentation_delay_us`] と [`PlayoutTimeline::learned_delay_us`] が
+    /// 返す。
+    pub audio_delay_feedback: AudioDelayFeedbackSnapshot,
 }
 
 /// 時間軸の設定
@@ -403,6 +414,9 @@ struct TrackState {
     /// 基準の遅れ (マイクロ秒)
     base_us: Option<i64>,
     /// 自分の揺らぎから求めた表示の遅れ (マイクロ秒)
+    ///
+    /// 音声は揺らぎの学習と閉ループの目標 ([`crate::playout::feedback`]) の大きい方、
+    /// 映像は揺らぎの百分位である。
     own_delay_us: i64,
     /// A/V 同期の制御が足した遅れ (マイクロ秒)。自分の遅れの上に乗る
     sync_extra_us: i64,
@@ -470,6 +484,11 @@ pub struct PlayoutTimeline {
     config: TimelineConfig,
     /// 音声と映像の状態
     tracks: [TrackState; 2],
+    /// 実際に鳴った結果から決める音声の目標遅延 (閉ループ)
+    ///
+    /// 音声トラックごとではなく時間軸に 1 つ持つ。目標は到着から鳴るまでの経路の学習で
+    /// あり、購読のやり直しでは変わらないためである。
+    audio_delay_feedback: AudioDelayFeedback,
     /// 直近に同期の制御を行った時刻 (足した遅延を戻す速さの経過時間を求める)
     last_sync_us: Option<i64>,
     /// 直近に観測した、同期の制御が足していない方の遅れ
@@ -507,6 +526,7 @@ impl PlayoutTimeline {
         Self {
             config,
             tracks: [TrackState::new(), TrackState::new()],
+            audio_delay_feedback: AudioDelayFeedback::new(),
             last_sync_us: None,
             last_own_floor_us: None,
             last_unshared_at_us: None,
@@ -529,8 +549,18 @@ impl PlayoutTimeline {
     /// 同じ render group のトラックは同じ値でなければならないため、音声と映像で
     /// 1 つの値を使う。解決の規則は呼び出し側が持ち、ここへは確定した値だけを渡す。
     /// 値は A/V 同期の基準の遅延になり、2 つのトラックの表示の遅れの下限になる。
+    /// 同時に、音声の目標遅延を閉ループで決めるときの上限にもなる (明示された値より
+    /// 自動で大きくしない)。0 は「下限にしない」の意味であり、上限の解除として扱う。
     pub fn set_target_latency_ms(&mut self, target_latency_ms: i64) {
         self.config.target_latency_ms = target_latency_ms.max(0);
+        // 明示された目標遅延は、閉ループが自動で超えない上限にする。0 は「下限にしない」
+        // の意味であるため、上限を掛けない (None)
+        self.audio_delay_feedback
+            .set_ceiling_us(if target_latency_ms > 0 {
+                Some(target_latency_ms.saturating_mul(1_000))
+            } else {
+                None
+            });
         // 明示された値は基準を共有するかの閾値にも効くため、保持の起点を取り直す
         self.refresh_unshared_state();
         // 下限は 2 つのトラックの表示の遅れの下限になる。片方だけがこの下限に当たることが
@@ -595,7 +625,11 @@ impl PlayoutTimeline {
             Track::Audio => {
                 // 音声の表示の遅れは目標遅延の学習 (`playout::delay`) から求める
                 state.delay.observe(wall_clock_us, timestamp_us);
-                state.own_delay_us = state.delay.target_delay_ms().saturating_mul(1_000);
+                // 実際に鳴った結果から決めた目標 (`playout::feedback`) との大きい方を使う。
+                // 学習だけではストリーム全体が一様に遅れている分が見えない
+                state.own_delay_us = self
+                    .audio_delay_feedback
+                    .target_delay_us(state.delay.target_delay_ms().saturating_mul(1_000));
             }
             Track::Video => {
                 if let Some(base_us) = state.base_us {
@@ -636,6 +670,27 @@ impl PlayoutTimeline {
         self.update_sync_delays(wall_clock_us);
     }
 
+    /// 音声を実際に鳴らした結果の観測を渡す (購読側が鳴らすたびに呼ぶ)
+    ///
+    /// 「予定をどれだけ過ぎて鳴ったか」「到着から鳴り始めるまで」「並べすぎで捨てた量」から、
+    /// 音声の目標遅延を閉ループで決める ([`crate::playout::feedback`])。目標を動かすのは
+    /// 毎秒 1 回までであり、観測のたびに呼んでよい。動かした目標はその場で音声の表示の
+    /// 遅れへ反映する。
+    ///
+    /// 揺らぎの学習 ([`crate::playout::delay`]) は「直近で最も早く届いた音との差」しか
+    /// 見ないため、ストリーム全体が一様に遅れている分を見つけられない。この観測がその分を
+    /// 補う。遅れが許容の中に収まっていれば目標を減らすため、正常時は遅延が増えない。
+    pub fn observe_audio_playout(&mut self, observation: AudioDelayFeedbackObservation) {
+        self.audio_delay_feedback.update(observation);
+        let state = &mut self.tracks[Track::Audio.index()];
+        if state.base_us.is_some() {
+            // 次の音から新しい目標で並ぶように、その場で表示の遅れを取り直す
+            state.own_delay_us = self
+                .audio_delay_feedback
+                .target_delay_us(state.delay.target_delay_ms().saturating_mul(1_000));
+        }
+    }
+
     /// この TIMESTAMP を鳴らす・表示する時刻 (受信側の壁時計のマイクロ秒)
     ///
     /// 基準がまだ無いときと、そのトラックの TIMESTAMP を使わないとき (基準がずれて
@@ -670,8 +725,9 @@ impl PlayoutTimeline {
 
     /// 自分の揺らぎから求めた表示の遅れ (マイクロ秒)
     ///
-    /// 音声は `crate::playout::delay` の目標遅延、映像は揺らぎの百分位である。
-    /// `targetLatency` と同期の制御の分を含まない。観測が無いときは 0 になる。
+    /// 音声は揺らぎの学習と閉ループの目標 ([`crate::playout::feedback`]) の大きい方、
+    /// 映像は揺らぎの百分位である。`targetLatency` と同期の制御の分を含まない。観測が
+    /// 無いときは 0 になる。
     pub fn learned_delay_us(&self, track: Track) -> i64 {
         self.tracks[track.index()].own_delay_us
     }
@@ -776,6 +832,7 @@ impl PlayoutTimeline {
             base_drift_us_per_second: self.base_drift_us_per_second(),
             base_drift_limit_us: TIMELINE_BASE_DRIFT_US,
             presentation_delay_cap_us: self.presentation_cap_us(),
+            audio_delay_feedback: self.audio_delay_feedback.snapshot(),
         }
     }
 
@@ -806,6 +863,10 @@ impl PlayoutTimeline {
     ///
     /// 世代は進めない。世代を進めると、もう片方に既に積んだフレームの表示時刻が
     /// 決められなくなるためである。`targetLatency` は設定の値であり残す。
+    ///
+    /// 音声の目標遅延を決める閉ループ ([`crate::playout::feedback`]) も残す。目標は
+    /// 「到着から鳴るまでの経路」の学習であり、購読のやり直しでは変わらないためである
+    /// (消すと、その間だけ遅れが戻る)。
     pub fn reset_track(&mut self, track: Track) {
         self.tracks[track.index()] = TrackState::new();
         self.presented[track.index()] = None;
@@ -821,6 +882,9 @@ impl PlayoutTimeline {
     }
 
     /// 基準と学習をすべて消す (TIMESTAMP の飛び、購読のやり直し)。世代を進める
+    ///
+    /// 音声の目標遅延を決める閉ループ ([`crate::playout::feedback`]) と `targetLatency` は
+    /// 設定と経路の学習であり、残す ([`PlayoutTimeline::reset_track`] と同じ扱い)。
     pub fn reset(&mut self) {
         self.generation = self.generation.saturating_add(1);
         for track in [Track::Audio, Track::Video] {

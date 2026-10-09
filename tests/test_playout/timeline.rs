@@ -2,11 +2,45 @@
 //!
 //! 公開 API (`PlayoutTimeline`) の契約を確認する。
 
+use shiguredo_moqt::playout::delay::AUDIO_DELAY_START_MS;
+use shiguredo_moqt::playout::feedback::{
+    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
+};
+use shiguredo_moqt::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use shiguredo_moqt::playout::timeline::{
     PlayoutTimeline, TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US,
     TIMELINE_BASE_DRIFT_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TimelineConfig, Track,
     UnsharedReason, audio_arrival_delay_us,
 };
+use shiguredo_moqt::playout::timing::{
+    AudioDelayFeedbackObservation, AudioPlayoutTimingStats, TimingSummary,
+};
+
+/// 閉ループへ渡す観測を 1 つ作る
+///
+/// `lateness_p50_us` が None のときは「まだ鳴らしていない」観測になる。
+fn feedback_observation(at_us: i64, lateness_p50_us: Option<i64>) -> AudioDelayFeedbackObservation {
+    AudioDelayFeedbackObservation {
+        at_us,
+        lateness_us: lateness_p50_us.map(|p50| TimingSummary {
+            p50,
+            p95: p50,
+            max: p50,
+        }),
+        start_delay_us: Some(TimingSummary {
+            p50: 120_000,
+            p95: 130_000,
+            max: 140_000,
+        }),
+        slack_us: Some(TimingSummary {
+            p50: 20_000,
+            p95: 25_000,
+            max: 30_000,
+        }),
+        backlog_misses: 0,
+        backlog_us: 0,
+    }
+}
 
 /// 映像の揺らぎを 40 ms、フレーム間隔を 33 ms にして観測を並べる
 fn observe_jittered_video(timeline: &mut PlayoutTimeline, count: i64) {
@@ -344,4 +378,246 @@ fn audio_arrival_delay_is_clamped_between_the_floor_and_the_cap() {
     let timeline = PlayoutTimeline::new();
     assert_eq!(timeline.audio_arrival_delay_us(), None);
     assert_eq!(timeline.playout_delay_us(), None);
+}
+
+#[test]
+fn observe_audio_playout_raises_the_audio_delay_to_the_closed_loop_target() {
+    // 鳴り遅れの観測を渡すと、揺らぎの学習値だけでは足りない分を閉ループが補い、
+    // 音声の表示の遅れがその場で上がる
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Audio),
+        Some(AUDIO_DELAY_START_MS * 1_000),
+        "まずは揺らぎの学習値を使う"
+    );
+
+    // 予定を 60 ms 過ぎて鳴った。1 回の増分の上限 (40 ms) まで増える
+    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
+    let raised_us = AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US;
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        raised_us,
+        "閉ループの目標へ上がる"
+    );
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Audio),
+        Some(raised_us),
+        "表示の遅れもその場で上がる"
+    );
+    // 表示時刻 = TIMESTAMP + 基準の遅れ + 表示の遅れ
+    assert_eq!(
+        timeline.present_us(Track::Audio, 1_000_000),
+        Some(10_000_000 + raised_us),
+        "鳴らす時刻も新しい目標で求める"
+    );
+    assert_eq!(
+        timeline.delay_breakdown().audio_delay_feedback.reason,
+        AudioDelayFeedbackReason::Lateness,
+        "閉ループの理由が遅れである"
+    );
+}
+
+#[test]
+fn target_latency_caps_the_closed_loop_target() {
+    // 明示された `targetLatency` は、閉ループが自動で超えない上限になる
+    let mut timeline = PlayoutTimeline::new();
+    timeline.set_target_latency_ms(120);
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+
+    // 遅れが大きくても、閉ループの目標は上限で止まる
+    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(400_000)));
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        120_000,
+        "上限で止まる"
+    );
+    assert_eq!(timeline.presentation_delay_us(Track::Audio), Some(120_000));
+
+    // 遅れが続いても上限を超えない
+    timeline.observe_audio_playout(feedback_observation(11_020_000, Some(400_000)));
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        120_000,
+        "何度観測しても上限を超えない"
+    );
+    let breakdown = timeline.delay_breakdown();
+    assert_eq!(
+        breakdown.audio_delay_feedback.target_us, 120_000,
+        "内訳に閉ループの目標が出る"
+    );
+    assert_eq!(
+        breakdown.audio_delay_feedback.ceiling_us,
+        Some(120_000),
+        "内訳に明示の上限が出る"
+    );
+
+    // 0 を渡すと「下限にしない」の意味であり、上限が外れる
+    timeline.set_target_latency_ms(0);
+    assert_eq!(
+        timeline.delay_breakdown().audio_delay_feedback.ceiling_us,
+        None,
+        "0 で上限を外す"
+    );
+    timeline.observe_audio_playout(feedback_observation(12_020_000, Some(400_000)));
+    assert!(
+        timeline.learned_delay_us(Track::Audio) > 120_000,
+        "上限が無ければ自動で増える: {}",
+        timeline.learned_delay_us(Track::Audio)
+    );
+}
+
+#[test]
+fn target_latency_does_not_cap_the_learned_jitter_target() {
+    // 明示の上限は閉ループの目標にだけ掛ける。揺らぎの学習値は既存の揺らぎの吸収そのもの
+    // であり、切り下げると挙動が変わるため掛けない
+    let mut timeline = PlayoutTimeline::new();
+    // 学習の初期値 (80 ms) より小さい上限にする
+    timeline.set_target_latency_ms(50);
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
+
+    assert_eq!(
+        timeline.delay_breakdown().audio_delay_feedback.target_us,
+        50_000,
+        "閉ループの目標は上限で止まる"
+    );
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        AUDIO_DELAY_START_MS * 1_000,
+        "学習値は上限で切り下げない"
+    );
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Audio),
+        Some(AUDIO_DELAY_START_MS * 1_000),
+        "表示の遅れは学習値のままになる"
+    );
+}
+
+#[test]
+fn reset_track_keeps_the_closed_loop_target() {
+    // 購読のやり直しでは、jitter buffer の学習だけを消し、閉ループの目標は戻さない
+    // (戻すと、その間だけ遅れが戻る)
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
+    let raised_us = AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US;
+    assert_eq!(timeline.learned_delay_us(Track::Audio), raised_us);
+
+    timeline.reset_track(Track::Audio);
+    assert!(
+        timeline.present_us(Track::Audio, 1_000_000).is_none(),
+        "基準は消える"
+    );
+    let breakdown = timeline.delay_breakdown();
+    assert_eq!(
+        breakdown.audio_delay_feedback.target_us, raised_us,
+        "閉ループの目標は残る"
+    );
+    assert_eq!(
+        breakdown.audio_delay_feedback.reason,
+        AudioDelayFeedbackReason::Lateness,
+        "理由も残る"
+    );
+    assert_eq!(
+        breakdown.audio_delay_feedback.adjustments, 1,
+        "動かした回数も残る"
+    );
+
+    // 観測し直しても、揺らぎの学習の初期値 (80 ms) ではなく閉ループの目標を使う
+    timeline.observe(Track::Audio, 20_000_000, 11_000_000);
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        raised_us,
+        "購読のやり直しで目標を戻さない"
+    );
+
+    // すべてリセットしても同じである
+    timeline.reset();
+    assert_eq!(
+        timeline.delay_breakdown().audio_delay_feedback.target_us,
+        raised_us,
+        "全リセットでも閉ループの目標は残る"
+    );
+}
+
+#[test]
+fn delay_breakdown_reports_the_closed_loop_state() {
+    // 遅延の内訳に、閉ループがどう動いたかが出る
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    let before = timeline.delay_breakdown().audio_delay_feedback;
+    assert_eq!(before.target_us, AUDIO_DELAY_FEEDBACK_START_US);
+    assert_eq!(before.reason, AudioDelayFeedbackReason::Initial);
+    assert_eq!(before.adjustments, 0, "まだ動かしていない");
+    assert_eq!(before.ceiling_us, None, "明示の上限は無い");
+    assert_eq!(before.lateness_p50_us, None, "観測が無い");
+
+    timeline.observe_audio_playout(AudioDelayFeedbackObservation {
+        at_us: 10_020_000,
+        lateness_us: Some(TimingSummary {
+            p50: 60_000,
+            p95: 80_000,
+            max: 90_000,
+        }),
+        start_delay_us: Some(TimingSummary {
+            p50: 120_000,
+            p95: 130_000,
+            max: 140_000,
+        }),
+        slack_us: Some(TimingSummary {
+            p50: 20_000,
+            p95: 25_000,
+            max: 30_000,
+        }),
+        backlog_misses: 0,
+        backlog_us: 0,
+    });
+    let after = timeline.delay_breakdown().audio_delay_feedback;
+    assert_eq!(
+        after.target_us,
+        AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "閉ループの目標が出る"
+    );
+    assert_eq!(after.reason, AudioDelayFeedbackReason::Lateness);
+    assert_eq!(
+        after.last_change_us, AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "直前の増分が出る"
+    );
+    assert_eq!(after.adjustments, 1, "動かした回数が出る");
+    assert_eq!(after.lateness_p50_us, Some(60_000), "遅れの p50 が出る");
+    assert_eq!(
+        after.start_delay_p50_us,
+        Some(120_000),
+        "到着から鳴るまでの p50 が出る"
+    );
+    assert_eq!(after.slack_p50_us, Some(20_000), "余裕の p50 が出る");
+}
+
+#[test]
+fn closed_loop_accepts_the_observation_from_the_timing_stats() {
+    // 計器 (`AudioPlayoutTimingStats`) が作る観測をそのまま渡しても閉ループが動くこと
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        AUDIO_DELAY_START_MS * 1_000,
+        "まずは揺らぎの学習値を使う"
+    );
+
+    let mut stats = AudioPlayoutTimingStats::new();
+    stats.record_play(AudioPlayoutPlay {
+        arrival_us: 10_020_000,
+        target_start_us: Some(10_000_000),
+        start_at_us: 10_080_000,
+        played_us: 20_000,
+        basis: AudioPlayoutBasis::Timestamp,
+    });
+    // 予定 (10_000_000) を 80 ms 過ぎて鳴ったため、1 回の上限まで増える
+    timeline.observe_audio_playout(stats.audio_delay_feedback(10_100_000));
+    assert_eq!(
+        timeline.learned_delay_us(Track::Audio),
+        AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "計器の観測でも閉ループが動く"
+    );
 }

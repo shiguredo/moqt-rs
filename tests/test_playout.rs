@@ -7,6 +7,8 @@
 mod buffer;
 #[path = "test_playout/delay.rs"]
 mod delay;
+#[path = "test_playout/feedback.rs"]
+mod feedback;
 #[path = "test_playout/scheduler.rs"]
 mod scheduler;
 #[path = "test_playout/stretch.rs"]
