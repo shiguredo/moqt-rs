@@ -8,6 +8,10 @@
 //!
 //! 使い方:
 //!   cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
+//!   cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --fake-capture-device
+//!
+//! `--namespace` を省略した場合は `--url` の `msf` fragment の track-identifier が示す
+//! namespace を使う。どちらにも無い場合はエラーになる。
 //!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。

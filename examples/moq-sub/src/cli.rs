@@ -3,7 +3,6 @@
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
 use shiguredo_moqt::message::common::TrackNamespace;
-use shiguredo_moqt::name;
 use tokio_moq::{ServerUrl, Transport};
 
 /// CLI オプション
@@ -114,30 +113,20 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
 
-    let namespace: TrackNamespace = noargs::opt("namespace")
+    // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
+    // (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の
+    // track-identifier が示す namespace を使う。どちらにも無い場合はエラーになる。
+    let namespace_opt = noargs::opt("namespace")
         .ty("NS")
-        .doc("Track namespace (draft-ietf-moq-transport-22 §8.8 form; '-' separates namespace fields, e.g. moq-example)")
-        // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
-        // ヘルプ表示のための例を与えて help モードでも先へ進めるようにする (通常の実行では
-        // 例は使われず、`--namespace` の省略は MissingOpt になる)
+        .doc("Track namespace (draft-ietf-moq-transport-22 §8.8 form; '-' separates namespace fields, e.g. moq-example). Defaults to the namespace of the MSF fragment in --url")
+        // 省略可能だが、help モードで値が無いと namespace の解決に失敗するため、ヘルプ表示の
+        // ための例を与える (通常の実行では、指定が無いときに例は使われない)
         .example("moq-example")
-        .take(&mut args)
-        .then(|o| {
-            // 空文字は §8.8 では 0 フィールドの namespace になるが、example は catalog を
-            // 持つ namespace を購読するため、必須オプションの欠如と同じく CLI の時点で
-            // エラーにする
-            let v = o.value();
-            if v.is_empty() {
-                return Err("--namespace must not be empty".to_string());
-            }
-            // §8.8 の正規形として解釈する。`-` は namespace フィールドの区切りであり、
-            // フィールド内のリテラルな `-` は `.2d` として書く
-            name::parse_namespace(v).map_err(|e| {
-                format!(
-                    "{e} ('-' separates namespace fields; use the draft-ietf-moq-transport-22 §8.8 form)"
-                )
-            })
-        })?;
+        .take(&mut args);
+    let namespace_value: Option<String> = namespace_opt
+        .present_and_then(|o| Ok::<_, std::convert::Infallible>(o.value().to_string()))?;
+    let namespace: TrackNamespace = tokio_moq::resolve_namespace(namespace_value.as_deref(), &url)
+        .map_err(|e| noargs::Error::other(&args, e))?;
 
     let no_video: bool = noargs::flag("no-video")
         .doc("Disable video track subscription")
@@ -201,6 +190,8 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 mod tests {
     use super::*;
 
+    use shiguredo_moqt::name;
+
     /// テスト用の必須引数
     const BASE_ARGS: &[&str] = &[
         "--url",
@@ -225,18 +216,9 @@ mod tests {
         }
     }
 
-    /// `--namespace` は必須で、指定した値が設定に入る
-    ///
-    /// 以前は `kaki` を既定値にしていたため、指定を忘れると `kaki` を購読していた。
-    /// 購読先の取り違えを防ぐため既定値を持たせない。
+    /// `--namespace` に指定した値が設定に入る
     #[test]
-    fn namespace_is_required() {
-        let args = ["--url", "moqt://127.0.0.1:4443"];
-        assert!(
-            parse_args(&args).is_err(),
-            "--namespace の欠如はエラーになること"
-        );
-
+    fn namespace_uses_the_explicit_option() {
         let config = parse_args(BASE_ARGS)
             .expect("オプションの解析に成功すること")
             .expect("設定が返ること");
@@ -245,6 +227,78 @@ mod tests {
             "moq-example",
             "指定した namespace が使われること"
         );
+    }
+
+    /// `--namespace` を省略した場合は `--url` の `msf` fragment の namespace を使う
+    ///
+    /// 以前は `kaki` を既定値にしていたため、指定を忘れると `kaki` を購読していた。
+    /// 現在は `--url` の `msf` fragment から取り、どちらにも無い場合はエラーにする。
+    #[test]
+    fn namespace_falls_back_to_the_msf_fragment() {
+        let args = ["--url", "moqt://127.0.0.1:4443#msf:spam-egg--video"];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            name::serialize_namespace(&config.namespace),
+            "spam-egg",
+            "msf fragment の namespace が使われること"
+        );
+        assert_eq!(
+            config.namespace.fields().len(),
+            2,
+            "#msf:spam-egg--video の '-' が namespace フィールドの区切りになること"
+        );
+
+        // MSF URI の track-identifier は URI 層の `%XX` をデータバイトとしてデコードするため、
+        // `%2D` は区切りではなく 1 フィールドの `-` になる
+        let args = ["--url", "moqt://127.0.0.1:4443#msf:spam%2Degg--video"];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.namespace.fields().to_vec(),
+            vec![b"spam-egg".to_vec()],
+            "'%2D' がリテラルの '-' として 1 フィールドになること"
+        );
+    }
+
+    /// `--namespace` と `msf` fragment の両方がある場合は `--namespace` を使う
+    #[test]
+    fn namespace_option_overrides_the_msf_fragment() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video",
+            "--namespace",
+            "moq-example",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            name::serialize_namespace(&config.namespace),
+            "moq-example",
+            "指定した namespace が msf fragment より優先されること"
+        );
+    }
+
+    /// `--namespace` も `msf` fragment も無い場合はエラーになる
+    #[test]
+    fn namespace_is_required_without_msf_fragment() {
+        for url in [
+            // fragment が無い
+            "moqt://127.0.0.1:4443",
+            // msf 以外の fragment type
+            "moqt://127.0.0.1:4443#type:moq-example--video",
+            // msf fragment の namespace が 0 フィールド
+            "moqt://127.0.0.1:4443#msf:--video",
+        ] {
+            let args = ["--url", url];
+            assert!(
+                parse_args(&args).is_err(),
+                "namespace を解決できない場合はエラーになること: {url}"
+            );
+        }
     }
 
     /// `--namespace` の空文字はエラーになる

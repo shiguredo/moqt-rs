@@ -11,6 +11,11 @@
 
 ## develop
 
+- [ADD] moq-pub / moq-sub が `--namespace` の省略時に `--url` の `msf` fragment の namespace を使う
+  - `#msf:<track-identifier>` の track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) の表現としてパースする
+  - fragment が無い、`msf` 以外、または namespace が 0 フィールドの場合はエラーにする
+  - @voluntas
+
 - [UPDATE] 依存ライブラリを最新化し、examples の MSRV を 1.95 に引き上げる
   - s2n-quic を 1.90 に更新する (s2n-quic が Rust 1.95 を要求するため)。shiguredo_aom / shiguredo_dav1d / shiguredo_opus を 2026.3 に更新する
   - `tokio-moq` / `moq-sub` / `moq-pub` / `e2e-tests` の `rust-version` を 1.95 にし、README と CODEBASE の前提条件を追随させる。ライブラリ本体 (`shiguredo_moqt`) と `pbt` は 1.93 のまま

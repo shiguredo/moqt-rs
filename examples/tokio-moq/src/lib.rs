@@ -3,6 +3,8 @@
 //! `moq-pub` / `moq-sub` の両バイナリが共通で利用する
 //! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 のトランスポート層を提供する。
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
+//! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
+//! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
 //! publisher は能動的に送信ストリームを open する側、subscriber は受動的に
 //! 受信ストリームを accept する側という非対称があるため、両者の union API を
@@ -13,7 +15,8 @@ use std::time::Duration;
 
 use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
 
-use shiguredo_moqt::msf::uri::parse_msf_fragment;
+use shiguredo_moqt::message::common::TrackNamespace;
+use shiguredo_moqt::msf::uri::{MsfFragment, parse_msf_fragment};
 
 use crate::error::TransportError;
 
@@ -166,8 +169,19 @@ pub struct ServerUrl {
     ///
     /// draft-ietf-moq-transport-22 §6.1.1 (Fragment Identifiers) によりサーバーへは
     /// 送信しない。接続経路 (`:path` / PATH option / SNI) では参照しない。
-    /// `msf` fragment の解釈結果は [`ServerUrl::c4m_tokens`] に取り出している。
+    /// `msf` fragment の track-identifier とパラメータの解釈結果は [`ServerUrl::msf`]、
+    /// 予約パラメータ `c4m` の認可トークンは [`ServerUrl::c4m_tokens`] に取り出している。
     pub fragment: Option<MoqtFragment>,
+    /// MSF fragment (`#msf:...`) の解釈結果
+    ///
+    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` をパースした結果で、
+    /// track-identifier が示す namespace と track name、パラメータ列を保持する。
+    ///
+    /// fragment が無い場合と fragment type が `msf` 以外の場合は `None`。
+    /// `msf` fragment は example が解釈すると宣言した fragment type であり、形式が
+    /// §11.1 の ABNF に一致しない場合は [`parse_url`] がエラーにする。
+    pub msf: Option<MsfFragment>,
     /// MSF fragment の `c4m` パラメータから取り出した C4M 認可トークン (出現順)
     ///
     /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `c4m` を
@@ -198,8 +212,9 @@ pub struct ServerUrl {
 /// と定める。この仕様は将来 draft 改訂で変更される可能性がある。
 ///
 /// `type` が `msf` の場合は value を MSF fragment (`track-identifier [ "&" parameter-list ]`)
-/// として検証し、予約パラメータ `c4m` を Base64 デコードして [`ServerUrl::c4m_tokens`] に
-/// 入れる。MSF fragment の形式が不正な場合はエラーにする。
+/// として検証し、track-identifier の解釈結果を [`ServerUrl::msf`] に、予約パラメータ `c4m` を
+/// Base64 デコードした結果を [`ServerUrl::c4m_tokens`] に入れる。MSF fragment の形式が
+/// 不正な場合はエラーにする。
 ///
 /// # Errors
 ///
@@ -248,17 +263,79 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
     };
     // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): fragment type
     // "msf" の value は MSF の track-identifier とパラメータ列である。example が
-    // 解釈するのは予約パラメータ c4m の認可トークンだけである。
-    let c4m_tokens = match &fragment {
-        Some(f) if f.fragment_type == "msf" => parse_c4m_tokens(url, &f.value)?,
-        _ => Vec::new(),
+    // 解釈するのは track-identifier が示す namespace と予約パラメータ c4m の認可トークンである。
+    // 同じ value を 2 度パースしないよう、解釈結果を 1 度だけ作って共有する。
+    let msf = match &fragment {
+        Some(f) if f.fragment_type == "msf" => Some(parse_msf_value(url, &f.value)?),
+        _ => None,
+    };
+    let c4m_tokens = match &msf {
+        Some(msf) => parse_c4m_tokens(url, msf)?,
+        None => Vec::new(),
     };
     Ok(ServerUrl {
         authority,
         path,
         fragment,
+        msf,
         c4m_tokens,
     })
+}
+
+impl ServerUrl {
+    /// MSF fragment の track-identifier が示す Track Namespace を返す
+    ///
+    /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
+    /// track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) としてパースした
+    /// namespace である。`msf` fragment が無い場合と `msf` 以外の fragment の場合は `None`。
+    pub fn msf_namespace(&self) -> Option<&TrackNamespace> {
+        self.msf.as_ref().map(|msf| &msf.namespace)
+    }
+}
+
+/// `--namespace` の指定と `--url` の MSF fragment から Track Namespace を解決する
+///
+/// `explicit` が `Some` のときは draft-ietf-moq-transport-22 §8.8 (Representing Namespace and
+/// Track Names) の表現としてパースする。`None` のときは `--url` の `msf` fragment
+/// (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の track-identifier が
+/// 示す namespace を使う。moq-pub / moq-sub が共通で使う。
+///
+/// 解決した namespace は 1 つ以上のフィールドを持つ必要がある。example が扱う catalog と
+/// トラックは 1 つ以上のフィールドを持つ namespace に置くため、0 フィールドは
+/// `--namespace` の空文字と同じく CLI の時点でエラーにする。
+///
+/// # Errors
+///
+/// - `explicit` が空文字 / §8.8 として不正: namespace の解釈エラー
+/// - `explicit` が無く、`--url` に `msf` fragment も無い: `--namespace` を要求するエラー
+/// - 解決した namespace が 0 フィールド: 1 つ以上のフィールドを要求するエラー
+pub fn resolve_namespace(
+    explicit: Option<&str>,
+    url: &ServerUrl,
+) -> Result<TrackNamespace, String> {
+    let namespace = match explicit {
+        Some(value) => {
+            // 空文字は §8.8 では 0 フィールドの namespace になるが、example は 1 つ以上の
+            // フィールドを持つ namespace を扱うため、指定の欠如と同じく CLI の時点で拒否する
+            if value.is_empty() {
+                return Err("--namespace must not be empty".to_string());
+            }
+            // §8.8 の正規形として解釈する。`-` は namespace フィールドの区切りであり、
+            // フィールド内のリテラルな `-` は `.2d` として書く
+            shiguredo_moqt::name::parse_namespace(value).map_err(|e| {
+                format!(
+                    "{e} ('-' separates namespace fields; use the draft-ietf-moq-transport-22 §8.8 form)"
+                )
+            })?
+        }
+        None => url.msf_namespace().cloned().ok_or_else(|| {
+            "--namespace is required when --url has no 'msf' fragment (e.g. --namespace moq-example, or --url 'moqt://host:4443#msf:moq-example--video')".to_string()
+        })?,
+    };
+    if namespace.fields().is_empty() {
+        return Err("the namespace must have at least one field (e.g. 'moq-example')".to_string());
+    }
+    Ok(namespace)
 }
 
 /// URL の `#` 以降を fragment として分離する
@@ -335,13 +412,26 @@ fn is_fragment_type(fragment_type: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// `msf` fragment の value から `c4m` パラメータの認可トークンを取り出す
+/// `msf` fragment の value を MSF fragment としてパースする
 ///
 /// draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation) の
 /// `msf-fragment-value = track-identifier [ "&" parameter-list ]` に従い、value 全体を
-/// [`parse_msf_fragment`] で検証してから予約パラメータ `c4m` を読む。MSF fragment の
-/// 形式が不正な場合は [`parse_url`] のエラーとして扱う (example が解釈すると宣言した
-/// fragment type の値は、黙って無視せず仕様どおりに扱う)。
+/// [`parse_msf_fragment`] で検証する。MSF fragment の形式が不正な場合は [`parse_url`] の
+/// エラーとして扱う (example が解釈すると宣言した fragment type の値は、黙って無視せず
+/// 仕様どおりに扱う)。
+///
+/// # Errors
+///
+/// - MSF fragment が §11.1 の ABNF に一致しない: `invalid MSF fragment`
+fn parse_msf_value(url: &str, fragment_value: &str) -> Result<MsfFragment, String> {
+    // parse_msf_fragment は `msf:` 前置を含む fragment 全体を受け取る
+    parse_msf_fragment(&format!("msf:{fragment_value}"))
+        .map_err(|e| format!("invalid MSF fragment in {url}: {e}"))
+}
+
+/// パース済みの `msf` fragment から `c4m` パラメータの認可トークンを取り出す
+///
+/// 予約パラメータ `c4m` を読む (draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。
 ///
 /// 各 `c4m` の値は RFC 3986 §2.1 (Percent-Encoding) の `%XX` をデコードしてから
 /// Base64 としてデコードする。得られたバイト列が MOQT の AUTHORIZATION_TOKEN
@@ -349,14 +439,10 @@ fn is_fragment_type(fragment_type: &str) -> bool {
 ///
 /// # Errors
 ///
-/// - MSF fragment が §11.1 の ABNF に一致しない: `invalid MSF fragment`
 /// - `c4m` の値が Base64 でない / 空: `invalid c4m parameter`
-fn parse_c4m_tokens(url: &str, fragment_value: &str) -> Result<Vec<Vec<u8>>, String> {
-    // parse_msf_fragment は `msf:` 前置を含む fragment 全体を受け取る
-    let fragment = parse_msf_fragment(&format!("msf:{fragment_value}"))
-        .map_err(|e| format!("invalid MSF fragment in {url}: {e}"))?;
+fn parse_c4m_tokens(url: &str, msf: &MsfFragment) -> Result<Vec<Vec<u8>>, String> {
     let mut tokens: Vec<Vec<u8>> = Vec::new();
-    for text in fragment.c4m_tokens() {
+    for text in msf.c4m_tokens() {
         let token = decode_c4m_token(url, text)?;
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
         // alias 解決後の (Token Type, Token Value) の重複は送れないため、同一トークンは畳む
@@ -732,6 +818,7 @@ mod tests {
 
     use shiguredo_moqt::c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT;
     use shiguredo_moqt::message_parameter::AuthorizationToken;
+    use shiguredo_moqt::name::serialize_namespace;
     use shiguredo_moqt::parameter::SetupOptions;
 
     /// path 付き URL は authority と path に分離される
@@ -1194,10 +1281,124 @@ mod tests {
         ))
         .expect("URL のパースに成功すること");
         assert_eq!(url.c4m_tokens, vec![vec![0x01, 0x02, 0x03]]);
-        // track-identifier は example が使わないが、MSF fragment として保持される
+        // track-identifier の解釈結果も msf に保持される
         let fragment = url.fragment.expect("fragment が保持されること");
         assert_eq!(fragment.fragment_type, "msf");
         assert_eq!(fragment.value, format!("moq-example--video&c4m={token}"));
+        let msf = url.msf.as_ref().expect("MSF fragment が保持されること");
+        assert_eq!(
+            serialize_namespace(&msf.namespace),
+            "moq-example",
+            "track-identifier の namespace が取り出されること"
+        );
+        assert_eq!(msf.track_name, b"video", "track name が取り出されること");
+    }
+
+    /// msf fragment の track-identifier から namespace と track name を取り出す
+    ///
+    /// MSF URI の track-identifier は §11.1.2 の namespace-name 表現であり、`-` は
+    /// namespace フィールドの区切り、`--` が namespace と track name の境界になる。
+    /// URI 層の `%XX` はデータバイトとしてデコードする (`%2D` は区切りではない)。
+    #[test]
+    fn parse_url_extracts_msf_track_identifier() {
+        let url = parse_url("moqt://example.com/app#msf:spam-egg--video")
+            .expect("URL のパースに成功すること");
+        let msf = url.msf.as_ref().expect("MSF fragment が保持されること");
+        assert_eq!(serialize_namespace(&msf.namespace), "spam-egg");
+        assert_eq!(msf.namespace.fields().len(), 2, "'-' が区切りになること");
+        assert_eq!(msf.track_name, b"video");
+
+        // `%XX` はデータバイトへデコードされるため、`%2D` は区切りではなく 1 フィールドの `-` になる
+        let url = parse_url("moqt://example.com/app#msf:spam%2Degg--video")
+            .expect("URL のパースに成功すること");
+        let msf = url.msf.as_ref().expect("MSF fragment が保持されること");
+        assert_eq!(
+            msf.namespace.fields().to_vec(),
+            vec![b"spam-egg".to_vec()],
+            "'%2D' がリテラルの '-' として 1 フィールドになること"
+        );
+    }
+
+    /// `msf_namespace` が fragment の有無と type に応じて namespace を返す
+    #[test]
+    fn msf_namespace_returns_namespace_only_for_msf_fragment() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video")
+            .expect("URL のパースに成功すること");
+        assert_eq!(
+            url.msf_namespace().map(serialize_namespace),
+            Some("moq-example".to_string())
+        );
+
+        // msf 以外の fragment type は track-identifier を解釈しない
+        let url = parse_url("moqt://example.com/app#type:moq-example--video")
+            .expect("URL のパースに成功すること");
+        assert!(url.msf.is_none(), "msf 以外は MSF fragment を持たないこと");
+        assert!(url.msf_namespace().is_none());
+
+        // fragment が無い場合も持たない
+        let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
+        assert!(url.msf.is_none());
+        assert!(url.msf_namespace().is_none());
+    }
+
+    /// `--namespace` を指定した場合は §8.8 表現として解釈する
+    #[test]
+    fn resolve_namespace_uses_explicit_option() {
+        let url = parse_url("moqt://example.com/app#msf:spam-egg--video")
+            .expect("URL のパースに成功すること");
+        let namespace = resolve_namespace(Some("moq-example"), &url).expect("解決に成功すること");
+        assert_eq!(
+            serialize_namespace(&namespace),
+            "moq-example",
+            "指定した namespace が msf fragment より優先されること"
+        );
+    }
+
+    /// `--namespace` が無い場合は `--url` の msf fragment の namespace を使う
+    #[test]
+    fn resolve_namespace_falls_back_to_msf_fragment() {
+        let url = parse_url("moqt://example.com/app#msf:spam-egg--video&c4m=AQID")
+            .expect("URL のパースに成功すること");
+        let namespace = resolve_namespace(None, &url).expect("解決に成功すること");
+        assert_eq!(serialize_namespace(&namespace), "spam-egg");
+        assert_eq!(namespace.fields().len(), 2);
+    }
+
+    /// `--namespace` も msf fragment も無い場合はエラーになる
+    #[test]
+    fn resolve_namespace_requires_namespace_or_msf_fragment() {
+        for text in [
+            // fragment が無い
+            "moqt://example.com/app",
+            // msf 以外の fragment type
+            "moqt://example.com/app#type:moq-example--video",
+        ] {
+            let url = parse_url(text).expect("URL のパースに成功すること");
+            let err = resolve_namespace(None, &url).expect_err("エラーになること");
+            assert!(err.contains("--namespace is required"), "{text}: {err}");
+        }
+    }
+
+    /// msf fragment の namespace が 0 フィールドの場合はエラーになる
+    ///
+    /// 0 フィールドの namespace は `--namespace` の空文字と同じく example が扱わない。
+    #[test]
+    fn resolve_namespace_rejects_msf_fragment_without_namespace_fields() {
+        let url =
+            parse_url("moqt://example.com/app#msf:--video").expect("URL のパースに成功すること");
+        let err = resolve_namespace(None, &url).expect_err("エラーになること");
+        assert!(err.contains("at least one field"), "{err}");
+    }
+
+    /// `--namespace` の空文字と §8.8 として不正な値はエラーになる
+    #[test]
+    fn resolve_namespace_rejects_invalid_explicit_option() {
+        let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
+        let err = resolve_namespace(Some(""), &url).expect_err("空文字はエラーになること");
+        assert!(err.contains("must not be empty"), "{err}");
+        let err = resolve_namespace(Some("moq/example"), &url)
+            .expect_err("§8.8 として不正な値はエラーになること");
+        assert!(err.contains("§8.8"), "{err}");
     }
 
     /// パディング無しの標準 Base64 と base64url も c4m として受理する

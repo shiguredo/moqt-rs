@@ -2,6 +2,8 @@
 //!
 //! 実 relay に publisher と subscriber を接続し、publisher が配信した映像が subscriber に
 //! 届いて MP4 に保存されるところまでを検証する。接続先は環境変数 `MOQT_E2E_URL` で渡す。
+//! Track Namespace は `--namespace` ではなく `--url` の MSF fragment (`#msf:...`) から渡し、
+//! `--namespace` を省略したときの解決も併せて検証する。
 //!
 //! 実 relay が必要なため、通常の `cargo test` では実行しない (`#[ignore]` を付けている)。
 //! `MOQT_E2E_URL` を設定したうえで `cargo test -p e2e-tests -- --ignored` を実行する。
@@ -36,6 +38,11 @@ const LAST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 /// publisher が生成する映像のサイズ (moq-pub の既定値)
 const VIDEO_SIZE: (i32, i32) = (1280, 720);
+/// MSF fragment の track-identifier に使う track name
+///
+/// publisher の `--track-name` の既定値と同じ値を使う。subscriber は catalog track を
+/// FETCH してから video / audio を SUBSCRIBE するため、fragment の track name は使わない。
+const MSF_TRACK_NAME: &str = "video";
 
 /// 接続先 URL を環境変数から取り出す
 ///
@@ -187,17 +194,29 @@ impl Subscriber {
     }
 }
 
+/// `--url` に MSF fragment (`#msf:<track-identifier>`) を付けた URL を作る
+///
+/// track-identifier は §11.1.2 (MSF Namespace-Name String Encoding) の表現であり、
+/// `moq-pub` / `moq-sub` は `--namespace` を省略したときにここから Track Namespace を取る。
+fn msf_url(url: &str, namespace: &str, track_name: &str) -> String {
+    assert!(
+        !url.contains('#'),
+        "MOQT_E2E_URL に fragment を含めないこと: {url}"
+    );
+    format!("{url}#msf:{namespace}--{track_name}")
+}
+
 /// publisher を起動する
 ///
-/// 疑似キャプチャの映像と catalog を PUBLISH する。音声は扱わない。
+/// 疑似キャプチャの映像と catalog を PUBLISH する。音声は扱わない。namespace は
+/// `--namespace` ではなく `--url` の MSF fragment から渡し、省略時の解決も E2E で確かめる。
 fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
+    let url = msf_url(url, namespace, MSF_TRACK_NAME);
     let config = moq_pub::cli::parse_args(&[
         "--url",
-        url,
+        url.as_str(),
         "--transport",
         transport,
-        "--namespace",
-        namespace,
         "--fake-capture-device",
         "--no-audio",
     ])
@@ -219,7 +238,8 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
 /// subscriber を起動し、最初の映像フレームが届くまで待つ
 ///
 /// publisher が catalog を PUBLISH する前に起動すると、subscriber は catalog を取得できず
-/// 終了する。そのため終了した場合は理由を残して少し待ち、起動し直す。
+/// 終了する。そのため終了した場合は理由を残して少し待ち、起動し直す。namespace は
+/// `--namespace` ではなく `--url` の MSF fragment から渡し、省略時の解決も E2E で確かめる。
 async fn start_subscriber(
     url: &str,
     transport: &str,
@@ -229,16 +249,15 @@ async fn start_subscriber(
 ) -> Subscriber {
     let deadline = Instant::now() + READY_TIMEOUT;
     let mp4_path = mp4_path.to_string_lossy().to_string();
+    let url = msf_url(url, namespace, MSF_TRACK_NAME);
     loop {
         // --no-play は指定しない。no_play はデコード自体を無効にするため映像フレームが
         // 得られなくなる。SDL プレイヤーは lib に含まれないため、再生は行われない。
         let config = moq_sub::cli::parse_args(&[
             "--url",
-            url,
+            url.as_str(),
             "--transport",
             transport,
-            "--namespace",
-            namespace,
             "--no-audio",
             "--mp4",
             &mp4_path,

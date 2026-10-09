@@ -8,6 +8,10 @@
 //! 使い方:
 //!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 //!   cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --mp4 out.mp4 --no-play
+//!   cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
+//!
+//! `--namespace` を省略した場合は `--url` の `msf` fragment の track-identifier が示す
+//! namespace を使う。どちらにも無い場合はエラーになる。
 //!
 //! 受信とデコードの本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの

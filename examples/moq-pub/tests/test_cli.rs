@@ -1,8 +1,9 @@
 //! moq-pub の CLI のふるまいを実行ファイル経由で固定する
 //!
-//! `--help` / `-h` がヘルプを表示して正常終了することと、`--url` / `--namespace` を
-//! 省略した実行がエラーになることは、引数の解釈結果ではなくプロセスの終了コードと
-//! 出力で確認する必要がある (実際の利用者の見え方と同じ経路で確かめる)。
+//! `--help` / `-h` がヘルプを表示して正常終了すること、`--url` を省略した実行が
+//! エラーになること、`--namespace` を省略した実行が `--url` の `msf` fragment から
+//! namespace を取れること (取れない場合はエラーになること) は、引数の解釈結果ではなく
+//! プロセスの終了コードと出力で確認する必要がある (実際の利用者の見え方と同じ経路で確かめる)。
 
 use std::process::Command;
 
@@ -67,7 +68,7 @@ fn missing_url_is_reported_as_an_error() {
     );
 }
 
-/// `--namespace` を省略した実行は必須オプション欠如のエラーになる
+/// `--namespace` も `--url` の `msf` fragment も無い実行はエラーになる
 ///
 /// 既定値の `kaki` を持たせないことを、実際の実行ファイルのふるまいとして固定する。
 #[test]
@@ -77,5 +78,28 @@ fn missing_namespace_is_reported_as_an_error() {
     assert!(
         stderr.contains("--namespace"),
         "エラーに --namespace が含まれること: {stdout}{stderr}"
+    );
+}
+
+/// `--namespace` を省略しても `--url` の `msf` fragment から namespace を取れる
+///
+/// namespace の解決より後に検証されるオプションのエラーで、解決が通ったことを確かめる
+/// (接続は行わない)。
+#[test]
+fn msf_fragment_provides_namespace_without_the_option() {
+    let (code, stdout, stderr) = run(&[
+        "--url",
+        "moqt://127.0.0.1:4443#msf:moq-example--video",
+        "--no-video",
+        "--no-audio",
+    ]);
+    assert_eq!(code, Some(1), "異常終了すること: {stdout}{stderr}");
+    assert!(
+        stderr.contains("at least one of audio or video"),
+        "namespace の解決より後の検証まで進むこと: {stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains("--namespace is required"),
+        "--namespace のエラーにならないこと: {stdout}{stderr}"
     );
 }

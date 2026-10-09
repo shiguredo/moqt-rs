@@ -191,6 +191,7 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。
 
 URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP の AUTHORIZATION_TOKEN として送信できます。
+`--namespace` を省略した場合は MSF fragment の track-identifier が示す namespace を Track Namespace として使います (`--namespace` と MSF fragment のどちらも無い場合はエラーになります)。
 
 接続先となる MoQT relay は別途用意してください。
 詳細なオプションは [`examples/README.md`](examples/README.md) と各クレートの `--help` を参照してください。
