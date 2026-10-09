@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moqt-client-drain-cancel-safety
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-09
 
 ## 目的
 
@@ -22,10 +22,20 @@
   `send.send(...).await` の途中で破棄されると、開いたストリームが台帳へ登録されず受信タスクも
   起動されないまま失われる。
 - `examples/moq-pub/src/pipeline.rs` と `examples/moq-sub/src/pipeline.rs` は
-  `notable = client.next_event() =>` の分岐で `next_event` を poll しており、他の分岐
-  (映像 / 音声 / tick / shutdown) が先に完了すると破棄される。
-- `send.send(...)` が失敗した場合も送信半は台帳から消えたままである (警告なしで以後の送信が捨てられる)。
+  `notable = client.next_event() =>` の分岐で `next_event` を poll しており、他の分岐が
+  先に完了すると破棄される。moq-pub の他の分岐は映像 / 音声入力、tick、catalog の再送、
+  shutdown であり、moq-sub では data stream の accept、catalog の更新、tick、終了依頼
+  (termination)、shutdown、player の停止が該当する (moq-sub では data stream の accept が
+  頻繁に成立するため、破棄自体は珍しくない)。
+- 送信半を台帳から取り出した後の `send.send(...)` がエラーで返った場合 (`?` で呼び出し側へ
+  伝播し、この時点では警告ログは出ない) も送信半は台帳へ戻されない。以後の `SendOnStream` は
+  「Dropping send on already closed request stream」を warn して捨てられる。
 - 0201 で「捨てられるイベントを減らす」方向の修正は入ったが、future 破棄そのものは未解消。
+- 現行の examples (moq-pub / moq-sub) の REQUEST_UPDATE 処理は常に REQUEST_OK を返すため、
+  保留 PUBLISH_DONE の flush 送信が破棄される経路には現状到達しない (公開 API の
+  `send_request_error` を使う配線で到達する)。一方、peer 起点の要求への自動 REQUEST_ERROR
+  送信 (`Session::emit_request_error`) は `pump_once` 経由で drain されるため、送信途中の
+  破棄で応答が失われる経路は現行でも存在する。
 
 ## 設計方針
 
@@ -40,9 +50,11 @@
 
 ## 完了条件
 
-- `next_event` の future が破棄されても送信半が台帳から消えず、破棄後に再度 `next_event` を呼ぶと
-  未送信のメッセージが送られること。
-- 部分送信の可能性と、その場合の扱いが doc に明記されていること。
+- `next_event` の future が破棄されても送信半が台帳から消えないこと。破棄後に再度
+  `next_event` を呼ぶと、破棄時点でまだ送信を開始していなかったメッセージ (Session の
+  イベントキューに残っていたもの) が送られること。
+- 送信中に破棄されたメッセージの扱い (再送するか、部分送信により再送不能となるか) が
+  doc に明記されていること。
 - 追加した挙動を単体テストで固定すること (I/O ハンドルが必要な配線部分はレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
