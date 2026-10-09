@@ -1,7 +1,7 @@
 # 音声の目標遅延を実際に鳴った結果から閉ループで決める
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-playout-delay-feedback
 - Polished: {YYYY-MM-DD}
 
@@ -46,4 +46,16 @@ jitter buffer の学習 (`src/audioDelayManager.ts`) は基準が窓内で最も
 
 ## 解決方法
 
-{未着手}
+- `src/playout/feedback.rs` を追加し、moqt-js の `src/audioDelayFeedback.ts` を移植した (時刻は引数で受ける Sans-I/O)
+- 定数 (マイクロ秒): 下限 80 / 上限 300 / 初期 100 / 調整の間隔 1 秒 / 観測の窓 1 秒 (`crate::playout::timing` の既存定数を参照) / 許容 10 / 余白 20 / 増分の下限 20 / 増分の上限 40 / 毎秒の減少量 10 (いずれも ms の値)
+- 公開: `AudioDelayFeedbackReason` (`Initial` / `Backlog` / `Lateness` / `Settled` / `Waiting`)、`AudioDelayFeedbackSnapshot`、`AudioDelayFeedback` (`set_ceiling_us` / `ceiling_us` / `feedback_target_us` / `target_delay_us` / `update` / `snapshot` / `reset`)
+- 目標は jitter buffer の学習値との大きい方を採る。実際に鳴った観測を 1 つも受けていない間は学習値をそのまま返す
+- 調整は毎秒 1 回だけ行う。鳴り遅れ (許容 10 ms 超) と並べすぎの累積の増分から増分を [20, 40] ms にクランプして増やし、どちらも無ければ毎秒 10 ms の速さで減らす (負にはしない)。明示された `targetLatency` は閉ループの目標にだけ上限として掛け、学習値には掛けない
+- `PlayoutTimeline` に閉ループを持たせ、音声の `observe` で表示の遅れを「揺らぎの学習値と閉ループの目標の大きい方」から決める。`observe_audio_playout` を追加して観測を渡し、その場で表示の遅れを取り直す
+- `set_target_latency_ms` は 0 より大きいときだけ閉ループの上限として渡す (0 は「下限にしない」の意味であるため、上限の解除として扱う)
+- `reset_track(Track::Audio)` と `reset` は揺らぎの学習だけを消し、閉ループは消さない (購読のやり直しで目標を戻さない)
+- `DelayBreakdown` に `audio_delay_feedback` を追加し、閉ループの状態 (目標・理由・上限・調整の回数・直近の分布) を内訳から読めるようにした
+- テスト: `tests/test_playout/feedback.rs` に 13 件 (観測前は学習値 / 鳴り遅れと並べすぎでの増分のクランプ / 間隔 / 許容内の減少 / 下限と上限と明示 ceiling / 大きい方の採用 / reset で上限が残ること) を追加した
+- 検証: `cargo fmt --check` / `make pbt` / `make test` / `cargo clippy --workspace --all-targets -- -D warnings` / `RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。`PBT_SEED` を 17 種類変えても property が成功する
+- 検証: 10 種類の欠陥 (調整の間隔の無効化 / 観測前の閉ループ利用 / 増分の上限の変更 / 明示上限の無視 / 表示の遅れの取り直し漏れ / 上限の配線漏れ / `observe` の閉ループ無視 / `reset_track` での閉ループ消去 / PBT への 2 種) を入れて、追加したテストと property がそれぞれ検出することを確認した
+- 備考: 明示された上限が下限 80 ms を下回る場合は、moqt-js と同じく上限を優先する (目標が下限を下回り得る)

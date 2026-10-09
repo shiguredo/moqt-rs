@@ -673,6 +673,14 @@
   - `AudioPlayoutScheduler::last_play` と `AudioPlayoutPlay` を追加し、スケジューラが決めた音 (到着・目標・鳴り始める時刻・実際に鳴る長さ・計画) をそのまま計器へ渡せるようにする
   - @voluntas
 
+- [CHANGE] 音声の目標遅延を、実際に鳴った結果から閉ループで決める
+  - `src/playout/feedback.rs` に `AudioDelayFeedback` を追加する。鳴り遅れ (許容 10 ms 超) があれば 1 回の増分を 20〜40 ms にクランプして増やし、並べすぎで捨てた累積が増えていれば余白 20 ms を足して同じ範囲にクランプして増やし、どちらも無ければ毎秒 10 ms の速さで減らす (判断は毎秒 1 回まで。目標は下限 80 ms / 上限 300 ms)
+  - 目標は jitter buffer の学習値との大きい方を採る。実際に鳴った観測を 1 つも受けていない間は学習値をそのまま返す
+  - 明示された `targetLatency` は閉ループの目標にだけ上限として掛け、学習値には掛けない (`PlayoutTimeline::set_target_latency_ms` の 0 は上限の解除として扱う)
+  - `PlayoutTimeline::observe_audio_playout` を追加し、音声の表示の遅れをその場で閉ループの目標へ取り直す。遅延の内訳 (`DelayBreakdown`) に `audio_delay_feedback` を追加する
+  - `PlayoutTimeline::reset_track` と `reset` は jitter buffer の学習だけを消し、閉ループの目標は残す (購読のやり直しで目標を戻さない)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する
