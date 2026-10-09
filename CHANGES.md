@@ -11,6 +11,12 @@
 
 ## develop
 
+- [FIX] `MoqtClient` が保留中の PUBLISH_DONE を送信できずに失う経路を修正する
+  - 回収の条件に保留中の PUBLISH_DONE が無いことを加え、回収は Session のイベントを drain した後だけに行う (`tick` からの回収をやめる)
+  - `next_event` は notable イベントより先に `drain_events` を呼び、`take_notable_event` は配送キューの pop だけを行う (`SendOnStream` を捨てない)
+  - `drain_events` が消費した `CloseSession` も配送キュー経由でアプリへ届くようにする
+  - @voluntas
+
 - [CHANGE] `Session::recv_data_stream_stop_sending` と `Session::fetch_stop_sending_received` に、peer の STOP_SENDING のエラーコードを受け取る引数を追加する
   - `None` は「アプリケーションエラーコード無し」を表す (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))
   - `tokio_moq` の `quic::connect` の戻り値と `MoqtClient::establish_quic` の引数にも STOP_SENDING の観測を追加する
