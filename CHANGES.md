@@ -11,6 +11,11 @@
 
 ## develop
 
+- [FIX] moq-pub のカタログのトラックに role を載せる
+  - 映像は `video`、音声は `audio` (draft-ietf-moq-msf-01 §5.2.6 Table 4 の予約 role)
+  - 受信側は codec だけでなく role からも content の種別を判定できる
+  - @voluntas
+
 - [FIX] moq-sub がカタログを取得する FETCH に C4M の AUTHORIZATION_TOKEN を載せる
   - `moqt` クレームがその FETCH の Full Track Name を認可するトークンだけを載せる (draft-ietf-moq-c4m-01 §1.1)
   - クレームをデコードできないトークンは SETUP と SUBSCRIBE / PUBLISH には従来どおり載せる
