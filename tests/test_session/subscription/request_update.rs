@@ -2644,7 +2644,7 @@ fn forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup() {
     // subscriber (client) が STOP_SENDING を送信 → publisher は StoppedByPeer を記録する。
     // 記録自体は後段の再オープン成功で検証する (StoppedByPeer からのみ再オープン可)
     server
-        .recv_data_stream_stop_sending(stream_id)
+        .recv_data_stream_stop_sending(stream_id, None)
         .expect("テストフィクスチャの前提条件を満たす");
 
     // client が REQUEST_UPDATE で forward=1 に変更
@@ -3990,7 +3990,7 @@ fn publish_originated_forward_0_to_1_allows_reopen_of_stopped_by_peer_subgroup()
     // subscriber が STOP_SENDING を送信 → publisher は再オープン禁止を記録する
     // (記録は REQUEST_OK 前の再オープン拒否で、解除は REQUEST_OK 後の再オープン成功で検証する)
     client
-        .recv_data_stream_stop_sending(stream_id)
+        .recv_data_stream_stop_sending(stream_id, None)
         .expect("テストフィクスチャの前提条件を満たす");
     let stream_id2 = DataStreamId(302);
     let err = client

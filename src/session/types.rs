@@ -1562,6 +1562,18 @@ pub struct Fetch {
     /// `FetchState::Terminated` はデータストリームの終端でも遷移するため、状態ではなく
     /// 本フラグで判定する (データストリーム終端は bidi request stream を閉じない)。
     pub local_cancel_sent: bool,
+    /// publisher 側が FETCH データストリームで受信した STOP_SENDING のエラーコード
+    ///
+    /// [`Session::fetch_stop_sending_received`](crate::session::core::Session::fetch_stop_sending_received)
+    /// がデータストリームの STOP_SENDING を受理したときだけ設定する。外側の `Option` は
+    /// 「その受理が起きたか」、内側は「解釈できたアプリケーションエラーコード」を表す
+    /// (内側の `None` の意味は [`RequestStreamEnd::Reset`] の `error_code` を参照する)。
+    /// bidi request stream 側の STOP_SENDING が先に fetch を終端した場合、後着の
+    /// データストリーム側は受理されないため本フィールドは `None` のままになる
+    /// (その場合も cancel の理由は `TerminationReason::PeerStreamReset` が運ぶ)。
+    /// subscriber 側は常に `None` のまま。
+    /// この節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
+    pub peer_stop_sending_error_code: Option<Option<u64>>,
     /// Subscriber Priority (draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter))
     ///
     /// SUBSCRIBE / FETCH / PUBLISH_OK / REQUEST_UPDATE に含まれ、動的に変更可能。

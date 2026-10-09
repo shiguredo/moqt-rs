@@ -1,7 +1,7 @@
 # 受信した STOP_SENDING のエラーコードを MOQT のコードへ戻す
 
 - Created: 2026-09-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/fix-received-stop-sending-code-remap
 - Polished: 2026-10-08
 - Updated: 2026-10-08
@@ -153,3 +153,38 @@ draft-ietf-webtrans-http3-16 §4.4 は RESET_STREAM と STOP_SENDING の両方�
   `tests/test_session/fetch/unified.rs` の `fetch_stop_sending_received` 呼び出し) が
   シグネチャ変更に追従し、`cargo test --workspace` が通ること
 - 実接続での確認は [issues/pending/0094](../issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md) の解消後に行う
+
+## 解決方法
+
+peer の STOP_SENDING のエラーコードを MOQT のコードへ戻し、該当する送信ストリームの終端として
+Session へ通知する経路を追加した。
+
+- `Session::recv_data_stream_stop_sending` と `Session::fetch_stop_sending_received` に
+  `error_code: Option<u64>` を追加した。`None` は「アプリケーションエラーコード無し」を表し、
+  予約コードポイントも同じ扱いになる
+- 参照 API `Session::stopped_outgoing_subgroup_error_code` と `Fetch::peer_stop_sending_error_code`
+  を追加した。bidi request stream は既存の `Session::recv_request_stream_closed` の
+  `RequestStreamEnd::Reset` として通知するため新規 API は不要である
+- example は s2n-quic の `Subscriber::on_frame_received` で `Frame::StopSending` を観測する。
+  QUIC 直接接続は wire のコードをそのまま、WebTransport over HTTP/3 は
+  `wt_stop_sending_error_code` で MOQT のコードへ戻して Session へ渡す。wt-h3 では h3 層へも
+  `ClientConnection::stop_sending` で通知する
+- bidi request stream は RESET_STREAM と STOP_SENDING が対で届くため、example に終端通知済みの
+  記録 (`TerminatedRequestStreams`) を追加した。通知に成功したときだけ記録し、二重通知で
+  Session が未知 id としてセッションを閉じることを防ぐ
+- 未知の stream id への通知は Session がセッションを閉じずにエラーを返すため、example は
+  該当ストリームの終端として吸収する
+- peer の STOP_SENDING に由来する送信エラーを `TransportError::StreamReset` として切り分け、
+  moq-pub / moq-sub は該当ストリームだけを終端して配信 / 受信を継続する。moq-pub は
+  再オープン禁止 (§11.3.2) を避けるため、cancel された Subgroup の group id を飛ばす
+- `skills/shiguredo-moqt/SKILL.md` と `src/session.rs` の表記を新シグネチャへ更新した
+
+テストは `tests/test_session/data_stream.rs` と `tests/test_session/fetch/unified.rs` に
+受信コードの保持・未知 stream id と重複通知でセッションを閉じないことを追加し、
+`examples/tokio-moq/src/{transport.rs,webtransport_h3.rs,moqt_client.rs}` と
+`examples/moq-{pub,sub}/src/{error.rs,pipeline.rs}` に変換則・二重通知ガード・
+ストリーム終端の切り分けの単体テストを追加した。
+
+実接続での確認は pending/0094 の解消後に行う。なお WebTransport over HTTP/2 は STOP_SENDING の
+観測経路を持たず、peer の cancel は `TransportError::StreamClosed` として現れるため、
+その経路で publisher が終了する既知の制限は残っている。

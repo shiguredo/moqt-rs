@@ -1150,7 +1150,7 @@ fn peer_stop_sending_on_fill_absorbed() {
         .send_fill_fetch_header(stream_id, update_rid)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .recv_data_stream_stop_sending(stream_id)
+        .recv_data_stream_stop_sending(stream_id, None)
         .expect("fill への STOP_SENDING は吸収されること");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 0);
     assert_eq!(

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use s2n_quic::Client;
 use s2n_quic::client::Connect;
 use s2n_quic::connection::Connection;
+use s2n_quic::provider::event::events::{Frame, FrameReceived};
 use s2n_quic::provider::tls::rustls as s2n_rustls;
+use tokio::sync::mpsc;
 
 use crate::error::{Result, TransportError};
 
@@ -16,22 +18,59 @@ use crate::error::{Result, TransportError};
 /// WebTransport の `WT-Available-Protocols` と共通の定数を使う。
 const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
 
-/// 受信パケットの内訳を数える診断用の購読者。
+/// peer から受信した STOP_SENDING の観測結果
 ///
-/// `MOQT_PACKET_DIAG=1` のときだけ event provider として差し込む。受信が止まった
-/// ときに「パケットが来ていない」のか「来ているが復号に失敗している」のかを
-/// 切り分けるために使う。常時有効にすると per-packet の処理が増えて計測そのものが
-/// 結果を歪めるため、環境変数で明示的に有効化する。
+/// RFC 9000 §19.5 の STOP_SENDING を、送信ストリームを所有する MOQT 層へ渡すための値である。
+/// `error_code` は wire のコードであり、WebTransport over HTTP/3 は HTTP/3 の code space を
+/// 共有するため `wt_stop_sending_error_code` で MOQT のコードへ戻す
+/// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopSendingObserved {
+    /// STOP_SENDING の対象となったストリーム ID
+    pub stream_id: u64,
+    /// peer が載せた wire のエラーコード
+    pub error_code: u64,
+}
+
+/// peer の STOP_SENDING の観測を受け取る receiver
+///
+/// 接続終了で channel が閉じると `recv` は `None` を返す。呼び出し側は receiver を落として
+/// 観測を止めること (閉じた receiver を poll し続けると待たずに `None` が返り続ける)。
+pub type StopSendingReceiver = mpsc::UnboundedReceiver<StopSendingObserved>;
+
+/// 接続イベントの購読者
+///
+/// 2 つの役割を持つ。
+///
+/// - 受信パケットの内訳 (受信 / 破棄 / 復号失敗) を数える診断。`MOQT_PACKET_DIAG=1` の
+///   ときだけ 1 秒ごとのログ出力を有効化する。受信が止まったときに「パケットが来ていない」
+///   のか「来ているが復号に失敗している」のかを切り分けるために使う。常時出力すると
+///   計測そのものを歪めるため、環境変数で明示的に有効化する
+/// - peer の STOP_SENDING の観測。診断ではなく MOQT 層へ渡す必要のある情報であるため、
+///   `MOQT_PACKET_DIAG` の有無に関わらず常に行う
+///
+/// s2n-quic の `with_event` は 1 接続につき 1 購読者しか差し込めないため、診断と観測を
+/// 同じ購読者に同居させている。
 #[derive(Debug, Clone, Default)]
-struct PacketDiag {
+pub(crate) struct ConnectionObserver {
     received: Arc<std::sync::atomic::AtomicU64>,
     dropped: Arc<std::sync::atomic::AtomicU64>,
     decryption_failed: Arc<std::sync::atomic::AtomicU64>,
+    /// peer の STOP_SENDING を流す先。観測が不要な場合は `None`
+    stop_sending_tx: Option<mpsc::UnboundedSender<StopSendingObserved>>,
 }
 
-impl PacketDiag {
+impl ConnectionObserver {
+    /// peer の STOP_SENDING を `tx` へ流す購読者を作る
+    pub(crate) fn with_stop_sending(tx: mpsc::UnboundedSender<StopSendingObserved>) -> Self {
+        Self {
+            stop_sending_tx: Some(tx),
+            ..Self::default()
+        }
+    }
+
     /// 1 秒ごとに内訳を出すタスクを起動する
-    fn spawn_logger(&self) {
+    pub(crate) fn spawn_logger(&self) {
         let received = Arc::clone(&self.received);
         let dropped = Arc::clone(&self.dropped);
         let decryption_failed = Arc::clone(&self.decryption_failed);
@@ -49,7 +88,7 @@ impl PacketDiag {
     }
 }
 
-impl s2n_quic::provider::event::Subscriber for PacketDiag {
+impl s2n_quic::provider::event::Subscriber for ConnectionObserver {
     type ConnectionContext = ();
 
     fn create_connection_context(
@@ -67,6 +106,27 @@ impl s2n_quic::provider::event::Subscriber for PacketDiag {
     ) {
         self.received
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn on_frame_received(
+        &mut self,
+        _context: &mut Self::ConnectionContext,
+        _meta: &s2n_quic::provider::event::ConnectionMeta,
+        event: &FrameReceived<'_>,
+    ) {
+        // peer が送出した STOP_SENDING を観測して MOQT 層へ渡す。送信 API の失敗からは
+        // 検知できない場合がある (FIN ack 済みのストリームでは s2n-quic が RESET を
+        // 組み立てず、STOP_SENDING に由来するエラーが `send` / `finish` に現れない) ため、
+        // フレームの観測を検知の唯一の経路にする。
+        // 自側が送出した STOP_SENDING はこのフックに現れないため、peer 由来に限られる。
+        if let Frame::StopSending { id, error_code, .. } = &event.frame
+            && let Some(tx) = &self.stop_sending_tx
+        {
+            let _ = tx.send(StopSendingObserved {
+                stream_id: *id,
+                error_code: *error_code,
+            });
+        }
     }
 
     fn on_packet_dropped(
@@ -87,7 +147,7 @@ impl s2n_quic::provider::event::Subscriber for PacketDiag {
 }
 
 /// パケットの診断を有効にするか (環境変数 `MOQT_PACKET_DIAG=1` で明示的に有効化)
-fn packet_diag_enabled() -> bool {
+pub(crate) fn packet_diag_enabled() -> bool {
     std::env::var("MOQT_PACKET_DIAG").is_ok_and(|v| v == "1")
 }
 
@@ -95,11 +155,15 @@ fn packet_diag_enabled() -> bool {
 ///
 /// `socket_addr` は呼び出し側が [`crate::resolve_socket_addrs`] で解決した接続先の
 /// 1 件を使う。複数に解決された場合の試行順は [`crate::connect_with_fallback`] が決める。
+///
+/// 戻り値の [`StopSendingReceiver`] は peer の STOP_SENDING の観測であり、QUIC 直接接続
+/// (`moqt://`) では QUIC の code space のコードがそのまま流れる。MOQT 層が送信ストリームの
+/// 終端として扱う。
 pub async fn connect(
     socket_addr: std::net::SocketAddr,
     server_name: &str,
     cert_path: Option<&str>,
-) -> Result<Connection> {
+) -> Result<(Connection, StopSendingReceiver)> {
     let tls = build_tls_client(cert_path)?;
 
     let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
@@ -113,7 +177,10 @@ pub async fn connect(
     // `with_event` は builder の型を変えるため if で分岐できない。購読者は常に
     // 差し込み、カウンタの加算とログ出力を環境変数で切り替える。無効時は
     // atomic の加算だけが残るが、分岐のための型の複雑さを避けるほうを取る。
-    let diag = PacketDiag::default();
+    // peer の STOP_SENDING の観測は診断ではなく MOQT 層へ渡す必要のある情報であるため、
+    // `MOQT_PACKET_DIAG` の有無に関わらず常に行う。
+    let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
+    let diag = ConnectionObserver::with_stop_sending(stop_sending_tx);
     if packet_diag_enabled() {
         diag.spawn_logger();
         tracing::warn!("packet diagnostics are enabled (MOQT_PACKET_DIAG=1)");
@@ -140,7 +207,7 @@ pub async fn connect(
         .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
 
     tracing::info!("Connected to {socket_addr}");
-    Ok(connection)
+    Ok((connection, stop_sending_rx))
 }
 
 /// クライアントの接続 limits を構築する。

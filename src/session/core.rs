@@ -48,6 +48,18 @@ use super::types::{
     TrackStatusEntry, Transport,
 };
 
+/// STOP_SENDING を受けた outgoing Subgroup の識別子 (`(track_alias, group_id, subgroup_id)`)
+///
+/// `subgroup_id` の `None` は FirstObjectId モードの未解決 subgroup_id を表す。
+type StoppedOutgoingSubgroupKey = (u64, u64, Option<u64>);
+
+/// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」の対応表
+///
+/// 内側の `HashMap` の値は STOP_SENDING と一緒に受信したエラーコードである。`None` は
+/// 「アプリケーションエラーコード無し」を表す (意味は [`RequestStreamEnd::Reset`] の
+/// `error_code` と同じ。draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
+type StoppedOutgoingSubgroups = HashMap<u64, HashMap<StoppedOutgoingSubgroupKey, Option<u64>>>;
+
 /// 1 本の `MOQT Transport Session` に閉じた sans-I/O 状態機械
 ///
 /// この型が保持するのは、この endpoint から見た peer との protocol state のみ。
@@ -482,7 +494,7 @@ pub struct Session {
     /// Request ID と一致する場合より優先する。破棄は
     /// [`Session::forget_subscription`](crate::session::core::Session::forget_subscription) が行う。
     pub(super) fill_request_subscriptions: HashMap<u64, u64>,
-    /// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」集合
+    /// request_id ごとの「STOP_SENDING を受けた outgoing Subgroup」の対応表
     ///
     /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A publisher that
     /// receives a STOP_SENDING on a Subgroup stream SHOULD NOT attempt to open a new stream
@@ -500,8 +512,8 @@ pub struct Session {
     ///
     /// PUBLISH 起点 (自側 publisher) の subscription でも、peer subscriber の
     /// REQUEST_UPDATE に REQUEST_OK で応答できるため、Forward 0→1 の受理で解除される
-    /// (SUBSCRIBE 起点と同じ)。
-    pub(super) stopped_outgoing_subgroups: HashMap<u64, HashSet<(u64, u64, Option<u64>)>>,
+    /// (SUBSCRIBE 起点と同じ)。値の意味は [`StoppedOutgoingSubgroups`] を参照する。
+    pub(super) stopped_outgoing_subgroups: StoppedOutgoingSubgroups,
     pub(super) events: VecDeque<SessionEvent>,
 }
 

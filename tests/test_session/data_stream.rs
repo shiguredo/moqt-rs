@@ -849,7 +849,7 @@ fn outgoing_first_object_id_stream_is_resolved_on_first_object() {
         .send_subgroup_object(DataStreamId(31), 9, None)
         .expect("テストフィクスチャの前提条件を満たす");
     server
-        .recv_data_stream_stop_sending(DataStreamId(31))
+        .recv_data_stream_stop_sending(DataStreamId(31), None)
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .send_data_stream_closed(DataStreamId(31), RequestStreamEnd::Fin)
@@ -4147,7 +4147,7 @@ fn stop_sending_requires_forward_0_to_1_before_reopen() {
         .send_subgroup_header(DataStreamId(60), rid, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(60))
+        .recv_data_stream_stop_sending(DataStreamId(60), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // Forward 0→1 前の再オープンは拒否され、セッションは閉じない
@@ -4219,6 +4219,92 @@ fn stop_sending_requires_forward_0_to_1_before_reopen() {
         .expect("Forward 0→1 後は再オープンできること");
 }
 
+/// STOP_SENDING と一緒に受信したエラーコードが参照 API から取得できる
+///
+/// draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) は予約コードポイント
+/// (0x1f * N + 0x21) を remap の対象から除外し (MUST)、WT_APPLICATION_ERROR の範囲外の
+/// コードはアプリケーションエラーコードへ写さずに配送する (SHOULD) と定める。そのため
+/// コード無しは内側の `None`、停止していない Subgroup は外側の `None` で表す。
+/// 停止エントリは Forward 0→1 の REQUEST_UPDATE 受理で破棄される。
+#[test]
+fn stop_sending_error_code_is_reported_for_stopped_subgroup() {
+    let alias = 842u64;
+    let (mut client, mut server, rid) = establish_forward_0_subscription(alias);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 6,
+        subgroup_id: SubgroupIdMode::FirstObjectId,
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(70), rid, &header)
+        .expect("header の送信に成功すること");
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 6, None),
+        None,
+        "STOP_SENDING を受けていない Subgroup は外側が None であること"
+    );
+    server
+        .recv_data_stream_stop_sending(DataStreamId(70), Some(0x1))
+        .expect("STOP_SENDING の通知に成功すること");
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 6, None),
+        Some(Some(0x1)),
+        "FirstObjectId モードの未解決 subgroup_id でも受信したコードが保持されること"
+    );
+
+    // コード無しで受信した場合は内側が None になる (解決済み subgroup_id の経路)
+    let no_code_header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 7,
+        subgroup_id: SubgroupIdMode::Explicit(5),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(71), rid, &no_code_header)
+        .expect("header の送信に成功すること");
+    server
+        .recv_data_stream_stop_sending(DataStreamId(71), None)
+        .expect("STOP_SENDING の通知に成功すること");
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 7, Some(5)),
+        Some(None),
+        "アプリケーションエラーコード無しは内側の None で表すこと"
+    );
+
+    update_forward_to_1(&mut client, &mut server, rid);
+    assert_eq!(
+        server.stopped_outgoing_subgroup_error_code(rid, alias, 6, None),
+        None,
+        "Forward 0→1 の受理で停止エントリが破棄されること"
+    );
+}
+
+/// 未知の outgoing stream への STOP_SENDING はセッションを閉じずに拒否される
+///
+/// I/O 層は STOP_SENDING の受信を終端通知より先に渡す契約だが、終端済みの stream へ
+/// 遅延して届く場合がある。Session はこの経路で `fail()` を呼ばず、example が該当
+/// ストリームの終端として吸収できることを固定する。
+#[test]
+fn recv_data_stream_stop_sending_for_unknown_stream_does_not_close_session() {
+    let (_client, mut server, _rid) = establish_subscribe_track(843);
+    let err = server
+        .recv_data_stream_stop_sending(DataStreamId(999), Some(0x1))
+        .expect_err("未知の stream id は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+}
+
 /// 停止時の Forward State が 1 の場合は 0→1 遷移がないため再オープンできない
 #[test]
 fn stop_sending_with_forward_1_blocks_reopen_without_transition() {
@@ -4240,7 +4326,7 @@ fn stop_sending_with_forward_1_blocks_reopen_without_transition() {
         .send_subgroup_header(DataStreamId(62), rid, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(62))
+        .recv_data_stream_stop_sending(DataStreamId(62), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // 既定の Forward State 1 のままで 0→1 遷移がないため再オープン不可
@@ -4322,7 +4408,7 @@ fn stop_sending_then_reset_still_blocks_reopen_until_forward_0_to_1() {
         .send_subgroup_header(DataStreamId(64), rid, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(64))
+        .recv_data_stream_stop_sending(DataStreamId(64), None)
         .expect("STOP_SENDING の通知に成功すること");
     // §11.3.2 の SHOULD に従って reset しても STOP_SENDING の再オープン禁止は残る
     server
@@ -4363,7 +4449,7 @@ fn first_object_id_stop_sending_blocks_resolution_until_forward_0_to_1() {
         .send_subgroup_header(DataStreamId(66), rid, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(66))
+        .recv_data_stream_stop_sending(DataStreamId(66), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // 先頭 Object による subgroup_id 解決経路が拒否され、セッションは閉じない
@@ -4439,7 +4525,7 @@ fn shared_alias_forward_0_to_1_does_not_unlock_other_subscription() {
         .send_subgroup_header(DataStreamId(80), rid1, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(80))
+        .recv_data_stream_stop_sending(DataStreamId(80), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // rid2 の Forward 0→1 を受理しても rid1 の禁止は解除されない
@@ -4484,7 +4570,7 @@ fn first_object_id_resolved_stopped_subgroup_blocks_other_stream_resolution() {
         .send_subgroup_object(DataStreamId(67), 3, None)
         .expect("subgroup_id の解決に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(67))
+        .recv_data_stream_stop_sending(DataStreamId(67), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // stream B (未解決 FirstObjectId) で同じ Object ID 3 を送ると subgroup 3 の停止に当たる
@@ -4553,7 +4639,7 @@ fn stop_sending_does_not_block_same_subgroup_on_different_alias() {
         .send_subgroup_header(DataStreamId(100), rid1, &header1)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(100))
+        .recv_data_stream_stop_sending(DataStreamId(100), None)
         .expect("STOP_SENDING の通知に成功すること");
     let err = server
         .send_subgroup_header(DataStreamId(101), rid1, &header1)
@@ -4593,7 +4679,7 @@ fn forget_subscription_discards_stopped_subgroups() {
         .send_subgroup_header(DataStreamId(110), rid, &header)
         .expect("header の送信に成功すること");
     server
-        .recv_data_stream_stop_sending(DataStreamId(110))
+        .recv_data_stream_stop_sending(DataStreamId(110), None)
         .expect("STOP_SENDING の通知に成功すること");
 
     // subscriber (client) が cancel し、publisher (server) が stream 終端で Terminated → forget する

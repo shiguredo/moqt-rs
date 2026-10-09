@@ -312,10 +312,11 @@ pub async fn run(
             async move {
                 let connected = match cfg.transport {
                     Transport::Quic => {
-                        let connection =
+                        let (connection, stop_sending_rx) =
                             quic::connect(socket_addr, server_name, cfg.cert.as_deref()).await?;
                         MoqtClient::establish_quic(
                             connection,
+                            stop_sending_rx,
                             &cfg.url.path,
                             &authority_url,
                             "moq-sub",
@@ -874,6 +875,12 @@ pub async fn run(
                         fatal_error = Some(Error::Moqt(e));
                         break 'main;
                     }
+                    // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
+                    // だけが終端するため、受信と再生は継続する。subscriber は uni data stream を
+                    // 送らないため、STOP_SENDING を受ける送信経路はこの bidi request stream だけである
+                    Err(e) if is_peer_stream_reset(&e) => {
+                        tracing::info!("Request stream was reset by peer; continuing");
+                    }
                     // transport 自体のエラーは後始末 (stream task の join と録画の
                     // finalize) を終えてから `run` の戻り値として返す。接続が死んでいるため
                     // 終了コード付きの close は送れず、後段の終了依頼の回収も行わない
@@ -1040,6 +1047,20 @@ pub async fn run(
 /// 依存しない)。
 fn is_transport_session_end(error: &Error) -> bool {
     matches!(error, Error::ConnectionClosed)
+}
+
+/// transport エラーが peer によるストリーム終端 (送信方向への STOP_SENDING) を表すかどうか
+///
+/// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
+/// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
+/// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+/// pipeline は致命エラーにしない。
+///
+/// WebTransport over HTTP/2 は STOP_SENDING の観測経路を持たず、peer の cancel は
+/// `TransportError::StreamClosed` として現れるため本判定の対象外である
+/// (該当経路は従来どおり致命扱いのまま)。
+fn is_peer_stream_reset(error: &Error) -> bool {
+    matches!(error, Error::StreamReset { .. })
 }
 
 /// transport エラーがセッション終了 (接続クローズ) を表すかどうか
@@ -3041,6 +3062,30 @@ mod tests {
             assert!(
                 !is_transport_session_end(&error),
                 "transport 以外のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
+    }
+
+    /// peer のストリーム終端だけを `is_peer_stream_reset` が真とする
+    ///
+    /// 該当ストリームだけの終端でありセッションは継続するため、pipeline は致命エラーに
+    /// しない。セッション終了 (`ConnectionClosed`) は別扱いのままであることも固定する。
+    #[test]
+    fn is_peer_stream_reset_only_matches_stream_reset() {
+        assert!(
+            is_peer_stream_reset(&Error::from(TransportError::StreamReset {
+                error_code: 0x1
+            })),
+            "peer のストリーム終端は真とすること"
+        );
+        for error in [
+            Error::from(TransportError::ConnectionClosed),
+            Error::from(TransportError::Quic("connection failed".to_string())),
+            Error::Other("other".to_string()),
+        ] {
+            assert!(
+                !is_peer_stream_reset(&error),
+                "ストリーム終端以外は偽とすること: {error}"
             );
         }
     }
