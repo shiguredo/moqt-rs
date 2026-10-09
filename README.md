@@ -176,9 +176,9 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 - `moq-sub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
 - `tokio-moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
-前提条件は Rust 1.94 以降です。
-`moq-pub` の依存が 1.94 を要求するためです。
-`moq-sub` / `tokio-moq` だけであれば 1.93 で構築できます。
+前提条件は Rust 1.95 以降です。
+サンプルが使う `s2n-quic` が 1.95 を要求するためです。
+`shiguredo_moqt` ライブラリと `pbt` だけであれば 1.93 で構築できます。
 
 ```bash
 # publisher (疑似キャプチャ)

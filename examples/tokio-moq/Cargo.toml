@@ -2,7 +2,8 @@
 name = "tokio-moq"
 version = "2026.0.0"
 edition = "2024"
-rust-version = "1.93"
+# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる
+rust-version = "1.95"
 publish = false
 
 [dependencies]
@@ -24,7 +25,7 @@ bytes = "1.12"
 # TLS バックエンド (s2n-quic provider と WebTransport over HTTP/2 の rustls で使う)
 rustls = "0.23"
 # QUIC クライアント
-s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+s2n-quic = { version = "1.90", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
 tokio = { version = "1.53", features = ["full"] }
 # Tokio タスクメトリクス計測

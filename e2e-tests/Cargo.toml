@@ -2,8 +2,8 @@
 name = "e2e-tests"
 version = "0.0.0"
 edition = "2024"
-# moq-pub の依存 (raden) が MSRV 1.94 を要求するため、それに合わせる
-rust-version = "1.94"
+# moq-pub / moq-sub の依存 (s2n-quic) が MSRV 1.95 を要求するため、それに合わせる
+rust-version = "1.95"
 publish = false
 
 [dev-dependencies]

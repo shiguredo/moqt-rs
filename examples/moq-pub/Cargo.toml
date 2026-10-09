@@ -2,19 +2,19 @@
 name = "moq-pub"
 version = "2026.0.0"
 edition = "2024"
-# 依存の raden (cranelift-codegen) が MSRV 1.94 を要求するため、publisher だけ 1.94 にしている
-rust-version = "1.94"
+# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる (raden の 1.94 要求も包含する)
+rust-version = "1.95"
 publish = false
 
 [dependencies]
 # 時雨堂クレート
 
 # AV1 エンコーダ (libaom)
-shiguredo_aom = "2026.2"
+shiguredo_aom = "2026.3"
 # 音声キャプチャ
 shiguredo_audio_device = "2026.3"
 # AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
-shiguredo_dav1d = "2026.2"
+shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.9"
 # MoQT 本体 (ローカル参照)
@@ -22,7 +22,7 @@ shiguredo_moqt = { path = "../../" }
 # MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
 shiguredo_mp4 = "2026.5"
 # Opus エンコーダ
-shiguredo_opus = "2026.2"
+shiguredo_opus = "2026.3"
 # カメラキャプチャ
 shiguredo_video_device = "2026.3"
 
@@ -38,7 +38,7 @@ noargs = "0.4"
 # 疑似キャプチャ用 2D ベクターグラフィックス
 raden = "2026.2"
 # QUIC クライアント
-s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+s2n-quic = { version = "1.90", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
 tokio = { version = "1.53", features = ["full"] }
 # Tokio タスクメトリクス計測
