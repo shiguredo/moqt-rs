@@ -23,12 +23,13 @@ use shiguredo_moqt::session::types::{
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
-    c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT, message::ControlMessage, message::ReasonPhrase,
-    message::common::Location, message::common::TrackNamespace,
-    message_parameter::AuthorizationToken, message_parameter::MessageParameter,
-    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
-    message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
-    session::core::Session, session::types::DataStreamId, session::types::DataStreamResetReason,
+    c4m::MoqtAction, c4m::cat::CatClaims, c4m::cat::CatToken, c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT,
+    message::ControlMessage, message::ReasonPhrase, message::common::Location,
+    message::common::TrackNamespace, message_parameter::AuthorizationToken,
+    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
+    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
+    message_parameter::PARAM_SUBSCRIBER_PRIORITY, session::core::Session,
+    session::types::DataStreamId, session::types::DataStreamResetReason,
     session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
     session::types::Transport as MoqtTransport, stream::decoder::DecodedSubgroupObject,
     stream::fetch::FetchHeader, stream::fetch::FetchPriorContext, stream::fetch::FetchStreamEntry,
@@ -429,7 +430,9 @@ pub struct MoqtClient {
     ///
     /// SETUP (draft-ietf-moq-transport-22 §9.1) だけでなく、SUBSCRIBE / PUBLISH などの
     /// メッセージにも AUTHORIZATION_TOKEN (0x03) として載せる (§9.20.2)。
-    auth_tokens: Vec<AuthorizationToken>,
+    /// FETCH はトークンの `moqt` クレームがそのアクションを認可する場合だけ載せる
+    /// ([`MoqtClient::fetch`])。
+    auth_tokens: Vec<AuthToken>,
     session: Arc<StdMutex<Session>>,
     control_send: SendStream,
     handle: StreamHandle,
@@ -655,18 +658,88 @@ fn request_id_of(message: &ControlMessage) -> Option<u64> {
     }
 }
 
+/// C4M 認可トークンと、そこからデコードしたクレーム
+struct AuthToken {
+    /// SETUP Option / メッセージパラメータに載せる表現
+    ///
+    /// alias の登録・参照は行わないため USE_VALUE を使い、Token Type は CAT (0x01) とする
+    /// (draft-ietf-moq-c4m-01 §7.1.1 / draft-ietf-moq-transport-22 §8.9
+    /// (Authorization Token Compression))。
+    token: AuthorizationToken,
+    /// デコード済みのクレーム。デコードできなかったトークンは `None`
+    ///
+    /// SETUP と SUBSCRIBE / PUBLISH では従来どおりトークンを送るが、FETCH は
+    /// アクションの認可を判定できないトークンを送らない
+    /// ([`auth_message_parameters_for`])。
+    claims: Option<CatClaims>,
+}
+
+impl AuthToken {
+    /// C4M トークンの Token Value から、トークンとそのクレームを組み立てる
+    fn new(token_value: &[u8]) -> Self {
+        Self {
+            token: AuthorizationToken::UseValue {
+                token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
+                token_value: token_value.to_vec(),
+            },
+            // draft-ietf-moq-c4m-01 §7.1.1: MOQT の Auth Token Type 0x01 は CAT
+            claims: match CatToken::decode_moqt_auth_token(MOQT_AUTH_TOKEN_TYPE_CAT, token_value) {
+                Ok(token) => Some(token.claims().clone()),
+                Err(error) => {
+                    // クレームを読めないトークンでも SETUP の認可には使えるため破棄しない
+                    tracing::warn!("Failed to decode C4M token claims: {error}");
+                    None
+                }
+            },
+        }
+    }
+}
+
+/// 認可トークンを AUTHORIZATION_TOKEN (0x03) のメッセージパラメータへ変換する
+fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
+    MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(token.clone()),
+    }
+}
+
 /// 認可トークンをメッセージパラメータ (0x03) として組み立てる
 ///
 /// URL の MSF fragment (`#msf:...&c4m=...`) のトークンを、SETUP だけでなく
-/// SUBSCRIBE / PUBLISH / FETCH などのメッセージにも載せる
+/// SUBSCRIBE / PUBLISH などのメッセージにも載せる
 /// (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))。
+/// FETCH は認可を判定する必要があるため [`auth_message_parameters_for`] を使う。
 pub fn auth_message_parameters(tokens: &[AuthorizationToken]) -> MessageParameters {
     let mut parameters = MessageParameters::new();
     for token in tokens {
-        parameters.push(MessageParameter {
-            param_type: PARAM_AUTHORIZATION_TOKEN,
-            value: MessageParameterValue::AuthorizationToken(token.clone()),
-        });
+        parameters.push(authorization_parameter(token));
+    }
+    parameters
+}
+
+/// 指定したアクションと Full Track Name を認可するトークンだけを
+/// AUTHORIZATION_TOKEN (0x03) として組み立てる
+///
+/// C4M は「明示的に許可されたアクション以外はブロックする」ため、`moqt` クレームの
+/// スコープが `action` / `namespace` / `track_name` を認可する場合だけ載せる
+/// (draft-ietf-moq-c4m-01 §1.1 (Overview of the authorization workflow) /
+/// §2.1 (The `moqt` claim))。クレームをデコードできなかったトークンは認可を
+/// 判定できないため載せない。
+fn auth_message_parameters_for(
+    tokens: &[AuthToken],
+    action: MoqtAction,
+    namespace: &[&[u8]],
+    track_name: &[u8],
+) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    for auth in tokens {
+        let authorized = auth
+            .claims
+            .as_ref()
+            .is_some_and(|claims| claims.authorize(action, namespace, track_name));
+        if authorized {
+            parameters.push(authorization_parameter(&auth.token));
+        }
     }
     parameters
 }
@@ -967,10 +1040,7 @@ impl MoqtClient {
         Ok(Self {
             auth_tokens: c4m_tokens
                 .iter()
-                .map(|token| AuthorizationToken::UseValue {
-                    token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
-                    token_value: token.clone(),
-                })
+                .map(|token_value| AuthToken::new(token_value.as_slice()))
                 .collect(),
             session,
             control_send,
@@ -1005,7 +1075,11 @@ impl MoqtClient {
     /// SUBSCRIBE / PUBLISH などのメッセージにも載せる
     /// (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))。
     fn auth_parameters(&self) -> MessageParameters {
-        auth_message_parameters(&self.auth_tokens)
+        let mut parameters = MessageParameters::new();
+        for auth in &self.auth_tokens {
+            parameters.push(authorization_parameter(&auth.token));
+        }
+        parameters
     }
 
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
@@ -1109,12 +1183,31 @@ impl MoqtClient {
     /// (draft-ietf-moq-transport-22 §9.11 (FETCH))
     ///
     /// range は LOCATION_FILTER パラメータで指定する。
+    ///
+    /// C4M 認可トークンの `moqt` クレームが、この Full Track Name に対する FETCH を
+    /// 認可する場合は AUTHORIZATION_TOKEN (0x03) を追加する
+    /// (draft-ietf-moq-c4m-01 §1.1 (Overview of the authorization workflow) /
+    /// draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))。
     pub async fn fetch(
         &mut self,
         namespace: TrackNamespace,
         track_name: Vec<u8>,
-        parameters: MessageParameters,
+        mut parameters: MessageParameters,
     ) -> Result<FetchResult> {
+        let namespace_fields: Vec<&[u8]> = namespace
+            .fields()
+            .iter()
+            .map(|field| field.as_slice())
+            .collect();
+        let auth_parameters = auth_message_parameters_for(
+            &self.auth_tokens,
+            MoqtAction::Fetch,
+            &namespace_fields,
+            &track_name,
+        );
+        for parameter in auth_parameters.as_slice() {
+            parameters.push(parameter.clone());
+        }
         let request_id = {
             let mut session = lock_session(&self.session);
             session
@@ -1823,6 +1916,9 @@ async fn send_control_stream_setup(
 mod tests {
     use super::*;
 
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use shiguredo_moqt::c4m::{CLAIM_MOQT, Match, MoqtClaim, MoqtScope, NamespaceMatch, cbor};
+
     /// 認可トークンが AUTHORIZATION_TOKEN (0x03) のメッセージパラメータになること
     #[test]
     fn auth_tokens_become_message_parameters() {
@@ -1853,6 +1949,132 @@ mod tests {
         }
         // 空のときはパラメータを載せない
         assert!(auth_message_parameters(&[]).is_empty());
+    }
+
+    /// `moqt` クレームを 1 つ持つ C4M トークンを compact 形式で組み立てる
+    ///
+    /// 署名検証は行わないため署名は任意のバイト列でよい。ヘッダの `alg` は
+    /// RFC 9052 §3.1 の HMAC 256/256 (5) を使う。
+    fn compact_c4m_token(scope: MoqtScope) -> Vec<u8> {
+        let protected = cbor::encode(&cbor::Value::Map(vec![(
+            cbor::Value::integer(1),
+            cbor::Value::integer(5),
+        )]))
+        .expect("protected ヘッダをエンコードできる");
+        let moqt = MoqtClaim::new()
+            .scope(scope)
+            .encode()
+            .expect("moqt クレームをエンコードできる");
+        let payload = cbor::encode(&cbor::Value::Map(vec![(
+            cbor::Value::integer(CLAIM_MOQT),
+            moqt,
+        )]))
+        .expect("クレームをエンコードできる");
+        format!(
+            "{}.{}.{}",
+            Base64UrlUnpadded::encode_string(&protected),
+            Base64UrlUnpadded::encode_string(&payload),
+            Base64UrlUnpadded::encode_string(&[0x00]),
+        )
+        .into_bytes()
+    }
+
+    /// `moqt` クレームが FETCH を認可するトークンだけを FETCH に載せること
+    #[test]
+    fn fetch_authorization_token_requires_fetch_scope() {
+        // アクションだけを指定したスコープは任意の Full Track Name を認可する (§2.1)
+        let fetch_token = AuthToken::new(&compact_c4m_token(MoqtScope::new([MoqtAction::Fetch])));
+        let subscribe_token =
+            AuthToken::new(&compact_c4m_token(MoqtScope::new([MoqtAction::Subscribe])));
+        let tokens = vec![fetch_token, subscribe_token];
+        // クレームのデコードに成功していなければ FETCH に載らないため、まずデコードを確認する
+        assert!(
+            tokens[0]
+                .claims
+                .as_ref()
+                .expect("FETCH トークンのクレームをデコードできる")
+                .authorize(MoqtAction::Fetch, &[&b"ns"[..]], b"catalog"),
+            "FETCH トークンは FETCH を認可する"
+        );
+        assert!(
+            tokens[1]
+                .claims
+                .as_ref()
+                .expect("SUBSCRIBE トークンのクレームをデコードできる")
+                .authorize(MoqtAction::Subscribe, &[&b"ns"[..]], b"catalog"),
+            "SUBSCRIBE トークンは SUBSCRIBE を認可する"
+        );
+
+        let parameters =
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"ns"[..]], b"catalog");
+        assert_eq!(parameters.len(), 1, "FETCH を認可するトークンだけを載せる");
+        match &parameters.as_slice()[0].value {
+            MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+                token_type,
+                ..
+            }) => {
+                assert_eq!(*token_type, MOQT_AUTH_TOKEN_TYPE_CAT, "Token Type は CAT");
+            }
+            other => panic!("UseValue でない: {other:?}"),
+        }
+
+        // FETCH を認可しないトークンしか無い場合は載せない
+        let parameters =
+            auth_message_parameters_for(&tokens[1..], MoqtAction::Fetch, &[&b"ns"[..]], b"catalog");
+        assert!(
+            parameters.is_empty(),
+            "FETCH を認可しないトークンは載せない"
+        );
+    }
+
+    /// Full Track Name が一致しないトークンを FETCH に載せないこと
+    #[test]
+    fn fetch_authorization_token_requires_full_track_name_match() {
+        // 名前空間が完全一致し、かつ末尾であることを要求するスコープ
+        let scope = MoqtScope::new([MoqtAction::Fetch])
+            .namespace_match(NamespaceMatch::Match(Match::Exact(b"other".to_vec())))
+            .namespace_end();
+        let tokens = vec![AuthToken::new(&compact_c4m_token(scope))];
+        assert!(
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"ns"[..]], b"catalog")
+                .is_empty(),
+            "名前空間が一致しないトークンは載せない"
+        );
+        assert_eq!(
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"other"[..]], b"catalog")
+                .len(),
+            1,
+            "名前空間が一致すれば載せる"
+        );
+
+        // トラック名のマッチも判定に含める
+        let scope = MoqtScope::new([MoqtAction::Fetch])
+            .namespace_match(NamespaceMatch::Match(Match::Prefix(b"ns".to_vec())))
+            .track(Match::Exact(b"catalog".to_vec()));
+        let tokens = vec![AuthToken::new(&compact_c4m_token(scope))];
+        assert!(
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"ns"[..]], b"video")
+                .is_empty(),
+            "トラック名が一致しないトークンは載せない"
+        );
+        assert_eq!(
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"ns"[..]], b"catalog")
+                .len(),
+            1,
+            "トラック名が一致すれば載せる"
+        );
+    }
+
+    /// クレームをデコードできないトークンを FETCH に載せないこと
+    #[test]
+    fn fetch_authorization_token_requires_decodable_claims() {
+        let tokens = vec![AuthToken::new(&[0xff, 0x00])];
+        assert!(tokens[0].claims.is_none(), "クレームをデコードできない");
+        assert!(
+            auth_message_parameters_for(&tokens, MoqtAction::Fetch, &[&b"ns"[..]], b"catalog")
+                .is_empty(),
+            "認可を判定できないトークンは載せない"
+        );
     }
 
     /// PUBLISH_DONE はアプリが観測する notable イベントである

@@ -11,6 +11,11 @@
 
 ## develop
 
+- [FIX] moq-sub がカタログを取得する FETCH に C4M の AUTHORIZATION_TOKEN を載せる
+  - `moqt` クレームがその FETCH の Full Track Name を認可するトークンだけを載せる (draft-ietf-moq-c4m-01 §1.1)
+  - クレームをデコードできないトークンは SETUP と SUBSCRIBE / PUBLISH には従来どおり載せる
+  - @voluntas
+
 - [ADD] moq-pub / moq-sub が `--namespace` の省略時に `--url` の `msf` fragment の namespace を使う
   - `#msf:<track-identifier>` の track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) の表現としてパースする
   - fragment が無い、`msf` 以外、または namespace が 0 フィールドの場合はエラーにする
