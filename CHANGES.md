@@ -11,6 +11,11 @@
 
 ## develop
 
+- [ADD] moq-pub が C4M トークンで接続するときに catalog の映像 / 音声の track に authInfo を載せる
+  - 視聴側に CAT のトークン提示を求める `{"cat": "%c4m%"}` を載せる (draft-ietf-moq-msf-01 §5.2.42 / §11.4.1)
+  - 値は視聴側の URI の予約パラメータ `c4m` を指す変数参照にし、配信者のトークンは載せない (§5.2.43 / §5.4)
+  - @voluntas
+
 - [FIX] `MoqtClient` が保留中の PUBLISH_DONE を送信できずに失う経路を修正する
   - 回収の条件に保留中の PUBLISH_DONE が無いことを加え、回収は Session のイベントを drain した後だけに行う (`tick` からの回収をやめる)
   - `next_event` は notable イベントより先に `drain_events` を呼び、`take_notable_event` は配送キューの pop だけを行う (`SendOnStream` を捨てない)

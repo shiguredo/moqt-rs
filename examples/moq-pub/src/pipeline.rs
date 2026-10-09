@@ -507,6 +507,8 @@ pub async fn run(
             render_group: CATALOG_RENDER_GROUP,
             target_latency_ms: u64::from(config.target_latency_ms),
         },
+        // `c4m` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
+        c4m_tokens: &config.url.c4m_tokens,
         video: match (&mp4_reader, video_encoder.as_ref()) {
             (Some(reader), _) => {
                 let info = reader.info();

@@ -6,7 +6,8 @@
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::{
-    msf::MSF_VERSION, msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfPackaging, msf::MsfTrack,
+    msf::MSF_VERSION, msf::MsfAuthInfo, msf::MsfCatalog, msf::MsfCatalogDocument,
+    msf::MsfPackaging, msf::MsfTrack,
 };
 
 use crate::error::{Error, Result};
@@ -19,6 +20,15 @@ const MSF_ROLE_VIDEO: &str = "video";
 
 /// 音声トラックの role (draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4)
 const MSF_ROLE_AUDIO: &str = "audio";
+
+/// C4M (CAT) の認可 scheme 名 (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) Table 7)
+const MSF_AUTH_SCHEME_CAT: &str = "cat";
+
+/// 視聴側の URI の予約 fragment パラメータ `c4m` を指す変数参照
+///
+/// draft-ietf-moq-msf-01 §5.2.43 (Token Delivery via URI) / §5.4 (Variable Substitution)。
+/// `authInfo` の値は scheme 固有の JSON 値であるため、JSON 文字列として持つ。
+const C4M_AUTH_INFO_VALUE: &str = "\"%c4m%\"";
 
 /// 映像トラックの catalog 情報
 pub struct VideoTrackParams<'a> {
@@ -79,19 +89,50 @@ pub struct CatalogParams<'a> {
     pub start_location: Option<Location>,
     /// 音声・映像で共通の同期用メタデータ
     pub sync: CatalogSyncParams,
+    /// URL の MSF fragment の `c4m` から取り出した C4M 認可トークン
+    ///
+    /// SETUP の AUTHORIZATION TOKEN (0x03) として送るトークンであり、空でないときは
+    /// 映像 / 音声の track に authInfo を載せる (draft-ietf-moq-msf-01 §5.2.42)。
+    pub c4m_tokens: &'a [Vec<u8>],
     pub video: Option<VideoTrackParams<'a>>,
     pub audio: Option<AudioTrackParams<'a>>,
+}
+
+/// SETUP に載せる C4M 認可トークンから、catalog の track に載せる authInfo を決める
+///
+/// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info) / §11.4.1 (Discovering Authorization
+/// Requirements): authInfo の存在は「この track の購読には認可トークンが必要」という
+/// 視聴側へのシグナルであり、視聴側はこれを見てトークンの提示を決める。
+///
+/// - C4M トークン (Token Type CAT) が指定されているときだけ `{"cat": "%c4m%"}`
+/// - 値はトークンそのものではなく、視聴側の URI の fragment の `c4m` を指す変数参照にする
+///   (§5.2.43)。catalog は全ての視聴者に届き、配信者のトークンは PUBLISH の権限を含むため
+/// - トークンが無いときは `None` (authInfo を載せない)
+///
+/// 本 example は `c4m` のトークンを常に Token Type CAT (0x01) として SETUP に載せるため
+/// (`tokio_moq::build_setup_options`)、ここでは有無だけを見る。
+fn auth_info_for_c4m_tokens(c4m_tokens: &[Vec<u8>]) -> Option<Vec<MsfAuthInfo>> {
+    if c4m_tokens.is_empty() {
+        return None;
+    }
+    Some(vec![MsfAuthInfo {
+        scheme: MSF_AUTH_SCHEME_CAT.to_string(),
+        value_raw: C4M_AUTH_INFO_VALUE.as_bytes().to_vec(),
+    }])
 }
 
 /// video / audio のパラメータから MSF カタログを構築する
 ///
 /// video / audio のいずれも指定されない場合は、トラックを 1 つも持たないカタログになるため
 /// 構築せずにエラーを返す。
+/// `auth_info` は track 単位のフィールドのため、載せるときは全ての track に同じ値を載せる
+/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
 /// draft-ietf-moq-msf-01 §5 (Catalog)
 fn build_catalog(
     video: Option<&VideoTrackParams<'_>>,
     audio: Option<&AudioTrackParams<'_>>,
     sync: CatalogSyncParams,
+    auth_info: Option<&[MsfAuthInfo]>,
 ) -> Result<MsfCatalogDocument> {
     let mut tracks = Vec::new();
 
@@ -108,6 +149,7 @@ fn build_catalog(
         track.bitrate = Some(v.bitrate as u64 * 1000);
         track.target_latency = Some(sync.target_latency_ms);
         track.render_group = Some(sync.render_group);
+        track.auth_info = auth_info.map(|infos| infos.to_vec());
         tracks.push(track);
     }
 
@@ -123,6 +165,7 @@ fn build_catalog(
         track.bitrate = Some(a.bitrate as u64 * 1000);
         track.target_latency = Some(sync.target_latency_ms);
         track.render_group = Some(sync.render_group);
+        track.auth_info = auth_info.map(|infos| infos.to_vec());
         tracks.push(track);
     }
 
@@ -149,9 +192,17 @@ fn build_catalog(
 /// 戻り値は送信したカタログの JSON バイト列である。MOQT relay が subscriber の
 /// FETCH を転送してきた場合、publisher は同じバイト列を FETCH 応答として返すため、
 /// 呼び出し側で保持する。
+/// C4M 認可トークンで接続する配信は、映像 / 音声の track に authInfo を載せ、
+/// 視聴側に同じ方式のトークンの提示を求める (draft-ietf-moq-msf-01 §5.2.42)。
 /// draft-ietf-moq-msf-01 §5 (Catalog)
 pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
-    let catalog = build_catalog(params.video.as_ref(), params.audio.as_ref(), params.sync)?;
+    let auth_info = auth_info_for_c4m_tokens(params.c4m_tokens);
+    let catalog = build_catalog(
+        params.video.as_ref(),
+        params.audio.as_ref(),
+        params.sync,
+        auth_info.as_deref(),
+    )?;
 
     let catalog_json = catalog
         .encode()
@@ -225,8 +276,8 @@ mod tests {
             channel_config: "2",
             bitrate: 128,
         };
-        let catalog =
-            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
+            .expect("カタログを構築できること");
         catalog
             .encode()
             .expect("publisher のカタログが encode に成功すること");
@@ -257,8 +308,8 @@ mod tests {
             channel_config: "1",
             bitrate: 64,
         };
-        let catalog =
-            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
+            .expect("カタログを構築できること");
         let encoded = catalog
             .encode()
             .expect("publisher のカタログが encode に成功すること");
@@ -324,8 +375,8 @@ mod tests {
             channel_config: "2",
             bitrate: 128,
         };
-        let catalog =
-            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
+            .expect("カタログを構築できること");
         let encoded = catalog
             .encode()
             .expect("publisher のカタログが encode に成功すること");
@@ -346,7 +397,7 @@ mod tests {
         );
         // 映像だけ・音声だけのカタログでも role が載ること
         let video_only =
-            build_catalog(Some(&video), None, TEST_SYNC).expect("カタログを構築できること");
+            build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
         let MsfCatalogDocument::Full(full) = video_only
             .encode()
             .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
@@ -360,7 +411,7 @@ mod tests {
             "映像のみのカタログにも role が載ること"
         );
         let audio_only =
-            build_catalog(None, Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+            build_catalog(None, Some(&audio), TEST_SYNC, None).expect("カタログを構築できること");
         let MsfCatalogDocument::Full(full) = audio_only
             .encode()
             .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
@@ -391,8 +442,8 @@ mod tests {
                 fps: 30,
                 bitrate: 5_000,
             };
-            let catalog =
-                build_catalog(Some(&video), None, TEST_SYNC).expect("カタログを構築できること");
+            let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
+                .expect("カタログを構築できること");
             catalog
                 .encode()
                 .expect("代替の video codec でも encode に成功すること");
@@ -403,8 +454,106 @@ mod tests {
     #[test]
     fn empty_catalog_is_rejected() {
         assert!(
-            build_catalog(None, None, TEST_SYNC).is_err(),
+            build_catalog(None, None, TEST_SYNC, None).is_err(),
             "トラックが 1 つも無い場合はエラーになること"
+        );
+    }
+
+    /// C4M トークンがあるときだけ CAT の authInfo を組み立てること
+    ///
+    /// 値はトークンそのものではなく、視聴側の URI の `c4m` を指す変数参照にする
+    /// (draft-ietf-moq-msf-01 §5.2.42 / §5.2.43)。
+    #[test]
+    fn auth_info_is_built_only_for_c4m_tokens() {
+        assert!(
+            auth_info_for_c4m_tokens(&[]).is_none(),
+            "c4m が無ければ authInfo を載せない"
+        );
+        let auth_info = auth_info_for_c4m_tokens(&[vec![0x01, 0x02]])
+            .expect("c4m があれば authInfo を組み立てられること");
+        assert_eq!(auth_info.len(), 1, "CAT の 1 エントリを持つこと");
+        assert_eq!(
+            auth_info[0].scheme, MSF_AUTH_SCHEME_CAT,
+            "scheme は §5.2.42 Table 7 の cat であること"
+        );
+        assert_eq!(
+            auth_info[0].value_raw,
+            C4M_AUTH_INFO_VALUE.as_bytes().to_vec(),
+            "値は c4m を指す変数参照の JSON 文字列であること"
+        );
+    }
+
+    /// C4M トークンで接続する配信が映像 / 音声の両トラックに authInfo を載せること
+    ///
+    /// 視聴側は authInfo の存在で track の認可要否を判断する (draft-ietf-moq-msf-01
+    /// §5.2.42 / §11.4.1)。authInfo は track 単位のフィールドのため両トラックに載せる。
+    #[test]
+    fn publisher_catalog_sets_auth_info_on_both_tracks_for_c4m() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+        };
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "2",
+            bitrate: 128,
+        };
+
+        // c4m が無い場合は authInfo を載せない
+        let catalog = build_catalog(Some(&video), Some(&audio), TEST_SYNC, None)
+            .expect("カタログを構築できること");
+        let MsfCatalogDocument::Full(full) = catalog else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert!(
+            full.tracks.iter().all(|track| track.auth_info.is_none()),
+            "c4m が無いときは authInfo を載せない"
+        );
+
+        // c4m がある場合は両トラックに載せ、encode / decode を往復しても保たれる
+        let auth_info =
+            auth_info_for_c4m_tokens(&[vec![0x01, 0x02]]).expect("authInfo を組み立てる");
+        let catalog = build_catalog(
+            Some(&video),
+            Some(&audio),
+            TEST_SYNC,
+            Some(auth_info.as_slice()),
+        )
+        .expect("カタログを構築できること");
+        let encoded = catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+        let decoded =
+            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+        let MsfCatalogDocument::Full(full) = decoded else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(full.tracks.len(), 2, "音声と映像の 2 トラックを持つこと");
+        for track in &full.tracks {
+            let track_auth_info = track
+                .auth_info
+                .as_ref()
+                .unwrap_or_else(|| panic!("track '{}' に authInfo が載ること", track.name));
+            assert_eq!(
+                track_auth_info.as_slice(),
+                auth_info.as_slice(),
+                "track '{}' の authInfo が組み立てた値と一致すること",
+                track.name
+            );
+        }
+        // 配信者のトークンそのものではなく、視聴側の `c4m` を指す変数参照が JSON に載ること
+        let text = String::from_utf8(encoded).expect("カタログは UTF-8 の JSON であること");
+        assert!(
+            text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
+            "catalog の JSON に authInfo が載ること: {text}"
         );
     }
 }
