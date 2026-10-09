@@ -1,7 +1,7 @@
 # moq-sub の音声再生の組み立てを最新の再生制御に追従する
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/update-moq-sub-playout-assembly
 - Polished: {YYYY-MM-DD}
 
@@ -42,4 +42,13 @@ moqt-rs では `examples/moq-sub/src/main.rs` の `play_decoded_audio` / `AudioP
 
 ## 解決方法
 
-{未着手}
+- `examples/moq-sub/src/main.rs` の音声再生の組み立てを `AudioPlayoutAssembly` にまとめ、時間軸・スケジューラ・計器・閉ループを 1 か所で扱うようにした
+  - `arrange`: 目標の開始時刻・学習した遅れ・到着基準の遅れ・表示の遅れを時間軸から読み、`schedule` で予約する。`Drop` は理由 (並べすぎの `Backlog`) を計器へ記録し、閉ループへ観測を渡して音を積まない
+  - `commit`: `confirm_stretch` の後に `last_play()` を計器へ記録し、閉ループへ観測を渡す (実際に詰めた長さが反映された後で読む)
+  - `record_error` / `record_stopped` / `record_miss` / `feed_feedback`: 鳴らせなかった音を理由付きで計器へ記録し、`audio_delay_feedback` の観測を `observe_audio_playout` へ渡す
+  - `sounding_position_us` は音声出力が実際に鳴っている位置から到着の基準を求める (0228 の `arrival_us`)
+  - ログに、鳴るはずの時刻・到着・鳴り始め、予定に対する余裕と到着から鳴り始めるまでの p50 / p95、理由別の捨ての件数と長さ、閉ループの目標と理由を追加した (pipeline の終了時にも出す)
+- `examples/moq-sub/src/jitter_buffer.rs` の `drop_late` を削除した。鳴らすかどうかは、鳴らす時点の遅れを知っているスケジューラが音ごとに決める (遅れたまま順序と連続性を保って鳴らすか、音が途切れたときに到着基準へ並べ直すか)。バッファ段で遅れを理由に捨てると語尾が切れる。件数上限だけをメモリの安全弁として残した
+- テスト: example に 6 件 (計器への記録と詰めの反映 / 閉ループへの観測 / 並べすぎの記録 / 積めなかった音の記録 / 停止時の記録 / ログの項目) を追加し、jitter_buffer の遅延破棄のテストを「遅れても保持する」に差し替えた
+- 検証: `cargo fmt --check` / `cargo test -p moq-sub --lib` / `cargo test -p moq-sub --bin moq-sub` / `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo build -p moq-sub` が成功した
+- 検証: 4 種類の欠陥 (詰めの反映の順序 / 捨ての記録漏れ / 閉ループへの観測漏れ / バッファ段の遅延破棄の復活) を入れて、追加したテストがそれぞれ検出することを確認した
