@@ -193,6 +193,71 @@ pub fn sample_moqt_claim(ctx: &mut noprop::TestCaseContext) -> MoqtClaim {
     claim
 }
 
+/// JSON の文字列リテラルを組み立てる
+pub fn json_string(value: &str) -> String {
+    format!("\"{value}\"")
+}
+
+/// JSON オブジェクトを組み立てる
+///
+/// 値は JSON の断片 (文字列リテラルや数値) をそのまま連結する。生成する値は
+/// エスケープが不要な `[a-z0-9_-]` と base64url に限定する。
+pub fn json_object(members: &[(&str, String)]) -> String {
+    let body: Vec<String> = members
+        .iter()
+        .map(|(name, value)| format!("{}:{value}", json_string(name)))
+        .collect();
+    format!("{{{}}}", body.join(","))
+}
+
+/// テスト側で base64url (RFC 4648 §5) をエンコードするモデル
+///
+/// `src/c4m/base64url.rs` は crate 内部 API のためテストからは使えない。JWS compact
+/// と CAT の compact 形式の入力を組み立てるために、仕様どおりの変換をテスト側に持つ。
+pub fn base64url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let third = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let triple = (first << 16) | (second << 8) | third;
+        out.push(char::from(ALPHABET[(triple >> 18) as usize & 0x3f]));
+        out.push(char::from(ALPHABET[(triple >> 12) as usize & 0x3f]));
+        if chunk.len() > 1 {
+            out.push(char::from(ALPHABET[(triple >> 6) as usize & 0x3f]));
+        }
+        if chunk.len() > 2 {
+            out.push(char::from(ALPHABET[triple as usize & 0x3f]));
+        }
+    }
+    out
+}
+
+/// パディング付きの base64url でエンコードする
+///
+/// base64url のデコーダはパディング無しを優先し、失敗した場合はパディング付きを
+/// 再試行するため、パディング付きの受理も property の対象にする。
+pub fn base64url_encode_padded(bytes: &[u8]) -> String {
+    let mut out = base64url_encode(bytes);
+    while !out.len().is_multiple_of(4) {
+        out.push('=');
+    }
+    out
+}
+
+/// JSON とクエリ文字列の値に使える安全な ASCII 文字列を生成する
+///
+/// JSON のエスケープが不要で、base64url とクエリの区切り文字 (`?` `&` `=`) の
+/// どちらとも衝突しない `[a-z0-9_-]` だけを使う。
+pub fn sample_safe_text(ctx: &mut noprop::TestCaseContext, max_len: usize) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_-";
+    let len = noprop::sample_usize_in(ctx, 0..=max_len);
+    (0..len)
+        .map(|_| char::from(noprop::sample_choice(ctx, CHARS)))
+        .collect()
+}
+
 /// `catdpop` クレームを生成する
 pub fn sample_catdpop(ctx: &mut noprop::TestCaseContext) -> CatDpop {
     let window = if noprop::sample_bool(ctx) {
