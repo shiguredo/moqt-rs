@@ -69,6 +69,7 @@ WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。draft
 ただし example が使う s2n-quic は `RESET_STREAM_AT` を送出できず、`reset_stream_at` transport parameter も広告しない。
 このため `wt-h3` の reset は `RESET_STREAM` へのフォールバックになり、WebTransport ヘッダが確実に届く保証が無い。`wt-h2` は `WT_RESET_STREAM` capsule で reset するため `RESET_STREAM_AT` は不要だが、relay の capsule 対応に依存する。
 reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) は relay によっては成立しない。
+この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
 
 ## C4M 認可トークン
 
@@ -164,7 +165,7 @@ publisher / subscriber は `--cert` を省略すると証明書検証をスキ�
 
 ## ログ
 
-環境変数 `RUST_LOG` でログレベルを制御できる。
+環境変数 `RUST_LOG` でログレベルを制御できる。未設定の場合の既定は `moq-pub` が `error`、`moq-sub` が `info` である。`moq-pub` の警告ログ (WebTransport が experimental である旨など) を見るには `RUST_LOG=warn` 以上を指定する。
 
 ```bash
 RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device

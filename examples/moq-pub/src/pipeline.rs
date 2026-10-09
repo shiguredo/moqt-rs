@@ -249,6 +249,17 @@ pub async fn run(
     // 確立後の SETUP 以降の失敗はアドレスに依存しないため、次のアドレスは試さない。
     // `socket_addr` は試行ごとに変わるため、試行の中で接続先を組み立てる。
 
+    // WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できず、
+    // WebTransport が MUST とする Reliable Size 付きの reset を行えないため)。接続の前に 1 度だけ
+    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。接続先の試行ごとに
+    // 出さないよう `connect_with_fallback` の外側で判定する。
+    if matches!(config.transport, Transport::WtH3 | Transport::WtH2) {
+        tracing::warn!(
+            "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
+            config.transport
+        );
+    }
+
     // 1. 接続確立と SETUP ハンドシェイク
     let connect_monitor = task_monitor.clone();
     let connection_config = config.clone();

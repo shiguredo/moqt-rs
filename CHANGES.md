@@ -588,9 +588,9 @@
 
 ### misc
 
-- [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記する
+- [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する
   - s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きの reset を行えないため
-  - `--transport` の既定は `quic` のままとし、単体テストで固定する
+  - `--transport` の既定は `quic` のまま単体テストで固定し、`wt-h3` / `wt-h2` では接続の前に警告ログを出す
   - @voluntas
 
 - [ADD] secrets.TEST_MOQT_URI の relay へ moq-pub を接続し SETUP / PUBLISH を確認する E2E テストを GitHub Actions に追加する
