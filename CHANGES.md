@@ -649,6 +649,15 @@
   - `--input-mp4` との同時指定と `--width` / `--height` / `--fps` の併用はエラーにし、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視して警告する
   - @voluntas
 
+- [CHANGE] 共有の時間軸の A/V 同期の制御を moqt-js の最新に合わせる
+  - 基準を共有しない理由を `UnsharedReason` (未観測 / 差 / ドリフト / 保持) で返し、片方をまだ観測していない間は共有しない扱いにする
+  - 基準の差が動き続けているとき (TIMESTAMP が壁時計からずれているとき) も共有をやめる。動きは 5 秒の窓で 50 ms を超えたら時計のずれとみなす
+  - 相手側へ移す遅延は `TIMELINE_MAX_COMPENSATED_DIFFERENCE_US` (100 ms) までにし、基準の差の残りは A/V のずれとして受け入れる
+  - 一度共有をやめたら `TIMELINE_BASE_UNSHARED_HOLD_US` (30 秒) の間は戻さない
+  - 基準を共有できない側が音声のときは、同期をやめずに映像だけを音声の到着基準の遅れ (`audio_arrival_delay_us`、80〜100 ms) へ合わせる
+  - 遅延の内訳を `delay_breakdown` で返す (`UnsharedReason` / `TrackBreakdown` / `DelayBreakdown` を追加)
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する
