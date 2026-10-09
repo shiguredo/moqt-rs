@@ -185,6 +185,31 @@ doc = false
 name = "fuzz_verify_c4m_dpop_context"
 path = "fuzz_targets/fuzz_verify_c4m_dpop_context.rs"
 
+[[bin]]
+doc = false
+name = "fuzz_decode_c4m_jws"
+path = "fuzz_targets/fuzz_decode_c4m_jws.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_c4m_cat_claims"
+path = "fuzz_targets/fuzz_decode_c4m_cat_claims.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_decode_c4m_cose_message"
+path = "fuzz_targets/fuzz_decode_c4m_cose_message.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_c4m_authorization_context"
+path = "fuzz_targets/fuzz_c4m_authorization_context.rs"
+
+[[bin]]
+doc = false
+name = "fuzz_c4m_dpop_verify"
+path = "fuzz_targets/fuzz_c4m_dpop_verify.rs"
+
 [dependencies]
 # 構造化入力生成に使用 (Arbitrary derive)
 arbitrary = { version = "1.4", features = ["derive"] }
