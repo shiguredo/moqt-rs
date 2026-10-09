@@ -22,5 +22,6 @@ mod decoder;
 mod encoder;
 mod fake_audio_capture;
 mod fake_capture;
+mod group_id;
 mod mp4;
 mod stream_writer;

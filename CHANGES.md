@@ -11,6 +11,20 @@
 
 ## develop
 
+- [FIX] moq-pub が catalog を group 0 に固定して publish し、FETCH の要求 range を無視していたのを修正する
+  - 映像 / 音声 / catalog の開始 Group ID を Unix epoch ミリ秒から払い出し、catalog を新しい Group で定期的に送り直す (draft-ietf-moq-msf-01 §5 / §6.1)
+  - FETCH は要求 range を判定し、範囲外は空応答、Start が Largest Object を超える場合は INVALID_RANGE を返す (draft-ietf-moq-transport-22 §3.2 / §3.2.1 / §3.3.1)
+  - @voluntas
+
+- [FIX] moq-sub が catalog を group 0 固定の FETCH で取得していたのを修正する
+  - catalog track を Next Object の Location Filter で SUBSCRIBE し、SUBSCRIBE_OK の LARGEST_OBJECT が示す Group の先頭から FETCH する (draft-ietf-moq-transport-22 §3.5.1 / draft-ietf-moq-msf-01 §5)
+  - Unix epoch ミリ秒を開始 Group ID にする publisher の catalog も取得できる (同 §6.1)
+  - @voluntas
+
+- [ADD] `MoqtClient` に LOCATION_FILTER 付き SUBSCRIBE と空の FETCH 応答を追加する
+  - `subscribe_track_with_filter` と `SubscribeResult::largest_object`、`send_empty_fetch_response` を追加する
+  - @voluntas
+
 - [UPDATE] `Session::subscription_cleanup_ready` が保留中の PUBLISH_DONE を見ないことを doc に明記する
   - 保留が `Some` の間は `Session::forget_subscription` を呼んではならない (§9.5.1 / §9.9)
   - @voluntas

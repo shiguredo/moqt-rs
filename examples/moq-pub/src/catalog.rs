@@ -5,6 +5,7 @@
 
 use shiguredo_moqt::loc::LocProperties;
 use shiguredo_moqt::message::common::Location;
+use shiguredo_moqt::message_parameter::{LocationFilter, LocationFilterContext};
 use shiguredo_moqt::{
     msf::MSF_VERSION, msf::MsfAuthInfo, msf::MsfCatalog, msf::MsfCatalogDocument,
     msf::MsfPackaging, msf::MsfTrack,
@@ -81,6 +82,12 @@ pub struct CatalogParams<'a> {
     pub data_plane: &'a DataPlaneHandle,
     pub catalog_request_id: u64,
     pub catalog_alias: u64,
+    /// カタログ最初の Object を載せる Group ID
+    ///
+    /// draft-ietf-moq-msf-01 §6.1 (Group numbering): Track の Group ID は一意で単調増加が
+    /// MUST であり、publisher が再起動したときは以前に publish したどの Group ID よりも
+    /// 大きい値から始めなければならない。Group ID を 0 に固定してはならない。
+    pub group_id: u64,
     /// カタログ track の購読の Start Location (`MoqtClient::subscription_filter_start`)
     ///
     /// カタログは 1 Subgroup = 1 Object なので終端方法の判定結果は変わらない (省略があれば
@@ -188,7 +195,7 @@ fn build_catalog(
 
 /// MSF カタログを構築して送信する
 ///
-/// カタログトラックとして Group 0 / Object 0 に Full カタログを送信する。
+/// カタログトラックとして `params.group_id` の Object 0 に Full カタログを送信する。
 /// 戻り値は送信したカタログの JSON バイト列である。MOQT relay が subscriber の
 /// FETCH を転送してきた場合、publisher は同じバイト列を FETCH 応答として返すため、
 /// 呼び出し側で保持する。
@@ -213,31 +220,131 @@ pub async fn send_catalog(params: CatalogParams<'_>) -> Result<Vec<u8>> {
         String::from_utf8_lossy(&catalog_json)
     );
 
-    // カタログを Subgroup Stream として送信する
-    let mut writer = SubgroupWriter::new(
+    publish_catalog_object(
         params.handle,
         params.data_plane,
         params.catalog_request_id,
         params.catalog_alias,
-        0,
+        params.group_id,
+        &catalog_json,
+        params.start_location,
+    )
+    .await
+    .and_then(|outcome| {
+        if outcome == ObjectFilterOutcome::Skip {
+            // カタログがフィルタ不通過で届かないと subscriber は起動できないため、
+            // 静かに飲み込まずエラーとして報告する
+            Err(Error::Other(
+                "catalog object skipped by subscription filter".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    })?;
+
+    Ok(catalog_json)
+}
+
+/// MSF カタログの JSON を 1 Object (Object ID 0) として Group に送信する
+///
+/// draft-ietf-moq-msf-01 §5 (Catalog): 各 Group の最初の Object (Object ID 0) は独立した
+/// 完全なカタログでなければならず、独立した更新は新しい Group の先頭に置く。カタログの
+/// 送り直しは新しい Group ID でこの関数を呼ぶ。
+/// draft-ietf-moq-msf-01 §5 (Catalog) は「配信網の cache から落ちうる時間が過ぎたら
+/// publish し直す」を SHOULD とするため、呼び出し側が間隔を決める。
+///
+/// 戻り値は購読フィルタの評価結果である。`ObjectFilterOutcome::Skip` はどの購読にも
+/// 届かなかったことを示す (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) /
+/// §3.3.3 (Combining Filters))。送り直しでは Skip を正常系として扱い、同じ Location を
+/// 再送しないために Group ID だけを進める。
+pub async fn publish_catalog_object(
+    handle: &transport::StreamHandle,
+    data_plane: &DataPlaneHandle,
+    catalog_request_id: u64,
+    catalog_alias: u64,
+    group_id: u64,
+    catalog_json: &[u8],
+    start_location: Option<Location>,
+) -> Result<ObjectFilterOutcome> {
+    // カタログを Subgroup Stream として送信する。Subgroup ID は 0 でなければならない
+    // (draft-ietf-moq-msf-01 §5: すべてのカタログ更新は MOQT sub-group 0 に置く MUST)
+    let mut writer = SubgroupWriter::new(
+        handle,
+        data_plane,
+        catalog_request_id,
+        catalog_alias,
+        group_id,
         128,
         false,
-        params.start_location,
+        start_location,
     )
     .await?;
     let empty_props = LocProperties::new();
-    let outcome = writer.write_object(&catalog_json, &empty_props).await?;
-    if outcome == ObjectFilterOutcome::Skip {
-        // 全 Skip の writer を reset で終端してから、カタログが届かないことをエラーとして報告する
-        // (カタログがフィルタ不通過で届かないと subscriber は起動できないため、静かに飲み込まない)
-        writer.finish(params.start_location)?;
-        return Err(Error::Other(
-            "catalog object skipped by subscription filter".to_string(),
-        ));
-    }
-    writer.finish(params.start_location)?;
+    let outcome = writer.write_object(catalog_json, &empty_props).await?;
+    writer.finish(start_location)?;
+    Ok(outcome)
+}
 
-    Ok(catalog_json)
+/// FETCH に応答するときの方針
+///
+/// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.2.1 (Fetch Object Delivery) /
+/// §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter) に基づく。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogFetchResponse {
+    /// 要求 range にカタログの Object が含まれる。FETCH_OK の End Location は
+    /// カタログ自身の Location になり、Object を 1 つ返す
+    Object { end_location: Location },
+    /// 要求 range にカタログの Object が含まれない。FETCH_OK の End Location は
+    /// 要求 range の終端になり、Object を返さずに FIN する
+    Empty { end_location: Location },
+    /// 開始 Location が Largest Object を超える、または range が空である。
+    /// REQUEST_ERROR (INVALID_RANGE) を返す
+    InvalidRange,
+}
+
+/// FETCH の Location Filter とカタログの Location から応答方針を決める
+///
+/// - フィルタ省略時は `{0, 0}` から Largest Object までを要求されたものとして扱う
+///   (draft-ietf-moq-transport-22 §3.2)
+/// - 開始 Location が Largest Object を超える場合は INVALID_RANGE が MUST (§3.2)
+/// - range に Object が無い場合は空の FETCH 応答を返す (§3.2.1)
+/// - 要求 range の外の Object を送ってはならない (§3.3.1)
+///
+/// `catalog` はこの publisher が publish 済みのカタログの Location であり、この track の
+/// Largest Object でもある。
+pub fn catalog_fetch_response(
+    filter: Option<&LocationFilter>,
+    catalog: Location,
+) -> CatalogFetchResponse {
+    // フィルタ省略時は既定の start `{0, 0}` と End = Largest Object を使う (§3.2)
+    let default_start = Location {
+        group_id: 0,
+        object_id: 0,
+    };
+    let start = match filter {
+        None => default_start,
+        Some(filter) => match filter.effective_start_location(Some(&catalog)) {
+            Some(start) => start,
+            None => return CatalogFetchResponse::InvalidRange,
+        },
+    };
+    let end = match filter {
+        None => catalog,
+        Some(filter) => filter
+            .effective_end_location(Some(&catalog), LocationFilterContext::Fetch)
+            .unwrap_or(catalog),
+    };
+    // 開始 Location が Largest Object を超える、または range が空の場合は INVALID_RANGE
+    if start > catalog || start > end {
+        return CatalogFetchResponse::InvalidRange;
+    }
+    // カタログが要求 range に含まれるときだけ Object を返す
+    if start <= catalog && catalog <= end {
+        return CatalogFetchResponse::Object {
+            end_location: catalog,
+        };
+    }
+    CatalogFetchResponse::Empty { end_location: end }
 }
 
 #[cfg(test)]
@@ -554,6 +661,132 @@ mod tests {
         assert!(
             text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
             "catalog の JSON に authInfo が載ること: {text}"
+        );
+    }
+
+    /// フィルタ省略の FETCH は `{0, 0}` から Largest Object までを要求したものとして扱うこと
+    ///
+    /// draft-ietf-moq-transport-22 §3.2 (Fetch): フィルタ省略時の range は `{0, 0}` と
+    /// Largest Object。カタログがその範囲にあるため Object を返す。
+    #[test]
+    fn catalog_fetch_without_filter_serves_the_object() {
+        let catalog = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        assert_eq!(
+            catalog_fetch_response(None, catalog),
+            CatalogFetchResponse::Object {
+                end_location: catalog
+            }
+        );
+    }
+
+    /// カタログを含む絶対 range の FETCH は Object を返すこと
+    ///
+    /// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
+    /// "observe the Largest Object in the response" パターンが要求する範囲である。
+    #[test]
+    fn catalog_fetch_with_range_containing_the_catalog_serves_the_object() {
+        let catalog = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        let filter = LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: catalog.group_id,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+            end_object: 0,
+        };
+        assert_eq!(
+            catalog_fetch_response(Some(&filter), catalog),
+            CatalogFetchResponse::Object {
+                end_location: catalog
+            }
+        );
+    }
+
+    /// range の外にある FETCH は Object を返さず、要求 range の終端で空応答にすること
+    ///
+    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
+    /// 無いときは uni stream を開いて FETCH_HEADER だけを送り FIN する。§3.3.1
+    /// (Location Filters): publisher は要求 range の外の Object を送ってはならない。
+    /// Group ID を 0 に固定して要求する古い形の FETCH がこれに該当する。
+    #[test]
+    fn catalog_fetch_outside_the_range_is_empty() {
+        let catalog = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        let filter = LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+            end_object: 1,
+        };
+        assert_eq!(
+            catalog_fetch_response(Some(&filter), catalog),
+            CatalogFetchResponse::Empty {
+                end_location: Location {
+                    group_id: 0,
+                    object_id: 1,
+                }
+            }
+        );
+    }
+
+    /// 開始 Location が Largest Object を超える FETCH は INVALID_RANGE にすること
+    ///
+    /// draft-ietf-moq-transport-22 §3.2 (Fetch): "If no Objects have been published for the
+    /// track or Start Location is greater than the Largest Object the publisher MUST return
+    /// FETCH_ERROR with error code INVALID_RANGE."
+    #[test]
+    fn catalog_fetch_starting_after_the_catalog_is_invalid_range() {
+        let catalog = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        let filter = LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: catalog.group_id + 1,
+                object_id: 0,
+            },
+        };
+        assert_eq!(
+            catalog_fetch_response(Some(&filter), catalog),
+            CatalogFetchResponse::InvalidRange
+        );
+    }
+
+    /// 絶対 range の終端がカタログより手前の FETCH は空応答にすること
+    ///
+    /// 開始 Location は Largest Object 以下だが、終端がカタログに届かない範囲である。
+    #[test]
+    fn catalog_fetch_ending_before_the_catalog_is_empty() {
+        let catalog = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        let filter = LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 1_759_999_999_999,
+                object_id: 0,
+            },
+            end_group_delta: 0,
+            end_object: 0,
+        };
+        assert_eq!(
+            catalog_fetch_response(Some(&filter), catalog),
+            CatalogFetchResponse::Empty {
+                end_location: Location {
+                    group_id: 1_759_999_999_999,
+                    object_id: 0,
+                }
+            }
         );
     }
 }

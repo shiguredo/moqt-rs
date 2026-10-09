@@ -24,8 +24,9 @@ use shiguredo_moqt::loc::{
 };
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
 use shiguredo_moqt::{
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfTrack,
-    session::types::DataStreamId, session::types::RequestStreamEnd, session::types::SessionEvent,
+    message::common::Location, message_parameter::LocationFilter, msf::MSF_CATALOG_TRACK_NAME,
+    msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfTrack, session::types::DataStreamId,
+    session::types::RequestStreamEnd, session::types::SessionEvent,
     stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder,
 };
@@ -250,6 +251,31 @@ fn spawn_stream_task(
 enum TrackKind {
     Video,
     Audio,
+    /// カタログトラック
+    ///
+    /// 購読は LARGEST_OBJECT の取得と、以後に配られるカタログ (独立カタログと delta) の
+    /// 受信に使う (draft-ietf-moq-msf-01 §5 (Catalog))。本 example は起動時に解決した
+    /// トラックを再生し続けるため、購読で届くカタログは適用せずに捨てる。
+    Catalog,
+}
+
+/// 購読前に配られたカタログを取得する FETCH の Location Filter を組み立てる
+///
+/// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
+/// "observe the Largest Object in the response" パターンに従い、LARGEST_OBJECT が示す
+/// Group の先頭 Object から Largest Object までを要求する。catalog track は Group の
+/// 先頭 Object (Object ID 0) が独立した完全なカタログであるため (draft-ietf-moq-msf-01
+/// §5 (Catalog))、最新 Group の先頭から読めば完全なカタログと同一 Group 内の delta が
+/// 揃う。終端を省略した Absolute Start は Fetch の既定で Largest Object までになり
+/// (draft-ietf-moq-transport-22 §3.2 (Fetch))、LARGEST_OBJECT の受信後に配られた
+/// delta も同じ応答で取得できる。
+fn catalog_fetch_filter(largest_object: Location) -> LocationFilter {
+    LocationFilter::AbsoluteStart {
+        start: Location {
+            group_id: largest_object.group_id,
+            object_id: 0,
+        },
+    }
 }
 
 /// パイプラインを実行する
@@ -408,22 +434,50 @@ pub async fn run(
         client.data_stream_timeout_ms(),
     );
 
-    // 3. FETCH でカタログを取得 (range {0, 0} - {0, 1} を LOCATION_FILTER で指定)
+    // 3. カタログを SUBSCRIBE し、購読前に配られたカタログを FETCH で取得する
     //
-    // C4M 認可トークンは `MoqtClient::fetch` が `moqt` クレームを見て付けるため、ここでは
+    // MSF は catalog の取得に "SUBSCRIBE with a Joining FETCH (offset = 0)" を MUST とする
+    // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-ietf-moq-transport-21 で
+    // 廃止されたため、本 example は draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting
+    // New Groups) が示す購読パターンで表す:
+    //
+    // 1. Location Filter を Next Object (§9.20.9 Table 6 の Type 0x05) にして catalog track を
+    //    SUBSCRIBE する。以後に配られるカタログ (独立カタログと delta) が届く
+    // 2. SUBSCRIBE_OK の LARGEST_OBJECT (§9.20.17 (LARGEST OBJECT Parameter)) が示す Group の
+    //    先頭 Object から FETCH する。catalog track は Group の先頭 Object が独立した完全な
+    //    カタログであるため (draft-ietf-moq-msf-01 §5)、最新 Group の先頭から読めば完全な
+    //    カタログが得られる
+    //
+    // Group ID を 0 と仮定してはならない。publisher は再起動時に以前 publish したどの
+    // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
+    // (Group numbering))、Unix epoch ミリ秒を開始値にする実装が一般的である。
+    //
+    // C4M 認可トークンは `MoqtClient` が `moqt` クレームを見て付けるため、ここでは
     // 指定しない (draft-ietf-moq-c4m-01 §1.1)。
+    let catalog_sub = client
+        .subscribe_track_with_filter(
+            namespace.clone(),
+            MSF_CATALOG_TRACK_NAME.to_vec(),
+            LocationFilter::NextObject,
+        )
+        .await?;
+    let largest_object = catalog_sub.largest_object.ok_or_else(|| {
+        Error::Other(
+            "catalog track has no published object (LARGEST_OBJECT is unknown)".to_string(),
+        )
+    })?;
+    tracing::info!(
+        "Subscribed to catalog track: alias={}, request_id={}, largest_object=({}, {})",
+        catalog_sub.track_alias,
+        catalog_sub.request_id,
+        largest_object.group_id,
+        largest_object.object_id,
+    );
     let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
     catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
         param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
         value: shiguredo_moqt::message_parameter::MessageParameterValue::LocationFilter(
-            shiguredo_moqt::message_parameter::LocationFilter::AbsoluteRangeWithEnd {
-                start: shiguredo_moqt::message::common::Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                end_group_delta: 0,
-                end_object: 1,
-            },
+            catalog_fetch_filter(largest_object),
         ),
     });
     let catalog_fetch = client
@@ -481,6 +535,8 @@ pub async fn run(
     }
 
     let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
+    // カタログの購読は、購読で届くカタログを捨てるだけの stream として扱う
+    track_map.insert(catalog_sub.track_alias, TrackKind::Catalog);
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
     let mut audio_request_id: Option<u64> = None;
@@ -971,6 +1027,12 @@ pub async fn run(
         {
             log_failure(
                 format_args!("Failed to send STOP_SENDING for audio: {e}"),
+                is_connection_closed(&e),
+            );
+        }
+        if let Err(e) = client.stop_sending(catalog_sub.request_id).await {
+            log_failure(
+                format_args!("Failed to send STOP_SENDING for catalog: {e}"),
                 is_connection_closed(&e),
             );
         }
@@ -1693,6 +1755,17 @@ async fn handle_stream_body(
                         "Stream #{stream_num}: audio group {} complete ({chunks} chunks)",
                         header.group_id,
                     );
+                }
+                Some(TrackKind::Catalog) => {
+                    // 購読の確立後に配られたカタログ。本 example は起動時に解決したトラックを
+                    // 再生し続けるため適用せず、stream を読み切って捨てる。購読を維持して
+                    // catalog の更新を受け取れる状態にしておくこと自体が
+                    // draft-ietf-moq-msf-01 §5 (Catalog) の要求である。
+                    tracing::debug!(
+                        "Stream #{stream_num}: draining catalog group {}",
+                        header.group_id,
+                    );
+                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
                 }
                 None => {
                     tracing::warn!(
@@ -3235,6 +3308,54 @@ mod tests {
             warnings.len(),
             2,
             "両方の不一致で警告が 2 件であること: {warnings:?}"
+        );
+    }
+
+    /// カタログの FETCH は LARGEST_OBJECT が示す Group の先頭から要求すること
+    ///
+    /// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
+    /// "observe the Largest Object in the response" パターン。catalog track は Group の
+    /// 先頭 Object が独立した完全なカタログであるため (draft-ietf-moq-msf-01 §5 (Catalog))、
+    /// 最新 Group の先頭から読めば完全なカタログが得られる。Group ID は publisher ごとに
+    /// 異なるため 0 を仮定しない (同 §6.1 (Group numbering))。
+    #[test]
+    fn catalog_fetch_filter_starts_at_the_largest_group() {
+        let largest = Location {
+            group_id: 1_760_000_000_000,
+            object_id: 0,
+        };
+        assert_eq!(
+            catalog_fetch_filter(largest),
+            LocationFilter::AbsoluteStart {
+                start: Location {
+                    group_id: 1_760_000_000_000,
+                    object_id: 0,
+                }
+            },
+            "LARGEST_OBJECT が示す Group の先頭 Object から要求すること"
+        );
+    }
+
+    /// LARGEST_OBJECT が同一 Group の delta を指していても Group の先頭から要求すること
+    ///
+    /// 最初の Object (Object ID 0) が独立した完全なカタログであり、以降は delta である
+    /// (draft-ietf-moq-msf-01 §5 (Catalog))。Object ID 0 から読むことで完全なカタログを
+    /// 取りこぼさない。
+    #[test]
+    fn catalog_fetch_filter_starts_at_object_zero() {
+        let largest = Location {
+            group_id: 42,
+            object_id: 3,
+        };
+        assert_eq!(
+            catalog_fetch_filter(largest),
+            LocationFilter::AbsoluteStart {
+                start: Location {
+                    group_id: 42,
+                    object_id: 0,
+                }
+            },
+            "Largest Object が delta を指していても Group の先頭から要求すること"
         );
     }
 }

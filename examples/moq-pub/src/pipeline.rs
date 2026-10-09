@@ -10,8 +10,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use shiguredo_audio_device::AudioFrameOwned;
 use shiguredo_moqt::{
     error::{
-        MessageError, REQUEST_DOES_NOT_EXIST, REQUEST_NOT_SUPPORTED,
-        SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
+        MessageError, REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE,
+        REQUEST_NOT_SUPPORTED, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_PROTOCOL_VIOLATION,
     },
     loc::{
         LocProperties, LocProperty, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE,
@@ -40,6 +40,7 @@ use crate::encoder::{self, EncodedFrame};
 use crate::error::{Error, Result};
 use crate::fake_audio_capture;
 use crate::fake_capture;
+use crate::group_id;
 use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
 use tokio_moq::Transport;
@@ -127,6 +128,15 @@ const AUDIO_TRACK_NAME: &str = "audio";
 /// 音声と映像を同時に再生させるため、両トラックに同じ値を載せる
 /// (draft-ietf-moq-msf-01 §5.2.11 (Render group))。
 const CATALOG_RENDER_GROUP: u64 = 1;
+
+/// カタログを送り直す間隔
+///
+/// draft-ietf-moq-msf-01 §5 (Catalog) は、配信網の cache から落ちうる時間が過ぎたときに
+/// カタログを publish し直すことを SHOULD とする。後から購読を始めた相手は relay の cache に
+/// 残っているカタログを FETCH で取得するため、cache から落ちる前に新しい Group で送り直す。
+/// relay の cache が既定で保持する時間 (10 分程度) より十分短く、かつ送り直しの負荷が
+/// 問題にならない 30 秒にする。
+const CATALOG_REPUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 停滞の切り分け用の診断ログを出すかどうか。
 ///
@@ -495,12 +505,24 @@ pub async fn run(
         .map(|_| build_opus_head(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS));
 
     // 5. MSF カタログを送信する
+    //
+    // カタログの Group ID は 0 に固定しない。draft-ietf-moq-msf-01 §6.1 (Group numbering) は
+    // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
+    // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
+    // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
     let handle = client.handle();
+    let mut catalog_group_id = group_id::allocate_initial_group_id()?;
+    // カタログの Location。FETCH 応答の範囲判定と SUBSCRIBE_OK の LARGEST_OBJECT に使う
+    let mut catalog_location = Location {
+        group_id: catalog_group_id,
+        object_id: 0,
+    };
     let catalog_json = catalog::send_catalog(catalog::CatalogParams {
         handle: &handle,
         data_plane: &data_plane,
         catalog_request_id,
         catalog_alias: CATALOG_TRACK_ALIAS,
+        group_id: catalog_group_id,
         start_location: client.subscription_filter_start(catalog_request_id),
         // 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる
         sync: catalog::CatalogSyncParams {
@@ -595,8 +617,10 @@ pub async fn run(
 
     // 7. データループ
     let start = Instant::now();
-    let mut video_group_id: u64 = 0;
-    let mut audio_group_id: u64 = 0;
+    // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
+    // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
+    let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
+    let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
     // セッション終了を観測してループを抜けたかどうか。後始末の失敗をセッション終了に伴う
@@ -620,6 +644,12 @@ pub async fn run(
     let mut audio_config_sent = false;
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // カタログの送り直し。開始直後の 1 回は送信済みなので、1 間隔ぶん待ってから始める
+    let mut catalog_republish_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + CATALOG_REPUBLISH_INTERVAL,
+        CATALOG_REPUBLISH_INTERVAL,
+    );
+    catalog_republish_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     tracing::info!(
         "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={})",
@@ -944,8 +974,14 @@ pub async fn run(
                             )
                         }
                         Some(ClientEvent::Request(request)) => {
-                            serve_peer_request(&mut client, request, &config, &catalog_json)
-                                .await?;
+                            serve_peer_request(
+                                &mut client,
+                                request,
+                                &config,
+                                &catalog_json,
+                                catalog_location,
+                            )
+                            .await?;
                             Ok(false)
                         }
                         Some(ClientEvent::RequestUpdate(update)) => {
@@ -1006,6 +1042,61 @@ pub async fn run(
                         video_group_id,
                         audio_frame_count,
                     );
+                }
+            }
+            _ = catalog_republish_interval.tick() => {
+                // 独立したカタログを新しい Group の先頭に置き直す
+                // (draft-ietf-moq-msf-01 §5 (Catalog) / §6.1 (Group numbering))。
+                // relay の cache から落ちる前に送り直すことで、配信開始後に購読を始めた相手も
+                // cache のカタログを FETCH で取得できる。
+                let outcome: Result<()> = async {
+                    let next_group_id = group_id::next_group_id(catalog_group_id);
+                    let published = catalog::publish_catalog_object(
+                        &handle,
+                        &data_plane,
+                        catalog_request_id,
+                        CATALOG_TRACK_ALIAS,
+                        next_group_id,
+                        &catalog_json,
+                        client.subscription_filter_start(catalog_request_id),
+                    )
+                    .await?;
+                    catalog_group_id = next_group_id;
+                    if published == ObjectFilterOutcome::Skip {
+                        // どの購読にも届かなかった (Forward State 0 など)。Object は送られて
+                        // いないため、FETCH 応答と LARGEST_OBJECT が指す Location は前回の
+                        // 送信のままにする
+                        tracing::debug!(
+                            "Catalog republish at group {next_group_id} was filtered out"
+                        );
+                    } else {
+                        catalog_location = Location {
+                            group_id: next_group_id,
+                            object_id: 0,
+                        };
+                        tracing::debug!("Republished the MSF catalog at group {next_group_id}");
+                    }
+                    Ok(())
+                }
+                .await;
+                match outcome {
+                    Ok(()) => {}
+                    Err(e) if is_transport_session_end(&e) => {
+                        tracing::info!("Session closed by transport");
+                        session_ended = true;
+                        break 'main;
+                    }
+                    Err(e) if is_peer_stream_reset(&e) => {
+                        // peer がカタログの Subgroup stream を cancel した。同じ Location を
+                        // 再送できないため Group だけ進め、次の間隔で送り直す
+                        catalog_group_id = group_id::next_group_id(catalog_group_id);
+                        tracing::info!("Catalog subgroup stream was reset by peer; continuing");
+                    }
+                    Err(e) => {
+                        // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
+                        close_on_message_error(&mut client, &e).await;
+                        return Err(e);
+                    }
                 }
             }
             _ = shutdown_monitor.recv() => {
@@ -1185,9 +1276,9 @@ fn session_error_code(error: &MessageError) -> u64 {
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
 /// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
-/// 本 publisher は video / audio の SUBSCRIBE に SUBSCRIBE_OK を返し
+/// 本 publisher は video / audio / catalog の SUBSCRIBE に SUBSCRIBE_OK を返し
 /// (以後の Object は継続して送信中の subgroup stream で届く)、catalog の FETCH には
-/// FETCH_OK と FETCH 応答ストリームを返す。
+/// 要求された range を判定したうえで FETCH_OK と FETCH 応答ストリームを返す。
 /// 未知の track と未対応の要求種別は REQUEST_ERROR で拒否する
 /// (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))。
 async fn serve_peer_request(
@@ -1195,6 +1286,7 @@ async fn serve_peer_request(
     request: IncomingRequest,
     config: &Config,
     catalog_json: &[u8],
+    catalog_location: Location,
 ) -> Result<()> {
     let request_id = request.request_id;
     match request.message {
@@ -1204,6 +1296,11 @@ async fn serve_peer_request(
                 Some(VIDEO_TRACK_ALIAS)
             } else if config.audio_enabled && track == AUDIO_TRACK_NAME.as_bytes() {
                 Some(AUDIO_TRACK_ALIAS)
+            } else if track == MSF_CATALOG_TRACK_NAME {
+                // カタログの購読を受理する。SUBSCRIBE_OK の LARGEST_OBJECT は session 層が
+                // この track の publish 済み Object から補完する
+                // (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))
+                Some(CATALOG_TRACK_ALIAS)
             } else {
                 None
             };
@@ -1235,22 +1332,80 @@ async fn serve_peer_request(
         }
         ControlMessage::Fetch(fetch) => {
             if fetch.track_name == MSF_CATALOG_TRACK_NAME {
-                client
-                    .send_fetch_ok(
-                        request_id,
-                        0,
-                        Location {
-                            group_id: 0,
-                            object_id: 0,
-                        },
-                        MessageParameters::new(),
-                        TrackProperties::new(),
-                    )
-                    .await?;
-                client
-                    .send_fetch_response(request_id, 0, 0, catalog_json, None)
-                    .await?;
-                tracing::info!("Served catalog FETCH (request_id={request_id})");
+                // 要求された Location Filter から range を解決し、範囲外の Object を
+                // 送らないようにする (draft-ietf-moq-transport-22 §3.2 (Fetch) /
+                // §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))。
+                // wire 経路では decode 層が不正な符号化を弾くため、ここでの失敗は
+                // アプリが手組みしたメッセージだけが到達する
+                let filter = fetch.parameters.location_filter_typed().map_err(|e| {
+                    Error::Other(format!("invalid catalog fetch location filter: {e}"))
+                });
+                let filter = match filter {
+                    Ok(filter) => filter,
+                    Err(e) => {
+                        tracing::warn!("Rejecting catalog FETCH with invalid filter: {e}");
+                        client
+                            .send_request_error(
+                                request_id,
+                                REQUEST_INVALID_FILTER,
+                                "invalid location filter",
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                match catalog::catalog_fetch_response(filter.as_ref(), catalog_location) {
+                    catalog::CatalogFetchResponse::Object { end_location } => {
+                        client
+                            .send_fetch_ok(
+                                request_id,
+                                0,
+                                end_location,
+                                MessageParameters::new(),
+                                TrackProperties::new(),
+                            )
+                            .await?;
+                        client
+                            .send_fetch_response(
+                                request_id,
+                                catalog_location.group_id,
+                                catalog_location.object_id,
+                                catalog_json,
+                                None,
+                            )
+                            .await?;
+                        tracing::info!(
+                            "Served catalog FETCH (request_id={request_id}, group={})",
+                            catalog_location.group_id,
+                        );
+                    }
+                    catalog::CatalogFetchResponse::Empty { end_location } => {
+                        // 要求 range に Object が無い場合は FETCH_OK と FETCH_HEADER だけの
+                        // 空ストリームを返す (draft-ietf-moq-transport-22 §3.2.1)
+                        client
+                            .send_fetch_ok(
+                                request_id,
+                                0,
+                                end_location,
+                                MessageParameters::new(),
+                                TrackProperties::new(),
+                            )
+                            .await?;
+                        client.send_empty_fetch_response(request_id).await?;
+                        tracing::info!(
+                            "Served empty catalog FETCH (request_id={request_id}, end={:?})",
+                            end_location,
+                        );
+                    }
+                    catalog::CatalogFetchResponse::InvalidRange => {
+                        tracing::warn!(
+                            "Rejecting catalog FETCH with out-of-range filter (request_id={request_id})"
+                        );
+                        client
+                            .send_request_error(request_id, REQUEST_INVALID_RANGE, "invalid range")
+                            .await?;
+                    }
+                }
             } else {
                 tracing::warn!(
                     "Rejecting FETCH for unknown track: {}",

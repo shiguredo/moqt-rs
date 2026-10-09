@@ -26,8 +26,9 @@ use shiguredo_moqt::{
     c4m::MoqtAction, c4m::cat::CatClaims, c4m::cat::CatToken, c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT,
     message::ControlMessage, message::ReasonPhrase, message::common::Location,
     message::common::TrackNamespace, message_parameter::AuthorizationToken,
-    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
-    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
+    message_parameter::LocationFilter, message_parameter::MessageParameter,
+    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
+    message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_LOCATION_FILTER,
     message_parameter::PARAM_SUBSCRIBER_PRIORITY, session::core::Session,
     session::types::DataStreamId, session::types::DataStreamResetReason,
     session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
@@ -139,6 +140,13 @@ pub type ControlIncoming = Result<StreamRead<ControlMessage>>;
 pub struct SubscribeResult {
     pub request_id: u64,
     pub track_alias: u64,
+    /// SUBSCRIBE_OK が広告した LARGEST_OBJECT (未広告なら `None`)
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
+    /// §3.1.4 (Largest Object)。購読の確立時点で track に publish 済みの最新 Location であり、
+    /// 購読前に配られた Object を FETCH で取得する際の開始位置になる (同 §3.5.1 の
+    /// "observe the Largest Object in the response" パターン)。
+    pub largest_object: Option<Location>,
 }
 
 /// FETCH_OK の結果
@@ -1272,12 +1280,52 @@ impl MoqtClient {
     }
 
     /// トラックを SUBSCRIBE する (subscriber 側)
+    ///
+    /// Location Filter を指定しないため、購読の確立後に配られる Object と、relay が
+    /// 保持している Object の双方が届きうる (draft-ietf-moq-transport-22 §3.3.1 (Location Filters))。
     pub async fn subscribe_track(
         &mut self,
         namespace: TrackNamespace,
         track_name: Vec<u8>,
     ) -> Result<SubscribeResult> {
-        let mut parameters = self.auth_parameters();
+        self.subscribe_track_inner(namespace, track_name, MessageParameters::new())
+            .await
+    }
+
+    /// Location Filter を指定してトラックを SUBSCRIBE する (subscriber 側)
+    ///
+    /// 購読開始後の Object だけを受け取りたい場合は [`LocationFilter::NextObject`]
+    /// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) Table 6 の Type 0x05)
+    /// を指定する。購読前に配られた Object は FETCH で別に取得する
+    /// (同 §3.5.1 (Dynamically Starting New Groups) の "observe the Largest Object in the
+    /// response" パターン)。
+    pub async fn subscribe_track_with_filter(
+        &mut self,
+        namespace: TrackNamespace,
+        track_name: Vec<u8>,
+        filter: LocationFilter,
+    ) -> Result<SubscribeResult> {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_LOCATION_FILTER,
+            value: MessageParameterValue::LocationFilter(filter),
+        });
+        self.subscribe_track_inner(namespace, track_name, parameters)
+            .await
+    }
+
+    /// SUBSCRIBE を発行して確立まで待ち、結果を組み立てる
+    async fn subscribe_track_inner(
+        &mut self,
+        namespace: TrackNamespace,
+        track_name: Vec<u8>,
+        mut parameters: MessageParameters,
+    ) -> Result<SubscribeResult> {
+        // C4M の AUTHORIZATION_TOKEN を追加する。呼び出し側が渡した LOCATION_FILTER などは
+        // そのまま残す (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))
+        for parameter in self.auth_parameters().as_slice() {
+            parameters.push(parameter.clone());
+        }
         parameters.push(MessageParameter {
             param_type: PARAM_SUBSCRIBER_PRIORITY,
             value: MessageParameterValue::Uint8(DEFAULT_SUBSCRIBER_PRIORITY),
@@ -1290,7 +1338,7 @@ impl MoqtClient {
         };
         self.drain_events().await?;
         self.wait_subscription_resolved(request_id).await?;
-        let (request_id, track_alias) = {
+        let (request_id, track_alias, largest_object) = {
             let session = lock_session(&self.session);
             let sub = session
                 .subscription(request_id)
@@ -1298,12 +1346,13 @@ impl MoqtClient {
             let track_alias = sub.track_alias.ok_or_else(|| {
                 TransportError::Internal("SUBSCRIBE_OK without track_alias".into())
             })?;
-            (sub.request_id, track_alias)
+            (sub.request_id, track_alias, sub.largest_location)
         };
         tracing::info!("SUBSCRIBE_OK: request_id={request_id}, alias={track_alias}");
         Ok(SubscribeResult {
             request_id,
             track_alias,
+            largest_object,
         })
     }
 
@@ -1558,6 +1607,27 @@ impl MoqtClient {
         buf.extend_from_slice(payload);
 
         data_plane.send_fetch_object(stream_id)?;
+        stream.send(Bytes::from(buf)).await?;
+        stream.finish()?;
+        data_plane.send_fetch_data_stream_closed(stream_id)?;
+        Ok(())
+    }
+
+    /// Object を 1 つも含まない FETCH 応答ストリームを開く (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 要求 range に Object が
+    /// 1 つも無い場合、publisher は uni stream を開いて FETCH_HEADER だけを送り、FIN で閉じる。
+    /// FETCH_OK はこの stream を開く前に別途送る (§9.12 (FETCH_OK))。
+    pub async fn send_empty_fetch_response(&mut self, request_id: u64) -> Result<()> {
+        let data_plane = self.data_plane();
+        let mut stream = self.handle.open_send_stream().await?;
+        let stream_id = DataStreamId(stream.stream_id());
+
+        // Session に FETCH 応答 stream の open を通知し、台帳に登録する
+        data_plane.send_fetch_header(stream_id, request_id)?;
+        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
+
+        let buf = FetchHeader { request_id }.encode();
         stream.send(Bytes::from(buf)).await?;
         stream.finish()?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
