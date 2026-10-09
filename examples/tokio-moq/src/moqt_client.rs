@@ -816,6 +816,27 @@ fn auth_message_parameters_for(
     parameters
 }
 
+/// 受け取ったパラメータに、保持している C4M 認可トークンを AUTHORIZATION_TOKEN (0x03)
+/// として追加したパラメータを返す
+///
+/// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは、
+/// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
+/// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE)
+/// へ MUST 付与する。SETUP に載せていても免除されない。
+///
+/// どのトークンが track に紐づくかは catalog の authInfo と視聴側の URI で決まるため、
+/// SUBSCRIBE / PUBLISH と同じく保持しているトークンをすべて載せる。アクションごとの
+/// 絞り込みは relay 側の認可判断であり、絞り込むと MUST の付与漏れになりうる。
+fn with_auth_parameters(
+    mut parameters: MessageParameters,
+    tokens: &[AuthToken],
+) -> MessageParameters {
+    for auth in tokens {
+        parameters.push(authorization_parameter(&auth.token));
+    }
+    parameters
+}
+
 // `finish_handshake` の引数を 7 個以下に保つため、接続確立済みの I/O 資源をまとめて渡す
 // (`clippy::too_many_arguments`)。
 /// `finish_handshake` へ渡す接続確立済みの I/O 資源
@@ -1186,11 +1207,7 @@ impl MoqtClient {
     /// SUBSCRIBE / PUBLISH などのメッセージにも載せる
     /// (draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter))。
     fn auth_parameters(&self) -> MessageParameters {
-        let mut parameters = MessageParameters::new();
-        for auth in &self.auth_tokens {
-            parameters.push(authorization_parameter(&auth.token));
-        }
-        parameters
+        with_auth_parameters(MessageParameters::new(), &self.auth_tokens)
     }
 
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
@@ -1638,11 +1655,17 @@ impl MoqtClient {
     }
 
     /// 指定した request に対して REQUEST_UPDATE を送信する (subscriber 側)
+    ///
+    /// SUBSCRIBE / FETCH / PUBLISH と同じ C4M 認可トークンを AUTHORIZATION_TOKEN (0x03)
+    /// として載せる。更新対象の track に紐づくトークンは、SUBSCRIBE などの元の要求だけで
+    /// なく REQUEST_UPDATE にも付与しなければならない
+    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
     pub async fn send_request_update(
         &mut self,
         request_id: u64,
         parameters: MessageParameters,
     ) -> Result<()> {
+        let parameters = with_auth_parameters(parameters, &self.auth_tokens);
         {
             let mut session = lock_session(&self.session);
             session
@@ -2295,6 +2318,62 @@ mod tests {
         }
         // 空のときはパラメータを載せない
         assert!(auth_message_parameters(&[]).is_empty());
+    }
+
+    /// REQUEST_UPDATE に SUBSCRIBE / PUBLISH と同じ AUTHORIZATION_TOKEN を追加すること
+    ///
+    /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは
+    /// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
+    /// メッセージへ MUST 付与するため、REQUEST_UPDATE だけが抜けてはならない。
+    /// 呼び出し側が渡したパラメータは保持する。
+    #[test]
+    fn request_update_carries_authorization_tokens() {
+        let tokens = vec![AuthToken {
+            token: AuthorizationToken::UseValue {
+                token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
+                token_value: vec![0x01, 0x02, 0x03],
+            },
+            claims: None,
+        }];
+        let mut base = MessageParameters::new();
+        base.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(192),
+        });
+        let parameters = with_auth_parameters(base, &tokens);
+        assert_eq!(
+            parameters.len(),
+            2,
+            "呼び出し側のパラメータと AUTHORIZATION_TOKEN の 2 つになること"
+        );
+        assert!(
+            parameters
+                .as_slice()
+                .iter()
+                .any(|parameter| parameter.param_type == PARAM_SUBSCRIBER_PRIORITY),
+            "呼び出し側のパラメータを保持すること"
+        );
+        assert!(
+            parameters
+                .as_slice()
+                .iter()
+                .any(|parameter| parameter.param_type == PARAM_AUTHORIZATION_TOKEN),
+            "AUTHORIZATION_TOKEN を載せること"
+        );
+
+        // トークンが無いときは呼び出し側のパラメータだけを送る
+        let mut base = MessageParameters::new();
+        base.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(192),
+        });
+        let parameters = with_auth_parameters(base, &[]);
+        assert_eq!(parameters.len(), 1, "トークンが無ければ追加しないこと");
+        assert_eq!(
+            parameters.as_slice()[0].param_type,
+            PARAM_SUBSCRIBER_PRIORITY,
+            "呼び出し側のパラメータだけになること"
+        );
     }
 
     /// `moqt` クレームを 1 つ持つ C4M トークンを compact 形式で組み立てる

@@ -11,6 +11,10 @@
 
 ## develop
 
+- [FIX] moq-sub の REQUEST_UPDATE に C4M の AUTHORIZATION_TOKEN を載せる
+  - SUBSCRIBE / FETCH と同じトークンを `MoqtClient::send_request_update` が付与する (draft-ietf-moq-msf-01 §11.4.3)
+  - @voluntas
+
 - [ADD] moq-pub が C4M トークンで接続するときに catalog の映像 / 音声の track に authInfo を載せる
   - 視聴側に CAT のトークン提示を求める `{"cat": "%c4m%"}` を載せる (draft-ietf-moq-msf-01 §5.2.42 / §11.4.1)
   - 値は視聴側の URI の予約パラメータ `c4m` を指す変数参照にし、配信者のトークンは載せない (§5.2.43 / §5.4)

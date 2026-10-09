@@ -503,6 +503,10 @@ pub async fn run(
         // 欠落範囲の補填が必要な場合は SUBSCRIBE 時に FILL_PARAMETERS を付与する。
 
         // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
+        //
+        // C4M 認可トークンは `MoqtClient::send_request_update` が付けるため、ここでは
+        // 指定しない (draft-ietf-moq-msf-01 §11.4.3)。SUBSCRIBE と同じトークンを
+        // REQUEST_UPDATE にも MUST 付与する。
         let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
         params.push(shiguredo_moqt::message_parameter::MessageParameter {
             param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
