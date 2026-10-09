@@ -855,3 +855,9 @@
   - `e2e-tests/` を追加し、`#[ignore]` 付きのテストで実 relay に対する往復 (SETUP / PUBLISH / SUBSCRIBE / 映像の受信 / MP4 の保存 / graceful shutdown) を検証する
   - GitHub Actions の E2E は publisher のみの検証から往復検証に置き換え、接続先のマスクと未設定時のスキップは維持する
   - @voluntas
+- [UPDATE] C4M の DPoP / JWS / JWK と CAT トークン経路の PBT と fuzz を追加する
+  - `pbt/tests/prop_c4m/dpop.rs` を追加し、Authorization Context の検証、暗号を必要としない鮮度とリプレイ保護の検証を仕様のモデルと比較する
+  - `pbt/tests/prop_c4m/jwt.rs` と `jwk.rs` を追加し、JWS compact のデコードと JWK のデコード / 正規化 JSON / 鍵変換を検証する
+  - `pbt/tests/prop_c4m/cat.rs` に compact 形式と COSE 形式のトークンのデコード、`CatClaims::validate` の判定順を追加する
+  - `fuzz/fuzz_targets/` に JWS / CAT クレーム / COSE メッセージ / Authorization Context / DPoP 検証の 5 本を追加する
+  - @voluntas

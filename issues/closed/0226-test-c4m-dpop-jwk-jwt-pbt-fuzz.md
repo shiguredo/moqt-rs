@@ -1,7 +1,7 @@
 # C4M の DPoP / JWS / JWK と CAT トークン経路に PBT と fuzzing を追加する
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-c4m-dpop-pbt-fuzz
 - Polished: {YYYY-MM-DD}
 
@@ -48,4 +48,13 @@ fuzzing は `fuzz/fuzz_targets/` に追加し、`fuzz/Cargo.toml` の `[[bin]]` 
 
 ## 解決方法
 
-{未着手}
+- `pbt/tests/prop_c4m/` に `dpop.rs` / `jwt.rs` / `jwk.rs` を追加し、`cat.rs` に compact / COSE 形式のトークンとクレーム検証の property を追加した。`common.rs` にテスト側の base64url エンコーダと JSON 組み立てのヘルパーを置き、`main.rs` にモジュールを登録した
+- `dpop.rs` は Authorization Context のデコードと 4 つの検証 (type / action / target / resource) を仕様のモデルと比較し、組み立てた JWS compact からの proof のデコード、鮮度の判定、リプレイキャッシュの保持と拒否をモデルと比較する。`DpopReplayCache` の保持期間と記録数の一致まで確認する
+- `jwt.rs` はヘッダの欠陥 (必須の `alg` 欠落 / 未知の `alg` / `crit` / 重複メンバー / 不正な JWK) と、compact 形式の 3 分割・パディング付き base64url の受理・署名対象の組み立てを検証する
+- `jwk.rs` は JWK のデコード (秘密鍵メンバー / 重複メンバーの拒否)、RFC 7638 §3.2 の正規化 JSON、`to_cose_key` / `matches_public_key` / `default_signing_algorithm` を検証する
+- `cat.rs` は compact 形式と COSE 形式 (COSE_Sign1 / COSE_Mac0 / base64url で包んだ形式 / detached payload / `alg` 無し) のデコードと、`CatClaims::validate` の判定順をモデルと比較する
+- `fuzz/fuzz_targets/` に `fuzz_decode_c4m_jws` / `fuzz_decode_c4m_cat_claims` / `fuzz_decode_c4m_cose_message` / `fuzz_c4m_authorization_context` / `fuzz_c4m_dpop_verify` を追加し、`fuzz/Cargo.toml` に登録した
+- 署名 / 検証 (`aws-lc-rs` feature) を使う property は対象外とし、`tests/test_c4m/` のテストに任せた
+- 検証: `make pbt` / `make test` / `make clippy` / `make fmt` が成功した。追加した 5 本の fuzz ターゲットはそれぞれ 10 秒以上の実行でクラッシュしなかった。`PBT_SEED` を 1 から 10 まで変えても 16 本の property がすべて成功した
+- 検証: `cargo llvm-cov -p pbt --tests` で `src/c4m/dpop.rs` が 0% から 84.6%、`src/c4m/jwt.rs` が 0% から 86.3%、`src/c4m/jwk.rs` が 0% から 72.0%、`src/c4m/cat.rs` が 31.8% から 64.6%、`src/c4m/base64url.rs` が 0% から 61.9% になった
+- 検証: 意図的に 4 種類の欠陥 (resource の整合チェック無効化 / JWK の秘密鍵メンバー検出無効化 / JWS の `crit` 拒否無効化 / compact 形式の署名対象のずらし) を入れて、追加した property がそれぞれ検出することを確認した

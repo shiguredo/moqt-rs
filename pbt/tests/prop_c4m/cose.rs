@@ -7,7 +7,7 @@ use shiguredo_moqt::c4m::cose::{
 };
 
 /// ヘッダを生成する
-fn sample_header(ctx: &mut noprop::TestCaseContext, algorithm: Algorithm) -> Header {
+pub(super) fn sample_header(ctx: &mut noprop::TestCaseContext, algorithm: Algorithm) -> Header {
     let key_id = match noprop::sample_weighted_index(ctx, &[2, 2, 1]) {
         0 => None,
         1 => Some(KeyId::Bytes(sample_bytes(ctx, 4))),
