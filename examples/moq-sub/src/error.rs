@@ -26,6 +26,14 @@ pub enum Error {
     WebTransport(String),
     /// トランスポートがセッション終了を検知した
     ConnectionClosed,
+    /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
+    ///
+    /// セッションは継続し該当ストリームだけが終端するため、pipeline は致命エラーにしない
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    StreamReset {
+        /// peer が載せた wire のエラーコード
+        error_code: u64,
+    },
     /// その他のエラー
     Other(String),
 }
@@ -36,6 +44,9 @@ impl fmt::Display for Error {
             Self::Quic(msg) => write!(f, "QUIC: {msg}"),
             Self::WebTransport(msg) => write!(f, "WebTransport: {msg}"),
             Self::ConnectionClosed => write!(f, "session closed"),
+            Self::StreamReset { error_code } => {
+                write!(f, "stream reset by peer (error code {error_code:#x})")
+            }
             Self::Moqt(e) => write!(f, "MoQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
@@ -108,6 +119,11 @@ impl From<tokio_moq::error::TransportError> for Error {
             | tokio_moq::error::TransportError::ResolutionFailed(msg) => Self::Other(msg),
             // セッション終了は表示文字列ではなく variant で判定できるように専用にする
             tokio_moq::error::TransportError::ConnectionClosed => Self::ConnectionClosed,
+            // peer の STOP_SENDING によるストリーム終端も、セッション終了と区別して
+            // 判定できるように専用にする (pipeline は致命エラーにしない)
+            tokio_moq::error::TransportError::StreamReset { error_code } => {
+                Self::StreamReset { error_code }
+            }
             // encode / decode 失敗は main ループが終了コード (PROTOCOL_VIOLATION など) を
             // 決めるため MessageError の variant を保って伝える
             tokio_moq::error::TransportError::Moqt(e) => Self::Moqt(e),
@@ -169,6 +185,24 @@ mod tests {
             "ConnectionClosed に振り分けられること: {err}"
         );
         assert_eq!(err.to_string(), "session closed");
+    }
+
+    /// peer のストリーム終端は専用の `StreamReset` variant になりセッション終了と区別できる
+    ///
+    /// 該当ストリームだけの終端でありセッションは継続するため、pipeline が
+    /// `ConnectionClosed` と同じ扱いをしないよう variant で判定できる必要がある。
+    #[test]
+    fn transport_error_mapping_uses_stream_reset_variant() {
+        let err = Error::from(TransportError::StreamReset { error_code: 0x1 });
+        assert!(
+            matches!(err, Error::StreamReset { error_code } if error_code == 0x1),
+            "StreamReset に振り分けられること: {err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "stream reset by peer (error code 0x1)",
+            "wire のコードが表示に残ること"
+        );
     }
 
     /// encode / decode 失敗は `Moqt` variant になり、main ループが終了コードを決められる

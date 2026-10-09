@@ -318,7 +318,11 @@ fn recv_data_stream_type(
     stream_id: DataStreamId,
     stream_type: u64,
 ) -> Result<DataStreamType, RecvDataStreamError>
-fn recv_data_stream_stop_sending(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
+fn recv_data_stream_stop_sending(
+    &mut self,
+    stream_id: DataStreamId,
+    error_code: Option<u64>,
+) -> Result<(), SessionError>
 fn recv_subgroup_header(
     &mut self,
     stream_id: DataStreamId,
@@ -332,6 +336,7 @@ fn recv_subgroup_object(
 fn recv_fetch_header(&mut self, stream_id: DataStreamId, header: &FetchHeader) -> Result<(), SessionError>
 fn recv_fetch_entry(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn recv_fetch_data_stream_closed(&mut self, request_id: u64, end: RequestStreamEnd) -> Result<(), SessionError>
+fn fetch_stop_sending_received(&mut self, request_id: u64, error_code: Option<u64>) -> Result<(), SessionError>
 fn recv_datagram(&mut self, raw: &[u8]) -> Result<DatagramAcceptance, SessionError>
 fn recv_object_datagram(&mut self, datagram: &ObjectDatagram) -> Result<TrackDataAcceptance, SessionError>
 fn recv_padding_datagram(&mut self) -> Result<(), SessionError>
@@ -358,6 +363,12 @@ request stream 上の GOAWAY の timeout が満了した場合も request を終
 `error_code` は `Option<u64>` であり、`None` は「アプリケーションエラーコード無し」を表す
 (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams)。WebTransport 経路で HTTP/3 の
 コードを MOQT のコードへ戻せない場合に `None` になる)。QUIC 経路は常にコードがあるため `Some`。
+`recv_data_stream_stop_sending(stream_id, error_code)` と
+`fetch_stop_sending_received(request_id, error_code)` の `error_code` も同じ意味である。
+受信したコードは `Session::stopped_outgoing_subgroup_error_code(request_id, track_alias,
+group_id, subgroup_id) -> Option<Option<u64>>` (外側が再オープン禁止の有無、内側がコードの有無) と
+`Fetch::peer_stop_sending_error_code` (外側がデータストリーム側の STOP_SENDING 受理の有無、
+内側がコードの有無) から参照できる。
 
 ### 送信 API
 

@@ -56,7 +56,7 @@
 //! - `recv_stream_message(request_id, msg)` / `SessionEvent::SendOnStream { request_id, message, fin }` —
 //!   bidi request stream 上の応答 (`fin` が true の応答がその stream の最終メッセージ)
 //! - `send_subgroup_header(...)` / `send_subgroup_object(...)` /
-//!   `send_data_stream_closed(stream_id, end)` / `recv_data_stream_stop_sending(stream_id)` /
+//!   `send_data_stream_closed(stream_id, end)` / `recv_data_stream_stop_sending(stream_id, error_code)` /
 //!   `recv_data_stream_type(stream_id, type_id)` / `recv_subgroup_header(...)` /
 //!   `recv_subgroup_object(...)` / `recv_fetch_header(...)` /
 //!   `recv_data_stream_closed(stream_id, end)` — uni data stream 用

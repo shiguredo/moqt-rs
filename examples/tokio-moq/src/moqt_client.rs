@@ -37,6 +37,7 @@ use shiguredo_moqt::{
 };
 
 use crate::error::{Result, TransportError};
+use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::transport::{
     BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
 };
@@ -437,6 +438,22 @@ pub struct MoqtClient {
     /// bidi 受信タスクへ STOP_SENDING の送出を依頼するチャネル (request_id 単位、値は error code と完了通知)
     bidi_stop_txs: HashMap<u64, mpsc::Sender<StopSendingCommand>>,
     closed_request_streams: HashSet<u64>,
+    /// peer の STOP_SENDING の観測 (QUIC stream id と wire のエラーコード)
+    ///
+    /// 接続確立時に受け取る。WebTransport over HTTP/2 は STOP_SENDING を送信 API へ
+    /// 伝える仕組みが無く本 example の対象外のため `None` になる。`pump_once` が受信し、
+    /// 該当する送信ストリームの終端として扱う。
+    stop_sending_rx: Option<StopSendingReceiver>,
+    /// FETCH 応答用 uni stream の stream id → request_id
+    ///
+    /// `Session::fetch_stop_sending_received` は request_id を要求するため、peer の
+    /// STOP_SENDING を受信したときに stream id から対象 FETCH を引き当てるための台帳である。
+    /// `send_fetch_response` が登録し、request の回収 (`cleanup_closed_requests`) で破棄する。
+    outgoing_fetch_streams: HashMap<u64, u64>,
+    /// peer 起点の bidi request stream の終端を Session へ通知済みの記録
+    ///
+    /// 詳細は [`TerminatedRequestStreams`] を参照する。
+    terminated_request_streams: TerminatedRequestStreams,
     /// peer から届いた未処理の要求 (relay が転送した SUBSCRIBE / FETCH など)
     incoming_requests: VecDeque<IncomingRequest>,
     /// peer から届いた未処理の REQUEST_UPDATE
@@ -472,6 +489,36 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // ここで捨てると保留 PUBLISH_DONE の flush 条件が満たされないため、アプリへ届ける
             | SessionEvent::ResetDataStream { .. }
     )
+}
+
+/// peer 起点の bidi request stream の終端を Session へ通知済みの記録
+///
+/// peer の cancel (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and
+/// Rejection)) では、RESET_STREAM (受信方向) と STOP_SENDING (送信方向) が対で届く。
+/// 同じ cancel で request の終端を 2 回 Session へ通知すると、subscription では未知 id
+/// としてセッションを閉じ、fetch / track_status では `RequestTerminated` が重複するため、
+/// 必ず 1 回に抑える。
+/// 記録は request の回収 (`closed_request_streams` からの削除) 後も保持する。
+/// 回収後に遅れて届く STOP_SENDING で再通知しないためである。
+/// 長寿命セッションでは request 数に比例して増えるが、1 件あたり 8 バイトであり、
+/// 二重通知でセッションを閉じさせないことを優先して上限は設けない。
+#[derive(Debug, Default)]
+struct TerminatedRequestStreams {
+    notified: HashSet<u64>,
+}
+
+impl TerminatedRequestStreams {
+    /// 終端を Session へ通知済みか
+    fn is_notified(&self, request_id: u64) -> bool {
+        self.notified.contains(&request_id)
+    }
+
+    /// 終端を Session へ通知済みとして記録する
+    ///
+    /// 記録は通知に成功したときだけ行う (失敗した場合は後着の close 通知で再試行する)。
+    fn mark_notified(&mut self, request_id: u64) {
+        self.notified.insert(request_id);
+    }
 }
 
 /// `Session` を排他ロックして取り出す
@@ -671,6 +718,22 @@ pub fn auth_message_parameters(tokens: &[AuthorizationToken]) -> MessageParamete
     parameters
 }
 
+// `finish_handshake` の引数を 7 個以下に保つため、接続確立済みの I/O 資源をまとめて渡す
+// (`clippy::too_many_arguments`)。
+/// `finish_handshake` へ渡す接続確立済みの I/O 資源
+struct HandshakeIo {
+    /// control stream 送信側 (SETUP 送信済み)
+    control_send: SendStream,
+    /// ストリームを開くためのハンドル
+    handle: StreamHandle,
+    /// peer の STOP_SENDING の観測。WebTransport over HTTP/2 では `None`
+    stop_sending_rx: Option<StopSendingReceiver>,
+    /// control stream 受信側
+    control_recv: ControlStream,
+    /// peer 起動の bidi request stream の受理
+    bidi_acceptor: BidiStreamAcceptor,
+}
+
 impl MoqtClient {
     /// QUIC 直接接続で MoQT client を確立する
     /// (draft-ietf-moq-transport-22 §6.2 (Session establishment) / §6.3 (Session initialization))
@@ -678,11 +741,15 @@ impl MoqtClient {
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送る。
     ///
+    /// `stop_sending_rx` は [`crate::quic::connect`] が返す peer の STOP_SENDING の観測で、
+    /// 該当する送信ストリームの終端として扱う。QUIC の code space のコードがそのまま流れる。
+    ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
     /// publisher も本 API を使える。
     pub async fn establish_quic(
         connection: s2n_quic::connection::Connection,
+        stop_sending_rx: StopSendingReceiver,
         path: &str,
         authority: &str,
         impl_name: &str,
@@ -728,10 +795,13 @@ impl MoqtClient {
 
         let client = Self::finish_handshake(
             session,
-            control_send,
-            handle,
-            control_recv,
-            BidiStreamAcceptor::Quic(bidi_acceptor),
+            HandshakeIo {
+                control_send,
+                handle,
+                stop_sending_rx: Some(stop_sending_rx),
+                control_recv,
+                bidi_acceptor: BidiStreamAcceptor::Quic(bidi_acceptor),
+            },
             c4m_tokens,
             task_monitor,
         )
@@ -763,7 +833,7 @@ impl MoqtClient {
         // 逆順にすると `accept_uni_stream` が receiver を取れず `StreamClosed` になる。
         // session のロックは制御ストリームの到着を待つ間だけ保持する (以降は receiver を
         // 取り出してロック外で待つ)。
-        let (wt_uni_rx, wt_bi_rx, session_state, wt_recv) = {
+        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state, wt_recv) = {
             let mut s = shared.lock().await;
             let wt_recv = s.accept_uni_stream().await?;
             // 受信ストリームの receiver は acceptor が持ち、accept の待機中に
@@ -776,8 +846,9 @@ impl MoqtClient {
             let bi_rx = s.take_bi_receiver().ok_or_else(|| {
                 TransportError::Internal("bidi stream receiver already taken".into())
             })?;
+            let stop_sending_rx = s.take_stop_sending_receiver();
             let session_state = s.session_state_receiver();
-            (uni_rx, bi_rx, session_state, wt_recv)
+            (uni_rx, bi_rx, stop_sending_rx, session_state, wt_recv)
         };
 
         let wt_send = {
@@ -809,13 +880,16 @@ impl MoqtClient {
 
         let client = Self::finish_handshake(
             session,
-            control_send,
-            handle,
-            control_recv,
-            BidiStreamAcceptor::WtH3 {
-                session: shared.clone(),
-                bi_rx: wt_bi_rx,
-                session_state: session_state.clone(),
+            HandshakeIo {
+                control_send,
+                handle,
+                stop_sending_rx,
+                control_recv,
+                bidi_acceptor: BidiStreamAcceptor::WtH3 {
+                    session: shared.clone(),
+                    bi_rx: wt_bi_rx,
+                    session_state: session_state.clone(),
+                },
             },
             c4m_tokens,
             task_monitor,
@@ -897,13 +971,18 @@ impl MoqtClient {
 
         let client = Self::finish_handshake(
             session,
-            control_send,
-            handle,
-            control_recv,
-            BidiStreamAcceptor::WtH2 {
-                session: shared.clone(),
-                bi_rx: wt_bi_rx,
-                session_state: session_state.clone(),
+            HandshakeIo {
+                control_send,
+                handle,
+                // WebTransport over HTTP/2 は STOP_SENDING を送信 API へ伝える仕組みが無く
+                // 本 example の対象外のため、観測 receiver を渡さない
+                stop_sending_rx: None,
+                control_recv,
+                bidi_acceptor: BidiStreamAcceptor::WtH2 {
+                    session: shared.clone(),
+                    bi_rx: wt_bi_rx,
+                    session_state: session_state.clone(),
+                },
             },
             c4m_tokens,
             task_monitor,
@@ -921,13 +1000,17 @@ impl MoqtClient {
 
     async fn finish_handshake(
         mut session: Session,
-        control_send: SendStream,
-        handle: StreamHandle,
-        mut control_recv: ControlStream,
-        bidi_acceptor: BidiStreamAcceptor,
+        io: HandshakeIo,
         c4m_tokens: &[Vec<u8>],
         task_monitor: &tokio_metrics::TaskMonitor,
     ) -> Result<Self> {
+        let HandshakeIo {
+            control_send,
+            handle,
+            stop_sending_rx,
+            mut control_recv,
+            bidi_acceptor,
+        } = io;
         // peer SETUP 受信
         let peer_setup = match control_recv.recv_message().await? {
             StreamRead::Value(message) => message,
@@ -978,6 +1061,9 @@ impl MoqtClient {
             bidi_sends: HashMap::new(),
             bidi_stop_txs: HashMap::new(),
             closed_request_streams: HashSet::new(),
+            stop_sending_rx,
+            outgoing_fetch_streams: HashMap::new(),
+            terminated_request_streams: TerminatedRequestStreams::default(),
             incoming_requests: VecDeque::new(),
             incoming_updates: VecDeque::new(),
             request_errors: HashMap::new(),
@@ -1303,6 +1389,8 @@ impl MoqtClient {
 
         // Session に FETCH 応答 stream の open を通知する
         data_plane.send_fetch_header(stream_id, request_id)?;
+        // 台帳に登録する
+        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&FetchHeader { request_id }.encode());
@@ -1561,14 +1649,26 @@ impl MoqtClient {
                                 self.drain_events().await?;
                             }
                             StreamRead::Closed(end) => {
+                                // peer の RESET_STREAM / FIN による終端。
+                                // STOP_SENDING 側の検知が先に Session へ終端を通知している場合
+                                // (同じ cancel に対して RESET_STREAM と STOP_SENDING が
+                                // 対で届く) は、2 回目の通知を no-op にする。
+                                let first_notification =
+                                    !self.terminated_request_streams.is_notified(rid);
                                 // 回収済み request (malformed 終端後など) への遅延 close は Session が
                                 // no-op 吸収するため、回収対象として登録しない (登録すると誰も除去できない)
                                 let register_for_cleanup = {
                                     let mut session = lock_session(&self.session);
-                                    let recv_result = session.recv_request_stream_closed(rid, end);
-                                    recv_result.is_ok()
-                                        && (session.subscription(rid).is_some()
-                                            || session.fetch(rid).is_some())
+                                    if first_notification
+                                        && session.recv_request_stream_closed(rid, end).is_err()
+                                    {
+                                        false
+                                    } else {
+                                        // 正常に終端した request と、STOP_SENDING 側で終端済みの
+                                        // request を回収対象にする
+                                        session.subscription(rid).is_some()
+                                            || session.fetch(rid).is_some()
+                                    }
                                 };
                                 if register_for_cleanup {
                                     self.closed_request_streams.insert(rid);
@@ -1601,7 +1701,169 @@ impl MoqtClient {
                     }
                 }
             }
+            // peer の STOP_SENDING の観測 (検知の扱いは `handle_stop_sending` を参照する)
+            maybe = async {
+                match self.stop_sending_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match maybe {
+                    Some(observed) => self.handle_stop_sending(observed).await?,
+                    // 接続終了で観測チャネルが閉じた場合は receiver を落とす。
+                    // 閉じた receiver を poll し続けると select が即時完了を繰り返す
+                    None => self.stop_sending_rx = None,
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// peer から受信した STOP_SENDING を該当する送信ストリームの終端として扱う
+    ///
+    /// peer の cancel は該当ストリームだけを終端させ、セッションと他のストリームの配信は
+    /// 継続する (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection) は
+    /// cancel の手段を定め、§6.6 (Termination) は request 単位のエラーをセッションエラーとして
+    /// 扱うかは端点の判断に委ねている。本 example は扱わない)。
+    /// 検知はフレーム観測で行い、送信 API の失敗からは推測しない (FIN ack 済みの
+    /// ストリームでは STOP_SENDING に由来するエラーが `send` / `finish` に現れないため)。
+    /// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため、h3 層への通知と
+    /// MOQT のコードへの remap を行う (draft-ietf-webtrans-http3-16 §4.4)。
+    async fn handle_stop_sending(&mut self, observed: StopSendingObserved) -> Result<()> {
+        let StopSendingObserved {
+            stream_id,
+            error_code: wire_code,
+        } = observed;
+        // h3 層の状態更新。h3 層が接続エラーと判定した場合は接続が閉じられる
+        // (`WtSession::notify_received_stop_sending` の doc 参照) が、ここでは MOQT 層の処理を
+        // 打ち切らず、該当ストリームの終端として扱う
+        if let Err(e) = self
+            .handle
+            .notify_received_stop_sending(stream_id, wire_code)
+            .await
+        {
+            tracing::warn!(
+                "Failed to notify the WebTransport layer of STOP_SENDING (stream_id={stream_id}): {e}"
+            );
+        }
+        // remap できないコードは「アプリケーションエラーコード無し」を表す None になる
+        let error_code = self.handle.remap_stop_sending_error_code(wire_code);
+        // 自側が開いた bidi request stream の送信方向への STOP_SENDING
+        if let Some(request_id) = self.request_id_for_outgoing_stream(stream_id) {
+            self.terminate_request_stream_by_stop_sending(request_id, error_code)
+                .await?;
+            return Ok(());
+        }
+        // FETCH 応答データストリーム (FETCH_OK 後の応答 stream)
+        //
+        // この経路は `recv_request_stream_closed` を呼ばないため二重通知ガードは使わない。
+        // データストリーム側の STOP_SENDING は fetch state の終端だけを行い、bidi request
+        // stream の終端通知は後着の close 通知 (`pump_once` の Closed 分岐) が 1 回だけ行う。
+        if let Some(request_id) = self.outgoing_fetch_streams.get(&stream_id).copied() {
+            {
+                let mut session = lock_session(&self.session);
+                // bidi request stream 側の STOP_SENDING が先に fetch を終端している場合、
+                // 後着の data stream 側は該当ストリームの終端として吸収する
+                let terminated = session
+                    .fetch(request_id)
+                    .is_none_or(|fetch| fetch.state == FetchState::Terminated);
+                if terminated {
+                    tracing::debug!(
+                        "Ignoring STOP_SENDING for a terminated FETCH (request_id={request_id})"
+                    );
+                } else if let Err(e) = session.fetch_stop_sending_received(request_id, error_code) {
+                    // 予期しないエラーも該当ストリームの終端として吸収するが、原因を追えるように warn に残す
+                    tracing::warn!(
+                        "Failed to handle STOP_SENDING for FETCH (request_id={request_id}): {e}"
+                    );
+                }
+            }
+            self.drain_events().await?;
+            return Ok(());
+        }
+        // outgoing subgroup data stream と fill fetch stream。
+        // 未知の stream id (終端済みなど) は Session が session を閉じずにエラーを返すため、
+        // 該当ストリームの終端として吸収する。STOP_SENDING の観測と、RESET_STREAM / FIN による
+        // 終端通知の順序は保証されない (別経路から届く) ため、どちらの順序でも吸収できる
+        // ようにしている。
+        {
+            let mut session = lock_session(&self.session);
+            if let Err(e) =
+                session.recv_data_stream_stop_sending(DataStreamId(stream_id), error_code)
+            {
+                tracing::debug!(
+                    "Ignoring STOP_SENDING for an unknown outgoing data stream (stream_id={stream_id}): {e}"
+                );
+            }
+        }
+        self.drain_events().await?;
+        Ok(())
+    }
+
+    /// 送信中の bidi request stream の stream id から request_id を引く
+    ///
+    /// 自側が送信方向を FIN した request は `bidi_sends` から外れているため引き当たらない
+    /// (STOP_SENDING は該当ストリームの終端として吸収される)。仕様適合な cancel は
+    /// 相手の送信方向を RESET_STREAM / FIN で閉じるため、request の終端はその close 通知で
+    /// 確定する (draft-ietf-moq-transport-22 §6.4.2.3)。
+    fn request_id_for_outgoing_stream(&self, stream_id: u64) -> Option<u64> {
+        self.bidi_sends
+            .iter()
+            .find(|(_, send)| send.stream_id() == stream_id)
+            .map(|(request_id, _)| *request_id)
+    }
+
+    /// peer の STOP_SENDING による bidi request stream の終端を Session へ通知する
+    ///
+    /// Session が request を保持している場合に限り通知する。回収済みの request への
+    /// `recv_request_stream_closed` は未知 id としてセッションを閉じるため、
+    /// peer の STOP_SENDING だけでセッションを終わらせない。
+    /// RESET_STREAM と対で届いた場合の二重通知は
+    /// [`TerminatedRequestStreams`] で防ぐ。
+    async fn terminate_request_stream_by_stop_sending(
+        &mut self,
+        request_id: u64,
+        error_code: Option<u64>,
+    ) -> Result<()> {
+        let known = {
+            let session = lock_session(&self.session);
+            session.subscription(request_id).is_some()
+                || session.fetch(request_id).is_some()
+                || session.track_status_request(request_id).is_some()
+        };
+        if !known || self.terminated_request_streams.is_notified(request_id) {
+            return Ok(());
+        }
+        let notified = {
+            let mut session = lock_session(&self.session);
+            // 受信方向の RESET_STREAM と同じ終端として扱う。`reliable_size` は s2n-quic が
+            // RESET_STREAM_AT に対応しないため None を渡す
+            match session.recv_request_stream_closed(
+                request_id,
+                RequestStreamEnd::Reset {
+                    error_code,
+                    reliable_size: None,
+                },
+            ) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to terminate the request stream for STOP_SENDING (request_id={request_id}): {e}"
+                    );
+                    false
+                }
+            }
+        };
+        if notified {
+            // 通知に成功したときだけ記録する。失敗した場合は後着の close 通知で再試行する
+            self.terminated_request_streams.mark_notified(request_id);
+        }
+        // 回収対象 (`closed_request_streams`) への登録は bidi request stream の close 通知
+        // (`pump_once` の Closed 分岐) に委ねる。仕様適合な cancel は相手の送信方向を
+        // RESET_STREAM または FIN で閉じるため (draft-ietf-moq-transport-22 §6.4.2.3)、
+        // その close 通知で登録される。ここで登録すると、保留中の PUBLISH_DONE を
+        // 持つ subscription を回収条件だけで破棄する経路を増やしてしまう。
+        self.drain_events().await?;
         Ok(())
     }
 
@@ -1793,6 +2055,9 @@ impl MoqtClient {
         for request_id in forgotten {
             self.closed_request_streams.remove(&request_id);
             self.bidi_stop_txs.remove(&request_id);
+            // FETCH 応答 stream の台帳も request の回収で破棄する
+            self.outgoing_fetch_streams
+                .retain(|_, rid| *rid != request_id);
             if let Some(mut send) = self.bidi_sends.remove(&request_id) {
                 let _ = send.finish();
             }
@@ -1896,5 +2161,23 @@ mod tests {
     #[test]
     fn established_is_not_notable_event() {
         assert!(!is_notable_event(&SessionEvent::Established));
+    }
+
+    /// 終端通知済みの記録は request_id 単位で独立している
+    ///
+    /// peer の cancel では RESET_STREAM (受信方向) と STOP_SENDING (送信方向) が対で届く
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// 2 回目の通知でセッションを閉じさせないため、記録済みの request だけを
+    /// 通知済みとして扱うことを固定する。記録は通知に成功したときだけ行う。
+    #[test]
+    fn terminated_request_streams_notifies_once() {
+        let mut streams = TerminatedRequestStreams::default();
+        assert!(!streams.is_notified(7), "記録前は未通知であること");
+        streams.mark_notified(7);
+        assert!(streams.is_notified(7), "記録後は通知済みであること");
+        assert!(
+            !streams.is_notified(8),
+            "別の request は独立して未通知のままであること"
+        );
     }
 }

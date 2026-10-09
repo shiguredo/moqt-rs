@@ -36,10 +36,9 @@ impl SendStream {
     /// データを送信する
     pub async fn send(&mut self, data: Bytes) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => s
-                .send(data)
-                .await
-                .map_err(|e| TransportError::Quic(format!("{e}"))),
+            SendStream::Quic(s) => s.send(data).await.map_err(|e| {
+                TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
+            }),
             SendStream::WtH3(s) => s.send(&data).await,
             SendStream::WtH2(s) => s.send(&data).await,
         }
@@ -57,7 +56,9 @@ impl SendStream {
     /// ストリームを終了する
     pub fn finish(&mut self) -> Result<(), TransportError> {
         match self {
-            SendStream::Quic(s) => s.finish().map_err(|e| TransportError::Quic(format!("{e}"))),
+            SendStream::Quic(s) => s.finish().map_err(|e| {
+                TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
+            }),
             SendStream::WtH3(s) => s.finish(),
             SendStream::WtH2(s) => s.finish(),
         }
@@ -71,8 +72,9 @@ impl SendStream {
             SendStream::Quic(s) => {
                 let code = s2n_quic::application::Error::new(error_code)
                     .map_err(|e| TransportError::Quic(format!("{e}")))?;
-                s.reset(code)
-                    .map_err(|e| TransportError::Quic(format!("{e}")))
+                s.reset(code).map_err(|e| {
+                    TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
+                })
             }
             SendStream::WtH3(s) => s.reset(error_code),
             SendStream::WtH2(s) => s.reset(error_code),
@@ -146,6 +148,38 @@ impl RecvStream {
     }
 }
 
+/// STOP_SENDING のエラーコード変換に使う transport 種別
+///
+/// wire のエラーコードの code space は transport ごとに異なるため、変換則を型で分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopSendingTransport {
+    /// QUIC 直接接続 (`moqt://`)。QUIC の code space を共有する
+    Quic,
+    /// WebTransport over HTTP/3。HTTP/3 の code space を共有する
+    WtH3,
+    /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶ
+    /// (STOP_SENDING の観測経路は無いが、変換則は QUIC と同じで remap しない)
+    WtH2,
+}
+
+/// peer から受信した STOP_SENDING の wire コードを MOQT のコードへ写す
+///
+/// QUIC 直接接続は QUIC の code space を共有するため remap しない。
+/// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため §4.4 の remap を行い、
+/// remap できない値は「アプリケーションエラーコード無し」を表す `None` にする
+/// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
+///
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub(crate) fn remap_stop_sending_error_code(
+    transport: StopSendingTransport,
+    wire_code: u64,
+) -> Option<u64> {
+    match transport {
+        StopSendingTransport::Quic | StopSendingTransport::WtH2 => Some(wire_code),
+        StopSendingTransport::WtH3 => crate::webtransport_h3::wt_stop_sending_error_code(wire_code),
+    }
+}
+
 /// 送信ストリームを開くためのハンドル (Clone 可能)
 ///
 /// 将来の FETCH 等でデータストリームを開く際にも使用する。
@@ -188,6 +222,43 @@ impl StreamHandle {
                 let stream = session.open_uni_stream().await?;
                 Ok(SendStream::WtH2(stream))
             }
+        }
+    }
+
+    /// peer から受信した STOP_SENDING を WebTransport (h3) 層へ通知する
+    ///
+    /// WebTransport over HTTP/3 は h3 層がストリーム状態を持つため、Sans I/O の h3 層へ
+    /// 受信を通知する必要がある (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
+    /// QUIC 直接接続は h3 層を持たず、WebTransport over HTTP/2 は STOP_SENDING を
+    /// 送信 API へ伝える仕組みが無く本 example の対象外のため、どちらも何もしない。
+    pub(crate) async fn notify_received_stop_sending(
+        &self,
+        stream_id: u64,
+        error_code: u64,
+    ) -> Result<(), TransportError> {
+        match self {
+            StreamHandle::Quic(_) | StreamHandle::WtH2(_) => Ok(()),
+            StreamHandle::WtH3(session) => {
+                let mut session = session.lock().await;
+                session.notify_received_stop_sending(stream_id, error_code)
+            }
+        }
+    }
+
+    /// peer から受信した STOP_SENDING の wire コードを MOQT のコードへ戻す
+    ///
+    /// `None` は「アプリケーションエラーコード無し」を表す (draft-ietf-webtrans-http3-16 §4.4)。
+    /// 変換則は [`remap_stop_sending_error_code`] を参照する。
+    pub(crate) fn remap_stop_sending_error_code(&self, wire_code: u64) -> Option<u64> {
+        remap_stop_sending_error_code(self.stop_sending_transport(), wire_code)
+    }
+
+    /// STOP_SENDING のコード変換に使う transport 種別
+    fn stop_sending_transport(&self) -> StopSendingTransport {
+        match self {
+            StreamHandle::Quic(_) => StopSendingTransport::Quic,
+            StreamHandle::WtH3(_) => StopSendingTransport::WtH3,
+            StreamHandle::WtH2(_) => StopSendingTransport::WtH2,
         }
     }
 
@@ -495,5 +566,54 @@ impl BidiStreamAcceptor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HTTP/3 以外の transport は wire のコードをそのまま MOQT のコードとして使う
+    ///
+    /// QUIC 直接接続は QUIC の code space を MOQT と共有するため remap しない。
+    /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードを直接運ぶため
+    /// remap しない (本 example に STOP_SENDING の観測経路は無いが、変換則を固定する)。
+    /// 32 ビットを超える値も切り詰めない。
+    #[test]
+    fn remap_stop_sending_error_code_keeps_non_http3_codes() {
+        for wire_code in [0, 0x1, 0x1234_5678_9abc] {
+            assert_eq!(
+                remap_stop_sending_error_code(StopSendingTransport::Quic, wire_code),
+                Some(wire_code),
+                "QUIC のコードは remap せずそのまま使うこと: {wire_code:#x}"
+            );
+            assert_eq!(
+                remap_stop_sending_error_code(StopSendingTransport::WtH2, wire_code),
+                Some(wire_code),
+                "HTTP/2 の capsule のコードは remap せずそのまま使うこと: {wire_code:#x}"
+            );
+        }
+    }
+
+    /// WebTransport over HTTP/3 は §4.4 の remap を行い、できない値はコード無しになる
+    #[test]
+    fn remap_stop_sending_error_code_remaps_webtransport_codes() {
+        use shiguredo_http3::webtransport::ApplicationErrorCode;
+        let http3_code = ApplicationErrorCode::to_http3_code(0x1);
+        assert_eq!(
+            remap_stop_sending_error_code(StopSendingTransport::WtH3, http3_code),
+            Some(0x1),
+            "HTTP/3 のコードは MOQT のコードへ戻すこと"
+        );
+        assert_eq!(
+            remap_stop_sending_error_code(StopSendingTransport::WtH3, 0x170d7b68),
+            None,
+            "WT_APPLICATION_ERROR の範囲外はコード無し (None) になること"
+        );
+        assert_eq!(
+            remap_stop_sending_error_code(StopSendingTransport::WtH3, u64::MAX),
+            None,
+            "範囲外の上限値もコード無し (None) になること"
+        );
     }
 }

@@ -903,10 +903,17 @@ impl Session {
     /// fill fetch stream に対する `STOP_SENDING` は subscriber による独立 cancel であり
     /// (draft-ietf-moq-transport-22 §3.4.1)、当該 stream のみ除去して `Ok` で吸収する
     /// (subscription には影響しない。保留 PUBLISH_DONE があり最後の stream が
-    /// なくなれば flush する)。
+    /// なくなれば flush する)。この経路ではエラーコードを保持しない (fill fetch は
+    /// 再オープン禁止の対象ではなく、cancel 後の状態を要求する API が無いため)。
+    ///
+    /// `error_code` は peer が STOP_SENDING に載せたアプリケーションエラーコードである
+    /// (`None` は「アプリケーションエラーコード無し」。意味は [`RequestStreamEnd::Reset`] の
+    /// `error_code` を参照する)。受信したコードは再オープン禁止エントリと一緒に保持し、
+    /// [`Session::stopped_outgoing_subgroup_error_code`] で参照できる。
     pub fn recv_data_stream_stop_sending(
         &mut self,
         stream_id: DataStreamId,
+        error_code: Option<u64>,
     ) -> Result<(), SessionError> {
         self.require_established()?;
         // 保留 PUBLISH_DONE の flush は `reset_outgoing_data_stream_with_code` と対称に扱う。
@@ -939,15 +946,41 @@ impl Session {
         // 受けた Subgroup は再オープン禁止として request_id 単位で記録する。終端状態
         // (`StoppedByPeer` / `Reset`) とは独立に保持し、Forward State 0→1 の
         // REQUEST_UPDATE 受理まで解除しない。FirstObjectId の未解決 subgroup は `None` で記録する。
+        // peer が載せたエラーコードも同時に保持し、cancel の理由を参照できるようにする。
         self.stopped_outgoing_subgroups
             .entry(request_id)
             .or_default()
-            .insert((track_alias, group_id, subgroup_id));
+            .insert((track_alias, group_id, subgroup_id), error_code);
         if let Some(subgroup_id) = subgroup_id {
             self.my_subgroups
                 .mark_stop_sending(track_alias, group_id, subgroup_id);
         }
         Ok(())
+    }
+
+    /// STOP_SENDING で再オープン禁止になった outgoing Subgroup のエラーコードを返す
+    ///
+    /// 外側の `Option` は「その Subgroup が STOP_SENDING を受けて再オープン禁止中か」を、
+    /// 内側は「peer が載せたアプリケーションエラーコードを解釈できたか」を表す
+    /// (内側の `None` の意味は [`RequestStreamEnd::Reset`] の `error_code` を参照する)。
+    /// `subgroup_id` の `None` は FirstObjectId モードの未解決 subgroup を表す。
+    /// 記録時のキーと完全一致する `(request_id, track_alias, group_id, subgroup_id)` の
+    /// エントリだけを返す。再オープン禁止の判定 (`outgoing_subgroup_reopen_blocked`) は
+    /// alias を共有する別 request のエントリも照合するため、本 API が `None` を返しても
+    /// 再オープンが禁止されている場合がある。
+    /// エントリは Forward State 0→1 の REQUEST_UPDATE 受理または
+    /// `Session::forget_subscription` で破棄される。
+    pub fn stopped_outgoing_subgroup_error_code(
+        &self,
+        request_id: u64,
+        track_alias: u64,
+        group_id: u64,
+        subgroup_id: Option<u64>,
+    ) -> Option<Option<u64>> {
+        self.stopped_outgoing_subgroups
+            .get(&request_id)
+            .and_then(|stopped| stopped.get(&(track_alias, group_id, subgroup_id)))
+            .copied()
     }
 
     /// outgoing Subgroup が STOP_SENDING による再オープン禁止中か判定する
@@ -967,7 +1000,7 @@ impl Session {
     ) -> bool {
         self.stopped_outgoing_subgroups
             .values()
-            .any(|stopped| stopped.contains(&(track_alias, group_id, subgroup_id)))
+            .any(|stopped| stopped.contains_key(&(track_alias, group_id, subgroup_id)))
     }
 
     /// 受信 uni stream の type varint を Session に通知する

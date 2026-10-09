@@ -279,6 +279,7 @@ impl Session {
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
+            peer_stop_sending_error_code: None,
             subscriber_priority: parameters.subscriber_priority(),
             group_order: parameters.group_order(),
             // 自側は subscriber のため FETCH_OK を送らず、INCLUDE_PROPERTIES の保持は不要
@@ -495,8 +496,17 @@ impl Session {
     /// bidi request stream の終端を待たずに破棄できる
     /// (`forget_fetch` の doc 参照。終端通知漏れの場合は従来どおり破棄前に
     /// bidi request stream の終端 (`RequestTerminated`) を確認すること)。
+    ///
+    /// `error_code` は peer が STOP_SENDING に載せたアプリケーションエラーコードである
+    /// (`None` は「アプリケーションエラーコード無し」。意味は [`RequestStreamEnd::Reset`] の
+    /// `error_code` を参照する)。受信したコードは `Fetch` に保持し、
+    /// [`Session::fetch`] の戻り値から参照できる。
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
-    pub fn fetch_stop_sending_received(&mut self, request_id: u64) -> Result<(), SessionError> {
+    pub fn fetch_stop_sending_received(
+        &mut self,
+        request_id: u64,
+        error_code: Option<u64>,
+    ) -> Result<(), SessionError> {
         self.require_established()?;
         {
             let fetch = self.fetches.get_mut(&request_id).ok_or_else(|| {
@@ -518,6 +528,8 @@ impl Session {
                 ));
             }
             fetch.state = FetchState::Terminated;
+            // cancel の理由を参照できるよう、解釈できたコード / できなかったことを保持する
+            fetch.peer_stop_sending_error_code = Some(error_code);
         }
         self.remove_incoming_data_streams_for_request(request_id);
         // ローカル送信方向を reset で閉じるため、request stream GOAWAY の reset deadline は
@@ -731,6 +743,7 @@ impl Session {
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
+            peer_stop_sending_error_code: None,
             subscriber_priority: fetch.parameters.subscriber_priority(),
             group_order,
             // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):

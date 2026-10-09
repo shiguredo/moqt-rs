@@ -23,6 +23,20 @@ pub enum TransportError {
     WtH2(shiguredo_http2::webtransport::WtError),
     /// 接続がクローズ済み
     ConnectionClosed,
+    /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
+    ///
+    /// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API (send / finish /
+    /// reset) を `StreamError::StreamReset` で失敗させる。これは該当ストリームだけの終端で
+    /// ありセッションは継続するため (draft-ietf-moq-transport-22 §6.4.2.3 (Request
+    /// Cancellation and Rejection))、アプリはセッション終了と区別して扱う必要がある。
+    /// `error_code` は transport 依存の wire コードであり、QUIC 直接接続は QUIC の code space、
+    /// WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ戻すには
+    /// `StreamHandle::remap_stop_sending_error_code` を通す)。受信方向の終端
+    /// (RESET_STREAM) は `RequestStreamEnd::Reset` が運ぶ。
+    StreamReset {
+        /// peer が載せた wire のエラーコード
+        error_code: u64,
+    },
     /// MOQT メッセージの encode / decode 失敗
     ///
     /// draft-ietf-moq-transport-22 §9 (Control Messages) と §9.20.1 (Parameter Scope) は
@@ -53,6 +67,26 @@ impl TransportError {
     pub(crate) fn transport(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self::Transport(e.into())
     }
+
+    /// ストリーム送信 API のエラーを transport エラーへ写す
+    ///
+    /// peer が STOP_SENDING で送信方向を閉じた場合、s2n-quic は送信 API を
+    /// `StreamError::StreamReset` で失敗させる。セッションは継続し、該当ストリームだけが
+    /// 終端するため、アプリがセッション終了と切り分けられるよう [`Self::StreamReset`] にする
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// `fallback` は `StreamReset` 以外のエラーを畳む先であり、経路ごとの既存の表示
+    /// (QUIC 直接接続は [`Self::Quic`]、WebTransport は [`Self::Transport`]) を保つために渡す。
+    pub(crate) fn from_send_error(
+        e: s2n_quic::stream::Error,
+        fallback: impl FnOnce(s2n_quic::stream::Error) -> Self,
+    ) -> Self {
+        match e {
+            s2n_quic::stream::Error::StreamReset { error, .. } => Self::StreamReset {
+                error_code: error.into(),
+            },
+            e => fallback(e),
+        }
+    }
 }
 
 impl std::fmt::Display for TransportError {
@@ -66,6 +100,9 @@ impl std::fmt::Display for TransportError {
             Self::Http2(e) => write!(f, "http2 error: {e}"),
             Self::WtH2(e) => write!(f, "webtransport over http2 error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
+            Self::StreamReset { error_code } => {
+                write!(f, "stream reset by peer (error code {error_code:#x})")
+            }
             Self::Moqt(e) => write!(f, "MOQT message error: {e}"),
             Self::ConnectFailed { status } => match status {
                 Some(s) => write!(f, "CONNECT failed with status {s}"),

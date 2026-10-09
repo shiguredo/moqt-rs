@@ -11,6 +11,21 @@
 
 ## develop
 
+- [CHANGE] `Session::recv_data_stream_stop_sending` と `Session::fetch_stop_sending_received` に、peer の STOP_SENDING のエラーコードを受け取る引数を追加する
+  - `None` は「アプリケーションエラーコード無し」を表す (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))
+  - `tokio_moq` の `quic::connect` の戻り値と `MoqtClient::establish_quic` の引数にも STOP_SENDING の観測を追加する
+  - @voluntas
+
+- [ADD] `Session::stopped_outgoing_subgroup_error_code` と `Fetch::peer_stop_sending_error_code` を追加し、受信した STOP_SENDING のエラーコードを参照できるようにする
+  - 外側の `Option` が停止 / 受信の有無、内側がコードの有無を表す
+  - `tokio_moq` に `TransportError::StreamReset` と `quic::StopSendingObserved` / `quic::StopSendingReceiver` を追加する
+  - @voluntas
+
+- [FIX] peer の STOP_SENDING のエラーコードを MOQT のコードへ戻し、example が該当する送信ストリームだけを終端して配信を継続するようにする
+  - QUIC 直接接続は wire のコード、WebTransport over HTTP/3 は §4.4 の remap を通す。bidi request stream は RESET_STREAM と対で届いても終端通知を 1 回にする
+  - peer によるストリーム終端の送信エラーをセッション終了と区別し、moq-pub / moq-sub は該当ストリームを捨てて配信 / 受信を継続する
+  - @voluntas
+
 - [ADD] moq-pub / moq-sub が `--namespace` の省略時に `--url` の `msf` fragment の namespace を使う
   - `#msf:<track-identifier>` の track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) の表現としてパースする
   - fragment が無い、`msf` 以外、または namespace が 0 フィールドの場合はエラーにする

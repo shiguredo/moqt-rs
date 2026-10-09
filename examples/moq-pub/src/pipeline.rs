@@ -194,6 +194,12 @@ fn reset_open_subgroup_stream(
             tracing::info!("Session closed by transport");
             Ok(true)
         }
+        Err(e) if is_peer_stream_reset(&e) => {
+            // peer が既に当該ストリームを cancel している。該当ストリームは終端済みであり
+            // セッションは継続するため、後始末を続ける
+            tracing::info!("Subgroup stream was already reset by peer");
+            Ok(false)
+        }
         Err(e) => Err(e),
     }
 }
@@ -271,10 +277,11 @@ pub async fn run(
         async move {
             let client = match cfg.transport {
                 Transport::Quic => {
-                    let connection =
+                    let (connection, stop_sending_rx) =
                         quic::connect(socket_addr, server_name, cfg.cert.as_deref()).await?;
                     let (client, _acceptor) = MoqtClient::establish_quic(
                         connection,
+                        stop_sending_rx,
                         &cfg.url.path,
                         &authority_url,
                         "moq-pub",
@@ -732,6 +739,18 @@ pub async fn run(
                         session_ended = true;
                         break 'main;
                     }
+                    Err(e) if is_peer_stream_reset(&e) => {
+                        // peer が subgroup stream を cancel した (§11.3.2)。該当ストリームの
+                        // writer を捨て、次の group id へ進める。STOP_SENDING を受けた
+                        // Subgroup の再オープンは Forward State 0→1 の REQUEST_UPDATE 受理まで
+                        // 禁止されるため、同じ group id (この example は subgroup id 0 固定) を
+                        // 使うと `send_subgroup_header` が拒否される
+                        current_video_writer = None;
+                        video_group_id += 1;
+                        tracing::info!(
+                            "Subgroup stream was reset by peer; dropping the current video group"
+                        );
+                    }
                     Err(e) => {
                         // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
                         close_on_message_error(&mut client, &e).await;
@@ -865,6 +884,15 @@ pub async fn run(
                         session_ended = true;
                         break 'main;
                     }
+                    Err(e) if is_peer_stream_reset(&e) => {
+                        // peer が音声の subgroup stream を cancel した (§11.3.2)。該当ストリーム
+                        // だけを終端し、次のフレームから新しい group で再開する。同じ group id を
+                        // 使うと再オープン禁止で拒否されるため、通常経路と同じくここで進める
+                        audio_group_id += 1;
+                        tracing::info!(
+                            "Audio subgroup stream was reset by peer; continuing with the next frame"
+                        );
+                    }
                     Err(e) => {
                         // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
                         close_on_message_error(&mut client, &e).await;
@@ -951,6 +979,11 @@ pub async fn run(
                         tracing::info!("Session closed by transport");
                         session_ended = true;
                         break 'main;
+                    }
+                    Err(e) if is_peer_stream_reset(&e) => {
+                        // peer が bidi request stream を cancel した (§6.4.2.3)。該当 request
+                        // だけが終端するため、パイプラインは継続する
+                        tracing::info!("Request stream was reset by peer; continuing");
                     }
                     Err(e) => {
                         // MOQT メッセージの encode / decode 失敗は終了コード付きで閉じる
@@ -1070,6 +1103,20 @@ fn unsupported_macos_encoder(codec: &str) -> Error {
 /// 依存しない)。
 fn is_transport_session_end(error: &Error) -> bool {
     matches!(error, Error::ConnectionClosed)
+}
+
+/// transport エラーが peer によるストリーム終端 (送信方向への STOP_SENDING) を表すかどうか
+///
+/// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API を `StreamReset` で
+/// 失敗させる。これは該当ストリームだけの終端でありセッションは継続するため
+/// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+/// pipeline は致命エラーにしない。
+///
+/// WebTransport over HTTP/2 は STOP_SENDING の観測経路を持たず、peer の cancel は
+/// `TransportError::StreamClosed` として現れるため本判定の対象外である
+/// (該当経路は従来どおり致命扱いのまま)。
+fn is_peer_stream_reset(error: &Error) -> bool {
+    matches!(error, Error::StreamReset { .. })
 }
 
 /// transport エラーがセッション終了 (接続クローズ) を表すかどうか
@@ -2145,6 +2192,30 @@ mod tests {
             assert!(
                 !is_transport_session_end(&error),
                 "transport 以外のエラーはセッション終了として扱わないこと: {error}"
+            );
+        }
+    }
+
+    /// peer のストリーム終端だけを `is_peer_stream_reset` が真とする
+    ///
+    /// 該当ストリームだけの終端でありセッションは継続するため、pipeline は致命エラーに
+    /// しない。セッション終了 (`ConnectionClosed`) は別扱いのままであることも固定する。
+    #[test]
+    fn is_peer_stream_reset_only_matches_stream_reset() {
+        assert!(
+            is_peer_stream_reset(&Error::from(TransportError::StreamReset {
+                error_code: 0x1
+            })),
+            "peer のストリーム終端は真とすること"
+        );
+        for error in [
+            Error::from(TransportError::ConnectionClosed),
+            Error::from(TransportError::Quic("connection failed".to_string())),
+            Error::Other("other".to_string()),
+        ] {
+            assert!(
+                !is_peer_stream_reset(&error),
+                "ストリーム終端以外は偽とすること: {error}"
             );
         }
     }

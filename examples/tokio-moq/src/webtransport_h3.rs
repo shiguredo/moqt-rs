@@ -174,6 +174,21 @@ impl ClientConnectionState {
         self.drain_after(result)
     }
 
+    /// QUIC からストリームの STOP_SENDING を受けたことを h3 層へ伝える
+    ///
+    /// h3 層は Sans I/O のため、I/O 層が通知しないと STOP_SENDING を処理できない
+    /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。h3 層は登録済みの
+    /// WebTransport ストリームに対して `WebTransportEvent::StreamStopSending` を、
+    /// それ以外には汎用の `Event::StopSending` を発火する。本 example は
+    /// `register_local_wt_stream` を呼ばないため実際には後者になるが、送信データの破棄と
+    /// QPACK の Stream Cancellation という h3 層側の処理はどちらでも行われる。
+    /// example はフレーム観測でコードを既に持つため、これらのイベントは h3 層の状態更新として
+    /// drain して捨てる。
+    fn process_stop_sending(&mut self, id: u64, error_code: u64) -> H3FeedOutcome {
+        let result = self.h3_conn.stop_sending(id, error_code);
+        self.drain_after(result)
+    }
+
     /// h3 層へ入力を流した結果を保ったままイベントを取り出す
     ///
     /// 入力がエラーでもイベントは取り出す。drain 自体がエラーになった場合もイベントを
@@ -828,6 +843,19 @@ impl WtClient {
             .build()
             .expect("datagram endpoint build must succeed after recv capacity is set");
 
+        // peer の STOP_SENDING を MOQT 層へ渡すチャネル。
+        //
+        // WebTransport over HTTP/3 では HTTP/3 の code space を共有するため、MOQT 層が
+        // `wt_stop_sending_error_code` で MOQT のコードへ戻す。観測は診断ではなく MOQT 層へ
+        // 渡す必要のある情報であるため、`MOQT_PACKET_DIAG` の有無に関わらず常に行う。
+        let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
+        let diag = crate::quic::ConnectionObserver::with_stop_sending(stop_sending_tx);
+        // QUIC 直接接続と同じく、環境変数で明示的に有効化したときだけ診断ログを出す
+        if crate::quic::packet_diag_enabled() {
+            diag.spawn_logger();
+            tracing::warn!("packet diagnostics are enabled (MOQT_PACKET_DIAG=1)");
+        }
+
         let client = if config.disable_cert_validation {
             // 開発用: 証明書検証をスキップする。WebTransport over HTTP/3 の ALPN は
             // `h3` (RFC 9114 §3.1) を使う。s2n-quic の default TLS は feature
@@ -841,6 +869,8 @@ impl WtClient {
                 .map_err(TransportError::transport)?
                 .with_datagram(datagram_endpoint)
                 .map_err(TransportError::transport)?
+                .with_event(diag)
+                .map_err(TransportError::transport)?
                 .start()
                 .map_err(TransportError::transport)?
         } else if let Some(ref ca_pem) = config.ca_cert_pem {
@@ -850,6 +880,8 @@ impl WtClient {
                 .with_io(crate::local_bind_addr(config.remote_addr))
                 .map_err(TransportError::transport)?
                 .with_datagram(datagram_endpoint)
+                .map_err(TransportError::transport)?
+                .with_event(diag)
                 .map_err(TransportError::transport)?
                 .start()
                 .map_err(TransportError::transport)?
@@ -1326,6 +1358,7 @@ impl WtClient {
             connect_send: send_stream,
             uni_rx: Some(uni_rx),
             bi_rx: Some(bi_rx),
+            stop_sending_rx: Some(stop_sending_rx),
             state,
             session_state: session_state_tx,
         })
@@ -1520,6 +1553,8 @@ pub struct WtSession {
     uni_rx: Option<mpsc::Receiver<WtRecvStream>>,
     /// 双方向受信ストリームの receiver。`take_bi_receiver` で取り出すと None になる
     bi_rx: Option<mpsc::Receiver<(WtSendStream, WtRecvStream)>>,
+    /// peer の STOP_SENDING の観測 receiver。`take_stop_sending_receiver` で取り出すと None になる
+    stop_sending_rx: Option<crate::quic::StopSendingReceiver>,
     state: Arc<StdMutex<ClientConnectionState>>,
     /// セッション状態 (§6 の終了 / §4.7 の drain / h3 層が返した接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
@@ -1629,6 +1664,40 @@ impl WtSession {
     /// 詳細は `take_uni_receiver` を参照する。
     pub fn take_bi_receiver(&mut self) -> Option<mpsc::Receiver<(WtSendStream, WtRecvStream)>> {
         self.bi_rx.take()
+    }
+
+    /// peer の STOP_SENDING の観測 receiver を取り出す
+    ///
+    /// 詳細は `take_uni_receiver` を参照する。
+    pub fn take_stop_sending_receiver(&mut self) -> Option<crate::quic::StopSendingReceiver> {
+        self.stop_sending_rx.take()
+    }
+
+    /// peer から受信した STOP_SENDING を h3 層へ通知する
+    ///
+    /// h3 層は Sans I/O のため、I/O 層が通知しないと STOP_SENDING を処理できない
+    /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。通知で発行される
+    /// イベントは h3 層の状態更新として drain する (MOQT 層はフレーム観測でコードを
+    /// 既に持っているため、イベントの内容は使わない)。
+    /// h3 層が返したエラーはセッション状態へ反映し、接続エラーなら接続を閉じる。
+    pub(crate) fn notify_received_stop_sending(
+        &mut self,
+        stream_id: u64,
+        error_code: u64,
+    ) -> Result<()> {
+        let outcome = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("connection state mutex must not be poisoned");
+            state.process_stop_sending(stream_id, error_code)
+        };
+        process_h3_outcome(
+            outcome,
+            &self.session_state,
+            &self.handle,
+            "WebTransport STOP_SENDING",
+        )
     }
 
     /// 双方向ストリームを開く (draft-ietf-webtrans-http3-16 Section 4.3)
@@ -1844,30 +1913,78 @@ fn wt_to_moqt_code(http3_code: u64) -> Option<u32> {
 
 /// RESET_STREAM で受信した HTTP/3 のエラーコードを `RequestStreamEnd::Reset` へ入れる値に変換する
 ///
+/// remap できれば MOQT のエラーコードを `Some` で返し、できない場合は `None` を返す。
+/// 「アプリケーションエラーコード無し」は [`RequestStreamEnd::Reset`] の `error_code: None` で表す。
+/// 変換則と warn 文言は [`remap_received_error_code`] を参照する。
+///
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+fn wt_reset_error_code(http3_code: u64) -> Option<u64> {
+    remap_received_error_code(RemapSource::ResetStream, http3_code)
+}
+
+/// STOP_SENDING で受信した HTTP/3 のエラーコードを Session API へ入れる値に変換する
+///
+/// remap できれば MOQT のエラーコードを `Some` で返し、できない場合は `None` を返す。
+/// 「アプリケーションエラーコード無し」は Session API の `error_code: None` で表す。
+/// 変換則と warn 文言は [`remap_received_error_code`] を参照する。
+///
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub(crate) fn wt_stop_sending_error_code(http3_code: u64) -> Option<u64> {
+    remap_received_error_code(RemapSource::StopSending, http3_code)
+}
+
+/// remap の対象となる受信フレーム
+///
+/// warn 文言に載せるフレーム名を型で固定し、文字列の綴り間違いでログが壊れるのを防ぐ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemapSource {
+    /// RESET_STREAM で受信したコード
+    ResetStream,
+    /// STOP_SENDING で受信したコード
+    StopSending,
+}
+
+impl RemapSource {
+    /// warn 文言に載せるフレーム名
+    fn frame_name(self) -> &'static str {
+        match self {
+            RemapSource::ResetStream => "RESET_STREAM",
+            RemapSource::StopSending => "STOP_SENDING",
+        }
+    }
+}
+
+/// peer から受信した HTTP/3 のエラーコードを MOQT のコードへ戻す共通処理
+///
 /// remap できれば MOQT のエラーコードを `Some` で返す。remap できない場合は §4.4 の
 /// "the stream is still considered reset, but the error code is not mapped to a WebTransport
 /// application error code." / "The WebTransport implementation SHOULD deliver this to the
 /// application as a stream reset with no application error code." に従い `None` を返し、
 /// wire の HTTP/3 コードは `tracing::warn!` でログに残す。
-/// 「アプリケーションエラーコード無し」は [`RequestStreamEnd::Reset`] の `error_code: None` で表す。
+/// §4.4 は予約コードポイント (0x1f * N + 0x21) を remap の対象から除外する (MUST) ため、
+/// 予約コードポイントも範囲外のコードと同じく「アプリケーションエラーコード無し」になる。
+///
+/// [`RemapSource`] で warn 文言のフレーム名を分け、ログの読み手がどちらのフレームで
+/// 受信したコードなのかを区別できるようにする。
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-fn wt_reset_error_code(http3_code: u64) -> Option<u64> {
+fn remap_received_error_code(source: RemapSource, http3_code: u64) -> Option<u64> {
     match wt_to_moqt_code(http3_code) {
         Some(code) => Some(u64::from(code)),
         None => {
+            let frame_name = source.frame_name();
             if ApplicationErrorCode::is_application_error(http3_code) {
                 // 数値上は WT_APPLICATION_ERROR の範囲内だが予約コードポイント (0x1f * N + 0x21)。
                 // 依存に予約コードポイントの判定 API が無いため、`from_http3_code` が None を返す条件と
                 // `is_application_error` が範囲だけを見ることの組み合わせで判定している。
                 // shiguredo_http3 を更新したらこの 2 つの条件が変わっていないか確認すること
                 tracing::warn!(
-                    "RESET_STREAM received with a reserved HTTP/3 error code point: {http3_code:#x}"
+                    "{frame_name} received with a reserved HTTP/3 error code point: {http3_code:#x}"
                 );
             } else {
                 // 範囲外 (WT_SESSION_GONE などのプロトコルコード)
                 tracing::warn!(
-                    "RESET_STREAM received with an HTTP/3 error code outside the WebTransport application error range: {http3_code:#x}"
+                    "{frame_name} received with an HTTP/3 error code outside the WebTransport application error range: {http3_code:#x}"
                 );
             }
             None
@@ -1968,7 +2085,7 @@ impl WtSendStream {
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         tokio::select! {
             sent = self.send.send(Bytes::copy_from_slice(data)) => {
-                sent.map_err(TransportError::transport)
+                sent.map_err(|e| TransportError::from_send_error(e, TransportError::transport))
             }
             _ = wait_until_terminated(&mut self.session_state) => {
                 self.abort_session_gone();
@@ -1979,7 +2096,9 @@ impl WtSendStream {
 
     /// ストリームの送信方向を終了する (FIN)
     pub fn finish(&mut self) -> Result<()> {
-        self.send.finish().map_err(TransportError::transport)
+        self.send
+            .finish()
+            .map_err(|e| TransportError::from_send_error(e, TransportError::transport))
     }
 
     /// ストリームの送信方向を reset する (QUIC RESET_STREAM)
@@ -2017,7 +2136,7 @@ impl WtSendStream {
     fn reset_with(&mut self, code: StreamErrorCode) -> Result<()> {
         self.send
             .reset(stream_application_error(code)?)
-            .map_err(TransportError::transport)
+            .map_err(|e| TransportError::from_send_error(e, TransportError::transport))
     }
 
     /// ストリーム ID を返す (publisher 側で使用)
@@ -3261,6 +3380,55 @@ mod tests {
                 "RESET_STREAM received with a reserved HTTP/3 error code point: {reserved:#x}"
             )],
             "予約コードポイントを範囲外と表現しないこと"
+        );
+    }
+
+    /// STOP_SENDING のコードも RESET_STREAM と同じ規則で MOQT のコードへ戻る
+    #[test]
+    fn wt_stop_sending_error_code_returns_moqt_code_or_none() {
+        let http3_code = moqt_to_wt_code(0x1).expect("remap に成功すること");
+        let (returned, count, messages) = with_warn_recorder(|| {
+            [
+                wt_stop_sending_error_code(http3_code),
+                wt_stop_sending_error_code(WT_SESSION_GONE),
+                wt_stop_sending_error_code(0x12345678),
+            ]
+        });
+        assert_eq!(
+            returned,
+            [Some(0x1), None, None],
+            "remap できたコードは MOQT のコードになり、できないコードはコード無し (None) になること"
+        );
+        assert_eq!(
+            count, 2,
+            "remap できないコードごとに warn が 1 回だけ出ること (remap できたコードでは出ないこと)"
+        );
+        assert_eq!(
+            messages,
+            [WT_SESSION_GONE, 0x12345678].map(|http3_code| format!(
+                "STOP_SENDING received with an HTTP/3 error code outside the WebTransport application error range: {http3_code:#x}"
+            )),
+            "RESET_STREAM 用の文言を流用せず、STOP_SENDING の warn になること"
+        );
+    }
+
+    /// STOP_SENDING の予約コードポイントは範囲外と区別できる warn になる
+    #[test]
+    fn wt_stop_sending_error_code_warns_reserved_code_points_separately() {
+        let reserved = first_reserved_code_point_in_range();
+        let (returned, count, messages) =
+            with_warn_recorder(|| wt_stop_sending_error_code(reserved));
+        assert_eq!(
+            returned, None,
+            "予約コードポイントはコード無し (None) になること"
+        );
+        assert_eq!(count, 1, "予約コードポイントで warn が 1 回出ること");
+        assert_eq!(
+            messages,
+            [format!(
+                "STOP_SENDING received with a reserved HTTP/3 error code point: {reserved:#x}"
+            )],
+            "RESET_STREAM 用の文言を流用せず、STOP_SENDING の warn になること"
         );
     }
 

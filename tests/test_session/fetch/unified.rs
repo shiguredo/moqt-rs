@@ -136,7 +136,7 @@ fn fetch_stop_sending_received_transitions_to_terminated_for_publisher() {
     );
     // publisher (server) 側で STOP_SENDING 受信
     server
-        .fetch_stop_sending_received(rid)
+        .fetch_stop_sending_received(rid, None)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
         server
@@ -165,6 +165,112 @@ fn fetch_stop_sending_received_transitions_to_terminated_for_publisher() {
     assert!(
         saw_reset,
         "STOP_SENDING 受信では ResetRequestStream が発行されること (§3.2.4 MUST)"
+    );
+}
+
+/// publisher が受信した STOP_SENDING のエラーコードが Fetch から参照できる
+///
+/// draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) により、remap できない
+/// コードは「アプリケーションエラーコード無し」として配送される。未受信は外側の `None`、
+/// コード無しは内側の `None` で表す。
+#[test]
+fn fetch_stop_sending_received_records_error_code() {
+    use shiguredo_moqt::message::common::Location;
+    let (_client, mut server, rid) = establish_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 1,
+            object_id: 0,
+        },
+    );
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .peer_stop_sending_error_code,
+        None,
+        "STOP_SENDING を受信する前は None であること"
+    );
+    server
+        .fetch_stop_sending_received(rid, Some(0x1))
+        .expect("STOP_SENDING 受信の通知に成功すること");
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("STOP_SENDING 受信後も fetch が保持されていること")
+            .peer_stop_sending_error_code,
+        Some(Some(0x1)),
+        "受信したエラーコードが保持されること"
+    );
+}
+
+/// アプリケーションエラーコード無しの STOP_SENDING も区別して保持できる
+#[test]
+fn fetch_stop_sending_received_records_no_application_error_code() {
+    use shiguredo_moqt::message::common::Location;
+    let (_client, mut server, rid) = establish_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 1,
+            object_id: 0,
+        },
+    );
+    server
+        .fetch_stop_sending_received(rid, None)
+        .expect("STOP_SENDING 受信の通知に成功すること");
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("STOP_SENDING 受信後も fetch が保持されていること")
+            .peer_stop_sending_error_code,
+        Some(None),
+        "アプリケーションエラーコード無しは内側の None で表すこと"
+    );
+}
+
+/// 終端済み fetch への STOP_SENDING の重複通知はセッションを閉じずに拒否される
+///
+/// bidi request stream 側の STOP_SENDING が先に fetch を終端した場合、後着のデータ
+/// ストリーム側の通知は拒否される。この経路で `fail()` を呼ばないことを固定する。
+#[test]
+fn fetch_stop_sending_received_twice_does_not_close_session() {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::session::types::SessionState;
+    let (_client, mut server, rid) = establish_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 1,
+            object_id: 0,
+        },
+    );
+    server
+        .fetch_stop_sending_received(rid, Some(0x1))
+        .expect("1 回目の通知に成功すること");
+    let err = server
+        .fetch_stop_sending_received(rid, Some(0x1))
+        .expect_err("終端済みの fetch への再通知は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "セッションは閉じないこと"
+    );
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("STOP_SENDING 受信後も fetch が保持されていること")
+            .peer_stop_sending_error_code,
+        Some(Some(0x1)),
+        "1 回目に受理したコードが保持されたままであること"
     );
 }
 
@@ -215,7 +321,7 @@ fn fetch_stop_sending_received_requires_publisher_role() {
             object_id: 0,
         },
     );
-    let err = client.fetch_stop_sending_received(rid).unwrap_err();
+    let err = client.fetch_stop_sending_received(rid, None).unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
 
@@ -781,7 +887,7 @@ fn fetch_stop_sending_received_then_stream_closed_cleans_outgoing_entries() {
         .send_fetch_header(stream_id, rid)
         .expect("FETCH_HEADER の送信に成功すること");
     server
-        .fetch_stop_sending_received(rid)
+        .fetch_stop_sending_received(rid, None)
         .expect("STOP_SENDING 受信の通知に成功すること");
     // アプリがデータストリームを reset し、終端を通知する
     server
@@ -807,7 +913,7 @@ fn forget_fetch_cleans_outgoing_fetch_entries() {
         .send_fetch_header(stream_id, rid)
         .expect("FETCH_HEADER の送信に成功すること");
     server
-        .fetch_stop_sending_received(rid)
+        .fetch_stop_sending_received(rid, None)
         .expect("STOP_SENDING 受信の通知に成功すること");
     assert!(
         server.forget_fetch(rid).is_some(),
@@ -911,7 +1017,7 @@ fn forget_fetch_does_not_clean_other_fetch_entries() {
         .expect("rid_b の stream で送信できること");
     // rid_a だけを STOP_SENDING 受信 → forget で掃除する
     server
-        .fetch_stop_sending_received(rid_a)
+        .fetch_stop_sending_received(rid_a, None)
         .expect("STOP_SENDING 受信の通知に成功すること");
     assert!(
         server.forget_fetch(rid_a).is_some(),
