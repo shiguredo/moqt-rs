@@ -1,7 +1,7 @@
 # 音声の再生スケジューラを最新の moqt-js に合わせる
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/change-playout-scheduler-arrival-rebase
 - Polished: {YYYY-MM-DD}
 
@@ -46,4 +46,17 @@ moqt-js の最新の判定を移植する。
 
 ## 解決方法
 
-{未着手}
+- `src/playout/scheduler.rs` を moqt-js の `src/audioPlayout.ts` の最新 (2026-10-09〜10-10) に合わせた
+- `AudioPlayoutInput` に `arrival_us` (到着した音がまだ鳴っていない位置) と `arrival_delay_us` (到着基準の遅れ) を追加した。`now_us` は出力のバッファへ積んだ分だけ実際に鳴る位置より先に進むため、到着基準の遅れは `arrival_us` から数える
+- 到着基準の遅れは時間軸の `audio_arrival_delay_us` が返す [80 ms, 100 ms] を使う。定数は時間軸側 (`TIMELINE_ARRIVAL_DELAY_US` / `TIMELINE_AUDIO_DELAY_FLOOR_US`) を正とし、スケジューラ側に同じ値の定数を作らない
+- `AUDIO_PLAYOUT_MAX_LATENESS_US` を超えた音を捨てるのをやめた。直前の音がまだ鳴っている間は遅れたまま順序と連続性を保って鳴らし、音が途切れているときだけ `rebase_by_arrival` で到着基準へ並べ直す
+- `AUDIO_PLAYOUT_RESYNC_MIN_JUMP_US` (10 ms) を追加し、ずらす幅がこれ未満のときは基準を取り直した回数に数えない
+- `schedule_by_arrival` の基準を `arrival_us` にし、最初の音は `arrival + arrival_delay` から並べる。timestamp が大きく飛んだときは `max(arrival + arrival_delay, now + MIN_LEAD, 直前の音の終わり)` から並べ直し、`now + (arrival_delay + BACKLOG)` を超えるなら並べすぎとして捨てる
+- `AudioPlayoutBasis` (`Timestamp` / `Arrival`) と `AudioPlayoutDropReason` (`Backlog`) を追加し、`Play` に `basis`、`Drop` に `reason` を足した
+- `confirm_stretch(0)` の呼び位置と、要求より長く詰められた分を実測として記録する扱いは moqt-rs の現状を維持した
+- `examples/moq-sub` は音声出力が実際に鳴っている位置から `arrival_us` を求め、`arrival_delay_us` を時間軸の規則で渡す。`basis` と `Drop` の理由をログに出す
+- テスト: `tests/test_playout/scheduler.rs` に「鳴り遅れの継続」「途切れ時の並べ直し」「到着の基準点の分離」「到着基準の遅れ」「resync の下限」の 5 件を追加し、既存 33 件の期待値を新しい規則 (basis / Drop の理由) に更新した
+- テスト: `pbt/tests/prop_playout/scheduler.rs` に `arrival_us` と `arrival_delay_us` の生成器、`basis` ごとのカバレッジゲート、`Drop` の理由が常に `Backlog` であること、目標を使えないときは必ず到着基準であること、`Timestamp` のときは遅れが目標と一致することを追加した
+- 検証: `cargo fmt --check` / `make pbt` / `make test` / `cargo clippy --workspace --all-targets -- -D warnings` / `RUSTDOCFLAGS="-D warnings" cargo doc` が成功した。`PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
+- 検証: 6 種類の欠陥 (鳴り遅れでの即時並べ直し / resync の下限の除去 / 到着の基準点を `now_us` と同一視 / 途切れ時の Drop への回帰 / `basis` の偽装 2 種) を入れて、追加したテストと property がそれぞれ検出することを確認した
+- 備考: `examples/moq-sub` の `AudioJitterBuffer::drop_late` はバッファ段の Drop を残している。example 全体の組み立ての追従は後続の issue で行う
