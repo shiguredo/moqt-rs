@@ -1,7 +1,7 @@
 # MSF catalog track の購読と delta 継続受信に対応する
 
 - Created: 2026-09-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/add-msf-catalog-subscribe
 - Polished: {YYYY-MM-DD}
 
@@ -24,7 +24,7 @@ MSF-01 §5 (Catalog) に従い、subscriber が catalog track を購読して最
 
 ## 現状
 
-- `examples/moqt-subscriber/src/pipeline.rs` の `receive_catalog` は固定 range の standalone FETCH で 1 回だけ取得する
+- `examples/moq-sub/src/pipeline.rs` の `receive_catalog` は固定 range の standalone FETCH で 1 回だけ取得する
 - 取得した全 Object を読み、`MsfCatalog::apply_delta` で delta を適用するようにはしたが、購読を継続しないため新しい Group の delta は受信しない
 - ライブラリには catalog track 固有の購読・delta 適用状態を扱う型は無い (`MsfCatalog::apply_delta` は単発適用のみ)
 - `src/session/` は汎用の SUBSCRIBE / FETCH を扱うが、catalog の Group / Object 規則は関知しない
@@ -40,3 +40,17 @@ MSF-01 §5 (Catalog) に従い、subscriber が catalog track を購読して最
 - catalog track を購読して最初の独立カタログと後続 delta を継続受信できること
 - §5 の独立カタログ / delta の配置規則を検証または明示的に扱えること
 - `tests/` / `pbt/` または example の動作確認で裏付けられていること
+
+## 解決方法
+
+- catalog track を SUBSCRIBE (Next Object の Location Filter) し、SUBSCRIBE_OK の LARGEST_OBJECT が示す Group の先頭 Object から FETCH する形にした (`examples/moq-sub/src/pipeline.rs` の `catalog_fetch_filter` / `receive_catalog`)
+  - MSF-01 §5 の "SUBSCRIBE with a Joining FETCH (offset = 0)" は、Joining FETCH が廃止された draft-ietf-moq-transport-22 §3.5.1 の購読パターンで表す。Group ID を 0 と仮定しない (draft-ietf-moq-msf-01 §6.1)
+  - LARGEST_OBJECT が未広告のときは FETCH を発行しない (同 §3.2 は Object が 1 つも無い track への FETCH に INVALID_RANGE を MUST とする)。購読で届く最初の独立カタログを待つ
+  - Group ID が Unix epoch ミリ秒から始まる publisher の catalog も取得できる
+- 受信した Object を `examples/moq-sub/src/catalog.rs` の `CatalogState` が MSF-01 §5 の配置規則で適用する
+  - Group の最初の Object (Object ID 0) は独立したカタログとして置き換える
+  - 同じ Group の Object ID >= 1 は delta update として `MsfCatalog::apply_delta` で適用する
+  - 最新 Group より前の Object、独立したカタログを持たない Group の delta、適用済みと重複する Location は適用しない
+- 購読は維持し、以降に配られるカタログも main ループが同じ規則で適用し続ける (購読で届く Object は stream task からチャネルで main ループへ渡す)
+- `CatalogState` の単体テストで §5 の配置規則 (置き換え / delta 適用 / 最新 Group より前の無視 / 重複の無視 / 独立カタログ無しの delta の無視) を固定した
+- 実 relay を介した E2E で、Group ID を Unix epoch ミリ秒から始める publisher の catalog を取得して映像が届くことを確認した
