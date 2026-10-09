@@ -516,6 +516,22 @@ mod tests {
         "moq-example",
     ];
 
+    /// `--transport` の既定は `quic` である
+    ///
+    /// WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental であり、既定にしてはいけない
+    /// (s2n-quic が `RESET_STREAM_AT` を送出できず、reset を伴う経路が成立しないため)。
+    #[test]
+    fn transport_defaults_to_quic() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::Quic,
+            "既定は QUIC 直接接続であること"
+        );
+    }
+
     /// `--namespace` に指定した値が設定に入る
     #[test]
     fn namespace_uses_the_explicit_option() {

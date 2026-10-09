@@ -54,7 +54,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 
 ## トランスポート
 
-接続経路は `--transport` で選ぶ。既定値は `quic`。
+接続経路は `--transport` で選ぶ。既定値は `quic` (WebTransport 経路は experimental のため既定にしない)。
 
 | `--transport` | 接続経路 | 備考 |
 | --- | --- | --- |
