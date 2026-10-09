@@ -658,6 +658,14 @@
   - 遅延の内訳を `delay_breakdown` で返す (`UnsharedReason` / `TrackBreakdown` / `DelayBreakdown` を追加)
   - @voluntas
 
+- [CHANGE] 音声の再生スケジューラを moqt-js の最新に合わせ、鳴り遅れで音を捨てずに到着基準へ並べ直す
+  - `AudioPlayoutInput` に到着の基準 (`arrival_us`、実際に鳴っている位置) と到着基準の遅れ (`arrival_delay_us`、`audio_arrival_delay_us` が返す 80〜100 ms) を追加する。`delay_us` は並べすぎの上限と目標の判定に残す
+  - `AUDIO_PLAYOUT_MAX_LATENESS_US` を超えた音を捨てるのをやめる。直前の音がまだ鳴っている間は遅れたまま順序と連続性を保って鳴らし、音が途切れているときだけ到着基準へ並べ直す
+  - 到着基準へ並べ直すときのずらす幅が `AUDIO_PLAYOUT_RESYNC_MIN_JUMP_US` (10 ms) 未満なら、基準を取り直した回数に数えない
+  - `AudioPlayoutDecision::Play` に `basis` (`AudioPlayoutBasis::Timestamp` / `Arrival`) を、`Drop` に `reason` (`AudioPlayoutDropReason::Backlog`) を追加する
+  - moq-sub が音声出力の実際の再生位置から到着の基準を求める
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する

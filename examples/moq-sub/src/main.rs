@@ -24,10 +24,11 @@ use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline};
 use shiguredo_moqt::name::serialize_namespace;
 use shiguredo_moqt::playout::buffer::PlayoutBuffer;
 use shiguredo_moqt::playout::scheduler::{
-    AUDIO_PLAYOUT_DELAY_US, AudioPlayoutDecision, AudioPlayoutInput, AudioPlayoutScheduler,
+    AUDIO_PLAYOUT_DELAY_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutInput,
+    AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::stretch;
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
+use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track, audio_arrival_delay_us};
 
 /// 音声を再生機器へ積むときに先行させる分 (マイクロ秒)
 ///
@@ -593,8 +594,8 @@ impl AudioPlayoutPosition {
 /// 隙間は直前の音の末尾を周期で繰り返して埋め、詰めは波形の周期 1 つ分を削って行う。
 /// 実際に適用した長さは `confirm_stretch` と `confirm_concealment` で返す。
 ///
-/// スケジューラが鳴らさないと決めた音は積まずに捨て、捨てた数をログに出す (鳴らせない音を
-/// 積むと、その分だけ音が遅れたままになる)。
+/// スケジューラが鳴らさないと決めた音は積まずに捨て、捨てた数と理由をログに出す
+/// (鳴らせない音を積むと、その分だけ音が遅れたままになる)。
 fn play_decoded_audio(
     audio_player: &raw_player::AudioPlayer,
     state: &mut AudioPlaybackState,
@@ -606,20 +607,28 @@ fn play_decoded_audio(
     let channels = usize::from(audio.channels);
     let sample_rate = audio.sample_rate;
     let duration_us = pcm_duration_us(audio.pcm.len(), channels, sample_rate);
+    // 到着の基準は、音声出力が実際に鳴っている位置から求める。`now_us` は既に出力へ積んだ
+    // 分だけ先に進んでいるため、到着基準の遅れはこの位置から数える
+    let arrival_us = sounding_position_us(audio_player, state, timeline, now_us);
     // 目標の開始時刻は時間軸が返す「鳴らす時刻」である。まだ基準が無い、または基準が
     // ずれているときは None であり、そのときは目標に従わず到着基準で並べる
     let target_start_us = timeline.present_us(Track::Audio, audio.pts_us);
-    // 揺らぎから求めた音声の遅れ。まだ学習していなければ既定値を下限にする。目標が無い
-    // ときは並べ方の先行分に、目標があるときは並べすぎの判定に使う
+    // 揺らぎから求めた音声の遅れ。まだ学習していなければ既定値を下限にする。目標がある
+    // ときは並べすぎの判定に使う
     let delay_us = timeline
         .learned_delay_us(Track::Audio)
         .max(AUDIO_PLAYOUT_DELAY_US);
+    // 到着基準で鳴らすときの遅れは、学習した遅れを [80 ms, 100 ms] に切った値にする。
+    // 学習した値には TIMESTAMP の壁時計からのずれが混じるため、そのまま使うと音がその分
+    // だけ遅れて鳴る
+    let arrival_delay_us = audio_arrival_delay_us(delay_us);
     // 表示の遅れは時間軸が返す値をそのまま渡す。まだ観測が無いときは既定値を使う
     let presentation_delay_us = timeline
         .presentation_delay_us(Track::Audio)
         .unwrap_or(AUDIO_PLAYOUT_DELAY_US);
     let decision = state.scheduler.schedule(AudioPlayoutInput {
         now_us,
+        arrival_us,
         timestamp_us: audio.pts_us,
         duration_us,
         target_start_us,
@@ -627,20 +636,29 @@ fn play_decoded_audio(
         // (`enforce_target` が false) では到着基準で並べる
         enforce_target: enforce_target && target_start_us.is_some(),
         delay_us,
+        arrival_delay_us,
         presentation_delay_us,
     });
-    let AudioPlayoutDecision::Play {
-        compress_us,
-        gap_us,
-        ..
-    } = decision
-    else {
-        tracing::warn!(
-            "Discarded an audio chunk the playout scheduler dropped (total {})",
-            state.scheduler.drops(),
-        );
-        return;
+    let (start_at_us, basis, compress_us, gap_us) = match decision {
+        AudioPlayoutDecision::Play {
+            start_at_us,
+            basis,
+            compress_us,
+            gap_us,
+            ..
+        } => (start_at_us, basis, compress_us, gap_us),
+        AudioPlayoutDecision::Drop { reason } => {
+            tracing::warn!(
+                "Discarded an audio chunk the playout scheduler dropped (reason {reason:?}, total {})",
+                state.scheduler.drops(),
+            );
+            return;
+        }
     };
+    if basis == AudioPlayoutBasis::Arrival {
+        // 目標を使えない、または目標から離れすぎて音が途切れていた。到着基準で並べた
+        tracing::debug!("Scheduled an audio chunk by arrival at {start_at_us}us");
+    }
 
     // 隙間の補間と詰めを音声へ適用する。埋めた音は今回の音の直前へ積むため、再生機器の
     // キューでは前の音の直後、今回の音の直前になる (キューは積んだ順に鳴る)。隙間の開始
@@ -727,6 +745,42 @@ fn record_sounding_audio(
         return;
     };
     timeline.record_presentation(Track::Audio, pts_us, wall_clock_us());
+}
+
+/// 音声出力が実際に鳴っている位置 (受信側の壁時計) を、到着の基準として求める
+///
+/// `raw_player` の `total_samples_played` と、積んだ音の (累積サンプル数, PTS) の対応から、
+/// いま鳴っている音の PTS を求める。PTS は媒体の軸であり `now_us` と同じ軸ではないため、
+/// 時間軸が同じトラックに決める時刻へ移してから使う。移せないとき (まだ一度も鳴らして
+/// いない、再生位置の対応が切れている、時間軸が音声の基準を持たない) は今の時刻を使う。
+fn sounding_position_us(
+    audio_player: &raw_player::AudioPlayer,
+    state: &mut AudioPlaybackState,
+    timeline: &PlayoutTimeline,
+    now_us: i64,
+) -> i64 {
+    let stats = audio_player.stats();
+    if stats.sample_rate <= 0 {
+        return now_us;
+    }
+    let Ok(sample_rate) = u32::try_from(stats.sample_rate) else {
+        return now_us;
+    };
+    let Some(sounding_pts_us) = state
+        .position
+        .sounding_pts_us(stats.total_samples_played, sample_rate)
+    else {
+        return now_us;
+    };
+    // 表示の遅れを引くと、そのトラックの TIMESTAMP を壁時計へ移した値になる
+    let Some(presentation_delay_us) = timeline.presentation_delay_us(Track::Audio) else {
+        return now_us;
+    };
+    timeline
+        .present_us(Track::Audio, sounding_pts_us)
+        .map_or(now_us, |present_us| {
+            present_us.saturating_sub(presentation_delay_us)
+        })
 }
 
 /// スケジューラが決めた隙間の補間と詰めを音声へ適用した結果
@@ -1317,17 +1371,20 @@ mod tests {
         // 1 つ目は目標の時刻にそのまま鳴る (詰めも隙間も無し)
         let first = scheduler.schedule(AudioPlayoutInput {
             now_us: 990_000,
+            arrival_us: 990_000,
             timestamp_us: 0,
             duration_us: 20_000,
             target_start_us: Some(1_000_000),
             enforce_target: true,
             delay_us: 80_000,
+            arrival_delay_us: 80_000,
             presentation_delay_us: 80_000,
         });
         assert_eq!(
             first,
             AudioPlayoutDecision::Play {
                 start_at_us: 1_000_000,
+                basis: AudioPlayoutBasis::Timestamp,
                 compress_us: 0,
                 gap_start_us: 0,
                 gap_us: 0,
@@ -1339,11 +1396,13 @@ mod tests {
         // 10 ms の隙間が空く
         let second = scheduler.schedule(AudioPlayoutInput {
             now_us: 1_010_000,
+            arrival_us: 1_010_000,
             timestamp_us: 30_000,
             duration_us: 20_000,
             target_start_us: Some(1_030_000),
             enforce_target: true,
             delay_us: 80_000,
+            arrival_delay_us: 80_000,
             presentation_delay_us: 80_000,
         });
         let AudioPlayoutDecision::Play {
@@ -1375,11 +1434,13 @@ mod tests {
         // 3 つ目は目標を過ぎて届く。遅れの分だけ詰める
         let third = scheduler.schedule(AudioPlayoutInput {
             now_us: 1_100_000,
+            arrival_us: 1_100_000,
             timestamp_us: 50_000,
             duration_us: 20_000,
             target_start_us: Some(1_090_000),
             enforce_target: true,
             delay_us: 80_000,
+            arrival_delay_us: 80_000,
             presentation_delay_us: 80_000,
         });
         let AudioPlayoutDecision::Play { compress_us, .. } = third else {
