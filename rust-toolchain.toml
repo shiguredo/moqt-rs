@@ -1,3 +1,6 @@
+# MSRV は Cargo.toml の rust-version (ライブラリ本体と pbt は 1.93) だが、
+# workspace の examples が使う s2n-quic が 1.95 を要求するため 1.95 に固定する。
+# workspace の最大 rust-version を上げたら channel も同時に更新すること。
 [toolchain]
-channel = "stable"
+channel = "1.95"
 components = ["rustfmt", "clippy"]

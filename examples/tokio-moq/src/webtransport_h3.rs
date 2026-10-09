@@ -545,11 +545,9 @@ impl ConnectObservation {
                         }
                     }
                 }
-                Event::HeadersEnd { .. } => {
-                    // 1xx 中間レスポンスのヘッダー終端は最終レスポンスの終端ではない
-                    if !self.informational {
-                        self.headers_end = true;
-                    }
+                // 1xx 中間レスポンスのヘッダー終端は最終レスポンスの終端ではない
+                Event::HeadersEnd { .. } if !self.informational => {
+                    self.headers_end = true;
                 }
                 Event::WebTransport(WebTransportEvent::SessionEstablished { .. }) => {
                     self.established = true;

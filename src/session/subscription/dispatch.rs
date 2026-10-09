@@ -331,7 +331,7 @@ impl Session {
         // いない購読を確立扱いにしてしまう。
         // PUBLISH 起点かどうかは購読を開始したメッセージ種別 (`Subscription::initiator`) で
         // 判定する (`my_role` は自側が担う役割であり、単独では起点を表さない)。
-        // 外側の `!is_initiator_self()` により、この条件が真のとき自側は subscriber である。
+        // `!is_initiator_self()` により、この条件が真のとき自側は subscriber である。
         let established_publish_origin = subscription.state == SubscriptionState::Established
             && subscription.initiator == SubscriptionInitiator::Publisher;
         // ローカル終端済みの request では終端前の state が失われるため
@@ -339,9 +339,9 @@ impl Session {
         // PUBLISH 起点 / SUBSCRIBE 起点のどちらでも自側から REQUEST_UPDATE を送れるため
         // (`send_update_for_subscription` の送信条件)、遅延した REQUEST_UPDATE_OK は
         // 正当な応答になりうる。自側が publisher の場合はガードを維持する。
-        if !subscription.is_initiator_self()
-            && !established_publish_origin
-            && !(locally_terminated && subscription.my_role == TrackRole::Subscriber)
+        if !(subscription.is_initiator_self()
+            || established_publish_origin
+            || (locally_terminated && subscription.my_role == TrackRole::Subscriber))
         {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
