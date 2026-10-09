@@ -3,7 +3,9 @@
 //! 公開 API (`PlayoutTimeline`) の契約を確認する。
 
 use shiguredo_moqt::playout::timeline::{
-    PlayoutTimeline, TIMELINE_SYNC_MIN_DELTA_US, TimelineConfig, Track,
+    PlayoutTimeline, TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US,
+    TIMELINE_BASE_DRIFT_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TimelineConfig, Track,
+    UnsharedReason, audio_arrival_delay_us,
 };
 
 /// 映像の揺らぎを 40 ms、フレーム間隔を 33 ms にして観測を並べる
@@ -56,14 +58,9 @@ fn sync_raises_the_leading_track_toward_the_late_one() {
     // 音声は 10 ms で届き、映像は同じ TIMESTAMP で 300 ms 遅れて届く
     timeline.observe(Track::Audio, 10_010_000, 1_000_000);
     timeline.observe(Track::Video, 10_310_000, 1_000_000);
-    // 先行する音声の遅れが上がり、表示時刻の差が不感帯に収まる
-    let audio_delay_us = timeline
-        .presentation_delay_us(Track::Audio)
-        .expect("基準があるので遅れが決まる");
-    assert!(
-        audio_delay_us > timeline.learned_delay_us(Track::Audio),
-        "自分の遅れより上に足す: {audio_delay_us}"
-    );
+    // 2 つのトラックの表示時刻の差は、目標の差に収まる。自然な差は
+    // 300 ms (基準の差) − 80 ms (音声の遅れ) = 220 ms であり、そこから
+    // TIMELINE_MAX_COMPENSATED_DIFFERENCE_US を引いた 120 ms になる
     let audio_present_us = timeline
         .present_us(Track::Audio, 1_000_000)
         .expect("基準がある");
@@ -72,8 +69,8 @@ fn sync_raises_the_leading_track_toward_the_late_one() {
         .expect("基準がある");
     assert_eq!(
         video_present_us - audio_present_us,
-        TIMELINE_SYNC_MIN_DELTA_US,
-        "後行側から不感帯だけ手前へ寄せる"
+        220_000 - TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+        "相手側へ移す分は上限までにする"
     );
 }
 
@@ -232,4 +229,119 @@ fn reset_track_keeps_the_other_track() {
     assert!(timeline.present_us(Track::Audio, 1_000_000).is_none());
     assert!(timeline.present_us(Track::Video, 1_000_000).is_some());
     assert_eq!(timeline.generation(), generation, "世代は進めない");
+}
+
+#[test]
+fn only_one_track_does_not_share_the_basis() {
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    // 観測が片方だけでは、差が 0 であるとも動きが無いとも言えない
+    assert!(!timeline.sharing_bases(), "片方だけでは共有しない");
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Unobserved);
+    let breakdown = timeline.delay_breakdown();
+    assert_eq!(breakdown.video.base_delay_us, None);
+    assert_eq!(breakdown.video.jitter_delay_us, None);
+    assert_eq!(breakdown.video.presentation_delay_us, None);
+    assert_eq!(breakdown.base_difference_us, None);
+    assert_eq!(breakdown.audio.base_delay_us, Some(9_000_000));
+    assert_eq!(breakdown.audio.jitter_delay_us, Some(80_000));
+    assert_eq!(breakdown.base_drift_limit_us, TIMELINE_BASE_DRIFT_US);
+}
+
+#[test]
+fn delay_breakdown_splits_the_basis_the_jitter_and_the_sync() {
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 9_000_000);
+    timeline.observe(Track::Video, 10_300_000, 9_000_000);
+    let breakdown = timeline.delay_breakdown();
+    assert_eq!(breakdown.audio.base_delay_us, Some(1_000_000));
+    assert_eq!(breakdown.video.base_delay_us, Some(1_300_000));
+    assert_eq!(breakdown.audio.jitter_delay_us, Some(80_000));
+    assert_eq!(breakdown.base_difference_us, Some(-300_000));
+    assert!(breakdown.sharing_bases);
+    assert_eq!(breakdown.unshared_reason, UnsharedReason::None);
+    // 表示の遅れは「基準の遅れ + jitter buffer の遅れ + 同期で足した分」である
+    assert_eq!(breakdown.audio.sync_extra_delay_us, 100_000);
+    assert_eq!(breakdown.audio.presentation_delay_us, Some(1_180_000));
+    assert_eq!(breakdown.video.sync_extra_delay_us, 0);
+    assert_eq!(breakdown.video.presentation_delay_us, Some(1_300_000));
+    // 表示時刻は内訳と同じ値になる
+    assert_eq!(
+        timeline.present_us(Track::Audio, 9_000_000),
+        Some(10_180_000)
+    );
+    assert_eq!(
+        timeline.present_us(Track::Video, 9_000_000),
+        Some(10_300_000)
+    );
+}
+
+#[test]
+fn a_moving_basis_is_treated_as_a_clock_drift() {
+    let mut timeline = PlayoutTimeline::new();
+    // 音声の基準は 1 秒で一定、映像の基準は 1.05 秒から毎秒 40 ms ずつ遅れていく。
+    // 差の大きさ (最大 250 ms) は閾値 (表示の遅れの上限から求まる値) に届かないため、
+    // 差の動き (5 秒で 200 ms) で検出できないと共有したままになる
+    let mut wall_us = 10_000_000;
+    for step in 0..60i64 {
+        wall_us += 100_000;
+        let video_offset_us = 1_050_000 + step * 4_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - video_offset_us);
+    }
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::Drift,
+        "差の動きで時計のずれを見つける"
+    );
+    assert!(!timeline.sharing_bases());
+    // 遅れて届いている側 (映像) の表示時刻は返らない
+    let timestamp_us = wall_us - 1_050_000;
+    assert!(timeline.present_us(Track::Video, timestamp_us).is_none());
+    assert!(timeline.present_us(Track::Audio, timestamp_us).is_some());
+    assert!(
+        timeline
+            .delay_breakdown()
+            .base_drift_us_per_second
+            .is_some()
+    );
+
+    // ドリフトが止まっても、保持の間 (30 秒) は共有に戻さない
+    for _ in 0..60 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_260_000);
+    }
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::Hold,
+        "一度やめた判定は保持する"
+    );
+}
+
+#[test]
+fn video_follows_the_audio_arrival_delay_when_the_audio_drifts() {
+    let mut timeline = PlayoutTimeline::new();
+    // 音声の基準が 2 秒、映像が 1 秒。音声の TIMESTAMP は信用できないとみなす
+    timeline.observe(Track::Audio, 10_000_000, 8_000_000);
+    timeline.observe(Track::Video, 10_000_000, 9_000_000);
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+    assert!(
+        timeline.presentation_delay_us(Track::Audio).is_none(),
+        "ずれている側の表示時刻は決めない"
+    );
+    // 映像は音声の到着基準の遅れ (80 ms) から不感帯 (30 ms) を引いた 50 ms へ上げる
+    assert_eq!(timeline.presentation_delay_us(Track::Video), Some(50_000));
+    assert_eq!(timeline.audio_arrival_delay_us(), Some(80_000));
+}
+
+#[test]
+fn audio_arrival_delay_is_clamped_between_the_floor_and_the_cap() {
+    assert_eq!(audio_arrival_delay_us(0), TIMELINE_AUDIO_DELAY_FLOOR_US);
+    assert_eq!(audio_arrival_delay_us(90_000), 90_000);
+    assert_eq!(audio_arrival_delay_us(1_000_000), TIMELINE_ARRIVAL_DELAY_US);
+    // 観測が無ければ読めない
+    let timeline = PlayoutTimeline::new();
+    assert_eq!(timeline.audio_arrival_delay_us(), None);
+    assert_eq!(timeline.playout_delay_us(), None);
 }
