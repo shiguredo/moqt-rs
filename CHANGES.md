@@ -11,6 +11,11 @@
 
 ## develop
 
+- [ADD] moq-sub が catalog track の購読を維持し、delta update を適用する
+  - LARGEST_OBJECT が未広告のときは live の最初のカタログを待つ (draft-ietf-moq-transport-22 §3.2)
+  - Group の先頭は独立カタログ、以降は delta、最新 Group より前は無視する (draft-ietf-moq-msf-01 §5)
+  - @voluntas
+
 - [FIX] moq-pub が catalog を group 0 に固定して publish し、FETCH の要求 range を無視していたのを修正する
   - 映像 / 音声 / catalog の開始 Group ID を Unix epoch ミリ秒から払い出し、catalog を新しい Group で定期的に送り直す (draft-ietf-moq-msf-01 §5 / §6.1)
   - FETCH は要求 range を判定し、範囲外は空応答、Start が Largest Object を超える場合は INVALID_RANGE を返す (draft-ietf-moq-transport-22 §3.2 / §3.2.1 / §3.3.1)

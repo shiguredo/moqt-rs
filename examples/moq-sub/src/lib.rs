@@ -22,6 +22,7 @@ pub mod pipeline;
 pub use decoder::{DecodedAudioFrame, DecodedVideoFrame};
 
 // パイプラインの内部実装
+mod catalog;
 mod decoder;
 mod mp4;
 mod stream_reader;

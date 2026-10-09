@@ -25,12 +25,12 @@ use shiguredo_moqt::loc::{
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
 use shiguredo_moqt::{
     message::common::Location, message_parameter::LocationFilter, msf::MSF_CATALOG_TRACK_NAME,
-    msf::MsfCatalog, msf::MsfCatalogDocument, msf::MsfTrack, session::types::DataStreamId,
-    session::types::RequestStreamEnd, session::types::SessionEvent,
-    stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
-    stream::decoder::SubgroupStreamDecoder,
+    msf::MsfTrack, session::types::DataStreamId, session::types::RequestStreamEnd,
+    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
 };
 
+use crate::catalog;
 use crate::cli::Config;
 use crate::decoder::opus::OpusDecoder;
 use crate::decoder::{self, DecodedAudioFrame, DecodedVideoFrame};
@@ -62,6 +62,12 @@ struct FrameSink<'a> {
 /// STOP_SENDING を送っても peer が data stream を reset しない場合に、shutdown の完了
 /// (録画中は finalize) に到達できなくならないようにするための保険。
 const STREAM_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// catalog の更新を stream task から main ループへ渡すチャネルの容量
+///
+/// catalog は 1 Group あたり数 Object であり、容量が小さいと埋まった時点で
+/// stream task が待つ (送信側の backpressure)。数 Object ぶんの余裕を持たせる。
+const CATALOG_CHANNEL_SIZE: usize = 8;
 
 /// 同時に処理する data stream 数の上限
 ///
@@ -208,6 +214,7 @@ fn spawn_stream_task(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -221,6 +228,7 @@ fn spawn_stream_task(
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let termination_tx = termination_tx.clone();
+    let catalog_tx = catalog_tx.clone();
     let recorder = recorder.cloned();
     join_set.spawn(task_monitor.clone().instrument(async move {
         handle_incoming_stream(
@@ -237,6 +245,7 @@ fn spawn_stream_task(
             audio_decoder.as_ref(),
             &audio_config_handled,
             &termination_tx,
+            &catalog_tx,
             playback,
             recorder.as_ref(),
         )
@@ -461,40 +470,57 @@ pub async fn run(
             LocationFilter::NextObject,
         )
         .await?;
-    let largest_object = catalog_sub.largest_object.ok_or_else(|| {
-        Error::Other(
-            "catalog track has no published object (LARGEST_OBJECT is unknown)".to_string(),
-        )
-    })?;
     tracing::info!(
-        "Subscribed to catalog track: alias={}, request_id={}, largest_object=({}, {})",
+        "Subscribed to catalog track: alias={}, request_id={}, largest_object={:?}",
         catalog_sub.track_alias,
         catalog_sub.request_id,
-        largest_object.group_id,
-        largest_object.object_id,
+        catalog_sub.largest_object,
     );
-    let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
-    catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
-        param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
-        value: shiguredo_moqt::message_parameter::MessageParameterValue::LocationFilter(
-            catalog_fetch_filter(largest_object),
-        ),
-    });
-    let catalog_fetch = client
-        .fetch(
-            namespace.clone(),
-            MSF_CATALOG_TRACK_NAME.to_vec(),
-            catalog_params,
-        )
-        .await?;
-    tracing::info!(
-        "Catalog FETCH_OK received: request_id={}",
-        catalog_fetch.request_id
-    );
+    // LARGEST_OBJECT が未広告のときは catalog がまだ publish されていない。この場合の
+    // FETCH は INVALID_RANGE になる MUST (draft-ietf-moq-transport-22 §3.2 (Fetch)) ため
+    // 発行せず、購読で最初の独立したカタログが届くのを待つ
+    let catalog_fetch_request_id = match catalog_sub.largest_object {
+        Some(largest_object) => {
+            let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
+            catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
+                param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
+                value: shiguredo_moqt::message_parameter::MessageParameterValue::LocationFilter(
+                    catalog_fetch_filter(largest_object),
+                ),
+            });
+            let catalog_fetch = client
+                .fetch(
+                    namespace.clone(),
+                    MSF_CATALOG_TRACK_NAME.to_vec(),
+                    catalog_params,
+                )
+                .await?;
+            tracing::info!(
+                "Catalog FETCH_OK received: request_id={}",
+                catalog_fetch.request_id
+            );
+            Some(catalog_fetch.request_id)
+        }
+        None => {
+            tracing::info!("Catalog LARGEST_OBJECT is unknown; waiting for the live catalog");
+            None
+        }
+    };
 
-    // カタログの FETCH 応答 data stream を受信
-    let (video_info, audio_info, catalog_target_latency_ms) =
-        receive_catalog(&mut recv_acceptor, &data_plane, catalog_fetch.request_id).await?;
+    // FETCH 応答と購読で届くカタログを読み、MSF の配置規則で適用する
+    let catalog_resolution = receive_catalog(
+        &mut recv_acceptor,
+        &data_plane,
+        catalog_fetch_request_id,
+        catalog_sub.track_alias,
+    )
+    .await?;
+    let CatalogResolution {
+        state: mut catalog_state,
+        video: video_info,
+        audio: audio_info,
+        target_latency_ms: catalog_target_latency_ms,
+    } = catalog_resolution;
     // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの
     // 下限として反映する (draft-ietf-moq-msf-01 §5.2.8)
     if let Some(catalog_target_latency_ms) = catalog_target_latency_ms {
@@ -735,6 +761,10 @@ pub async fn run(
     // 送信側の原本を main ループが保持するため、受信ループが動いている間このチャネルは
     // 閉じない (`select!` の受信分岐は `Some` のみを受ける)。
     let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
+    // catalog の更新は状態を所有する main ループが適用する。stream task は読み出した
+    // Object をこのチャネルへ渡す
+    let (catalog_tx, mut catalog_rx) =
+        tokio::sync::mpsc::channel::<catalog::CatalogObject>(CATALOG_CHANNEL_SIZE);
     // peer が subscription / session を終了させて受信ループを抜けたか。
     // この場合の subscription は Terminated であり、STOP_SENDING は不要である
     let mut peer_ended = false;
@@ -776,6 +806,7 @@ pub async fn run(
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &termination_tx,
+                &catalog_tx,
                 playback,
                 recorder_sender.as_ref(),
             );
@@ -810,6 +841,14 @@ pub async fn run(
                     }
                 };
                 pending_streams.push_back(stream);
+            }
+            Some(object) = catalog_rx.recv() => {
+                // 購読で届いた catalog の更新を MSF の配置規則で適用する
+                // (draft-ietf-moq-msf-01 §5 (Catalog))。起動時に解決したトラックは
+                // 変更しないが、カタログの状態は購読が続く限り最新に保つ
+                if let Err(e) = apply_catalog_object(&mut catalog_state, &object) {
+                    tracing::warn!("Failed to apply MSF catalog update: {e}");
+                }
             }
             notable = client.next_event() => {
                 // 分岐本体を async ブロックに閉じ込め、`?` が `run` を抜けないようにする。
@@ -1181,51 +1220,190 @@ async fn drain_registered_stream_to_end(
     }
 }
 
-/// カタログの FETCH 応答ストリームを受信してパースする
+/// カタログの取得結果
+struct CatalogResolution {
+    /// 適用済みのカタログ状態 (購読で届く更新の適用に引き継ぐ)
+    state: catalog::CatalogState,
+    /// catalog から解決したビデオトラック情報
+    video: Option<VideoTrackInfo>,
+    /// catalog から解決したオーディオトラック情報
+    audio: Option<AudioTrackInfo>,
+    /// catalog の targetLatency (ミリ秒)
+    target_latency_ms: Option<i64>,
+}
+
+/// カタログが届くまで待つ上限
+///
+/// publisher がまだ catalog を publish していない場合は、購読 (Next Object) で最初の
+/// 独立したカタログが届くまで待つ。待ち続けないよう上限を設ける。
+const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// カタログを取得する
+///
+/// 次の 2 経路で届く Object を到着順に適用する
+/// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
+/// "observe the Largest Object in the response" パターン)。
+///
+/// 1. 購読前に配られたカタログの FETCH 応答 (`fetch_request_id` が `Some` のときだけ発行済み)
+/// 2. 購読 (Next Object) で届くカタログの Subgroup stream
+///
+/// 購読の LARGEST_OBJECT が未広告のときは FETCH を発行していない
+/// (draft-ietf-moq-transport-22 §3.2 (Fetch) は Object が 1 つも無い track への FETCH に
+/// INVALID_RANGE を MUST とする)。この場合は最初の独立したカタログが購読で届くまで待つ。
+/// FETCH が失敗しても購読は生かしたままにして、届いた Object だけで解決を試みる。
+///
+/// これにより draft-ietf-moq-msf-01 §5 (Catalog) が求める「最新の完全なカタログと、
+/// それに続く delta update」を 1 つの状態 [`catalog::CatalogState`] へまとめて適用できる。
 async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
     data_plane: &DataPlaneHandle,
-    expected_request_id: u64,
-) -> Result<(Option<VideoTrackInfo>, Option<AudioTrackInfo>, Option<i64>)> {
-    // Padding stream が割り込んだ場合は読み捨てて次の stream を待つ。
-    let (mut stream, stream_id, buf) = loop {
-        let mut stream = recv_acceptor
-            .accept_recv_stream()
-            .await?
-            .ok_or_else(|| Error::Other("no catalog fetch stream received".to_string()))?;
+    fetch_request_id: Option<u64>,
+    catalog_alias: u64,
+) -> Result<CatalogResolution> {
+    let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
+    let mut state = catalog::CatalogState::new();
+    // FETCH を発行していない場合、または FETCH 応答を読み終えた場合に真になる
+    let mut fetch_done = fetch_request_id.is_none();
+    while !(fetch_done && state.catalog().is_some()) {
+        let accepted =
+            match tokio::time::timeout_at(deadline, recv_acceptor.accept_recv_stream()).await {
+                Ok(accepted) => accepted?,
+                // 期限までにカタログが決まらなかった
+                Err(_) => break,
+            };
+        let Some(mut stream) = accepted else {
+            return Err(Error::Other(
+                "no more data streams while waiting for the catalog".to_string(),
+            ));
+        };
         let stream_id = DataStreamId(stream.stream_id());
         let mut buf = Vec::new();
         let (stream_type_id, stream_type) =
             match stream_reader::peek_stream_type(&mut stream, &mut buf).await? {
                 StreamRead::Value(value) => value,
                 StreamRead::Closed(end) => {
-                    return Err(Error::Other(format!(
-                        "catalog stream closed before type: {end:?}"
-                    )));
+                    // 種別を持たない stream は無視して次の stream を待つ
+                    tracing::debug!("Catalog wait: stream closed before type: {end:?}");
+                    continue;
                 }
             };
         data_plane.recv_data_stream_type(stream_id, stream_type_id)?;
-        if matches!(stream_type, StreamType::Padding) {
-            // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams):
-            // パディングバイトを読み捨てて次の stream を待つ。
-            let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
-            continue;
+        match stream_type {
+            StreamType::Padding => {
+                // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams)
+                let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
+            }
+            StreamType::Fetch => match fetch_request_id {
+                Some(expected_request_id) => {
+                    match read_catalog_fetch_stream(
+                        &mut stream,
+                        data_plane,
+                        stream_id,
+                        &buf,
+                        expected_request_id,
+                    )
+                    .await
+                    {
+                        Ok(objects) => {
+                            for object in &objects {
+                                apply_catalog_object(&mut state, object)?;
+                            }
+                        }
+                        // FETCH の失敗 (REQUEST_ERROR / RESET) は購読の失敗ではない。
+                        // 購読で届くカタログを待つ
+                        Err(e) => tracing::warn!("Catalog FETCH failed: {e}"),
+                    }
+                    fetch_done = true;
+                }
+                None => {
+                    tracing::debug!("Catalog wait: unexpected fetch stream");
+                    let _ =
+                        drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
+                }
+            },
+            StreamType::Subgroup => {
+                match read_catalog_subgroup_stream(
+                    &mut stream,
+                    data_plane,
+                    stream_id,
+                    &buf,
+                    catalog_alias,
+                )
+                .await
+                {
+                    Ok(objects) => {
+                        for object in &objects {
+                            apply_catalog_object(&mut state, object)?;
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to read catalog stream: {e}"),
+                }
+            }
         }
-        if !matches!(stream_type, StreamType::Fetch) {
-            let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
-            return Err(Error::Other(
-                "catalog stream is not a fetch response".to_string(),
-            ));
-        }
-        break (stream, stream_id, buf);
+    }
+
+    let Some(catalog) = state.catalog() else {
+        return Err(Error::Other(format!(
+            "catalog did not arrive within {}ms",
+            CATALOG_TIMEOUT.as_millis()
+        )));
     };
+    // targetLatency は再生側の時間軸が表示の遅れの下限に使う。ここでは読むだけにして、
+    // 呼び出し側が共有セルへ入れる
+    let target_latency_ms = catalog_target_latency_ms(&catalog.tracks);
+    let video = catalog
+        .tracks
+        .iter()
+        .find(|t| {
+            t.codec.as_ref().is_some_and(|c| {
+                c.starts_with("av01")
+                    || c.starts_with("avc1")
+                    || c.starts_with("hvc1")
+                    || c.starts_with("hev1")
+            })
+        })
+        .map(extract_video_info)
+        .transpose()?;
+    let audio = catalog
+        .tracks
+        .iter()
+        .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")))
+        .map(extract_audio_info)
+        .transpose()?;
+    if video.is_none() && audio.is_none() {
+        return Err(Error::Other(
+            "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus)".to_string(),
+        ));
+    }
+    Ok(CatalogResolution {
+        state,
+        video,
+        audio,
+        target_latency_ms,
+    })
+}
+
+/// FETCH 応答ストリームを読み切り、catalog Object を取り出す
+///
+/// 読み出しの終端検知は `receive_registered_stream_data` に任せる。同関数が
+/// `recv_data_stream_closed` で終端を通知しており、Session は受信 fetch stream の終端を
+/// `recv_fetch_data_stream_closed` へ dispatch して FETCH 状態に記録する。ここで改めて
+/// drain したり fetch の終端を通知したりすると二重通知になり
+/// 「unknown stream id」「fetch stream event on terminated fetch」で失敗する。
+async fn read_catalog_fetch_stream(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    buf: &[u8],
+    expected_request_id: u64,
+) -> Result<Vec<catalog::CatalogObject>> {
     let mut decoder = FetchStreamDecoder::new();
-    decoder.push(&buf);
+    decoder.push(buf);
     let fetch_header = loop {
         if let Some(h) = decoder.try_decode_header()? {
             break h;
         }
-        match receive_registered_stream_data(&mut stream, data_plane, stream_id).await? {
+        match receive_registered_stream_data(stream, data_plane, stream_id).await? {
             Some(data) => decoder.push(&data),
             None => {
                 return Err(Error::Other(
@@ -1236,21 +1414,17 @@ async fn receive_catalog(
     };
     data_plane.recv_fetch_header(stream_id, &fetch_header)?;
     if fetch_header.request_id != expected_request_id {
-        let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
+        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
         return Err(Error::Other(format!(
             "unexpected fetch request_id: expected={expected_request_id}, got={}",
             fetch_header.request_id,
         )));
     }
-    // カタログトラックのオブジェクトを順に読み、Full で置き換え、Delta を適用する。
-    // draft-ietf-moq-msf-01 §5 (Catalog): 最初の Object (Object ID 0) が独立カタログ、
-    // 以降 (Object ID >= 1) が delta update。
-    let mut catalog: Option<MsfCatalog> = None;
+    let mut objects = Vec::new();
     loop {
         let entry = match decoder.try_decode_entry()? {
             Some(e) => e,
-            None => match receive_registered_stream_data(&mut stream, data_plane, stream_id).await?
-            {
+            None => match receive_registered_stream_data(stream, data_plane, stream_id).await? {
                 Some(data) => {
                     decoder.push(&data);
                     continue;
@@ -1264,7 +1438,7 @@ async fn receive_catalog(
                 if let Some(p) = decoder.try_read_payload() {
                     break p;
                 }
-                match receive_registered_stream_data(&mut stream, data_plane, stream_id).await? {
+                match receive_registered_stream_data(stream, data_plane, stream_id).await? {
                     Some(data) => decoder.push(&data),
                     None => {
                         return Err(Error::Other(
@@ -1275,62 +1449,176 @@ async fn receive_catalog(
             },
             _ => Vec::new(),
         };
-        let document = MsfCatalogDocument::decode(&payload).map_err(|e| {
-            Error::Other(format!(
-                "failed to parse MSF catalog: {e}, raw={}",
-                String::from_utf8_lossy(&payload),
-            ))
-        })?;
-        match document {
-            MsfCatalogDocument::Full(full) => {
-                tracing::info!("Received MSF catalog: {full:?}");
-                catalog = Some(full);
+        // Object 以外 (End of Range 系) は catalog の Object ではない
+        let DecodedFetchEntry::Object(obj) = &entry else {
+            continue;
+        };
+        let location = Location {
+            group_id: obj.group_id,
+            object_id: obj.object_id,
+        };
+        objects.push(catalog::CatalogObject::decode(location, &payload)?);
+    }
+    Ok(objects)
+}
+
+/// catalog の Subgroup stream を読み切り、catalog Object を取り出す
+///
+/// `catalog_alias` 以外の track alias の stream は catalog のものではないため読み捨てる。
+async fn read_catalog_subgroup_stream(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    buf: &[u8],
+    catalog_alias: u64,
+) -> Result<Vec<catalog::CatalogObject>> {
+    let mut decoder = SubgroupStreamDecoder::new();
+    decoder.push(buf);
+    let header = loop {
+        match decoder.try_decode_header()? {
+            Some(header) => break header,
+            None => match receive_registered_stream_data(stream, data_plane, stream_id).await? {
+                Some(data) => decoder.push(&data),
+                None => {
+                    return Err(Error::Other(
+                        "stream closed before subgroup header".to_string(),
+                    ));
+                }
+            },
+        }
+    };
+    if header.track_alias != catalog_alias {
+        tracing::debug!(
+            "Catalog: subgroup stream for another track alias={}",
+            header.track_alias,
+        );
+        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+        return Ok(Vec::new());
+    }
+    match data_plane.recv_subgroup_header(stream_id, &header) {
+        Ok(TrackDataAcceptance::Accepted) => {}
+        Ok(TrackDataAcceptance::UnknownTrackAlias) => {
+            return Err(Error::Other(format!(
+                "unknown track alias for the catalog: {}",
+                header.track_alias
+            )));
+        }
+        Ok(TrackDataAcceptance::FilteredOut | TrackDataAcceptance::Discarded) => {
+            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+            return Ok(Vec::new());
+        }
+        Err(e) => {
+            return Err(Error::Other(format!(
+                "failed to register subgroup header: {e}"
+            )));
+        }
+    }
+    let mut objects = Vec::new();
+    loop {
+        let object = match decoder.try_decode_object()? {
+            Some(object) => object,
+            None => match receive_registered_stream_data(stream, data_plane, stream_id).await? {
+                Some(data) => {
+                    decoder.push(&data);
+                    continue;
+                }
+                None => break,
+            },
+        };
+        let accepted = match data_plane.recv_subgroup_object(stream_id, &object) {
+            Ok(TrackDataAcceptance::Accepted) => true,
+            // header 受理済み stream では `UnknownTrackAlias` は返らない契約だが、
+            // 型上あり得るため防御的に読み捨てる
+            Ok(
+                TrackDataAcceptance::UnknownTrackAlias
+                | TrackDataAcceptance::FilteredOut
+                | TrackDataAcceptance::Discarded,
+            ) => false,
+            Err(e) => {
+                return Err(Error::Other(format!(
+                    "failed to register catalog object: {e}"
+                )));
             }
-            MsfCatalogDocument::Delta(delta) => {
-                // example の publisher は track に明示 namespace を付けるため、
-                // catalog namespace は省略 (None) でも親トラックを解決できる。
-                let base = catalog.as_mut().ok_or_else(|| {
-                    Error::Other("received delta catalog before an independent catalog".to_string())
-                })?;
-                base.apply_delta(&delta, None)
-                    .map_err(|e| Error::Other(format!("failed to apply MSF delta catalog: {e}")))?;
-                tracing::info!("Applied MSF delta catalog: {delta:?}");
+        };
+        if object.payload_length == 0 {
+            continue;
+        }
+        // 配送しない Object でも payload は wire 上に存在するため読み出して消費する。
+        // 残すと次の `try_decode_object` が ProtocolViolation になる
+        let payload = read_catalog_payload(stream, data_plane, stream_id, &mut decoder).await?;
+        if !accepted {
+            continue;
+        }
+        let location = Location {
+            group_id: header.group_id,
+            object_id: object.object_id,
+        };
+        objects.push(catalog::CatalogObject::decode(location, &payload)?);
+    }
+    Ok(objects)
+}
+
+/// Subgroup stream から次の Object の payload を読み出す
+async fn read_catalog_payload(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    decoder: &mut SubgroupStreamDecoder,
+) -> Result<Vec<u8>> {
+    loop {
+        if let Some(payload) = decoder.try_read_payload() {
+            return Ok(payload);
+        }
+        match receive_registered_stream_data(stream, data_plane, stream_id).await? {
+            Some(data) => decoder.push(&data),
+            None => {
+                return Err(Error::Other(
+                    "stream closed before catalog payload".to_string(),
+                ));
             }
         }
     }
-    // 読み出しループは fetch 応答ストリームの終端を `receive_registered_stream_data` で
-    // 検知して抜ける。同関数が `recv_data_stream_closed` で終端を通知しており、Session は
-    // 受信 fetch stream の終端を `recv_fetch_data_stream_closed` へ dispatch して FETCH 状態に
-    // 記録する。ここで改めて drain したり fetch の終端を通知したりすると二重通知になり
-    // 「unknown stream id」「fetch stream event on terminated fetch」で失敗する。
-    let catalog = catalog.ok_or_else(|| Error::Other("empty catalog fetch stream".to_string()))?;
-    let tracks = &catalog.tracks;
-    // targetLatency は再生側の時間軸が表示の遅れの下限に使う。ここでは読むだけにして、
-    // 呼び出し側が共有セルへ入れる
-    let catalog_target_latency_ms = catalog_target_latency_ms(tracks);
-    let video_info = tracks
-        .iter()
-        .find(|t| {
-            t.codec.as_ref().is_some_and(|c| {
-                c.starts_with("av01")
-                    || c.starts_with("avc1")
-                    || c.starts_with("hvc1")
-                    || c.starts_with("hev1")
-            })
-        })
-        .map(extract_video_info)
-        .transpose()?;
-    let audio_info = tracks
-        .iter()
-        .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")))
-        .map(extract_audio_info)
-        .transpose()?;
-    if video_info.is_none() && audio_info.is_none() {
-        return Err(Error::Other(
-            "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus)".to_string(),
-        ));
+}
+
+/// 受信した catalog Object を状態へ適用し、結果をログに出す
+///
+/// draft-ietf-moq-msf-01 §5 (Catalog) の配置規則の判定は [`catalog::CatalogState::apply`]
+/// が行う。適用しなかった Object は理由付きで debug に出す。
+fn apply_catalog_object(
+    state: &mut catalog::CatalogState,
+    object: &catalog::CatalogObject,
+) -> Result<()> {
+    let location = object.location;
+    match state.apply(object)? {
+        catalog::CatalogApplyOutcome::Replaced => {
+            if let Some(catalog) = state.catalog() {
+                tracing::info!(
+                    "Applied MSF catalog (group={}, object={}): tracks=[{}]",
+                    location.group_id,
+                    location.object_id,
+                    catalog::track_names(catalog),
+                );
+            }
+        }
+        catalog::CatalogApplyOutcome::DeltaApplied => {
+            if let Some(catalog) = state.catalog() {
+                tracing::info!(
+                    "Applied MSF catalog delta (group={}, object={}): tracks=[{}]",
+                    location.group_id,
+                    location.object_id,
+                    catalog::track_names(catalog),
+                );
+            }
+        }
+        catalog::CatalogApplyOutcome::Ignored(reason) => {
+            tracing::debug!(
+                "Ignored MSF catalog object (group={}, object={}): {reason}",
+                location.group_id,
+                location.object_id,
+            );
+        }
     }
-    Ok((video_info, audio_info, catalog_target_latency_ms))
+    Ok(())
 }
 
 /// カタログの track から `targetLatency` (ミリ秒) を求める
@@ -1405,6 +1693,7 @@ async fn handle_incoming_stream(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -1427,6 +1716,7 @@ async fn handle_incoming_stream(
         audio_decoder,
         audio_config_handled,
         termination_tx,
+        catalog_tx,
         playback,
         recorder,
     )
@@ -1488,6 +1778,7 @@ async fn handle_stream_body(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -1757,15 +2048,33 @@ async fn handle_stream_body(
                     );
                 }
                 Some(TrackKind::Catalog) => {
-                    // 購読の確立後に配られたカタログ。本 example は起動時に解決したトラックを
-                    // 再生し続けるため適用せず、stream を読み切って捨てる。購読を維持して
-                    // catalog の更新を受け取れる状態にしておくこと自体が
-                    // draft-ietf-moq-msf-01 §5 (Catalog) の要求である。
-                    tracing::debug!(
-                        "Stream #{stream_num}: draining catalog group {}",
-                        header.group_id,
-                    );
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                    // 購読の確立後に配られたカタログ。読み出した Object を main ループへ渡し、
+                    // 状態 (CatalogState) を所有する main ループが MSF の配置規則で適用する。
+                    // 状態を stream task 側に持たせないのは、複数の Group の stream が
+                    // 同時に走りうるためである。
+                    match read_catalog_subgroup_stream(
+                        stream,
+                        &data_plane,
+                        stream_id,
+                        &buf,
+                        header.track_alias,
+                    )
+                    .await
+                    {
+                        Ok(objects) => {
+                            for object in objects {
+                                if catalog_tx.send(object).await.is_err() {
+                                    // main ループが終了した
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Stream #{stream_num}: failed to read catalog stream: {e}"
+                            );
+                        }
+                    }
                 }
                 None => {
                     tracing::warn!(
