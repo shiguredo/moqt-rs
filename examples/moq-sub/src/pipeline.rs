@@ -409,6 +409,9 @@ pub async fn run(
     );
 
     // 3. FETCH でカタログを取得 (range {0, 0} - {0, 1} を LOCATION_FILTER で指定)
+    //
+    // C4M 認可トークンは `MoqtClient::fetch` が `moqt` クレームを見て付けるため、ここでは
+    // 指定しない (draft-ietf-moq-c4m-01 §1.1)。
     let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
     catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
         param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,

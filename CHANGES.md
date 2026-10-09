@@ -26,6 +26,16 @@
   - peer によるストリーム終端の送信エラーをセッション終了と区別し、moq-pub / moq-sub は該当ストリームを捨てて配信 / 受信を継続する
   - @voluntas
 
+- [FIX] moq-pub のカタログのトラックに role を載せる
+  - 映像は `video`、音声は `audio` (draft-ietf-moq-msf-01 §5.2.6 Table 4 の予約 role)
+  - 受信側は codec だけでなく role からも content の種別を判定できる
+  - @voluntas
+
+- [FIX] moq-sub がカタログを取得する FETCH に C4M の AUTHORIZATION_TOKEN を載せる
+  - `moqt` クレームがその FETCH の Full Track Name を認可するトークンだけを載せる (draft-ietf-moq-c4m-01 §1.1)
+  - クレームをデコードできないトークンは SETUP と SUBSCRIBE / PUBLISH には従来どおり載せる
+  - @voluntas
+
 - [ADD] moq-pub / moq-sub が `--namespace` の省略時に `--url` の `msf` fragment の namespace を使う
   - `#msf:<track-identifier>` の track-identifier を §11.1.2 (MSF Namespace-Name String Encoding) の表現としてパースする
   - fragment が無い、`msf` 以外、または namespace が 0 フィールドの場合はエラーにする

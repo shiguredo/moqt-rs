@@ -14,6 +14,12 @@ use crate::stream_writer::SubgroupWriter;
 use tokio_moq::moqt_client::{DataPlaneHandle, ObjectFilterOutcome};
 use tokio_moq::transport;
 
+/// 映像トラックの role (draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4)
+const MSF_ROLE_VIDEO: &str = "video";
+
+/// 音声トラックの role (draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4)
+const MSF_ROLE_AUDIO: &str = "audio";
+
 /// 映像トラックの catalog 情報
 pub struct VideoTrackParams<'a> {
     pub track_name: &'a str,
@@ -92,6 +98,9 @@ fn build_catalog(
     if let Some(v) = video {
         let mut track = MsfTrack::new(v.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(v.namespace.to_string());
+        // draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4 の予約 role を載せる。
+        // 受信側は codec だけでなく role からも content の種別を判定できる
+        track.role = Some(MSF_ROLE_VIDEO.to_string());
         track.codec = Some(v.codec.to_string());
         track.width = Some(v.width as u64);
         track.height = Some(v.height as u64);
@@ -105,6 +114,9 @@ fn build_catalog(
     if let Some(a) = audio {
         let mut track = MsfTrack::new(a.track_name.to_string(), MsfPackaging::Loc, true);
         track.namespace = Some(a.namespace.to_string());
+        // draft-ietf-moq-msf-01 §5.2.6 (Track role) Table 4 の予約 role を載せる。
+        // 受信側は codec だけでなく role からも content の種別を判定できる
+        track.role = Some(MSF_ROLE_AUDIO.to_string());
         track.codec = Some(a.codec.to_string());
         track.samplerate = Some(a.samplerate as u64);
         track.channel_config = Some(a.channel_config.to_string());
@@ -286,6 +298,80 @@ mod tests {
         assert_eq!(
             video_track.target_latency, audio_track.target_latency,
             "音声と映像の targetLatency が同一値であること"
+        );
+    }
+
+    /// publisher が載せる role が §5.2.6 Table 4 の予約 role であること
+    ///
+    /// 受信側は codec だけでなく role からも content の種別を判定できる。
+    /// draft-ietf-moq-msf-01 §5.2.6 (Track role)
+    #[test]
+    fn publisher_catalog_sets_reserved_track_roles() {
+        let video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+        };
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "opus",
+            samplerate: 48_000,
+            channel_config: "2",
+            bitrate: 128,
+        };
+        let catalog =
+            build_catalog(Some(&video), Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let encoded = catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+        let decoded =
+            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること");
+        let MsfCatalogDocument::Full(full) = decoded else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(
+            full.tracks[0].role.as_deref(),
+            Some(MSF_ROLE_VIDEO),
+            "映像トラックに role 'video' が載ること"
+        );
+        assert_eq!(
+            full.tracks[1].role.as_deref(),
+            Some(MSF_ROLE_AUDIO),
+            "音声トラックに role 'audio' が載ること"
+        );
+        // 映像だけ・音声だけのカタログでも role が載ること
+        let video_only =
+            build_catalog(Some(&video), None, TEST_SYNC).expect("カタログを構築できること");
+        let MsfCatalogDocument::Full(full) = video_only
+            .encode()
+            .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
+            .expect("encode / decode に成功すること")
+        else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(
+            full.tracks[0].role.as_deref(),
+            Some(MSF_ROLE_VIDEO),
+            "映像のみのカタログにも role が載ること"
+        );
+        let audio_only =
+            build_catalog(None, Some(&audio), TEST_SYNC).expect("カタログを構築できること");
+        let MsfCatalogDocument::Full(full) = audio_only
+            .encode()
+            .and_then(|encoded| MsfCatalogDocument::decode(&encoded))
+            .expect("encode / decode に成功すること")
+        else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(
+            full.tracks[0].role.as_deref(),
+            Some(MSF_ROLE_AUDIO),
+            "音声のみのカタログにも role が載ること"
         );
     }
 
