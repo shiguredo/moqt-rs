@@ -666,6 +666,13 @@
   - moq-sub が音声出力の実際の再生位置から到着の基準を求める
   - @voluntas
 
+- [ADD] 音声の再生の観測値 (`AudioPlayoutTimingStats`) を追加する
+  - `src/playout/timing.rs` に、鳴るはずの時刻 (再生予定時刻)・到着した時刻・鳴り始める時刻を記録し、予定に対する余裕と到着から鳴り始めるまでの時間と予定からの遅れを p50 / p95 / max の分布で返す計器を追加する (分布は `AUDIO_PLAYOUT_TIMING_WINDOW_US` の直近 10 秒の窓から求める)
+  - 鳴らさなかった音は理由 (`AudioMissReason`: `Backlog` / `CatchUp` / `Error` / `Stopped`) ごとに件数と長さを累積し、直近 `MAX_RECENT_AUDIO_MISSES` (30) 件を残す。`record_stopped` は鳴り終わった音を数えず、鳴り始めている音は残りの長さだけを数える
+  - 目標遅延を閉ループで決めるための `audio_delay_feedback` は、短い窓 (1 秒) の分布と累積の捨てた量を返す
+  - `AudioPlayoutScheduler::last_play` と `AudioPlayoutPlay` を追加し、スケジューラが決めた音 (到着・目標・鳴り始める時刻・実際に鳴る長さ・計画) をそのまま計器へ渡せるようにする
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する
