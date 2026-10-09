@@ -479,8 +479,15 @@ pub struct MoqtClient {
 
 /// アプリ (`next_event`) が観測する notable イベントか
 ///
-/// `drain_events` はアプリより先に `Session` のイベントを poll する。ここに挙げた
-/// イベントを `drain_events` が捨てると、`next_event` は二度と取り出せない。
+/// `drain_events` はアプリより先に `Session` のイベントを poll し、配送対象のイベントを
+/// 配送キュー (`notable_events`) へ積む。`take_notable_event` はキューの pop だけを
+/// 行うため、配送対象から漏れたイベントはアプリへ届かない。
+///
+/// 配送対象の判定は `drain_events` の arm の列挙が行う。この述語は同じ集合を表し、
+/// notable / 非配送の 2 つの arm が debug ビルドで一致を検査する (`CloseSession` は
+/// 専用 arm で配送するため、単体テストで notable であることを固定する)。
+/// variant を追加するときは arm の列挙とこの述語の両方を更新する (リリースビルドでは
+/// arm の debug_assert は実行されない)。
 fn is_notable_event(event: &SessionEvent) -> bool {
     matches!(
         event,
@@ -492,6 +499,24 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // ここで捨てると保留 PUBLISH_DONE の flush 条件が満たされないため、アプリへ届ける
             | SessionEvent::ResetDataStream { .. }
     )
+}
+
+/// 終端済み subscription を破棄してよいか
+///
+/// `Session::forget_subscription` は保留中の PUBLISH_DONE も破棄するため、送出すべき
+/// PUBLISH_DONE が残っている間は呼んではならない。draft-ietf-moq-transport-22 §9.5.1
+/// (Updating Subscriptions) は REQUEST_UPDATE が失敗した場合に publisher が PUBLISH_DONE
+/// (UPDATE_FAILED) を送ることを MUST で要求するため、保留中の PUBLISH_DONE を失うと
+/// この MUST を果たせない。
+///
+/// `Session::subscription_cleanup_ready` は `cleanup_ready` だけを見て
+/// `pending_publish_done` を見ないため本判定には使えない。`Session::subscription` から
+/// `Subscription` を取り出して両方を見る。
+///
+/// `Subscription` 全体ではなく判定に必要な値だけを受け取る (`Subscription` は pub
+/// フィールドが多く、テストで組むと壊れやすいため)。
+fn should_forget_subscription(cleanup_ready: bool, pending_publish_done: Option<u64>) -> bool {
+    cleanup_ready && pending_publish_done.is_none()
 }
 
 /// peer 起点の bidi request stream の終端を Session へ通知済みの記録
@@ -1359,12 +1384,16 @@ impl MoqtClient {
 
     /// 次のイベントを返す
     ///
-    /// session の注目イベント (GoawayReceived / CloseSession / PublishDoneReceived) に加えて、
-    /// peer (MOQT relay) から届いた要求を [`ClientEvent::Request`]、
-    /// REQUEST_UPDATE を [`ClientEvent::RequestUpdate`] として返す。
-    /// 未処理の要求が溜まっている場合はそちらを優先して返す。
+    /// session の注目イベント (GoawayReceived / CloseSession / PublishDoneReceived /
+    /// ResetDataStream) に加えて、peer (MOQT relay) から届いた要求を
+    /// [`ClientEvent::Request`]、REQUEST_UPDATE を [`ClientEvent::RequestUpdate`] として返す。
+    /// 未処理の要求が溜まっている場合はそちらを優先して返す (アプリ向けキュー
+    /// (`incoming_updates` / `incoming_requests`) は notable イベントより優先する)。
     /// REQUEST_UPDATE は応答を待たせると peer の control message timeout を招くため、
     /// 要求より先に返す。
+    ///
+    /// Session のイベントは `drain_events` で I/O 操作へ変換し、配送対象
+    /// (`is_notable_event`) は `notable_events` 経由で返す。
     pub async fn next_event(&mut self) -> Result<Option<ClientEvent>> {
         loop {
             if let Some(update) = self.incoming_updates.pop_front() {
@@ -1372,6 +1401,14 @@ impl MoqtClient {
             }
             if let Some(request) = self.incoming_requests.pop_front() {
                 return Ok(Some(ClientEvent::Request(request)));
+            }
+            self.drain_events().await?;
+            // `drain_events` は `RequestUpdateReceived` をアプリ向けキューへ積む。同一呼び出しで
+            // notable イベント (とくに `CloseSession`) を先に返すと、アプリがループを抜けたときに
+            // その update が配送されないまま残るため、積まれた分を先に返す
+            // (`incoming_requests` は現状 drain では積まないが、同じ優先規則を両キューに適用する)
+            if !self.incoming_updates.is_empty() || !self.incoming_requests.is_empty() {
+                continue;
             }
             if let Some(ev) = self.take_notable_event() {
                 return Ok(Some(ClientEvent::Session(ev)));
@@ -1511,11 +1548,13 @@ impl MoqtClient {
     }
 
     /// Session::tick を呼び出す (GOAWAY_TIMEOUT の deadline 判定)
+    ///
+    /// 同期 API のため `drain_events` を呼べない。request の回収は Session のイベントを
+    /// I/O へ変換し終えた後にだけ行う契約であり (`cleanup_closed_requests` 参照)、
+    /// ここでは行わない。
     pub fn tick(&mut self, now_ms: u64) {
         let mut session = lock_session(&self.session);
         session.tick(now_ms);
-        drop(session);
-        self.cleanup_closed_requests();
     }
 
     /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
@@ -1591,7 +1630,7 @@ impl MoqtClient {
             tracing::warn!("Failed to reset bidi request stream (request_id={request_id}): {e}");
         }
         // 受信タスク終了後は peer からの close を検知できないため、回収対象として登録する。
-        // 実際の回収は通常の pump_once / tick に任せる (キュー済みの Closed を先に処理させるため、
+        // 実際の回収は次の `drain_events` に任せる (キュー済みの Closed を先に処理させるため、
         // ここで即時 cleanup すると unknown request id になる余地がある)
         self.closed_request_streams.insert(request_id);
         self.request_stop_sending(request_id, error_code).await;
@@ -1686,21 +1725,13 @@ impl MoqtClient {
         Ok(())
     }
 
-    /// アプリ側に通知すべき SessionEvent を取り出す (GoawayReceived など)
+    /// 配送キューからアプリ側に通知すべき SessionEvent を取り出す
+    ///
+    /// `Session::poll_event` を直接呼ぶとキューに残った `SendOnStream` を
+    /// アプリへの配送対象外として捨ててしまうため、配送対象の判定と push は
+    /// `drain_events` に任せる。
     fn take_notable_event(&mut self) -> Option<SessionEvent> {
-        if let Some(event) = self.notable_events.pop_front() {
-            return Some(event);
-        }
-        loop {
-            let event = {
-                let mut session = lock_session(&self.session);
-                session.poll_event()
-            };
-            let ev = event?;
-            if is_notable_event(&ev) {
-                return Some(ev);
-            }
-        }
+        self.notable_events.pop_front()
     }
 
     /// control / bidi channel のいずれか 1 件を受信して session に流し、events を drain
@@ -1768,7 +1799,6 @@ impl MoqtClient {
                                 }
                                 tracing::debug!("bidi stream {rid} closed by peer");
                                 self.drain_events().await?;
-                                self.cleanup_closed_requests();
                             }
                         }
                     }
@@ -2062,7 +2092,24 @@ impl MoqtClient {
                     self.request_stop_sending(request_id, error_code).await;
                 }
                 SessionEvent::CloseSession(err) => {
-                    self.handle.close(err.code, err.reason).await?;
+                    // 終了理由をアプリへ届けるため配送キューへ積む。ここで積まないと
+                    // `next_event` は終了理由を観測できない (`take_notable_event` は
+                    // Session のイベントを直接 poll しない)。自側の `close` 起点でも
+                    // 1 度だけ配送される。
+                    // transport の close 失敗で終了理由の配送を落とさないよう、エラーは
+                    // warn に留める (QUIC の close は失敗しないが、WebTransport の
+                    // close は接続断や FIN 済みで失敗しうる)。
+                    if let Err(e) = self.handle.close(err.code, err.reason).await {
+                        tracing::warn!(
+                            "Failed to close the transport with the session error (code={:#x}): {e}",
+                            err.code
+                        );
+                    }
+                    self.notable_events
+                        .push_back(SessionEvent::CloseSession(err));
+                    // 閉じた後は Session のイベントを I/O へ変換できないため drain を終える。
+                    // 末尾の回収に到達しないため、ここで回収を済ませる
+                    self.cleanup_closed_requests();
                     return Ok(());
                 }
                 SessionEvent::RequestUpdateReceived {
@@ -2082,11 +2129,42 @@ impl MoqtClient {
                 ev @ (SessionEvent::GoawayReceived { .. }
                 | SessionEvent::PublishDoneReceived { .. }
                 | SessionEvent::ResetDataStream { .. }) => {
-                    // アプリ (next_event) が観測する notable イベント。
-                    // ここで捨てると take_notable_event が取り出せなくなる
-                    // (受信メッセージを契機に生成されたイベントは、この drain が
-                    //  next_event の次の take_notable_event より先に poll する)。
+                    // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
+                    // `take_notable_event` が取り出せない
+                    // (配送キューへ積むのはこの drain だけ)。
+                    // 配送の判定はこの arm の列挙で行い、`is_notable_event` との一致を
+                    // debug ビルドで検査する。
+                    debug_assert!(
+                        is_notable_event(&ev),
+                        "notable event predicate is inconsistent with this arm"
+                    );
                     self.notable_events.push_back(ev);
+                }
+                ev @ (SessionEvent::Established
+                | SessionEvent::RequestTerminated { .. }
+                | SessionEvent::RequestOkReceived { .. }
+                | SessionEvent::PublishStateNotifyReceived { .. }
+                | SessionEvent::FetchOkReceived { .. }
+                | SessionEvent::SendPaddingStream { .. }
+                | SessionEvent::OpenFillFetchStream { .. }
+                | SessionEvent::SendPaddingDatagram { .. }) => {
+                    // ここに列挙したイベントはアプリへ配送しない。この列挙も網羅性の担保であり、
+                    // variant を追加するとコンパイルエラーになる (`is_notable_event` との一致は
+                    // debug ビルドで検査する)。
+                    debug_assert!(
+                        !is_notable_event(&ev),
+                        "notable event predicate is inconsistent with this arm"
+                    );
+                    // PublishStateNotifyReceived は peer publisher の通知であり、
+                    // 本 example では特別な処理を行わない
+                    // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
+                    // OpenFillFetchStream は fill 配信を要求された場合に発火する
+                    // (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。本 example は fill 配信を行わないため無視する。
+                    // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
+                    // ポーリングで参照するためここでは特別な処理を行わない
+                    // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。
+                    // SendPaddingStream / SendPaddingDatagram も padding を要求していないため到達しない。
+                    // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
                 }
                 SessionEvent::RequestErrorReceived {
                     request_id,
@@ -2099,45 +2177,46 @@ impl MoqtClient {
                     self.request_errors
                         .insert(request_id, (error_code, reason.as_str().to_string()));
                 }
-                SessionEvent::Established
-                | SessionEvent::RequestTerminated { .. }
-                | SessionEvent::RequestOkReceived { .. }
-                | SessionEvent::PublishStateNotifyReceived { .. }
-                | SessionEvent::FetchOkReceived { .. }
-                | SessionEvent::SendPaddingStream { .. }
-                | SessionEvent::OpenFillFetchStream { .. }
-                | SessionEvent::SendPaddingDatagram { .. } => {
-                    // GoawayReceived / PublishDoneReceived / ResetDataStream は
-                    // メインループが take_notable_event で拾う。
-                    // PublishStateNotifyReceived は peer publisher の通知であり、
-                    // 本 example では特別な処理を行わない
-                    // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
-                    // OpenFillFetchStream は fill 配信を要求された場合に発火する
-                    // (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。本 example は fill 配信を行わないため無視する。
-                    // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
-                    // ポーリングで参照するためここでは特別な処理を行わない
-                    // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。
-                    // SendPaddingStream / SendPaddingDatagram も padding を要求していないため到達しない。
-                    // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
-                }
             }
         }
         self.cleanup_closed_requests();
         Ok(())
     }
 
+    /// 終端済み request を Session から回収する
+    ///
+    /// 保留中の PUBLISH_DONE を持つ subscription は破棄しない (`should_forget_subscription`)。
+    /// flush は `SessionEvent::SendOnStream` を積むだけで、ワイヤへの書き出しは
+    /// `drain_events` が行うため、回収は Session のイベントを I/O へ変換し終えた後にだけ行う
+    /// (`drain_events` の末尾と、`CloseSession` で早期 return する分岐)。
+    /// drain できない同期経路 (`tick`) から呼ぶと、未送出の PUBLISH_DONE を捨ててしまう。
+    ///
+    /// 保証は「`Session` のイベントキューが空になってから回収する」ところまでである。
+    /// flush の契機 (`send_data_stream_closed` / `reset_outgoing_data_stream` / fill への
+    /// `STOP_SENDING`) を別タスクから呼ぶ配線では、キューが空になった直後に flush が
+    /// 積まれる競合が残る (本 repo の examples にその配線は無いため現状は到達しない)。
+    /// またイベントが一切来ない間は、回収が次の drain まで遅延する。
     fn cleanup_closed_requests(&mut self) {
         let request_ids: Vec<u64> = self.closed_request_streams.iter().copied().collect();
         let mut forgotten = Vec::new();
         {
             let mut session = lock_session(&self.session);
             for request_id in request_ids {
-                if session.subscription_cleanup_ready(request_id) == Some(true)
-                    && session.forget_subscription(request_id).is_some()
-                {
+                let subscription_forgettable =
+                    session
+                        .subscription(request_id)
+                        .is_some_and(|subscription| {
+                            should_forget_subscription(
+                                subscription.cleanup_ready(),
+                                subscription.pending_publish_done,
+                            )
+                        });
+                if subscription_forgettable && session.forget_subscription(request_id).is_some() {
                     forgotten.push(request_id);
                     continue;
                 }
+                // fetch / track_status には保留 PUBLISH_DONE に相当する状態が無いため、
+                // Session の判定 (fetch_cleanup_ready) をそのまま使う
                 if session.fetch_cleanup_ready(request_id) == Some(true)
                     && session.forget_fetch(request_id).is_some()
                 {
@@ -2183,6 +2262,8 @@ mod tests {
 
     use base64ct::{Base64UrlUnpadded, Encoding};
     use shiguredo_moqt::c4m::{CLAIM_MOQT, Match, MoqtClaim, MoqtScope, NamespaceMatch, cbor};
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::session::types::SessionError;
 
     /// 認可トークンが AUTHORIZATION_TOKEN (0x03) のメッセージパラメータになること
     #[test]
@@ -2342,6 +2423,21 @@ mod tests {
         );
     }
 
+    /// セッション終了もアプリが観測する notable イベントである
+    ///
+    /// 終了理由 (`ClientEvent::Session(CloseSession)`) をアプリがログに残せるようにする。
+    #[test]
+    fn close_session_is_notable_event() {
+        let event = SessionEvent::CloseSession(SessionError::new(
+            SESSION_PROTOCOL_VIOLATION,
+            "protocol violation",
+        ));
+        assert!(
+            is_notable_event(&event),
+            "CloseSession は notable であること"
+        );
+    }
+
     /// PUBLISH_DONE はアプリが観測する notable イベントである
     #[test]
     fn publish_done_is_notable_event() {
@@ -2383,6 +2479,32 @@ mod tests {
     #[test]
     fn established_is_not_notable_event() {
         assert!(!is_notable_event(&SessionEvent::Established));
+    }
+
+    /// 保留中の PUBLISH_DONE がある subscription は破棄しない
+    ///
+    /// `Session::forget_subscription` は保留中の PUBLISH_DONE も破棄するため、破棄すると
+    /// REQUEST_UPDATE を拒否した publisher が §9.5.1 の MUST で送る PUBLISH_DONE
+    /// (UPDATE_FAILED) を失う。保留が無ければ Session の cleanup 判定に従う。
+    #[test]
+    fn pending_publish_done_blocks_subscription_cleanup() {
+        let stream_count = 3;
+        assert!(
+            !should_forget_subscription(true, Some(stream_count)),
+            "保留中の PUBLISH_DONE がある間は破棄しないこと"
+        );
+        assert!(
+            !should_forget_subscription(false, Some(stream_count)),
+            "保留中は cleanup_ready が true でも破棄しないこと"
+        );
+        assert!(
+            should_forget_subscription(true, None),
+            "保留が無ければ cleanup_ready に従って破棄すること"
+        );
+        assert!(
+            !should_forget_subscription(false, None),
+            "cleanup_ready が false なら破棄しないこと"
+        );
     }
 
     /// 終端通知済みの記録は request_id 単位で独立している

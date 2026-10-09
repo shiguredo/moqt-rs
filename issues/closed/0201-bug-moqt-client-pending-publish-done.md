@@ -1,7 +1,7 @@
 # moqt_client が保留中の PUBLISH_DONE を送信できない経路がある
 
 - Created: 2026-10-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/fix-moqt-client-pending-publish-done
 - Polished: 2026-10-06
 - Updated: 2026-10-09
@@ -100,3 +100,31 @@ example の `MoqtClient` には、この MUST を阻害する経路が 2 つあ�
 - 破棄しなかった request が `closed_request_streams` に残り、次の cleanup で破棄されること (同上)
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`MoqtClient` が保留中の PUBLISH_DONE を失う 2 つの経路を修正した。
+
+- `cleanup_closed_requests` の subscription の破棄条件に「保留中の PUBLISH_DONE が無いこと」を
+  加えた (純関数 `should_forget_subscription`)。判定には `Session::subscription` が返す
+  `Subscription::cleanup_ready` と `pending_publish_done` を使う
+  (`Session::subscription_cleanup_ready` は `cleanup_ready` だけを見るため使わない)
+- request の回収を Session のイベントを I/O へ変換し終えた後に限定した。`MoqtClient::tick` からの
+  回収をやめ、`drain_events` の末尾と `CloseSession` で早期 return する分岐に一本化した
+- `next_event` は Session のイベントを drain してから配送キュー (`notable_events`) を取り出す。
+  `take_notable_event` は `notable_events` のみを pop する (Session のイベントを直接 poll すると
+  キューに残った `SendOnStream` を捨ててしまう)
+- 配送対象の判定は `drain_events` の arm の列挙が行い、`is_notable_event` との一致を
+  notable / 非配送の 2 つの arm の debug_assert と単体テストで検査する (リリースビルドでは
+  arm の debug_assert は実行されないため、variant を追加するときは両方を更新する)
+- `drain_events` の `CloseSession` 分岐は transport を閉じたうえで `notable_events` へ積み、
+  終了理由が `ClientEvent::Session(CloseSession)` としてアプリへ届くことを維持する。
+  transport の close が失敗しても配送は落とさない (warn に留める)
+- テストは `should_forget_subscription` の真理値表と `close_session_is_notable_event` を
+  単体テストで固定した。example の配線 (drain 順序 / flush 後の回収) は I/O ハンドルが必要なため
+  単体テストの対象外であり、レビューで確認した
+
+残った制限: 保証は「Session のイベントキューが空になってから回収する」ところまでであり、
+flush の契機 (`send_data_stream_closed` など) を別タスクから呼ぶ配線では flush と回収の競合が
+残る (本 repo の examples にその配線は無いため現状は到達しない)。またイベントが一切来ない間は
+回収が次の drain まで遅延する。
