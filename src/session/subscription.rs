@@ -71,6 +71,11 @@ impl Session {
     }
 
     /// 指定 Request ID の subscription が cleanup 可能か返す
+    ///
+    /// `bool` は [`Subscription::cleanup_ready`] の結果である。同メソッドは保留中の
+    /// PUBLISH_DONE (`Subscription::pending_publish_done`) を見ないため、`Some(true)` でも
+    /// 破棄してよいとは限らない。保留が `Some` の間は [`Session::forget_subscription`] を
+    /// 呼んではならない (同関数の doc の順序契約を参照する)。
     pub fn subscription_cleanup_ready(&self, request_id: u64) -> Option<bool> {
         self.subscriptions
             .get(&request_id)

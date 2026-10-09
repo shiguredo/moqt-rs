@@ -11,6 +11,10 @@
 
 ## develop
 
+- [UPDATE] `Session::subscription_cleanup_ready` が保留中の PUBLISH_DONE を見ないことを doc に明記する
+  - 保留が `Some` の間は `Session::forget_subscription` を呼んではならない (§9.5.1 / §9.9)
+  - @voluntas
+
 - [FIX] moq-sub の REQUEST_UPDATE に C4M の AUTHORIZATION_TOKEN を載せる
   - SUBSCRIBE / FETCH と同じトークンを `MoqtClient::send_request_update` が付与する (draft-ietf-moq-msf-01 §11.4.3)
   - @voluntas
