@@ -1,7 +1,7 @@
 # MoqtClient の drain が future の破棄でメッセージを失う
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-11
 - Branch: feature/fix-moqt-client-drain-cancel-safety
 - Polished: 2026-10-09
 - Updated: 2026-10-11
@@ -64,3 +64,30 @@
 - 追加した挙動を単体テストで固定すること (I/O ハンドルが必要な配線部分はレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+`drain_events` の `SendOnStream` で送信半を台帳から取り出す順序を変え、送信中は `bidi_sends` に
+残したまま `get_mut` で送信し、FIN を送るときだけ送信の完了後に取り出すようにした。これにより
+`next_event` の future が await の途中で破棄されても送信半が失われず、破棄後に呼び直すと Session の
+イベントキューに残っていたメッセージから送信が再開される。FIN の送信に失敗した場合は送信半を
+台帳へ戻して warn し、以後の送信で再試行できるようにした。
+
+`SendRequest` は encode → ストリームを開く → 受信タスクと STOP_SENDING のチャネルを登録 →
+ヘッドメッセージを送信 → 台帳へ登録、の順にした。台帳への登録を送信より先にすると、破棄時に
+ヘッド未送信のストリームが台帳へ残り、以後の応答や PUBLISH_DONE が初回メッセージとしてワイヤに
+載って peer が PROTOCOL_VIOLATION でセッションを閉じるためである。
+
+送信中に破棄されたメッセージの扱いと、破棄で失われる 3 経路 (ストリームを開く await、ヘッド
+メッセージの送信、確立済み request のメッセージの送信) を `drain_events` の doc に明記した。送信の
+3 経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) の実装を確認し、いずれも
+メッセージ単位で書き込むため部分送信は起きないこと、破棄されたメッセージが送られるかどうかは
+transport に依存することを記録した。
+
+`SendOnStream` の判定は `plan_send_on_stream` に切り出し、送信半が無い request では encode も
+送信もしないこと (FIN / RESET 済みの request を no-op にする既存挙動の維持) と、`fin` のときだけ
+送信の完了後に台帳から取り出すことを単体テストで固定した。I/O ハンドルが要る配線の順序は
+差分レビュー 3 周で確認した。回収時の FIN 失敗も warn するようにした。
+
+`cargo test --workspace` (2645 件) / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` はすべて通っている。
