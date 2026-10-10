@@ -1,7 +1,7 @@
 # 映像 Object を復号してよいか Group の順序と欠落から判定する
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-video-decode-order
 
 ## 目的
@@ -46,4 +46,15 @@ moqt-js の `VideoDecodeOrder` を移植し、純粋な状態機械としてラ�
 
 ## 解決方法
 
-{未着手}
+- `src/video_decode_order.rs` を追加し、moqt-js の `src/videoDecodeOrder.ts` の `VideoDecodeOrder` を移植した (時刻も I/O も要らない純粋な状態機械)
+- 公開した: `VideoObjectPosition { group_id, object_id, is_key_frame, prior_object_id_gap }`、`VideoObjectAdmission` (`Decode` / `Skip { reason }`)、`VideoObjectSkipReason` (`Stale` / `MissingReference`)、`VideoDecodeOrder` (`admit` / `reset` / `decoding_group_id` / `last_decoded_object_id` / `awaiting_key_frame`)、`prior_object_id_gap_of`
+- 判定の規則: 復号中の Group より古い Group の Object は `Stale`。同じ Group で直前に復号した Object ID 以前の Object は `Stale` (重複か遅着)。キーフレームは参照を持たないため復号を始め直す。新しい Group の delta はその Group でキーフレームを待つ。
+  同じ Group の delta は直前に復号した Object の次の Object ID のときだけ通し、間の欠けは Prior Object ID Gap (draft-ietf-moq-transport-22 §10.9) が非存在を示す範囲に収まるときだけ連続とみなす。示されない欠けは欠落として扱い、次のキーフレームまで delta を捨てる
+- 欠落を検出しても Group は保持する (それより古い Group の Object を古いとして捨てるため)
+- `prior_object_id_gap_of` は `properties_bytes` から Prior Object ID Gap を読む。Property が無ければ 0。framing は受信経路と同じ `ObjectProperties::decode_exact` で検証する
+- `examples/moq-sub/src/pipeline.rs` は購読に 1 つ `VideoDecodeOrder` を持ち、復号の直前に判定を通す。Group は別々の Subgroup ストリームで届くため、stream ごとに持つと Group をまたいだ判定ができないためである。`Skip` のときは復号せず理由を debug ログに出す。キーフレームの判定は録画と共有する `is_video_keyframe` に切り出した
+- FETCH の経路は判定を通さない。FETCH 応答は publisher が要求された Group Order で送るため live の到着順を前提にした判定は当てはまらない (本 example の FETCH は catalog の取得のみである)
+- テスト: `tests/test_video_decode_order.rs` に 11 件、`pbt/tests/prop_video_decode_order.rs` に 7 件 (判定の分岐 8 種のカバレッジゲート付き)、example に 1 件を追加した
+- 検証: `cargo fmt --check` / `make pbt` / `make test` (59 バイナリすべて成功) / `cargo clippy --workspace --all-targets -- -D warnings` / `RUSTDOCFLAGS="-D warnings" cargo doc` / no_std ビルドが成功した。`PBT_SEED` を 40 種類変えても property が成功する
+- 検証: 9 種類の欠陥 (古い Group の判定の削除 / 重複・遅着の判定の削除 / 欠落のときに直前の Object ID を残す / 欠落のときに Group を保持しない / Prior Object ID Gap の判定を甘くする / キーフレームも通さない / 新しい Group の delta を待たない / Prior Object ID Gap を常に 0 にする / delta で Object ID を進めない) を入れて、追加したテストと property がそれぞれ検出することを確認した
+- 備考: 「同じ Group で復号した Object ID は単調に増える」はキーフレームでは成り立たない (欠落の後に遅れて届いた Group 先頭のキーフレームは、直前の Object ID より前から復号を始め直す)。property は delta に限定し、キーフレームの例外は単体テストで固定した。`pub mod video_decode_order;` に `///` を付けないのは、付けると rustdoc がモジュール内の intra-doc link をクレート直下で解決してしまうためである
