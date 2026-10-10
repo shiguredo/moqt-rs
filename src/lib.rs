@@ -60,3 +60,6 @@ pub mod subgroup_tracker;
 pub mod track_properties;
 /// 可変長整数 (Variable-Length Integer) のコーデック (draft-ietf-moq-transport-22 §8.1 (Variable-Length Integers))
 pub mod varint;
+// 概要と根拠は src/video_decode_order.rs の //! ドキュメントに書く。ここに /// を置くと
+// rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
+pub mod video_decode_order;
