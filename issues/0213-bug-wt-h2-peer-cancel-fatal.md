@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-wt-h2-peer-cancel-fatal
 - Polished: 2026-10-10
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -26,7 +27,9 @@ HTTP/2 (`wt-h2`) だけは peer の cancel で moq-pub / moq-sub が終了する
 - `examples/moq-pub/src/error.rs` と `examples/moq-sub/src/error.rs` の
   `From<tokio_moq::error::TransportError> for Error` は `TransportError::StreamClosed` を明示せず
   catch-all で `WebTransport` にする。そのため pipeline の `is_peer_stream_reset`
-  (`Error::StreamReset` のみ真) に該当せず、`close_on_message_error` + `main` の Fatal で終了する。
+  (`Error::StreamReset` のみ真) に該当せず、致命エラーとして扱われて example が終了する
+  (moq-pub は `close_on_message_error` が `Error::Moqt` 以外を素通りしたうえで致命判定になり、
+  moq-sub は `fatal_error` を立てて `main` を抜ける)。
 - 0152 は `From<TransportError>` の表示振り分けを網羅 match にする issue であり、本 issue は
   pipeline の挙動 (致命扱いをやめる) を扱う。目的が異なるため分けて扱う。
 
@@ -42,8 +45,8 @@ HTTP/2 (`wt-h2`) だけは peer の cancel で moq-pub / moq-sub が終了する
   拒否のうち台帳に一致するものだけを `StreamReset { error_code }` にする
   (wt-h2 の capsule は MOQT のコードをそのまま運ぶため remap は不要。
   変換則は `StopSendingTransport::WtH2` が実装済み)。
-  新規 variant の追加は moq-pub / moq-sub の `From<TransportError>` への追記を強制し、
-  表示振り分けを扱う 0152 と作業が混ざるため行わない。
+  新規 variant は追加しない (`From<TransportError>` に catch-all があるため写像の追記は強制されず、
+  追加すると黙って `WebTransport:` 表示に落ちて 0152 が扱う表示振り分けと衝突する)。
 - wt-h2 で cancel 後の送信がどのエラーで拒否されるかを確認し、該当ストリームの終端として扱えるようにする。
 - wt-h2 が experimental であることと capsule 実装の挙動は変えない。
 

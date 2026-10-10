@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-publisher-codec-constant-reference
 - Polished: 2026-09-28
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -11,8 +12,11 @@
 
 ## 現状
 
-`build_catalog` を検証する `publisher_catalog_tracks_encode` / `publisher_alternate_video_codecs_encode` は
-`av01.0.08M.08` / `avc1.640028` / `hvc1.1.6.L120.B0` / `opus` をリテラルで持つ。送信に使う codec 文字列の元になるのは
+`build_catalog` (第 4 引数 `auth_info` を持つ) を検証する `examples/moq-pub/src/catalog.rs` のテスト 5 件
+(`publisher_catalog_tracks_encode` / `publisher_catalog_sets_sync_metadata_on_both_tracks` /
+`publisher_catalog_sets_reserved_track_roles` / `publisher_alternate_video_codecs_encode` /
+`publisher_catalog_sets_auth_info_on_both_tracks_for_c4m`) は、
+`av01.0.08M.08` / `avc1.640028` / `hvc1.1.6.L120.B0` / `opus` を 8 箇所でリテラルとして持つ。送信に使う codec 文字列の元になるのは
 encoder モジュールの次の定数である。av1 / opus は常に定数の値そのものが送信される。h264 / h265 は最初のキーフレームまでは
 定数の値 (`new` 時点の既定値) が送信され、最初のキーフレームで SPS から再構築した値へ置き換わる。
 

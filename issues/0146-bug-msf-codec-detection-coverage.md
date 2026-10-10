@@ -4,7 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-codec-detection-coverage
 - Polished: 2026-10-08
-- Updated: 2026-10-08
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -35,7 +35,7 @@ draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラッ
 - 第二段: codec が登録外または欠如でも、`mimeType` が `audio/` または `video/` で始まるトラックはその種別として MUST を課す
 - `mimeType` が `audio/` / `video/` を示すトラックは inherent codec を持つトラック (draft-ietf-moq-msf-01 §5.2.18) とみなし、codec も必須とする。codec を持たないトラックは既存の `MUST specify codec` の分岐で拒否し、この分岐のメッセージも mimeType を根拠として示す
 - 種別判定は codec の登録名一致と mimeType の接頭辞一致を OR で合成する。audio を示す根拠が 1 つ以上あれば audio の要求を、video を示す根拠が 1 つ以上あれば video の要求を課し、食い違う場合は両方の要求を重ねる (例: codec `opus` + mimeType `video/mp4` は bitrate と samplerate / channelConfig を要求する)
-- mimeType の判定は draft-ietf-moq-msf-01 §5.2.19 (Mimetype) が参照する RFC 6838 §4.2 のとおり大文字小文字を区別せず `audio/` / `video/` の接頭辞で行い、判定は「より厳しく拒否する」方向にのみ働かせる (要求を減らさない)
+- mimeType の判定は RFC 6838 §4.2 (メディア型の大文字小文字を区別しない) に従って `audio/` / `video/` の接頭辞で行い、判定は「より厳しく拒否する」方向にのみ働かせる (要求を減らさない)。draft-ietf-moq-msf-01 §5.2.19 (Mimetype) は [MIME] として RFC 6838 を参照するのみで節を指定しない (`refs/` に rfc6838.txt は未収録)
 - エラーメッセージの根拠は role / codec / mimeType のうち該当するものを列挙する (例: `mimeType 'audio/mp4'`)。`requirement_source` は role / codec の 2 値しか選べないため、根拠種別を列挙できる形に変える
 - timeline の `mimeType` が `application/json` であることの完全一致検証は、本 issue の種別判定の変更対象に含めない (timeline の mimeType 検証は現行の完全一致のままとする)
 - codec も mimeType も種別を示さないトラック (codec なし・登録外 codec で mimeType が `audio/` / `video/` でない) は従来どおり raw data / event stream として扱い、codec に基づく要求を行わない
@@ -55,6 +55,4 @@ draft-ietf-moq-msf-01 の §5.2.18 (Codec) は inherent codec を持つトラッ
 - encode 経路 (`MsfCatalog` を手組みして `MsfCatalogDocument::encode`) でも同じ拒否になるテストが追加されていること
 - mimeType 由来の要求でもエラーメッセージに要求の根拠として `mimeType '<値>'` が含まれること (codec が欠如または登録外で、mimeType だけが種別の根拠になるトラックで固定する。codec 欠如時の `MUST specify codec` も mimeType を根拠として示す)
 - role と mimeType の判定が食い違う場合に両方の要求を満たす必要があるテストが追加されていること (例: role `video` + codec `av01` + mimeType `audio/mp4` で bitrate を与え、samplerate / channelConfig を欠けば mimeType 側の audio 要求で拒否され、両方を揃えれば受理される。role 側が mimeType 側の要求を包摂する向きでは mimeType の寄与を判別できないため使わない)
-- `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること
-- `CHANGES.md` の `## develop` にある media track の必須フィールド検証の FIX エントリが、mimeType を補助根拠に加えたこととエラーメッセージの根拠表示の変更に追随していること (同一 develop 内の未リリース変更のため既存エントリを更新する)
-- `make test` / `make clippy` / `make fmt` が通ること
+- `docs/msf.md` の検証規則の記述が mimeType による判定と登録外 codec の扱いに追随していること- `make test` / `make clippy` / `make fmt` が通ること

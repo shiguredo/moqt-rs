@@ -4,14 +4,16 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-catalog-fill-fetch
 - Polished: 2026-10-10
+- Updated: 2026-10-11
 
 ## 目的
 
 draft-ietf-moq-msf-01 §5 (Catalog) は「Subscribers accessing the catalog MUST use SUBSCRIBE with a
 Joining FETCH (offset = 0) in order to obtain the latest complete catalog along with all
 subsequent catalog objects, including delta updates, that follow.」と MUST を定める。
-draft-ietf-moq-transport-22 は Appendix A.3 で Joining FETCH を削除し、fill fetch stream (§3.4)
-と FILL_PARAMETERS (§9.20.15) に置き換えた。同 draft §3.5 (Joining an Ongoing Track) は
+Joining FETCH は draft-20 で削除され (draft-ietf-moq-transport-22 Appendix A.3 の
+"Since draft-ietf-moq-transport-19" に記録)、fill fetch stream (§3.4) と
+FILL_PARAMETERS (§9.20.15) に置き換わった。同 draft §3.5 (Joining an Ongoing Track) は
 「To join a Track at the current Group, the subscriber sends a SUBSCRIBE with a Location Filter
 that starts at the Next Object and a FILL_PARAMETERS parameter whose Location filter has
 StartGroup=1, which fills the current Group from its start.」と、Joining FETCH (offset = 0) に
@@ -46,7 +48,8 @@ StartGroup=1, which fills the current Group from its start.」と、Joining FETC
 
 - カタログの購読に FILL_PARAMETERS (type 0x23) を付ける。内側の LOCATION_FILTER は現在 Group の
   先頭から埋める指定 (`LocationFilter::RelativeGroup { start_group: 1 }` 相当) にする。
-  §3.4 は fill range の解決と FIN / RESET の規則を定めているため、その規則に従う。
+  §3.4 (Fill Semantics) が fill range の解決を、§3.4.1 (Opening and Closing Fill Fetch Streams) が
+  FIN / RESET の規則を定めているため、その規則に従う。
 - `MoqtClient` にパラメータを渡せる購読 API を追加し、LARGEST_OBJECT の観測と別 FETCH は fill で
   代替できるなら削除する。
 - 受信側の `receive_catalog` は fill fetch stream の受理経路へ切り替え、購読で届く Object と

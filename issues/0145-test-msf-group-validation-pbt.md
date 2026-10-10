@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/test-msf-group-validation-pbt
 - Polished: 2026-09-27
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -21,7 +22,12 @@ MSF の renderGroup / altGroup のグループ内一致検証 (draft-ietf-moq-ms
 
 PBT のトラック生成にグループの一貫性を持たせ、グループ検証を性質として固定する。
 
-- カタログ全体で renderGroup / altGroup の ID を先に決め、同じグループに属するトラックは同じ `targetLatency` / `buffers` を持つように生成する (グループ ID は少数の値域から選び、トラック間の衝突を意図的に起こす)
+- カタログ全体で renderGroup / altGroup の ID を先に決め、同じグループに属するトラックは同じ
+  `targetLatency` / `buffers` を持つように生成する (グループ ID は少数の値域から選び、トラック間の
+  衝突を意図的に起こす)。§5.2.8 / §5.2.9 は同じトラック内での `targetLatency` と `buffers` の同居を
+  MUST NOT とし、`src/msf.rs` の `validate_group_target_latency` / `validate_group_buffers` は
+  `isLive=false` のトラックと省略値を比較対象外にするため、グループごとに `targetLatency` 形か
+  `buffers` 形のどちらかに揃え、一致・不一致の判定は `isLive=true` のトラックで作る
 - グループの割当は `tracks` と `publishTracks` の両方に適用する (グループ検証は方向ごとに独立して実行されるため、片方だけでは成功経路・失敗経路のどちらかが未カバーになる)
 - グループ内で片方だけが値を宣言する形 (省略との混在) も生成対象に含める
 - 宣言値が異なるグループを意図的に生成し、`MsfCatalogDocument::decode` と `MsfCatalogDocument::encode` の両方が拒否する性質を別のテストで固定する
@@ -32,6 +38,6 @@ PBT のトラック生成にグループの一貫性を持たせ、グループ�
 ## 完了条件
 
 - グループ内一致を満たすカタログ (tracks と publishTracks の両方を含む) の往復の性質テストが追加されていること
-- 宣言値が異なるグループを `MsfCatalogDocument::decode` と `MsfCatalogDocument::encode` の両方が拒否する性質テストが追加されていること
+- 宣言値が異なるグループを `MsfCatalogDocument::decode` と `MsfCatalogDocument::encode` の両方が拒否する性質テストが追加されていること (同一グループの 2 件以上を `isLive=true` かつ同じフィールド宣言にして値だけ変える)
 - 省略との混在を受理する性質が固定されていること
 - `make pbt` / `make test` / `make clippy` / `make fmt` が通ること

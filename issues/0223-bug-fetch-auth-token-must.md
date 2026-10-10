@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-auth-token-must
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -32,7 +33,9 @@ whether the token was also provided in SETUP.」と MUST を定める。現状�
 
 ## 設計方針
 
-- FETCH も `with_auth_parameters` に統一し、track に紐づくトークンを付与する。
+- FETCH も `with_auth_parameters` に統一し、track に紐づくトークンを付与する。§11.4.3 の列挙には
+  SUBSCRIBE_NAMESPACE も含まれるが、`MoqtClient` に SUBSCRIBE_NAMESPACE の送信経路が無いため
+  本 issue の対象外とする。
 - C4M の claim による事前判定を残す場合は、「トークンが track に紐づく」条件と、判定できない
   ときの扱いを先に決める。判断できないときは付与する側に倒し、MUST の付与漏れを作らない。
 - `auth_message_parameters_for` を使う箇所が無くなる場合は、関数・テスト・doc を整理する。

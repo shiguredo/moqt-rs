@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moqt-client-drain-cancel-safety
 - Polished: 2026-10-09
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -33,7 +34,9 @@
 - 0201 で「捨てられるイベントを減らす」方向の修正は入ったが、future 破棄そのものは未解消。
 - 現行の examples (moq-pub / moq-sub) の REQUEST_UPDATE 処理は常に REQUEST_OK を返すため、
   保留 PUBLISH_DONE の flush 送信が破棄される経路には現状到達しない (公開 API の
-  `send_request_error` を使う配線で到達する)。一方、peer 起点の要求への自動 REQUEST_ERROR
+  `send_request_error` を REQUEST_UPDATE の失敗応答に使う配線で到達する。moq-pub は
+  SUBSCRIBE / FETCH の失敗応答に `send_request_error` を既に使っているが、保留 PUBLISH_DONE が
+  立つのは Established の購読を拒否した場合だけである)。一方、peer 起点の要求への自動 REQUEST_ERROR
   送信 (`Session::emit_request_error`) は `pump_once` 経由で drain されるため、送信途中の
   破棄で応答が失われる経路は現行でも存在する。
 
@@ -43,6 +46,9 @@
   - 送信半を台帳に残したまま `&mut` で送信し、FIN のときだけ完了後に取り出す
   - 送信中の状態を台帳に持たせ、破棄時に復元する (Drop 実装は使わず、状態を明示的に持つ)
   - `drain_events` を専用タスクへ移し、`next_event` の破棄の影響を受けないようにする
+    (2026-10-10 以降の moq-sub の pipeline には「s2n-quic のエンドポイントは `next_event()` の poll で
+    動く」ため `select!` の分岐内で待ってはならない旨が記録されている。専用タスク化は
+    エンドポイントと session タイマーの駆動主体を変えるため、成立可否を確認してから採否を決める)
 - 各 transport の送信 API が途中で破棄された場合にどこまで書かれるか (cancel safety) を確認する。
   部分送信が起きる場合はメッセージ単位の再送ができないため、その限界を doc に明記する。
 - 送信失敗 (`?`) の経路でも台帳の状態と警告の有無を揃える。

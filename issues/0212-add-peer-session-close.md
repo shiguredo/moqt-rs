@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-peer-session-close
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -23,8 +24,9 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 
 ## 現状
 
-- `src/session/core.rs` の `Session::recv_control_stream_closed(RequestStreamEnd)` は終了コードと理由を
-  受け取らず、`RequestStreamEnd::Fin` で `SESSION_PROTOCOL_VIOLATION` + "peer control stream closed with FIN"、
+- `src/session/core.rs` の `Session::recv_control_stream_closed(RequestStreamEnd)` は理由 (reason phrase) を受け取る口を持たず、
+  `RequestStreamEnd::Reset { error_code }` が運ぶ §12.5 の stream reset コードも `Reset { .. }` として捨てる。
+  `RequestStreamEnd::Fin` で `SESSION_PROTOCOL_VIOLATION` + "peer control stream closed with FIN"、
   `RequestStreamEnd::Reset` で `SESSION_PROTOCOL_VIOLATION` + "peer control stream reset" を生成する。
 - Session のセッション制御系の入力 API は `recv_control` / `recv_control_stream_type` /
   `recv_control_stream_closed` / `recv_request` / `recv_request_stream_closed` / `recv_stream_message` のみで、
@@ -52,9 +54,12 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 - `recv_control_stream_closed` の既存の挙動 (コード・理由・セッション状態) は変えない。transport の終了に
   伴う閉鎖と session 中の不正な閉鎖の区別は I/O 層が行い、transport の終了コードと理由を取得できた場合に
   新 API を呼ぶ。
-- `examples/tokio-moq` の I/O 層は transport の終了コードと理由を取得して新 API を呼ぶ。取得経路は
-  s2n-quic / shiguredo_http3 / shiguredo_http2 の API に依存するため、example 側の対応は取得可否を
-  確認してから決める。
+- `examples/tokio-moq` の I/O 層は transport の終了コードと理由を取得して新 API を呼ぶ。WebTransport 経路は
+  取得できることが確定している (`examples/tokio-moq/src/webtransport_h3.rs` の `WebTransportEvent::SessionClosed` が
+  `close_error_code` / `close_message` を、`webtransport_h2.rs` の `WtEvent::SessionClosed` が `error_code` / `reason` を
+  運ぶ。h3 は現状ログに出すだけで破棄している)。h3 の `close_error_code` は HTTP/3 のコード空間の値なので、
+  0163 で入った `wt_to_moqt_code` で §12.2 のコードへ戻す。native QUIC (s2n-quic) の CONNECTION_CLOSE から
+  終了コードと理由を取得できるかは確認してから決める。
 
 ## 完了条件
 

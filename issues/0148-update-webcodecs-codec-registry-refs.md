@@ -4,10 +4,11 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-webcodecs-codec-registry-refs
 - Polished: 2026-09-28
+- Updated: 2026-10-11
 
 ## 目的
 
-MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 が参照する WEBCODECS-CODEC-REGISTRY の登録名に依存しているが、レジストリの写しが `refs/` に無いため判定表の根拠をリポジトリ内で検証できない。他の一次資料と同じく `refs/` に保存し、判定表を更新するときに差分照合できるようにする。
+MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 (Codec) が LOC packaged content について参照する WEBCODECS-CODEC-REGISTRY の登録名に依存しているが、レジストリの写しが `refs/` に無いため判定表の根拠をリポジトリ内で検証できない。他の一次資料と同じく `refs/` に保存し、判定表を更新するときに差分照合できるようにする。
 
 ## 現状
 
@@ -21,7 +22,8 @@ MSF の codec 判定は draft-ietf-moq-msf-01 §5.2.18 が参照する WEBCODECS
 ## 設計方針
 
 - W3C の Registry Draft (2026-02-12 版) のテキストを取得し、`refs/` 配下の新しいディレクトリ (`refs/webcodecs/`) に保存する
-  - 2026-09-28 時点の最新公開版は 2026-09-24 版であるが、§3 / §4 の登録表記は 2026-02-12 版と同一であることを確認済みである。`src/msf.rs` と `docs/msf.md` の版記述 (`Registry Draft, 2026-02-12`) に合わせ、2026-02-12 版を保存する
+  - draft-ietf-moq-msf-01 §5.2.18 の参照は "WebCodecs Codec Registry", September 2024 で、日付版を持たない living registry である。保存する版は `src/msf.rs` と `docs/msf.md` の版記述 (`Registry Draft, 2026-02-12`) に合わせる
+  - 2026-09-28 時点の最新公開版は 2026-09-24 版であるが、§3 / §4 の登録表記は 2026-02-12 版と同一であることを確認済みである
 - ファイル名は他の refs (draft-{name}-{version}.txt / rfc{nnnn}.txt) に合わせ、版が分かる名前にする (例: `refs/webcodecs/webcodecs-codec-registry-20260212.txt`)
 - `src/msf.rs` の判定表コメントから保存先を辿れるようにする
 - 保存したテキストの登録名と現行の判定表が一致することを確認する

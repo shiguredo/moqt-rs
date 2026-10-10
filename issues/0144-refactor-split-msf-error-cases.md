@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-split-msf-error-cases
 - Polished: 2026-09-27
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -42,7 +43,7 @@ codec / role に応じた必須フィールド節の末尾にある `parent_name
 
 ファイルは 2208 行あり、複数の節見出しコメントで区切られている。`tests/test_msf/` 配下の他ファイル (`catalog_decode.rs` / `track_fields.rs` / `media_timeline.rs` 等) は 1 テーマ 1 ファイルで分割済みである (`event_timeline.rs` には nojson の深さ制限 (`MAX_NESTING_DEPTH`) の検証も含まれるが、本 issue のテーマとは独立した関心事である)。`error_cases.rs` だけが複数のテーマを 1 ファイルに持っている。
 
-なお、open の `issues/0146` は `tests/test_msf/error_cases.rs` へのテスト追加を完了条件にしている。本 issue を先行させると 0146 の追加先が分割後の codec / role ファイルへ変わるため、実施順に依存があり、`issues/0146` を未着手のまま本 issue を実施する場合は参照先の読み替えが必要である。
+なお、open の [issues/0146](../issues/0146-bug-msf-codec-detection-coverage.md) は `tests/test_msf/error_cases.rs` へのテスト追加を完了条件にしている。本 issue を先行させると 0146 の追加先が分割後の codec / role ファイルへ変わるが、0146 側には既に「0144 を先行させた場合は分割後の codec / role テーマのファイルへ読み替える」と追記済みであるため、実施順の依存による新たな読み替えは生じない。
 
 ## 設計方針
 

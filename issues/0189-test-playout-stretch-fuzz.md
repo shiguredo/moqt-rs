@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-playout-stretch-fuzz
 - Polished: 2026-10-01
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -11,9 +12,10 @@
 
 ## 現状
 
-- `fuzz/fuzz_targets/` にデコーダ / パーサ中心のターゲットが 35 本あるが、`playout` を対象にしたものは無い
-- `pbt/tests/prop_playout/` が境界長 (0 / 1 / 123 / 124 / 729 / 730 / 1440) と構造不変条件を 256 ケースで検証している
+- `fuzz/fuzz_targets/` にデコーダ / パーサと C4M の暗号検証が中心のターゲットが 40 本あるが、`playout` を対象にしたものは無い
+- `pbt/tests/prop_playout/stretch.rs` が境界長 (0 / 1 / 123 / 124 / 729 / 730 / 1440) と構造不変条件を 256 ケースで検証している
 - `playout::stretch::compress` / `expand` はおおむね `[-1.0, 1.0]` に正規化された有限値を前提にしており (doc に明記)、任意の f32 ビット列に対する挙動は未検証である
+- `playout::stretch` には 0206 (2026-10-06) で `conceal` / `concealment_end_gain` が追加されており、同じく `[-1.0, 1.0]` の有限値の前提を持つ。本 issue の対象を `compress` / `expand` に限るかは実装時に決める
 
 ## 設計方針
 

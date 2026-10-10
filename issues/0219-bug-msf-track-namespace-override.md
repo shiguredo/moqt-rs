@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-track-namespace-override
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -18,10 +19,11 @@ Full Track Name は (宣言された namespace, Track Name) であり、catalog 
 
 - `examples/moq-sub/src/pipeline.rs` の `extract_video_info` / `extract_audio_info` は
   `MsfTrack::name` や codec などだけを取り出し、`MsfTrack::namespace` を参照しない。
-- 同じファイルの `run` は catalog track の namespace をそのまま使って
+- 同じファイルの `run` は catalog track の namespace (`config.namespace`、CLI または
+  MSF fragment の track-identifier 由来) をそのまま使って
   `MoqtClient::subscribe_track` / `MoqtClient::subscribe_track_with_filter` を呼ぶ。
 - `examples/moq-sub/src/catalog.rs` の `CatalogState::apply` も、delta の適用時に catalog の
-  namespace を渡していない (namespace 継承の扱いは別 issue で対応する)。
+  namespace を渡していない (namespace 継承の扱いは 0218 で対応する)。
 - そのため、カタログの track が catalog track と異なる namespace を宣言している場合に誤った
   namespace を購読する。example の publisher (moq-pub) は全 track に同じ namespace を書くため
   現状の組み合わせでは顕在化しない。
@@ -30,12 +32,13 @@ Full Track Name は (宣言された namespace, Track Name) であり、catalog 
 
 - `VideoTrackInfo` / `AudioTrackInfo` に購読に使う namespace を持たせ、`MsfTrack::namespace` が
   あればそれを使い、無ければ catalog track の namespace を継承する。
-- §8.8 (Representing Namespace and Track Names) 表現の文字列は
+- namespace の表現は draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names。
+  MSF では §11.1.2 に再掲) の文字列であり、
   `shiguredo_moqt::name::parse_namespace` で `TrackNamespace` へ解決する。
 - 解決に失敗したときの扱い (警告してその track をスキップする / エラーで終了する) を決めて
   doc に書く。track の選択は video / audio の 1 つずつであり、片方だけ解決できない場合の
   挙動も決める。
-- track の選択に使う codec 判定や role の扱いは変えない。
+- track の選択に使う codec 判定は変えない (example は track の role を参照していない)。
 
 ## 完了条件
 

@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-fragment-connection
 - Polished: 2026-10-10
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -31,11 +32,13 @@ client 側で処理する指定であり (§11.1)、example はこれを無視�
 
 - `--url` の `connection` を `--transport` の既定として反映する。`q` は native QUIC、`wt` は
   WebTransport (`wt-h3` / `wt-h2` のどちらを既定にするかを決める) に対応させる。
-- `--transport` を明示した場合の優先順位を決めて help と doc に書く (明示指定を優先するか、
-  fragment と矛盾したらエラーにするか)。
-- §11.1.1 は同じパラメータの複数指定について「the client MUST process the union of those ranges」
-  を定めるが、接続は 1 つに定まる必要がある。`q` と `wt` が同時に指定された場合の扱いを決めて
-  テストで固定する。
+- `--transport` を明示した場合の優先規則を決めて help と doc に書く。`connection` は接続種別を
+  MUST で指定するため「明示指定を優先する (fragment を無視する)」は選べない。fragment を優先するか、
+  矛盾したらエラーにするかのいずれかにする。
+- §11.1.1 は同じパラメータの複数指定について「the client MUST process the union of those ranges」を
+  定めるが、この規則は値域 (range) を対象としたもので `connection` のような単一値の指定には
+  そのままは当てはまらない。`q` と `wt` が同時に指定された場合は 2 つの MUST が両立しないため、
+  エラーにするのが唯一の整合解である。この扱いを決めてテストで固定する。
 - 値の検証 (q / wt 以外の拒否) は `MsfFragment::connection_types` に任せ、example 側で再実装しない。
 
 ## 完了条件

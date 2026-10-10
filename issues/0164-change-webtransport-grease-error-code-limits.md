@@ -4,12 +4,13 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/change-webtransport-grease-error-code-limits
 - Polished: 2026-09-28
+- Updated: 2026-10-10
 
 ## 目的
 
 draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams) と draft-ietf-webtrans-http2-15 §6.2 / §6.3 は、
 WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリケーションエラーコードを
-32 ビット (0x00000000-0xffffffff) に限る一方、draft-ietf-moq-transport-21 §13 (Grease) の greasing 値
+32 ビット (0x00000000-0xffffffff) に限る一方、draft-ietf-moq-transport-22 §13 (Grease) の greasing 値
 (`0x7f * N + 0x9D`、`0x9D, 0x11C, ..., 0x3fffffffffffffde`) は 32 ビットを超える値を取り得る。
 §16.11.4 (Stream Reset Error Codes) の registry も greasing 予約を持つため、MOQT の reset コードとして
 32 ビット超の値が正当にあり得る。
@@ -35,8 +36,8 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   `flow_control_error` で拒否する (draft-ietf-webtrans-http2-15 §6.2 / §6.3 の MUST NOT) が、example の
   driver はこのエラーを `debug` ログに残すだけで WT_RESET_STREAM / WT_STOP_SENDING を送らず、
   呼び出し元には `Ok(())` を返す。example 側の doc は `WtH2SendStream::reset` の
-  「capsule は 32 ビットのコードを運ぶ」の記述にとどまり、0xffffffff 超の拒否・MUST NOT の
-  根拠・エラーが呼び出し元へ返らないことは記されていない (`WtH2RecvStream::stop_sending` に doc は無い)。
+  「capsule は 32 ビットのコードを運ぶ」の記述にとどまり、`WtH2RecvStream::stop_sending` の doc も
+  送信の目的のみで、0xffffffff 超の拒否・MUST NOT の根拠・エラーが呼び出し元へ返らないことは記されていない。
 - `examples/tokio-moq/src/transport.rs` の `SendStream::reset` / `RecvStream::stop_sending` の QUIC 分岐は
   `s2n_quic::application::Error::new` にそのまま渡すため、`2^32` 以上 `2^62` 未満の値は QUIC 経路では
   送信できる (`Error::new` は varint の上限 `2^62 - 1` まで受け付ける)。
@@ -49,7 +50,7 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   現行 example が渡すのは `SubgroupTermination::reset_error_code()` / `DataStreamResetReason::Cancelled.error_code()`
   の MOQT §12.5 の小さい値だけなので、32 ビット超は公開 API 経由で送信時に初めて問題になる。
 - close 経路 (MOQT §16.11.1 の Session Termination Error Codes) の 32 ビット超の扱いは本 issue の対象外であり、
-  [issues/0176](../issues/0176-bug-moqt-close-code-over-32-bits.md) が扱う。
+  [issues/0176](../issues/closed/0176-bug-moqt-close-code-over-32-bits.md) (closed、2026-09-30) が対応済みである。
 
 ## 設計方針
 
@@ -61,8 +62,8 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
     呼び出し元 (moq-pub / moq-sub) の doc に分かれる。
   - (b) `Session` の API (`reset_outgoing_data_stream_with_code` / `reset_outgoing_data_stream_at_with_code`) で
     受け付ける値を 32 ビットに制限し、送信前にエラーにする (QUIC 経路の挙動も変わる)。
-    この場合 [issues/0176](../issues/0176-bug-moqt-close-code-over-32-bits.md) の接続レベルの
-    close フォールバックは到達不能になるため、0176 側の扱いも合わせて決める。
+    接続レベルの close は `Session::close` と `moqt_close_code` の close 用の別経路であり (0176 で実装済み)、
+    reset コードの制限とは独立している。
   - (c) 経路で扱いを分ける。QUIC 経路はそのまま送り、WebTransport 経路は「送れない」ことを
     `moqt_to_wt_code` のエラーメッセージのように明示する (H3 はこの挙動とテスト・doc が既にある)。
     (c) を採る場合、H2 は現状エラーを呼び出し元へ返さないため、それを変更対象にすること。
@@ -85,4 +86,5 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   H2 でエラーが呼び出し元へ返ること、QUIC 経路で `2^62 - 1` まで送れることがそれぞれ対象になる)
 - QUIC 経路と WebTransport 経路 (H3 / H2) の差が、選んだ方針と一致していること
 - 32 ビット制限が §4.4 (H3)、§6.2 / §6.3 (H2) に由来する制限であることがコメント・doc に書かれていること
-- (b) を選ぶ場合は [issues/0176](../issues/0176-bug-moqt-close-code-over-32-bits.md) との整合が取れていること
+- (b) を選ぶ場合は [issues/0176](../issues/closed/0176-bug-moqt-close-code-over-32-bits.md) (closed) の
+  close フォールバックと矛盾しないこと

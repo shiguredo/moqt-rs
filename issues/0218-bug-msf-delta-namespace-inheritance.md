@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-delta-namespace-inheritance
 - Polished: 2026-10-10
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -33,9 +34,9 @@ namespace を継承先として解決できなければならない。現状の 
   `?` が伝播して example が終了する。
 - §5.2.3 (Track name) の (namespace, name) 一意性検査と §5.3 (Delta updates) の属性不変検査も、
   namespace を省略した track に対しては継承が解決できず無効化される。
-- 一次資料の例も namespace を省略する。§5.6.1 (Time-aligned Audio/Video Tracks with single
-  quality) は track ごとに `namespace` を宣言し、§5.6.5 (Delta update removing tracks) は
-  `{"op":"remove","tracks":[{"name":"video"},{"name":"slides"}]}` で namespace を省略する。
+- 一次資料には namespace を宣言する例と省略する例の両方がある。§5.6.1 (Time-aligned Audio/Video
+  Tracks with single quality) は track ごとに `namespace` を宣言し、§5.6.5 (Delta update removing
+  tracks) は `{"op":"remove","tracks":[{"name":"video"},{"name":"slides"}]}` で namespace を省略する。
 - catalog track の namespace は example が保持している。`examples/moq-sub/src/pipeline.rs` の
   `run` の `namespace` (CLI または MSF fragment の track-identifier 由来) がそれにあたり、
   `examples/moq-pub/src/pipeline.rs` も `serialize_namespace` の結果を track の `namespace` に書く。
@@ -44,7 +45,8 @@ namespace を継承先として解決できなければならない。現状の 
 
 - `CatalogState` が catalog track の namespace を保持し、`apply_delta` の第 2 引数へ渡す。
   比較対象は catalog JSON の `namespace` フィールドと同じ表現であるため、
-  `shiguredo_moqt::name::serialize_namespace` で作る §8.8 表現の文字列を使う。
+  `shiguredo_moqt::name::serialize_namespace` で作る draft-ietf-moq-transport-22 §8.8
+  (Representing Namespace and Track Names。MSF では §11.1.2 に再掲) の表現の文字列を使う。
 - namespace は `CatalogState::new` の引数で受け取り、`CatalogState` が保持する。
   起動経路の `receive_catalog` と継続受信は同じ `CatalogState` を共有しているため、
   `apply` が保持した値を `apply_delta` へ渡せば両経路に同じ値が届く。

@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moqt-client-concurrent-flush-cleanup-race
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-10-10
 
 ## 目的
 
@@ -16,16 +17,19 @@
 ## 現状
 
 - `examples/tokio-moq/src/moqt_client.rs` の `MoqtClient::cleanup_closed_requests` は `drain_events` の
-  末尾 (と `CloseSession` の早期 return 前) に呼ばれ、`Subscription::pending_publish_done` が `None` なら
-  subscription を破棄する。
+  末尾 (と `CloseSession` の早期 return 前) に呼ばれ、`should_forget_subscription` (`cleanup_ready` が真
+  かつ `Subscription::pending_publish_done` が `None`) が真なら subscription を破棄する。
 - `src/session/data.rs` の `Session::maybe_flush_pending_publish_done` は `send_data_stream_closed` /
-  `reset_outgoing_data_stream` / fill fetch stream への STOP_SENDING を契機に `SendOnStream { fin: true }`
-  を積み、`pending_publish_done` を `take` する。
-- これらの送信 API は `DataPlaneHandle` (Clone 可能で Session を共有する) から呼べるため、別タスクから
-  呼ぶ配線では「drain がキュー空を観測 → 別タスクが flush → 回収が subscription を破棄」の順になりうる。
+  `reset_outgoing_data_stream_at_with_code` / fill fetch stream への STOP_SENDING を契機に
+  `SendOnStream { fin: true }` を積み、`pending_publish_done` を `take` する。
+- これらの flush 契機のうち `DataPlaneHandle` (Clone 可能で Session を共有する) から呼べるのは
+  `send_data_stream_closed` と fill fetch stream への STOP_SENDING だけである (`reset_outgoing_data_stream*`
+  は `Session` の API で、example が持つハンドルからは呼べない)。別タスクから呼ぶ配線では
+  「drain がキュー空を観測 → 別タスクが flush → 回収が subscription を破棄」の順になりうる。
 - Session にはイベントキューに未処理のイベントがあるかを問い合わせる API が無いため、example 側だけでは
   競合を閉じられない。
-- 現在の examples は data plane を main ループからのみ使うため到達しない (コードにも制限として明記済み)。
+- 現在の examples は flush の契機を別タスクから呼ぶ配線を持たないため到達しない (コードにも制限として
+  明記済み。moq-sub は data plane を spawn したタスクからも使うが、受信系 API のみである)。
 
 ## 設計方針
 

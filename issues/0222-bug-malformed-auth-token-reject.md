@@ -4,6 +4,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-malformed-auth-token-reject
 - Polished: 2026-10-10
+- Updated: 2026-10-11
 
 ## 目的
 
@@ -13,8 +14,10 @@ KEY_VALUE_FORMATTING_ERROR」、構造は正しいが内容が不正な場合は
 containing a well-formed Token structure that is otherwise invalid MUST reject that message with
 an MALFORMED_AUTH_TOKEN error.」である。後者はメッセージ単位の拒否であり、MALFORMED_AUTH_TOKEN は
 REQUEST_ERROR のコード 0x4 として定義される (§12.3 (Request Error Codes) / §16.11.2)。
-現状の example は両者を区別せず、`MalformedAuthToken` をセッション終了またはメッセージ破棄として
-扱うため、MUST を満たしていない。
+現状の example は `MalformedAuthToken` でも REQUEST_ERROR を返さず、セッション終了またはメッセージ
+破棄として扱うため、後者の MUST (メッセージ単位の拒否) を満たしていない (セッション終了コードの写像は
+`KeyValueFormattingError` を `SESSION_KEY_VALUE_FORMATTING_ERROR`、それ以外を
+`SESSION_PROTOCOL_VIOLATION` に分けている)。
 
 ## 現状
 
