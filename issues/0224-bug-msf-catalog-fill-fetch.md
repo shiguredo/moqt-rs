@@ -1,7 +1,7 @@
 # カタログ取得を FILL_PARAMETERS 付き SUBSCRIBE に寄せる
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-11
 - Branch: feature/fix-msf-catalog-fill-fetch
 - Polished: 2026-10-10
 - Updated: 2026-10-11
@@ -69,3 +69,28 @@ StartGroup=1, which fills the current Group from its start.」と、Joining FETC
 - doc が新しい取得経路に更新されていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+moq-sub は `catalog_subscribe_parameters` で LOCATION_FILTER (Next Object) と FILL_PARAMETERS
+(内側の LOCATION_FILTER は Relative Start の StartGroup=1) を組み立て、
+`MoqtClient::subscribe_track_with_parameters` で catalog track を 1 要求で購読する。購読前に
+publish された独立カタログは fill fetch stream で届き、以後の delta は購読 (Subgroup) で届く。
+`receive_catalog` はどちらも同じ `CatalogState` へ到着順に適用する。別 FETCH は削除した
+(`catalog_fetch_filter` とそのテストも削除。`MoqtClient::fetch` を使う経路は example から
+無くなった)。
+
+moq-pub は `SessionEvent::OpenFillFetchStream` を受けて `send_fill_fetch_response` で uni stream
+を開き、起因メッセージの Request ID を載せた FETCH_HEADER に続けて現在のカタログ Object を送り、
+FIN で閉じる (FETCH_OK は送らない)。応答できない fill (カタログ以外の track、fill range の外)
+は `reject_fill_fetch` で FETCH_HEADER の直後で reset する (draft-ietf-moq-transport-22 §3.4.1)。
+
+ライブラリの `SessionEvent::OpenFillFetchStream` に `subscription_request_id` / `start` / `end`
+を追加した。REQUEST_UPDATE 起因の fill は FETCH_HEADER に載せる Request ID が購読のものと
+異なるため (§6.4.2.1)、アプリが対象 track を引けるようにするためである。`start` / `end` は
+解決済みの fill range で、終端は Largest Object でクランプする (§3.4)。
+
+`cargo test --workspace` (2650 件) / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` はすべて通っている。fill fetch stream の受信から `CatalogState` への
+適用は I/O ハンドルが必要なため単体テストで固定できず、レビュー 3 周 (致命的 0 / 重要は検出の
+たびに修正) で確認した。
