@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-fragment-connection
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-10
 
 ## 目的
 
@@ -18,9 +18,10 @@ client 側で処理する指定であり (§11.1)、example はこれを無視�
 
 - `examples/moq-pub/src/cli.rs` と `examples/moq-sub/src/cli.rs` は `--url` を
   `tokio_moq::parse_url` で解釈し、接続経路は `--transport` (既定 quic) だけで決める。
-- `src/msf/uri.rs` の `MsfUri::connection_types` は `connection` を
-  `MsfConnectionType` へ変換する実装が既にあり、`q` / `wt` 以外の値をエラーにする。しかし
-  example からは呼ばれておらず、`--url` の `connection` は捨てられる。
+- `src/msf/uri.rs` の `MsfFragment::connection_types` は `connection` を
+  `MsfConnectionType` へ変換する実装が既にあり、`q` / `wt` 以外の値をエラーにする。
+  `examples/tokio-moq/src/lib.rs` の `ServerUrl::msf` がこの `MsfFragment` を保持するが、
+  example から `connection_types` は呼ばれておらず、`--url` の `connection` は捨てられる。
 - `examples/tokio-moq/src/lib.rs` には接続経路を URL ではなく `Transport` で選ぶ方針のコメントが
   あり、意図的に未対応のままになっている。
 - 結果として `#msf:ns--catalog&connection=wt` を渡しても native QUIC で接続し、`connection=q` を
@@ -35,11 +36,13 @@ client 側で処理する指定であり (§11.1)、example はこれを無視�
 - §11.1.1 は同じパラメータの複数指定について「the client MUST process the union of those ranges」
   を定めるが、接続は 1 つに定まる必要がある。`q` と `wt` が同時に指定された場合の扱いを決めて
   テストで固定する。
-- 値の検証 (q / wt 以外の拒否) は `MsfUri::connection_types` に任せ、example 側で再実装しない。
+- 値の検証 (q / wt 以外の拒否) は `MsfFragment::connection_types` に任せ、example 側で再実装しない。
 
 ## 完了条件
 
-- `#msf:ns--catalog&connection=wt` で WebTransport、`connection=q` で native QUIC が選ばれること。
+- `--transport` を指定しないとき、`#msf:ns--catalog&connection=wt` で WebTransport、
+  `connection=q` で native QUIC が選ばれること。
+- `connection=wt` の既定が `wt-h3` / `wt-h2` のどちらかに決まり、doc・help・テストで固定されていること。
 - `--transport` との優先規則と q / wt 併記時の扱いが doc・help・テストで固定されていること。
 - moq-pub と moq-sub の両方で同じ規則になっていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
