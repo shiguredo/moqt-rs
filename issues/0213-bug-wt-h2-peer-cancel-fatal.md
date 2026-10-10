@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-wt-h2-peer-cancel-fatal
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-10
 
 ## 目的
 
@@ -35,8 +35,15 @@ HTTP/2 (`wt-h2`) だけは peer の cancel で moq-pub / moq-sub が終了する
 - wt-h2 の `WtEvent::StopSending` を観測経路へ流し、`establish_wt_h2` でも peer の STOP_SENDING を
   Session へ通知できるようにする (wt-h3 と同じ扱い)。
 - peer の cancel に由来する送信エラーを pipeline が「該当ストリームの終端」と判別できるようにする。
-  `TransportError::StreamClosed` は cancel 以外の経路でも生成されるため、cancel 由来かを区別する方法
-  (専用 variant にする / cancel を観測したストリーム id を台帳に持つ) を比較して決める。
+  `TransportError::StreamClosed` は cancel 以外 (FIN / reset 済みなど) でも生成されるため、
+  cancel 由来の失敗だけを既存の `TransportError::StreamReset` (0163 が QUIC / wt-h3 で確立した
+  「peer が送信方向を終端した」の表現) で返す。driver の `stop_sending_received` を
+  ストリーム id → エラーコードの台帳に拡張し、`fail_pending_sends` と `Command::Send` の
+  拒否のうち台帳に一致するものだけを `StreamReset { error_code }` にする
+  (wt-h2 の capsule は MOQT のコードをそのまま運ぶため remap は不要。
+  変換則は `StopSendingTransport::WtH2` が実装済み)。
+  新規 variant の追加は moq-pub / moq-sub の `From<TransportError>` への追記を強制し、
+  表示振り分けを扱う 0152 と作業が混ざるため行わない。
 - wt-h2 で cancel 後の送信がどのエラーで拒否されるかを確認し、該当ストリームの終端として扱えるようにする。
 - wt-h2 が experimental であることと capsule 実装の挙動は変えない。
 
