@@ -1,7 +1,7 @@
 # 音声の TIMESTAMP を配信側の壁時計へ合わせる AudioTimestampClock を追加する
 
 - Created: 2026-10-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/add-audio-timestamp-clock
 
 ## 目的
@@ -46,4 +46,16 @@ moqt-js の `src/audioTimestampClock.ts` を移植し、音声専用のクロッ
 
 ## 解決方法
 
-{未着手}
+- `src/audio_clock.rs` を追加し、moqt-js の `src/audioTimestampClock.ts` を移植した (時刻は引数で受ける Sans-I/O)
+- 公開した: `AUDIO_TIMESTAMP_OFFSET_WINDOW_US` (2 秒) / `AUDIO_TIMESTAMP_OFFSET_STEP_US` (200 ms) / `AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US` (500 ms) / `AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES` (5) / `AUDIO_TIMESTAMP_SLOPE_WINDOW_US` (10 秒) / `AUDIO_TIMESTAMP_SLOPE_LONG_WINDOW_US` (60 秒)、
+- `AudioTimestampClock` (`record` / `apply` / `applied_us` / `snapshot` / `reset`)、`AudioTimestampOffsetStats`
+- 補正は「読んだ壁時計 − 音声の TIMESTAMP」の 2 秒の窓の最小値へ合わせる。窓が滑るにつれて最小値が動くため、ゆっくりしたドリフトに追従する
+- 適用中の補正があるとき、直近 500 ms の窓の観測が 5 個以上あり、その最小値が適用中の値より 200 ms 以上大きければ段差とみなし、その値へ取り直して古い観測を捨てる。窓が埋まるのを待つと、その間だけ TIMESTAMP が実際より古くなり、受信側の再生の目標が過去へずれて音が捨てられる
+- `apply` は補正を足すだけであり、同じ補正を当てた chunk どうしの間隔は音声の TIMESTAMP の間隔そのままになる。LOC の Timestamp は vi64 で負を表せないため、Unix epoch より前にはしない
+- 観測は `VecDeque` に時刻の昇順で持ち、60 秒より古い観測を先頭から捨てる。統計の最小・最大・サンプル数は補正の取り直しでは消さない (生の観測の証拠を残す)
+- 傾きは窓を前半と後半に分け、それぞれの最小の観測の差を経過時間で割って求める。両端とも床を使うため読み出しの遅れの揺らぎを受けにくい。桁あふれは i128 で避ける
+- `examples/moq-pub/src/pipeline.rs` の音声の換算を `AudioTimestampClock` に置き換えた (映像は `WallClockMapper` のまま)。映像と音声で追従の規則が違うため、換算の関数は音声専用の `map_audio_capture_timestamp_us` に分けた。残差の要約 (5 秒間隔) と同じ行に補正の統計 (現在値・最小・最大・10 秒と 60 秒の傾き・適用中の補正・サンプル数) をミリ秒で出す
+- テスト: `tests/test_audio_clock.rs` に 14 件 (窓の最小値への追随 / ドリフト / 段差の取り直しと必要な観測数 / 閾値未満では取り直さない / `apply` の間隔保持 / 負にしない / 統計 / 傾き / `reset`)、`pbt/tests/prop_audio_clock.rs` に 3 件 (規則のモデルとの差分と分岐のカバレッジゲート)、example に 3 件を追加した
+- 検証: `cargo fmt --check` / `make pbt` / `make test` / `cargo clippy --workspace --all-targets -- -D warnings` / `RUSTDOCFLAGS="-D warnings" cargo doc` / no_std ビルド (`thumbv7em-none-eabihf`) が成功した。`PBT_SEED` を変えても property が成功する
+- 検証: 9 種類の欠陥 (段差の取り直しの無効化 / 必要な観測数のゲートの除去 / 窓の最小値を最大にする / epoch の丸めの除去 / 取り直しで統計を消す / 傾きの窓の分割の破壊 / 段差の窓の取り違え / 取り直しで古い観測を残す / 傾きの床を最大にする) を入れて、追加したテストと property がそれぞれ検出することを確認した
+- 備考: `apply` は状態を変えないため `&self` にした。`src/lib.rs` の `pub mod audio_clock;` には `///` を付けない (`///` を置くと rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまうため)。理由は `//` コメントに書いた

@@ -688,6 +688,13 @@
   - `AudioJitterBuffer::drop_late` を削除し、鳴り遅れた音をバッファ段で捨てない (鳴らすかどうかはスケジューラが決める)
   - @voluntas
 
+- [ADD] 音声の TIMESTAMP を配信側の壁時計へ合わせる `AudioTimestampClock` を追加する
+  - 「読み出した壁時計 - 音声の TIMESTAMP」の 2 秒の窓の最小値へ原点を合わせ、ゆっくりしたドリフトへ窓が滑るにつれて追従する
+  - 直近 0.5 秒の窓の最小値が適用中の補正より 200 ms 以上大きく、その窓に 5 個以上の観測があるときだけ段差とみなし、古い観測を捨てて取り直す
+  - 観測の現在値・最小・最大・10 秒と 60 秒の傾き・適用中の補正・サンプル数を `AudioTimestampClock::snapshot` で返す (最小・最大・サンプル数は取り直しでは消さない)
+  - moq-pub は live capture の音声の換算を `AudioTimestampClock` へ置き換え、その統計を既存の残差の要約と合わせてミリ秒でログに出す
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する
