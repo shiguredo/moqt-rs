@@ -1,7 +1,7 @@
 # カタログ delta の適用で catalog namespace の継承を成立させる
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-11
 - Branch: feature/fix-msf-delta-namespace-inheritance
 - Polished: 2026-10-10
 - Updated: 2026-10-10
@@ -64,3 +64,25 @@ namespace を継承先として解決できなければならない。現状の 
   (§5.6.1 の例は 1080p-video / audio、§5.6.5 の例は video / slides で一致しないため)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+`examples/moq-sub/src/catalog.rs` の `CatalogState` が catalog track の namespace
+(draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names) の表現) を保持し、
+`MsfCatalog::apply_delta` の第 2 引数へ常に渡すようにした。`CatalogState::new` は namespace を
+必須で受け取る形にし、`None` を渡す経路を無くした。`examples/moq-sub/src/pipeline.rs` の
+`receive_catalog` が `run` から namespace を受け取り、`serialize_namespace` で §8.8 表現にして
+渡す。起動経路と継続受信は同じ `CatalogState` を共有するため、どちらの経路でも同じ継承先を使う。
+
+継承は catalog JSON の `namespace` との文字列比較になる。MSF は catalog JSON の namespace の
+符号化を規定しておらず (§5.2.2 は String と定めるのみ、§11.1.2 は URL fragment 用)、publisher が
+別の表現で書いたカタログでは継承が一致しない。この前提はフィールドの doc に明記した。
+
+テストは `examples/moq-sub/src/catalog.rs` に追加した。namespace を宣言した track へ namespace を
+省略した remove / clone を適用できること、namespace を省略した add が §5.2.3 (Track name) の
+重複として拒否されること、namespace が異なる同名 track を誤って削除しないこと (catalog の
+namespace 側だけが削除されること) を固定した。delta を適用できない場合は `apply_delta` が
+複製へ適用してから差し替えるため、カタログは変更されない。
+
+`cargo test --workspace` (2649 件) / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo fmt --all -- --check` はすべて通っている。
