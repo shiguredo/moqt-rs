@@ -1,7 +1,7 @@
 # CHANGES.md の develop セクションを種別順に整理する
 
 - Created: 2026-10-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-10
 - Branch: feature/update-changes-develop-order
 - Polished: 2026-10-01
 
@@ -38,4 +38,14 @@ shiguredo-changelog は `## develop` のエントリを CHANGE → ADD → UPDAT
 
 ## 解決方法
 
-{未着手}
+対応せずに closed にした。整理の対象そのものが無くなったためである。
+
+- `CHANGES.md` の `## develop` の変更履歴は削除され、現在の `## develop` は空である。
+  `CODEBASE.md` が「この指示がなくなるまでは変更履歴を `CHANGES.md` に残さないこと」を
+  定めており、エントリを追記しない運用になっている。
+- したがって、本 issue が対象としていた `## develop` 直下と `### misc` のエントリは存在せず、
+  完了条件の「CHANGE → ADD → UPDATE → FIX の順に並んでいること」は成立しない。
+- 併せて、本 issue が対象外としていた `### misc` の `docs/MOQT-RELAY.md` のエントリも、
+  0188 の対応と `## develop` の削除により失われている。
+
+`CHANGES.md` の運用を再開する場合は、その時点の規約に沿って改めて issue を起票する。
