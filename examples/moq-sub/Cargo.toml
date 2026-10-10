@@ -18,7 +18,7 @@ shiguredo_moqt = { path = "../../" }
 # MP4 mux (録画)
 shiguredo_mp4 = "2026.5"
 # Opus デコーダ
-shiguredo_opus = "2026.3"
+shiguredo_opus = "2026.4"
 
 # examples 共有トランスポート crate (QUIC / WebTransport)
 tokio-moq = { path = "../tokio-moq" }

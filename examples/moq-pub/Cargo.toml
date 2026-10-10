@@ -22,7 +22,7 @@ shiguredo_moqt = { path = "../../" }
 # MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
 shiguredo_mp4 = "2026.5"
 # Opus エンコーダ
-shiguredo_opus = "2026.3"
+shiguredo_opus = "2026.4"
 # カメラキャプチャ
 shiguredo_video_device = "2026.3"
 

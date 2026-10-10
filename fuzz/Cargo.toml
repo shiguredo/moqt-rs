@@ -212,7 +212,7 @@ path = "fuzz_targets/fuzz_c4m_dpop_verify.rs"
 
 [dependencies]
 # 構造化入力生成に使用 (Arbitrary derive)
-arbitrary = { version = "1.4", features = ["derive"] }
+arbitrary = { version = "1.5", features = ["derive"] }
 # fuzz ターゲットのランタイム
 libfuzzer-sys = "0.4"
 
