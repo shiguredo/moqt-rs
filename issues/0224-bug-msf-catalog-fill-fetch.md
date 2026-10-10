@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-catalog-fill-fetch
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-10
 
 ## 目的
 
@@ -34,6 +34,13 @@ StartGroup=1, which fills the current Group from its start.」と、Joining FETC
 - `src/session/subscription/fill.rs` には FILL_PARAMETERS の検証と fill fetch stream の処理が
   既にある。一方 `MoqtClient::subscribe_track_with_filter` は LocationFilter しか受け取らず、
   example から FILL_PARAMETERS を付ける API が無い。
+- publisher 側にも fill の配信経路が無い。Session は FILL_PARAMETERS 付き SUBSCRIBE の処理で
+  `SessionEvent::OpenFillFetchStream` を発火するが、fill fetch stream を開いて FETCH_HEADER を
+  書くのはアプリの役割であり (`src/session/data.rs` の `send_fill_fetch_header`)、
+  `examples/tokio-moq/src/moqt_client.rs` は `OpenFillFetchStream` を無視する
+  (draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams))。このため
+  `examples/moq-pub` は FILL_PARAMETERS 付き SUBSCRIBE に fill fetch stream で応答せず、
+  subscriber 側だけの変更では本 issue の完了条件を満たせない。
 
 ## 設計方針
 
@@ -44,12 +51,16 @@ StartGroup=1, which fills the current Group from its start.」と、Joining FETC
   代替できるなら削除する。
 - 受信側の `receive_catalog` は fill fetch stream の受理経路へ切り替え、購読で届く Object と
   fill で届く Object を同じ `CatalogState` へ到着順に適用する。
+- publisher 側は `OpenFillFetchStream` を受けて uni stream を開き、fill の FETCH_HEADER に
+  SUBSCRIBE の Request ID を載せて (§3.4) fill range のカタログ Object を配信する経路を
+  `examples/moq-pub` に追加する。moq-pub が publish するカタログは Group の先頭 Object だけ
+  なので、fill range の判定は moq-pub の `catalog::catalog_fetch_response` を流用できる。
 - Group ID を 0 と仮定しない扱いと、独立カタログを Group の先頭 Object とする前提は維持する。
 
 ## 完了条件
 
-- カタログの取得が FILL_PARAMETERS 付き SUBSCRIBE 1 つで完結し、独立カタログより先に delta を
-  処理する経路が無いこと。
+- カタログの取得が FILL_PARAMETERS 付き SUBSCRIBE 1 つで完結し (publisher が fill fetch stream
+  で応答することを含む)、独立カタログより先に delta を処理する経路が無いこと。
 - fill fetch stream で届く独立カタログと delta を `CatalogState` が適用できることのテスト。
 - Group ID を 0 と仮定しないこと (Largest Object 由来の値を使うこと)。
 - doc が新しい取得経路に更新されていること。
