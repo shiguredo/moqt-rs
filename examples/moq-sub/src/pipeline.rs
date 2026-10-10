@@ -22,7 +22,11 @@ use shiguredo_moqt::loc::{
     LocProperties, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_TIMESTAMP,
     PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
+use shiguredo_moqt::pending_subgroup_buffer::{
+    DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS, PendingNotifyReason, PendingSubgroupBuffer,
+};
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
+use shiguredo_moqt::stream::subgroup::SubgroupHeader;
 use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
@@ -195,6 +199,15 @@ fn request_session_termination(
     tracing::warn!("Closing session on LOC property error: {code:#x} {reason}");
 }
 
+/// session で共有する保留バッファ
+///
+/// Track Alias 未確立の Subgroup ストリームを保持するバッファは、session (run) スコープで
+/// 1 つ共有する。stream task ごとに持つと per-session の上限が per-stream の上限としてしか
+/// 働かないためである。各 stream task は自分の entry の識別子を保持し、
+/// [`shiguredo_moqt::pending_subgroup_buffer::PendingSubgroupBuffer::take_ready_for`] で
+/// 自分の通知だけを引き取る。
+type SharedPendingSubgroupBuffer = std::sync::Arc<tokio::sync::Mutex<PendingSubgroupBuffer>>;
+
 /// 受け入れた data stream の処理タスクを起動する。
 ///
 /// `permit` はこの stream の処理枠である。タスクの終了時に手放すので、
@@ -219,6 +232,7 @@ fn spawn_stream_task(
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -234,6 +248,7 @@ fn spawn_stream_task(
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let termination_tx = termination_tx.clone();
     let catalog_tx = catalog_tx.clone();
+    let pending_subgroups = std::sync::Arc::clone(pending_subgroups);
     let recorder = recorder.cloned();
     join_set.spawn(task_monitor.clone().instrument(async move {
         handle_incoming_stream(
@@ -252,6 +267,7 @@ fn spawn_stream_task(
             &audio_config_handled,
             &termination_tx,
             &catalog_tx,
+            &pending_subgroups,
             playback,
             recorder.as_ref(),
         )
@@ -766,6 +782,20 @@ pub async fn run(
     // エンドポイントは `next_event()` の poll で動くため、ここが止まると受信も
     // 送信も完全に停止し、relay 側の輻輳ウィンドウが最小値へ落ちて復帰しない。
     let stream_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_STREAMS));
+    // Track Alias 未確立の Subgroup ストリームの保留バッファ。stream task ごとに持つと
+    // per-session の上限が per-stream の上限としてしか働かず、未知 alias のストリームが
+    // 枠の数だけ同時に届いたときに合計を抑えられないため、session で 1 つ共有する。
+    // 各 task は自分の entry の識別子を保持して `take_ready_for` を呼ぶため、他の task の
+    // entry を引き取ることはない (バッファ全体を返す `take_ready` は 1 つの待ち手だけが
+    // 使う API であり、この example では使わない)。
+    //
+    // `Mutex` を使うのは、バッファが複数の stream task から共有され、どの操作も await を
+    // またがない短い同期処理で完結するためである。状態を 1 つのタスクへ所有させてチャネルで
+    // 操作を依頼する構成は、チャンク 1 つごとに往復が増えて受信経路が応答待ちになるため採らない。
+    let pending_subgroups: SharedPendingSubgroupBuffer =
+        std::sync::Arc::new(tokio::sync::Mutex::new(PendingSubgroupBuffer::new(
+            DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS,
+        )));
     // 枠待ちの stream。accept 済みだがまだ処理を開始していない
     let mut pending_streams: std::collections::VecDeque<transport::RecvStream> =
         std::collections::VecDeque::new();
@@ -820,6 +850,7 @@ pub async fn run(
                 &audio_config_handled,
                 &termination_tx,
                 &catalog_tx,
+                &pending_subgroups,
                 playback,
                 recorder_sender.as_ref(),
             );
@@ -1708,6 +1739,7 @@ async fn handle_incoming_stream(
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -1732,6 +1764,7 @@ async fn handle_incoming_stream(
         audio_config_handled,
         termination_tx,
         catalog_tx,
+        pending_subgroups,
         playback,
         recorder,
     )
@@ -1795,6 +1828,7 @@ async fn handle_stream_body(
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
+    pending_subgroups: &SharedPendingSubgroupBuffer,
     playback: bool,
     recorder: Option<&RecorderSender>,
 ) {
@@ -1919,45 +1953,18 @@ async fn handle_stream_body(
                 let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
                 return;
             }
-            match data_plane.recv_subgroup_header(stream_id, &header) {
-                Ok(TrackDataAcceptance::Accepted) => {}
-                Ok(TrackDataAcceptance::UnknownTrackAlias) => {
-                    tracing::warn!(
-                        "Stream #{stream_num}: session rejected unknown track alias={}",
-                        header.track_alias,
-                    );
-                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                    return;
-                }
-                // draft-ietf-moq-transport-22 §3.1.3 (Track Alias): キャンセル済み subscription へ
-                // 遅れて届いた Object。未知 alias と違い確実に不要なので静かに捨てる。
-                Ok(TrackDataAcceptance::Discarded) => {
-                    tracing::debug!(
-                        "Stream #{stream_num}: discarding objects for cancelled track alias={}",
-                        header.track_alias,
-                    );
-                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                    return;
-                }
-                // draft-ietf-moq-transport-22 §3.1 (Subscriptions): フィルタ再適用の結果
-                // どの subscription にも属さなかった Object。セッションは閉じずに捨てる。
-                Ok(TrackDataAcceptance::FilteredOut) => {
-                    tracing::debug!(
-                        "Stream #{stream_num}: object filtered out for track alias={}",
-                        header.track_alias,
-                    );
-                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                    return;
-                }
-                Err(e) => {
-                    // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
-                    // ここはセッション終了でも warn のままにする
-                    tracing::warn!("Stream #{stream_num}: failed to register subgroup header: {e}");
-                    return;
-                }
+            if !register_subgroup_header(
+                stream,
+                &data_plane,
+                stream_id,
+                &header,
+                &mut sg_decoder,
+                stream_num,
+                pending_subgroups,
+            )
+            .await
+            {
+                return;
             }
             let kind = track_map.get(&header.track_alias);
             tracing::debug!(
@@ -2104,6 +2111,260 @@ async fn handle_stream_body(
             }
         }
     }
+}
+
+/// Subgroup header を Session へ登録する
+///
+/// Track Alias が未確立 (`UnknownTrackAlias`) の場合は、draft-ietf-moq-transport-22
+/// §3.1.3.1 (Unknown Track Alias) の "buffer it briefly" に従い、購読が確立するまで
+/// 短時間ストリームを保持する。保持の上限とタイムアウトは
+/// [`shiguredo_moqt::pending_subgroup_buffer::PendingSubgroupBuffer`] が管理する。
+///
+/// 保持している間に読んだチャンクは、確立を検出した時点で `decoder` へ積み直す。decoder は
+/// header を復号済みであり、保留中はストリームを読んでも decoder へ積んでいないため、
+/// 積み直すだけで続きから復号できる。
+///
+/// 保留バッファは session で 1 つ共有する。この関数は自分の entry の識別子を保持し、
+/// `take_ready_for` で自分の通知だけを引き取るため、他の stream task が保持する entry を
+/// 引き取ることはない。バッファを task ローカルに持つと per-session の上限が per-stream の
+/// 上限としてしか働かない。
+///
+/// 購読の確立は 2 つの経路で検出する。
+///
+/// - `recv_subgroup_header` の再試行が `Accepted` を返す (Session が alias を解決できる)
+/// - 呼び出し側が `note_subscriber` を呼び、`take_ready_for` が `Subscriber` を返す
+///
+/// この example は受信ループを始める前にすべての `SUBSCRIBE_OK` を処理するため、
+/// 受信ループの実行中に購読が確立する経路は無く `note_subscriber` を呼ぶ箇所はない。
+/// そのため再試行で検出する (将来、実行中に購読を追加する場合は、確立した時点で
+/// `note_subscriber` を呼べば保持している chunk を直ちに引き取れる)。
+///
+/// 戻り値が false の場合は header を登録できず、ストリームを破棄した
+/// (STOP_SENDING を送って読み捨て済み)。
+///
+/// 保留は stream task の同時実行枠を最大 `timeout_us` (既定 5 秒) 占有する。未知の alias の
+/// ストリームが枠の数だけ同時に届くと、その間は新しいストリームの処理が始まらない。
+/// 保持量は per-stream の上限に加え、session 共有のバッファの per-session の上限でも抑えられ、
+/// 占有は期限で解消するため、無制限には増えない。
+async fn register_subgroup_header(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    header: &SubgroupHeader,
+    decoder: &mut SubgroupStreamDecoder,
+    stream_num: u64,
+    pending_subgroups: &SharedPendingSubgroupBuffer,
+) -> bool {
+    match data_plane.recv_subgroup_header(stream_id, header) {
+        Ok(TrackDataAcceptance::Accepted) => return true,
+        Ok(TrackDataAcceptance::UnknownTrackAlias) => {}
+        // draft-ietf-moq-transport-22 §3.1.3 (Track Alias): キャンセル済み subscription へ
+        // 遅れて届いた Object。未知 alias と違い確実に不要なので保持しない。
+        Ok(TrackDataAcceptance::Discarded) => {
+            tracing::debug!(
+                "Stream #{stream_num}: discarding objects for cancelled track alias={}",
+                header.track_alias,
+            );
+            abort_subgroup_stream(stream, data_plane, stream_id).await;
+            return false;
+        }
+        // draft-ietf-moq-transport-22 §3.1 (Subscriptions): フィルタ再適用の結果
+        // どの subscription にも属さなかった Object。セッションは閉じずに捨てる。
+        Ok(TrackDataAcceptance::FilteredOut) => {
+            tracing::debug!(
+                "Stream #{stream_num}: object filtered out for track alias={}",
+                header.track_alias,
+            );
+            abort_subgroup_stream(stream, data_plane, stream_id).await;
+            return false;
+        }
+        Err(e) => {
+            // MoqtClient の登録 API は全エラーを `TransportError::Internal` に写すため、
+            // ここはセッション終了でも warn のままにする
+            tracing::warn!("Stream #{stream_num}: failed to register subgroup header: {e}");
+            return false;
+        }
+    }
+
+    // 保留経路。バッファは session で共有し、この task は自分の entry の識別子だけを保持する。
+    // 引き取りは `take_ready_for` で行うため、他の task の entry を引き取ることはない
+    // (バッファ全体を返す `take_ready` は 1 つの待ち手だけが使う API であり、この example
+    // では使わない)。
+    let options = DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS;
+    let added_us = monotonic_now_us();
+    let id = {
+        let mut pending = pending_subgroups.lock().await;
+        pending.add(header.track_alias, added_us)
+    };
+    let deadline_us = added_us.saturating_add(options.timeout_us);
+    tracing::debug!(
+        "Stream #{stream_num}: holding subgroup stream until the track alias={} is established",
+        header.track_alias,
+    );
+    loop {
+        // 通知済み (購読の確立 / 期限切れ / 上限超過 / 終端) の自分の entry を引き取る。
+        // 引き取りと削除を 1 回のロックで行い、ロックを await またぎにしない
+        let taken = {
+            let mut pending = pending_subgroups.lock().await;
+            let ready = pending.take_ready_for(id, monotonic_now_us());
+            if let Some(ready) = &ready {
+                pending.remove(ready.id);
+            }
+            ready
+        };
+        if let Some(ready) = taken {
+            match ready.reason {
+                PendingNotifyReason::Subscriber => {
+                    // 購読が確立した。保持したチャンクを decoder へ戻して続きを読む
+                    let buffered: usize = ready.chunks.iter().map(Vec::len).sum();
+                    for chunk in &ready.chunks {
+                        decoder.push(chunk);
+                    }
+                    tracing::debug!(
+                        "Stream #{stream_num}: released the held subgroup stream \
+                         (track alias={}, buffered={} bytes)",
+                        ready.track_alias,
+                        buffered,
+                    );
+                    return true;
+                }
+                // 購読が確立しないまま保持の上限を過ぎた。破棄した理由を残す
+                PendingNotifyReason::Timeout => {
+                    tracing::warn!(
+                        "Stream #{stream_num}: dropping the held subgroup stream \
+                         (track alias={} was not established within {} ms)",
+                        ready.track_alias,
+                        options.timeout_us / 1000,
+                    );
+                }
+                PendingNotifyReason::OverflowPerStream => {
+                    tracing::warn!(
+                        "Stream #{stream_num}: dropping the held subgroup stream \
+                         (per-stream buffer overflow: track alias={}, limit={} bytes)",
+                        ready.track_alias,
+                        options.per_stream_max_bytes,
+                    );
+                }
+                PendingNotifyReason::OverflowPerSession => {
+                    tracing::warn!(
+                        "Stream #{stream_num}: dropping the held subgroup stream \
+                         (per-session buffer overflow: track alias={}, limit={} bytes)",
+                        ready.track_alias,
+                        options.per_session_max_bytes,
+                    );
+                }
+                // session が閉じた。以降の受信は失敗するため保留を打ち切る
+                PendingNotifyReason::SessionClose => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: session closed while holding the subgroup stream \
+                         (track alias={})",
+                        ready.track_alias,
+                    );
+                }
+                // FIN / RESET_STREAM でストリームが終わった
+                PendingNotifyReason::EndOfStream => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: stream ended while holding the subgroup stream \
+                         (track alias={})",
+                        ready.track_alias,
+                    );
+                }
+            }
+            abort_subgroup_stream(stream, data_plane, stream_id).await;
+            return false;
+        }
+
+        // 購読の確立を再試行する。確立していれば Session が alias を解決して受理する
+        match data_plane.recv_subgroup_header(stream_id, header) {
+            Ok(TrackDataAcceptance::Accepted) => {
+                // 確立を検出した。entry を引き取り待ちにして次のループでチャンクを戻す
+                pending_subgroups
+                    .lock()
+                    .await
+                    .note_subscriber(header.track_alias);
+                continue;
+            }
+            Ok(TrackDataAcceptance::UnknownTrackAlias) => {}
+            Ok(TrackDataAcceptance::Discarded) => {
+                tracing::debug!(
+                    "Stream #{stream_num}: discarding objects for cancelled track alias={}",
+                    header.track_alias,
+                );
+                pending_subgroups.lock().await.remove(id);
+                abort_subgroup_stream(stream, data_plane, stream_id).await;
+                return false;
+            }
+            Ok(TrackDataAcceptance::FilteredOut) => {
+                tracing::debug!(
+                    "Stream #{stream_num}: object filtered out for track alias={}",
+                    header.track_alias,
+                );
+                pending_subgroups.lock().await.remove(id);
+                abort_subgroup_stream(stream, data_plane, stream_id).await;
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!("Stream #{stream_num}: failed to register subgroup header: {e}");
+                pending_subgroups.lock().await.remove(id);
+                return false;
+            }
+        }
+
+        // 期限までは読み続けて保持する。読まないと peer のフロー制御が止まり、確立が
+        // 遅れたぶんだけ転送が滞る (draft-ietf-moq-transport-22 §3.1.3.1 は
+        // "withhold stream flow control" も MAY とするが、本 example は上限付きで読む)
+        let remaining_us = deadline_us.saturating_sub(monotonic_now_us());
+        if remaining_us <= 0 {
+            // 期限切れ。次のループで take_ready_for が Timeout を返す
+            continue;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_micros(remaining_us as u64),
+            receive_registered_stream_data(stream, data_plane, stream_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(data))) => pending_subgroups.lock().await.push(id, &data),
+            // ストリームが終端した。entry に終端を通知し、次のループで引き取る
+            Ok(Ok(None)) => pending_subgroups
+                .lock()
+                .await
+                .note_end_of_stream(header.track_alias),
+            Ok(Err(e)) => {
+                log_failure(
+                    format_args!("Stream #{stream_num}: failed to read held subgroup stream: {e}"),
+                    is_transport_session_end(&e),
+                );
+                pending_subgroups.lock().await.remove(id);
+                return false;
+            }
+            // 期限切れ。次のループで take_ready_for が Timeout を返す
+            Err(_) => {}
+        }
+    }
+}
+
+/// 保留を打ち切った Subgroup ストリームを停止して読み捨てる
+///
+/// STOP_SENDING を送ってから終端まで読む。送らないと peer が送信を続け、受信ループの
+/// 枠と帯域を不要に消費する。
+async fn abort_subgroup_stream(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+) {
+    let _ = data_plane.send_data_stream_stop_sending(stream_id);
+    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+}
+
+/// 単調増加するマイクロ秒時刻
+///
+/// [`shiguredo_moqt::pending_subgroup_buffer::PendingSubgroupBuffer`] は Sans-I/O のため
+/// 時刻を引数 (マイクロ秒の `i64`) で受ける。example ではプロセス起動からの経過時間を渡す。
+fn monotonic_now_us() -> i64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)
 }
 
 #[expect(clippy::too_many_arguments)]
