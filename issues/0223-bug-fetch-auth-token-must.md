@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-fetch-auth-token-must
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-11
 - Updated: 2026-10-11
 
 ## 目的
