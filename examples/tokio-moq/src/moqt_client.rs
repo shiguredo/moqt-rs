@@ -26,9 +26,8 @@ use shiguredo_moqt::{
     c4m::MoqtAction, c4m::cat::CatClaims, c4m::cat::CatToken, c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT,
     message::ControlMessage, message::ReasonPhrase, message::common::Location,
     message::common::TrackNamespace, message_parameter::AuthorizationToken,
-    message_parameter::LocationFilter, message_parameter::MessageParameter,
-    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
-    message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_LOCATION_FILTER,
+    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
+    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
     message_parameter::PARAM_SUBSCRIBER_PRIORITY, session::core::Session,
     session::types::DataStreamId, session::types::DataStreamResetReason,
     session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
@@ -144,8 +143,8 @@ pub struct SubscribeResult {
     ///
     /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
     /// §3.1.4 (Largest Object)。購読の確立時点で track に publish 済みの最新 Location であり、
-    /// 購読前に配られた Object を FETCH で取得する際の開始位置になる (同 §3.5.1 の
-    /// "observe the Largest Object in the response" パターン)。
+    /// 購読より前に配られた Object は FILL_PARAMETERS 付き購読の fill fetch stream
+    /// (§3.4) で受け取る。LARGEST_OBJECT は fill range の上限を publisher が決めるために使う。
     pub largest_object: Option<Location>,
 }
 
@@ -309,6 +308,23 @@ impl DataPlaneHandle {
         session
             .send_fetch_header(stream_id, request_id)
             .map_err(|e| TransportError::Internal(format!("send_fetch_header: {e}")))
+    }
+
+    /// fill fetch stream の open を Session に通知する (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §11.4.1 (Fetch Header):
+    /// `SessionEvent::OpenFillFetchStream` を受けた publisher は uni stream を開き、起因
+    /// メッセージの Request ID を載せた FETCH_HEADER を書く。`fill_request_id` には
+    /// FETCH_HEADER に載せた値 (= `SessionEvent::OpenFillFetchStream::request_id`) を渡す。
+    pub fn send_fill_fetch_header(
+        &self,
+        stream_id: DataStreamId,
+        fill_request_id: u64,
+    ) -> Result<()> {
+        let mut session = lock_session(&self.session);
+        session
+            .send_fill_fetch_header(stream_id, fill_request_id)
+            .map_err(|e| TransportError::Internal(format!("send_fill_fetch_header: {e}")))
     }
 
     /// FETCH 応答 stream 上の Object 送信を Session に通知する (publisher 側)
@@ -506,6 +522,11 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // ワイヤを閉じるのも Session へ終端を通知するのも I/O 層 (example) の責務である。
             // ここで捨てると保留 PUBLISH_DONE の flush 条件が満たされないため、アプリへ届ける
             | SessionEvent::ResetDataStream { .. }
+            // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE を受けた publisher が uni
+            // stream を開く」指示である (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。
+            // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層 (example) の
+            // 責務であり、ここで捨てると fill に応答できないため、アプリへ届ける
+            | SessionEvent::OpenFillFetchStream { .. }
     )
 }
 
@@ -1323,26 +1344,31 @@ impl MoqtClient {
             .await
     }
 
-    /// Location Filter を指定してトラックを SUBSCRIBE する (subscriber 側)
+    /// メッセージパラメータを指定してトラックを SUBSCRIBE する (subscriber 側)
     ///
-    /// 購読開始後の Object だけを受け取りたい場合は [`LocationFilter::NextObject`]
-    /// (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter) Table 6 の Type 0x05)
-    /// を指定する。購読前に配られた Object は FETCH で別に取得する
-    /// (同 §3.5.1 (Dynamically Starting New Groups) の "observe the Largest Object in the
-    /// response" パターン)。
-    pub async fn subscribe_track_with_filter(
+    /// LOCATION_FILTER や FILL_PARAMETERS (draft-ietf-moq-transport-22 §9.20.15) のように
+    /// 呼び出し側が組み立てたパラメータをそのまま渡す。`MoqtClient` は C4M の
+    /// AUTHORIZATION_TOKEN と既定の SUBSCRIBER_PRIORITY を追加する。
+    pub async fn subscribe_track_with_parameters(
         &mut self,
         namespace: TrackNamespace,
         track_name: Vec<u8>,
-        filter: LocationFilter,
+        parameters: MessageParameters,
     ) -> Result<SubscribeResult> {
-        let mut parameters = MessageParameters::new();
-        parameters.push(MessageParameter {
-            param_type: PARAM_LOCATION_FILTER,
-            value: MessageParameterValue::LocationFilter(filter),
-        });
         self.subscribe_track_inner(namespace, track_name, parameters)
             .await
+    }
+
+    /// 自側が持つ購読の track 名を返す (publisher 側)
+    ///
+    /// `SessionEvent::OpenFillFetchStream` は track 名を持たないため、その
+    /// `subscription_request_id` (fill 対象 subscription の Request ID) を渡して
+    /// FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE (§9.20.15) が対象とする track を引く。
+    /// 回収済みの request では `None` を返す (`Subscription` は `Pending` でも存在する)。
+    pub fn subscription_track_name(&self, subscription_request_id: u64) -> Option<Vec<u8>> {
+        lock_session(&self.session)
+            .subscription(subscription_request_id)
+            .map(|subscription| subscription.track_name.clone())
     }
 
     /// SUBSCRIBE を発行して確立まで待ち、結果を組み立てる
@@ -1647,6 +1673,90 @@ impl MoqtClient {
         stream.finish()?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
         Ok(())
+    }
+
+    /// fill fetch stream を開いてカタログ Object を 1 つ送る (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1 (Opening and Closing Fill Fetch
+    /// Streams): `SessionEvent::OpenFillFetchStream` を受けた publisher は uni stream を開き、
+    /// 起因メッセージの Request ID を載せた FETCH_HEADER に続けて fill range の Object を送り、
+    /// FIN で閉じる。通常の FETCH 応答と異なり FETCH_OK は送らない。
+    ///
+    /// `outgoing_fetch_streams` には登録しない。peer の STOP_SENDING は Session が
+    /// `outgoing_fill` を見て fill stream として吸収するため、FETCH 応答として扱うと
+    /// subscription 側の会計が更新されない (`recv_data_stream_stop_sending` の doc 参照)。
+    pub async fn send_fill_fetch_response(
+        &mut self,
+        fill_request_id: u64,
+        group_id: u64,
+        object_id: u64,
+        payload: &[u8],
+    ) -> Result<()> {
+        let data_plane = self.data_plane();
+        let mut stream = self.handle.open_send_stream().await?;
+        let stream_id = DataStreamId(stream.stream_id());
+        if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
+            // 開いた stream を閉じずに返すと、Session にも peer にも終端が伝わらない
+            let _ = stream.reset(DataStreamResetReason::InternalError.error_code());
+            return Err(e);
+        }
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(
+            &FetchHeader {
+                request_id: fill_request_id,
+            }
+            .encode(),
+        );
+        let object = FetchStreamEntry::Object(FetchStreamObject {
+            group_id: Some(group_id),
+            subgroup_id: FetchSubgroupIdMode::Zero,
+            object_id: Some(object_id),
+            // 最初の Object は prior Object を持たないため Publisher Priority を明示する
+            publisher_priority: Some(128),
+            has_properties: false,
+            is_datagram_origin: false,
+            payload_length: payload.len() as u64,
+        });
+        object
+            .encode(None, FetchPriorContext::First, &mut buf)
+            .map_err(|e| TransportError::Internal(format!("fill fetch object encode: {e}")))?;
+        buf.extend_from_slice(payload);
+
+        data_plane.send_fetch_object(stream_id)?;
+        stream.send(Bytes::from(buf)).await?;
+        stream.finish()?;
+        data_plane.send_fetch_data_stream_closed(stream_id)?;
+        Ok(())
+    }
+
+    /// 応答できない fill fetch stream を開き、FETCH_HEADER の直後で reset する (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
+    /// stream には REQUEST_ERROR が無いため、publisher は fill の失敗を reset で伝える。
+    /// 「必要なら fill fetch stream を開き、FETCH_HEADER の直後で reset する」MUST があるため、
+    /// 応答できない場合も stream を開いて reset する (無応答にすると peer が待ち続ける)。
+    /// エラーコードは §12.5 (Stream Reset Error Codes) の `INTERNAL_ERROR` を使う。
+    pub async fn reject_fill_fetch(&mut self, fill_request_id: u64) -> Result<()> {
+        let data_plane = self.data_plane();
+        let mut stream = self.handle.open_send_stream().await?;
+        let stream_id = DataStreamId(stream.stream_id());
+        if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
+            let _ = stream.reset(DataStreamResetReason::InternalError.error_code());
+            return Err(e);
+        }
+        let buf = FetchHeader {
+            request_id: fill_request_id,
+        }
+        .encode();
+        let result = async {
+            stream.send(Bytes::from(buf)).await?;
+            stream.reset(DataStreamResetReason::InternalError.error_code())?;
+            Ok(())
+        }
+        .await;
+        let _ = data_plane.send_fetch_data_stream_closed(stream_id);
+        result
     }
 
     /// Object を 1 つも含まない FETCH 応答ストリームを開く (publisher 側)
@@ -2299,7 +2409,12 @@ impl MoqtClient {
                 }
                 ev @ (SessionEvent::GoawayReceived { .. }
                 | SessionEvent::PublishDoneReceived { .. }
-                | SessionEvent::ResetDataStream { .. }) => {
+                | SessionEvent::ResetDataStream { .. }
+                // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE を受けた publisher が
+                // uni stream を開く」指示である (draft-ietf-moq-transport-22 §3.4)。
+                // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層
+                // (example) の責務であり、ここで捨てると fill に応答できない
+                | SessionEvent::OpenFillFetchStream { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
                     // `take_notable_event` が取り出せない
                     // (配送キューへ積むのはこの drain だけ)。
@@ -2317,7 +2432,6 @@ impl MoqtClient {
                 | SessionEvent::PublishStateNotifyReceived { .. }
                 | SessionEvent::FetchOkReceived { .. }
                 | SessionEvent::SendPaddingStream { .. }
-                | SessionEvent::OpenFillFetchStream { .. }
                 | SessionEvent::SendPaddingDatagram { .. }) => {
                     // ここに列挙したイベントはアプリへ配送しない。この列挙も網羅性の担保であり、
                     // variant を追加するとコンパイルエラーになる (`is_notable_event` との一致は
@@ -2329,8 +2443,6 @@ impl MoqtClient {
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
                     // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
-                    // OpenFillFetchStream は fill 配信を要求された場合に発火する
-                    // (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。本 example は fill 配信を行わないため無視する。
                     // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
                     // ポーリングで参照するためここでは特別な処理を行わない
                     // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。
@@ -2753,6 +2865,30 @@ mod tests {
         assert!(
             !streams.is_notified(8),
             "別の request は独立して未通知のままであること"
+        );
+    }
+
+    /// fill 配信の指示がアプリへ配送されること
+    ///
+    /// `SessionEvent::OpenFillFetchStream` は「FILL_PARAMETERS 付き SUBSCRIBE を受けた
+    /// publisher が uni stream を開く」指示であり (draft-ietf-moq-transport-22 §3.4)、
+    /// ここで捨てると fill に応答できない。
+    #[test]
+    fn open_fill_fetch_stream_is_notable_event() {
+        assert!(
+            is_notable_event(&SessionEvent::OpenFillFetchStream {
+                request_id: 1,
+                subscription_request_id: 1,
+                start: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                end: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+            }),
+            "fill 配信の指示はアプリへ配送すること"
         );
     }
 

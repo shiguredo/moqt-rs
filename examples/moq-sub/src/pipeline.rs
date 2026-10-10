@@ -1,6 +1,7 @@
 //! subscriber の全体パイプライン
 //!
-//! 接続 → SETUP → カタログ FETCH → ビデオ / オーディオ SUBSCRIBE → データストリーム受信
+//! 接続 → SETUP → カタログ購読 (FILL_PARAMETERS 付き SUBSCRIBE) → ビデオ / オーディオ SUBSCRIBE
+//! → データストリーム受信
 //! → デコード (AV1 / H.264 / H.265 / Opus) → フレーム送出の流れを、
 //! `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
@@ -31,9 +32,11 @@ use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
 use shiguredo_moqt::{
-    message::common::Location, message_parameter::LocationFilter, msf::MSF_CATALOG_TRACK_NAME,
-    msf::MsfTrack, name::serialize_namespace, session::types::DataStreamId,
-    session::types::RequestStreamEnd, session::types::SessionEvent,
+    message::common::Location, message_parameter::LocationFilter,
+    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
+    message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
+    message_parameter::PARAM_LOCATION_FILTER, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
+    name::serialize_namespace, session::types::DataStreamId, session::types::SessionEvent,
     stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
     stream::decoder::SubgroupStreamDecoder,
 };
@@ -291,25 +294,6 @@ enum TrackKind {
     Catalog,
 }
 
-/// 購読前に配られたカタログを取得する FETCH の Location Filter を組み立てる
-///
-/// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
-/// "observe the Largest Object in the response" パターンに従い、LARGEST_OBJECT が示す
-/// Group の先頭 Object から Largest Object までを要求する。catalog track は Group の
-/// 先頭 Object (Object ID 0) が独立した完全なカタログであるため (draft-ietf-moq-msf-01
-/// §5 (Catalog))、最新 Group の先頭から読めば完全なカタログと同一 Group 内の delta が
-/// 揃う。終端を省略した Absolute Start は Fetch の既定で Largest Object までになり
-/// (draft-ietf-moq-transport-22 §3.2 (Fetch))、LARGEST_OBJECT の受信後に配られた
-/// delta も同じ応答で取得できる。
-fn catalog_fetch_filter(largest_object: Location) -> LocationFilter {
-    LocationFilter::AbsoluteStart {
-        start: Location {
-            group_id: largest_object.group_id,
-            object_id: 0,
-        },
-    }
-}
-
 /// パイプラインを実行する
 ///
 /// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
@@ -466,19 +450,19 @@ pub async fn run(
         client.data_stream_timeout_ms(),
     );
 
-    // 3. カタログを SUBSCRIBE し、購読前に配られたカタログを FETCH で取得する
+    // 3. カタログを FILL_PARAMETERS 付き SUBSCRIBE で取得する
     //
     // MSF は catalog の取得に "SUBSCRIBE with a Joining FETCH (offset = 0)" を MUST とする
-    // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-ietf-moq-transport-21 で
-    // 廃止されたため、本 example は draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting
-    // New Groups) が示す購読パターンで表す:
+    // (draft-ietf-moq-msf-01 §5 (Catalog))。Joining FETCH は draft-20 で削除され
+    // (draft-ietf-moq-transport-22 Appendix A.3 の "Since draft-ietf-moq-transport-19" に記録)、
+    // §3.5 (Joining an Ongoing Track) が示す購読パターンに置き換わった:
     //
-    // 1. Location Filter を Next Object (§9.20.9 Table 6 の Type 0x05) にして catalog track を
-    //    SUBSCRIBE する。以後に配られるカタログ (独立カタログと delta) が届く
-    // 2. SUBSCRIBE_OK の LARGEST_OBJECT (§9.20.17 (LARGEST OBJECT Parameter)) が示す Group の
-    //    先頭 Object から FETCH する。catalog track は Group の先頭 Object が独立した完全な
-    //    カタログであるため (draft-ietf-moq-msf-01 §5)、最新 Group の先頭から読めば完全な
-    //    カタログが得られる
+    // 1. catalog track を Location Filter Next Object (§9.20.9 Table 6 の Type 0x05) と
+    //    FILL_PARAMETERS (§9.20.15) で SUBSCRIBE する。FILL 内側の Location Filter は
+    //    現在 Group の先頭から埋める Relative Start (Type 0x01 の StartGroup=1) にする
+    // 2. publisher は fill range を fill fetch stream (§3.4) で送る。購読より前に publish
+    //    された独立カタログがこれで届き、以後の delta は購読で届く。どちらも同じ
+    //    `CatalogState` へ到着順に適用する
     //
     // Group ID を 0 と仮定してはならない。publisher は再起動時に以前 publish したどの
     // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
@@ -486,11 +470,12 @@ pub async fn run(
     //
     // C4M 認可トークンは `MoqtClient` が `moqt` クレームを見て付けるため、ここでは
     // 指定しない (draft-ietf-moq-c4m-01 §1.1)。
+    let catalog_params = catalog_subscribe_parameters();
     let catalog_sub = client
-        .subscribe_track_with_filter(
+        .subscribe_track_with_parameters(
             namespace.clone(),
             MSF_CATALOG_TRACK_NAME.to_vec(),
-            LocationFilter::NextObject,
+            catalog_params,
         )
         .await?;
     tracing::info!(
@@ -499,42 +484,12 @@ pub async fn run(
         catalog_sub.request_id,
         catalog_sub.largest_object,
     );
-    // LARGEST_OBJECT が未広告のときは catalog がまだ publish されていない。この場合の
-    // FETCH は INVALID_RANGE になる MUST (draft-ietf-moq-transport-22 §3.2 (Fetch)) ため
-    // 発行せず、購読で最初の独立したカタログが届くのを待つ
-    let catalog_fetch_request_id = match catalog_sub.largest_object {
-        Some(largest_object) => {
-            let mut catalog_params = shiguredo_moqt::message_parameter::MessageParameters::new();
-            catalog_params.push(shiguredo_moqt::message_parameter::MessageParameter {
-                param_type: shiguredo_moqt::message_parameter::PARAM_LOCATION_FILTER,
-                value: shiguredo_moqt::message_parameter::MessageParameterValue::LocationFilter(
-                    catalog_fetch_filter(largest_object),
-                ),
-            });
-            let catalog_fetch = client
-                .fetch(
-                    namespace.clone(),
-                    MSF_CATALOG_TRACK_NAME.to_vec(),
-                    catalog_params,
-                )
-                .await?;
-            tracing::info!(
-                "Catalog FETCH_OK received: request_id={}",
-                catalog_fetch.request_id
-            );
-            Some(catalog_fetch.request_id)
-        }
-        None => {
-            tracing::info!("Catalog LARGEST_OBJECT is unknown; waiting for the live catalog");
-            None
-        }
-    };
 
-    // FETCH 応答と購読で届くカタログを読み、MSF の配置規則で適用する
+    // fill fetch stream と購読で届くカタログを読み、MSF の配置規則で適用する
     let catalog_resolution = receive_catalog(
         &mut recv_acceptor,
         &data_plane,
-        catalog_fetch_request_id,
+        catalog_sub.request_id,
         catalog_sub.track_alias,
         // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
         // publisher が書く表現と同じ draft-ietf-moq-transport-22 §8.8 の表現で渡す
@@ -1286,34 +1241,64 @@ struct CatalogResolution {
 /// 独立したカタログが届くまで待つ。待ち続けないよう上限を設ける。
 const CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// カタログ購読のメッセージパラメータを組み立てる
+///
+/// draft-ietf-moq-transport-22 §3.5 (Joining an Ongoing Track) の購読パターンに従い、
+/// 購読の Location Filter を Next Object (§9.20.9 Table 6 の Type 0x05) にしつつ、
+/// FILL_PARAMETERS (§9.20.15) で現在 Group の先頭から埋める fill を要求する
+/// (内側の Location Filter は Relative Start の StartGroup=1)。
+/// 内側を省略すると購読の Next Object を継承してしまい、購読より前に publish された
+/// 独立カタログが fill range に入らない。
+fn catalog_subscribe_parameters() -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::NextObject),
+    });
+    let mut fill_params = MessageParameters::new();
+    fill_params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 1,
+        }),
+    });
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(fill_params),
+    });
+    parameters
+}
+
 /// カタログを取得する
 ///
 /// 次の 2 経路で届く Object を到着順に適用する
-/// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
-/// "observe the Largest Object in the response" パターン)。
+/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.5 (Joining an Ongoing Track))。
 ///
-/// 1. 購読前に配られたカタログの FETCH 応答 (`fetch_request_id` が `Some` のときだけ発行済み)
-/// 2. 購読 (Next Object) で届くカタログの Subgroup stream
+/// 1. fill fetch stream (`fill_request_id` は起因 SUBSCRIBE の Request ID。FETCH_HEADER に
+///    載る値と一致することを確認してから読む)。購読より前に publish された独立カタログが届く
+/// 2. 購読 (Next Object) で届くカタログの Subgroup stream。以後の独立カタログと delta が届く
 ///
-/// 購読の LARGEST_OBJECT が未広告のときは FETCH を発行していない
-/// (draft-ietf-moq-transport-22 §3.2 (Fetch) は Object が 1 つも無い track への FETCH に
-/// INVALID_RANGE を MUST とする)。この場合は最初の独立したカタログが購読で届くまで待つ。
-/// FETCH が失敗しても購読は生かしたままにして、届いた Object だけで解決を試みる。
+/// fill fetch stream が届かない場合 (publisher が Largest Object をまだ広告していない、
+/// または fill に対応していない) も、購読で最初の独立したカタログが届くまで待つ。
+/// fill の読み取りに失敗しても購読は生かしたままにして、届いた Object だけで解決を試みる。
+///
+/// 期限はカタログ取得の開始からの絶対時刻で、全 stream の読みに共有される。期限を超えて
+/// 分割配信される fill は受信済みの Object ごと破棄する。また fill 非対応の publisher では、購読での再 publish が
+/// `CATALOG_TIMEOUT` より後になると期限切れで終了する (MSF は fill を伴う購読を MUST と
+/// するため、本 example は fill 非対応の publisher を対象にしない)。
 ///
 /// これにより draft-ietf-moq-msf-01 §5 (Catalog) が求める「最新の完全なカタログと、
 /// それに続く delta update」を 1 つの状態 [`catalog::CatalogState`] へまとめて適用できる。
 async fn receive_catalog(
     recv_acceptor: &mut transport::StreamAcceptor,
     data_plane: &DataPlaneHandle,
-    fetch_request_id: Option<u64>,
+    fill_request_id: u64,
     catalog_alias: u64,
     catalog_namespace: String,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
     let mut state = catalog::CatalogState::new(catalog_namespace);
-    // FETCH を発行していない場合、または FETCH 応答を読み終えた場合に真になる
-    let mut fetch_done = fetch_request_id.is_none();
-    while !(fetch_done && state.catalog().is_some()) {
+    while state.catalog().is_none() {
         let accepted =
             match tokio::time::timeout_at(deadline, recv_acceptor.accept_recv_stream()).await {
                 Ok(accepted) => accepted?,
@@ -1327,65 +1312,97 @@ async fn receive_catalog(
         };
         let stream_id = DataStreamId(stream.stream_id());
         let mut buf = Vec::new();
-        let (stream_type_id, stream_type) =
-            match stream_reader::peek_stream_type(&mut stream, &mut buf).await? {
-                StreamRead::Value(value) => value,
-                StreamRead::Closed(end) => {
-                    // 種別を持たない stream は無視して次の stream を待つ
-                    tracing::debug!("Catalog wait: stream closed before type: {end:?}");
-                    continue;
-                }
-            };
+        // 種別の読みにも期限を掛ける。stall した stream で待ち続けない
+        let (stream_type_id, stream_type) = match tokio::time::timeout_at(
+            deadline,
+            stream_reader::peek_stream_type(&mut stream, &mut buf),
+        )
+        .await
+        {
+            Ok(Ok(StreamRead::Value(value))) => value,
+            Ok(Ok(StreamRead::Closed(end))) => {
+                // 種別を持たない stream は無視して次の stream を待つ
+                tracing::debug!("Catalog wait: stream closed before type: {end:?}");
+                continue;
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                tracing::warn!(
+                    "Catalog wait: stream type did not arrive within {}ms",
+                    CATALOG_TIMEOUT.as_millis()
+                );
+                break;
+            }
+        };
         data_plane.recv_data_stream_type(stream_id, stream_type_id)?;
         match stream_type {
             StreamType::Padding => {
                 // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams)
                 let _ = drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
             }
-            StreamType::Fetch => match fetch_request_id {
-                Some(expected_request_id) => {
-                    match read_catalog_fetch_stream(
+            StreamType::Fetch => {
+                // fill fetch stream は FETCH_HEADER に起因 SUBSCRIBE の Request ID を載せる
+                // (draft-ietf-moq-transport-22 §3.4)。購読で届くカタログと同じ状態へ適用する
+                // 読みにも期限を適用する。fill fetch stream が stall すると期限が効かず、
+                // 購読で届くカタログを待つ経路へ戻れなくなる
+                match tokio::time::timeout_at(
+                    deadline,
+                    read_catalog_fetch_stream(
                         &mut stream,
                         data_plane,
                         stream_id,
                         &buf,
-                        expected_request_id,
-                    )
-                    .await
-                    {
-                        Ok(objects) => {
-                            for object in &objects {
-                                apply_catalog_object(&mut state, object)?;
-                            }
-                        }
-                        // FETCH の失敗 (REQUEST_ERROR / RESET) は購読の失敗ではない。
-                        // 購読で届くカタログを待つ
-                        Err(e) => tracing::warn!("Catalog FETCH failed: {e}"),
-                    }
-                    fetch_done = true;
-                }
-                None => {
-                    tracing::debug!("Catalog wait: unexpected fetch stream");
-                    let _ =
-                        drain_registered_stream_to_end(&mut stream, data_plane, stream_id).await;
-                }
-            },
-            StreamType::Subgroup => {
-                match read_catalog_subgroup_stream(
-                    &mut stream,
-                    data_plane,
-                    stream_id,
-                    &buf,
-                    catalog_alias,
+                        fill_request_id,
+                    ),
                 )
                 .await
                 {
-                    Ok(objects) => {
+                    Ok(Ok(objects)) => {
                         for object in &objects {
                             apply_catalog_object(&mut state, object)?;
                         }
                     }
-                    Err(e) => tracing::warn!("Failed to read catalog stream: {e}"),
+                    // fill の失敗 (REQUEST_ERROR / RESET / 不一致) は購読の失敗ではない。
+                    // 購読で届くカタログを待つ。読み切れなかった stream を Session の会計から
+                    // 外すため STOP_SENDING を送る (送らないと受信 stream が残り、data stream
+                    // timeout でセッションが落ちる)
+                    Ok(Err(e)) => {
+                        tracing::warn!("Catalog fill fetch failed: {e}");
+                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Catalog fill fetch did not finish within {}ms",
+                            CATALOG_TIMEOUT.as_millis()
+                        );
+                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
+                    }
+                }
+            }
+            StreamType::Subgroup => {
+                // 読みにも期限を掛ける。stall した stream で待ち続けない
+                match tokio::time::timeout_at(
+                    deadline,
+                    read_catalog_subgroup_stream(
+                        &mut stream,
+                        data_plane,
+                        stream_id,
+                        &buf,
+                        catalog_alias,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(objects)) => {
+                        for object in &objects {
+                            apply_catalog_object(&mut state, object)?;
+                        }
+                    }
+                    Ok(Err(e)) => tracing::warn!("Failed to read catalog stream: {e}"),
+                    Err(_) => tracing::warn!(
+                        "Catalog stream did not finish within {}ms",
+                        CATALOG_TIMEOUT.as_millis()
+                    ),
                 }
             }
         }
@@ -1432,7 +1449,7 @@ async fn receive_catalog(
     })
 }
 
-/// FETCH 応答ストリームを読み切り、catalog Object を取り出す
+/// fill fetch stream (FETCH 系の uni stream) を読み切り、catalog Object を取り出す
 ///
 /// 読み出しの終端検知は `receive_registered_stream_data` に任せる。同関数が
 /// `recv_data_stream_closed` で終端を通知しており、Session は受信 fetch stream の終端を
@@ -1862,54 +1879,12 @@ async fn handle_stream_body(
     }
     match stream_type {
         StreamType::Fetch => {
-            // 録画中は group を破棄せず、デコードだけをスキップして録画する
-            let skip_decode = display_backlog.load(Ordering::Relaxed) > MAX_DISPLAY_BACKLOG;
-            if skip_decode && recorder.is_none() {
-                tracing::debug!(
-                    "Stream #{stream_num}: dropping fetch stream (display backlog={})",
-                    display_backlog.load(Ordering::Relaxed)
-                );
-                let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                return;
-            }
-            // 本 example はカタログ取得の FETCH のみ発行する。
-            // カタログ応答は receive_catalog で消費済みのため、ここに来る Fetch は想定外である。
-            let Some(codec) = video_codec else {
-                tracing::warn!("Stream #{stream_num}: fetch stream received without video codec");
-                let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                return;
-            };
-            let mut decoder = match build_stream_video_decoder(
-                playback,
-                skip_decode,
-                codec,
-                stream_num,
-                recorder.is_some(),
-            ) {
-                Ok(decoder) => decoder,
-                Err(e) => {
-                    tracing::warn!("Stream #{stream_num}: failed to create video decoder: {e}");
-                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
-                    return;
-                }
-            };
-            handle_fetch_stream(
-                stream,
-                &data_plane,
-                stream_id,
-                &buf,
-                decoder.as_mut(),
-                &FrameSink {
-                    frame_tx,
-                    display_backlog: &display_backlog,
-                },
-                stream_num,
-                termination_tx,
-                recorder,
-            )
-            .await;
+            // 本 example は FETCH を発行しない。ここに来る Fetch stream は FILL_PARAMETERS 付き
+            // SUBSCRIBE への fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+            // がカタログ解決後に届いたものであり、購読 (Subgroup) でも同じカタログが届くため
+            // 読み捨てる
+            tracing::debug!("Stream #{stream_num}: dropping a fill fetch stream");
+            let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
         }
         StreamType::Padding => {
             // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams):
@@ -2370,174 +2345,6 @@ fn monotonic_now_us() -> i64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(Instant::now);
     i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX)
-}
-
-#[expect(clippy::too_many_arguments)]
-async fn handle_fetch_stream(
-    stream: &mut transport::RecvStream,
-    data_plane: &DataPlaneHandle,
-    stream_id: DataStreamId,
-    buf: &[u8],
-    mut video_decoder: Option<&mut decoder::VideoDecoder>,
-    sink: &FrameSink<'_>,
-    stream_num: u64,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
-    recorder: Option<&RecorderSender>,
-) {
-    let mut decoder = FetchStreamDecoder::new();
-    decoder.push(buf);
-    let fetch_header = loop {
-        match decoder.try_decode_header() {
-            Ok(Some(h)) => break h,
-            Ok(None) => match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                Ok(Some(data)) => decoder.push(&data),
-                Ok(None) => return,
-                Err(e) => {
-                    log_failure(
-                        format_args!("Stream #{stream_num}: failed to read fetch header: {e}"),
-                        is_transport_session_end(&e),
-                    );
-                    return;
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Stream #{stream_num}: failed to read fetch header: {e}");
-                let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                return;
-            }
-        }
-    };
-    if let Err(e) = data_plane.recv_fetch_header(stream_id, &fetch_header) {
-        tracing::warn!("Stream #{stream_num}: failed to register fetch header: {e}");
-        return;
-    }
-    tracing::info!(
-        "Stream #{stream_num}: FETCH response (request_id={})",
-        fetch_header.request_id,
-    );
-    let mut frames: u64 = 0;
-    loop {
-        let entry = loop {
-            match decoder.try_decode_entry() {
-                Ok(Some(e)) => break e,
-                Ok(None) => match receive_registered_stream_data(stream, data_plane, stream_id)
-                    .await
-                {
-                    Ok(Some(data)) => decoder.push(&data),
-                    Ok(None) => {
-                        tracing::info!("Stream #{stream_num}: FETCH complete ({frames} frames)");
-                        if let Err(e) = data_plane.recv_fetch_data_stream_closed(
-                            fetch_header.request_id,
-                            RequestStreamEnd::Fin,
-                        ) {
-                            tracing::warn!(
-                                "Stream #{stream_num}: failed to notify fetch closed: {e}"
-                            );
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        log_failure(
-                            format_args!("Stream #{stream_num}: stream error: {e}"),
-                            is_transport_session_end(&e),
-                        );
-                        return;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("Stream #{stream_num}: failed to read fetch entry: {e}");
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                    return;
-                }
-            }
-        };
-        // エントリデコード直後 (payload 読み込み前) に Session へ通知する。
-        // draft-ietf-moq-transport-22 §6.6 (Termination) の activity は object header の
-        // 到着時点を指すため、読み込み完了時点を記録すると deadline が読み込み時間ぶん
-        // 後ろへずれる (payload 読み込み中は更新されない既知の限界。Session 側の
-        // subgroup 経路と同じ設計。この節番号・規則は draft 由来であり将来 draft 改定で
-        // 変わる可能性がある)。
-        if let Err(e) = data_plane.recv_fetch_entry(stream_id) {
-            tracing::warn!("Stream #{stream_num}: failed to register fetch entry: {e}");
-            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-            return;
-        }
-        if let DecodedFetchEntry::Object(ref obj) = entry
-            && obj.payload_length > 0
-        {
-            let payload = loop {
-                if let Some(p) = decoder.try_read_payload() {
-                    break p;
-                }
-                match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                    Ok(Some(data)) => decoder.push(&data),
-                    Ok(None) => {
-                        if let Err(e) = data_plane.recv_fetch_data_stream_closed(
-                            fetch_header.request_id,
-                            RequestStreamEnd::Fin,
-                        ) {
-                            tracing::warn!(
-                                "Stream #{stream_num}: failed to notify fetch closed: {e}"
-                            );
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        log_failure(
-                            format_args!("Stream #{stream_num}: stream error: {e}"),
-                            is_transport_session_end(&e),
-                        );
-                        return;
-                    }
-                }
-            };
-            // Subgroup 経路と同じく Object Properties から Video Config を取り出す
-            // (draft-ietf-moq-loc-04 §2.2 (MOQ Object Mapping) は LOC の Public Properties を
-            // MOQT の Object Properties に載せると規定する)。H.264/H.265 はこの
-            // AVCDecoderConfigurationRecord が無いと parameter set を適用できない。
-            let timestamp_us = match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
-                Ok((timestamp, timescale)) => loc_timestamp_us(timestamp, timescale),
-                Err(e) => {
-                    request_session_termination(termination_tx, &e);
-                    return;
-                }
-            };
-            let video_config = match extract_video_config(obj.properties_bytes.as_deref()) {
-                Ok(config) => config,
-                Err(e) => {
-                    request_session_termination(termination_tx, &e);
-                    return;
-                }
-            };
-            if let Some(recorder) = recorder
-                && let Err(e) = record_video_object(
-                    recorder,
-                    obj.properties_bytes.as_deref(),
-                    video_config.as_deref(),
-                    &payload,
-                )
-            {
-                request_session_termination(termination_tx, &e);
-                return;
-            }
-            let Some(video_decoder) = video_decoder.as_deref_mut() else {
-                continue;
-            };
-            // FETCH 応答は publisher が要求された Group Order で送るため (draft-ietf-moq-transport-22
-            // §3.2.1 (Fetch Object Delivery))、live の購読と同じ到着順の前提を置けない。本
-            // example の FETCH はカタログ取得のみで映像を復号しないため、live の購読の復号順の
-            // 判定は通さない。
-            frames += tokio::task::block_in_place(|| {
-                decode_and_send(
-                    &payload,
-                    video_config.as_deref(),
-                    timestamp_us,
-                    video_decoder,
-                    sink,
-                )
-            });
-        }
-    }
 }
 
 /// 1 本の Subgroup ストリームから映像 Object を取り出して復号する
@@ -3161,6 +2968,8 @@ async fn decode_audio_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use shiguredo_moqt::message_parameter::LocationFilterUpdate;
 
     /// テスト用: targetLatency 付きの track を作る
     fn track_with_target_latency(target_latency: Option<u64>) -> MsfTrack {
@@ -4019,51 +3828,30 @@ mod tests {
         );
     }
 
-    /// カタログの FETCH は LARGEST_OBJECT が示す Group の先頭から要求すること
+    /// カタログ購読が FILL_PARAMETERS 付きで、fill range が現在 Group の先頭からであること
     ///
-    /// draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) の
-    /// "observe the Largest Object in the response" パターン。catalog track は Group の
-    /// 先頭 Object が独立した完全なカタログであるため (draft-ietf-moq-msf-01 §5 (Catalog))、
-    /// 最新 Group の先頭から読めば完全なカタログが得られる。Group ID は publisher ごとに
-    /// 異なるため 0 を仮定しない (同 §6.1 (Group numbering))。
+    /// draft-ietf-moq-transport-22 §3.5 (Joining an Ongoing Track): 購読の Location Filter は
+    /// Next Object、FILL_PARAMETERS 内側の Location Filter は現在 Group の先頭 (Relative Start の
+    /// StartGroup=1)。内側を省略すると購読の Next Object を継承し、購読より前に publish された
+    /// 独立カタログが fill range に入らない (同 §3.4 (Fill Semantics))。
     #[test]
-    fn catalog_fetch_filter_starts_at_the_largest_group() {
-        let largest = Location {
-            group_id: 1_760_000_000_000,
-            object_id: 0,
-        };
+    fn catalog_subscribe_parameters_request_a_fill_from_the_group_start() {
+        let parameters = catalog_subscribe_parameters();
         assert_eq!(
-            catalog_fetch_filter(largest),
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 1_760_000_000_000,
-                    object_id: 0,
-                }
-            },
-            "LARGEST_OBJECT が示す Group の先頭 Object から要求すること"
+            parameters
+                .location_filter_typed()
+                .expect("LOCATION_FILTER を読めること"),
+            Some(LocationFilter::NextObject),
+            "購読は Next Object から始めること"
         );
-    }
-
-    /// LARGEST_OBJECT が同一 Group の delta を指していても Group の先頭から要求すること
-    ///
-    /// 最初の Object (Object ID 0) が独立した完全なカタログであり、以降は delta である
-    /// (draft-ietf-moq-msf-01 §5 (Catalog))。Object ID 0 から読むことで完全なカタログを
-    /// 取りこぼさない。
-    #[test]
-    fn catalog_fetch_filter_starts_at_object_zero() {
-        let largest = Location {
-            group_id: 42,
-            object_id: 3,
-        };
+        let fill = parameters
+            .fill_parameters()
+            .expect("FILL_PARAMETERS を持つこと");
         assert_eq!(
-            catalog_fetch_filter(largest),
-            LocationFilter::AbsoluteStart {
-                start: Location {
-                    group_id: 42,
-                    object_id: 0,
-                }
-            },
-            "Largest Object が delta を指していても Group の先頭から要求すること"
+            fill.location_filter_update()
+                .expect("内側の LOCATION_FILTER を読めること"),
+            LocationFilterUpdate::Set(LocationFilter::RelativeGroup { start_group: 1 }),
+            "fill range は現在 Group の先頭からにすること"
         );
     }
 }

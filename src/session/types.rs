@@ -379,6 +379,17 @@ pub enum SessionEvent {
     OpenFillFetchStream {
         /// fill 起因の request の Request ID (FETCH_HEADER に載せる値)
         request_id: u64,
+        /// fill 対象 subscription の Request ID
+        ///
+        /// 起因メッセージが REQUEST_UPDATE の場合は [`Self::OpenFillFetchStream::request_id`]
+        /// と一致しない (§6.4.2.1 (Request ID))。対象 track の識別に使う。
+        subscription_request_id: u64,
+        /// fill range の開始 Location
+        start: Location,
+        /// fill range の終端 Location
+        ///
+        /// 開いた範囲 (終端の指定が無い filter) は開設時点の Largest Object で解決した値。
+        end: Location,
     },
     /// bidi request stream の送信方向を RESET_STREAM で打ち切る
     ///

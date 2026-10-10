@@ -43,7 +43,11 @@ pub(super) fn validate_outgoing_fill_parameters(
     Ok(())
 }
 
-/// FILL_PARAMETERS 付きメッセージの fill fetch stream 開設要否を判定する
+/// FILL_PARAMETERS 付きメッセージの fill range を解決する
+///
+/// 開設できる場合は `(開始 Location, 終端 Location)` を返し、開設できない場合
+/// (fill range が空、Largest Object より後に始まる、Largest Object が未知) は `None` を返す。
+/// 終端は Largest Object でクランプする (§3.4)。
 ///
 /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1 (Opening and
 /// Closing Fill Fetch Streams):
@@ -66,10 +70,8 @@ fn should_open_fill_stream(
     fill: &MessageParameters,
     subscription_filter: Option<&LocationFilter>,
     largest: Option<&Location>,
-) -> bool {
-    let Some(largest) = largest else {
-        return false;
-    };
+) -> Option<(Location, Location)> {
+    let largest = largest?;
     // 内側 LOCATION_FILTER → subscription filter → track 全体の順で fill range を決める。
     // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): 内側の Location Filter Type 0x00
     // (None) は track 全体 (Largest Object まで) を指し、内側を省略した場合は
@@ -82,7 +84,7 @@ fn should_open_fill_stream(
         Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
         // 0x21 が Location Filter 形式でない場合はデコード済みメッセージでは到達しない。
         // API 経由の不正入力では安全側に倒して開設しない。
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let (start, end) = match filter.as_ref() {
         // track 全体: 先頭から Largest Object まで
@@ -101,19 +103,23 @@ fn should_open_fill_stream(
     let Some(start) = start else {
         // 開始位置が定まらない場合は開設しない (現行の全フィルタ種別は常時 Some を
         // 返すため到達しない防御。将来種別追加時の安全側)
-        return false;
+        return None;
     };
     // fill range が Largest Object より後に始まる場合は開設しない
     if start > *largest {
-        return false;
+        return None;
     }
+    // 終端の指定が無い filter は Largest Object までを range とする。
+    // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は Largest Object を
+    // 超えない。EndObject / EndGroup を明示する filter (Type 0x03 / 0x04) でも
+    // Largest Object を超える分は要求できないため、Largest Object でクランプする
+    let end = end.unwrap_or(*largest);
+    let end = if end > *largest { *largest } else { end };
     // fill range が empty (Start > End) の場合は開設しない
-    if let Some(end) = end
-        && start > end
-    {
-        return false;
+    if start > end {
+        return None;
     }
-    true
+    Some((start, end))
 }
 
 impl Session {
@@ -158,9 +164,14 @@ impl Session {
         let track_namespace = subscription.track_namespace.clone();
         let track_name = subscription.track_name.clone();
         let largest = self.publisher_track_largest(&track_namespace, &track_name);
-        if should_open_fill_stream(fill, filter_view.as_ref(), largest.as_ref()) {
+        if let Some((start, end)) =
+            should_open_fill_stream(fill, filter_view.as_ref(), largest.as_ref())
+        {
             self.events.push_back(SessionEvent::OpenFillFetchStream {
                 request_id: fill_request_id,
+                subscription_request_id,
+                start,
+                end,
             });
         }
     }

@@ -513,7 +513,8 @@ pub async fn run(
     // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
     let handle = client.handle();
     let mut catalog_group_id = group_id::allocate_initial_group_id()?;
-    // カタログの Location。FETCH 応答の範囲判定と SUBSCRIBE_OK の LARGEST_OBJECT に使う
+    // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、SUBSCRIBE_OK の
+    // LARGEST_OBJECT に使う
     let mut catalog_location = Location {
         group_id: catalog_group_id,
         object_id: 0,
@@ -985,6 +986,71 @@ pub async fn run(
                             .await?;
                             Ok(false)
                         }
+                        Some(ClientEvent::Session(SessionEvent::OpenFillFetchStream {
+                            request_id,
+                            subscription_request_id,
+                            start,
+                            end,
+                        })) => {
+                            // draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1:
+                            // FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を受けた publisher は
+                            // uni stream を開き、起因メッセージの Request ID を載せた FETCH_HEADER に
+                            // 続けて fill range の Object を送り、FIN で閉じる (FETCH_OK は送らない)。
+                            // 応答できない場合は FETCH_HEADER の直後で reset して失敗を伝える
+                            // (無応答にすると peer が fill を待ち続ける)
+                            match client.subscription_track_name(subscription_request_id) {
+                                Some(track) if track == MSF_CATALOG_TRACK_NAME => {
+                                    // 送るのは現在のカタログ Object 1 つだけである。これが fill range に
+                                    // 入らない場合 (過去 Group だけを指す range など) は応答できないため
+                                    // reset で失敗を伝える
+                                    let location = catalog_location;
+                                    if location < start || location > end {
+                                        tracing::info!(
+                                            "Rejecting catalog fill fetch outside the requested range: request_id={request_id}, location={:?}",
+                                            location,
+                                        );
+                                        reject_fill_fetch(&mut client, request_id).await;
+                                    } else if let Err(e) = client
+                                        .send_fill_fetch_response(
+                                            request_id,
+                                            location.group_id,
+                                            location.object_id,
+                                            &catalog_json,
+                                        )
+                                        .await
+                                    {
+                                        // 失敗しても publisher は停止しない。Terminated / 回収済みの
+                                        // subscription は通常の失敗条件である (§3.4.1)
+                                        tracing::warn!(
+                                            "Failed to serve catalog fill fetch (request_id={request_id}): {e}"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "Served catalog fill fetch (request_id={request_id}, group={})",
+                                            location.group_id,
+                                        );
+                                    }
+                                }
+                                Some(track) => {
+                                    // moq-pub はカタログ以外の fill range を判定できないため、
+                                    // FETCH_HEADER の直後で reset する (§3.4.1)。
+                                    // video / audio への FILL_PARAMETERS 付き SUBSCRIBE もここへ来る
+                                    tracing::warn!(
+                                        "Rejecting fill fetch for an unsupported track: track={}",
+                                        String::from_utf8_lossy(&track),
+                                    );
+                                    reject_fill_fetch(&mut client, request_id).await;
+                                }
+                                None => {
+                                    // subscription を引けない経路 (回収済みなど) も reset で伝える
+                                    tracing::warn!(
+                                        "Rejecting fill fetch for an unresolved subscription: request_id={request_id}",
+                                    );
+                                    reject_fill_fetch(&mut client, request_id).await;
+                                }
+                            }
+                            Ok(false)
+                        }
                         Some(ClientEvent::RequestUpdate(update)) => {
                             // draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE):
                             // 受信側は必ず 1 通の REQUEST_OK / REQUEST_ERROR で応答する MUST。
@@ -1270,6 +1336,17 @@ fn session_error_code(error: &MessageError) -> u64 {
     match error {
         MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
         _ => SESSION_PROTOCOL_VIOLATION,
+    }
+}
+
+/// fill fetch stream を開いて FETCH_HEADER の直後で reset する
+///
+/// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch
+/// stream には REQUEST_ERROR が無く、publisher は fill の失敗を reset で伝える。無応答にすると
+/// peer が fill を待ち続けるため、応答できない場合も stream を開いて reset する。
+async fn reject_fill_fetch(client: &mut MoqtClient, request_id: u64) {
+    if let Err(e) = client.reject_fill_fetch(request_id).await {
+        tracing::warn!("Failed to reject fill fetch (request_id={request_id}): {e}");
     }
 }
 

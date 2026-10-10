@@ -39,7 +39,7 @@ fn drain_open_fill_events(s: &mut Session) -> Vec<u64> {
     let mut ids = Vec::new();
     while let Some(e) = s.poll_event() {
         match e {
-            SessionEvent::OpenFillFetchStream { request_id } => ids.push(request_id),
+            SessionEvent::OpenFillFetchStream { request_id, .. } => ids.push(request_id),
             SessionEvent::CloseSession(err) => {
                 panic!("CloseSession が発行された: {err:?}")
             }
@@ -247,6 +247,63 @@ fn subscribe_with_fill_opens_fill_stream() {
         vec![sub_rid],
         "SUBSCRIBE 処理時にも fill stream が開くこと"
     );
+}
+
+/// OpenFillFetchStream イベントの (request_id, subscription_request_id, start, end) を回収する
+fn drain_open_fill_stream_events(s: &mut Session) -> Vec<(u64, u64, Location, Location)> {
+    let mut events = Vec::new();
+    while let Some(e) = s.poll_event() {
+        match e {
+            SessionEvent::OpenFillFetchStream {
+                request_id,
+                subscription_request_id,
+                start,
+                end,
+            } => events.push((request_id, subscription_request_id, start, end)),
+            SessionEvent::CloseSession(err) => {
+                panic!("CloseSession が発行された: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+/// fill fetch stream のイベントが解決済みの fill range と購読の Request ID を運ぶこと
+///
+/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は内側の LOCATION_FILTER が
+/// 決め、終端は Largest Object を超えない。Relative Start の StartGroup=1 は現在の Group の
+/// 先頭 (`{Largest Group, 0}`) を指す。REQUEST_UPDATE 起因の fill では `request_id` が
+/// REQUEST_UPDATE 自身の Request ID になり、対象 subscription の Request ID とは一致しない
+/// (§6.4.2.1 (Request ID))。
+#[test]
+fn fill_stream_event_carries_the_resolved_range() {
+    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let mut inner = MessageParameters::new();
+    inner.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::RelativeGroup {
+            start_group: 1,
+        }),
+    });
+    let update_rid = send_update_to_server(&mut client, &mut server, sub_rid, fill_params(inner));
+    let events = drain_open_fill_stream_events(&mut server);
+    assert_eq!(events.len(), 1, "fill stream が 1 本開くこと: {events:?}");
+    let (request_id, subscription_request_id, start, end) = events[0];
+    assert_eq!(
+        request_id, update_rid,
+        "FETCH_HEADER には起因メッセージの Request ID を載せること"
+    );
+    assert_eq!(
+        subscription_request_id, sub_rid,
+        "fill 対象 subscription の Request ID を別に運ぶこと"
+    );
+    assert_eq!(
+        (start.group_id, start.object_id),
+        (0, 0),
+        "StartGroup=1 は現在の Group の先頭を指すこと"
+    );
+    assert!(end >= start, "fill range が空でないこと: {end:?}");
 }
 
 /// Forward State 1 で FILL_PARAMETERS 付き REQUEST_UPDATE を処理すると fill stream が開く

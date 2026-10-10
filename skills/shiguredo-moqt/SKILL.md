@@ -269,7 +269,7 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
-| `OpenFillFetchStream { request_id }` | fill fetch stream を開く (`request_id` は FETCH_HEADER に載せる起因メッセージの Request ID) |
+| `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く (`request_id` は FETCH_HEADER に載せる起因メッセージの Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済みの fill range) |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
 | `FinishRequestStream { request_id }` | request stream の送信方向を FIN で閉じる |
