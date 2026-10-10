@@ -702,6 +702,12 @@
   - moq-sub の映像の経路が、購読ごとに共有する判定を通した Object だけを復号し、捨てた理由を debug ログに出す
   - @voluntas
 
+- [ADD] Track Alias 未確立の Subgroup ストリームを短時間保持する `PendingSubgroupBuffer` を追加する
+  - per-stream (1 MiB) / per-session (16 MiB) のバイト上限と 5 秒のタイムアウトで保持量を抑え、購読の確立・タイムアウト・上限超過・session 終了・ストリーム終端を理由として返す (draft-ietf-moq-transport-22 §3.1.3.1 の "buffer it briefly")
+  - Sans I/O のため時刻はマイクロ秒の `i64` で受け、`take_ready` (バッファ全体) と `take_ready_for` (entry 指定) で引き取り可能な entry を poll する。`take_ready_for` は期限切れの確定も含めて指定した entry だけを対象にし、他の entry の状態を変えない。上限超過で破棄した entry には以後のチャンクを足さず、集計は実際に保持しているチャンクの合計と一致し続ける
+  - moq-sub は `UnknownTrackAlias` の Subgroup ストリームを保持し、購読が確立したら保持したチャンクを decoder へ戻して続きを読む。保留バッファは session (run) スコープで 1 つ共有し、各 stream task は `take_ready_for` で自分の entry だけを引き取るため、per-session と per-stream の両方の上限が意図どおり働く。確立しないまま期限を過ぎた場合などは理由をログに出して破棄する
+  - @voluntas
+
 ### misc
 
 - [UPDATE] moq-pub / moq-sub の WebTransport 経路が experimental であることを明記し、実行時にも警告する

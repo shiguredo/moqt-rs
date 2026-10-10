@@ -51,6 +51,9 @@ pub mod name;
 pub mod object_properties;
 /// SETUP 用の Setup Options (draft-ietf-moq-transport-22 §9.1 (SETUP))
 pub mod parameter;
+// 概要と根拠は src/pending_subgroup_buffer.rs の //! ドキュメントに書く。ここに /// を
+// 置くと rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
+pub mod pending_subgroup_buffer;
 /// 音声の再生に関する処理 (時間圧縮・伸長、目標遅延の学習と閉ループの調整、鳴らす時刻の決定、A/V 同期)
 pub mod playout;
 pub mod session;
