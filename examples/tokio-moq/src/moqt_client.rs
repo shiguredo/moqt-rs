@@ -527,6 +527,37 @@ fn should_forget_subscription(cleanup_ready: bool, pending_publish_done: Option<
     cleanup_ready && pending_publish_done.is_none()
 }
 
+/// `SessionEvent::SendOnStream` の処理方法
+///
+/// `drain_events` の送信は await をまたぐ。送信半を台帳から先に取り出すと、`next_event` の
+/// future が `tokio::select!` の敗北で破棄されたときに送信半が失われ、以後その request への
+/// 送信がすべて「送信方向を閉じた request」として捨てられる (draft-ietf-moq-transport-22
+/// §9.5.1 (Updating Subscriptions) の MUST を果たせない)。台帳から取り出すのは、送信の
+/// 完了後に FIN するときだけにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendOnStreamStep {
+    /// 送信半が台帳に無い。encode も送信もしない
+    Skip,
+    /// 送信半がある。encode して送信し、`fin` が真なら送信の完了後に FIN して取り出す
+    Send {
+        /// 送信の完了後に FIN するか (library の `SessionEvent::SendOnStream` の `fin` に対応)
+        fin: bool,
+    },
+}
+
+/// `SessionEvent::SendOnStream` の処理方法を決める
+///
+/// 送信半が台帳にあるかと `fin` だけで決まる純関数にする。判定が `Skip` のときは encode も
+/// 送信もしないため、送信半が無い request への送信で example を停止させない。
+/// 送信の完了後に台帳から取り出すのは `fin` のときだけである。
+fn plan_send_on_stream(send_present: bool, fin: bool) -> SendOnStreamStep {
+    if send_present {
+        SendOnStreamStep::Send { fin }
+    } else {
+        SendOnStreamStep::Skip
+    }
+}
+
 /// peer 起点の bidi request stream の終端を Session へ通知済みの記録
 ///
 /// peer の cancel (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and
@@ -1460,6 +1491,11 @@ impl MoqtClient {
     ///
     /// Session のイベントは `drain_events` で I/O 操作へ変換し、配送対象
     /// (`is_notable_event`) は `notable_events` 経由で返す。
+    ///
+    /// この future は `tokio::select!` の分岐で使えるよう、await の途中で破棄されても
+    /// 送信半の台帳 (`bidi_sends`) を壊さない。破棄された時点で送信中だったメッセージは
+    /// 再送されず、破棄後に呼び直すとキューに残っていたメッセージから送信が再開される
+    /// (`drain_events` の doc を参照)。
     pub async fn next_event(&mut self) -> Result<Option<ClientEvent>> {
         loop {
             if let Some(update) = self.incoming_updates.pop_front() {
@@ -2084,6 +2120,27 @@ impl MoqtClient {
     }
 
     /// session の events キューを drain し、I/O 操作に変換する
+    ///
+    /// `next_event` は `tokio::select!` の分岐で使われるため、この future は await の
+    /// 途中で破棄されうる。破棄で台帳 (`bidi_sends`) が壊れないように、送信中は送信半を
+    /// 台帳から取り出さず、FIN を送るときだけ送信の完了後に取り出す。送信半が台帳にある
+    /// request では、破棄後に `next_event` を呼び直すとキューに残っていたメッセージから
+    /// 送信が再開される。
+    ///
+    /// 破棄された時点で送信中だったメッセージは、Session のイベントキューから既に
+    /// 取り出されているため再送されない。送られたかどうかは transport の実装に依存する。
+    /// 現在の 3 経路は、QUIC / WebTransport over HTTP/3 が送信バッファに載るまで待つため
+    /// 破棄された分は送られず、WebTransport over HTTP/2 は driver へ投入済みのため送られる。
+    /// いずれもメッセージ単位で書き込むため部分送信は起きないが、`SendStream::send` の
+    /// 契約として保証されているわけではない。
+    ///
+    /// 破棄で失われる経路は 3 つある。request stream を開く await (`open_bidi_stream`) の
+    /// 途中で破棄された場合は、開いたストリームを台帳へ登録できないまま失う。ヘッド
+    /// メッセージ (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS) の送信中に破棄された場合は、
+    /// それを再送できず (Session は再発行しない)、送信半も台帳に登録されないため、以後の
+    /// 応答や PUBLISH_DONE は警告のみで捨てられる。確立済み request のメッセージの送信中に
+    /// 破棄された場合は、そのメッセージを送れず、送信の MUST
+    /// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) など) を果たせない。
     async fn drain_events(&mut self) -> Result<()> {
         loop {
             let event = {
@@ -2101,9 +2158,11 @@ impl MoqtClient {
                     request_id,
                     message,
                 } => {
+                    // encode はストリームを開く前に行う (encode 失敗でストリームを開かない)
+                    let bytes = Bytes::from(message.encode()?);
                     let (mut send, recv) = self.handle.open_bidi_stream().await?;
-                    send.send(Bytes::from(message.encode()?)).await?;
-                    self.bidi_sends.insert(request_id, send);
+                    // 送信の前に受信タスクと STOP_SENDING のチャネルを整える。送信中に
+                    // future が破棄されても受信タスクは起動済みになる
                     let (stop_tx, stop_rx) = mpsc::channel(1);
                     self.bidi_stop_txs.insert(request_id, stop_tx);
                     let reader = ControlStream::new(recv);
@@ -2114,35 +2173,54 @@ impl MoqtClient {
                         stop_rx,
                         &self.task_monitor,
                     );
+                    send.send(bytes).await?;
+                    // ヘッドメッセージを送り終えてから台帳へ登録する。登録を送信より先に
+                    // 行うと、送信中に破棄された場合にヘッド未送信のストリームが台帳へ残り、
+                    // 以後の応答や PUBLISH_DONE が初回メッセージとしてワイヤに載って
+                    // peer が PROTOCOL_VIOLATION でセッションを閉じる
+                    self.bidi_sends.insert(request_id, send);
                 }
                 SessionEvent::SendOnStream {
                     request_id,
                     message,
                     fin,
                 } => {
-                    // 送信方向を FIN / RESET 済みの request では送信半が台帳に無い。
-                    // Session が同一 request へ 2 度目の fin 付き送信を発行し得るため
-                    // (例: 拒否した REQUEST_UPDATE がパイプラインで届き、同じ request へ
-                    // 2 度目の REQUEST_ERROR + fin が発行される)、
-                    // ResetRequestStream と同じく no-op にして example を停止させない。
-                    if let Some(mut send) = self.bidi_sends.remove(&request_id) {
-                        send.send(Bytes::from(message.encode()?)).await?;
-                        // 最終メッセージの場合は送信後に FIN する (§6.4.2.3 / §9.9)。
-                        // 以後の送信は Session が発行しないためエントリは戻さない。
-                        if fin {
-                            send.finish()?;
-                        } else {
-                            self.bidi_sends.insert(request_id, send);
+                    // 送信半が台帳に無い request への送信は no-op にする。Session が同一
+                    // request へ 2 度目の fin 付き送信を発行し得るためである (例: 拒否した
+                    // REQUEST_UPDATE がパイプラインで届き、同じ request へ 2 度目の
+                    // REQUEST_ERROR + fin が発行される)。ResetRequestStream と同じ扱いで
+                    // example を停止させず、encode も行わない。
+                    match plan_send_on_stream(self.bidi_sends.contains_key(&request_id), fin) {
+                        SendOnStreamStep::Skip => {
+                            // ログにメッセージ全体を出さない (AUTHORIZATION_TOKEN を含み得る)
+                            tracing::warn!(
+                                "Dropping send on a request stream with no send half: request_id={request_id}, fin={fin}"
+                            );
                         }
-                    } else {
-                        // 送信方向を FIN / RESET 済みの request では送信半が台帳に無い。
-                        // Session は同一 request へ 2 度目の fin 付き送信を発行し得るため
-                        // (例: 拒否した REQUEST_UPDATE がパイプラインで届き、同じ request へ
-                        // 2 度目の REQUEST_ERROR + fin が発行される)、
-                        // ResetRequestStream と同じく no-op にして example を停止させない。
-                        tracing::warn!(
-                            "Dropping send on already closed request stream: request_id={request_id}, fin={fin}, message={message:?}"
-                        );
+                        SendOnStreamStep::Send { fin } => {
+                            // 送信がエラーで返った場合も取り出さずに台帳へ残す
+                            let send = self
+                                .bidi_sends
+                                .get_mut(&request_id)
+                                .expect("the ledger entry is present");
+                            send.send(Bytes::from(message.encode()?)).await?;
+                            if fin {
+                                // FIN は必須メッセージを送り終えてから送る
+                                // (draft-ietf-moq-transport-22 §6.4.2.2)
+                                let mut send = self
+                                    .bidi_sends
+                                    .remove(&request_id)
+                                    .expect("the ledger entry is present");
+                                if let Err(e) = send.finish() {
+                                    // FIN を送れなかった場合は送信半を台帳へ戻し、以後の
+                                    // 送信で再試行できるようにする (drain は継続する)
+                                    tracing::warn!(
+                                        "Failed to finish bidi request stream (request_id={request_id}): {e}"
+                                    );
+                                    self.bidi_sends.insert(request_id, send);
+                                }
+                            }
+                        }
                     }
                 }
                 SessionEvent::FinishRequestStream { request_id } => {
@@ -2323,8 +2401,12 @@ impl MoqtClient {
             // FETCH 応答 stream の台帳も request の回収で破棄する
             self.outgoing_fetch_streams
                 .retain(|_, rid| *rid != request_id);
-            if let Some(mut send) = self.bidi_sends.remove(&request_id) {
-                let _ = send.finish();
+            if let Some(mut send) = self.bidi_sends.remove(&request_id)
+                && let Err(e) = send.finish()
+            {
+                tracing::warn!(
+                    "Failed to finish bidi request stream (request_id={request_id}): {e}"
+                );
             }
         }
     }
@@ -2671,6 +2753,36 @@ mod tests {
         assert!(
             !streams.is_notified(8),
             "別の request は独立して未通知のままであること"
+        );
+    }
+
+    /// `SendOnStream` の判定が no-op と送信を正しく分けること
+    ///
+    /// FIN / RESET 済みの request では送信半が台帳に無い。Session は同一 request へ 2 度目の
+    /// fin 付き送信を発行し得るため、この経路は no-op のままにして example を停止させない
+    /// (判定が `Skip` のときは encode も送信もしない)。送信半があるときは台帳から取り出さずに
+    /// 送信し、`fin` のときだけ送信の完了後に台帳から取り出す。
+    #[test]
+    fn send_on_stream_plan_skips_closed_requests() {
+        assert_eq!(
+            plan_send_on_stream(false, false),
+            SendOnStreamStep::Skip,
+            "送信半が無い request への送信は no-op にすること"
+        );
+        assert_eq!(
+            plan_send_on_stream(false, true),
+            SendOnStreamStep::Skip,
+            "FIN / RESET 済みの request への 2 度目の fin 付き送信も no-op にすること"
+        );
+        assert_eq!(
+            plan_send_on_stream(true, false),
+            SendOnStreamStep::Send { fin: false },
+            "送信半があるときは送信の判定にすること (台帳から取り出さない)"
+        );
+        assert_eq!(
+            plan_send_on_stream(true, true),
+            SendOnStreamStep::Send { fin: true },
+            "fin のときは送信の判定にすること (送信後に台帳から取り出す)"
         );
     }
 }
