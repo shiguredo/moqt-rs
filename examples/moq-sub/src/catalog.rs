@@ -52,8 +52,17 @@ pub(crate) enum CatalogApplyOutcome {
 }
 
 /// 受信した catalog Object を順に適用する状態
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CatalogState {
+    /// catalog track の namespace (draft-ietf-moq-transport-22 §8.8 (Representing Namespace and
+    /// Track Names) の表現。draft-ietf-moq-msf-01 §11.1.2 (MSF Namespace-Name String Encoding) が
+    /// URL fragment 用に同じ符号化を再掲する)
+    ///
+    /// delta update の track object は add / remove / clone のいずれも namespace を省略できるため
+    /// (§5.1.6 (Delta update) / §5.2.2 (Track namespace))、省略時の継承先として
+    /// [`MsfCatalog::apply_delta`] へ渡す。継承の解決は catalog JSON の `namespace` との
+    /// 文字列比較であるため、この表現で書かれたカタログにだけ効く。
+    catalog_namespace: String,
     /// 適用済みのカタログ
     catalog: Option<MsfCatalog>,
     /// 適用済みの最新 Group ID
@@ -63,9 +72,17 @@ pub(crate) struct CatalogState {
 }
 
 impl CatalogState {
-    /// 空の状態を作る
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// catalog track の namespace を受け取って空の状態を作る
+    ///
+    /// 継承先が不明な状態 (namespace を省略した delta を解決できない状態) を作らないため、
+    /// 接続時に確定している catalog track の namespace を必須で受け取る。
+    pub(crate) fn new(catalog_namespace: impl Into<String>) -> Self {
+        Self {
+            catalog_namespace: catalog_namespace.into(),
+            catalog: None,
+            latest_group: None,
+            last_applied: None,
+        }
     }
 
     /// 適用済みのカタログを返す
@@ -133,10 +150,12 @@ impl CatalogState {
                     .catalog
                     .as_mut()
                     .expect("catalog presence checked above");
-                // example の publisher は track に明示 namespace を付けるため、
-                // catalog namespace は省略 (None) でも親トラックを解決できる
+                // namespace を省略した remove / clone は catalog track の namespace を継承する
+                // (§5.2.2 の MUST)。継承先を渡さないと、namespace を宣言した track と
+                // 省略した操作が一致せず、remove / clone は対象が見つからず失敗し、add は
+                // 重複を検出できず同じ (namespace, name) の track が二重に登録される
                 catalog
-                    .apply_delta(delta, None)
+                    .apply_delta(delta, Some(&self.catalog_namespace))
                     .map_err(|e| Error::Other(format!("failed to apply MSF delta catalog: {e}")))?;
                 self.last_applied = Some(location);
                 Ok(CatalogApplyOutcome::DeltaApplied)
@@ -158,6 +177,9 @@ pub(crate) fn track_names(catalog: &MsfCatalog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テストで使う catalog track の namespace (§8.8 表現)
+    const TEST_NAMESPACE: &str = "moq-example";
 
     /// テストで使う Full カタログの JSON
     ///
@@ -185,7 +207,7 @@ mod tests {
     /// 独立した完全なカタログ。
     #[test]
     fn apply_full_replaces_the_catalog() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let object = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -210,7 +232,7 @@ mod tests {
     /// draft-ietf-moq-msf-01 §5 (Catalog): 同じ Group の以降の Object は delta update。
     #[test]
     fn apply_delta_updates_the_catalog() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let full = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -247,7 +269,7 @@ mod tests {
     /// 先に来ていないため適用しない。
     #[test]
     fn apply_delta_from_another_group_is_ignored() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let full = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -284,7 +306,7 @@ mod tests {
     /// catalog update は無視する (MUST)。
     #[test]
     fn apply_full_from_an_older_group_is_ignored() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let full = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -321,7 +343,7 @@ mod tests {
     /// カタログが壊れるため、適用済みの Location は弾く。
     #[test]
     fn apply_duplicate_location_is_ignored() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let full = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -359,7 +381,7 @@ mod tests {
     /// 届きうる。適用先が無いため無視し、次の Full を待つ。
     #[test]
     fn apply_delta_without_full_is_ignored() {
-        let mut state = CatalogState::new();
+        let mut state = CatalogState::new(TEST_NAMESPACE);
         let delta = CatalogObject::decode(
             Location {
                 group_id: 100,
@@ -374,6 +396,204 @@ mod tests {
             "独立したカタログが無いときの delta は適用しないこと"
         );
         assert!(state.catalog().is_none(), "カタログが生まれないこと");
+    }
+
+    /// namespace を宣言した track を持つ Full カタログの JSON
+    ///
+    /// 引数は (namespace, track 名) の並び。draft-ietf-moq-msf-01 §5.6.1 (Time-aligned
+    /// Audio/Video Tracks with single quality) が track に `namespace` を宣言する形の例である
+    /// (同節の値は §11.1.2 の符号化形ではないため、構造だけを参考にする)。
+    fn full_json_with_tracks(tracks: &[(&str, &str)]) -> Vec<u8> {
+        let tracks_json = tracks
+            .iter()
+            .map(|(namespace, name)| {
+                format!(
+                    r#"{{"name":"{name}","namespace":"{namespace}","packaging":"loc","isLive":true}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"version":"draft-01","tracks":[{tracks_json}]}}"#).into_bytes()
+    }
+
+    /// namespace を省略した remove の delta の JSON
+    ///
+    /// draft-ietf-moq-msf-01 §5.6.5 (Delta update removing tracks) の例も track の namespace を
+    /// 省略する (同節の例が持つ `generatedAt` は省略する)。
+    fn delta_remove_json(tracks: &[&str]) -> Vec<u8> {
+        let tracks_json = tracks
+            .iter()
+            .map(|name| format!(r#"{{"name":"{name}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"deltaUpdate":[{{"op":"remove","tracks":[{tracks_json}]}}]}}"#).into_bytes()
+    }
+
+    /// namespace を省略した clone の delta の JSON
+    ///
+    /// `parentNamespace` を省略すると親の namespace は catalog の namespace と仮定される
+    /// (draft-ietf-moq-msf-01 §5.2.34 (Parent namespace))。
+    fn delta_clone_json(name: &str, parent_name: &str) -> Vec<u8> {
+        format!(
+            r#"{{"deltaUpdate":[{{"op":"clone","tracks":[{{"name":"{name}","parentName":"{parent_name}"}}]}}]}}"#
+        )
+        .into_bytes()
+    }
+
+    /// namespace を省略した remove が catalog track の namespace を継承すること
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は、track が namespace を宣言しない場合は
+    /// catalog track の namespace を継承する MUST を定める。§5.6.5 の remove は track の
+    /// namespace を省略するため、継承先を解決できないと削除対象を引き当てられず失敗する。
+    #[test]
+    fn apply_delta_removes_a_track_that_inherits_the_catalog_namespace() {
+        let mut state = CatalogState::new(TEST_NAMESPACE);
+        let full = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_with_tracks(&[(TEST_NAMESPACE, "video"), (TEST_NAMESPACE, "slides")]),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&full).expect("Full を適用できること");
+
+        let delta = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 1,
+            },
+            &delta_remove_json(&["slides"]),
+        )
+        .expect("delta をデコードできること");
+        assert_eq!(
+            state.apply(&delta).expect("適用結果が返ること"),
+            CatalogApplyOutcome::DeltaApplied,
+            "namespace を省略した remove を適用すること"
+        );
+        assert_eq!(
+            track_names(state.catalog().expect("カタログがあること")),
+            "video",
+            "namespace を継承した track が削除されること"
+        );
+    }
+
+    /// namespace を省略した clone が catalog track の namespace を継承すること
+    ///
+    /// clone track 自身の namespace (§5.2.2) と `parentNamespace` (§5.2.34 (Parent namespace))
+    /// の両方を省略している。`parentNamespace` の省略時は catalog の namespace を親の
+    /// namespace と仮定するため、継承先を解決できないと親トラックを引き当てられない。
+    #[test]
+    fn apply_delta_clones_a_track_that_inherits_the_catalog_namespace() {
+        let mut state = CatalogState::new(TEST_NAMESPACE);
+        let full = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_with_tracks(&[(TEST_NAMESPACE, "video")]),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&full).expect("Full を適用できること");
+
+        let delta = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 1,
+            },
+            &delta_clone_json("video-hd", "video"),
+        )
+        .expect("delta をデコードできること");
+        assert_eq!(
+            state.apply(&delta).expect("適用結果が返ること"),
+            CatalogApplyOutcome::DeltaApplied,
+            "namespace を省略した clone を適用すること"
+        );
+        assert_eq!(
+            track_names(state.catalog().expect("カタログがあること")),
+            "video, video-hd",
+            "clone で追加された track が反映されること"
+        );
+    }
+
+    /// namespace を省略した add が catalog track の namespace を継承して重複を検出すること
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.3 (Track name) は (namespace, name) が一意であることを MUST と
+    /// する。namespace を省略した add も catalog track の namespace を継承するため (§5.2.2)、
+    /// 同じ名前の track は重複として拒否する。
+    #[test]
+    fn apply_delta_rejects_an_add_that_duplicates_an_inherited_track() {
+        let mut state = CatalogState::new(TEST_NAMESPACE);
+        let full = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            &full_json_with_tracks(&[(TEST_NAMESPACE, "video")]),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&full).expect("Full を適用できること");
+
+        let delta = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 1,
+            },
+            &delta_json("video"),
+        )
+        .expect("delta をデコードできること");
+        let error = state
+            .apply(&delta)
+            .expect_err("namespace を省略した add でも同じ名前の track は重複になること");
+        assert!(
+            error.to_string().contains("already exists"),
+            "重複として拒否されること: {error}"
+        );
+        assert_eq!(
+            track_names(state.catalog().expect("カタログがあること")),
+            "video",
+            "適用に失敗した delta でカタログが変わらないこと"
+        );
+    }
+
+    /// namespace が異なる同名 track を namespace 省略の remove が削除しないこと
+    ///
+    /// 継承先は catalog track の namespace に限られるため (§5.2.2)、同じ名前でも別の
+    /// namespace を宣言した track は削除対象にならない。
+    #[test]
+    fn apply_delta_does_not_remove_a_track_from_another_namespace() {
+        let mut state = CatalogState::new(TEST_NAMESPACE);
+        let full = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 0,
+            },
+            // 同じ名前の track を catalog の namespace と別の namespace に 1 つずつ置く
+            &full_json_with_tracks(&[(TEST_NAMESPACE, "video"), ("other_namespace", "video")]),
+        )
+        .expect("カタログをデコードできること");
+        state.apply(&full).expect("Full を適用できること");
+
+        let delta = CatalogObject::decode(
+            Location {
+                group_id: 100,
+                object_id: 1,
+            },
+            &delta_remove_json(&["video"]),
+        )
+        .expect("delta をデコードできること");
+        assert_eq!(
+            state.apply(&delta).expect("適用結果が返ること"),
+            CatalogApplyOutcome::DeltaApplied,
+            "namespace を省略した remove を適用すること"
+        );
+        let catalog = state.catalog().expect("カタログがあること");
+        assert_eq!(catalog.tracks.len(), 1, "削除されるのは 1 件だけであること");
+        assert_eq!(
+            catalog.tracks[0].namespace.as_deref(),
+            Some("other_namespace"),
+            "catalog track と namespace が異なる track は削除対象にならないこと"
+        );
     }
 
     /// パースできない payload がエラーになること

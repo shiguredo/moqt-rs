@@ -32,9 +32,10 @@ use shiguredo_moqt::video_decode_order::{
 };
 use shiguredo_moqt::{
     message::common::Location, message_parameter::LocationFilter, msf::MSF_CATALOG_TRACK_NAME,
-    msf::MsfTrack, session::types::DataStreamId, session::types::RequestStreamEnd,
-    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
-    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
+    msf::MsfTrack, name::serialize_namespace, session::types::DataStreamId,
+    session::types::RequestStreamEnd, session::types::SessionEvent,
+    stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
+    stream::decoder::SubgroupStreamDecoder,
 };
 
 use crate::catalog;
@@ -535,6 +536,9 @@ pub async fn run(
         &data_plane,
         catalog_fetch_request_id,
         catalog_sub.track_alias,
+        // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
+        // publisher が書く表現と同じ draft-ietf-moq-transport-22 §8.8 の表現で渡す
+        serialize_namespace(&namespace),
     )
     .await?;
     let CatalogResolution {
@@ -1303,9 +1307,10 @@ async fn receive_catalog(
     data_plane: &DataPlaneHandle,
     fetch_request_id: Option<u64>,
     catalog_alias: u64,
+    catalog_namespace: String,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
-    let mut state = catalog::CatalogState::new();
+    let mut state = catalog::CatalogState::new(catalog_namespace);
     // FETCH を発行していない場合、または FETCH 応答を読み終えた場合に真になる
     let mut fetch_done = fetch_request_id.is_none();
     while !(fetch_done && state.catalog().is_some()) {
