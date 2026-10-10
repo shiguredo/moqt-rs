@@ -688,11 +688,18 @@
   - `AudioJitterBuffer::drop_late` を削除し、鳴り遅れた音をバッファ段で捨てない (鳴らすかどうかはスケジューラが決める)
   - @voluntas
 
-- [ADD] 音声の TIMESTAMP を配信側の壁時計へ合わせる `AudioTimestampClock` を追加する
+- [ADD] 映像の TIMESTAMP を配信側の壁時計へ合わせる `AudioTimestampClock` を追加する
   - 「読み出した壁時計 - 音声の TIMESTAMP」の 2 秒の窓の最小値へ原点を合わせ、ゆっくりしたドリフトへ窓が滑るにつれて追従する
   - 直近 0.5 秒の窓の最小値が適用中の補正より 200 ms 以上大きく、その窓に 5 個以上の観測があるときだけ段差とみなし、古い観測を捨てて取り直す
   - 観測の現在値・最小・最大・10 秒と 60 秒の傾き・適用中の補正・サンプル数を `AudioTimestampClock::snapshot` で返す (最小・最大・サンプル数は取り直しでは消さない)
   - moq-pub は live capture の音声の換算を `AudioTimestampClock` へ置き換え、その統計を既存の残差の要約と合わせてミリ秒でログに出す
+  - @voluntas
+
+- [ADD] 受信した映像 Object を復号してよいか Group の順序と欠落から判定する `VideoDecodeOrder` を追加する
+  - 復号中の Group より古い Group の Object と、同じ Group で直前に復号した Object 以前の Object ID (重複か遅着) を古いとして捨てる。キーフレームは参照を持たないため、復号中の Group より新しい Group なら復号を始め直す (draft-ietf-moq-transport-22 §2.1.2)
+  - 同じ Group の delta は直前に復号した Object の次の Object ID のときだけ通す。間の Object ID が欠けている場合は Prior Object ID Gap がその分の非存在を示すときに限り連続とみなし、示されない欠けは欠落として次のキーフレームまで delta を捨てる (§10.9)
+  - `prior_object_id_gap_of` で Object Properties から Prior Object ID Gap を読む (Property が無ければ 0、framing の書式違反は `MessageError::ProtocolViolation`)
+  - moq-sub の映像の経路が、購読ごとに共有する判定を通した Object だけを復号し、捨てた理由を debug ログに出す
   - @voluntas
 
 ### misc

@@ -23,6 +23,9 @@ use shiguredo_moqt::loc::{
     PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
 };
 use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
+use shiguredo_moqt::video_decode_order::{
+    VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
+};
 use shiguredo_moqt::{
     message::common::Location, message_parameter::LocationFilter, msf::MSF_CATALOG_TRACK_NAME,
     msf::MsfTrack, session::types::DataStreamId, session::types::RequestStreamEnd,
@@ -211,6 +214,7 @@ fn spawn_stream_task(
     audio_codec: Option<&str>,
     audio_params: Option<(u32, u8)>,
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
@@ -225,6 +229,7 @@ fn spawn_stream_task(
     let codec = video_codec.map(str::to_owned);
     let audio_codec = audio_codec.map(str::to_owned);
     let backlog = std::sync::Arc::clone(display_backlog);
+    let video_decode_order = std::sync::Arc::clone(video_decode_order);
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let termination_tx = termination_tx.clone();
@@ -242,6 +247,7 @@ fn spawn_stream_task(
             &audio_tx,
             stream_num,
             backlog,
+            &video_decode_order,
             audio_decoder.as_ref(),
             &audio_config_handled,
             &termination_tx,
@@ -566,6 +572,12 @@ pub async fn run(
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
     let mut audio_request_id: Option<u64> = None;
+    // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
+    // ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、stream ごとに
+    // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
+    // 判定できない。映像のトラックを切り替えて decoder を作り直す経路を足すときは、
+    // この状態を reset してから次のキーフレームで復号を始め直すこと。
+    let video_decode_order = std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
 
     if subscribe_video {
         let v = video_info.as_ref().expect("video_info is Some");
@@ -803,6 +815,7 @@ pub async fn run(
                 audio_codec.as_deref(),
                 audio_params,
                 &display_backlog,
+                &video_decode_order,
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &termination_tx,
@@ -1690,6 +1703,7 @@ async fn handle_incoming_stream(
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
@@ -1713,6 +1727,7 @@ async fn handle_incoming_stream(
         audio_tx,
         stream_num,
         display_backlog,
+        video_decode_order,
         audio_decoder,
         audio_config_handled,
         termination_tx,
@@ -1775,6 +1790,7 @@ async fn handle_stream_body(
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
@@ -1982,7 +1998,9 @@ async fn handle_stream_body(
                         stream,
                         &data_plane,
                         stream_id,
+                        header.group_id,
                         &mut sg_decoder,
+                        video_decode_order,
                         decoder.as_mut(),
                         &FrameSink {
                             frame_tx,
@@ -2239,6 +2257,10 @@ async fn handle_fetch_stream(
             let Some(video_decoder) = video_decoder.as_deref_mut() else {
                 continue;
             };
+            // FETCH 応答は publisher が要求された Group Order で送るため (draft-ietf-moq-transport-22
+            // §3.2.1 (Fetch Object Delivery))、live の購読と同じ到着順の前提を置けない。本
+            // example の FETCH はカタログ取得のみで映像を復号しないため、live の購読の復号順の
+            // 判定は通さない。
             frames += tokio::task::block_in_place(|| {
                 decode_and_send(
                     &payload,
@@ -2252,12 +2274,21 @@ async fn handle_fetch_stream(
     }
 }
 
+/// 1 本の Subgroup ストリームから映像 Object を取り出して復号する
+///
+/// `group_id` は Subgroup ヘッダの Group ID である。Subgroup ストリームの Object はすべて
+/// 同じ Group に属する (draft-ietf-moq-transport-22 §2.2 (Subgroups)) ため、Object ごとに
+/// 読む必要はない。
+/// `video_decode_order` は購読で共有する復号順の判定である。復号の直前に通し、復号してよい
+/// Object だけを decoder へ渡す。
 #[expect(clippy::too_many_arguments)]
 async fn decode_video_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
+    group_id: u64,
     sg_decoder: &mut SubgroupStreamDecoder,
+    video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     recorder: Option<&RecorderSender>,
@@ -2362,6 +2393,45 @@ async fn decode_video_stream(
         let Some(video_decoder) = video_decoder.as_deref_mut() else {
             continue;
         };
+        // キーフレーム判定は録画と同じ規則を使う。PROP_VIDEO_FRAME_MARKING が無い publisher の
+        // 映像も復号できるように、PROP_VIDEO_CONFIG の有無で代用する。
+        let is_key_frame =
+            match is_video_keyframe(obj.properties_bytes.as_deref(), video_config.as_deref()) {
+                Ok(keyframe) => keyframe,
+                Err(e) => {
+                    request_session_termination(termination_tx, &e);
+                    return frames;
+                }
+            };
+        // Prior Object ID Gap は Object Properties から読む (Property が無ければ 0)
+        let prior_object_id_gap = match prior_object_id_gap_of(obj.properties_bytes.as_deref()) {
+            Ok(gap) => gap,
+            Err(e) => {
+                request_session_termination(termination_tx, &e);
+                return frames;
+            }
+        };
+        // 復号してよい Object か判定する。Group ごとに別の stream で届くため、判定の状態は
+        // 購読で共有する (draft-ietf-moq-transport-22 §2.1.2 (Object States))。ロックは判定の
+        // 間だけ持ち、復号 (block_in_place) の間は持たない。
+        let admission = {
+            let mut decode_order = video_decode_order.lock().await;
+            decode_order.admit(&VideoObjectPosition {
+                group_id,
+                object_id: obj.object_id,
+                is_key_frame,
+                prior_object_id_gap,
+            })
+        };
+        if let VideoObjectAdmission::Skip { reason } = admission {
+            // 捨てるのは参照するフレームが無い Object であり、異常ではない。毎 Object で
+            // warn を出すとログが埋まるため debug に留める
+            tracing::debug!(
+                "Skipping video object (group={group_id}, object={}, reason={reason:?})",
+                obj.object_id,
+            );
+            continue;
+        }
         frames += tokio::task::block_in_place(|| {
             decode_and_send(
                 &payload,
@@ -2482,21 +2552,33 @@ fn extract_video_keyframe(properties_bytes: Option<&[u8]>) -> ExtractResult<Opti
     Ok(None)
 }
 
+/// video object がキーフレームかどうかを判定する
+///
+/// キーフレーム判定は PROP_VIDEO_FRAME_MARKING (I ビット) を使い、プロパティが無い場合は
+/// PROP_VIDEO_CONFIG の有無で代用する (Group の先頭がキーフレームである publisher の映像も
+/// 復号できるようにするため)。同じ規則を録画と復号順の判定で共有する。
+/// 書式違反は `Err` で返し、呼び出し側がセッションを閉じる。
+fn is_video_keyframe(
+    properties_bytes: Option<&[u8]>,
+    video_config: Option<&[u8]>,
+) -> ExtractResult<bool> {
+    Ok(match extract_video_keyframe(properties_bytes)? {
+        Some(keyframe) => keyframe,
+        None => video_config.is_some(),
+    })
+}
+
 /// video object を録画用に writer へ送る
 ///
-/// キーフレーム判定は PROP_VIDEO_FRAME_MARKING を使い、プロパティが無い場合は
-/// PROP_VIDEO_CONFIG の有無で代用する。Timestamp / Timescale の書式違反は `Err` で返し、
-/// 呼び出し側がセッションを閉じる。
+/// キーフレーム判定は [`is_video_keyframe`] に従う。Timestamp / Timescale の書式違反は
+/// `Err` で返し、呼び出し側がセッションを閉じる。
 fn record_video_object(
     recorder: &RecorderSender,
     properties_bytes: Option<&[u8]>,
     video_config: Option<&[u8]>,
     payload: &[u8],
 ) -> ExtractResult<()> {
-    let keyframe = match extract_video_keyframe(properties_bytes)? {
-        Some(keyframe) => keyframe,
-        None => video_config.is_some(),
-    };
+    let keyframe = is_video_keyframe(properties_bytes, video_config)?;
     let (timestamp, timescale) = extract_timestamp_timescale(properties_bytes)?;
     recorder.video(VideoSample {
         timestamp,
@@ -3129,6 +3211,57 @@ mod tests {
         );
         assert_eq!(
             extract_video_keyframe(Some(&[0xFF, 0xFF, 0xFF])),
+            Err(MessageError::UnexpectedEof),
+            "切り詰められた properties は UnexpectedEof であること"
+        );
+    }
+
+    /// キーフレーム判定は PROP_VIDEO_FRAME_MARKING を優先し、無ければ PROP_VIDEO_CONFIG で代用する
+    ///
+    /// 録画と復号順の判定が同じ規則を使うことを固定する。
+    #[test]
+    fn is_video_keyframe_falls_back_to_video_config() {
+        use shiguredo_moqt::loc::LocProperty;
+
+        // PROP_VIDEO_FRAME_MARKING があればその I ビットを使う (PROP_VIDEO_CONFIG の有無より優先)
+        let mut marked = LocProperties::new();
+        marked.push(LocProperty {
+            prop_id: PROP_VIDEO_FRAME_MARKING,
+            value: LocPropertyValue::Bytes(vec![0xC0]),
+        });
+        let marked_bytes = marked
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            is_video_keyframe(Some(&marked_bytes), Some(&[0x01])),
+            Ok(false),
+            "I ビットが立っていなければキーフレームとしないこと"
+        );
+
+        // PROP_VIDEO_FRAME_MARKING が無ければ PROP_VIDEO_CONFIG の有無で代用する
+        let props = LocProperties::new();
+        let bytes = props
+            .encode()
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            is_video_keyframe(Some(&bytes), Some(&[0x01])),
+            Ok(true),
+            "Video Config を持つ Object をキーフレームとみなすこと"
+        );
+        assert_eq!(
+            is_video_keyframe(Some(&bytes), None),
+            Ok(false),
+            "Video Config を持たなければキーフレームとしないこと"
+        );
+        assert_eq!(
+            is_video_keyframe(None, Some(&[0x01])),
+            Ok(true),
+            "Properties が無くても Video Config があればキーフレームとみなすこと"
+        );
+
+        // 書式違反は「キーフレームでない」に潰さない
+        assert_eq!(
+            is_video_keyframe(Some(&[0xFF, 0xFF, 0xFF]), None),
             Err(MessageError::UnexpectedEof),
             "切り詰められた properties は UnexpectedEof であること"
         );
