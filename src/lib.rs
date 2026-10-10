@@ -17,6 +17,9 @@ extern crate alloc;
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+// 概要と根拠は src/audio_clock.rs の //! ドキュメントに書く。ここに /// を置くと rustdoc が
+// モジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
+pub mod audio_clock;
 /// shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O MoQ ライブラリ
 ///
 /// WebTransport over HTTP/2 ・ WebTransport over HTTP/3 ・ QUIC 上で動作する前提で、
