@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-msf-track-namespace-override
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-11
 - Updated: 2026-10-10
 
 ## 目的
@@ -21,9 +21,10 @@ Full Track Name は (宣言された namespace, Track Name) であり、catalog 
   `MsfTrack::name` や codec などだけを取り出し、`MsfTrack::namespace` を参照しない。
 - 同じファイルの `run` は catalog track の namespace (`config.namespace`、CLI または
   MSF fragment の track-identifier 由来) をそのまま使って
-  `MoqtClient::subscribe_track` / `MoqtClient::subscribe_track_with_filter` を呼ぶ。
-- `examples/moq-sub/src/catalog.rs` の `CatalogState::apply` も、delta の適用時に catalog の
-  namespace を渡していない (namespace 継承の扱いは 0218 で対応する)。
+  `MoqtClient::subscribe_track` を呼ぶ。
+- `examples/moq-sub/src/catalog.rs` の `CatalogState::apply` は delta の適用時に catalog の
+  namespace を渡す (namespace 継承の扱いは 0218 で対応済み)。本 issue は購読に使う
+  namespace の解決を扱い、delta の継承とは別である。
 - そのため、カタログの track が catalog track と異なる namespace を宣言している場合に誤った
   namespace を購読する。example の publisher (moq-pub) は全 track に同じ namespace を書くため
   現状の組み合わせでは顕在化しない。
@@ -35,9 +36,16 @@ Full Track Name は (宣言された namespace, Track Name) であり、catalog 
 - namespace の表現は draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track Names。
   MSF では §11.1.2 に再掲) の文字列であり、
   `shiguredo_moqt::name::parse_namespace` で `TrackNamespace` へ解決する。
-- 解決に失敗したときの扱い (警告してその track をスキップする / エラーで終了する) を決めて
-  doc に書く。track の選択は video / audio の 1 つずつであり、片方だけ解決できない場合の
-  挙動も決める。
+- MSF §5.2.2 は catalog JSON の namespace を String と定めるのみで符号化を規定しない
+  (§11.1.2 は URL fragment 用)。本 example は moq-pub が書く §8.8 表現を前提とし、
+  それ以外の表現のカタログは解決失敗として扱う (0218 と同じ前提)。
+- 解決に失敗したときはエラーで終了する。カタログは publisher の契約であり、§8.8 として
+  不正な namespace は publisher のバグである。黙ってスキップすると、ユーザーが期待した
+  track が購読されず、別の track の購読や DOES_NOT_EXIST と同じく気づかない誤動作になる。
+  既存の `extract_video_info` / `extract_audio_info` も必須フィールド欠如でエラーにする
+  ため、挙動を揃える。video / audio のどちらか一方だけ解決できない場合もエラーで終了する
+  (片方だけスキップして再生を続けると、ユーザーが期待した映像または音声が欠ける)。
+  この扱いは doc とテストで固定する。
 - track の選択に使う codec 判定は変えない (example は track の role を参照していない)。
 
 ## 完了条件
