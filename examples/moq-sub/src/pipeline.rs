@@ -476,8 +476,8 @@ pub async fn run(
     // Group ID よりも大きい値から始める MUST があり (draft-ietf-moq-msf-01 §6.1
     // (Group numbering))、Unix epoch ミリ秒を開始値にする実装が一般的である。
     //
-    // C4M 認可トークンは `MoqtClient` が `moqt` クレームを見て付けるため、ここでは
-    // 指定しない (draft-ietf-moq-c4m-01 §1.1)。
+    // C4M 認可トークンは `MoqtClient` が URL の c4m トークンをすべて付けるため、ここでは
+    // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
     let catalog_params = catalog_subscribe_parameters();
     let catalog_sub = client
         .subscribe_track_with_parameters(

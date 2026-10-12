@@ -41,8 +41,8 @@ const VIDEO_SIZE: (i32, i32) = (1280, 720);
 /// MSF fragment の track-identifier に使う track name
 ///
 /// publisher の `--track-name` の既定値と同じ値を使う。subscriber は catalog track を
-/// SUBSCRIBE してから LARGEST_OBJECT 起点で FETCH し、video / audio を SUBSCRIBE するため、
-/// fragment の track name は使わない。
+/// SUBSCRIBE して video / audio を SUBSCRIBE する (Joining FETCH は draft-20 で削除された
+/// ため発行しない) ので、fragment の track name は使わない。
 const MSF_TRACK_NAME: &str = "video";
 
 /// 接続先 URL を環境変数から取り出す

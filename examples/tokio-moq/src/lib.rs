@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
 
+use shiguredo_moqt::c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT;
 use shiguredo_moqt::message::common::TrackNamespace;
+use shiguredo_moqt::message_parameter::AuthorizationToken;
 use shiguredo_moqt::msf::uri::{MsfFragment, parse_msf_fragment};
 
 use crate::error::TransportError;
@@ -42,7 +44,6 @@ pub fn build_setup_options(
     c4m_tokens: &[Vec<u8>],
 ) -> shiguredo_moqt::parameter::SetupOptions {
     use shiguredo_moqt::{
-        c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT, message_parameter::AuthorizationToken,
         parameter::SETUP_OPTION_AUTHORITY, parameter::SETUP_OPTION_AUTHORIZATION_TOKEN,
         parameter::SETUP_OPTION_MOQT_IMPLEMENTATION, parameter::SETUP_OPTION_PATH,
         parameter::SetupOption, parameter::SetupOptionValue, parameter::SetupOptions,
@@ -70,18 +71,26 @@ pub fn build_setup_options(
     for token_value in c4m_tokens {
         // draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の c4m は
         // C4M の認可トークンであり、SETUP の AUTHORIZATION_TOKEN として送る。
-        // Token Type は CAT (0x01) を使う (draft-ietf-moq-c4m-01 §7.1.1)。
-        // alias の登録・参照を行わないため USE_VALUE (Alias Type 0x3) を使う
-        // (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))。
         options.push(SetupOption {
             option_type: SETUP_OPTION_AUTHORIZATION_TOKEN,
-            value: SetupOptionValue::AuthorizationToken(AuthorizationToken::UseValue {
-                token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
-                token_value: token_value.clone(),
-            }),
+            value: SetupOptionValue::AuthorizationToken(c4m_authorization_token(token_value)),
         });
     }
     options
+}
+
+/// C4M トークンの Token Value を AUTHORIZATION TOKEN の Token 構造へ変換する
+///
+/// SETUP の AUTHORIZATION_TOKEN (option type 0x03) と、制御メッセージの
+/// AUTHORIZATION_TOKEN (param type 0x03) の双方で同じ表現を使う。
+/// Token Type は CAT (0x01) を使い (draft-ietf-moq-c4m-01 §7.1.1)、alias の登録・参照を
+/// 行わないため USE_VALUE (Alias Type 0x3) を使う
+/// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))。
+pub(crate) fn c4m_authorization_token(token_value: &[u8]) -> AuthorizationToken {
+    AuthorizationToken::UseValue {
+        token_type: MOQT_AUTH_TOKEN_TYPE_CAT,
+        token_value: token_value.to_vec(),
+    }
 }
 
 /// MOQT のプロトコル識別子 (draft-ietf-moq-transport-22 §6.2 (Session establishment))

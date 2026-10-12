@@ -173,7 +173,7 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
 
 - `moq-pub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、video / audio / `catalog` track を PUBLISH する
-- `moq-sub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、`catalog` を FETCH して video / audio を SUBSCRIBE して再生する
+- `moq-sub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、`catalog` を SUBSCRIBE して取得し、video / audio を SUBSCRIBE して再生する
 - `tokio-moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.95 以降です。
@@ -192,7 +192,7 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 
 `wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/README.md`](examples/README.md) を参照してください)。
 
-URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP の AUTHORIZATION_TOKEN として送信できます。
+URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP と各制御メッセージ (PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE) の AUTHORIZATION_TOKEN として送信できます。
 `--namespace` を省略した場合は MSF fragment の track-identifier が示す namespace を Track Namespace として使います (`--namespace` と MSF fragment のどちらも無い場合はエラーになります)。
 
 接続先となる MoQT relay は別途用意してください。

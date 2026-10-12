@@ -7,7 +7,7 @@ draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 ## 構成
 
 - **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
-- **moq-sub**：MoQ relay から catalog を FETCH し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-sub**：MoQ relay から catalog を SUBSCRIBE して取得し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。
@@ -74,6 +74,7 @@ reset を伴う経路 (request stream の cancel や、送信中の subgroup / d
 ## C4M 認可トークン
 
 MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-01 §11.1.1、draft-ietf-moq-c4m-01 §7.1.1)。
+あわせて PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-01 §11.4.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
 
 ```bash
 # C4M トークン付きで QUIC 接続する (シェルでは `&` を引用符で囲む)
@@ -82,7 +83,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 `<base64 token>` は C4M トークンのバイト列 (CBOR エンコードされた CWT) を Base64 (RFC 4648 §4) または base64url (§5) で表した文字列で、パディングは省略できる。`%XX` の percent-encoding もデコードする。トークンの検証 (署名 / クレーム / `moqt` クレームの認可判定) は relay が行い、example はデコードしたバイト列をそのまま送る。DPoP バインディング (`cnf` / `catdpop`) を使うトークンに必要な DPoP proof の送信には対応しない。
 
-`c4m` は複数指定でき、すべてのトークンを SETUP に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`c4m` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
+`c4m` は複数指定でき、すべてのトークンを SETUP と上記の制御メッセージの双方に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`c4m` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
 
 example が `msf` fragment から使うのは track-identifier の namespace と予約パラメータ `c4m` である。`--namespace` を省略した場合は track-identifier (§11.1.2 の namespace-name 表現。`-` が namespace フィールドの区切り、`--` が namespace と track name の境界、`%XX` はデータバイト) の示す namespace を Track Namespace として使う。
 `--namespace` を指定した場合はそちらが優先され、`msf` fragment の namespace は使わない。
