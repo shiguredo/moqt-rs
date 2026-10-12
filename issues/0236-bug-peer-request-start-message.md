@@ -1,7 +1,7 @@
 # request stream の先頭メッセージを種別に応じて拒否またはセッション終了にする
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-peer-request-start-message
 - Polished: 2026-10-13
 
@@ -90,6 +90,15 @@ ignoring them." に従って REQUEST_ERROR (NOT_SUPPORTED) で拒否しセッシ
   `examples/tokio-moq/src/moqt_client.rs` の `request_id_of` (§6.3 を 4 種類と誤引用)、
   `src/session/types.rs` の `RequestKind` (同じ誤引用) である。
 
+### 実装時に変更した点
+
+- `BidiMessage::PeerRequestRejected` は `stop_tx` を持たない。拒否した request は Session が状態を
+  持たないため `SessionEvent::StopSendingRequestStream` が来ず、STOP_SENDING の依頼チャネルは
+  不要である。受信半は「終端まで読む」ことで保持する (drop すると peer へ STOP_SENDING が届く)。
+- 拒否したストリームの終端は `BidiMessage::RejectedRequestStreamClosed` で main ループへ渡し、
+  `Session::recv_request_stream_closed` で拒否した request の記録を回収する。
+- 詳細と理由は解決方法を参照する。
+
 ## 完了条件
 
 - peer が decode できる 7 種類以外のメッセージを request stream の先頭に送ったとき、session が
@@ -103,3 +112,47 @@ ignoring them." に従って REQUEST_ERROR (NOT_SUPPORTED) で拒否しセッシ
   が渡らないこと。
 - `Session::recv_request` / `request_id_of` / `RequestKind` の doc が実装と一致していること。
 - 上記がテストで固定されていること。モック / スタブを使わないこと。
+
+## 解決方法
+
+- `examples/tokio-moq/src/moqt_client.rs` の `spawn_peer_bidi_accept_task` は、先頭メッセージを
+  `request_id_of` で「アプリへ渡す 4 種類 (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS) か、
+  それ以外か」に分けるようにした。§6.3 (Session initialization) の 7 種類判定は
+  `Session::recv_request` が持つため example 側では複製しない。
+- `BidiMessage::PeerRequestRejected { message, send }` を追加し、4 種類以外の先頭メッセージは
+  アプリへ渡さず Session に判定させる。`pump_once` の新しい arm は `Session::recv_request` を
+  呼び、`Ok` のときは応答を書けるよう `drain_events` より先に送信半を `bidi_sends` へ登録する
+  (台帳に無いと `SendOnStream` が `Skip` され、応答が捨てられて peer から見て無応答になる)。
+  `Err(RecvRequestError::Session)` のときは `TransportError::Internal` に畳まず `drain_events` に
+  `CloseSession` を処理させ、終了コード付きのセッション終了を peer へ送る。
+- 設計方針では拒否した request の `stop_tx` を `bidi_stop_txs` へ登録する予定だったが、拒否した
+  request は Session の request table に登録されないため `SessionEvent::StopSendingRequestStream` が
+  来ない。`stop_tx` は持たせず、代わりに `read_rejected_request_stream` が受信半を保持したまま
+  終端まで読み、`BidiMessage::RejectedRequestStreamClosed { request_id, end }` で終端を main ループへ
+  伝える。main ループは `Session::recv_request_stream_closed` を呼んで拒否した request の記録を
+  回収し、`bidi_sends` からも外す (通知しないと記録がセッション生存中に残り続ける)。また通常の
+  `BidiMessage::Response` の経路に流すと `Session::recv_stream_message` が 2 通目の "First" 型を
+  PROTOCOL_VIOLATION で閉じるため、拒否したストリーム専用の読み捨て reader にした。この回収は
+  公開 API からは観測できないため、テストでは固定できないことをコードに明記した。
+- 既存の `BidiMessage::PeerRequest` (4 種類) の arm も、`Err(RecvRequestError::Session)` を
+  `TransportError::Internal` に畳まず `drain_events` に委ねるようにした。parity 違反・Request ID
+  重複では 4 種類でも同じ経路で closing になるため、終了コードを peer へ届けるには両方の扱いが
+  必要である。
+- doc を実装に合わせた。`Session::recv_request` (未対応 3 種類は `REQUEST_ERROR`
+  (NOT_SUPPORTED / GOING_AWAY) を積んで維持し、§1.6 (Modularity) を引用。本体を解析しないため
+  `accept_peer_request` を通らないこと)、`examples/tokio-moq/src/moqt_client.rs` の `request_id_of`
+  (§6.3 は 7 種類であり、アプリへ渡すのは 4 種類)、`src/session/types.rs` の `RequestKind`
+  (同じ誤引用) の 3 件である。
+- テストは `examples/tokio-moq/src/peer_harness.rs` を拡張して 3 本追加した (計 5 本)。peer が
+  開いた request stream に届く応答を読む `recv_response` と、送信方向を FIN で閉じる
+  `finish_request_stream` を追加し、(1) REQUEST_OK (§6.3 の 7 種類に含まれない decode 可能な型) を
+  先頭に送ると `CloseSession` の `err.code` が `PROTOCOL_VIOLATION` になること、(2)
+  PUBLISH_NAMESPACE (`ControlMessage::Unsupported`、body は §9.14 (PUBLISH_NAMESPACE) /
+  §8.7 (Track Namespace Structure) の構造) を先頭に送ると peer が `REQUEST_ERROR`
+  (NOT_SUPPORTED) を受け取り、アプリへ要求が渡らず、拒否のあとも通常の request が受理されること、
+  (3) parity 違反の SUBSCRIBE で `INVALID_REQUEST_ID` の `CloseSession` が届くことを固定した。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。テストは
+  20 回以上の連続実行でフレークが無いこと、変異テストで主要な欠陥 (accept task の旧挙動、送信半の
+  未登録、`TransportError::Internal` への畳み込み、アプリへの配送、登録順の反転など) を検出できる
+  ことを確認した。回収処理だけは公開 API から観測できずテストで固定できない (コードに明記)。
