@@ -1882,15 +1882,25 @@ mod tests {
 
     /// 名前解決がタイムアウトで打ち切られる
     ///
-    /// `example.invalid` は RFC 2606 §2 の予約 TLD `.invalid` のため必ず解決に失敗する。
+    /// 一意な `example-<pid>.invalid` は RFC 2606 §2 の予約 TLD `.invalid` のため必ず解決に
+    /// 失敗する。
     /// `tokio::net::lookup_host` は OS のリゾルバを待つため、この名前の解決は待機中の future になる。
     /// タイムアウトを 100 ナノ秒にして、成功し得ないことを固定する。
-    /// 同じ名前の解決がタイムアウト無しでは従来どおり失敗することも
-    /// [`resolve_socket_addrs_reports_resolution_failure`] で固定する。
+    /// タイムアウト無しでは従来どおり解決に失敗することも
+    /// [`resolve_socket_addrs_reports_resolution_failure`] (`example.invalid` を使う) で
+    /// 固定する。
+    ///
+    /// ただし OS が否定応答をキャッシュすると、解決が最初のポーリングで即座に失敗して
+    /// タイムアウトを観測できなくなる ([`resolve_socket_addrs_reports_resolution_failure`] が
+    /// 先に同じ名前を解決した場合や、直前の実行のキャッシュが残っている場合である)。
+    /// テストごとに一意な名前を使い、キャッシュの状態に依存しないようにする。
     #[tokio::test]
     async fn resolve_socket_addrs_times_out_when_resolver_does_not_answer() {
         let started = std::time::Instant::now();
-        let err = resolve_socket_addrs_within("example.invalid", Duration::from_nanos(100))
+        // `.invalid` は予約 TLD のため必ず解決に失敗する。他のテストや過去の実行と衝突しない
+        // 名前を使う
+        let authority = format!("example-{}.invalid", std::process::id());
+        let err = resolve_socket_addrs_within(&authority, Duration::from_nanos(100))
             .await
             .expect_err("タイムアウトでエラーになること");
         assert!(
@@ -1906,7 +1916,7 @@ mod tests {
             "使ったタイムアウトが理由に含まれること: {err}"
         );
         assert!(
-            err.to_string().contains("example.invalid"),
+            err.to_string().contains(&authority),
             "入力の authority が含まれること: {err}"
         );
         assert!(
