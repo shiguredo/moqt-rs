@@ -13,6 +13,10 @@
 //! `--namespace` を省略した場合は `--url` の `msf` fragment の track-identifier が示す
 //! namespace を使う。どちらにも無い場合はエラーになる。
 //!
+//! `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
+//! (draft-ietf-moq-msf-01 §11.1.1)。どちらにも無い場合は `quic` になる。`connection` と矛盾する
+//! `--transport` はエラーになる。
+//!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
 //! Ctrl+C の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。
 

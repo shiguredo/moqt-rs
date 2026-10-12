@@ -107,7 +107,9 @@ impl MsfFragment {
 
     /// connection パラメータを接続種別へ変換する
     ///
-    /// 複数指定された場合は出現順に返す (§11.1.1 (Reserved fragment parameters) の union 規則)。
+    /// 複数指定された場合は出現順にすべて返す。§11.1.1 (Reserved fragment parameters) の union 規則は
+    /// 値域 (range) を対象としたもので `connection` には適用しないため、`q` と `wt` のように両立しない
+    /// 組み合わせの扱いは呼び出し側が決める。
     ///
     /// # Errors
     ///

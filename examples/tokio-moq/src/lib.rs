@@ -3,6 +3,8 @@
 //! `moq-pub` / `moq-sub` の両バイナリが共通で利用する
 //! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 のトランスポート層を提供する。
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
+//! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
+//! ([`resolve_transport`])。
 //! `--url` の `moqt://` URI は [`parse_url`] でパースし、`--namespace` と `--url` の MSF fragment
 //! からの Track Namespace の解決は [`resolve_namespace`] が担う。
 //!
@@ -23,7 +25,7 @@ use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
 use shiguredo_moqt::c4m::cat::MOQT_AUTH_TOKEN_TYPE_CAT;
 use shiguredo_moqt::message::common::TrackNamespace;
 use shiguredo_moqt::message_parameter::AuthorizationToken;
-use shiguredo_moqt::msf::uri::{MsfFragment, parse_msf_fragment};
+use shiguredo_moqt::msf::uri::{MsfConnectionType, MsfFragment, parse_msf_fragment};
 
 use crate::error::TransportError;
 
@@ -151,6 +153,15 @@ impl Transport {
             )),
         }
     }
+
+    /// `--transport` の値としての表現を返す ([`Self::parse`] の逆写像)
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::WtH3 => "wt-h3",
+            Self::WtH2 => "wt-h2",
+        }
+    }
 }
 
 /// moqt URI の fragment (`<type>:<value>`)
@@ -180,8 +191,9 @@ pub struct MoqtFragment {
 
 /// パース済みの接続先情報
 ///
-/// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は URL ではなく
-/// [`Transport`] (`--transport`) で選ぶため、ここには持たない。
+/// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は [`Transport`] で
+/// 選ぶため、ここには持たない。`--transport` が指定されていればそれを使い、無ければ `msf` fragment
+/// の `connection`、どちらも無ければ native QUIC になる ([`resolve_transport`])。
 #[derive(Debug, Clone)]
 pub struct ServerUrl {
     /// ホスト名または IP アドレス (ポートを含む場合がある)
@@ -226,7 +238,9 @@ pub struct ServerUrl {
 /// URL をパースして authority ・ path ・ fragment ・ C4M 認可トークンを取得する
 ///
 /// scheme は `moqt://` だけを受け付ける (`MOQT://` も受理する。RFC 3986 §3.1 に従い
-/// scheme は大文字小文字を区別しない)。接続経路は URL では選ばず [`Transport`] で選ぶ。
+/// scheme は大文字小文字を区別しない)。接続経路は [`Transport`] で選び、`--transport` が指定されて
+/// いればそれを使い、無ければ `msf` fragment の `connection`、どちらも無ければ native QUIC になる
+/// ([`resolve_transport`])。
 /// scheme は比較のみを大文字小文字非区別に行い、authority / path / query / fragment は入力の
 /// 文字列をそのまま保持する (RFC 3986 §6.2.2.1 は scheme と host を大文字小文字非区別とするが、
 /// host を入力のまま使うのは DNS / SNI の非区別性に依存する設計判断である)。
@@ -288,8 +302,9 @@ pub fn parse_url(url: &str) -> Result<ServerUrl, String> {
         None => None,
     };
     // draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation): fragment type
-    // "msf" の value は MSF の track-identifier とパラメータ列である。example が
-    // 解釈するのは track-identifier が示す namespace と予約パラメータ c4m の認可トークンである。
+    // "msf" の value は MSF の track-identifier とパラメータ列である。example が解釈するのは
+    // track-identifier が示す namespace、予約パラメータ c4m の認可トークン、予約パラメータ
+    // connection の接続種別 ([`resolve_transport`]) である。
     // 同じ value を 2 度パースしないよう、解釈結果を 1 度だけ作って共有する。
     let msf = match &fragment {
         Some(f) if f.fragment_type == "msf" => Some(parse_msf_value(url, &f.value)?),
@@ -362,6 +377,94 @@ pub fn resolve_namespace(
         return Err("the namespace must have at least one field (e.g. 'moq-example')".to_string());
     }
     Ok(namespace)
+}
+
+/// URL の `connection` と `--transport` から接続種別を解決する
+///
+/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の予約パラメータ `connection`
+/// は、client に接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は
+/// WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、本 example は `wt-h3` (HTTP/3 上の
+/// WebTransport) を既定にし、`wt-h2` は `--transport wt-h2` を明示したときだけ使う。WebTransport の
+/// 主経路は HTTP/3 であり、`wt-h2` は relay の capsule 対応に依存する experimental な経路である
+/// (draft-ietf-moq-transport-22 §6.2 (Session establishment) は HTTP/2 上の WebTransport も
+/// 許容する)。
+///
+/// 解決の規則は次のとおりである。
+///
+/// - fragment に `connection` が無ければ `explicit` (`--transport` の指定) を使い、省略時は
+///   native QUIC にする
+/// - `connection=q` と native QUIC、`connection=wt` と WebTransport (`wt-h3` / `wt-h2`) は
+///   整合するため `explicit` をそのまま使う
+/// - `connection` と `explicit` が矛盾する場合はエラーにする。`connection` は接続種別を MUST で
+///   指定するため、`explicit` で上書きできない (`explicit` を優先して fragment を無視することは
+///   許されない)
+/// - `connection=q` と `connection=wt` が同時に指定された場合はエラーにする。§11.1.1 は `q` に
+///   Native QUIC、`wt` に WebTransport を MUST で対応づけており、同じ `connection` が両方を
+///   要求すると 2 つの MUST が両立しない。§11.1.1 の union (`If multiple ranges are specified
+///   within the same URL for the same parameter, the client MUST process the union of those
+///   ranges.`) は値域 (range) を対象とした規則であり `connection` には適用しないため、
+///   [`MsfFragment::connection_types`] は `connection` の値を出現順にすべて返すだけである。
+///   example はその結果を見て両立しない組み合わせを拒否する
+///
+/// 値域の検証 (`q` / `wt` 以外の拒否) は [`MsfFragment::connection_types`] が行う。
+///
+/// # Errors
+///
+/// - `connection` に `q` / `wt` 以外の値がある: fragment の解釈エラー
+/// - `connection` と `--transport` が矛盾する: どちらを優先するかを決められないためエラー
+/// - `connection=q` と `connection=wt` が同時に指定されている: 両立しないためエラー
+pub fn resolve_transport(
+    explicit: Option<Transport>,
+    url: &ServerUrl,
+) -> Result<Transport, String> {
+    let mut requires_quic = false;
+    let mut requires_webtransport = false;
+    if let Some(msf) = url.msf.as_ref() {
+        for connection in msf.connection_types().map_err(|e| e.to_string())? {
+            match connection {
+                MsfConnectionType::Quic => requires_quic = true,
+                MsfConnectionType::WebTransport => requires_webtransport = true,
+            }
+        }
+    }
+    if requires_quic && requires_webtransport {
+        return Err(
+            "'connection=q' and 'connection=wt' cannot be used together: draft-ietf-moq-msf-01 \
+             §11.1.1 mandates a native QUIC connection for 'q' and a WebTransport connection for \
+             'wt' (remove one of them from --url)"
+                .to_string(),
+        );
+    }
+    // fragment が要求する接続種別。`wt` は WebTransport の実装を指定しないため WebTransport と
+    // して扱い、実装は `explicit` (省略時は `wt-h3`) で選ぶ
+    let required = if requires_quic {
+        Some(MsfConnectionType::Quic)
+    } else if requires_webtransport {
+        Some(MsfConnectionType::WebTransport)
+    } else {
+        None
+    };
+    match (required, explicit) {
+        (None, explicit) => Ok(explicit.unwrap_or(Transport::Quic)),
+        (Some(MsfConnectionType::Quic), None) => Ok(Transport::Quic),
+        (Some(MsfConnectionType::Quic), Some(Transport::Quic)) => Ok(Transport::Quic),
+        (Some(MsfConnectionType::Quic), Some(explicit)) => Err(format!(
+            "--transport {} conflicts with 'connection=q' in --url: draft-ietf-moq-msf-01 \
+             §11.1.1 mandates a native QUIC connection (remove --transport or the 'connection' \
+             parameter)",
+            explicit.as_str()
+        )),
+        (Some(MsfConnectionType::WebTransport), None) => Ok(Transport::WtH3),
+        (
+            Some(MsfConnectionType::WebTransport),
+            Some(explicit @ (Transport::WtH3 | Transport::WtH2)),
+        ) => Ok(explicit),
+        (Some(MsfConnectionType::WebTransport), Some(explicit)) => Err(format!(
+            "--transport {} conflicts with 'connection=wt' in --url: draft-ietf-moq-msf-01 \
+             §11.1.1 mandates a WebTransport connection (use --transport wt-h3 or wt-h2)",
+            explicit.as_str()
+        )),
+    }
 }
 
 /// URL の `#` 以降を fragment として分離する
@@ -1365,6 +1468,174 @@ mod tests {
         let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
         assert!(url.msf.is_none());
         assert!(url.msf_namespace().is_none());
+    }
+
+    /// `Transport::as_str` は `Transport::parse` の逆写像である
+    #[test]
+    fn transport_as_str_is_the_inverse_of_parse() {
+        for transport in [Transport::Quic, Transport::WtH3, Transport::WtH2] {
+            assert_eq!(
+                Transport::parse(transport.as_str()).expect("解釈できること"),
+                transport,
+                "as_str の結果を parse すると元の値に戻ること: {}",
+                transport.as_str()
+            );
+        }
+    }
+
+    /// `connection=q` は native QUIC を要求する
+    ///
+    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) は `connection` で接続種別を
+    /// MUST で指定する。`q` は native QUIC である。
+    #[test]
+    fn resolve_transport_requires_native_quic() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=q")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::Quic,
+            "connection=q は native QUIC になること"
+        );
+        // `--transport quic` は fragment と整合するためそのまま使う
+        assert_eq!(
+            resolve_transport(Some(Transport::Quic), &url).expect("接続種別を解決できること"),
+            Transport::Quic,
+            "整合する明示はそのまま使われること"
+        );
+        // WebTransport を明示すると 2 つの MUST が両立しない
+        let error = resolve_transport(Some(Transport::WtH3), &url)
+            .expect_err("connection=q と --transport wt-h3 はエラーになること");
+        assert!(
+            error.contains("connection=q"),
+            "fragment が要求する接続種別が理由として分かること: {error}"
+        );
+    }
+
+    /// `connection=wt` は WebTransport を要求し、既定は `wt-h3` になる
+    ///
+    /// `wt` は WebTransport の実装 (HTTP/3 / HTTP/2) を指定しないため、example は `wt-h3` を
+    /// 既定にする。
+    #[test]
+    fn resolve_transport_requires_webtransport_and_defaults_to_wt_h3() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt の既定は wt-h3 であること"
+        );
+        // WebTransport の実装は `--transport` で選べる
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
+            Transport::WtH2,
+            "connection=wt と --transport wt-h2 は整合すること"
+        );
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt と --transport wt-h3 は整合すること"
+        );
+        // native QUIC を明示すると 2 つの MUST が両立しない
+        let error = resolve_transport(Some(Transport::Quic), &url)
+            .expect_err("connection=wt と --transport quic はエラーになること");
+        assert!(
+            error.contains("connection=wt"),
+            "fragment が要求する接続種別が理由として分かること: {error}"
+        );
+    }
+
+    /// `connection` が無ければ `--transport` の指定を使い、省略時は native QUIC になる
+    #[test]
+    fn resolve_transport_defaults_to_quic_without_connection() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video")
+            .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::Quic,
+            "connection が無ければ既定は native QUIC であること"
+        );
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
+            Transport::WtH2,
+            "connection が無ければ明示がそのまま使われること"
+        );
+        // fragment が無い URL でも同じ
+        let url = parse_url("moqt://example.com/app").expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::Quic,
+            "fragment が無ければ既定は native QUIC であること"
+        );
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH3), &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "fragment が無ければ明示がそのまま使われること"
+        );
+    }
+
+    /// `connection=q` と `connection=wt` の同時指定はエラーにする
+    ///
+    /// 2 つの MUST が両立しないため、どちらかを選ぶことはできない。§11.1.1 の「複数指定は
+    /// union を処理する」は値域を対象とした規則であり、単一値の `connection` には当てはまらない。
+    #[test]
+    fn resolve_transport_rejects_conflicting_connections() {
+        let url =
+            parse_url("moqt://example.com/app#msf:moq-example--video&connection=q&connection=wt")
+                .expect("URL を解釈できること");
+        let error =
+            resolve_transport(None, &url).expect_err("q と wt の同時指定はエラーになること");
+        assert!(
+            error.contains("cannot be used together"),
+            "両立しないことが理由として分かること: {error}"
+        );
+        assert!(
+            resolve_transport(Some(Transport::Quic), &url).is_err(),
+            "明示があっても q と wt の同時指定はエラーになること"
+        );
+    }
+
+    /// 同じ `connection` の重複はエラーにせず、その接続種別を使う
+    ///
+    /// 重複は同じ要求の反復であり、`q` と `wt` の併記 (両立しない) とは異なる。
+    #[test]
+    fn resolve_transport_accepts_duplicated_connection_values() {
+        let url =
+            parse_url("moqt://example.com/app#msf:moq-example--video&connection=q&connection=q")
+                .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::Quic,
+            "connection=q の重複は native QUIC になること"
+        );
+
+        let url =
+            parse_url("moqt://example.com/app#msf:moq-example--video&connection=wt&connection=wt")
+                .expect("URL を解釈できること");
+        assert_eq!(
+            resolve_transport(None, &url).expect("接続種別を解決できること"),
+            Transport::WtH3,
+            "connection=wt の重複は WebTransport (既定 wt-h3) になること"
+        );
+        assert_eq!(
+            resolve_transport(Some(Transport::WtH2), &url).expect("接続種別を解決できること"),
+            Transport::WtH2,
+            "重複していても整合する明示はそのまま使われること"
+        );
+    }
+
+    /// `connection` の不正値はエラーにする
+    ///
+    /// 値の検証は [`MsfFragment::connection_types`] が行う。
+    #[test]
+    fn resolve_transport_rejects_invalid_connection_value() {
+        let url = parse_url("moqt://example.com/app#msf:moq-example--video&connection=xx")
+            .expect("URL を解釈できること");
+        let error =
+            resolve_transport(None, &url).expect_err("connection の不正値はエラーになること");
+        assert!(
+            error.contains("invalid connection parameter value"),
+            "connection の値の検証エラーとして分かること: {error}"
+        );
     }
 
     /// `--namespace` を指定した場合は §8.8 表現として解釈する

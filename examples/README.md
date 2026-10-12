@@ -54,7 +54,12 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 
 ## トランスポート
 
-接続経路は `--transport` で選ぶ。既定値は `quic` (WebTransport 経路は experimental のため既定にしない)。
+接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
+`connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
+(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。WebTransport 経路は experimental の
+ため、`--transport` も `connection` も無いときの既定にはしない。`connection=wt` のときの既定は
+`wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。`connection` と矛盾する `--transport`
+および `connection=q` と `connection=wt` の併記はエラーになる。
 
 | `--transport` | 接続経路 | 備考 |
 | --- | --- | --- |
@@ -85,7 +90,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 `c4m` は複数指定でき、すべてのトークンを SETUP と上記の制御メッセージの双方に載せる (同一トークンは 1 つに畳む)。MSF fragment が §11.1 の ABNF に一致しない場合と、`c4m` が空または Base64 として不正な場合は `--url` の解釈でエラーになる。
 
-example が `msf` fragment から使うのは track-identifier の namespace と予約パラメータ `c4m` である。`--namespace` を省略した場合は track-identifier (§11.1.2 の namespace-name 表現。`-` が namespace フィールドの区切り、`--` が namespace と track name の境界、`%XX` はデータバイト) の示す namespace を Track Namespace として使う。
+example が `msf` fragment から使うのは track-identifier の namespace、予約パラメータ `c4m`、予約パラメータ `connection` (接続種別の決定。前述の「トランスポート」) である。`--namespace` を省略した場合は track-identifier (§11.1.2 の namespace-name 表現。`-` が namespace フィールドの区切り、`--` が namespace と track name の境界、`%XX` はデータバイト) の示す namespace を Track Namespace として使う。
 `--namespace` を指定した場合はそちらが優先され、`msf` fragment の namespace は使わない。
 
 `--namespace` を省略したときに `--url` に `msf` fragment が無い場合、`msf` 以外の fragment の場合、`msf` fragment の namespace が 0 フィールドの場合はエラーになる。`msf` fragment の track name は使わず、Track Name は `--track-name` (既定 `video`) で指定する。
@@ -99,7 +104,7 @@ example が `msf` fragment から使うのは track-identifier の namespace と
 | オプション | 短縮 | デフォルト | 説明 |
 | --- | --- | --- | --- |
 | `--url` | `-u` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | | `quic` | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
+| `--transport` | | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
 | `--cert` | | | TLS CA 証明書パス |
 | `--device-id` | | | カメラデバイス ID |
 | `--width` | | `1280` | 映像幅 (px) |
@@ -129,7 +134,7 @@ example が `msf` fragment から使うのは track-identifier の namespace と
 | オプション | 短縮 | デフォルト | 説明 |
 | --- | --- | --- | --- |
 | `--url` | `-u` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | | `quic` | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
+| `--transport` | | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
 | `--cert` | | | TLS CA 証明書パス |
 | `--namespace` | | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | | 映像トラックの購読を無効化する |
@@ -140,7 +145,7 @@ example が `msf` fragment から使うのは track-identifier の namespace と
 
 ## URL スキーム
 
-- `moqt://host[:port]/path`：接続経路は `--transport` で選ぶ
+- `moqt://host[:port]/path`：接続経路は `--transport` で選ぶ (`--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う)
 - `moqt://host[:port]/path#msf:<track-identifier>`：`--namespace` を省略した場合の Track Namespace を track-identifier の namespace から取る
 
 `port` を省略すると 443 を使う (draft-ietf-moq-transport-22 §6.1.2)。`host` は IP リテラル (例：`127.0.0.1` / `[2001:db8::1]`) と DNS 名の両方を受け付け、DNS 名は接続時に名前解決する。解決した接続先アドレスはログに出力される。
@@ -154,7 +159,9 @@ query (`?key=value`) は SETUP の PATH option と WebTransport の `:path` に�
 fragment (`#type:value`) は draft-ietf-moq-transport-22 §6.1.1 に従いサーバーへ送信せず、SETUP の PATH option と WebTransport の `:path` には含めない。§6.2.1 が WebTransport の https:// URI を moqt URI の scheme 置換と定め、§16.2 が application/moqt の fragment identifier を同節に従わせるため、WebTransport 経路でも同じ規則で扱う。
 `type` は ASCII 小文字 / 数字 / ハイフンに限り、`:` を含まない fragment、空または規則に一致しない `type`、fragment 内の 2 個目の `#` (RFC 3986 §3.5 により `%23` が必要) はエラーになる。
 
-example は `type` が `msf` のときだけ値を MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証し、track-identifier が示す namespace を `--namespace` 省略時の Track Namespace として使う。予約パラメータ `c4m` の認可トークンも取り出す (前述の「C4M 認可トークン」)。`msf` 以外の `type` の値は構文 (§6.1.1) の検証だけを行い、解釈しない。
+example は `type` が `msf` のときだけ値を MSF fragment (`track-identifier [ "&" parameter-list ]`) として検証し、track-identifier が示す namespace を `--namespace` 省略時の Track Namespace として使う。予約パラメータ `c4m` の認可トークンも取り出す (前述の「C4M 認可トークン」)。
+
+予約パラメータ `connection` は `--transport` 省略時の接続種別として使い、`--transport` と矛盾する場合はエラーになる (前述の「トランスポート」)。`msf` 以外の `type` の値は構文 (§6.1.1) の検証だけを行い、解釈しない。
 
 scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT://` も受理する)。`moqt://` 以外の scheme はエラーになる。authority / path / query / fragment は入力の大文字小文字をそのまま使う。
 

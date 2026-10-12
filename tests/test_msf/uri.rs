@@ -52,6 +52,40 @@ fn parse_connection_parameter() {
     );
 }
 
+/// connection パラメータの複数指定は出現順にすべて返ること
+///
+/// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の union 規則は値域を対象とした
+/// もので `connection` には適用しない。`q` と `wt` のように両立しない組み合わせの扱いは呼び出し側
+/// が決めるため、ここでは検証せずすべて返す。
+#[test]
+fn parse_connection_parameter_with_multiple_values() {
+    let uri = parse_msf_uri(
+        "moqt://example.com/relay-app/relayID#msf:customerID-broadcastID--catalog&connection=q&connection=wt",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .connection_types()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![MsfConnectionType::Quic, MsfConnectionType::WebTransport]
+    );
+
+    // 同じ値の重複もそのまま返す (呼び出し側は集合として扱う)
+    let uri = parse_msf_uri(
+        "moqt://example.com/relay-app/relayID#msf:customerID-broadcastID--catalog&connection=wt&connection=wt",
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        uri.fragment
+            .connection_types()
+            .expect("テストフィクスチャの前提条件を満たす"),
+        vec![
+            MsfConnectionType::WebTransport,
+            MsfConnectionType::WebTransport
+        ]
+    );
+}
+
 /// connection パラメータの不正値は reject されること
 #[test]
 fn parse_connection_invalid_value_rejected() {

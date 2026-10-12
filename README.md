@@ -188,7 +188,10 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fa
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
-接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。既定は `quic` です。
+接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。
+`--transport` を省略した場合は `--url` の `msf` fragment の `connection` (`q`: native QUIC /
+`wt`: WebTransport) を使い、それも無ければ `quic` が既定になります。`connection` と矛盾する
+`--transport` および `connection=q` と `connection=wt` の併記はエラーになります。
 
 `wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/README.md`](examples/README.md) を参照してください)。
 

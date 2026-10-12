@@ -35,6 +35,9 @@ pub struct Config {
     /// 接続先 URL
     pub url: ServerUrl,
     /// トランスポート種別
+    ///
+    /// `--transport` の指定、無ければ `--url` の `msf` fragment の `connection` で解決する
+    /// (`tokio_moq::resolve_transport`)。
     pub transport: Transport,
     /// TLS CA 証明書パス
     pub cert: Option<String>,
@@ -178,12 +181,21 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
             tokio_moq::parse_url(v)
         })?;
 
-    let transport: Transport = noargs::opt("transport")
+    // `--transport` が省略された場合は `--url` の msf fragment の `connection` を使う
+    // (draft-ietf-moq-msf-01 §11.1.1)。解決の規則は `tokio_moq::resolve_transport` を参照
+    let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
-        .doc("Transport (quic | wt-h3 | wt-h2; wt-h3 / wt-h2 (WebTransport) are experimental)")
-        .default("quic")
+        .doc(
+            "Transport (quic | wt-h3 | wt-h2; wt-h3 / wt-h2 (WebTransport) are experimental). If \
+             --transport is omitted, uses the 'connection' parameter of the --url MSF fragment \
+             (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with --transport wt-h2 for \
+             HTTP/2); otherwise defaults to quic. A conflicting --transport, or 'connection=q' \
+             with 'connection=wt', is an error",
+        )
         .take(&mut args)
-        .then(|o| Transport::parse(o.value()))?;
+        .present_and_then(|o| Transport::parse(o.value()))?;
+    let transport = tokio_moq::resolve_transport(transport_opt, &url)
+        .map_err(|e| noargs::Error::other(&args, e))?;
 
     let cert: Option<String> = noargs::opt("cert")
         .ty("PATH")
@@ -516,7 +528,7 @@ mod tests {
         "moq-example",
     ];
 
-    /// `--transport` の既定は `quic` である
+    /// `--url` の `msf` fragment に `connection` が無いときの `--transport` の既定は `quic` である
     ///
     /// WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental であり、既定にしてはいけない
     /// (s2n-quic が `RESET_STREAM_AT` を送出できず、reset を伴う経路が成立しないため)。
@@ -529,6 +541,129 @@ mod tests {
             config.transport,
             Transport::Quic,
             "既定は QUIC 直接接続であること"
+        );
+    }
+
+    /// `--transport` を省略した場合は `--url` の `msf` fragment の `connection` を使う
+    ///
+    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `connection` は client に
+    /// 接続種別を MUST で指定する (`q` は native QUIC、`wt` は WebTransport)。`wt` は WebTransport の
+    /// 実装を指定しないため `wt-h3` を既定にする。moq-sub と同じ規則である。
+    #[test]
+    fn transport_follows_the_msf_fragment_connection() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=wt",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::WtH3,
+            "connection=wt は WebTransport (既定 wt-h3) になること"
+        );
+
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=q",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::Quic,
+            "connection=q は native QUIC になること"
+        );
+    }
+
+    /// `connection=wt` と整合する `--transport` の明示はそのまま使う
+    #[test]
+    fn transport_accepts_explicit_webtransport_with_fragment() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=wt",
+            "--transport",
+            "wt-h2",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::WtH2,
+            "connection=wt と --transport wt-h2 は整合し、明示が使われること"
+        );
+    }
+
+    /// `connection` と矛盾する `--transport` はエラーにする
+    ///
+    /// `connection` は接続種別を MUST で指定するため、`--transport` で上書きできない。
+    #[test]
+    fn transport_rejects_explicit_conflicting_with_fragment() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=wt",
+            "--transport",
+            "quic",
+        ];
+        let Err(error) = parse_args(&args) else {
+            panic!("connection=wt と --transport quic はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("connection=wt"),
+            "矛盾した fragment が理由として分かること: {error:?}"
+        );
+
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=q",
+            "--transport",
+            "wt-h3",
+        ];
+        let Err(error) = parse_args(&args) else {
+            panic!("connection=q と --transport wt-h3 はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("connection=q"),
+            "矛盾した fragment が理由として分かること: {error:?}"
+        );
+    }
+
+    /// `connection=q` と `connection=wt` の同時指定はエラーにする
+    ///
+    /// 2 つの MUST が両立しないため、どちらかを選ぶことはできない。
+    #[test]
+    fn transport_rejects_conflicting_connections() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=q&connection=wt",
+        ];
+        let Err(error) = parse_args(&args) else {
+            panic!("q と wt の同時指定はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("cannot be used together"),
+            "両立しないことが理由として分かること: {error:?}"
+        );
+    }
+
+    /// `connection` の不正値はエラーにする
+    ///
+    /// 値の検証は `MsfFragment::connection_types` に任せる。
+    #[test]
+    fn transport_rejects_invalid_connection_value() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video&connection=xx",
+        ];
+        let Err(error) = parse_args(&args) else {
+            panic!("connection の不正値はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("invalid connection parameter value"),
+            "connection の値の検証エラーとして分かること: {error:?}"
         );
     }
 
