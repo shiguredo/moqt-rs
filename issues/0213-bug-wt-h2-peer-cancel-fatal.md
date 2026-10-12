@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 で peer の cancel が example を終了させる
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/fix-wt-h2-peer-cancel-fatal
 - Polished: 2026-10-10
 - Updated: 2026-10-10
@@ -59,3 +59,31 @@ HTTP/2 (`wt-h2`) だけは peer の cancel で moq-pub / moq-sub が終了する
 - 追加した判定を単体テストで固定すること (I/O ハンドルが必要な配線部分はレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `examples/tokio-moq/src/webtransport_h2.rs` の `DriverState::stop_sending_received` を
+  ストリーム ID → エラーコードの台帳 (`HashMap`) に拡張し、台帳に載ったストリームへの送信の拒否と
+  未送信データの失敗 (`fail_pending_sends`) を `TransportError::StreamReset { error_code }` に
+  した。台帳に無い FIN / reset 済みのストリームは従来どおり `StreamClosed` のままである
+  (写像は `stream_end_error` の 1 箇所に閉じた)。
+- `WtH2Session` に STOP_SENDING の観測チャネルと `take_stop_sending_receiver` を追加し、
+  `WtEvent::StopSending` で台帳の登録と観測の送出を行う。`establish_wt_h2` が観測 receiver を
+  `finish_handshake` へ渡し、`MoqtClient::handle_stop_sending` 経由で Session へ cancel が届く
+  ようにした (wt-h3 と同じ扱い)。capsule は MOQT のコードをそのまま運ぶため remap は不要である。
+- テストは `examples/tokio-moq/src/webtransport_h2.rs` に追加した。実 TCP+TLS+HTTP/2 サーバーから
+  `WT_STOP_SENDING` を送る `wt_h2_stop_sending_terminates_only_the_stream` で、未送信データの失敗と
+  cancel 後の送信拒否が `StreamReset` になること、cancel 後も新しいストリームの送受信が継続する
+  ことを固定した。`stream_end_error` の写像 (`None` → `StreamClosed`) と
+  `take_stop_sending_receiver` の 1 回取り出し契約も単体テストで固定した。
+- doc は `is_peer_stream_reset` (moq-pub / moq-sub)、`remap_stop_sending_error_code`、
+  `StopSendingObserved`、`TransportError::StreamReset`、`skills/shiguredo-moqt/SKILL.md` の
+  「wt-h2 は STOP_SENDING の観測経路を持たない / 致命扱いのまま」という記述を実装に合わせて
+  更新した。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。
+  peer cancel で example が終了しないことはパイプラインの終了経路の実トレースで確認した
+  (実 relay での手動確認は未実施)。
+- レビューで見つけた残りの課題は別 issue とした: 0243 (wt-h2 の `finish` / `reset` が driver の
+  拒否を返さず Session の状態遷移が wt-h3 と異なる)、0244 (moq-pub の終了時の後始末が `Fatal`
+  終了する)。
