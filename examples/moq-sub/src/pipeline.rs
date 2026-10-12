@@ -30,13 +30,13 @@ use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
 use shiguredo_moqt::{
-    message::common::Location, message_parameter::LocationFilter,
+    message::common::Location, message::common::TrackNamespace, message_parameter::LocationFilter,
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
     message_parameter::PARAM_LOCATION_FILTER, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    name::serialize_namespace, session::types::DataStreamId, session::types::SessionEvent,
-    stream::decoder::DecodedFetchEntry, stream::decoder::FetchStreamDecoder,
-    stream::decoder::SubgroupStreamDecoder,
+    name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
+    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
 };
 
 use crate::catalog;
@@ -95,6 +95,11 @@ use tokio_moq::transport;
 
 /// カタログから取得したビデオトラック情報
 struct VideoTrackInfo {
+    /// 購読に使う namespace
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が
+    /// catalog track の namespace を上書きすると定めるため、宣言があればそれを使う。
+    namespace: TrackNamespace,
     track_name: String,
     codec: String,
     width: u32,
@@ -104,6 +109,8 @@ struct VideoTrackInfo {
 
 /// カタログから取得した音声トラック情報
 struct AudioTrackInfo {
+    /// 購読に使う namespace (解決の規則は [`VideoTrackInfo::namespace`] と同じ)
+    namespace: TrackNamespace,
     track_name: String,
     codec: String,
     samplerate: u32,
@@ -417,7 +424,9 @@ pub async fn run(
         .await?;
 
     // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
-    let namespace = config.namespace.clone();
+    // `config` から move して受け取る。購読呼び出しを catalog track の namespace に変える 1 行の
+    // 変更は、move 済みの値の再利用としてコンパイルエラーになる
+    let namespace = config.namespace;
     let data_plane = client.data_plane();
 
     // 2. タイムアウト設定
@@ -470,9 +479,7 @@ pub async fn run(
         &data_plane,
         catalog_sub.request_id,
         catalog_sub.track_alias,
-        // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
-        // publisher が書く表現と同じ draft-ietf-moq-transport-22 §8.8 の表現で渡す
-        serialize_namespace(&namespace),
+        namespace,
     )
     .await?;
     let CatalogResolution {
@@ -492,7 +499,8 @@ pub async fn run(
     }
     if let Some(ref v) = video_info {
         tracing::info!(
-            "Catalog video track: name={}, codec={}, {}x{} @ {} fps",
+            "Catalog video track: namespace={}, name={}, codec={}, {}x{} @ {} fps",
+            serialize_namespace(&v.namespace),
             v.track_name,
             v.codec,
             v.width,
@@ -502,7 +510,8 @@ pub async fn run(
     }
     if let Some(ref a) = audio_info {
         tracing::info!(
-            "Catalog audio track: name={}, codec={}, samplerate={}, channel_config={}",
+            "Catalog audio track: namespace={}, name={}, codec={}, samplerate={}, channel_config={}",
+            serialize_namespace(&a.namespace),
             a.track_name,
             a.codec,
             a.samplerate,
@@ -536,7 +545,7 @@ pub async fn run(
     if subscribe_video {
         let v = video_info.as_ref().expect("video_info is Some");
         let video_sub = client
-            .subscribe_track(namespace.clone(), v.track_name.as_bytes().to_vec())
+            .subscribe_track(v.namespace.clone(), v.track_name.as_bytes().to_vec())
             .await?;
         tracing::info!(
             "Subscribed to video track: alias={}, request_id={}",
@@ -589,7 +598,7 @@ pub async fn run(
     let audio_params: Option<(u32, u8)> = if subscribe_audio {
         let a = audio_info.as_ref().expect("audio_info is Some");
         let audio_sub = client
-            .subscribe_track(namespace.clone(), a.track_name.as_bytes().to_vec())
+            .subscribe_track(a.namespace.clone(), a.track_name.as_bytes().to_vec())
             .await?;
         tracing::info!(
             "Subscribed to audio track: alias={}, request_id={}",
@@ -1275,10 +1284,12 @@ async fn receive_catalog(
     data_plane: &DataPlaneHandle,
     fill_request_id: u64,
     catalog_alias: u64,
-    catalog_namespace: String,
+    catalog_namespace: TrackNamespace,
 ) -> Result<CatalogResolution> {
     let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
-    let mut state = catalog::CatalogState::new(catalog_namespace);
+    // delta の namespace 継承は catalog JSON の `namespace` との文字列比較になるため、
+    // publisher が書く表現と同じ draft-ietf-moq-transport-22 §8.8 の表現へ直す
+    let mut state = catalog::CatalogState::new(serialize_namespace(&catalog_namespace));
     while state.catalog().is_none() {
         let accepted =
             match tokio::time::timeout_at(deadline, recv_acceptor.accept_recv_stream()).await {
@@ -1409,13 +1420,13 @@ async fn receive_catalog(
                     || c.starts_with("hev1")
             })
         })
-        .map(extract_video_info)
+        .map(|track| extract_video_info(track, &catalog_namespace))
         .transpose()?;
     let audio = catalog
         .tracks
         .iter()
         .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")))
-        .map(extract_audio_info)
+        .map(|track| extract_audio_info(track, &catalog_namespace))
         .transpose()?;
     if video.is_none() && audio.is_none() {
         return Err(Error::Other(
@@ -1681,7 +1692,52 @@ fn catalog_target_latency_ms(tracks: &[MsfTrack]) -> Option<i64> {
         .and_then(|value| i64::try_from(value).ok())
 }
 
-fn extract_video_info(track: &MsfTrack) -> Result<VideoTrackInfo> {
+/// track の購読に使う namespace を解決する
+///
+/// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は「track が宣言した namespace は継承した
+/// namespace を上書きする」と定める。宣言が無ければ catalog track の namespace を継承する
+/// (MSF の継承の規則。delta 適用時の継承は [`catalog::CatalogState`] が扱う)。
+///
+/// 宣言された namespace は draft-ietf-moq-transport-22 §8.8 (Representing Namespace and Track
+/// Names。MSF では §11.1.2 に再掲) の表現として [`parse_namespace`] で解決する。§8.8 の形式は
+/// RECOMMENDED であり、draft-ietf-moq-msf-01 §5.2.2 (Track namespace) も catalog JSON の
+/// `namespace` を String と定めるのみで符号化を規定しない。本 example は moq-pub が書く §8.8
+/// 表現を前提とする契約であり、それ以外の表現 (MSF §5.6.1 の例のような値) を宣言したカタログでは
+/// この解決に失敗して起動できない。
+///
+/// 解決に失敗した場合はエラーにする。カタログは publisher の契約であり、本 example の契約では
+/// 解決できない namespace を publisher のバグとして扱う。黙って catalog track の namespace を
+/// 継承すると、ユーザーが期待した track ではなく別の track を購読して気づかない誤動作になる。
+/// 空の namespace (0 フィールド) も、example が 1 つ以上のフィールドを持つ namespace を扱う前提
+/// (`tokio_moq::resolve_namespace` と同じ) から解決失敗として扱う。
+///
+/// 解決は `--no-video` / `--no-audio` で無効化した track でも行う (既存の必須フィールドの検証と
+/// 同じ扱い)。無効化した側の解決に失敗しても example は起動しない。
+fn resolve_track_namespace(track: &MsfTrack, inherited: &TrackNamespace) -> Result<TrackNamespace> {
+    let namespace = match track.namespace.as_deref() {
+        Some(declared) => parse_namespace(declared).map_err(|e| {
+            Error::Other(format!(
+                "catalog media track {:?} has an invalid namespace {declared:?}: {e} \
+                 ('-' separates namespace fields; use the draft-ietf-moq-transport-22 \
+                 §8.8 form)",
+                track.name
+            ))
+        })?,
+        None => inherited.clone(),
+    };
+    if namespace.fields().is_empty() {
+        return Err(Error::Other(format!(
+            "catalog media track {:?} has an empty namespace",
+            track.name
+        )));
+    }
+    Ok(namespace)
+}
+
+fn extract_video_info(
+    track: &MsfTrack,
+    inherited_namespace: &TrackNamespace,
+) -> Result<VideoTrackInfo> {
     let codec = track
         .codec
         .clone()
@@ -1696,6 +1752,7 @@ fn extract_video_info(track: &MsfTrack) -> Result<VideoTrackInfo> {
         as u32;
     let fps = track.framerate.map(|f| f as u32).unwrap_or(30);
     Ok(VideoTrackInfo {
+        namespace: resolve_track_namespace(track, inherited_namespace)?,
         track_name: track.name.clone(),
         codec,
         width,
@@ -1704,7 +1761,10 @@ fn extract_video_info(track: &MsfTrack) -> Result<VideoTrackInfo> {
     })
 }
 
-fn extract_audio_info(track: &MsfTrack) -> Result<AudioTrackInfo> {
+fn extract_audio_info(
+    track: &MsfTrack,
+    inherited_namespace: &TrackNamespace,
+) -> Result<AudioTrackInfo> {
     let codec = track
         .codec
         .clone()
@@ -1718,6 +1778,7 @@ fn extract_audio_info(track: &MsfTrack) -> Result<AudioTrackInfo> {
         .clone()
         .ok_or_else(|| Error::Other("catalog audio track missing channelConfig".to_string()))?;
     Ok(AudioTrackInfo {
+        namespace: resolve_track_namespace(track, inherited_namespace)?,
         track_name: track.name.clone(),
         codec,
         samplerate,
@@ -2962,6 +3023,158 @@ mod tests {
         );
         track.target_latency = target_latency;
         track
+    }
+
+    /// テスト用の namespace を §8.8 表現から解決する
+    fn test_namespace(value: &str) -> TrackNamespace {
+        parse_namespace(value).expect("namespace を解決できること")
+    }
+
+    /// テスト用の track (codec と namespace だけを設定する)
+    fn track_with_namespace(codec: &str, namespace: Option<&str>) -> MsfTrack {
+        let mut track = MsfTrack::new(
+            "track".to_string(),
+            shiguredo_moqt::msf::MsfPackaging::Loc,
+            true,
+        );
+        track.codec = Some(codec.to_string());
+        track.namespace = namespace.map(|value| value.to_string());
+        track
+    }
+
+    /// namespace を宣言した track は宣言された namespace を購読に使う
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は track が宣言した namespace が継承した
+    /// namespace を上書きすると定める。MOQT の購読は Full Track Name に対して行うため
+    /// (draft-ietf-moq-transport-22 §2.4.1 (Track Naming))、catalog track の namespace を使うと
+    /// 別の track を購読するか DOES_NOT_EXIST になる。
+    #[test]
+    fn video_track_info_uses_declared_namespace() {
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example-video"));
+        track.width = Some(1920);
+        track.height = Some(1080);
+        let info = extract_video_info(&track, &test_namespace("moq-example"))
+            .expect("トラック情報を取り出せること");
+        assert_eq!(
+            info.namespace,
+            test_namespace("moq-example-video"),
+            "宣言された namespace を使うこと"
+        );
+    }
+
+    /// namespace を宣言しない track は catalog track の namespace を継承する
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace) は宣言が無い場合に catalog track の
+    /// namespace を継承する MUST を定める。
+    #[test]
+    fn video_track_info_inherits_catalog_namespace() {
+        let mut track = track_with_namespace("av01.0.04M.08", None);
+        track.width = Some(1920);
+        track.height = Some(1080);
+        let info = extract_video_info(&track, &test_namespace("moq-example"))
+            .expect("トラック情報を取り出せること");
+        assert_eq!(
+            info.namespace,
+            test_namespace("moq-example"),
+            "catalog track の namespace を継承すること"
+        );
+    }
+
+    /// 解決できない namespace を宣言した track はエラーにする
+    ///
+    /// カタログは publisher の契約であり、本 example は §8.8 (Representing Namespace and Track
+    /// Names) 表現を前提とするため、解決できない namespace を publisher のバグとして扱う。
+    /// 黙って catalog track の namespace を継承すると別の track を購読して気づかない誤動作になる。
+    #[test]
+    fn video_track_info_with_invalid_namespace_is_an_error() {
+        let mut track = track_with_namespace("av01.0.04M.08", Some("moq-example--video"));
+        track.width = Some(1920);
+        track.height = Some(1080);
+        let error = extract_video_info(&track, &test_namespace("moq-example"))
+            .err()
+            .expect("解決できない namespace はエラーになること");
+        assert!(
+            error.to_string().contains("invalid namespace"),
+            "namespace の解決失敗として分かること: {error}"
+        );
+    }
+
+    /// 空の namespace を宣言した映像 track はエラーにする
+    ///
+    /// `parse_namespace` は空文字を 0 フィールドの namespace として通すが、本 example は
+    /// 1 つ以上のフィールドを持つ namespace を扱う (`tokio_moq::resolve_namespace` と同じ前提)。
+    #[test]
+    fn video_track_info_with_empty_namespace_is_an_error() {
+        let mut track = track_with_namespace("av01.0.04M.08", Some(""));
+        track.width = Some(1920);
+        track.height = Some(1080);
+        let error = extract_video_info(&track, &test_namespace("moq-example"))
+            .err()
+            .expect("空の namespace はエラーになること");
+        assert!(
+            error.to_string().contains("empty namespace"),
+            "空の namespace として分かること: {error}"
+        );
+    }
+
+    /// 空の namespace を宣言した音声 track もエラーにする (映像と同じ扱い)
+    #[test]
+    fn audio_track_info_with_empty_namespace_is_an_error() {
+        let mut track = track_with_namespace("opus", Some(""));
+        track.samplerate = Some(48000);
+        track.channel_config = Some("2".to_string());
+        let error = extract_audio_info(&track, &test_namespace("moq-example"))
+            .err()
+            .expect("空の namespace はエラーになること");
+        assert!(
+            error.to_string().contains("empty namespace"),
+            "空の namespace として分かること: {error}"
+        );
+    }
+
+    /// 音声 track でも宣言された namespace を購読に使う
+    #[test]
+    fn audio_track_info_uses_declared_namespace() {
+        let mut track = track_with_namespace("opus", Some("moq-example-audio"));
+        track.samplerate = Some(48000);
+        track.channel_config = Some("2".to_string());
+        let info = extract_audio_info(&track, &test_namespace("moq-example"))
+            .expect("トラック情報を取り出せること");
+        assert_eq!(
+            info.namespace,
+            test_namespace("moq-example-audio"),
+            "宣言された namespace を使うこと"
+        );
+    }
+
+    /// 音声 track でも catalog track の namespace を継承する
+    #[test]
+    fn audio_track_info_inherits_catalog_namespace() {
+        let mut track = track_with_namespace("opus", None);
+        track.samplerate = Some(48000);
+        track.channel_config = Some("2".to_string());
+        let info = extract_audio_info(&track, &test_namespace("moq-example"))
+            .expect("トラック情報を取り出せること");
+        assert_eq!(
+            info.namespace,
+            test_namespace("moq-example"),
+            "catalog track の namespace を継承すること"
+        );
+    }
+
+    /// 解決できない namespace を宣言した音声 track もエラーにする (映像と同じ扱い)
+    #[test]
+    fn audio_track_info_with_invalid_namespace_is_an_error() {
+        let mut track = track_with_namespace("opus", Some("moq-example--audio"));
+        track.samplerate = Some(48000);
+        track.channel_config = Some("2".to_string());
+        let error = extract_audio_info(&track, &test_namespace("moq-example"))
+            .err()
+            .expect("解決できない namespace はエラーになること");
+        assert!(
+            error.to_string().contains("invalid namespace"),
+            "namespace の解決失敗として分かること: {error}"
+        );
     }
 
     // カタログの targetLatency をそのまま読む

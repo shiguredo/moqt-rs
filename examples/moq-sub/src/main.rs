@@ -183,7 +183,9 @@ fn main() {
 
 /// 再生ウィンドウのタイトルを組み立てる
 ///
-/// 複数の namespace を同時に購読するときに取り違えないよう、購読中の namespace を出す。
+/// どの接続先の再生かを示すため、catalog track の namespace (example が接続時に指定した
+/// namespace) を出す。track が namespace を宣言している場合は購読に使う namespace が異なり得る
+/// (`resolve_track_namespace` を参照)。
 fn player_window_title(namespace: &str) -> String {
     format!("{namespace} - MOQT Subscriber")
 }
