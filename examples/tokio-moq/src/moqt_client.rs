@@ -6,7 +6,7 @@
 //! # 構造
 //!
 //! - control stream: uni 送信用 + uni 受信用の 1 ペア (draft-ietf-moq-transport-22 §6.3 (Session initialization))
-//! - bidi request stream: PUBLISH / SUBSCRIBE / FETCH ごとに 1 本、`bidi_sends` に保持する
+//! - bidi request stream: 自側が開く PUBLISH / SUBSCRIBE と peer 起点の request を `bidi_sends` に保持する
 //! - data stream: 各バイナリが [`DataPlaneHandle`] 経由で `Session` に通知する
 //! - 受信は `tokio::spawn` した task で行い、`mpsc` 経由でメインループに集約する
 
@@ -154,11 +154,6 @@ pub struct SubscribeResult {
     /// 購読より前に配られた Object は FILL_PARAMETERS 付き購読の fill fetch stream
     /// (§3.4) で受け取る。LARGEST_OBJECT は fill range の上限を publisher が決めるために使う。
     pub largest_object: Option<Location>,
-}
-
-/// FETCH_OK の結果
-pub struct FetchResult {
-    pub request_id: u64,
 }
 
 /// 制御ストリームから読み出した値または終端
@@ -461,7 +456,7 @@ impl DataPlaneHandle {
 pub struct MoqtClient {
     /// URL の MSF fragment (`#msf:...&c4m=...`) から取り出した認可トークン
     ///
-    /// PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE には [`with_auth_parameters`] が
+    /// PUBLISH / SUBSCRIBE / REQUEST_UPDATE には [`with_auth_parameters`] が
     /// この一覧をすべて載せる。SETUP に載せる分はここではなく、`establish_*` の
     /// `c4m_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
     auth_tokens: Vec<AuthorizationToken>,
@@ -817,16 +812,16 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 ///
 /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは、
 /// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
-/// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE)
-/// へ MUST 付与する。SETUP に載せていても免除されない。
+/// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE。
+/// 本 client が送るのは SUBSCRIBE / FETCH を除いた経路である) へ MUST 付与する。
+/// SETUP に載せていても免除されない。
 ///
 /// 本 client (`MoqtClient`) は catalog を解析しないため、送信時点で track とトークンの
 /// 対応を決められない (end subscriber は catalog を解析して認可要件を知る。
 /// draft-ietf-moq-msf-01 §11.4.1 (Authorization)。authInfo の解釈は §5.2.42、
-/// URI fragment からのトークン配送は §5.2.43)。そのため保持しているトークンをすべて載せる。
-/// C4M の `moqt` クレームでアクションごとに選別すると、クレームをデコードできないトークンや
-/// FETCH を認可しないトークンが落ちて MUST の付与漏れになる。デコードできないトークンも
-/// 同様に載せる。
+/// URI fragment からのトークン配送は §5.2.43)。C4M の `moqt` クレームでアクションごとに
+/// 選別すると、クレームをデコードできないトークンや対象のアクションを認可しないトークンが
+/// 落ちて MUST の付与漏れになるため、保持しているトークンをすべて載せる。
 ///
 /// 複数のトークンを提示したときに relay がどう評価するかは一次資料に規定が無く実装依存で
 /// ある。draft-ietf-moq-c4m-01 §7.1.1 (CAT Token Type) は relay にトークン検証を課し、
@@ -836,7 +831,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
 /// (draft-ietf-moq-msf-01 §11.4.3 の MUST) を避ける側に倒す。
 ///
-/// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
+/// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) /
 /// REQUEST_UPDATE (`send_request_update`) は本関数の単一経路でトークンを付与する。
 /// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `c4m_tokens`
 /// 引数から `crate::build_setup_options` が option として組み立てる別経路である。
@@ -872,7 +867,7 @@ impl MoqtClient {
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// `stop_sending_rx` は [`crate::quic::connect`] が返す peer の STOP_SENDING の観測で、
     /// 該当する送信ストリームの終端として扱う。QUIC の code space のコードがそのまま流れる。
@@ -949,7 +944,7 @@ impl MoqtClient {
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1046,7 +1041,7 @@ impl MoqtClient {
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
     /// SETUP の AUTHORIZATION_TOKEN として送り、同じトークンを PUBLISH / SUBSCRIBE /
-    /// FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
+    /// REQUEST_UPDATE の AUTHORIZATION_TOKEN としても付与する。
     ///
     /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
     /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
@@ -1358,40 +1353,6 @@ impl MoqtClient {
         })
     }
 
-    /// FETCH を発行する (subscriber 側)
-    /// (draft-ietf-moq-transport-22 §9.11 (FETCH))
-    ///
-    /// range は LOCATION_FILTER パラメータで指定する。
-    ///
-    /// track に紐づく C4M 認可トークンは、SUBSCRIBE / REQUEST_UPDATE と同じく
-    /// AUTHORIZATION_TOKEN (0x03) としてすべて付与する
-    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
-    pub async fn fetch(
-        &mut self,
-        namespace: TrackNamespace,
-        track_name: Vec<u8>,
-        parameters: MessageParameters,
-    ) -> Result<FetchResult> {
-        let parameters = with_auth_parameters(parameters, &self.auth_tokens);
-        let request_id = {
-            let mut session = lock_session(&self.session);
-            session
-                .send_fetch(namespace, track_name, parameters)
-                .map_err(|e| TransportError::Internal(format!("send_fetch: {e}")))?
-        };
-        self.drain_events().await?;
-        self.wait_fetch_resolved(request_id).await?;
-        self.build_fetch_result(request_id)
-    }
-
-    fn build_fetch_result(&self, request_id: u64) -> Result<FetchResult> {
-        let session = lock_session(&self.session);
-        let _fetch = session
-            .fetch(request_id)
-            .ok_or_else(|| TransportError::Internal("fetch entry missing".into()))?;
-        Ok(FetchResult { request_id })
-    }
-
     async fn wait_subscription_resolved(&mut self, request_id: u64) -> Result<()> {
         loop {
             let state = {
@@ -1409,25 +1370,6 @@ impl MoqtClient {
                         .unwrap_or_default();
                     return Err(TransportError::Internal(format!(
                         "request {request_id} rejected{detail}"
-                    )));
-                }
-                _ => {}
-            }
-            self.pump_once().await?;
-        }
-    }
-
-    async fn wait_fetch_resolved(&mut self, request_id: u64) -> Result<()> {
-        loop {
-            let state = {
-                let session = lock_session(&self.session);
-                session.fetch(request_id).map(|fetch| fetch.state)
-            };
-            match state {
-                Some(FetchState::Established) => return Ok(()),
-                Some(FetchState::Terminated) => {
-                    return Err(TransportError::Internal(format!(
-                        "FETCH rejected (request_id={request_id})"
                     )));
                 }
                 _ => {}
@@ -1803,8 +1745,8 @@ impl MoqtClient {
 
     /// 指定した request に対して REQUEST_UPDATE を送信する (subscriber 側)
     ///
-    /// SUBSCRIBE / FETCH / PUBLISH と同じ C4M 認可トークンを AUTHORIZATION_TOKEN (0x03)
-    /// として載せる。更新対象の track に紐づくトークンは、SUBSCRIBE などの元の要求だけで
+    /// SUBSCRIBE / PUBLISH と同じ C4M 認可トークンを AUTHORIZATION_TOKEN (0x03) として
+    /// 載せる。更新対象の track に紐づくトークンは、SUBSCRIBE などの元の要求だけで
     /// なく REQUEST_UPDATE にも付与しなければならない
     /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
     pub async fn send_request_update(
@@ -2182,7 +2124,7 @@ impl MoqtClient {
     ///
     /// 破棄で失われる経路は 3 つある。request stream を開く await (`open_bidi_stream`) の
     /// 途中で破棄された場合は、開いたストリームを台帳へ登録できないまま失う。ヘッド
-    /// メッセージ (SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS) の送信中に破棄された場合は、
+    /// メッセージ (PUBLISH / SUBSCRIBE) の送信中に破棄された場合は、
     /// それを再送できず (Session は再発行しない)、送信半も台帳に登録されないため、以後の
     /// 応答や PUBLISH_DONE は警告のみで捨てられる。確立済み request のメッセージの送信中に
     /// 破棄された場合は、そのメッセージを送れず、送信の MUST
@@ -2379,8 +2321,8 @@ impl MoqtClient {
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
                     // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
-                    // FetchOkReceived は subscriber 役でのみ発火し、終端情報は Session::fetch の
-                    // ポーリングで参照するためここでは特別な処理を行わない
+                    // FetchOkReceived は自側が FETCH を発行したときだけ発火する。本 example は
+                    // FETCH を発行しないため到達しない (SessionEvent の網羅性のために arm は残す)
                     // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。
                     // SendPaddingStream / SendPaddingDatagram も padding を要求していないため到達しない。
                     // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
@@ -2491,7 +2433,7 @@ mod tests {
 
     /// 共通ヘルパが、渡したトークンをすべて入力順に付与すること
     ///
-    /// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
+    /// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) /
     /// REQUEST_UPDATE (`send_request_update`) は `with_auth_parameters` の単一経路で
     /// トークンを付与する。本テストはその共通ヘルパの契約 (呼び出し側のパラメータを保持し、
     /// トークンを入力順に末尾へ追加し、0 件なら追加しない) を固定する。各送信経路が
@@ -2591,32 +2533,40 @@ mod tests {
         .into_bytes()
     }
 
-    /// FETCH を認可しない有効な C4M トークンでも選別せずに付与すること
+    /// 送信経路のアクションを認可しない有効な C4M トークンでも選別せずに付与すること
     ///
     /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは
-    /// SUBSCRIBE / FETCH / REQUEST_UPDATE を含むすべての制御メッセージへ MUST 付与する。
-    /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-01 §2.1) が FETCH を認可しないトークンでも、
-    /// client 側で選別すると付与漏れになるため選別しない。
-    /// 旧実装は FETCH だけクレームで選別しており、このトークンが FETCH から落ちていた。
+    /// AUTHORIZATION TOKEN パラメータを受け付ける制御メッセージへ MUST 付与する。
+    /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-01 §2.1) がメッセージのアクションを
+    /// 認可しないトークンでも、client 側で選別すると付与漏れになるため選別しない。
+    /// 0223 まで FETCH の送信経路だけがクレームで選別しており、認可しないトークンが
+    /// その経路から落ちていた (本 fixture のトークンは FETCH だけを認可する)。
     #[test]
-    fn with_auth_parameters_attaches_c4m_token_outside_fetch_scope() {
-        let token_value = compact_c4m_token(MoqtScope::new([MoqtAction::Subscribe]));
+    fn with_auth_parameters_attaches_c4m_token_outside_action_scope() {
+        // 残る送信経路 (PUBLISH / SUBSCRIBE / REQUEST_UPDATE) のいずれも認可しないスコープ
+        let token_value = compact_c4m_token(MoqtScope::new([MoqtAction::Fetch]));
         let decoded = CatToken::decode_moqt_auth_token(MOQT_AUTH_TOKEN_TYPE_CAT, &token_value)
             .expect("テストフィクスチャはデコードできる C4M トークンであること");
         assert!(
             decoded
                 .claims()
-                .authorize(MoqtAction::Subscribe, &[&b"ns"[..]], b"catalog"),
-            "テストフィクスチャは SUBSCRIBE を認可する"
-        );
-        assert!(
-            !decoded
-                .claims()
                 .authorize(MoqtAction::Fetch, &[&b"ns"[..]], b"catalog"),
-            "テストフィクスチャは FETCH を認可しない"
+            "テストフィクスチャは FETCH を認可する"
         );
+        for action in [
+            MoqtAction::Subscribe,
+            MoqtAction::Publish,
+            MoqtAction::RequestUpdate,
+        ] {
+            assert!(
+                !decoded
+                    .claims()
+                    .authorize(action, &[&b"ns"[..]], b"catalog"),
+                "テストフィクスチャは送信経路のアクションを認可しない"
+            );
+        }
 
-        // FETCH / SUBSCRIBE / REQUEST_UPDATE の共通経路はクレームで選別せず付与する
+        // 送信経路の共通ヘルパはクレームで選別せず付与する
         let parameters = with_auth_parameters(
             MessageParameters::new(),
             &[c4m_authorization_token(&token_value)],
@@ -2624,7 +2574,7 @@ mod tests {
         assert_eq!(
             parameters.len(),
             1,
-            "FETCH を認可しないトークンでも付与すること"
+            "送信経路のアクションを認可しないトークンでも付与すること"
         );
         match &parameters.as_slice()[0] {
             MessageParameter {

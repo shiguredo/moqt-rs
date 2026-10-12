@@ -74,7 +74,7 @@ reset を伴う経路 (request stream の cancel や、送信中の subgroup / d
 ## C4M 認可トークン
 
 MSF fragment (`#msf:<track-identifier>&c4m=<token>`) の `c4m` パラメータに C4M トークンを指定すると、SETUP の AUTHORIZATION_TOKEN (Token Type CAT) として送信する (draft-ietf-moq-msf-01 §11.1.1、draft-ietf-moq-c4m-01 §7.1.1)。
-あわせて PUBLISH / SUBSCRIBE / FETCH / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-01 §11.4.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
+あわせて PUBLISH / SUBSCRIBE / REQUEST_UPDATE の AUTHORIZATION_TOKEN としてもすべてのトークンを送信する (draft-ietf-moq-msf-01 §11.4.3 の MUST。SETUP に載せていても免除されない。`MoqtClient` が catalog を解析しないため track とトークンの対応付けは行わず、アクションごとの選別はしない)。
 
 ```bash
 # C4M トークン付きで QUIC 接続する (シェルでは `&` を引用符で囲む)
