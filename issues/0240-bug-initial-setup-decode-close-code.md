@@ -88,12 +88,16 @@ decode 失敗は 0222 で終了コード付きで閉じるようにしたため�
       取り出せない場合のフォールバックだけ渡されたコードと固定文字列にする。
     - `?` で早期 return している箇所は `match` に書き換えて、ヘルパを呼んでから error を
       返す形にする。
-  - 本 issue の対象外は次の経路である (終了コードを送る session が無い、または transport 自体が
-    死んでいるため)。自側 SETUP の encode 失敗 (`send_control_stream_setup`)、
-    `Session::new_client` の失敗、`pop_send_control` の失敗、`open_send_stream` / acceptor の
-    失敗、control stream の受信 I/O 失敗 (`read_stream_type` / `recv_message` が
-    `TransportError::Moqt` 以外を返す場合)、確立後の `pump_once` の `recv_control` /
-    `recv_stream_message` / `recv_request` の失敗である。
+  - 本 issue の対象外は次である。自側の失敗 (自側 SETUP の encode 失敗
+    (`send_control_stream_setup`)、`Session::new_client` の失敗、`pop_send_control` の失敗) は
+    peer の違反ではないため終了コードを送る対象にしない。transport 自体の失敗
+    (`open_send_stream` / acceptor の失敗、control stream の受信 I/O 失敗
+    (`read_stream_type` / `recv_message` が `TransportError::Moqt` 以外を返す場合)) は接続が
+    死んでいるため送れない。
+  - 確立後の `pump_once` の `recv_control` / `recv_stream_message` の失敗は、本 issue と同じ
+    欠陥クラス (session が `CloseSession` を積んでいるのに `?` が `drain_events` より先に
+    return して終了コードが届かない) だが、確立前の SETUP 交換とは別の経路であるため本 issue の
+    対象外とし、別 issue で扱う (`recv_request` は `drain_events` を呼んでおり欠陥は無い)。
 - 終了コードの写像を `examples/tokio-moq/src/error.rs` へ `pub fn session_error_code(error:
   &MessageError) -> u64` として移設し、`moq-pub` / `moq-sub` の pipeline は tokio-moq の関数を
   使う (`examples/tokio-moq/src/lib.rs` の方針どおり最上位再エクスポートは設けず、
@@ -164,3 +168,58 @@ decode 失敗は 0222 で終了コード付きで閉じるようにしたため�
   `moq-sub` の doc も実態に合っていること。
 - 上記がテストで固定されていること (確立前の失敗は peer が CONNECTION_CLOSE のコードを
   観測する)。モック / スタブを使わないこと。
+
+## 解決方法
+
+- `examples/tokio-moq/src/moqt_client.rs` に `close_handshake_session` を追加し、SETUP 交換中の
+  失敗で終了コード付きのセッション終了を送るようにした。session が `CloseSession` を積んでいれば
+  (`recv_control` / `recv_control_stream_type` / `recv_control_stream_closed` の検証失敗) その
+  コードと理由を使い、積んでいなければ (decode 失敗) 渡されたコードと理由を使う。積まれていない
+  場合は `Session::close` を呼んでから改めて取り出し、ローカル専用コードの正規化後のコードを使う。
+  `CloseSession` はキューの先頭とは限らないため `take_close_session` で見つかるまで取り出す。
+  終了コードを wire に載せるのは `StreamHandle::close` (`drain_events` の `CloseSession` 処理と
+  同じ経路) であり、QUIC では CONNECTION_CLOSE になる (§6.6 (Termination))。制御ストリームへ
+  メッセージを書くのではない。
+- decode 失敗の終了コードは `session_error_code` の写像で決める
+  (`close_handshake_session_on_message_error`)。`TransportError::Moqt` 以外 (transport 自体の
+  失敗) は接続が死んでいるため何もしない。
+- `establish_quic` / `establish_wt` / `establish_wt_h2` / `finish_handshake` の失敗経路のうち、
+  SETUP の decode 失敗、`recv_control(peer_setup)` の検証失敗、stream type の不一致、SETUP 前の
+  control stream 終端を同じ扱いにした。`?` で早期 return していた箇所は `match` に書き換えて
+  ヘルパを呼んでから error を返す。stream type の検証は 3 経路で同一だったため
+  `recv_control_stream_type` に集約した。
+- 終了コードの写像を `examples/tokio-moq/src/error.rs` の
+  `pub fn session_error_code(error: &MessageError) -> u64` へ移設し、`moq-pub` / `moq-sub` の
+  pipeline は `tokio_moq::error::session_error_code` を参照するようにした (`lib.rs` の方針どおり
+  最上位再エクスポートは設けない)。pipeline 側の private 定義は削除し、単体テストは移設先の
+  `session_error_code_maps_message_failures` として維持した (アサーション 4 件は同一)。写像の doc
+  から「初回 SETUP では終了コードを送れない (既知の限界)」を除き、確立前の SETUP の decode 失敗も
+  この写像で決めることを書いた。
+- `examples/tokio-moq/src/peer_harness.rs` を拡張した。送る SETUP を差し替える経路 (`send_setup`
+  と、control stream の先頭に書く完全なバイト列を渡す `send_control_stream_head`)、SETUP を
+  送らずに終端する経路 (`finish_control_stream`)、peer 側で client の CONNECTION_CLOSE の終了
+  コードを観測する経路 (s2n-quic の event subscriber の `on_connection_closed` が受け取る
+  `connection::Error::Application` を `initiator: Remote` に限って記録する `CloseCodeRecorder`)
+  を追加し、module doc の「提供しない」から提供するようになった能力を外した。
+- テストは 7 本追加した。トークン構造の decode 失敗 (未知の Alias Type) で
+  `KEY_VALUE_FORMATTING_ERROR` (0x6)、トークンの重複 (REGISTER 2 件、alias のみ異なる) で
+  `MALFORMED_AUTH_TOKEN` (0x16)、SETUP の Token の DELETE で `PROTOCOL_VIOLATION` (0x3)、
+  server 役の SETUP の PATH で `INVALID_PATH` (0x8)、control stream の stream type 不一致、
+  stream type を読む前の終端、stream type の直後の終端で `PROTOCOL_VIOLATION` (0x3) を peer 側で
+  観測する。生の Setup Options は型付き API で構築できないため、`ControlMessage::Unsupported` で
+  SETUP と同じ書式のバイト列を組み立てている。
+- 設計方針の「対象外」の理由を実態に合わせた。自側の失敗は peer の違反ではないため対象にせず、
+  transport 自体の失敗は接続が死んでいるため送れない。確立後の `pump_once` の `recv_control` /
+  `recv_stream_message` の失敗は同じ欠陥クラス (session が `CloseSession` を積んでいるのに `?` が
+  `drain_events` より先に return する) だが、確立前とは別経路であるため対象外とし別 issue で扱う
+  (`recv_request` は `drain_events` を呼んでおり欠陥は無い)。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。変異テスト
+  で、close を送らない変異で 7 本、写像・分岐ごとの変異でそれぞれ対応するテストが失敗すること、
+  `initiator` の絞り込みを反転すると終了コードを観測する 7 本が失敗することを確認した。
+- 併せて `examples/tokio-moq/src/lib.rs` の
+  `resolve_socket_addrs_times_out_when_resolver_does_not_answer` が OS の否定応答キャッシュに
+  依存して不安定だった (OS が否定応答をキャッシュすると、100 ナノ秒のタイムアウトより先に解決が
+  失敗して timeout 経路を観測できない) ため、テストごとに一意な authority を使うようにした
+  (0240 とは別のコミット)。追加したテストでこのキャッシュが起きるようになり push と CI の前提と
+  して直した。
