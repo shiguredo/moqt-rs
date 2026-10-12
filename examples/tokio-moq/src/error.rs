@@ -31,8 +31,10 @@ pub enum TransportError {
     /// Cancellation and Rejection))、アプリはセッション終了と区別して扱う必要がある。
     /// `error_code` は transport 依存の wire コードであり、QUIC 直接接続は QUIC の code space、
     /// WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ戻すには
-    /// `StreamHandle::remap_stop_sending_error_code` を通す)。受信方向の終端
-    /// (RESET_STREAM) は `RequestStreamEnd::Reset` が運ぶ。
+    /// `StreamHandle::remap_stop_sending_error_code` を通す)。WebTransport over HTTP/2 は
+    /// capsule が MOQT のコードをそのまま運ぶため remap は不要である
+    /// (draft-ietf-webtrans-http2-15 §6.3)。受信方向の終端 (RESET_STREAM) は
+    /// `RequestStreamEnd::Reset` が運ぶ。
     StreamReset {
         /// peer が載せた wire のエラーコード
         error_code: u64,

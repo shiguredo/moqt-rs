@@ -361,8 +361,9 @@ request stream 上の GOAWAY の timeout が満了した場合も request を終
 `RequestStreamEnd::Reset` は cancel として即時に終端する
 (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
 `error_code` は `Option<u64>` であり、`None` は「アプリケーションエラーコード無し」を表す
-(draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams)。WebTransport 経路で HTTP/3 の
-コードを MOQT のコードへ戻せない場合に `None` になる)。QUIC 経路は常にコードがあるため `Some`。
+(draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams)。WebTransport over HTTP/3 経路で
+HTTP/3 のコードを MOQT のコードへ戻せない場合に `None` になる)。QUIC 直接接続と
+WebTransport over HTTP/2 は wire のコードがそのまま MOQT のコードのため常に `Some`。
 `recv_data_stream_stop_sending(stream_id, error_code)` と
 `fetch_stop_sending_received(request_id, error_code)` の `error_code` も同じ意味である。
 受信したコードは `Session::stopped_outgoing_subgroup_error_code(request_id, track_alias,

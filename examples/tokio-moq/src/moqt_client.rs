@@ -467,11 +467,11 @@ pub struct MoqtClient {
     /// bidi 受信タスクへ STOP_SENDING の送出を依頼するチャネル (request_id 単位、値は error code と完了通知)
     bidi_stop_txs: HashMap<u64, mpsc::Sender<StopSendingCommand>>,
     closed_request_streams: HashSet<u64>,
-    /// peer の STOP_SENDING の観測 (QUIC stream id と wire のエラーコード)
+    /// peer の STOP_SENDING の観測 (transport のストリーム ID と wire のエラーコード)
     ///
-    /// 接続確立時に受け取る。WebTransport over HTTP/2 は STOP_SENDING を送信 API へ
-    /// 伝える仕組みが無く本 example の対象外のため `None` になる。`pump_once` が受信し、
-    /// 該当する送信ストリームの終端として扱う。
+    /// 接続確立時に受け取る。`pump_once` が受信し、該当する送信ストリームの終端として扱う。
+    /// QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 のいずれも
+    /// 観測経路を持ち、wt-h2 は driver が受信した capsule をそのまま流す。
     stop_sending_rx: Option<StopSendingReceiver>,
     /// FETCH 応答用 uni stream の stream id → request_id
     ///
@@ -853,7 +853,8 @@ struct HandshakeIo {
     control_send: SendStream,
     /// ストリームを開くためのハンドル
     handle: StreamHandle,
-    /// peer の STOP_SENDING の観測。WebTransport over HTTP/2 では `None`
+    /// peer の STOP_SENDING の観測。`None` は同一セッションから receiver を 2 回取り出した
+    /// 場合 (実装バグ) を表す
     stop_sending_rx: Option<StopSendingReceiver>,
     /// control stream 受信側
     control_recv: ControlStream,
@@ -1058,7 +1059,7 @@ impl MoqtClient {
         // session のロックを保持しないようにする (`WtH2Session::take_uni_receiver`)。
         // セッション状態の receiver も同じ理由でここで取り出す (セッション終了を
         // accept の待機中に観測し、受信ループを待たせないため)。
-        let (wt_uni_rx, wt_bi_rx, session_state) = {
+        let (wt_uni_rx, wt_bi_rx, stop_sending_rx, session_state) = {
             let mut s = shared.lock().await;
             let uni_rx = s.take_uni_receiver().ok_or_else(|| {
                 TransportError::Internal("uni stream receiver already taken".into())
@@ -1066,8 +1067,9 @@ impl MoqtClient {
             let bi_rx = s.take_bi_receiver().ok_or_else(|| {
                 TransportError::Internal("bidi stream receiver already taken".into())
             })?;
+            let stop_sending_rx = s.take_stop_sending_receiver();
             let session_state = s.session_state_receiver();
-            (uni_rx, bi_rx, session_state)
+            (uni_rx, bi_rx, stop_sending_rx, session_state)
         };
 
         let wt_send = {
@@ -1104,9 +1106,7 @@ impl MoqtClient {
             HandshakeIo {
                 control_send,
                 handle,
-                // WebTransport over HTTP/2 は STOP_SENDING を送信 API へ伝える仕組みが無く
-                // 本 example の対象外のため、観測 receiver を渡さない
-                stop_sending_rx: None,
+                stop_sending_rx,
                 control_recv,
                 bidi_acceptor: BidiStreamAcceptor::WtH2 {
                     session: shared.clone(),
@@ -1967,8 +1967,10 @@ impl MoqtClient {
     /// 扱うかは端点の判断に委ねている。本 example は扱わない)。
     /// 検知はフレーム観測で行い、送信 API の失敗からは推測しない (FIN ack 済みの
     /// ストリームでは STOP_SENDING に由来するエラーが `send` / `finish` に現れないため)。
-    /// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため、h3 層への通知と
-    /// MOQT のコードへの remap を行う (draft-ietf-webtrans-http3-16 §4.4)。
+    /// wire のコードの扱いは経路で異なる。WebTransport over HTTP/3 は HTTP/3 の code space を
+    /// 共有するため、h3 層への通知と MOQT のコードへの remap を行う
+    /// (draft-ietf-webtrans-http3-16 §4.4)。WebTransport over HTTP/2 は capsule が MOQT の
+    /// コードをそのまま運ぶため remap は不要である (draft-ietf-webtrans-http2-15 §6.3)。
     async fn handle_stop_sending(&mut self, observed: StopSendingObserved) -> Result<()> {
         let StopSendingObserved {
             stream_id,

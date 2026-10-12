@@ -36,6 +36,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_rustls::TlsConnector;
 
 use crate::error::{Result, TransportError};
+use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::webtransport::{
     WtSessionState, session_policy, update_session_state, wait_until_terminated,
 };
@@ -440,6 +441,12 @@ impl WtH2Client {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (uni_tx, uni_rx) = mpsc::unbounded_channel();
         let (bi_tx, bi_rx) = mpsc::unbounded_channel();
+        // peer の STOP_SENDING を MOQT 層へ渡すチャネル。
+        //
+        // over HTTP/2 の WT_STOP_SENDING capsule はアプリケーションエラーコード
+        // (MOQT §12.5 のコード) をそのまま運ぶため、HTTP/3 のような code space の
+        // remap は不要である (draft-ietf-webtrans-http2-15 §6.3)。
+        let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
         let (session_state_tx, _) = watch::channel(WtSessionState::Active);
         let datagrams = Arc::new(StdMutex::new(VecDeque::new()));
         let session_consumed = Arc::new(AtomicU64::new(0));
@@ -465,7 +472,8 @@ impl WtH2Client {
                 pending_sends: HashMap::new(),
                 wt_out_pending: Vec::new(),
                 stop_sending_sent: HashSet::new(),
-                stop_sending_received: HashSet::new(),
+                stop_sending_received: HashMap::new(),
+                stop_sending_tx,
                 session_received: 0,
                 session_consumed: driver_consumed,
             };
@@ -476,6 +484,7 @@ impl WtH2Client {
             cmd_tx,
             uni_rx: Some(uni_rx),
             bi_rx: Some(bi_rx),
+            stop_sending_rx: Some(stop_sending_rx),
             session_state: session_state_tx,
             datagrams,
             _driver: AbortOnDrop(driver),
@@ -686,6 +695,8 @@ pub struct WtH2Session {
     uni_rx: Option<mpsc::UnboundedReceiver<WtH2RecvStream>>,
     /// 双方向受信ストリームの receiver。`take_bi_receiver` で取り出すと None になる
     bi_rx: Option<mpsc::UnboundedReceiver<(WtH2SendStream, WtH2RecvStream)>>,
+    /// peer の STOP_SENDING の観測 receiver。`take_stop_sending_receiver` で取り出すと None になる
+    stop_sending_rx: Option<StopSendingReceiver>,
     /// セッション状態 (§6.12 の終了 / §6.13 の drain / 接続エラー) を配る sender
     session_state: watch::Sender<WtSessionState>,
     /// 受信した datagram のバッファ
@@ -767,6 +778,15 @@ impl WtH2Session {
         &mut self,
     ) -> Option<mpsc::UnboundedReceiver<(WtH2SendStream, WtH2RecvStream)>> {
         self.bi_rx.take()
+    }
+
+    /// peer の STOP_SENDING の観測 receiver を取り出す
+    ///
+    /// MOQT 層は観測した cancel を該当する subscription / fetch の状態遷移に使う
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// 詳細は `take_uni_receiver` を参照する。
+    pub fn take_stop_sending_receiver(&mut self) -> Option<StopSendingReceiver> {
+        self.stop_sending_rx.take()
     }
 
     /// セッションをクローズする (draft-ietf-webtrans-http2-15 §6.12)
@@ -883,6 +903,10 @@ impl WtH2SendStream {
     /// ストリームの送信方向を終了する (FIN)
     ///
     /// FIN は capsule として送られるため、完了を待たずに戻る。
+    /// peer の STOP_SENDING で終端したストリーム (driver の台帳に載っている) への FIN は
+    /// driver が送らずに捨てるが、その結果は返らない (`reply` を持たないため、成功として
+    /// 戻る)。cancel の検知は観測チャネル ([`WtH2Session::take_stop_sending_receiver`]) が
+    /// 担う。
     pub fn finish(&mut self) -> Result<()> {
         self.cmd_tx
             .send(Command::Send {
@@ -898,6 +922,8 @@ impl WtH2SendStream {
     ///
     /// MOQT のエラーコードは WebTransport の Application Error Code としてそのまま送る
     /// (over HTTP/2 の capsule は 32 ビットのコードを運ぶ)。
+    /// peer の STOP_SENDING で終端したストリームは capsule 層が既に `WT_RESET_STREAM` を
+    /// 送っているため、本要求は driver が送らずに捨てる (`finish` と同じ扱い)。
     pub fn reset(&mut self, error_code: u64) -> Result<()> {
         self.cmd_tx
             .send(Command::Reset {
@@ -979,10 +1005,10 @@ impl WtH2RecvStream {
                         // 空のデータ capsule (FIN なし) は次を待つ
                     }
                     Some(StreamPacket::Reset { error_code }) => {
-                        // over HTTP/2 の WT_RESET_STREAM は Reliable Size を運ぶが、
-                        // `WtEvent::StreamReset` には現れないため `None` にする
-                        // over HTTP/2 の WT_RESET_STREAM は MOQT §12.5 のコードをそのまま運ぶため
-                        // 常にコードがある (HTTP/3 のような code space の remap は不要)
+                        // WT_RESET_STREAM は Reliable Size も運ぶが (draft-ietf-webtrans-http2-15
+                        // §6.2)、`WtEvent::StreamReset` には現れないため `None` にする
+                        // (over HTTP/2 の WT_RESET_STREAM は MOQT §12.5 のコードをそのまま運ぶため
+                        // エラーコードは常にある。HTTP/3 のような code space の remap は不要)
                         let end = RequestStreamEnd::Reset {
                             error_code: Some(error_code),
                             reliable_size: None,
@@ -1117,12 +1143,36 @@ struct DriverState {
     wt_out_pending: Vec<u8>,
     /// `WT_STOP_SENDING` を送ったストリーム (以降の受信データを破棄する)
     stop_sending_sent: HashSet<WtStreamId>,
-    /// peer から `WT_STOP_SENDING` を受けたストリーム (以降の送信を拒否する)
-    stop_sending_received: HashSet<WtStreamId>,
+    /// peer から `WT_STOP_SENDING` を受けたストリームの台帳 (ストリーム ID → エラーコード)
+    ///
+    /// 以降の送信を拒否し、未送信データを該当ストリームの終端として失敗させる。
+    /// エラーコードは capsule が運んだ MOQT のコードであり、アプリへそのまま伝える
+    /// (draft-ietf-webtrans-http2-15 §6.3)。
+    /// エントリは削除せず、上限も設けない。WebTransport のストリーム ID は QUIC の識別子を
+    /// 写したもので再利用されないため (draft-ietf-webtrans-http2-15 §5.2 が RFC 9000 §2.1 の
+    /// 識別子を写すと定める) 誤判定は起きず、削除すると遅延した送信が `StreamClosed`
+    /// (アプリは該当ストリームの終端と判別できず致命エラーとして扱う) に化けるためである。
+    /// したがって本 map は peer が cancel したストリーム数に比例して増える。
+    stop_sending_received: HashMap<WtStreamId, u64>,
+    /// peer の STOP_SENDING の観測を MOQT 層へ流す sender
+    stop_sending_tx: mpsc::UnboundedSender<StopSendingObserved>,
     /// セッション全体で受信したバイト数
     session_received: u64,
     /// アプリが消費したバイト数 (セッション全体)
     session_consumed: Arc<AtomicU64>,
+}
+
+/// 終端済みストリームへの操作に対するエラーを作る
+///
+/// `error_code` が `Some` の場合は peer の STOP_SENDING で終端したストリームであり、
+/// 該当ストリームだけの終端であることをアプリが判別できるように
+/// [`TransportError::StreamReset`] にする。`None` は FIN / reset 済みなど STOP_SENDING
+/// 以外で終端したストリームであり [`TransportError::StreamClosed`] にする。
+fn stream_end_error(error_code: Option<u64>) -> TransportError {
+    match error_code {
+        Some(error_code) => TransportError::StreamReset { error_code },
+        None => TransportError::StreamClosed,
+    }
 }
 
 impl DriverState {
@@ -1205,12 +1255,12 @@ impl DriverState {
                 fin,
                 reply,
             } => {
-                // FIN / reset 済みのストリームへの送信は受け付けない
-                if self.stop_sending_received.contains(&stream_id)
+                // FIN / reset / peer の STOP_SENDING 済みのストリームへの送信は受け付けない
+                if self.stop_sending_received.contains_key(&stream_id)
                     || self.wt_session.stream(stream_id).is_none()
                 {
                     if let Some(reply) = reply {
-                        let _ = reply.send(Err(TransportError::StreamClosed));
+                        let _ = reply.send(Err(self.closed_stream_error(stream_id)));
                     }
                     return true;
                 }
@@ -1478,12 +1528,19 @@ impl DriverState {
                 error_code,
             } => {
                 // 送信側のストリームに対して peer が停止を要求した。未送信データを
-                // 破棄し、以降の送信を拒否する
+                // 該当ストリームの終端として破棄し、以降の送信を拒否する
                 tracing::debug!(
                     "Received WT_STOP_SENDING for stream {stream_id}: error_code={error_code:#x}"
                 );
-                self.stop_sending_received.insert(stream_id);
+                self.stop_sending_received.insert(stream_id, error_code);
                 self.fail_pending_sends(stream_id);
+                // MOQT 層は cancel を該当する subscription / fetch の状態遷移に使う。
+                // MOQT 層が receiver を drop 済みの場合は送信が失敗するが、driver の処理は
+                // 継続する
+                let _ = self.stop_sending_tx.send(StopSendingObserved {
+                    stream_id,
+                    error_code,
+                });
                 Ok(true)
             }
             WtEvent::DatagramReceived { data } => {
@@ -1684,15 +1741,24 @@ impl DriverState {
         }
     }
 
-    /// `pending_sends` の未送信データを失敗させる
+    /// `pending_sends` の未送信データを、そのストリームの終端理由で失敗させる
     fn fail_pending_sends(&mut self, stream_id: WtStreamId) {
         if let Some(queue) = self.pending_sends.remove(&stream_id) {
             for pending in queue {
                 if let Some(reply) = pending.reply {
-                    let _ = reply.send(Err(TransportError::StreamClosed));
+                    let _ = reply.send(Err(self.closed_stream_error(stream_id)));
                 }
             }
         }
+    }
+
+    /// 終端済みストリームへの操作を拒否するときのエラーを返す
+    ///
+    /// 台帳に載っていれば peer の STOP_SENDING による終端 (`StreamReset`)、載っていなければ
+    /// FIN / reset による終端 (`StreamClosed`) になる。写像の規則は [`stream_end_error`] を
+    /// 参照する。
+    fn closed_stream_error(&self, stream_id: WtStreamId) -> TransportError {
+        stream_end_error(self.stop_sending_received.get(&stream_id).copied())
     }
 
     /// WT の出力を HTTP/2 の DATA として送信可能な分だけ流す
@@ -1918,6 +1984,27 @@ mod tests {
         assert_eq!(format!("{chunk:?}"), "End(Fin)");
     }
 
+    /// 台帳に無い終端は `StreamClosed` のままにすること
+    ///
+    /// peer の STOP_SENDING で終端したストリームだけを `StreamReset` にする
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))。
+    /// FIN / reset 済みのストリームまで `StreamReset` にすると、セッション終了と区別できない
+    /// 失敗が pipeline の致命判定から外れてしまう。
+    #[test]
+    fn stream_end_error_keeps_stream_closed_without_the_ledger() {
+        assert!(
+            matches!(stream_end_error(None), TransportError::StreamClosed),
+            "台帳に無い終端は StreamClosed にすること"
+        );
+        assert!(
+            matches!(
+                stream_end_error(Some(0x1)),
+                TransportError::StreamReset { error_code } if error_code == 0x1
+            ),
+            "台帳のエラーコードで StreamReset にすること"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // 実サーバーとの結合テスト
     // -----------------------------------------------------------------------
@@ -1956,6 +2043,54 @@ mod tests {
         io.flush()
             .await
             .map_err(|e| format!("failed to flush server output: {e}"))
+    }
+
+    /// CONNECT リクエストを受理して WebTransport セッションを確立する
+    ///
+    /// `:protocol` を検証して 200 + `wt-protocol` で応答し、`WtSession::server` を構築する
+    /// (§3.1 / §3.2 / §3.3)。`wt_config` は SETTINGS で広告済みのローカル設定であり、
+    /// 実際に広告した値を SETTINGS から重ねる (§4.3.1)。ピア設定は Initial Value (全て 0) から
+    /// 始めてピアの SETTINGS を重ねる (§11.2)。
+    async fn accept_wt_connect<S>(
+        io: &mut H2Io<S>,
+        wt_config: &WtConfig,
+        stream_id: StreamId,
+        headers: &[HeaderField],
+    ) -> std::result::Result<WtSession, String>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let protocol = headers
+            .iter()
+            .find(|h| h.name() == b":protocol")
+            .map(HeaderField::value);
+        if protocol != Some(WEBTRANSPORT_PROTOCOL) {
+            return Err(format!("unexpected :protocol: {protocol:?}"));
+        }
+        let wt_protocol =
+            shiguredo_http2::webtransport::serialize_wt_protocol(crate::MOQT_PROTOCOL.as_bytes())
+                .map_err(|e| format!("failed to serialize wt-protocol: {e}"))?;
+        let response = vec![
+            HeaderField::from_static(b":status", b"200"),
+            HeaderField::new(b"wt-protocol", wt_protocol)
+                .map_err(|e| format!("failed to build wt-protocol: {e}"))?,
+        ];
+        io.conn
+            .send_response(stream_id, response, false)
+            .map_err(|e| format!("failed to send 200 response: {e}"))?;
+        io.flush()
+            .await
+            .map_err(|e| format!("failed to flush the response: {e}"))?;
+
+        let mut local = wt_config.clone();
+        local.overlay_settings(io.local_settings());
+        let mut peer = WtConfig::peer_default();
+        peer.overlay_settings(io.remote_settings());
+        let mut session = WtSession::server(local, peer);
+        session
+            .initiate()
+            .map_err(|e| format!("WtSession::initiate failed: {e}"))?;
+        Ok(session)
     }
 
     /// テスト用の WebTransport over HTTP/2 サーバー
@@ -2002,37 +2137,8 @@ mod tests {
                 Event::HeadersReceived {
                     stream_id, headers, ..
                 } if connect_stream.is_none() => {
-                    let protocol = headers
-                        .iter()
-                        .find(|h| h.name() == b":protocol")
-                        .map(HeaderField::value);
-                    if protocol != Some(WEBTRANSPORT_PROTOCOL) {
-                        return Err(format!("unexpected :protocol: {protocol:?}"));
-                    }
-                    let wt_protocol = shiguredo_http2::webtransport::serialize_wt_protocol(
-                        crate::MOQT_PROTOCOL.as_bytes(),
-                    )
-                    .map_err(|e| format!("failed to serialize wt-protocol: {e}"))?;
-                    let response = vec![
-                        HeaderField::from_static(b":status", b"200"),
-                        HeaderField::new(b"wt-protocol", wt_protocol)
-                            .map_err(|e| format!("failed to build wt-protocol: {e}"))?,
-                    ];
-                    io.conn
-                        .send_response(stream_id, response, false)
-                        .map_err(|e| format!("failed to send 200 response: {e}"))?;
-                    io.flush()
-                        .await
-                        .map_err(|e| format!("failed to flush the response: {e}"))?;
-
-                    let mut local = WtConfig::default();
-                    local.overlay_settings(io.local_settings());
-                    let mut peer = WtConfig::peer_default();
-                    peer.overlay_settings(io.remote_settings());
-                    let mut session = WtSession::server(local, peer);
-                    session
-                        .initiate()
-                        .map_err(|e| format!("WtSession::initiate failed: {e}"))?;
+                    let session =
+                        accept_wt_connect(&mut io, &wt_config, stream_id, &headers).await?;
                     wt = Some(session);
                     connect_stream = Some(stream_id);
                 }
@@ -2259,6 +2365,284 @@ mod tests {
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+
+            session
+                .close(0, "done")
+                .await
+                .expect("close に成功すること");
+        })
+        .await;
+        assert!(result.is_ok(), "テストがタイムアウトしないこと: {result:?}");
+
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+
+    /// STOP_SENDING のテストで client の単方向送信ストリームへ広告する送信ウィンドウ (bytes)
+    ///
+    /// これより大きいデータを送ると未送信分が driver の `pending_sends` に残り、
+    /// STOP_SENDING による未送信データの失敗を再現できる。
+    const SMALL_UNI_SEND_WINDOW: u64 = 8;
+
+    /// client のストリームへ WT_STOP_SENDING を送るテストサーバー
+    ///
+    /// CONNECT に 200 + WT-Protocol で応答し、client の単方向送信ストリームの送信ウィンドウを
+    /// `SMALL_UNI_SEND_WINDOW` だけ広告する。client から最初のデータを受信したらそのストリームへ
+    /// WT_STOP_SENDING を送り、その後で自分の単方向ストリームに "alive" を送る (cancel 後も
+    /// セッションが継続し他のストリームが使えることを client が確認するため)。cancel 後に
+    /// client が新しいストリームへ送ったデータを回収し、最後に WT_CLOSE_SESSION を待つ。
+    async fn run_stop_sending_server(
+        listener: tokio::net::TcpListener,
+        tls: tokio_rustls::TlsAcceptor,
+        error_code: u64,
+    ) -> std::result::Result<(), String> {
+        let (tcp, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept failed: {e}"))?;
+        let stream = tls
+            .accept(tcp)
+            .await
+            .map_err(|e| format!("TLS accept failed: {e}"))?;
+
+        // client の送信ウィンドウを小さく広告し、STOP_SENDING の時点で未送信データが
+        // driver に残るようにする
+        let wt_config = WtConfig {
+            initial_max_stream_data_uni: SMALL_UNI_SEND_WINDOW,
+            ..WtConfig::default()
+        };
+        let limits = build_limits(&wt_config).map_err(|e| format!("limits failed: {e}"))?;
+        let mut io = H2Io::server(stream, limits);
+        io.send_preface()
+            .await
+            .map_err(|e| format!("failed to send server SETTINGS: {e}"))?;
+
+        let mut wt: Option<WtSession> = None;
+        let mut connect_stream: Option<StreamId> = None;
+        // client が開始した単方向ストリームの ID
+        let mut client_uni: Option<WtStreamId> = None;
+        // cancel 後に client が新しいストリームへ送ったデータ
+        let mut after_cancel = Vec::new();
+        let mut sent_stop_sending = false;
+        let mut saw_close = false;
+
+        loop {
+            let event = io
+                .next_event()
+                .await
+                .map_err(|e| format!("server next_event failed: {e}"))?;
+            match event {
+                Event::HeadersReceived {
+                    stream_id, headers, ..
+                } if connect_stream.is_none() => {
+                    let session =
+                        accept_wt_connect(&mut io, &wt_config, stream_id, &headers).await?;
+                    wt = Some(session);
+                    connect_stream = Some(stream_id);
+                }
+                Event::DataReceived {
+                    stream_id,
+                    data,
+                    end_stream,
+                } if Some(stream_id) == connect_stream => {
+                    let session = wt.as_mut().ok_or("session is not established")?;
+                    session
+                        .feed(&data)
+                        .map_err(|e| format!("wt feed failed: {e}"))?;
+                    session
+                        .process()
+                        .map_err(|e| format!("wt process failed: {e}"))?;
+                    while let Some(event) = session.poll_event() {
+                        match event {
+                            WtEvent::StreamOpened {
+                                stream_id,
+                                bidirectional: false,
+                            } => {
+                                // 最初の単方向ストリームを STOP_SENDING の対象にする
+                                client_uni.get_or_insert(stream_id);
+                            }
+                            // client がデータを送れた = 送信ウィンドウの分だけ送信済みであり、
+                            // 残りは driver の `pending_sends` に残っている
+                            WtEvent::StreamData {
+                                stream_id,
+                                ref data,
+                                fin: _,
+                            } if Some(stream_id) == client_uni
+                                && !data.is_empty()
+                                && !sent_stop_sending =>
+                            {
+                                session
+                                    .stop_sending(stream_id, error_code)
+                                    .map_err(|e| format!("stop_sending failed: {e}"))?;
+                                sent_stop_sending = true;
+                                let uni = session
+                                    .open_uni_stream()
+                                    .map_err(|e| format!("open_uni_stream failed: {e}"))?;
+                                session
+                                    .send_stream_data(uni, b"alive", true)
+                                    .map_err(|e| format!("send_stream_data failed: {e}"))?;
+                            }
+                            // cancel 後に client が新しいストリームへ送ったデータ
+                            WtEvent::StreamData {
+                                stream_id,
+                                ref data,
+                                ..
+                            } if sent_stop_sending
+                                && Some(stream_id) != client_uni
+                                && !data.is_empty() =>
+                            {
+                                after_cancel.extend_from_slice(data);
+                            }
+                            WtEvent::SessionClosed { .. } => saw_close = true,
+                            _ => {}
+                        }
+                    }
+                    pump_server_output(&mut io, session, stream_id).await?;
+                    if end_stream {
+                        break;
+                    }
+                }
+                Event::StreamReset { stream_id, .. } | Event::StreamClosed { stream_id }
+                    if Some(stream_id) == connect_stream =>
+                {
+                    saw_close = true;
+                    break;
+                }
+                Event::ConnectionError { .. } => break,
+                _ => {}
+            }
+        }
+
+        assert!(
+            sent_stop_sending,
+            "client のストリームへ WT_STOP_SENDING を送ること"
+        );
+        assert_eq!(
+            after_cancel, b"ok",
+            "cancel 後も client が新しいストリームへ送信できること"
+        );
+        assert!(saw_close, "WT_CLOSE_SESSION を受信すること");
+        Ok(())
+    }
+
+    /// 送信結果が該当ストリームの終端 (`StreamReset`) であることを確認する
+    ///
+    /// peer の cancel は該当ストリームだけの終端であり、セッション終了
+    /// (`ConnectionClosed` など) と区別できる必要がある。
+    fn assert_stream_reset(result: Result<()>, error_code: u64, what: &str) {
+        match result {
+            Err(TransportError::StreamReset { error_code: actual }) => assert_eq!(
+                actual, error_code,
+                "{what} が peer のエラーコードで失敗すること"
+            ),
+            other => panic!("{what} が StreamReset になること: {other:?}"),
+        }
+    }
+
+    /// peer の STOP_SENDING が該当ストリームだけを終端し、セッションは継続すること
+    ///
+    /// driver は受信した WT_STOP_SENDING を台帳 (ストリーム ID → エラーコード) に記録し、
+    /// 未送信データの失敗と以降の送信の拒否を `StreamReset` にする。これによりアプリは
+    /// セッション終了と該当ストリームの終端を区別できる (draft-ietf-moq-transport-22
+    /// §6.4.2.3 (Request Cancellation and Rejection))。併せて観測チャネルで MOQT 層へ
+    /// cancel が伝わることを固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_stop_sending_terminates_only_the_stream() {
+        // cancel に載せるのは §12.5 (Stream Reset Error Codes) のコードである
+        let error_code = shiguredo_moqt::error::STREAM_CANCELLED;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind に成功すること");
+        let addr = listener
+            .local_addr()
+            .expect("local_addr の取得に成功すること");
+        let server = tokio::spawn(run_stop_sending_server(
+            listener,
+            test_server_tls(),
+            error_code,
+        ));
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let config = ClientConfig::new(addr, "localhost")
+                .authority(format!("localhost:{}", addr.port()))
+                .insecure();
+            let mut session = WtH2Client::connect(config, "/test")
+                .await
+                .expect("WebTransport セッションの確立に成功すること");
+            let mut stop_sending_rx = session
+                .take_stop_sending_receiver()
+                .expect("STOP_SENDING の観測 receiver を取り出せること");
+            // 取り出しは 1 回だけである (2 回目以降は None)
+            assert!(
+                session.take_stop_sending_receiver().is_none(),
+                "観測 receiver は 1 回だけ取り出せること"
+            );
+
+            // 送信ウィンドウ (SMALL_UNI_SEND_WINDOW) より大きいデータを送る。未送信分は
+            // driver の `pending_sends` に残り、送信は STOP_SENDING が届くまで完了しない。
+            // テスト本体を止めないよう送信は task に逃がす
+            let mut send = session
+                .open_uni_stream()
+                .await
+                .expect("open_uni_stream に成功すること");
+            let stream_id = send.stream_id();
+            let payload = vec![0xabu8; 64];
+            let send_task = tokio::spawn(async move {
+                let result = send.send(&payload).await;
+                (send, result)
+            });
+
+            // MOQT 層は観測した cancel を subscription / fetch の状態遷移に使う
+            let observed = stop_sending_rx
+                .recv()
+                .await
+                .expect("STOP_SENDING の観測が届くこと");
+            assert_eq!(
+                observed.stream_id, stream_id,
+                "cancel されたストリームの観測が届くこと"
+            );
+            assert_eq!(
+                observed.error_code, error_code,
+                "capsule が運んだ MOQT のコードがそのまま届くこと"
+            );
+
+            // 未送信データは該当ストリームの終端として失敗すること
+            let (mut send, result) = send_task.await.expect("送信タスクの join に成功すること");
+            assert_stream_reset(result, error_code, "未送信データの失敗");
+
+            // cancel 後の送信は該当ストリームの終端として拒否されること
+            let result = send.send(b"more").await;
+            assert_stream_reset(result, error_code, "cancel 後の送信");
+
+            // cancel 後も新しいストリームへは送信できること (セッションは継続する)
+            let mut resumed = session
+                .open_uni_stream()
+                .await
+                .expect("open_uni_stream に成功すること");
+            resumed
+                .send(b"ok")
+                .await
+                .expect("cancel 後も新しいストリームへ送信できること");
+
+            // セッションは継続し、他のストリームは使えること
+            let mut recv = session
+                .accept_uni_stream()
+                .await
+                .expect("accept_uni_stream に成功すること");
+            let mut received = Vec::new();
+            loop {
+                match recv.recv_chunk().await.expect("recv_chunk に成功すること") {
+                    RecvChunk::Data(data) => received.extend_from_slice(&data),
+                    RecvChunk::End(RequestStreamEnd::Fin) => break,
+                    RecvChunk::End(end) => panic!("unexpected end: {end:?}"),
+                }
+            }
+            assert_eq!(
+                received, b"alive",
+                "cancel 後も他のストリームを受信できること"
+            );
 
             session
                 .close(0, "done")

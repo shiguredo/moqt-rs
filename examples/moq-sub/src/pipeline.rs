@@ -1172,9 +1172,11 @@ fn is_transport_session_end(error: &Error) -> bool {
 /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
 /// pipeline は致命エラーにしない。
 ///
-/// WebTransport over HTTP/2 は STOP_SENDING の観測経路を持たず、peer の cancel は
-/// `TransportError::StreamClosed` として現れるため本判定の対象外である
-/// (該当経路は従来どおり致命扱いのまま)。
+/// WebTransport over HTTP/2 も driver が受領した `WT_STOP_SENDING` のエラーコードを
+/// `StreamReset` として返すため本判定の対象になる (draft-ietf-webtrans-http2-15 §6.3)。
+/// WebTransport over HTTP/3 の送信 API も同じ `StreamReset` を返す (コードは HTTP/3 の
+/// code space のままで、MOQT のコードへ写すのは観測経路だけである)。
+/// 本判定は variant のみを見るため、コードの空間に依存しない。
 fn is_peer_stream_reset(error: &Error) -> bool {
     matches!(error, Error::StreamReset { .. })
 }

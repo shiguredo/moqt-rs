@@ -157,14 +157,16 @@ pub(crate) enum StopSendingTransport {
     Quic,
     /// WebTransport over HTTP/3。HTTP/3 の code space を共有する
     WtH3,
-    /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶ
-    /// (STOP_SENDING の観測経路は無いが、変換則は QUIC と同じで remap しない)
+    /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶため
+    /// remap しない (draft-ietf-webtrans-http2-15 §6.3)
     WtH2,
 }
 
 /// peer から受信した STOP_SENDING の wire コードを MOQT のコードへ写す
 ///
 /// QUIC 直接接続は QUIC の code space を共有するため remap しない。
+/// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードをそのまま運ぶため
+/// remap しない (draft-ietf-webtrans-http2-15 §6.3)。
 /// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため §4.4 の remap を行い、
 /// remap できない値は「アプリケーションエラーコード無し」を表す `None` にする
 /// (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
@@ -229,8 +231,9 @@ impl StreamHandle {
     ///
     /// WebTransport over HTTP/3 は h3 層がストリーム状態を持つため、Sans I/O の h3 層へ
     /// 受信を通知する必要がある (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
-    /// QUIC 直接接続は h3 層を持たず、WebTransport over HTTP/2 は STOP_SENDING を
-    /// 送信 API へ伝える仕組みが無く本 example の対象外のため、どちらも何もしない。
+    /// QUIC 直接接続は h3 層を持たず、WebTransport over HTTP/2 は driver が capsule を
+    /// 受信して自ら状態を更新するため、どちらも何もしない
+    /// (draft-ietf-webtrans-http2-15 §6.3)。
     pub(crate) async fn notify_received_stop_sending(
         &self,
         stream_id: u64,
@@ -577,7 +580,7 @@ mod tests {
     ///
     /// QUIC 直接接続は QUIC の code space を MOQT と共有するため remap しない。
     /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードを直接運ぶため
-    /// remap しない (本 example に STOP_SENDING の観測経路は無いが、変換則を固定する)。
+    /// remap しない (wt-h2 の driver が capsule で受けたコードを MOQT のコードとして使う)。
     /// 32 ビットを超える値も切り詰めない。
     #[test]
     fn remap_stop_sending_error_code_keeps_non_http3_codes() {
