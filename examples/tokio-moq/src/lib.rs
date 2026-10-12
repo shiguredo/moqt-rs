@@ -107,6 +107,10 @@ pub mod webtransport;
 pub mod webtransport_h2;
 pub mod webtransport_h3;
 
+// in-process の MOQT peer 試験基盤 (テスト専用)
+#[cfg(test)]
+mod peer_harness;
+
 // 型はサブモジュールパス (`error::...` / `transport::...` / `webtransport_h3::...` / `quic::...`) 経由で
 // 参照する。最上位再エクスポートは設けない。
 
