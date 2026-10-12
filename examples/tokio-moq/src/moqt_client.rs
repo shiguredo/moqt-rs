@@ -23,21 +23,22 @@ use shiguredo_moqt::session::types::{
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
-    message::ControlMessage, message::ReasonPhrase, message::common::Location,
-    message::common::TrackNamespace, message_parameter::AuthorizationToken,
-    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
-    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
-    message_parameter::PARAM_SUBSCRIBER_PRIORITY, session::core::Session,
-    session::types::DataStreamId, session::types::DataStreamResetReason,
-    session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
-    session::types::Transport as MoqtTransport, stream::decoder::DecodedSubgroupObject,
-    stream::fetch::FetchHeader, stream::fetch::FetchPriorContext, stream::fetch::FetchStreamEntry,
+    error::SESSION_PROTOCOL_VIOLATION, message::ControlMessage, message::ReasonPhrase,
+    message::common::Location, message::common::TrackNamespace,
+    message_parameter::AuthorizationToken, message_parameter::MessageParameter,
+    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
+    message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+    session::core::Session, session::types::DataStreamId, session::types::DataStreamResetReason,
+    session::types::RequestStreamEnd, session::types::SessionError, session::types::SessionEvent,
+    session::types::SessionState, session::types::Transport as MoqtTransport,
+    stream::decoder::DecodedSubgroupObject, stream::fetch::FetchHeader,
+    stream::fetch::FetchPriorContext, stream::fetch::FetchStreamEntry,
     stream::fetch::FetchStreamObject, stream::fetch::FetchSubgroupIdMode,
     stream::subgroup::SubgroupHeader, track_properties::TrackProperties,
 };
 
 use crate::c4m_authorization_token;
-use crate::error::{Result, TransportError};
+use crate::error::{Result, TransportError, session_error_code};
 use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::transport::{
     BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
@@ -1006,16 +1007,7 @@ impl MoqtClient {
                 TransportError::Quic("connection closed before control stream".into())
             })?;
         let mut control_recv = ControlStream::new(RecvStream::Quic(recv_stream));
-        let stream_type = match control_recv.read_stream_type().await? {
-            StreamRead::Value(stream_type) => stream_type,
-            StreamRead::Closed(end) => {
-                let _ = session.recv_control_stream_closed(end);
-                return Err(TransportError::Internal(
-                    "control stream closed before stream type".into(),
-                ));
-            }
-        };
-        session.recv_control_stream_type(stream_type)?;
+        recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
             session,
@@ -1092,16 +1084,7 @@ impl MoqtClient {
         // 制御ストリームを受け取る順序は `take_uni_receiver` より前である (上記)。
         // 受け取ったストリームは acceptor へ流さず、ここで制御ストリームとして読む
         let mut control_recv = ControlStream::new(RecvStream::WtH3(wt_recv));
-        let stream_type = match control_recv.read_stream_type().await? {
-            StreamRead::Value(stream_type) => stream_type,
-            StreamRead::Closed(end) => {
-                let _ = session.recv_control_stream_closed(end);
-                return Err(TransportError::Internal(
-                    "control stream closed before stream type".into(),
-                ));
-            }
-        };
-        session.recv_control_stream_type(stream_type)?;
+        recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
             session,
@@ -1185,16 +1168,7 @@ impl MoqtClient {
             s.accept_uni_stream().await?
         };
         let mut control_recv = ControlStream::new(RecvStream::WtH2(wt_recv));
-        let stream_type = match control_recv.read_stream_type().await? {
-            StreamRead::Value(stream_type) => stream_type,
-            StreamRead::Closed(end) => {
-                let _ = session.recv_control_stream_closed(end);
-                return Err(TransportError::Internal(
-                    "control stream closed before stream type".into(),
-                ));
-            }
-        };
-        session.recv_control_stream_type(stream_type)?;
+        recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
             session,
@@ -1237,17 +1211,44 @@ impl MoqtClient {
             bidi_acceptor,
         } = io;
         // peer SETUP 受信
-        let peer_setup = match control_recv.recv_message().await? {
-            StreamRead::Value(message) => message,
-            StreamRead::Closed(end) => {
+        let peer_setup = match control_recv.recv_message().await {
+            Ok(StreamRead::Value(message)) => message,
+            Ok(StreamRead::Closed(end)) => {
                 let _ = session.recv_control_stream_closed(end);
+                close_handshake_session(
+                    &mut session,
+                    &handle,
+                    SESSION_PROTOCOL_VIOLATION,
+                    "control stream closed before SETUP",
+                )
+                .await;
                 return Err(TransportError::Internal(
                     "control stream closed before SETUP".into(),
                 ));
             }
+            Err(e) => {
+                close_handshake_session_on_message_error(&mut session, &handle, &e).await;
+                return Err(e);
+            }
         };
-        session.recv_control(peer_setup)?;
+        if let Err(e) = session.recv_control(peer_setup) {
+            close_handshake_session(
+                &mut session,
+                &handle,
+                SESSION_PROTOCOL_VIOLATION,
+                "peer SETUP was rejected",
+            )
+            .await;
+            return Err(e.into());
+        }
         if session.state() != SessionState::Established {
+            close_handshake_session(
+                &mut session,
+                &handle,
+                SESSION_PROTOCOL_VIOLATION,
+                "session not established after SETUP exchange",
+            )
+            .await;
             return Err(TransportError::Internal(
                 "session not established after SETUP exchange".into(),
             ));
@@ -2585,6 +2586,128 @@ async fn send_control_stream_setup(
         .send(Bytes::from(encode_control_stream_setup(setup)?))
         .await?;
     Ok(())
+}
+
+/// SETUP 交換中に失敗した session を終了コード付きで閉じる
+///
+/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+/// KEY_VALUE_FORMATTING_ERROR で、§8.9 (Authorization Token Compression) は Token 構造を
+/// decode できない場合を KEY_VALUE_FORMATTING_ERROR で、それぞれセッションを閉じることを
+/// MUST で要求する (§8.9 の整形式だが不正な Token はメッセージ単位の reject を要求するが、
+/// SETUP は Request ID を持たず reject できないため、同じくセッションを閉じる)。
+/// 確立前の失敗では `MoqtClient` がまだ存在しないため、この関数が Session と送信ハンドルを
+/// 直接使って終了コードを送る (`drain_events` の `CloseSession` 処理と同じ経路)。
+///
+/// session が `CloseSession` を積んでいれば (session 層の検証失敗) そのコードと理由を使い、
+/// 積んでいなければ (decode 失敗) 呼び出し側が渡したコードと理由を使う。終了コードを wire に
+/// 載せるのは [`StreamHandle::close`] であり、QUIC では CONNECTION_CLOSE になる
+/// (draft-ietf-moq-transport-22 §6.6 (Termination))。制御ストリームへメッセージを書くのでは
+/// ない。
+async fn close_handshake_session(
+    session: &mut Session,
+    handle: &StreamHandle,
+    fallback_code: u64,
+    fallback_reason: &'static str,
+) {
+    let mut close_session = take_close_session(session);
+    if close_session.is_none() {
+        // session が `CloseSession` を積んでいない場合は渡されたコードで閉じる。
+        // `Session::close` はローカル専用コードを `INTERNAL_ERROR` に置換するため、
+        // 正規化後のコードと理由を改めて取り出す。既に Closing / Closed の場合は `close` が
+        // no-op になり正規化できないが、呼び出し側が渡すコードはレジストリのコードに限る
+        session.close(fallback_code, fallback_reason);
+        close_session = take_close_session(session);
+    }
+    let (code, reason) = match close_session {
+        Some(error) => (error.code, error.reason),
+        None => (fallback_code, fallback_reason),
+    };
+    tracing::warn!("Closing session during SETUP exchange: {code:#x} {reason}");
+    if let Err(e) = handle.close(code, reason).await {
+        tracing::warn!("Failed to close session during SETUP exchange: {e}");
+    }
+}
+
+/// session が積んだ `CloseSession` を取り出す
+///
+/// `CloseSession` はキューの先頭とは限らないため、見つかるまで取り出す。`Session::fail` は
+/// Closing / Closed で早期 return するため、キューに積まれる `CloseSession` は高々 1 件である。
+/// 見つかるまでに取り出した他のイベントは捨てる (SETUP 交換中の失敗経路からのみ呼ぶため、
+/// 捨てても問題になるイベントは積まれていない)。
+fn take_close_session(session: &mut Session) -> Option<SessionError> {
+    while let Some(event) = session.poll_event() {
+        if let SessionEvent::CloseSession(error) = event {
+            return Some(error);
+        }
+    }
+    None
+}
+
+/// peer の control stream の先頭から stream type を読み、session へ通知する
+///
+/// SETUP 交換中の失敗は終了コード付きで閉じる。control stream の先頭は
+/// `SETUP_STREAM_TYPE` (0x2F00) であり、未知の stream type の受信は
+/// `PROTOCOL_VIOLATION` で閉じる (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional
+/// Streams) / §12.2 (Session Termination Codes))。ストリームが stream type を読む前に終端した
+/// 場合も同じである。既知だが control stream でない型を先頭に置く peer は、本 example が
+/// 最初の uni stream を control stream として受理するため同じ経路で閉じる。
+async fn recv_control_stream_type(
+    session: &mut Session,
+    handle: &StreamHandle,
+    control_recv: &mut ControlStream,
+) -> Result<()> {
+    let stream_type = match control_recv.read_stream_type().await {
+        Ok(StreamRead::Value(stream_type)) => stream_type,
+        Ok(StreamRead::Closed(end)) => {
+            let _ = session.recv_control_stream_closed(end);
+            close_handshake_session(
+                session,
+                handle,
+                SESSION_PROTOCOL_VIOLATION,
+                "control stream closed before stream type",
+            )
+            .await;
+            return Err(TransportError::Internal(
+                "control stream closed before stream type".into(),
+            ));
+        }
+        Err(e) => {
+            close_handshake_session_on_message_error(session, handle, &e).await;
+            return Err(e);
+        }
+    };
+    if let Err(e) = session.recv_control_stream_type(stream_type) {
+        close_handshake_session(
+            session,
+            handle,
+            SESSION_PROTOCOL_VIOLATION,
+            "control stream has an unexpected stream type",
+        )
+        .await;
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// decode 失敗で SETUP 交換中の session を閉じる
+///
+/// 終了コードは [`session_error_code`] の写像で決める。decode 失敗以外 (transport 自体の
+/// 失敗) は接続が死んでいるため終了コードを送れず、何もしない。
+async fn close_handshake_session_on_message_error(
+    session: &mut Session,
+    handle: &StreamHandle,
+    error: &TransportError,
+) {
+    let TransportError::Moqt(message_error) = error else {
+        return;
+    };
+    close_handshake_session(
+        session,
+        handle,
+        session_error_code(message_error),
+        message_error.reason(),
+    )
+    .await;
 }
 
 #[cfg(test)]

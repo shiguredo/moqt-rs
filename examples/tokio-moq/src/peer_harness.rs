@@ -13,21 +13,23 @@
 //! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) である。WebTransport over HTTP/3 /
 //! HTTP/2 のハーネスは必要になった時点で別途追加する。
 //!
-//! 提供するのは SETUP 交換、peer 起点 request stream へのメッセージ送信、peer 起点 request
-//! stream に届く応答の読み出し、client 起点 request stream の受理と REQUEST_OK による応答で
-//! ある。次は提供しない (必要になった時点で拡張する)。
+//! 提供するのは SETUP 交換 (送る SETUP の差し替え、SETUP を送らない control stream の終端を
+//! 含む)、peer 起点 request stream へのメッセージ送信、peer 起点 request stream に届く応答の
+//! 読み出し、client 起点 request stream の受理と REQUEST_OK による応答、client が送る終了
+//! コード (CONNECTION_CLOSE) の観測である。次は提供しない (必要になった時点で拡張する)。
 //!
-//! - client が送る終了コード (CONNECTION_CLOSE) の観測
 //! - peer が送る STOP_SENDING の観測
-//! - SETUP の内容を差し替えて送る経路 (`Session::new_server` が積んだ SETUP を送るだけである)
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
 use shiguredo_moqt::message::ControlMessage;
+use shiguredo_moqt::message::Setup;
 use shiguredo_moqt::message_parameter::MessageParameters;
-use shiguredo_moqt::parameter::SetupOptions;
+use shiguredo_moqt::parameter::{SetupOption, SetupOptionValue, SetupOptions};
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{SessionEvent, SessionState, Transport as MoqtTransport};
 use shiguredo_moqt::stream::encode_control_stream_setup;
@@ -88,12 +90,67 @@ fn request_stream_id(message: &ControlMessage) -> Option<u64> {
     }
 }
 
+/// client が送る終了コードの観測を待つ上限時間
+///
+/// テスト全体の上限 ([`tests::TEST_TIMEOUT`]) より短くし、終了コードを送らない退行を
+/// 「終了コードが届かない」として切り分けられるようにする。
+const CLOSE_CODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// client が送る CONNECTION_CLOSE の終了コードを記録する購読者
+///
+/// s2n-quic は application close を `s2n_quic::connection::Error::Application` として
+/// `on_connection_closed` に届ける (`initiator` が `Remote` なら peer 起点である)。peer 側で
+/// 終了コードを観測する唯一の経路であり、example が終了コード付きで閉じたことをテストが
+/// 確かめるために使う。
+///
+/// 記録は `std::sync::Mutex` で保護する。購読者は s2n-quic の駆動スレッドから同期で呼ばれ、
+/// `tokio::sync::Mutex` を await できないため、ロックを保持する区間を「Vec へ 1 件 push する」
+/// だけに限って使う。
+#[derive(Debug, Default)]
+struct CloseCodeRecorder {
+    /// 観測した終了コード
+    codes: Arc<StdMutex<Vec<u64>>>,
+}
+
+impl s2n_quic::provider::event::Subscriber for CloseCodeRecorder {
+    type ConnectionContext = ();
+
+    fn create_connection_context(
+        &mut self,
+        _meta: &s2n_quic::provider::event::ConnectionMeta,
+        _info: &s2n_quic::provider::event::ConnectionInfo<'_>,
+    ) -> Self::ConnectionContext {
+    }
+
+    fn on_connection_closed(
+        &mut self,
+        _context: &mut Self::ConnectionContext,
+        _meta: &s2n_quic::provider::event::ConnectionMeta,
+        event: &s2n_quic::provider::event::events::ConnectionClosed,
+    ) {
+        // `Application` は自側の close でも作られるため、peer 起点 (`Remote`) に限る
+        if let s2n_quic::connection::Error::Application {
+            error,
+            initiator: s2n_quic::provider::event::Location::Remote,
+            ..
+        } = &event.error
+        {
+            self.codes
+                .lock()
+                .expect("終了コードの記録を壊さない")
+                .push(u64::from(*error));
+        }
+    }
+}
+
 /// client の接続を受理する前の in-process peer (s2n-quic サーバー)
 pub(crate) struct TestPeerServer {
     /// 接続を受理する s2n-quic サーバー
     server: s2n_quic::Server,
     /// 待ち受けているアドレス
     local_addr: SocketAddr,
+    /// client が送る終了コードの記録 (サーバーごとに 1 つで、受理した全接続が共有する)
+    close_codes: Arc<StdMutex<Vec<u64>>>,
 }
 
 impl TestPeerServer {
@@ -130,15 +187,24 @@ impl TestPeerServer {
             .build()
             .map_err(|e| TransportError::Internal(format!("failed to build server I/O: {e}")))?;
 
+        let close_codes = Arc::new(StdMutex::new(Vec::new()));
         let server = s2n_quic::Server::builder()
             .with_tls(server_tls)
             .map_err(|e| TransportError::Internal(format!("failed to set TLS: {e}")))?
             .with_io(server_io)
             .map_err(|e| TransportError::Internal(format!("failed to set I/O: {e}")))?
+            .with_event(CloseCodeRecorder {
+                codes: Arc::clone(&close_codes),
+            })
+            .map_err(|e| TransportError::Internal(format!("failed to set event: {e}")))?
             .start()
             .map_err(|e| TransportError::Internal(format!("failed to start server: {e}")))?;
 
-        Ok(Self { server, local_addr })
+        Ok(Self {
+            server,
+            local_addr,
+            close_codes,
+        })
     }
 
     /// 待ち受けているアドレス
@@ -153,7 +219,7 @@ impl TestPeerServer {
             .accept()
             .await
             .ok_or_else(|| TransportError::Quic("server stopped before connection".into()))?;
-        TestPeer::new(connection)
+        TestPeer::new(connection, Arc::clone(&self.close_codes))
     }
 }
 
@@ -217,11 +283,16 @@ pub(crate) struct TestPeer {
     opened_requests: Vec<OpenedRequest>,
     /// peer から受理した request stream
     accepted_requests: Vec<AcceptedRequest>,
+    /// client が送る終了コードの記録
+    close_codes: Arc<StdMutex<Vec<u64>>>,
 }
 
 impl TestPeer {
     /// 受理した QUIC 接続から peer を作る
-    fn new(connection: s2n_quic::connection::Connection) -> Result<Self> {
+    fn new(
+        connection: s2n_quic::connection::Connection,
+        close_codes: Arc<StdMutex<Vec<u64>>>,
+    ) -> Result<Self> {
         let (handle, acceptor) = connection.split();
         let (bidi_acceptor, recv_acceptor) = acceptor.split();
         let session = Session::new_server(MoqtTransport::Quic, SetupOptions::new())?;
@@ -234,6 +305,7 @@ impl TestPeer {
             control_recv: None,
             opened_requests: Vec::new(),
             accepted_requests: Vec::new(),
+            close_codes,
         })
     }
 
@@ -444,6 +516,72 @@ impl TestPeer {
     pub(crate) fn session_state(&self) -> SessionState {
         self.session.state()
     }
+
+    /// 自側 control stream の先頭に書く完全なバイト列を送る
+    ///
+    /// `ControlMessage::encode` は stream type prefix を含まないため、SETUP を差し替える
+    /// テストは prefix を含むバイト列
+    /// (`shiguredo_moqt::stream::encode_control_stream_setup`) を作って渡す。prefix を誤らせて
+    /// `Session::recv_control_stream_type` の失敗を再現することもできる。
+    ///
+    /// 受け取った側は先頭の varint を stream type として読むため、空のバイト列を送ると
+    /// stream type を読む前に終端する (FIN は [`Self::finish_control_stream`] で送る)。
+    pub(crate) async fn send_control_stream_head(&mut self, head: Vec<u8>) -> Result<()> {
+        let mut control_send = self.handle.open_send_stream().await?;
+        if !head.is_empty() {
+            control_send.send(Bytes::from(head)).await?;
+        }
+        self.control_send = Some(control_send);
+        Ok(())
+    }
+
+    /// 自側 control stream の送信方向を FIN で終端する
+    pub(crate) fn finish_control_stream(&mut self) -> Result<()> {
+        let mut control_send = self
+            .control_send
+            .take()
+            .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
+        control_send.finish()?;
+        Ok(())
+    }
+
+    /// 自側の SETUP を指定した `SetupOptions` で送る
+    ///
+    /// ハーネスの session は `SetupOptions::new()` のままにする (server 役の SETUP に PATH を
+    /// 渡すと `Session::new_server` が `INVALID_PATH` で拒否するため)。送る SETUP だけを
+    /// 差し替えて、client の検証失敗を再現する。
+    pub(crate) async fn send_setup(&mut self, options: &SetupOptions) -> Result<()> {
+        let setup = ControlMessage::Setup(Setup {
+            options: options.clone(),
+        });
+        let head = shiguredo_moqt::stream::encode_control_stream_setup(&setup)?;
+        self.send_control_stream_head(head).await
+    }
+
+    /// peer が観測した client の終了コード (CONNECTION_CLOSE) を待つ
+    ///
+    /// example が終了コードを送らずに接続を切った場合と、上限時間までに届かなかった場合は
+    /// `TransportError::Internal` を返す。
+    pub(crate) async fn recv_close_code(&mut self) -> Result<u64> {
+        let deadline = Instant::now() + CLOSE_CODE_TIMEOUT;
+        loop {
+            if let Some(code) = self
+                .close_codes
+                .lock()
+                .expect("終了コードの記録を壊さない")
+                .first()
+                .copied()
+            {
+                return Ok(code);
+            }
+            if Instant::now() >= deadline {
+                return Err(TransportError::Internal(
+                    "client did not send CONNECTION_CLOSE".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 mod tests {
@@ -451,7 +589,9 @@ mod tests {
     use std::time::Duration;
 
     use shiguredo_moqt::error::{
-        REQUEST_NOT_SUPPORTED, SESSION_INVALID_REQUEST_ID, SESSION_PROTOCOL_VIOLATION,
+        REQUEST_NOT_SUPPORTED, SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID,
+        SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN,
+        SESSION_PROTOCOL_VIOLATION,
     };
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
@@ -781,6 +921,327 @@ mod tests {
                 }
                 other => panic!("CloseSession が届くこと: {other:?}"),
             }
+        })
+        .await;
+    }
+
+    /// 生の Setup Options を載せた SETUP を control stream の先頭に書くバイト列
+    ///
+    /// `ControlMessage::Setup` は `SetupOptions` の型付き API しか受け付けないため、型では
+    /// 表現できない不正な Setup Options は `ControlMessage::Unsupported` で書き出す (encode は
+    /// type varint + u16 長 + body であり SETUP と同じ書式になる)。body は
+    /// draft-ietf-moq-transport-22 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
+    /// エンコードされた KVP」である。
+    fn setup_head(body: Vec<u8>) -> Vec<u8> {
+        let message = ControlMessage::Unsupported {
+            type_id: shiguredo_moqt::stream::SETUP_STREAM_TYPE,
+            request_id: None,
+            body,
+        };
+        shiguredo_moqt::stream::encode_control_stream_setup(&message)
+            .expect("SETUP のバイト列を組み立てられること")
+    }
+
+    /// peer と client を接続し、client の SETUP 交換を開始した状態にする
+    ///
+    /// [`connect_pair`] と違い peer 側の SETUP 送信はテストが決める。client の establish は
+    /// 相手の SETUP を待つため、タスクとして起動して返す。
+    async fn connect_handshake() -> (TestPeer, tokio::task::JoinHandle<Result<MoqtClient>>) {
+        let mut server = TestPeerServer::start()
+            .await
+            .expect("サーバーを起動できること");
+        let addr = server.local_addr();
+
+        let connect =
+            tokio::spawn(async move { crate::quic::connect(addr, "localhost", None).await });
+        let (connection, stop_sending_rx) = connect
+            .await
+            .expect("接続タスクが終了すること")
+            .expect("接続できること");
+        let peer = server.accept().await.expect("接続を受理できること");
+
+        let task_monitor = tokio_metrics::TaskMonitor::new();
+        let establish = tokio::spawn(async move {
+            MoqtClient::establish_quic(
+                connection,
+                stop_sending_rx,
+                "/",
+                "localhost",
+                "test-peer",
+                &[],
+                &task_monitor,
+            )
+            .await
+            .map(|(client, _acceptor)| client)
+        });
+        (peer, establish)
+    }
+
+    /// 初回 SETUP のトークン構造の decode 失敗で KEY_VALUE_FORMATTING_ERROR を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は Token 構造を
+    /// decode できない場合に KEY_VALUE_FORMATTING_ERROR で閉じることを MUST で要求する。
+    /// AUTHORIZATION_TOKEN (0x03) の値に未知の Alias Type (0x04) を置くと
+    /// `AuthorizationToken::decode` が `KeyValueFormattingError` を返す。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_unknown_token_alias_closes_with_key_value_formatting_error() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // Setup Options: option type 0x03 (delta 3)、値長 1、値 = 未知の Alias Type (0x04)
+            peer.send_control_stream_head(setup_head(vec![0x03, 0x01, 0x04]))
+                .await
+                .expect("control stream を書けること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP の decode 失敗で確立が失敗すること");
+            assert!(
+                matches!(error, TransportError::Moqt(_)),
+                "decode 失敗として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_KEY_VALUE_FORMATTING_ERROR,
+                "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+            );
+        })
+        .await;
+    }
+
+    /// 初回 SETUP のトークン重複で MALFORMED_AUTH_TOKEN を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は Authorization Token の
+    /// 繰り返しを "(Token Type, Token Value) が alias 解決後に一意である限り" 許し、整形式だが
+    /// 不正な Token を "MUST reject that message with an MALFORMED_AUTH_TOKEN error" とする。
+    /// SETUP は Request ID を持たずメッセージ単位の reject ができないため、§12.2
+    /// (Session Termination Codes) の MALFORMED_AUTH_TOKEN (0x16) でセッションを閉じる。
+    /// `SetupOptions::encode` は重複を拒否するため、生の Setup Options で 2 つ目を書く。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_duplicate_tokens_closes_with_malformed_auth_token() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // REGISTER (0x01) の AUTHORIZATION_TOKEN を 2 つ書き、(Token Type, Token Value) を
+            // 重複させる (alias だけが異なる)。§12.2 の MALFORMED_AUTH_TOKEN は
+            // "registration 中の不正な直列化" を指すため、REGISTER で組む
+            let token_a: Vec<u8> = [&[0x01, 0x01, 0x00][..], b"test"].concat();
+            let token_b: Vec<u8> = [&[0x01, 0x02, 0x00][..], b"test"].concat();
+            let mut body = vec![0x03, token_a.len() as u8];
+            body.extend_from_slice(&token_a);
+            // 2 つ目は option type のデルタ 0
+            body.push(0x00);
+            body.push(token_b.len() as u8);
+            body.extend_from_slice(&token_b);
+            peer.send_control_stream_head(setup_head(body))
+                .await
+                .expect("control stream を書けること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP の decode 失敗で確立が失敗すること");
+            assert!(
+                matches!(
+                    error,
+                    TransportError::Moqt(shiguredo_moqt::error::MessageError::MalformedAuthToken(
+                        _
+                    ))
+                ),
+                "トークン重複として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_MALFORMED_AUTH_TOKEN,
+                "トークン重複は MALFORMED_AUTH_TOKEN (0x16) であること"
+            );
+        })
+        .await;
+    }
+
+    /// server 役の SETUP が PATH を持つと INVALID_PATH を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §9.1.2 (PATH) は server が PATH を送ることを MUST NOT と
+    /// する。session 層の検証失敗であるため、`Session` が積んだ終了コードを送る。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_path_from_server_closes_with_invalid_path() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            let mut options = SetupOptions::new();
+            options.push(SetupOption {
+                option_type: shiguredo_moqt::parameter::SETUP_OPTION_PATH,
+                value: SetupOptionValue::Bytes(b"/evil".to_vec()),
+            });
+            peer.send_setup(&options).await.expect("SETUP を送れること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("session 層の検証失敗で確立が失敗すること");
+            assert!(
+                matches!(error, TransportError::Internal(_)),
+                "session 層の失敗として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_INVALID_PATH,
+                "server の PATH は INVALID_PATH (0x8) であること"
+            );
+        })
+        .await;
+    }
+
+    /// control stream の stream type が不一致だと PROTOCOL_VIOLATION を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams) は control stream の先頭を
+    /// `SETUP_STREAM_TYPE` (0x2F00) に限り、未知の stream type の受信でセッションを閉じる。
+    /// 終了コードは §12.2 (Session Termination Codes) の PROTOCOL_VIOLATION (0x3) である。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_stream_with_wrong_stream_type_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // 誤った stream type prefix (control stream は 0x2F00)
+            let mut head = Vec::new();
+            shiguredo_moqt::varint::encode(0x2F01, &mut head);
+            peer.send_control_stream_head(head)
+                .await
+                .expect("control stream を書けること");
+
+            establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("stream type の不一致で確立が失敗すること");
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "stream type の不一致は PROTOCOL_VIOLATION (0x3) であること"
+            );
+        })
+        .await;
+    }
+
+    /// SETUP の前に control stream が終端すると PROTOCOL_VIOLATION を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は control stream を
+    /// セッション中に閉じることを禁じる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_stream_finished_before_setup_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // 何も書かずに control stream を終端する (client は stream type を読めない)
+            peer.send_control_stream_head(Vec::new())
+                .await
+                .expect("control stream を開けること");
+            peer.finish_control_stream()
+                .expect("control stream を終端できること");
+
+            establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP 前の終端で確立が失敗すること");
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "SETUP 前の終端は PROTOCOL_VIOLATION (0x3) であること"
+            );
+        })
+        .await;
+    }
+
+    /// 初回 SETUP の decode 失敗で写像が PROTOCOL_VIOLATION を選ぶこと
+    ///
+    /// draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN) は SETUP の Token に DELETE /
+    /// USE_ALIAS を許さず、受信側は PROTOCOL_VIOLATION でセッションを閉じる (原文の MUST は
+    /// server が受信する場合について述べているが、library は役割によらず同じ検証をする)。
+    /// SETUP の decode 失敗なので写像 (`session_error_code`) の 3 つ目の分岐を通り、
+    /// §12.2 (Session Termination Codes) の PROTOCOL_VIOLATION (0x3) で閉じる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_delete_token_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // Setup Options: option type 0x03 (delta 3)、値長 2、値 = DELETE (0x00) + alias 1
+            peer.send_control_stream_head(setup_head(vec![0x03, 0x02, 0x00, 0x01]))
+                .await
+                .expect("control stream を書けること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP の decode 失敗で確立が失敗すること");
+            assert!(
+                matches!(error, TransportError::Moqt(_)),
+                "decode 失敗として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "DELETE トークンは PROTOCOL_VIOLATION (0x3) であること"
+            );
+        })
+        .await;
+    }
+
+    /// stream type の直後に control stream が終端すると PROTOCOL_VIOLATION を送ること
+    ///
+    /// stream type は正当だが SETUP を送らずに終端する場合であり、`finish_handshake` の
+    /// 「control stream closed before SETUP」経路を通る (stream type を読む前に終端する
+    /// [`control_stream_finished_before_setup_closes_with_protocol_violation`] とは別の経路)。
+    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は control stream を
+    /// セッション中に閉じることを禁じ、§12.2 (Session Termination Codes) の
+    /// PROTOCOL_VIOLATION (0x3) で閉じる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_stream_finished_after_stream_type_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // 正当な stream type prefix だけを書いて SETUP を送らずに終端する
+            let mut head = Vec::new();
+            shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut head);
+            peer.send_control_stream_head(head)
+                .await
+                .expect("control stream を書けること");
+            peer.finish_control_stream()
+                .expect("control stream を終端できること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP 前の終端で確立が失敗すること");
+            assert!(
+                error.to_string().contains("closed before SETUP"),
+                "SETUP 前の終端として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "SETUP 前の終端は PROTOCOL_VIOLATION (0x3) であること"
+            );
         })
         .await;
     }

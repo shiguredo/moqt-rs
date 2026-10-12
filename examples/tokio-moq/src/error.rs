@@ -3,6 +3,39 @@
 //! QUIC / WebTransport の全戻り値をこの `TransportError` に統一する。
 //! 各バイナリのアプリケーションエラー型は `From<TransportError>` を実装して
 //! `?` で伝播できるようにする。
+//!
+//! MOQT メッセージの encode / decode 失敗をどのセッション終了コードで閉じるかも、この層の
+//! [`session_error_code`] に集約する (`moq-pub` / `moq-sub` / 確立前の `MoqtClient` が共有する)。
+
+use shiguredo_moqt::error::{
+    MessageError, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN,
+    SESSION_PROTOCOL_VIOLATION,
+};
+
+/// encode / decode 失敗を閉じる終了コード
+///
+/// library の data plane (`src/session/data.rs` の `session_error_from_data_message`) と
+/// 異なるのは `MalformedAuthToken` の写像 (0x16) だけである。draft-ietf-moq-transport-22
+/// §8.3 (Key-Value-Pair Structure) が MUST を定める書式違反は KEY_VALUE_FORMATTING_ERROR
+/// (0x6)、それ以外は両者とも PROTOCOL_VIOLATION (0x3) で閉じる。
+///
+/// Request ID を持つ request メッセージの不正トークンは、library のセッションが
+/// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否するためここには届かない。
+/// ここへ届く `MalformedAuthToken` は、自側で重複トークンを組み立てた encode 失敗と、
+/// peer の SETUP (確立前後を問わない) の decode 失敗である。確立前の SETUP の decode 失敗も
+/// `MoqtClient::establish_*` がこの写像で終了コードを決める。
+///
+/// 終了コードは §12.2 (Session Termination Codes) の MALFORMED_AUTH_TOKEN (0x16)
+/// 「registration 中の不正な Auth Token 直列化」を使う (PROTOCOL_VIOLATION では原因を
+/// 伝えられない)。encode と decode はこの層では区別できないが、いずれも
+/// AUTHORIZATION_TOKEN の直列化の不整合であり、reason phrase が実際の条件を示す。
+pub fn session_error_code(error: &MessageError) -> u64 {
+    match error {
+        MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
+        MessageError::MalformedAuthToken(_) => SESSION_MALFORMED_AUTH_TOKEN,
+        _ => SESSION_PROTOCOL_VIOLATION,
+    }
+}
 
 /// 共有トランスポート層のエラー型
 #[derive(Debug)]
@@ -189,6 +222,40 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "MOQT message error: protocol violation: out of scope parameter"
+        );
+    }
+
+    /// encode / decode 失敗がセッション終了コードへ写ること
+    ///
+    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
+    /// KEY_VALUE_FORMATTING_ERROR (0x6)、MALFORMED_AUTH_TOKEN (0x16)、
+    /// PROTOCOL_VIOLATION (0x3) を使い分ける。
+    #[test]
+    fn session_error_code_maps_message_failures() {
+        assert_eq!(
+            session_error_code(&MessageError::KeyValueFormattingError(
+                "test formatting error"
+            )),
+            SESSION_KEY_VALUE_FORMATTING_ERROR,
+            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+        );
+        // Request ID を持たない経路 (SETUP の AUTHORIZATION_TOKEN) の不正トークンは
+        // セッション終了コードの MALFORMED_AUTH_TOKEN (0x16) へ写す
+        assert_eq!(
+            session_error_code(&MessageError::MalformedAuthToken("test malformed token")),
+            SESSION_MALFORMED_AUTH_TOKEN,
+            "不正トークンは MALFORMED_AUTH_TOKEN (0x16) であること"
+        );
+        assert_eq!(
+            session_error_code(&MessageError::ProtocolViolation("test violation")),
+            SESSION_PROTOCOL_VIOLATION,
+            "プロトコル違反は PROTOCOL_VIOLATION (0x3) であること"
+        );
+        // メッセージを持たない失敗も PROTOCOL_VIOLATION として扱う
+        assert_eq!(
+            session_error_code(&MessageError::UnexpectedEof),
+            SESSION_PROTOCOL_VIOLATION,
+            "切り詰めは PROTOCOL_VIOLATION (0x3) であること"
         );
     }
 }
