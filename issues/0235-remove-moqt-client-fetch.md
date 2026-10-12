@@ -1,7 +1,7 @@
 # example の MoqtClient::fetch を削除する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/remove-moqt-client-fetch
 - Polished: {YYYY-MM-DD}
 
@@ -45,3 +45,24 @@
 - `MoqtClient::fetch` とその関連シンボルが消え、参照が残っていないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MoqtClient::fetch` / `FetchResult` / `build_fetch_result` / `wait_fetch_resolved` を削除した。
+  example に FETCH を発行する経路は無く (0224 でカタログ取得を FILL_PARAMETERS 付き SUBSCRIBE に
+  寄せた時点で呼び出し元が消えている)、open issue にも追加する計画が無い。
+- FETCH を受けて応答する経路 (`send_fetch_ok` / `send_fetch_response` /
+  `send_fill_fetch_response` / `reject_fill_fetch`) と fill fetch stream の `DataPlaneHandle` API は
+  そのまま残した。`FetchState` は FETCH 応答データストリームの STOP_SENDING 処理で使い続ける。
+- 削除に伴い、example が FETCH を発行する・FETCH にもトークンを付与すると読める記述を実態に
+  合わせた (`MoqtClient` のモジュール doc / `auth_tokens` / `with_auth_parameters` /
+  `establish_*` / `send_request_update` / `drain_events` / テスト doc、`README.md`、
+  `examples/README.md`)。トークンを付与する送信経路の列挙は PUBLISH / SUBSCRIBE /
+  REQUEST_UPDATE の 3 つになった。
+- 0223 が `MoqtClient::fetch` の認可トークン付与を修正していたため、本削除でその到達点の一部は
+  無効になる。0223 の解決方法は記録としてそのまま残し、README と doc コメントの列挙だけを
+  本 issue で直した。
+- 本作業で起票した関連 issue (実装は別途): 0236 (request stream の先頭メッセージの扱い)、
+  0237 (§8.9 の alias 解決後の一意性)、0238 (KVP の宣言長超過の終了コード)、
+  0239 (手組み SETUP の一意性検証)、0240 (初回 SETUP 交換の失敗時の終了コード)、
+  0241 (未対応 request の REGISTER 適用)、0242 (in-process の MOQT peer 試験基盤)。
