@@ -705,6 +705,8 @@ fn subgroup_header() -> SubgroupHeader {
 
 #[path = "test_session/alias_tombstone.rs"]
 mod alias_tombstone;
+#[path = "test_session/auth_token.rs"]
+mod auth_token;
 #[path = "test_session/data_stream.rs"]
 mod data_stream;
 #[path = "test_session/datagram_object_filter.rs"]

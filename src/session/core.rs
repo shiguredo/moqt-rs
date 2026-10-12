@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
-    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH,
-    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION,
-    SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
+    PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, REQUEST_MALFORMED_AUTH_TOKEN,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
+    SESSION_INVALID_PATH, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
+    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
     ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
@@ -939,22 +939,26 @@ impl Session {
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
     /// - `validate_peer_request_id` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
+    /// - 構造は正しいが内容が不正な AUTHORIZATION_TOKEN (同一 (Token Type, Token Value) の
+    ///   重複) を含む場合は REQUEST_ERROR(MALFORMED_AUTH_TOKEN) を送信し `Ok(false)` を返す
+    ///   (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))
     /// - control GOAWAY 送信済み (`local_sent`) なら REQUEST_ERROR(GOING_AWAY) を送信し
     ///   `Ok(false)` を返す (draft §9.2 (GOAWAY))
     ///
-    /// GOAWAY 拒否経路では REQUEST_ERROR を発行する前に、当該 request のパラメータに
-    /// 含まれる AUTHORIZATION_TOKEN の **REGISTER のみ** を `peer_token_cache` に反映させる
-    /// (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
-    /// "The receiver of a message carrying an Authorization Token with Alias Type REGISTER
-    /// that does not result in a Session error MUST register the Token Alias in the token
-    /// cache, even if the message fails for other reasons, including Unauthorized." (MUST))。
-    /// `REQUEST_GOING_AWAY` は request error であって session error ではないため、
-    /// REGISTER の MUST が適用される。DELETE / USE_ALIAS / USE_VALUE は「失敗した request の
-    /// パラメータ」として peer 側で not-applied 扱いされる可能性があるため触らない
+    /// REQUEST_ERROR で拒否する 2 経路 (MALFORMED_AUTH_TOKEN / GOING_AWAY) はいずれも
+    /// request error であって session error ではないため、拒否の前に当該 request の
+    /// AUTHORIZATION_TOKEN の **REGISTER のみ** を `peer_token_cache` に反映させる
+    /// (draft §8.9 (Authorization Token Compression): "The receiver of a message carrying an
+    /// Authorization Token with Alias Type REGISTER that does not result in a Session error
+    /// MUST register the Token Alias in the token cache, even if the message fails for other
+    /// reasons, including Unauthorized." (MUST))。DELETE / USE_ALIAS / USE_VALUE は「失敗した
+    /// request のパラメータ」として peer 側で not-applied 扱いされる可能性があるため触らない
     /// (`apply_peer_message_auth_token_registers_only` の doc 参照)。
     /// REGISTER 適用が session error (`AUTH_TOKEN_CACHE_OVERFLOW` /
-    /// `DUPLICATE_AUTH_TOKEN_ALIAS`) になった場合は、session error > GOING_AWAY 優先で
-    /// `Err` を返し、REQUEST_ERROR は発行しない。
+    /// `DUPLICATE_AUTH_TOKEN_ALIAS`) になった場合は、session error を優先して `Err` を返し、
+    /// REQUEST_ERROR は発行しない。
+    /// §8.9 のメッセージ拒否は MUST、§9.2 の GOAWAY 拒否は MAY のため、MALFORMED_AUTH_TOKEN
+    /// の判定を GOAWAY 拒否より先に行う。
     /// 受理経路 (Ok(true)) では従来どおり呼び出し側 handler が `apply_peer_message_auth_tokens`
     /// を呼ぶ (二重登録を避けるため本関数では適用しない)。
     ///
@@ -984,7 +988,8 @@ impl Session {
     ///
     /// 戻り値:
     /// - `Ok(true)`: 受理された
-    /// - `Ok(false)`: GOAWAY 送信済みのため REQUEST_ERROR(GOING_AWAY) を送信済み (セッションは継続)
+    /// - `Ok(false)`: REQUEST_ERROR を送信済み (セッションは継続。MALFORMED_AUTH_TOKEN または
+    ///   GOING_AWAY)
     /// - `Err(SessionError)`: parity/重複、または REGISTER 適用時の session error
     ///   (セッションは Closing に遷移)
     pub(super) fn accept_peer_request(
@@ -994,6 +999,24 @@ impl Session {
         is_publisher_request: bool,
     ) -> Result<bool, SessionError> {
         self.validate_peer_request_id(request_id)?;
+        // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver
+        // of a message containing a well-formed Token structure that is otherwise invalid
+        // MUST reject that message with an MALFORMED_AUTH_TOKEN error."
+        // 本ライブラリが検出できる「構造は正しいが内容が不正」は REGISTER / USE_VALUE の
+        // (Token Type, Token Value) 重複である。USE_ALIAS を含む重複 (alias 解決後の一意性)
+        // は解決結果を持つセッション層で判定する必要があり、現状未実装である
+        // (`MessageParameters::validate_auth_token_uniqueness` の doc 参照)。
+        // メッセージ単位の reject は request を処理せず REQUEST_ERROR を返すことで表す。
+        // REGISTER の MUST (失敗したメッセージでも alias を登録する) を先に適用する。
+        if parameters.validate_auth_token_uniqueness().is_err() {
+            self.apply_peer_message_auth_token_registers_only(parameters)?;
+            self.emit_request_error(
+                request_id,
+                REQUEST_MALFORMED_AUTH_TOKEN,
+                "malformed AUTHORIZATION_TOKEN",
+            );
+            return Ok(false);
+        }
         // draft §9.2 (GOAWAY): control GOAWAY を送信した publisher は
         // GOAWAY 後に到着する新規 request を GOING_AWAY で MAY 拒否。
         // REQUEST_ERROR は SendOnStream イベントとして発行し、自側の送信方向の FIN は
@@ -1022,6 +1045,12 @@ impl Session {
     /// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS の 7 種類のいずれかである。
     /// 本実装が受理するのはこのうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類で
     /// あり、残り 3 種類は relay 専用機能の削除 (namespace 発見・告知機構) により扱わない。
+    ///
+    /// 構造は正しいが内容が不正な AUTHORIZATION_TOKEN (同一 (Token Type, Token Value) の
+    /// 重複) を含む request は、セッションを閉じずに REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で
+    /// メッセージ単位に拒否する (draft-ietf-moq-transport-22 §8.9 (Authorization Token
+    /// Compression))。確立済み request stream 上の REQUEST_UPDATE は
+    /// [`Session::recv_stream_message`] が同じ検証を行う。
     ///
     /// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
@@ -1457,6 +1486,12 @@ impl Session {
     /// 既存 bidi request stream 上の応答メッセージを受信する
     ///
     /// `request_id` は I/O 層が bidi stream に紐付けて記憶した値。
+    ///
+    /// REQUEST_UPDATE に含まれる AUTHORIZATION_TOKEN のうち、構造は正しいが内容が不正な
+    /// もの (同一 (Token Type, Token Value) の重複) は、セッションを閉じずに REQUEST_ERROR
+    /// (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否する (draft-ietf-moq-transport-22
+    /// §8.9 (Authorization Token Compression))。request stream の先頭メッセージは
+    /// [`Session::recv_request`] が同じ検証を行う。
     ///
     /// ローカル終端済みの request (拒否した request、または request stream 上の GOAWAY の
     /// deadline 満了で終端した request) へ遅延して届く peer メッセージは peer の違反ではない。
@@ -2341,8 +2376,10 @@ impl Session {
     ///   (draft §8.9 (Authorization Token Compression))。
     /// - USE_VALUE: cache 操作なし。
     ///
-    /// Malformed Token (`MALFORMED_AUTH_TOKEN`) はコーデック層 (`message_parameter`) で
-    /// 検出済みのため、本関数は形式的に健全な Token 構造のみを扱う。
+    /// (Token Type, Token Value) の重複 (`MALFORMED_AUTH_TOKEN`) は呼び出し元が
+    /// `MessageParameters::validate_auth_token_uniqueness` で判定済みであり、本関数は
+    /// 重複の無い Token 構造のみを扱う (message_parameter の decode は重複を検出しないため、
+    /// 保証は呼び出し元の事前検証が担う)。
     pub(super) fn apply_peer_message_auth_tokens(
         &mut self,
         parameters: &MessageParameters,

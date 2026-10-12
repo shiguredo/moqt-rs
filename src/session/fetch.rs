@@ -755,24 +755,39 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn handle_update_for_fetch(
+    /// REQUEST_UPDATE を受信できる FETCH かを検証する
+    ///
+    /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): "An endpoint that receives a
+    /// REQUEST_UPDATE other than in the two cases above MUST close the session with a
+    /// PROTOCOL_VIOLATION." の MUST を満たす。
+    ///
+    /// - 送信者: REQUEST_UPDATE を送れるのは元 FETCH の送信者だけであり、自側は publisher
+    ///   であること (§9.5 の 2 ケースの 1 つ目に FETCH が含まれる)
+    /// - 状態: Established であること。draft §3.2.4 (Fetch State Management) は fetch 状態の
+    ///   保持期間と終端手順を定めるが、"Established" という状態は §3.1 (Subscriptions) の
+    ///   購読にしか定義されていない。Established を要求する本検証は本実装の判断である。
+    ///   Terminated の fetch には更新対象が無く、応答 (REQUEST_ERROR) も送れないため、
+    ///   subscription と同様に PROTOCOL_VIOLATION でセッションを閉じる
+    ///   (tests/test_session/fetch/request_update.rs の
+    ///   `terminated_fetch_rejects_late_request_update` と同じ判断)
+    ///
+    /// `locally_terminated` は送信方向を reset 済みの request を表す。応答を送れないため
+    /// state 検証のみ緩める (role 検証は応答の有無に依存しないため常に行う)。
+    ///
+    /// 違反時は session を Closing に遷移させて Err を返す。メッセージ単位の reject
+    /// (§8.9 の不正トークン / §3.3.2 の INVALID_FILTER) より先に呼ぶこと。
+    pub(super) fn validate_fetch_request_update(
         &mut self,
         request_id: u64,
-        parameters: MessageParameters,
+        locally_terminated: bool,
     ) -> Result<(), SessionError> {
-        // ローカル終端済みの request (`rejected_request_ids` に記録) は送信方向を reset 済みだが、
-        // peer が reset を観測する前に送った REQUEST_UPDATE は正当に届く。その場合は
-        // 送信者の検証だけを行い、状態遷移とイベント発行はしない (Request ID /
-        // MAX_REQUEST_UPDATES / auth token / パラメータスコープの検証は
-        // 呼び出し元 `handle_peer_request_update` で済んでいる)。
-        // 破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は送信者を特定できないため
-        // 従来どおり違反になる。
-        let locally_terminated = self.is_locally_terminated_request(request_id);
         let fetch = self
             .fetches
-            .get_mut(&request_id)
+            .get(&request_id)
             .expect("locate_request guarantees key presence");
-        if fetch.my_role != TrackRole::Publisher {
+        let my_role = fetch.my_role;
+        let state = fetch.state;
+        if my_role != TrackRole::Publisher {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE (fetch) received on subscriber side",
@@ -780,7 +795,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        if fetch.state != FetchState::Established && !locally_terminated {
+        if state != FetchState::Established && !locally_terminated {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE requires Established fetch",
@@ -788,7 +803,26 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移しない
+        Ok(())
+    }
+
+    pub(super) fn handle_update_for_fetch(
+        &mut self,
+        request_id: u64,
+        parameters: MessageParameters,
+        locally_terminated: bool,
+    ) -> Result<(), SessionError> {
+        // ローカル終端済みの request (`rejected_request_ids` に記録) は送信方向を reset 済みだが、
+        // peer が reset を観測する前に送った REQUEST_UPDATE は正当に届く。その場合は
+        // 状態遷移とイベント発行をしない (Request ID / MAX_REQUEST_UPDATES / state・role /
+        // auth token / パラメータスコープの検証は呼び出し元 `handle_peer_request_update` で
+        // 済んでいる)。
+        // 破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は送信者を特定できないため
+        // 従来どおり違反になる。
+        let fetch = self
+            .fetches
+            .get_mut(&request_id)
+            .expect("locate_request guarantees key presence");
         if locally_terminated {
             return Ok(());
         }

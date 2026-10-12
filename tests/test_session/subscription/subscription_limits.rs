@@ -1285,7 +1285,7 @@ fn invalid_filter_rejection_defers_publish_done_until_streams_close() {
 /// 保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ると
 /// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) の「PUBLISH_DONE が最終メッセージ」
 /// が守れなくなるため、Terminated への REQUEST_UPDATE は
-/// `handle_update_for_subscription` の state 検証と同じ経路で閉じる。
+/// `validate_subscription_request_update` の state 検証と同じ経路で閉じる。
 #[test]
 fn second_invalid_filter_rejection_after_termination_closes_session() {
     use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};

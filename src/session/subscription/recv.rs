@@ -5,8 +5,9 @@
 //! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
-    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_UNSUPPORTED_EXTENSION,
-    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN,
+    REQUEST_UNSUPPORTED_EXTENSION, SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
+    STREAM_CANCELLED,
 };
 use crate::message::{
     FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
@@ -704,25 +705,44 @@ impl Session {
                 return Err(err);
             }
         }
-        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
-        self.apply_peer_message_auth_tokens(&update.parameters)?;
         // draft §9.20.1 (Parameter Scope): context 別の許可パラメータ集合で
         // 検証する。違反時は PROTOCOL_VIOLATION でセッションをクローズする (MUST)。
+        // あわせて draft §9.5 (REQUEST_UPDATE): "An endpoint that receives a REQUEST_UPDATE
+        // other than in the two cases above MUST close the session with a PROTOCOL_VIOLATION."
+        // を満たすため、更新できない request (TRACK_STATUS / 未知 id) もここで閉じる。
+        // 対象 request の state / role (§3.1 / §3.2 / §9.5) もここで検証する。
         //
         // この検証は Range Filter の内容検証より先に行う。Range Filter を許可しない
         // context (FETCH_UPDATE_ALLOWED_PARAMS など) に Range Filter が来た場合、
         // 内容検証を先に走らせると §3.3.2 の INVALID_FILTER (REQUEST_ERROR で継続) が
         // 発火してしまい、§9.20.1 が MUST とするセッションクローズに到達しない。
+        // 同じ理由で、同じくメッセージ単位の reject である不正トークン判定 (§8.9) よりも
+        // 先に置き、セッション終了の MUST が REQUEST_ERROR に隠れないようにする。
+        // context 別の許可集合は decode 時の `REQUEST_UPDATE_ALLOWED_PARAMS`
+        // (draft-ietf-moq-transport-22 §9.5 の全 context の和集合) より狭いため、
+        // wire 経路でも context 逸脱を検出できるのはこの検証だけである。
+        //
+        // state / role の検証はローカル終端済みの request でも行う (state のみ緩める)。
+        // 応答を送れないことと、送信者として正当かは独立である。
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let table = self.locate_request(request_id);
-        let context_allowed = match table {
-            Some(RequestTable::Subscription) => Some((
-                SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (subscription) parameter not allowed in this context",
-            )),
-            Some(RequestTable::Fetch) => Some((
-                FETCH_UPDATE_ALLOWED_PARAMS,
-                "REQUEST_UPDATE (fetch) parameter not allowed in this context",
-            )),
+        let (table, allowed, scope_error) = match table {
+            Some(t @ RequestTable::Subscription) => {
+                self.validate_subscription_request_update(request_id, locally_terminated)?;
+                (
+                    t,
+                    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (subscription) parameter not allowed in this context",
+                )
+            }
+            Some(t @ RequestTable::Fetch) => {
+                self.validate_fetch_request_update(request_id, locally_terminated)?;
+                (
+                    t,
+                    FETCH_UPDATE_ALLOWED_PARAMS,
+                    "REQUEST_UPDATE (fetch) parameter not allowed in this context",
+                )
+            }
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -732,10 +752,8 @@ impl Session {
                 return Err(err);
             }
         };
-        if let Some((allowed, message)) = context_allowed
-            && update.parameters.validate_scope(allowed).is_err()
-        {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, message);
+        if update.parameters.validate_scope(allowed).is_err() {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, scope_error);
             self.fail(err.clone());
             return Err(err);
         }
@@ -750,6 +768,40 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver
+        // of a message containing a well-formed Token structure that is otherwise invalid
+        // MUST reject that message with an MALFORMED_AUTH_TOKEN error."
+        // REQUEST_UPDATE は Request ID を持つ request メッセージのため、メッセージ単位の
+        // reject は §9.5 (REQUEST_UPDATE) が MUST とする REQUEST_ERROR で表す。
+        // 判定は token cache の適用より先に行う。reject するメッセージの DELETE / USE_ALIAS を
+        // 適用すると、未登録 alias の USE_ALIAS が UNKNOWN_AUTH_TOKEN_ALIAS として session を
+        // kill し、reject のはずの失敗を session error に格上げしてしまう (GOAWAY 拒否経路と
+        // 同じ理由。`apply_peer_message_auth_token_registers_only` の doc 参照)。
+        // セッション終了の検証 (§9.20.1 の context スコープ / §9.5 と §3.1・§3.2 の
+        // state・role / §9.20.18 の FORWARD 値域) は上で済ませてある。§9.20.19
+        // (NEW_GROUP_REQUEST) だけは対象 subscription のトラックプロパティを要するため
+        // dispatch 側に残る (メッセージ単位の reject が先行し得る。受信側の close は
+        // 実装判断であり MUST ではない)。
+        if update.parameters.validate_auth_token_uniqueness().is_err() {
+            // §8.9 の REGISTER MUST は「session error にならないメッセージの失敗」に適用される
+            self.apply_peer_message_auth_token_registers_only(&update.parameters)?;
+            // ローカル終端済みの request は送信方向を reset 済みで拒否応答を送れないため、
+            // 状態を変えずにメッセージを捨てる (Range Filter 拒否と同じ扱い)
+            if locally_terminated {
+                return Ok(());
+            }
+            self.reject_request_update(
+                request_id,
+                REQUEST_MALFORMED_AUTH_TOKEN,
+                "malformed AUTHORIZATION_TOKEN",
+            )?;
+            return Ok(());
+        }
+        // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
+        // §9.20.1 のスコープ検証より後に行う。スコープ違反で session error になる
+        // メッセージのトークンは適用しない (§8.9 の REGISTER MUST は
+        // "does not result in a Session error" が前提)
+        self.apply_peer_message_auth_tokens(&update.parameters)?;
         // draft-ietf-moq-transport-22 §3.3.2 (Range Filters): MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否。
         // スコープ上正当な Range Filter に対してのみ内容検証を行う。
         // 自側 publisher の Established subscription では PUBLISH_DONE(UPDATE_FAILED) まで
@@ -757,12 +809,12 @@ impl Session {
         // ローカル終端済みの request は送信方向を reset 済みで拒否応答 (REQUEST_ERROR) を
         // 送れないため、拒否せず dispatch へ進む。Range Filter の内容検証自体は省略され
         // (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、応答を送れない以上
-        // 満たせない)、送信者・NEW_GROUP_REQUEST・FORWARD の MUST 検証は各ハンドラで行い、
+        // 満たせない)、NEW_GROUP_REQUEST・FORWARD の MUST 検証は各ハンドラで行い、
         // 状態遷移はしない
         if let Err(reason) = self.check_incoming_range_filters(&update.parameters)
-            && !self.is_locally_terminated_request(request_id)
+            && !locally_terminated
         {
-            self.reject_request_update_range_filters(request_id, reason)?;
+            self.reject_request_update(request_id, REQUEST_INVALID_FILTER, reason)?;
             return Ok(());
         }
         // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): REQUEST_UPDATE 起因の
@@ -777,14 +829,99 @@ impl Session {
             self.register_fill_request_subscription(update.request_id, request_id);
         }
         match table {
-            Some(RequestTable::Subscription) => self.handle_update_for_subscription(
+            RequestTable::Subscription => self.handle_update_for_subscription(
                 request_id,
                 update.request_id,
                 update.parameters,
+                locally_terminated,
             ),
-            Some(RequestTable::Fetch) => {
-                self.handle_update_for_fetch(request_id, update.parameters)
+            RequestTable::Fetch => {
+                self.handle_update_for_fetch(request_id, update.parameters, locally_terminated)
             }
+            // 上の検証で TRACK_STATUS は PROTOCOL_VIOLATION としてセッション終了済み (防御)
+            RequestTable::TrackStatus => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "REQUEST_UPDATE received for unknown or unsupported request id",
+                );
+                self.fail(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    /// REQUEST_UPDATE を REQUEST_ERROR で拒否するときの終端処理
+    ///
+    /// `error_code` は拒否理由 (Range Filter の INVALID_FILTER、不正トークンの
+    /// MALFORMED_AUTH_TOKEN など) を表す。あわせて draft-ietf-moq-transport-22 §9.5.1
+    /// (Updating Subscriptions): "When a REQUEST_UPDATE is unsuccessful, the publisher MUST
+    /// also terminate the subscription by sending a PUBLISH_DONE with error code
+    /// UPDATE_FAILED." を満たす。
+    ///
+    /// 呼び出し元 (`handle_peer_request_update` の拒否経路と、`handle_update_for_subscription`
+    /// の累積 Range Filter 超過) は、事前に §9.5 / §3.1 / §3.2 の state・role 検証
+    /// (`validate_subscription_request_update` /
+    /// `validate_fetch_request_update`) を通している。更新できない request は
+    /// REQUEST_ERROR ではなくセッション終了になっているため、本関数は
+    /// 拒否できる request (Established) だけを扱う。state は見ない前提であり、
+    /// TRACK_STATUS / 未知 id だけを防御として閉じる。
+    ///
+    /// - Established かつ自側 publisher: `send_request_error` と同じ経路で
+    ///   REQUEST_ERROR (`error_code`) → Terminated → PUBLISH_DONE(UPDATE_FAILED)。
+    ///   open 中の outgoing data stream (subgroup / fill fetch) がある場合は PUBLISH_DONE を保留する。
+    /// - Established かつ自側 subscriber (peer が PUBLISH 起点の publisher):
+    ///   REQUEST_ERROR のみを送る。PUBLISH_DONE の送出は publisher である peer の責務であり、
+    ///   state の終端は peer の PUBLISH_DONE / bidi 終端処理に委ねる。
+    /// - FETCH: `send_request_error` (`send_err_for_fetch`) を通し、draft §9.5.1 の MUST
+    ///   (FETCH data stream の reset) と fetch state の `Terminated` 遷移を行う。
+    ///   Terminated の fetch は事前検証でセッション終了になるため REQUEST_ERROR は送られない。
+    /// - ローカル終端済み (`rejected_request_ids` に記録済み) の request: 呼び出し元が
+    ///   拒否応答を積まずに吸収する (送信方向を reset 済みで応答を送れないため)。
+    ///   本関数には到達しない。
+    /// - Pending / Terminated: 呼び出し元の state 検証でセッション終了になるため
+    ///   到達しない (本関数は state を見ない前提)。
+    /// - TRACK_STATUS / 未知 id: 呼び出し元の request 種別判定 (`locate_request`) で
+    ///   PROTOCOL_VIOLATION に落ちるため到達しない (防御として閉じる)。
+    ///
+    /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
+    /// (超過時は panic)。
+    fn reject_request_update(
+        &mut self,
+        request_id: u64,
+        error_code: u64,
+        reason: &'static str,
+    ) -> Result<(), SessionError> {
+        let reason_phrase = || {
+            ReasonPhrase::new(reason)
+                .expect("request update rejection reason must be <= 1024 bytes")
+        };
+        match self.locate_request(request_id) {
+            // draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a
+            // REQUEST_UPDATE fails for a FETCH, the publisher MUST reset the FETCH data
+            // stream." の MUST と fetch state の遷移は `send_request_error`
+            // (`send_err_for_fetch`) が担う。`emit_request_error` では reset が発行されない。
+            Some(RequestTable::Fetch) => {
+                self.send_request_error(request_id, error_code, 0, reason_phrase(), None)
+            }
+            Some(RequestTable::Subscription) => {
+                let my_role = self
+                    .subscriptions
+                    .get(&request_id)
+                    .expect("locate_request guarantees key presence")
+                    .my_role;
+                match my_role {
+                    TrackRole::Publisher => {
+                        self.send_request_error(request_id, error_code, 0, reason_phrase(), None)
+                    }
+                    TrackRole::Subscriber => {
+                        self.emit_request_error(request_id, error_code, reason);
+                        Ok(())
+                    }
+                }
+            }
+            // draft §9.5 (REQUEST_UPDATE): 更新できない request への受信は
+            // PROTOCOL_VIOLATION で閉じる MUST。呼び出し元の request 種別判定
+            // (`locate_request`) で検出済み (防御)
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -796,95 +933,36 @@ impl Session {
         }
     }
 
-    /// REQUEST_UPDATE の Range Filter 拒否時の終端処理
+    /// REQUEST_UPDATE を受信できる Subscription かを検証する
     ///
-    /// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) の MUST reject に加え、
-    /// draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a REQUEST_UPDATE
-    /// is unsuccessful, the publisher MUST also terminate the subscription by sending a
-    /// PUBLISH_DONE with error code UPDATE_FAILED." を満たす。
+    /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): "An endpoint that receives a
+    /// REQUEST_UPDATE other than in the two cases above MUST close the session with a
+    /// PROTOCOL_VIOLATION." の MUST を満たす。
     ///
-    /// - Established かつ自側 publisher: `send_request_error` と同じ経路で
-    ///   REQUEST_ERROR (INVALID_FILTER) → Terminated → PUBLISH_DONE(UPDATE_FAILED)。
-    ///   open 中の outgoing data stream (subgroup / fill fetch) がある場合は PUBLISH_DONE を保留する。
-    /// - Established かつ自側 subscriber: 従来どおり REQUEST_ERROR のみを送る。
-    ///   PUBLISH_DONE の送出は publisher である peer の責務であり、state の終端は
-    ///   peer の PUBLISH_DONE / bidi 終端処理に委ねる。
-    /// - ローカル終端済み (`rejected_request_ids` に記録済み) の request: 呼び出し元
-    ///   `handle_peer_request_update` が拒否応答を積まずに吸収する (送信方向を reset 済みで
-    ///   応答を送れないため)。本関数には到達しない。
-    /// - Pending / Terminated: REQUEST_UPDATE は Established の self loop のみ
-    ///   (draft-ietf-moq-transport-22 §3.1 (Subscriptions)) であり、受信は state machine の
-    ///   違反である。valid な REQUEST_UPDATE に対する `handle_update_for_subscription` の
-    ///   state 検証と同じく PROTOCOL_VIOLATION でセッションを閉じる。Pending で fin 付き
-    ///   REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK 等) を閉じたり、Terminated で
-    ///   保留中の PUBLISH_DONE を持つ bidi stream に fin 付き REQUEST_ERROR を送ったり
-    ///   しないため、応答は送らない。
-    /// - subscription 以外 (FETCH の REQUEST_UPDATE 等) と subscriptions 未登録:
-    ///   従来どおり REQUEST_ERROR のみを送る。
+    /// - draft §3.1 (Subscriptions) / state diagram: REQUEST_UPDATE は Established の
+    ///   self loop。Pending* / Terminated での受信は PROTOCOL_VIOLATION
+    /// - REQUEST_UPDATE を送れる側は (a) 元 request の initiator (自側は responder)、
+    ///   (b) PUBLISH 経由の subscription の subscriber。自側が initiator かつ subscriber
+    ///   (SUBSCRIBE 経由で peer が publisher) での受信は PROTOCOL_VIOLATION
     ///
-    /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
-    /// (超過時は panic)。
-    fn reject_request_update_range_filters(
+    /// `locally_terminated` は送信方向を reset 済みの request を表す。応答を送れないため
+    /// state 検証のみ緩める (role 検証は応答の有無に依存しないため常に行う)。
+    ///
+    /// 違反時は session を Closing に遷移させて Err を返す。メッセージ単位の reject
+    /// (§8.9 の不正トークン / §3.3.2 の INVALID_FILTER) より先に呼ぶこと。
+    fn validate_subscription_request_update(
         &mut self,
         request_id: u64,
-        reason: &'static str,
+        locally_terminated: bool,
     ) -> Result<(), SessionError> {
-        let state = self
-            .subscriptions
-            .get(&request_id)
-            .map(|s| (s.state, s.my_role));
-        match state {
-            Some((SubscriptionState::Established, TrackRole::Publisher)) => self
-                .send_request_error(
-                    request_id,
-                    REQUEST_INVALID_FILTER,
-                    0,
-                    ReasonPhrase::new(reason)
-                        .expect("range filter rejection reason must be <= 1024 bytes"),
-                    None,
-                ),
-            Some((SubscriptionState::Established, _)) => {
-                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
-                Ok(())
-            }
-            Some((SubscriptionState::Pending | SubscriptionState::Terminated, _)) => {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "REQUEST_UPDATE requires Established subscription",
-                );
-                self.fail(err.clone());
-                Err(err)
-            }
-            _ => {
-                self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn handle_update_for_subscription(
-        &mut self,
-        request_id: u64,
-        fill_request_id: u64,
-        parameters: MessageParameters,
-    ) -> Result<(), SessionError> {
-        // ローカル終端済みの request (`rejected_request_ids` に記録。GOAWAY の deadline 満了や
-        // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
-        // REQUEST_UPDATE は正当に届く。その場合は本関数の残りの検証 (送信者・パラメータ・
-        // FORWARD) だけを行い、状態遷移とイベント発行はしない (Request ID /
-        // MAX_REQUEST_UPDATES / auth token / パラメータスコープの検証は
-        // 呼び出し元 `handle_peer_request_update` で済んでいる)。
-        // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
-        // 送信者を特定できないため従来どおり PROTOCOL_VIOLATION になる。
-        let locally_terminated = self.is_locally_terminated_request(request_id);
         let subscription = self
             .subscriptions
-            .get_mut(&request_id)
+            .get(&request_id)
             .expect("locate_request guarantees key presence");
-        // draft §3.1 (Subscriptions) / state diagram:
-        // REQUEST_UPDATE は Established の self loop。Pending* / Terminated で
-        // 受信した場合は PROTOCOL_VIOLATION としてセッションを閉じる。
-        if subscription.state != SubscriptionState::Established && !locally_terminated {
+        let state = subscription.state;
+        let my_role = subscription.my_role;
+        let is_initiator_self = subscription.is_initiator_self();
+        if state != SubscriptionState::Established && !locally_terminated {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE requires Established subscription",
@@ -892,14 +970,7 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft §9.5 (REQUEST_UPDATE): REQUEST_UPDATE を送れる側は
-        //   (a) 元 request の initiator (= 自側は responder)
-        //   (b) PUBLISH 経由の subscription では subscriber も送れる
-        // 自側から見ると: peer が initiator (= !is_initiator_self) か、
-        // または peer が subscriber (= 自側 my_role == Publisher) なら受理できる。
-        // それ以外 (自側 initiator かつ my_role == Subscriber = SUBSCRIBE 経由で
-        // peer が publisher) での受信は PROTOCOL_VIOLATION。
-        if subscription.is_initiator_self() && subscription.my_role != TrackRole::Publisher {
+        if is_initiator_self && my_role != TrackRole::Publisher {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "REQUEST_UPDATE cannot be received by subscriber initiator",
@@ -907,8 +978,35 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        Ok(())
+    }
+
+    fn handle_update_for_subscription(
+        &mut self,
+        request_id: u64,
+        fill_request_id: u64,
+        parameters: MessageParameters,
+        locally_terminated: bool,
+    ) -> Result<(), SessionError> {
+        // ローカル終端済みの request (`rejected_request_ids` に記録。GOAWAY の deadline 満了や
+        // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
+        // REQUEST_UPDATE は正当に届く。その場合は本関数の残りの検証 (NEW_GROUP_REQUEST)
+        // だけを行い、状態遷移とイベント発行はしない (Request ID / MAX_REQUEST_UPDATES /
+        // state・role / auth token / パラメータスコープ / FORWARD 値域の検証は呼び出し元
+        // `handle_peer_request_update` で済んでいる)。
+        // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
+        // 送信者を特定できないため従来どおり PROTOCOL_VIOLATION になる。
+        let subscription = self
+            .subscriptions
+            .get(&request_id)
+            .expect("locate_request guarantees key presence");
         // draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter): subscriber MUST NOT send NEW_GROUP_REQUEST in
         // REQUEST_UPDATE if Track did not include DYNAMIC_GROUPS Property with value 1.
+        // 同節は送信側の MUST NOT のみを定め、受信側の close は規定しない。そのため
+        // メッセージ単位の reject (§8.9 の不正トークン / §3.3.2 の INVALID_FILTER) との
+        // 順序を競わせず、DYNAMIC_GROUPS を持つ subscription entry を要する本検証を
+        // dispatch 側に残す (重複トークン付きの REQUEST_UPDATE が先行して reject され得るが、
+        // 受信側 MUST ではないため適法)。
         if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
@@ -917,20 +1015,9 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter): 値域外 (0 / 1 以外) の
-        // 受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。検証がないと
-        // `pending_update_params` に保存され、応答送信時 (REQUEST_UPDATE_OK 分岐) に初めて
-        // エラーになる遅延検証になる。検証はここで行い、下記の累積 Range Filter 上限チェック
-        // より前に置く (複合違反時は §9.20.18 の
-        // MUST に従い FORWARD のセッションクローズが優先される)。
-        // `?` 伝播のみだとセッション state が Closing に遷移せず開いたまま残る
-        // (GROUP_ORDER の値域検証と同じパターンで `self.fail()` に接続する)。
-        if let Some(f) = parameters.forward()
-            && let Err(err) = validate_forward(f)
-        {
-            self.fail(err.clone());
-            return Err(err);
-        }
+        // draft-ietf-moq-transport-22 §9.20.18 (FORWARD Parameter) の値域検証は
+        // 呼び出し元 `handle_peer_request_update` が dispatch 前に済ませている
+        // (同一の `MessageParameters` を渡すため、ここで再検証しても到達しない)。
         // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移と
         // イベント発行 (pending_update_params / RequestUpdateReceived / fill stream 開設) はしない
         if locally_terminated {
@@ -967,8 +1054,9 @@ impl Session {
         // 存在する) ため、ここでは総数だけを見る。
         let (_, accumulated_ranges) = range_filter_usage(&merged);
         if accumulated_ranges > self.local_max_filter_ranges() {
-            self.reject_request_update_range_filters(
+            self.reject_request_update(
                 request_id,
+                REQUEST_INVALID_FILTER,
                 "cumulative Range Filters exceed MAX_FILTER_RANGES",
             )?;
             return Ok(());

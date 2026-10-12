@@ -886,15 +886,7 @@ impl MessageParameters {
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) は alias 解決後に一意でなければならない。
         // USE_ALIAS の alias 解決はセッション状態依存のためコーデック層では検証不可。
-        validate_auth_token_uniqueness(sorted.iter().filter_map(|p| {
-            if p.param_type == PARAM_AUTHORIZATION_TOKEN
-                && let MessageParameterValue::AuthorizationToken(ref token) = p.value
-            {
-                Some(token)
-            } else {
-                None
-            }
-        }))?;
+        self.validate_auth_token_uniqueness()?;
 
         varint::encode(sorted.len() as u64, buf);
 
@@ -911,6 +903,13 @@ impl MessageParameters {
 
     /// バッファの先頭から Message Parameters をデコードし `(Self, 消費バイト数)` を返す
     ///
+    /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複は本メソッドでは検出しない。
+    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) が求める
+    /// 不正トークンの扱いはメッセージ単位の判断であり、Request ID を持つ request では
+    /// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を返す責務がセッション層にある。ここで
+    /// decode を失敗させると Request ID が得られずメッセージ単位の reject を送れないため、
+    /// [`MessageParameters::validate_auth_token_uniqueness`] を別途呼ぶこと。
+    ///
     /// # Errors
     ///
     /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 7 外の
@@ -921,7 +920,6 @@ impl MessageParameters {
     ///   (フィールド数超過 / 空フィールド / 4096 バイト超過)、フレーミング違反 (KVP Type の delta
     ///   オーバーフロー、count がバッファ容量を超える場合、値長が 2^16-1 バイトを超える KVP
     ///   (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))): `ProtocolViolation`
-    /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     /// - 値の直列化 (Length/Value) が型の定義と一致しない場合 (FILL_PARAMETERS の値が空、内側の
     ///   余剰バイト、壊れた AUTHORIZATION_TOKEN): `KeyValueFormattingError`
     /// - バッファが途中で切れている場合 (LOCATION_FILTER の必須フィールド欠落を含む): `UnexpectedEof`
@@ -1014,17 +1012,9 @@ impl MessageParameters {
         }
 
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
-        // (Token Type, Token Value) は alias 解決後に一意でなければならない
-        validate_auth_token_uniqueness(params.iter().filter_map(|p| {
-            if p.param_type == PARAM_AUTHORIZATION_TOKEN
-                && let MessageParameterValue::AuthorizationToken(ref token) = p.value
-            {
-                Some(token)
-            } else {
-                None
-            }
-        }))?;
-
+        // (Token Type, Token Value) 重複はここでは検出しない。decode を失敗させると
+        // Request ID が得られず、メッセージ単位の REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を
+        // 送れなくなるため、`MessageParameters::validate_auth_token_uniqueness` で検証する。
         Ok((Self(params), pos))
     }
 
@@ -1357,6 +1347,36 @@ impl MessageParameters {
             }
         }
         Ok(())
+    }
+
+    /// AUTHORIZATION_TOKEN の (Token Type, Token Value) の一意性を検証する
+    ///
+    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver
+    /// of a message containing a well-formed Token structure that is otherwise invalid
+    /// MUST reject that message with an MALFORMED_AUTH_TOKEN error."
+    ///
+    /// REGISTER / USE_VALUE の (Token Type, Token Value) の重複を「構造は正しいが内容が
+    /// 不正」として `MalformedAuthToken` で返す。重複が無ければ `Ok(())` を返す。
+    ///
+    /// 対象は alias 解決を要さない Token に限る。§8.9 が定める「alias 解決後の一意性」
+    /// ("unique after resolving any aliases") のうち、USE_ALIAS を含む重複 (同一 Alias の
+    /// USE_ALIAS の繰り返し、同一メッセージ内の REGISTER とそれを参照する USE_ALIAS の
+    /// 組み合わせ) は alias 解決を要するため本検証の対象外である (現状未実装。解決結果を
+    /// 保持するセッション層で判定する必要がある)。
+    ///
+    /// [`MessageParameters::decode`] は本検証を行わない。reject するかどうかは
+    /// メッセージ単位の判断であり、Request ID を持つ request では `REQUEST_ERROR`
+    /// (MALFORMED_AUTH_TOKEN) を返すセッション層が本メソッドを呼ぶ。
+    pub fn validate_auth_token_uniqueness(&self) -> Result<(), MessageError> {
+        validate_auth_token_uniqueness(self.0.iter().filter_map(|p| {
+            if p.param_type == PARAM_AUTHORIZATION_TOKEN
+                && let MessageParameterValue::AuthorizationToken(ref token) = p.value
+            {
+                Some(token)
+            } else {
+                None
+            }
+        }))
     }
 
     /// Range Filter パラメータ (0x25-0x29) が 1 つでも含まれているかを返す

@@ -391,7 +391,12 @@ mod param_encoding_strictness {
 ///
 /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
 /// alias 解決後の (Token Type, Token Value) の組み合わせは一意でなければならない。
-/// encode / decode の両経路で同じ検証が働くことを固定する。
+/// encode は自側で重複を組み立てた時点で拒否する。decode は重複を検出せず (メッセージ単位の
+/// reject は Request ID を得たセッション層が行う)、
+/// `MessageParameters::validate_auth_token_uniqueness` で検証する。
+/// 重複の有無に対する主な被覆は `pbt/tests/prop_message_parameter.rs` の PBT が担う。
+/// ここでは alias 解決を要する Token が検証対象外である境界と、encode → decode の
+/// 往復 (PBT は手組みバイト列を decode するため往復は固定しない) を固定する。
 mod auth_token_uniqueness {
     use super::*;
     use shiguredo_moqt::message_parameter::{AuthorizationToken, PARAM_AUTHORIZATION_TOKEN};
@@ -448,20 +453,28 @@ mod auth_token_uniqueness {
     }
 
     #[test]
-    fn decode_rejects_duplicate_token_type_value() {
-        // count=2, delta1=0x03, len=3, Token=[0x03, 0x00, 'x'],
-        // delta2=0x00 (同一型の繰り返しは AUTHORIZATION_TOKEN では許可), len=3, 同一 Token
-        let buf = vec![
-            0x02, 0x03, 0x03, 0x03, 0x00, 0x78, 0x00, 0x03, 0x03, 0x00, 0x78,
-        ];
+    fn validate_auth_token_uniqueness_ignores_use_alias() {
+        // 現状の実装は alias 解決を要する Token を検証対象外としている。§8.9 が定める
+        // 「alias 解決後の一意性」のうち USE_ALIAS を含む重複 (同一 alias の繰り返しや、
+        // 同一メッセージ内の REGISTER とそれを参照する USE_ALIAS の組み合わせ) は未実装で
+        // あり、解決結果を保持するセッション層で扱う必要がある。本テストは現状の境界を固定する。
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseAlias {
+                alias: 1,
+            }),
+        });
+        params.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseAlias {
+                alias: 1,
+            }),
+        });
 
-        assert!(
-            matches!(
-                MessageParameters::decode(&buf),
-                Err(MessageError::MalformedAuthToken(_))
-            ),
-            "同一 (Token Type, Token Value) の decode は MALFORMED_AUTH_TOKEN になること"
-        );
+        params
+            .validate_auth_token_uniqueness()
+            .expect("USE_ALIAS は現状の一意性検証の対象外であること");
     }
 }
 

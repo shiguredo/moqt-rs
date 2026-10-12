@@ -448,7 +448,7 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
     assert_eq!(f.request_id, rid);
 }
 
-/// `Terminated` 遷移後の fetch への REQUEST_UPDATE 受信が `handle_update_for_fetch` で
+/// `Terminated` 遷移後の fetch への REQUEST_UPDATE 受信が `validate_fetch_request_update` で
 /// 拒否され、セッションが PROTOCOL_VIOLATION で閉じること
 ///
 /// draft-ietf-moq-transport-22 §9.5: "The sender of a request (SUBSCRIBE, PUBLISH, FETCH,
@@ -518,8 +518,8 @@ fn terminated_fetch_rejects_late_request_update() {
     client
         .recv_stream_message(rid, err_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // Terminated の fetch にワイヤ REQUEST_UPDATE を直接注入する (handle_update_for_fetch
-    // が Established 要求で拒否し、self.fail でセッションを閉じる)
+    // Terminated の fetch にワイヤ REQUEST_UPDATE を直接注入する
+    // (validate_fetch_request_update が Established 要求で拒否し、self.fail でセッションを閉じる)
     let err = client
         .recv_stream_message(
             rid,

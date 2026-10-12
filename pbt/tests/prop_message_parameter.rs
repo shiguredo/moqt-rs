@@ -1,7 +1,8 @@
 use shiguredo_moqt::{
-    message::common::Location, message_parameter::LocationFilter,
-    message_parameter::LocationFilterContext, message_parameter::MessageParameter,
-    message_parameter::MessageParameterValue, message_parameter::MessageParameters, varint,
+    message::common::Location, message_parameter::AuthorizationToken,
+    message_parameter::LocationFilter, message_parameter::LocationFilterContext,
+    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
+    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN, varint,
 };
 
 use pbt::common::{RANGE_FILTER_TYPES, has_property_type_field, sample_small_varint, test_runner};
@@ -380,5 +381,251 @@ fn relative_group_zero_ge_next_object() -> noprop::TestResult {
         assert!(next_group >= next_object);
         Ok(())
     })?;
+    Ok(())
+}
+
+/// AUTHORIZATION_TOKEN 1 件の生成指示
+///
+/// REGISTER / USE_VALUE は (Token Type, Token Value) を、USE_ALIAS / DELETE は alias を持つ。
+/// 候補を狭く取ることで (Token Type, Token Value) の重複が十分な確率で生成されるようにする。
+#[derive(Debug, Clone, Copy)]
+enum AuthTokenSpec {
+    /// REGISTER (alias, token_type, token_value)
+    Register(u64, u64, u8),
+    /// USE_VALUE (token_type, token_value)
+    UseValue(u64, u8),
+    /// USE_ALIAS (alias)
+    UseAlias(u64),
+    /// DELETE (alias)
+    Delete(u64),
+}
+
+fn sample_auth_token_spec(ctx: &mut noprop::TestCaseContext) -> AuthTokenSpec {
+    let alias = noprop::sample_usize_in(ctx, 1..=2) as u64;
+    let token_type = noprop::sample_usize_in(ctx, 0..=1) as u64;
+    let token_value = noprop::sample_usize_in(ctx, 0..=1) as u8;
+    match noprop::sample_usize_in(ctx, 0..=3) {
+        0 => AuthTokenSpec::Register(alias, token_type, token_value),
+        1 => AuthTokenSpec::UseValue(token_type, token_value),
+        2 => AuthTokenSpec::UseAlias(alias),
+        _ => AuthTokenSpec::Delete(alias),
+    }
+}
+
+/// alias 解決なしで (Token Type, Token Value) を決められる Token の値を返す
+///
+/// §8.9 の一意性検証は alias 解決後の値を対象とするが、USE_ALIAS / DELETE は
+/// セッション状態を要するため現状の `validate_auth_token_uniqueness()` の対象外である。
+fn auth_spec_type_value(spec: AuthTokenSpec) -> Option<(u64, u8)> {
+    match spec {
+        AuthTokenSpec::Register(_, token_type, token_value)
+        | AuthTokenSpec::UseValue(token_type, token_value) => Some((token_type, token_value)),
+        AuthTokenSpec::UseAlias(_) | AuthTokenSpec::Delete(_) => None,
+    }
+}
+
+/// 生成指示の列から `MessageParameters` を組み立てる
+fn params_from_auth_specs(specs: &[AuthTokenSpec]) -> MessageParameters {
+    let mut params = MessageParameters::new();
+    for &spec in specs {
+        let token = match spec {
+            AuthTokenSpec::Register(alias, token_type, token_value) => {
+                AuthorizationToken::Register {
+                    alias,
+                    token_type,
+                    token_value: vec![token_value],
+                }
+            }
+            AuthTokenSpec::UseValue(token_type, token_value) => AuthorizationToken::UseValue {
+                token_type,
+                token_value: vec![token_value],
+            },
+            AuthTokenSpec::UseAlias(alias) => AuthorizationToken::UseAlias { alias },
+            AuthTokenSpec::Delete(alias) => AuthorizationToken::Delete { alias },
+        };
+        params.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(token),
+        });
+    }
+    params
+}
+
+/// 生成指示から独立に (Token Type, Token Value) の重複を判定する参照モデル
+///
+/// §8.9 の一意性検証の対象は alias 解決を要さない REGISTER / USE_VALUE のみである
+/// (USE_ALIAS / DELETE はセッション状態を要するため対象外)。
+fn has_duplicate_type_value(specs: &[AuthTokenSpec]) -> bool {
+    let mut seen = Vec::new();
+    for &spec in specs {
+        if let Some(key) = auth_spec_type_value(spec) {
+            if seen.contains(&key) {
+                return true;
+            }
+            seen.push(key);
+        }
+    }
+    false
+}
+
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// `validate_auth_token_uniqueness()` は alias 解決を要さない Token (REGISTER / USE_VALUE) の
+/// (Token Type, Token Value) が重複するとき、かつそのときに限り `MalformedAuthToken` を返す。
+///
+/// USE_ALIAS / DELETE は現状の検証対象外であり、いくつ並んでも結果に影響しないことも
+/// あわせて確認する。重複あり / 重複なし / USE_ALIAS・DELETE を含む入力の 3 つを
+/// カバレッジゲートで検証する。
+#[test]
+fn validate_auth_token_uniqueness_errs_exactly_on_duplicate_type_value() -> noprop::TestResult {
+    let duplicate_seen = std::cell::Cell::new(false);
+    let no_duplicate_seen = std::cell::Cell::new(false);
+    let alias_or_delete_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let spec_count = noprop::sample_usize_in(ctx, 0..=6);
+        let specs = (0..spec_count)
+            .map(|_| sample_auth_token_spec(ctx))
+            .collect::<Vec<_>>();
+        let params = params_from_auth_specs(&specs);
+
+        let has_duplicate = has_duplicate_type_value(&specs);
+        if has_duplicate {
+            duplicate_seen.set(true);
+        } else {
+            no_duplicate_seen.set(true);
+        }
+        if specs
+            .iter()
+            .any(|spec| matches!(spec, AuthTokenSpec::UseAlias(_) | AuthTokenSpec::Delete(_)))
+        {
+            alias_or_delete_seen.set(true);
+        }
+
+        assert_eq!(
+            params.validate_auth_token_uniqueness().is_err(),
+            has_duplicate
+        );
+        Ok(())
+    })?;
+    assert!(
+        duplicate_seen.get(),
+        "同一 (Token Type, Token Value) が生成されたケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        no_duplicate_seen.get(),
+        "重複が無いケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        alias_or_delete_seen.get(),
+        "USE_ALIAS / DELETE を含むケースが 1 つも観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// 生成指示 1 件の Token 構造のワイヤバイト列を組み立てる
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// Alias Type (vi64) と、REGISTER は Alias + Token Type + Token Value、USE_VALUE は
+/// Token Type + Token Value、USE_ALIAS / DELETE は Alias を続ける。
+fn auth_token_wire_bytes(spec: AuthTokenSpec) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match spec {
+        AuthTokenSpec::Delete(alias) => {
+            varint::encode(0x0, &mut buf);
+            varint::encode(alias, &mut buf);
+        }
+        AuthTokenSpec::Register(alias, token_type, token_value) => {
+            varint::encode(0x1, &mut buf);
+            varint::encode(alias, &mut buf);
+            varint::encode(token_type, &mut buf);
+            buf.push(token_value);
+        }
+        AuthTokenSpec::UseAlias(alias) => {
+            varint::encode(0x2, &mut buf);
+            varint::encode(alias, &mut buf);
+        }
+        AuthTokenSpec::UseValue(token_type, token_value) => {
+            varint::encode(0x3, &mut buf);
+            varint::encode(token_type, &mut buf);
+            buf.push(token_value);
+        }
+    }
+    buf
+}
+
+/// 生成指示の列から Message Parameters のワイヤバイト列を組み立てる
+///
+/// encode は重複した (Token Type, Token Value) を拒否するため、重複を含む入力の decode を
+/// 検証するにはテスト側でバイト列を組み立てる必要がある。すべて AUTHORIZATION_TOKEN
+/// (0x03) なので、delta は先頭のみ 0x03、以降は 0 になる。
+fn auth_params_wire_bytes(specs: &[AuthTokenSpec]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    varint::encode(specs.len() as u64, &mut buf);
+    for (index, &spec) in specs.iter().enumerate() {
+        varint::encode(
+            if index == 0 {
+                PARAM_AUTHORIZATION_TOKEN
+            } else {
+                0
+            },
+            &mut buf,
+        );
+        let token = auth_token_wire_bytes(spec);
+        varint::encode(token.len() as u64, &mut buf);
+        buf.extend_from_slice(&token);
+    }
+    buf
+}
+
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+/// decode は重複した (Token Type, Token Value) を拒否せず、encode は拒否する。
+///
+/// decode が重複を拒否すると Request ID が失われ、メッセージ単位の
+/// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を送れなくなる。重複の reject は Request ID を
+/// 得たセッション層の責務であり、decode は受理して
+/// `validate_auth_token_uniqueness()` に判定を委ねる。encode は自側で重複を組み立てた
+/// 時点で拒否する。ワイヤバイト列はテスト側で組み立て、重複の有無にかかわらず decode が
+/// 受理して件数と検証結果を保つことを確認する。
+#[test]
+fn auth_token_encode_rejects_duplicates_but_decode_accepts_them() -> noprop::TestResult {
+    let duplicate_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let spec_count = noprop::sample_usize_in(ctx, 0..=6);
+        let specs = (0..spec_count)
+            .map(|_| sample_auth_token_spec(ctx))
+            .collect::<Vec<_>>();
+        let params = params_from_auth_specs(&specs);
+        // encode の結果は実装内の検証を経由するため、参照モデルで独立に期待値を求める
+        let has_duplicate = has_duplicate_type_value(&specs);
+        if has_duplicate {
+            duplicate_seen.set(true);
+        }
+
+        // encode は自側で重複を組み立てた時点で拒否する
+        let mut encoded = Vec::new();
+        assert_eq!(
+            params.encode(&mut encoded).is_err(),
+            has_duplicate,
+            "encode の重複拒否が参照モデルと一致すること"
+        );
+
+        // decode は重複を受理する (reject は Request ID を得たセッション層の責務)
+        let wire = auth_params_wire_bytes(&specs);
+        let (decoded, consumed) = MessageParameters::decode(&wire)
+            .expect("(Token Type, Token Value) の重複は decode では検出しない");
+        assert_eq!(consumed, wire.len(), "生成したバイト列をすべて消費すること");
+        assert_eq!(decoded.authorization_tokens().len(), specs.len());
+        assert_eq!(
+            decoded.validate_auth_token_uniqueness().is_err(),
+            has_duplicate,
+            "decode 後も一意性検証の結果が参照モデルと一致すること"
+        );
+        Ok(())
+    })?;
+    assert!(
+        duplicate_seen.get(),
+        "重複した (Token Type, Token Value) の decode が 1 つも観測されなかった\n{runner}"
+    );
     Ok(())
 }

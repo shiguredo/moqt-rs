@@ -1107,6 +1107,23 @@ impl ControlMessage {
     }
 
     /// バッファの先頭からメッセージをデコードし `(ControlMessage, 消費バイト数)` を返す
+    ///
+    /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複を本 decode が検出するのは
+    /// SETUP だけである (draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN)。
+    /// Request ID を持たずメッセージ単位の reject ができないため decode 時に
+    /// `MalformedAuthToken` で拒否する)。
+    ///
+    /// Request ID を持つ request メッセージの重複は本 decode では検出しない。
+    /// draft §8.9 (Authorization Token Compression) の reject はメッセージ単位の判断であり、
+    /// `Session` が受信時に REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で拒否する
+    /// ([`crate::session::core::Session::recv_request`] が request stream の先頭メッセージ、
+    /// [`crate::session::core::Session::recv_stream_message`] が確立済み request stream 上の
+    /// REQUEST_UPDATE)。decode を失敗させると Request ID が失われ、メッセージ単位の
+    /// reject を送れないためである。
+    /// `Session` を経由せずパラメータを直接扱う場合は
+    /// [`crate::message_parameter::MessageParameters::validate_auth_token_uniqueness`] を
+    /// 呼ぶこと。本体を解析しない未実装 request (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
+    /// SUBSCRIBE_TRACKS) は本検証の対象外である。
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
 

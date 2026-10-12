@@ -71,6 +71,14 @@ pub enum ObjectFilterOutcome {
 pub(crate) enum BidiMessage {
     /// 自側が開始した request stream 上のメッセージ (応答または追加メッセージ)
     Response(u64, Result<StreamRead<ControlMessage>>),
+    /// peer が開始した request stream の先頭メッセージの読み出しに失敗した
+    ///
+    /// decode 失敗 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) /
+    /// §8.9 (Authorization Token Compression) が MUST とするセッション終了の対象) と
+    /// transport エラーの両方を運ぶ。warn ログだけで破棄すると終了コード付きの
+    /// セッション終了を果たせないため、エラーを保ったまま main ループへ伝える。
+    /// 終了コードを決めるのは呼び出し側 (pipeline) である。
+    PeerRequestError(TransportError),
     /// peer が開始した request stream の先頭メッセージ
     ///
     /// メインループが `Session::recv_request` で受理した後、`send` を応答用の
@@ -716,7 +724,10 @@ fn spawn_peer_bidi_accept_task(
                     Ok(StreamRead::Value(message)) => message,
                     Ok(StreamRead::Closed(_)) => return,
                     Err(e) => {
+                        // decode 失敗は warn ログで破棄せず main ループへ伝える
+                        // (破棄すると §8.3 / §8.9 が MUST とするセッション終了を果たせない)
                         tracing::warn!("Failed to read peer request start message: {e}");
+                        let _ = tx.send(BidiMessage::PeerRequestError(e)).await;
                         return;
                     }
                 };
@@ -2040,6 +2051,11 @@ impl MoqtClient {
                                 self.drain_events().await?;
                             }
                         }
+                    }
+                    BidiMessage::PeerRequestError(e) => {
+                        // peer request の開始メッセージを復号できない以上この session は
+                        // 継続できない。終了コードの決定は呼び出し側 (pipeline) に委ねる。
+                        return Err(e);
                     }
                     BidiMessage::PeerRequest { request_id, message, send, stop_tx } => {
                         // peer (relay) が開始した request stream の受理。
