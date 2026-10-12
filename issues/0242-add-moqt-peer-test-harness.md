@@ -1,7 +1,7 @@
 # example に in-process の MOQT peer 試験基盤を追加する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/add-moqt-peer-test-harness
 - Polished: 2026-10-12
 
@@ -74,3 +74,34 @@ example の I/O 経路 (ハンドシェイク、peer 開始 request stream の�
 - 実 relay を必要とせず `cargo test --workspace` で実行されること (`#[ignore]` を付けない)。
 - 追加した基盤がモック / スタブを使っていないこと (実 s2n-quic サーバーと `Session::new_server`
   で駆動する)。
+
+## 解決方法
+
+- `examples/tokio-moq/src/peer_harness.rs` を追加し、`lib.rs` に `#[cfg(test)] mod peer_harness;`
+  を置いた。s2n-quic のサーバーを 127.0.0.1 で立て、`Session::new_server` を駆動する peer 役を
+  提供する。テスト専用モジュールであり通常ビルドには含まれない。`#[cfg(test)]` の module は他
+  クレートへ公開されないため `examples/moq-pub` / `examples/moq-sub` からは参照できず、検証は
+  tokio-moq の中で行う。
+- 提供する機能は 3 つである。SETUP 交換 (`SessionEvent::SendControl` を取り出し
+  `stream::encode_control_stream_setup` で制御ストリームへ書き、client の制御ストリームを受理して
+  stream type を検証してから `Session::recv_control` へ渡す)、peer 起点 request stream への
+  メッセージ送信 (`Session::next_local_request_id` で奇数を採番する)、client 起点 request stream の
+  受理 (`Session::recv_request`) と REQUEST_OK による応答 (`Session::send_request_ok`)。
+  peer が開いた request stream に届く応答の読み出し、client が送る終了コードの観測、SETUP の内容を
+  差し替えて送る経路は提供しない (0236 / 0240 の実装時に必要になった時点で拡張する)。
+- モック / スタブは使わず、実 s2n-quic サーバーと実 `MoqtClient` を接続する。ライブラリと example の
+  公開 API だけで組み、`moqt_client.rs` の private 関数の可視性は変えていない (SETUP の取り出し、
+  制御ストリームへの書き出し、request の種別判定は、テスト専用の都合で可視性を広げないため同じ
+  処理をハーネス側に持たせている)。
+- テストは `examples/tokio-moq/src/peer_harness.rs` の `#[cfg(test)]` 内の `mod tests` に 2 本
+  追加した。`peer_request_stream_start_message_is_accepted` は peer 起点 request stream の先頭に
+  送った SUBSCRIBE が Request ID / 名前空間 / トラック名ごと example に受理されること、
+  `client_request_stream_start_message_is_accepted_by_peer` は example の PUBLISH が peer に request
+  として受理され REQUEST_OK で要求が完了することを固定する。どちらも `tokio::time::timeout` で
+  10 秒の上限を設け、`#[ignore]` は付けない (実 relay 不要)。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。
+  テストは 40 回以上連続実行してフレークが無いこと、実装を変異させると失敗すること (vacuous な
+  テストでないこと) を確認した。
+- 0236 / 0240 の検証に必要な拡張 (peer が開いた stream に届く応答の読み出し、不正な SETUP の送信、
+  終了コードの観測) はそれらの issue で行う。
