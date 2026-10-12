@@ -1,7 +1,7 @@
 # 不正な AUTHORIZATION_TOKEN を MALFORMED_AUTH_TOKEN でメッセージ単位に拒否する
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-12
 - Branch: feature/fix-malformed-auth-token-reject
 - Polished: 2026-10-10
 - Updated: 2026-10-11
@@ -88,3 +88,34 @@ REQUEST_ERROR のコード 0x4 として定義される (§12.3 (Request Error C
   検証できる層 (library の decode / 検証層 `tests/` と example の単体テスト) で行うこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `MessageParameters::decode` から (Token Type, Token Value) の一意性検証を分離し、公開 API
+  `MessageParameters::validate_auth_token_uniqueness` を追加した。decode を失敗させると
+  Request ID が失われ、§8.9 が MUST とするメッセージ単位の reject を送れないためである。
+  `ControlMessage::decode` は SETUP だけを decode 時に拒否し続ける (`SetupOptions::decode` が
+  検証する)。
+- セッションの受理経路で一意性を検証し、違反時は REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を返して
+  セッションを維持する。対象は SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS
+  (`Session::accept_peer_request`) と REQUEST_UPDATE (`handle_peer_request_update`)。
+  REGISTER の alias は §8.9 の MUST に従い、拒否するメッセージでも cache に登録する。
+- REQUEST_UPDATE では §9.20.1 の context スコープ、§9.5 と §3.1 / §3.2 の state・role、
+  §9.20.18 の FORWARD 値域の検証を不正トークン判定より先に行う。セッション終了の検証が
+  メッセージ単位の reject に隠れないようにするためである。token cache の適用はこれらの検証の
+  後に行い、session error になるメッセージのトークンは適用しない。
+- `reject_request_update` を `locate_request` ベースに一般化し、FETCH の拒否では
+  `send_request_error` を通して §9.5.1 の MUST (fetch の Terminated 遷移と FETCH data stream の
+  reset) を満たすようにした。
+- relay 経路 (`examples/tokio-moq/src/moqt_client.rs`) は peer 開始 request stream の先頭
+  メッセージの decode 失敗を破棄せず main ループへ伝播し (`BidiMessage::PeerRequestError`)、
+  KEY_VALUE_FORMATTING_ERROR でセッションを閉じる。
+- examples の `session_error_code` は、確立後に届いた SETUP の decode 失敗と自側 encode 失敗を
+  §12.2 の MALFORMED_AUTH_TOKEN (0x16) に写す。SETUP は Request ID を持たずメッセージ単位の
+  reject ができないため、原因が伝わる最も近いセッション終了コードを選んだ。peer の初回 SETUP の
+  decode 失敗は接続確立時に確定し終了コードを送れない (既知の限界)。
+- テストは `tests/test_session/auth_token.rs` に SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS /
+  REQUEST_UPDATE の拒否、wire バイト列経由の通し検証、GOAWAY 拒否との優先順位、FETCH data
+  stream の reset、ローカル終端済み request の吸収、state・role 違反でのセッション終了を追加した。
+  `pbt/tests/prop_message_parameter.rs` に一意性検証と encode / decode の非対称性の PBT を追加し、
+  `tests/test_message_parameter.rs` の decode 重複テストを契約変更に合わせて更新した。
