@@ -603,9 +603,13 @@ pub enum DatagramAcceptance {
 // bidi request stream のライフサイクルを追跡するための基礎型。
 // 将来 draft が変更される可能性がある。
 
-/// bidi request stream の開始メッセージ種別 (draft-ietf-moq-transport-22 §6.3 (Session initialization))
+/// 本実装が扱う bidi request stream の開始メッセージ種別
+/// (draft-ietf-moq-transport-22 §6.3 (Session initialization))
 ///
-/// bidi request stream は以下の 4 種類のいずれかの制御メッセージで開始する。
+/// §6.3 は bidi request stream の先頭メッセージを 7 種類 (TRACK_STATUS / SUBSCRIBE / PUBLISH /
+/// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限る。本実装が
+/// 受理するのはこのうち以下の 4 種類である (残り 3 種類は `Session::recv_request` が
+/// `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら GOING_AWAY) で拒否する)。
 /// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {

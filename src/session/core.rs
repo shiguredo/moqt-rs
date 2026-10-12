@@ -1054,7 +1054,9 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
-    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う)。
+    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う。本体を
+    /// 解析しない未対応 request は `accept_peer_request` を通せないため
+    /// `validate_peer_request_id` を直接呼ぶ)。
     /// 仕様がセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
     /// 未到達 Request ID の保持数に上限は設けない。
     ///
@@ -1065,7 +1067,10 @@ impl Session {
     /// 閉じるかを選べる。将来 draft が変更される可能性がある。
     ///
     /// 上記 7 種類のうち本実装が扱わない 3 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-    /// SUBSCRIBE_TRACKS) と、7 種類以外の message type
+    /// SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら
+    /// GOING_AWAY) を積んで session を維持する (draft §1.6 (Modularity): "Limited endpoints
+    /// SHOULD respond to any unsupported messages with the appropriate NOT_SUPPORTED error
+    /// code, rather than ignoring them.")。7 種類以外の message type
     /// (draft §6.3 (Session initialization) 違反) は `PROTOCOL_VIOLATION` で session を
     /// closing に遷移させる。
     pub fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError> {

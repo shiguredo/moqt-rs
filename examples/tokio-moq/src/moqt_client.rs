@@ -18,8 +18,8 @@ use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::session::types::{
-    DatagramAcceptance, FetchState, RecvDataStreamError, SendRequestError, SubscriptionState,
-    TrackDataAcceptance,
+    DatagramAcceptance, FetchState, RecvDataStreamError, RecvRequestError, SendRequestError,
+    SubscriptionState, TrackDataAcceptance,
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
@@ -92,6 +92,34 @@ pub(crate) enum BidiMessage {
         send: SendStream,
         /// 受信方向の STOP_SENDING を依頼するチャネル
         stop_tx: mpsc::Sender<StopSendingCommand>,
+    },
+    /// peer が開始した request stream の先頭メッセージのうち、アプリへ渡さないもの
+    ///
+    /// decode できる先頭メッセージのうち、本実装が扱う 4 種類以外を運ぶ。§6.3 (Session
+    /// initialization) の 7 種類のうち未対応の 3 種類 (PUBLISH_NAMESPACE /
+    /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY
+    /// を送信済みなら GOING_AWAY) で拒否してセッションを維持し、7 種類以外は
+    /// `PROTOCOL_VIOLATION` でセッションを閉じる。どちらの判定も `Session::recv_request` が
+    /// 持つため、main ループはこの variant をそのまま `Session::recv_request` へ渡す。アプリへ
+    /// 要求として渡さないのは、未対応 request にアプリが応答すると
+    /// `Session::send_request_error` が未登録の Request ID を拒否して example が致命終了する
+    /// ためである。decode できない先頭メッセージは [`BidiMessage::PeerRequestError`] が運ぶ。
+    PeerRequestRejected {
+        /// 先頭メッセージ
+        message: ControlMessage,
+        /// 応答 (REQUEST_ERROR) を書き戻すための送信半
+        send: SendStream,
+    },
+    /// 拒否した request stream の終端
+    ///
+    /// Session は拒否した request の記録を終端通知で回収する
+    /// (`Session::recv_request_stream_closed`)。I/O 層が終端を通知しないと記録がセッション
+    /// 生存中に残り続けるため、受信半の終端を main ループへ運ぶ。
+    RejectedRequestStreamClosed {
+        /// 先頭メッセージの Request ID (Request ID を持たないメッセージでは `None`)
+        request_id: Option<u64>,
+        /// 受信半の終端
+        end: RequestStreamEnd,
     },
 }
 
@@ -691,9 +719,12 @@ fn spawn_bidi_recv_task(
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
 /// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
-/// ストリームごとに reader task を起こし、先頭メッセージを
-/// [`BidiMessage::PeerRequest`] としてメインループへ渡す。以降のメッセージは
-/// 通常の bidi メッセージと同じ経路で流す。
+/// ストリームごとに reader task を起こし、decode できる先頭メッセージを
+/// [`BidiMessage::PeerRequest`] (本実装が扱う 4 種類) または [`BidiMessage::PeerRequestRejected`]
+/// (それ以外) としてメインループへ渡す。decode できない先頭メッセージは
+/// [`BidiMessage::PeerRequestError`] として渡す。以降のメッセージは、先頭メッセージをアプリへ
+/// 渡したストリームでは通常の bidi メッセージと同じ経路で流し、拒否したストリームでは Session が
+/// 受理していないため読み捨て、終端を [`BidiMessage::RejectedRequestStreamClosed`] として渡す。
 fn spawn_peer_bidi_accept_task(
     mut acceptor: BidiStreamAcceptor,
     tx: mpsc::Sender<BidiMessage>,
@@ -725,8 +756,25 @@ fn spawn_peer_bidi_accept_task(
                         return;
                     }
                 };
+                // アプリへ渡すのは本実装が扱う 4 種類だけにする。§6.3 (Session initialization) の
+                // 7 種類判定と、未対応 request の拒否 / 7 種類以外のセッション終了は Session が
+                // 持つため、それ以外はアプリへ渡さず Session に判定させる
                 let Some(request_id) = request_id_of(&first) else {
-                    tracing::warn!("Peer request start message is not a request: {first:?}");
+                    // 拒否するストリームでは Session が request を受理しないため、STOP_SENDING の
+                    // 依頼は来ない。応答 (REQUEST_ERROR) を書く送信半だけを main ループへ渡し、
+                    // 受信半は終端まで読む (drop すると peer へ STOP_SENDING が届く)
+                    let rejected_request_id = unsupported_request_id(&first);
+                    if tx
+                        .send(BidiMessage::PeerRequestRejected {
+                            message: first,
+                            send,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    read_rejected_request_stream(stream, tx, rejected_request_id).await;
                     return;
                 };
                 let (stop_tx, mut stop_rx) = mpsc::channel::<StopSendingCommand>(1);
@@ -780,17 +828,64 @@ fn spawn_peer_bidi_accept_task(
     }))
 }
 
-/// request の開始メッセージから Request ID を取り出す
+/// 拒否した request stream の終端まで読み続ける
 ///
-/// bidi request stream の先頭メッセージとして許されるのは SUBSCRIBE / PUBLISH /
-/// FETCH / TRACK_STATUS の 4 種類である
-/// (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
+/// Session が受理しないストリームであるため、先頭メッセージ以外は読み捨てる。受信半を drop
+/// すると peer へ STOP_SENDING が届くため終端まで読む。終端は main ループへ伝え、Session が
+/// 拒否した request の記録を回収できるようにする。
+async fn read_rejected_request_stream(
+    mut stream: ControlStream,
+    tx: mpsc::Sender<BidiMessage>,
+    request_id: Option<u64>,
+) {
+    loop {
+        match stream.recv_message().await {
+            Ok(StreamRead::Value(_)) => {
+                // 先頭メッセージ以外は Session が受理していないため読み捨てる
+                // (メッセージ全体はログに出さない。AUTHORIZATION_TOKEN を含み得る)
+                tracing::debug!("Dropping a message on a rejected request stream");
+            }
+            Ok(StreamRead::Closed(end)) => {
+                let _ = tx
+                    .send(BidiMessage::RejectedRequestStreamClosed { request_id, end })
+                    .await;
+                return;
+            }
+            Err(e) => {
+                // 終端を観測できないまま読めなくなった。Session へ終端を通知できないため、
+                // 拒否した request の記録はセッション終了まで残る
+                tracing::warn!("Failed to read a rejected request stream: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// 本実装が扱う request の開始メッセージから Request ID を取り出す
+///
+/// draft-ietf-moq-transport-22 §6.3 (Session initialization) は bidi request stream の先頭
+/// メッセージを 7 種類 (SUBSCRIBE / PUBLISH / FETCH / PUBLISH_NAMESPACE /
+/// SUBSCRIBE_NAMESPACE / TRACK_STATUS / SUBSCRIBE_TRACKS) に限る。本実装がアプリへ渡すのは
+/// このうち SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の 4 種類であり、それ以外は
+/// `Session::recv_request` に判定させる (未対応の 3 種類は拒否、7 種類以外はセッション終了)。
 fn request_id_of(message: &ControlMessage) -> Option<u64> {
     match message {
         ControlMessage::Subscribe(m) => Some(m.request_id),
         ControlMessage::Publish(m) => Some(m.request_id),
         ControlMessage::Fetch(m) => Some(m.request_id),
         ControlMessage::TrackStatus(m) => Some(m.request_id),
+        _ => None,
+    }
+}
+
+/// アプリへ渡さない先頭メッセージから Request ID を取り出す
+///
+/// `ControlMessage::Unsupported` のうち、本実装が扱わない request (PUBLISH_NAMESPACE /
+/// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) だけが Request ID を持つ。応答専用の型
+/// (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は持たないため `None` になる。
+fn unsupported_request_id(message: &ControlMessage) -> Option<u64> {
+    match message {
+        ControlMessage::Unsupported { request_id, .. } => *request_id,
         _ => None,
     }
 }
@@ -1923,11 +2018,25 @@ impl MoqtClient {
                         // peer (relay) が開始した request stream の受理。
                         // 先頭メッセージを Session に通知して状態を作り、応答用の送信半を
                         // 登録したうえでアプリへ引き渡す。
-                        {
+                        let accepted = {
                             let mut session = lock_session(&self.session);
-                            session
-                                .recv_request(message.clone())
-                                .map_err(|e| TransportError::Internal(format!("recv_request: {e}")))?;
+                            session.recv_request(message.clone())
+                        };
+                        match accepted {
+                            Ok(()) => {}
+                            Err(RecvRequestError::Session(_)) => {
+                                // parity 違反・Request ID 重複で Session は closing に遷移して
+                                // CloseSession を積んでいる。終了コード付きで閉じるため
+                                // drain_events に処理させる (TransportError::Internal に写して
+                                // ? で伝播させると drain_events を飛ばし、終了コードが peer に
+                                // 届かない)
+                                self.drain_events().await?;
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                // SETUP 完了前の到着など。Session は状態を変えていない。
+                                return Err(TransportError::Internal(format!("recv_request: {e}")));
+                            }
                         }
                         self.bidi_sends.insert(request_id, send);
                         self.bidi_stop_txs.insert(request_id, stop_tx);
@@ -1938,6 +2047,61 @@ impl MoqtClient {
                         });
                         // 受理時に Session が自動応答 (REQUEST_ERROR 等) を積むことがある
                         self.drain_events().await?;
+                    }
+                    BidiMessage::PeerRequestRejected { message, send } => {
+                        // 本実装が扱わない先頭メッセージの受理。§6.3 (Session initialization) の
+                        // 7 種類判定と、未対応 request の拒否 (REQUEST_ERROR) / 7 種類以外の
+                        // セッション終了 (PROTOCOL_VIOLATION) の決定は Session が持つ。
+                        // アプリへは渡さない (未対応 request にアプリが応答すると
+                        // send_request_error が未登録の Request ID を拒否して致命終了する)。
+                        let rejected_request_id = unsupported_request_id(&message);
+                        let accepted = {
+                            let mut session = lock_session(&self.session);
+                            session.recv_request(message)
+                        };
+                        match accepted {
+                            Ok(()) => {
+                                // Ok になるのは Request ID を持つ未対応 request (3 種類) だけである。
+                                // Session が積んだ REQUEST_ERROR (FIN 付き) を書けるよう、
+                                // drain_events より先に送信半を登録する (台帳に無いと SendOnStream が
+                                // Skip され、応答が捨てられて peer から見て無応答になる)。
+                                // 送信半は FIN 付きの送信で台帳から外れる。
+                                if let Some(request_id) = rejected_request_id {
+                                    tracing::info!(
+                                        "Rejected unsupported peer request: request_id={request_id}"
+                                    );
+                                    self.bidi_sends.insert(request_id, send);
+                                }
+                                self.drain_events().await?;
+                            }
+                            Err(RecvRequestError::Session(_)) => {
+                                // Session は closing に遷移して CloseSession を積んでいる。
+                                // 終了コード付きで閉じるため drain_events に処理させる
+                                // (TransportError::Internal に写して ? で伝播させると
+                                // drain_events を飛ばし、終了コードが peer に届かない)。
+                                // 未対応の 3 種類でも parity 違反・Request ID 重複のときは
+                                // INVALID_REQUEST_ID で closing になる。
+                                self.drain_events().await?;
+                            }
+                            Err(e) => {
+                                // SETUP 完了前の到着など。Session は状態を変えていない。
+                                return Err(TransportError::Internal(format!("recv_request: {e}")));
+                            }
+                        }
+                    }
+                    BidiMessage::RejectedRequestStreamClosed { request_id, end } => {
+                        // 拒否した request stream の終端。Session へ通知して拒否した request の
+                        // 記録を回収させ、example 側の台帳からも外す (通知しないと記録が
+                        // セッション生存中に残り続ける)。この回収は公開 API から観測できないため
+                        // `peer_harness` のテストでは固定できない (通知を削除しても
+                        // テストは通る)。回収の要否を判断するときはここを直接確認すること
+                        if let Some(request_id) = request_id {
+                            let _ = lock_session(&self.session)
+                                .recv_request_stream_closed(request_id, end);
+                            // 応答を送れなかった場合 (セッション終了など) に備えて外す。
+                            // 応答を送れていれば FIN 付きの送信で既に外れている
+                            self.bidi_sends.remove(&request_id);
+                        }
                     }
                 }
             }

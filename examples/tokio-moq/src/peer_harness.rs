@@ -13,11 +13,12 @@
 //! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) である。WebTransport over HTTP/3 /
 //! HTTP/2 のハーネスは必要になった時点で別途追加する。
 //!
-//! 提供するのは SETUP 交換、peer 起点 request stream へのメッセージ送信、client 起点 request
-//! stream の受理と REQUEST_OK による応答である。次は提供しない (必要になった時点で拡張する)。
+//! 提供するのは SETUP 交換、peer 起点 request stream へのメッセージ送信、peer 起点 request
+//! stream に届く応答の読み出し、client 起点 request stream の受理と REQUEST_OK による応答で
+//! ある。次は提供しない (必要になった時点で拡張する)。
 //!
-//! - peer が開いた request stream に届く応答の読み出し
 //! - client が送る終了コード (CONNECTION_CLOSE) の観測
+//! - peer が送る STOP_SENDING の観測
 //! - SETUP の内容を差し替えて送る経路 (`Session::new_server` が積んだ SETUP を送るだけである)
 
 use std::net::SocketAddr;
@@ -34,11 +35,13 @@ use shiguredo_moqt::track_properties::TrackProperties;
 
 use crate::error::{Result, TransportError};
 use crate::moqt_client::{ControlStream, StreamRead};
-use crate::transport::{BidiStreamAcceptor, RecvStream, SendStream, StreamAcceptor, StreamHandle};
+use crate::transport::{BidiStreamAcceptor, SendStream, StreamAcceptor, StreamHandle};
 
-// 以下の 3 つは `moqt_client` の同名 private 関数と同じ処理である。テスト専用の都合で
+// 以下の 3 つは `moqt_client` の対応する private 関数と同じ処理を含む。テスト専用の都合で
 // 通常ビルド対象の可視性を広げないため (`shiguredo-rust` の「テストのために private な API を
-// 無理矢理公開しないこと」)、あえて重複させている。
+// 無理矢理公開しないこと」)、あえて重複させている。`request_stream_id` は
+// `moqt_client::request_id_of` に加えて `ControlMessage::Unsupported` の Request ID も扱う
+// (未対応 request の応答を読むために必要)。
 
 /// 初期イベントとして積まれた SETUP を取り出す
 ///
@@ -68,17 +71,19 @@ async fn send_control_stream_setup(
     Ok(())
 }
 
-/// request の開始メッセージから Request ID を取り出す
+/// 先頭メッセージから request stream の Request ID を取り出す
 ///
 /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は request stream の先頭に
-/// 7 種類のメッセージを許すが、本 example が request として扱うのは SUBSCRIBE / PUBLISH /
-/// FETCH / TRACK_STATUS の 4 種類である (残り 3 種類は `ControlMessage::Unsupported`)。
-fn request_id_of(message: &ControlMessage) -> Option<u64> {
+/// 7 種類のメッセージを許す。本 example が request として扱う 4 種類 (SUBSCRIBE / PUBLISH /
+/// FETCH / TRACK_STATUS) はそれぞれの構造体が Request ID を持ち、本実装が扱わない 3 種類は
+/// `ControlMessage::Unsupported` が持つ。応答専用の型は持たないため `None` になる。
+fn request_stream_id(message: &ControlMessage) -> Option<u64> {
     match message {
         ControlMessage::Subscribe(m) => Some(m.request_id),
         ControlMessage::Publish(m) => Some(m.request_id),
         ControlMessage::Fetch(m) => Some(m.request_id),
         ControlMessage::TrackStatus(m) => Some(m.request_id),
+        ControlMessage::Unsupported { request_id, .. } => *request_id,
         _ => None,
     }
 }
@@ -174,6 +179,19 @@ struct AcceptedRequest {
     reader: ControlStream,
 }
 
+/// peer が開いた request stream
+///
+/// 送信半と reader を保持する。drop すると送信半は FIN、受信半は STOP_SENDING として peer に
+/// 観測されるため、テストが終わるまで保持する。
+struct OpenedRequest {
+    /// 先頭メッセージの Request ID (先頭メッセージが request でない場合は `None`)
+    request_id: Option<u64>,
+    /// 送信半 (drop すると FIN が peer へ届くため保持する)
+    send: SendStream,
+    /// 応答を読む reader
+    reader: ControlStream,
+}
+
 /// 受理済みの in-process peer (MOQT のサーバー役)
 pub(crate) struct TestPeer {
     /// sans-I/O なサーバー側 session
@@ -195,8 +213,8 @@ pub(crate) struct TestPeer {
     control_recv: Option<ControlStream>,
     /// 自側が開いた request stream
     ///
-    /// 送信半の drop は FIN、受信半の drop は STOP_SENDING として peer に観測されるため保持する。
-    opened_requests: Vec<(SendStream, RecvStream)>,
+    /// 送信半の drop は FIN、reader の drop は STOP_SENDING として peer に観測されるため保持する。
+    opened_requests: Vec<OpenedRequest>,
     /// peer から受理した request stream
     accepted_requests: Vec<AcceptedRequest>,
 }
@@ -286,8 +304,34 @@ impl TestPeer {
     pub(crate) async fn send_request_start(&mut self, message: ControlMessage) -> Result<()> {
         let (mut send, recv) = self.handle.open_bidi_stream().await?;
         send.send(Bytes::from(message.encode()?)).await?;
-        self.opened_requests.push((send, recv));
+        self.opened_requests.push(OpenedRequest {
+            request_id: request_stream_id(&message),
+            send,
+            reader: ControlStream::new(recv),
+        });
         Ok(())
+    }
+
+    /// peer が開いた request stream に届いたメッセージを 1 つ読む
+    ///
+    /// `request_id` は [`Self::send_request_start`] に渡したメッセージの Request ID である。
+    /// example が request に応答したこと (REQUEST_ERROR など) を確認するために使う。
+    /// その Request ID の request stream を開いていない場合と、応答の前に終端された場合は
+    /// `TransportError::Internal` を返す。
+    pub(crate) async fn recv_response(&mut self, request_id: u64) -> Result<ControlMessage> {
+        let request = self
+            .opened_requests
+            .iter_mut()
+            .find(|request| request.request_id == Some(request_id))
+            .ok_or_else(|| {
+                TransportError::Internal(format!("request stream not found: {request_id}"))
+            })?;
+        match request.reader.recv_message().await? {
+            StreamRead::Value(message) => Ok(message),
+            StreamRead::Closed(_) => Err(TransportError::Internal(
+                "request stream closed before the response".into(),
+            )),
+        }
     }
 
     /// client から request stream の先頭メッセージを受理する
@@ -311,7 +355,7 @@ impl TestPeer {
                 ));
             }
         };
-        let request_id = request_id_of(&message).ok_or_else(|| {
+        let request_id = request_stream_id(&message).ok_or_else(|| {
             TransportError::Internal(format!(
                 "peer request start message is not a request: {message:?}"
             ))
@@ -376,6 +420,21 @@ impl TestPeer {
         Ok(())
     }
 
+    /// peer が開いた request stream の送信方向を FIN で閉じる
+    ///
+    /// example が拒否した request のストリーム終端を通知する経路を確かめるために使う。
+    pub(crate) fn finish_request_stream(&mut self, request_id: u64) -> Result<()> {
+        let request = self
+            .opened_requests
+            .iter_mut()
+            .find(|request| request.request_id == Some(request_id))
+            .ok_or_else(|| {
+                TransportError::Internal(format!("request stream not found: {request_id}"))
+            })?;
+        request.send.finish()?;
+        Ok(())
+    }
+
     /// 自側の次の Request ID を採番する (server 役は奇数)
     pub(crate) fn next_request_id(&mut self) -> Result<u64> {
         Ok(self.session.next_local_request_id()?)
@@ -391,11 +450,18 @@ mod tests {
     use std::future::Future;
     use std::time::Duration;
 
+    use shiguredo_moqt::error::{
+        REQUEST_NOT_SUPPORTED, SESSION_INVALID_REQUEST_ID, SESSION_PROTOCOL_VIOLATION,
+    };
+    use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message::common::TrackNamespace;
 
     use super::*;
     use crate::moqt_client::{ClientEvent, MoqtClient};
+
+    /// PUBLISH_NAMESPACE の制御メッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
+    const PUBLISH_NAMESPACE_TYPE_ID: u64 = 0x6;
 
     /// 基盤を使うテストの上限時間 (ハングを失敗として観測する)
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -564,6 +630,157 @@ mod tests {
                 published, request_id,
                 "publish_track が返した Request ID が一致すること"
             );
+        })
+        .await;
+    }
+
+    /// peer が §6.3 の 7 種類でないメッセージを先頭に送るとセッションが終了する
+    ///
+    /// 未知の type ID は decode 失敗の経路 (`BidiMessage::PeerRequestError`) を通るため、
+    /// decode できる型を送って example の種別判定を確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_message_outside_allowed_types_closes_session() {
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // REQUEST_OK は §6.3 の 7 種類に含まれない (request stream の先頭に置けない)
+            let message = ControlMessage::RequestOk(RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            });
+            peer.send_request_start(message)
+                .await
+                .expect("request stream を開けること");
+
+            // example は PROTOCOL_VIOLATION でセッションを閉じる
+            let event = client.next_event().await.expect("イベントを取得できること");
+            match event {
+                Some(ClientEvent::Session(SessionEvent::CloseSession(error))) => {
+                    assert_eq!(
+                        error.code, SESSION_PROTOCOL_VIOLATION,
+                        "PROTOCOL_VIOLATION で閉じること"
+                    );
+                }
+                other => panic!("CloseSession が届くこと: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    /// peer が本実装の扱わない request を先頭に送ると拒否され、セッションが維持される
+    ///
+    /// アプリへ要求が渡らないこと (二重応答を避けること) も確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsupported_request_start_message_is_rejected_and_session_is_kept() {
+        run_with_timeout(async {
+            let (mut peer, client) = connect_pair().await;
+
+            // PUBLISH_NAMESPACE を先頭に送る。body は 3 種類の共通構造
+            // (Request ID → Track Namespace Prefix → Number of Parameters) に従う
+            // (draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) /
+            // §8.7 (Track Namespace Structure))
+            let request_id = peer.next_request_id().expect("Request ID を採番できること");
+            let mut body = Vec::new();
+            shiguredo_moqt::varint::encode(request_id, &mut body);
+            // 空の Track Namespace Prefix (フィールド数 0)
+            shiguredo_moqt::varint::encode(0, &mut body);
+            // パラメータ数 0
+            shiguredo_moqt::varint::encode(0, &mut body);
+            let message = ControlMessage::Unsupported {
+                type_id: PUBLISH_NAMESPACE_TYPE_ID,
+                request_id: Some(request_id),
+                body,
+            };
+            peer.send_request_start(message)
+                .await
+                .expect("request stream を開けること");
+
+            // client の main ループを回す。peer が開いた stream の先頭メッセージは accept task
+            // から main ループへ渡されるため、駆動しないと Session が処理しない。
+            // アプリへ要求が渡っていれば、この next_event が直ちに Request を返す
+            let drive = tokio::spawn(async move {
+                let mut client = client;
+                client.next_event().await
+            });
+
+            // peer は REQUEST_ERROR (NOT_SUPPORTED) を受け取る
+            let response = peer
+                .recv_response(request_id)
+                .await
+                .expect("応答を読めること");
+            match response {
+                ControlMessage::RequestError(error) => {
+                    assert_eq!(
+                        error.error_code, REQUEST_NOT_SUPPORTED,
+                        "NOT_SUPPORTED で拒否されること"
+                    );
+                }
+                other => panic!("REQUEST_ERROR が届くこと: {other:?}"),
+            }
+
+            // アプリへ要求は渡らない (渡っていれば next_event が先に完了している)
+            assert!(!drive.is_finished(), "アプリへ request が渡らないこと");
+
+            // 拒否したストリームを終端しても session は維持される
+            peer.finish_request_stream(request_id)
+                .expect("request stream を終端できること");
+
+            // 拒否のあとも通常の request が受理されることで session の維持を確かめる
+            let next_request_id = peer.next_request_id().expect("Request ID を採番できること");
+            let next_message = ControlMessage::Subscribe(Subscribe {
+                request_id: next_request_id,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("名前空間を作れること"),
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            });
+            peer.send_request_start(next_message)
+                .await
+                .expect("request stream を開けること");
+            match drive.await.expect("駆動タスクが終了すること") {
+                Ok(Some(ClientEvent::Request(request))) => {
+                    assert_eq!(
+                        request.request_id, next_request_id,
+                        "拒否のあとも request が受理されること"
+                    );
+                }
+                other => panic!("拒否のあとも request が受理されること: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    /// peer が parity 違反の request を先頭に送るとセッションが終了する
+    ///
+    /// 本実装が扱う 4 種類の request でも Session がエラーを返す場合は、終了コード付きで
+    /// セッションを閉じることを確かめる (draft-ietf-moq-transport-22 §6.4.2.1 (Request ID))。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_start_message_with_invalid_parity_closes_session() {
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // server 役の peer が client の parity (偶数) を使うと §6.4.2.1 違反になる
+            let message = ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("名前空間を作れること"),
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            });
+            peer.send_request_start(message)
+                .await
+                .expect("request stream を開けること");
+
+            let event = client.next_event().await.expect("イベントを取得できること");
+            match event {
+                Some(ClientEvent::Session(SessionEvent::CloseSession(error))) => {
+                    assert_eq!(
+                        error.code, SESSION_INVALID_REQUEST_ID,
+                        "INVALID_REQUEST_ID で閉じること"
+                    );
+                }
+                other => panic!("CloseSession が届くこと: {other:?}"),
+            }
         })
         .await;
     }
