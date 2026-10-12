@@ -163,7 +163,7 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 - [Media over QUIC Transport (MOQT)](docs/moqt.md)
 - [MOQT Streaming Format (MSF)](docs/msf.md)
 - [Low Overhead Container (LOC)](docs/loc.md)
-- [C4M (Common Access Token for MOQT)](docs/c4m.md)
+- [C4M (Common Access Token for MoQ)](docs/c4m.md)
 
 モジュール構成とアーキテクチャは [`docs/moqt.md`](docs/moqt.md) を参照してください。
 
