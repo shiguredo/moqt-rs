@@ -75,7 +75,7 @@ pub fn parse_args(args: &[&str]) -> noargs::Result<Option<Config>> {
 /// [`noargs::RawArgs`] を解釈して [`Config`] を返す
 fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     args.metadata_mut().app_name = env!("CARGO_PKG_NAME");
-    args.metadata_mut().app_description = "MoQT subscriber client";
+    args.metadata_mut().app_description = "MOQT subscriber client";
 
     if noargs::VERSION_FLAG.take(&mut args).is_present() {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));

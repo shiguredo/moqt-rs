@@ -9,7 +9,7 @@ use std::fmt;
 pub enum Error {
     /// QUIC 接続エラー
     Quic(String),
-    /// MoQT プロトコルエラー
+    /// MOQT プロトコルエラー
     Moqt(shiguredo_moqt::error::MessageError),
     /// AV1 デコードエラー
     Decode(shiguredo_dav1d::Error),
@@ -47,7 +47,7 @@ impl fmt::Display for Error {
             Self::StreamReset { error_code } => {
                 write!(f, "stream reset by peer (error code {error_code:#x})")
             }
-            Self::Moqt(e) => write!(f, "MoQT: {e}"),
+            Self::Moqt(e) => write!(f, "MOQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
             Self::Player(e) => write!(f, "player: {e}"),
@@ -217,7 +217,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "MoQT: protocol violation: out of scope parameter"
+            "MOQT: protocol violation: out of scope parameter"
         );
     }
 }

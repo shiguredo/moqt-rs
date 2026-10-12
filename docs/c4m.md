@@ -1,4 +1,4 @@
-# C4M (Common Access Token for MoQ)
+# C4M (Common Access Token for MOQT)
 
 MOQT の認可トークンを扱う `c4m` モジュールの解説です。
 [draft-ietf-moq-c4m-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01) が定義するトークンと、その基盤となる CBOR、COSE、CWT、CAT を実装しています。

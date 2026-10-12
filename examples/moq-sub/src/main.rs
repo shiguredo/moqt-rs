@@ -1,4 +1,4 @@
-//! MoQT サブスクライバークライアント
+//! MOQT サブスクライバークライアント
 //!
 //! リレーサーバーに接続し、指定トラックを SUBSCRIBE してデータを受信・デコード・再生する。
 //! `--mp4` を指定すると受信した映像 / 音声を MP4 ファイルへ保存し、`--no-play` を併せて
@@ -108,7 +108,7 @@ fn main() {
     // 完了するため、この結果を受け取った時点で MP4 は確定している。
     let (result_tx, result_rx) = std::sync::mpsc::channel::<error::Result<()>>();
     // macOS では SDL のウィンドウ操作をメインスレッドで行う必要がある。
-    // MoQT 処理は別スレッドの tokio ランタイムで動かす。
+    // MOQT 処理は別スレッドの tokio ランタイムで動かす。
     std::thread::spawn(move || {
         let result = rt.block_on(async move {
             // タスクメトリクスを定期的にログ出力する
@@ -185,13 +185,13 @@ fn main() {
 ///
 /// 複数の namespace を同時に購読するときに取り違えないよう、購読中の namespace を出す。
 fn player_window_title(namespace: &str) -> String {
-    format!("{namespace} - MoQT Subscriber")
+    format!("{namespace} - MOQT Subscriber")
 }
 
 /// メインスレッドで raw_player のイベントループを実行する
 ///
 /// macOS では SDL のウィンドウ操作がメインスレッドでしか動作しないため、
-/// raw_player はメインスレッドで動かし、MoQT 処理は別スレッドで実行する。
+/// raw_player はメインスレッドで動かし、MOQT 処理は別スレッドで実行する。
 ///
 /// SDL の初期化やウィンドウ・レンダラー作成に失敗する環境でも panic せず、`Error::Player` として失敗を返す。
 ///
@@ -1322,12 +1322,12 @@ mod tests {
     fn player_window_title_includes_namespace() {
         assert_eq!(
             player_window_title("moq-example"),
-            "moq-example - MoQT Subscriber",
+            "moq-example - MOQT Subscriber",
             "指定した namespace がそのままタイトルへ出ること"
         );
         assert_eq!(
             player_window_title("example.2ecom"),
-            "example.2ecom - MoQT Subscriber",
+            "example.2ecom - MOQT Subscriber",
             "エスケープを含む §8.8 表現でもそのままタイトルへ出ること"
         );
     }

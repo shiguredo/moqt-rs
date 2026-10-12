@@ -1,4 +1,4 @@
-//! MoQT セッション状態機械 (sans-I/O)
+//! MOQT セッション状態機械 (sans-I/O)
 //!
 //! draft-ietf-moq-transport-22 の §6 (Sessions), §3 (Publishing and Receiving Tracks), §9 (Control Messages) に基づく。draft 由来の
 //! 実装のため、将来のバージョンで変更される可能性がある。
@@ -41,7 +41,7 @@
 //!
 //! # Stream 抽象化
 //!
-//! MoQT は制御ストリーム (SETUP 用 uni stream ペア) と request stream (bidi、
+//! MOQT は制御ストリーム (SETUP 用 uni stream ペア) と request stream (bidi、
 //! SUBSCRIBE / PUBLISH / FETCH のいずれかで始まる) と
 //! data stream (uni、FETCH_HEADER / SUBGROUP_HEADER で始まる) を区別する。
 //! 応答メッセージ (SUBSCRIBE_OK / PUBLISH_OK / REQUEST_ERROR 等) は wire

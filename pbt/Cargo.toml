@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 # Property-Based Testing
 noprop = "0.2"
-# MoQT 本体 (ローカル参照)
+# MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = ".." }
 
 [dev-dependencies]

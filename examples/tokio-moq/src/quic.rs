@@ -267,7 +267,7 @@ fn build_tls_client(cert_path: Option<&str>) -> Result<s2n_rustls::Client> {
 
 /// 証明書検証をスキップする開発用 TLS クライアントを構築する
 ///
-/// `alpn_protocols` には接続方式に応じた ALPN を渡す。QUIC 直接接続は MoQT の
+/// `alpn_protocols` には接続方式に応じた ALPN を渡す。QUIC 直接接続は MOQT の
 /// プロトコル識別子、WebTransport over HTTP/3 は `h3` を使う。
 /// s2n-quic の default TLS は feature `provider-tls-rustls` で rustls に解決されるため、
 /// rustls の `ClientConfig` を直接構築して渡す。

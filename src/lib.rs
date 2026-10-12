@@ -1,9 +1,9 @@
 // no_std 環境向けライブラリ
 #![no_std]
 
-//! shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O な MoQ ライブラリ
+//! shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O な MOQT ライブラリ
 //!
-//! I/O を持たない純粋なコーデック層と、1 本の MoQT Transport Session に閉じた
+//! I/O を持たない純粋なコーデック層と、1 本の MOQT Transport Session に閉じた
 //! sans I/O なセッション状態機械を提供する。
 
 extern crate alloc;
@@ -20,7 +20,7 @@ struct ReadmeDoctests;
 // 概要と根拠は src/audio_clock.rs の //! ドキュメントに書く。ここに /// を置くと rustdoc が
 // モジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
 pub mod audio_clock;
-/// shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O MoQ ライブラリ
+/// shiguredo_moqt: draft-ietf-moq-transport-22 に基づく sans I/O MOQT ライブラリ
 ///
 /// WebTransport over HTTP/2 ・ WebTransport over HTTP/3 ・ QUIC 上で動作する前提で、
 /// I/O を持たない純粋なコーデック層と、1 本の `MOQT Transport Session` に閉じた

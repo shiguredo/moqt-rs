@@ -1,6 +1,6 @@
 //! publisher の全体パイプライン
 //!
-//! カメラ/マイクキャプチャ → 映像/音声エンコード → MoQT 送信の流れを、
+//! カメラ/マイクキャプチャ → 映像/音声エンコード → MOQT 送信の流れを、
 //! sans-I/O な `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
 

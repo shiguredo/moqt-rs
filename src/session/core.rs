@@ -1,4 +1,4 @@
-//! MoQT セッション本体 (draft-ietf-moq-transport-22)
+//! MOQT セッション本体 (draft-ietf-moq-transport-22)
 //!
 //! `Session` 構造体と、1 本の `MOQT Transport Session` に閉じた endpoint-local な
 //! 状態機械の基盤となる以下の責務を持つ:

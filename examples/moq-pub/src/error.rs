@@ -9,7 +9,7 @@ use std::fmt;
 pub enum Error {
     /// QUIC 接続エラー
     Quic(String),
-    /// MoQT プロトコルエラー
+    /// MOQT プロトコルエラー
     Moqt(shiguredo_moqt::error::MessageError),
     /// カメラキャプチャエラー
     Capture(shiguredo_video_device::Error),
@@ -63,7 +63,7 @@ impl fmt::Display for Error {
                 "object datagram is too large: {size} bytes (limit {max_size} bytes). \
                  Disable --audio-datagram or increase --datagram-max-size"
             ),
-            Self::Moqt(e) => write!(f, "MoQT: {e}"),
+            Self::Moqt(e) => write!(f, "MOQT: {e}"),
             Self::Capture(e) => write!(f, "capture: {e:?}"),
             Self::Encode(e) => write!(f, "encode: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
@@ -265,7 +265,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "MoQT: protocol violation: out of scope parameter"
+            "MOQT: protocol violation: out of scope parameter"
         );
     }
 }

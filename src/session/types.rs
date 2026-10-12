@@ -1,4 +1,4 @@
-//! MoQT セッション状態機械の型定義
+//! MOQT セッション状態機械の型定義
 //!
 //! 1 本の `MOQT Transport Session` に閉じた [`crate::session::core::Session`] 構造体以外の
 //! 全 public 型をまとめる。draft-ietf-moq-transport-22 由来の実装のため将来変更される

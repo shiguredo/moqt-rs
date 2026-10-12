@@ -1,6 +1,6 @@
 //! バッファ付きインクリメンタルデコーダー (sans I/O)
 //!
-//! MoQT の制御メッセージは type(varint) + length(u16) + payload で構成される。
+//! MOQT の制御メッセージは type(varint) + length(u16) + payload で構成される。
 //! QUIC/WebTransport のフレーム境界とメッセージ境界は一致しないため、
 //! 受信バッファに蓄積しながらインクリメンタルにデコードする必要がある。
 //!
@@ -81,7 +81,7 @@ impl MessageDecoder {
     ///
     /// ストリームタイプの読み取りに使用する。
     /// draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams):
-    /// 全ての MoQT 単方向ストリームは先頭にストリームタイプ varint を持つ。
+    /// 全ての MOQT 単方向ストリームは先頭にストリームタイプ varint を持つ。
     ///
     /// - `Ok(Some(val))` — デコード成功、バッファから消費済み
     /// - `Ok(None)` — データ不足、追加データが必要

@@ -1,4 +1,4 @@
-//! `shiguredo_moqt::session::core::Session` を tokio I/O 層と結線する MoQT クライアント
+//! `shiguredo_moqt::session::core::Session` を tokio I/O 層と結線する MOQT クライアント
 //!
 //! sans-I/O な [`Session`] を核に、QUIC / WebTransport の制御ストリームと
 //! bidi request stream を駆動する。publisher / subscriber の双方が共有する。
@@ -452,7 +452,7 @@ impl DataPlaneHandle {
     }
 }
 
-/// publisher / subscriber 共通の MoQT クライアント (Session ドライバ)
+/// publisher / subscriber 共通の MOQT クライアント (Session ドライバ)
 pub struct MoqtClient {
     /// URL の MSF fragment (`#msf:...&c4m=...`) から取り出した認可トークン
     ///
@@ -862,7 +862,7 @@ struct HandshakeIo {
 }
 
 impl MoqtClient {
-    /// QUIC 直接接続で MoQT client を確立する
+    /// QUIC 直接接続で MOQT client を確立する
     /// (draft-ietf-moq-transport-22 §6.2 (Session establishment) / §6.3 (Session initialization))
     ///
     /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
@@ -937,7 +937,7 @@ impl MoqtClient {
         Ok((client, StreamAcceptor::Quic(recv_acceptor)))
     }
 
-    /// WebTransport over HTTP/3 接続で MoQT client を確立する
+    /// WebTransport over HTTP/3 接続で MOQT client を確立する
     ///
     /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
@@ -1034,7 +1034,7 @@ impl MoqtClient {
         ))
     }
 
-    /// WebTransport over HTTP/2 接続で MoQT client を確立する
+    /// WebTransport over HTTP/2 接続で MOQT client を確立する
     ///
     /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) により
     /// WebTransport 使用時は PATH (0x01) と AUTHORITY (0x05) を送信してはならない。
