@@ -178,6 +178,58 @@ fn sample_published(ctx: &mut noprop::TestCaseContext) -> Vec<PublishedObject> {
     published
 }
 
+/// 損失も入れ替えも重複も無い列を作る確率
+///
+/// 復号の連鎖 (キーフレーム → delta → delta) は、Group 内の複数の Object が順に届いて
+/// 初めて成立する。損失 (1/5) と Fisher-Yates の入れ替えだけに任せると、256 ケースでも
+/// 連鎖が 1 件も生成されないシードがあるため、連鎖が必ず作れる列を一定割合で混ぜる。
+const CHAIN_RATIO: noprop::Ratio = noprop::Ratio::one_nth(8);
+
+/// 1 ケース分の Object 列 (publisher が送った列と、経路を通った受信列) を生成する
+///
+/// 一定割合で「先頭 Group に delta を 2 つ以上持たせ、損失・入れ替え・重複を加えずに
+/// 届ける」ケースを作る。この列ではキーフレーム → delta → delta の復号が必ず起きるため、
+/// 復号の連鎖を検証するゲートがシードに依存しない。
+fn sample_case(ctx: &mut noprop::TestCaseContext) -> (Vec<PublishedObject>, Vec<PublishedObject>) {
+    if noprop::sample_ratio(ctx, CHAIN_RATIO) {
+        let mut published = sample_published(ctx);
+        ensure_chain(&mut published);
+        let received = published.clone();
+        return (published, received);
+    }
+    let published = sample_published(ctx);
+    let received = sample_received(ctx, &published);
+    (published, received)
+}
+
+/// 先頭 Group にキーフレーム + delta 2 つ以上を持たせる
+///
+/// 追加する delta は直前の Object を参照し、Prior Object ID Gap は 0 (飛ばし無し) にする。
+fn ensure_chain(published: &mut Vec<PublishedObject>) {
+    let group_id = published[0].position.group_id;
+    // 先頭 Group の末尾 (published は Group ID 昇順、各 Group の先頭はキーフレーム)
+    let mut end = 1usize;
+    while end < published.len() && published[end].position.group_id == group_id {
+        end += 1;
+    }
+    while end < 3 {
+        let previous_object_id = published[end - 1].position.object_id;
+        published.insert(
+            end,
+            PublishedObject {
+                position: VideoObjectPosition {
+                    group_id,
+                    object_id: previous_object_id + 1,
+                    is_key_frame: false,
+                    prior_object_id_gap: 0,
+                },
+                previous_existing_object_id: Some(previous_object_id),
+            },
+        );
+        end += 1;
+    }
+}
+
 /// 損失・到着順の入れ替え・重複を加えた受信列を生成する
 ///
 /// 経路で起きることをそのまま作る。入れ替えは Fisher-Yates で行うため、前の Group の
@@ -331,8 +383,7 @@ fn decoded_groups_are_non_decreasing() -> noprop::TestResult {
     let stale_older_group = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
-        let received = sample_received(ctx, &published);
+        let (_, received) = sample_case(ctx);
         let mut last_decoded_group_id: Option<u64> = None;
         for step in &run_received(&received) {
             match step.admission {
@@ -403,8 +454,7 @@ fn decoded_delta_object_ids_increase_within_a_group() -> noprop::TestResult {
     let delta_advanced = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
-        let received = sample_received(ctx, &published);
+        let (_, received) = sample_case(ctx);
         let mut last_decoded: Option<(u64, u64)> = None;
         for step in &run_received(&received) {
             if step.admission != DECODE {
@@ -446,8 +496,7 @@ fn decoded_deltas_reference_the_previously_decoded_object() -> noprop::TestResul
     let delta_after_delta = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
-        let received = sample_received(ctx, &published);
+        let (_, received) = sample_case(ctx);
         let mut previous_decoded: Option<Step> = None;
         for step in run_received(&received) {
             if step.admission != DECODE {
@@ -500,8 +549,7 @@ fn missing_reference_blocks_delta_until_a_key_frame() -> noprop::TestResult {
     let delta_after_resume = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
-        let received = sample_received(ctx, &published);
+        let (_, received) = sample_case(ctx);
         let mut blocked = false;
         let mut resumed = false;
         for step in run_received(&received) {
@@ -572,8 +620,7 @@ fn admission_reasons_match_the_observed_state() -> noprop::TestResult {
     let counts = RefCell::new([0usize; BRANCH_COUNT]);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
-        let received = sample_received(ctx, &published);
+        let (_, received) = sample_case(ctx);
         let mut order = VideoDecodeOrder::new();
         for object in &received {
             let before = order_state(&order);
@@ -644,7 +691,7 @@ fn without_loss_or_reorder_every_object_is_decoded() -> noprop::TestResult {
     let skipped_by_publisher = Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let published = sample_published(ctx);
+        let (published, _) = sample_case(ctx);
         let mut groups = Vec::new();
         for object in &published {
             if !groups.contains(&object.position.group_id) {
