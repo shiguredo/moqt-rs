@@ -81,3 +81,34 @@ moq-pub のメインループを抜けた後の映像 subgroup stream の後始�
   実際に `run` の後始末を通す検証は実 relay が必要なため、0243 の前例に倣いレビューで確認する。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/moq-pub/src/pipeline.rs` のメインループ後の後始末で、`current_video_writer` の
+  `SubgroupWriter::finish` の失敗を `?` で伝播させず、`log_failure` で分類するようにした
+  (`Failed to finish video subgroup stream: {e}`)。これによりセッション終了 / Ctrl+C / 入力終了の
+  どの経路でも後始末 (PUBLISH_DONE ×3 / GOAWAY / close) まで到達し、`main.rs` の `Fatal:` と
+  `exit(1)` を通らない (終了コード 0)。
+- 分類の純関数 `cleanup_finish_is_expected(session_ended: bool, error: &Error) -> bool` を追加した
+  (`session_ended || is_transport_session_end(error) || is_peer_stream_reset(error)`)。述語は
+  `Error` を取る `is_transport_session_end` を使う (`is_connection_closed` は `TransportError` 専用
+  で、この呼び出しのエラー型と合わない)。peer の cancel は 0243 が本 issue に委譲した経路で、
+  ループ内の分類と同じく info にする。FIN / RESET 送信済みのストリームが返す
+  `TransportError::StreamClosed` は `Error` に variant が無く `Error::WebTransport` に畳まれるため
+  本判定では拾えず、セッション終了を観測していない経路では warn のままになる (peer の cancel では
+  ないため期待する失敗に数えない)。
+- 真理値表のテスト `cleanup_finish_is_expected_matches_the_truth_table` を追加した (セッション終了
+  の有無 × 接続クローズ / peer の cancel / `StreamClosed` / その他)。実際に `run` の後始末を通す
+  検証は実 relay が必要で、`examples/tokio-moq` の peer harness は `moq-pub` から使えないため
+  0243 の前例に倣いレビューで確認する。変異テストで、述語の各項を落とす変更と常に真 / 偽にする
+  変更が検出されることを確認した。
+- `finish` が失敗した経路では `send_data_stream_closed` が呼ばれないため Session の outgoing
+  stream 追跡が残り、直後の映像の PUBLISH_DONE は `publish_done requires all outgoing streams
+  closed` で拒否される (draft-ietf-moq-transport-22 §9.9 の MUST NOT)。追跡の終端は cancel の観測と
+  終端通知の到着順に依存するため本 issue では扱わないことを、コードのコメントに記録した。
+- `examples/moq-pub/src/main.rs` の終了コードと `MoqtClient::close` に渡す値は変更していない。
+  `run` の戻り値は後始末の最後で MP4 リーダーの停止結果も合成するため、その異常終了
+  (通常は到達しない) は従来どおり exit 1 のままである。
+- セッション終了の検知と後始末の順序は変えていない。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。
