@@ -1,7 +1,7 @@
 # moq-sub がカタログ再送の subgroup header を二重登録し 30 秒後にセッションを閉じる
 
 - Created: 2026-10-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-moq-sub-catalog-header-reregister
 - Polished: 2026-10-13
 
@@ -87,3 +87,30 @@ run では受信 stream 数は数千になる。上記の実測値 (22 本 / 音
   同じく **I/O ハンドルが必要な配線部分はレビューで確認する**。
 - ソースコードのコメントに issue 番号や issue への言及を書かないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/moq-sub/src/pipeline.rs` の `read_catalog_subgroup_stream` から Object のループを
+  `read_catalog_objects` として切り出した。ヘッダの decode と `DataPlaneHandle::recv_subgroup_header`
+  による登録、track alias の判定は `read_catalog_subgroup_stream` に残し、`SubgroupStreamDecoder` が
+  復号済みのヘッダを保持しないため、`header` は呼び出し側から渡す。
+- `handle_stream_body` の `TrackKind::Catalog` は、`register_subgroup_header` 済みの decoder と
+  `header` を渡して `read_catalog_objects` を呼ぶようにした。これにより同じ stream へ
+  `recv_subgroup_header` を再登録しなくなり、`session error 0x3: subgroup header already received
+  for stream id` で失敗して Object のループに到達しなくなる問題を解消した。ヘッダを含む `buf` は
+  渡さない。
+- カタログの読み取りに失敗したときは、`DataPlaneHandle::send_data_stream_stop_sending` で
+  Session の会計から外すようにした。読み切れたときは、既存の `receive_registered_stream_data` が
+  FIN で `recv_data_stream_closed` する経路に乗る。起動時のカタログ取得 (`receive_catalog` の
+  Subgroup 分岐) の失敗アームも fill fetch の失敗経路と対称にした。
+- `Session::recv_subgroup_header` の「登録済みなら拒否する」判定は変えていない。2 回目を呼んでいる
+  のは example 自身であり、仕様上 wire で同じ stream の 2 回目の SUBGROUP_HEADER は現れない。
+- テストは `tests/test_session/` の単体テストで固定した。`data_stream.rs` の
+  `re_subgroup_header_for_registered_stream_is_rejected` が、登録済みの stream への再登録が
+  `SESSION_PROTOCOL_VIOLATION` (0x3) を返し `Established` のままであることを、`timeout_api.rs` の
+  `stopped_subgroup_stream_is_excluded_from_data_stream_timeout` が、
+  `send_data_stream_stop_sending` の後に `DATA_STREAM_TIMEOUT` (0x12) が発火しないことを固定する。
+  実 relay と peer の data stream 送信が必要な example 側の配線 (Catalog 分岐が再登録しないこと、
+  失敗経路が STOP_SENDING を送ること) はレビューで確認した。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。
