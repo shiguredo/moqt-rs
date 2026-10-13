@@ -357,6 +357,30 @@ pub enum SessionEvent {
         /// RESET_STREAM_AT の reliable size (`None` は RESET_STREAM)
         reliable_size: Option<u64>,
     },
+    /// 受信 data stream に STOP_SENDING を送る (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))
+    ///
+    /// I/O 層は `stream_id` に相当する uni data stream の受信方向に `error_code` で
+    /// STOP_SENDING を送る。`error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
+    /// Session が本イベントを発行するのは、open な subgroup stream で新しい object header を
+    /// 待って DATA_STREAM_TIMEOUT (0x12) の期限に達した場合である。§12.2 はこの場合の措置を
+    /// "it MAY send a STOP_SENDING on that stream or terminate the subscription" と定め、
+    /// セッション全体のクローズを挙げていない (§6.6 (Termination) は単一購読の条件を
+    /// セッションエラーへ昇格させることを MAY で認めているため、クローズも仕様違反ではない。
+    /// 他の購読への影響を避けるため本実装は STOP_SENDING を選ぶ)。
+    /// 購読は生かしたまま timeout した stream だけを止め、以後の Group の stream は通常どおり
+    /// 受信する (§11.3.2 (Closing Subgroup Streams): "Resets and STOP_SENDING on SUBSCRIBE data
+    /// streams have no impact on other Subgroups in the Group or the subscription")。
+    /// timeout 後に同じ stream へ届く Object / FIN / RESET_STREAM / 遅延 SUBGROUP_HEADER は
+    /// 破棄対象として no-op で吸収する (吸収は `peer_alias_retention_ms` の保持期間の間であり、
+    /// 期限切れ後は unknown stream id の `SESSION_PROTOCOL_VIOLATION` になる)。FETCH stream は
+    /// §12.2 に代替措置が無いため現行どおり 0x12 でセッションを閉じる。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    StopSendingDataStream {
+        /// 対象 data stream の ID
+        stream_id: DataStreamId,
+        /// Stream Reset Error Code (§12.5)
+        error_code: u64,
+    },
     /// fill fetch stream を開く (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
     ///
     /// publisher が FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を Forward State 1 で

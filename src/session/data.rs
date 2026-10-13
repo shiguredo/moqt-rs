@@ -3659,6 +3659,65 @@ impl Session {
         }
     }
 
+    /// 受信 data stream が subgroup stream か (`AwaitingHeader` で stream type だけ受信した状態を含む)
+    ///
+    /// DATA_STREAM_TIMEOUT の期限到達で STOP_SENDING を送れる対象の判定に使う。
+    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT (0x12) は、
+    /// open な subgroup stream で新しい object header を待って timeout した場合の措置として
+    /// "it MAY send a STOP_SENDING on that stream or terminate the subscription" を挙げる。
+    /// stream header の受信待ちも DATA_STREAM_TIMEOUT の対象であるため `AwaitingHeader` の
+    /// Subgroup も含める。FETCH stream には §12.2 が代替措置を示していないため、呼び出し側は
+    /// 現行どおりセッションを閉じる。破棄対象 (`IncomingDataStream::Discarded`) と保持集合へ
+    /// 移した id は DATA_STREAM_TIMEOUT の監視対象から外れているため `expired` には現れない
+    /// (呼び出し側は false を FETCH 相当として扱う)。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(super) fn is_subgroup_data_stream(&self, stream_id: DataStreamId) -> bool {
+        matches!(
+            self.data_streams.incoming.get(&stream_id),
+            Some(IncomingDataStream::Subgroup(_))
+                | Some(IncomingDataStream::AwaitingHeader {
+                    kind: DataStreamType::Subgroup,
+                })
+        )
+    }
+
+    /// DATA_STREAM_TIMEOUT の期限到達で timeout した subgroup stream を会計から外す
+    ///
+    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams) の STOP_SENDING と同じ後始末を
+    /// 行う。`peer_subgroups` に停止を記録し、購読の受信 stream 計数と per-subgroup delivery timeout
+    /// override を戻し、stream を `data_streams.incoming` から除去して破棄対象の保持集合へ移す。
+    /// 保持期間 (`peer_alias_retention_ms`) の間は、STOP_SENDING に応答する RESET_STREAM や
+    /// in-flight の Object / FIN / 遅延 SUBGROUP_HEADER を no-op で吸収する。
+    /// `data_streams.incoming` に残さないのは、STOP_SENDING の送出後にアプリが読み取りを打ち切ると
+    /// 終端通知が Session に届かず、破棄対象の entry が回収されないためである
+    /// (保持集合は `tick_discarded_data_stream_ids` が期限で掃除する)。この経路では Session が
+    /// 当該 stream の終端通知を受けないため、保持期間が遅延到着を吸収する唯一の防波堤になる。
+    /// SUBGROUP_HEADER 受信前 (`AwaitingHeader`) は購読が未確定なので tracker への記録と
+    /// 計数の補正は行わない。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(super) fn discard_timed_out_subgroup_stream(&mut self, stream_id: DataStreamId) {
+        let subgroup = self
+            .data_streams
+            .incoming
+            .get(&stream_id)
+            .and_then(IncomingDataStream::as_subgroup)
+            .copied();
+        if let Some(subgroup) = &subgroup {
+            if let Some(subgroup_id) = subgroup.subgroup_id {
+                self.peer_subgroups.mark_stop_sending(
+                    subgroup.track_alias,
+                    subgroup.group_id,
+                    subgroup_id,
+                );
+            }
+            // 受信 stream の会計 (open_incoming_subgroup_count) と per-subgroup delivery timeout
+            // override を戻す
+            self.cleanup_discarded_subgroup_stream(subgroup);
+        }
+        self.data_streams.incoming.remove(&stream_id);
+        self.retain_discarded_stream_id(stream_id);
+    }
+
     /// 破棄対象の subgroup stream が破棄分岐に入るかどうかを判定し、入る場合は後始末する
     ///
     /// 破棄分岐へ入る条件は「キャンセル由来 `Terminated` に属し、現在も生きた Object の
@@ -3692,8 +3751,10 @@ impl Session {
     ///
     /// 破棄分岐へ入る条件の判定は
     /// [`discard_cancelled_subgroup_stream`](Self::discard_cancelled_subgroup_stream) に置く。
-    /// 本関数を条件判定なしで呼ぶのは、既存 `Subgroup` variant を無条件に破棄する
-    /// [`register_discarded_stream`](Self::register_discarded_stream) だけである。
+    /// 条件判定なしで呼ぶのは、既存 `Subgroup` variant を無条件に破棄する
+    /// [`register_discarded_stream`](Self::register_discarded_stream) と、
+    /// DATA_STREAM_TIMEOUT の期限到達で timeout した stream を破棄する
+    /// [`discard_timed_out_subgroup_stream`](Self::discard_timed_out_subgroup_stream) である。
     fn cleanup_discarded_subgroup_stream(&mut self, stream: &IncomingSubgroupStream) {
         let _ = self.note_incoming_stream_closed(stream.request_id);
         if let Some(subgroup_id) = stream.subgroup_id {

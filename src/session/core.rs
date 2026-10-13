@@ -260,8 +260,10 @@ pub(super) struct DataStreamState {
     /// (既定値は [`DEFAULT_PEER_ALIAS_RETENTION_MS`]) と同じ期間だけ、破棄対象 stream の
     /// 受信・終端を no-op で吸収するために使う。対象はキャンセル由来 `Terminated`
     /// subscription に属する stream と、`forget_subscription` 後に届く新規 stream の
-    /// 終端済み id である ([`Session::register_discarded_stream`] /
-    /// [`Session::retain_discarded_stream_id`] 参照)。
+    /// 終端済み id、および DATA_STREAM_TIMEOUT の期限到達で破棄した subgroup stream
+    /// (生きた `Established` の購読に属しうる) である ([`Session::register_discarded_stream`] /
+    /// [`Session::retain_discarded_stream_id`] /
+    /// [`Session::discard_timed_out_subgroup_stream`] 参照)。
     ///
     /// draft-ietf-moq-transport-22 §3.1.3 (Track Alias): "Objects can arrive after a
     /// subscription has been cancelled. Subscribers SHOULD retain sufficient state to
@@ -757,6 +759,9 @@ impl Session {
     /// Data Stream タイムアウト (ms) を設定する (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))
     ///
     /// `None` で無効化する。設定変更後に既に記録済みの activity 時刻は影響を受けない。
+    /// 無効化は `None` であり、`Some(0)` は「期限なし」ではなく監視中の Data Stream が
+    /// 即座に期限到達する (draft §5.2 (Delivery Timeouts and Data Reliability) の
+    /// "a value of 0 means that there is no timeout set" は delivery timeout の規則である)。
     pub fn set_data_stream_timeout_ms(&mut self, timeout_ms: Option<u64>) {
         self.timing.data_stream_timeout_ms = timeout_ms;
     }

@@ -204,9 +204,17 @@ fn role(&self) -> Role
 fn transport(&self) -> Transport
 ```
 
-`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / data stream / GOAWAY の
-セッション全体のタイムアウトを評価し、満了時は `CloseSession` をキューへ積む。あわせて
-subscription の delivery timeout は `ResetDataStream { error_code: STREAM_DELIVERY_TIMEOUT }` を積み、
+`tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / GOAWAY のセッション全体の
+タイムアウトと data stream timeout を評価する。control message / GOAWAY と FETCH stream の
+data stream timeout の満了時は `CloseSession` をキューへ積む。subgroup stream の data stream
+timeout ではセッションを閉じず、当該 stream に `StopSendingDataStream { stream_id, error_code }` を積む
+(draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の "it MAY send a STOP_SENDING on
+that stream or terminate the subscription" に従い、購読は生かしたまま timeout した stream だけを止める。
+§6.6 (Termination) は単一購読の条件をセッションエラーへ昇格させることを MAY で認めており、
+クローズも仕様違反ではないが、他の購読への影響を避けるため STOP_SENDING を選ぶ)。
+timeout 後に同じ stream へ届く Object / FIN / RESET_STREAM は `peer_alias_retention_ms` の
+保持期間の間 no-op で吸収する。
+あわせて subscription の delivery timeout は `ResetDataStream { error_code: STREAM_DELIVERY_TIMEOUT }` を積み、
 alias tombstone / 破棄対象 stream id の保持期間は期限切れの片付けだけを行う。
 request stream 上の GOAWAY の timeout はセッションを閉じず、
 当該 request の `ResetRequestStream { error_code: STREAM_GOING_AWAY }` を積む。さらに期限到達時には、
@@ -269,6 +277,7 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
+| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT。`error_code` は `STREAM_CANCELLED`。timeout 後の遅延到着は保持期間の間 no-op) |
 | `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く (`request_id` は FETCH_HEADER に載せる起因メッセージの Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済みの fill range) |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |

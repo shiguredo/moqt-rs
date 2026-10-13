@@ -1203,17 +1203,41 @@ fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
     }
 }
 
+/// 受信 data stream から次のチャンクを読む
+///
+/// Session が DATA_STREAM_TIMEOUT で STOP_SENDING を指示した場合は、受信半に STOP_SENDING を
+/// 送出して読み取りを打ち切る (`SessionEvent::StopSendingDataStream` の doc と
+/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) を参照)。
+/// セッションは閉じないため、購読と他の stream の受信は継続する。
 async fn receive_registered_stream_data(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
 ) -> Result<Option<Bytes>> {
-    match stream.receive_chunk().await? {
-        transport::RecvChunk::Data(data) => Ok(Some(data)),
-        transport::RecvChunk::End(end) => {
-            data_plane.recv_data_stream_closed(stream_id, end)?;
+    tokio::select! {
+        biased;
+        error_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
+            // Session 側は破棄対象として会計を閉じている。送出に失敗しても読み取りは打ち切る
+            // (peer は応答の reset を返すか、遅延した FIN で終端する)。
+            // 送出後に指示の登録を破棄し、同じ stream へ STOP_SENDING を二重に送らない
+            // (同じ stream を読み直す呼び出し元 (保留 subgroup の保持ループなど) でも再送されない)
+            if let Err(e) = stream.stop_sending(error_code) {
+                tracing::warn!(
+                    "Failed to send STOP_SENDING for timed out data stream: \
+                     stream_id={}, error_code={error_code:#x} {e}",
+                    stream_id.0
+                );
+            }
+            data_plane.clear_data_stream_stop_sending(stream_id);
             Ok(None)
         }
+        chunk = stream.receive_chunk() => match chunk? {
+            transport::RecvChunk::Data(data) => Ok(Some(data)),
+            transport::RecvChunk::End(end) => {
+                data_plane.recv_data_stream_closed(stream_id, end)?;
+                Ok(None)
+            }
+        },
     }
 }
 
@@ -1386,8 +1410,8 @@ async fn receive_catalog(
                     }
                     // fill の失敗 (REQUEST_ERROR / RESET / 不一致) は購読の失敗ではない。
                     // 購読で届くカタログを待つ。読み切れなかった stream を Session の会計から
-                    // 外すため STOP_SENDING を送る (送らないと受信 stream が残り、data stream
-                    // timeout でセッションが落ちる)
+                    // 外すため `send_data_stream_stop_sending` を呼ぶ (呼ばないと受信 FETCH stream が
+                    // 残り、FETCH stream の data stream timeout でセッションが落ちる)
                     Ok(Err(e)) => {
                         tracing::warn!("Catalog fill fetch failed: {e}");
                         let _ = data_plane.send_data_stream_stop_sending(stream_id);
@@ -1437,6 +1461,8 @@ async fn receive_catalog(
                 }
             }
         }
+        // 読み終わった stream の STOP_SENDING 指示の登録を破棄する
+        data_plane.clear_data_stream_stop_sending(stream_id);
     }
 
     let Some(catalog) = state.catalog() else {
@@ -1925,7 +1951,7 @@ async fn handle_incoming_stream(
     }
     handle_stream_body(
         &mut stream,
-        data_plane,
+        &data_plane,
         track_map,
         video_codec,
         audio_codec,
@@ -1944,6 +1970,9 @@ async fn handle_incoming_stream(
         recorder,
     )
     .await;
+    // stream の読みが終わったら STOP_SENDING 指示の登録を破棄する (登録を残すと
+    // 指示が出た stream 数に比例してメモリが増える)
+    data_plane.clear_data_stream_stop_sending(DataStreamId(raw_stream_id));
     // 診断時は stream ごとの滞在時間を残す。枠を長時間占有する stream を特定する
     if stream_diag_enabled() {
         tracing::info!(
@@ -1989,7 +2018,7 @@ fn build_stream_video_decoder(
 #[expect(clippy::too_many_arguments)]
 async fn handle_stream_body(
     stream: &mut transport::RecvStream,
-    data_plane: DataPlaneHandle,
+    data_plane: &DataPlaneHandle,
     track_map: &HashMap<u64, TrackKind>,
     video_codec: Option<&str>,
     audio_codec: Option<&str>,
@@ -2037,12 +2066,12 @@ async fn handle_stream_body(
             // がカタログ解決後に届いたものであり、購読 (Subgroup) でも同じカタログが届くため
             // 読み捨てる
             tracing::debug!("Stream #{stream_num}: dropping a fill fetch stream");
-            let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
         }
         StreamType::Padding => {
             // draft-ietf-moq-transport-22 §11.5.1 (Padding Streams):
             // パディングバイトを読み捨てる。session には recv_data_stream_type で登録済み。
-            let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
         }
         StreamType::Subgroup => {
             let mut sg_decoder = SubgroupStreamDecoder::new();
@@ -2051,7 +2080,7 @@ async fn handle_stream_body(
                 match sg_decoder.try_decode_header() {
                     Ok(Some(h)) => break h,
                     Ok(None) => {
-                        match receive_registered_stream_data(stream, &data_plane, stream_id).await {
+                        match receive_registered_stream_data(stream, data_plane, stream_id).await {
                             Ok(Some(data)) => sg_decoder.push(&data),
                             Ok(None) => return,
                             Err(e) => {
@@ -2067,8 +2096,7 @@ async fn handle_stream_body(
                     }
                     Err(e) => {
                         tracing::warn!("Stream #{stream_num}: failed to read subgroup header: {e}");
-                        let _ =
-                            drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
                     }
                 }
@@ -2083,12 +2111,12 @@ async fn handle_stream_body(
                     display_backlog.load(Ordering::Relaxed)
                 );
                 let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                 return;
             }
             if !register_subgroup_header(
                 stream,
-                &data_plane,
+                data_plane,
                 stream_id,
                 &header,
                 &mut sg_decoder,
@@ -2112,8 +2140,7 @@ async fn handle_stream_body(
                             "Stream #{stream_num}: video stream arrived but video is not configured"
                         );
                         let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        let _ =
-                            drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
                     };
                     let mut decoder = match build_stream_video_decoder(
@@ -2129,14 +2156,14 @@ async fn handle_stream_body(
                                 "Stream #{stream_num}: failed to create video decoder: {e}"
                             );
                             let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                            let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id)
-                                .await;
+                            let _ =
+                                drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                             return;
                         }
                     };
                     let frames = decode_video_stream(
                         stream,
-                        &data_plane,
+                        data_plane,
                         stream_id,
                         header.group_id,
                         &mut sg_decoder,
@@ -2161,8 +2188,7 @@ async fn handle_stream_body(
                             "Stream #{stream_num}: audio stream arrived but audio is not configured"
                         );
                         let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                        let _ =
-                            drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                        let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
                     };
                     // デコーダは subscription で共有する。stream ごとに作ると 20 ms ごとに
@@ -2184,7 +2210,7 @@ async fn handle_stream_body(
                         audio_config_handled.load(std::sync::atomic::Ordering::Acquire);
                     let chunks = decode_audio_stream(
                         stream,
-                        &data_plane,
+                        data_plane,
                         stream_id,
                         &mut sg_decoder,
                         decoder.as_deref_mut(),
@@ -2216,7 +2242,7 @@ async fn handle_stream_body(
                     // `buf` (ヘッダを含む) も渡さない。
                     match read_catalog_objects(
                         stream,
-                        &data_plane,
+                        data_plane,
                         stream_id,
                         &mut sg_decoder,
                         &header,
@@ -2235,8 +2261,10 @@ async fn handle_stream_body(
                             tracing::warn!(
                                 "Stream #{stream_num}: failed to read catalog stream: {e}"
                             );
-                            // 読み切れなかった stream を Session の会計から外す。残すと data stream
-                            // timeout でセッション全体が落ちる (fill fetch の失敗経路と同じ扱い)
+                            // 読み切れなかった stream を Session の会計から外す。残すと timeout まで
+                            // open_incoming_subgroup_count が戻らず、cleanup_ready() が false のまま
+                            // になって forget_subscription と GOAWAY drain が進まない
+                            // (fill fetch の失敗経路と同じ扱い)
                             let _ = data_plane.send_data_stream_stop_sending(stream_id);
                         }
                     }
@@ -2246,7 +2274,7 @@ async fn handle_stream_body(
                         "Stream #{stream_num}: unknown track alias={}",
                         header.track_alias,
                     );
-                    let _ = drain_registered_stream_to_end(stream, &data_plane, stream_id).await;
+                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                 }
             }
         }
@@ -2280,7 +2308,7 @@ async fn handle_stream_body(
 /// `note_subscriber` を呼べば保持している chunk を直ちに引き取れる)。
 ///
 /// 戻り値が false の場合は header を登録できず、ストリームを破棄した
-/// (STOP_SENDING を送って読み捨て済み)。
+/// (会計から外して読み捨て済み。wire の STOP_SENDING は送らない)。
 ///
 /// 保留は stream task の同時実行枠を最大 `timeout_us` (既定 5 秒) 占有する。未知の alias の
 /// ストリームが枠の数だけ同時に届くと、その間は新しいストリームの処理が始まらない。
@@ -2484,10 +2512,12 @@ async fn register_subgroup_header(
     }
 }
 
-/// 保留を打ち切った Subgroup ストリームを停止して読み捨てる
+/// 保留を打ち切った Subgroup ストリームを Session の会計から外し、終端の通知まで読み捨てる
 ///
-/// STOP_SENDING を送ってから終端まで読む。送らないと peer が送信を続け、受信ループの
-/// 枠と帯域を不要に消費する。
+/// `send_data_stream_stop_sending` は Session の会計を閉じる通知であり、subgroup stream では
+/// wire の STOP_SENDING を送らない (wire の送出は timeout 経路で I/O 層が行う)。会計を閉じないと
+/// timeout まで受信 stream が残り、購読の `cleanup_ready()` と GOAWAY drain が進まない。
+/// peer が終端を返さない場合この drain は待ち続ける (既知の制限)。
 async fn abort_subgroup_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,

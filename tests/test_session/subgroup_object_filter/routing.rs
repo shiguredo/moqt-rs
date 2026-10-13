@@ -1,7 +1,7 @@
 //! フィルタによる Object の振り分けとフィルタ不通過 Object の扱いのテスト
 
 use super::*;
-use shiguredo_moqt::error::{SESSION_DATA_STREAM_TIMEOUT, SESSION_PROTOCOL_VIOLATION};
+use shiguredo_moqt::error::{SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED};
 use shiguredo_moqt::message_parameter::{PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER};
 use shiguredo_moqt::stream::OBJECT_STATUS_END_OF_GROUP;
 use shiguredo_moqt::track_properties::PROP_OBJECT_DELIVERY_TIMEOUT;
@@ -530,28 +530,41 @@ fn filtered_out_object_updates_data_stream_activity() {
         TrackDataAcceptance::FilteredOut
     );
 
-    // header から 60ms (timeout 50ms 超過) でも Object 受信から 20ms なので閉じない
+    // header から 60ms (timeout 50ms 超過) でも Object 受信から 20ms なので期限に達しない
     client.tick(60);
-    let mut closed = false;
+    let mut timed_out = false;
     while let Some(event) = client.poll_event() {
-        if matches!(event, SessionEvent::CloseSession(_)) {
-            closed = true;
+        if matches!(
+            event,
+            SessionEvent::CloseSession(_) | SessionEvent::StopSendingDataStream { .. }
+        ) {
+            timed_out = true;
             break;
         }
     }
     assert!(
-        !closed,
+        !timed_out,
         "FilteredOut Object の受信で DATA_STREAM_TIMEOUT が誤発火しないこと"
     );
 
-    // Object 受信から 50ms 以上経過すると timeout で閉じる
+    // Object 受信から 50ms 以上経過すると DATA_STREAM_TIMEOUT の期限に達する。
+    // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は open な subgroup stream の
+    // timeout の措置として STOP_SENDING を挙げるため、セッションは閉じず指示だけを発行する。
     client.tick(91);
     let mut got = false;
     while let Some(event) = client.poll_event() {
-        if let SessionEvent::CloseSession(err) = event {
+        if let SessionEvent::StopSendingDataStream {
+            stream_id: timed_out_stream_id,
+            error_code,
+        } = event
+        {
             assert_eq!(
-                err.code, SESSION_DATA_STREAM_TIMEOUT,
-                "FilteredOut 後も activity が止まれば DATA_STREAM_TIMEOUT で閉じること"
+                timed_out_stream_id, stream_id,
+                "FilteredOut 後も activity が止まった stream の STOP_SENDING が指示されること"
+            );
+            assert_eq!(
+                error_code, STREAM_CANCELLED,
+                "STOP_SENDING の error code は CANCELLED (§12.5) であること"
             );
             got = true;
             break;
@@ -559,7 +572,12 @@ fn filtered_out_object_updates_data_stream_activity() {
     }
     assert!(
         got,
-        "Object 受信が止まると DATA_STREAM_TIMEOUT で CloseSession が発火すること"
+        "Object 受信が止まると StopSendingDataStream が発行されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "subgroup stream の DATA_STREAM_TIMEOUT でセッションが閉じないこと"
     );
 }
 

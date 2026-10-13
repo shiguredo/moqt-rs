@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bytes::Bytes;
-use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot};
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::session::types::{
@@ -169,6 +169,91 @@ pub(crate) struct StopSendingCommand {
     ack: oneshot::Sender<Result<()>>,
 }
 
+/// 受信 data stream 1 本への STOP_SENDING 指示
+///
+/// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT (0x12) は、
+/// open な subgroup stream で新しい object header を待って timeout した場合の措置として
+/// STOP_SENDING または購読終了を挙げる。Session はセッションを閉じずに本指示を発行し、
+/// 当該 stream を読んでいるタスクが [`DataPlaneHandle::wait_data_stream_stop_sending`] で
+/// 観測して `transport::RecvStream::stop_sending` を呼ぶ。
+///
+/// `notify` は待機中のタスクを起こすためだけに使い、指示そのものは `code` に保持する。
+/// 待機を始める前に指示が届いていても取りこぼさないようにするためである。
+/// `Mutex` を使うのは、ロックの保持区間が `code` の読み書きだけで await をまたがず、
+/// 指示の到着が受信タスクの起動より先でも値を取りこぼさないためである
+/// (チャネルで単一所有者へ依頼する構成では、購読側のタスクが moq-sub の所有であり
+/// 本 example 側で受信タスクを spawn しないため、依頼先を定められない)。
+#[derive(Debug, Default)]
+struct StopSendingSignal {
+    /// 指示された error code (`None` は未指示)
+    code: StdMutex<Option<u64>>,
+    /// 待機中のタスクを起こすための通知
+    notify: Notify,
+}
+
+impl StopSendingSignal {
+    /// STOP_SENDING の指示があるまで待ち、載せる error code を返す
+    async fn wait(&self) -> u64 {
+        loop {
+            // 待機登録を状態確認より先に行い、確認と通知の競合で取りこぼさないようにする
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(error_code) = *self.code.lock().expect("stop sending mutex poisoned") {
+                return error_code;
+            }
+            notified.await;
+        }
+    }
+
+    /// STOP_SENDING を指示する
+    fn request(&self, error_code: u64) {
+        *self.code.lock().expect("stop sending mutex poisoned") = Some(error_code);
+        self.notify.notify_waiters();
+    }
+}
+
+/// 受信 data stream の STOP_SENDING 指示のレジストリ
+///
+/// Session が `SessionEvent::StopSendingDataStream` を発行したときに対象 stream へ指示を記録し、
+/// 当該 stream を読んでいるタスクが [`DataPlaneHandle::wait_data_stream_stop_sending`] で受け取る。
+/// 登録は `Mutex` で保護する。ロックの保持区間は map の操作だけで await をまたがない。
+#[derive(Debug, Default)]
+pub(crate) struct StopSendingSignals {
+    signals: StdMutex<HashMap<u64, Arc<StopSendingSignal>>>,
+}
+
+impl StopSendingSignals {
+    /// 対象 stream の STOP_SENDING 指示を待つ
+    async fn wait(&self, stream_id: u64) -> u64 {
+        let signal = self.entry(stream_id);
+        signal.wait().await
+    }
+
+    /// 対象 stream に STOP_SENDING を指示する
+    fn request(&self, stream_id: u64, error_code: u64) {
+        self.entry(stream_id).request(error_code);
+    }
+
+    /// 終了した stream の登録を破棄する
+    fn clear(&self, stream_id: u64) {
+        self.signals
+            .lock()
+            .expect("stop sending mutex poisoned")
+            .remove(&stream_id);
+    }
+
+    /// 対象 stream の指示スロットを取得する (未登録なら作る)
+    fn entry(&self, stream_id: u64) -> Arc<StopSendingSignal> {
+        self.signals
+            .lock()
+            .expect("stop sending mutex poisoned")
+            .entry(stream_id)
+            .or_insert_with(|| Arc::new(StopSendingSignal::default()))
+            .clone()
+    }
+}
+
 /// 制御ストリーム受信タスクからメインループへの通知
 pub type ControlIncoming = Result<StreamRead<ControlMessage>>;
 
@@ -246,11 +331,38 @@ impl ControlStream {
 #[derive(Clone)]
 pub struct DataPlaneHandle {
     session: Arc<StdMutex<Session>>,
+    /// Session が指示した受信 data stream の STOP_SENDING
+    stop_sending: Arc<StopSendingSignals>,
 }
 
 impl DataPlaneHandle {
-    fn new(session: Arc<StdMutex<Session>>) -> Self {
-        Self { session }
+    fn new(session: Arc<StdMutex<Session>>, stop_sending: Arc<StopSendingSignals>) -> Self {
+        Self {
+            session,
+            stop_sending,
+        }
+    }
+
+    /// Session が DATA_STREAM_TIMEOUT で指示した STOP_SENDING を待つ
+    ///
+    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes): open な subgroup stream で
+    /// 新しい object header を待って timeout した場合、Session はセッションを閉じず
+    /// [`SessionEvent::StopSendingDataStream`] を発行する。受信タスクは
+    /// `stream.receive_chunk()` と併せて本 future を select し、完了したら
+    /// `transport::RecvStream::stop_sending` に本メソッドが返す error code を渡す。
+    /// 既に指示済みの場合は即座に返る。
+    pub async fn wait_data_stream_stop_sending(&self, stream_id: DataStreamId) -> u64 {
+        self.stop_sending.wait(stream_id.0).await
+    }
+
+    /// 受信 data stream の STOP_SENDING 指示の登録を破棄する
+    ///
+    /// 受信タスクの読み取り終了時に呼ぶ。登録を残すと指示が出た stream 数に比例して
+    /// メモリが増える。待機中のタスクがある間に呼ぶと、その待機は以後の指示を観測できないため、
+    /// 読み取りを終えてから呼ぶこと。指示より先に読み取りが終わった stream では登録が残りうるが、
+    /// その場合の `request` は新しい登録を作るだけで、既に終了した stream には影響しない。
+    pub fn clear_data_stream_stop_sending(&self, stream_id: DataStreamId) {
+        self.stop_sending.clear(stream_id.0);
     }
 
     /// subgroup stream open を Session に通知する
@@ -502,6 +614,8 @@ pub struct MoqtClient {
     /// QUIC 直接接続 / WebTransport over HTTP/3 / WebTransport over HTTP/2 のいずれも
     /// 観測経路を持ち、wt-h2 は driver が受信した capsule をそのまま流す。
     stop_sending_rx: Option<StopSendingReceiver>,
+    /// Session が指示した受信 data stream の STOP_SENDING (`DataPlaneHandle` と共有する)
+    stop_sending_signals: Arc<StopSendingSignals>,
     /// FETCH 応答用 uni stream の stream id → request_id
     ///
     /// `Session::fetch_stop_sending_received` は request_id を要求するため、peer の
@@ -1287,6 +1401,7 @@ impl MoqtClient {
             bidi_stop_txs: HashMap::new(),
             closed_request_streams: HashSet::new(),
             stop_sending_rx,
+            stop_sending_signals: Arc::new(StopSendingSignals::default()),
             outgoing_fetch_streams: HashMap::new(),
             terminated_request_streams: TerminatedRequestStreams::default(),
             incoming_requests: VecDeque::new(),
@@ -1307,7 +1422,10 @@ impl MoqtClient {
 
     /// data plane 通知用ハンドルのクローン
     pub fn data_plane(&self) -> DataPlaneHandle {
-        DataPlaneHandle::new(Arc::clone(&self.session))
+        DataPlaneHandle::new(
+            Arc::clone(&self.session),
+            Arc::clone(&self.stop_sending_signals),
+        )
     }
 
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
@@ -2475,6 +2593,25 @@ impl MoqtClient {
                     self.cleanup_closed_requests().await;
                     return Ok(());
                 }
+                SessionEvent::StopSendingDataStream {
+                    stream_id,
+                    error_code,
+                } => {
+                    // アプリへ配送せず I/O 層で完結させる (当該 stream の受信半を持つタスクが
+                    // 指示を観測して transport へ送出する。ここでは指示を記録するだけ)
+                    debug_assert!(
+                        !is_notable_event(&event),
+                        "notable event predicate is inconsistent with this arm"
+                    );
+                    tracing::info!(
+                        "Session requested STOP_SENDING for timed out data stream: \
+                         stream_id={}, error_code={:#x}",
+                        stream_id.0,
+                        error_code
+                    );
+                    self.stop_sending_signals
+                        .request(stream_id.0, error_code);
+                }
                 SessionEvent::RequestUpdateReceived {
                     request_id,
                     parameters,
@@ -2959,6 +3096,61 @@ mod tests {
         assert!(
             is_notable_event(&event),
             "CloseSession は notable であること"
+        );
+    }
+
+    /// 受信 data stream の STOP_SENDING 指示は、待機中のタスクを起こす
+    ///
+    /// Session の DATA_STREAM_TIMEOUT で指示が届いたとき、受信タスクが `stream.receive_chunk()`
+    /// と併せて待っている future が完了すること (待機中の取りこぼしが無いこと)。
+    #[tokio::test]
+    async fn stop_sending_signals_wakes_waiter() {
+        let signals = StopSendingSignals::default();
+        let wait = async {
+            assert_eq!(
+                signals.wait(1).await,
+                0x1,
+                "待機中のタスクへ指示された error code が返ること"
+            );
+        };
+        let request = async {
+            // 待機が登録された後に指示する
+            tokio::task::yield_now().await;
+            signals.request(1, 0x1);
+        };
+        tokio::join!(wait, request);
+    }
+
+    /// 指示が待機より先に届いても取りこぼさない
+    ///
+    /// 受信タスクが読み取りに入る前に Session が指示を出した場合 (tick が先に走った場合) でも、
+    /// 後から待機を始めたタスクが指示を観測できること。
+    #[tokio::test]
+    async fn stop_sending_signals_keeps_request_before_wait() {
+        let signals = StopSendingSignals::default();
+        signals.request(7, 0x2);
+        assert_eq!(
+            signals.wait(7).await,
+            0x2,
+            "指示済みの stream では待機が即座に完了すること"
+        );
+    }
+
+    /// 登録を破棄した stream の待機は、破棄前の指示を引き継がない
+    ///
+    /// `clear_data_stream_stop_sending` は登録を破棄するだけであり、以後の待機は新しい登録を
+    /// 作る (受信タスクが終了した stream の指示を後から別のタスクが拾わないこと)。
+    #[tokio::test]
+    async fn stop_sending_signals_clear_drops_registration() {
+        let signals = StopSendingSignals::default();
+        signals.request(9, 0x1);
+        signals.clear(9);
+        let wait = signals.wait(9);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), wait)
+                .await
+                .is_err(),
+            "登録破棄後の待機は新しい登録を待ち続けること"
         );
     }
 

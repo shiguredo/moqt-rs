@@ -14,9 +14,9 @@ use alloc::vec::Vec;
 
 use super::core::{RequestTable, Session};
 use super::types::{
-    DeadlineTimer, FetchState, GoawayDrainSnapshot, MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo,
-    RequestKind, Role, SessionError, SessionEvent, SessionState, SubscriptionState,
-    TerminationReason,
+    DataStreamResetReason, DeadlineTimer, FetchState, GoawayDrainSnapshot,
+    MAX_NEW_SESSION_URI_LENGTH, PeerGoawayInfo, RequestKind, Role, SessionError, SessionEvent,
+    SessionState, SubscriptionState, TerminationReason,
 };
 
 /// GOAWAY URI の検証ヘルパー (送信側)
@@ -161,6 +161,17 @@ impl Session {
     /// (以後 1 回目の close 通知は拒否済み id として no-op で吸収される)。
     /// 既に終端済みの request には reset イベントのみを積む。
     ///
+    /// また subgroup stream の DATA_STREAM_TIMEOUT が満了した場合は、セッションを閉じずに
+    /// 当該 stream の `StopSendingDataStream` を積み、その stream を破棄対象として会計から外す
+    /// (保持期間の間、遅延して届く Object / FIN / RESET_STREAM は no-op で吸収する)。
+    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の MAY が挙げる措置は
+    /// STOP_SENDING と購読終了であり、セッション全体のクローズは挙げていない
+    /// (§6.6 (Termination) は単一購読の条件をセッションエラーへ昇格させることを MAY で
+    /// 認めているため、クローズも仕様違反ではない。他の購読への影響を避けるため本実装は
+    /// STOP_SENDING を選ぶ)。FETCH stream の DATA_STREAM_TIMEOUT は同節に代替措置が無いため
+    /// 現行どおり 0x12 で閉じる。
+    /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    ///
     /// また subscription の delivery timeout と alias tombstone / 破棄対象 stream id の
     /// 保持期間も同じ tick で進める。
     ///
@@ -189,6 +200,9 @@ impl Session {
         // control → data_stream → goaway の順に固定する。
         // 同一 tick に複数の deadline が満了しても、評価順で決定的に 1 つのエラーコードが
         // 選ばれる。各 HashMap ループ内の反復順は出力に影響しない。
+        // DATA_STREAM_TIMEOUT は subgroup stream ではセッションを閉じないため、複数本が同時に
+        // 期限到達しても評価順の影響を受けない (FETCH stream が 1 本でも期限到達した場合は
+        // 0x12 で閉じる)。
         // (将来の draft で変更される可能性がある)
 
         // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される CONTROL_MESSAGE_TIMEOUT
@@ -203,15 +217,46 @@ impl Session {
             }
         }
         // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される DATA_STREAM_TIMEOUT
+        //
+        // open な subgroup stream で新しい object header を待って timeout した場合、同節は
+        // "it MAY send a STOP_SENDING on that stream or terminate the subscription" と定め、
+        // セッション全体のクローズを挙げていない。購読は生かしたまま timeout した subgroup stream
+        // だけを止め、STOP_SENDING の送出を I/O 層へ依頼する。FETCH stream には同節が代替措置を
+        // 示していないため、現行どおり 0x12 でセッションを閉じる。
+        // 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
         if let Some(timeout_ms) = self.timing.data_stream_timeout_ms {
-            for last_activity_ms in self.timing.data_stream_last_activity_ms.values() {
-                if now_ms.saturating_sub(*last_activity_ms) >= timeout_ms {
-                    self.fail(SessionError::new(
-                        SESSION_DATA_STREAM_TIMEOUT,
-                        "data stream timeout expired",
-                    ));
-                    return;
+            let mut expired = Vec::new();
+            for (&stream_id, &last_activity_ms) in &self.timing.data_stream_last_activity_ms {
+                if now_ms.saturating_sub(last_activity_ms) >= timeout_ms {
+                    expired.push(stream_id);
                 }
+            }
+            // 同一 tick で複数が期限到達してもイベント順を決定的にする
+            expired.sort_unstable();
+            // FETCH stream (stream type だけ受信して header 待ちの状態を含む) が 1 本でも期限到達して
+            // いれば、§12.2 が代替措置を示していないため現行どおりセッションを閉じる。
+            // `data_stream_last_activity_ms` の全 entry は `data_streams.incoming` に存在する
+            // 不変条件 (どの除去経路も両方を同時に更新する) があるため、FETCH stream 以外は
+            // subgroup stream である。
+            if expired
+                .iter()
+                .any(|stream_id| !self.is_subgroup_data_stream(*stream_id))
+            {
+                self.fail(SessionError::new(
+                    SESSION_DATA_STREAM_TIMEOUT,
+                    "data stream timeout expired",
+                ));
+                return;
+            }
+            for stream_id in expired {
+                // draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes) には
+                // DATA_STREAM_TIMEOUT に対応する stream reset code が無いため、stream の cancel を
+                // 表す CANCELLED を使う
+                self.events.push_back(SessionEvent::StopSendingDataStream {
+                    stream_id,
+                    error_code: DataStreamResetReason::Cancelled.error_code(),
+                });
+                self.discard_timed_out_subgroup_stream(stream_id);
             }
         }
         // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される GOAWAY_TIMEOUT
