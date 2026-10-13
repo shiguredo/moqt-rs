@@ -1,7 +1,7 @@
 # WebTransport over HTTP/2 の finish / reset が driver の拒否を返さない
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-wt-h2-finish-reset-result
 - Polished: 2026-10-13
 
