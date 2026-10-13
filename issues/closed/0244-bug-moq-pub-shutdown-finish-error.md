@@ -1,7 +1,7 @@
 # moq-pub の終了時の subgroup stream 後始末が Fatal 終了する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-moq-pub-shutdown-finish-error
 - Polished: 2026-10-13
 
