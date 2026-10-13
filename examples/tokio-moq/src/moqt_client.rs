@@ -506,7 +506,8 @@ pub struct MoqtClient {
     ///
     /// `Session::fetch_stop_sending_received` は request_id を要求するため、peer の
     /// STOP_SENDING を受信したときに stream id から対象 FETCH を引き当てるための台帳である。
-    /// `send_fetch_response` が登録し、request の回収 (`cleanup_closed_requests`) で破棄する。
+    /// `send_fetch_response` が登録し、request の回収 (`forget_ready_requests` と
+    /// `finish_forgotten`) で破棄する。
     outgoing_fetch_streams: HashMap<u64, u64>,
     /// peer 起点の bidi request stream の終端を Session へ通知済みの記録
     ///
@@ -1759,7 +1760,8 @@ impl MoqtClient {
     /// Session::tick を呼び出す (GOAWAY_TIMEOUT の deadline 判定)
     ///
     /// 同期 API のため `drain_events` を呼べない。request の回収は Session のイベントを
-    /// I/O へ変換し終えた後にだけ行う契約であり (`cleanup_closed_requests` 参照)、
+    /// I/O へ変換し終えた後にだけ行う契約であり (`forget_ready_requests` /
+    /// `cleanup_closed_requests` 参照)、
     /// ここでは行わない。
     pub fn tick(&mut self, now_ms: u64) {
         let mut session = lock_session(&self.session);
@@ -2305,10 +2307,24 @@ impl MoqtClient {
     /// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) など) を果たせない。
     async fn drain_events(&mut self) -> Result<()> {
         loop {
-            let event = {
+            let (event, forgotten) = {
                 let mut session = lock_session(&self.session);
-                session.poll_event()
+                let event = session.poll_event();
+                // キューが空である観測と、終端済み request の回収の判定を同一のロック保持で行う。
+                // flush は同じロックを取るため、この観測と判定の間に別タスクの flush が
+                // `SessionEvent::SendOnStream` (PUBLISH_DONE) を積むことはない。flush が先に
+                // 起きていれば、その `SendOnStream` がキューに残り `poll_event` が `Some` を
+                // 返すため、この判定には到達しない (取り出し済みなら送出済みか、`next_event` の
+                // future 破棄で失われている。いずれにせよ回収で失われることはない)。
+                let forgotten = if event.is_none() {
+                    forget_ready_requests(&mut session, &self.closed_request_streams)
+                } else {
+                    Vec::new()
+                };
+                (event, forgotten)
             };
+            // 送信半の後始末はロックを解放してから行う
+            self.finish_forgotten(forgotten).await;
             let Some(event) = event else {
                 break;
             };
@@ -2454,7 +2470,8 @@ impl MoqtClient {
                     self.notable_events
                         .push_back(SessionEvent::CloseSession(err));
                     // 閉じた後は Session のイベントを I/O へ変換できないため drain を終える。
-                    // 末尾の回収に到達しないため、ここで回収を済ませる
+                    // キューが空である観測を伴う通常の回収 (`forget_ready_requests`) には
+                    // 到達しないため、ここで回収を済ませる
                     self.cleanup_closed_requests().await;
                     return Ok(());
                 }
@@ -2527,7 +2544,6 @@ impl MoqtClient {
                 }
             }
         }
-        self.cleanup_closed_requests().await;
         Ok(())
     }
 
@@ -2535,43 +2551,30 @@ impl MoqtClient {
     ///
     /// 保留中の PUBLISH_DONE を持つ subscription は破棄しない (`should_forget_subscription`)。
     /// flush は `SessionEvent::SendOnStream` を積むだけで、ワイヤへの書き出しは
-    /// `drain_events` が行うため、回収は Session のイベントを I/O へ変換し終えた後にだけ行う
-    /// (`drain_events` の末尾と、`CloseSession` で早期 return する分岐)。
+    /// `drain_events` が行うため、回収は Session のイベントを I/O へ変換し終えた後にだけ行う。
     /// drain できない同期経路 (`tick`) から呼ぶと、未送出の PUBLISH_DONE を捨ててしまう。
     ///
-    /// 保証は「`Session` のイベントキューが空になってから回収する」ところまでである。
-    /// flush の契機 (`send_data_stream_closed` / `reset_outgoing_data_stream` / fill への
-    /// `STOP_SENDING`) を別タスクから呼ぶ配線では、キューが空になった直後に flush が
-    /// 積まれる競合が残る (本 repo の examples にその配線は無いため現状は到達しない)。
-    /// またイベントが一切来ない間は、回収が次の drain まで遅延する。
+    /// 通常の回収は `drain_events` が「キューが空である観測」と同じロック保持で行う
+    /// (`forget_ready_requests` を参照)。本メソッドは `CloseSession` で早期 return する分岐専用で、
+    /// そのときはキューが空であることを観測しない。セッション終了後は flush の契機
+    /// (`send_data_stream_closed` / `reset_outgoing_data_stream` / fill への `STOP_SENDING`) が
+    /// すべて `require_established` で失敗するため、新たな `SendOnStream` は積まれない。
+    /// 保留中の subscription は回収しないので、未送出の保留はそのまま残る。
+    /// またイベントが一切来ない間は、回収が次の `drain_events` まで遅延する。
     async fn cleanup_closed_requests(&mut self) {
-        let request_ids: Vec<u64> = self.closed_request_streams.iter().copied().collect();
-        let mut forgotten = Vec::new();
-        {
+        let forgotten = {
             let mut session = lock_session(&self.session);
-            for request_id in request_ids {
-                let subscription_forgettable =
-                    session
-                        .subscription(request_id)
-                        .is_some_and(|subscription| {
-                            should_forget_subscription(
-                                subscription.cleanup_ready(),
-                                subscription.pending_publish_done,
-                            )
-                        });
-                if subscription_forgettable && session.forget_subscription(request_id).is_some() {
-                    forgotten.push(request_id);
-                    continue;
-                }
-                // fetch / track_status には保留 PUBLISH_DONE に相当する状態が無いため、
-                // Session の判定 (fetch_cleanup_ready) をそのまま使う
-                if session.fetch_cleanup_ready(request_id) == Some(true)
-                    && session.forget_fetch(request_id).is_some()
-                {
-                    forgotten.push(request_id);
-                }
-            }
-        }
+            forget_ready_requests(&mut session, &self.closed_request_streams)
+        };
+        self.finish_forgotten(forgotten).await;
+    }
+
+    /// 回収した request の後始末を行う
+    ///
+    /// `forgotten` は [`forget_ready_requests`] が返した request_id であることを前提とする。
+    /// ロックを保持したまま `finish()` を待つと Session を使う他のタスクを止めてしまうため、
+    /// 台帳から取り出してから呼ぶ。
+    async fn finish_forgotten(&mut self, forgotten: Vec<u64>) {
         for request_id in forgotten {
             self.closed_request_streams.remove(&request_id);
             self.bidi_stop_txs.remove(&request_id);
@@ -2587,6 +2590,42 @@ impl MoqtClient {
             }
         }
     }
+}
+
+/// 回収してよい終端済み request を Session から破棄し、その request_id を返す
+///
+/// 通常経路 (`drain_events`) では、キューが空であることを観測したのと同じロック保持で呼ぶ。
+/// flush は同じロックを取るため、「保留 PUBLISH_DONE がキューに積まれる前に回収してしまう」
+/// 競合を閉じる。セッション終了後の `cleanup_closed_requests` はキューが空である観測を伴わないが、
+/// flush の契機がすべて `require_established` で失敗するため同じ競合は起きない。判定と
+/// `Session::forget_subscription` / `Session::forget_fetch` を分離できない (分離するとロックを
+/// 解放した隙に flush が入る) ため、本関数は破棄まで行う。個々の判定は純関数
+/// (`should_forget_subscription`) に保つ。
+fn forget_ready_requests(session: &mut Session, closed_request_streams: &HashSet<u64>) -> Vec<u64> {
+    let mut forgotten = Vec::new();
+    for request_id in closed_request_streams.iter().copied() {
+        let subscription_forgettable =
+            session
+                .subscription(request_id)
+                .is_some_and(|subscription| {
+                    should_forget_subscription(
+                        subscription.cleanup_ready(),
+                        subscription.pending_publish_done,
+                    )
+                });
+        if subscription_forgettable && session.forget_subscription(request_id).is_some() {
+            forgotten.push(request_id);
+            continue;
+        }
+        // fetch / track_status には保留 PUBLISH_DONE に相当する状態が無いため、
+        // Session の判定 (fetch_cleanup_ready) をそのまま使う
+        if session.fetch_cleanup_ready(request_id) == Some(true)
+            && session.forget_fetch(request_id).is_some()
+        {
+            forgotten.push(request_id);
+        }
+    }
+    forgotten
 }
 
 fn pop_send_control(session: &mut Session) -> Result<ControlMessage> {

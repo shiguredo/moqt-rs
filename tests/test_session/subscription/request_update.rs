@@ -1219,7 +1219,12 @@ fn send_subgroup_object_to_terminated_subscription_rejected() {
     server
         .send_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("テストフィクスチャの前提条件を満たす");
-    let (_, done_msg) = take_send_on_stream(&mut server);
+    // 保留していた PUBLISH_DONE は送信方向の終端として 1 通だけ積まれる
+    let (_, done_msg, done_fin) = take_send_on_stream_with_fin(&mut server);
+    assert!(
+        done_fin,
+        "最後の outgoing data stream の終端で PUBLISH_DONE と同時に送信方向を閉じること"
+    );
     match done_msg {
         ControlMessage::PublishDone(done) => {
             assert_eq!(
