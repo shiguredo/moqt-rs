@@ -549,7 +549,7 @@ pub async fn run(
     }
 
     let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
-    // カタログの購読は、購読で届くカタログを捨てるだけの stream として扱う
+    // カタログの購読は TrackKind::Catalog として登録し、届いた Object は main ループが適用する
     track_map.insert(catalog_sub.track_alias, TrackKind::Catalog);
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
