@@ -22,6 +22,9 @@ pub enum Error {
     /// Video Toolbox エンコードエラー (macOS)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
+    /// Audio Toolbox エンコードエラー (macOS)
+    #[cfg(target_os = "macos")]
+    AudioToolbox(shiguredo_audio_toolbox::Error),
     /// Opus エンコードエラー
     Opus(shiguredo_opus::Error),
     /// 音声キャプチャエラー
@@ -72,6 +75,8 @@ impl fmt::Display for Error {
             Self::Vpx(e) => write!(f, "vpx: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
+            #[cfg(target_os = "macos")]
+            Self::AudioToolbox(e) => write!(f, "audio toolbox: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
             Self::AudioCapture(e) => write!(f, "audio capture: {e:?}"),
             Self::Io(e) => write!(f, "I/O: {e}"),
@@ -122,6 +127,13 @@ impl From<shiguredo_libvpx::Error> for Error {
 impl From<shiguredo_video_toolbox::Error> for Error {
     fn from(e: shiguredo_video_toolbox::Error) -> Self {
         Self::VideoToolbox(e)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<shiguredo_audio_toolbox::Error> for Error {
+    fn from(e: shiguredo_audio_toolbox::Error) -> Self {
+        Self::AudioToolbox(e)
     }
 }
 

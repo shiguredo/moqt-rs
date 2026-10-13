@@ -1,10 +1,12 @@
-//! ビデオデコーダの Enum 抽象化
+//! デコーダの Enum 抽象化
 //!
-//! codec ごとの実装を `VideoDecoder` の variant に持ち、`match` で分岐する。
+//! codec ごとの実装を `VideoDecoder` / `AudioDecoder` の variant に持ち、`match` で分岐する。
 //! 具体実装は codec 別サブモジュールに分離する。
 
 use crate::error::{Error, Result};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod aac;
 pub(crate) mod av1;
 #[cfg(target_os = "macos")]
 pub(crate) mod h264;
@@ -127,6 +129,106 @@ pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
     }
 }
 
+/// サンプル subscriber が扱う音声デコーダ
+///
+/// codec ごとの実装を variant に持つ Enum とし、呼び出し側は本型のメソッド経由で
+/// 利用する。macOS 限定の codec は variant 単位で `cfg` を付ける。
+pub(crate) enum AudioDecoder {
+    /// Opus デコーダ
+    Opus(opus::OpusDecoder),
+    /// AAC-LC デコーダ (Apple Audio Toolbox、macOS 限定)
+    #[cfg(target_os = "macos")]
+    Aac(aac::AacDecoder),
+}
+
+impl AudioDecoder {
+    /// catalog の RFC 6381 codec 文字列から音声デコーダを生成する
+    ///
+    /// `sample_rate` と `channels` は catalog の audio track が宣言した入力の値である。
+    /// AAC は Apple Audio Toolbox を使うため macOS でのみ生成できる。
+    pub(crate) fn build(codec: &str, sample_rate: u32, channels: u8) -> Result<Self> {
+        if is_aac_codec(codec) {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(AudioDecoder::Aac(aac::AacDecoder::new(
+                    sample_rate,
+                    channels,
+                )?))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(Error::Other(format!(
+                    "AAC decoder is only supported on macOS (catalog codec: {codec})"
+                )))
+            }
+        } else if is_opus_codec(codec) {
+            Ok(AudioDecoder::Opus(opus::OpusDecoder::new(
+                sample_rate,
+                channels,
+            )?))
+        } else {
+            Err(Error::Other(format!("unsupported audio codec: {codec}")))
+        }
+    }
+
+    /// 1 パケットをデコードして PCM (S16 interleaved) を返す
+    ///
+    /// AAC はデコードを専用スレッドが行うため、完了を待って返す。
+    pub(crate) async fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+        match self {
+            AudioDecoder::Opus(d) => d.decode(data),
+            #[cfg(target_os = "macos")]
+            AudioDecoder::Aac(d) => d.decode(data).await,
+        }
+    }
+
+    /// デコード後の出力チャンネル数を返す
+    ///
+    /// AAC は AudioToolbox の出力がステレオ固定であるため常に 2 になる。
+    pub(crate) fn channels(&self) -> u8 {
+        match self {
+            AudioDecoder::Opus(d) => d.channels(),
+            #[cfg(target_os = "macos")]
+            AudioDecoder::Aac(d) => d.channels(),
+        }
+    }
+
+    /// デコード後の出力サンプルレート (Hz) を返す
+    ///
+    /// Opus と AAC のどちらも、出力は catalog が宣言した入力のサンプルレートと同じになる。
+    pub(crate) fn sample_rate(&self) -> u32 {
+        match self {
+            AudioDecoder::Opus(d) => d.sample_rate(),
+            #[cfg(target_os = "macos")]
+            AudioDecoder::Aac(d) => d.sample_rate(),
+        }
+    }
+}
+
+/// catalog の RFC 6381 codec 文字列が Opus かを判定する
+///
+/// `src/msf.rs` の `is_audio_codec` は登録名 `opus` の完全一致のみを audio とみなすが、
+/// 本 example は従来どおり `opus` 始まりを Opus として扱う。
+pub(crate) fn is_opus_codec(codec: &str) -> bool {
+    codec.starts_with("opus")
+}
+
+/// catalog の RFC 6381 codec 文字列が AAC (MPEG-4 Audio) かを判定する
+///
+/// WEBCODECS-CODEC-REGISTRY (Registry Draft, 2026-02-12) §3 の登録表記 `mp4a.*` は
+/// `mp4a` 単独と `mp4a.` 始まりを表す (`mp4a.40.2` は AAC-LC)。
+pub(crate) fn is_aac_codec(codec: &str) -> bool {
+    codec == "mp4a" || codec.starts_with("mp4a.")
+}
+
+/// catalog の RFC 6381 codec 文字列が本 example でデコードできる音声 codec かを判定する
+///
+/// 購読する audio track の選択に使う。デコードできない codec を選ぶと、録画中でも
+/// 再生時にデコーダを生成できずに失敗するため、対応する codec だけを対象にする。
+pub(crate) fn is_supported_audio_codec(codec: &str) -> bool {
+    is_opus_codec(codec) || is_aac_codec(codec)
+}
+
 /// stride 付きプレーンを連続バッファにコピーする
 pub(crate) fn copy_plane(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
     if stride == width {
@@ -208,5 +310,61 @@ mod tests {
                 "未対応であることが分かるエラーになること: {codec}"
             );
         }
+    }
+
+    /// catalog の codec 文字列から対応する音声デコーダを生成できること
+    ///
+    /// Opus は全プラットフォーム、AAC (`mp4a.*`) は Apple Audio Toolbox を使うため
+    /// macOS のみで生成できる。
+    #[test]
+    fn audio_codec_strings_select_a_decoder() {
+        assert!(matches!(
+            AudioDecoder::build("opus", 48_000, 2).expect("Opus のデコーダを生成できること"),
+            AudioDecoder::Opus(_)
+        ));
+        assert!(
+            is_supported_audio_codec("opus") && is_supported_audio_codec("mp4a.40.2"),
+            "opus と mp4a.* は購読対象の音声 codec であること"
+        );
+        #[cfg(target_os = "macos")]
+        for codec in ["mp4a", "mp4a.40.2"] {
+            assert!(
+                matches!(
+                    AudioDecoder::build(codec, 48_000, 2).expect("AAC のデコーダを生成できること"),
+                    AudioDecoder::Aac(_)
+                ),
+                "AAC の codec 文字列で AAC デコーダが選ばれること: {codec}"
+            );
+        }
+    }
+
+    /// 登録外の音声 codec 文字列はエラーになること
+    #[test]
+    fn unknown_audio_codec_string_is_rejected() {
+        let result = AudioDecoder::build("unknown", 48_000, 2);
+        assert!(result.is_err(), "登録外の codec 文字列はエラーになること");
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("unsupported audio codec")),
+            "未対応であることが分かるエラーになること"
+        );
+        assert!(
+            !is_supported_audio_codec("unknown"),
+            "未対応の codec は購読対象にならないこと"
+        );
+    }
+
+    /// macOS 以外では AAC のデコーダを生成できないこと
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn aac_audio_codec_is_rejected_on_non_macos() {
+        let result = AudioDecoder::build("mp4a.40.2", 48_000, 2);
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("only supported on macOS")),
+            "macOS 限定であることが分かるエラーになること"
+        );
     }
 }

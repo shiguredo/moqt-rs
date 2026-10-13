@@ -459,6 +459,27 @@ mod tests {
         );
     }
 
+    /// `--audio-codec aac` の codec 文字列でも encode に成功すること
+    ///
+    /// `mp4a.40.2` が audio と判定されることは、library 側の登録名テストで固定している。
+    /// AAC-LC の channelConfiguration は MSF の channelConfig と同じ値 (mono = 1 / stereo = 2) である。
+    #[test]
+    fn publisher_aac_audio_codec_encodes() {
+        let audio = AudioTrackParams {
+            track_name: "audio",
+            namespace: "ns",
+            codec: "mp4a.40.2",
+            samplerate: 48_000,
+            channel_config: "1",
+            bitrate: 64,
+        };
+        let catalog =
+            build_catalog(None, Some(&audio), TEST_SYNC, None).expect("カタログを構築できること");
+        catalog
+            .encode()
+            .expect("AAC-LC の audio codec でも encode に成功すること");
+    }
+
     /// publisher が載せる role が §5.2.6 Table 4 の予約 role であること
     ///
     /// 受信側は codec だけでなく role からも content の種別を判定できる。

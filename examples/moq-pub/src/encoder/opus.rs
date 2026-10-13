@@ -60,3 +60,51 @@ impl OpusEncoder {
         OPUS_CATALOG_CODEC_STRING
     }
 }
+
+/// OpusHead パケットを構築する (RFC 7845 §5.1 (Identification Header))
+///
+/// Audio Config プロパティ (draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) に載せる
+/// Opus の configuration bytes を生成する。
+///
+/// フォーマット:
+/// - Magic: "OpusHead" (8 bytes)
+/// - Version: 1 (1 byte)
+/// - Channel Count: channels (1 byte)
+/// - Pre-skip: 0 (2 bytes, little-endian)
+/// - Input Sample Rate: sample_rate (4 bytes, little-endian)
+/// - Output Gain: 0 (2 bytes, little-endian)
+/// - Channel Mapping Family: 0 (1 byte)
+pub(crate) fn build_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
+    let mut head = Vec::with_capacity(19);
+    head.extend_from_slice(b"OpusHead");
+    head.push(1); // Version
+    head.push(channels); // Channel Count
+    head.extend_from_slice(&0u16.to_le_bytes()); // Pre-skip
+    head.extend_from_slice(&sample_rate.to_le_bytes()); // Input Sample Rate
+    head.extend_from_slice(&0u16.to_le_bytes()); // Output Gain
+    head.push(0); // Channel Mapping Family
+    head
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// OpusHead 構築: RFC 7845 §5.1 (Identification Header) のフォーマットで 19 バイトのパケットが生成されること
+    #[test]
+    fn build_opus_head_format() {
+        let head = build_opus_head(48_000, 1);
+        assert_eq!(head.len(), 19, "OpusHead は 19 バイトであること");
+        assert_eq!(&head[0..8], b"OpusHead", "Magic は OpusHead であること");
+        assert_eq!(head[8], 1, "Version は 1 であること");
+        assert_eq!(head[9], 1, "Channel Count は 1 であること");
+        assert_eq!(&head[10..12], &[0x00, 0x00], "Pre-skip は 0 であること");
+        assert_eq!(
+            &head[12..16],
+            &48_000u32.to_le_bytes(),
+            "Input Sample Rate は 48000 であること"
+        );
+        assert_eq!(&head[16..18], &[0x00, 0x00], "Output Gain は 0 であること");
+        assert_eq!(head[18], 0, "Channel Mapping Family は 0 であること");
+    }
+}

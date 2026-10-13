@@ -7,6 +7,9 @@ use shiguredo_video_device::VideoFrameOwned;
 
 use crate::error::Result;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod aac;
+pub(crate) mod audio;
 pub(crate) mod av1;
 #[cfg(target_os = "macos")]
 pub(crate) mod h264;

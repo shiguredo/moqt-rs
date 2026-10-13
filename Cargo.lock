@@ -888,6 +888,7 @@ dependencies = [
  "s2n-quic",
  "shiguredo_aom",
  "shiguredo_audio_device",
+ "shiguredo_audio_toolbox",
  "shiguredo_dav1d",
  "shiguredo_http3",
  "shiguredo_libvpx",
@@ -912,6 +913,7 @@ dependencies = [
  "noargs",
  "raw_player",
  "s2n-quic",
+ "shiguredo_audio_toolbox",
  "shiguredo_dav1d",
  "shiguredo_http3",
  "shiguredo_libvpx",
@@ -1526,6 +1528,15 @@ dependencies = [
  "cc",
  "pkg-config",
  "windows",
+]
+
+[[package]]
+name = "shiguredo_audio_toolbox"
+version = "2026.2.0-canary.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc3eb1adb4abdd2aaca8bf0a1b5b9d644300eddfcd638558361d45c3f3f3b3dd"
+dependencies = [
+ "bindgen 0.72.1",
 ]
 
 [[package]]

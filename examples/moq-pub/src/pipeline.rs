@@ -36,7 +36,7 @@ use crate::capture;
 use crate::catalog;
 use crate::cli::{Config, VideoCodec};
 use crate::datagram_writer::DatagramWriter;
-use crate::encoder::opus::OpusEncoder;
+use crate::encoder::audio::AudioEncoder;
 use crate::encoder::{self, EncodedFrame};
 use crate::error::{Error, Result};
 use crate::fake_audio_capture;
@@ -496,11 +496,12 @@ pub async fn run(
     let reencode_video_timescale: Option<u64> =
         reencode_video_info.as_ref().map(|info| info.timescale);
 
-    let mut audio_encoder: Option<OpusEncoder> = if config.audio_enabled {
-        Some(OpusEncoder::new(
+    let mut audio_encoder: Option<AudioEncoder> = if config.audio_enabled {
+        Some(AudioEncoder::new(
+            config.audio_codec,
             AUDIO_SAMPLE_RATE,
             AUDIO_CHANNELS,
-            config.audio_bitrate * 1000,
+            config.audio_bitrate,
         )?)
     } else {
         None
@@ -516,11 +517,12 @@ pub async fn run(
     } else {
         None
     };
-    // Opus の configuration bytes (OpusHead) を事前に構築する
-    // Audio Config プロパティとして最初の audio object にだけ付与する
-    let audio_opus_head = audio_encoder
+    // codec 固有の configuration bytes (Opus は OpusHead、AAC-LC は AudioSpecificConfig) を
+    // 事前に構築する。Audio Config プロパティとして最初の audio object にだけ付与する
+    let audio_config = audio_encoder
         .as_ref()
-        .map(|_| build_opus_head(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS));
+        .map(|e| e.audio_config(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS))
+        .transpose()?;
 
     // 5. MSF カタログを送信する
     //
@@ -660,7 +662,7 @@ pub async fn run(
     let mut audio_timeline = AudioCaptureTimeline::new();
     // 再エンコードで入力サンプルの PTS を出力フレームへ対応付ける待ち行列
     let mut pending_video_timestamps: VecDeque<u64> = VecDeque::new();
-    // Audio Config (OpusHead) を送信済みかどうかのフラグ
+    // Audio Config を送信済みかどうかのフラグ
     // Opus は全フレームが独立してデコード可能なため、最初の audio object だけでよい
     let mut audio_config_sent = false;
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -857,7 +859,7 @@ pub async fn run(
                     let mut next_chunk_timestamp = input_timestamp;
                     while audio_pcm_buf.len() >= samples_per_frame {
                         let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
-                        let encoded = encoder.encode(&chunk)?;
+                        let encoded = encoder.encode(&chunk).await?;
                         let timestamp = match next_chunk_timestamp {
                             Some(timestamp) => {
                                 // 再エンコードの入力音声トラックのタイムスケール
@@ -875,14 +877,14 @@ pub async fn run(
                                 AUDIO_SAMPLE_RATE,
                             ),
                         };
-                        // 最初の audio object にだけ Audio Config (OpusHead) を付与する。
+                        // 最初の audio object にだけ Audio Config を付与する。
                         // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
-                        // (Skip 時に audio_config_sent を立てると OpusHead が永遠に届かず、
+                        // (Skip 時に audio_config_sent を立てると Audio Config が永遠に届かず、
                         // フィルタを通過する後続フレームが Opus デコード不能になる)。
                         let audio_config = if audio_config_sent {
                             None
                         } else {
-                            audio_opus_head.as_deref()
+                            audio_config.as_deref()
                         };
                         let properties =
                             build_audio_loc_properties(timestamp, audio_timescale, audio_config);
@@ -1953,38 +1955,14 @@ fn build_video_loc_properties(frame: &EncodedFrame, timescale: Option<u64>) -> L
     props
 }
 
-/// OpusHead パケットを構築する (RFC 7845 §5.1 (Identification Header))
-///
-/// Audio Config プロパティ (draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) に載せる
-/// Opus の configuration bytes を生成する。
-///
-/// フォーマット:
-/// - Magic: "OpusHead" (8 bytes)
-/// - Version: 1 (1 byte)
-/// - Channel Count: channels (1 byte)
-/// - Pre-skip: 0 (2 bytes, little-endian)
-/// - Input Sample Rate: sample_rate (4 bytes, little-endian)
-/// - Output Gain: 0 (2 bytes, little-endian)
-/// - Channel Mapping Family: 0 (1 byte)
-fn build_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
-    let mut head = Vec::with_capacity(19);
-    head.extend_from_slice(b"OpusHead");
-    head.push(1); // Version
-    head.push(channels); // Channel Count
-    head.extend_from_slice(&0u16.to_le_bytes()); // Pre-skip
-    head.extend_from_slice(&sample_rate.to_le_bytes()); // Input Sample Rate
-    head.extend_from_slice(&0u16.to_le_bytes()); // Output Gain
-    head.push(0); // Channel Mapping Family
-    head
-}
-
 /// 音声 LOC プロパティを構築する
 ///
 /// `timescale` は入力ファイル由来のメディア時刻を送るときだけ渡す。live capture は
 /// Unix epoch マイクロ秒を送るため `None` にし、`PROP_TIMESCALE` を付けない
 /// (draft-ietf-moq-loc-04 §2.3.1.1 の既定)。
 ///
-/// `audio_config` に OpusHead バイト列を渡すと Audio Config プロパティ (0x0F) として付与する。
+/// `audio_config` に codec 固有の configuration bytes (Opus は OpusHead、AAC-LC は
+/// AudioSpecificConfig) を渡すと Audio Config プロパティ (0x0F) として付与する。
 /// Opus は全フレームが独立してデコード可能なため、最初の audio object だけに付与すればよい。
 fn build_audio_loc_properties(
     timestamp: u64,
@@ -2141,38 +2119,12 @@ mod tests {
         props.encode().expect("LOC プロパティは encode できること");
     }
 
-    /// OpusHead 構築: RFC 7845 §5.1 (Identification Header) のフォーマットで 19 バイトのパケットが生成されること
-    #[test]
-    fn build_opus_head_format() {
-        let head = build_opus_head(48_000, 1);
-        // 全 19 バイトであること
-        assert_eq!(head.len(), 19, "OpusHead は 19 バイトであること");
-        // Magic: "OpusHead"
-        assert_eq!(&head[0..8], b"OpusHead", "Magic は OpusHead であること");
-        // Version: 1
-        assert_eq!(head[8], 1, "Version は 1 であること");
-        // Channel Count
-        assert_eq!(head[9], 1, "Channel Count は 1 であること");
-        // Pre-skip: 0 (little-endian)
-        assert_eq!(&head[10..12], &[0x00, 0x00], "Pre-skip は 0 であること");
-        // Input Sample Rate: 48000 (little-endian)
-        assert_eq!(
-            &head[12..16],
-            &48_000u32.to_le_bytes(),
-            "Input Sample Rate は 48000 であること"
-        );
-        // Output Gain: 0 (little-endian)
-        assert_eq!(&head[16..18], &[0x00, 0x00], "Output Gain は 0 であること");
-        // Channel Mapping Family: 0
-        assert_eq!(head[18], 0, "Channel Mapping Family は 0 であること");
-    }
-
     /// Audio Config 付きの音声 LOC プロパティ: Timestamp / Timescale / Audio Config が付与され encode できること
     ///
     /// MP4 の経路では入力ファイルのメディア時刻を入力トラックの timescale で送る。
     #[test]
     fn build_audio_loc_properties_with_audio_config() {
-        let opus_head = build_opus_head(48_000, 1);
+        let opus_head = crate::encoder::opus::build_opus_head(48_000, 1);
         let props = build_audio_loc_properties(960, Some(48_000), Some(&opus_head));
         assert_eq!(props.timestamp(), Some(960), "Timestamp が付与されること");
         assert_eq!(

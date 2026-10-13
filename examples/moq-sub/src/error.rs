@@ -22,6 +22,9 @@ pub enum Error {
     /// Apple Video Toolbox エラー (H.264 / H.265 デコード)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
+    /// Apple Audio Toolbox エラー (AAC-LC デコード)
+    #[cfg(target_os = "macos")]
+    AudioToolbox(shiguredo_audio_toolbox::Error),
     /// I/O エラー
     Io(std::io::Error),
     /// WebTransport エラー
@@ -56,6 +59,8 @@ impl fmt::Display for Error {
             Self::Player(e) => write!(f, "player: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
+            #[cfg(target_os = "macos")]
+            Self::AudioToolbox(e) => write!(f, "audio toolbox: {e}"),
             Self::Io(e) => write!(f, "I/O: {e}"),
             Self::Other(msg) => write!(f, "{msg}"),
         }
@@ -104,6 +109,13 @@ impl From<raw_player::Error> for Error {
 impl From<shiguredo_video_toolbox::Error> for Error {
     fn from(e: shiguredo_video_toolbox::Error) -> Self {
         Self::VideoToolbox(e)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<shiguredo_audio_toolbox::Error> for Error {
+    fn from(e: shiguredo_audio_toolbox::Error) -> Self {
+        Self::AudioToolbox(e)
     }
 }
 

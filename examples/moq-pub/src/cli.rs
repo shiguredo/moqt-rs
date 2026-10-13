@@ -35,6 +35,27 @@ impl VideoCodec {
     }
 }
 
+/// 音声コーデック種別
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    /// Opus (libopus, 全プラットフォーム)
+    Opus,
+    /// AAC-LC (Apple Audio Toolbox, macOS 限定)
+    Aac,
+}
+
+impl AudioCodec {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "opus" => Ok(Self::Opus),
+            "aac" => Ok(Self::Aac),
+            other => Err(format!(
+                "unknown audio codec '{other}' (expected opus or aac)"
+            )),
+        }
+    }
+}
+
 /// CLI オプション
 #[derive(Clone)]
 pub struct Config {
@@ -73,6 +94,8 @@ pub struct Config {
     pub audio_enabled: bool,
     /// 音声入力デバイス ID
     pub audio_device_id: Option<String>,
+    /// 音声コーデック
+    pub audio_codec: AudioCodec,
     /// 音声ターゲットビットレート kbps
     pub audio_bitrate: u32,
     /// 音声トラックを datagram で送るかどうか
@@ -296,6 +319,13 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         "64",
     )?;
 
+    let audio_codec_opt = noargs::opt("audio-codec")
+        .ty("CODEC")
+        .doc("Audio codec (opus | aac). aac requires macOS")
+        .default("opus")
+        .take(&mut args);
+    let audio_codec: AudioCodec = audio_codec_opt.then(|o| AudioCodec::parse(o.value()))?;
+
     // `.default()` は `&'static str` しか取れないため、`DEFAULT_DATAGRAM_MAX_SIZE` と
     // 一致する値を文字列で渡す (一致は単体テストで固定する)
     let datagram_max_size_opt = noargs::opt("datagram-max-size")
@@ -484,6 +514,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         video_enabled,
         audio_enabled,
         audio_device_id,
+        audio_codec,
         audio_bitrate,
         audio_datagram,
         datagram_max_size,
@@ -971,6 +1002,43 @@ mod tests {
         };
         assert!(
             format!("{error:?}").contains("unknown video codec"),
+            "未対応の codec であることが分かること: {error:?}"
+        );
+    }
+
+    /// `--audio-codec` が opus / aac を受け付けること
+    ///
+    /// 省略時は opus である。AAC は Apple Audio Toolbox を使うため macOS 限定である。
+    #[test]
+    fn audio_codec_accepts_opus_and_aac() {
+        let cases: &[(&[&str], AudioCodec)] = &[
+            (&[], AudioCodec::Opus),
+            (&["--audio-codec", "opus"], AudioCodec::Opus),
+            (&["--audio-codec", "aac"], AudioCodec::Aac),
+        ];
+        for (extra, expected) in cases {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(extra);
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.audio_codec, *expected,
+                "codec が一致すること: {extra:?}"
+            );
+        }
+    }
+
+    /// 未対応の音声コーデックはエラーになること
+    #[test]
+    fn unknown_audio_codec_is_rejected() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--audio-codec", "mp3"]);
+        let Err(error) = parse_args(&args) else {
+            panic!("未対応の codec はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("unknown audio codec"),
             "未対応の codec であることが分かること: {error:?}"
         );
     }

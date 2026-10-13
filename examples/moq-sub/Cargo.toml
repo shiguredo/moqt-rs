@@ -47,5 +47,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# AAC-LC デコーダ (Apple Audio Toolbox)
+# 2026.1.0 は 1 回の AudioConverterFillComplexBuffer で同じパケットを再入力する不具合があり、
+# 音声が重複するため、修正が入った canary を使う
+shiguredo_audio_toolbox = "2026.2.0-canary.2"
 # H.264 / H.265 ハードウェアデコーダ (Apple Video Toolbox)
 shiguredo_video_toolbox = "2026.1"

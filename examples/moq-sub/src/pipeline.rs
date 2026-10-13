@@ -2,7 +2,7 @@
 //!
 //! 接続 → SETUP → カタログ購読 (FILL_PARAMETERS 付き SUBSCRIBE) → ビデオ / オーディオ SUBSCRIBE
 //! → データストリーム受信
-//! → デコード (AV1 / H.264 / H.265 / Opus) → フレーム送出の流れを、
+//! → デコード (AV1 / H.264 / H.265 / VP8 / VP9 / Opus / AAC-LC) → フレーム送出の流れを、
 //! `shiguredo_moqt::session::core::Session` を駆動する
 //! [`tokio_moq::moqt_client::MoqtClient`] と結線する。
 //!
@@ -41,8 +41,7 @@ use shiguredo_moqt::{
 
 use crate::catalog;
 use crate::cli::Config;
-use crate::decoder::opus::OpusDecoder;
-use crate::decoder::{self, DecodedAudioFrame, DecodedVideoFrame};
+use crate::decoder::{self, AudioDecoder, DecodedAudioFrame, DecodedVideoFrame};
 use crate::error::{Error, Result};
 use crate::mp4::{
     self, AudioSample, AudioSetup, Recorder, RecorderSender, Setup, VideoSample, VideoSetup,
@@ -218,7 +217,7 @@ fn spawn_stream_task(
     audio_params: Option<(u32, u8)>,
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
+    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
@@ -640,8 +639,57 @@ pub async fn run(
     } else {
         None
     };
-    // Audio Config の検証 (codec 判定) に使う catalog の audio codec
+    // Audio Config の解釈 (codec 判定) と音声デコーダの生成に使う catalog の audio codec
     let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
+
+    // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-04 §4.1)。
+    // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
+    // フレーム境界で波形が不連続になってノイズになる。
+    // subscription で 1 つのデコーダを共有し、Audio Config の処理済みフラグも共有する。
+    // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
+    //
+    // デコーダは録画のセットアップより先に作る。AAC は AudioToolbox の出力がステレオ固定で
+    // catalog の channelConfig と食い違うことがあり、再生と録画に渡すチャンネル数を
+    // デコーダの出力に合わせるためである。
+    let audio_decoder = match (playback, audio_params, audio_codec.as_deref()) {
+        (true, Some((sample_rate, channels)), Some(codec)) => {
+            match AudioDecoder::build(codec, sample_rate, channels) {
+                Ok(decoder) => {
+                    tracing::info!(
+                        "Audio decoder available (codec={}, sample_rate={}, channels={})",
+                        codec,
+                        sample_rate,
+                        decoder.channels()
+                    );
+                    // AAC は入力がモノラルでも AudioToolbox がステレオへアップミックスする。
+                    // catalog の channelConfig と食い違っても再生と録画は継続する
+                    // (Opus の OpusHead 検証と同じ方針)
+                    if decoder.channels() != channels {
+                        tracing::warn!(
+                            "Audio decoder output channels {} do not match catalog channelConfig {} (playback continues)",
+                            decoder.channels(),
+                            channels,
+                        );
+                    }
+                    Some(decoder)
+                }
+                Err(e) if recording_requested => {
+                    tracing::warn!(
+                        "Audio decoder is unavailable; recording without audio playback: {e}"
+                    );
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // `audio_params` が Some なら catalog の audio track は codec を持つ
+        // (extract_audio_info が codec を必須とする) ため、この経路は型上の防御である
+        (true, Some(_), None) => {
+            tracing::warn!("Audio track has no codec; audio playback is disabled");
+            None
+        }
+        _ => None,
+    };
 
     // 録画対象のトラック情報を確定してライタースレッドを起動する。stream task が動き出す前に
     // 起動するため、最初のサンプルより先にセットアップが反映される。
@@ -654,10 +702,25 @@ pub async fn run(
     } else {
         None
     };
-    let audio_setup = audio_params.map(|(sample_rate, channels)| AudioSetup {
-        sample_rate,
-        channels,
-    });
+    // MP4 録画の音声トラックは Opus のみに対応する。mp4.rs の `build_audio_entry` は
+    // Opus のサンプルエントリーを構築し、録画するデータは圧縮 payload そのものであるため、
+    // AAC を録画するとコンテナの表記と実際のペイロードが食い違う。AAC のトラックでは
+    // 音声を録画せず警告する (映像のみの MP4 になる)
+    let audio_setup = match (audio_params, audio_codec.as_deref()) {
+        (Some((sample_rate, channels)), Some(codec)) if decoder::is_opus_codec(codec) => {
+            Some(AudioSetup {
+                sample_rate,
+                channels,
+            })
+        }
+        (Some(_), Some(codec)) if config.mp4.is_some() => {
+            tracing::warn!(
+                "MP4 recording supports Opus audio only; audio is not recorded (catalog codec: {codec})"
+            );
+            None
+        }
+        _ => None,
+    };
     let recorder = match config.mp4.as_deref() {
         Some(path) => Some(Recorder::start(
             path,
@@ -670,31 +733,9 @@ pub async fn run(
     };
     let recorder_sender = recorder.as_ref().map(|recorder| recorder.sender());
 
-    // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-04 §4.1)。
-    // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
-    // フレーム境界で波形が不連続になってノイズになる。
-    // subscription で 1 つのデコーダを共有し、Audio Config の処理済みフラグも共有する。
-    // 録画中はデコーダが使えなくても録画を続けるため、警告に留める。
-    let audio_decoder = match (playback, audio_params) {
-        (true, Some((sample_rate, channels))) => match OpusDecoder::new(sample_rate, channels) {
-            Ok(decoder) => {
-                tracing::info!(
-                    "Audio decoder available (sample_rate={}, channels={})",
-                    sample_rate,
-                    channels
-                );
-                Some(std::sync::Arc::new(tokio::sync::Mutex::new(decoder)))
-            }
-            Err(e) if recording_requested => {
-                tracing::warn!(
-                    "Audio decoder is unavailable; recording without audio playback: {e}"
-                );
-                None
-            }
-            Err(e) => return Err(e),
-        },
-        _ => None,
-    };
+    // stream task は `Arc<Mutex<...>>` でデコーダを共有する
+    let audio_decoder =
+        audio_decoder.map(|decoder| std::sync::Arc::new(tokio::sync::Mutex::new(decoder)));
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let track_map: Arc<HashMap<u64, TrackKind>> = Arc::new(track_map);
@@ -1485,10 +1526,14 @@ async fn receive_catalog(
                 || c.starts_with("vp09.")
         })
     });
-    let audio_track = catalog
-        .tracks
-        .iter()
-        .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")));
+    // 音声トラックは本 example がデコードできる codec (opus / mp4a.* (AAC)) から選ぶ。
+    // codec の文字列は draft-ietf-moq-msf-01 §5.2.18 (Codec) が定める RFC 6381 の表記である。
+    // デコードできない codec を購読すると、録画中でも再生時にデコーダを生成できずに失敗する。
+    let audio_track = catalog.tracks.iter().find(|t| {
+        t.codec
+            .as_deref()
+            .is_some_and(decoder::is_supported_audio_codec)
+    });
     let selected_latency = |track: Option<&MsfTrack>| {
         track.map(|track| SelectedTrackLatency {
             render_group: track.render_group,
@@ -1506,7 +1551,8 @@ async fn receive_catalog(
     let audio_latency = selected_latency(audio_track);
     if video.is_none() && audio.is_none() {
         return Err(Error::Other(
-            "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus)".to_string(),
+            "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus/mp4a)"
+                .to_string(),
         ));
     }
     Ok(CatalogResolution {
@@ -1940,7 +1986,7 @@ async fn handle_incoming_stream(
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
+    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
@@ -2032,7 +2078,7 @@ async fn handle_stream_body(
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
-    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<OpusDecoder>>>,
+    audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
@@ -2203,13 +2249,15 @@ async fn handle_stream_body(
                         None => None,
                     };
                     // Audio Config の中身はコーデック依存 (LOC draft-ietf-moq-loc-04 §2.3.3.1 (Audio Config)) のため、
-                    // catalog の codec が opus の場合のみ OpusHead として解釈する。
+                    // catalog の codec が opus の場合のみ OpusHead として解釈する。AAC (mp4a.*) の
+                    // Audio Config は AudioSpecificConfig であり、AudioToolbox のデコーダは
+                    // 入力のサンプルレートとチャンネル数だけで構成できるため解釈しない。
                     // 処理済みフラグは subscription で共有する: decode_audio_stream は
                     // subgroup stream ごとに呼ばれるが、OpusHead はセッションで 1 回しか
                     // 送られないため、共有しないと 2 本目以降の stream が OpusHead を
                     // 待ち続けて音声が途切れる。
-                    let is_opus_codec = audio_codec.is_some_and(|c| c.starts_with("opus"));
-                    // Audio Config (OpusHead) は subscription で 1 回だけ処理する
+                    let is_opus_codec = audio_codec.is_some_and(decoder::is_opus_codec);
+                    // Audio Config は subscription で 1 回だけ処理する
                     let mut handled =
                         audio_config_handled.load(std::sync::atomic::Ordering::Acquire);
                     let chunks = decode_audio_stream(
@@ -2980,7 +3028,7 @@ fn validate_audio_config(
     }
     warnings
 }
-/// 1 本の audio subgroup ストリームから Opus パケットを順次デコードする
+/// 1 本の audio subgroup ストリームから音声パケットを順次デコードする
 ///
 /// LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
 /// 防御的に subgroup 内の object をすべて処理する。
@@ -2991,16 +3039,17 @@ fn validate_audio_config(
 /// (不正 OpusHead で警告を 1 回に抑える)。現行 publisher は OpusHead をセッションで 1 回しか
 /// 送らない (publisher 側の `audio_config_sent` フラグ) ため、実質セッション全体で 1 回きりになる。
 /// `is_opus_codec` が false の場合は OpusHead を解釈せず検証をスキップする
-/// (Audio Config の中身はコーデック依存のため。catalog の audio track は opus のみ選択される
-/// (receive_catalog の `starts_with("opus")` 抽出) ためコードパス上常に true だが、
-/// 非 opus codec 対応時の防御的ガードとして判定を残す)。
+/// (Audio Config の中身はコーデック依存のため。catalog の audio track は opus と
+/// `mp4a.*` (AAC) が選ばれ、`mp4a.*` の Audio Config は AudioSpecificConfig であって
+/// OpusHead ではない)。この場合も最初の Audio Config でフラグを立て、解釈しないことを
+/// 1 回だけ記録する。
 #[expect(clippy::too_many_arguments)]
 async fn decode_audio_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     sg_decoder: &mut SubgroupStreamDecoder,
-    mut opus_decoder: Option<&mut OpusDecoder>,
+    mut audio_decoder: Option<&mut AudioDecoder>,
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     audio_config_handled: &mut bool,
     is_opus_codec: bool,
@@ -3129,22 +3178,30 @@ async fn decode_audio_stream(
                     }
                 }
             } else {
-                tracing::debug!("Audio Config received but codec is not opus; skipped validation");
+                // AAC (mp4a.*) の Audio Config は AudioSpecificConfig であり、OpusHead として
+                // 解釈しない。AudioToolbox のデコーダは catalog のサンプルレートと
+                // チャンネル数だけで構成できる
+                tracing::debug!(
+                    "Audio Config is not interpreted for codecs other than opus: len={}",
+                    config_bytes.len(),
+                );
             }
         }
-        let Some(opus_decoder) = opus_decoder.as_deref_mut() else {
+        let Some(audio_decoder) = audio_decoder.as_deref_mut() else {
             continue;
         };
-        let decoded = tokio::task::block_in_place(|| opus_decoder.decode(&payload));
-        let pcm = match decoded {
-            Ok(p) => p,
+        let pcm = match audio_decoder.decode(&payload).await {
+            Ok(pcm) => pcm,
             Err(e) => {
-                tracing::warn!("Opus decode error: {e}, payload_len={}", payload.len());
+                tracing::warn!("Audio decode error: {e}, payload_len={}", payload.len());
                 continue;
             }
         };
-        let sample_rate = opus_decoder.sample_rate();
-        let channels = opus_decoder.channels();
+        // サンプルレートとチャンネル数はデコーダの出力を使う。AAC は AudioToolbox の出力が
+        // ステレオ固定で catalog の channelConfig と食い違うことがあるが、そのまま再生を
+        // 継続する (validate_audio_config の警告と同じ方針)
+        let sample_rate = audio_decoder.sample_rate();
+        let channels = audio_decoder.channels();
         let pts_us = loc_timestamp_us(timestamp, timescale).unwrap_or(0);
         let frame = DecodedAudioFrame {
             pcm,

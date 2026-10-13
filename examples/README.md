@@ -6,8 +6,8 @@ draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 
 ## 構成
 
-- **moq-pub**：映像を AV1 / H.264 / H.265 / VP8 / VP9 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
-- **moq-sub**：MoQ relay から catalog を SUBSCRIBE して取得し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
+- **moq-pub**：映像を AV1 / H.264 / H.265 / VP8 / VP9 で、音声を Opus / AAC-LC でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する (AAC-LC は macOS 限定)。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
+- **moq-sub**：MoQ relay から catalog を SUBSCRIBE して取得し、video / audio を SUBSCRIBE してデコードして再生する (音声は Opus / AAC-LC。AAC-LC は macOS 限定)。jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` で映像 / 音声を MP4 に保存でき、Full / Delta と datagram にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 publisher / subscriber の接続先となる MoQ relay は別途用意する。
@@ -121,6 +121,7 @@ example が `msf` fragment から使うのは track-identifier の namespace、�
 | `--no-video` | | | 映像トラックの送信を無効化する |
 | `--no-audio` | | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | | 音声入力デバイス ID |
+| `--audio-codec` | | `opus` | 音声コーデック (opus / aac。aac は macOS 限定で AAC-LC のみ) |
 | `--audio-bitrate` | | `64` | 音声ターゲットビットレート (kbps) |
 | `--audio-datagram` | | | 音声トラックを subgroup stream ではなく datagram で配信する (映像と catalog は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2)。上限は `--datagram-max-size` で指定し、超える object はエラーになる |
 | `--datagram-max-size` | | `1160` | MOQT の object datagram (ヘッダ + Properties + payload) の上限サイズ (bytes)。上限を超える object は送信せず、実サイズと対処を示すエラーで終了する。既定は RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値である |
@@ -140,7 +141,7 @@ example が `msf` fragment から使うのは track-identifier の namespace、�
 | `--no-video` | | | 映像トラックの購読を無効化する |
 | `--no-audio` | | | 音声トラックの購読を無効化する |
 | `--audio-output-device` | | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
-| `--mp4` | | | 受信した映像 / 音声を MP4 ファイルへ保存する (再エンコードせずに mux する。既存ファイルは上書きし、datagram 経由で届いたメディアは対象外) |
+| `--mp4` | | | 受信した映像 / 音声を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、datagram 経由で届いたメディアは対象外) |
 | `--no-play` | | | 再生を行わない (SDL を初期化せず、デコードもしない) |
 
 ## URL スキーム
