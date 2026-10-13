@@ -807,12 +807,23 @@ fn proof_freshness_matches_model() -> noprop::TestResult {
             noprop::Ratio::one_nth(4),
             |ctx| noprop::sample_f64_in(ctx, -1.0e12, 1.0e12),
         );
-        let window = noprop::sample_with_boundaries(
-            ctx,
-            &[0.0, 1.0, 10.0, 100.0, f64::NAN, f64::INFINITY],
-            noprop::Ratio::one_nth(3),
-            |ctx| noprop::sample_f64_in(ctx, 0.0, 1000.0),
-        );
+        // ウィンドウ内 (|reference - iat| <= window で Ok) のケースは、reference を
+        // -1.0e12 〜 1.0e12 から、window を 0 〜 1000 から一様に生成するとほぼ作れない
+        // (1 ケースあたり 1e-9 程度)。境界値だけに頼るとシード依存で Ok のケースが 0 件になり、
+        // 256 ケースでも再現しないカバレッジゲートになるため、一定割合でウィンドウ内の値を
+        // 明示的に作る。
+        let window =
+            if reference.is_finite() && noprop::sample_ratio(ctx, noprop::Ratio::one_nth(3)) {
+                // delta == window なので `delta > window` も `-delta > window` も成り立たない
+                (reference - iat).abs()
+            } else {
+                noprop::sample_with_boundaries(
+                    ctx,
+                    &[0.0, 1.0, 10.0, 100.0, f64::NAN, f64::INFINITY],
+                    noprop::Ratio::one_nth(3),
+                    |ctx| noprop::sample_f64_in(ctx, 0.0, 1000.0),
+                )
+            };
 
         // 参照時刻 / ウィンドウ / iat の有限性と差分から判定するモデル
         let expected: Result<(), DpopError> = if !reference.is_finite() {
