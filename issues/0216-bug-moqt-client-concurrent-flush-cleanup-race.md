@@ -102,3 +102,31 @@
   0201・0214・0215 と同じく **I/O ハンドルが必要な配線部分はレビューで確認する**。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `examples/tokio-moq/src/moqt_client.rs` の `drain_events` で、`Session::poll_event` が `None` を返した
+  「キューが空である観測」と、終端済み request の回収の判定・破棄を同一のロック保持で行うようにした。
+  別タスクから呼べる flush の契機 (`DataPlaneHandle::send_data_stream_closed`) は同じ
+  `Arc<StdMutex<Session>>` を取るため、観測と判定の間に flush が `SessionEvent::SendOnStream`
+  (PUBLISH_DONE) を積むことはない。flush が先に起きていればそのイベントがキューに残り `poll_event` が
+  `Some` を返すため判定には到達しない (取り出し済みなら送出済みか、`next_event` の future 破棄で
+  失われている)。これで回収によって PUBLISH_DONE が失われる経路は閉じた。
+- 判定と破棄を `forget_ready_requests` (free 関数) に、後始末を `MoqtClient::finish_forgotten` に
+  切り出した。判定と `Session::forget_subscription` / `Session::forget_fetch` は分離できない
+  (分離するとロックを解放した隙に flush が入る) ため `forget_ready_requests` が破棄まで行う。
+  個々の判定は `should_forget_subscription` の純関数に保っている。送信半の `finish()` はロックを
+  解放してから待つ (`finish_forgotten`)。
+- `cleanup_closed_requests` は `CloseSession` で早期 return する分岐専用として残した。この経路は
+  キューが空である観測を伴わないが、セッション終了後は flush の契機がすべて `require_established` で
+  失敗するため新たな `SendOnStream` は積まれない。保留中の subscription は回収しないので、未送出の
+  保留はそのまま残る。`tick` から回収しない方針も維持している。
+- `tests/test_session/subscription/request_update.rs` の
+  `send_subgroup_object_to_terminated_subscription_rejected` に `take_send_on_stream_with_fin` を
+  使った `fin: true` のアサートを足し、最後の outgoing data stream の終端で PUBLISH_DONE と同時に
+  送信方向が閉じることを RESET 経路と揃えて固定した。
+- 二タスクの割り込みそのものはロックの解放と再取得の間でしか起きず、割り込みのタイミングを公開 API で
+  指定できないため決定的に再現できない。0201・0214・0215 と同じく配線部分はレビューで確認した
+  (同一 Mutex の共有、`require_established` を通る flush の 4 契機、`poll_event` の FIFO 順)。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 4 周 (致命的 0 件) で行った。
