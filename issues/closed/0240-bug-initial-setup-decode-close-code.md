@@ -1,7 +1,7 @@
 # SETUP 交換の失敗時にセッション終了コードを送る
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-initial-setup-decode-close-code
 - Polished: 2026-10-13
 
