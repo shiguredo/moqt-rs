@@ -1,7 +1,7 @@
 # PUBLISH 起点 publisher の保留 PUBLISH_DONE が request stream の FIN で失われる
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-moqt-client-publish-done-after-finish-request-stream
 - Polished: {YYYY-MM-DD}
 - Updated: 2026-10-11
@@ -58,3 +58,32 @@ example 側の防御 (現時点では到達しない経路) である。実施�
 - 判定を単体テストで固定すること (I/O ハンドルが必要な配線部分はレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+コード変更なしで closed にする。磨き上げのレビューで、本 issue が扱う経路は現行実装では到達しない
+と確定したためである。
+
+- `pending_publish_done` が `Some` になるのは publisher 役に限られる。設定は
+  `Session::send_request_error` の 1 経路のみで、そこへ至る `Session::send_err_for_subscription` は
+  `subscription.my_role != TrackRole::Publisher` を拒否し、`Session::handle_err_for_subscription` も
+  `my_role == TrackRole::Publisher` かつ `is_initiator_self()` を要求する。subscriber 役の拒否経路
+  (`reject_request_update`) は `pending_publish_done` を立てない。
+- `SessionEvent::FinishRequestStream` が発行されるのは subscriber 役に限られる。発行は
+  `Session::recv_request_stream_closed` (`Session::is_local_requester` が `RequestKind::Publish` では
+  常に false を返す) と `Session::handle_peer_publish_done` (`my_role != TrackRole::Subscriber` を
+  拒否する) の 2 箇所である。
+- したがって「保留 PUBLISH_DONE を持つ request に `FinishRequestStream` が発行される」経路は役割の
+  不変条件で閉じている。example 側に FIN を保留する防御を足しても到達しないコードになる
+  (example の配線を変えても成立せず、library の役割判定を変えない限り到達しない)。
+- 保留 PUBLISH_DONE を持つ publisher 役で peer FIN が遅延されること自体は事実で、その組合せは
+  到達する。遅延した FIN は flush の `SendOnStream { fin: true }` が PUBLISH_DONE を書いてから
+  送信方向を閉じる。
+- 上記の不変条件は既存テスト (`tests/test_session/request_stream.rs` の
+  `publish_sender_survives_peer_fin_and_sends_publish_done` と
+  `tests/test_session/subscription/handshake.rs` の `responder_does_not_get_finish_request_stream`)
+  が固定済みで、本 issue を実装しても新しい保護は増えない。
+- 本文の「Dropping send on already closed request stream」は現行のログ文言
+  (`Dropping send on a request stream with no send half`) と異なる。`send_publish_done` のガード
+  (§9.9 の MUST NOT) と、その拒否が warn として現れることは、moq-pub の後始末のコードコメントに
+  記録した。
