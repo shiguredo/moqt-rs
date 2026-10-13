@@ -1,7 +1,7 @@
 # 別の render group の targetLatency が購読中の track に適用される
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-msf-target-latency-render-group
 - Polished: 2026-10-13
 - Updated: 2026-10-11
@@ -97,3 +97,31 @@ draft-ietf-moq-msf-01 §5.2.8 (Target latency) は、同じ render group に属�
 - ソースコードのコメントに issue 番号や issue への言及を書かないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `examples/moq-sub/src/pipeline.rs` の `catalog_target_latency_ms` の対象を、実際に購読する track の
+  `renderGroup` に属する track に限った。カタログ全体の最大値を採っていたため、購読する track とは別の
+  render group がより大きい `targetLatency` を宣言していると、その値が購読中の track の表示の遅れの
+  下限と音声目標遅延の閉ループの上限に適用されていた (§5.2.8 が group 単位で同一性を求める設計意図に
+  反する)。
+  - 購読する track ごとに、`renderGroup` が `Some(g)` なら group `g` に属する track、`None` なら
+    その track 自身を対象に含め、その最大値を採る。購読する group が複数あるときは、時間軸が持てる値が
+    1 つだけであるため最大値をすべての購読 track に掛ける。
+  - 購読する track が 1 つも `renderGroup` を宣言していないとき (および `subscribed` が空のとき) は、
+    group が分からないため従来どおり `tracks` の全 track の最大値を採る。
+  - `is_live` による絞り込みは行わない (§5.2.8 の「isLive が FALSE ならこのフィールドを無視する」
+    MUST は、カタログが必ず通る `MsfCatalogDocument::decode` の正規化で満たされている)。
+- `CatalogResolution` の `target_latency_ms` を、選択した映像 / 音声 track の `renderGroup` と
+  `targetLatency` (`SelectedTrackLatency`) に置き換え、`receive_catalog` は選択した track の情報だけを
+  返すようにした。値の計算は `run` が `subscribe_video` / `subscribe_audio` を決めた後に行い、実際に
+  購読する track の選択は純関数 `subscribed_track_latencies` に切り出した。
+- `catalog_target_latency_ms` と `run` の doc を、group 単位で選ぶ理由と §5.2.8 / §5.2.11 の引用を
+  含めて更新した。
+- テストは `examples/moq-sub/src/pipeline.rs` の `#[cfg(test)] mod tests` を更新した。既存 5 件は
+  新しい引数 (購読する track が `renderGroup` を宣言していない場合) に合わせ、購読する group だけを
+  対象にすること、複数 group の最大値、片方だけ宣言した場合、購読しない group を除外すること、
+  全未宣言のフォールバックを固定する 7 件を追加した。変異テストで、group 参照をやめる変更、分岐の
+  量化子を反転する変更、購読判定の除外をやる変更がすべて検出されることを確認した。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` 3 周 (致命的 0 件) で行った。
