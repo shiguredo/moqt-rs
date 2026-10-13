@@ -1,7 +1,7 @@
 # MSF fragment の connection を接続種別に反映する
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-msf-fragment-connection
 - Polished: 2026-10-10
 - Updated: 2026-10-11
