@@ -281,7 +281,7 @@ pub async fn publish_catalog_object(
     .await?;
     let empty_props = LocProperties::new();
     let outcome = writer.write_object(catalog_json, &empty_props).await?;
-    writer.finish(start_location)?;
+    writer.finish(start_location).await?;
     Ok(outcome)
 }
 

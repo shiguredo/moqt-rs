@@ -487,7 +487,7 @@ impl TestPeer {
             })?;
         request.send.send(Bytes::from(message.encode()?)).await?;
         if fin {
-            request.send.finish()?;
+            request.send.finish().await?;
         }
         Ok(())
     }
@@ -495,7 +495,7 @@ impl TestPeer {
     /// peer が開いた request stream の送信方向を FIN で閉じる
     ///
     /// example が拒否した request のストリーム終端を通知する経路を確かめるために使う。
-    pub(crate) fn finish_request_stream(&mut self, request_id: u64) -> Result<()> {
+    pub(crate) async fn finish_request_stream(&mut self, request_id: u64) -> Result<()> {
         let request = self
             .opened_requests
             .iter_mut()
@@ -503,7 +503,7 @@ impl TestPeer {
             .ok_or_else(|| {
                 TransportError::Internal(format!("request stream not found: {request_id}"))
             })?;
-        request.send.finish()?;
+        request.send.finish().await?;
         Ok(())
     }
 
@@ -536,12 +536,12 @@ impl TestPeer {
     }
 
     /// 自側 control stream の送信方向を FIN で終端する
-    pub(crate) fn finish_control_stream(&mut self) -> Result<()> {
+    pub(crate) async fn finish_control_stream(&mut self) -> Result<()> {
         let mut control_send = self
             .control_send
             .take()
             .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
-        control_send.finish()?;
+        control_send.finish().await?;
         Ok(())
     }
 
@@ -863,6 +863,7 @@ mod tests {
 
             // 拒否したストリームを終端しても session は維持される
             peer.finish_request_stream(request_id)
+                .await
                 .expect("request stream を終端できること");
 
             // 拒否のあとも通常の request が受理されることで session の維持を確かめる
@@ -1149,6 +1150,7 @@ mod tests {
                 .await
                 .expect("control stream を開けること");
             peer.finish_control_stream()
+                .await
                 .expect("control stream を終端できること");
 
             establish
@@ -1224,6 +1226,7 @@ mod tests {
                 .await
                 .expect("control stream を書けること");
             peer.finish_control_stream()
+                .await
                 .expect("control stream を終端できること");
 
             let error = establish

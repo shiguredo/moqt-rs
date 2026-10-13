@@ -876,7 +876,9 @@ impl WtH2SendStream {
     ///
     /// driver が `WT_STREAM` capsule へ変換して CONNECT ストリームに載せるまで待つ
     /// (WT の送信ウィンドウが枯渇している間は待つ)。セッション終了を観測した場合は
-    /// `ConnectionClosed` を返す。
+    /// `ConnectionClosed` を返す。peer の STOP_SENDING で cancel 済みのストリームでは
+    /// [`TransportError::StreamReset`]、送信方向を既に閉じたストリームでは
+    /// [`TransportError::StreamClosed`] を返す。
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         let cmd_tx = self.cmd_tx.clone();
@@ -887,7 +889,7 @@ impl WtH2SendStream {
                     stream_id,
                     data: data.to_vec(),
                     fin: false,
-                    reply: Some(reply),
+                    reply,
                 })
                 .map_err(|_| TransportError::ConnectionClosed)?;
             rx.await.map_err(|_| TransportError::ConnectionClosed)?
@@ -902,35 +904,65 @@ impl WtH2SendStream {
 
     /// ストリームの送信方向を終了する (FIN)
     ///
-    /// FIN は capsule として送られるため、完了を待たずに戻る。
-    /// peer の STOP_SENDING で終端したストリーム (driver の台帳に載っている) への FIN は
-    /// driver が送らずに捨てるが、その結果は返らない (`reply` を持たないため、成功として
-    /// 戻る)。cancel の検知は観測チャネル ([`WtH2Session::take_stop_sending_receiver`]) が
-    /// 担う。
-    pub fn finish(&mut self) -> Result<()> {
-        self.cmd_tx
-            .send(Command::Send {
-                stream_id: self.stream_id,
-                data: Vec::new(),
-                fin: true,
-                reply: None,
-            })
-            .map_err(|_| TransportError::ConnectionClosed)
+    /// FIN は capsule として送られるが、driver が受理したかどうかは待つ。peer の STOP_SENDING で
+    /// 終端したストリームへの FIN は driver が送らず、[`TransportError::StreamReset`] (台帳に
+    /// peer のコードがある場合) または [`TransportError::StreamClosed`] (ストリームが既に
+    /// 閉じている場合) を返す。cancel の検知は観測チャネル
+    /// ([`WtH2Session::take_stop_sending_receiver`]) も担う (`examples/tokio-moq/src/quic.rs` の
+    /// doc を参照)。
+    ///
+    /// 送信データが flow control で滞留している間は返らないため、[`Self::send`] と同じく
+    /// セッションの終端を観測しながら待つ。
+    pub async fn finish(&mut self) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        let cmd_tx = self.cmd_tx.clone();
+        let stream_id = self.stream_id;
+        let finish = async move {
+            cmd_tx
+                .send(Command::Send {
+                    stream_id,
+                    data: Vec::new(),
+                    fin: true,
+                    reply,
+                })
+                .map_err(|_| TransportError::ConnectionClosed)?;
+            rx.await.map_err(|_| TransportError::ConnectionClosed)?
+        };
+        tokio::select! {
+            finished = finish => finished,
+            _ = wait_until_terminated(&mut self.session_state) => {
+                Err(TransportError::ConnectionClosed)
+            }
+        }
     }
 
     /// ストリームの送信方向を reset する (`WT_RESET_STREAM` capsule)
     ///
     /// MOQT のエラーコードは WebTransport の Application Error Code としてそのまま送る
-    /// (over HTTP/2 の capsule は 32 ビットのコードを運ぶ)。
-    /// peer の STOP_SENDING で終端したストリームは capsule 層が既に `WT_RESET_STREAM` を
-    /// 送っているため、本要求は driver が送らずに捨てる (`finish` と同じ扱い)。
-    pub fn reset(&mut self, error_code: u64) -> Result<()> {
-        self.cmd_tx
-            .send(Command::Reset {
-                stream_id: self.stream_id,
-                error_code,
-            })
-            .map_err(|_| TransportError::ConnectionClosed)
+    /// (over HTTP/2 の capsule は 32 ビットのコードを運ぶ)。peer の STOP_SENDING で終端した
+    /// ストリームは capsule 層が既に `WT_RESET_STREAM` を送っているため、本要求は driver が
+    /// 送らず、[`TransportError::StreamReset`] または [`TransportError::StreamClosed`] を返す
+    /// ([`Self::finish`] と同じ扱い)。
+    pub async fn reset(&mut self, error_code: u64) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        let cmd_tx = self.cmd_tx.clone();
+        let stream_id = self.stream_id;
+        let reset = async move {
+            cmd_tx
+                .send(Command::Reset {
+                    stream_id,
+                    error_code,
+                    reply,
+                })
+                .map_err(|_| TransportError::ConnectionClosed)?;
+            rx.await.map_err(|_| TransportError::ConnectionClosed)?
+        };
+        tokio::select! {
+            reset = reset => reset,
+            _ = wait_until_terminated(&mut self.session_state) => {
+                Err(TransportError::ConnectionClosed)
+            }
+        }
     }
 
     /// ストリーム ID を返す
@@ -1066,12 +1098,13 @@ enum Command {
         stream_id: WtStreamId,
         data: Vec<u8>,
         fin: bool,
-        reply: Option<oneshot::Sender<Result<()>>>,
+        reply: oneshot::Sender<Result<()>>,
     },
     /// ストリームの送信方向を reset する
     Reset {
         stream_id: WtStreamId,
         error_code: u64,
+        reply: oneshot::Sender<Result<()>>,
     },
     /// ストリームの受信方向へ STOP_SENDING を送る
     StopSending {
@@ -1106,7 +1139,7 @@ struct PendingSend {
     /// このデータを送り終えたら FIN を送るか
     fin: bool,
     /// 送信完了 (capsule への変換完了) を知らせる reply
-    reply: Option<oneshot::Sender<Result<()>>>,
+    reply: oneshot::Sender<Result<()>>,
 }
 
 /// ストリームごとの受信状態
@@ -1255,13 +1288,16 @@ impl DriverState {
                 fin,
                 reply,
             } => {
-                // FIN / reset / peer の STOP_SENDING 済みのストリームへの送信は受け付けない
+                // FIN / reset / peer の STOP_SENDING 済みのストリームへの送信は受け付けない。
+                // 送信方向を閉じたストリーム (bidi は `WtSession` に残る) も含めるため、
+                // 存在しないか送信できない場合を拒否する
                 if self.stop_sending_received.contains_key(&stream_id)
-                    || self.wt_session.stream(stream_id).is_none()
+                    || self
+                        .wt_session
+                        .stream(stream_id)
+                        .is_none_or(|stream| !stream.can_send())
                 {
-                    if let Some(reply) = reply {
-                        let _ = reply.send(Err(self.closed_stream_error(stream_id)));
-                    }
+                    let _ = reply.send(Err(self.closed_stream_error(stream_id)));
                     return true;
                 }
                 self.pending_sends
@@ -1277,22 +1313,44 @@ impl DriverState {
             Command::Reset {
                 stream_id,
                 error_code,
+                reply,
             } => {
+                // FIN / reset / peer の STOP_SENDING 済みのストリームへの reset は受け付けない
+                // (`Command::Send` と同じ判定)。台帳に peer のコードがあれば `StreamReset`、
+                // 無ければ `StreamClosed` を返す (どちらも `closed_stream_error` が決める)。
+                if self.stop_sending_received.contains_key(&stream_id)
+                    || self
+                        .wt_session
+                        .stream(stream_id)
+                        .is_none_or(|stream| !stream.can_send())
+                {
+                    let _ = reply.send(Err(self.closed_stream_error(stream_id)));
+                    return true;
+                }
                 // 未送信のデータを破棄し、待っている reply を失敗させる
                 self.fail_pending_sends(stream_id);
-                match self.wt_session.reset_stream(stream_id, error_code) {
+                let result = match self.wt_session.reset_stream(stream_id, error_code) {
                     Ok(()) => {
                         if !self.pump_and_flush().await {
                             return false;
                         }
+                        Ok(())
                     }
                     Err(e) => {
-                        // 終端済みストリームへの reset など、アプリの後始末で起きる
+                        // 終端済みストリームへの reset など、アプリの後始末で起きる。
+                        // ストリームが閉じている場合は `StreamClosed`、それ以外 (状態不正など) は
+                        // 依存 crate のエラーを保つ
                         tracing::debug!(
                             "Failed to send WT_RESET_STREAM for stream {stream_id}: {e}"
                         );
+                        if self.wt_session.stream(stream_id).is_none() {
+                            Err(TransportError::StreamClosed)
+                        } else {
+                            Err(TransportError::from(e))
+                        }
                     }
-                }
+                };
+                let _ = reply.send(result);
                 true
             }
             Command::StopSending {
@@ -1668,6 +1726,11 @@ impl DriverState {
     }
 
     /// 送信待ちのデータを送信ウィンドウの空きに応じて送る
+    ///
+    /// 本メソッドを呼ぶのは [`Command::Send`] の処理だけである。送信ウィンドウの拡張
+    /// (`WT_MAX_STREAM_DATA` capsule) は [`WtEvent`] を発火しないため、滞留したデータは次の
+    /// `Command::Send` が届くまで送られない (既存の `send` にも共通の制約で、送信を待ってから
+    /// `finish` を呼ぶ現在の利用では空 FIN の特例で直ちに送られる)。
     fn flush_pending_sends(&mut self) {
         let stream_ids: Vec<WtStreamId> = self.pending_sends.keys().copied().collect();
         for stream_id in stream_ids {
@@ -1713,9 +1776,7 @@ impl DriverState {
                                 .get_mut(&stream_id)
                                 .and_then(|queue| queue.pop_front())
                                 .expect("front was checked above");
-                            if let Some(reply) = pending.reply {
-                                let _ = reply.send(Ok(()));
-                            }
+                            let _ = pending.reply.send(Ok(()));
                         }
                     }
                     Err(e) => {
@@ -1724,9 +1785,7 @@ impl DriverState {
                             .get_mut(&stream_id)
                             .and_then(|queue| queue.pop_front())
                             .expect("front was checked above");
-                        if let Some(reply) = pending.reply {
-                            let _ = reply.send(Err(TransportError::from(e)));
-                        }
+                        let _ = pending.reply.send(Err(TransportError::from(e)));
                     }
                 }
                 if self
@@ -1745,9 +1804,7 @@ impl DriverState {
     fn fail_pending_sends(&mut self, stream_id: WtStreamId) {
         if let Some(queue) = self.pending_sends.remove(&stream_id) {
             for pending in queue {
-                if let Some(reply) = pending.reply {
-                    let _ = reply.send(Err(self.closed_stream_error(stream_id)));
-                }
+                let _ = pending.reply.send(Err(self.closed_stream_error(stream_id)));
             }
         }
     }
@@ -2259,7 +2316,7 @@ mod tests {
                 .await
                 .expect("open_uni_stream に成功すること");
             send.send(b"hello").await.expect("send に成功すること");
-            send.finish().expect("finish に成功すること");
+            send.finish().await.expect("finish に成功すること");
 
             // client → server (双方向ストリーム) と server からの応答
             let (mut req_send, mut req_recv) = session
@@ -2267,7 +2324,21 @@ mod tests {
                 .await
                 .expect("open_bi_stream に成功すること");
             req_send.send(b"req").await.expect("send に成功すること");
-            req_send.finish().expect("finish に成功すること");
+            req_send.finish().await.expect("finish に成功すること");
+            // 送信方向を閉じたストリームへの FIN は拒否されること。bidi は自側の FIN 後も
+            // `WtSession` に残るため、ストリームの不在だけでなく送信可否も見る必要がある
+            // (`finish` が `Ok` を返すと、アプリは FIN が届いていないストリームを終端済みとして
+            // Session へ通知してしまう)。
+            match req_send.finish().await {
+                Err(TransportError::StreamClosed) => {}
+                other => panic!("FIN 済みストリームへの FIN は StreamClosed になること: {other:?}"),
+            }
+            match req_send.reset(0x1).await {
+                Err(TransportError::StreamClosed) => {}
+                other => {
+                    panic!("FIN 済みストリームへの reset は StreamClosed になること: {other:?}")
+                }
+            }
             let mut response = Vec::new();
             loop {
                 match req_recv
@@ -2331,7 +2402,7 @@ mod tests {
                 .send(b"reset-me")
                 .await
                 .expect("send に成功すること");
-            reset_send.reset(0x1).expect("reset に成功すること");
+            reset_send.reset(0x1).await.expect("reset に成功すること");
 
             // server → client (uni stream) への STOP_SENDING
             let mut extra = session
@@ -2615,6 +2686,15 @@ mod tests {
             // cancel 後の送信は該当ストリームの終端として拒否されること
             let result = send.send(b"more").await;
             assert_stream_reset(result, error_code, "cancel 後の送信");
+
+            // cancel 後の FIN / reset も該当ストリームの終端として拒否されること。
+            // driver が拒否した場合は wt-h3 / QUIC が reset を報告する場合と同じ状態遷移になる
+            // (FIN / RESET が無言で捨てられて成功として戻ると、アプリが Session へ終端を通知して
+            // しまう)。
+            let result = send.finish().await;
+            assert_stream_reset(result, error_code, "cancel 後の FIN");
+            let result = send.reset(error_code).await;
+            assert_stream_reset(result, error_code, "cancel 後の reset");
 
             // cancel 後も新しいストリームへは送信できること (セッションは継続する)
             let mut resumed = session

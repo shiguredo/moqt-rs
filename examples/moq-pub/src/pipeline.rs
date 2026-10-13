@@ -174,7 +174,7 @@ fn reset_targets_open_subgroup(
 ///
 /// 戻り値は「publish ループを抜けるか」。transport の終了 (`ConnectionClosed`) は
 /// セッション終了として扱い、それ以外のエラーは呼び出し元へ伝播させる。
-fn reset_open_subgroup_stream(
+async fn reset_open_subgroup_stream(
     current_video_writer: &mut Option<SubgroupWriter>,
     stream_id: DataStreamId,
     error_code: u64,
@@ -193,7 +193,7 @@ fn reset_open_subgroup_stream(
     let writer = current_video_writer
         .take()
         .expect("applies is true only when an open subgroup stream matches");
-    match writer.reset_by_session(error_code) {
+    match writer.reset_by_session(error_code).await {
         Ok(()) => {
             tracing::info!(
                 "Reset subgroup stream on session request: stream_id={}, error_code={:#x}",
@@ -737,7 +737,9 @@ pub async fn run(
                             // 指定でき、キーフレーム (IDR) が 1 QUIC datagram に収まらない
                             // 映像では使わない。
                             if let Some(writer) = current_video_writer.take() {
-                                writer.finish(client.subscription_filter_start(video_request_id))?;
+                                writer
+                                .finish(client.subscription_filter_start(video_request_id))
+                                .await?;
                             }
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
                             // ヘッダと全オブジェクトで一致が必須 (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
@@ -904,7 +906,9 @@ pub async fn run(
                             if outcome == ObjectFilterOutcome::Pass {
                                 audio_config_sent = true;
                             }
-                            writer.finish(client.subscription_filter_start(audio_request_id))?;
+                            writer
+                                .finish(client.subscription_filter_start(audio_request_id))
+                                .await?;
                         }
                         audio_group_id += 1;
                         audio_frame_count += 1;
@@ -975,6 +979,7 @@ pub async fn run(
                                 stream_id,
                                 error_code,
                             )
+                            .await
                         }
                         Some(ClientEvent::Request(request)) => {
                             serve_peer_request(
@@ -1189,7 +1194,9 @@ pub async fn run(
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
         // 省略があれば RESET 側に倒れる (安全側)
-        writer.finish(video_request_id.and_then(|rid| client.subscription_filter_start(rid)))?;
+        writer
+            .finish(video_request_id.and_then(|rid| client.subscription_filter_start(rid)))
+            .await?;
     }
 
     // PUBLISH_DONE を各 request に送信してストリームを閉じる

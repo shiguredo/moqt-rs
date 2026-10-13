@@ -355,7 +355,7 @@ impl SubgroupWriter {
     /// ことを MAY で示すが、example の transport API に RESET_STREAM_AT が無いためヘッダを送らず
     /// RESET_STREAM で代替する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn finish(mut self, current_start_location: Option<Location>) -> Result<()> {
+    pub async fn finish(mut self, current_start_location: Option<Location>) -> Result<()> {
         let termination = self.object_state.termination(current_start_location);
         tracing::debug!(
             "finish subgroup stream: stream_id={}, group_id={}, termination={:?}, start_location={:?}, \
@@ -371,7 +371,7 @@ impl SubgroupWriter {
         // (`transport::SendStream` を要求する分岐そのものは example の単体テストから観測できない)
         match termination.reset_error_code() {
             Some(error_code) => {
-                self.stream.reset(error_code)?;
+                self.stream.reset(error_code).await?;
                 self.data_plane.send_data_stream_closed(
                     self.stream_id,
                     RequestStreamEnd::Reset {
@@ -381,7 +381,7 @@ impl SubgroupWriter {
                 )?;
             }
             None => {
-                self.stream.finish()?;
+                self.stream.finish().await?;
                 self.data_plane
                     .send_data_stream_closed(self.stream_id, RequestStreamEnd::Fin)?;
             }
@@ -405,14 +405,14 @@ impl SubgroupWriter {
     /// `reliable_size` は使わず RESET_STREAM で代替する (`Session` 自身も自動発火の reset では
     /// `reliable_size: None` を渡す)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn reset_by_session(mut self, error_code: u64) -> Result<()> {
+    pub async fn reset_by_session(mut self, error_code: u64) -> Result<()> {
         tracing::debug!(
             "reset subgroup stream by session: stream_id={}, group_id={}, error_code={:#x}",
             self.stream_id.0,
             self.group_id,
             error_code,
         );
-        self.stream.reset(error_code)?;
+        self.stream.reset(error_code).await?;
         self.data_plane.send_data_stream_closed(
             self.stream_id,
             RequestStreamEnd::Reset {

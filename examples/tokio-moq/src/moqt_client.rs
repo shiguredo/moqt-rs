@@ -584,13 +584,14 @@ fn should_forget_subscription(cleanup_ready: bool, pending_publish_done: Option<
 /// `drain_events` の送信は await をまたぐ。送信半を台帳から先に取り出すと、`next_event` の
 /// future が `tokio::select!` の敗北で破棄されたときに送信半が失われ、以後その request への
 /// 送信がすべて「送信方向を閉じた request」として捨てられる (draft-ietf-moq-transport-22
-/// §9.5.1 (Updating Subscriptions) の MUST を果たせない)。台帳から取り出すのは、送信の
-/// 完了後に FIN するときだけにする。
+/// §9.5.1 (Updating Subscriptions) の MUST を果たせない)。台帳から取り出すのは、送信と FIN が
+/// 成功したときだけにする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendOnStreamStep {
     /// 送信半が台帳に無い。encode も送信もしない
     Skip,
-    /// 送信半がある。encode して送信し、`fin` が真なら送信の完了後に FIN して取り出す
+    /// 送信半がある。encode して送信し、`fin` が真なら送信の完了後に FIN する。台帳からの
+    /// 取り出しは FIN が成功したときだけ行う ([`MoqtClient::next_event`] の doc を参照)
     Send {
         /// 送信の完了後に FIN するか (library の `SessionEvent::SendOnStream` の `fin` に対応)
         fin: bool,
@@ -1639,7 +1640,7 @@ impl MoqtClient {
 
         data_plane.send_fetch_object(stream_id)?;
         stream.send(Bytes::from(buf)).await?;
-        stream.finish()?;
+        stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
         Ok(())
     }
@@ -1666,7 +1667,9 @@ impl MoqtClient {
         let stream_id = DataStreamId(stream.stream_id());
         if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
             // 開いた stream を閉じずに返すと、Session にも peer にも終端が伝わらない
-            let _ = stream.reset(DataStreamResetReason::InternalError.error_code());
+            let _ = stream
+                .reset(DataStreamResetReason::InternalError.error_code())
+                .await;
             return Err(e);
         }
 
@@ -1694,7 +1697,7 @@ impl MoqtClient {
 
         data_plane.send_fetch_object(stream_id)?;
         stream.send(Bytes::from(buf)).await?;
-        stream.finish()?;
+        stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
         Ok(())
     }
@@ -1711,7 +1714,9 @@ impl MoqtClient {
         let mut stream = self.handle.open_send_stream().await?;
         let stream_id = DataStreamId(stream.stream_id());
         if let Err(e) = data_plane.send_fill_fetch_header(stream_id, fill_request_id) {
-            let _ = stream.reset(DataStreamResetReason::InternalError.error_code());
+            let _ = stream
+                .reset(DataStreamResetReason::InternalError.error_code())
+                .await;
             return Err(e);
         }
         let buf = FetchHeader {
@@ -1720,7 +1725,9 @@ impl MoqtClient {
         .encode();
         let result = async {
             stream.send(Bytes::from(buf)).await?;
-            stream.reset(DataStreamResetReason::InternalError.error_code())?;
+            stream
+                .reset(DataStreamResetReason::InternalError.error_code())
+                .await?;
             Ok(())
         }
         .await;
@@ -1744,7 +1751,7 @@ impl MoqtClient {
 
         let buf = FetchHeader { request_id }.encode();
         stream.send(Bytes::from(buf)).await?;
-        stream.finish()?;
+        stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
         Ok(())
     }
@@ -1827,7 +1834,7 @@ impl MoqtClient {
         // (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 送信方向は
         // RESET_STREAM、受信方向は STOP_SENDING)
         if let Some(mut send) = self.bidi_sends.remove(&request_id)
-            && let Err(e) = send.reset(error_code)
+            && let Err(e) = send.reset(error_code).await
         {
             tracing::warn!("Failed to reset bidi request stream (request_id={request_id}): {e}");
         }
@@ -2278,7 +2285,7 @@ impl MoqtClient {
     ///
     /// `next_event` は `tokio::select!` の分岐で使われるため、この future は await の
     /// 途中で破棄されうる。破棄で台帳 (`bidi_sends`) が壊れないように、送信中は送信半を
-    /// 台帳から取り出さず、FIN を送るときだけ送信の完了後に取り出す。送信半が台帳にある
+    /// 台帳から取り出さず、FIN を送るときだけ、その FIN が成功した後に取り出す。送信半が台帳にある
     /// request では、破棄後に `next_event` を呼び直すとキューに残っていたメッセージから
     /// 送信が再開される。
     ///
@@ -2362,17 +2369,26 @@ impl MoqtClient {
                             if fin {
                                 // FIN は必須メッセージを送り終えてから送る
                                 // (draft-ietf-moq-transport-22 §6.4.2.2)
-                                let mut send = self
+                                // 台帳から取り出すのは FIN が成功したときだけにする。FIN の完了を
+                                // 待つ間 (`wt-h2` は driver の reply を待つ) に `next_event` の future が
+                                // `tokio::select!` の敗北で破棄されても送信半を失わないためである
+                                let finish_result = self
                                     .bidi_sends
-                                    .remove(&request_id)
-                                    .expect("the ledger entry is present");
-                                if let Err(e) = send.finish() {
-                                    // FIN を送れなかった場合は送信半を台帳へ戻し、以後の
-                                    // 送信で再試行できるようにする (drain は継続する)
-                                    tracing::warn!(
-                                        "Failed to finish bidi request stream (request_id={request_id}): {e}"
-                                    );
-                                    self.bidi_sends.insert(request_id, send);
+                                    .get_mut(&request_id)
+                                    .expect("the ledger entry is present")
+                                    .finish()
+                                    .await;
+                                match finish_result {
+                                    Ok(()) => {
+                                        self.bidi_sends.remove(&request_id);
+                                    }
+                                    Err(e) => {
+                                        // FIN を送れなかった場合は送信半を台帳へ残し、以後の
+                                        // 送信で再試行できるようにする (drain は継続する)
+                                        tracing::warn!(
+                                            "Failed to finish bidi request stream (request_id={request_id}): {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2382,12 +2398,16 @@ impl MoqtClient {
                     // draft-ietf-moq-transport-22 §6.4.2.2 (Graceful Request Stream Closure):
                     // responder の FIN で request が完了したため、requester である自側も
                     // 送信方向を FIN で閉じる (SHOULD)。既に FIN 済みなら送信半は台帳に無い。
-                    if let Some(mut send) = self.bidi_sends.remove(&request_id)
-                        && let Err(e) = send.finish()
+                    // 台帳から取り出すのは FIN が成功したときだけにする (future の破棄で送信半を
+                    // 失わないため。`SendOnStream` の FIN 経路を参照)
+                    if let Some(send) = self.bidi_sends.get_mut(&request_id)
+                        && let Err(e) = send.finish().await
                     {
                         tracing::warn!(
                             "Failed to finish bidi request stream (request_id={request_id}): {e}"
                         );
+                    } else if self.bidi_sends.contains_key(&request_id) {
+                        self.bidi_sends.remove(&request_id);
                     }
                 }
                 SessionEvent::ResetRequestStream {
@@ -2398,7 +2418,7 @@ impl MoqtClient {
                     // (GOING_AWAY timeout reset と malformed cancel が重複して届きうる。
                     // `ResetRequestStream` の doc 参照)
                     if let Some(mut send) = self.bidi_sends.remove(&request_id)
-                        && let Err(e) = send.reset(error_code)
+                        && let Err(e) = send.reset(error_code).await
                     {
                         tracing::warn!(
                             "Failed to reset bidi request stream (request_id={request_id}): {e}"
@@ -2435,7 +2455,7 @@ impl MoqtClient {
                         .push_back(SessionEvent::CloseSession(err));
                     // 閉じた後は Session のイベントを I/O へ変換できないため drain を終える。
                     // 末尾の回収に到達しないため、ここで回収を済ませる
-                    self.cleanup_closed_requests();
+                    self.cleanup_closed_requests().await;
                     return Ok(());
                 }
                 SessionEvent::RequestUpdateReceived {
@@ -2507,7 +2527,7 @@ impl MoqtClient {
                 }
             }
         }
-        self.cleanup_closed_requests();
+        self.cleanup_closed_requests().await;
         Ok(())
     }
 
@@ -2524,7 +2544,7 @@ impl MoqtClient {
     /// `STOP_SENDING`) を別タスクから呼ぶ配線では、キューが空になった直後に flush が
     /// 積まれる競合が残る (本 repo の examples にその配線は無いため現状は到達しない)。
     /// またイベントが一切来ない間は、回収が次の drain まで遅延する。
-    fn cleanup_closed_requests(&mut self) {
+    async fn cleanup_closed_requests(&mut self) {
         let request_ids: Vec<u64> = self.closed_request_streams.iter().copied().collect();
         let mut forgotten = Vec::new();
         {
@@ -2559,7 +2579,7 @@ impl MoqtClient {
             self.outgoing_fetch_streams
                 .retain(|_, rid| *rid != request_id);
             if let Some(mut send) = self.bidi_sends.remove(&request_id)
-                && let Err(e) = send.finish()
+                && let Err(e) = send.finish().await
             {
                 tracing::warn!(
                     "Failed to finish bidi request stream (request_id={request_id}): {e}"

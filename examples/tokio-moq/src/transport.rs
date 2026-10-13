@@ -54,20 +54,24 @@ impl SendStream {
     }
 
     /// ストリームを終了する
-    pub fn finish(&mut self) -> Result<(), TransportError> {
+    ///
+    /// peer が cancel 済みのストリームでは I/O 層が拒否を返す (wt-h2 の driver の reply を待つ。
+    /// [`TransportError::StreamReset`] / [`TransportError::StreamClosed`])。
+    pub async fn finish(&mut self) -> Result<(), TransportError> {
         match self {
             SendStream::Quic(s) => s.finish().map_err(|e| {
                 TransportError::from_send_error(e, |e| TransportError::Quic(format!("{e}")))
             }),
             SendStream::WtH3(s) => s.finish(),
-            SendStream::WtH2(s) => s.finish(),
+            SendStream::WtH2(s) => s.finish().await,
         }
     }
 
     /// ストリームの送信方向を reset する
     ///
     /// Session の `ResetRequestStream` イベントに対応する。QUIC RESET_STREAM を送出する。
-    pub fn reset(&mut self, error_code: u64) -> Result<(), TransportError> {
+    /// peer が cancel 済みのストリームでは I/O 層が拒否を返す (`finish` と同じ)。
+    pub async fn reset(&mut self, error_code: u64) -> Result<(), TransportError> {
         match self {
             SendStream::Quic(s) => {
                 let code = s2n_quic::application::Error::new(error_code)
@@ -77,7 +81,7 @@ impl SendStream {
                 })
             }
             SendStream::WtH3(s) => s.reset(error_code),
-            SendStream::WtH2(s) => s.reset(error_code),
+            SendStream::WtH2(s) => s.reset(error_code).await,
         }
     }
 }
