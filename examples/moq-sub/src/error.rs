@@ -13,6 +13,8 @@ pub enum Error {
     Moqt(shiguredo_moqt::error::MessageError),
     /// AV1 デコードエラー
     Decode(shiguredo_dav1d::Error),
+    /// VP8 / VP9 デコードエラー
+    Vpx(shiguredo_libvpx::Error),
     /// Opus デコードエラー
     Opus(shiguredo_opus::Error),
     /// raw_player (SDL) エラー
@@ -49,6 +51,7 @@ impl fmt::Display for Error {
             }
             Self::Moqt(e) => write!(f, "MOQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
+            Self::Vpx(e) => write!(f, "vpx: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
             Self::Player(e) => write!(f, "player: {e}"),
             #[cfg(target_os = "macos")]
@@ -76,6 +79,12 @@ impl From<shiguredo_moqt::session::types::SessionError> for Error {
 impl From<shiguredo_dav1d::Error> for Error {
     fn from(e: shiguredo_dav1d::Error) -> Self {
         Self::Decode(e)
+    }
+}
+
+impl From<shiguredo_libvpx::Error> for Error {
+    fn from(e: shiguredo_libvpx::Error) -> Self {
+        Self::Vpx(e)
     }
 }
 

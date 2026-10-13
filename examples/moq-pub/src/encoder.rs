@@ -13,6 +13,7 @@ pub(crate) mod h264;
 #[cfg(target_os = "macos")]
 pub(crate) mod h265;
 pub(crate) mod opus;
+pub(crate) mod vpx;
 
 /// エンコード済みフレーム
 pub struct EncodedFrame {
@@ -31,6 +32,7 @@ pub struct EncodedFrame {
     /// - AV1: Sequence Header OBU
     /// - H.264: AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.2.4.1.1)
     /// - H.265: HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3.1.2)
+    /// - VP8 / VP9: 無し (codec 固有の設定データが無いため常に `None`)
     pub video_config: Option<Vec<u8>>,
 }
 
@@ -49,6 +51,10 @@ pub(crate) enum VideoEncoder {
     /// H.265 エンコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
     H265(h265::H265Encoder),
+    /// VP8 エンコーダ (libvpx)
+    Vp8(vpx::VpxEncoder),
+    /// VP9 エンコーダ (libvpx)
+    Vp9(vpx::VpxEncoder),
 }
 
 impl VideoEncoder {
@@ -67,6 +73,8 @@ impl VideoEncoder {
             VideoEncoder::H264(e) => e.encode(frame, timestamp_us),
             #[cfg(target_os = "macos")]
             VideoEncoder::H265(e) => e.encode(frame, timestamp_us),
+            VideoEncoder::Vp8(e) => e.encode(frame, timestamp_us),
+            VideoEncoder::Vp9(e) => e.encode(frame, timestamp_us),
         }
     }
 
@@ -78,6 +86,8 @@ impl VideoEncoder {
             VideoEncoder::H264(e) => e.catalog_codec_string(),
             #[cfg(target_os = "macos")]
             VideoEncoder::H265(e) => e.catalog_codec_string(),
+            VideoEncoder::Vp8(e) => e.catalog_codec_string(),
+            VideoEncoder::Vp9(e) => e.catalog_codec_string(),
         }
     }
 }

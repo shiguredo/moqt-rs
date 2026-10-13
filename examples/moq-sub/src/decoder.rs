@@ -11,6 +11,7 @@ pub(crate) mod h264;
 #[cfg(target_os = "macos")]
 pub(crate) mod h265;
 pub(crate) mod opus;
+pub(crate) mod vpx;
 
 /// デコード済みビデオフレーム (I420)
 ///
@@ -58,6 +59,10 @@ pub(crate) enum VideoDecoder {
     /// H.265 デコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
     H265(h265::H265Decoder),
+    /// VP8 デコーダ (libvpx)
+    Vp8(vpx::VpxDecoder),
+    /// VP9 デコーダ (libvpx)
+    Vp9(vpx::VpxDecoder),
 }
 
 impl VideoDecoder {
@@ -67,6 +72,7 @@ impl VideoDecoder {
     /// - `video_config`: PROP_VIDEO_CONFIG 由来の codec 固有設定 (avcC / hvcC / Sequence Header 等)
     ///   - H.264 / H.265 ではキーフレーム到達時に与えられる想定
     ///   - AV1 では payload 内に Sequence Header OBU が含まれるため無視される
+    ///   - VP8 / VP9 では codec 固有の設定データが無いため無視される
     pub fn decode(
         &mut self,
         payload: &[u8],
@@ -78,6 +84,8 @@ impl VideoDecoder {
             VideoDecoder::H264(d) => d.decode(payload, video_config),
             #[cfg(target_os = "macos")]
             VideoDecoder::H265(d) => d.decode(payload, video_config),
+            VideoDecoder::Vp8(d) => d.decode(payload, video_config),
+            VideoDecoder::Vp9(d) => d.decode(payload, video_config),
         }
     }
 }
@@ -108,6 +116,12 @@ pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
                 "H.265 decoder is only supported on macOS (catalog codec: {codec})"
             )))
         }
+    } else if codec == "vp8" {
+        // VP8 は登録名のみ (パラメーター無し) である (RFC 6381 §3.3)
+        Ok(VideoDecoder::Vp8(vpx::VpxDecoder::new(vpx::VpxCodec::Vp8)?))
+    } else if codec == "vp09" || codec.starts_with("vp09.") {
+        // VP9 は `vp09.<profile>.<level>.<bit depth>` を取る
+        Ok(VideoDecoder::Vp9(vpx::VpxDecoder::new(vpx::VpxCodec::Vp9)?))
     } else {
         Err(Error::Other(format!("unsupported video codec: {codec}")))
     }
@@ -143,4 +157,56 @@ pub(crate) fn read_ps_nal(buf: &[u8], pos: &mut usize, codec_label: &str) -> Res
     let nal = buf[*pos..*pos + len].to_vec();
     *pos += len;
     Ok(nal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// catalog の codec 文字列から対応するデコーダを生成できること
+    ///
+    /// `src/msf.rs` の `is_video_codec` が video と判定する codec 文字列は、すべて
+    /// デコーダを生成できる必要がある (`vp8` は登録名のみ、`vp09` は登録名単独と
+    /// `vp09.` 始まりを受け付ける)。
+    #[test]
+    fn video_codec_strings_select_a_decoder() {
+        assert!(matches!(
+            build_video_decoder("av01.0.08M.08").expect("AV1 のデコーダを生成できること"),
+            VideoDecoder::Av1(_)
+        ));
+        assert!(
+            matches!(
+                build_video_decoder("vp8").expect("VP8 のデコーダを生成できること"),
+                VideoDecoder::Vp8(_)
+            ),
+            "VP8 の codec 文字列で VP8 デコーダが選ばれること"
+        );
+        for codec in ["vp09", "vp09.00.40.08", "vp09.0.10.08"] {
+            assert!(
+                matches!(
+                    build_video_decoder(codec).expect("VP9 のデコーダを生成できること"),
+                    VideoDecoder::Vp9(_)
+                ),
+                "VP9 の codec 文字列で VP9 デコーダが選ばれること: {codec}"
+            );
+        }
+    }
+
+    /// 登録外の codec 文字列はエラーになること
+    #[test]
+    fn unknown_video_codec_string_is_rejected() {
+        for codec in ["vp8x", "vp09x", "mp4v.20.9", "unknown"] {
+            let result = build_video_decoder(codec);
+            assert!(
+                result.is_err(),
+                "登録外の codec 文字列はエラーになること: {codec}"
+            );
+            assert!(
+                result
+                    .err()
+                    .is_some_and(|e| e.to_string().contains("unsupported video codec")),
+                "未対応であることが分かるエラーになること: {codec}"
+            );
+        }
+    }
 }

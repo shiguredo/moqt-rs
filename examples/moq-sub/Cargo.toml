@@ -13,6 +13,8 @@ publish = false
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.9"
+# VP8 / VP9 デコーダ (libvpx)
+shiguredo_libvpx = "2026.1"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 mux (録画)

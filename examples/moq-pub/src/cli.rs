@@ -14,6 +14,10 @@ pub enum VideoCodec {
     H264,
     /// H.265 / HEVC (Apple Video Toolbox, macOS 限定)
     H265,
+    /// VP8 (libvpx, 全プラットフォーム)
+    Vp8,
+    /// VP9 (libvpx, 全プラットフォーム)
+    Vp9,
 }
 
 impl VideoCodec {
@@ -22,8 +26,10 @@ impl VideoCodec {
             "av1" => Ok(Self::Av1),
             "h264" => Ok(Self::H264),
             "h265" => Ok(Self::H265),
+            "vp8" => Ok(Self::Vp8),
+            "vp9" => Ok(Self::Vp9),
             other => Err(format!(
-                "unknown video codec '{other}' (expected av1, h264, or h265)"
+                "unknown video codec '{other}' (expected av1, h264, h265, vp8, or vp9)"
             )),
         }
     }
@@ -260,7 +266,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let video_codec_opt = noargs::opt("video-codec")
         .ty("CODEC")
-        .doc("Video codec (av1 | h264 | h265). h264/h265 require macOS")
+        .doc("Video codec (av1 | h264 | h265 | vp8 | vp9). h264/h265 require macOS")
         .default("av1")
         .take(&mut args);
     let video_codec_explicit = is_explicit(&video_codec_opt);
@@ -925,6 +931,47 @@ mod tests {
         assert!(
             config.audio_datagram,
             "指定で音声トラックを datagram で送ること"
+        );
+    }
+
+    /// `--video-codec` が av1 / h264 / h265 / vp8 / vp9 を受け付けること
+    ///
+    /// 省略時は av1 である。VP8 / VP9 は macOS 以外でも使えるため、macOS 限定の
+    /// h264 / h265 と同じ扱いにしてはいけない。
+    #[test]
+    fn video_codec_accepts_vp8_and_vp9() {
+        let cases: &[(&[&str], VideoCodec)] = &[
+            (&[], VideoCodec::Av1),
+            (&["--video-codec", "av1"], VideoCodec::Av1),
+            (&["--video-codec", "h264"], VideoCodec::H264),
+            (&["--video-codec", "h265"], VideoCodec::H265),
+            (&["--video-codec", "vp8"], VideoCodec::Vp8),
+            (&["--video-codec", "vp9"], VideoCodec::Vp9),
+        ];
+        for (extra, expected) in cases {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(extra);
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.video_codec, *expected,
+                "codec が一致すること: {extra:?}"
+            );
+        }
+    }
+
+    /// 未対応の映像コーデックはエラーになること
+    #[test]
+    fn unknown_video_codec_is_rejected() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--video-codec", "vp10"]);
+        let Err(error) = parse_args(&args) else {
+            panic!("未対応の codec はエラーになること");
+        };
+        assert!(
+            format!("{error:?}").contains("unknown video codec"),
+            "未対応の codec であることが分かること: {error:?}"
         );
     }
 

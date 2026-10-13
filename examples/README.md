@@ -6,7 +6,7 @@ draft-ietf-moq-transport-22、draft-ietf-moq-loc-04、draft-ietf-moq-msf-01、dr
 
 ## 構成
 
-- **moq-pub**：映像を AV1 / H.264 / H.265 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
+- **moq-pub**：映像を AV1 / H.264 / H.265 / VP8 / VP9 で、音声を Opus でエンコードし、video / audio / `catalog` track を MoQ relay へ PUBLISH する。`--input-mp4` を指定すると MP4 ファイルの映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` を指定すると MP4 ファイルの映像 / 音声をデコードして再エンコードして配信する
 - **moq-sub**：MoQ relay から catalog を SUBSCRIBE して取得し、video / audio を SUBSCRIBE してデコードして再生する。音声は jitter buffer が到着の揺らぎに合わせた遅延まで保持してから再生し、映像は共通の時間軸が決めた表示時刻に合わせて表示する。catalog の `targetLatency` は表示の遅れの下限として使う。`--mp4` を指定すると受信した映像 / 音声を MP4 に保存できる。catalog の Full / Delta 適用と datagram 受信にも対応する
 - **tokio-moq**：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
@@ -117,7 +117,7 @@ example が `msf` fragment から使うのは track-identifier の namespace、�
 | `--fake-capture-device` | | | 実デバイスの代わりに raden 生成の疑似映像と 440 Hz サイン波音声を使う |
 | `--input-mp4` | | | MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265。音声は配信せず、B フレームを含む MP4 は拒否する。`--video-codec` / `--width` / `--height` / `--fps` / `--no-video` とは併用不可) |
 | `--input-mp4-reencode` | | | MP4 ファイルの映像 / 音声をデコードして再エンコード配信する (映像は AV1 / H.264 / H.265、音声は Opus のみ。解像度 / フレームレートは MP4 から自動検出する。`--input-mp4` / `--width` / `--height` / `--fps` とは併用不可) |
-| `--video-codec` | | `av1` | 映像コーデック (av1 / h264 / h265。h264 / h265 は macOS 限定) |
+| `--video-codec` | | `av1` | 映像コーデック (av1 / h264 / h265 / vp8 / vp9。h264 / h265 は macOS 限定) |
 | `--no-video` | | | 映像トラックの送信を無効化する |
 | `--no-audio` | | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | | 音声入力デバイス ID |

@@ -17,6 +17,8 @@ pub enum Error {
     Encode(shiguredo_aom::Error),
     /// AV1 デコードエラー
     Decode(shiguredo_dav1d::Error),
+    /// VP8 / VP9 エンコードエラー
+    Vpx(shiguredo_libvpx::Error),
     /// Video Toolbox エンコードエラー (macOS)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
@@ -67,6 +69,7 @@ impl fmt::Display for Error {
             Self::Capture(e) => write!(f, "capture: {e:?}"),
             Self::Encode(e) => write!(f, "encode: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
+            Self::Vpx(e) => write!(f, "vpx: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
@@ -106,6 +109,12 @@ impl From<shiguredo_aom::Error> for Error {
 impl From<shiguredo_dav1d::Error> for Error {
     fn from(e: shiguredo_dav1d::Error) -> Self {
         Self::Decode(e)
+    }
+}
+
+impl From<shiguredo_libvpx::Error> for Error {
+    fn from(e: shiguredo_libvpx::Error) -> Self {
+        Self::Vpx(e)
     }
 }
 

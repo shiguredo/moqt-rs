@@ -17,6 +17,8 @@ shiguredo_audio_device = "2026.3"
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.9"
+# VP8 / VP9 エンコーダ・デコーダ (libvpx)
+shiguredo_libvpx = "2026.1"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)

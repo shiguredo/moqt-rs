@@ -533,13 +533,13 @@ mod tests {
         );
     }
 
-    /// `--video-codec h264` / `h265` の codec 文字列でも encode に成功すること
+    /// `--video-codec h264` / `h265` / `vp8` / `vp9` の codec 文字列でも encode に成功すること
     ///
-    /// `avc1.640028` / `hvc1.1.6.L120.B0` が video と判定されることは、library 側の
-    /// 登録名テストで固定している。
+    /// `avc1.640028` / `hvc1.1.6.L120.B0` / `vp8` / `vp09.00.40.08` が video と判定されることは、
+    /// library 側の登録名テストで固定している。
     #[test]
     fn publisher_alternate_video_codecs_encode() {
-        for codec in ["avc1.640028", "hvc1.1.6.L120.B0"] {
+        for codec in ["avc1.640028", "hvc1.1.6.L120.B0", "vp8", "vp09.00.40.08"] {
             let video = VideoTrackParams {
                 track_name: "video",
                 namespace: "ns",

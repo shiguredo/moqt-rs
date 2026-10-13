@@ -1479,6 +1479,10 @@ async fn receive_catalog(
                 || c.starts_with("avc1")
                 || c.starts_with("hvc1")
                 || c.starts_with("hev1")
+                // VP8 は登録名のみ、VP9 は `vp09.<profile>.<level>.<bit depth>` である
+                || c == "vp8"
+                || c == "vp09"
+                || c.starts_with("vp09.")
         })
     });
     let audio_track = catalog

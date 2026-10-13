@@ -462,6 +462,22 @@ pub async fn run(
             VideoCodec::H265 => {
                 return Err(unsupported_macos_encoder("H.265"));
             }
+            VideoCodec::Vp8 => encoder::VideoEncoder::Vp8(encoder::vpx::VpxEncoder::new(
+                encoder::vpx::VpxCodec::Vp8,
+                encode_width,
+                encode_height,
+                encode_fps,
+                config.bitrate,
+                config.keyframe_interval,
+            )?),
+            VideoCodec::Vp9 => encoder::VideoEncoder::Vp9(encoder::vpx::VpxEncoder::new(
+                encoder::vpx::VpxCodec::Vp9,
+                encode_width,
+                encode_height,
+                encode_fps,
+                config.bitrate,
+                config.keyframe_interval,
+            )?),
         };
         Some(enc)
     } else {
