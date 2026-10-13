@@ -1,7 +1,7 @@
 # 別タスクからの flush と request 回収が競合して PUBLISH_DONE を失う
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-moqt-client-concurrent-flush-cleanup-race
 - Polished: 2026-10-13
 - Updated: 2026-10-10
