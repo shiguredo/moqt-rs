@@ -113,3 +113,44 @@ peer が cancel (STOP_SENDING) したストリームへの FIN / RESET が無言
   レビューで確認する。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/tokio-moq/src/webtransport_h2.rs` の `WtH2SendStream::finish` / `reset` を async 化し、
+  driver の reply を待つようにした。driver は判定と返答を同一処理で行うため、`Ok` は「FIN /
+  RESET を `WtSession` へ渡した」ことを意味する。
+  - `Command::Reset` に `reply` を追加し、driver の `Command::Send` / `Command::Reset` の拒否判定を
+    「台帳 (`stop_sending_received`) にあるか、`wt_session.stream()` が無いか `can_send()` が偽」に
+    統一した。bidi ストリームは自側の FIN 後も `WtSession` に残るため、`can_send()` まで見ないと
+    拒否できない。拒否時は `closed_stream_error` を返すため、peer が cancel 済みなら
+    [`TransportError::StreamReset`] (peer が載せた wire のエラーコード)、送信方向を閉じた
+    ストリームなら [`TransportError::StreamClosed`] になる。
+  - `Command::Send` / `PendingSend` の `reply` を必須にして、reply を返す契約を型で担保した。
+  - `finish` / `reset` は `send` と同じ `wait_until_terminated` の select でセッション終端を
+    観測しながら待つ。flow control で滞留している間は返らないため、この制約は
+    `flush_pending_sends` の doc に明記した。
+  - doc を実際の拒否条件に合わせ、「台帳に peer のコードがあれば `StreamReset`、無ければ
+    `StreamClosed`」に統一した。
+- `examples/tokio-moq/src/transport.rs` の `SendStream::finish` / `reset` を async 化し、QUIC /
+  wt-h3 は同期実装をそのまま呼ぶ形を維持した。
+- 呼び出し元を async 化した。`examples/tokio-moq/src/moqt_client.rs` (11 箇所と
+  `cleanup_closed_requests`)、`examples/tokio-moq/src/peer_harness.rs` (3 箇所と
+  `finish_request_stream` / `finish_control_stream`)、`examples/tokio-moq/src/webtransport_h2.rs`
+  の既存テスト 3 箇所、`examples/moq-pub/src/stream_writer.rs` (`SubgroupWriter::finish` /
+  `reset_by_session`)、`examples/moq-pub/src/pipeline.rs` (`reset_open_subgroup_stream`) と
+  `examples/moq-pub/src/catalog.rs`。
+- `SubgroupWriter::finish` は `self.stream.finish().await?` の短絡で
+  `send_data_stream_closed(RequestStreamEnd::Fin)` に到達しない。cancel されたストリームでは
+  Session へ Fin を通知しない。
+- FIN の完了を待つようになったため、`next_event` の future が `tokio::select!` の敗北で破棄されて
+  も送信半を失わないよう、`moqt_client.rs` の FIN 経路を「`get_mut` で借用したまま await し、
+  成功したときだけ台帳から取り出す」形にした (台帳の不変条件の doc も更新)。
+- テストは `wt_h2_stop_sending_terminates_only_the_stream` に cancel 後の `finish` / `reset` が
+  `StreamReset` を返すことを、`wt_h2_session_roundtrip_over_real_tls` に FIN 済みストリームへの
+  `finish` / `reset` が `StreamClosed` を返すことを追加した。変異テストで、reply を待たない実装、
+  拒否判定から `can_send()` を外す変更 (Send / Reset の両方)、拒否の写像を変える変更が検出される
+  ことを確認した。
+- cancel されたストリームの Session 側の後始末 (終端通知と STOP_SENDING 観測の順序契約、outgoing
+  追跡の終端と PUBLISH_DONE の flush 条件) は Session の課題として別 issue (0246) に分離した。
+- 検証は `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` の通過と、`/review-diff-code` の指摘 (致命的 0 件) で行った。
