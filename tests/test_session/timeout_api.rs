@@ -529,3 +529,58 @@ fn padding_stream_does_not_trigger_data_stream_timeout() {
         "padding stream は DATA_STREAM_TIMEOUT を誘発しないこと"
     );
 }
+
+/// STOP_SENDING を送った stream は data stream timeout の対象から外れる
+///
+/// カタログの読み取りに失敗した stream を example が `send_data_stream_stop_sending` で Session の
+/// 会計から外すため、その stream のせいでセッションが DATA_STREAM_TIMEOUT で閉じない。
+#[test]
+fn stopped_subgroup_stream_is_excluded_from_data_stream_timeout() {
+    let (mut client, mut server, data_rid) = establish_subscribe_track(1);
+    client.tick(0);
+    client.set_data_stream_timeout_ms(Some(30));
+
+    // ヘッダだけ受信した subgroup stream を登録する
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    server
+        .send_subgroup_header(DataStreamId(201), data_rid, &header)
+        .expect("publisher が subgroup stream を開く");
+    client
+        .recv_data_stream_type(DataStreamId(201), 0x14)
+        .expect("client が subgroup stream type を受理する");
+    assert_eq!(
+        client
+            .recv_subgroup_header(DataStreamId(201), &header)
+            .expect("client が subgroup header を受理する"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // 読み切れなかった stream を会計から外す (example の失敗経路と同じ)
+    client
+        .send_data_stream_stop_sending(DataStreamId(201))
+        .expect("STOP_SENDING の送信は Err にならないこと");
+
+    // object を受信しないまま timeout を経過させる
+    client.tick(31);
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::CloseSession(err) = ev {
+            assert_ne!(
+                err.code, SESSION_DATA_STREAM_TIMEOUT,
+                "STOP_SENDING を送った stream では DATA_STREAM_TIMEOUT が発火しないこと"
+            );
+        }
+    }
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "STOP_SENDING を送った stream のせいでセッションが閉じないこと"
+    );
+}

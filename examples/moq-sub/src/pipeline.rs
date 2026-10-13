@@ -275,8 +275,9 @@ enum TrackKind {
     /// カタログトラック
     ///
     /// 購読は LARGEST_OBJECT の取得と、以後に配られるカタログ (独立カタログと delta) の
-    /// 受信に使う (draft-ietf-moq-msf-01 §5 (Catalog))。本 example は起動時に解決した
-    /// トラックを再生し続けるため、購読で届くカタログは適用せずに捨てる。
+    /// 受信に使う (draft-ietf-moq-msf-01 §5 (Catalog))。購読で届くカタログは、stream task が
+    /// 読み出した Object を main ループへ渡し、`CatalogState` を所有する main ループが
+    /// MSF の配置規則で適用する。
     Catalog,
 }
 
@@ -1419,11 +1420,20 @@ async fn receive_catalog(
                             apply_catalog_object(&mut state, object)?;
                         }
                     }
-                    Ok(Err(e)) => tracing::warn!("Failed to read catalog stream: {e}"),
-                    Err(_) => tracing::warn!(
-                        "Catalog stream did not finish within {}ms",
-                        CATALOG_TIMEOUT.as_millis()
-                    ),
+                    // 読み切れなかった stream を Session の会計から外す。起動時の取得は最初の
+                    // `tick` より前に走るため data stream timeout の会計には入っていないが、
+                    // 受信 stream と購読の後始末のために fill fetch の失敗経路と同じ扱いにする
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to read catalog stream: {e}");
+                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Catalog stream did not finish within {}ms",
+                            CATALOG_TIMEOUT.as_millis()
+                        );
+                        let _ = data_plane.send_data_stream_stop_sending(stream_id);
+                    }
                 }
             }
         }
@@ -1608,6 +1618,24 @@ async fn read_catalog_subgroup_stream(
             )));
         }
     }
+    read_catalog_objects(stream, data_plane, stream_id, &mut decoder, &header).await
+}
+
+/// 登録済みの catalog の Subgroup stream から Object を読み切る
+///
+/// ヘッダの登録 (`DataPlaneHandle::recv_subgroup_header`) は呼び出し側の責務である。
+/// 登録に成功した stream へ同じヘッダを再登録すると `session error 0x3: subgroup header
+/// already received for stream id` になるため、ヘッダの decode と登録は
+/// [`read_catalog_subgroup_stream`] に残し、本関数は Object のループだけを担う。
+/// `decoder` は呼び出し側が保持する復号器であり、`header` はその復号結果である
+/// (`SubgroupStreamDecoder` は復号済みのヘッダを保持しない)。
+async fn read_catalog_objects(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    decoder: &mut SubgroupStreamDecoder,
+    header: &SubgroupHeader,
+) -> Result<Vec<catalog::CatalogObject>> {
     let mut objects = Vec::new();
     loop {
         let object = match decoder.try_decode_object()? {
@@ -1640,7 +1668,7 @@ async fn read_catalog_subgroup_stream(
         }
         // 配送しない Object でも payload は wire 上に存在するため読み出して消費する。
         // 残すと次の `try_decode_object` が ProtocolViolation になる
-        let payload = read_catalog_payload(stream, data_plane, stream_id, &mut decoder).await?;
+        let payload = read_catalog_payload(stream, data_plane, stream_id, decoder).await?;
         if !accepted {
             continue;
         }
@@ -2182,12 +2210,16 @@ async fn handle_stream_body(
                     // 状態 (CatalogState) を所有する main ループが MSF の配置規則で適用する。
                     // 状態を stream task 側に持たせないのは、複数の Group の stream が
                     // 同時に走りうるためである。
-                    match read_catalog_subgroup_stream(
+                    // ヘッダは既に `register_subgroup_header` が登録済みであるため、
+                    // `read_catalog_subgroup_stream` (ヘッダ登録を含む入口) は呼ばない。
+                    // 呼ぶと同じ stream へ再登録となり `session error 0x3` になる。
+                    // `buf` (ヘッダを含む) も渡さない。
+                    match read_catalog_objects(
                         stream,
                         &data_plane,
                         stream_id,
-                        &buf,
-                        header.track_alias,
+                        &mut sg_decoder,
+                        &header,
                     )
                     .await
                     {
@@ -2203,6 +2235,9 @@ async fn handle_stream_body(
                             tracing::warn!(
                                 "Stream #{stream_num}: failed to read catalog stream: {e}"
                             );
+                            // 読み切れなかった stream を Session の会計から外す。残すと data stream
+                            // timeout でセッション全体が落ちる (fill fetch の失敗経路と同じ扱い)
+                            let _ = data_plane.send_data_stream_stop_sending(stream_id);
                         }
                     }
                 }

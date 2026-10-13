@@ -1,4 +1,5 @@
 use super::*;
+use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
 use shiguredo_moqt::session::types::SendRequestError;
 
 #[test]
@@ -4986,4 +4987,62 @@ fn recv_object_datagram_rejects_zero_length_properties_blob() {
         })
         .expect_err("Properties Length = 0 は拒否される");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}
+
+/// 登録済みの stream へ同じ subgroup header を再登録すると拒否され、セッションは閉じない
+///
+/// カタログの Subgroup stream を二重に登録しないという example 側の前提は、この拒否が
+/// エラーを返すだけでセッションを壊さないことを根拠にしている。
+#[test]
+fn re_subgroup_header_for_registered_stream_is_rejected() {
+    let (mut client, mut server) = establish_pair();
+    let stream_id = DataStreamId(10);
+    let header = SubgroupHeader {
+        track_alias: 700,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+
+    // track alias を確立してから header を登録する
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam1".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 700, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_data_stream_type(stream_id, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream_id, &header)
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+
+    // 同じ stream へ再登録する
+    let err = client
+        .recv_subgroup_header(stream_id, &header)
+        .expect_err("登録済みの stream への再登録は拒否されること");
+    assert_eq!(
+        err.code, SESSION_PROTOCOL_VIOLATION,
+        "再登録は SESSION_PROTOCOL_VIOLATION で拒否されること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "再登録の拒否でセッションが閉じないこと"
+    );
 }
