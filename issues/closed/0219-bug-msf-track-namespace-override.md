@@ -1,7 +1,7 @@
 # カタログの track 単位 namespace を購読に反映する
 
 - Created: 2026-10-09
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/fix-msf-track-namespace-override
 - Polished: 2026-10-11
 - Updated: 2026-10-10
