@@ -1,7 +1,7 @@
 # DATA_STREAM_TIMEOUT でセッション全体を閉じる挙動の扱いを決める
 
 - Created: 2026-10-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-13
 - Branch: feature/change-data-stream-timeout-scope
 - Polished: 2026-10-13
 
@@ -157,4 +157,78 @@ moqt-js 側の Subgroup を FIN しない不備は moqt-js で直す。本 issue
 
 ## 解決方法
 
-{対応時に記入}
+案 A を採り、draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) が第一に挙げる
+「timeout した subgroup stream に STOP_SENDING を送る」を実装した。セッションは閉じず、購読は生かしたまま
+timeout した stream だけを止める。FETCH stream は §12.2 に代替措置が無いため現行どおり 0x12 で閉じる。
+
+決定の根拠:
+
+- §12.2 は DATA_STREAM_TIMEOUT (0x12) を「The session was closed because the peer took too long to send
+  data expected on an open Data Stream」と定義しつつ、open な subgroup stream で新しい object header を
+  待って timeout した場合の措置を "it MAY send a STOP_SENDING on that stream or terminate the subscription"
+  とする。§6.6 (Termination) は単一購読の条件をセッションエラーへ昇格させることを MAY で認めているため
+  現行挙動も仕様違反ではないが、1 本の stream の stall で映像・音声を含む配信全体が落ちる被害を避け、
+  §6.6 の "Implementations need to consider the impact on other outstanding subscriptions" に従って
+  draft が名指しした STOP_SENDING を選ぶ。
+- 検知の損失を許容する根拠: DATA_STREAM_TIMEOUT は「相手が data stream を送るのを完全にやめた」ことの
+  唯一の検知手段であり、本変更でセッションクローズによる検知を失う。購読の生存は peer の PUBLISH_DONE と
+  制御メッセージ、stream ごとの期限 (例: moq-sub の `CATALOG_TIMEOUT`)、購読の cancel で扱える。
+  1 本の stall を理由に他の購読を巻き添えにしないことを優先する。
+  STOP_SENDING の送出により、stall していたアプリの読み取りも終端できる。
+- STOP_SENDING に載せる error code は §12.5 (Stream Reset Error Codes) に DATA_STREAM_TIMEOUT 相当が無く、
+  DELIVERY_TIMEOUT (0x2) は §5.2 の別機構を指すため、stream の cancel を表す CANCELLED (0x1) を使う。
+- FETCH stream を対象外にした判断: §12.2 の MAY は open な subgroup stream を対象にし、FETCH stream には
+  代替措置を示していない。FETCH data stream の cancel は §3.2.4 が bidi request stream の STOP_SENDING
+  (MUST) と data stream の STOP_SENDING (MAY) を定めており、アプリ起点の cancel 経路
+  (`Session::send_fetch_stop_sending` / `Session::stop_sending`) がある。よって FETCH stream の
+  DATA_STREAM_TIMEOUT は現行どおり 0x12 でセッションを閉じる (単体テストで固定した)。
+
+変更内容:
+
+- `src/session/types.rs`: `SessionEvent::StopSendingDataStream { stream_id, error_code }` を追加した
+  (公開 enum の破壊的変更)。
+- `src/session/goaway.rs`: `Session::tick` の DATA_STREAM_TIMEOUT 判定を、期限到達した stream を
+  stream_id 昇順に集め、subgroup stream はセッションを閉じず STOP_SENDING の指示と破棄対象化を行い、
+  FETCH stream が 1 本でもあれば 0x12 で閉じる形に変更した。
+- `src/session/data.rs`: `Session::is_subgroup_data_stream` と `Session::discard_timed_out_subgroup_stream`
+  を追加した。後者は `peer_subgroups` への停止記録、`open_incoming_subgroup_count` と per-subgroup
+  delivery timeout override の補正、`data_streams.incoming` からの除去、保持集合
+  (`retain_discarded_stream_id`) への移動を行う。`incoming` に残さないのは、STOP_SENDING の送出後に
+  アプリが読み取りを打ち切ると終端通知が Session に届かず破棄 entry が回収されないためである。
+- `examples/tokio-moq/src/moqt_client.rs`: `StopSendingSignals` レジストリを追加し、drain ループが
+  `StopSendingDataStream` を観測して対象 stream に指示を記録する
+  (`DataPlaneHandle::wait_data_stream_stop_sending` / `clear_data_stream_stop_sending`)。
+- `examples/moq-sub/src/pipeline.rs`: `receive_registered_stream_data` が `stream.receive_chunk()` と
+  STOP_SENDING の指示を select し、指示を受けたら `transport::RecvStream::stop_sending` を呼んで
+  読み取りを打ち切る。送出後に指示を破棄して二重送出を防ぎ、stream 終了時に登録を破棄する。
+- `skills/shiguredo-moqt/SKILL.md`: `tick` の説明と `SessionEvent` の表を新しい挙動に合わせた。
+
+テスト:
+
+- `tests/test_session/timeout_api.rs`: 新規 11 本 (SUBGROUP_HEADER 未受信の timeout、FETCH_HEADER 未受信の
+  timeout、遅延 Object / FIN / RESET の吸収、購読の継続、監視除外の再 tick、複数 stream の昇順指示、
+  stream type の再通知、境界 (経過 == timeout)、FETCH 混在で 0x12、会計と tracker の後始末、
+  STOP_SENDING 済み stream の監視除外)。既存 4 本を新挙動に更新した。
+- `tests/test_session/subgroup_object_filter/routing.rs`: FilteredOut Object の activity 更新テストを
+  新挙動 (`StopSendingDataStream`) に更新した。
+- `pbt/tests/prop_session/goaway.rs`: 新規 2 本 (subgroup は STOP_SENDING の指示のみ、FETCH は 0x12)。
+  境界 (timeout = 1、経過 == timeout) を明示的にサンプリングし、カバレッジゲートを置いた。
+- `examples/tokio-moq/src/moqt_client.rs`: STOP_SENDING 指示のシグナル型の単体テスト 3 本を追加した。
+
+完了条件の確認:
+
+- 決定と根拠 / FETCH stream を対象外にした判断と理由: 上記のとおり記録した。
+- 単体テスト: 上記のとおり固定した (監視からの除外、`Established` 維持、遅延到着の吸収、FETCH の 0x12)。
+- `SessionEvent` の配線: tokio-moq の drain ループがイベントを内部で処理し、moq-sub が STOP_SENDING を
+  送出する。イベントを取りこぼす経路は無い。
+- 実 relay での確認: relay と未修正の moqt-js publisher を用意できないため未実施。代替として
+  Session の状態遷移と遅延到着の吸収を単体テストで固定し、example の配線
+  (drain → レジストリ → 受信タスク → `RecvStream::stop_sending`) をレビューで確認した。
+  moqt-js 側の FIN 不備が修正されると同じ組み合わせでは再現しなくなるため、この確認は未修正版を
+  用意できる場合の補助確認として扱う。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check`: 通過。
+- ソースコードのコメントに issue 番号や issue への言及は無い。
+
+補足: CODEBASE.md の指示 (ブランチ・PR を作らず develop に直接コミット) に従い、`Branch:` の
+ブランチは作らず develop に直接コミットした。
