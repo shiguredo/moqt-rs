@@ -290,6 +290,9 @@ enum TrackKind {
 /// `display_backlog` は表示待ちの映像フレーム数であり、閾値を超えると古い group を捨てる。
 /// 録画中は読み切って保存するため捨てない。
 /// `player_stop` は再生側の終了を伝える。sender が drop されるとパイプラインは停止する。
+/// `target_latency_ms` はカタログの `targetLatency` を渡すセルであり、値があるときだけ格納する
+/// (対象は実際に購読する track の `renderGroup` に属する track。§5.2.8)。購読する group が
+/// 複数あるときは最大値をすべての購読 track に掛ける。
 #[expect(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
@@ -486,17 +489,9 @@ pub async fn run(
         state: mut catalog_state,
         video: video_info,
         audio: audio_info,
-        target_latency_ms: catalog_target_latency_ms,
+        video_latency,
+        audio_latency,
     } = catalog_resolution;
-    // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの
-    // 下限として反映する (draft-ietf-moq-msf-01 §5.2.8)
-    if let Some(catalog_target_latency_ms) = catalog_target_latency_ms {
-        target_latency_ms.store(
-            catalog_target_latency_ms,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        tracing::info!("Using catalog targetLatency: {catalog_target_latency_ms}ms");
-    }
     if let Some(ref v) = video_info {
         tracing::info!(
             "Catalog video track: namespace={}, name={}, codec={}, {}x{} @ {} fps",
@@ -527,6 +522,29 @@ pub async fn run(
             "no tracks to subscribe (catalog does not provide enabled video/audio track)"
                 .to_string(),
         ));
+    }
+
+    // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの下限として
+    // 反映する。対象は実際に購読する track の render group に属する track に限る
+    // (別の render group の宣言値を購読中の track に適用しない。
+    // draft-ietf-moq-msf-01 §5.2.8 は同じ render group の track が同一の targetLatency を
+    // 持つことを MUST とする)
+    let subscribed_latencies = subscribed_track_latencies(
+        video_latency,
+        audio_latency,
+        subscribe_video,
+        subscribe_audio,
+    );
+    let catalog_target_latency_ms = match catalog_state.catalog() {
+        Some(catalog) => catalog_target_latency_ms(&catalog.tracks, &subscribed_latencies),
+        None => None,
+    };
+    if let Some(catalog_target_latency_ms) = catalog_target_latency_ms {
+        target_latency_ms.store(
+            catalog_target_latency_ms,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::info!("Using catalog targetLatency: {catalog_target_latency_ms}ms");
     }
 
     let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
@@ -1221,8 +1239,19 @@ struct CatalogResolution {
     video: Option<VideoTrackInfo>,
     /// catalog から解決したオーディオトラック情報
     audio: Option<AudioTrackInfo>,
-    /// catalog の targetLatency (ミリ秒)
-    target_latency_ms: Option<i64>,
+    /// 解決した映像 track の targetLatency の決定に使う情報
+    video_latency: Option<SelectedTrackLatency>,
+    /// 解決した音声 track の targetLatency の決定に使う情報
+    audio_latency: Option<SelectedTrackLatency>,
+}
+
+/// `targetLatency` の決定に使う、購読する track の情報
+#[derive(Clone, Copy)]
+struct SelectedTrackLatency {
+    /// 宣言された render group (宣言が無ければ `None`)
+    render_group: Option<u64>,
+    /// track 自身の `targetLatency` (ミリ秒)
+    target_latency: Option<u64>,
 }
 
 /// カタログが届くまで待つ上限
@@ -1406,28 +1435,35 @@ async fn receive_catalog(
             CATALOG_TIMEOUT.as_millis()
         )));
     };
-    // targetLatency は再生側の時間軸が表示の遅れの下限に使う。ここでは読むだけにして、
-    // 呼び出し側が共有セルへ入れる
-    let target_latency_ms = catalog_target_latency_ms(&catalog.tracks);
-    let video = catalog
+    // targetLatency は再生側の時間軸が表示の遅れの下限に使う。どの track を購読するかは
+    // 呼び出し側が決めるため、ここでは選択した track の情報だけを返し、値の決定は呼び出し側で行う
+    let video_track = catalog.tracks.iter().find(|t| {
+        t.codec.as_ref().is_some_and(|c| {
+            c.starts_with("av01")
+                || c.starts_with("avc1")
+                || c.starts_with("hvc1")
+                || c.starts_with("hev1")
+        })
+    });
+    let audio_track = catalog
         .tracks
         .iter()
-        .find(|t| {
-            t.codec.as_ref().is_some_and(|c| {
-                c.starts_with("av01")
-                    || c.starts_with("avc1")
-                    || c.starts_with("hvc1")
-                    || c.starts_with("hev1")
-            })
+        .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")));
+    let selected_latency = |track: Option<&MsfTrack>| {
+        track.map(|track| SelectedTrackLatency {
+            render_group: track.render_group,
+            target_latency: track.target_latency,
         })
+    };
+    let video = video_track
         .map(|track| extract_video_info(track, &catalog_namespace))
         .transpose()?;
-    let audio = catalog
-        .tracks
-        .iter()
-        .find(|t| t.codec.as_ref().is_some_and(|c| c.starts_with("opus")))
+    let audio = audio_track
         .map(|track| extract_audio_info(track, &catalog_namespace))
         .transpose()?;
+    // `state` を move する前に catalog への借用を終わらせる
+    let video_latency = selected_latency(video_track);
+    let audio_latency = selected_latency(audio_track);
     if video.is_none() && audio.is_none() {
         return Err(Error::Other(
             "no usable tracks found in catalog (expected av01/avc1/hvc1/hev1/opus)".to_string(),
@@ -1437,7 +1473,8 @@ async fn receive_catalog(
         state,
         video,
         audio,
-        target_latency_ms,
+        video_latency,
+        audio_latency,
     })
 }
 
@@ -1679,15 +1716,61 @@ fn apply_catalog_object(
     Ok(())
 }
 
-/// カタログの track から `targetLatency` (ミリ秒) を求める
+/// 実際に購読する track の `targetLatency` の決定に使う情報を選ぶ
 ///
-/// 同じ `renderGroup` の track は同じ値でなければならない (draft-ietf-moq-msf-01 §5.2.8)。
-/// 値が無い track は無視し、複数の値があるときは安全側に倒して大きい方を採る。どの track も
-/// 持たないときは `None` (時間軸は自分の揺らぎから求めた遅れだけを使う)。
-fn catalog_target_latency_ms(tracks: &[MsfTrack]) -> Option<i64> {
-    tracks
-        .iter()
-        .filter_map(|track| track.target_latency)
+/// 購読しない track は対象から外す (`--no-video` / `--no-audio` の指定を反映する)。
+fn subscribed_track_latencies(
+    video: Option<SelectedTrackLatency>,
+    audio: Option<SelectedTrackLatency>,
+    subscribe_video: bool,
+    subscribe_audio: bool,
+) -> Vec<SelectedTrackLatency> {
+    [
+        if subscribe_video { video } else { None },
+        if subscribe_audio { audio } else { None },
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// カタログの track から、購読する track の `targetLatency` (ミリ秒) を求める
+///
+/// 対象は購読する track の `renderGroup` に属する track に限る。`renderGroup` は
+/// 「一緒に描画される track の集合」であり (draft-ietf-moq-msf-01 §5.2.11)、同じ group の
+/// track は同じ `targetLatency` を持たなければならない (§5.2.8 の MUST)。購読する group が
+/// 複数あるときは、時間軸が持てる値が 1 つだけであるため最大値をすべての購読 track に掛ける
+/// (track ごとの値の適用は本 example の範囲外)。
+///
+/// 購読する track が `renderGroup` を宣言していないときはその track 自身を対象に含める。
+/// 購読する track が 1 つも宣言していないとき (および `subscribed` が空のとき) は group が
+/// 分からないため、従来どおり全 track を対象にする (`run` は購読する track が 1 つも無ければ
+/// 先にエラーにするため、空にはならない)。値が無い track は無視し、複数の値があるときは
+/// 安全側に倒して大きい方を採る。対象のどの track も持たないときは `None` (時間軸は自分の
+/// 揺らぎから求めた遅れだけを使う)。
+fn catalog_target_latency_ms(
+    tracks: &[MsfTrack],
+    subscribed: &[SelectedTrackLatency],
+) -> Option<i64> {
+    let values: Vec<u64> = if subscribed.iter().all(|s| s.render_group.is_none()) {
+        tracks.iter().filter_map(|t| t.target_latency).collect()
+    } else {
+        let mut values = Vec::new();
+        for s in subscribed {
+            match s.render_group {
+                Some(group) => values.extend(
+                    tracks
+                        .iter()
+                        .filter(|t| t.render_group == Some(group))
+                        .filter_map(|t| t.target_latency),
+                ),
+                None => values.extend(s.target_latency),
+            }
+        }
+        values
+    };
+    values
+        .into_iter()
         .max()
         .and_then(|value| i64::try_from(value).ok())
 }
@@ -3025,6 +3108,24 @@ mod tests {
         track
     }
 
+    /// テスト用: render group を宣言した track を作る
+    fn track_in_render_group(render_group: Option<u64>, target_latency: Option<u64>) -> MsfTrack {
+        let mut track = track_with_target_latency(target_latency);
+        track.render_group = render_group;
+        track
+    }
+
+    /// テスト用: 購読する track の情報を作る
+    fn subscribed_track(
+        render_group: Option<u64>,
+        target_latency: Option<u64>,
+    ) -> SelectedTrackLatency {
+        SelectedTrackLatency {
+            render_group,
+            target_latency,
+        }
+    }
+
     /// テスト用の namespace を §8.8 表現から解決する
     fn test_namespace(value: &str) -> TrackNamespace {
         parse_namespace(value).expect("namespace を解決できること")
@@ -3185,9 +3286,9 @@ mod tests {
             track_with_target_latency(Some(200)),
         ];
         assert_eq!(
-            catalog_target_latency_ms(&tracks),
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, None)]),
             Some(200),
-            "同じ render group の track は同じ値を持つ"
+            "render group を宣言していない track だけのときは全 track から値を読む"
         );
     }
 
@@ -3199,7 +3300,7 @@ mod tests {
             track_with_target_latency(Some(150)),
         ];
         assert_eq!(
-            catalog_target_latency_ms(&tracks),
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, None)]),
             Some(150),
             "値を持つ track だけを見る"
         );
@@ -3210,7 +3311,7 @@ mod tests {
     fn catalog_target_latency_is_none_without_the_value() {
         let tracks = [track_with_target_latency(None)];
         assert_eq!(
-            catalog_target_latency_ms(&tracks),
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, None)]),
             None,
             "値が無ければ時間軸は自分の遅れだけを使う"
         );
@@ -3224,7 +3325,7 @@ mod tests {
             track_with_target_latency(Some(300)),
         ];
         assert_eq!(
-            catalog_target_latency_ms(&tracks),
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, None)]),
             Some(300),
             "食い違うときは大きい方を採る"
         );
@@ -3235,9 +3336,146 @@ mod tests {
     fn catalog_target_latency_ignores_values_out_of_range() {
         let tracks = [track_with_target_latency(Some(u64::MAX))];
         assert_eq!(
-            catalog_target_latency_ms(&tracks),
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, None)]),
             None,
             "i64 に収まらない値は無いものとして扱う"
+        );
+    }
+
+    // 同じ render group の別の track が宣言した値を採る (購読 track 自身は値を持たなくてもよい)
+    #[test]
+    fn catalog_target_latency_reads_the_value_of_another_track_in_the_group() {
+        let tracks = [
+            // 購読する映像 (group 1 を宣言し targetLatency は省略)
+            track_in_render_group(Some(1), None),
+            // 同じ group の別の track (購読しない音声)
+            track_in_render_group(Some(1), Some(500)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks, &[subscribed_track(Some(1), None)]),
+            Some(500),
+            "同じ render group の track が宣言した値を採ること"
+        );
+    }
+
+    // 購読 track が group を宣言しているときは、購読しない group の値に引っ張られない
+    #[test]
+    fn catalog_target_latency_ignores_unsubscribed_render_groups() {
+        let tracks = [
+            track_in_render_group(Some(1), Some(100)),
+            track_in_render_group(None, Some(200)),
+            // 購読しない group 9 のより大きい値
+            track_in_render_group(Some(9), Some(900)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(
+                &tracks,
+                &[
+                    subscribed_track(Some(1), Some(100)),
+                    subscribed_track(None, Some(200)),
+                ],
+            ),
+            Some(200),
+            "購読する track が group を宣言しているときは購読しない group の値を見ないこと"
+        );
+    }
+
+    // 購読しない track は対象から外れる
+    #[test]
+    fn subscribed_track_latencies_excludes_tracks_not_subscribed() {
+        let video = subscribed_track(Some(1), Some(100));
+        let audio = subscribed_track(Some(2), Some(500));
+        let only_video = subscribed_track_latencies(Some(video), Some(audio), true, false);
+        assert_eq!(
+            only_video.len(),
+            1,
+            "音声を購読しないときは音声の情報を渡さないこと"
+        );
+        assert_eq!(
+            only_video[0].render_group,
+            Some(1),
+            "購読する映像の情報だけを渡すこと"
+        );
+        let only_audio = subscribed_track_latencies(Some(video), Some(audio), false, true);
+        assert_eq!(
+            only_audio.len(),
+            1,
+            "映像を購読しないときは映像の情報を渡さないこと"
+        );
+        assert_eq!(
+            only_audio[0].render_group,
+            Some(2),
+            "購読する音声の情報だけを渡すこと"
+        );
+    }
+
+    // 購読する track の render group だけが対象になる (購読しない track の group の値は採らない)
+    #[test]
+    fn catalog_target_latency_uses_the_subscribed_render_group() {
+        let tracks = [
+            // 購読する映像 (group 1)
+            track_in_render_group(Some(1), Some(100)),
+            // --no-audio で購読しない音声 (group 2)
+            track_in_render_group(Some(2), Some(500)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks, &[subscribed_track(Some(1), Some(100))]),
+            Some(100),
+            "購読しない render group の値は採らないこと"
+        );
+    }
+
+    // 購読する track が複数の render group にまたがるときは大きい方を採る
+    #[test]
+    fn catalog_target_latency_takes_the_larger_value_across_subscribed_groups() {
+        let tracks = [
+            track_in_render_group(Some(1), Some(100)),
+            track_in_render_group(Some(3), Some(300)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(
+                &tracks,
+                &[
+                    subscribed_track(Some(1), Some(100)),
+                    subscribed_track(Some(3), Some(300)),
+                ],
+            ),
+            Some(300),
+            "時間軸は映像と音声で 1 つの値を使うため大きい方を採ること"
+        );
+    }
+
+    // 片方だけが render group を宣言しているとき、宣言していない側の値も対象に残る
+    #[test]
+    fn catalog_target_latency_keeps_the_value_of_a_track_without_render_group() {
+        let tracks = [
+            track_in_render_group(Some(1), None),
+            track_in_render_group(None, Some(200)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(
+                &tracks,
+                &[
+                    subscribed_track(Some(1), None),
+                    subscribed_track(None, Some(200)),
+                ],
+            ),
+            Some(200),
+            "render group を宣言していない購読 track の値を落とさないこと"
+        );
+    }
+
+    // 購読する track が 1 つも render group を宣言していないときは全 track を見る (従来の挙動)
+    #[test]
+    fn catalog_target_latency_falls_back_to_all_tracks_without_render_group() {
+        let tracks = [
+            track_in_render_group(None, Some(100)),
+            track_in_render_group(Some(2), Some(900)),
+        ];
+        assert_eq!(
+            catalog_target_latency_ms(&tracks, &[subscribed_track(None, Some(100))]),
+            Some(900),
+            "group が分からないときは安全側に倒して全 track の最大値を採ること"
         );
     }
 
