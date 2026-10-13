@@ -3,7 +3,7 @@
 - Created: 2026-10-13
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-moq-sub-catalog-header-reregister
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-13
 
 ## 目的
 
@@ -41,7 +41,16 @@ WARN moq_sub::pipeline: Session closed: 0x12 data stream timeout expired
 - `read_catalog_subgroup_stream` はエラーを返すだけで、`drain_registered_stream_to_end` も `DataPlaneHandle::send_data_stream_stop_sending` も呼ばない。呼び出し側の `handle_stream_body` も警告を出して戻る。`spawn_stream_task` は stream を drop するだけで `recv_data_stream_closed` を呼ばない。
 - 最初の登録で入った activity が更新されないまま 30 秒経つ。`examples/moq-sub/src/pipeline.rs` の `run` が `set_data_stream_timeout_ms(Some(30000))` しており、`Session::tick` が `SESSION_DATA_STREAM_TIMEOUT` (`0x12`) でセッション全体を閉じる。
 
-起動時のカタログ取得 (`receive_catalog`) は `read_catalog_subgroup_stream` だけを呼ぶ。ヘッダ登録は 1 回で、映像の購読まで進める。二重登録が起きるのは、受信ループが登録済みの stream に対して同じ関数を再利用したときである。
+起動時のカタログ取得 (`receive_catalog`) は、カタログが fill fetch stream で届けば `read_catalog_fetch_stream`、subgroup
+stream で届けば `read_catalog_subgroup_stream` を呼ぶ。後者の分岐は事前の `register_subgroup_header` を持たないため、
+ヘッダ登録は 1 回で済む。二重登録が起きるのは、`handle_stream_body` が登録済みの stream に対して同じ関数を再利用した
+ときである。
+
+この経路では Object のループに到達しないため、再送されたカタログの内容は `CatalogState` に反映されない。data stream
+timeout を無効にした運用では、カタログが起動時のまま固定される。
+
+再現手順では subscriber の音声は既定で有効であり、音声は 1 object ごとに新しい stream を開くため、音声が流れている
+run では受信 stream 数は数千になる。上記の実測値 (22 本 / 音声チャンク 0) は音声が届いていない run のものである。
 
 同じファイルの fill fetch 失敗経路は、読み切れなかった stream を `send_data_stream_stop_sending` で Session の会計から外す。コメントは「送らないと受信 stream が残り、data stream timeout でセッションが落ちる」と書いている。`Session::send_data_stream_stop_sending` は `data_stream_last_activity_ms` から stream id を除去する。カタログ再送の失敗経路にはこの後始末が無い。
 
@@ -49,14 +58,32 @@ WARN moq_sub::pipeline: Session closed: 0x12 data stream timeout expired
 
 ## 設計方針
 
-- `handle_stream_body` の `TrackKind::Catalog` は、`register_subgroup_header` 済みの `SubgroupStreamDecoder` から Object を読む。`read_catalog_subgroup_stream` は呼ばない。この関数は `receive_catalog` が未登録の stream に対してヘッダ登録から行う入口のままにする。
-- カタログの読み取りに失敗したときは、fill fetch の失敗経路と同じく `DataPlaneHandle::send_data_stream_stop_sending` で監視対象から外す。読み切れたときは、既存の `receive_registered_stream_data` が FIN で `recv_data_stream_closed` する経路に乗せる。
-- `Session::recv_subgroup_header` の「登録済みなら拒否する」判定は変えない。
+- ヘッダ登録と Object のループを分ける。`read_catalog_objects(stream, data_plane, stream_id, decoder, header) ->
+  Result<Vec<CatalogObject>>` を切り出し、`read_catalog_subgroup_stream` (ヘッダ登録と track alias の判定) と
+  `handle_stream_body` の `TrackKind::Catalog` 分岐の両方から呼ぶ。`SubgroupStreamDecoder` は復号済みのヘッダを
+  保持しないため、`header.group_id` (Location 用) と `header.track_alias` は呼び出し側から渡す。
+- `handle_stream_body` の `TrackKind::Catalog` は、`register_subgroup_header` 済みの decoder から `read_catalog_objects` を
+  呼ぶ。ヘッダを含む `buf` は渡さない (渡すとヘッダを復号し直し、同じ二重登録の温床になる)。`read_catalog_subgroup_stream`
+  は `receive_catalog` が未登録の stream に対してヘッダ登録から行う入口のままにする。
+- カタログの読み取りに失敗したときは、fill fetch の失敗経路と同じく `DataPlaneHandle::send_data_stream_stop_sending` で
+  監視対象から外し、stream を drop する (読み切れなかった stream を Session の会計から外すと data stream timeout の
+  対象から外れる。draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は、open な Subgroup stream で新しい
+  object header を待って timeout した場合に STOP_SENDING を送るか subscription を終了してもよい (MAY) と定める)。
+  読み切れたときは、既存の `receive_registered_stream_data` が FIN で `recv_data_stream_closed` する経路に乗せる。
+- `Session::recv_subgroup_header` の「登録済みなら拒否する」判定は変えない (2 回目を呼んでいるのは example 自身であり、
+  仕様上 wire で同じ stream の 2 回目の SUBGROUP_HEADER は現れない)。
 
 ## 完了条件
 
 - moq-pub のカタログ再送が届いても、`subgroup header already received for stream id` が出ず、その約 30 秒後に `0x12 data stream timeout expired` でセッションが閉じないこと。
-- 受信ループが 1 本の catalog subgroup に対して `recv_subgroup_header` を 1 回だけ呼ぶこと。
-- カタログの読み取りに失敗した stream が `data_stream_last_activity_ms` に残らないこと。
-- 上記がテストで固定されていること。
+- カタログの stream を登録した後に、同じ stream へ `recv_subgroup_header` を再登録しないこと (保留中の
+  `UnknownTrackAlias` の再試行は対象外とし、登録に成功した後の再登録を禁じる)。
+- カタログの読み取りに失敗した stream が原因で `DATA_STREAM_TIMEOUT` (0x12) が発火しないこと (読み切れなかった
+  stream を Session の会計から外す)。
+- 上記の Session 側の挙動が `tests/test_session/` の単体テストで固定されていること (同じ stream への 2 回目の
+  `recv_subgroup_header` が `SESSION_PROTOCOL_VIOLATION` を返しても Established のままであること、
+  `send_data_stream_stop_sending` の後に timeout が発火しないこと)。example の配線 (Catalog 分岐が再登録しないこと、
+  失敗経路が STOP_SENDING を送ること) は実 relay と peer の data stream 送信が必要なため、0201・0214・0215・0216・0244 と
+  同じく **I/O ハンドルが必要な配線部分はレビューで確認する**。
+- ソースコードのコメントに issue 番号や issue への言及を書かないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
