@@ -1193,10 +1193,26 @@ pub async fn run(
 
     if let Some(writer) = current_video_writer.take() {
         // 終了時点で購読が消えていれば `None` (Location Filter 無し) と同じ扱いになり、
-        // 省略があれば RESET 側に倒れる (安全側)
-        writer
+        // 省略があれば RESET 側に倒れる (安全側)。
+        // 失敗は `?` で `run` まで通さない。セッション終了・接続クローズ・peer の cancel に
+        // 伴う失敗を致命エラーにすると、正常な終了経路でも `Fatal:` と exit(1) になって後始末が
+        // 途中で切れる (期待する失敗の範囲をループ内の分類と同じにする。ループ内は想定外の
+        // エラーを致命にするが、後始末は warn に落として続ける点が異なる)。
+        // なお `finish` が失敗した経路では [`DataPlaneHandle::send_data_stream_closed`] が
+        // 呼ばれないため Session の outgoing stream 追跡が残り、直後の映像の PUBLISH_DONE は
+        // publish_done requires all outgoing streams closed で拒否される
+        // (draft-ietf-moq-transport-22 §9.9 の MUST NOT)。セッション終了を観測していない経路
+        // (peer の cancel 後に Ctrl+C / 入力終了でループを抜けた場合) では warn になる。
+        // 追跡の終端は cancel の観測と終端通知の到着順に依存するため、本 example では扱わない
+        if let Err(e) = writer
             .finish(video_request_id.and_then(|rid| client.subscription_filter_start(rid)))
-            .await?;
+            .await
+        {
+            log_failure(
+                format_args!("Failed to finish video subgroup stream: {e}"),
+                cleanup_finish_is_expected(session_ended, &e),
+            );
+        }
     }
 
     // PUBLISH_DONE を各 request に送信してストリームを閉じる
@@ -1287,6 +1303,24 @@ fn is_transport_session_end(error: &Error) -> bool {
 /// 本判定は variant のみを見るため、コードの空間に依存しない。
 fn is_peer_stream_reset(error: &Error) -> bool {
     matches!(error, Error::StreamReset { .. })
+}
+
+/// 後始末での `finish` の失敗を `info!` で出すべきかどうか
+///
+/// 期待する失敗の範囲をループ内の分類と同じにする。セッション終了を観測していれば
+/// (`session_ended`) どの失敗も期待される。観測していなくても transport によるセッション終了
+/// (`Error::ConnectionClosed`) と peer による該当ストリームの cancel (`Error::StreamReset`) は
+/// 期待される失敗である。cancel は peer の STOP_SENDING を観測した場合に限られるため
+/// `StreamReset` だけが対象になる (draft-ietf-moq-transport-22 §6.4.2.3)。
+/// ループ内は想定外のエラーを致命エラーにして `run` を終わらせるが、後始末はそれらを warn に
+/// 落として続ける点が異なる。
+///
+/// peer の cancel でも、driver が台帳に peer のコードを持たないままストリームを閉じている
+/// 場合の拒否は `TransportError::StreamClosed` になる。これは [`Error`] に variant が無く
+/// `Error::WebTransport` に文字列として畳まれるため、`session_ended` が偽のときは本判定では
+/// 拾えず warn のままになる (peer の cancel ではないので期待される失敗に数えない)。
+fn cleanup_finish_is_expected(session_ended: bool, error: &Error) -> bool {
+    session_ended || is_transport_session_end(error) || is_peer_stream_reset(error)
 }
 
 /// transport エラーがセッション終了 (接続クローズ) を表すかどうか
@@ -2627,6 +2661,50 @@ mod tests {
                 "ストリーム終端以外は偽とすること: {error}"
             );
         }
+    }
+
+    /// 後始末の `finish` の失敗を info にする条件 (真理値表)
+    ///
+    /// 期待される失敗はセッション終了・ transport によるセッション終了・ peer の cancel であり、
+    /// それ以外は warn にする。FIN / RESET 送信済みのストリームが返す
+    /// `TransportError::StreamClosed` は `Error` に variant が無いため warn のままになる。
+    ///
+    /// 呼び出し側 (`run` の後始末) は実 relay が必要なため本テストでは観測できず、レビューで
+    /// 確認する (`session_ended` を渡していること、真 = `info!` の写像)。
+    #[test]
+    fn cleanup_finish_is_expected_matches_the_truth_table() {
+        let stream_reset = Error::from(TransportError::StreamReset { error_code: 0x1 });
+        let connection_closed = Error::from(TransportError::ConnectionClosed);
+        let stream_closed = Error::from(TransportError::StreamClosed);
+        let other = Error::Other("encode failed".to_string());
+
+        // セッション終了を観測していれば、どの失敗も期待される
+        for error in [&stream_reset, &connection_closed, &stream_closed, &other] {
+            assert!(
+                cleanup_finish_is_expected(true, error),
+                "セッション終了後の失敗は期待されること: {error}"
+            );
+        }
+
+        // セッション終了を観測していなくても、接続クローズと peer の cancel は期待される
+        assert!(
+            cleanup_finish_is_expected(false, &connection_closed),
+            "接続クローズは期待されること"
+        );
+        assert!(
+            cleanup_finish_is_expected(false, &stream_reset),
+            "peer の cancel は期待されること"
+        );
+
+        // それ以外は warn のままにする
+        assert!(
+            !cleanup_finish_is_expected(false, &stream_closed),
+            "FIN / RESET 送信済みのストリームへの送信は期待される失敗に数えないこと: {stream_closed}"
+        );
+        assert!(
+            !cleanup_finish_is_expected(false, &other),
+            "その他の失敗は期待される失敗に数えないこと: {other}"
+        );
     }
 
     /// テスト用のエンコード済みフレームを構築する
