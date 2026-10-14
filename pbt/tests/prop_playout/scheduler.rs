@@ -7,12 +7,13 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_DELAY_US, AUDIO_PLAYOUT_MAX_CONCEAL_US, AUDIO_PLAYOUT_MIN_CONCEAL_US,
-    AUDIO_PLAYOUT_MIN_LEAD_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutDropReason,
-    AudioPlayoutInput, AudioPlayoutScheduler,
+    AUDIO_PLAYOUT_MIN_LEAD_US, AUDIO_PLAYOUT_STRETCH_MIN_US, AudioPlayoutBasis,
+    AudioPlayoutDecision, AudioPlayoutDropReason, AudioPlayoutInput, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::timeline::{TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US};
 
 /// 鳴らすと決めた音は今から下限以上先に鳴り、詰める長さは音の長さの半分以内。
+/// 詰めるのは遅れが不感帯に届いたときだけである。
 /// 補間する隙間は下限より長く上限以内で、補間しないときは開始も 0。
 /// 破棄の統計は捨てた回数と一致し、詰めた合計と補間した合計は実際に適用した量と一致する。
 /// 決定の計画 (目標の時刻か到着基準か) の両方と、捨てる決定に到達していること
@@ -129,6 +130,13 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                     assert!(
                         compress_us <= duration_us / 2,
                         "詰める長さが音の半分を超えた: compress_us={compress_us} duration_us={duration_us}"
+                    );
+                    // 詰めるのは、遅れが不感帯に届いたときだけである。不感帯の中の遅れは
+                    // 「予定の方が僅かにずれている」だけであり、加工では打ち消さない
+                    assert!(
+                        compress_us == 0 || scheduler.lateness_us() >= AUDIO_PLAYOUT_STRETCH_MIN_US,
+                        "不感帯の中で詰めた: compress_us={compress_us} lateness_us={}",
+                        scheduler.lateness_us()
                     );
                     // 補間する隙間は、下限を超えて上限以内である
                     assert!(

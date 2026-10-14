@@ -58,7 +58,7 @@ fn compress_removes_one_pitch_period() {
     let original = square_wave(960, 240, 0.5);
     let mut channel = original.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    let change = compress(&mut channels, 48_000);
+    let change = compress(&mut channels, 48_000, usize::MAX);
     assert_eq!(change, -240);
     // 周期と同じ長さを削るため、使用する範囲 (720 サンプル) は元の波形のまま
     for index in 0..720 {
@@ -72,7 +72,7 @@ fn compress_mixes_splice_with_cross_fade() {
     let original = varied_square_wave(960, 240, 0.5);
     let mut channel = original.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    let change = compress(&mut channels, 48_000);
+    let change = compress(&mut channels, 48_000, usize::MAX);
     assert_eq!(change, -240);
 
     let removed = 240usize;
@@ -103,7 +103,7 @@ fn compress_with_mismatched_channel_lengths_is_ignored() {
     let original_left = left.clone();
     let original_right = right.clone();
     let mut channels: [&mut [f32]; 2] = [left.as_mut_slice(), right.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     assert_eq!(left, original_left);
     assert_eq!(right, original_right);
 }
@@ -113,7 +113,7 @@ fn compress_with_short_input_is_ignored() {
     let mut channel = square_wave(100, 20, 0.5);
     let original = channel.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     assert_eq!(channel, original);
 }
 
@@ -124,7 +124,7 @@ fn compress_with_period_longer_than_the_search_range_is_ignored() {
     let mut channel = square_wave(960, 480, 0.5);
     let original = channel.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     assert_eq!(channel, original);
 }
 
@@ -133,18 +133,18 @@ fn compress_with_unsupported_sample_rate_is_ignored() {
     let original = square_wave(960, 240, 0.5);
     let mut channel = original.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 44_100), 0);
+    assert_eq!(compress(&mut channels, 44_100, usize::MAX), 0);
     assert_eq!(channel, original);
 }
 
 #[test]
 fn compress_with_empty_input_is_ignored() {
     let mut no_channels: [&mut [f32]; 0] = [];
-    assert_eq!(compress(&mut no_channels, 48_000), 0);
+    assert_eq!(compress(&mut no_channels, 48_000, usize::MAX), 0);
 
     let mut channel: Vec<f32> = Vec::new();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn stereo_channels_are_stretched_together() {
     let mut left = original.clone();
     let mut right = original.clone();
     let mut channels: [&mut [f32]; 2] = [left.as_mut_slice(), right.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), -240);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), -240);
     assert_eq!(left, right);
 }
 
@@ -162,13 +162,13 @@ fn pitch_period_must_fit_in_half_of_the_frame() {
     // 周期 720 サンプル (15 ms) が音の半分 (720) にちょうど収まるときは操作する
     let mut channel = square_wave(1_440, 720, 0.5);
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), -720);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), -720);
 
     // 音の半分 (665) に収まらないときは操作しない
     let mut channel = square_wave(1_330, 720, 0.5);
     let original = channel.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     assert_eq!(channel, original);
 }
 
@@ -178,14 +178,14 @@ fn analysis_boundary_of_the_downsampled_length_is_inclusive() {
     let mut channel = vec![0.0f32; 123];
     let original = channel.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 8_000), 0);
+    assert_eq!(compress(&mut channels, 8_000, usize::MAX), 0);
     assert_eq!(channel, original);
 
     // 8 kHz: 間引き後 60 サンプル (ずらし幅の上限が下限と同じ 10) では操作する
     let mut channel = vec![0.0f32; 124];
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
     assert_eq!(
-        compress(&mut channels, 8_000),
+        compress(&mut channels, 8_000, usize::MAX),
         -(TIME_STRETCH_MIN_LAG as isize * 2)
     );
 }
@@ -195,7 +195,7 @@ fn noise_is_not_stretched() {
     let original = noise(960);
     let mut channel = original.clone();
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 48_000), 0);
+    assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     // 操作しなかったのでバッファは変わらない
     assert_eq!(channel, original);
 
@@ -213,7 +213,7 @@ fn silence_is_stretched() {
     let mut channel = vec![0.0f32; 960];
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
     assert_eq!(
-        compress(&mut channels, 48_000),
+        compress(&mut channels, 48_000, usize::MAX),
         -(TIME_STRETCH_MIN_LAG as isize * 12)
     );
 
@@ -342,7 +342,7 @@ fn supported_sample_rates_are_stretched() {
         let mut channel = original.clone();
         let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
         assert_eq!(
-            compress(&mut channels, sample_rate),
+            compress(&mut channels, sample_rate, usize::MAX),
             -expected,
             "sample_rate={sample_rate}"
         );

@@ -33,6 +33,7 @@
 //! ([`AudioPlayoutTimingStats::audio_delay_feedback`](crate::playout::timing::AudioPlayoutTimingStats::audio_delay_feedback))
 //! をそのまま [`AudioDelayFeedback::update`] へ渡す。
 
+use crate::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use crate::playout::timing::AudioDelayFeedbackObservation;
 
 /// 目標遅延の下限 (マイクロ秒)
@@ -220,7 +221,22 @@ impl AudioDelayFeedback {
     /// 窓が短いため、間隔を空けずに動かすと、増やした結果が現れる前に増やし続ける。
     ///
     /// 並べすぎの累積は、購読のやり直しで 0 に戻っても負の差で増やさない。
-    pub fn update(&mut self, observation: AudioDelayFeedbackObservation) {
+    ///
+    /// 遅れの p50 からは、時間圧縮の不感帯 ([`AUDIO_PLAYOUT_STRETCH_MIN_US`]) の分を引く。
+    /// 不感帯の中で意図して残した遅れは「予定の方が僅かにずれている」だけであり、目標を
+    /// 上げても playout は詰めないため、目標だけが上がり続けて遅延が伸びる。裾 (p95 と max)
+    /// は引かない。引くと「たまに大きく遅れた」事実まで消えてしまう。
+    ///
+    /// [`AudioDelayFeedback::snapshot`] が返す直近の観測は、引いた後の値である (閉ループが
+    /// 判断に使った値を見せる)。
+    pub fn update(&mut self, mut observation: AudioDelayFeedbackObservation) {
+        // 不感帯の中で playout が意図して残した遅れを、目標を動かす根拠から外す
+        if let Some(lateness_us) = observation.lateness_us.as_mut() {
+            lateness_us.p50 = lateness_us
+                .p50
+                .saturating_sub(AUDIO_PLAYOUT_STRETCH_MIN_US)
+                .max(0);
+        }
         self.latest = Some(observation);
         // 1 つでも観測を受けたら、以降は閉ループの目標を使う
         self.observed = true;

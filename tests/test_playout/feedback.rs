@@ -10,6 +10,7 @@ use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_START_US, AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback,
     AudioDelayFeedbackReason,
 };
+use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use shiguredo_moqt::playout::timing::{AudioDelayFeedbackObservation, TimingSummary};
 
 /// 1 件の値だけを持つ分布
@@ -94,10 +95,12 @@ fn uses_the_jitter_target_until_the_first_observation() {
 #[test]
 fn lateness_raises_the_target_by_the_clamped_step() {
     // 遅れが続くなら目標を増やす。増やす量は「遅れ - 許容 + 余白」であり、1 回の上限
-    // (40 ms) までにする。許容のすぐ上で往復しないよう余白を足す
+    // (40 ms) までにする。許容のすぐ上で往復しないよう余白を足す。遅れからは時間圧縮の
+    // 不感帯 (20 ms) の分を引く (playout が意図して残した遅れでは目標を動かさない)
     let mut feedback = AudioDelayFeedback::new();
 
-    // 遅れ 60 ms: 60 - 10 + 20 = 70 だが、1 回の上限 (40) までにする
+    // 遅れ 60 ms: 不感帯を引いた 40 ms に対して 40 - 10 + 20 = 50 だが、1 回の上限
+    // (40) までにする
     feedback.update(observation(0, Some(60_000), 0, 0));
     assert_eq!(
         feedback.feedback_target_us(),
@@ -110,10 +113,10 @@ fn lateness_raises_the_target_by_the_clamped_step() {
         "理由が遅れである"
     );
 
-    // 遅れ 20 ms: 20 - 10 + 20 = 30 だけ増やす
+    // 遅れ 40 ms: 不感帯を引いた 20 ms に対して 20 - 10 + 20 = 30 だけ増やす
     feedback.update(observation(
         AUDIO_DELAY_FEEDBACK_INTERVAL_US,
-        Some(20_000),
+        Some(40_000),
         0,
         0,
     ));
@@ -461,7 +464,11 @@ fn snapshot_reports_the_latest_observation() {
     let mut feedback = AudioDelayFeedback::new();
     feedback.update(observation(0, Some(60_000), 0, 0));
     let snapshot = feedback.snapshot();
-    assert_eq!(snapshot.lateness_p50_us, Some(60_000), "遅れの p50 を出す");
+    assert_eq!(
+        snapshot.lateness_p50_us,
+        Some(40_000),
+        "遅れの p50 を出す (時間圧縮の不感帯の 20 ms を引いた値)"
+    );
     assert_eq!(
         snapshot.start_delay_p50_us,
         Some(120_000),
@@ -477,6 +484,50 @@ fn snapshot_reports_the_latest_observation() {
     assert_eq!(
         feedback.snapshot().target_us,
         AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US
+    );
+}
+
+#[test]
+fn the_stretch_deadband_is_not_counted_as_lateness() {
+    // 不感帯 (20 ms) の中の遅れは、playout が時間圧縮せずに意図して残した分である。これを
+    // そのまま学習へ渡すと、playout は詰めないのに目標だけが上がり続けて遅延が伸びる。
+    // 裾 (p95 と max) は引かない (「たまに大きく遅れた」事実を消さないため)
+    let mut feedback = AudioDelayFeedback::new();
+
+    // 不感帯ちょうどの遅れ (20 ms) では目標を動かす根拠にしない
+    feedback.update(observation(0, Some(AUDIO_PLAYOUT_STRETCH_MIN_US), 0, 0));
+    assert_eq!(
+        feedback.snapshot().reason,
+        AudioDelayFeedbackReason::Waiting,
+        "不感帯の中の遅れでは目標を動かさないこと"
+    );
+    assert_eq!(
+        feedback.snapshot().lateness_p50_us,
+        Some(0),
+        "不感帯の分を引いた遅れを残すこと"
+    );
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_START_US,
+        "目標は初期値のままであること"
+    );
+
+    // 不感帯を超えた遅れ (40 ms) では、超えた分 (20 ms) を遅れとして扱う
+    feedback.update(observation(
+        AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+        Some(40_000),
+        0,
+        0,
+    ));
+    assert_eq!(
+        feedback.snapshot().reason,
+        AudioDelayFeedbackReason::Lateness,
+        "不感帯を超えた分は遅れとして扱うこと"
+    );
+    assert_eq!(
+        feedback.snapshot().lateness_p50_us,
+        Some(20_000),
+        "不感帯を超えた分だけを遅れとして残すこと"
     );
 }
 

@@ -321,12 +321,22 @@ fn cross_fade(target: &mut [f32], source: &[f32], fade: usize) {
 /// `[-1.0, 1.0]` に正規化された有限値であること。圧縮した結果は同じバッファへ書き、
 /// 使用する範囲は元の長さに戻り値を足した長さまでになる。
 ///
+/// 削る長さはピッチの周期で決まり、要求では選べない。周期が `max_length_change_samples` を
+/// 超えるときは操作しない。遅れより長い周期を削ると、削りすぎた分は「早すぎる」側へ振れ、
+/// 次の音でまた遅れて詰める往復になる。往復のたびに周期が 1 つ消えるため、声では
+/// 粗さ・ざらつきとして聞こえる。
+///
 /// # 戻り値
 ///
 /// 長さの変化 (サンプル数)。負が圧縮、0 が操作なし。0 のときバッファは変更しない。
 /// 0 になるのは、対応外のサンプルレート、空または長さの揃わないチャンネル、音が
-/// 短すぎるとき、相関が閾値未満で無音でもないとき。
-pub fn compress(channels: &mut [&mut [f32]], sample_rate: u32) -> isize {
+/// 短すぎるとき、相関が閾値未満で無音でもないとき、周期が `max_length_change_samples` を
+/// 超えるとき。
+pub fn compress(
+    channels: &mut [&mut [f32]],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+) -> isize {
     if channels.is_empty() {
         return 0;
     }
@@ -343,6 +353,10 @@ pub fn compress(channels: &mut [&mut [f32]], sample_rate: u32) -> isize {
         None => return 0,
     };
     let removed = pitch.samples;
+    if removed > max_length_change_samples {
+        // 遅れより長い周期しか無い。削ると行き過ぎるため、この音では詰めない
+        return 0;
+    }
     for channel in channels.iter_mut() {
         {
             // 切れ目の前後は同じバッファの隣り合う領域であるため、分割して借用する

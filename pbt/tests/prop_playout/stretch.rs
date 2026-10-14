@@ -33,6 +33,26 @@ fn sample_length(ctx: &mut noprop::TestCaseContext) -> usize {
     }
 }
 
+/// 削ってよい長さの上限 (サンプル数) を選ぶ
+///
+/// 無制限、0、周期の下限の前後、音の長さの半分、音の長さの範囲を混ぜて、上限の分岐を
+/// ひととおり踏む。
+fn sample_max_length_change_samples(
+    ctx: &mut noprop::TestCaseContext,
+    length: usize,
+    factor: usize,
+) -> usize {
+    let period_floor = TIME_STRETCH_MIN_LAG * factor;
+    match noprop::sample_usize_in(ctx, 0..6) {
+        0 => usize::MAX,
+        1 => 0,
+        2 => period_floor - 1,
+        3 => period_floor,
+        4 => length / 2,
+        _ => noprop::sample_usize_in(ctx, 0..=length),
+    }
+}
+
 /// 任意の音声のサンプル列を 1 チャンネル分生成する
 ///
 /// ノイズ (操作されない経路)、周期的な矩形波 (操作される経路)、無音 (相関に関係なく
@@ -89,8 +109,8 @@ fn sample_conceal_us(ctx: &mut noprop::TestCaseContext) -> i64 {
     }
 }
 
-/// compress は 0 または負の長さの変化を返し、変更しなかった範囲と詰めた範囲が
-/// 元のサンプルと一致する
+/// compress は 0 または負の長さの変化を返し、削った長さは上限を超えず、変更しなかった
+/// 範囲と詰めた範囲が元のサンプルと一致する
 #[test]
 fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -100,17 +120,22 @@ fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::Test
         let channel_count = noprop::sample_usize_in(ctx, 1..=2);
         let mut channels = sample_channels(ctx, length, channel_count);
         let original = channels.clone();
+        let max_length_change_samples = sample_max_length_change_samples(ctx, length, factor);
         let mut references: Vec<&mut [f32]> = channels
             .iter_mut()
             .map(|channel| channel.as_mut_slice())
             .collect();
-        let change = compress(&mut references, sample_rate);
+        let change = compress(&mut references, sample_rate, max_length_change_samples);
         assert!(change <= 0);
         if change == 0 {
             // 操作しなかったときはバッファを変えない
             assert_eq!(channels, original);
         } else {
             let removed = (-change) as usize;
+            assert!(
+                removed <= max_length_change_samples,
+                "上限を超えて削った: removed={removed} max={max_length_change_samples}"
+            );
             assert_eq!(removed % factor, 0);
             assert!(
                 (TIME_STRETCH_MIN_LAG * factor..=TIME_STRETCH_MAX_LAG * factor).contains(&removed)

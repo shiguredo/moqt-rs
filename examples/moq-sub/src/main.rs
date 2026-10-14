@@ -1073,6 +1073,9 @@ struct AppliedAudioPlayout {
 /// 1 つ分を削って詰める。削れる長さは周期 (2.5 ms 以上 15 ms 以下) で決まり、要求された
 /// 長さとは一致しないため、実際に削れた長さを `compressed_us` として返す。どちらも
 /// `confirm_stretch` と `confirm_concealment` へそのまま渡せる。
+///
+/// 削ってよい長さは `compress_us` までとする。周期がこれを超える音では削らない
+/// ([`stretch::compress`] が上限で判断する)。
 fn apply_audio_playout(
     audio: &DecodedAudioFrame,
     last_played_audio: Option<&PlayedAudio>,
@@ -1097,7 +1100,14 @@ fn apply_audio_playout(
             .iter_mut()
             .map(|channel| channel.as_mut_slice())
             .collect();
-        let removed = stretch::compress(&mut channel_slices, sample_rate);
+        // 削ってよい長さの上限は、目標に対して遅れている分までにする。周期がこれを超える
+        // 音では削らない。削ると行き過ぎて「早すぎる」側へ振れ、次の音でまた遅れて詰める
+        // 往復になり、往復のたびに周期が 1 つ消える
+        let removed = stretch::compress(
+            &mut channel_slices,
+            sample_rate,
+            us_to_samples(compress_us, sample_rate),
+        );
         if removed < 0 {
             // 削った分だけ後ろを詰めた状態で使う範囲が短くなる
             let removed_frames = removed.unsigned_abs().min(used_frames);
@@ -1296,6 +1306,18 @@ fn us_to_samples_ceil(us: i64, sample_rate: u32) -> usize {
     usize::try_from(scaled.saturating_add(999_999) / 1_000_000).unwrap_or(usize::MAX)
 }
 
+/// マイクロ秒に相当するサンプル数 (四捨五入)
+///
+/// 時間圧縮で削ってよい長さの上限を求めるときに使う (`samples_to_us` と逆向きの丸め)。
+/// 0 以下とサンプルレートが 0 のときは 0 を返す。
+fn us_to_samples(us: i64, sample_rate: u32) -> usize {
+    if us <= 0 || sample_rate == 0 {
+        return 0;
+    }
+    let scaled = us.saturating_mul(i64::from(sample_rate));
+    usize::try_from(scaled.saturating_add(500_000) / 1_000_000).unwrap_or(usize::MAX)
+}
+
 /// サンプル数をマイクロ秒へ直す (四捨五入)
 ///
 /// `stretch` がマイクロ秒をサンプル数へ直すときと同じ丸めにする。サンプルレートが 0 の
@@ -1473,6 +1495,28 @@ mod tests {
         assert_eq!(us_to_samples_ceil(-1, 48_000), 0, "負の長さは 0 であること");
         assert_eq!(
             us_to_samples_ceil(1_000, 0),
+            0,
+            "サンプルレート 0 は 0 であること"
+        );
+        assert_eq!(
+            us_to_samples(20_000, 48_000),
+            960,
+            "20 ms は 48 kHz で 960 サンプルであること"
+        );
+        assert_eq!(
+            us_to_samples(10, 48_000),
+            0,
+            "1 サンプルの半分未満は 0 サンプルへ切り捨てること"
+        );
+        assert_eq!(
+            us_to_samples(11, 48_000),
+            1,
+            "1 サンプルの半分を超える長さは 1 サンプルへ四捨五入すること"
+        );
+        assert_eq!(us_to_samples(0, 48_000), 0, "0 は 0 であること");
+        assert_eq!(us_to_samples(-1, 48_000), 0, "負の長さは 0 であること");
+        assert_eq!(
+            us_to_samples(1_000, 0),
             0,
             "サンプルレート 0 は 0 であること"
         );
@@ -1786,10 +1830,10 @@ mod tests {
         let target_us = timeline
             .present_us(Track::Audio, audio.pts_us)
             .expect("観測したので音声の目標が決まること");
-        // 目標の時刻に届いた音を予約する。今から鳴らせる最も早い時刻 (10 ms) へずれ、
-        // ずれた分だけ詰める要求が出る
+        // 目標の時刻に届いた音を、10 ms 過ぎた時点で予約する。今から鳴らせる最も早い時刻
+        // (今 + 10 ms) へずれ、ずれた分 (20 ms) だけ詰める要求が出る
         let arrangement = assembly
-            .arrange(&mut timeline, &audio, target_us, target_us, true)
+            .arrange(&mut timeline, &audio, target_us + 10_000, target_us, true)
             .expect("目標に間に合う音は鳴ると決まること");
         assert_eq!(arrangement.duration_us, 20_000, "音の長さを返すこと");
         let play = assembly
@@ -1835,13 +1879,13 @@ mod tests {
         );
         assert_eq!(
             snapshot.last_start_delay_us,
-            Some(10_000),
+            Some(20_000),
             "到着から鳴り始めるまでを記録すること"
         );
         assert_eq!(
             snapshot.last_lateness_us,
-            Some(10_000),
-            "予定からどれだけ過ぎて鳴るかを記録すること"
+            Some(20_000),
+            "予定からどれだけ過ぎて鳴るかを記録すること (不感帯を引く前の値)"
         );
     }
 
@@ -1886,8 +1930,8 @@ mod tests {
         );
         assert_eq!(
             feedback.lateness_p50_us,
-            Some(10_000),
-            "予定を過ぎて鳴った量が閉ループへ届くこと"
+            Some(0),
+            "予定を過ぎて鳴った量が閉ループへ届くこと (不感帯の 20 ms を引いた後)"
         );
         // 閉ループが決めた目標 (観測が届いた後は初期値の 100 ms) が時間軸へ反映され、
         // 以降の音はその目標で並ぶ

@@ -20,6 +20,24 @@ pub const AUDIO_PLAYOUT_BACKLOG_US: i64 = 220_000;
 /// 鳴らす時刻の下限 (今からどれだけ先にするか、マイクロ秒)
 pub const AUDIO_PLAYOUT_MIN_LEAD_US: i64 = 10_000;
 
+/// 時間圧縮を始める遅れ (マイクロ秒)
+///
+/// 目標に対する遅れがこれ未満のときは詰めない。時間圧縮は波形のピッチ周期 (2.5 ms 以上
+/// 15 ms 以下) を 1 つ削る操作であり、削る長さは周期で決まって要求では選べない。遅れが
+/// 数 ms しかないときに動かすと、削った分だけ「早すぎる」側へ振れ、次の音でまた遅れて
+/// 詰める往復になる。往復のたびに周期が 1 つ消えるため、声では粗さ・ざらつきとして聞こえる。
+///
+/// この値は、時計の対応付けが意図して無視する幅 ([`crate::playout::timeline::TIMELINE_SYNC_MIN_DELTA_US`]
+/// の 30 ms) の内側で吸収できる遅れである。時計層が無視した誤差を音の加工で打ち消すと、
+/// 加工だけが増えて遅れは減らない。moqt-js の実測 (2026-10-14、実リレー経由の 60 秒、
+/// 16 kHz モノラル) では、遅れが約 2.5 ms で安定しているのに 60 秒の再生で 2727 ms を
+/// 詰めていた。この値にすると 722〜780 ms まで減り、鳴り始めの遅れは 98 ms から
+/// 113〜114 ms へ僅かに伸びるだけであった。
+///
+/// 閉ループ ([`crate::playout::feedback`]) は、この不感帯の中で意図して残した遅れを
+/// 目標を動かす根拠にしない。
+pub const AUDIO_PLAYOUT_STRETCH_MIN_US: i64 = 20_000;
+
 /// 目標から離れすぎとみなす量 (マイクロ秒)
 ///
 /// 経路の停止などで目標から大きく離れた音を鳴らすと、その分だけ音が遅れたままになる。
@@ -214,6 +232,11 @@ impl AudioPlayoutScheduler {
     /// 基準へ並べ直す (並べ直すと媒体時刻が跳び、鳴っている音の続きが前へずれるため)。
     /// 前の音に要求した詰める量と補間の長さが返ってきていなければ、適用されなかった
     /// ものとして扱う (どちらの並べ方でも同じ)。
+    ///
+    /// 目標に間に合わない音へ要求する詰める量は、遅れが
+    /// [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときは 0 にする。返した `compress_us` は
+    /// 削ってよい長さの上限でもあるため、呼び出し側はそのまま
+    /// [`crate::playout::stretch::compress`] へ渡すこと。
     pub fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision {
         // 前の音に要求した詰める量が返ってきていなければ、適用されなかったものとして扱う
         self.confirm_stretch(0);
@@ -261,8 +284,15 @@ impl AudioPlayoutScheduler {
             }
         }
         self.lateness_us = lateness_us;
-        // 詰める量は、遅れの分と音の長さの半分の小さい方にする
-        let compress_us = lateness_us.min(input.duration_us.max(0) / 2);
+        // 詰める量は、遅れの分と音の長さの半分の小さい方にする (1 つの音で詰めすぎない)。
+        // 遅れが [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときは詰めない (不感帯)。削れる
+        // 長さは波形の周期で決まるため、周期がこの量を超える音でも詰めない (呼び出し側が
+        // [`crate::playout::stretch::compress`] へ上限として渡す)
+        let compress_us = if lateness_us >= AUDIO_PLAYOUT_STRETCH_MIN_US {
+            lateness_us.min(input.duration_us.max(0) / 2)
+        } else {
+            0
+        };
         self.requested_us = compress_us;
         self.last_end_us = Some(
             start_at_us

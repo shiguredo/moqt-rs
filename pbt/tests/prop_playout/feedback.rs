@@ -15,6 +15,7 @@ use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback, AudioDelayFeedbackReason,
     AudioDelayFeedbackSnapshot,
 };
+use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use shiguredo_moqt::playout::timing::{AudioDelayFeedbackObservation, TimingSummary};
 
 /// 操作の重み (観測 / 明示の上限の設定 / 明示の上限の解除 / リセット)
@@ -263,25 +264,53 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         noprop::Ratio::one_nth(3),
                         |ctx| noprop::sample_usize_in(ctx, 0..=2_500_000) as i64,
                     ));
-                    // 鳴り遅れの p50
+                    // 鳴り遅れの p50。閉ループは時間圧縮の不感帯 (20 ms) の分を引いてから
+                    // 判断するため、不感帯と許容の境界の前後を必ず含める
                     let lateness_p50_us = match noprop::sample_weighted_index(ctx, &LATENESS_WEIGHTS)
                     {
                         0 => None,
                         1 => Some(
-                            noprop::sample_usize_in(
+                            noprop::sample_with_boundaries(
                                 ctx,
-                                0..=AUDIO_DELAY_FEEDBACK_TOLERANCE_US as usize,
-                            ) as i64,
+                                &[
+                                    0,
+                                    AUDIO_PLAYOUT_STRETCH_MIN_US - 1,
+                                    AUDIO_PLAYOUT_STRETCH_MIN_US,
+                                ],
+                                noprop::Ratio::one_nth(3),
+                                |ctx| {
+                                    noprop::sample_usize_in(
+                                        ctx,
+                                        0..=AUDIO_DELAY_FEEDBACK_TOLERANCE_US as usize,
+                                    ) as i64
+                                },
+                            ),
                         ),
-                        2 => Some(
-                            noprop::sample_usize_in(
-                                ctx,
-                                AUDIO_DELAY_FEEDBACK_TOLERANCE_US as usize
-                                    ..=AUDIO_DELAY_FEEDBACK_MAX_US as usize,
-                            ) as i64,
-                        ),
+                        2 => Some(noprop::sample_with_boundaries(
+                            ctx,
+                            &[
+                                AUDIO_PLAYOUT_STRETCH_MIN_US,
+                                AUDIO_PLAYOUT_STRETCH_MIN_US + AUDIO_DELAY_FEEDBACK_TOLERANCE_US - 1,
+                                AUDIO_PLAYOUT_STRETCH_MIN_US + AUDIO_DELAY_FEEDBACK_TOLERANCE_US,
+                                AUDIO_PLAYOUT_STRETCH_MIN_US + AUDIO_DELAY_FEEDBACK_TOLERANCE_US + 1,
+                            ],
+                            noprop::Ratio::one_nth(3),
+                            |ctx| {
+                                noprop::sample_usize_in(
+                                    ctx,
+                                    AUDIO_PLAYOUT_STRETCH_MIN_US as usize
+                                        ..=AUDIO_DELAY_FEEDBACK_MAX_US as usize,
+                                ) as i64
+                            },
+                        )),
                         _ => Some(noprop::sample_usize_in(ctx, 0..=2_000_000) as i64),
                     };
+                    // 閉ループが根拠にする遅れは、不感帯の分を引いた値である
+                    let effective_lateness_p50_us = lateness_p50_us.map(|lateness_p50_us| {
+                        lateness_p50_us
+                            .saturating_sub(AUDIO_PLAYOUT_STRETCH_MIN_US)
+                            .max(0)
+                    });
                     // 並べすぎの累積。購読のやり直しに相当する「戻る」も混ぜる
                     match noprop::sample_weighted_index(ctx, &BACKLOG_WEIGHTS) {
                         0 => {}
@@ -330,6 +359,11 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     let snapshot = feedback.snapshot();
                     let ceiling_us = feedback.ceiling_us();
                     let (lower_us, upper_us) = target_limits(ceiling_us);
+                    // 計器に出す遅れは、閉ループが判断に使った値 (不感帯を引いた後) である
+                    assert_eq!(
+                        snapshot.lateness_p50_us, effective_lateness_p50_us,
+                        "計器の遅れが不感帯を引いた値でない: lateness={lateness_p50_us:?} {snapshot:?}"
+                    );
                     assert!(
                         (lower_us..=upper_us).contains(&snapshot.target_us),
                         "目標が上下限の外に出た: target={} lower={lower_us} upper={upper_us} {snapshot:?}",
@@ -384,9 +418,11 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                                 "並べすぎが増えていないのに理由が遅れになった: {snapshot:?}"
                             );
                             assert!(
-                                lateness_p50_us.is_some_and(|lateness_p50_us| lateness_p50_us
-                                    > AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
-                                "遅れが許容の中なのに理由が遅れになった: lateness={lateness_p50_us:?}"
+                                effective_lateness_p50_us.is_some_and(
+                                    |effective_lateness_p50_us| effective_lateness_p50_us
+                                        > AUDIO_DELAY_FEEDBACK_TOLERANCE_US
+                                ),
+                                "不感帯を引いた遅れが許容の中なのに理由が遅れになった: lateness={lateness_p50_us:?} effective={effective_lateness_p50_us:?}"
                             );
                             check_increase(snapshot, upper_us, &saw_increase);
                         }
@@ -416,9 +452,11 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                                 "並べすぎが増えているのに理由が収束になった: {snapshot:?}"
                             );
                             assert!(
-                                lateness_p50_us.is_some_and(|lateness_p50_us| lateness_p50_us
-                                    <= AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
-                                "遅れが許容の外なのに理由が収束になった: lateness={lateness_p50_us:?}"
+                                effective_lateness_p50_us.is_some_and(
+                                    |effective_lateness_p50_us| effective_lateness_p50_us
+                                        <= AUDIO_DELAY_FEEDBACK_TOLERANCE_US
+                                ),
+                                "不感帯を引いた遅れが許容の外なのに理由が収束になった: lateness={lateness_p50_us:?} effective={effective_lateness_p50_us:?}"
                             );
                             assert!(
                                 snapshot.last_change_us <= 0,

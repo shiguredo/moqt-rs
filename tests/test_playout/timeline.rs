@@ -585,7 +585,11 @@ fn delay_breakdown_reports_the_closed_loop_state() {
         "直前の増分が出る"
     );
     assert_eq!(after.adjustments, 1, "動かした回数が出る");
-    assert_eq!(after.lateness_p50_us, Some(60_000), "遅れの p50 が出る");
+    assert_eq!(
+        after.lateness_p50_us,
+        Some(40_000),
+        "遅れの p50 が出る (不感帯の 20 ms を引いた値)"
+    );
     assert_eq!(
         after.start_delay_p50_us,
         Some(120_000),
