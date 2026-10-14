@@ -1,7 +1,7 @@
 # 映像の Group 長を時間ベースにし fps に依存しないようにする
 
 - Created: 2026-09-18
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-video-gop-duration
 - Polished: 2026-09-27
 - Updated: 2026-10-10
@@ -36,3 +36,84 @@
 - フレーム落ちやエンコード遅延があっても Group が `gop_duration` + 1 フレーム程度で進むこと (判定は受信フレームの `timestamp_us` 差分のため、`gop_duration` 経過直後に連続してフレームが落ちた場合はその分だけ伸びる)
 - カタログの `maxGopDuration` / `maxGroupDuration` が実測値と整合すること
 - `examples/README.md` のオプション表が追随していること
+
+## 解決方法
+
+映像の Group 長をフレーム数ではなく時間で指定できるようにした。`--keyframe-interval` (フレーム数、
+既定 60) を削除し、`--gop-duration` (ms、既定 2000) を追加する。入力フレームの Timestamp の
+差分が `gop_duration` に達したらキーフレームを強制して新しい Group を開始するため、fps を
+変えても Group の実時間長は変わらない。
+
+### 変更内容
+
+- `examples/moq-pub/src/gop.rs` (新規): `GopTracker` (Group の開始時刻とキーフレーム要求の状態) と、
+  ミリ秒 → マイクロ秒の換算、キーフレーム間隔のフレーム数上限 `ceil(fps × gop_duration / 1000)`、
+  カタログへ宣言する値 `gop_duration + ceil(1000 / fps)` ms を置く
+- `examples/moq-pub/src/cli.rs`: `--keyframe-interval` を削除し `--gop-duration` (既定 2000 ms) を
+  追加する。0 と数値でない値はエラーにし、`--input-mp4` と同時に指定した場合は無視する警告を出す
+- `examples/moq-pub/src/encoder.rs` と `examples/moq-pub/src/encoder/av1.rs` /
+  `vpx.rs` / `h264.rs` / `h265.rs`: `encode()` にキーフレーム強制の引数を追加し、各エンコーダの
+  `force_keyframe` / `force_key_frame` へ渡す。キーフレーム間隔の引数は「フレーム数上限
+  (安全弁)」とし、0 はエラーにする
+- `examples/moq-pub/src/pipeline.rs`: 入力フレームの Timestamp (live capture は epoch
+  マイクロ秒、MP4 の再エンコードは入力トラックのタイムスケール単位を換算した値) の差分で
+  キーフレームを要求する。Group を開始した出力フレームを観測するたびに基準を進め、実測の
+  Group 長を debug ログに出す
+- `examples/moq-pub/src/catalog.rs`: 映像トラックに `maxGopDuration` / `maxGroupDuration` を載せる
+- `examples/README.md` と `e2e-tests/tests/roundtrip.rs`: `--gop-duration` の説明と用語を追随させる
+
+### 判断と根拠
+
+- **Group 長は時間で指定する**: Group はキーフレームで始まるため (draft-ietf-moq-loc-04 §4.2)、
+  キーフレーム間隔をフレーム数で指定すると Group の実時間長が fps に依存する (5 fps で 12 秒 /
+  120 fps で 0.5 秒)。MSF カタログの `maxGopDuration` / `maxGroupDuration` も fps ごとの値になり、
+  1 つの値で実態を表せない
+- **判定は入力フレームの Timestamp の差分で行う**: live capture の Timestamp は経路によって
+  起源が異なるため、絶対値ではなく差分を使う
+- **要求したキーフレームを観測するまで再要求しない**: エンコーダによっては出力が非同期に
+  返るため、要求したフレームの出力が同じ呼び出しで返らないと、次の入力フレームでも要求が
+  重なってキーフレームが連続し 1 フレームの Group ができる。要求を記録して観測まで抑える
+- **Group 開始の基準は出力キーフレームの観測で進める**: エンコーダがフレーム数の上限で
+  自主的に出したキーフレームでも基準を進めないと、その直後に時間ベースの要求が重なって
+  1 フレームの Group ができる
+- **安全弁のフレーム数は切り上げる**: 切り下げると、公称 fps でも安全弁が時間ベースの要求より
+  先に発火して Group を短縮し得る。0 を渡すとエンコーダによって上限を設定せず既定値に委ねるか、
+  上限無しとして扱われるため受け付けない
+- **カタログの宣言は `gop_duration` + 1 フレーム分**: 判定は入力フレームの Timestamp の差分で
+  行うため、境界の直後にフレームが無いと次の入力まで Group が伸びる。Group は 1 キーフレーム
+  間隔 = 1 GOP であるため `maxGopDuration` / `maxGroupDuration` に同じ値を載せる
+  (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。入力のゆらぎが 1 フレームの切り上げ分を超える場合、
+  フレームが落ちた場合、`--input-mp4-reencode` で可変フレーム長の MP4 を入力にした場合は実測が
+  この値を超え得る (宣言は公称 fps で境界の 1 フレームを見込んだ値であり、Group 長の厳密な
+  上限ではない)
+- **MP4 パススルーでは宣言しない**: Group が MP4 のキーフレームで進み `--gop-duration` を使わない
+  ため、`maxGopDuration` / `maxGroupDuration` を載せない
+
+### テスト
+
+- `examples/moq-pub/src/gop.rs`: 5 / 30 / 120 fps で Group が同じ実時間長で進むこと、境界
+  (未満・ちょうど・超過) と要求直後に再要求しないこと、安全弁のキーフレームの直後で要求しない
+  こと、フレーム落ち・ゆらぎ・時刻の巻き戻り・桁あふれ・fps 0 の扱い
+- `examples/moq-pub/src/cli.rs`: `--gop-duration` の既定値・上書き・0 と数値でない値の拒否、
+  削除した `--keyframe-interval` の拒否
+- `examples/moq-pub/src/catalog.rs`: 同じ値が `maxGopDuration` と `maxGroupDuration` に載ることと、
+  宣言しない場合に載らないこと
+- `examples/moq-pub/src/encoder/av1.rs` と `vpx.rs`: 強制したフレームがキーフレームとして出力
+  されること (AV1 / VP8 / VP9)
+- `examples/moq-pub/src/pipeline.rs`: 出力フレームの Timestamp の換算
+
+### スコープ外 (別 issue)
+
+- H.264 / H.265 の強制キーフレームのエンコードテストは、依存する `shiguredo_video_toolbox`
+  2026.1.1 が NV12 入力を扱えず失敗するため入れていない (同クレートの更新で解消する)
+- `pipeline::run` と `GopTracker` の結線 (キーフレーム要求・観測の呼び出し位置) は、
+  `pipeline::run` を走らせるテストが無く単体テストで守られていない
+
+### 確認
+
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通る
+- 実 relay に `moq-pub` を接続し、Group の実測長が 5 fps で 1993〜2004 ms、30 fps で
+  1982〜2002 ms、120 fps で 1995〜2000 ms (いずれも平均 2000 ms) であることを debug ログで
+  確認した。カタログの宣言値 (5 fps: 2200 / 30 fps: 2034 / 120 fps: 2009 ms) は実測を上回っている
+- `e2e-tests` の publish / subscribe 往復が実 relay で通る
