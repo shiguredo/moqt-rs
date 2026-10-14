@@ -1,6 +1,6 @@
 # CODEBASE
 
-- **クライアントとサーバーのみでリレーには対応しないこと**
+- **クライアントとサーバーのみで MoQ リレーには対応しないこと**
 
 - 良い設計は良いコードを生む
 - より良い設計のためには破壊的変更を恐れないこと
@@ -27,9 +27,9 @@
 ## MOQT
 
 - 最新ドラフトに準拠すること
-- 実 relay が必要な E2E テストは `#[ignore]` を付け、CI が `--ignored` を付けて必ず実行すること (`e2e-tests/`)。通常の `cargo test` では実行しない
+- 実際の MoQ リレーが必要な E2E テストは `#[ignore]` を付け、CI が `--ignored` を付けて必ず実行すること (`e2e-tests/`)。通常の `cargo test` では実行しない
 - `Session` (State Machine) は 1 本の `MOQT Transport Session` に閉じた protocol state machine として設計すること
 - `Session` は 1 peer 間の endpoint-local な state machine として扱うこと
 - MOQT draft の issue は draft 番号を含めて {SEQUENCE}-draft-{NUM}-{short-description}.md という命名規則で作成すること
   - 例: `0001-draft-18-support-for-joins.md`
-- **リレーの実装について書いてよいのは「Sora の Media over QUIC 実装であり、リレー機能を提供する」ということだけである**
+- **MoQ リレーの実装について書いてよいのは「Sora の Media over QUIC 実装であり、MoQ リレー機能を提供する」ということだけである**
