@@ -1,7 +1,7 @@
 # 配信側の TIMESTAMP 補正が一瞬の読み出し遅れで動くのを直す
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/fix-audio-timestamp-clock-rise-hold
 - Polished: {YYYY-MM-DD}
 
@@ -66,4 +66,29 @@ moqt-js の最新 (2026-10-10) の判定を移植する。
 
 ## 解決方法
 
-(対応時に記入)
+- `src/audio_clock.rs` に `AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US` (0.5 秒)、
+  `AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND` (100 ms/秒)、
+  `AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US` (5 秒) を追加した
+- `AudioTimestampClock` に `rise_hold_since_us` を追加し、`update_applied_offset` の
+  段差の取り直しの後に「床が上がるとき」の分岐を足した。保留中なら保留の長さ未満の間は
+  何もせず、保留していなければ上がり方を調べて速すぎるなら保留を始める
+- `rise_is_too_fast_for_clock` を追加した。`[読んだ時刻 − (2 秒 + 0.5 秒), 読んだ時刻 −
+  0.5 秒]` の窓の最小値との差が `100 ms/秒 × 0.5 秒` を超えるかで決める。前の窓が無ければ
+  速くないものとする
+- 段差の取り直しと `reset` では保留を消す。下がる方向と段差は従来どおり待たずに合わせる
+- モジュール doc を「2 つの動き」から「3 つの動き」(ドリフト / 段差 / 読み出しの遅れ) へ
+  直した
+- テスト: `tests/test_audio_clock.rs` に `apply_keeps_the_offset_on_a_transient_read_delay`
+  (95 ms の遅れが 3 秒続いて戻っても補正を動かさない) と
+  `apply_follows_a_persistent_read_delay_after_the_hold` (保留と窓の長さより長く続いたら
+  その水準へ合わせる) を追加した
+- PBT: `pbt/tests/prop_audio_clock.rs` のモデルに保留の分岐と
+  `rise_is_too_fast_for_clock` を写し、`ModelOutcome` に `rise_held` を足した。生成器に
+  「読み出しの遅れが増えて続く」動かし方を足し、保留の長さを超える長さも混ぜた。補正の
+  検証は「窓の最小値以下である」へ直し (保留中は窓の最小値より小さい)、保留した場合の
+  到達も数えるようにした
+- 検証: 保留の分岐を外した状態で `apply_keeps_the_offset_on_a_transient_read_delay` が
+  失敗することを確かめ、戻したうえで成功することを確かめた
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
