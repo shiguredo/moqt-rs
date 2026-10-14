@@ -1,7 +1,7 @@
 # 配信側の音声の遅れを、段ごとに定期的にログへ出す
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/add-audio-publish-lag-stats
 - Polished: {YYYY-MM-DD}
 
@@ -42,4 +42,20 @@ moqt-rs には `AudioPublishCatchUp::snapshot()` があり、読み出しの遅�
 
 ## 解決方法
 
-(対応時に記入)
+- `examples/moq-pub/src/pipeline.rs` の配信のループの tick (100 ms) で、10 秒ごとに
+  `AudioPublishCatchUp::snapshot()` の内容を `info` で 1 行に出すようにした
+- 整形は `format_audio_publish_stats` に切り出した。読み出しの遅れ・符号化のキューの長さと
+  フレーム数・遅れ・上限・床・捨てた数と長さ・追いつきの最中か・始めた回数・送信の
+  キューの長さとフレーム数・読んでから送り終えるまでの長さとその最大を出す
+- 音声を配信していないとき (`--no-audio` / `--input-mp4`) は出さない
+- テスト: `audio_publish_stats_reports_every_stage` を追加し、段ごとの値がすべて 1 行に
+  含まれることを固定した
+- 検証 (ローカル): relay に対して publisher を起動し、次の 1 行が出ることを確認した
+
+```text
+Audio publish stats: read_lag=0ms pending=20ms/1 lag=Some(20)ms limit=60ms floor=Some(0)ms dropped=0(0ms) catching_up=false starts=0 send_queue=0ms/0 send_lag=None max_send_lag=None
+```
+
+- 検証: E2E Test が 2 件とも成功する
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
