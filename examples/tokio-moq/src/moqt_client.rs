@@ -1429,11 +1429,16 @@ impl MoqtClient {
     }
 
     /// PUBLISH を発行し、REQUEST_OK または REQUEST_ERROR が返るまで待つ (publisher 側)
+    ///
+    /// `track_properties` は PUBLISH に載せる Track Properties である
+    /// (draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §8.4 (Track and Object Properties))。
+    /// 不要な場合は空を渡す。
     pub async fn publish_track(
         &mut self,
         namespace: TrackNamespace,
         track_name: Vec<u8>,
         track_alias: u64,
+        track_properties: TrackProperties,
     ) -> Result<u64> {
         let request_id = {
             let mut session = lock_session(&self.session);
@@ -1443,7 +1448,7 @@ impl MoqtClient {
                     track_name,
                     track_alias,
                     with_auth_parameters(MessageParameters::new(), &self.auth_tokens),
-                    TrackProperties::new(),
+                    track_properties,
                 )
                 .map_err(|e| TransportError::Internal(format!("send_publish: {e}")))?
         };

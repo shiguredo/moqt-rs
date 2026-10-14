@@ -9,6 +9,11 @@
 //!
 //! 判定は入力フレームの Timestamp の差分だけで行う。live capture の Timestamp は
 //! 起源が経路によって異なるため、絶対値ではなく差分を使う。
+//!
+//! 購読者からの `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) による Group 開始の
+//! 前倒しもここで扱う。直前の Group が最小長に達するまでは前倒しせず、達した最初の入力
+//! フレームでキーフレームを要求する (同節が認める遅延)。`--gop-duration` による通常の境界が
+//! 先に来た場合は、そこで Group が始まって要求は満たされる。
 
 /// `--gop-duration` のミリ秒をマイクロ秒へ換算する
 ///
@@ -16,6 +21,26 @@
 /// `u32::MAX × 1000` は `u64` に収まるため桁あふれしない。
 fn gop_duration_us(gop_duration_ms: u32) -> u64 {
     u64::from(gop_duration_ms) * 1_000
+}
+
+/// `NEW_GROUP_REQUEST` に応じてキーフレームを要求するときの最小 Group 長 (マイクロ秒)
+///
+/// draft-ietf-moq-transport-22 §9.20.19 は、Group 長の最小値を実現するなどの実装固有の
+/// 理由で `NEW_GROUP_REQUEST` を遅延させてよい (MAY) と定める。連続する要求で
+/// キーフレームが乱発しないよう、直前の Group がこの長さに達するまでは要求を保留する。
+const MIN_GROUP_DURATION_US: u64 = 300_000;
+
+/// `NEW_GROUP_REQUEST` の値を受け付けるかどうかを返す
+///
+/// draft-ietf-moq-transport-22 §9.20.19 は、値が 0 (購読者が Group の情報を持たない) か、
+/// 現在の Group より大きい場合に、現在の Group を終えて新しい Group を開始することを
+/// SHOULD とする。`current_group_id` は直前に開始した Group の ID であり、まだ Group を
+/// 開始していない場合は `None`。
+pub(crate) fn accepts_new_group_request(next_group_id: u64, current_group_id: Option<u64>) -> bool {
+    match current_group_id {
+        None => true,
+        Some(current_group_id) => next_group_id == 0 || next_group_id > current_group_id,
+    }
 }
 
 /// 映像 Group の開始時刻を追跡し、キーフレームを強制する入力フレームを決める
@@ -34,6 +59,10 @@ pub(crate) struct GopTracker {
     ///
     /// 観測するまでの再要求を抑える。
     pending_keyframe: bool,
+    /// `NEW_GROUP_REQUEST` により、新しい Group の開始を予約しているかどうか
+    ///
+    /// 実際の要求は次の入力フレームで行う。直前の Group が最小長に達するまでは保留する。
+    new_group_request: bool,
     /// Group 長のしきい値 (マイクロ秒)
     gop_duration_us: u64,
 }
@@ -47,6 +76,7 @@ impl GopTracker {
         Self {
             group_start_us: None,
             pending_keyframe: false,
+            new_group_request: false,
             gop_duration_us: gop_duration_us(gop_duration_ms),
         }
     }
@@ -59,6 +89,10 @@ impl GopTracker {
     /// `timestamp_us` が基準より小さい場合 (入力の時刻が巻き戻った場合) は経過時間を
     /// 0 として扱い、要求しない。
     ///
+    /// [`Self::request_new_group`] で予約された要求は、直前の Group が
+    /// [`MIN_GROUP_DURATION_US`] に達した最初の呼び出しで要求になり、達するまでは保留する
+    /// (保留した要求は破棄しない)。
+    ///
     /// 要求したキーフレームを観測できないままエンコーダがキーフレームを出さなくなった場合、
     /// Group を閉じるのはエンコーダのフレーム数上限だけになり、その実時間長は実際の
     /// フレーム間隔に依存する。キーフレームを返さないエンコーダは異常であり、再要求すると
@@ -68,34 +102,65 @@ impl GopTracker {
         // 非同期な Video Toolbox など)、出力を観測するまで基準が古いままで、次の入力
         // フレームでも要求を繰り返してしまう。要求が重なるとキーフレームが連続し、
         // 1 フレームの Group ができる
-        if self.pending_keyframe || !self.is_keyframe_due(timestamp_us) {
+        if self.pending_keyframe {
             return false;
         }
+        // NEW_GROUP_REQUEST による要求は、直前の Group が最小長に達するまで保留する。
+        // 保留している要求は破棄しない
+        let new_group = self.new_group_request && self.min_group_duration_elapsed(timestamp_us);
+        if !new_group && !self.is_keyframe_due(timestamp_us) {
+            return false;
+        }
+        self.new_group_request = false;
         self.pending_keyframe = true;
         true
     }
 
+    /// `NEW_GROUP_REQUEST` による新しい Group の開始を予約する
+    ///
+    /// 実際のキーフレームの要求は、直前の Group が最小長に達した後の最初の入力フレームで
+    /// 行う。保留の条件は [`MIN_GROUP_DURATION_US`] を参照すること。
+    pub(crate) fn request_new_group(&mut self) {
+        self.new_group_request = true;
+    }
+
+    /// 直前の Group が最小長に達しているかどうか
+    ///
+    /// まだ Group を開始していない場合は `false` を返す。先頭の Group は最初のキーフレームで
+    /// 始まっており、その出力を観測する前に要求すると 1 フレームの Group ができる。
+    fn min_group_duration_elapsed(&self, timestamp_us: u64) -> bool {
+        self.elapsed_us(timestamp_us)
+            .is_some_and(|elapsed_us| elapsed_us >= MIN_GROUP_DURATION_US)
+    }
+
     /// キーフレームの要求が必要かどうかだけを返す (状態は変えない)
     fn is_keyframe_due(&self, timestamp_us: u64) -> bool {
-        match self.group_start_us {
-            None => false,
-            Some(group_start_us) => {
-                timestamp_us.saturating_sub(group_start_us) >= self.gop_duration_us
-            }
-        }
+        self.elapsed_us(timestamp_us)
+            .is_some_and(|elapsed_us| elapsed_us >= self.gop_duration_us)
+    }
+
+    /// 直前の Group の開始からの経過時間 (マイクロ秒)
+    ///
+    /// まだ Group を開始していない場合は `None`。`timestamp_us` が基準より小さい場合
+    /// (入力の時刻が巻き戻った場合) は 0 として扱う。
+    fn elapsed_us(&self, timestamp_us: u64) -> Option<u64> {
+        self.group_start_us
+            .map(|group_start_us| timestamp_us.saturating_sub(group_start_us))
     }
 
     /// Group を開始した出力フレームを観測し、基準をその Timestamp へ進める
     ///
     /// 戻り値は直前の Group の長さ (マイクロ秒)。最初に観測した Group では `None` になる。
     /// 呼び出し側はカタログへ宣言した値と実測を突き合わせるために使える。
-    /// キーフレームの要求が未観測であれば、ここで観測済みにする。
+    ///
+    /// キーフレームの要求が未観測であれば、ここで観測済みにする。新しい Group が始まった
+    /// ため、保留していた `NEW_GROUP_REQUEST` も満たされたものとして消す (残すと、最小長が
+    /// 経過した時点で誰も要求していないキーフレームを強制し、短い Group が 1 つ増える)。
     pub(crate) fn observe_keyframe(&mut self, timestamp_us: u64) -> Option<u64> {
-        let previous_duration_us = self
-            .group_start_us
-            .map(|group_start_us| timestamp_us.saturating_sub(group_start_us));
+        let previous_duration_us = self.elapsed_us(timestamp_us);
         self.group_start_us = Some(timestamp_us);
         self.pending_keyframe = false;
+        self.new_group_request = false;
         previous_duration_us
     }
 }
@@ -245,6 +310,154 @@ mod tests {
         assert!(
             tracker.request_keyframe_if_due(4_033_333),
             "出力を観測した時刻から gop_duration が経過したら要求すること"
+        );
+    }
+
+    /// NEW_GROUP_REQUEST の値が 0 か現在の Group より大きいときだけ受け付けること
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.19 は、値が 0 (購読者が Group の情報を持たない)
+    /// か、現在の Group より大きい場合に新しい Group を開始することを SHOULD とする。
+    #[test]
+    fn accepts_new_group_request_only_for_zero_or_a_future_group() {
+        assert!(
+            accepts_new_group_request(0, Some(100)),
+            "値 0 は受け付けること"
+        );
+        assert!(
+            accepts_new_group_request(101, Some(100)),
+            "現在の Group より大きければ受け付けること"
+        );
+        assert!(
+            !accepts_new_group_request(100, Some(100)),
+            "現在の Group と同じ値は受け入れないこと"
+        );
+        assert!(
+            !accepts_new_group_request(99, Some(100)),
+            "過去の Group への要求は受け入れないこと"
+        );
+        assert!(
+            accepts_new_group_request(1, None),
+            "まだ Group を開始していなければ受け付けること"
+        );
+    }
+
+    /// NEW_GROUP_REQUEST が最小長の経過後、次の入力フレームでキーフレームを要求すること
+    #[test]
+    fn a_new_group_request_forces_a_keyframe_after_the_minimum_duration() {
+        let mut tracker = GopTracker::new(2_000);
+        tracker.observe_keyframe(0);
+        tracker.request_new_group();
+        assert!(
+            tracker.request_keyframe_if_due(MIN_GROUP_DURATION_US),
+            "NEW_GROUP_REQUEST で次の入力フレームから要求すること"
+        );
+        assert!(
+            !tracker.request_keyframe_if_due(MIN_GROUP_DURATION_US + 33_333),
+            "要求したキーフレームを観測するまで再要求しないこと"
+        );
+    }
+
+    /// NEW_GROUP_REQUEST は直前の Group が最小長に達するまで保留すること
+    ///
+    /// 連続する要求でキーフレームが乱発しないようにする (draft-ietf-moq-transport-22
+    /// §9.20.19 が認める遅延)。保留した要求は破棄しない。
+    #[test]
+    fn a_new_group_request_waits_for_the_minimum_group_duration() {
+        let mut tracker = GopTracker::new(2_000);
+        let group_start_us = 1_000_000;
+        tracker.observe_keyframe(group_start_us);
+        tracker.request_new_group();
+        assert!(
+            !tracker.request_keyframe_if_due(group_start_us + 100_000),
+            "最小長に達するまでは要求しないこと"
+        );
+        assert!(
+            !tracker.request_keyframe_if_due(group_start_us + MIN_GROUP_DURATION_US - 1),
+            "最小長の 1 マイクロ秒手前では要求しないこと"
+        );
+        assert!(
+            tracker.request_keyframe_if_due(group_start_us + MIN_GROUP_DURATION_US),
+            "最小長に達した最初の入力フレームで要求すること"
+        );
+    }
+
+    /// キーフレームの観測で NEW_GROUP_REQUEST が満たされること
+    ///
+    /// キーフレームの要求が飛行中に届いた NEW_GROUP_REQUEST は、その出力の観測で新しい
+    /// Group が始まるため満たされる。保留したままにすると、新しい Group の最小長が経過した
+    /// 時点で誰も要求していないキーフレームを強制し、短い Group が 1 つ増える。
+    #[test]
+    fn observing_a_keyframe_satisfies_a_new_group_request() {
+        let mut tracker = GopTracker::new(2_000);
+        tracker.observe_keyframe(0);
+        assert!(
+            tracker.request_keyframe_if_due(2_000_000),
+            "時間ベースの要求が出ること"
+        );
+        tracker.request_new_group();
+        assert!(
+            !tracker.request_keyframe_if_due(2_000_000 + MIN_GROUP_DURATION_US),
+            "要求したキーフレームを観測するまでは要求しないこと"
+        );
+        tracker.observe_keyframe(2_000_000);
+        assert!(
+            !tracker.request_keyframe_if_due(2_000_000 + MIN_GROUP_DURATION_US),
+            "観測で満たされた要求を再実行しないこと"
+        );
+    }
+
+    /// Group を開始する前に来た NEW_GROUP_REQUEST では要求しないこと
+    ///
+    /// 先頭の Group は最初のキーフレームで始まっており、その出力を観測する前に要求すると
+    /// 1 フレームの Group ができる。要求は先頭のキーフレームで満たされる。
+    #[test]
+    fn no_request_before_the_first_group_starts_with_a_new_group_request() {
+        let mut tracker = GopTracker::new(2_000);
+        tracker.request_new_group();
+        assert!(
+            !tracker.request_keyframe_if_due(10_000_000),
+            "Group を開始するまでは要求しないこと"
+        );
+        tracker.observe_keyframe(10_000_000);
+        assert!(
+            !tracker.request_keyframe_if_due(10_000_000 + MIN_GROUP_DURATION_US),
+            "先頭のキーフレームの観測で要求が満たされること"
+        );
+    }
+
+    /// 連続する NEW_GROUP_REQUEST でキーフレームが乱発しないこと
+    #[test]
+    fn consecutive_new_group_requests_do_not_repeat_keyframes() {
+        let mut tracker = GopTracker::new(2_000);
+        let group_start_us = 1_000_000;
+        tracker.observe_keyframe(group_start_us);
+        tracker.request_new_group();
+        // 最小長に達した最初の入力フレームで 1 回だけ要求する
+        assert!(
+            tracker.request_keyframe_if_due(group_start_us + MIN_GROUP_DURATION_US),
+            "最初の要求でキーフレームを要求すること"
+        );
+        // 要求を観測する前に連続で要求が来ても、キーフレームは増えない
+        for offset_us in [
+            MIN_GROUP_DURATION_US + 33_333,
+            MIN_GROUP_DURATION_US + 66_666,
+        ] {
+            tracker.request_new_group();
+            assert!(
+                !tracker.request_keyframe_if_due(group_start_us + offset_us),
+                "要求を観測するまで追加のキーフレームを要求しないこと: {offset_us}"
+            );
+        }
+        tracker.observe_keyframe(group_start_us + MIN_GROUP_DURATION_US);
+        // 観測後も、最小長に達するまでは追加の要求を出さない
+        tracker.request_new_group();
+        assert!(
+            !tracker.request_keyframe_if_due(group_start_us + MIN_GROUP_DURATION_US + 100_000),
+            "新しい Group が最小長に達するまでは要求しないこと"
+        );
+        assert!(
+            tracker.request_keyframe_if_due(group_start_us + 2 * MIN_GROUP_DURATION_US),
+            "最小長に達したら要求すること"
         );
     }
 

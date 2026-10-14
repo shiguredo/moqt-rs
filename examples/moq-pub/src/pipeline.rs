@@ -26,7 +26,7 @@ use shiguredo_moqt::{
     name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
-    track_properties::TrackProperties,
+    track_properties::{PROP_DYNAMIC_GROUPS, TrackProperties, TrackProperty, TrackPropertyValue},
 };
 use shiguredo_video_device::VideoFrameOwned;
 use tokio::sync::mpsc;
@@ -217,6 +217,64 @@ async fn reset_open_subgroup_stream(
     }
 }
 
+/// 映像トラックの PUBLISH に載せる Track Properties
+///
+/// draft-ietf-moq-transport-22 §10.6 (DYNAMIC_GROUPS) の `DYNAMIC_GROUPS=1` を告知し、
+/// 購読者からの `NEW_GROUP_REQUEST` (§9.20.19) に応じて Group を動的に開始できることを
+/// 示す。購読者は `DYNAMIC_GROUPS=1` を知らないと REQUEST_UPDATE で `NEW_GROUP_REQUEST` を
+/// 送れないため、映像トラックの PUBLISH で告知する。音声とカタログのトラックには載せない。
+fn video_track_properties() -> TrackProperties {
+    let mut properties = TrackProperties::new();
+    properties.push(TrackProperty {
+        prop_type: PROP_DYNAMIC_GROUPS,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    properties
+}
+
+/// 映像トラックの PUBLISH に載せる Track Properties を入力モードから決める
+///
+/// MP4 パススルーはエンコーダを使わないため、購読者からの `NEW_GROUP_REQUEST` に応じて
+/// Group を開始できない。できないことを告知しないよう、`DYNAMIC_GROUPS` は映像を
+/// エンコードするときだけ載せる。
+fn video_publish_properties(mp4_passthrough: bool) -> TrackProperties {
+    if mp4_passthrough {
+        TrackProperties::new()
+    } else {
+        video_track_properties()
+    }
+}
+
+/// 受信したパラメータから、映像のキーフレーム要求として受け付ける `NEW_GROUP_REQUEST` を取り出す
+///
+/// `can_force_keyframe` は要求を映像のキーフレーム要求として扱えるかどうかである。映像
+/// トラック宛てであっても、キーフレームを強制できない経路 (MP4 パススルー) では扱わない。
+/// 値が 0 (購読者が Group の情報を持たない) か、現在の Group より大きいときだけ受け付ける
+/// (draft-ietf-moq-transport-22 §9.20.19)。受け付けない要求は debug ログに残す。
+/// 呼び出し側は購読が成立した後に [`gop::GopTracker::request_new_group`] を呼ぶ。
+fn accepted_new_group_request(
+    can_force_keyframe: bool,
+    parameters: &MessageParameters,
+    started_video_group_id: Option<u64>,
+) -> Option<u64> {
+    let next_group_id = parameters.new_group_request()?;
+    if !can_force_keyframe {
+        tracing::debug!(
+            "Ignoring NEW_GROUP_REQUEST that cannot force a video keyframe: \
+             next_group_id={next_group_id}"
+        );
+        return None;
+    }
+    if gop::accepts_new_group_request(next_group_id, started_video_group_id) {
+        return Some(next_group_id);
+    }
+    tracing::debug!(
+        "Ignoring NEW_GROUP_REQUEST that does not ask for a future group: \
+         next_group_id={next_group_id}, current={started_video_group_id:?}"
+    );
+    None
+}
+
 /// パイプラインを実行する
 ///
 /// `config` は接続先・トランスポート・送信するトラック・入力の指定を持つ。
@@ -393,6 +451,7 @@ pub async fn run(
                     namespace.clone(),
                     config.track_name.as_bytes().to_vec(),
                     VIDEO_TRACK_ALIAS,
+                    video_publish_properties(config.input_mp4.is_some()),
                 )
                 .await?,
         )
@@ -406,6 +465,7 @@ pub async fn run(
                     namespace.clone(),
                     AUDIO_TRACK_NAME.as_bytes().to_vec(),
                     AUDIO_TRACK_ALIAS,
+                    TrackProperties::new(),
                 )
                 .await?,
         )
@@ -417,6 +477,7 @@ pub async fn run(
             namespace,
             MSF_CATALOG_TRACK_NAME.to_vec(),
             CATALOG_TRACK_ALIAS,
+            TrackProperties::new(),
         )
         .await?;
 
@@ -656,6 +717,9 @@ pub async fn run(
     // 映像 / 音声の Group ID も 0 に固定しない (draft-ietf-moq-msf-01 §6.1 (Group numbering))。
     // 再起動時に以前の Group ID を下回らないよう、カタログと同じ規則で払い出す。
     let mut video_group_id: u64 = group_id::allocate_initial_group_id()?;
+    // 直前に開始した映像 Group の ID。NEW_GROUP_REQUEST (§9.20.19) の値が未来の Group を
+    // 指しているかを判定するために使う
+    let mut started_video_group_id: Option<u64> = None;
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
@@ -809,6 +873,12 @@ pub async fn run(
                                 )
                                 .await?,
                             );
+                            // 「現在の Group ID」は Session へ登録できた Group を記録する。
+                            // writer の作成前に記録すると、直前の Group の終端 (peer の
+                            // STOP_SENDING など) や writer の作成が失敗した場合に、送られて
+                            // いない Group を現在の Group として NEW_GROUP_REQUEST を
+                            // 誤って無視し得る
+                            started_video_group_id = Some(video_group_id);
                             // 直前の Group の長さを出し、カタログへ宣言した
                             // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
                             if let Some(previous_duration_us) = previous_duration_us {
@@ -1048,6 +1118,8 @@ pub async fn run(
                                 &config,
                                 &catalog_json,
                                 catalog_location,
+                                &mut gop_tracker,
+                                started_video_group_id,
                             )
                             .await?;
                             Ok(false)
@@ -1126,11 +1198,34 @@ pub async fn run(
                                 "Received REQUEST_UPDATE: request_id={}",
                                 update.request_id
                             );
-                            if let Err(e) = client.send_request_ok(update.request_id).await {
-                                tracing::warn!(
-                                    "Failed to send REQUEST_OK for request {}: {e}",
-                                    update.request_id
-                                );
+                            // NEW_GROUP_REQUEST (§9.20.19) は新しい Group の開始
+                            // (ランダムアクセス点) を要求する。映像の購読に限るのは、他の
+                            // トラックの要求で映像のキーフレームを強制しないためである
+                            // (`parameters` は購読の累積パラメータであり、複数の更新が合体すると
+                            // 以前の要求が再び現れ得る。値 0 は常に受け付けのため、その場合も
+                            // 要求として扱う)
+                            let new_group_request = accepted_new_group_request(
+                                Some(update.request_id) == video_request_id
+                                    && config.input_mp4.is_none(),
+                                &update.parameters,
+                                started_video_group_id,
+                            );
+                            match client.send_request_ok(update.request_id).await {
+                                Ok(()) => {
+                                    // 購読が成立している要求だけを受け付ける
+                                    if let Some(next_group_id) = new_group_request {
+                                        gop_tracker.request_new_group();
+                                        tracing::info!(
+                                            "Received NEW_GROUP_REQUEST: next_group_id={next_group_id}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to send REQUEST_OK for request {}: {e}",
+                                        update.request_id
+                                    );
+                                }
                             }
                             Ok(false)
                         }
@@ -1446,12 +1541,17 @@ async fn reject_fill_fetch(client: &mut MoqtClient, request_id: u64) {
 /// 要求された range を判定したうえで FETCH_OK と FETCH 応答ストリームを返す。
 /// 未知の track と未対応の要求種別は REQUEST_ERROR で拒否する
 /// (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))。
+///
+/// `gop_tracker` と `started_video_group_id` は、SUBSCRIBE に載った `NEW_GROUP_REQUEST`
+/// (draft-ietf-moq-transport-22 §9.20.19) を映像のキーフレーム要求へ配線するために使う。
 async fn serve_peer_request(
     client: &mut MoqtClient,
     request: IncomingRequest,
     config: &Config,
     catalog_json: &[u8],
     catalog_location: Location,
+    gop_tracker: &mut gop::GopTracker,
+    started_video_group_id: Option<u64>,
 ) -> Result<()> {
     let request_id = request.request_id;
     match request.message {
@@ -1471,6 +1571,18 @@ async fn serve_peer_request(
             };
             match track_alias {
                 Some(track_alias) => {
+                    // 購読者は DYNAMIC_GROUPS を知らずに SUBSCRIBE へ NEW_GROUP_REQUEST を
+                    // 載せられる (§9.20.19)。Group の途中で参加した購読者が新しい Group を
+                    // 要求する経路であり、映像トラックのときだけ受け付ける。MP4 パススルーは
+                    // キーフレームを要求できないため受け付けない
+                    let new_group_request = accepted_new_group_request(
+                        track_alias == VIDEO_TRACK_ALIAS && config.input_mp4.is_none(),
+                        &subscribe.parameters,
+                        started_video_group_id,
+                    );
+                    // SUBSCRIBE_OK に Track Properties を載せないのは、DYNAMIC_GROUPS の告知を
+                    // Original Publisher としての PUBLISH で行う設計だからである
+                    // (draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §10.6 (DYNAMIC GROUPS))
                     client
                         .send_subscribe_ok(
                             request_id,
@@ -1483,6 +1595,13 @@ async fn serve_peer_request(
                         "Accepted SUBSCRIBE (request_id={request_id}, track={}, alias={track_alias})",
                         String::from_utf8_lossy(track),
                     );
+                    // 購読が成立している要求だけを受け付ける
+                    if let Some(next_group_id) = new_group_request {
+                        gop_tracker.request_new_group();
+                        tracing::info!(
+                            "Received NEW_GROUP_REQUEST in SUBSCRIBE: next_group_id={next_group_id}"
+                        );
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -2067,6 +2186,10 @@ fn extract_pcm_i16(frame: &AudioFrameOwned) -> Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `NEW_GROUP_REQUEST` の判定はテストでのみ直接組み立てる
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
+    };
     // セッション終了の判定は `Error` の variant で行うため、`TransportError` はテストでのみ使う
     use tokio_moq::error::TransportError;
 
@@ -2081,6 +2204,97 @@ mod tests {
         assert!(
             !reset_targets_open_subgroup(None, stream_id),
             "open 中の stream が無ければ通知しないこと"
+        );
+    }
+
+    /// MP4 パススルーでは DYNAMIC_GROUPS を告知しないこと
+    ///
+    /// パススルーはエンコーダを使わずキーフレームを要求できないため、購読者に
+    /// `NEW_GROUP_REQUEST` を送れると告知しない (draft-ietf-moq-transport-22 §10.6)。
+    #[test]
+    fn video_publish_properties_skip_dynamic_groups_for_mp4_passthrough() {
+        assert!(
+            video_publish_properties(true).dynamic_groups().is_none(),
+            "パススルーでは告知しないこと"
+        );
+        assert_eq!(
+            video_publish_properties(false).dynamic_groups(),
+            Some(1),
+            "エンコードする場合は告知すること"
+        );
+    }
+
+    /// キーフレームを強制できる要求だけを受け付けること
+    ///
+    /// 値が 0 か現在の Group より大きいときだけ受け付ける
+    /// (draft-ietf-moq-transport-22 §9.20.19)。音声やカタログのトラック宛ての要求、および
+    /// キーフレームを強制できない経路 (MP4 パススルー) の要求では映像のキーフレームを
+    /// 強制しない。
+    #[test]
+    fn accepted_new_group_request_checks_the_track_and_the_value() {
+        let parameters = |next_group_id: u64| {
+            let mut parameters = MessageParameters::new();
+            parameters.push(MessageParameter {
+                param_type: PARAM_NEW_GROUP_REQUEST,
+                value: MessageParameterValue::VarInt(next_group_id),
+            });
+            parameters
+        };
+        let current = Some(100);
+
+        assert_eq!(
+            accepted_new_group_request(true, &parameters(0), current),
+            Some(0),
+            "値 0 は受け付けること"
+        );
+        assert_eq!(
+            accepted_new_group_request(true, &parameters(101), current),
+            Some(101),
+            "現在の Group より大きい値は受け付けること"
+        );
+        assert_eq!(
+            accepted_new_group_request(true, &parameters(100), current),
+            None,
+            "現在の Group と同じ値は受け付けないこと"
+        );
+        assert_eq!(
+            accepted_new_group_request(true, &parameters(99), current),
+            None,
+            "過去の Group への要求は受け付けないこと"
+        );
+        assert_eq!(
+            accepted_new_group_request(false, &parameters(0), current),
+            None,
+            "キーフレームを強制できない要求は受け付けないこと"
+        );
+        assert_eq!(
+            accepted_new_group_request(true, &MessageParameters::new(), current),
+            None,
+            "要求が無い場合は受け付けないこと"
+        );
+    }
+
+    /// 映像トラックの PUBLISH に DYNAMIC_GROUPS=1 を載せること
+    ///
+    /// 購読者は DYNAMIC_GROUPS=1 を知らないと REQUEST_UPDATE で NEW_GROUP_REQUEST を
+    /// 送れない (draft-ietf-moq-transport-22 §9.20.19)。音声とカタログのトラックには
+    /// 載せないため、空の Track Properties では告知されないことも確かめる。
+    #[test]
+    fn video_track_properties_announce_dynamic_groups() {
+        let properties = video_track_properties();
+        assert_eq!(
+            properties.dynamic_groups(),
+            Some(1),
+            "映像トラックの PUBLISH に DYNAMIC_GROUPS=1 を載せること"
+        );
+        assert_eq!(
+            properties.len(),
+            1,
+            "映像トラックは DYNAMIC_GROUPS だけを載せること"
+        );
+        assert!(
+            TrackProperties::new().dynamic_groups().is_none(),
+            "空の Track Properties では告知しないこと"
         );
     }
 

@@ -596,6 +596,9 @@ mod tests {
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
     use shiguredo_moqt::message::common::TrackNamespace;
+    use shiguredo_moqt::track_properties::{
+        PROP_DYNAMIC_GROUPS, TrackProperty, TrackPropertyValue,
+    };
 
     use super::*;
     use crate::moqt_client::{ClientEvent, MoqtClient};
@@ -733,7 +736,9 @@ mod tests {
             // client の PUBLISH 送信と peer の受理は並行して進める
             let publish = tokio::spawn(async move {
                 let mut client = client;
-                client.publish_track(namespace, b"video".to_vec(), 7).await
+                client
+                    .publish_track(namespace, b"video".to_vec(), 7, TrackProperties::new())
+                    .await
             });
 
             // peer が request stream の先頭メッセージとして受理する
@@ -770,6 +775,57 @@ mod tests {
                 published, request_id,
                 "publish_track が返した Request ID が一致すること"
             );
+        })
+        .await;
+    }
+
+    /// PUBLISH に載せた Track Properties が peer へ届くこと
+    ///
+    /// moq-pub は映像トラックの PUBLISH で `DYNAMIC_GROUPS=1` を告知し、購読者からの
+    /// `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) に応じて新しい Group を
+    /// 開始する。告知は PUBLISH の Track Properties (§8.4 / §10.6) で行う。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_publish_track_properties_are_sent_to_peer() {
+        run_with_timeout(async {
+            let (mut peer, client) = connect_pair().await;
+
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let mut properties = TrackProperties::new();
+            properties.push(TrackProperty {
+                prop_type: PROP_DYNAMIC_GROUPS,
+                value: TrackPropertyValue::VarInt(1),
+            });
+            let publish = tokio::spawn(async move {
+                let mut client = client;
+                client
+                    .publish_track(namespace, b"video".to_vec(), 7, properties)
+                    .await
+            });
+
+            let message = peer
+                .recv_request_start()
+                .await
+                .expect("request stream を受理できること");
+            let request_id = match message {
+                ControlMessage::Publish(publish) => {
+                    assert_eq!(
+                        publish.track_properties.dynamic_groups(),
+                        Some(1),
+                        "PUBLISH に DYNAMIC_GROUPS=1 が載ること"
+                    );
+                    publish.request_id
+                }
+                other => panic!("PUBLISH として受理されること: {other:?}"),
+            };
+
+            peer.send_request_ok(request_id)
+                .await
+                .expect("応答を送れること");
+            publish
+                .await
+                .expect("publish タスクが終了すること")
+                .expect("PUBLISH を送れること");
         })
         .await;
     }

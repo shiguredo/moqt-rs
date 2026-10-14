@@ -166,6 +166,27 @@ example は `type` が `msf` のときだけ値を MSF fragment (`track-identifi
 
 scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT://` も受理する)。`moqt://` 以外の scheme はエラーになる。authority / path / query / fragment は入力の大文字小文字をそのまま使う。
 
+## 購読者からの新しい Group の要求
+
+moq-pub は映像トラックの PUBLISH で `DYNAMIC_GROUPS=1` を告知し、購読者からの
+`NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) に応じて新しい Group の開始を
+前倒しする。
+
+- `NEW_GROUP_REQUEST` は SUBSCRIBE と REQUEST_UPDATE のどちらに載っていても受け付ける。
+  映像トラック宛ての要求だけを受理し、値が 0 または現在の Group より大きいときだけ
+  受け付ける (同節)。まだ Group を開始していない間は値によらず受理する (先頭の Group は
+  最初のキーフレームで始まるため、要求はそこで満たされる)
+- ただし REQUEST_UPDATE で送れるのは `DYNAMIC_GROUPS=1` を知っている Track に限られる
+  (同節の MUST NOT)。publisher が告知するのは映像トラックの PUBLISH だけで、SUBSCRIBE_OK
+  には載せないため、ピアの SUBSCRIBE で確立した購読で REQUEST_UPDATE に載せると session 層が
+  プロトコル違反として接続を閉じる。SUBSCRIBE に載せた要求は購読と同時に受け付ける
+- 直前の Group が 300 ms に達するまで新しい Group を前倒しせず、達した最初の入力フレームで
+  キーフレームを要求する (同節が認める遅延)。保留した要求は破棄しない。`--gop-duration` に
+  よる通常の境界が先に来た場合は、そこで Group が始まる
+- Group ID は publisher が選ぶため、要求の値と一致させる必要はない (同節)
+- `--input-mp4` (パススルー) はエンコーダを使わずキーフレームを要求できないため、
+  `DYNAMIC_GROUPS` を告知せず、SUBSCRIBE に載った要求も受け付けない
+
 ## TLS 証明書
 
 publisher / subscriber は `--cert` を省略すると証明書検証をスキップする。
