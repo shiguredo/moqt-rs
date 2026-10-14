@@ -17,6 +17,8 @@
 //!   (数秒スケール。行き過ぎを防ぐ)
 //! - 目標は [`AUDIO_DELAY_FEEDBACK_MIN_US`] から [`AUDIO_DELAY_FEEDBACK_MAX_US`] の間に
 //!   収める
+//! - 実際に使う値は [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] でも切る。到着が大きく跳ねた分
+//!   まで目標にすると、その分だけ常に遅れて鳴るためである
 //! - `targetLatency` を明示設定したときは、その値を自動で超えない
 //!   ([`AudioDelayFeedback::set_ceiling_us`] で渡す)。jitter buffer の学習値
 //!   ([`AudioDelayFeedback::target_delay_us`] へ渡す値) には掛けない。既存の揺らぎの吸収を
@@ -47,6 +49,21 @@ pub const AUDIO_DELAY_FEEDBACK_MIN_US: i64 = 80_000;
 /// 表示の遅れの上限 ([`crate::playout::timeline::TIMELINE_MAX_PRESENTATION_DELAY_MS`] の
 /// 500 ms) より小さい。
 pub const AUDIO_DELAY_FEEDBACK_MAX_US: i64 = 300_000;
+
+/// 実際に使う目標遅延の上限 (マイクロ秒)
+///
+/// 揺らぎの学習 ([`crate::playout::delay`]) と閉ループの目標の大きい方をそのまま使うと、
+/// 到着が大きく跳ねた分まで目標になり、その分だけ常に遅れて鳴る。moqt-js の実測 (実リレー
+/// 経由) では到着の跳ねの最大が 271 ms あり、目標 100 ms の内側に収まらない分は受信側の
+/// 追いつきが吸収する分担にした。
+///
+/// 到着基準で並べるときの遅れ ([`crate::playout::timeline::TIMELINE_ARRIVAL_DELAY_US`]) と
+/// 同じ値である。A/V の合わせ先が 2 つの経路で食い違わないようにするためである。
+///
+/// この上限は実際に使う値にだけ掛かり、閉ループの内部値
+/// ([`AudioDelayFeedback::feedback_target_us`]) は [`AUDIO_DELAY_FEEDBACK_MAX_US`] または
+/// `targetLatency` まで上がり得る。
+pub const AUDIO_DELAY_FEEDBACK_MAX_TARGET_US: i64 = 100_000;
 
 /// 最初の目標遅延 (マイクロ秒)
 ///
@@ -200,19 +217,24 @@ impl AudioDelayFeedback {
 
     /// 実際に使う目標遅延 (マイクロ秒)
     ///
-    /// jitter buffer の学習値と、閉ループが決めた目標の大きい方にする。上限は閉ループの
-    /// 値にだけ掛ける。学習値は既存の揺らぎの吸収そのものであり、明示設定で切り下げると
-    /// 挙動が変わるためである。
+    /// jitter buffer の学習値と、閉ループが決めた目標の大きい方にし、最後に
+    /// [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] で切る。明示設定の上限
+    /// ([`AudioDelayFeedback::set_ceiling_us`]) は閉ループの値にだけ掛ける。学習値は既存の
+    /// 揺らぎの吸収そのものであり、明示設定で切り下げると挙動が変わるためである。
+    /// [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] の上限は、学習値も含めて掛ける。到着が大きく
+    /// 跳ねた分まで目標にすると、その分だけ常に遅れて鳴るためである。
     ///
     /// 実際に鳴った結果をまだ 1 つも観測していないときは、閉ループの目標を使わず
-    /// `jitter_target_us` をそのまま返す。閉ループは観測を入力にする制御であり、観測が
+    /// `jitter_target_us` だけを切って返す。閉ループは観測を入力にする制御であり、観測が
     /// 無い間に目標を動かすと、まだ鳴らしていない間の表示の遅れ (購読を始めた直後の基準) が
     /// 変わるためである。
     pub fn target_delay_us(&self, jitter_target_us: i64) -> i64 {
         if !self.observed {
-            return jitter_target_us;
+            return jitter_target_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US);
         }
-        jitter_target_us.max(self.feedback_target_us())
+        jitter_target_us
+            .max(self.feedback_target_us())
+            .min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US)
     }
 
     /// 観測を 1 つ受け取り、必要なら目標を動かす

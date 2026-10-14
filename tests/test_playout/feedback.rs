@@ -6,9 +6,9 @@
 
 use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_INTERVAL_US,
-    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_US,
-    AUDIO_DELAY_FEEDBACK_START_US, AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback,
-    AudioDelayFeedbackReason,
+    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+    AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_US, AUDIO_DELAY_FEEDBACK_START_US,
+    AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback, AudioDelayFeedbackReason,
 };
 use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use shiguredo_moqt::playout::timing::{AudioDelayFeedbackObservation, TimingSummary};
@@ -59,15 +59,16 @@ fn uses_the_jitter_target_until_the_first_observation() {
     );
     assert_eq!(snapshot.adjustments, 0, "まだ動かしていない");
     assert_eq!(snapshot.lateness_p50_us, None, "観測が無い");
-    // 観測が無い間は、既存の規則 (揺らぎだけから求めた目標) をそのまま使う
+    // 観測が無い間は、既存の規則 (揺らぎだけから求めた目標) をそのまま使う。ただし上限
+    // (実際に使う値の上限) は掛ける
     assert_eq!(
         feedback.target_delay_us(0),
         0,
         "観測が無ければ閉ループの目標を使わない"
     );
     assert_eq!(
-        feedback.target_delay_us(300_000),
-        300_000,
+        feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
         "揺らぎだけの目標をそのまま使う"
     );
     assert_eq!(feedback.feedback_target_us(), AUDIO_DELAY_FEEDBACK_START_US);
@@ -86,8 +87,8 @@ fn uses_the_jitter_target_until_the_first_observation() {
         "観測後は初期値を使う"
     );
     assert_eq!(
-        feedback.target_delay_us(300_000),
-        300_000,
+        feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
         "揺らぎだけの目標の方が大きければそれを使う"
     );
 }
@@ -353,8 +354,8 @@ fn explicit_ceiling_below_the_floor_wins_over_the_floor() {
 
 #[test]
 fn the_larger_of_the_jitter_and_feedback_targets_is_used() {
-    // 揺らぎだけから求めた目標 (学習値) の方が大きいときは、それを使う。上限は自動で
-    // 決める分にだけ掛け、学習値には掛けない (既存の揺らぎの吸収を変えないため)
+    // 揺らぎだけから求めた目標 (学習値) の方が大きいときは、それを使う。明示設定の上限は
+    // 自動で決める分にだけ掛け、学習値には掛けない (既存の揺らぎの吸収を変えないため)
     let mut feedback = AudioDelayFeedback::new();
     feedback.set_ceiling_us(Some(90_000));
     // 観測を受けて、閉ループの目標を使い始めさせる (遅れが続いているため上限まで増える)
@@ -366,14 +367,54 @@ fn the_larger_of_the_jitter_and_feedback_targets_is_used() {
         "閉ループの目標 (上限まで) を使う"
     );
     assert_eq!(
+        feedback.target_delay_us(95_000),
+        95_000,
+        "学習値の方が大きければそれを使う (実際に使う値の上限の内側)"
+    );
+    assert_eq!(
         feedback.target_delay_us(260_000),
-        260_000,
-        "学習値の方が大きければそれを使う"
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "学習値が実際に使う値の上限を超えたら切る"
     );
 
     let snapshot = feedback.snapshot();
     assert_eq!(snapshot.target_us, 90_000, "閉ループが決めた目標を出す");
     assert_eq!(snapshot.ceiling_us, Some(90_000), "明示された上限を出す");
+}
+
+/// 実際に使う目標遅延は上限 (100 ms) で切る
+///
+/// 到着が大きく跳ねた分まで目標にすると、その分だけ常に遅れて鳴る。100 ms は到着基準で
+/// 並べるときの遅れと同じ値であり、収まらない分は受信側の追いつきが吸収する。
+#[test]
+fn the_applied_target_is_capped() {
+    let mut feedback = AudioDelayFeedback::new();
+
+    // 観測が無い間も、学習値が上限を超えたら切る
+    assert_eq!(
+        feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US + 1),
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "学習値が上限を超えたら切る"
+    );
+    assert_eq!(
+        feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "ちょうど上限は切らない"
+    );
+
+    // 観測後も同じ上限で切る
+    feedback.update(observation(0, Some(300_000), 0, 0));
+    assert_eq!(
+        feedback.target_delay_us(300_000),
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "閉ループの目標と学習値の大きい方を上限で切る"
+    );
+    // 上限は実際に使う値にだけ掛かる。閉ループの内部値はそれを超えて上がり得る
+    assert!(
+        feedback.feedback_target_us() > AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "内部値は実際に使う値の上限を超えて上がる: {}",
+        feedback.feedback_target_us()
+    );
 }
 
 #[test]

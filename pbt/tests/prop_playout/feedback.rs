@@ -10,10 +10,10 @@ use std::cell::Cell;
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_INTERVAL_US,
-    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_US,
-    AUDIO_DELAY_FEEDBACK_MIN_STEP_US, AUDIO_DELAY_FEEDBACK_MIN_US, AUDIO_DELAY_FEEDBACK_START_US,
-    AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback, AudioDelayFeedbackReason,
-    AudioDelayFeedbackSnapshot,
+    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+    AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_STEP_US, AUDIO_DELAY_FEEDBACK_MIN_US,
+    AUDIO_DELAY_FEEDBACK_START_US, AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback,
+    AudioDelayFeedbackReason, AudioDelayFeedbackSnapshot,
 };
 use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use shiguredo_moqt::playout::timing::{AudioDelayFeedbackObservation, TimingSummary};
@@ -143,11 +143,11 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
 
         for _ in 0..noprop::sample_usize_in(ctx, 1..=24) {
             if last_update_at_us.is_none() {
-                // まだ実際に鳴った結果を観測していない。学習値をそのまま使う
+                // まだ実際に鳴った結果を観測していない。学習値をそのまま使う (上限は掛ける)
                 let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
                 assert_eq!(
                     feedback.target_delay_us(jitter_us),
-                    jitter_us,
+                    jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
                     "観測を受ける前は学習値をそのまま使う"
                 );
                 let (lower_us, upper_us) = target_limits(feedback.ceiling_us());
@@ -238,11 +238,11 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         ceiling_us,
                         "リセットで明示の上限が消えた"
                     );
-                    // 観測が無い扱いへ戻るため、学習値をそのまま使う
+                    // 観測が無い扱いへ戻るため、学習値 (上限の内側) をそのまま使う
                     let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
                     assert_eq!(
                         feedback.target_delay_us(jitter_us),
-                        jitter_us,
+                        jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
                         "リセットで観測が無い扱いへ戻らない"
                     );
                     saw_reset_clears_the_observation.set(true);
@@ -383,18 +383,28 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         saw_upper.set(true);
                     }
                     // 実際に使う値は、学習値と閉ループの目標の大きい方である
+                    // 実際に使う値は、学習値と閉ループの目標の大きい方を上限 (100 ms) で
+                    // 切った値である
                     let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
+                    let applied_us = feedback.target_delay_us(jitter_us);
                     assert!(
-                        feedback.target_delay_us(jitter_us) >= jitter_us,
-                        "実際に使う値が学習値を下回った: jitter={jitter_us} applied={}",
-                        feedback.target_delay_us(jitter_us)
+                        applied_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                        "実際に使う値が上限を超えた: jitter={jitter_us} applied={applied_us}"
                     );
                     assert!(
-                        feedback.target_delay_us(jitter_us) >= snapshot.target_us,
-                        "実際に使う値が閉ループの目標を下回った: target={} applied={}",
-                        snapshot.target_us,
-                        feedback.target_delay_us(jitter_us)
+                        applied_us >= jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+                        "実際に使う値が学習値 (上限の内側) を下回った: jitter={jitter_us} applied={applied_us}"
                     );
+                    // 観測を受けた後は、閉ループの目標 (上限の内側) も反映する。観測を
+                    // 受ける前は閉ループの目標を使わないため確かめない
+                    if !matches!(snapshot.reason, AudioDelayFeedbackReason::Initial) {
+                        assert!(
+                            applied_us
+                                >= snapshot.target_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+                            "実際に使う値が閉ループの目標 (上限の内側) を下回った: target={} applied={applied_us}",
+                            snapshot.target_us
+                        );
+                    }
                     if jitter_us > snapshot.target_us {
                         saw_jitter_larger.set(true);
                     }
@@ -630,11 +640,11 @@ fn reset_restores_the_initial_state_and_keeps_the_ceiling() -> noprop::TestResul
         assert_eq!(snapshot.slack_p50_us, None, "リセットで観測が残る");
         // 明示設定の上限は呼び出し側が決めた値であるため残す
         assert_eq!(feedback.ceiling_us(), ceiling_us, "リセットで上限が消えた");
-        // 観測が無い扱いへ戻るため、学習値をそのまま使う
+        // 観測が無い扱いへ戻るため、学習値 (上限の内側) をそのまま使う
         let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
         assert_eq!(
             feedback.target_delay_us(jitter_us),
-            jitter_us,
+            jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
             "リセットで観測が無い扱いへ戻らない"
         );
 
