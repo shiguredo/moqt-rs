@@ -3,7 +3,7 @@
 - Created: 2026-10-14
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-datagram-audio-delivery
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-14
 
 ## 目的
 
@@ -55,4 +55,29 @@ publisher は購読され、音声を datagram で送っている。subscriber �
 
 ## 解決方法
 
-(対応時に記入)
+- 調査の結果、`examples/moq-sub` の datagram の受信ループが、datagram が 1 つも無いときに
+  即座に空の結果を返していた。呼び出し側はそれを待たずに回り続けるため、CPU を 1 コア
+  使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせていた。
+  `StreamHandle::recv_datagrams` を、最初の 1 つは届くまで `poll_recv_datagram` で待ち、
+  続けて届いている分はまとめて取る形に直した (WebTransport の経路は元から待つ)
+- あわせて、最初の datagram を受け取ったときに 1 回だけ件数を出すログを追加した
+- 切り分けの結果、subscriber は relay から datagram を 1 つも受け取っていない
+  (`Received the first datagram batch` が出ない、`Pipeline stopped: 0 streams received`)。
+  publisher の側では catalog と audio の PUBLISH が解決した直後に、relay が
+  `application::Error(3)` (PROTOCOL_VIOLATION) で接続を切っている
+
+```text
+Sent PUBLISH (request_id=0, alias=2)
+Received REQUEST_UPDATE: request_id=0
+Failed to accept peer bidi stream: QUIC error: The connection was closed on the application
+level with error application::Error(3) by the remote endpoint
+```
+
+- 映像ありの `publish_and_subscribe_roundtrip` は同じ経路で成功するため、差分は
+  `--no-video` と `--audio-datagram` の 2 点である。OBJECT_DATAGRAM の組み立ては
+  draft-ietf-moq-transport-22 §11.2.1 に沿っており (`src/stream/datagram.rs`)、
+  moqt-rs 側の書式の不備は見当たらない
+- 残る問題は実 relay の OBJECT_DATAGRAM 配送への対応であり、moqt-rs 側では直せない。
+  テストは `MOQT_E2E_DATAGRAM=1` を設定したときだけ実行する形にした。relay が対応したら
+  この条件を外す
+- `issues/pending` へ移した
