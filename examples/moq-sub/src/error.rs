@@ -14,6 +14,9 @@ pub enum Error {
     /// AV1 デコードエラー
     Decode(shiguredo_dav1d::Error),
     /// VP8 / VP9 デコードエラー
+    ///
+    /// libvpx の Windows ビルド (MSVC) は動作しないため Windows では発生しない。
+    #[cfg(not(target_os = "windows"))]
     Vpx(shiguredo_libvpx::Error),
     /// Opus デコードエラー
     Opus(shiguredo_opus::Error),
@@ -54,6 +57,7 @@ impl fmt::Display for Error {
             }
             Self::Moqt(e) => write!(f, "MOQT: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
+            #[cfg(not(target_os = "windows"))]
             Self::Vpx(e) => write!(f, "vpx: {e}"),
             Self::Opus(e) => write!(f, "opus: {e}"),
             Self::Player(e) => write!(f, "player: {e}"),
@@ -87,6 +91,7 @@ impl From<shiguredo_dav1d::Error> for Error {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 impl From<shiguredo_libvpx::Error> for Error {
     fn from(e: shiguredo_libvpx::Error) -> Self {
         Self::Vpx(e)

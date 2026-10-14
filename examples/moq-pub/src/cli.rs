@@ -17,9 +17,9 @@ pub enum VideoCodec {
     H264,
     /// H.265 / HEVC (Apple Video Toolbox, macOS 限定)
     H265,
-    /// VP8 (libvpx, 全プラットフォーム)
+    /// VP8 (libvpx、Windows 非対応)
     Vp8,
-    /// VP9 (libvpx, 全プラットフォーム)
+    /// VP9 (libvpx、Windows 非対応)
     Vp9,
 }
 
@@ -321,7 +321,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
 
     let video_codec_opt = noargs::opt("video-codec")
         .ty("CODEC")
-        .doc("Video codec (av1 | h264 | h265 | vp8 | vp9). h264/h265 require macOS")
+        .doc("Video codec (av1 | h264 | h265 | vp8 | vp9). h264/h265 require macOS, vp8/vp9 are unavailable on Windows")
         .default("av1")
         .take(&mut args);
     let video_codec_explicit = is_explicit(&video_codec_opt);
@@ -1091,8 +1091,8 @@ mod tests {
 
     /// `--video-codec` が av1 / h264 / h265 / vp8 / vp9 を受け付けること
     ///
-    /// 省略時は av1 である。VP8 / VP9 は macOS 以外でも使えるため、macOS 限定の
-    /// h264 / h265 と同じ扱いにしてはいけない。
+    /// 省略時は av1 である。VP8 / VP9 は Windows 以外で使えるため、macOS 限定の
+    /// h264 / h265 と同じ扱いにしてはいけない (Windows での拒否は pipeline が担う)。
     #[test]
     fn video_codec_accepts_vp8_and_vp9() {
         let cases: &[(&[&str], VideoCodec)] = &[

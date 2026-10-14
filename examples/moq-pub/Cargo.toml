@@ -17,8 +17,6 @@ shiguredo_audio_device = "2026.4.0-canary.0"
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.9"
-# VP8 / VP9 エンコーダ・デコーダ (libvpx)
-shiguredo_libvpx = "2026.2.0-canary.2"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
@@ -51,6 +49,11 @@ tokio-utils = "0.1"
 tracing = "0.1"
 # ログのフィルタリングと購読
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# libvpx の Windows ビルド (MSVC) は動作しないため、Windows 以外に限って依存させる
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+# VP8 / VP9 エンコーダ・デコーダ (libvpx)
+shiguredo_libvpx = "2026.2.0-canary.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # AAC-LC エンコーダ (Apple Audio Toolbox)

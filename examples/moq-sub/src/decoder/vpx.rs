@@ -3,6 +3,9 @@
 //! VP8 と VP9 は libvpx の API が共通であるため 1 つのモジュールにまとめ、
 //! [`VpxCodec`] で切り替える。デコード結果は既存のコーデックと同じく stride を詰めた
 //! I420 (`DecodedVideoFrame`) にする。
+//!
+//! libvpx の Windows ビルド (MSVC) は動作しないため、このモジュールは Windows 以外でのみ
+//! コンパイルする (`decoder.rs` の `mod vpx` に `cfg` を付けている)。
 
 use shiguredo_libvpx::{Decoder, DecoderCodec, DecoderConfig};
 

@@ -7,6 +7,7 @@ MoQ リレーから catalog を SUBSCRIBE して取得し、audio / video を SU
 音声トラックは subgroup stream と datagram のどちらで届いてもデコードして再生する。
 
 AAC-LC は macOS の Audio Toolbox、H.264 / H.265 は macOS の Video Toolbox を使うため macOS 限定である。
+VP8 / VP9 は libvpx を使う。libvpx の Windows ビルド (MSVC) は動作しないため、Windows では `vp8` / `vp09.*` のトラックをデコードできない。
 
 `--mp4` を指定すると、受信した音声 / 映像を再エンコードせずに MP4 ファイルへ保存する。
 

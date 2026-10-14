@@ -2,6 +2,9 @@
 //!
 //! NV12 入力をリアルタイム CBR で VP8 / VP9 にエンコードする。VP8 と VP9 は
 //! libvpx の API が共通であるため 1 つのモジュールにまとめ、[`VpxCodec`] で切り替える。
+//!
+//! libvpx の Windows ビルド (MSVC) は動作しないため、このモジュールは Windows 以外でのみ
+//! コンパイルする (`encoder.rs` の `mod vpx` に `cfg` を付けている)。
 
 use std::num::NonZeroUsize;
 

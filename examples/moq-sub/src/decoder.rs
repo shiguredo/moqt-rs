@@ -13,6 +13,7 @@ pub(crate) mod h264;
 #[cfg(target_os = "macos")]
 pub(crate) mod h265;
 pub(crate) mod opus;
+#[cfg(not(target_os = "windows"))]
 pub(crate) mod vpx;
 
 /// デコード済みビデオフレーム (I420)
@@ -52,7 +53,7 @@ pub struct DecodedAudioFrame {
 /// サンプル subscriber が扱うビデオデコーダ
 ///
 /// codec ごとの実装を variant に持つ Enum とし、呼び出し側は本型のメソッド経由で
-/// 利用する。macOS 限定の codec は variant 単位で `cfg` を付ける。
+/// 利用する。macOS 限定の codec と Windows 非対応の codec は variant 単位で `cfg` を付ける。
 pub(crate) enum VideoDecoder {
     /// AV1 デコーダ (dav1d)
     Av1(av1::Av1Decoder),
@@ -62,9 +63,11 @@ pub(crate) enum VideoDecoder {
     /// H.265 デコーダ (Apple Video Toolbox、macOS 限定)
     #[cfg(target_os = "macos")]
     H265(h265::H265Decoder),
-    /// VP8 デコーダ (libvpx)
+    /// VP8 デコーダ (libvpx、Windows 非対応)
+    #[cfg(not(target_os = "windows"))]
     Vp8(vpx::VpxDecoder),
-    /// VP9 デコーダ (libvpx)
+    /// VP9 デコーダ (libvpx、Windows 非対応)
+    #[cfg(not(target_os = "windows"))]
     Vp9(vpx::VpxDecoder),
 }
 
@@ -87,7 +90,9 @@ impl VideoDecoder {
             VideoDecoder::H264(d) => d.decode(payload, video_config),
             #[cfg(target_os = "macos")]
             VideoDecoder::H265(d) => d.decode(payload, video_config),
+            #[cfg(not(target_os = "windows"))]
             VideoDecoder::Vp8(d) => d.decode(payload, video_config),
+            #[cfg(not(target_os = "windows"))]
             VideoDecoder::Vp9(d) => d.decode(payload, video_config),
         }
     }
@@ -121,10 +126,28 @@ pub(crate) fn build_video_decoder(codec: &str) -> Result<VideoDecoder> {
         }
     } else if codec == "vp8" {
         // VP8 は登録名のみ (パラメーター無し) である (RFC 6381 §3.3)
-        Ok(VideoDecoder::Vp8(vpx::VpxDecoder::new(vpx::VpxCodec::Vp8)?))
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(VideoDecoder::Vp8(vpx::VpxDecoder::new(vpx::VpxCodec::Vp8)?))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Err(Error::Other(format!(
+                "VP8 decoder is not available on Windows (catalog codec: {codec})"
+            )))
+        }
     } else if codec == "vp09" || codec.starts_with("vp09.") {
         // VP9 は `vp09.<profile>.<level>.<bit depth>` を取る
-        Ok(VideoDecoder::Vp9(vpx::VpxDecoder::new(vpx::VpxCodec::Vp9)?))
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(VideoDecoder::Vp9(vpx::VpxDecoder::new(vpx::VpxCodec::Vp9)?))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Err(Error::Other(format!(
+                "VP9 decoder is not available on Windows (catalog codec: {codec})"
+            )))
+        }
     } else {
         Err(Error::Other(format!("unsupported video codec: {codec}")))
     }
@@ -270,27 +293,49 @@ mod tests {
     ///
     /// `src/msf.rs` の `is_video_codec` が video と判定する codec 文字列は、すべて
     /// デコーダを生成できる必要がある (`vp8` は登録名のみ、`vp09` は登録名単独と
-    /// `vp09.` 始まりを受け付ける)。
+    /// `vp09.` 始まりを受け付ける)。VP8 / VP9 は libvpx を使うため Windows では
+    /// 生成できない。
     #[test]
     fn video_codec_strings_select_a_decoder() {
         assert!(matches!(
             build_video_decoder("av01.0.08M.08").expect("AV1 のデコーダを生成できること"),
             VideoDecoder::Av1(_)
         ));
-        assert!(
-            matches!(
-                build_video_decoder("vp8").expect("VP8 のデコーダを生成できること"),
-                VideoDecoder::Vp8(_)
-            ),
-            "VP8 の codec 文字列で VP8 デコーダが選ばれること"
-        );
-        for codec in ["vp09", "vp09.00.40.08", "vp09.0.10.08"] {
+        #[cfg(not(target_os = "windows"))]
+        {
             assert!(
                 matches!(
-                    build_video_decoder(codec).expect("VP9 のデコーダを生成できること"),
-                    VideoDecoder::Vp9(_)
+                    build_video_decoder("vp8").expect("VP8 のデコーダを生成できること"),
+                    VideoDecoder::Vp8(_)
                 ),
-                "VP9 の codec 文字列で VP9 デコーダが選ばれること: {codec}"
+                "VP8 の codec 文字列で VP8 デコーダが選ばれること"
+            );
+            for codec in ["vp09", "vp09.00.40.08", "vp09.0.10.08"] {
+                assert!(
+                    matches!(
+                        build_video_decoder(codec).expect("VP9 のデコーダを生成できること"),
+                        VideoDecoder::Vp9(_)
+                    ),
+                    "VP9 の codec 文字列で VP9 デコーダが選ばれること: {codec}"
+                );
+            }
+        }
+    }
+
+    /// Windows では VP8 / VP9 のデコーダを生成できないこと
+    ///
+    /// libvpx の Windows ビルド (MSVC) は動作しないため、Windows では catalog に
+    /// `vp8` / `vp09.*` が載っていても生成できない。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vpx_video_codec_is_rejected_on_windows() {
+        for codec in ["vp8", "vp09", "vp09.00.40.08"] {
+            let result = build_video_decoder(codec);
+            assert!(
+                result
+                    .err()
+                    .is_some_and(|e| e.to_string().contains("not available on Windows")),
+                "Windows 非対応であることが分かるエラーになること: {codec}"
             );
         }
     }

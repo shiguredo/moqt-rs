@@ -543,6 +543,7 @@ pub async fn run(
             VideoCodec::H265 => {
                 return Err(unsupported_macos_encoder("H.265"));
             }
+            #[cfg(not(target_os = "windows"))]
             VideoCodec::Vp8 => encoder::VideoEncoder::Vp8(encoder::vpx::VpxEncoder::new(
                 encoder::vpx::VpxCodec::Vp8,
                 encode_width,
@@ -551,6 +552,7 @@ pub async fn run(
                 config.bitrate,
                 keyframe_interval_frames,
             )?),
+            #[cfg(not(target_os = "windows"))]
             VideoCodec::Vp9 => encoder::VideoEncoder::Vp9(encoder::vpx::VpxEncoder::new(
                 encoder::vpx::VpxCodec::Vp9,
                 encode_width,
@@ -559,6 +561,14 @@ pub async fn run(
                 config.bitrate,
                 keyframe_interval_frames,
             )?),
+            #[cfg(target_os = "windows")]
+            VideoCodec::Vp8 => {
+                return Err(unsupported_windows_encoder("VP8"));
+            }
+            #[cfg(target_os = "windows")]
+            VideoCodec::Vp9 => {
+                return Err(unsupported_windows_encoder("VP9"));
+            }
         };
         Some(enc)
     } else {
@@ -1446,6 +1456,17 @@ pub async fn run(
 fn unsupported_macos_encoder(codec: &str) -> Error {
     Error::Other(format!(
         "{codec} encoder is only available on macOS; rebuild on macOS or specify --video-codec av1"
+    ))
+}
+
+/// Windows で VP8 / VP9 のエンコーダを指定したときのエラーを作る
+///
+/// libvpx の Windows ビルド (MSVC) は動作しないため、Windows では VP8 / VP9 を
+/// エンコードできない。
+#[cfg(target_os = "windows")]
+fn unsupported_windows_encoder(codec: &str) -> Error {
+    Error::Other(format!(
+        "{codec} encoder is not available on Windows; specify --video-codec av1"
     ))
 }
 

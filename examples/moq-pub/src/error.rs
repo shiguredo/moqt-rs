@@ -18,6 +18,9 @@ pub enum Error {
     /// AV1 デコードエラー
     Decode(shiguredo_dav1d::Error),
     /// VP8 / VP9 エンコードエラー
+    ///
+    /// libvpx の Windows ビルド (MSVC) は動作しないため Windows では発生しない。
+    #[cfg(not(target_os = "windows"))]
     Vpx(shiguredo_libvpx::Error),
     /// Video Toolbox エンコードエラー (macOS)
     #[cfg(target_os = "macos")]
@@ -72,6 +75,7 @@ impl fmt::Display for Error {
             Self::Capture(e) => write!(f, "capture: {e:?}"),
             Self::Encode(e) => write!(f, "encode: {e}"),
             Self::Decode(e) => write!(f, "decode: {e}"),
+            #[cfg(not(target_os = "windows"))]
             Self::Vpx(e) => write!(f, "vpx: {e}"),
             #[cfg(target_os = "macos")]
             Self::VideoToolbox(e) => write!(f, "video toolbox: {e}"),
@@ -117,6 +121,7 @@ impl From<shiguredo_dav1d::Error> for Error {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 impl From<shiguredo_libvpx::Error> for Error {
     fn from(e: shiguredo_libvpx::Error) -> Self {
         Self::Vpx(e)

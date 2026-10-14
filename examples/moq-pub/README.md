@@ -5,6 +5,7 @@ MoQ リレーへ catalog / audio / video track を PUBLISH する publisher ク�
 音声は Opus / AAC-LC で、映像は VP8 / VP9 / AV1 / H.264 / H.265 でエンコードする。
 
 AAC-LC は macOS の Audio Toolbox、H.264 / H.265 は macOS の Video Toolbox を使うため macOS 限定である。
+VP8 / VP9 は libvpx を使う。libvpx の Windows ビルド (MSVC) は動作しないため、Windows では `vp8` / `vp9` を指定できない。
 
 入力はカメラとマイクのほかに MP4 ファイルに対応し、`--input-mp4` は映像トラックを再エンコードせずに配信し、`--input-mp4-reencode` は音声 / 映像をデコードして再エンコードして配信する。
 
@@ -52,7 +53,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--fake-capture-device` | | 実デバイスの代わりに 440 Hz サイン波音声と raden 生成の疑似映像を使う |
 | `--input-mp4` | | MP4 ファイルの映像トラックを再エンコードせずに配信する (AV1 / H.264 / H.265。音声は配信せず、B フレームを含む MP4 は拒否する) |
 | `--input-mp4-reencode` | | MP4 ファイルの音声 / 映像をデコードして再エンコード配信する (音声は Opus のみ、映像は AV1 / H.264 / H.265。解像度 / フレームレートは MP4 から自動検出する) |
-| `--video-codec` | `av1` | 映像コーデック (vp8 / vp9 / av1 / h264 / h265。h264 / h265 は macOS 限定) |
+| `--video-codec` | `av1` | 映像コーデック (vp8 / vp9 / av1 / h264 / h265。h264 / h265 は macOS 限定、vp8 / vp9 は Windows 非対応) |
 | `--no-video` | | 映像トラックの送信を無効化する |
 | `--no-audio` | | 音声トラックの送信を無効化する |
 | `--audio-device-id` | | 音声入力デバイス ID |
