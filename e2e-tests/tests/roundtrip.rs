@@ -97,12 +97,17 @@ fn e2e_transport() -> String {
 ///
 /// 同じ relay を同時に使う実行や、前回の実行で残った配信と混ざらないようにする。
 /// プロセス ID だけでは別のマシンで同時に走る実行と衝突しうるため、時刻も混ぜる。
-fn e2e_namespace() -> String {
+fn e2e_namespace(test: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    format!("moqt-e2e-{}-{nanos}", std::process::id())
+    // テストは同じプロセスで並列に走る。プロセス ID と時刻だけでは足りない
+    // (`SystemTime::now()` の分解能は OS 依存であり、macOS ではマイクロ秒であるため、
+    // 2 つのテストが同じ名前を作りうる)。どちらのテストも catalog track を PUBLISH する
+    // ため、名前が同じになると後から publish した側が already_owned で拒否される。
+    // テストごとの名前を混ぜる
+    format!("moqt-e2e-{}-{test}-{nanos}", std::process::id())
 }
 
 /// 一時ディレクトリ
@@ -429,7 +434,7 @@ async fn publish_and_subscribe_roundtrip() {
     init_tracing();
     let url = e2e_url();
     let transport = e2e_transport();
-    let namespace = e2e_namespace();
+    let namespace = e2e_namespace("roundtrip");
     let dir = WorkDir::new("roundtrip");
     let mp4_path = dir.path().join("subscriber.mp4");
 
@@ -514,7 +519,7 @@ async fn publish_and_subscribe_audio_datagram_roundtrip() {
     init_tracing();
     let url = e2e_url();
     let transport = e2e_transport();
-    let namespace = e2e_namespace();
+    let namespace = e2e_namespace("audio-datagram");
     let dir = WorkDir::new("audio-datagram");
     let mp4_path = dir.path().join("subscriber-audio.mp4");
 
@@ -633,6 +638,20 @@ mod tests {
         std::fs::write(&marker, b"mp4").expect("成果物を書けること");
         let _restarted = WorkDir::new("second");
         assert!(marker.exists(), "別のテストの作り直しで消えないこと");
+    }
+
+    /// 同じプロセスで並列に走るテストが、同じ namespace を使わないこと
+    ///
+    /// どちらのテストも catalog track を PUBLISH するため、名前が同じになると後から
+    /// publish した側が already_owned で拒否される。
+    #[test]
+    fn namespaces_are_unique_per_test() {
+        let first = e2e_namespace("roundtrip");
+        let second = e2e_namespace("audio-datagram");
+        assert_ne!(first, second, "テストごとに別の namespace を使うこと");
+        // 同じテスト名でも、実行ごとに別の名前になる
+        let third = e2e_namespace("roundtrip");
+        assert_ne!(first, third, "実行ごとに別の namespace を使うこと");
     }
 
     /// 同じ名前のディレクトリは、前回の実行の残骸を消してから作り直すこと
