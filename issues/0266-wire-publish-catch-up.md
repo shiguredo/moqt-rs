@@ -1,7 +1,7 @@
 # moq-pub の音声の配信へ追いつきの判定を配線する
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/wire-publish-catch-up
 - Polished: {YYYY-MM-DD}
 
@@ -49,4 +49,21 @@
 
 ## 解決方法
 
-(対応時に記入)
+- `examples/moq-pub/src/pipeline.rs` の音声のループで、チャンクの TIMESTAMP を先に決めてから
+  `AudioPublishCatchUp::evaluate` を呼ぶようにした。読み出しの遅れは「読んだ壁時計 −
+  TIMESTAMP」である。live capture の TIMESTAMP は音声の時計の補正を通した epoch マイクロ秒
+  であるため、補正は 0 として渡す
+- `evaluate` が偽を返したら、バッファからは取り出したうえで符号化へ渡さずに捨てる。捨てた
+  数・長さ・遅れ・キューの長さ・始めた回数は、状態が変わったときだけ `warn` でログに出す
+  (毎フレーム出すとログが埋まる)
+- `evaluate` が真を返したら符号化へ渡し、`record_encoded_chunk` で出力を記録する
+- 再エンコードでは TIMESTAMP が入力のタイムスケールであり壁時計ではないため、
+  `applied_offset_us` を `None` にして判定しない
+- 呼び出しの順序 (TIMESTAMP を先に決める、捨てるときもバッファから取り出す) が要点である。
+  判定の契約そのものは `tests/test_playout/publish_catch_up.rs` と
+  `pbt/tests/prop_playout/publish_catch_up.rs` で固定されている
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
+- 検証: E2E Test (実 relay を介した publish / subscribe) が成功することを確認する
+- 備考: 棄却で飛んだ境目のフェード (`src/playout/splice_fade.rs`) の配線は、符号化へ渡す
+  チャンクを 1 つ保持する変更になるため、別の issue で行う
