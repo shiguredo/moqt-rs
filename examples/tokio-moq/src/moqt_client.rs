@@ -31,7 +31,8 @@ use shiguredo_moqt::{
     session::core::Session, session::types::DataStreamId, session::types::DataStreamResetReason,
     session::types::RequestStreamEnd, session::types::SessionError, session::types::SessionEvent,
     session::types::SessionState, session::types::Transport as MoqtTransport,
-    stream::decoder::DecodedSubgroupObject, stream::fetch::FetchHeader,
+    stream::decoder::DecodedSubgroupObject, stream::encoder::FetchObjectInput,
+    stream::encoder::FetchStreamEncoder, stream::fetch::FetchHeader,
     stream::fetch::FetchPriorContext, stream::fetch::FetchStreamEntry,
     stream::fetch::FetchStreamObject, stream::fetch::FetchSubgroupIdMode,
     stream::subgroup::SubgroupHeader, track_properties::TrackProperties,
@@ -268,6 +269,82 @@ pub struct SubscribeResult {
     /// 購読より前に配られた Object は FILL_PARAMETERS 付き購読の fill fetch stream
     /// (§3.4) で受け取る。LARGEST_OBJECT は fill range の上限を publisher が決めるために使う。
     pub largest_object: Option<Location>,
+}
+
+/// FETCH 応答ストリームの writer (publisher 側)
+///
+/// [`MoqtClient::open_fetch_response`] が返す。1 本の uni stream に Object と End of Range を
+/// 順に書き、[`FetchResponseWriter::finish`] で FIN する。
+///
+/// End of Range は「直前に書いた entry の Location から自分の Location までの区間」を表すため
+/// (draft-ietf-moq-transport-22 §11.4.1.2)、書く順序と Location は呼び出し側が決める。
+pub struct FetchResponseWriter {
+    /// 応答を書く送信ストリーム
+    stream: crate::transport::SendStream,
+    /// Session へ data stream の状態を通知するハンドル
+    data_plane: DataPlaneHandle,
+    /// 応答 stream の ID (Session への通知と終了に使う)
+    stream_id: DataStreamId,
+    /// Object と End of Range のエンコーダ (直前の Location を保持する)
+    encoder: FetchStreamEncoder,
+}
+
+impl FetchResponseWriter {
+    /// Object を 1 件書く
+    ///
+    /// `properties_data` は Properties Length varint を含む生バイト列である
+    /// (draft-ietf-moq-transport-22 §11.1.2 (Object Properties))。
+    /// `input.has_properties` が true のときだけ渡す。
+    ///
+    /// # Errors
+    ///
+    /// エンコードの規則 (delta encoding / Group Order / Publisher Priority) に反する場合は
+    /// [`TransportError`] になる。
+    pub async fn write_object(
+        &mut self,
+        input: &FetchObjectInput,
+        payload: &[u8],
+        properties_data: Option<&[u8]>,
+    ) -> Result<()> {
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_object(input, properties_data, &mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch object encode: {e}")))?;
+        buf.extend_from_slice(payload);
+        self.data_plane.send_fetch_object(self.stream_id)?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
+    /// End of Unknown Range を書く
+    ///
+    /// 直前までに書いた entry の Location から `location` までの区間が「不明」であることを示す
+    /// (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+    ///
+    /// # Errors
+    ///
+    /// エンコードの規則 (直前の Location との順序など) に反する場合は [`TransportError`] になる。
+    pub async fn write_end_of_unknown_range(&mut self, location: Location) -> Result<()> {
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_end_of_unknown_range(location.group_id, location.object_id, &mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
+        self.data_plane.send_fetch_object(self.stream_id)?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
+    /// 応答を FIN で閉じる
+    ///
+    /// # Errors
+    ///
+    /// ストリームの終端に失敗した場合は [`TransportError`] になる。
+    pub async fn finish(mut self) -> Result<()> {
+        self.stream.finish().await?;
+        self.data_plane
+            .send_fetch_data_stream_closed(self.stream_id)?;
+        Ok(())
+    }
 }
 
 /// 制御ストリームから読み出した値または終端
@@ -1805,6 +1882,34 @@ impl MoqtClient {
         stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
         Ok(())
+    }
+
+    /// FETCH 応答ストリームを開き、FETCH_HEADER を書く (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): FETCH 応答は uni stream を開き、
+    /// FETCH_HEADER (要求の Request ID) に続けて Object と End of Range を書く。
+    /// [`send_fetch_response`](Self::send_fetch_response) が「Object 1 件で FIN」するのに対し、
+    /// こちらは保持している複数の Object と End of Range を 1 本の stream に並べて書く。
+    ///
+    /// 返る [`FetchResponseWriter`] で Object と End of Range を書き、最後に
+    /// [`FetchResponseWriter::finish`] で FIN する。
+    pub async fn open_fetch_response(&mut self, request_id: u64) -> Result<FetchResponseWriter> {
+        let data_plane = self.data_plane();
+        let mut stream = self.handle.open_send_stream().await?;
+        let stream_id = DataStreamId(stream.stream_id());
+
+        // Session に FETCH 応答 stream の open を通知する
+        data_plane.send_fetch_header(stream_id, request_id)?;
+        self.outgoing_fetch_streams.insert(stream_id.0, request_id);
+
+        let encoder = FetchStreamEncoder::new(request_id);
+        stream.send(Bytes::from(encoder.encode_header())).await?;
+        Ok(FetchResponseWriter {
+            stream,
+            data_plane,
+            stream_id,
+            encoder,
+        })
     }
 
     /// fill fetch stream を開いてカタログ Object を 1 つ送る (publisher 側)

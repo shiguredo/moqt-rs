@@ -28,6 +28,7 @@ use bytes::Bytes;
 
 use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message::Setup;
+use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::parameter::{SetupOption, SetupOptionValue, SetupOptions};
 use shiguredo_moqt::session::core::Session;
@@ -454,6 +455,15 @@ impl TestPeer {
             MessageParameters::new(),
             TrackProperties::new(),
         )?;
+        self.flush_queued_response(request_id).await
+    }
+
+    /// Session が積んだ応答 (`SessionEvent::SendOnStream`) を該当する request stream へ書く
+    ///
+    /// 応答を返さないと client の API (`MoqtClient::publish_track` など) は応答待ちのまま
+    /// 解決しない。他の request への送信イベントは待ち合わせに影響しないため読み飛ばす
+    /// (複数 request へ連続して応答する場合は保持が必要になる)。
+    async fn flush_queued_response(&mut self, request_id: u64) -> Result<()> {
         let (message, fin) = loop {
             match self.session.poll_event() {
                 Some(SessionEvent::SendOnStream {
@@ -507,38 +517,37 @@ impl TestPeer {
             MessageParameters::new(),
             TrackProperties::new(),
         )?;
-        let (message, fin) = loop {
-            match self.session.poll_event() {
-                Some(SessionEvent::SendOnStream {
-                    request_id: id,
-                    message,
-                    fin,
-                }) if id == request_id => break (message, fin),
-                Some(SessionEvent::CloseSession(error)) => {
-                    return Err(TransportError::Internal(format!(
-                        "session closed before responding to request {request_id}: {error}"
-                    )));
-                }
-                Some(_) => continue,
-                None => {
-                    return Err(TransportError::Internal(format!(
-                        "no response queued for request {request_id}"
-                    )));
-                }
-            }
-        };
-        let request = self
-            .accepted_requests
-            .iter_mut()
-            .find(|request| request.request_id == request_id)
-            .ok_or_else(|| {
-                TransportError::Internal(format!("request stream not found: {request_id}"))
-            })?;
-        request.send.send(Bytes::from(message.encode()?)).await?;
-        if fin {
-            request.send.finish().await?;
-        }
-        Ok(())
+        self.flush_queued_response(request_id).await
+    }
+
+    /// 受理した FETCH に FETCH_OK で応答する
+    ///
+    /// draft-ietf-moq-transport-22 §9.12 (FETCH_OK)。End Location は publisher が返す範囲の
+    /// 終端で、End of Track は track の終端まで返し切ったことを示す (0 は未達)。
+    pub(crate) async fn send_fetch_ok(
+        &mut self,
+        request_id: u64,
+        end_location: Location,
+        end_of_track: u8,
+    ) -> Result<()> {
+        self.session
+            .send_fetch_ok(
+                request_id,
+                end_of_track,
+                end_location,
+                MessageParameters::new(),
+                TrackProperties::new(),
+            )
+            .map_err(|e| TransportError::Internal(format!("send_fetch_ok: {e}")))?;
+        self.flush_queued_response(request_id).await
+    }
+
+    /// 自側が開く uni stream を開き、送信ハンドルを返す
+    ///
+    /// FETCH 応答 (draft-ietf-moq-transport-22 §11.4.1) のように、peer が自ら uni stream を
+    /// 開いて書く経路をテストで再現するために使う。
+    pub(crate) async fn open_uni_send_stream(&mut self) -> Result<crate::transport::SendStream> {
+        self.handle.open_send_stream().await
     }
 
     /// 自側 control stream に GOAWAY を書く
@@ -593,6 +602,22 @@ impl TestPeer {
             })?;
         request.send.finish().await?;
         Ok(())
+    }
+
+    /// client が開いた uni data stream を受理し、FIN まで読む
+    ///
+    /// FETCH 応答や subgroup stream の内容を、client が書いたバイト列のまま取り出す。
+    pub(crate) async fn recv_uni_data_stream(&mut self) -> Result<Vec<u8>> {
+        let mut stream = self
+            .recv_acceptor
+            .accept_recv_stream()
+            .await?
+            .ok_or_else(|| TransportError::Internal("data stream acceptor closed".into()))?;
+        let mut buf = Vec::new();
+        while let crate::transport::RecvChunk::Data(data) = stream.receive_chunk().await? {
+            buf.extend_from_slice(&data);
+        }
+        Ok(buf)
     }
 
     /// 自側の次の Request ID を採番する (server 役は奇数)
@@ -711,6 +736,15 @@ mod tests {
     /// client の接続とハンドシェイクは peer のハンドシェイクと並行して進める (どちらも相手の
     /// SETUP を待つため、直列に await すると停止する)。
     async fn connect_pair() -> (TestPeer, MoqtClient) {
+        let (peer, client, _acceptor) = connect_pair_with_acceptor().await;
+        (peer, client)
+    }
+
+    /// peer と client を接続し、SETUP 交換まで進める (client の StreamAcceptor も返す)
+    ///
+    /// peer が開く uni stream (FETCH 応答など) を client 側で読むテストが使う。
+    async fn connect_pair_with_acceptor() -> (TestPeer, MoqtClient, crate::transport::StreamAcceptor)
+    {
         // server はこの関数を抜けるまで保持する。s2n-quic の endpoint は Server ハンドルとは
         // 独立に駆動されるが、待ち受けを意図せず閉じないことをコードで示しておく
         let mut server = TestPeerServer::start()
@@ -745,7 +779,7 @@ mod tests {
         });
 
         peer.establish().await.expect("SETUP を交換できること");
-        let (client, _acceptor) = establish
+        let (client, acceptor) = establish
             .await
             .expect("establish タスクが終了すること")
             .expect("client を確立できること");
@@ -754,7 +788,7 @@ mod tests {
             SessionState::Established,
             "peer 側 session が Established になること"
         );
-        (peer, client)
+        (peer, client, acceptor)
     }
 
     /// peer が SETUP を送ってハンドシェイクが完了し、peer 起点 request stream の先頭に
@@ -1721,6 +1755,422 @@ mod tests {
                 0,
                 "旧 session は NO_ERROR (0x0) で閉じられること"
             );
+        })
+        .await;
+    }
+    /// peer から届いた FETCH に、複数 Object と End of Unknown Range を 1 本の応答で返す
+    ///
+    /// publisher 側の応答経路 (`send_fetch_ok` → `open_fetch_response` → writer) を固定する。
+    /// 保持した複数の Object と End of Range を 1 本の uni stream に並べて書けること、
+    /// peer 側の [`FetchStreamDecoder`] が同じ内容を読めることを確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_response_writer_writes_objects_and_end_of_range() {
+        use shiguredo_moqt::message::Fetch;
+        use shiguredo_moqt::message::common::Location;
+        use shiguredo_moqt::message_parameter::MessageParameters;
+        use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, FetchStreamDecoder};
+        use shiguredo_moqt::stream::encoder::FetchObjectInput;
+
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // peer (relay) が publisher へ FETCH を送る
+            let request_id = peer.next_request_id().expect("Request ID を採番できること");
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            peer.send_request_start(ControlMessage::Fetch(Fetch {
+                request_id,
+                track_namespace: namespace,
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .await
+            .expect("FETCH を送れること");
+
+            // client が request として受理する
+            let event = client.next_event().await.expect("イベントを取得できること");
+            let delivered_request_id = match event {
+                Some(ClientEvent::Request(request)) => {
+                    assert!(
+                        matches!(request.message, ControlMessage::Fetch(_)),
+                        "FETCH として受理されること"
+                    );
+                    request.request_id
+                }
+                other => panic!("FETCH がアプリへ届くこと: {other:?}"),
+            };
+            assert_eq!(
+                delivered_request_id, request_id,
+                "Request ID が一致すること"
+            );
+
+            // FETCH_OK を返し、保持している Object と End of Unknown Range を 1 本に書く
+            client
+                .send_fetch_ok(
+                    request_id,
+                    0,
+                    Location {
+                        group_id: 3,
+                        object_id: 1,
+                    },
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .await
+                .expect("FETCH_OK を返せること");
+            let mut writer = client
+                .open_fetch_response(request_id)
+                .await
+                .expect("FETCH 応答 stream を開けること");
+            // Properties Length = 0 を含む生バイト列 (draft-ietf-moq-transport-22 §11.1.2)
+            let properties: Vec<u8> = vec![0x00];
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 1,
+                        subgroup_id: 0,
+                        object_id: 0,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 4,
+                    },
+                    b"abcd",
+                    Some(&properties),
+                )
+                .await
+                .expect("1 件目の Object を書けること");
+            // 保持していない範囲を End of Unknown Range で示す
+            writer
+                .write_end_of_unknown_range(Location {
+                    group_id: 2,
+                    object_id: 5,
+                })
+                .await
+                .expect("End of Unknown Range を書けること");
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 3,
+                        subgroup_id: 0,
+                        object_id: 1,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    b"xy",
+                    Some(&properties),
+                )
+                .await
+                .expect("2 件目の Object を書けること");
+            writer.finish().await.expect("応答を FIN で閉じられること");
+
+            // peer が応答 stream を読み、FETCH_HEADER と entry を decode する
+            let bytes = peer
+                .recv_uni_data_stream()
+                .await
+                .expect("FETCH 応答 stream を読めること");
+            let mut decoder = FetchStreamDecoder::new();
+            decoder.push(&bytes);
+            let header = decoder
+                .try_decode_header()
+                .expect("FETCH_HEADER を decode できること")
+                .expect("FETCH_HEADER があること");
+            assert_eq!(header.request_id, request_id, "FETCH_HEADER の Request ID");
+
+            let mut decoded = Vec::new();
+            while let Some(entry) = decoder
+                .try_decode_entry()
+                .expect("entry を decode できること")
+            {
+                let payload = match &entry {
+                    DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
+                        decoder.try_read_payload().expect("payload を読めること")
+                    }
+                    _ => Vec::new(),
+                };
+                decoded.push((entry, payload));
+            }
+            assert_eq!(decoded.len(), 3, "Object / End of Range / Object の 3 件");
+            match (&decoded[0].0, &decoded[0].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 1);
+                    assert_eq!(object.object_id, 0);
+                    assert_eq!(payload.as_slice(), b"abcd", "1 件目の payload");
+                }
+                other => panic!("1 件目が Object であること: {other:?}"),
+            }
+            match &decoded[1].0 {
+                DecodedFetchEntry::EndOfUnknownRange {
+                    group_id,
+                    object_id,
+                } => {
+                    assert_eq!(*group_id, 2);
+                    assert_eq!(*object_id, 5);
+                }
+                other => panic!("2 件目が End of Unknown Range であること: {other:?}"),
+            }
+            match (&decoded[2].0, &decoded[2].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 3);
+                    assert_eq!(object.object_id, 1);
+                    assert_eq!(payload.as_slice(), b"xy", "2 件目の payload");
+                }
+                other => panic!("3 件目が Object であること: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    /// client が FETCH を発行し、FETCH_OK と応答 stream の Object / End of Range を受け取る
+    ///
+    /// subscriber 側の取得経路を固定する。`MoqtClient::fetch` → `FetchOkReceived` の配送 →
+    /// peer が開いた uni stream の `FetchStreamDecoder` での decode までを通す。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_fetch_receives_fetch_ok_and_response_entries() {
+        use shiguredo_moqt::message_parameter::MessageParameters;
+        use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, FetchStreamDecoder};
+        use shiguredo_moqt::stream::encoder::{FetchObjectInput, FetchStreamEncoder};
+
+        run_with_timeout(async {
+            let (mut peer, mut client, mut acceptor) = connect_pair_with_acceptor().await;
+
+            // client が FETCH を発行する
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let request_id = client
+                .fetch(namespace, b"video".to_vec(), MessageParameters::new())
+                .await
+                .expect("FETCH を発行できること");
+
+            // peer が受理し、FETCH_OK を返す
+            let message = peer
+                .recv_request_start()
+                .await
+                .expect("FETCH を受理できること");
+            let received_request_id = match message {
+                ControlMessage::Fetch(fetch) => fetch.request_id,
+                other => panic!("FETCH として受理されること: {other:?}"),
+            };
+            assert_eq!(received_request_id, request_id, "Request ID が一致すること");
+            let end_location = Location {
+                group_id: 3,
+                object_id: 1,
+            };
+            peer.send_fetch_ok(request_id, end_location, 0)
+                .await
+                .expect("FETCH_OK を返せること");
+
+            // peer が応答 stream (uni) に Object と End of Unknown Range を書く
+            let mut encoder = FetchStreamEncoder::new(request_id);
+            let mut bytes = encoder.encode_header();
+            let properties: Vec<u8> = vec![0x00];
+            encoder
+                .encode_object(
+                    &FetchObjectInput {
+                        group_id: 1,
+                        subgroup_id: 0,
+                        object_id: 0,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 4,
+                    },
+                    Some(&properties),
+                    &mut bytes,
+                )
+                .expect("1 件目の Object を encode できること");
+            bytes.extend_from_slice(b"abcd");
+            encoder
+                .encode_end_of_unknown_range(2, 5, &mut bytes)
+                .expect("End of Unknown Range を encode できること");
+            encoder
+                .encode_object(
+                    &FetchObjectInput {
+                        group_id: 3,
+                        subgroup_id: 0,
+                        object_id: 1,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    Some(&properties),
+                    &mut bytes,
+                )
+                .expect("2 件目の Object を encode できること");
+            bytes.extend_from_slice(b"xy");
+            let mut stream = peer
+                .open_uni_send_stream()
+                .await
+                .expect("uni stream を開けること");
+            stream
+                .send(Bytes::from(bytes))
+                .await
+                .expect("応答 stream を書けること");
+            stream.finish().await.expect("応答 stream を終端できること");
+
+            // client が FETCH_OK を受信する
+            let event = client.next_event().await.expect("イベントを取得できること");
+            match event {
+                Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
+                    request_id: rid,
+                    end_location: location,
+                    end_of_track,
+                })) => {
+                    assert_eq!(rid, request_id, "FETCH_OK の Request ID");
+                    assert_eq!(location, end_location, "FETCH_OK の End Location");
+                    assert!(!end_of_track, "FETCH_OK の End of Track は未達であること");
+                }
+                other => panic!("FETCH_OK がアプリへ届くこと: {other:?}"),
+            }
+
+            // client が応答 stream を読んで decode する
+            let mut stream = acceptor
+                .accept_recv_stream()
+                .await
+                .expect("応答 stream を受理できること")
+                .expect("応答 stream があること");
+            let mut buf = Vec::new();
+            while let crate::transport::RecvChunk::Data(data) = stream
+                .receive_chunk()
+                .await
+                .expect("応答 stream を読めること")
+            {
+                buf.extend_from_slice(&data);
+            }
+            let mut decoder = FetchStreamDecoder::new();
+            decoder.push(&buf);
+            let header = decoder
+                .try_decode_header()
+                .expect("FETCH_HEADER を decode できること")
+                .expect("FETCH_HEADER があること");
+            assert_eq!(header.request_id, request_id, "FETCH_HEADER の Request ID");
+            let mut decoded = Vec::new();
+            while let Some(entry) = decoder
+                .try_decode_entry()
+                .expect("entry を decode できること")
+            {
+                let payload = match &entry {
+                    DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
+                        decoder.try_read_payload().expect("payload を読めること")
+                    }
+                    _ => Vec::new(),
+                };
+                decoded.push((entry, payload));
+            }
+            assert_eq!(decoded.len(), 3, "Object / End of Range / Object の 3 件");
+            match (&decoded[0].0, &decoded[0].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 1);
+                    assert_eq!(object.object_id, 0);
+                    assert_eq!(payload.as_slice(), b"abcd", "1 件目の payload");
+                }
+                other => panic!("1 件目が Object であること: {other:?}"),
+            }
+            match &decoded[1].0 {
+                DecodedFetchEntry::EndOfUnknownRange {
+                    group_id,
+                    object_id,
+                } => {
+                    assert_eq!(*group_id, 2);
+                    assert_eq!(*object_id, 5);
+                }
+                other => panic!("2 件目が End of Unknown Range であること: {other:?}"),
+            }
+            match (&decoded[2].0, &decoded[2].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 3);
+                    assert_eq!(object.object_id, 1);
+                    assert_eq!(payload.as_slice(), b"xy", "2 件目の payload");
+                }
+                other => panic!("3 件目が Object であること: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    /// Session が INVALID_RANGE で拒否した FETCH はアプリへ渡らない
+    ///
+    /// draft-ietf-moq-transport-22 §3.2 (Fetch) の MUST 2 条件 (Object が publish されていない /
+    /// Start Location が Largest Object より大きい) は Session が判定して REQUEST_ERROR を送る。
+    /// アプリが重ねて応答すると `send_fetch_ok` が未登録の Request ID を拒否して致命終了するため、
+    /// 拒否済みの FETCH を配送しないことを固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_fetch_is_not_delivered_to_the_application() {
+        use shiguredo_moqt::error::REQUEST_INVALID_RANGE;
+        use shiguredo_moqt::message::Fetch;
+        use shiguredo_moqt::message_parameter::MessageParameters;
+
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+
+            // まだ Object を publish していない track を PUBLISH する
+            // (publish の送信と peer の応答は並行して進める)
+            let publish_namespace = namespace.clone();
+            let (published, _) = tokio::join!(
+                client.publish_track(
+                    publish_namespace,
+                    b"video".to_vec(),
+                    7,
+                    TrackProperties::new()
+                ),
+                async {
+                    let message = peer
+                        .recv_request_start()
+                        .await
+                        .expect("PUBLISH を受理できること");
+                    let request_id = match message {
+                        ControlMessage::Publish(publish) => publish.request_id,
+                        other => panic!("PUBLISH として受理されること: {other:?}"),
+                    };
+                    peer.send_request_ok(request_id)
+                        .await
+                        .expect("PUBLISH_OK を返せること");
+                    request_id
+                }
+            );
+            published.expect("PUBLISH が成立すること");
+
+            // peer が、まだ Object が無い track へ FETCH を送る
+            let fetch_request_id = peer.next_request_id().expect("Request ID を採番できること");
+            peer.send_request_start(ControlMessage::Fetch(Fetch {
+                request_id: fetch_request_id,
+                track_namespace: namespace,
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .await
+            .expect("FETCH を送れること");
+
+            // peer 起点 request の受理と自動応答はアプリのイベントループ
+            // (`MoqtClient::next_event`) から駆動されるため、待つ間も回しておく
+            let drive = tokio::spawn(async move { client.next_event().await });
+            // peer は INVALID_RANGE の REQUEST_ERROR を受け取る
+            let response = peer
+                .recv_response(fetch_request_id)
+                .await
+                .expect("応答を読めること");
+            match response {
+                ControlMessage::RequestError(error) => {
+                    assert_eq!(
+                        error.error_code, REQUEST_INVALID_RANGE,
+                        "INVALID_RANGE で拒否されること"
+                    );
+                }
+                other => panic!("REQUEST_ERROR が届くこと: {other:?}"),
+            }
+
+            // アプリへは要求が渡らない (渡っていれば next_event が先に完了している)
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !drive.is_finished(),
+                "拒否された FETCH がアプリへ渡らないこと"
+            );
+            drive.abort();
         })
         .await;
     }
