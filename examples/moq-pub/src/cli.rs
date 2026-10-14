@@ -108,8 +108,10 @@ pub struct Config {
     pub audio_bitrate: u32,
     /// 音声トラックを datagram で送るかどうか
     ///
-    /// 映像は 1 group = 1 unidirectional stream で送る (draft-ietf-moq-loc-04 §4.2)。
-    /// datagram が示されているのは §4.1 の音声の例だけである。
+    /// 既定は真である (draft-ietf-moq-loc-04 §4.1 (Application with one audio track) は
+    /// 1 audio frame = 1 Object = 1 Group と定める)。datagram は再送されないため、遅れた
+    /// 音声を届けるより落とす方が A/V のずれを残さない。映像は 1 group = 1 unidirectional
+    /// stream で送る (§4.2)。`--audio-subgroup` で subgroup 配送へ切り替える。
     pub audio_datagram: bool,
     /// object datagram の上限サイズ (bytes)
     ///
@@ -381,10 +383,13 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         Ok(size)
     })?;
 
-    let audio_datagram: bool = noargs::flag("audio-datagram")
-        .doc("Use datagrams for the audio track instead of subgroup streams")
+    // 音声は OBJECT_DATAGRAM 配送が既定である。`--audio-subgroup` で subgroup 配送へ
+    // 切り替える
+    let audio_subgroup: bool = noargs::flag("audio-subgroup")
+        .doc("Use subgroup streams for the audio track instead of datagrams")
         .take(&mut args)
         .is_present();
+    let audio_datagram = !audio_subgroup;
 
     // `.default()` は `&'static str` しか取れないため、`DEFAULT_TARGET_LATENCY_MS` と
     // 一致する値を文字列で渡す (一致は単体テストで固定する)
@@ -420,8 +425,8 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let audio_enabled = !no_audio && input_mp4.is_none();
 
     // datagram 配送を使わない場合、上限の指定は意味を持たない (黙って捨てずに警告する)
-    if audio_datagram && !audio_enabled {
-        tracing::warn!("--audio-datagram is ignored because the audio track is not published");
+    if audio_subgroup && !audio_enabled {
+        tracing::warn!("--audio-subgroup is ignored because the audio track is not published");
     }
     if datagram_max_size_explicit && (!audio_datagram || !audio_enabled) {
         tracing::warn!(
@@ -503,9 +508,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
                     "--audio-bitrate is ignored when --input-mp4 is set (audio is not published)"
                 );
             }
-            if audio_datagram {
+            if audio_subgroup {
                 tracing::warn!(
-                    "--audio-datagram is ignored when --input-mp4 is set (audio is not published)"
+                    "--audio-subgroup is ignored when --input-mp4 is set (audio is not published)"
                 );
             }
         }
@@ -1064,28 +1069,29 @@ mod tests {
         );
     }
 
-    /// `--audio-datagram` は既定で無効、指定で有効になる
+    /// 音声は既定で datagram 配送になり、`--audio-subgroup` で subgroup 配送になること
     ///
-    /// datagram 配送は音声トラックだけに指定できる (映像は 1 group = 1 unidirectional stream。
-    /// draft-ietf-moq-loc-04 §4.2)。
+    /// datagram 配送が既定である (draft-ietf-moq-loc-04 §4.1 (Application with one audio
+    /// track) は 1 audio frame = 1 Object = 1 Group と定める)。映像は 1 group = 1
+    /// unidirectional stream のままである (§4.2)。
     #[test]
-    fn audio_datagram_flag_is_opt_in() {
+    fn audio_delivery_defaults_to_datagrams() {
         let config = parse_args(BASE_ARGS)
             .expect("オプションの解析に成功すること")
             .expect("設定が返ること");
         assert!(
-            !config.audio_datagram,
-            "既定では音声トラックも subgroup stream で送ること"
+            config.audio_datagram,
+            "既定では音声トラックを datagram で送ること"
         );
 
         let mut args = BASE_ARGS.to_vec();
-        args.push("--audio-datagram");
+        args.push("--audio-subgroup");
         let config = parse_args(&args)
             .expect("オプションの解析に成功すること")
             .expect("設定が返ること");
         assert!(
-            config.audio_datagram,
-            "指定で音声トラックを datagram で送ること"
+            !config.audio_datagram,
+            "--audio-subgroup で subgroup stream で送ること"
         );
     }
 

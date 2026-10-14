@@ -7,7 +7,7 @@
 2 つのテストがあります。
 
 - `publish_and_subscribe_roundtrip`：映像を subgroup stream で配信し、購読側でデコードして MP4 へ保存するまでを検証する
-- `publish_and_subscribe_audio_datagram_roundtrip`：音声を datagram で配信し (`moq-pub` の `--audio-datagram`)、購読側でデコードして MP4 へ保存するまでを検証する
+- `publish_and_subscribe_audio_datagram_roundtrip`：音声を datagram で配信し (`moq-pub` の既定 (音声は datagram 配送))、購読側でデコードして MP4 へ保存するまでを検証する
 
 検証する内容は次の 5 点です。
 

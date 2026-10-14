@@ -268,7 +268,7 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
 
 /// 音声だけを datagram で配信する publisher を起動する
 ///
-/// `--audio-datagram` は音声トラックを OBJECT_DATAGRAM 配送に切り替える
+/// 音声は既定で OBJECT_DATAGRAM 配送になる
 /// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。namespace の解決は
 /// [`start_publisher`] と同じく MSF fragment から行う。
 fn start_audio_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
@@ -280,7 +280,6 @@ fn start_audio_publisher(url: &str, transport: &str, namespace: &str) -> Publish
         transport,
         "--fake-capture-device",
         "--no-video",
-        "--audio-datagram",
     ])
     .expect("publisher のオプションを解釈できること")
     .expect("publisher の設定が返ること");
@@ -510,7 +509,7 @@ async fn publish_and_subscribe_roundtrip() {
 
 /// relay を介した datagram 音声の往復を検証する
 ///
-/// publisher は `--audio-datagram` で音声を OBJECT_DATAGRAM 配送にする
+/// publisher は音声を OBJECT_DATAGRAM 配送にする (既定)
 /// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subscriber が datagram の
 /// payload を decode していなければ、音声フレームは 1 つも届かない。
 #[tokio::test(flavor = "multi_thread")]

@@ -59,7 +59,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--audio-device-id` | | 音声入力デバイス ID |
 | `--audio-codec` | `opus` | 音声コーデック (opus / aac。aac は macOS 限定で AAC-LC のみ) |
 | `--audio-bitrate` | `64` | 音声ターゲットビットレート (kbps) |
-| `--audio-datagram` | | 音声トラックを subgroup stream ではなく datagram で配信する (catalog と映像は常に subgroup stream)。datagram は 1 object が 1 QUIC datagram に収まる必要があり (draft-ietf-moq-loc-04 §4.1)、映像は 1 group = 1 unidirectional stream で送る (同 §4.2)。上限は `--datagram-max-size` で指定し、超える object はエラーになる |
+| `--audio-subgroup` | | 音声トラックを datagram ではなく subgroup stream で配信する。既定は datagram である (draft-ietf-moq-loc-04 §4.1 は 1 audio frame = 1 Object = 1 Group と定める)。上限は `--datagram-max-size` で指定し、超える object はエラーになる。catalog と映像は常に subgroup stream である (§4.2) |
 | `--datagram-max-size` | `1160` | MOQT の object datagram (ヘッダ + Properties + payload) の上限サイズ (bytes)。上限を超える object は送信せず、実サイズと対処を示すエラーで終了する。既定は RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値である |
 | `--target-latency` | `200` | MSF カタログの `targetLatency` (ms)。受信側は符号化時刻からこの値ぶん遅らせて表示する (draft-ietf-moq-msf-01 §5.2.8)。音声と映像には同じ値を載せ、同じ `renderGroup` で同時に再生させる (同 §5.2.11) |
 
@@ -86,7 +86,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--bitrate`
   - `--audio-device-id`
   - `--audio-bitrate`
-  - `--audio-datagram`
+  - `--audio-subgroup`
   - `--datagram-max-size`
 - `--input-mp4-reencode` と同時に指定すると無視されるオプション
   - `--device-id`
