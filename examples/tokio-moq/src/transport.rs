@@ -341,19 +341,31 @@ impl StreamHandle {
     /// datagram を送信する (publisher 側で使用)
     ///
     /// QUIC では s2n-quic の datagram sender を使い、WebTransport では HTTP Datagram 経由で送信する。
+    ///
+    /// QUIC の送信のキューが満杯のときは、空きができるまで待つ。datagram は再送されないため、
+    /// ここで捨てると音声が飛ぶ。満杯になるのは回線が詰まっているときであり、待てば送れる。
+    /// 待たずにエラーを返すと、購読側は音声を一切受け取れないまま publisher が終了する。
     pub async fn send_datagram(&self, data: &[u8]) -> Result<(), TransportError> {
         match self {
             StreamHandle::Quic(handle) => {
-                let bytes = Bytes::copy_from_slice(data);
-                handle
-                    .datagram_mut(
+                let mut bytes = Bytes::copy_from_slice(data);
+                // `poll_send_datagram` は空きが無いとき `Waker` を登録するため、
+                // ポーリングで待たずに空きができ次第おきる
+                std::future::poll_fn(|cx| {
+                    let sent = handle.datagram_mut(
                         |sender: &mut s2n_quic::provider::datagram::default::Sender| {
-                            sender.send_datagram(bytes)
+                            sender.poll_send_datagram(&mut bytes, cx)
                         },
-                    )
-                    .map_err(|e| TransportError::Quic(format!("datagram send error: {e}")))?
-                    .map_err(|e| TransportError::Quic(format!("datagram send error: {e}")))?;
-                Ok(())
+                    );
+                    match sent {
+                        Ok(sent) => sent
+                            .map_err(|e| TransportError::Quic(format!("datagram send error: {e}"))),
+                        Err(e) => std::task::Poll::Ready(Err(TransportError::Quic(format!(
+                            "datagram send error: {e}"
+                        )))),
+                    }
+                })
+                .await
             }
             StreamHandle::WtH3(session) => {
                 let session = session.lock().await;
