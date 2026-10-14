@@ -1,7 +1,7 @@
 # 音声の配送を OBJECT_DATAGRAM 既定にする
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-default-audio-delivery
 - Polished: {YYYY-MM-DD}
 
@@ -45,4 +45,19 @@ draft-ietf-moq-loc-04 §4.1 (Application with one audio track) は「1 audio fra
 
 ## 解決方法
 
-(対応時に記入)
+- `examples/moq-pub/src/cli.rs` の `audio_datagram` の既定を真にした。`noargs::flag` は
+  既定が無効であるため、逆の意味の `--audio-subgroup` を追加し、`audio_datagram` を
+  その否定として求める
+- `--audio-datagram` は削除した (後方互換は不要)
+- 警告メッセージを `--audio-subgroup` に合わせた (`--input-mp4` で音声を publish しない
+  とき、音声トラックを publish しないとき)
+- `examples/moq-pub/README.md` と `e2e-tests/README.md` の記述を既定に合わせた
+- E2E テストの publisher から `--audio-datagram` を外した (既定で datagram になる)
+- テスト: `audio_delivery_defaults_to_datagrams` を追加し、既定で datagram 配送になること
+  と `--audio-subgroup` で subgroup 配送になることを固定した
+- 検証 (ローカル): sora-moq の relay に対して `--no-video` だけで publisher を起動し、
+  `audio_delivery=datagram` で動くこと、subscriber が 500 個の音声チャンクを受信して
+  MP4 (175168 バイト) を作ることを確認した
+- 検証: E2E Test が 2 件とも成功する
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
