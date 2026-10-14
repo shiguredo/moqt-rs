@@ -98,9 +98,13 @@ struct WorkDir {
 }
 
 impl WorkDir {
-    /// プロセスごとに一意な一時ディレクトリを作る
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("moqt-e2e-{}", std::process::id()));
+    /// テストごとに一意な一時ディレクトリを作る
+    ///
+    /// テストは同じプロセスで並列に走る。プロセス ID だけを名前に入れると、後から始めた
+    /// テストが先のテストの成果物 (受信中の MP4) をディレクトリごと消してしまい、録画の
+    /// 検証が「ファイルが無い」で落ちる。`name` はテストの目的を表す短い語にする。
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("moqt-e2e-{}-{name}", std::process::id()));
         // 前回の実行が残したファイルを使い回さないよう、いったん消してから作る
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("一時ディレクトリを作成できること");
@@ -409,7 +413,7 @@ async fn publish_and_subscribe_roundtrip() {
     let url = e2e_url();
     let transport = e2e_transport();
     let namespace = e2e_namespace();
-    let dir = WorkDir::new();
+    let dir = WorkDir::new("roundtrip");
     let mp4_path = dir.path().join("subscriber.mp4");
 
     // 1. publisher を起動して SETUP と PUBLISH を完了させる
@@ -493,7 +497,7 @@ async fn publish_and_subscribe_audio_datagram_roundtrip() {
     let url = e2e_url();
     let transport = e2e_transport();
     let namespace = e2e_namespace();
-    let dir = WorkDir::new();
+    let dir = WorkDir::new("audio-datagram");
     let mp4_path = dir.path().join("subscriber-audio.mp4");
 
     // 1. 音声だけを datagram で配信する publisher を起動する
@@ -586,4 +590,46 @@ async fn publish_and_subscribe_audio_datagram_roundtrip() {
     // 5. どちらも graceful shutdown で正常終了する
     subscriber.stop().await;
     publisher.stop().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同じプロセスで並列に走るテストが、互いの成果物を消さないこと
+    ///
+    /// テストは同じプロセスで並列に走るため、一時ディレクトリの名前をプロセス ID だけで
+    /// 決めると、後から始めたテストが受信中の MP4 をディレクトリごと消してしまう。
+    #[test]
+    fn work_dirs_are_unique_per_test() {
+        let first = WorkDir::new("first");
+        let second = WorkDir::new("second");
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "テストごとに別のディレクトリを使うこと"
+        );
+
+        // 片方のテストが作り直しても、もう片方の成果物が残る
+        let marker = first.path().join("subscriber.mp4");
+        std::fs::write(&marker, b"mp4").expect("成果物を書けること");
+        let _restarted = WorkDir::new("second");
+        assert!(marker.exists(), "別のテストの作り直しで消えないこと");
+    }
+
+    /// 同じ名前のディレクトリは、前回の実行の残骸を消してから作り直すこと
+    #[test]
+    fn work_dir_clears_the_previous_run() {
+        let first = WorkDir::new("reused");
+        let marker = first.path().join("subscriber.mp4");
+        std::fs::write(&marker, b"mp4").expect("成果物を書けること");
+        drop(first);
+
+        let second = WorkDir::new("reused");
+        assert!(
+            !marker.exists(),
+            "前回の実行が残した成果物を持ち越さないこと"
+        );
+        assert!(second.path().exists(), "ディレクトリは作り直されること");
+    }
 }
