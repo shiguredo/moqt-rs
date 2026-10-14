@@ -4,11 +4,16 @@
 
 `moq-pub` と `moq-sub` の lib API を使い、publisher と subscriber のパイプラインを同一プロセス内で起動します。バイナリを起動してログを照合する方法は取らず、判定はチャネルで受け取るフレームと MP4 の実体で行います。
 
+2 つのテストがあります。
+
+- `publish_and_subscribe_roundtrip`：映像を subgroup stream で配信し、購読側でデコードして MP4 へ保存するまでを検証する
+- `publish_and_subscribe_audio_datagram_roundtrip`：音声を datagram で配信し (`moq-pub` の `--audio-datagram`)、購読側でデコードして MP4 へ保存するまでを検証する
+
 検証する内容は次の 5 点です。
 
 1. publisher のパイプラインが SETUP と PUBLISH を完了する
-2. subscriber のパイプラインが catalog を取得して SUBSCRIBE を完了する (最初のフレームが publisher の生成するサイズでデコードできること)
-3. subscriber がデコード済みの映像フレームを継続して受け取る (5 秒間で 30 フレーム以上、かつ配信の終了間際まで届くこと)
+2. subscriber のパイプラインが catalog を取得して SUBSCRIBE を完了する (最初のフレームが publisher の生成するパラメータでデコードできること)
+3. subscriber がデコード済みのフレームを継続して受け取る (5 秒間で映像は 30 フレーム以上、音声は 50 フレーム以上。配信の終了間際まで届き、音声は PTS が 1 秒以上進むこと)
 4. subscriber が書き出した MP4 が 0 バイトより大きい
 5. どちらのパイプラインも shutdown で正常終了する
 
@@ -20,7 +25,8 @@ Track Namespace は実行ごとに一意な値を使うため、同じ MoQ リ�
 
 ```console
 $ MOQT_E2E_URL=moqt://<HOST>/ cargo test -p e2e-tests -- --ignored
-running 1 test
+running 2 tests
+test publish_and_subscribe_audio_datagram_roundtrip ... ok
 test publish_and_subscribe_roundtrip ... ok
 ```
 

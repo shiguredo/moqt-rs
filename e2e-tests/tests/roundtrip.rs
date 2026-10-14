@@ -1,9 +1,10 @@
 //! relay を介した publish / subscribe の往復 E2E テスト
 //!
-//! 実 relay に publisher と subscriber を接続し、publisher が配信した映像が subscriber に
-//! 届いて MP4 に保存されるところまでを検証する。接続先は環境変数 `MOQT_E2E_URL` で渡す。
-//! Track Namespace は `--namespace` ではなく `--url` の MSF fragment (`#msf:...`) から渡し、
-//! `--namespace` を省略したときの解決も併せて検証する。
+//! 実 relay に publisher と subscriber を接続し、publisher が配信した映像 (stream 配送) と
+//! 音声 (datagram 配送) が subscriber に届いてデコードされ、MP4 に保存されるところまでを
+//! 検証する。接続先は環境変数 `MOQT_E2E_URL` で渡す。Track Namespace は `--namespace` では
+//! なく `--url` の MSF fragment (`#msf:...`) から渡し、`--namespace` を省略したときの解決も
+//! 併せて検証する。
 //!
 //! 実 relay が必要なため、通常の `cargo test` では実行しない (`#[ignore]` を付けている)。
 //! `MOQT_E2E_URL` を設定したうえで `cargo test -p e2e-tests -- --ignored` を実行する。
@@ -30,6 +31,15 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(4);
 const STREAM_DURATION: Duration = Duration::from_secs(5);
 /// 受け取り続けたとみなす最小フレーム数 (30 fps の 1 秒分)
 const MIN_FRAMES: u64 = 30;
+/// 受け取り続けたとみなす最小の音声フレーム数
+///
+/// publisher は 20 ms ごとに 1 Object を送るため、5 秒で 250 程度になる。relay の負荷を
+/// 見込んで 1 秒分を下限にする。
+const MIN_AUDIO_FRAMES: u64 = 50;
+/// publisher が配信する音声のサンプルレート (moq-pub の既定値)
+const AUDIO_SAMPLE_RATE: u32 = 48_000;
+/// publisher が配信する音声のチャンネル数 (moq-pub の既定値)
+const AUDIO_CHANNELS: u8 = 1;
 /// 配信の終了間際まで届いたとみなす、最後の受信からの許容時間
 ///
 /// 受信の間隔 (500 ms) と 30 fps のフレーム間隔 (33 ms) に対して十分な余裕を取る。
@@ -163,18 +173,22 @@ struct Subscriber {
     shutdown: ShutdownController,
     /// パイプラインのタスク
     task: tokio::task::JoinHandle<moq_sub::error::Result<()>>,
-    /// デコード済み映像フレームの受信側
+    /// デコード済み映像フレームの受信側 (音声のみ購読するときは空のまま)
     frames: std::sync::mpsc::Receiver<moq_sub::DecodedVideoFrame>,
-    /// デコード済み音声フレームの受信側 (音声は購読しないが、チャネルを閉じないために保持する)
-    _audio_frames: std::sync::mpsc::Receiver<moq_sub::DecodedAudioFrame>,
+    /// デコード済み音声フレームの受信側 (映像のみ購読するときは空のまま)
+    ///
+    /// 購読しないトラックのチャネルも、閉じないために保持する。
+    audio_frames: std::sync::mpsc::Receiver<moq_sub::DecodedAudioFrame>,
     /// 再生側の終了通知の送信側 (drop するとパイプラインが停止するため保持する)
     _player_stop: tokio::sync::oneshot::Sender<()>,
     /// 表示待ちの映像フレーム数
     ///
     /// パイプラインがフレームを送るたびに増えるため、表示側と同じようにテスト側で減らす。
     backlog: Arc<AtomicI64>,
-    /// 最初に受け取った映像フレームのサイズ (幅, 高さ)
-    first_frame_size: (i32, i32),
+    /// 最初に受け取った映像フレームのサイズ (幅, 高さ)。音声を待ったときは `None`
+    first_frame_size: Option<(i32, i32)>,
+    /// 最初に受け取った音声フレームの (サンプルレート, チャンネル数)。映像を待ったときは `None`
+    first_audio_params: Option<(u32, u8)>,
 }
 
 impl Subscriber {
@@ -224,6 +238,33 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
     .expect("publisher のオプションを解釈できること")
     .expect("publisher の設定が返ること");
 
+    spawn_publisher(config)
+}
+
+/// 音声だけを datagram で配信する publisher を起動する
+///
+/// `--audio-datagram` は音声トラックを OBJECT_DATAGRAM 配送に切り替える
+/// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。namespace の解決は
+/// [`start_publisher`] と同じく MSF fragment から行う。
+fn start_audio_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
+    let url = msf_url(url, namespace, MSF_TRACK_NAME);
+    let config = moq_pub::cli::parse_args(&[
+        "--url",
+        url.as_str(),
+        "--transport",
+        transport,
+        "--fake-capture-device",
+        "--no-video",
+        "--audio-datagram",
+    ])
+    .expect("publisher のオプションを解釈できること")
+    .expect("publisher の設定が返ること");
+
+    spawn_publisher(config)
+}
+
+/// publisher のパイプラインを起動する
+fn spawn_publisher(config: moq_pub::cli::Config) -> Publisher {
     let shutdown = ShutdownController::new();
     let task = tokio::spawn(moq_pub::pipeline::run(
         config,
@@ -236,7 +277,16 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
     }
 }
 
-/// subscriber を起動し、最初の映像フレームが届くまで待つ
+/// subscriber が最初に待つトラック
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestTrack {
+    /// 映像を購読する (音声は購読しない)
+    Video,
+    /// 音声を購読する (映像は購読しない)
+    Audio,
+}
+
+/// subscriber を起動し、最初のフレームが届くまで待つ
 ///
 /// publisher が catalog を PUBLISH する前に起動すると、subscriber は catalog を取得できず
 /// 終了する。そのため終了した場合は理由を残して少し待ち、起動し直す。namespace は
@@ -247,19 +297,26 @@ async fn start_subscriber(
     namespace: &str,
     mp4_path: &std::path::Path,
     publisher: &mut Publisher,
+    track: TestTrack,
 ) -> Subscriber {
     let deadline = Instant::now() + READY_TIMEOUT;
     let mp4_path = mp4_path.to_string_lossy().to_string();
     let url = msf_url(url, namespace, MSF_TRACK_NAME);
+    // 購読しないトラックは SUBSCRIBE しない。カタログには両方が載りうるため、
+    // 待つトラックを明示しないと最初のフレームの到着を判定できない
+    let disabled_track = match track {
+        TestTrack::Video => "--no-audio",
+        TestTrack::Audio => "--no-video",
+    };
     loop {
-        // --no-play は指定しない。no_play はデコード自体を無効にするため映像フレームが
-        // 得られなくなる。SDL プレイヤーは lib に含まれないため、再生は行われない。
+        // --no-play は指定しない。no_play はデコード自体を無効にするため映像 / 音声
+        // フレームが得られなくなる。SDL プレイヤーは lib に含まれないため、再生は行われない。
         let config = moq_sub::cli::parse_args(&[
             "--url",
             url.as_str(),
             "--transport",
             transport,
-            "--no-audio",
+            disabled_track,
             "--mp4",
             &mp4_path,
         ])
@@ -287,19 +344,33 @@ async fn start_subscriber(
         ));
 
         // フレームの受信はブロッキングなので、他のタスクを止めないようにする
-        let received = tokio::task::block_in_place(|| frames.recv_timeout(ATTEMPT_TIMEOUT));
-        match received {
-            Ok(frame) => {
-                // 表示側と同じように、受け取った 1 枚目も待ちフレーム数から減らす
-                backlog.fetch_sub(1, Ordering::Relaxed);
+        let mut first_frame_size = None;
+        let mut first_audio_params = None;
+        let ready: std::result::Result<(), std::sync::mpsc::RecvTimeoutError> = match track {
+            TestTrack::Video => tokio::task::block_in_place(|| {
+                frames.recv_timeout(ATTEMPT_TIMEOUT).map(|frame| {
+                    // 表示側と同じように、受け取った 1 枚目も待ちフレーム数から減らす
+                    backlog.fetch_sub(1, Ordering::Relaxed);
+                    first_frame_size = Some((frame.width, frame.height));
+                })
+            }),
+            TestTrack::Audio => tokio::task::block_in_place(|| {
+                audio_frames.recv_timeout(ATTEMPT_TIMEOUT).map(|frame| {
+                    first_audio_params = Some((frame.sample_rate, frame.channels));
+                })
+            }),
+        };
+        match ready {
+            Ok(()) => {
                 return Subscriber {
                     shutdown,
                     task,
                     frames,
-                    _audio_frames: audio_frames,
+                    audio_frames,
                     _player_stop: player_stop,
                     backlog,
-                    first_frame_size: (frame.width, frame.height),
+                    first_frame_size,
+                    first_audio_params,
                 };
             }
             Err(_) => {
@@ -311,19 +382,19 @@ async fn start_subscriber(
                 let last_error = match result {
                     Ok(Ok(Err(e))) => e.to_string(),
                     Ok(Err(e)) => format!("タスクが失敗しました: {e}"),
-                    Ok(Ok(Ok(()))) => "映像フレームが届かないまま終了しました".to_string(),
+                    Ok(Ok(Ok(()))) => "フレームが届かないまま終了しました".to_string(),
                     Err(_) => "タスクが終了しませんでした".to_string(),
                 };
                 // publisher が先に終了していれば subscriber 側の問題ではない
                 if publisher.is_finished() {
                     let result = publisher.take_result().await;
                     panic!(
-                        "subscriber が映像を受信できないうちに publisher が終了しました: {result:?}"
+                        "subscriber がフレームを受信できないうちに publisher が終了しました: {result:?}"
                     );
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "subscriber が {READY_TIMEOUT:?} 以内に映像を受信できませんでした (最後の失敗: {last_error})"
+                    "subscriber が {READY_TIMEOUT:?} 以内にフレームを受信できませんでした (最後の失敗: {last_error})"
                 );
                 tokio::time::sleep(RETRY_INTERVAL).await;
             }
@@ -345,10 +416,18 @@ async fn publish_and_subscribe_roundtrip() {
     let mut publisher = start_publisher(&url, &transport, &namespace);
 
     // 2. subscriber を起動し、catalog の取得と SUBSCRIBE を完了させる
-    let subscriber =
-        start_subscriber(&url, &transport, &namespace, &mp4_path, &mut publisher).await;
+    let subscriber = start_subscriber(
+        &url,
+        &transport,
+        &namespace,
+        &mp4_path,
+        &mut publisher,
+        TestTrack::Video,
+    )
+    .await;
     assert_eq!(
-        subscriber.first_frame_size, VIDEO_SIZE,
+        subscriber.first_frame_size,
+        Some(VIDEO_SIZE),
         "publisher が生成した映像のサイズでデコードできること"
     );
 
@@ -396,6 +475,112 @@ async fn publish_and_subscribe_roundtrip() {
     assert!(
         mp4_size > 0,
         "MP4 に映像が保存されていること: {mp4_size} バイト"
+    );
+
+    // 5. どちらも graceful shutdown で正常終了する
+    subscriber.stop().await;
+    publisher.stop().await;
+}
+
+/// relay を介した datagram 音声の往復を検証する
+///
+/// publisher は `--audio-datagram` で音声を OBJECT_DATAGRAM 配送にする
+/// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subscriber が datagram の
+/// payload を decode していなければ、音声フレームは 1 つも届かない。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]
+async fn publish_and_subscribe_audio_datagram_roundtrip() {
+    let url = e2e_url();
+    let transport = e2e_transport();
+    let namespace = e2e_namespace();
+    let dir = WorkDir::new();
+    let mp4_path = dir.path().join("subscriber-audio.mp4");
+
+    // 1. 音声だけを datagram で配信する publisher を起動する
+    let mut publisher = start_audio_publisher(&url, &transport, &namespace);
+
+    // 2. subscriber を起動し、最初の音声フレームが届くまで待つ
+    let subscriber = start_subscriber(
+        &url,
+        &transport,
+        &namespace,
+        &mp4_path,
+        &mut publisher,
+        TestTrack::Audio,
+    )
+    .await;
+    assert_eq!(
+        subscriber.first_audio_params,
+        Some((AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)),
+        "publisher が配信した音声のサンプルレートとチャンネル数でデコードできること"
+    );
+
+    // 3. 音声フレームを受け取り続ける
+    let mut received: u64 = 1;
+    let mut first_pts: Option<i64> = None;
+    let mut last_pts: Option<i64> = None;
+    let mut last_received = Instant::now();
+    let deadline = Instant::now() + STREAM_DURATION;
+    while Instant::now() < deadline {
+        // フレームの受信はブロッキングなので、他のタスクを止めないようにする
+        match tokio::task::block_in_place(|| {
+            subscriber
+                .audio_frames
+                .recv_timeout(Duration::from_millis(500))
+        }) {
+            Ok(frame) => {
+                received += 1;
+                last_received = Instant::now();
+                if first_pts.is_none() {
+                    first_pts = Some(frame.pts_us);
+                }
+                // 音声の Timestamp は LOC の Timestamp から求めるため、到着順に進む。
+                // 巻き戻ると別の Group の Object を混ぜている
+                if let Some(previous) = last_pts {
+                    assert!(
+                        frame.pts_us >= previous,
+                        "音声の PTS が巻き戻らないこと: {previous} -> {}",
+                        frame.pts_us
+                    );
+                }
+                last_pts = Some(frame.pts_us);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // pipeline が終了している。理由を取り出して報告する
+                let result = tokio::time::timeout(SHUTDOWN_TIMEOUT, subscriber.task).await;
+                panic!(
+                    "音声フレームのチャネルが閉じました (pipeline が終了しました): received={received}, result={result:?}"
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    assert!(
+        received >= MIN_AUDIO_FRAMES,
+        "音声フレームを継続して受信できること: received={received}"
+    );
+    assert!(
+        last_received.elapsed() < LAST_FRAME_TIMEOUT,
+        "配信の終了間際まで音声フレームが届くこと: 最後の受信から {:?} (received={received}, publisher_finished={})",
+        last_received.elapsed(),
+        publisher.is_finished()
+    );
+    // 20 ms 間隔の音声が続いていること。数フレームしか届いていない場合と、
+    // 同じ Object を繰り返し届けている場合を PTS の幅で切り分ける
+    let span_us = last_pts.expect("音声フレームの PTS を観測していること")
+        - first_pts.expect("音声フレームの PTS を観測していること");
+    assert!(
+        span_us >= 1_000_000,
+        "音声の PTS が 1 秒以上進むこと: {span_us}us (received={received})"
+    );
+
+    // 4. datagram で届いた音声が MP4 に保存されている
+    let mp4_size = std::fs::metadata(&mp4_path)
+        .expect("MP4 ファイルが作成されていること")
+        .len();
+    assert!(
+        mp4_size > 0,
+        "MP4 に datagram の音声が保存されていること: {mp4_size} バイト"
     );
 
     // 5. どちらも graceful shutdown で正常終了する

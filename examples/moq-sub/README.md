@@ -4,6 +4,8 @@ MoQ リレーから catalog を SUBSCRIBE して取得し、audio / video を SU
 
 音声は Opus / AAC-LC、映像は VP8 / VP9 / AV1 / H.264 / H.265 に対応する。
 
+音声トラックは subgroup stream と datagram のどちらで届いてもデコードして再生する。
+
 AAC-LC は macOS の Audio Toolbox、H.264 / H.265 は macOS の Video Toolbox を使うため macOS 限定である。
 
 `--mp4` を指定すると、受信した音声 / 映像を再エンコードせずに MP4 ファイルへ保存する。
@@ -43,7 +45,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | `--no-video` | | 映像トラックの購読を無効化する |
 | `--no-audio` | | 音声トラックの購読を無効化する |
 | `--audio-output-device` | `default` | 音声の出力先。`none` はスピーカーへ出力せず受信とデコードだけを続ける (`default` と `none` のみ対応) |
-| `--mp4` | | 受信した音声 / 映像を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、datagram 経由で届いたメディアは対象外) |
+| `--mp4` | | 受信した音声 / 映像を MP4 ファイルへ保存する (再エンコードせずに mux する。音声は Opus のみで、AAC-LC のトラックでは音声を録画せず警告する。既存ファイルは上書きし、音声は subgroup stream と datagram のどちらで届いても保存する) |
 | `--no-play` | | 再生を行わない (SDL を初期化せず、デコードもしない) |
 
 ## 注意事項
@@ -67,6 +69,18 @@ moq-sub は映像トラックの SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ�
 購読中でも REQUEST_UPDATE で要求を送れるが、送れるのは相手が `DYNAMIC_GROUPS=1` を告知している Track だけである。moq-pub は映像トラックの PUBLISH と SUBSCRIBE_OK の両方で告知するため、購読の確立経路によらず送れる。
 
 仕様上の扱いは draft-ietf-moq-transport-22 §9.20.19 (NEW_GROUP_REQUEST) と §10.6 (DYNAMIC_GROUPS) を参照すること。
+
+## datagram 配送の音声
+
+音声トラックは subgroup stream と datagram の両方で届きうる。LOC は音声について「1 audio chunk = 1 Object = 1 Group」の datagram 配送を例示しており (draft-ietf-moq-loc-04 §4.1)、moq-pub は `--audio-datagram` でこの配送を選べる。
+
+moq-sub は datagram で届いた OBJECT_DATAGRAM を自ら decode し、subgroup stream と同じ経路 (録画 → Audio Config の検証 → デコード → jitter buffer) へ流す。
+
+- フィルタを通過しなかった Object とキャンセル済み subscription の Object、Object Status のみの Object は再生しない
+- 映像とカタログの datagram には対応しない (LOC の映像は 1 group = 1 unidirectional stream で配送される。同 §4.2)。届いた場合はトラックごとに警告を 1 回出す
+- LOC Properties の書式違反は subgroup stream と同じくセッション終了の対象になる (draft-ietf-moq-transport-22 §8.3)
+
+仕様上の扱いは draft-ietf-moq-transport-22 §2.1 (Objects) と §11.2.1 (Object Datagram) を参照すること。
 
 ## ログ
 

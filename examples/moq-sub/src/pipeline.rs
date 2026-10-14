@@ -11,6 +11,7 @@
 //! 保存だけを行う。
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -24,7 +25,8 @@ use shiguredo_moqt::loc::{
 use shiguredo_moqt::pending_subgroup_buffer::{
     DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS, PendingNotifyReason, PendingSubgroupBuffer,
 };
-use shiguredo_moqt::session::types::{SessionError, TrackDataAcceptance};
+use shiguredo_moqt::session::types::{DatagramAcceptance, SessionError, TrackDataAcceptance};
+use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::subgroup::SubgroupHeader;
 use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
@@ -63,6 +65,128 @@ struct FrameSink<'a> {
     frame_tx: &'a std::sync::mpsc::Sender<DecodedVideoFrame>,
     /// 表示待ちのフレーム数 (受信側が増やし、表示側が減らす)
     display_backlog: &'a std::sync::atomic::AtomicI64,
+}
+
+/// 音声 Object を再生経路へ流すための共有状態
+///
+/// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
+/// 経路に依存しない値をここへまとめ、録画 → Audio Config の検証 → デコード →
+/// デコード済みフレームの送出という順序が両経路で食い違わないようにする。
+struct AudioDelivery<'a> {
+    /// デコード済み音声フレームの送り先
+    audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
+    /// Audio Config (OpusHead) を処理済みかどうか (購読で 1 つ共有する)
+    audio_config_handled: &'a std::sync::atomic::AtomicBool,
+    /// catalog の codec が Opus かどうか (Audio Config の中身は codec 依存のため)
+    is_opus_codec: bool,
+    /// catalog が宣言したサンプルレート (Audio Config の検証に使う)
+    catalog_sample_rate: u32,
+    /// catalog が宣言したチャンネル数 (Audio Config の検証に使う)
+    catalog_channels: u8,
+    /// 録画先 (`--mp4` 指定時のみ)
+    recorder: Option<&'a RecorderSender>,
+    /// 書式違反によるセッション終了を main ループへ依頼するチャネル
+    termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+}
+
+impl AudioDelivery<'_> {
+    /// 音声 Object 1 つを再生経路へ流す
+    ///
+    /// `decoder` が `None` のとき (再生しない指定、デコーダを生成できないとき) は
+    /// 録画だけを行う。返り値は呼び出し側が処理を継続してよいかどうかで、`false` は
+    /// LOC Properties の書式違反でセッション終了を依頼したか、デコード済みフレームの
+    /// 送り先が閉じたことを表す。
+    ///
+    /// Properties の書式違反は「配送する Object」だけを対象にする。フィルタ不通過などで
+    /// 配送しない Object は呼び出し側がこの関数を呼ばない。
+    async fn deliver(
+        &self,
+        properties_bytes: Option<&[u8]>,
+        payload: &[u8],
+        decoder: Option<&mut AudioDecoder>,
+    ) -> bool {
+        // 書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出するため、
+        // ここでは常に抽出する (検証は下の swap で 1 回に絞る)
+        let audio_config = match extract_audio_config(properties_bytes) {
+            Ok(config) => config,
+            Err(e) => {
+                request_session_termination(self.termination_tx, &e);
+                return false;
+            }
+        };
+        let (timestamp, timescale) = match extract_timestamp_timescale(properties_bytes) {
+            Ok(ts) => ts,
+            Err(e) => {
+                request_session_termination(self.termination_tx, &e);
+                return false;
+            }
+        };
+        if let Some(recorder) = self.recorder {
+            record_audio_object(
+                recorder,
+                timestamp,
+                timescale,
+                audio_config.as_deref(),
+                self.is_opus_codec,
+                payload,
+            );
+        }
+        // Audio Config (OpusHead) を含む Object を受信した最初の 1 回のみ検証する
+        // (途中参加で OpusHead を受信しない場合はスキップされる)。subgroup stream と
+        // datagram のどちらで届いても 1 回で済むよう、フラグは購読で共有する
+        if let Some(config_bytes) = audio_config.as_deref()
+            && !self.audio_config_handled.swap(true, Ordering::AcqRel)
+        {
+            if self.is_opus_codec {
+                match parse_opus_head(config_bytes) {
+                    Some(head) => {
+                        for warning in validate_audio_config(
+                            &head,
+                            self.catalog_sample_rate,
+                            self.catalog_channels,
+                        ) {
+                            tracing::warn!("{warning}");
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "Failed to parse Audio Config (OpusHead): len={}, head={:02x?}",
+                            config_bytes.len(),
+                            &config_bytes[..config_bytes.len().min(8)],
+                        );
+                    }
+                }
+            } else {
+                // AAC (mp4a.*) の Audio Config は AudioSpecificConfig であり、OpusHead として
+                // 解釈しない。AudioToolbox のデコーダは catalog のサンプルレートと
+                // チャンネル数だけで構成できる
+                tracing::debug!(
+                    "Audio Config is not interpreted for codecs other than opus: len={}",
+                    config_bytes.len(),
+                );
+            }
+        }
+        let Some(decoder) = decoder else {
+            return true;
+        };
+        let pcm = match decoder.decode(payload).await {
+            Ok(pcm) => pcm,
+            Err(e) => {
+                tracing::warn!("Audio decode error: {e}, payload_len={}", payload.len());
+                return true;
+            }
+        };
+        // サンプルレートとチャンネル数はデコーダの出力を使う。AAC は AudioToolbox の出力が
+        // ステレオ固定で catalog の channelConfig と食い違うことがあるが、そのまま再生を
+        // 継続する (validate_audio_config の警告と同じ方針)
+        let frame = DecodedAudioFrame {
+            pcm,
+            sample_rate: decoder.sample_rate(),
+            channels: decoder.channels(),
+            pts_us: loc_timestamp_us(timestamp, timescale).unwrap_or(0),
+        };
+        self.audio_tx.send(frame).is_ok()
+    }
 }
 
 /// stream task の終了を待つ上限
@@ -760,36 +884,6 @@ pub async fn run(
 
     let track_map: Arc<HashMap<u64, TrackKind>> = Arc::new(track_map);
 
-    // 6. datagram 受信タスク
-    let data_plane_for_datagram = data_plane.clone();
-    let handle_for_datagram = client.handle();
-    tokio::spawn(task_monitor.clone().instrument(async move {
-        loop {
-            match handle_for_datagram.recv_datagrams().await {
-                Ok(datagrams) => {
-                    for payload in datagrams {
-                        // type 分岐は Session が行う。未知 type は
-                        // draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
-                        if let Err(e) = data_plane_for_datagram.recv_datagram(&payload) {
-                            tracing::warn!("Failed to process datagram: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    // セッション終了 (§6) と接続クローズは期待される終了であるため、
-                    // 異常 (warn) ではなく info に揃える
-                    if matches!(e, TransportError::ConnectionClosed) {
-                        tracing::info!("Datagram receive error: {e}");
-                    } else {
-                        tracing::warn!("Datagram receive error: {e}");
-                    }
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }));
-
     // 7. データストリーム受信ループ
     let start = Instant::now();
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -834,6 +928,111 @@ pub async fn run(
     // Object をこのチャネルへ渡す
     let (catalog_tx, mut catalog_rx) =
         tokio::sync::mpsc::channel::<catalog::CatalogObject>(CATALOG_CHANNEL_SIZE);
+
+    // 6. datagram 受信タスク
+    //
+    // OBJECT_DATAGRAM の type 分岐と wire の書式検証は Session が行う (`recv_datagram`)。
+    // Session は payload をアプリへ返さないため、メディアとして使う Object はこのタスクで
+    // decode し、subgroup stream と同じ配送経路へ流す。終了依頼のチャネルを必要とするため、
+    // チャネルを用意した後で起動する。
+    let data_plane_for_datagram = data_plane.clone();
+    let handle_for_datagram = client.handle();
+    let track_map_for_datagram = Arc::clone(&track_map);
+    let audio_decoder_for_datagram = audio_decoder.clone();
+    let audio_config_handled_for_datagram = Arc::clone(&audio_config_handled);
+    let audio_codec_for_datagram = audio_codec.clone();
+    let recorder_for_datagram = recorder_sender.clone();
+    let termination_tx_for_datagram = termination_tx.clone();
+    let audio_tx_for_datagram = audio_tx.clone();
+    let datagram_task = tokio::spawn(task_monitor.clone().instrument(async move {
+        // Audio Config の処理とデコードは subgroup stream と共有する。datagram の音声は
+        // 購読した audio track でしか届かないため、catalog の値はここで確定できる
+        // (audio track を購読していなければ audio_params は None だが、その場合
+        //  track_map に Audio が入らないため配送経路には来ない)。
+        let delivery = AudioDelivery {
+            audio_tx: &audio_tx_for_datagram,
+            audio_config_handled: &audio_config_handled_for_datagram,
+            is_opus_codec: audio_codec_for_datagram
+                .as_deref()
+                .is_some_and(decoder::is_opus_codec),
+            catalog_sample_rate: audio_params.map_or(0, |(sample_rate, _)| sample_rate),
+            catalog_channels: audio_params.map_or(0, |(_, channels)| channels),
+            recorder: recorder_for_datagram.as_ref(),
+            termination_tx: &termination_tx_for_datagram,
+        };
+        // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
+        let mut unsupported_aliases: HashSet<u64> = HashSet::new();
+        'receive: loop {
+            let datagrams = match handle_for_datagram.recv_datagrams().await {
+                Ok(datagrams) => datagrams,
+                Err(e) => {
+                    // セッション終了 (§6) と接続クローズは期待される終了であるため、
+                    // 異常 (warn) ではなく info に揃える
+                    if matches!(e, TransportError::ConnectionClosed) {
+                        tracing::info!("Datagram receive error: {e}");
+                    } else {
+                        tracing::warn!("Datagram receive error: {e}");
+                    }
+                    break;
+                }
+            };
+            for raw in datagrams {
+                // type 分岐は Session が行う。未知 type は
+                // draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
+                // アプリ側で decode を代行せず raw を渡すのは、wire の検証順序と終了コードを
+                // Session に一本化するためである (payload は改めて decode する)
+                let acceptance = match data_plane_for_datagram.recv_datagram(&raw) {
+                    Ok(acceptance) => acceptance,
+                    Err(e) => {
+                        // Session がセッションを閉じる経路である。close は main ループが送る
+                        tracing::warn!("Failed to process datagram: {e}");
+                        continue;
+                    }
+                };
+                // Padding Datagram と、フィルタを通過しなかった Object・キャンセル済み
+                // subscription の Object はメディアとして扱わない
+                // (draft-ietf-moq-transport-22 §3.1 (Subscriptions) / §11.5.2 (Padding Datagrams))
+                let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
+                    continue;
+                };
+                match plan_datagram(&raw, &track_map_for_datagram) {
+                    DatagramAction::DeliverAudio { datagram, payload } => {
+                        // デコーダは subscription で 1 つを共有する。stream task と同じく
+                        // デコードが終わるまでロックを保持する
+                        let mut decoder = match audio_decoder_for_datagram.as_ref() {
+                            Some(decoder) => Some(decoder.lock().await),
+                            None => None,
+                        };
+                        if !delivery
+                            .deliver(
+                                datagram.properties_data.as_deref(),
+                                payload,
+                                decoder.as_deref_mut(),
+                            )
+                            .await
+                        {
+                            // LOC Properties の書式違反でセッション終了を依頼したか、
+                            // 再生側が終了した
+                            break 'receive;
+                        }
+                    }
+                    // 映像とカタログの datagram は本 example では扱わない。LOC の映像は
+                    // 1 group = 1 unidirectional stream で配送され (draft-ietf-moq-loc-04 §4.2)、
+                    // moq-pub も datagram では送らない
+                    DatagramAction::Unsupported { track_alias } => {
+                        if unsupported_aliases.insert(track_alias) {
+                            tracing::warn!(
+                                "Ignoring media delivered as a datagram on an unsupported track: alias={track_alias}"
+                            );
+                        }
+                    }
+                    DatagramAction::Ignore => {}
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }));
+
     // peer が subscription / session を終了させて受信ループを抜けたか。
     // この場合の subscription は Terminated であり、STOP_SENDING は不要である
     let mut peer_ended = false;
@@ -1188,6 +1387,12 @@ pub async fn run(
             );
         }
     }
+
+    // datagram 受信タスクを止める。このタスクはデコード済み音声フレームの送信側を保持して
+    // いるため、残したままだとプレイヤーが「音声チャネルの切断」を観測できず、終了できない
+    // (接続は既に閉じており、datagram の受信を続ける意味も無い)。
+    datagram_task.abort();
+    let _ = datagram_task.await;
 
     // 録画を finalize してライタースレッドの終了を待つ。ここまでで stream task はすべて
     // 終了している
@@ -2275,29 +2480,24 @@ async fn handle_stream_body(
                     // 処理済みフラグは subscription で共有する: decode_audio_stream は
                     // subgroup stream ごとに呼ばれるが、OpusHead はセッションで 1 回しか
                     // 送られないため、共有しないと 2 本目以降の stream が OpusHead を
-                    // 待ち続けて音声が途切れる。
-                    let is_opus_codec = audio_codec.is_some_and(decoder::is_opus_codec);
-                    // Audio Config は subscription で 1 回だけ処理する
-                    let mut handled =
-                        audio_config_handled.load(std::sync::atomic::Ordering::Acquire);
+                    // 待ち続けて音声が途切れる。datagram 配送の音声とも共有する。
                     let chunks = decode_audio_stream(
                         stream,
                         data_plane,
                         stream_id,
                         &mut sg_decoder,
                         decoder.as_deref_mut(),
-                        audio_tx,
-                        &mut handled,
-                        is_opus_codec,
-                        sample_rate,
-                        channels,
-                        recorder,
-                        termination_tx,
+                        &AudioDelivery {
+                            audio_tx,
+                            audio_config_handled,
+                            is_opus_codec: audio_codec.is_some_and(decoder::is_opus_codec),
+                            catalog_sample_rate: sample_rate,
+                            catalog_channels: channels,
+                            recorder,
+                            termination_tx,
+                        },
                     )
                     .await;
-                    if handled {
-                        audio_config_handled.store(true, std::sync::atomic::Ordering::Release);
-                    }
                     tracing::debug!(
                         "Stream #{stream_num}: audio group {} complete ({chunks} chunks)",
                         header.group_id,
@@ -3048,35 +3248,70 @@ fn validate_audio_config(
     }
     warnings
 }
+/// 受信した OBJECT_DATAGRAM をメディアとしてどう扱うか
+enum DatagramAction<'a> {
+    /// 音声トラックの Object。音声の配送経路へ流す
+    DeliverAudio {
+        /// decode 済みの OBJECT_DATAGRAM ヘッダ (Object Properties を含む)
+        datagram: ObjectDatagram,
+        /// 圧縮された音声 payload (datagram 全体のうち header より後ろ)
+        payload: &'a [u8],
+    },
+    /// 本 example がメディアとして扱わないトラックの Object (映像 / カタログ)
+    Unsupported {
+        /// 対象トラックの alias (警告を 1 回に絞るために使う)
+        track_alias: u64,
+    },
+    /// メディアとして扱わない Object (Object Status のみ・未知の alias・wire の書式違反)
+    Ignore,
+}
+
+/// 受信した datagram をメディアとしてどう扱うかを決める
+///
+/// `raw` は Session が OBJECT_DATAGRAM として受け入れた datagram 全体である。payload は
+/// `ObjectDatagram::decode` が返す header の消費バイト数以降であり、`raw` の一部を指す
+/// (datagram は 1 メッセージ = 1 データグラムであるため、残りはすべて payload である)。
+///
+/// 音声以外をメディアとして扱わないのは、LOC の映像が 1 group = 1 unidirectional stream で
+/// 配送されるためである (draft-ietf-moq-loc-04 §4.2)。カタログも stream で届く。
+fn plan_datagram<'a>(raw: &'a [u8], track_map: &HashMap<u64, TrackKind>) -> DatagramAction<'a> {
+    // Session が同じバイト列を検証済みであるため、ここでの decode 失敗は実装の不整合を表す。
+    // メディアを黙って落とさないよう警告する
+    let Ok((datagram, header_len)) = ObjectDatagram::decode(raw) else {
+        tracing::warn!("Failed to decode an object datagram the session already accepted");
+        return DatagramAction::Ignore;
+    };
+    // Object Status のみの Object は payload を持たない (draft-ietf-moq-transport-22 §11.2.1)
+    if datagram.status.is_some() {
+        return DatagramAction::Ignore;
+    }
+    match track_map.get(&datagram.track_alias) {
+        Some(TrackKind::Audio) => DatagramAction::DeliverAudio {
+            datagram,
+            payload: &raw[header_len..],
+        },
+        Some(TrackKind::Video | TrackKind::Catalog) => DatagramAction::Unsupported {
+            track_alias: datagram.track_alias,
+        },
+        // 未知の alias は Session が Accepted にしないため到達しない
+        None => DatagramAction::Ignore,
+    }
+}
+
 /// 1 本の audio subgroup ストリームから音声パケットを順次デコードする
 ///
 /// LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track) では「1 audio chunk = 1 Object = 1 Group」と例示されているが、
 /// 防御的に subgroup 内の object をすべて処理する。
 ///
-/// `audio_config_handled` は呼び出し側 (handle_incoming_stream。ストリームごとに呼ばれる) で
-/// 保持する処理済みフラグで、PROP_AUDIO_CONFIG を含むオブジェクトを受信した最初の 1 回のみ
-/// OpusHead と catalog の整合を検証する。パース失敗時もフラグは立てる
-/// (不正 OpusHead で警告を 1 回に抑える)。現行 publisher は OpusHead をセッションで 1 回しか
-/// 送らない (publisher 側の `audio_config_sent` フラグ) ため、実質セッション全体で 1 回きりになる。
-/// `is_opus_codec` が false の場合は OpusHead を解釈せず検証をスキップする
-/// (Audio Config の中身はコーデック依存のため。catalog の audio track は opus と
-/// `mp4a.*` (AAC) が選ばれ、`mp4a.*` の Audio Config は AudioSpecificConfig であって
-/// OpusHead ではない)。この場合も最初の Audio Config でフラグを立て、解釈しないことを
-/// 1 回だけ記録する。
-#[expect(clippy::too_many_arguments)]
+/// 配送 (録画・Audio Config の検証・デコード・フレーム送出) は [`AudioDelivery::deliver`] が
+/// 行う。datagram で届く音声も同じ関数を通る。
 async fn decode_audio_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
     sg_decoder: &mut SubgroupStreamDecoder,
     mut audio_decoder: Option<&mut AudioDecoder>,
-    audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
-    audio_config_handled: &mut bool,
-    is_opus_codec: bool,
-    catalog_sample_rate: u32,
-    catalog_channels: u8,
-    recorder: Option<&RecorderSender>,
-    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    delivery: &AudioDelivery<'_>,
 ) -> u64 {
     let mut chunks: u64 = 0;
     loop {
@@ -3149,87 +3384,14 @@ async fn decode_audio_stream(
         if !deliver {
             continue;
         }
-        // 書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出するため、
-        // ここでは常に抽出する (検証は下の `!*audio_config_handled` で 1 回に絞る)
-        let audio_config = match extract_audio_config(obj.properties_bytes.as_deref()) {
-            Ok(config) => config,
-            Err(e) => {
-                request_session_termination(termination_tx, &e);
-                return chunks;
-            }
-        };
-        let (timestamp, timescale) =
-            match extract_timestamp_timescale(obj.properties_bytes.as_deref()) {
-                Ok(ts) => ts,
-                Err(e) => {
-                    request_session_termination(termination_tx, &e);
-                    return chunks;
-                }
-            };
-        if let Some(recorder) = recorder {
-            record_audio_object(
-                recorder,
-                timestamp,
-                timescale,
-                audio_config.as_deref(),
-                is_opus_codec,
+        if !delivery
+            .deliver(
+                obj.properties_bytes.as_deref(),
                 &payload,
-            );
-        }
-        // Audio Config (OpusHead) を含むオブジェクトを受信した最初の 1 回のみ検証する
-        // (途中参加で OpusHead を受信しない場合はスキップされる)
-        if !*audio_config_handled && let Some(config_bytes) = audio_config {
-            *audio_config_handled = true;
-            if is_opus_codec {
-                match parse_opus_head(&config_bytes) {
-                    Some(head) => {
-                        for warning in
-                            validate_audio_config(&head, catalog_sample_rate, catalog_channels)
-                        {
-                            tracing::warn!("{warning}");
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            "Failed to parse Audio Config (OpusHead): len={}, head={:02x?}",
-                            config_bytes.len(),
-                            &config_bytes[..config_bytes.len().min(8)],
-                        );
-                    }
-                }
-            } else {
-                // AAC (mp4a.*) の Audio Config は AudioSpecificConfig であり、OpusHead として
-                // 解釈しない。AudioToolbox のデコーダは catalog のサンプルレートと
-                // チャンネル数だけで構成できる
-                tracing::debug!(
-                    "Audio Config is not interpreted for codecs other than opus: len={}",
-                    config_bytes.len(),
-                );
-            }
-        }
-        let Some(audio_decoder) = audio_decoder.as_deref_mut() else {
-            continue;
-        };
-        let pcm = match audio_decoder.decode(&payload).await {
-            Ok(pcm) => pcm,
-            Err(e) => {
-                tracing::warn!("Audio decode error: {e}, payload_len={}", payload.len());
-                continue;
-            }
-        };
-        // サンプルレートとチャンネル数はデコーダの出力を使う。AAC は AudioToolbox の出力が
-        // ステレオ固定で catalog の channelConfig と食い違うことがあるが、そのまま再生を
-        // 継続する (validate_audio_config の警告と同じ方針)
-        let sample_rate = audio_decoder.sample_rate();
-        let channels = audio_decoder.channels();
-        let pts_us = loc_timestamp_us(timestamp, timescale).unwrap_or(0);
-        let frame = DecodedAudioFrame {
-            pcm,
-            sample_rate,
-            channels,
-            pts_us,
-        };
-        if audio_tx.send(frame).is_err() {
+                audio_decoder.as_deref_mut(),
+            )
+            .await
+        {
             return chunks;
         }
         chunks += 1;
@@ -3241,7 +3403,9 @@ mod tests {
     use super::*;
 
     use shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR;
+    use shiguredo_moqt::loc::LocProperty;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
+    use shiguredo_opus::{Application, Encoder, EncoderConfig, FrameDuration};
 
     /// 映像トラックの SUBSCRIBE が新しい Group の開始を要求すること
     ///
@@ -4425,5 +4589,341 @@ mod tests {
             LocationFilterUpdate::Set(LocationFilter::RelativeGroup { start_group: 1 }),
             "fill range は現在 Group の先頭からにすること"
         );
+    }
+
+    /// テスト用: Opus の 20 ms フレームを 1 つエンコードする
+    ///
+    /// 入力は無音 (全 0 サンプル) とする。エンコーダは本物 (shiguredo_opus) を使う。
+    fn encode_opus_silence(sample_rate: u32, channels: u8) -> Vec<u8> {
+        let mut config = EncoderConfig::new(sample_rate, channels);
+        config.bitrate = Some(64_000);
+        config.application = Some(Application::Audio);
+        config.frame_duration = Some(FrameDuration::Ms20);
+        let mut encoder = Encoder::new(config).expect("Opus エンコーダを生成できること");
+        let pcm = vec![0i16; encoder.frame_samples() * usize::from(channels)];
+        encoder
+            .encode(&pcm)
+            .expect("無音の Opus フレームをエンコードできること")
+    }
+
+    /// テスト用: RFC 7845 §5.1 (Identification Header) の OpusHead を組み立てる
+    ///
+    /// publisher が Audio Config に載せる値と同じ形式である。
+    fn opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
+        let mut head = Vec::new();
+        head.extend_from_slice(b"OpusHead");
+        head.push(1);
+        head.push(channels);
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.extend_from_slice(&sample_rate.to_le_bytes());
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.push(0);
+        head
+    }
+
+    /// テスト用: 音声 Object の LOC Properties を組み立てる
+    ///
+    /// publisher は 1 audio chunk = 1 Object = 1 Group の datagram に Timestamp / Timescale を
+    /// 載せ、最初の Object にだけ Audio Config (OpusHead) を載せる
+    /// (draft-ietf-moq-loc-04 §4.1)。
+    fn audio_loc_properties(
+        timestamp: u64,
+        timescale: u64,
+        audio_config: Option<&[u8]>,
+    ) -> LocProperties {
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(timestamp),
+        });
+        props.push(LocProperty {
+            prop_id: PROP_TIMESCALE,
+            value: LocPropertyValue::VarInt(timescale),
+        });
+        if let Some(config) = audio_config {
+            props.push(LocProperty {
+                prop_id: PROP_AUDIO_CONFIG,
+                value: LocPropertyValue::Bytes(config.to_vec()),
+            });
+        }
+        props
+    }
+
+    /// テスト用: OBJECT_DATAGRAM のワイヤ表現を組み立てる
+    fn object_datagram_wire(
+        track_alias: u64,
+        properties: Option<&LocProperties>,
+        payload: &[u8],
+        status: Option<u64>,
+    ) -> Vec<u8> {
+        let datagram = ObjectDatagram {
+            track_alias,
+            group_id: 0,
+            object_id: 0,
+            publisher_priority: Some(128),
+            properties_data: properties
+                .map(|props| props.encode().expect("LOC プロパティを encode できること")),
+            end_of_group: false,
+            status,
+        };
+        let mut raw = datagram
+            .encode()
+            .expect("OBJECT_DATAGRAM を encode できること");
+        raw.extend_from_slice(payload);
+        raw
+    }
+
+    /// テスト用: 音声 Object を配送する `AudioDelivery` を作る
+    ///
+    /// catalog は 48 kHz / 1ch の Opus を宣言しているものとする。`recorder` が `None` のときは
+    /// 録画しない。
+    fn test_audio_delivery<'a>(
+        audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
+        audio_config_handled: &'a std::sync::atomic::AtomicBool,
+        termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+        recorder: Option<&'a RecorderSender>,
+    ) -> AudioDelivery<'a> {
+        AudioDelivery {
+            audio_tx,
+            audio_config_handled,
+            is_opus_codec: true,
+            catalog_sample_rate: 48_000,
+            catalog_channels: 1,
+            recorder,
+            termination_tx,
+        }
+    }
+
+    /// datagram で届いた音声 Object が subgroup stream と同じ経路でデコードされること
+    ///
+    /// moq-pub は `--audio-datagram` で 1 audio chunk = 1 Object = 1 Group の datagram を送る
+    /// (draft-ietf-moq-loc-04 §4.1)。購読側は payload を decode してデコード済みフレームを
+    /// 送出する必要がある。
+    #[tokio::test]
+    async fn audio_datagram_object_is_decoded_into_a_frame() {
+        const AUDIO_ALIAS: u64 = 7;
+
+        let packet = encode_opus_silence(48_000, 1);
+        let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
+        let raw = object_datagram_wire(AUDIO_ALIAS, Some(&properties), &packet, None);
+
+        // 購読では audio track の alias が Audio として登録される
+        let mut track_map = HashMap::new();
+        track_map.insert(AUDIO_ALIAS, TrackKind::Audio);
+        let DatagramAction::DeliverAudio { datagram, payload } = plan_datagram(&raw, &track_map)
+        else {
+            panic!("音声トラックの datagram は配送対象になること");
+        };
+        assert_eq!(
+            payload,
+            packet.as_slice(),
+            "header の消費バイト数より後ろが payload であること"
+        );
+
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let delivery = test_audio_delivery(&audio_tx, &audio_config_handled, &termination_tx, None);
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        let deliver = delivery
+            .deliver(
+                datagram.properties_data.as_deref(),
+                payload,
+                Some(&mut decoder),
+            )
+            .await;
+        assert!(deliver, "デコードに成功したときは配送を継続すること");
+
+        let frame = audio_rx
+            .try_recv()
+            .expect("デコード済みの音声フレームが届くこと");
+        assert_eq!(
+            frame.sample_rate, 48_000,
+            "サンプルレートは catalog の値であること"
+        );
+        assert_eq!(frame.channels, 1, "チャンネル数は catalog の値であること");
+        assert!(!frame.pcm.is_empty(), "PCM が空でないこと");
+        // LOC の Timestamp 960 / Timescale 48000 は 20 ms である
+        assert_eq!(
+            frame.pts_us, 20_000,
+            "LOC の Timestamp がマイクロ秒へ換算されること"
+        );
+        assert!(
+            audio_config_handled.load(Ordering::Acquire),
+            "Audio Config を処理済みとして記録すること"
+        );
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+    }
+
+    /// Object Status のみの Object と未知の alias はメディアとして扱わないこと
+    ///
+    /// Object Status のみの Object は payload を持たず (draft-ietf-moq-transport-22 §11.2.1)、
+    /// 未知の alias は Session が Accepted にしない。どちらも payload を decode しない。
+    #[test]
+    fn plan_datagram_ignores_objects_without_media() {
+        const AUDIO_ALIAS: u64 = 7;
+
+        let mut track_map = HashMap::new();
+        track_map.insert(AUDIO_ALIAS, TrackKind::Audio);
+
+        // Object Status のみ (payload なし) の Object
+        let status_only = object_datagram_wire(AUDIO_ALIAS, None, &[], Some(0x0));
+        assert!(
+            matches!(
+                plan_datagram(&status_only, &track_map),
+                DatagramAction::Ignore
+            ),
+            "Object Status のみの Object は配送しないこと"
+        );
+
+        // 購読していない alias
+        let properties = audio_loc_properties(960, 48_000, None);
+        let unknown_alias =
+            object_datagram_wire(AUDIO_ALIAS + 1, Some(&properties), b"payload", None);
+        assert!(
+            matches!(
+                plan_datagram(&unknown_alias, &track_map),
+                DatagramAction::Ignore
+            ),
+            "未知の alias は配送しないこと"
+        );
+    }
+
+    /// 映像とカタログの datagram は非対応のトラックとして報告されること
+    ///
+    /// LOC の映像は 1 group = 1 unidirectional stream で配送される
+    /// (draft-ietf-moq-loc-04 §4.2)。moq-sub は datagram の映像 / カタログを扱わない。
+    #[test]
+    fn plan_datagram_reports_tracks_this_subscriber_does_not_handle() {
+        let mut track_map = HashMap::new();
+        track_map.insert(1, TrackKind::Video);
+        track_map.insert(2, TrackKind::Catalog);
+
+        let properties = audio_loc_properties(960, 48_000, None);
+        for alias in [1u64, 2u64] {
+            let raw = object_datagram_wire(alias, Some(&properties), b"payload", None);
+            assert!(
+                matches!(
+                    plan_datagram(&raw, &track_map),
+                    DatagramAction::Unsupported { track_alias } if track_alias == alias
+                ),
+                "映像 / カタログの datagram は非対応として報告すること: alias={alias}"
+            );
+        }
+    }
+
+    /// LOC Properties の書式違反でセッション終了を依頼すること
+    ///
+    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+    /// セッション終了の対象とする MUST を定める。datagram 経路も stream 経路と同じ扱いにする。
+    #[tokio::test]
+    async fn audio_delivery_requests_session_termination_on_malformed_loc_properties() {
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let delivery = test_audio_delivery(&audio_tx, &audio_config_handled, &termination_tx, None);
+
+        // Properties Length の宣言に対して実データが足りない壊れたバイト列
+        let deliver = delivery
+            .deliver(Some(&[0xFF, 0xFF, 0xFF]), b"payload", None)
+            .await;
+
+        assert!(!deliver, "書式違反では配送を打ち切ること");
+        let termination = termination_rx
+            .try_recv()
+            .expect("セッション終了が依頼されること");
+        assert_eq!(
+            termination.code,
+            shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
+            "書式違反のセッション終了コードであること"
+        );
+        assert!(
+            audio_rx.try_recv().is_err(),
+            "書式違反の Object はデコードしないこと"
+        );
+    }
+
+    /// datagram の音声 Object が MP4 へ保存されること
+    ///
+    /// `--mp4` は受信した payload を再エンコードせずに mux する。datagram 経路も
+    /// stream 経路と同じ `record_audio_object` を通るため、録画対象になる。
+    #[tokio::test]
+    async fn audio_delivery_records_a_datagram_audio_object() {
+        let path =
+            std::env::temp_dir().join(format!("moq-sub-datagram-audio-{}.mp4", std::process::id()));
+        std::fs::remove_file(&path).ok();
+
+        let recorder = Recorder::start(
+            path.clone(),
+            Setup {
+                video: None,
+                audio: Some(AudioSetup {
+                    sample_rate: 48_000,
+                    channels: 1,
+                }),
+            },
+        )
+        .expect("録画を開始できること");
+        let recorder_sender = recorder.sender();
+
+        let packet = encode_opus_silence(48_000, 1);
+        let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
+        let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            Some(&recorder_sender),
+        );
+
+        // 再生しない指定と同じくデコーダ無しでも録画は行う
+        let properties_bytes = properties
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        let deliver = delivery
+            .deliver(Some(&properties_bytes), &packet, None)
+            .await;
+        assert!(deliver, "録画のみの経路でも配送を継続すること");
+        recorder.finish().expect("MP4 を finalize できること");
+
+        // 書き出した MP4 を読み戻し、audio トラック 1 本にサンプルが 1 つ入っていることを見る
+        let bytes = std::fs::read(&path).expect("MP4 ファイルを読めること");
+        let mut demuxer = shiguredo_mp4::demux::Mp4FileDemuxer::new();
+        while let Some(required) = demuxer.required_input() {
+            let position = required.position as usize;
+            demuxer.handle_input(shiguredo_mp4::demux::Input {
+                position: required.position,
+                data: &bytes[position..],
+            });
+        }
+        assert_eq!(
+            demuxer
+                .tracks()
+                .expect("トラック情報を取得できること")
+                .len(),
+            1,
+            "audio トラック 1 本の MP4 になること"
+        );
+        let mut samples = 0;
+        while demuxer
+            .next_sample()
+            .expect("サンプルを読めること")
+            .is_some()
+        {
+            samples += 1;
+        }
+        assert_eq!(
+            samples, 1,
+            "datagram で届いた音声が 1 サンプル保存されること"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 }
