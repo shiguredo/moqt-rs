@@ -1,7 +1,7 @@
 # 音声の時間圧縮に不感帯と削る長さの上限を入れる
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-audio-stretch-deadband
 - Polished: {YYYY-MM-DD}
 
@@ -72,4 +72,35 @@ moqt-js の最新 (2026-10-14) の判定を移植する。
 
 ## 解決方法
 
-(対応時に記入)
+- `src/playout/scheduler.rs` に `AUDIO_PLAYOUT_STRETCH_MIN_US` (20 ms) を追加し、
+  `AudioPlayoutScheduler::schedule` の `compress_us` を、遅れが不感帯に届いたときだけ
+  `min(lateness_us, duration_us / 2)` にするよう変えた
+- `src/playout/stretch.rs` の `compress` に `max_length_change_samples` (削ってよい
+  サンプル数の上限) を追加した。求めた周期が上限を超えるときは操作せず 0 を返す。上限を
+  外すときは `usize::MAX` を渡すことを doc に書いた
+- `src/playout/feedback.rs` の `AudioDelayFeedback::update` で、観測の遅れの p50 から
+  `AUDIO_PLAYOUT_STRETCH_MIN_US` を引くようにした。p95 と max は引かない (引くと
+  「たまに大きく遅れた」事実まで消えるため)。引いた後が
+  `AudioDelayFeedbackSnapshot` の遅れになる (閉ループが判断に使った値を見せる)
+- `examples/moq-sub` の `apply_audio_playout` が `us_to_samples` (四捨五入) で上限を
+  求めて `stretch::compress` へ渡すようにした。`us_to_samples` と `us_to_samples_ceil`
+  の使い分けを doc に書いた
+- テスト: `tests/test_playout/scheduler.rs` に不感帯の境界 2 件 (1 µs 手前では詰めない、
+  ちょうどでは詰める) を追加した。詰めの機構を確かめていた既存 5 件は、遅れが不感帯に
+  届く入力へ直した (要求が 10 ms 以下になるところを 20 ms 以上にした)
+- テスト: `tests/test_playout/feedback.rs` に「不感帯の中の遅れでは目標を動かさない」
+  を追加し、`snapshot` の遅れが引いた後になることを固定した
+- テスト: `tests/test_playout/stretch.rs` の既存 17 件の呼び出しに上限 (`usize::MAX`) を
+  渡した。上限そのものの契約は `max_length_change_samples` の doc と PBT で守る
+- テスト: `tests/test_playout/timeline.rs` と `examples/moq-sub` の計器の期待値を、
+  引いた後の値に更新した
+- PBT: `pbt/tests/prop_playout/scheduler.rs` に「詰めるのは遅れが不感帯に届いたときだけ」
+  を追加した。`pbt/tests/prop_playout/stretch.rs` に上限の sampler と「上限を超えて
+  削らない」を追加した。`pbt/tests/prop_playout/feedback.rs` は判断と計器を不感帯を
+  引いた値で検証するようにし、不感帯と許容の境界を生成器へ含めた
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
+- 備考: `examples/tokio-moq` の rustdoc リンク切れ (`resolve_socket_addrs` が非公開の
+  `RESOLVE_TIMEOUT` へリンクする) は変更前からある別の問題であり、この issue では
+  触っていない
