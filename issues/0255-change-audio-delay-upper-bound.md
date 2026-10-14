@@ -1,7 +1,7 @@
 # 音声の目標遅延に上限を入れる
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-audio-delay-upper-bound
 - Polished: {YYYY-MM-DD}
 
@@ -56,4 +56,24 @@ moqt-rs の閉ループ (`src/playout/feedback.rs`) が決める目標は、`tar
 
 ## 解決方法
 
-(対応時に記入)
+- `src/playout/feedback.rs` に `AUDIO_DELAY_FEEDBACK_MAX_TARGET_US` (100 ms) を追加した
+- `AudioDelayFeedback::target_delay_us` の 2 つの return を `min` で切った。観測が無い間は
+  学習値だけを切り、観測後は学習値と閉ループの目標の大きい方を切る
+- 閉ループの内部値と `update` のクランプは変えていない。上限は実際に使う値にだけ掛かり、
+  内部値は `AUDIO_DELAY_FEEDBACK_MAX_US` (300 ms) または `targetLatency` まで上がり得る
+- モジュール doc と `target_delay_us` の doc に、上限の理由 (到着の大きな跳ねまで目標に
+  すると常に遅れて鳴る) と、到着基準で並べるときの遅れと同じ値であることを書いた
+- テスト: `tests/test_playout/feedback.rs` に `the_applied_target_is_capped` を追加した
+  (観測前後で 100 ms を超えないこと、ちょうど上限は切らないこと、内部値は上限を超える
+  こと)。`uses_the_jitter_target_until_the_first_observation` と
+  `the_larger_of_the_jitter_and_feedback_targets_is_used` の期待値を新しい規則へ直した
+- テスト: `tests/test_playout/timeline.rs` の 4 件の期待値を直した。実際に使う値が 100 ms で
+  切られるため、閉ループの内部値 (140 ms) を見る箇所と、実際に使う値を見る箇所を分けた。
+  `target_latency_caps_the_closed_loop_target` は `targetLatency` を 90 ms にして
+  「明示の上限の方が厳しいときはそちらが効く」形へ直した
+- PBT: `pbt/tests/prop_playout/feedback.rs` に、実際に使う値が上限以内であること、
+  学習値 (上限の内側) 以上であること、観測後は閉ループの目標 (上限の内側) 以上であることを
+  追加した。リセット後と観測前の期待値も `min` で切った値へ直した
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 5 に変えても property が成功する
