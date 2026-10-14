@@ -9,7 +9,7 @@ pub const TASK_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// `TaskMonitor::intervals()` が返す `TaskIntervals` は終端のない iterator で、
 /// `next()` は現在の interval のメトリクスを即座に返す。`collect()` すると
-/// 永久に回り続けて Vec が伸び続け、CPU とメモリを食い尽くす (moqt-rs 0101)。
+/// 永久に回り続けて Vec が伸び続け、CPU とメモリを食い尽くす。
 /// そのため 1 件ずつ取り出してログ出力する。
 pub fn spawn_task_metrics_logger(task_monitor: tokio_metrics::TaskMonitor) {
     tokio::spawn(async move {
@@ -37,7 +37,7 @@ mod tests {
     use std::time::Instant;
 
     /// `TaskIntervals` が終端のない iterator であることを確認する。
-    /// この性質があるため `collect()` してはいけない (moqt-rs 0101)
+    /// この性質があるため `collect()` してはいけない
     #[test]
     fn test_task_intervals_never_ends() {
         let monitor = tokio_metrics::TaskMonitor::new();

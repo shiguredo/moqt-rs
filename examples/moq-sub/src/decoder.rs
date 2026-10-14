@@ -31,7 +31,8 @@ pub struct DecodedVideoFrame {
     pub height: i32,
     /// LOC の Timestamp から求めた時刻 (マイクロ秒)。無いときは None
     ///
-    /// 0103 の完了後は epoch マイクロ秒、それまでは publisher が送った時間軸の値である。
+    /// publisher が LOC の TIMESCALE プロパティを載せていれば epoch マイクロ秒、
+    /// 載せていなければ publisher の時間軸の値である。
     /// None のときは、表示時刻を時間軸から決められないため到着順に表示する。
     pub timestamp_us: Option<i64>,
 }

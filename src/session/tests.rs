@@ -1789,7 +1789,7 @@ fn stale_attribution_falls_back_to_live_owner_on_fin() {
 }
 
 // ============================================================================
-// 0075: publisher の REQUEST_UPDATE 失敗応答 (REQUEST_ERROR) で
+// publisher の REQUEST_UPDATE 失敗応答 (REQUEST_ERROR) で
 // PUBLISH_DONE (UPDATE_FAILED) を送る (§9.5.1 の MUST)
 // ============================================================================
 

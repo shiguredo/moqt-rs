@@ -2342,7 +2342,7 @@ enum RouteAction {
 /// 単方向は MOQT 層へ渡さず読み捨て、双方向は HTTP/3 層へ流す (従来動作)。
 ///
 /// datagram 経路は対象外である。依存する shiguredo_http3 は datagram の session ID 不正に
-/// H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る (別 issue)。
+/// H3_DATAGRAM_ERROR を返すため、H3_ID_ERROR にするには crate 側の変更が要る。
 fn decide_route(direction: StreamDirection, input: RouteInput) -> RouteAction {
     match input {
         RouteInput::WebTransport { own_session: true } => RouteAction::ForwardToMoqt,

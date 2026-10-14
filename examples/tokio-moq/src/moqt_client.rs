@@ -3029,7 +3029,7 @@ mod tests {
     /// AUTHORIZATION TOKEN パラメータを受け付ける制御メッセージへ MUST 付与する。
     /// C4M の `moqt` クレーム (draft-ietf-moq-c4m-01 §2.1) がメッセージのアクションを
     /// 認可しないトークンでも、client 側で選別すると付与漏れになるため選別しない。
-    /// 0223 まで FETCH の送信経路だけがクレームで選別しており、認可しないトークンが
+    /// 以前は FETCH の送信経路だけがクレームで選別しており、認可しないトークンが
     /// その経路から落ちていた (本 fixture のトークンは FETCH だけを認可する)。
     #[test]
     fn with_auth_parameters_attaches_c4m_token_outside_action_scope() {
