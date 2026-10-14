@@ -1,7 +1,7 @@
 # E2E テストの namespace が並列実行で衝突するのを直す
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/fix-e2e-namespace-collision
 - Polished: {YYYY-MM-DD}
 
@@ -37,4 +37,11 @@ E2E Test の `publish_and_subscribe_audio_datagram_roundtrip` が
 
 ## 解決方法
 
-(対応時に記入)
+- `e2e_namespace(test)` にして、テストごとの名前を混ぜるようにした。名前は
+  `moqt-e2e-<プロセス ID>-<テスト名>-<ナノ秒>` になる
+- 呼び出し側は `e2e_namespace("roundtrip")` と `e2e_namespace("audio-datagram")` にした
+- テスト: `namespaces_are_unique_per_test` を追加した。テストごとに別の名前になり、
+  同じテスト名でも実行ごとに別の名前になることを固定する
+- 検証: E2E Test が 2 件とも成功するようになった (修正前は `already_owned` で 1 件が失敗)
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
