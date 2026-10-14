@@ -36,6 +36,10 @@ use crate::capture;
 use crate::catalog;
 use crate::cli::{Config, VideoCodec};
 use crate::datagram_writer::DatagramWriter;
+use shiguredo_moqt::playout::publish_catch_up::{
+    AudioPublishCatchUp, AudioPublishCatchUpChunk, AudioPublishCatchUpFrame,
+};
+
 use crate::encoder::audio::AudioEncoder;
 use crate::encoder::{self, EncodedFrame};
 use crate::error::{Error, Result};
@@ -597,6 +601,11 @@ pub async fn run(
     } else {
         None
     };
+    // 音声の追いつきの判定 (配信ごとに 1 つ)。符号化が実時間に追いつかなくなるとキューが
+    // 溜まり、遅れが受信側の基準を押し上げるため、遅れたチャンクは符号化へ渡さずに捨てる
+    let mut audio_publish_catch_up = AudioPublishCatchUp::new();
+    // 直近にログへ出した、捨てたチャンクの数。状態が変わったときだけログに出す
+    let mut audio_catch_up_logged_dropped_frames: u64 = 0;
     let audio_samples_per_frame = audio_encoder.as_ref().map(|e| e.samples_per_frame());
     // PROP_TIMESCALE は再エンコードでは入力音声トラックのタイムスケールを使う。
     // live capture は Unix epoch マイクロ秒 (LOC の既定) を送るため載せない (`None`)。
@@ -994,9 +1003,12 @@ pub async fn run(
                     // 再エンコードでは 1 つの入力から複数チャンクを取り出しても入力の
                     // タイムスケールで 20 ms ずつ進める
                     let mut next_chunk_timestamp = input_timestamp;
+                    // 再エンコードでは TIMESTAMP が入力のタイムスケールであり壁時計ではない。
+                    // 読み出しの遅れを測れないため、追いつきの判定をしない
+                    let is_reencode = input_timestamp.is_some();
                     while audio_pcm_buf.len() >= samples_per_frame {
-                        let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
-                        let encoded = encoder.encode(&chunk).await?;
+                        // TIMESTAMP を先に決める。読み出しの遅れは「読んだ壁時計 − TIMESTAMP」
+                        // であり、判定に要る
                         let timestamp = match next_chunk_timestamp {
                             Some(timestamp) => {
                                 // 再エンコードの入力音声トラックのタイムスケール
@@ -1014,6 +1026,41 @@ pub async fn run(
                                 AUDIO_SAMPLE_RATE,
                             ),
                         };
+                        // 読み出しの遅れと符号化のキューから、このチャンクを符号化するかを
+                        // 決める。live capture の TIMESTAMP は音声の時計の補正を通した epoch
+                        // マイクロ秒であるため、補正は 0 として渡す
+                        let now_us = wall_clock_now_us()?;
+                        let duration_us = samples_to_micros(samples_per_frame as u64, AUDIO_SAMPLE_RATE);
+                        let accepted = audio_publish_catch_up.evaluate(AudioPublishCatchUpFrame {
+                            now_ms: now_us / 1_000,
+                            timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
+                            read_wall_clock_us: now_us,
+                            applied_offset_us: if is_reencode { None } else { Some(0) },
+                            duration_us: Some(i64::try_from(duration_us).unwrap_or(i64::MAX)),
+                        });
+                        // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
+                        let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
+                        if !accepted {
+                            let stats = audio_publish_catch_up.snapshot();
+                            // 状態が変わったときだけログに出す (毎フレーム出すとログが埋まる)
+                            if stats.dropped_frames != audio_catch_up_logged_dropped_frames {
+                                audio_catch_up_logged_dropped_frames = stats.dropped_frames;
+                                tracing::warn!(
+                                    "Dropping audio chunks to catch up (dropped_frames={}, dropped_ms={}, lag_ms={:?}, pending_ms={}, starts={})",
+                                    stats.dropped_frames,
+                                    stats.dropped_ms,
+                                    stats.lag_ms,
+                                    stats.pending_ms,
+                                    stats.catch_up_starts,
+                                );
+                            }
+                            continue;
+                        }
+                        let encoded = encoder.encode(&chunk).await?;
+                        audio_publish_catch_up.record_encoded_chunk(AudioPublishCatchUpChunk {
+                            timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
+                            duration_us: Some(i64::try_from(duration_us).unwrap_or(i64::MAX)),
+                        });
                         // 最初の audio object にだけ Audio Config を付与する。
                         // フィルタ不通過で Skip された場合は次回のオブジェクトに付与し直す
                         // (Skip 時に audio_config_sent を立てると Audio Config が永遠に届かず、
