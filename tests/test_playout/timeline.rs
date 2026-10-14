@@ -314,11 +314,20 @@ fn delay_breakdown_splits_the_basis_the_jitter_and_the_sync() {
 #[test]
 fn a_moving_basis_is_treated_as_a_clock_drift() {
     let mut timeline = PlayoutTimeline::new();
-    // 音声の基準は 1 秒で一定、映像の基準は 1.05 秒から毎秒 40 ms ずつ遅れていく。
-    // 差の大きさ (最大 250 ms) は閾値 (表示の遅れの上限から求まる値) に届かないため、
-    // 差の動き (5 秒で 200 ms) で検出できないと共有したままになる
+    // まず 11 秒ぶん、差の無い観測を流して水準を決める。判定は落ち着いた水準を観測してから
+    // 始める (購読の直後は relay の cache から届いた分をまとめて復号しており、基準が
+    // 数百 ms から数秒動く)
     let mut wall_us = 10_000_000;
-    for step in 0..60i64 {
+    for _ in 0..110 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+    }
+
+    // 映像の基準が毎秒 40 ms ずつ遅れていく。差の大きさ (最大 450 ms) は閾値 (表示の遅れの
+    // 上限から求まる値) に届かないため、差の動き (6 秒で 240 ms) で検出できないと共有した
+    // ままになる。持続の確認 (6 秒) を超える長さを見る
+    for step in 0..100i64 {
         wall_us += 100_000;
         let video_offset_us = 1_050_000 + step * 4_000;
         timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
@@ -340,17 +349,154 @@ fn a_moving_basis_is_treated_as_a_clock_drift() {
             .base_drift_us_per_second
             .is_some()
     );
+}
 
-    // ドリフトが止まっても、保持の間 (30 秒) は共有に戻さない
-    for _ in 0..60 {
+#[test]
+fn the_unshared_hold_is_released_when_the_difference_returns() {
+    // 保持 (30 秒) は閾値が動くたびに共有と解除を往復しないために置く。解除のきっかけが
+    // 去って差が水準へ戻った後は、同じ水準へ留まる理由が無いため、保持を待たずに戻す
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    for _ in 0..110 {
         wall_us += 100_000;
         timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_260_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+    }
+    for step in 0..100i64 {
+        wall_us += 100_000;
+        let video_offset_us = 1_050_000 + step * 4_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - video_offset_us);
+    }
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Drift);
+
+    // ドリフトが止まり、差が元の水準 (50 ms) へ戻る
+    for _ in 0..30 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+    }
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::None,
+        "きっかけが去って差が戻ったら保持を待たずに戻す"
+    );
+    assert!(timeline.sharing_bases(), "共有へ戻ること");
+}
+
+/// 一過性の動きでは共有をやめない
+///
+/// 読み出しが一瞬遅れただけでも、直近の窓の最小値の差は動く。しかし離れ幅が段差とみなす
+/// 大きさに届かず、参照 (表示時刻が使う基準の差) も動いていなければ、経路と復号の乱れで
+/// ある。持続の確認の前に戻るため、解除しない。
+#[test]
+fn a_transient_move_does_not_unshare_the_bases() {
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    for _ in 0..110 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+    }
+
+    // 映像の基準が一瞬 150 ms 遅れる (段差とみなす 200 ms には届かない)。直近の窓 (2 秒) が
+    // 入れ替わる長さだけ続ける
+    for _ in 0..20 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_200_000);
+    }
+    for _ in 0..40 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+        assert_ne!(
+            timeline.unshared_reason(),
+            UnsharedReason::Drift,
+            "一過性の動きを時計のずれとみなさない"
+        );
+    }
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::None,
+        "一過性の動きでは共有をやめない"
+    );
+    assert!(timeline.sharing_bases(), "共有したままであること");
+}
+
+/// 1 回で大きく離れた段差は、持続を待たずに共有をやめる
+#[test]
+fn a_step_away_from_the_level_unshares_immediately() {
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    for _ in 0..110 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+    }
+
+    // 映像の基準が 1 回で 500 ms 遅れる (離れ幅が段差とみなす 200 ms を超える)。直近の窓
+    // (2 秒) が入れ替わって初めて差に現れる
+    let mut seen_drift = false;
+    for _ in 0..30 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_550_000);
+        if timeline.unshared_reason() == UnsharedReason::Drift {
+            seen_drift = true;
+        }
+    }
+    assert!(seen_drift, "段差は持続を待たずに見つける");
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::Hold,
+        "解除した後は保持の間は戻さない"
+    );
+}
+
+/// 閾値だけが動いた解除は、差が戻っても保持を待たずには戻さない
+///
+/// 差が同じ水準のまま、jitter buffer の目標遅延が動いて閾値が下がると解除される。この
+/// 解除は動きがきっかけではないため、閾値が戻っても差は元の水準の側にある。往復を防ぐ
+/// ために保持する。
+#[test]
+fn a_threshold_only_unshare_is_held() {
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    // 映像が 200 ms 遅い状態で水準を決める (差は 250 ms で一定)
+    for _ in 0..110 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    }
+    assert!(
+        timeline.sharing_bases(),
+        "差が閾値の中なら共有したままであること"
+    );
+
+    // 明示の `targetLatency` を上げると、基準の差の閾値が下がって差が超える。差は動いて
+    // いないため、解除のきっかけに動きは無い
+    timeline.set_target_latency_ms(400);
+    wall_us += 100_000;
+    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::Difference,
+        "動かない差でも、閾値を超えたら解除する"
+    );
+
+    // 閾値を戻しても、差が戻った状態が続くだけでは保持を待たずには戻さない
+    timeline.set_target_latency_ms(0);
+    for _ in 0..30 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
     }
     assert_eq!(
         timeline.unshared_reason(),
         UnsharedReason::Hold,
-        "一度やめた判定は保持する"
+        "動きがきっかけでない解除は保持する"
     );
 }
 

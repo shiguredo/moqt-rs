@@ -140,6 +140,43 @@ pub const TIMELINE_MAX_COMPENSATED_DIFFERENCE_US: i64 = 100_000;
 /// 戻さない。
 pub const TIMELINE_BASE_UNSHARED_HOLD_US: i64 = 30_000_000;
 
+/// 基準の差がこれ以下の変化なら「動いていない」とみなす幅 (マイクロ秒)
+pub const TIMELINE_BASE_DIFFERENCE_QUIET_US: i64 = 5_000;
+
+/// 動きが止まってから、落ち着いた水準を観測したとみなすまでの時間 (マイクロ秒)
+///
+/// 水準は動きが戻ったときにだけ取り直す。記録のたびに取り直すと、ゆっくりしたドリフトでも
+/// 水準が一緒に動いてしまい、離れた幅が [`TIMELINE_BASE_DRIFT_US`] を超えない。
+pub const TIMELINE_BASE_DIFFERENCE_SETTLE_US: i64 = 3_000_000;
+
+/// 最初の記録から、動きが続いていても水準を決めるまでの時間 (マイクロ秒)
+///
+/// 動き続ける差 (ドリフト) のために、水準を観測するまでの待ちに上限を置く。
+pub const TIMELINE_BASE_DIFFERENCE_START_US: i64 = 10_000_000;
+
+/// 1 回の記録で水準から離れたとみなす幅 (マイクロ秒)
+///
+/// 段差はここに現れ、経路と復号の乱れは数十 ms ずつしか動かない (乱れは窓の最小値が
+/// 入れ替わることで現れるため)。
+pub const TIMELINE_BASE_DIFFERENCE_JUMP_US: i64 = 150_000;
+
+/// 水準から離れたまま、時計のずれとみなすまでに要求する時間 (マイクロ秒)
+///
+/// 離れた幅が元へ戻れば、その動きは一過性 (読み出しが一瞬遅れた、経路が一瞬つまずいた) で
+/// あったと分かる。持続を確かめてから解除する。
+pub const TIMELINE_BASE_DRIFT_CONFIRM_US: i64 = 6_000_000;
+
+/// 待たずに時計のずれとみなす、水準からの離れ幅 (マイクロ秒)
+///
+/// この大きさでは、時計のずれと読み出しの遅れを見分けられない。ただし参照 (表示時刻が
+/// 使う基準の差) が同じ向きに [`TIMELINE_BASE_DRIFT_US`] を超えて動いていることを確かめる。
+/// 確かめないと、経路と復号の乱れを時計のずれとみなして解除し、しかも水準が乱れの側で
+/// 取られると解除が解けなくなる。
+pub const TIMELINE_BASE_DRIFT_STEP_US: i64 = 200_000;
+
+/// 解除のきっかけが去ってから、保持を待たずに戻すまでの時間 (マイクロ秒)
+pub const TIMELINE_BASE_UNSHARED_RELEASE_US: i64 = 2_000_000;
+
 /// 基準の差を記録する間隔 (マイクロ秒)
 const TIMELINE_BASE_DIFFERENCE_SAMPLE_INTERVAL_US: i64 = 250_000;
 
@@ -505,6 +542,29 @@ pub struct PlayoutTimeline {
     last_base_difference_at_us: Option<i64>,
     /// 直前に記録した基準の差 (マイクロ秒)。履歴と同じ求め方であり、動きの今側の値になる
     last_base_difference_value_us: Option<i64>,
+    /// 直前に記録した、表示時刻が使う基準の差 (マイクロ秒)
+    ///
+    /// 「参照」であり、離れ始めの参照と比べて同じ向きに動いたかを見る。
+    last_base_difference_reference_us: Option<i64>,
+    /// 動きが止まっている状態が続いている開始時刻 (マイクロ秒)
+    base_difference_quiet_since_us: Option<i64>,
+    /// 基準の差を最初に記録した時刻 (マイクロ秒)
+    base_difference_first_at_us: Option<i64>,
+    /// 動きが止まっているとみなした水準 (マイクロ秒)。まだ観測していなければ None
+    settled_base_difference_us: Option<i64>,
+    /// 水準から離れている状態が続いている開始時刻 (マイクロ秒)
+    base_difference_deviation_since_us: Option<i64>,
+    /// 離れ始めたときの参照 (マイクロ秒)
+    base_difference_deviation_reference_us: Option<i64>,
+    /// いま基準の差を時計のずれとみなしているか
+    base_difference_drifted_value: bool,
+    /// 直近の解除のきっかけに動きがあったか
+    ///
+    /// 差が同じ水準のまま閾値だけが動いた解除では、きっかけが去っても差は元の水準の側に
+    /// ある。早期の解除の対象にしない。
+    unshared_trigger_moved_value: bool,
+    /// きっかけが去って差が戻っている状態の開始時刻 (マイクロ秒)
+    unshared_returned_since_us: Option<i64>,
     /// 基準を取り直した回数
     generation: u64,
     /// 直近の表示の実績
@@ -534,6 +594,15 @@ impl PlayoutTimeline {
             base_differences: TimedWindow::default(),
             last_base_difference_at_us: None,
             last_base_difference_value_us: None,
+            last_base_difference_reference_us: None,
+            base_difference_quiet_since_us: None,
+            base_difference_first_at_us: None,
+            settled_base_difference_us: None,
+            base_difference_deviation_since_us: None,
+            base_difference_deviation_reference_us: None,
+            base_difference_drifted_value: false,
+            unshared_trigger_moved_value: false,
+            unshared_returned_since_us: None,
             generation: 0,
             presented: [None, None],
         }
@@ -668,6 +737,9 @@ impl PlayoutTimeline {
 
         // ここまでの更新で表示の遅れが変わったため、A/V 同期の制御をそろえる
         self.update_sync_delays(wall_clock_us);
+
+        // 解除のきっかけが去って差が戻ったら、保持を待たずに共有を戻す
+        self.update_unshared_release(wall_clock_us);
     }
 
     /// 音声を実際に鳴らした結果の観測を渡す (購読側が鳴らすたびに呼ぶ)
@@ -1216,9 +1288,8 @@ impl PlayoutTimeline {
         let Some(difference_us) = self.current_base_difference_us() else {
             return;
         };
-        if difference_us.saturating_abs() <= self.base_difference_limit_us()
-            && !self.base_difference_drifted()
-        {
+        let drifted = self.base_difference_drifted();
+        if difference_us.saturating_abs() <= self.base_difference_limit_us() && !drifted {
             return;
         }
         self.last_unshared_at_us = self.last_base_difference_at_us;
@@ -1227,6 +1298,63 @@ impl PlayoutTimeline {
         } else {
             Track::Video
         });
+        // 解除のきっかけに動きがあったか。差が同じ水準のまま閾値だけが動いた解除では、
+        // きっかけが去っても差は元の水準の側にあり、早期に戻すと往復する
+        self.unshared_trigger_moved_value = drifted;
+    }
+
+    /// 解除のきっかけが去って差が戻ったら、保持を待たずに共有を戻す
+    ///
+    /// 戻った状態が [`TIMELINE_BASE_UNSHARED_RELEASE_US`] 続いたら解除する。同じ水準へ
+    /// 留まる理由が無いためである。
+    fn update_unshared_release(&mut self, now_us: i64) {
+        if !self.can_release_unshared_hold() {
+            self.unshared_returned_since_us = None;
+            return;
+        }
+        if self.unshared_returned_since_us.is_none() {
+            self.unshared_returned_since_us = Some(now_us);
+        }
+        let Some(returned_since_us) = self.unshared_returned_since_us else {
+            return;
+        };
+        if now_us.saturating_sub(returned_since_us) < TIMELINE_BASE_UNSHARED_RELEASE_US {
+            return;
+        }
+        self.last_unshared_track = None;
+        self.last_unshared_at_us = None;
+        self.unshared_trigger_moved_value = false;
+        self.unshared_returned_since_us = None;
+    }
+
+    /// 保持を早く解除してよい状態か (解除のきっかけが去り、差が戻っているか)
+    ///
+    /// 次のすべてを満たすこと。どれかが崩れれば、差はまだ解除の水準の側にあり、共有と
+    /// 解除を往復し得る。
+    ///
+    /// - 保持していること
+    /// - 解除のきっかけに動きがあったこと ([`PlayoutTimeline::refresh_unshared_state`])。
+    ///   差が同じ水準のまま閾値だけが動いた解除では解除しない
+    /// - 動きの判定が解けていること。離れた幅が続いている間 (真のドリフト) は、その幅が
+    ///   元の水準へ戻ったことにならない
+    /// - 差が閾値を超えていないこと (超えていれば合わせられない)
+    /// - 差が水準へ戻っていること。記録の間隔ごとの変化ではなく水準への復帰を見るのは、
+    ///   負荷のある環境では差が数十 ms の幅で細かく動き続け、変化が 0 になる瞬間が来ない
+    ///   ためである
+    fn can_release_unshared_hold(&self) -> bool {
+        if self.last_unshared_track.is_none() || self.held_unshared_track().is_none() {
+            return false;
+        }
+        if !self.unshared_trigger_moved_value || self.base_difference_drifted() {
+            return false;
+        }
+        let Some(difference_us) = self.current_base_difference_us() else {
+            return false;
+        };
+        if difference_us.saturating_abs() > self.base_difference_limit_us() {
+            return false;
+        }
+        self.base_difference_deviation_since_us.is_none()
     }
 
     /// 直近の基準の差の動き (マイクロ秒/秒)。まだ履歴が無ければ None
@@ -1283,10 +1411,22 @@ impl PlayoutTimeline {
         };
         self.last_base_difference_at_us = Some(now_us);
         let difference_us = audio_us.saturating_sub(video_us);
+        let previous_value_us = self.last_base_difference_value_us;
+        let previous_reference_us = self.last_base_difference_reference_us;
         self.last_base_difference_value_us = Some(difference_us);
+        // 参照 (表示時刻が使う基準の差) を残す。動きの向きを確かめるのに使う
+        let reference_us = self.current_base_difference_us();
+        self.last_base_difference_reference_us = reference_us;
         self.base_differences.push(now_us, difference_us);
         self.base_differences
             .prune(now_us.saturating_sub(TIMELINE_BASE_DRIFT_WINDOW_US));
+        self.update_base_difference_drift(
+            now_us,
+            difference_us,
+            previous_value_us,
+            previous_reference_us,
+            reference_us,
+        );
     }
 
     /// 直近の基準 (マイクロ秒)。まだ観測していなければ None
@@ -1300,9 +1440,128 @@ impl PlayoutTimeline {
     }
 
     /// 基準の差が動き続けているか (時計がずれているとみなすか)
+    ///
+    /// 判定は [`PlayoutTimeline::update_base_difference_drift`] が記録のたびに行い、結果を
+    /// ここへ残す。
     fn base_difference_drifted(&self) -> bool {
-        self.base_difference_history()
-            .is_some_and(|(movement_us, _)| movement_us.saturating_abs() > TIMELINE_BASE_DRIFT_US)
+        self.base_difference_drifted_value
+    }
+
+    /// 記録した差から、動きの持続と水準への復帰を判定する
+    ///
+    /// 差が「離れた幅のまま」になっている時間を測り、[`TIMELINE_BASE_DRIFT_CONFIRM_US`]
+    /// 続いたときだけ時計のずれとみなす。離れた水準が元へ戻れば、その動きは一過性
+    /// (読み出しが一瞬遅れた、経路が一瞬つまずいた) だったと分かるため、判定を消して水準を
+    /// 取り直す。
+    ///
+    /// 水準は動きが戻ったときにだけ取り直す。記録のたびに取り直すと、ゆっくりしたドリフト
+    /// でも水準が一緒に動いてしまい、離れた幅が [`TIMELINE_BASE_DRIFT_US`] を超えない。
+    ///
+    /// 待たずに判定する段差 ([`TIMELINE_BASE_DRIFT_STEP_US`]) だけは、参照 (`reference_us`) が
+    /// 同じ向きに [`TIMELINE_BASE_DRIFT_US`] を超えて動いていることも確かめる。短い窓の
+    /// 最小値の差は、経路と復号がつまずくと 200 ms を超えて動くが、表示時刻が使う基準は
+    /// 動かない。参照を確かめないと、その乱れを時計のずれとみなして共有を解除し、しかも
+    /// 水準が乱れの側で取られると解除が解けなくなる。
+    ///
+    /// 判定は落ち着いた水準を観測してから始める。購読の直後は、relay の cache から届いた分と
+    /// 購読を始めるまでにたまった分をまとめて復号しており、基準の遅れが数百 ms から数秒
+    /// 動く。この動きを時計のずれとみなすと、共有を 30 秒解除してしまい、落ち着いた後の
+    /// 観測がすべて解除されたままになる。
+    fn update_base_difference_drift(
+        &mut self,
+        now_us: i64,
+        difference_us: i64,
+        previous_value_us: Option<i64>,
+        previous_reference_us: Option<i64>,
+        reference_us: Option<i64>,
+    ) {
+        // 差が動いているかどうか。記録の間隔ごとの変化であり、窓の最小値のような遅れが無い
+        let change_us = previous_value_us.map_or(0, |previous_value_us| {
+            difference_us
+                .saturating_sub(previous_value_us)
+                .saturating_abs()
+        });
+        if change_us <= TIMELINE_BASE_DIFFERENCE_QUIET_US {
+            if self.base_difference_quiet_since_us.is_none() {
+                self.base_difference_quiet_since_us = Some(now_us);
+            }
+        } else {
+            self.base_difference_quiet_since_us = None;
+        }
+        if self.base_difference_first_at_us.is_none() {
+            self.base_difference_first_at_us = Some(now_us);
+        }
+
+        let Some(settled_us) = self.settled_base_difference_us else {
+            // まだ「動いていない水準」を観測していない。動き続ける差 (ドリフト) のために、
+            // 待つ時間には上限を置く
+            let settled_by_quiet_us = self.base_difference_quiet_since_us.map(|quiet_since_us| {
+                quiet_since_us.saturating_add(TIMELINE_BASE_DIFFERENCE_SETTLE_US)
+            });
+            let settled_by_latest_us = self
+                .base_difference_first_at_us
+                .map(|first_at_us| first_at_us.saturating_add(TIMELINE_BASE_DIFFERENCE_START_US));
+            let settled_at_us = match (settled_by_quiet_us, settled_by_latest_us) {
+                (Some(quiet), Some(latest)) => Some(quiet.min(latest)),
+                (Some(quiet), None) => Some(quiet),
+                (None, Some(latest)) => Some(latest),
+                (None, None) => None,
+            };
+            // 水準は参照 (表示時刻が使う基準の差) から取る。動きを見る短い窓の差は経路と
+            // 復号の乱れの位相で動くため、そこから取ると乱れの側の水準を基準にしてしまい、
+            // 乱れが去っても離れた幅が戻らず、解除が解けなくなる
+            if let Some(settled_at_us) = settled_at_us
+                && now_us >= settled_at_us
+                && let Some(reference_us) = reference_us
+            {
+                self.settled_base_difference_us = Some(reference_us);
+            }
+            self.base_difference_drifted_value = false;
+            return;
+        };
+
+        let deviation_us = difference_us.saturating_sub(settled_us).saturating_abs();
+        if deviation_us <= TIMELINE_BASE_DRIFT_US {
+            self.base_difference_drifted_value = false;
+            if self.base_difference_deviation_since_us.is_some() {
+                // 離れた水準から戻った。動いていた幅は一過性だったので、今の水準を基準にする
+                self.settled_base_difference_us = Some(difference_us);
+                self.base_difference_deviation_since_us = None;
+                self.base_difference_deviation_reference_us = None;
+            }
+            return;
+        }
+        if self.base_difference_deviation_since_us.is_none() {
+            // 離れ始めの参照を残す。動きと同じ向きに参照が動いていなければ、この動きは
+            // 経路と復号の乱れであり、待たずに判定してはいけない
+            self.base_difference_deviation_reference_us = previous_reference_us;
+        }
+        let since_us = self.base_difference_deviation_since_us.unwrap_or(now_us);
+        self.base_difference_deviation_since_us = Some(since_us);
+        // 1 回の記録で水準から離れた幅。段差はここに現れ、経路と復号の乱れは数十 ms ずつ
+        // しか動かない (乱れは窓の最小値が入れ替わることで現れるため)
+        let previous_deviation_us = previous_value_us.map_or(0, |previous_value_us| {
+            previous_value_us
+                .saturating_sub(settled_us)
+                .saturating_abs()
+        });
+        let jumped_away_us =
+            deviation_us.saturating_sub(previous_deviation_us) > TIMELINE_BASE_DIFFERENCE_JUMP_US;
+        // 段差とみなせる大きさで、参照も同じ向きに離れていれば待たない。読み出しの遅れが
+        // 戻るのを待つのは、その大きさでは時計のずれと読み出しの遅れを見分けられないためで
+        // ある
+        let reference_from_us = self.base_difference_deviation_reference_us.or(reference_us);
+        let reference_movement_us = match (reference_us, reference_from_us) {
+            (Some(reference_us), Some(from_us)) => reference_us.saturating_sub(from_us),
+            _ => 0,
+        };
+        let deviation_signed_us = difference_us.saturating_sub(settled_us);
+        let reference_moved_same_way = deviation_signed_us.saturating_mul(reference_movement_us)
+            > 0
+            && reference_movement_us.saturating_abs() > TIMELINE_BASE_DRIFT_US;
+        self.base_difference_drifted_value = (deviation_us > TIMELINE_BASE_DRIFT_STEP_US
+            && (jumped_away_us || reference_moved_same_way))
+            || now_us.saturating_sub(since_us) >= TIMELINE_BASE_DRIFT_CONFIRM_US;
     }
 
     /// 基準の差の履歴の、最も古い記録から今までの動き
@@ -1333,6 +1592,15 @@ impl PlayoutTimeline {
         self.base_differences = TimedWindow::default();
         self.last_base_difference_at_us = None;
         self.last_base_difference_value_us = None;
+        self.last_base_difference_reference_us = None;
+        self.base_difference_quiet_since_us = None;
+        self.base_difference_first_at_us = None;
+        self.settled_base_difference_us = None;
+        self.base_difference_deviation_since_us = None;
+        self.base_difference_deviation_reference_us = None;
+        self.base_difference_drifted_value = false;
+        self.unshared_trigger_moved_value = false;
+        self.unshared_returned_since_us = None;
     }
 
     /// 同期が足した分を含まない、トラックの表示の遅れ (マイクロ秒)。未観測なら None
