@@ -168,11 +168,17 @@ pub async fn connect(
 ) -> Result<(Connection, StopSendingReceiver)> {
     let tls = build_tls_client(cert_path)?;
 
+    // QUIC DATAGRAM の送受信のキューの容量を決める。s2n-quic の既定はどちらも 0 であり、
+    // 送信の容量が 0 のままだと `poll_send_datagram` が常に `Poll::Pending` を返すため、
+    // datagram を 1 つも送れない (音声の配信がそこで止まる)。受信の容量は 20 ms ごとに
+    // 届く音声をまとめて取り出せるだけの余裕を持たせる
     let datagram_endpoint = s2n_quic::provider::datagram::default::Endpoint::builder()
+        .with_send_capacity(64)
+        .map_err(|e| TransportError::Quic(format!("datagram endpoint: {e}")))?
         .with_recv_capacity(64)
         .map_err(|e| TransportError::Quic(format!("datagram endpoint: {e}")))?
         .build()
-        .expect("datagram endpoint build must succeed after recv capacity is set");
+        .expect("datagram endpoint build must succeed after capacities are set");
 
     // 受信パケットの内訳を見るときだけ記録する。
     //

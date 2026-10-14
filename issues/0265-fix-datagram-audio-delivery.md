@@ -1,7 +1,7 @@
 # relay 経由の datagram 配送の音声が subscriber に届かない
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/fix-datagram-audio-delivery
 - Polished: 2026-10-14
 
@@ -55,29 +55,25 @@ publisher は購読され、音声を datagram で送っている。subscriber �
 
 ## 解決方法
 
-- 調査の結果、`examples/moq-sub` の datagram の受信ループが、datagram が 1 つも無いときに
-  即座に空の結果を返していた。呼び出し側はそれを待たずに回り続けるため、CPU を 1 コア
-  使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせていた。
-  `StreamHandle::recv_datagrams` を、最初の 1 つは届くまで `poll_recv_datagram` で待ち、
-  続けて届いている分はまとめて取る形に直した (WebTransport の経路は元から待つ)
-- あわせて、最初の datagram を受け取ったときに 1 回だけ件数を出すログを追加した
-- 切り分けの結果、subscriber は relay から datagram を 1 つも受け取っていない
-  (`Received the first datagram batch` が出ない、`Pipeline stopped: 0 streams received`)。
-  publisher の側では catalog と audio の PUBLISH が解決した直後に、relay が
-  `application::Error(3)` (PROTOCOL_VIOLATION) で接続を切っている
-
-```text
-Sent PUBLISH (request_id=0, alias=2)
-Received REQUEST_UPDATE: request_id=0
-Failed to accept peer bidi stream: QUIC error: The connection was closed on the application
-level with error application::Error(3) by the remote endpoint
-```
-
-- 映像ありの `publish_and_subscribe_roundtrip` は同じ経路で成功するため、差分は
-  `--no-video` と `--audio-datagram` の 2 点である。OBJECT_DATAGRAM の組み立ては
-  draft-ietf-moq-transport-22 §11.2.1 に沿っており (`src/stream/datagram.rs`)、
-  moqt-rs 側の書式の不備は見当たらない
-- 残る問題は実 relay の OBJECT_DATAGRAM 配送への対応であり、moqt-rs 側では直せない。
-  テストは `MOQT_E2E_DATAGRAM=1` を設定したときだけ実行する形にした。relay が対応したら
-  この条件を外す
-- `issues/pending` へ移した
+- 原因は `examples/tokio-moq/src/quic.rs` の QUIC DATAGRAM の設定にあった。s2n-quic の
+  `provider::datagram::default::EndpointBuilder` は `#[derive(Default)]` であり、
+  **送信と受信のキューの容量の既定値がどちらも 0** である。moqt-rs は `with_recv_capacity(64)`
+  だけを呼んでおり、送信の容量が 0 のままだった
+- `Sender::poll_send_datagram` は `self.queue.len() == self.capacity` のときに `Poll::Pending`
+  を返す。容量が 0 なら `0 == 0` が常に成り立ち、**datagram を 1 つも送れない**。
+  `send_datagram` が永久に待ち続け、音声の配信ループがそこで止まる
+- `with_send_capacity(64)` を追加した。送信の容量が 0 でないことは `BuilderError::ZeroCapacity`
+  で守られており、設定しない限り気づけない
+- 検証 (ローカル): sora-moq (develop) の relay を 4433 番で起動し、moq-pub と moq-sub を
+  繋いだ。修正前は `DIAG audio chunk` が 1 回だけで止まり、subscriber は
+  `0 streams received`、relay の `upstream_objects_received` は catalog の 1 件だけだった。
+  修正後は `Received the first datagram batch from the relay: count=1` が出て、
+  `1553 audio chunks` を受信し、MP4 (269291 バイト) が作られた
+- 検証: E2E テストの `MOQT_E2E_DATAGRAM` によるガードを外し、常に実行するようにした
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
+- 備考: 2026-10-14 の E2E Test で publisher が `application::Error(3)`
+  (PROTOCOL_VIOLATION) で切断されていた件は、relay が
+  `max_datagram_frame_size` を広告しない接続を閉じる実装
+  (`sora_moq_listener.erl`) によるものである。容量を設定すると datagram の交渉が
+  成立し、あわせて解消した

@@ -508,20 +508,9 @@ async fn publish_and_subscribe_roundtrip() {
 /// publisher は `--audio-datagram` で音声を OBJECT_DATAGRAM 配送にする
 /// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。subscriber が datagram の
 /// payload を decode していなければ、音声フレームは 1 つも届かない。
-///
-/// 実 relay が OBJECT_DATAGRAM の配送に対応していないため、`MOQT_E2E_DATAGRAM=1` を設定した
-/// ときだけ実行する。現状は catalog と audio の PUBLISH が解決した直後に publisher が
-/// `application::Error(3)` (PROTOCOL_VIOLATION) で切断され、subscriber には datagram が
-/// 1 つも届かない。relay が対応したらこの条件を外し、常に実行する。
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]
 async fn publish_and_subscribe_audio_datagram_roundtrip() {
-    if !std::env::var("MOQT_E2E_DATAGRAM").is_ok_and(|v| v == "1") {
-        eprintln!(
-            "relay の OBJECT_DATAGRAM 配送に依存するため、MOQT_E2E_DATAGRAM=1 を設定したときだけ実行します"
-        );
-        return;
-    }
     init_tracing();
     let url = e2e_url();
     let transport = e2e_transport();
