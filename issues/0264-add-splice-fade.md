@@ -1,7 +1,7 @@
 # 棄却で飛んだ境目をフェードで繋ぐ
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/add-splice-fade
 - Polished: {YYYY-MM-DD}
 
@@ -50,4 +50,21 @@ moqt-js の `src/audioSpliceFade.ts` (2026-10-12) の仕組みを取り込む。
 
 ## 解決方法
 
-(対応時に記入)
+- 新規モジュール `src/playout/splice_fade.rs` に `fade_splice_edge` と `splice_fade_samples`
+  を追加した。チャンネルごとの `&mut [f32]` を受け取り、端を線形に 0 へ落とす純粋関数で
+  ある
+- `AUDIO_SPLICE_FADE_US` を 2 ms とした。8 ms のフレームの半分より短く、20 ms のフレーム
+  では 10 分の 1 であり、聞こえる欠落にならない
+- 落とすサンプル数はサンプルレートから求め、四捨五入して 1 以上、バッファの長さ以内に
+  する (48 kHz で 96 サンプル)。端のサンプルは 0 になり、落とす長さだけ離れたサンプルは
+  元の値のままである
+- テスト: `tests/test_playout/splice_fade.rs` に 7 件 (落とす長さの決まり方・先頭と末尾の
+  フェード・複数チャンネル・短いバッファ・空のバッファ) 追加した
+- PBT: `pbt/tests/prop_playout/splice_fade.rs` に 2 件追加した。落とす長さの外のサンプルを
+  変えないこと、端へ向けて単調に小さくなること、元の絶対値を超えないことを検証する
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 備考: `examples/moq-pub` への配線は、追いつきの判定を使う変更と合わせて別の issue で
+  行う。呼び出し側は符号化へ渡すフレームを 1 つ保持し、次のフレームの判定が「捨てる」なら
+  保持しているフレームの末尾を、判定が「捨てる」の直後なら先頭を落としてから符号化へ渡す
+  (先読みの分だけ符号化が 1 フレーム遅れる)
