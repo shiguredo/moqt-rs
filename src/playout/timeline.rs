@@ -958,6 +958,11 @@ impl PlayoutTimeline {
     /// 後行側の表示時刻から、目標の差 ([`PlayoutTimeline::desired_difference_us`]) だけ
     /// 手前へ寄せる。既に足している分は減らさない (減らすのは
     /// [`PlayoutTimeline::decay_sync_extras`] の目標へ戻す処理だけにする)。
+    ///
+    /// 足す量は [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] までにする。ずれを収める目標は
+    /// 「既に足している分を含む表示時刻」から計算するため、相手側が既に足している分だけ
+    /// 足りない分が上限を超えることがある。超えた分は合わせても実際のずれは減らないまま
+    /// そのトラックの表示の遅れだけが伸びるため、足さずに A/V のずれとして残す。
     fn align_sync_extras(&mut self, natural_us: [i64; 2]) {
         let audio_us = natural_us[Track::Audio.index()]
             .saturating_add(self.tracks[Track::Audio.index()].sync_extra_us);
@@ -967,11 +972,13 @@ impl PlayoutTimeline {
             .max(video_us)
             .saturating_sub(self.desired_difference_us(natural_us));
         if audio_us < target_us {
-            self.tracks[Track::Audio.index()].sync_extra_us =
-                target_us.saturating_sub(natural_us[Track::Audio.index()]);
+            self.tracks[Track::Audio.index()].sync_extra_us = target_us
+                .saturating_sub(natural_us[Track::Audio.index()])
+                .min(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US);
         } else if video_us < target_us {
-            self.tracks[Track::Video.index()].sync_extra_us =
-                target_us.saturating_sub(natural_us[Track::Video.index()]);
+            self.tracks[Track::Video.index()].sync_extra_us = target_us
+                .saturating_sub(natural_us[Track::Video.index()])
+                .min(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US);
         }
     }
 
@@ -1536,6 +1543,31 @@ mod tests {
             video_present_us - audio_present_us,
             120_000,
             "相手側へ移す分は上限までにする"
+        );
+    }
+
+    /// 同期で足す遅延は、相手側が既に足している分があっても上限を超えないこと
+    ///
+    /// ずれを収める目標は「既に足している分を含む表示時刻」から計算するため、相手側が
+    /// 既に足している分だけ足りない分が上限を超えることがある。超えた分は合わせても実際の
+    /// ずれは減らないまま、そのトラックの表示の遅れだけが伸びる。
+    #[test]
+    fn sync_never_adds_more_than_the_compensation_limit() {
+        let mut timeline = PlayoutTimeline::new();
+        // 音声の素の表示の遅れが 1,000 ms、映像が 0 ms で、音声へは既に上限いっぱい足して
+        // いる (映像が遅れていたため音声を遅らせた後、映像の遅れだけが消えた状態)
+        timeline.tracks[Track::Audio.index()].sync_extra_us =
+            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US;
+        timeline.align_sync_extras([1_000_000, 0]);
+        assert_eq!(
+            timeline.tracks[Track::Video.index()].sync_extra_us,
+            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+            "映像へ足す量を上限で切ること"
+        );
+        assert_eq!(
+            timeline.tracks[Track::Audio.index()].sync_extra_us,
+            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+            "音声へ足した分を減らさないこと"
         );
     }
 

@@ -146,22 +146,29 @@ fn sync_never_moves_more_than_the_compensation_limit() -> noprop::TestResult {
     runner.run(128, |ctx| {
         let mut timeline = PlayoutTimeline::new();
         let interval_us = noprop::sample_u64_in(ctx, 8_000..=50_000) as i64;
-        // トラックごとの基準のドリフト (毎秒)。0 と上限付近の値を混ぜる
+        // トラックごとの基準のドリフト (毎秒)。0 と上限付近の値を混ぜ、差が反転する場合を
+        // 通す (片側へ既に足した分が残ったまま反転すると、移す分が上限を超えやすい)
         let audio_drift_us_per_second = noprop::sample_with_boundaries(
             ctx,
-            &[-40_000, -20_000, 0, 20_000, 40_000],
+            &[-100_000, -40_000, 0, 40_000, 100_000],
             noprop::Ratio::one_nth(4),
-            |ctx| noprop::sample_u64_in(ctx, 0..=80_000) as i64 - 40_000,
+            |ctx| noprop::sample_u64_in(ctx, 0..=200_000) as i64 - 100_000,
         );
         let video_drift_us_per_second = noprop::sample_with_boundaries(
             ctx,
-            &[-40_000, -20_000, 0, 20_000, 40_000],
+            &[-100_000, -40_000, 0, 40_000, 100_000],
             noprop::Ratio::one_nth(4),
-            |ctx| noprop::sample_u64_in(ctx, 0..=80_000) as i64 - 40_000,
+            |ctx| noprop::sample_u64_in(ctx, 0..=200_000) as i64 - 100_000,
         );
         let mut audio_offset_us = noprop::sample_u64_in(ctx, 900_000..=1_100_000) as i64;
-        let mut video_offset_us =
-            audio_offset_us + noprop::sample_u64_in(ctx, 0..=600_000) as i64 - 300_000;
+        // 2 つのトラックの基準の差。共有が続く範囲で大きく動かす
+        let offset_difference_us = noprop::sample_with_boundaries(
+            ctx,
+            &[-800_000, -400_000, -300_000, 0, 300_000, 400_000, 800_000],
+            noprop::Ratio::one_nth(4),
+            |ctx| noprop::sample_u64_in(ctx, 0..=1_600_000) as i64 - 800_000,
+        );
+        let mut video_offset_us = audio_offset_us + offset_difference_us;
         let mut wall_us: i64 = 100_000_000;
         let steps = noprop::sample_usize_in(ctx, 20..=200);
         // 内訳と共有の判定、表示時刻の整合を確かめる
@@ -218,9 +225,21 @@ fn sync_never_moves_more_than_the_compensation_limit() -> noprop::TestResult {
             let gap_us = audio_delay_us
                 .saturating_sub(video_delay_us)
                 .saturating_abs();
+            // 同期で足す量は上限までである。上限で切った分は合わせきれず、2 つの表示時刻の
+            // 差として残るため、差は目標の差にその分を足した値まで許す
             assert!(
-                gap_us <= desired_us,
+                gap_us <= desired_us + TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
                 "移す分が上限を超えた: gap={gap_us} desired={desired_us} {breakdown:?}"
+            );
+            // 同期で片側へ足す量は上限を超えない (超えた分は合わせても実際のずれが減らず、
+            // そのトラックの表示の遅れだけが伸びる)
+            assert!(
+                breakdown.audio.sync_extra_delay_us <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+                "音声へ足した分が上限を超えた: {breakdown:?}"
+            );
+            assert!(
+                breakdown.video.sync_extra_delay_us <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+                "映像へ足した分が上限を超えた: {breakdown:?}"
             );
             true
         };
