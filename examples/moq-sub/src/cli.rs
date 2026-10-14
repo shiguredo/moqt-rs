@@ -87,7 +87,6 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     noargs::HELP_FLAG.take_help(&mut args);
 
     let url: ServerUrl = noargs::opt("url")
-        .short('u')
         .ty("URL")
         .doc("Server URL (moqt://host[:port]/path; '#msf:ns--track&c4m=BASE64' sends a C4M token in SETUP)")
         // 必須オプションは help モードでも Opt::None になり `then()` が MissingOpt を返すため、
