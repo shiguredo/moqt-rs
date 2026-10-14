@@ -316,6 +316,25 @@ impl FetchResponseWriter {
         Ok(())
     }
 
+    /// End of Non-Existent Range を書く
+    ///
+    /// 直前までに書いた entry の Location から `location` までの区間の Object が
+    /// 「存在しない」ことを示す (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+    /// §3.2.2 は「存在しない範囲と不明な範囲に分割する」用途に限って使ってよいとしている。
+    ///
+    /// # Errors
+    ///
+    /// エンコードの規則 (直前の Location との順序など) に反する場合は [`TransportError`] になる。
+    pub async fn write_end_of_non_existent_range(&mut self, location: Location) -> Result<()> {
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_end_of_non_existent_range(location.group_id, location.object_id, &mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
+        self.data_plane.send_fetch_object(self.stream_id)?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
     /// End of Unknown Range を書く
     ///
     /// 直前までに書いた entry の Location から `location` までの区間が「不明」であることを示す

@@ -20,19 +20,25 @@ use shiguredo_moqt::{
     },
     media_clock::WallClockMapper,
     message::ControlMessage,
+    message::Fetch,
     message::common::Location,
     message::common::TrackNamespace,
-    message_parameter::MessageParameters,
+    message_parameter::{LocationFilter, LocationFilterContext, MessageParameters},
     msf::MSF_CATALOG_TRACK_NAME,
     name::serialize_namespace,
     session::types::DataStreamId,
     session::types::SessionEvent,
-    track_properties::{PROP_DYNAMIC_GROUPS, TrackProperties, TrackProperty, TrackPropertyValue},
+    stream::encoder::FetchObjectInput,
+    track_properties::{
+        PROP_DYNAMIC_GROUPS, PROP_MAX_CACHE_DURATION, TrackProperties, TrackProperty,
+        TrackPropertyValue,
+    },
 };
 use shiguredo_video_device::VideoFrameOwned;
 use tokio::sync::mpsc;
 
 use crate::audio_capture;
+use crate::cache;
 use crate::capture;
 use crate::catalog;
 use crate::cli::{Config, VideoCodec};
@@ -228,6 +234,20 @@ async fn reset_open_subgroup_stream(
     }
 }
 
+/// `MAX_CACHE_DURATION` を告知する Track Properties を作る
+///
+/// draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
+/// ミリ秒で示す。この example は `--cache-duration` の時間窓だけ保持するため、同じ値を
+/// 告知する。告知しないと購読者と relay が「いつまで FETCH で配れるか」を知れない。
+fn cache_duration_properties(cache_duration_ms: u64) -> TrackProperties {
+    let mut properties = TrackProperties::new();
+    properties.push(TrackProperty {
+        prop_type: PROP_MAX_CACHE_DURATION,
+        value: TrackPropertyValue::VarInt(cache_duration_ms),
+    });
+    properties
+}
+
 /// 映像トラックに載せる Track Properties
 ///
 /// draft-ietf-moq-transport-22 §10.6 (DYNAMIC_GROUPS) の `DYNAMIC_GROUPS=1` を告知し、
@@ -235,8 +255,10 @@ async fn reset_open_subgroup_stream(
 /// 示す。購読者は `DYNAMIC_GROUPS=1` を知らないと REQUEST_UPDATE で `NEW_GROUP_REQUEST` を
 /// 送れないため、PUBLISH と SUBSCRIBE_OK の両方で告知する (§3.5.1)。音声とカタログの
 /// トラックには載せない。
-fn video_track_properties() -> TrackProperties {
-    let mut properties = TrackProperties::new();
+///
+/// `MAX_CACHE_DURATION` は映像 / 音声のどちらにも載せる (保持するのはメディアだけである)。
+fn video_track_properties(cache_duration_ms: u64) -> TrackProperties {
+    let mut properties = cache_duration_properties(cache_duration_ms);
     properties.push(TrackProperty {
         prop_type: PROP_DYNAMIC_GROUPS,
         value: TrackPropertyValue::VarInt(1),
@@ -248,12 +270,12 @@ fn video_track_properties() -> TrackProperties {
 ///
 /// MP4 パススルーはエンコーダを使わないため、購読者からの `NEW_GROUP_REQUEST` に応じて
 /// Group を開始できない。できないことを告知しないよう、`DYNAMIC_GROUPS` は映像を
-/// エンコードするときだけ載せる。
-fn video_publish_properties(mp4_passthrough: bool) -> TrackProperties {
+/// エンコードするときだけ載せる。`MAX_CACHE_DURATION` はパススルーでも保持するため載せる。
+fn video_publish_properties(mp4_passthrough: bool, cache_duration_ms: u64) -> TrackProperties {
     if mp4_passthrough {
-        TrackProperties::new()
+        cache_duration_properties(cache_duration_ms)
     } else {
-        video_track_properties()
+        video_track_properties(cache_duration_ms)
     }
 }
 
@@ -261,11 +283,17 @@ fn video_publish_properties(mp4_passthrough: bool) -> TrackProperties {
 ///
 /// 映像トラックには PUBLISH と同じ `DYNAMIC_GROUPS=1` を載せる。購読者はこの値で publisher が
 /// 動的 Group に対応しているかを知り (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
-/// `NEW_GROUP_REQUEST` を送れるようになる (§9.20.19 の MUST NOT)。音声とカタログのトラックには
-/// 載せない。
-fn subscribe_ok_properties(track_alias: u64, mp4_passthrough: bool) -> TrackProperties {
+/// `NEW_GROUP_REQUEST` を送れるようになる (§9.20.19 の MUST NOT)。音声トラックには
+/// `MAX_CACHE_DURATION` だけを載せ、カタログには何も載せない。
+fn subscribe_ok_properties(
+    track_alias: u64,
+    mp4_passthrough: bool,
+    cache_duration_ms: u64,
+) -> TrackProperties {
     if track_alias == VIDEO_TRACK_ALIAS {
-        video_publish_properties(mp4_passthrough)
+        video_publish_properties(mp4_passthrough, cache_duration_ms)
+    } else if track_alias == AUDIO_TRACK_ALIAS {
+        cache_duration_properties(cache_duration_ms)
     } else {
         TrackProperties::new()
     }
@@ -337,7 +365,10 @@ async fn establish_publisher_session(
                         namespace.clone(),
                         config.track_name.as_bytes().to_vec(),
                         VIDEO_TRACK_ALIAS,
-                        video_publish_properties(config.input_mp4.is_some()),
+                        video_publish_properties(
+                            config.input_mp4.is_some(),
+                            config.cache_duration_ms,
+                        ),
                     )
                     .await?,
             )
@@ -351,7 +382,8 @@ async fn establish_publisher_session(
                         namespace.clone(),
                         AUDIO_TRACK_NAME.as_bytes().to_vec(),
                         AUDIO_TRACK_ALIAS,
-                        TrackProperties::new(),
+                        // 音声も同じ時間窓だけ保持するため、同じ MAX_CACHE_DURATION を告知する
+                        cache_duration_properties(config.cache_duration_ms),
                     )
                     .await?,
             )
@@ -753,6 +785,10 @@ pub async fn run(
     let mut audio_config_sent = false;
     // 直近に音声の配信の遅れの内訳を出した時刻 (開始からのミリ秒)
     let mut audio_stats_logged_ms: u64 = 0;
+    // publish したメディアの保持。subscriber の FETCH に配る Object と End of Unknown Range を
+    // 決めるために使う (draft-ietf-moq-transport-22 §3.2 (Fetch))。GOAWAY で session を移行しても
+    // 保持は続ける (移行先の購読者も直近の Object を FETCH で取得できる)
+    let mut media_cache = cache::MediaCache::new(config.cache_duration_ms);
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // カタログの送り直し。開始直後の 1 回は送信済みなので、1 間隔ぶん待ってから始める
@@ -763,7 +799,7 @@ pub async fn run(
     catalog_republish_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     tracing::info!(
-        "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={})",
+        "Starting publish loop (video={}, audio={}, video_delivery=subgroup, audio_delivery={}, cache_duration={}ms)",
         config.video_enabled,
         config.audio_enabled,
         if config.audio_datagram {
@@ -771,6 +807,7 @@ pub async fn run(
         } else {
             "subgroup"
         },
+        media_cache.duration_ms(),
     );
 
     'main: loop {
@@ -897,7 +934,21 @@ pub async fn run(
                         }
                         let properties = build_video_loc_properties(&ef, video_timescale);
                         if let Some(writer) = current_video_writer.as_mut() {
-                            let _ = writer.write_object(&ef.data, &properties).await?;
+                            // 保持する Location と SUBGROUP_OBJECT に載る Object ID を一致させる
+                            // ため、書き込む前に writer が使う Location を取る
+                            let object_location = writer.next_object_location();
+                            let outcome = writer.write_object(&ef.data, &properties).await?;
+                            if outcome == ObjectFilterOutcome::Pass {
+                                // フィルタを通過して実際に送った Object だけを保持する。送って
+                                // いない Object を FETCH で配ると購読のフィルタを迂回する
+                                media_cache.insert(
+                                    &namespace,
+                                    config.track_name.as_bytes(),
+                                    object_location,
+                                    &properties,
+                                    &ef.data,
+                                )?;
+                            }
                         }
                     }
                     Ok(())
@@ -959,9 +1010,17 @@ pub async fn run(
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 config.datagram_max_size,
                             );
+                            let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;
                             if outcome == ObjectFilterOutcome::Pass {
                                 audio_config_sent = true;
+                                media_cache.insert(
+                                    &namespace,
+                                    AUDIO_TRACK_NAME.as_bytes(),
+                                    object_location,
+                                    &properties,
+                                    &encoded,
+                                )?;
                             }
                         } else {
                             let audio_request_id =
@@ -977,9 +1036,17 @@ pub async fn run(
                                 client.subscription_filter_start(audio_request_id),
                             )
                             .await?;
+                            let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;
                             if outcome == ObjectFilterOutcome::Pass {
                                 audio_config_sent = true;
+                                media_cache.insert(
+                                    &namespace,
+                                    AUDIO_TRACK_NAME.as_bytes(),
+                                    object_location,
+                                    &properties,
+                                    &encoded,
+                                )?;
                             }
                             writer
                                 .finish(client.subscription_filter_start(audio_request_id))
@@ -1145,9 +1212,17 @@ pub async fn run(
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 config.datagram_max_size,
                             );
+                            let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;
                             if outcome == ObjectFilterOutcome::Pass {
                                 audio_config_sent = true;
+                                media_cache.insert(
+                                    &namespace,
+                                    AUDIO_TRACK_NAME.as_bytes(),
+                                    object_location,
+                                    &properties,
+                                    &encoded,
+                                )?;
                             }
                         } else {
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
@@ -1166,9 +1241,17 @@ pub async fn run(
                                 client.subscription_filter_start(audio_request_id),
                             )
                             .await?;
+                            let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;
                             if outcome == ObjectFilterOutcome::Pass {
                                 audio_config_sent = true;
+                                media_cache.insert(
+                                    &namespace,
+                                    AUDIO_TRACK_NAME.as_bytes(),
+                                    object_location,
+                                    &properties,
+                                    &encoded,
+                                )?;
                             }
                             writer
                                 .finish(client.subscription_filter_start(audio_request_id))
@@ -1424,10 +1507,13 @@ pub async fn run(
                                 &mut client,
                                 request,
                                 &config,
-                                &catalog_json,
-                                catalog_location,
+                                CatalogState {
+                                    json: &catalog_json,
+                                    location: catalog_location,
+                                },
                                 &mut gop_tracker,
                                 started_video_group_id,
+                                &mut media_cache,
                             )
                             .await?;
                             Ok(false)
@@ -1869,26 +1955,40 @@ async fn reject_fill_fetch(client: &mut MoqtClient, request_id: u64) {
     }
 }
 
+/// 現在 publish しているカタログの状態
+///
+/// カタログの JSON と、それが publish されている Location は常に組で扱う (FETCH 応答には
+/// 「どの Location の Object を返すか」と「その中身」の両方が要る)。
+#[derive(Debug, Clone, Copy)]
+struct CatalogState<'a> {
+    /// 最後に publish した MSF カタログの JSON
+    json: &'a [u8],
+    /// そのカタログ Object の Location
+    location: Location,
+}
+
 /// MOQT relay が転送してきた要求 (SUBSCRIBE / FETCH) に応答する
 ///
 /// relay は subscriber の SUBSCRIBE / FETCH を publisher 側 session の新しい
 /// request stream として転送する (draft-ietf-moq-transport-22 §6.3 (Session initialization))。
 /// 本 publisher は video / audio / catalog の SUBSCRIBE に SUBSCRIBE_OK を返し
-/// (以後の Object は継続して送信中の subgroup stream で届く)、catalog の FETCH には
-/// 要求された range を判定したうえで FETCH_OK と FETCH 応答ストリームを返す。
+/// (以後の Object は継続して送信中の subgroup stream で届く)、catalog とメディア (映像 /
+/// 音声) の FETCH には要求された range を判定したうえで FETCH_OK と FETCH 応答ストリームを返す。
 /// 未知の track と未対応の要求種別は REQUEST_ERROR で拒否する
 /// (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))。
 ///
 /// `gop_tracker` と `started_video_group_id` は、SUBSCRIBE に載った `NEW_GROUP_REQUEST`
 /// (draft-ietf-moq-transport-22 §9.20.19) を映像のキーフレーム要求へ配線するために使う。
+/// `media_cache` は publish 済みメディアの保持であり、メディアの FETCH に配る Object と
+/// End of Unknown Range を決めるために使う。
 async fn serve_peer_request(
     client: &mut MoqtClient,
     request: IncomingRequest,
     config: &Config,
-    catalog_json: &[u8],
-    catalog_location: Location,
+    catalog: CatalogState<'_>,
     gop_tracker: &mut gop::GopTracker,
     started_video_group_id: Option<u64>,
+    media_cache: &mut cache::MediaCache,
 ) -> Result<()> {
     let request_id = request.request_id;
     match request.message {
@@ -1921,8 +2021,11 @@ async fn serve_peer_request(
                     // 購読者はこの値で publisher が動的 Group に対応しているかを知り
                     // (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
                     // NEW_GROUP_REQUEST を送れるようになる (§9.20.19 の MUST NOT)
-                    let subscribe_properties =
-                        subscribe_ok_properties(track_alias, config.input_mp4.is_some());
+                    let subscribe_properties = subscribe_ok_properties(
+                        track_alias,
+                        config.input_mp4.is_some(),
+                        config.cache_duration_ms,
+                    );
                     client
                         .send_subscribe_ok(
                             request_id,
@@ -1978,7 +2081,7 @@ async fn serve_peer_request(
                         return Ok(());
                     }
                 };
-                match catalog::catalog_fetch_response(filter.as_ref(), catalog_location) {
+                match catalog::catalog_fetch_response(filter.as_ref(), catalog.location) {
                     catalog::CatalogFetchResponse::Object { end_location } => {
                         client
                             .send_fetch_ok(
@@ -1992,15 +2095,15 @@ async fn serve_peer_request(
                         client
                             .send_fetch_response(
                                 request_id,
-                                catalog_location.group_id,
-                                catalog_location.object_id,
-                                catalog_json,
+                                catalog.location.group_id,
+                                catalog.location.object_id,
+                                catalog.json,
                                 None,
                             )
                             .await?;
                         tracing::info!(
                             "Served catalog FETCH (request_id={request_id}, group={})",
-                            catalog_location.group_id,
+                            catalog.location.group_id,
                         );
                     }
                     catalog::CatalogFetchResponse::Empty { end_location } => {
@@ -2031,13 +2134,7 @@ async fn serve_peer_request(
                     }
                 }
             } else {
-                tracing::warn!(
-                    "Rejecting FETCH for unknown track: {}",
-                    String::from_utf8_lossy(&fetch.track_name),
-                );
-                client
-                    .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
-                    .await?;
+                serve_media_fetch(client, request_id, &fetch, config, media_cache).await?;
             }
         }
         other => {
@@ -2047,6 +2144,237 @@ async fn serve_peer_request(
                 .await?;
         }
     }
+    Ok(())
+}
+
+/// FETCH の LOCATION_FILTER から要求 range を決める
+///
+/// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.20.9 (LOCATION
+/// FILTER Parameter): Start の省略時は track の先頭 `{0, 0}`、End の省略時は Largest Object
+/// である。要求が Largest Object より先を指しても publisher が持つのは Largest Object まで
+/// であるため、`end` は Largest Object でクランプする。
+///
+/// Largest Object が無い (まだ 1 件も publish していない) track でも、境界の解決を Session と
+/// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答の判断は対象外の track と
+/// 同じになる。
+fn fetch_request_range(
+    filter: Option<&LocationFilter>,
+    largest: Option<Location>,
+) -> (Location, Location) {
+    let start = filter
+        .and_then(|filter| filter.effective_start_location(largest.as_ref()))
+        .unwrap_or(Location {
+            group_id: 0,
+            object_id: 0,
+        });
+    let end = filter
+        .and_then(|filter| {
+            filter.effective_end_location(largest.as_ref(), LocationFilterContext::Fetch)
+        })
+        .or(largest)
+        .unwrap_or(start);
+    let end = match largest {
+        Some(largest) => end.min(largest),
+        None => end,
+    };
+    (start, end)
+}
+
+/// メディア (映像 / 音声) の FETCH に応答する
+///
+/// 配る Object と End of Unknown Range は [`cache::MediaCache::plan`] が決める。ここでは要求
+/// range の解決と、FETCH_OK と 1 本の FETCH 応答ストリームの書き出しを行う
+/// (draft-ietf-moq-transport-22 §3.2 (Fetch) / §11.4 (Fetch Streams))。
+/// 応答は「End of Unknown Range (必要なら) → Object → (全滅なら End of Unknown Range)」を
+/// 順に書き、FIN で閉じる。
+async fn serve_media_fetch(
+    client: &mut MoqtClient,
+    request_id: u64,
+    fetch: &Fetch,
+    config: &Config,
+    media_cache: &mut cache::MediaCache,
+) -> Result<()> {
+    let track_name = fetch.track_name.as_slice();
+    // draft-ietf-moq-transport-22 §3.3.3 (Range Filters) は publisher に「すべてのフィルタを
+    // 通過した Object だけを送る」MUST を課す。この example はメディアの保持にフィルタ評価を
+    // 持たないため、フィルタ付きの FETCH は昇順の保持範囲を返さず拒否する (§1.6 の
+    // 「未対応のメッセージには NOT_SUPPORTED で応答する」に従う)
+    if fetch.parameters.has_range_filters() {
+        tracing::warn!(
+            "Rejecting media FETCH with a range filter (request_id={request_id}, track={}): filters are not supported",
+            fetch.track_name.len(),
+        );
+        client
+            .send_request_error(
+                request_id,
+                REQUEST_NOT_SUPPORTED,
+                "range filters are not supported",
+            )
+            .await?;
+        return Ok(());
+    }
+    // この example が PUBLISH しているメディア track かどうか。catalog は呼び出し元が扱う
+    let published = (config.video_enabled && track_name == config.track_name.as_bytes())
+        || (config.audio_enabled && track_name == AUDIO_TRACK_NAME.as_bytes());
+    // 要求された Location Filter から range を解決する。wire 経路では decode 層が不正な
+    // 符号化を弾くため、ここでの失敗はアプリが手組みしたメッセージだけが到達する
+    let filter = match fetch.parameters.location_filter_typed() {
+        Ok(filter) => filter,
+        Err(e) => {
+            tracing::warn!(
+                "Rejecting media FETCH with invalid filter (request_id={request_id}): {e}"
+            );
+            client
+                .send_request_error(
+                    request_id,
+                    REQUEST_INVALID_FILTER,
+                    "invalid location filter",
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+    let (start, end) = fetch_request_range(
+        filter.as_ref(),
+        media_cache.largest(&config.namespace, track_name),
+    );
+    let plan = media_cache.plan(
+        published,
+        &config.namespace,
+        track_name,
+        fetch.parameters.group_order(),
+        start,
+        end,
+    );
+    let entries = plan.entries();
+    match &plan {
+        cache::FetchPlan::NoPublishedObjects => {
+            // draft-ietf-moq-transport-22 §3.2 は「Object が publish されていない track への
+            // FETCH」に INVALID_RANGE を返す MUST を課す
+            tracing::warn!(
+                "Rejecting FETCH for a track without published objects: {}",
+                String::from_utf8_lossy(track_name),
+            );
+            client
+                .send_request_error(
+                    request_id,
+                    REQUEST_INVALID_RANGE,
+                    "no objects have been published for the track",
+                )
+                .await?;
+        }
+        cache::FetchPlan::EmptyRange => {
+            // 要求 range に存在する Object が無い。FETCH_OK を返し、FETCH_HEADER だけの
+            // stream を FIN で閉じる (draft-ietf-moq-transport-22 §3.2.1)
+            client
+                .send_fetch_ok(
+                    request_id,
+                    0,
+                    end,
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .await?;
+            let writer = client.open_fetch_response(request_id).await?;
+            writer.finish().await?;
+            tracing::info!(
+                "Served media FETCH with an empty range (request_id={request_id}, track={}, end={end:?})",
+                String::from_utf8_lossy(track_name),
+            );
+        }
+        cache::FetchPlan::UnknownTrack => {
+            tracing::warn!(
+                "Rejecting FETCH for unknown track: {}",
+                String::from_utf8_lossy(track_name),
+            );
+            client
+                .send_request_error(request_id, REQUEST_DOES_NOT_EXIST, "unknown track")
+                .await?;
+        }
+        cache::FetchPlan::UnsupportedGroupOrder => {
+            // draft-ietf-moq-transport-22 §3.2.1 (Fetch) は要求された group order で送る MUST を
+            // 課す。降順で返す実装を持たないため、昇順で返さず拒否する
+            tracing::warn!(
+                "Rejecting FETCH with a descending group order (request_id={request_id}, track={})",
+                String::from_utf8_lossy(track_name),
+            );
+            client
+                .send_request_error(
+                    request_id,
+                    REQUEST_NOT_SUPPORTED,
+                    "descending group order is not supported",
+                )
+                .await?;
+        }
+        cache::FetchPlan::AllUnknown { end_location } => {
+            // 要求 range 全体が不明である。FETCH_OK の End Location に置く End of Unknown
+            // Range を 1 件だけ書く (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))
+            serve_fetch_entries(client, request_id, track_name, *end_location, &entries).await?;
+        }
+        cache::FetchPlan::Serve { .. } => {
+            // FETCH_OK の End Location は要求 range の終端 (Largest Object でクランプ済み)
+            serve_fetch_entries(client, request_id, track_name, end, &entries).await?;
+        }
+    }
+    Ok(())
+}
+
+/// FETCH_OK を返し、entry を 1 本の応答 stream に書いて FIN する
+///
+/// entry の並びは [`cache::FetchPlan::entries`] が決める。End of Range は位置に意味を持つ
+/// ため、並びの決定と書き出しを分けてある (並びは単体テストで固定する)。
+async fn serve_fetch_entries(
+    client: &mut MoqtClient,
+    request_id: u64,
+    track_name: &[u8],
+    end_location: Location,
+    entries: &[cache::FetchResponseEntry<'_>],
+) -> Result<()> {
+    client
+        .send_fetch_ok(
+            request_id,
+            0,
+            end_location,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .await?;
+    let mut writer = client.open_fetch_response(request_id).await?;
+    for entry in entries {
+        match entry {
+            cache::FetchResponseEntry::NonExistent(location) => {
+                writer.write_end_of_non_existent_range(*location).await?;
+            }
+            cache::FetchResponseEntry::Unknown(location) => {
+                writer.write_end_of_unknown_range(*location).await?;
+            }
+            cache::FetchResponseEntry::Object(object) => {
+                // Publisher Priority は元の配送と同じ固定値にする。FETCH 応答では同じ Subgroup の
+                // Priority を変えられない (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks))。
+                // 元の配送が datagram でも、応答は 1 本の stream に載せるため Subgroup ID 0 の
+                // Object として書く
+                let input = FetchObjectInput {
+                    group_id: object.location.group_id,
+                    subgroup_id: 0,
+                    object_id: object.location.object_id,
+                    publisher_priority: DEFAULT_PUBLISHER_PRIORITY,
+                    // 保持する Properties は常に Properties Length varint を含む
+                    has_properties: true,
+                    is_datagram_origin: false,
+                    payload_length: object.payload.len() as u64,
+                };
+                writer
+                    .write_object(&input, &object.payload, Some(&object.properties_data))
+                    .await?;
+            }
+        }
+    }
+    writer.finish().await?;
+    tracing::info!(
+        "Served media FETCH (request_id={request_id}, track={}, entries={}, end={end_location:?})",
+        String::from_utf8_lossy(track_name),
+        entries.len(),
+    );
     Ok(())
 }
 
@@ -2567,6 +2895,9 @@ fn extract_pcm_i16(frame: &AudioFrameOwned) -> Result<Vec<i16>> {
 mod tests {
     use super::*;
 
+    // `--cache-duration` の既定値は告知値の期待に使う
+    use crate::cli::DEFAULT_CACHE_DURATION_MS;
+
     /// GOAWAY の New Session URI から移行先を決める判断を固定する
     mod migration_target_tests {
         use super::*;
@@ -2738,16 +3069,208 @@ mod tests {
     ///
     /// パススルーはエンコーダを使わずキーフレームを要求できないため、購読者に
     /// `NEW_GROUP_REQUEST` を送れると告知しない (draft-ietf-moq-transport-22 §10.6)。
+    /// `MAX_CACHE_DURATION` は保持するため、パススルーでも告知する。
     #[test]
     fn video_publish_properties_skip_dynamic_groups_for_mp4_passthrough() {
         assert!(
-            video_publish_properties(true).dynamic_groups().is_none(),
+            video_publish_properties(true, DEFAULT_CACHE_DURATION_MS)
+                .dynamic_groups()
+                .is_none(),
             "パススルーでは告知しないこと"
         );
         assert_eq!(
-            video_publish_properties(false).dynamic_groups(),
+            video_publish_properties(false, DEFAULT_CACHE_DURATION_MS).dynamic_groups(),
             Some(1),
             "エンコードする場合は告知すること"
+        );
+        for mp4_passthrough in [true, false] {
+            assert_eq!(
+                video_publish_properties(mp4_passthrough, DEFAULT_CACHE_DURATION_MS)
+                    .find_varint(PROP_MAX_CACHE_DURATION),
+                Some(DEFAULT_CACHE_DURATION_MS),
+                "パススルーでも MAX_CACHE_DURATION は告知すること: {mp4_passthrough}"
+            );
+        }
+    }
+
+    /// 告知する `MAX_CACHE_DURATION` が `--cache-duration` と同じ値であること
+    ///
+    /// draft-ietf-moq-transport-22 §10.3 (MAX CACHE DURATION): 保持した Object を配れる時間を
+    /// ミリ秒で示す。告知値と実際の保持が食い違うと、購読者と relay が配れる期間を誤解する。
+    /// 映像 / 音声の PUBLISH と SUBSCRIBE_OK のどの経路でも同じ値を載せる。
+    #[test]
+    fn max_cache_duration_follows_the_cache_duration() {
+        for cache_duration_ms in [0, 1, 5_000, 60_000] {
+            assert_eq!(
+                video_publish_properties(false, cache_duration_ms)
+                    .find_varint(PROP_MAX_CACHE_DURATION),
+                Some(cache_duration_ms),
+                "映像の PUBLISH に同じ値を載せること: {cache_duration_ms}"
+            );
+            assert_eq!(
+                cache_duration_properties(cache_duration_ms).find_varint(PROP_MAX_CACHE_DURATION),
+                Some(cache_duration_ms),
+                "音声の PUBLISH に同じ値を載せること: {cache_duration_ms}"
+            );
+            assert_eq!(
+                subscribe_ok_properties(VIDEO_TRACK_ALIAS, false, cache_duration_ms)
+                    .find_varint(PROP_MAX_CACHE_DURATION),
+                Some(cache_duration_ms),
+                "映像の SUBSCRIBE_OK に同じ値を載せること: {cache_duration_ms}"
+            );
+            assert_eq!(
+                subscribe_ok_properties(AUDIO_TRACK_ALIAS, false, cache_duration_ms)
+                    .find_varint(PROP_MAX_CACHE_DURATION),
+                Some(cache_duration_ms),
+                "音声の SUBSCRIBE_OK に同じ値を載せること: {cache_duration_ms}"
+            );
+            assert_eq!(
+                subscribe_ok_properties(CATALOG_TRACK_ALIAS, false, cache_duration_ms)
+                    .find_varint(PROP_MAX_CACHE_DURATION),
+                None,
+                "カタログの SUBSCRIBE_OK には載せないこと: {cache_duration_ms}"
+            );
+        }
+    }
+
+    /// FETCH の要求 range が Location Filter と Largest Object から決まること
+    ///
+    /// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.20.9
+    /// (LOCATION FILTER Parameter): 省略時は Start = `{0, 0}` / End = Largest Object である。
+    /// 要求が Largest Object より先を指しても配れるのは Largest Object までなので、End は
+    /// Largest Object でクランプする。
+    #[test]
+    fn fetch_request_range_follows_the_location_filter_and_the_largest_object() {
+        let largest = Location {
+            group_id: 10,
+            object_id: 5,
+        };
+
+        // フィルタ省略 (unfiltered)
+        assert_eq!(
+            fetch_request_range(None, Some(largest)),
+            (
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                largest
+            ),
+            "省略時は track の先頭から Largest Object までであること"
+        );
+
+        // Absolute Start: End 省略時は Largest Object (Fetch の既定)
+        let filter = LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 3,
+                object_id: 2,
+            },
+        };
+        assert_eq!(
+            fetch_request_range(Some(&filter), Some(largest)),
+            (
+                Location {
+                    group_id: 3,
+                    object_id: 2
+                },
+                largest
+            ),
+            "Start だけの指定は Largest Object までであること"
+        );
+
+        // Absolute Range: End Object まで
+        let filter = LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 3,
+                object_id: 2,
+            },
+            end_group_delta: 1,
+            end_object: 4,
+        };
+        assert_eq!(
+            fetch_request_range(Some(&filter), Some(largest)),
+            (
+                Location {
+                    group_id: 3,
+                    object_id: 2
+                },
+                Location {
+                    group_id: 4,
+                    object_id: 4
+                }
+            ),
+            "指定された End までであること"
+        );
+
+        // Largest Object より先を指す End はクランプする
+        let filter = LocationFilter::AbsoluteRangeWithEnd {
+            start: Location {
+                group_id: 3,
+                object_id: 2,
+            },
+            end_group_delta: 99,
+            end_object: 4,
+        };
+        assert_eq!(
+            fetch_request_range(Some(&filter), Some(largest)),
+            (
+                Location {
+                    group_id: 3,
+                    object_id: 2
+                },
+                largest
+            ),
+            "End は Largest Object でクランプすること"
+        );
+
+        // Relative Start: Largest Group から遡る
+        let filter = LocationFilter::RelativeGroup { start_group: 1 };
+        assert_eq!(
+            fetch_request_range(Some(&filter), Some(largest)),
+            (
+                Location {
+                    group_id: 10,
+                    object_id: 0
+                },
+                largest
+            ),
+            "相対 Start は Largest Object の Group から解決すること"
+        );
+
+        // Largest Object が無い track は先頭側に解決する (配れる Object は無い)
+        assert_eq!(
+            fetch_request_range(None, None),
+            (
+                Location {
+                    group_id: 0,
+                    object_id: 0
+                },
+                Location {
+                    group_id: 0,
+                    object_id: 0
+                }
+            ),
+            "Largest Object が無ければ先頭に解決すること"
+        );
+        let filter = LocationFilter::AbsoluteStart {
+            start: Location {
+                group_id: 3,
+                object_id: 2,
+            },
+        };
+        assert_eq!(
+            fetch_request_range(Some(&filter), None),
+            (
+                Location {
+                    group_id: 3,
+                    object_id: 2
+                },
+                Location {
+                    group_id: 3,
+                    object_id: 2
+                }
+            ),
+            "Largest Object が無ければ End も Start に解決すること"
         );
     }
 
@@ -2758,23 +3281,30 @@ mod tests {
     #[test]
     fn subscribe_ok_properties_announce_dynamic_groups_for_the_video_track() {
         assert_eq!(
-            subscribe_ok_properties(VIDEO_TRACK_ALIAS, false).dynamic_groups(),
+            subscribe_ok_properties(VIDEO_TRACK_ALIAS, false, DEFAULT_CACHE_DURATION_MS)
+                .dynamic_groups(),
             Some(1),
             "映像トラックには告知すること"
         );
         assert!(
-            subscribe_ok_properties(VIDEO_TRACK_ALIAS, true)
+            subscribe_ok_properties(VIDEO_TRACK_ALIAS, true, DEFAULT_CACHE_DURATION_MS)
                 .dynamic_groups()
                 .is_none(),
             "MP4 パススルーでは告知しないこと"
         );
         for track_alias in [AUDIO_TRACK_ALIAS, CATALOG_TRACK_ALIAS] {
-            assert_eq!(
-                subscribe_ok_properties(track_alias, false).len(),
-                0,
-                "音声とカタログには載せないこと: {track_alias}"
+            assert!(
+                subscribe_ok_properties(track_alias, false, DEFAULT_CACHE_DURATION_MS)
+                    .dynamic_groups()
+                    .is_none(),
+                "音声とカタログには DYNAMIC_GROUPS を載せないこと: {track_alias}"
             );
         }
+        assert_eq!(
+            subscribe_ok_properties(CATALOG_TRACK_ALIAS, false, DEFAULT_CACHE_DURATION_MS).len(),
+            0,
+            "カタログには何も載せないこと"
+        );
     }
 
     /// キーフレームを強制できる要求だけを受け付けること
@@ -2834,7 +3364,7 @@ mod tests {
     /// 載せないため、空の Track Properties では告知されないことも確かめる。
     #[test]
     fn video_track_properties_announce_dynamic_groups() {
-        let properties = video_track_properties();
+        let properties = video_track_properties(DEFAULT_CACHE_DURATION_MS);
         assert_eq!(
             properties.dynamic_groups(),
             Some(1),
@@ -2842,8 +3372,8 @@ mod tests {
         );
         assert_eq!(
             properties.len(),
-            1,
-            "映像トラックは DYNAMIC_GROUPS だけを載せること"
+            2,
+            "映像トラックは DYNAMIC_GROUPS と MAX_CACHE_DURATION を載せること"
         );
         assert!(
             TrackProperties::new().dynamic_groups().is_none(),

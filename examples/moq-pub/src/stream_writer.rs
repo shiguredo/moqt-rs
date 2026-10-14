@@ -342,6 +342,18 @@ impl SubgroupWriter {
         self.stream_id
     }
 
+    /// 次に [`SubgroupWriter::write_object`] が書く Object の Location を返す
+    ///
+    /// FETCH 応答のために保持する Location と、SUBGROUP_OBJECT に載る Object ID を
+    /// 一致させるために使う (フィルタ不通過で送らなかった Object も Object ID を進めるため、
+    /// 呼び出し側が数え直すとずれる)。
+    pub fn next_object_location(&self) -> Location {
+        Location {
+            group_id: self.group_id,
+            object_id: self.object_state.current_object_id(),
+        }
+    }
+
     /// ストリームを終了する
     ///
     /// 終端方法は `SubgroupObjectState::termination` が決める (sans I/O)。RESET 側の場合は

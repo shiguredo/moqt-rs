@@ -15,6 +15,7 @@ pub mod pipeline;
 
 // パイプラインの内部実装
 mod audio_capture;
+mod cache;
 mod capture;
 mod catalog;
 mod datagram_writer;

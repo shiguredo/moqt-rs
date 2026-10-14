@@ -123,6 +123,13 @@ pub struct Config {
     /// 受信側が符号化時刻からどれだけ遅らせて表示するかを示す
     /// (draft-ietf-moq-msf-01 §5.2.8)。音声と映像で同じ値を使う。
     pub target_latency_ms: u32,
+    /// publish した Object を保持する時間窓 (ms)
+    ///
+    /// 保持した Object は subscriber の FETCH で配る
+    /// (draft-ietf-moq-transport-22 §3.2 (Fetch))。同じ値を Track Property の
+    /// `MAX_CACHE_DURATION` (draft-ietf-moq-transport-22 §10.3) として映像 / 音声の
+    /// PUBLISH と SUBSCRIBE_OK で告知する。
+    pub cache_duration_ms: u64,
     /// MP4 ファイルの映像トラックをパススルー配信する入力パス
     pub input_mp4: Option<String>,
     /// MP4 ファイルを再エンコードして配信する入力パス
@@ -148,6 +155,13 @@ pub(crate) const DEFAULT_TARGET_LATENCY_MS: u32 = 200;
 ///
 /// フレーム数で指定していた頃の既定 (30 fps × 60 フレーム) と同じ実時間長にする。
 pub(crate) const DEFAULT_GOP_DURATION_MS: u32 = 2_000;
+
+/// `--cache-duration` の既定値 (ms)
+///
+/// publish した Object を保持して FETCH で配れる時間である。subscriber が配信の途中で
+/// 参加したときに、直近のキーフレームまで遡れる長さとして 5 秒にする。Group 長の既定
+/// (`DEFAULT_GOP_DURATION_MS`) より長くないと、現在の Group を保持できない。
+pub(crate) const DEFAULT_CACHE_DURATION_MS: u64 = 5_000;
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
 ///
@@ -408,6 +422,26 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         })
     })?;
 
+    // `.default()` は `&'static str` しか取れないため、`DEFAULT_CACHE_DURATION_MS` と
+    // 一致する値を文字列で渡す (一致は単体テストで固定する)
+    let cache_duration_opt = noargs::opt("cache-duration")
+        .ty("MS")
+        .doc(
+            "Duration in milliseconds that published objects are retained and can be served by \
+             FETCH. The same value is announced as the MAX_CACHE_DURATION track property",
+        )
+        .default("5000")
+        .take(&mut args);
+    let cache_duration_ms = cache_duration_opt.then(|o| {
+        let value = o.value();
+        value.parse::<u64>().map_err(|_| {
+            format!(
+                "--cache-duration must be a non-negative integer in milliseconds (default {}): {value}",
+                DEFAULT_CACHE_DURATION_MS
+            )
+        })
+    })?;
+
     let input_mp4: Option<String> = noargs::opt("input-mp4")
         .ty("PATH")
         .doc("Publish the video track of an MP4 file without re-encoding (audio is not published)")
@@ -575,6 +609,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_datagram,
         datagram_max_size,
         target_latency_ms,
+        cache_duration_ms,
         input_mp4,
         input_mp4_reencode,
     }))
@@ -1011,6 +1046,48 @@ mod tests {
             assert!(
                 parse_args(&args).is_err(),
                 "0 と数値でない値はエラーになること: {value}"
+            );
+        }
+    }
+
+    /// `--cache-duration` は既定値を使い、指定で上書き、数値でない値はエラーになる
+    ///
+    /// 既定の 5000 ms は publish した Object を保持して FETCH で配る時間であり、Group 長の
+    /// 既定 (2000 ms) より長い。同じ値を Track Property の `MAX_CACHE_DURATION` として告知する
+    /// (draft-ietf-moq-transport-22 §10.3)。0 は「保持しない」を意味するため受理する。
+    #[test]
+    fn cache_duration_is_configurable() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.cache_duration_ms, DEFAULT_CACHE_DURATION_MS,
+            "既定は 5000 ms であること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--cache-duration", "15000"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(config.cache_duration_ms, 15_000, "指定した値が使われること");
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--cache-duration", "0"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.cache_duration_ms, 0,
+            "保持しない時間窓も指定できること"
+        );
+
+        for value in ["1x", "-1"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--cache-duration", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "数値でない値と負の値はエラーになること: {value}"
             );
         }
     }

@@ -4,6 +4,7 @@
 //! draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) に準拠する。
 
 use shiguredo_moqt::loc::LocProperties;
+use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 
 use crate::error::{Error, Result};
@@ -53,6 +54,17 @@ impl DatagramWriter {
             publisher_priority,
             max_size,
             next_object_id: 0,
+        }
+    }
+
+    /// 次に [`DatagramWriter::write_object`] が送る Object の Location を返す
+    ///
+    /// FETCH 応答のために保持する Location と、OBJECT_DATAGRAM に載る Object ID を
+    /// 一致させるために使う。
+    pub fn next_object_location(&self) -> Location {
+        Location {
+            group_id: self.group_id,
+            object_id: self.next_object_id,
         }
     }
 
