@@ -1,7 +1,7 @@
 # 受信側の音声が遅れたら復号器を作り直して追いつく
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/add-receive-catch-up
 - Polished: {YYYY-MM-DD}
 
@@ -74,4 +74,35 @@ moqt-rs の `examples/moq-sub` には、この遅れを見て復号器を作り�
 
 ## 解決方法
 
-(対応時に記入)
+- 新規モジュール `src/playout/catch_up.rs` に `AudioReceiveCatchUp` を追加した。時刻と値は
+  引数で受ける純粋な状態機械であり、復号器には触れない
+  - 入力 `AudioReceiveCatchUpObservation` (now_ms / lag_ms / duration_ms / timestamp_us)、
+    出力 `AudioReceiveCatchUpDecision` (`rebuild_decoder`)
+  - 定数は床の窓 5 秒、下限 60 ms、増加 40 ms、跳び 100 ms、持続 100 ms、クールダウン
+    1 秒、数える跳びの下限 1 ms。跳びの 100 ms は `TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`
+    と同じ値であり、A/V の同期では合わせられない遅れであることを doc に書いた
+  - 床は直近 5 秒の最小値。観測が 5 秒より長く途切れたら、途切れる前の床を 5 秒保つ
+  - 上限は `max(60 ms, 床 + 40 ms)`。上限の中へ戻ったら追いつきを終える
+  - 始める条件は 2 つ。床 + 100 ms を超えたら持続を待たずに始め、超えないときは 100 ms
+    続いて初めて始める。どちらもクールダウン (1 秒) の中では始めない
+  - 追いつきの間だけ、TIMESTAMP の跳びから飛んだ音の数と長さを数える
+- `src/playout.rs` にモジュールを登録した
+- `examples/moq-sub/src/decoder.rs` の `AudioDecoder` に `reset` を追加し、
+  `decoder/opus.rs` の `OpusDecoder::reset` (Opus のデコーダを作り直す) と
+  `decoder/aac.rs` の `AacDecoder::reset` (専用スレッドごと作り直す) を実装した
+- `examples/moq-sub/src/pipeline.rs` の `AudioDelivery` に `catch_up` を足し、
+  `deliver` で復号の出力の TIMESTAMP と読んだ壁時計から遅れを求めて観測するようにした。
+  判定が真なら `AudioDecoder::reset` を呼ぶ。壁時計の TIMESTAMP を持たない音
+  (Timescale 付き) では観測しない。状態はストリーム経路と datagram 経路で共有する
+- `examples/moq-sub/src/lib.rs` に `wall_clock_us` を移し、`main.rs` と `pipeline.rs` の
+  両方から使えるようにした
+- テスト: `tests/test_playout/catch_up.rs` に 9 件 (健全時・跳び・持続・解除・
+  クールダウン・途切れた後の床・床が大きい環境・跳びの数え方・リセット)追加した
+- PBT: `pbt/tests/prop_playout/catch_up.rs` に 2 件追加した。遅れが上限の中へ戻れば必ず
+  追いつきが終わること、始めた間隔がクールダウン以上であること、跳びが無ければ飛んだ音を
+  数えないこと、跳びの合計が観測と一致することを検証する
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
+- 備考: 実リレーを介した遅れの再現 (メインスレッドを止める負荷) は E2E テストの領分で
+  あり、この issue では判定と配線までを行った
