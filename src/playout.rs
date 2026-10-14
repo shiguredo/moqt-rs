@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod catch_up;
 pub mod delay;
 pub mod feedback;
+pub mod publish_catch_up;
 pub mod scheduler;
 pub mod stretch;
 pub mod timeline;
