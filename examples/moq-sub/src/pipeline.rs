@@ -260,12 +260,11 @@ const CATALOG_CHANNEL_SIZE: usize = 8;
 /// 飢えて受信パケットが落ちる。
 const MAX_CONCURRENT_STREAMS: usize = 4;
 use tokio_moq::Transport;
-use tokio_moq::connect_with_fallback;
 use tokio_moq::error::TransportError;
 use tokio_moq::error::session_error_code;
-use tokio_moq::host_from_authority;
-use tokio_moq::moqt_client::{ClientEvent, DataPlaneHandle, MoqtClient, StreamRead};
-use tokio_moq::quic;
+use tokio_moq::moqt_client::{
+    ClientEvent, DataPlaneHandle, MoqtClient, StreamRead, SubscribeResult,
+};
 use tokio_moq::transport;
 
 /// カタログから取得したビデオトラック情報
@@ -459,6 +458,110 @@ enum TrackKind {
     Catalog,
 }
 
+/// 移行先の session で張り直す購読の指定
+struct ResubscribePlan {
+    /// catalog track の namespace
+    catalog_namespace: TrackNamespace,
+    /// 映像トラック (購読する場合)
+    video: Option<SubscribeTarget>,
+    /// 音声トラック (購読する場合)
+    audio: Option<SubscribeTarget>,
+}
+
+/// 購読する track の指定
+struct SubscribeTarget {
+    /// 購読に使う namespace
+    namespace: TrackNamespace,
+    /// track 名
+    track_name: Vec<u8>,
+}
+
+/// 張り直した購読の結果
+struct Resubscribed {
+    /// catalog の購読
+    catalog: SubscribeResult,
+    /// 映像の購読 (購読する場合)
+    video: Option<SubscribeResult>,
+    /// 音声の購読 (購読する場合)
+    audio: Option<SubscribeResult>,
+}
+
+/// 移行先の session で購読を張り直す
+///
+/// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-01 §5 (Catalog)
+/// が catalog の取得に求める経路)。映像は SUBSCRIBE のあとに SUBSCRIBER_PRIORITY の
+/// REQUEST_UPDATE を送る (起動時と同じ手順)。音声は SUBSCRIBE だけである。
+///
+/// track alias は peer が SUBSCRIBE_OK で決めるため、起動時と同じ値になる保証はない。
+/// 返った alias で `track_map` を更新するのは呼び出し側の責務である。
+async fn resubscribe_tracks(
+    client: &mut MoqtClient,
+    plan: &ResubscribePlan,
+) -> Result<Resubscribed> {
+    let catalog = client
+        .subscribe_track_with_parameters(
+            plan.catalog_namespace.clone(),
+            MSF_CATALOG_TRACK_NAME.to_vec(),
+            catalog_subscribe_parameters(),
+        )
+        .await?;
+    tracing::info!(
+        "Resubscribed to catalog track: alias={}, request_id={}",
+        catalog.track_alias,
+        catalog.request_id,
+    );
+
+    let video = match &plan.video {
+        Some(target) => {
+            let sub = client
+                .subscribe_track_with_parameters(
+                    target.namespace.clone(),
+                    target.track_name.clone(),
+                    video_subscribe_parameters(),
+                )
+                .await?;
+            tracing::info!(
+                "Resubscribed to video track: alias={}, request_id={}",
+                sub.track_alias,
+                sub.request_id,
+            );
+            // 起動時と同じく SUBSCRIBER_PRIORITY を送る。C4M 認可トークンは
+            // `MoqtClient::send_request_update` が付ける (draft-ietf-moq-msf-01 §11.4.3)
+            let mut params = shiguredo_moqt::message_parameter::MessageParameters::new();
+            params.push(shiguredo_moqt::message_parameter::MessageParameter {
+                param_type: shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+                value: shiguredo_moqt::message_parameter::MessageParameterValue::Uint8(192),
+            });
+            if let Err(e) = client.send_request_update(sub.request_id, params).await {
+                tracing::warn!("Failed to send REQUEST_UPDATE for video subscription: {e}");
+            }
+            Some(sub)
+        }
+        None => None,
+    };
+
+    let audio = match &plan.audio {
+        Some(target) => {
+            let sub = client
+                .subscribe_track(target.namespace.clone(), target.track_name.clone())
+                .await?;
+            tracing::info!(
+                "Resubscribed to audio track: alias={}, request_id={}",
+                sub.track_alias,
+                sub.request_id,
+            );
+            Some(sub)
+        }
+        None => None,
+    };
+
+    Ok(Resubscribed {
+        catalog,
+        video,
+        audio,
+    })
+}
+
 /// パイプラインを実行する
 ///
 /// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
@@ -490,7 +593,7 @@ fn video_subscribe_parameters() -> MessageParameters {
 
 #[expect(clippy::too_many_arguments)]
 pub async fn run(
-    config: Config,
+    mut config: Config,
     frame_tx: std::sync::mpsc::Sender<DecodedVideoFrame>,
     audio_tx: std::sync::mpsc::Sender<DecodedAudioFrame>,
     task_monitor: tokio_metrics::TaskMonitor,
@@ -505,20 +608,9 @@ pub async fn run(
     // 録画対象のトラック情報はカタログ取得後に確定するため、起動はその時点で行う。
     let recording_requested = config.mp4.is_some();
 
-    // TLS の SNI / 証明書検証に使う server_name はポートを含めない。
-    // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
-    let server_name = host_from_authority(&config.url.authority);
-
-    // 接続先の解決は QUIC / WebTransport で共通にする。ポートが省略された URL は
-    // 既定ポート 443 を使い、ホスト名は名前解決する (draft-ietf-moq-transport-22 §6.1.2)。
-    // 解決結果が複数の場合は順に試し、確立できたアドレスを採用する。
-    // 確立後の SETUP 以降の失敗はアドレスに依存しないため、次のアドレスは試さない。
-    // `socket_addr` は試行ごとに変わるため、試行の中で接続先を組み立てる。
-
     // WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できず、
     // WebTransport が MUST とする Reliable Size 付きの reset を行えないため)。接続の前に 1 度だけ
-    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。接続先の試行ごとに
-    // 出さないよう `connect_with_fallback` の外側で判定する。
+    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。
     if matches!(config.transport, Transport::WtH3 | Transport::WtH2) {
         tracing::warn!(
             "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
@@ -527,105 +619,27 @@ pub async fn run(
     }
 
     // 1. 接続確立と SETUP ハンドシェイク
-    let connect_monitor = task_monitor.clone();
-    let connection_config = config.clone();
-    let (mut client, mut recv_acceptor) =
-        connect_with_fallback(&config.url.authority, move |socket_addr| {
-            // 試行ごとに接続を組み立てるため、設定は複製して `move` で取り込む
-            let cfg = connection_config.clone();
-            let connect_monitor = connect_monitor.clone();
-            let authority_url = cfg.url.authority.clone();
-            async move {
-                let connected = match cfg.transport {
-                    Transport::Quic => {
-                        let (connection, stop_sending_rx) =
-                            quic::connect(socket_addr, server_name, cfg.cert.as_deref()).await?;
-                        MoqtClient::establish_quic(
-                            connection,
-                            stop_sending_rx,
-                            &cfg.url.path,
-                            &authority_url,
-                            "moq-sub",
-                            &cfg.url.c4m_tokens,
-                            &connect_monitor,
-                        )
-                        .await?
-                    }
-                    Transport::WtH3 => {
-                        let mut client_config =
-                            tokio_moq::webtransport_h3::ClientConfig::new(socket_addr, server_name)
-                                // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
-                                .authority(&authority_url)
-                                .enable_webtransport(
-                                    shiguredo_http3::webtransport::Settings::new()
-                                        .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                                )
-                                // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
-                                .receive_datagrams();
-                        if let Some(ref cert) = cfg.cert {
-                            let pem = std::fs::read_to_string(cert)?;
-                            client_config = client_config.ca_cert(pem);
-                        } else {
-                            // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                            tracing::warn!(
-                                "TLS certificate verification is disabled (development mode)"
-                            );
-                            client_config = client_config.insecure();
-                        }
-                        let wt_session = tokio_moq::webtransport_h3::WtClient::connect(
-                            client_config,
-                            &cfg.url.path,
-                        )
-                        .await?;
-                        MoqtClient::establish_wt(
-                            wt_session,
-                            "moq-sub",
-                            &cfg.url.c4m_tokens,
-                            &connect_monitor,
-                        )
-                        .await?
-                    }
-                    Transport::WtH2 => {
-                        let mut client_config =
-                            tokio_moq::webtransport_h2::ClientConfig::new(socket_addr, server_name)
-                                // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http2-15 §3.2)
-                                .authority(&authority_url)
-                                // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
-                                .receive_datagrams();
-                        if let Some(ref cert) = cfg.cert {
-                            let pem = std::fs::read_to_string(cert)?;
-                            client_config = client_config.ca_cert(pem);
-                        } else {
-                            // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                            tracing::warn!(
-                                "TLS certificate verification is disabled (development mode)"
-                            );
-                            client_config = client_config.insecure();
-                        }
-                        let wt_session = tokio_moq::webtransport_h2::WtH2Client::connect(
-                            client_config,
-                            &cfg.url.path,
-                        )
-                        .await?;
-                        MoqtClient::establish_wt_h2(
-                            wt_session,
-                            "moq-sub",
-                            &cfg.url.c4m_tokens,
-                            &connect_monitor,
-                        )
-                        .await?
-                    }
-                };
-                Ok::<_, Error>(connected)
-            }
-        })
-        .await?;
+    //
+    // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
+    // tokio_moq の共通の接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
+    let (mut client, mut recv_acceptor) = tokio_moq::connect(
+        &tokio_moq::ConnectParams {
+            url: &config.url,
+            transport: config.transport,
+            cert: config.cert.as_deref(),
+            impl_name: "moq-sub",
+            // subscriber は WebTransport 経路で datagram を継続受信する
+            receive_datagrams: true,
+        },
+        &task_monitor,
+    )
+    .await?;
 
     // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
     // `config` から move して受け取る。購読呼び出しを catalog track の namespace に変える 1 行の
     // 変更は、move 済みの値の再利用としてコンパイルエラーになる
     let namespace = config.namespace;
-    let data_plane = client.data_plane();
+    let mut data_plane = client.data_plane();
 
     // 2. タイムアウト設定
     client.set_control_message_timeout_ms(Some(30000));
@@ -656,6 +670,8 @@ pub async fn run(
     //
     // C4M 認可トークンは `MoqtClient` が URL の c4m トークンをすべて付けるため、ここでは
     // 指定しない (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    // 移行 (GOAWAY) で catalog を張り直すときに使う namespace
+    let catalog_namespace_for_migration = namespace.clone();
     let catalog_params = catalog_subscribe_parameters();
     let catalog_sub = client
         .subscribe_track_with_parameters(
@@ -748,6 +764,9 @@ pub async fn run(
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
     let mut audio_request_id: Option<u64> = None;
+    // peer が SUBSCRIBE_OK で決める track alias は移行で変わりうるため、現在の値を保持する
+    let mut video_alias: Option<u64> = None;
+    let mut audio_alias: Option<u64> = None;
     // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
     // ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、stream ごとに
     // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
@@ -770,6 +789,7 @@ pub async fn run(
             video_sub.request_id,
         );
         track_map.insert(video_sub.track_alias, TrackKind::Video);
+        video_alias = Some(video_sub.track_alias);
         video_request_id = Some(video_sub.request_id);
 
         // draft-20 で Joining FETCH は廃止され fill fetch stream
@@ -823,6 +843,7 @@ pub async fn run(
             audio_sub.request_id,
         );
         track_map.insert(audio_sub.track_alias, TrackKind::Audio);
+        audio_alias = Some(audio_sub.track_alias);
         audio_request_id = Some(audio_sub.request_id);
 
         let channels = match a.channel_config.as_str() {
@@ -840,6 +861,32 @@ pub async fn run(
     };
     // Audio Config の解釈 (codec 判定) と音声デコーダの生成に使う catalog の audio codec
     let audio_codec = audio_info.as_ref().map(|a| a.codec.clone());
+
+    // 移行 (GOAWAY) で購読を張り直すための指定と、現在の session の Request ID / alias
+    //
+    // catalog は移行時に読み直さない。購読済みの指定をそのまま使えば、移行先の session で
+    // 届く Object から同じ `CatalogState` が再び更新される
+    let resubscribe_plan = ResubscribePlan {
+        catalog_namespace: catalog_namespace_for_migration,
+        // `subscribe_video` / `subscribe_audio` は catalog から得た track がある場合だけ真に
+        // なるため、ここで `Option` の条件と購読の有無が一致する
+        video: video_info
+            .as_ref()
+            .filter(|_| subscribe_video)
+            .map(|info| SubscribeTarget {
+                namespace: info.namespace.clone(),
+                track_name: info.track_name.as_bytes().to_vec(),
+            }),
+        audio: audio_info
+            .as_ref()
+            .filter(|_| subscribe_audio)
+            .map(|info| SubscribeTarget {
+                namespace: info.namespace.clone(),
+                track_name: info.track_name.as_bytes().to_vec(),
+            }),
+    };
+    let mut catalog_request_id = catalog_sub.request_id;
+    let mut catalog_alias = catalog_sub.track_alias;
 
     // 音声は 1 object = 1 subgroup stream で届く (LOC draft-ietf-moq-loc-04 §4.1)。
     // stream ごとにデコーダを作り直すと 20 ms ごとにデコーダ状態が失われ、
@@ -939,7 +986,10 @@ pub async fn run(
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
     let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
 
-    let track_map: Arc<HashMap<u64, TrackKind>> = Arc::new(track_map);
+    // 移行 (GOAWAY) では peer が決める track alias が変わりうるため、書き換え可能にする。
+    // 読み出しは短い区間に限り、await をまたいでロックを保持しない
+    let track_map: Arc<std::sync::RwLock<HashMap<u64, TrackKind>>> =
+        Arc::new(std::sync::RwLock::new(track_map));
 
     // 7. データストリーム受信ループ
     let start = Instant::now();
@@ -992,9 +1042,22 @@ pub async fn run(
     // Session は payload をアプリへ返さないため、メディアとして使う Object はこのタスクで
     // decode し、subgroup stream と同じ配送経路へ流す。終了依頼のチャネルを必要とするため、
     // チャネルを用意した後で起動する。
-    let data_plane_for_datagram = data_plane.clone();
-    let handle_for_datagram = client.handle();
-    let track_map_for_datagram = Arc::clone(&track_map);
+    // 移行 (GOAWAY) で session を差し替えたら、新しい handle / data_plane と alias 表を
+    // このチャネルでまとめて渡す。alias は peer が SUBSCRIBE_OK で決めるため session ごとに
+    // 変わりうる。handle と表を別々に更新すると、旧 session の datagram を新しい表で解釈する
+    // 窓ができるため、1 つの値にして同時に切り替える。
+    // タスクを起動し直さないのは、デコーダと配送経路の状態をそのまま引き継ぐためである
+    let datagram_track_map = Arc::new(
+        track_map
+            .read()
+            .expect("track_map lock must not be poisoned")
+            .clone(),
+    );
+    let (datagram_session_tx, mut datagram_session_rx) = tokio::sync::watch::channel((
+        client.handle(),
+        data_plane.clone(),
+        Arc::clone(&datagram_track_map),
+    ));
     let audio_decoder_for_datagram = audio_decoder.clone();
     let audio_config_handled_for_datagram = Arc::clone(&audio_config_handled);
     let audio_codec_for_datagram = audio_codec.clone();
@@ -1024,8 +1087,29 @@ pub async fn run(
         // 最初の datagram を受け取ったことを 1 回だけ記録する。届いていないのか、届いて
         // いるのに配送経路へ流れていないのかを切り分けるために出す
         let mut datagram_received = false;
+        let (mut handle_for_datagram, mut data_plane_for_datagram, mut track_map_for_datagram) =
+            datagram_session_rx.borrow_and_update().clone();
+        // `recv_datagrams` は transport から datagram を取り出した後に await しないため
+        // (`StreamHandle::recv_datagrams`)、select が `changed()` を選んで future を捨てても
+        // 取り出し済みの datagram は失われない。新 session の datagram は新 handle 側に残る
         'receive: loop {
-            let datagrams = match handle_for_datagram.recv_datagrams().await {
+            let received = tokio::select! {
+                received = handle_for_datagram.recv_datagrams() => received,
+                changed = datagram_session_rx.changed() => {
+                    if changed.is_err() {
+                        // 送信側 (`run`) がこのタスクを abort する前に drop した場合に限り到達する。
+                        // 受信タスクは `run` の終了時に abort されるため、通常はここへ来ない
+                        break 'receive;
+                    }
+                    let (handle, data_plane, map) = datagram_session_rx.borrow_and_update().clone();
+                    handle_for_datagram = handle;
+                    data_plane_for_datagram = data_plane;
+                    track_map_for_datagram = map;
+                    tracing::info!("Datagram receive task switched to the migrated session");
+                    continue 'receive;
+                }
+            };
+            let datagrams = match received {
                 Ok(datagrams) => datagrams,
                 Err(e) => {
                     // セッション終了 (§6) と接続クローズは期待される終了であるため、
@@ -1035,7 +1119,22 @@ pub async fn run(
                     } else {
                         tracing::warn!("Datagram receive error: {e}");
                     }
-                    break;
+                    // 旧 session のエラーでタスクを終わらせない。GOAWAY の移行中に旧接続が
+                    // 閉じることは §9.2 が許容しており (timeout 前の close)、ここで終了すると
+                    // 移行後の datagram (音声) を受信する者が居なくなる。
+                    // 移行の通知 (watch の更新) を待って新しい session へ切り替える。
+                    // 送信側 (`run`) が drop された場合だけ終わる (run は終了時に abort する)
+                    if datagram_session_rx.changed().await.is_err() {
+                        break 'receive;
+                    }
+                    let (handle, data_plane, map) = datagram_session_rx.borrow_and_update().clone();
+                    handle_for_datagram = handle;
+                    data_plane_for_datagram = data_plane;
+                    track_map_for_datagram = map;
+                    tracing::info!(
+                        "Datagram receive task switched to the migrated session after a receive error"
+                    );
+                    continue 'receive;
                 }
             };
             if !datagram_received && !datagrams.is_empty() {
@@ -1064,7 +1163,9 @@ pub async fn run(
                 let DatagramAcceptance::Object(TrackDataAcceptance::Accepted) = acceptance else {
                     continue;
                 };
-                match plan_datagram(&raw, &track_map_for_datagram) {
+                // 種別の判定には、この handle と同時に受け取った表を使う
+                let action = plan_datagram(&raw, &track_map_for_datagram);
+                match action {
                     DatagramAction::DeliverAudio { datagram, payload } => {
                         // デコーダは subscription で 1 つを共有する。stream task と同じく
                         // デコードが終わるまでロックを保持する
@@ -1126,13 +1227,19 @@ pub async fn run(
                 break;
             };
             total_streams += 1;
+            // alias の対応表はタスクごとに複製する (移行で書き換わっても
+            // 既に処理中の stream の解釈は変わらない)
+            let track_map_snapshot = track_map
+                .read()
+                .expect("track_map lock must not be poisoned")
+                .clone();
             spawn_stream_task(
                 &mut join_set,
                 &task_monitor,
                 stream,
                 permit,
                 total_streams,
-                &track_map,
+                &track_map_snapshot,
                 &data_plane,
                 &frame_tx,
                 &audio_tx,
@@ -1202,14 +1309,222 @@ pub async fn run(
                 let outcome: Result<bool> = async {
                     match notable? {
                         Some(ClientEvent::Session(SessionEvent::GoawayReceived {
-                            timeout, ..
+                            new_session_uri,
+                            timeout,
+                            on_request_stream,
                         })) => {
-                            // draft-ietf-moq-transport-22 §9.2 (GOAWAY): GOAWAY は
-                            // subscription state に影響しないため、購読を個別に終了する
-                            // STOP_SENDING は送れる
-                            tracing::info!("Received GOAWAY (timeout={timeout})");
-                            goaway_received = true;
-                            Ok(true)
+                            tracing::info!(
+                                "Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})"
+                            );
+                            match tokio_moq::migration_target(
+                                &new_session_uri,
+                                on_request_stream,
+                                &config.url,
+                            ) {
+                                // request stream 単位の GOAWAY では session を維持する
+                                Ok(None) => Ok(false),
+                                Ok(Some(target)) => {
+                                    // 移行先 URI の msf fragment の connection が現在の接続経路と
+                                    // 矛盾しないかを確認する (draft-ietf-moq-msf-01 §11.1.1)。
+                                    // 矛盾する場合は移行せず、従来どおり終了する
+                                    if let Err(e) = tokio_moq::resolve_transport(
+                                        Some(config.transport),
+                                        &target,
+                                    ) {
+                                        tracing::warn!(
+                                            "GOAWAY migration target conflicts with the current transport: {e}"
+                                        );
+                                        // GOAWAY を受けた後に終了するため、購読の終了
+                                        // (STOP_SENDING) を送る経路に乗せる
+                                        goaway_received = true;
+                                        return Ok(true);
+                                    }
+                                    // control stream の GOAWAY: 新しい session を先に確立し、
+                                    // 購読を張り直してから旧 session を閉じる (§6.6.1)。
+                                    // 確立と張り直しはこの分岐の中で await するため、その間は
+                                    // データループが回らず枠の処理と catalog の適用が止まる。
+                                    // バックグラウンドで確立する設計は本 issue の対象外
+                                    match tokio_moq::connect(
+                                        &tokio_moq::ConnectParams {
+                                            url: &target,
+                                            transport: config.transport,
+                                            cert: config.cert.as_deref(),
+                                            impl_name: "moq-sub",
+                                            // subscriber は WebTransport 経路で datagram を
+                                            // 継続受信する
+                                            receive_datagrams: true,
+                                        },
+                                        &task_monitor,
+                                    )
+                                    .await
+                                    {
+                                        Ok((mut new_client, new_acceptor)) => {
+                                            new_client.set_control_message_timeout_ms(Some(30000));
+                                            new_client.set_data_stream_timeout_ms(Some(30000));
+                                            let new_data_plane = new_client.data_plane();
+                                            match resubscribe_tracks(
+                                                &mut new_client,
+                                                &resubscribe_plan,
+                                            )
+                                            .await
+                                            {
+                                                Ok(resubscribed) => {
+                                                    // 旧 session の alias を外し、新しい alias を
+                                                    // 登録し直す (alias は peer が決めるため変わりうる)
+                                                    let datagram_map = {
+                                                        let mut map = track_map.write().expect(
+                                                            "track_map lock must not be poisoned",
+                                                        );
+                                                        for alias in [
+                                                            Some(catalog_alias),
+                                                            video_alias,
+                                                            audio_alias,
+                                                        ]
+                                                        .into_iter()
+                                                        .flatten()
+                                                        {
+                                                            map.remove(&alias);
+                                                        }
+                                                        map.insert(
+                                                            resubscribed.catalog.track_alias,
+                                                            TrackKind::Catalog,
+                                                        );
+                                                        if let Some(ref sub) = resubscribed.video {
+                                                            map.insert(
+                                                                sub.track_alias,
+                                                                TrackKind::Video,
+                                                            );
+                                                        }
+                                                        if let Some(ref sub) = resubscribed.audio {
+                                                            map.insert(
+                                                                sub.track_alias,
+                                                                TrackKind::Audio,
+                                                            );
+                                                        }
+                                                        Arc::new(map.clone())
+                                                    };
+
+                                                    // datagram 受信タスクには、旧 session を閉じる前に
+                                                    // 新しい handle / data_plane / alias 表を渡す。
+                                                    // 閉じた後だと、旧接続の受信エラーでタスクが
+                                                    // 終了してしまう (移行後の音声 datagram が届かなくなる)
+                                                    let _ = datagram_session_tx.send((
+                                                        new_client.handle(),
+                                                        new_data_plane.clone(),
+                                                        datagram_map,
+                                                    ));
+
+                                                    // 旧 session の購読を STOP_SENDING で終了する
+                                                    for rid in [
+                                                        Some(catalog_request_id),
+                                                        video_request_id,
+                                                        audio_request_id,
+                                                    ]
+                                                    .into_iter()
+                                                    .flatten()
+                                                    {
+                                                        if let Err(e) = client.stop_sending(rid).await
+                                                        {
+                                                            // 旧 session は timeout の経過後に
+                                                            // 閉じるため、送れなくても購読は
+                                                            // session の終了で終わる
+                                                            tracing::warn!(
+                                                                "Failed to send STOP_SENDING for request {rid} during migration: {e}"
+                                                            );
+                                                        }
+                                                    }
+
+                                                    // 旧 session は移行対象を終了させたあと、
+                                                    // GOAWAY の timeout を期限として閉じる (§9.2)。
+                                                    // 期限まで待つ間も移行先の処理を続けるため、
+                                                    // 閉じる処理は別タスクに任せる
+                                                    let mut old_client =
+                                                        std::mem::replace(&mut client, new_client);
+                                                    let close_timeout_ms = timeout;
+                                                    tokio::spawn(async move {
+                                                        if close_timeout_ms > 0 {
+                                                            tokio::time::sleep(
+                                                                std::time::Duration::from_millis(
+                                                                    close_timeout_ms,
+                                                                ),
+                                                            )
+                                                            .await;
+                                                        }
+                                                        if let Err(e) = old_client.close(0, "").await
+                                                        {
+                                                            tracing::debug!(
+                                                                "Failed to close the old session after migration: {e}"
+                                                            );
+                                                        }
+                                                    });
+
+                                                    // 新しい session へ差し替える
+                                                    config.url = target;
+                                                    recv_acceptor = new_acceptor;
+                                                    data_plane = new_data_plane;
+                                                    catalog_request_id =
+                                                        resubscribed.catalog.request_id;
+                                                    catalog_alias = resubscribed.catalog.track_alias;
+                                                    video_request_id = resubscribed
+                                                        .video
+                                                        .as_ref()
+                                                        .map(|sub| sub.request_id);
+                                                    video_alias = resubscribed
+                                                        .video
+                                                        .as_ref()
+                                                        .map(|sub| sub.track_alias);
+                                                    audio_request_id = resubscribed
+                                                        .audio
+                                                        .as_ref()
+                                                        .map(|sub| sub.request_id);
+                                                    audio_alias = resubscribed
+                                                        .audio
+                                                        .as_ref()
+                                                        .map(|sub| sub.track_alias);
+                                                    // 旧 session で受理済みの stream は新しい
+                                                    // data_plane では処理できないため捨てる
+                                                    // (旧接続の stream id を新 session の会計へ
+                                                    // 持ち込むと誤ったトラックとして扱われうる)
+                                                    pending_streams.clear();
+                                                    tracing::info!(
+                                                        "Migrated the session to {}",
+                                                        config.url.authority
+                                                    );
+                                                    Ok(false)
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Failed to resubscribe on the new session: {e}"
+                                                    );
+                                                    // 途中まで確立した session を放置すると
+                                                    // peer が timeout まで資源を保持するため閉じる
+                                                    if let Err(e) = new_client.close(0, "").await {
+                                                        tracing::debug!(
+                                                            "Failed to close the new session after a failed migration: {e}"
+                                                        );
+                                                    }
+                                                    goaway_received = true;
+                                                    Ok(true)
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to migrate the session to the new URI: {e}"
+                                            );
+                                            goaway_received = true;
+                                            Ok(true)
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "GOAWAY carried an unusable New Session URI; terminating without migration: {e}"
+                                    );
+                                    goaway_received = true;
+                                    Ok(true)
+                                }
+                            }
                         }
                         Some(ClientEvent::Session(SessionEvent::PublishDoneReceived {
                             status_code,
@@ -1409,7 +1724,7 @@ pub async fn run(
                 is_connection_closed(&e),
             );
         }
-        if let Err(e) = client.stop_sending(catalog_sub.request_id).await {
+        if let Err(e) = client.stop_sending(catalog_request_id).await {
             log_failure(
                 format_args!("Failed to send STOP_SENDING for catalog: {e}"),
                 is_connection_closed(&e),
@@ -3475,6 +3790,56 @@ async fn decode_audio_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GOAWAY の New Session URI から移行先を決める判断を固定する
+    ///
+    /// 移行の判断そのものは tokio-moq の共通関数が持つ。subscriber 側でも
+    /// 「request stream の GOAWAY では移行しない」「空 URI は現在の URL の再利用」
+    /// 「解釈できない URI は移行しない」を固定する。
+    mod migration_target_tests {
+        use tokio_moq::parse_url;
+
+        /// 現在の URL (移行前の接続先)
+        fn current_url() -> tokio_moq::ServerUrl {
+            parse_url("moqt://relay.example:443/live#msf:moq-example--video")
+                .expect("現在の URL をパースできること")
+        }
+
+        /// request stream の GOAWAY では session を維持すること
+        #[test]
+        fn request_stream_goaway_keeps_the_session() {
+            let target = tokio_moq::migration_target(
+                b"moqt://other.example:443/live",
+                Some(3),
+                &current_url(),
+            )
+            .expect("判断に失敗しないこと");
+            assert!(target.is_none(), "移行しないこと");
+        }
+
+        /// New Session URI が空のときは現在の URL を再利用すること
+        #[test]
+        fn empty_uri_reuses_the_current_url() {
+            let current = current_url();
+            let target = tokio_moq::migration_target(&[], None, &current)
+                .expect("判断に失敗しないこと")
+                .expect("移行先があること");
+            assert_eq!(target.authority, current.authority);
+            assert_eq!(target.path, current.path);
+        }
+
+        /// 解釈できない New Session URI では移行しないこと
+        #[test]
+        fn invalid_uri_is_rejected() {
+            let err =
+                tokio_moq::migration_target(b"https://other.example/live", None, &current_url())
+                    .expect_err("エラーになること");
+            assert!(
+                err.to_string().contains("invalid new session URI"),
+                "解釈できない URI として報告すること: {err}"
+            );
+        }
+    }
 
     use shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR;
     use shiguredo_moqt::loc::LocProperty;

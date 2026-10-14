@@ -21,6 +21,7 @@ use shiguredo_moqt::{
     media_clock::WallClockMapper,
     message::ControlMessage,
     message::common::Location,
+    message::common::TrackNamespace,
     message_parameter::MessageParameters,
     msf::MSF_CATALOG_TRACK_NAME,
     name::serialize_namespace,
@@ -51,13 +52,14 @@ use crate::gop;
 use crate::group_id;
 use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
+use tokio_moq::ConnectParams;
+use tokio_moq::ServerUrl;
 use tokio_moq::Transport;
-use tokio_moq::connect_with_fallback;
 use tokio_moq::error::TransportError;
 use tokio_moq::error::session_error_code;
-use tokio_moq::host_from_authority;
-use tokio_moq::moqt_client::{ClientEvent, IncomingRequest, MoqtClient, ObjectFilterOutcome};
-use tokio_moq::quic;
+use tokio_moq::moqt_client::{
+    ClientEvent, DataPlaneHandle, IncomingRequest, MoqtClient, ObjectFilterOutcome,
+};
 
 /// 映像キャプチャの寿命管理
 ///
@@ -299,6 +301,93 @@ fn accepted_new_group_request(
     None
 }
 
+/// 接続を確立し、映像 / 音声 / catalog の PUBLISH を張る
+///
+/// 初回接続と GOAWAY 後の移行の双方で使う。SETUP まで終えた `MoqtClient` と、
+/// その接続に紐づく `DataPlaneHandle` と各 track の Request ID を返す。
+async fn establish_publisher_session(
+    config: &Config,
+    url: &ServerUrl,
+    namespace: &TrackNamespace,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<(MoqtClient, DataPlaneHandle, Option<u64>, Option<u64>, u64)> {
+    let (mut client, _acceptor) = tokio_moq::connect(
+        &ConnectParams {
+            url,
+            transport: config.transport,
+            cert: config.cert.as_deref(),
+            impl_name: "moq-pub",
+            // publisher は datagram を受信しない
+            receive_datagrams: false,
+        },
+        task_monitor,
+    )
+    .await?;
+    client.set_control_message_timeout_ms(Some(30000));
+    client.set_data_stream_timeout_ms(Some(30000));
+
+    let data_plane = client.data_plane();
+    // PUBLISH の途中で失敗した場合、確立済みの session を放置すると peer が timeout まで
+    // 資源を保持するため、閉じてからエラーを返す
+    let published: Result<(Option<u64>, Option<u64>, u64)> = async {
+        let video_request_id = if config.video_enabled {
+            Some(
+                client
+                    .publish_track(
+                        namespace.clone(),
+                        config.track_name.as_bytes().to_vec(),
+                        VIDEO_TRACK_ALIAS,
+                        video_publish_properties(config.input_mp4.is_some()),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let audio_request_id = if config.audio_enabled {
+            Some(
+                client
+                    .publish_track(
+                        namespace.clone(),
+                        AUDIO_TRACK_NAME.as_bytes().to_vec(),
+                        AUDIO_TRACK_ALIAS,
+                        TrackProperties::new(),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let catalog_request_id = client
+            .publish_track(
+                namespace.clone(),
+                MSF_CATALOG_TRACK_NAME.to_vec(),
+                CATALOG_TRACK_ALIAS,
+                TrackProperties::new(),
+            )
+            .await?;
+        Ok((video_request_id, audio_request_id, catalog_request_id))
+    }
+    .await;
+    match published {
+        Ok((video_request_id, audio_request_id, catalog_request_id)) => Ok((
+            client,
+            data_plane,
+            video_request_id,
+            audio_request_id,
+            catalog_request_id,
+        )),
+        Err(e) => {
+            if let Err(close_error) = client.close(0, "").await {
+                tracing::debug!(
+                    "Failed to close the session after a failed publish: {close_error}"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 /// パイプラインを実行する
 ///
 /// `config` は接続先・トランスポート・送信するトラック・入力の指定を持つ。
@@ -340,20 +429,9 @@ pub async fn run(
         config.audio_enabled = false;
     }
 
-    // TLS の SNI / 証明書検証に使う server_name はポートを含めない。
-    // IPv6 リテラル (`[::1]:4443` 等) でも正しく host を取り出す。
-    let server_name = host_from_authority(&config.url.authority);
-
-    // 接続先の解決は QUIC / WebTransport で共通にする。ポートが省略された URL は
-    // 既定ポート 443 を使い、ホスト名は名前解決する (draft-ietf-moq-transport-22 §6.1.2)。
-    // 解決結果が複数の場合は順に試し、確立できたアドレスを採用する。
-    // 確立後の SETUP 以降の失敗はアドレスに依存しないため、次のアドレスは試さない。
-    // `socket_addr` は試行ごとに変わるため、試行の中で接続先を組み立てる。
-
     // WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できず、
     // WebTransport が MUST とする Reliable Size 付きの reset を行えないため)。接続の前に 1 度だけ
-    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。接続先の試行ごとに
-    // 出さないよう `connect_with_fallback` の外側で判定する。
+    // 警告し、どのトランスポートで接続するかを実行時に分かるようにする。
     if matches!(config.transport, Transport::WtH3 | Transport::WtH2) {
         tracing::warn!(
             "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
@@ -361,149 +439,28 @@ pub async fn run(
         );
     }
 
-    // 1. 接続確立と SETUP ハンドシェイク
-    let connect_monitor = task_monitor.clone();
-    let connection_config = config.clone();
-    let mut client = connect_with_fallback(&config.url.authority, move |socket_addr| {
-        // 試行ごとに接続を組み立てるため、設定は複製して `move` で取り込む
-        let cfg = connection_config.clone();
-        let connect_monitor = connect_monitor.clone();
-        let authority_url = cfg.url.authority.clone();
-        async move {
-            let client = match cfg.transport {
-                Transport::Quic => {
-                    let (connection, stop_sending_rx) =
-                        quic::connect(socket_addr, server_name, cfg.cert.as_deref()).await?;
-                    let (client, _acceptor) = MoqtClient::establish_quic(
-                        connection,
-                        stop_sending_rx,
-                        &cfg.url.path,
-                        &authority_url,
-                        "moq-pub",
-                        &cfg.url.c4m_tokens,
-                        &connect_monitor,
-                    )
-                    .await?;
-                    client
-                }
-                Transport::WtH3 => {
-                    let mut client_config =
-                        tokio_moq::webtransport_h3::ClientConfig::new(socket_addr, server_name)
-                            // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http3-16 §3.2)
-                            .authority(&authority_url)
-                            .enable_webtransport(
-                                shiguredo_http3::webtransport::Settings::new()
-                                    .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
-                            );
-                    if let Some(ref cert) = cfg.cert {
-                        let pem = std::fs::read_to_string(cert)?;
-                        client_config = client_config.ca_cert(pem);
-                    } else {
-                        // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                        tracing::warn!(
-                            "TLS certificate verification is disabled (development mode)"
-                        );
-                        client_config = client_config.insecure();
-                    }
-                    let wt_session =
-                        tokio_moq::webtransport_h3::WtClient::connect(client_config, &cfg.url.path)
-                            .await?;
-                    let (client, _acceptor) = MoqtClient::establish_wt(
-                        wt_session,
-                        "moq-pub",
-                        &cfg.url.c4m_tokens,
-                        &connect_monitor,
-                    )
-                    .await?;
-                    client
-                }
-                Transport::WtH2 => {
-                    let mut client_config =
-                        tokio_moq::webtransport_h2::ClientConfig::new(socket_addr, server_name)
-                            // :authority は target URI の authority を URL の表記どおりに渡す (draft-ietf-webtrans-http2-15 §3.2)
-                            .authority(&authority_url);
-                    if let Some(ref cert) = cfg.cert {
-                        let pem = std::fs::read_to_string(cert)?;
-                        client_config = client_config.ca_cert(pem);
-                    } else {
-                        // 開発用: 証明書検証をスキップする (QUIC 経路と対称の警告)
-                        tracing::warn!(
-                            "TLS certificate verification is disabled (development mode)"
-                        );
-                        client_config = client_config.insecure();
-                    }
-                    let wt_session = tokio_moq::webtransport_h2::WtH2Client::connect(
-                        client_config,
-                        &cfg.url.path,
-                    )
-                    .await?;
-                    let (client, _acceptor) = MoqtClient::establish_wt_h2(
-                        wt_session,
-                        "moq-pub",
-                        &cfg.url.c4m_tokens,
-                        &connect_monitor,
-                    )
-                    .await?;
-                    client
-                }
-            };
-            Ok::<_, Error>(client)
-        }
-    })
-    .await?;
+    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
+    let namespace = config.namespace.clone();
+    // カタログの namespace は §8.8 の表現で書く (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))
+    let namespace_text = serialize_namespace(&namespace);
 
-    // 2. タイムアウト設定
-    client.set_control_message_timeout_ms(Some(30000));
-    client.set_data_stream_timeout_ms(Some(30000));
+    // 1. 接続確立と SETUP ハンドシェイク、2. タイムアウト設定、
+    // 3. PUBLISH (video / audio / catalog)
+    //
+    // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
+    // tokio_moq の共通の接続経路が担う (GOAWAY 後の移行でも同じ経路を使う)。
+    let (
+        mut client,
+        mut data_plane,
+        mut video_request_id,
+        mut audio_request_id,
+        mut catalog_request_id,
+    ) = establish_publisher_session(&config, &config.url, &namespace, &task_monitor).await?;
     tracing::info!(
         "Session timeouts: control={:?}ms, data={:?}ms",
         client.control_message_timeout_ms(),
         client.data_stream_timeout_ms(),
     );
-
-    // 3. PUBLISH (video / audio / catalog)
-    let data_plane = client.data_plane();
-    // CLI で §8.8 表現としてパース済みの namespace をそのまま使う
-    let namespace = config.namespace.clone();
-    // カタログの namespace は §8.8 の表現で書く (draft-ietf-moq-msf-01 §5.2.2 (Track namespace))。
-    // PUBLISH は `namespace` を move するため、先に文字列を作っておく
-    let namespace_text = serialize_namespace(&namespace);
-    let video_request_id = if config.video_enabled {
-        Some(
-            client
-                .publish_track(
-                    namespace.clone(),
-                    config.track_name.as_bytes().to_vec(),
-                    VIDEO_TRACK_ALIAS,
-                    video_publish_properties(config.input_mp4.is_some()),
-                )
-                .await?,
-        )
-    } else {
-        None
-    };
-    let audio_request_id = if config.audio_enabled {
-        Some(
-            client
-                .publish_track(
-                    namespace.clone(),
-                    AUDIO_TRACK_NAME.as_bytes().to_vec(),
-                    AUDIO_TRACK_ALIAS,
-                    TrackProperties::new(),
-                )
-                .await?,
-        )
-    } else {
-        None
-    };
-    let catalog_request_id = client
-        .publish_track(
-            namespace,
-            MSF_CATALOG_TRACK_NAME.to_vec(),
-            CATALOG_TRACK_ALIAS,
-            TrackProperties::new(),
-        )
-        .await?;
 
     // 4. エンコーダを先に生成し、catalog の codec 文字列を encoder から取得する
     // --input-mp4 の場合はエンコーダを使わず、MP4 の映像トラック情報を catalog に使う
@@ -635,7 +592,8 @@ pub async fn run(
     // Track の Group ID を一意で単調増加とする MUST を課し、publisher の再起動時には
     // 以前 publish したどの Group ID よりも大きい値から始める MUST を課す。同じ Track 名で
     // 配信し直しても Group ID が衝突しないよう、Unix epoch ミリ秒から払い出す。
-    let handle = client.handle();
+    // 移行 (GOAWAY) で差し替えるため、writer の生成に使う handle も可変にする
+    let mut handle = client.handle();
     let mut catalog_group_id = group_id::allocate_initial_group_id()?;
     // カタログの Location。FETCH 応答と fill fetch stream の範囲判定、SUBSCRIBE_OK の
     // LARGEST_OBJECT に使う
@@ -1255,10 +1213,184 @@ pub async fn run(
                 let outcome: Result<bool> = async {
                     match notable? {
                         Some(ClientEvent::Session(SessionEvent::GoawayReceived {
-                            timeout, ..
+                            new_session_uri,
+                            timeout,
+                            on_request_stream,
                         })) => {
-                            tracing::info!("Received GOAWAY (timeout={timeout})");
-                            Ok(true)
+                            tracing::info!(
+                                "Received GOAWAY (timeout={timeout}, on_request_stream={on_request_stream:?})"
+                            );
+                            match tokio_moq::migration_target(
+                                &new_session_uri,
+                                on_request_stream,
+                                &config.url,
+                            ) {
+                                // request stream 単位の GOAWAY は session を維持する
+                                Ok(None) => Ok(false),
+                                Ok(Some(target)) => {
+                                    // 移行先 URI の msf fragment の connection が現在の接続経路と
+                                    // 矛盾しないかを確認する (draft-ietf-moq-msf-01 §11.1.1)。
+                                    // 矛盾する場合は移行せず、従来どおり終了する
+                                    if let Err(e) = tokio_moq::resolve_transport(
+                                        Some(config.transport),
+                                        &target,
+                                    ) {
+                                        tracing::warn!(
+                                            "GOAWAY migration target conflicts with the current transport: {e}"
+                                        );
+                                        return Ok(true);
+                                    }
+                                    // control stream の GOAWAY: 新しい session を先に確立し、
+                                    // 購読 / 配信を移してから旧 session を閉じる (§6.6.1)。
+                                    // 確立と張り直しはこの分岐の中で await するため、その間は
+                                    // データループが回らず映像 / 音声の入力チャネルが詰まる。
+                                    // バックグラウンドで確立する設計は本 issue の対象外
+                                    match establish_publisher_session(
+                                        &config,
+                                        &target,
+                                        &namespace,
+                                        &task_monitor,
+                                    )
+                                    .await
+                                    {
+                                        Ok((
+                                            new_client,
+                                            new_data_plane,
+                                            new_video_request_id,
+                                            new_audio_request_id,
+                                            new_catalog_request_id,
+                                        )) => {
+                                            // カタログは Group ID の単調増加を維持して送り直す
+                                            let next_catalog_group_id =
+                                                group_id::next_group_id(catalog_group_id);
+                                            let catalog_start = new_client
+                                                .subscription_filter_start(new_catalog_request_id);
+                                            // 移行先の fragment に c4m があるときは SETUP と PUBLISH に
+                                            // そのトークンを使うが、catalog の authInfo は起動時に
+                                            // 組み立てた値のままである (再構築は本 issue の対象外)
+                                            match catalog::publish_catalog_object(
+                                                &new_client.handle(),
+                                                &new_data_plane,
+                                                new_catalog_request_id,
+                                                CATALOG_TRACK_ALIAS,
+                                                next_catalog_group_id,
+                                                &catalog_json,
+                                                catalog_start,
+                                            )
+                                            .await
+                                            {
+                                                Ok(ObjectFilterOutcome::Pass) => {
+                                                    catalog_location = Location {
+                                                        group_id: next_catalog_group_id,
+                                                        object_id: 0,
+                                                    };
+                                                }
+                                                Ok(ObjectFilterOutcome::Skip) => {
+                                                    // Object は送られていないため、FETCH 応答と
+                                                    // LARGEST_OBJECT が指す Location は前回のままにする
+                                                    tracing::debug!(
+                                                        "Catalog republish after migration was filtered out"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Failed to republish the catalog on the new session: {e}"
+                                                    );
+                                                }
+                                            }
+
+                                            // 旧 session の送信中の stream を閉じてから、
+                                            // PUBLISH_DONE で配信を終了し、NO_ERROR で閉じる
+                                            // (§9.9 の Stream Count、§6.6.1)
+                                            if let Some(writer) = current_video_writer.take() {
+                                                let filter_start = video_request_id.and_then(|rid| {
+                                                    client.subscription_filter_start(rid)
+                                                });
+                                                if let Err(e) = writer.finish(filter_start).await {
+                                                    tracing::debug!(
+                                                        "Failed to finish the outgoing subgroup stream during migration: {e}"
+                                                    );
+                                                }
+                                            }
+                                            for rid in [
+                                                video_request_id,
+                                                audio_request_id,
+                                                Some(catalog_request_id),
+                                            ]
+                                            .into_iter()
+                                            .flatten()
+                                            {
+                                                if let Err(e) = client
+                                                    .send_publish_done(
+                                                        rid,
+                                                        PUBLISH_DONE_GOING_AWAY,
+                                                        "",
+                                                    )
+                                                    .await
+                                                {
+                                                    // open な送信 stream が残っていると拒否される
+                                                    // (§9.9)。旧 session は timeout の経過後に
+                                                    // 閉じるため、ここで失敗しても購読は session の
+                                                    // 終了で終わる
+                                                    tracing::warn!(
+                                                        "Failed to send PUBLISH_DONE for request {rid} during migration: {e}"
+                                                    );
+                                                }
+                                            }
+                                            // 旧 session は移行対象を終了させたあと、GOAWAY の
+                                            // timeout を期限として閉じる (§9.2)。期限まで待つ間も
+                                            // 移行先の処理を続けるため、閉じる処理は別タスクに任せる
+                                            let mut old_client =
+                                                std::mem::replace(&mut client, new_client);
+                                            let close_timeout_ms = timeout;
+                                            tokio::spawn(async move {
+                                                if close_timeout_ms > 0 {
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(
+                                                            close_timeout_ms,
+                                                        ),
+                                                    )
+                                                    .await;
+                                                }
+                                                if let Err(e) = old_client.close(0, "").await {
+                                                    tracing::debug!(
+                                                        "Failed to close the old session after migration: {e}"
+                                                    );
+                                                }
+                                            });
+
+                                            // 新しい session へ差し替える (`client` は旧 session を
+                                            // 閉じるタスクへ渡したときに差し替え済み)
+                                            config.url = target;
+                                            // writer が使う handle も新しい session のものにする
+                                            // (旧 session の handle のままだと送信が失敗する)
+                                            handle = client.handle();
+                                            data_plane = new_data_plane;
+                                            video_request_id = new_video_request_id;
+                                            audio_request_id = new_audio_request_id;
+                                            catalog_request_id = new_catalog_request_id;
+                                            catalog_group_id = next_catalog_group_id;
+                                            tracing::info!(
+                                                "Migrated the session to {}",
+                                                config.url.authority
+                                            );
+                                            Ok(false)
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to migrate the session to the new URI: {e}"
+                                            );
+                                            Ok(true)
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "GOAWAY carried an unusable New Session URI; terminating without migration: {e}"
+                                    );
+                                    Ok(true)
+                                }
+                            }
                         }
                         Some(ClientEvent::Session(SessionEvent::CloseSession(err))) => {
                             tracing::warn!("Session closed: {:#x} {}", err.code, err.reason);
@@ -2434,6 +2566,108 @@ fn extract_pcm_i16(frame: &AudioFrameOwned) -> Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GOAWAY の New Session URI から移行先を決める判断を固定する
+    mod migration_target_tests {
+        use super::*;
+        use tokio_moq::parse_url;
+
+        /// 現在の URL (移行前の接続先)
+        fn current_url() -> ServerUrl {
+            parse_url("moqt://relay.example:443/live?token=abc#msf:moq-example--video&c4m=QUJD")
+                .expect("現在の URL をパースできること")
+        }
+
+        /// request stream の GOAWAY では移行しないこと
+        ///
+        /// draft-ietf-moq-transport-22 §6.6.1 は request stream の GOAWAY を
+        /// 「その request だけを移し、残りの session はそのままにする」と定める。
+        #[test]
+        fn request_stream_goaway_keeps_the_session() {
+            let current = current_url();
+            let target =
+                tokio_moq::migration_target(b"moqt://other.example:443/live", Some(7), &current)
+                    .expect("判断に失敗しないこと");
+            assert!(target.is_none(), "移行しないこと");
+        }
+
+        /// New Session URI が空のときは現在の URL を再利用すること
+        ///
+        /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) は「URI が 0 バイトなら現在の URI を
+        /// 再利用する」と定める。
+        #[test]
+        fn empty_uri_reuses_the_current_url() {
+            let current = current_url();
+            let target = tokio_moq::migration_target(&[], None, &current)
+                .expect("判断に失敗しないこと")
+                .expect("移行先があること");
+            assert_eq!(target.authority, current.authority);
+            assert_eq!(target.path, current.path);
+            assert_eq!(target.c4m_tokens, current.c4m_tokens);
+        }
+
+        /// New Session URI の fragment に c4m が無いときは元のトークンを引き継ぐこと
+        ///
+        /// draft-ietf-moq-msf-01 §11.4.3 は track に紐づくトークンを同じ track の制御
+        /// メッセージへ載せる MUST を課すため、移行先でも載せ続ける必要がある。
+        #[test]
+        fn uri_without_c4m_carries_the_tokens_over() {
+            let current = current_url();
+            let target = tokio_moq::migration_target(
+                b"moqt://other.example:443/live#msf:moq-example--video",
+                None,
+                &current,
+            )
+            .expect("判断に失敗しないこと")
+            .expect("移行先があること");
+            assert_eq!(target.authority, "other.example:443");
+            assert_eq!(target.path, "/live");
+            assert_eq!(
+                target.c4m_tokens, current.c4m_tokens,
+                "移行先に c4m が無い場合は元のトークンを引き継ぐこと"
+            );
+        }
+
+        /// New Session URI の fragment に c4m があるときはそちらを使うこと
+        #[test]
+        fn uri_with_c4m_uses_its_own_tokens() {
+            let current = current_url();
+            let target = tokio_moq::migration_target(
+                b"moqt://other.example:443/live#msf:moq-example--video&c4m=WFla",
+                None,
+                &current,
+            )
+            .expect("判断に失敗しないこと")
+            .expect("移行先があること");
+            assert_eq!(target.c4m_tokens, vec![b"XYZ".to_vec()]);
+        }
+
+        /// UTF-8 でない New Session URI はエラーにすること
+        #[test]
+        fn non_utf8_uri_is_rejected() {
+            let current = current_url();
+            let err = tokio_moq::migration_target(&[0xff, 0xfe], None, &current)
+                .expect_err("エラーになること");
+            assert!(
+                err.to_string().contains("not UTF-8"),
+                "UTF-8 でない URI として報告すること: {err}"
+            );
+        }
+
+        /// 解釈できない New Session URI はエラーにすること
+        ///
+        /// scheme が `moqt://` でない URI は移行先にしない (移行失敗として扱う)。
+        #[test]
+        fn invalid_uri_is_rejected() {
+            let current = current_url();
+            let err = tokio_moq::migration_target(b"https://other.example/live", None, &current)
+                .expect_err("エラーになること");
+            assert!(
+                err.to_string().contains("invalid new session URI"),
+                "解釈できない URI として報告すること: {err}"
+            );
+        }
+    }
     // `NEW_GROUP_REQUEST` の判定はテストでのみ直接組み立てる
     use shiguredo_moqt::message_parameter::{
         MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,

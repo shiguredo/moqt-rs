@@ -492,6 +492,94 @@ impl TestPeer {
         Ok(())
     }
 
+    /// 受理した SUBSCRIBE に SUBSCRIBE_OK で応答する
+    ///
+    /// [`TestPeer::send_request_ok`] と同じ手順で応答を書き出す。SUBSCRIBE_OK は
+    /// track alias を運ぶため、REQUEST_OK とは別の API を使う。
+    pub(crate) async fn send_subscribe_ok(
+        &mut self,
+        request_id: u64,
+        track_alias: u64,
+    ) -> Result<()> {
+        self.session.send_subscribe_ok(
+            request_id,
+            track_alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )?;
+        let (message, fin) = loop {
+            match self.session.poll_event() {
+                Some(SessionEvent::SendOnStream {
+                    request_id: id,
+                    message,
+                    fin,
+                }) if id == request_id => break (message, fin),
+                Some(SessionEvent::CloseSession(error)) => {
+                    return Err(TransportError::Internal(format!(
+                        "session closed before responding to request {request_id}: {error}"
+                    )));
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(TransportError::Internal(format!(
+                        "no response queued for request {request_id}"
+                    )));
+                }
+            }
+        };
+        let request = self
+            .accepted_requests
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+            .ok_or_else(|| {
+                TransportError::Internal(format!("request stream not found: {request_id}"))
+            })?;
+        request.send.send(Bytes::from(message.encode()?)).await?;
+        if fin {
+            request.send.finish().await?;
+        }
+        Ok(())
+    }
+
+    /// 自側 control stream に GOAWAY を書く
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY)。`new_session_uri` が空でない場合は、
+    /// 受け取った client がその URI へ移行する (server 役だけが非空 URI を送れる)。
+    /// `timeout_ms` は sender が閉じるまでの時間で、0 は期限なしを意味する。
+    pub(crate) async fn send_goaway(
+        &mut self,
+        new_session_uri: Vec<u8>,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        self.session
+            .send_goaway(new_session_uri, timeout_ms)
+            .map_err(|e| TransportError::Internal(format!("send_goaway: {e}")))?;
+        // 制御メッセージは SendControl として積まれるため、取り出して control stream へ書く
+        let message = loop {
+            match self.session.poll_event() {
+                Some(SessionEvent::SendControl(message)) => break message,
+                Some(SessionEvent::CloseSession(error)) => {
+                    return Err(TransportError::Internal(format!(
+                        "session closed before sending GOAWAY: {error}"
+                    )));
+                }
+                // 他のイベントは GOAWAY の書き出しに影響しないため読み飛ばす
+                Some(_) => continue,
+                None => {
+                    return Err(TransportError::Internal(
+                        "no GOAWAY queued for the control stream".into(),
+                    ));
+                }
+            }
+        };
+        let control_send = self
+            .control_send
+            .as_mut()
+            .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
+        control_send.send(Bytes::from(message.encode()?)).await?;
+        Ok(())
+    }
+
     /// peer が開いた request stream の送信方向を FIN で閉じる
     ///
     /// example が拒否した request のストリーム終端を通知する経路を確かめるために使う。
@@ -1300,6 +1388,338 @@ mod tests {
                     .expect("終了コードを観測できること"),
                 SESSION_PROTOCOL_VIOLATION,
                 "SETUP 前の終端は PROTOCOL_VIOLATION (0x3) であること"
+            );
+        })
+        .await;
+    }
+    /// 共通の接続経路で確立した session で PUBLISH と SUBSCRIBE が成立すること
+    ///
+    /// GOAWAY の移行先もこの経路 ([`crate::connect`]) で接続するため、経路そのものが
+    /// 動くことを固定する。PUBLISH は PUBLISH_OK、SUBSCRIBE は track alias を運ぶ
+    /// SUBSCRIBE_OK で解決する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shared_connect_path_establishes_publish_and_subscribe() {
+        run_with_timeout(async {
+            let mut server = TestPeerServer::start()
+                .await
+                .expect("サーバーを起動できること");
+            let addr = server.local_addr();
+            let url = crate::parse_url(&format!("moqt://{addr}/")).expect("URL をパースできること");
+
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+            let connect_url = url.clone();
+            let connect_monitor = task_monitor.clone();
+            let connect = tokio::spawn(async move {
+                crate::connect(
+                    &crate::ConnectParams {
+                        url: &connect_url,
+                        transport: crate::Transport::Quic,
+                        cert: None,
+                        impl_name: "test-peer",
+                        receive_datagrams: false,
+                    },
+                    &connect_monitor,
+                )
+                .await
+            });
+
+            let mut peer = server.accept().await.expect("接続を受理できること");
+            peer.establish().await.expect("SETUP を交換できること");
+            let (client, _acceptor) = connect
+                .await
+                .expect("接続タスクが終了すること")
+                .expect("共通の接続経路で接続できること");
+
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let subscribe_namespace = namespace.clone();
+            // PUBLISH と SUBSCRIBE は peer の応答と並行して進める
+            let client_task = tokio::spawn(async move {
+                let mut client = client;
+                let publish_request_id = client
+                    .publish_track(namespace, b"video".to_vec(), 7, TrackProperties::new())
+                    .await?;
+                let subscribe = client
+                    .subscribe_track(subscribe_namespace, b"video".to_vec())
+                    .await?;
+                Ok::<_, TransportError>((publish_request_id, subscribe))
+            });
+
+            let publish = peer
+                .recv_request_start()
+                .await
+                .expect("PUBLISH を受理できること");
+            let publish_request_id = match publish {
+                ControlMessage::Publish(publish) => publish.request_id,
+                other => panic!("PUBLISH として受理されること: {other:?}"),
+            };
+            peer.send_request_ok(publish_request_id)
+                .await
+                .expect("PUBLISH_OK を返せること");
+
+            let subscribe = peer
+                .recv_request_start()
+                .await
+                .expect("SUBSCRIBE を受理できること");
+            let subscribe_request_id = match subscribe {
+                ControlMessage::Subscribe(subscribe) => subscribe.request_id,
+                other => panic!("SUBSCRIBE として受理されること: {other:?}"),
+            };
+            // peer が決める track alias で SUBSCRIBE_OK を返す
+            peer.send_subscribe_ok(subscribe_request_id, 11)
+                .await
+                .expect("SUBSCRIBE_OK を返せること");
+
+            let (published, subscribed) = client_task
+                .await
+                .expect("client タスクが終了すること")
+                .expect("PUBLISH と SUBSCRIBE が成立すること");
+            assert_eq!(
+                published, publish_request_id,
+                "PUBLISH の Request ID が一致すること"
+            );
+            assert_eq!(
+                subscribed.request_id, subscribe_request_id,
+                "SUBSCRIBE の Request ID が一致すること"
+            );
+            assert_eq!(subscribed.track_alias, 11, "track alias が一致すること");
+        })
+        .await;
+    }
+    /// 移行先の New Session URI から決めた URL へ共通の接続経路で接続し、PUBLISH が成立すること
+    ///
+    /// GOAWAY の New Session URI を [`crate::migration_target`] で解釈した結果を、そのまま
+    /// [`crate::connect`] に渡せることを固定する。実際の移行では example がこの 2 つを順に呼ぶ。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn migration_target_url_is_connectable() {
+        run_with_timeout(async {
+            let mut server = TestPeerServer::start()
+                .await
+                .expect("サーバーを起動できること");
+            let addr = server.local_addr();
+
+            // GOAWAY が運ぶ New Session URI と同じ形の URI から移行先を決める
+            let current = crate::parse_url("moqt://relay.example:443/live")
+                .expect("現在の URL をパースできること");
+            let uri = format!("moqt://{addr}/live");
+            let target = crate::migration_target(uri.as_bytes(), None, &current)
+                .expect("判断に失敗しないこと")
+                .expect("移行先があること");
+
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+            let connect_monitor = task_monitor.clone();
+            let connect = tokio::spawn(async move {
+                crate::connect(
+                    &crate::ConnectParams {
+                        url: &target,
+                        transport: crate::Transport::Quic,
+                        cert: None,
+                        impl_name: "test-peer",
+                        receive_datagrams: false,
+                    },
+                    &connect_monitor,
+                )
+                .await
+            });
+
+            let mut peer = server.accept().await.expect("接続を受理できること");
+            peer.establish().await.expect("SETUP を交換できること");
+            let (mut client, _acceptor) = connect
+                .await
+                .expect("接続タスクが終了すること")
+                .expect("移行先へ接続できること");
+
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let publish_task = tokio::spawn(async move {
+                client
+                    .publish_track(namespace, b"video".to_vec(), 3, TrackProperties::new())
+                    .await
+            });
+            let publish = peer
+                .recv_request_start()
+                .await
+                .expect("PUBLISH を受理できること");
+            let publish_request_id = match publish {
+                ControlMessage::Publish(publish) => publish.request_id,
+                other => panic!("PUBLISH として受理されること: {other:?}"),
+            };
+            peer.send_request_ok(publish_request_id)
+                .await
+                .expect("PUBLISH_OK を返せること");
+            assert_eq!(
+                publish_task
+                    .await
+                    .expect("タスクが終了すること")
+                    .expect("PUBLISH が成立すること"),
+                publish_request_id,
+                "移行先の session で PUBLISH が成立すること"
+            );
+        })
+        .await;
+    }
+    /// GOAWAY の New Session URI へ移行する流れを、実 relay なしで固定する
+    ///
+    /// example が実装する手順 (GOAWAY 受信 → [`crate::migration_target`] で移行先を決定 →
+    /// [`crate::connect`] で新 session を確立 → 購読を張り直す → 旧 session を `close(0, "")`)
+    /// を、同じ API を同じ順に呼んで通す。旧 session が NO_ERROR で閉じられることも確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goaway_migration_switches_to_the_new_session() {
+        run_with_timeout(async {
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+
+            // 移行元 (server A) へ接続する
+            let mut server_a = TestPeerServer::start()
+                .await
+                .expect("サーバーを起動できること");
+            let addr_a = server_a.local_addr();
+            let url_a = crate::parse_url(&format!("moqt://{addr_a}/"))
+                .expect("移行元の URL をパースできること");
+            let connect_url = url_a.clone();
+            let connect_monitor = task_monitor.clone();
+            let connect_a = tokio::spawn(async move {
+                crate::connect(
+                    &crate::ConnectParams {
+                        url: &connect_url,
+                        transport: crate::Transport::Quic,
+                        cert: None,
+                        impl_name: "test-peer",
+                        receive_datagrams: false,
+                    },
+                    &connect_monitor,
+                )
+                .await
+            });
+            let mut peer_a = server_a.accept().await.expect("接続を受理できること");
+            peer_a.establish().await.expect("SETUP を交換できること");
+            let (mut client, _acceptor) = connect_a
+                .await
+                .expect("接続タスクが終了すること")
+                .expect("移行元へ接続できること");
+
+            // 移行元で購読を確立する
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            // 購読の送信と peer の応答は並行して進める (client は移行の判定でも使うため
+            // タスクへ move せず、join で同時に進める)
+            let subscribe_namespace = namespace.clone();
+            let (subscribed, _request_id) = tokio::join!(
+                client.subscribe_track(subscribe_namespace, b"video".to_vec()),
+                async {
+                    let message = peer_a
+                        .recv_request_start()
+                        .await
+                        .expect("SUBSCRIBE を受理できること");
+                    let request_id = match message {
+                        ControlMessage::Subscribe(subscribe) => subscribe.request_id,
+                        other => panic!("SUBSCRIBE として受理されること: {other:?}"),
+                    };
+                    peer_a
+                        .send_subscribe_ok(request_id, 5)
+                        .await
+                        .expect("SUBSCRIBE_OK を返せること");
+                    request_id
+                }
+            );
+            let subscribed = subscribed.expect("移行元で購読が成立すること");
+            assert_eq!(subscribed.track_alias, 5, "移行元の alias が一致すること");
+
+            // 移行先 (server B) の URI を載せた GOAWAY を server A から送る
+            let mut server_b = TestPeerServer::start()
+                .await
+                .expect("移行先のサーバーを起動できること");
+            let addr_b = server_b.local_addr();
+            let migration_uri = format!("moqt://{addr_b}/");
+            peer_a
+                .send_goaway(migration_uri.clone().into_bytes(), 0)
+                .await
+                .expect("GOAWAY を送れること");
+
+            // client が GOAWAY を受信し、移行先を決める
+            let event = client.next_event().await.expect("イベントを取得できること");
+            let (new_session_uri, on_request_stream) = match event {
+                Some(ClientEvent::Session(SessionEvent::GoawayReceived {
+                    new_session_uri,
+                    on_request_stream,
+                    ..
+                })) => (new_session_uri, on_request_stream),
+                other => panic!("GOAWAY として受理されること: {other:?}"),
+            };
+            assert!(
+                on_request_stream.is_none(),
+                "control stream の GOAWAY であること"
+            );
+            let target = crate::migration_target(&new_session_uri, on_request_stream, &url_a)
+                .expect("移行先を決められること")
+                .expect("移行先があること");
+            assert_eq!(
+                target.authority,
+                format!("127.0.0.1:{}", addr_b.port()),
+                "GOAWAY の URI が移行先になること"
+            );
+
+            // 移行先へ接続して購読を張り直す
+            let target_monitor = task_monitor.clone();
+            let connect_b = tokio::spawn(async move {
+                crate::connect(
+                    &crate::ConnectParams {
+                        url: &target,
+                        transport: crate::Transport::Quic,
+                        cert: None,
+                        impl_name: "test-peer",
+                        receive_datagrams: false,
+                    },
+                    &target_monitor,
+                )
+                .await
+            });
+            let mut peer_b = server_b.accept().await.expect("移行先で受理できること");
+            peer_b
+                .establish()
+                .await
+                .expect("移行先で SETUP を交換できること");
+            let (mut migrated, _acceptor) = connect_b
+                .await
+                .expect("接続タスクが終了すること")
+                .expect("移行先へ接続できること");
+            let resubscribe = tokio::spawn(async move {
+                migrated.subscribe_track(namespace, b"video".to_vec()).await
+            });
+            let message = peer_b
+                .recv_request_start()
+                .await
+                .expect("移行先で SUBSCRIBE を受理できること");
+            let request_id = match message {
+                ControlMessage::Subscribe(subscribe) => subscribe.request_id,
+                other => panic!("SUBSCRIBE として受理されること: {other:?}"),
+            };
+            peer_b
+                .send_subscribe_ok(request_id, 9)
+                .await
+                .expect("移行先で SUBSCRIBE_OK を返せること");
+            let resubscribed = resubscribe
+                .await
+                .expect("タスクが終了すること")
+                .expect("移行先で購読が成立すること");
+            assert_eq!(resubscribed.track_alias, 9, "移行先の alias が一致すること");
+
+            // 旧 session は移行対象を終了させてから NO_ERROR で閉じる
+            client.set_control_message_timeout_ms(Some(30_000));
+            client
+                .stop_sending(subscribed.request_id)
+                .await
+                .expect("旧 session の購読を終了できること");
+            client
+                .close(0, "")
+                .await
+                .expect("旧 session を閉じられること");
+            assert_eq!(
+                peer_a
+                    .recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                0,
+                "旧 session は NO_ERROR (0x0) で閉じられること"
             );
         })
         .await;

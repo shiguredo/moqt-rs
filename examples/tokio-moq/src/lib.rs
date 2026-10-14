@@ -924,6 +924,211 @@ where
     Err(last.expect("resolve_socket_addrs must return at least one address"))
 }
 
+/// GOAWAY の New Session URI から移行先の URL を決める
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration) に従う。
+///
+/// - request stream 単位の GOAWAY (`on_request_stream` が `Some`) では移行せず、
+///   現在の session を維持する (`Ok(None)`)。§9.2 は該当 request の再発行を SHOULD とするが、
+///   受信ループが 2 つの session を併走させる設計が要るため example では対応しない
+///   (request の終端は Session が deadline で行う)
+/// - `new_session_uri` が空のときは現在の URL を再利用する
+/// - 非空のときは [`parse_url`] と同じ規則で解釈する。移行先の fragment に `c4m` が無い場合は
+///   元の URL の認可トークンを引き継ぐ (draft-ietf-moq-msf-01 §11.4.3 は track に紐づく
+///   トークンを同じ track の制御メッセージへ載せる MUST を課すため)
+///
+/// 移行先 URI の `connection` (draft-ietf-moq-msf-01 §11.1.1) と msf の track-identifier は
+/// ここでは解釈しない。接続経路は呼び出し側が [`resolve_transport`] で現在の解決結果と
+/// 矛盾しないことを確認し、track 名は購読 / 配信の張り直しで使う既存の指定をそのまま使う。
+///
+/// # Errors
+///
+/// `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が解釈できない場合に
+/// [`TransportError`] になる。
+pub fn migration_target(
+    new_session_uri: &[u8],
+    on_request_stream: Option<u64>,
+    current: &ServerUrl,
+) -> Result<Option<ServerUrl>, TransportError> {
+    if on_request_stream.is_some() {
+        return Ok(None);
+    }
+    if new_session_uri.is_empty() {
+        return Ok(Some(current.clone()));
+    }
+    let uri = std::str::from_utf8(new_session_uri)
+        .map_err(|e| TransportError::Internal(format!("new session URI is not UTF-8: {e}")))?;
+    let mut target = parse_url(uri)
+        .map_err(|e| TransportError::Internal(format!("invalid new session URI '{uri}': {e}")))?;
+    if target.c4m_tokens.is_empty() {
+        target.c4m_tokens = current.c4m_tokens.clone();
+    }
+    Ok(Some(target))
+}
+
+/// 接続の確立に必要な設定
+///
+/// 接続経路ごとの分岐 (native QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は
+/// [`connect`] が担う。moq-pub / moq-sub は初回接続と GOAWAY 後の移行の双方で同じ設定を使う。
+#[derive(Debug, Clone)]
+pub struct ConnectParams<'a> {
+    /// 接続先 (authority / path / MSF fragment / C4M 認可トークン)
+    pub url: &'a ServerUrl,
+    /// 接続経路 (`--transport` と `--url` の `msf` fragment の `connection` から解決済みの値)
+    pub transport: Transport,
+    /// TLS の CA 証明書パス。省略すると証明書検証をスキップする (開発用)
+    pub cert: Option<&'a str>,
+    /// SETUP の MOQT IMPLEMENTATION (option type 0x07) に載せる実装名
+    pub impl_name: &'a str,
+    /// WebTransport 経路で datagram の継続受信を有効にする (subscriber が使う)
+    pub receive_datagrams: bool,
+}
+
+/// URL と接続設定から MOQT セッションを確立する
+///
+/// 接続先の名前解決と、解決したアドレスを順に試す処理は [`connect_with_fallback`] に任せる。
+/// 接続経路は `params.transport` で選び、SETUP まで終えた
+/// [`MoqtClient`](crate::moqt_client::MoqtClient) と data stream を受信する
+/// [`StreamAcceptor`](crate::transport::StreamAcceptor) を返す。
+///
+/// WebTransport 経路は experimental である (s2n-quic が `RESET_STREAM_AT` を送出できない)。
+/// experimental であることの警告は呼び出し側で 1 度だけ出す (`--cert` を省略したときの
+/// 証明書検証の無効化は、この関数が試行ごとに警告する)。
+///
+/// # Errors
+///
+/// 名前解決に失敗した場合、接続の確立に失敗した場合、SETUP の交換に失敗した場合、
+/// 証明書の読み込みに失敗した場合は [`TransportError`] になる。
+pub async fn connect(
+    params: &ConnectParams<'_>,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<
+    (
+        crate::moqt_client::MoqtClient,
+        crate::transport::StreamAcceptor,
+    ),
+    TransportError,
+> {
+    let server_name = host_from_authority(&params.url.authority).to_string();
+    let url = params.url.clone();
+    let transport = params.transport;
+    let cert = params.cert.map(str::to_string);
+    let impl_name = params.impl_name.to_string();
+    let receive_datagrams = params.receive_datagrams;
+    let authority = url.authority.clone();
+    let task_monitor = task_monitor.clone();
+
+    connect_with_fallback(&authority, move |socket_addr| {
+        // 試行ごとに接続を組み立てるため、設定は複製して `move` で取り込む
+        let url = url.clone();
+        let cert = cert.clone();
+        let impl_name = impl_name.clone();
+        let server_name = server_name.clone();
+        let task_monitor = task_monitor.clone();
+        async move {
+            // :authority は target URI の authority を URL の表記どおりに渡す
+            // (draft-ietf-webtrans-http3-16 §3.2 / draft-ietf-webtrans-http2-15 §3.2)
+            let authority_url = url.authority.clone();
+            match transport {
+                Transport::Quic => {
+                    let (connection, stop_sending_rx) =
+                        crate::quic::connect(socket_addr, &server_name, cert.as_deref()).await?;
+                    crate::moqt_client::MoqtClient::establish_quic(
+                        connection,
+                        stop_sending_rx,
+                        &url.path,
+                        &authority_url,
+                        &impl_name,
+                        &url.c4m_tokens,
+                        &task_monitor,
+                    )
+                    .await
+                }
+                Transport::WtH3 => {
+                    let mut client_config =
+                        crate::webtransport_h3::ClientConfig::new(socket_addr, &server_name)
+                            .authority(&authority_url)
+                            .enable_webtransport(
+                                shiguredo_http3::webtransport::Settings::new()
+                                    .wt_enabled(shiguredo_http3::VarInt::from_static(1)),
+                            );
+                    if receive_datagrams {
+                        // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
+                        client_config = client_config.receive_datagrams();
+                    }
+                    client_config = apply_tls_config_h3(client_config, cert.as_deref())?;
+                    let wt_session =
+                        crate::webtransport_h3::WtClient::connect(client_config, &url.path).await?;
+                    crate::moqt_client::MoqtClient::establish_wt(
+                        wt_session,
+                        &impl_name,
+                        &url.c4m_tokens,
+                        &task_monitor,
+                    )
+                    .await
+                }
+                Transport::WtH2 => {
+                    let mut client_config =
+                        crate::webtransport_h2::ClientConfig::new(socket_addr, &server_name)
+                            .authority(&authority_url);
+                    if receive_datagrams {
+                        // subscriber は datagram を継続受信するためバックグラウンドタスクを起動する
+                        client_config = client_config.receive_datagrams();
+                    }
+                    client_config = apply_tls_config_h2(client_config, cert.as_deref())?;
+                    let wt_session =
+                        crate::webtransport_h2::WtH2Client::connect(client_config, &url.path)
+                            .await?;
+                    crate::moqt_client::MoqtClient::establish_wt_h2(
+                        wt_session,
+                        &impl_name,
+                        &url.c4m_tokens,
+                        &task_monitor,
+                    )
+                    .await
+                }
+            }
+        }
+    })
+    .await
+}
+
+/// WebTransport over HTTP/3 の TLS 設定に CA 証明書を適用する
+///
+/// `--cert` が無い場合は証明書検証をスキップする (開発用)。QUIC 直接接続と対称の警告を出す。
+fn apply_tls_config_h3(
+    client_config: crate::webtransport_h3::ClientConfig,
+    cert: Option<&str>,
+) -> Result<crate::webtransport_h3::ClientConfig, TransportError> {
+    if let Some(cert) = cert {
+        let pem = std::fs::read_to_string(cert).map_err(|e| {
+            TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
+        })?;
+        Ok(client_config.ca_cert(pem))
+    } else {
+        tracing::warn!("TLS certificate verification is disabled (development mode)");
+        Ok(client_config.insecure())
+    }
+}
+
+/// WebTransport over HTTP/2 の TLS 設定に CA 証明書を適用する
+///
+/// `--cert` が無い場合は証明書検証をスキップする (開発用)。QUIC 直接接続と対称の警告を出す。
+fn apply_tls_config_h2(
+    client_config: crate::webtransport_h2::ClientConfig,
+    cert: Option<&str>,
+) -> Result<crate::webtransport_h2::ClientConfig, TransportError> {
+    if let Some(cert) = cert {
+        let pem = std::fs::read_to_string(cert).map_err(|e| {
+            TransportError::Internal(format!("failed to read certificate '{cert}': {e}"))
+        })?;
+        Ok(client_config.ca_cert(pem))
+    } else {
+        tracing::warn!("TLS certificate verification is disabled (development mode)");
+        Ok(client_config.insecure())
+    }
+}
+
 /// 名前解決に失敗したことを表すエラーを作る
 fn resolve_failed(authority: &str, reason: &str) -> TransportError {
     TransportError::ResolutionFailed(format!("failed to resolve '{authority}': {reason}"))
