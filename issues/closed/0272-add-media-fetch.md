@@ -1,7 +1,7 @@
 # メディアの Object を FETCH で取得できるようにする
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/add-media-fetch
 - Polished: 2026-10-15
 
@@ -174,3 +174,57 @@ FETCH による取得を可能にし、途中参加時にキーフレームま�
   切り出され、単体テストで固定されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- transport 層 (`examples/tokio-moq`)
+  - `MoqtClient::fetch` を追加した。LOCATION_FILTER など呼び出し側のパラメータをそのまま渡し、
+    C4M 認可トークンを付与して Request ID を返す (draft-ietf-moq-msf-01 §11.4.3)
+  - `SessionEvent::FetchOkReceived` をアプリへ配送するようにした (`is_notable_event` と配送キュー)
+  - Session が受理しなかった FETCH (INVALID_RANGE 送信済み) はアプリへ渡さない。受理の判定は
+    `Session::fetch(request_id)` で行い、重ね応答による致命終了を構造的に排除した
+  - `MoqtClient::open_fetch_response` と `FetchResponseWriter` を追加した。FETCH_HEADER を書き、
+    複数の Object と End of Non-Existent / Unknown Range を 1 本の uni stream に書いて FIN する。
+    catalog 用の `send_fetch_response` (Object 1 件) は用途を書き分けて残した
+  - `peer_harness` に `send_goaway` / `send_subscribe_ok` / `send_fetch_ok` /
+    `open_uni_send_stream` / `recv_uni_data_stream` を追加し、次の 3 点をテストで固定した。
+    「client が FETCH を発行し、FETCH_OK と応答 stream の Object / End of Range を受け取る」
+    「peer の FETCH に応答 writer で複数 Object と End of Unknown Range を返す」
+    「Session が拒否した FETCH はアプリへ渡らない」
+- publisher (`examples/moq-pub`)
+  - `cache.rs` を追加した。`--cache-duration` (ミリ秒、既定 5000) の時間窓で payload と
+    LOC Properties を Group 単位に保持し、期限切れを保持時と FETCH 応答時の双方で評価する。
+    期限は保持した時刻 (壁時計) で判定する
+  - `MAX_CACHE_DURATION` (draft-ietf-moq-transport-22 §10.3) を `--cache-duration` と同じ値で
+    映像 / 音声の PUBLISH と SUBSCRIBE_OK に告知する
+  - FETCH への応答の判断を純関数 (`MediaCache::plan` と `FetchPlan::entries`) に切り出した。
+    「対象外の track (REQUEST_DOES_NOT_EXIST)」「Descending (`REQUEST_NOT_SUPPORTED`)」
+    「未 publish の範囲 (FETCH_HEADER だけの空 stream)」「evict 済みの範囲
+    (End of Unknown Range)」「保持している Object (+ 必要なら End of Non-Existent / Unknown
+    Range)」を判断し、entry の並びまで固定した。Range Filter 付きの FETCH は §3.3.3 の MUST を
+    満たせないため `REQUEST_NOT_SUPPORTED` で拒否する
+  - End of Unknown Range は「直前に書いた entry からの区間」を表すため (§11.4.1.2)、
+    未 publish の範囲と evict 済みの範囲が混在するときは End of Non-Existent Range で分割する
+- subscriber (`examples/moq-sub`)
+  - 購読の Largest Object (`SUBSCRIBE_OK` の `LARGEST_OBJECT`) を基準に、直近の Group を
+    LOCATION_FILTER (Absolute Range) で FETCH する (`plan_fetch_range` /
+    `fetch_range_parameters`)。SUBSCRIBER_PRIORITY の REQUEST_UPDATE のあとに発行する。
+    失敗しても warn を残して live の購読を続ける
+  - 応答 stream は `fetch_stream_action` で映像 / 音声 / 読み捨て (catalog の fill fetch) を
+    振り分け、Object は live と同じ配送経路 (`deliver_video_object` / `AudioDelivery::deliver`)
+    へ流す。映像はキーフレームから復号を始める。End of Range 3 種は取得できなかった範囲として
+    ログに残す
+  - GOAWAY の移行でも購読の張り直しのあとに同じ手順で FETCH し、Request ID の対応表を
+    移行先のものへ差し替える
+- テスト: `cache.rs` 19 件 (判断の分岐・End of Range の位置・entry の並び・期限切れ・
+  Properties のエラー)、`pipeline.rs` で要求 range の解決と `MAX_CACHE_DURATION` の告知、
+  `cli.rs` で `--cache-duration`、`peer_harness.rs` で transport 層の FETCH 往復 3 件
+- 検証: `cargo test --workspace` (61 スイート) /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が成功した
+- 対象外: メディアの fill fetch (§3.4)、Descending で返す実装、任意位置シーク、VOD、
+  実 relay 越しの E2E (`e2e-tests/` の `#[ignore]`)
+- 残る制限: (1) 保持は Group 単位であるため、Group 先頭の Object は告知値より最大 1 Group 長く
+  保持されうる (§10.3 は Object 単位)。(2) 録画は live の最初のキーフレームを基準時刻にする
+  ため、live の録画が始まったあとに届いた FETCH の Object は録画から破棄される (README に明記)。
+  (3) FETCH 応答を書く I/O 経路そのものは `peer_harness` の transport 層テストと純関数の
+  単体テストで固定しており、example の pipeline を通すテストは実 relay が必要なため対象外である
