@@ -1034,7 +1034,7 @@ let token_text = CatTokenBuilder::new()
     .catdpop(300.0, true)
     .build_compact(&crypto, &key)?;
 
-// 検証 (relay / endpoint 側)
+// 検証 (MoQ リレー / endpoint 側)
 let token = CatToken::decode(token_text.as_bytes())?;
 token.verify(&crypto, &key)?;
 token.claims().validate(&shiguredo_moqt::c4m::cat::ClaimValidationOptions {
@@ -1261,7 +1261,7 @@ fn reset(&mut self)
 ## 注意事項
 
 - 型は定義元モジュールから import する。re-export は存在しない
-- `Session` は sans-I/O の状態機械であり、I/O・非同期処理・relay が担う namespace 発見・告知と forwarding は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
+- `Session` は sans-I/O の状態機械であり、I/O・非同期処理・MoQ リレーが担う namespace 発見・告知と forwarding は含まない。`poll_event()` の結果を I/O 層へ渡すのは利用側の責務
 - `SendRequestError` のローカルエラー (`PeerGoawayReceived` / `LocalFilterMismatch` / `LocalDatagramTimeout`) は wire コードを持たない。wire コードとして公開 API に渡す必要はない (渡しても各レジストリの `*_INTERNAL_ERROR` に置換される)
 - `ControlMessage` と各メッセージ構造体は `Clone` だが `Copy` ではない
 - `MessageError` は `Clone` / `Copy` 不可

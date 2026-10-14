@@ -32,7 +32,7 @@ MOQT / LOC / MSF / C4M の codec と、1 本の Transport Session に閉じた�
 - no_std 対応
 - 依存は `hashbrown` / `noflate` / `nojson` / `base64ct` の 4 つのみ (暗号処理は optional feature `aws-lc-rs`)
 - 1 本の Transport Session に閉じた endpoint-local な `Session` 状態機械
-  - I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含まない
+  - I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含まない
 - バッファ付きインクリメンタルデコーダー (`MessageDecoder` / `SubgroupStreamDecoder` / `FetchStreamDecoder`)
 - FETCH 応答のデルタ圧縮エンコーダー (`FetchStreamEncoder`)
 - 対応仕様
@@ -172,9 +172,9 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs)、[shiguredo_http2](https://github.com/shiguredo/http2-rs) を利用しています。
 引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
 
-- `moq-pub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、video / audio / `catalog` track を PUBLISH する
-- `moq-sub`：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で relay に接続し、`catalog` を SUBSCRIBE して取得し、video / audio を SUBSCRIBE して再生する
-- `tokio-moq`：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
+- [`moq-pub`](examples/moq-pub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で MoQ リレーに接続し、catalog / audio / video track を PUBLISH する
+- [`moq-sub`](examples/moq-sub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で MoQ リレーに接続し、catalog を SUBSCRIBE して取得し、audio / video を SUBSCRIBE して再生する
+- [`tokio-moq`](examples/tokio-moq/README.md)：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.95 以降です。
 サンプルが使う `s2n-quic` が 1.95 を要求するためです。
@@ -193,13 +193,13 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 `wt`: WebTransport) を使い、それも無ければ `quic` が既定になります。`connection` と矛盾する
 `--transport` および `connection=q` と `connection=wt` の併記はエラーになります。
 
-`wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/README.md`](examples/README.md) を参照してください)。
+`wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/tokio-moq/README.md`](examples/tokio-moq/README.md) を参照してください)。
 
 URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP と各制御メッセージ (PUBLISH / SUBSCRIBE / REQUEST_UPDATE) の AUTHORIZATION_TOKEN として送信できます。
 `--namespace` を省略した場合は MSF fragment の track-identifier が示す namespace を Track Namespace として使います (`--namespace` と MSF fragment のどちらも無い場合はエラーになります)。
 
-接続先となる MOQT relay は別途用意してください。
-詳細なオプションは [`examples/README.md`](examples/README.md) と各クレートの `--help` を参照してください。
+接続先となる MoQ リレーは別途用意してください。
+詳細なオプションは [`examples/moq-pub/README.md`](examples/moq-pub/README.md) / [`examples/moq-sub/README.md`](examples/moq-sub/README.md) と各クレートの `--help` を参照してください。
 
 ## Agent Skills
 

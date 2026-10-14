@@ -1,6 +1,6 @@
 # E2E テスト
 
-実 relay を介した publish / subscribe の往復を検証する E2E テストです。
+実際の MoQ リレーを介した publish / subscribe の往復を検証する E2E テストです。
 
 `moq-pub` と `moq-sub` の lib API を使い、publisher と subscriber のパイプラインを同一プロセス内で起動します。バイナリを起動してログを照合する方法は取らず、判定はチャネルで受け取るフレームと MP4 の実体で行います。
 
@@ -12,11 +12,11 @@
 4. subscriber が書き出した MP4 が 0 バイトより大きい
 5. どちらのパイプラインも shutdown で正常終了する
 
-Track Namespace は実行ごとに一意な値を使うため、同じ relay を同時に使う実行とは混ざりません。
+Track Namespace は実行ごとに一意な値を使うため、同じ MoQ リレーを同時に使う実行とは混ざりません。
 
 ## ローカルでの実行
 
-実 relay が必要なため、通常の `cargo test` では実行しません (`#[ignore]` を付けています)。接続先の URL は環境変数で渡します。ホスト名はリポジトリに残さないでください。
+実際の MoQ リレーが必要なため、通常の `cargo test` では実行しません (`#[ignore]` を付けています)。接続先の URL は環境変数で渡します。ホスト名はリポジトリに残さないでください。
 
 ```console
 $ MOQT_E2E_URL=moqt://<HOST>/ cargo test -p e2e-tests -- --ignored
@@ -38,4 +38,4 @@ test publish_and_subscribe_roundtrip ... ok
 
 `.github/workflows/e2e-test.yml` がこのテストを実行します。接続先は `secrets.TEST_MOQT_URI`、トランスポートは `vars.TEST_MOQT_TRANSPORT` から渡し、`secrets.TEST_MOQT_URI` が未設定の場合はテストを実行しません (fork からの PR など)。
 
-examples が macOS 専用依存 (Video Toolbox / CoreAudio 系) を持つため、runner は `macos-15` を使います。
+examples は Video Toolbox / CoreAudio 系の macOS 専用依存を持つため、runner は `macos-15` を使います。

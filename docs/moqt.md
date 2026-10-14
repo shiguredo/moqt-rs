@@ -60,7 +60,7 @@
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証
   - session 層で Object の forward 判定 (`object_passes_filters` / `header_passes_filters`)
   - TRACK_PROPERTY_FILTER は PUBLISH の選別を行わない。draft-22 は TRACK_PROPERTY_FILTER を
-    SUBSCRIBE_TRACKS の応答として返る PUBLISH の選別に使うが、本ライブラリは relay 専用機能
+    SUBSCRIBE_TRACKS の応答として返る PUBLISH の選別に使うが、本ライブラリは MoQ リレー専用機能
     (SUBSCRIBE_TRACKS) を対象外としているため、選別の対象が存在しない (draft から削除された
     仕様ではない)
 - Subscriber Priority
@@ -95,8 +95,8 @@
 
 ## 未対応
 
-relay が担う機能は本ライブラリの対象外である (`CODEBASE.md` の「クライアントとサーバーのみで
-リレーには対応しないこと」)。そのため relay 専用の以下のメッセージは実装しない。
+MoQ リレーが担う機能は本ライブラリの対象外である (`CODEBASE.md` の「クライアントとサーバーのみで
+MoQ リレーには対応しないこと」)。そのため MoQ リレー専用の以下のメッセージは実装しない。
 
 - `PUBLISH_NAMESPACE` (`0x06`)
 - `NAMESPACE` (`0x08`)
@@ -116,9 +116,9 @@ request stream の先頭として届く 3 種 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_
 `SESSION_PROTOCOL_VIOLATION` でセッションを閉じる。§9 Table 5 に無い型も従来どおり
 `MessageError::InvalidMessageType` で拒否する。
 
-relay 専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TIMEOUT Parameter) と
+MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TIMEOUT Parameter) と
 §16.7 (Message Parameters) の Table 14 に定義済みのため、SUBSCRIBE への出現は受理する。
-ただし本ライブラリは relay を実装しないため値を解釈せず、`Subscription` にも保持しない。
+ただし本ライブラリは MoQ リレーを実装しないため値を解釈せず、`Subscription` にも保持しない。
 アプリは decode 済みの `MessageParameters` から読める。
 
 ## モジュール構成
@@ -163,4 +163,4 @@ relay 専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TIMEOUT P
 `session` は SETUP と Request ID 管理に加えて、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の bidi request stream を扱います。
 uni data stream と datagram の送受信 state も扱います。
 REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイクと drain、delivery timeout などの deadline 管理 (`tick` 駆動) も行います。
-一方で I/O、非同期処理、relay が担う namespace 発見・告知と forwarding は含みません。
+一方で I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含みません。
