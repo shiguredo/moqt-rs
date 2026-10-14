@@ -1021,6 +1021,9 @@ pub async fn run(
         };
         // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
         let mut unsupported_aliases: HashSet<u64> = HashSet::new();
+        // 最初の datagram を受け取ったことを 1 回だけ記録する。届いていないのか、届いて
+        // いるのに配送経路へ流れていないのかを切り分けるために出す
+        let mut datagram_received = false;
         'receive: loop {
             let datagrams = match handle_for_datagram.recv_datagrams().await {
                 Ok(datagrams) => datagrams,
@@ -1035,6 +1038,13 @@ pub async fn run(
                     break;
                 }
             };
+            if !datagram_received && !datagrams.is_empty() {
+                datagram_received = true;
+                tracing::info!(
+                    "Received the first datagram batch from the relay: count={}",
+                    datagrams.len()
+                );
+            }
             for raw in datagrams {
                 // type 分岐は Session が行う。未知 type は
                 // draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
