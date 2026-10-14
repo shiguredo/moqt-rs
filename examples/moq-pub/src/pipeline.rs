@@ -125,7 +125,7 @@ const AUDIO_CHANNELS: u8 = 1;
 /// draft-ietf-moq-msf-01 §5.2.29 (Channel configuration) では string 表現。一次資料の例では "2" を使用。
 const AUDIO_CHANNEL_CONFIG: &str = "1";
 /// 音声トラック名
-const AUDIO_TRACK_NAME: &str = "audio";
+pub(crate) const AUDIO_TRACK_NAME: &str = "audio";
 /// カタログのレンダーグループ
 ///
 /// 音声と映像を同時に再生させるため、両トラックに同じ値を載せる
@@ -217,12 +217,13 @@ async fn reset_open_subgroup_stream(
     }
 }
 
-/// 映像トラックの PUBLISH に載せる Track Properties
+/// 映像トラックに載せる Track Properties
 ///
 /// draft-ietf-moq-transport-22 §10.6 (DYNAMIC_GROUPS) の `DYNAMIC_GROUPS=1` を告知し、
 /// 購読者からの `NEW_GROUP_REQUEST` (§9.20.19) に応じて Group を動的に開始できることを
 /// 示す。購読者は `DYNAMIC_GROUPS=1` を知らないと REQUEST_UPDATE で `NEW_GROUP_REQUEST` を
-/// 送れないため、映像トラックの PUBLISH で告知する。音声とカタログのトラックには載せない。
+/// 送れないため、PUBLISH と SUBSCRIBE_OK の両方で告知する (§3.5.1)。音声とカタログの
+/// トラックには載せない。
 fn video_track_properties() -> TrackProperties {
     let mut properties = TrackProperties::new();
     properties.push(TrackProperty {
@@ -242,6 +243,20 @@ fn video_publish_properties(mp4_passthrough: bool) -> TrackProperties {
         TrackProperties::new()
     } else {
         video_track_properties()
+    }
+}
+
+/// SUBSCRIBE_OK に載せる Track Properties
+///
+/// 映像トラックには PUBLISH と同じ `DYNAMIC_GROUPS=1` を載せる。購読者はこの値で publisher が
+/// 動的 Group に対応しているかを知り (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
+/// `NEW_GROUP_REQUEST` を送れるようになる (§9.20.19 の MUST NOT)。音声とカタログのトラックには
+/// 載せない。
+fn subscribe_ok_properties(track_alias: u64, mp4_passthrough: bool) -> TrackProperties {
+    if track_alias == VIDEO_TRACK_ALIAS {
+        video_publish_properties(mp4_passthrough)
+    } else {
+        TrackProperties::new()
     }
 }
 
@@ -1204,9 +1219,16 @@ pub async fn run(
                             // (`parameters` は購読の累積パラメータであり、複数の更新が合体すると
                             // 以前の要求が再び現れ得る。値 0 は常に受け付けのため、その場合も
                             // 要求として扱う)
+                            // 対象の購読が映像トラックかどうかは Track 名で解決する。購読は
+                            // 自側の PUBLISH と peer の SUBSCRIBE の両方で確立し得るため、
+                            // Request ID の空間では判定できない
+                            let is_video_subscription = client
+                                .subscription_track_name(update.request_id)
+                                .is_some_and(|track_name| {
+                                    track_name.as_slice() == config.track_name.as_bytes()
+                                });
                             let new_group_request = accepted_new_group_request(
-                                Some(update.request_id) == video_request_id
-                                    && config.input_mp4.is_none(),
+                                is_video_subscription && config.input_mp4.is_none(),
                                 &update.parameters,
                                 started_video_group_id,
                             );
@@ -1580,15 +1602,18 @@ async fn serve_peer_request(
                         &subscribe.parameters,
                         started_video_group_id,
                     );
-                    // SUBSCRIBE_OK に Track Properties を載せないのは、DYNAMIC_GROUPS の告知を
-                    // Original Publisher としての PUBLISH で行う設計だからである
-                    // (draft-ietf-moq-transport-22 §9.8 (PUBLISH) / §10.6 (DYNAMIC GROUPS))
+                    // 映像トラックの SUBSCRIBE_OK にも PUBLISH と同じ DYNAMIC_GROUPS を載せる。
+                    // 購読者はこの値で publisher が動的 Group に対応しているかを知り
+                    // (draft-ietf-moq-transport-22 §3.5.1)、REQUEST_UPDATE で
+                    // NEW_GROUP_REQUEST を送れるようになる (§9.20.19 の MUST NOT)
+                    let subscribe_properties =
+                        subscribe_ok_properties(track_alias, config.input_mp4.is_some());
                     client
                         .send_subscribe_ok(
                             request_id,
                             track_alias,
                             MessageParameters::new(),
-                            TrackProperties::new(),
+                            subscribe_properties,
                         )
                         .await?;
                     tracing::info!(
@@ -1801,8 +1826,8 @@ impl CaptureTrack {
 /// capture のメディア時刻と壁時計の差 (残差) を溜めて、定期的に要約を出す
 ///
 /// 残差は「撮影から読むまでの遅れ」であり、[`WallClockMapper`] はその最小値を対応に使う
-/// ため 0 にはならない。0103 の完了条件は音声と映像の残差の中央値の差であるが、毎フレームの
-/// debug ログでは確認できないため、トラックごとに溜めて定期的に info で出す。
+/// ため 0 にはならない。音声と映像の残差の中央値の差は毎フレームの debug ログでは
+/// 確認できないため、トラックごとに溜めて定期的に info で出す。
 struct CaptureClockResiduals {
     /// トラックごとの直近の残差 (マイクロ秒)。添字は [`CaptureTrack::index`] が決める
     samples_us: [Vec<i64>; 2],
@@ -1962,8 +1987,8 @@ fn map_capture_timestamp_us(
         wall_clock_us,
         difference_us,
     );
-    // 0103 の完了条件は「音声と映像の残差の中央値の差」である。毎フレームの debug ログでは
-    // 確認できないため、定期的に要約を出す
+    // 音声と映像の残差の中央値の差は、毎フレームの debug ログでは確認できないため、
+    // 定期的に要約を出す
     if let Some([video, audio]) =
         residuals.record(CaptureTrack::Video, difference_us, wall_clock_us)
     {
@@ -2222,6 +2247,32 @@ mod tests {
             Some(1),
             "エンコードする場合は告知すること"
         );
+    }
+
+    /// SUBSCRIBE_OK の Track Properties が映像トラックだけ DYNAMIC_GROUPS を告知すること
+    ///
+    /// 購読者は SUBSCRIBE_OK の値で publisher の対応を知る
+    /// (draft-ietf-moq-transport-22 §3.5.1)。音声とカタログには載せない。
+    #[test]
+    fn subscribe_ok_properties_announce_dynamic_groups_for_the_video_track() {
+        assert_eq!(
+            subscribe_ok_properties(VIDEO_TRACK_ALIAS, false).dynamic_groups(),
+            Some(1),
+            "映像トラックには告知すること"
+        );
+        assert!(
+            subscribe_ok_properties(VIDEO_TRACK_ALIAS, true)
+                .dynamic_groups()
+                .is_none(),
+            "MP4 パススルーでは告知しないこと"
+        );
+        for track_alias in [AUDIO_TRACK_ALIAS, CATALOG_TRACK_ALIAS] {
+            assert_eq!(
+                subscribe_ok_properties(track_alias, false).len(),
+                0,
+                "音声とカタログには載せないこと: {track_alias}"
+            );
+        }
     }
 
     /// キーフレームを強制できる要求だけを受け付けること

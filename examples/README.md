@@ -168,18 +168,19 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 
 ## 購読者からの新しい Group の要求
 
-moq-pub は映像トラックの PUBLISH で `DYNAMIC_GROUPS=1` を告知し、購読者からの
-`NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) に応じて新しい Group の開始を
-前倒しする。
+moq-pub は映像トラックの PUBLISH と SUBSCRIBE_OK で `DYNAMIC_GROUPS=1` を告知し
+(draft-ietf-moq-transport-22 §10.6 / §3.5.1)、購読者からの `NEW_GROUP_REQUEST`
+(同 §9.20.19) に応じて新しい Group の開始を前倒しする。moq-sub は映像トラックの SUBSCRIBE に
+`NEW_GROUP_REQUEST=0` を載せるため、Group の途中で参加しても次の周期キーフレームを待たずに
+復号を始められる。
 
 - `NEW_GROUP_REQUEST` は SUBSCRIBE と REQUEST_UPDATE のどちらに載っていても受け付ける。
-  映像トラック宛ての要求だけを受理し、値が 0 または現在の Group より大きいときだけ
-  受け付ける (同節)。まだ Group を開始していない間は値によらず受理する (先頭の Group は
-  最初のキーフレームで始まるため、要求はそこで満たされる)
-- ただし REQUEST_UPDATE で送れるのは `DYNAMIC_GROUPS=1` を知っている Track に限られる
-  (同節の MUST NOT)。publisher が告知するのは映像トラックの PUBLISH だけで、SUBSCRIBE_OK
-  には載せないため、ピアの SUBSCRIBE で確立した購読で REQUEST_UPDATE に載せると session 層が
-  プロトコル違反として接続を閉じる。SUBSCRIBE に載せた要求は購読と同時に受け付ける
+  映像トラックの購読に限り、値が 0 または現在の Group より大きいときだけ受け付ける (同節)。
+  まだ Group を開始していない間は値によらず受理する (先頭の Group は最初のキーフレームで
+  始まるため、要求はそこで満たされる)
+- REQUEST_UPDATE で送れるのは `DYNAMIC_GROUPS=1` を知っている Track に限られる (同節の
+  MUST NOT)。publisher は映像トラックの PUBLISH と SUBSCRIBE_OK の両方で告知するため、
+  どちらの経路で確立した購読でも要求を送れる
 - 直前の Group が 300 ms に達するまで新しい Group を前倒しせず、達した最初の入力フレームで
   キーフレームを要求する (同節が認める遅延)。保留した要求は破棄しない。`--gop-duration` に
   よる通常の境界が先に来た場合は、そこで Group が始まる

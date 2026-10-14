@@ -33,9 +33,9 @@ use shiguredo_moqt::{
     message::common::Location, message::common::TrackNamespace, message_parameter::LocationFilter,
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
     message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
-    message_parameter::PARAM_LOCATION_FILTER, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
-    name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
-    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
+    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, name::parse_namespace, name::serialize_namespace,
+    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
 };
 
@@ -293,6 +293,22 @@ enum TrackKind {
 /// `target_latency_ms` はカタログの `targetLatency` を渡すセルであり、値があるときだけ格納する
 /// (対象は実際に購読する track の `renderGroup` に属する track。§5.2.8)。購読する group が
 /// 複数あるときは最大値をすべての購読 track に掛ける。
+/// 映像トラックの SUBSCRIBE に載せるメッセージパラメータ
+///
+/// 購読の確立と同時に新しい Group の開始を要求する。`NEW_GROUP_REQUEST=0` は「購読者が
+/// Group の情報を持たない」ことを示し、publisher はできるだけ早く新しい Group を開始する
+/// (draft-ietf-moq-transport-22 §9.20.19)。Group の途中で参加した購読者は、次の周期
+/// キーフレームを待たずに復号を始められる。同節は DYNAMIC_GROUPS の告知が無くても
+/// SUBSCRIBE に載せてよいと定める。
+fn video_subscribe_parameters() -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_NEW_GROUP_REQUEST,
+        value: MessageParameterValue::VarInt(0),
+    });
+    parameters
+}
+
 #[expect(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
@@ -563,7 +579,11 @@ pub async fn run(
     if subscribe_video {
         let v = video_info.as_ref().expect("video_info is Some");
         let video_sub = client
-            .subscribe_track(v.namespace.clone(), v.track_name.as_bytes().to_vec())
+            .subscribe_track_with_parameters(
+                v.namespace.clone(),
+                v.track_name.as_bytes().to_vec(),
+                video_subscribe_parameters(),
+            )
             .await?;
         tracing::info!(
             "Subscribed to video track: alias={}, request_id={}",
@@ -3222,6 +3242,25 @@ mod tests {
 
     use shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
+
+    /// 映像トラックの SUBSCRIBE が新しい Group の開始を要求すること
+    ///
+    /// `NEW_GROUP_REQUEST=0` は「購読者が Group の情報を持たない」ことを示し、publisher は
+    /// できるだけ早く新しい Group を開始する (draft-ietf-moq-transport-22 §9.20.19)。
+    #[test]
+    fn video_subscribe_parameters_request_a_new_group() {
+        let parameters = video_subscribe_parameters();
+        assert_eq!(
+            parameters.new_group_request(),
+            Some(0),
+            "購読の確立時に新しい Group の開始を要求すること"
+        );
+        assert_eq!(
+            parameters.len(),
+            1,
+            "映像トラックの SUBSCRIBE には NEW_GROUP_REQUEST だけを載せること"
+        );
+    }
 
     /// テスト用: targetLatency 付きの track を作る
     fn track_with_target_latency(target_latency: Option<u64>) -> MsfTrack {
