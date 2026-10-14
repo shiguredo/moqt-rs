@@ -1,7 +1,7 @@
 # GOAWAY の New Session URI へセッションを移行する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/add-goaway-session-migration
 - Polished: 2026-10-15
 
@@ -127,3 +127,36 @@ GOAWAY で session 全体を移行できるようにする。
   `examples/tokio-moq/src/peer_harness.rs` のテストで固定されていること
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
+
+## 解決方法
+
+- `examples/tokio-moq` に共通の接続確立経路を追加した。`ConnectParams` (URL / 接続経路 /
+  証明書 / 実装名 / datagram の継続受信) と `connect` が名前解決・アドレスのフォールバック・
+  transport ごとの分岐を担い、moq-pub / moq-sub に重複していた接続コードを置き換えた
+- 移行の判断は `tokio_moq::migration_target` に切り出した。request stream の GOAWAY では
+  `None` (session を維持)、空 URI は現在の URL を再利用、非空 URI は `parse_url` で解釈し、
+  fragment に `c4m` が無いときは元の認可トークンを引き継ぐ
+- moq-pub: control stream GOAWAY で新しい session を先に確立し、映像 / 音声 / catalog の
+  PUBLISH を張り直す。移行先 URI の `connection` は `resolve_transport` で検証し、
+  矛盾する場合は移行せず従来どおり終了する。移行先では catalog を Group ID の単調増加を
+  維持して送り直し (送れたときだけ Location を進める)、writer が使う `StreamHandle` も
+  新しい session のものへ差し替える
+- moq-sub: catalog / 映像 / 音声を購読し直し (映像は REQUEST_UPDATE も送り直す)、peer が
+  決める track alias の変化に追随して alias 表を書き換え、`data_plane` / `recv_acceptor` /
+  Request ID を差し替える。datagram 受信タスクへは `tokio::sync::watch` で
+  (handle, data_plane, alias 表) を 1 単位で渡し、移行先への切り替えを 1 箇所で行う。
+  旧 session で受理済みの stream は移行時に破棄する
+- 旧 session は GOAWAY の `timeout` を期限として別タスクで `close(0, "")` する
+  (timeout が 0 なら即時)。移行先の確立に失敗した場合は従来どおり終了し、途中まで確立した
+  session は閉じる
+- テスト: `migration_target` の単体テスト (移行しない条件・現在 URL の再利用・c4m の引き継ぎ・
+  非 UTF-8 / scheme 不正)、`peer_harness` に `send_goaway` と `send_subscribe_ok` を追加し、
+  「共通の接続経路で PUBLISH と SUBSCRIBE が成立する」「移行先 URI から接続して PUBLISH が
+  成立する」「GOAWAY 受信 → 移行先の決定 → 新しい session へ接続 → 再購読 →
+  旧 session を NO_ERROR で閉じる」を固定した
+- 検証: `cargo test --workspace` (61 スイート) /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が成功した
+- 対象外: request stream 単位の GOAWAY による request の再発行 (§9.2 の SHOULD)、0-RTT、
+  移行中に欠落した Object の補填 (FETCH)、実 relay を使う E2E
+- 残る制限: 移行先の fragment に `c4m` がある場合、catalog の authInfo は起動時に組み立てた
+  値のままである (再構築は本 issue の対象外)
