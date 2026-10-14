@@ -18,6 +18,22 @@ use std::time::Instant;
 
 use tokio_utils::ShutdownController;
 
+/// テスト中のログを有効にする
+///
+/// CI で失敗したときに、publisher と subscriber のどちらで何が起きたかを追えるようにする。
+/// `RUST_LOG` で絞り込める。既定は `info`。
+fn init_tracing() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 /// publisher と subscriber の起動を待つ上限
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// subscriber を起動し直す間隔
@@ -410,6 +426,7 @@ async fn start_subscriber(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]
 async fn publish_and_subscribe_roundtrip() {
+    init_tracing();
     let url = e2e_url();
     let transport = e2e_transport();
     let namespace = e2e_namespace();
@@ -494,6 +511,7 @@ async fn publish_and_subscribe_roundtrip() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]
 async fn publish_and_subscribe_audio_datagram_roundtrip() {
+    init_tracing();
     let url = e2e_url();
     let transport = e2e_transport();
     let namespace = e2e_namespace();

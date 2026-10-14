@@ -11,6 +11,7 @@ mod delay;
 mod feedback;
 mod publish_catch_up;
 mod scheduler;
+mod splice_fade;
 mod stretch;
 mod timeline;
 mod timing;

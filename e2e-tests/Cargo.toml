@@ -17,3 +17,6 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-metrics = "0.5"
 # 非同期ユーティリティ (graceful shutdown)
 tokio-utils = "0.1"
+# テスト中のログ (失敗したときに publisher / subscriber の動きを追う)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

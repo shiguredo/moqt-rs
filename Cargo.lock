@@ -541,6 +541,8 @@ dependencies = [
  "tokio",
  "tokio-metrics",
  "tokio-utils",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

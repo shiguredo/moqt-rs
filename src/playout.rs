@@ -10,6 +10,7 @@ pub mod delay;
 pub mod feedback;
 pub mod publish_catch_up;
 pub mod scheduler;
+pub mod splice_fade;
 pub mod stretch;
 pub mod timeline;
 pub mod timing;

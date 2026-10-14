@@ -15,6 +15,8 @@ mod feedback;
 mod publish_catch_up;
 #[path = "test_playout/scheduler.rs"]
 mod scheduler;
+#[path = "test_playout/splice_fade.rs"]
+mod splice_fade;
 #[path = "test_playout/stretch.rs"]
 mod stretch;
 #[path = "test_playout/timeline.rs"]
