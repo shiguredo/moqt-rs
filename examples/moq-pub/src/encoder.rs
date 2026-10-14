@@ -65,19 +65,22 @@ impl VideoEncoder {
     ///
     /// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。先頭の出力フレームへ
     /// そのまま載せ、1 つの入力から複数の出力フレームが出た場合は 1 フレームずつ進める。
+    ///
+    /// `force_keyframe` が真なら、このフレームをキーフレームとしてエンコードする。
     pub fn encode(
         &mut self,
         frame: &VideoFrameOwned,
         timestamp_us: u64,
+        force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>> {
         match self {
-            VideoEncoder::Av1(e) => e.encode(frame, timestamp_us),
+            VideoEncoder::Av1(e) => e.encode(frame, timestamp_us, force_keyframe),
             #[cfg(target_os = "macos")]
-            VideoEncoder::H264(e) => e.encode(frame, timestamp_us),
+            VideoEncoder::H264(e) => e.encode(frame, timestamp_us, force_keyframe),
             #[cfg(target_os = "macos")]
-            VideoEncoder::H265(e) => e.encode(frame, timestamp_us),
-            VideoEncoder::Vp8(e) => e.encode(frame, timestamp_us),
-            VideoEncoder::Vp9(e) => e.encode(frame, timestamp_us),
+            VideoEncoder::H265(e) => e.encode(frame, timestamp_us, force_keyframe),
+            VideoEncoder::Vp8(e) => e.encode(frame, timestamp_us, force_keyframe),
+            VideoEncoder::Vp9(e) => e.encode(frame, timestamp_us, force_keyframe),
         }
     }
 
@@ -102,6 +105,32 @@ impl VideoEncoder {
 /// 出力を返すことがあり、その場合も同一の Timestamp を複数の Object に載せないため。
 fn output_timestamp_us(input_timestamp_us: u64, output_index: u64, frame_interval_us: u64) -> u64 {
     input_timestamp_us.saturating_add(output_index.saturating_mul(frame_interval_us))
+}
+
+/// テスト用の NV12 フレームを作る (単色ではなく市松模様にする)
+///
+/// 単色だとエンコーダが極端に小さい出力を返すため、隣接画素に差を付ける。
+/// codec ごとのエンコーダのテストが共有する。
+#[cfg(test)]
+pub(crate) fn test_frame(width: u32, height: u32) -> VideoFrameOwned {
+    let mut y = vec![0u8; (width * height) as usize];
+    for row in 0..height as usize {
+        for col in 0..width as usize {
+            y[row * width as usize + col] = if (row + col) % 2 == 0 { 32 } else { 200 };
+        }
+    }
+    let uv = vec![128u8; (width * height / 2) as usize];
+    VideoFrameOwned {
+        data: y,
+        uv_data: Some(uv),
+        width: width as i32,
+        height: height as i32,
+        stride: width as i32,
+        stride_uv: width as i32,
+        pixel_format: shiguredo_video_device::PixelFormat::Nv12,
+        timestamp_us: 0,
+        pixel_buffer: None,
+    }
 }
 
 #[cfg(test)]

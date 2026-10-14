@@ -42,6 +42,14 @@ pub struct VideoTrackParams<'a> {
     pub fps: u32,
     /// kbps
     pub bitrate: u32,
+    /// 映像トラックの最大 Group 長 (ms)
+    ///
+    /// `maxGopDuration` と `maxGroupDuration` の両方に同じ値を載せる。この publisher は
+    /// Group を 1 キーフレーム間隔で進めるため、Group = 1 GOP が成り立つ
+    /// (draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) / §5.2.25 (Maximum Group
+    /// Duration))。Group 長を宣言しない経路 (MP4 パススルーは MP4 のキーフレームで
+    /// Group が進む) では `None` とし、どちらのフィールドも載せない。
+    pub max_group_duration_ms: Option<u64>,
 }
 
 /// 音声トラックの catalog 情報
@@ -154,6 +162,10 @@ fn build_catalog(
         track.height = Some(v.height as u64);
         track.framerate = Some(v.fps as f64);
         track.bitrate = Some(v.bitrate as u64 * 1000);
+        // Group 長の宣言。Group = 1 GOP のため maxGopDuration (§5.2.24) と
+        // maxGroupDuration (§5.2.25) に同じ値を載せる。購読者はバッファ量の見積もりに使う
+        track.max_gop_duration = v.max_group_duration_ms;
+        track.max_group_duration = v.max_group_duration_ms;
         track.target_latency = Some(sync.target_latency_ms);
         track.render_group = Some(sync.render_group);
         track.auth_info = auth_info.map(|infos| infos.to_vec());
@@ -374,6 +386,7 @@ mod tests {
             height: 1080,
             fps: 30,
             bitrate: 5_000,
+            max_group_duration_ms: None,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -406,6 +419,7 @@ mod tests {
             height: 1080,
             fps: 30,
             bitrate: 5_000,
+            max_group_duration_ms: None,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -459,6 +473,68 @@ mod tests {
         );
     }
 
+    /// 映像トラックに maxGopDuration / maxGroupDuration を載せること
+    ///
+    /// Group は 1 キーフレーム間隔 = 1 GOP であるため、両方に同じ値を載せる。値は
+    /// 時間ベースの判定が境界の 1 フレームぶん遅れ得ることを見込んだ Group 長 + 1 フレーム
+    /// (30 fps / 2000 ms なら 2034 ms) である。Group 長を宣言できない経路ではどちらも
+    /// 載せない。draft-ietf-moq-msf-01 §5.2.24 (Maximum GOP Duration) /
+    /// §5.2.25 (Maximum Group Duration)
+    #[test]
+    fn publisher_catalog_sets_max_gop_and_group_duration() {
+        let mut video = VideoTrackParams {
+            track_name: "video",
+            namespace: "ns",
+            codec: "av01.0.08M.08",
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate: 5_000,
+            max_group_duration_ms: Some(2_034),
+        };
+        let catalog =
+            build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
+        let encoded = catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+        let MsfCatalogDocument::Full(full) =
+            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること")
+        else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(
+            full.tracks[0].max_gop_duration,
+            Some(2_034),
+            "maxGopDuration を載せること"
+        );
+        assert_eq!(
+            full.tracks[0].max_group_duration,
+            Some(2_034),
+            "maxGroupDuration に同じ値を載せること"
+        );
+
+        // Group 長を宣言できない経路 (MP4 パススルー) ではどちらも載せない
+        video.max_group_duration_ms = None;
+        let catalog =
+            build_catalog(Some(&video), None, TEST_SYNC, None).expect("カタログを構築できること");
+        let encoded = catalog
+            .encode()
+            .expect("publisher のカタログが encode に成功すること");
+        let MsfCatalogDocument::Full(full) =
+            MsfCatalogDocument::decode(&encoded).expect("encode したカタログを decode できること")
+        else {
+            panic!("publisher は Full カタログを送ること");
+        };
+        assert_eq!(
+            full.tracks[0].max_gop_duration, None,
+            "宣言しない場合は maxGopDuration を載せないこと"
+        );
+        assert_eq!(
+            full.tracks[0].max_group_duration, None,
+            "宣言しない場合は maxGroupDuration を載せないこと"
+        );
+    }
+
     /// `--audio-codec aac` の codec 文字列でも encode に成功すること
     ///
     /// `mp4a.40.2` が audio と判定されることは、library 側の登録名テストで固定している。
@@ -494,6 +570,7 @@ mod tests {
             height: 1080,
             fps: 30,
             bitrate: 5_000,
+            max_group_duration_ms: None,
         };
         let audio = AudioTrackParams {
             track_name: "audio",
@@ -569,6 +646,7 @@ mod tests {
                 height: 1080,
                 fps: 30,
                 bitrate: 5_000,
+                max_group_duration_ms: None,
             };
             let catalog = build_catalog(Some(&video), None, TEST_SYNC, None)
                 .expect("カタログを構築できること");
@@ -625,6 +703,7 @@ mod tests {
             height: 1080,
             fps: 30,
             bitrate: 5_000,
+            max_group_duration_ms: None,
         };
         let audio = AudioTrackParams {
             track_name: "audio",

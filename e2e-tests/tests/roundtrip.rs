@@ -23,7 +23,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// 1 回の起動試行で最初の映像フレームを待つ時間
 ///
-/// キーフレーム間隔 (既定 2 秒) より長くしないと、最初の group の位相によっては
+/// 映像 Group の長さ (既定 2 秒) より長くしないと、最初の group の位相によっては
 /// フレームが届かない。
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(4);
 /// 映像を受け取り続ける時間

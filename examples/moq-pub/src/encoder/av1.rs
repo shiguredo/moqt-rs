@@ -31,16 +31,26 @@ pub struct Av1Encoder {
 
 impl Av1Encoder {
     /// AV1 エンコーダを作成する
+    ///
+    /// `keyframe_interval_frames` はキーフレーム間隔のフレーム数上限であり、時間ベースの
+    /// キーフレーム要求が効かない場合の安全弁として使う。1 以上であること。
     pub fn new(
         width: u32,
         height: u32,
         fps: u32,
         bitrate: u32,
-        keyframe_interval: u32,
+        keyframe_interval_frames: u32,
     ) -> Result<Self> {
         if fps == 0 {
             return Err(Error::Other(
                 "fps must be non-zero to compute the frame interval".to_string(),
+            ));
+        }
+        // 0 だと上限を設定せずにエンコーダの既定値へ委ねるか、上限無しとして扱われる
+        // (`NonZeroUsize` が `None` になる)。意図した安全弁にならないため拒否する
+        if keyframe_interval_frames == 0 {
+            return Err(Error::Other(
+                "keyframe interval must be at least one frame".to_string(),
             ));
         }
         let mut config = EncoderConfig::new(width, height, ImageFormat::Nv12);
@@ -53,19 +63,19 @@ impl Av1Encoder {
         };
         config.g_threads = Some(4);
         config.cpu_used = Some(8);
-        config.kf_max_dist = Some(keyframe_interval);
+        config.kf_max_dist = Some(keyframe_interval_frames);
         config.kf_min_dist = Some(0);
 
         let encoder = Encoder::new(config)?;
         let frame_interval_us = 1_000_000 / u64::from(fps);
 
         tracing::info!(
-            "AV1 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval={}, frame_interval_us={})",
+            "AV1 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval_frames={}, frame_interval_us={})",
             width,
             height,
             fps,
             bitrate,
-            keyframe_interval,
+            keyframe_interval_frames,
             frame_interval_us
         );
 
@@ -81,19 +91,20 @@ impl Av1Encoder {
     ///
     /// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。先頭の出力フレームへ
     /// そのまま載せ、複数の出力フレームがある場合は 1 フレームずつ進める。
+    ///
+    /// `force_keyframe` が真なら、このフレームをキーフレームとしてエンコードする。
     pub fn encode(
         &mut self,
         frame: &VideoFrameOwned,
         timestamp_us: u64,
+        force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>> {
         let image = ImageData::Nv12 {
             y: &frame.data,
             uv: frame.uv_data.as_deref().unwrap_or(&[]),
         };
 
-        let options = EncodeOptions {
-            force_keyframe: false,
-        };
+        let options = EncodeOptions { force_keyframe };
 
         self.encoder.encode(&image, &options)?;
 
@@ -176,4 +187,63 @@ fn read_leb128(data: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::encoder::test_frame;
+
+    /// キーフレームを強制したフレームがキーフレームとして出力されること
+    ///
+    /// Group 長を時間ベースで守るには、任意のフレームでキーフレームを要求できる必要がある。
+    /// libaom は要求した呼び出しの中でキーフレームを返す (遅延しない) ため、強制した入力の
+    /// 出力がキーフレームになり、その次の入力はキーフレームにならないことを固定する。
+    #[test]
+    fn forced_frame_is_encoded_as_a_keyframe() {
+        // 上限を 600 フレームにして、強制しなければキーフレームが出ないようにする
+        let mut encoder =
+            Av1Encoder::new(64, 48, 30, 500, 600).expect("AV1 エンコーダを作成できること");
+        let mut keyframes = Vec::new();
+        for index in 0..8u64 {
+            let frames = encoder
+                .encode(&test_frame(64, 48), index * 33_333, index == 5)
+                .expect("AV1 エンコードに成功すること");
+            keyframes.push(frames.iter().any(|frame| frame.is_keyframe));
+        }
+        assert!(keyframes[0], "先頭フレームがキーフレームであること");
+        assert!(
+            keyframes[1..5].iter().all(|is_keyframe| !is_keyframe),
+            "強制しなければキーフレームが出ないこと: {keyframes:?}"
+        );
+        assert!(
+            keyframes[5],
+            "強制したフレームがキーフレームとして出力されること: {keyframes:?}"
+        );
+        assert!(
+            !keyframes[6],
+            "強制した次のフレームはキーフレームにならないこと: {keyframes:?}"
+        );
+    }
+
+    /// fps が 0 の場合はエラーになること
+    #[test]
+    fn zero_fps_is_rejected() {
+        assert!(
+            Av1Encoder::new(64, 48, 0, 500, 60).is_err(),
+            "fps が 0 の場合はエラーになること"
+        );
+    }
+
+    /// キーフレーム間隔が 0 の場合はエラーになること
+    ///
+    /// 0 を上限として渡すとエンコーダによっては上限無しとして扱われ、安全弁が消える。
+    #[test]
+    fn zero_keyframe_interval_is_rejected() {
+        assert!(
+            Av1Encoder::new(64, 48, 30, 500, 0).is_err(),
+            "キーフレーム間隔が 0 の場合はエラーになること"
+        );
+    }
 }

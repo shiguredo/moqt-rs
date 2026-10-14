@@ -78,8 +78,13 @@ pub struct Config {
     pub fps: u32,
     /// ターゲットビットレート kbps
     pub bitrate: u32,
-    /// キーフレーム間隔 (フレーム数)
-    pub keyframe_interval: u32,
+    /// 映像の Group 長 (ms)
+    ///
+    /// 入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、
+    /// 新しい Group を開始する。Group は 1 キーフレーム間隔 = 1 GOP であるため、
+    /// MSF カタログの `maxGopDuration` / `maxGroupDuration` の基になる
+    /// (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。
+    pub gop_duration_ms: u32,
     /// Track Namespace (draft-ietf-moq-transport-22 §8.8 表現をパースしたもの)
     pub namespace: TrackNamespace,
     /// Track Name
@@ -133,6 +138,11 @@ pub(crate) const DEFAULT_DATAGRAM_MAX_SIZE: usize = 1160;
 /// live 配信の example としての値。音声と映像で同じ値を使うため、カタログの
 /// `targetLatency` にも同じ値を載せる (draft-ietf-moq-msf-01 §5.2.8)。
 pub(crate) const DEFAULT_TARGET_LATENCY_MS: u32 = 200;
+
+/// `--gop-duration` の既定値 (ms)
+///
+/// フレーム数で指定していた頃の既定 (30 fps × 60 フレーム) と同じ実時間長にする。
+pub(crate) const DEFAULT_GOP_DURATION_MS: u32 = 2_000;
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
 ///
@@ -252,13 +262,33 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         "2000",
     )?;
 
-    let (keyframe_interval, keyframe_interval_explicit) = take_u32(
-        &mut args,
-        "keyframe-interval",
-        "FRAMES",
-        "Keyframe interval in frames",
-        "60",
-    )?;
+    // `.default()` は `&'static str` しか取れないため、`DEFAULT_GOP_DURATION_MS` と
+    // 一致する値を文字列で渡す (一致は単体テストで固定する)
+    let gop_duration_opt = noargs::opt("gop-duration")
+        .ty("MS")
+        .doc(
+            "Group duration in milliseconds. A keyframe is forced when this elapses on the input \
+             timestamps, so the group length does not depend on fps. Ignored when --input-mp4 is \
+             set (groups start at the keyframes in the MP4)",
+        )
+        .default("2000")
+        .take(&mut args);
+    let gop_duration_explicit = is_explicit(&gop_duration_opt);
+    let gop_duration_ms = gop_duration_opt.then(|o| {
+        let value = o.value();
+        let ms = value
+            .parse::<u32>()
+            .map_err(|_| format!("invalid --gop-duration: {value}"))?;
+        // 0 ms は Group 長として意味を持たず (毎フレームがキーフレームになる)、
+        // エンコーダへ渡すフレーム数の安全弁も 0 フレームになってしまうため拒否する
+        if ms == 0 {
+            return Err(format!(
+                "--gop-duration must be 1 or more milliseconds (default {}): {value}",
+                DEFAULT_GOP_DURATION_MS
+            ));
+        }
+        Ok(ms)
+    })?;
 
     // `--namespace` は省略可能で、省略した場合は `--url` の msf fragment
     // (draft-ietf-moq-msf-01 §11.1 (URL construction and interpretation)) の
@@ -432,9 +462,9 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
             if fake_capture_device {
                 tracing::warn!("--fake-capture-device is ignored when --input-mp4 is set");
             }
-            if keyframe_interval_explicit {
+            if gop_duration_explicit {
                 tracing::warn!(
-                    "--keyframe-interval is ignored when --input-mp4 is set (groups start at the keyframes in the MP4)"
+                    "--gop-duration is ignored when --input-mp4 is set (groups start at the keyframes in the MP4)"
                 );
             }
             if bitrate_explicit {
@@ -506,7 +536,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         height,
         fps,
         bitrate,
-        keyframe_interval,
+        gop_duration_ms,
         namespace,
         track_name,
         fake_capture_device,
@@ -925,6 +955,51 @@ mod tests {
                 "数値でない値と負の値はエラーになること: {value}"
             );
         }
+    }
+
+    /// `--gop-duration` は既定値を使い、指定で上書き、0 と数値でない値はエラーになる
+    ///
+    /// 既定の 2000 ms はフレーム数で指定していた頃の既定 (30 fps × 60 フレーム) と同じ
+    /// 実時間長であり、fps を変えても Group が同じ長さで進む。
+    /// 0 ms は毎フレームがキーフレームになり、フレーム数の安全弁も表現できないため拒否する。
+    #[test]
+    fn gop_duration_is_configurable() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.gop_duration_ms, DEFAULT_GOP_DURATION_MS,
+            "既定は 2000 ms であること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--gop-duration", "3000"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(config.gop_duration_ms, 3_000, "指定した値が使われること");
+
+        for value in ["0", "1x", "-1"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--gop-duration", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "0 と数値でない値はエラーになること: {value}"
+            );
+        }
+    }
+
+    /// 削除した `--keyframe-interval` は未定義のオプションとしてエラーになる
+    ///
+    /// Group 長をフレーム数で指定する形に戻さないよう、削除を回帰から守る。
+    #[test]
+    fn keyframe_interval_is_rejected() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--keyframe-interval", "30"]);
+        assert!(
+            parse_args(&args).is_err(),
+            "削除した --keyframe-interval はエラーになること"
+        );
     }
 
     /// 削除した `--use-datagram` は未定義のオプションとしてエラーになる

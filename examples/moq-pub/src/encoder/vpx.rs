@@ -62,17 +62,26 @@ impl VpxEncoder {
     /// VP8 / VP9 エンコーダを作成する
     ///
     /// `bitrate` は kbps 単位である (libvpx には bps で渡す)。
+    /// `keyframe_interval_frames` はキーフレーム間隔のフレーム数上限であり、時間ベースの
+    /// キーフレーム要求が効かない場合の安全弁として使う。1 以上であること。
     pub(crate) fn new(
         codec: VpxCodec,
         width: u32,
         height: u32,
         fps: u32,
         bitrate: u32,
-        keyframe_interval: u32,
+        keyframe_interval_frames: u32,
     ) -> Result<Self> {
         if fps == 0 {
             return Err(Error::Other(
                 "fps must be non-zero to compute the frame interval".to_string(),
+            ));
+        }
+        // 0 だと上限を設定せずにエンコーダの既定値へ委ねるか、上限無しとして扱われる
+        // (`NonZeroUsize` が `None` になる)。意図した安全弁にならないため拒否する
+        if keyframe_interval_frames == 0 {
+            return Err(Error::Other(
+                "keyframe interval must be at least one frame".to_string(),
             ));
         }
         let mut config = EncoderConfig::new(
@@ -92,19 +101,19 @@ impl VpxEncoder {
         // そのままだと最初の数十フレームが出力されず live 配信の遅延になる。
         // 1 を指定すると各入力に対してその場で出力される
         config.lag_in_frames = NonZeroUsize::new(1);
-        config.keyframe_interval = NonZeroUsize::new(keyframe_interval as usize);
+        config.keyframe_interval = NonZeroUsize::new(keyframe_interval_frames as usize);
 
         let encoder = Encoder::new(config)?;
         let frame_interval_us = 1_000_000 / u64::from(fps);
 
         tracing::info!(
             "VP8/VP9 encoder created (codec={codec:?}, {}x{}, {} fps, {} kbps, \
-             keyframe_interval={}, frame_interval_us={})",
+             keyframe_interval_frames={}, frame_interval_us={})",
             width,
             height,
             fps,
             bitrate,
-            keyframe_interval,
+            keyframe_interval_frames,
             frame_interval_us
         );
 
@@ -119,19 +128,20 @@ impl VpxEncoder {
     ///
     /// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。先頭の出力フレームへ
     /// そのまま載せ、複数の出力フレームがある場合は 1 フレームずつ進める。
+    ///
+    /// `force_keyframe` が真なら、このフレームをキーフレームとしてエンコードする。
     pub(crate) fn encode(
         &mut self,
         frame: &VideoFrameOwned,
         timestamp_us: u64,
+        force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>> {
         let image = ImageData::Nv12 {
             y: &frame.data,
             uv: frame.uv_data.as_deref().unwrap_or(&[]),
         };
 
-        let options = EncodeOptions {
-            force_keyframe: false,
-        };
+        let options = EncodeOptions { force_keyframe };
 
         self.encoder.encode(&image, &options)?;
 
@@ -164,33 +174,9 @@ impl VpxEncoder {
 
 #[cfg(test)]
 mod tests {
-    use shiguredo_video_device::{PixelFormat as VdPixelFormat, VideoFrameOwned};
-
     use super::*;
 
-    /// テスト用の NV12 フレームを作る (単色ではなく市松模様にする)
-    ///
-    /// 単色だとエンコーダが極端に小さい出力を返すため、隣接画素に差を付ける。
-    fn test_frame(width: u32, height: u32) -> VideoFrameOwned {
-        let mut y = vec![0u8; (width * height) as usize];
-        for row in 0..height as usize {
-            for col in 0..width as usize {
-                y[row * width as usize + col] = if (row + col) % 2 == 0 { 32 } else { 200 };
-            }
-        }
-        let uv = vec![128u8; (width * height / 2) as usize];
-        VideoFrameOwned {
-            data: y,
-            uv_data: Some(uv),
-            width: width as i32,
-            height: height as i32,
-            stride: width as i32,
-            stride_uv: width as i32,
-            pixel_format: VdPixelFormat::Nv12,
-            timestamp_us: 0,
-            pixel_buffer: None,
-        }
-    }
+    use crate::encoder::test_frame;
 
     /// VP8 エンコードがキーフレームを返すこと
     #[test]
@@ -198,7 +184,7 @@ mod tests {
         let mut encoder = VpxEncoder::new(VpxCodec::Vp8, 64, 48, 30, 500, 1)
             .expect("VP8 エンコーダを作成できること");
         let frames = encoder
-            .encode(&test_frame(64, 48), 1_000_000)
+            .encode(&test_frame(64, 48), 1_000_000, false)
             .expect("VP8 エンコードに成功すること");
         assert!(!frames.is_empty(), "エンコード結果が 1 件以上あること");
         assert!(
@@ -222,7 +208,7 @@ mod tests {
         let mut encoder = VpxEncoder::new(VpxCodec::Vp9, 64, 48, 30, 500, 1)
             .expect("VP9 エンコーダを作成できること");
         let frames = encoder
-            .encode(&test_frame(64, 48), 2_000_000)
+            .encode(&test_frame(64, 48), 2_000_000, false)
             .expect("VP9 エンコードに成功すること");
         assert!(!frames.is_empty(), "エンコード結果が 1 件以上あること");
         assert!(
@@ -230,6 +216,43 @@ mod tests {
             "先頭フレームがキーフレームであること"
         );
         assert!(!frames[0].data.is_empty(), "圧縮データが空でないこと");
+    }
+
+    /// キーフレームを強制したフレームがキーフレームとして出力されること
+    ///
+    /// Group 長を時間ベースで守るには、任意のフレームでキーフレームを要求できる必要がある。
+    /// libvpx は要求した呼び出しの中でキーフレームを返す (遅延しない) ため、強制した入力の
+    /// 出力がキーフレームになり、その次の入力はキーフレームにならないことを固定する。
+    #[test]
+    fn forced_frame_is_encoded_as_a_keyframe() {
+        for codec in [VpxCodec::Vp8, VpxCodec::Vp9] {
+            // 上限を 600 フレームにして、強制しなければキーフレームが出ないようにする
+            let mut encoder = VpxEncoder::new(codec, 64, 48, 30, 500, 600)
+                .expect("VP8 / VP9 エンコーダを作成できること");
+            let mut keyframes = Vec::new();
+            for index in 0..8u64 {
+                let frames = encoder
+                    .encode(&test_frame(64, 48), index * 33_333, index == 5)
+                    .expect("エンコードに成功すること");
+                keyframes.push(frames.iter().any(|frame| frame.is_keyframe));
+            }
+            assert!(
+                keyframes[0],
+                "先頭フレームがキーフレームであること: {codec:?}"
+            );
+            assert!(
+                keyframes[1..5].iter().all(|is_keyframe| !is_keyframe),
+                "強制しなければキーフレームが出ないこと: {codec:?} {keyframes:?}"
+            );
+            assert!(
+                keyframes[5],
+                "強制したフレームがキーフレームとして出力されること: {codec:?} {keyframes:?}"
+            );
+            assert!(
+                !keyframes[6],
+                "強制した次のフレームはキーフレームにならないこと: {codec:?} {keyframes:?}"
+            );
+        }
     }
 
     /// catalog の codec 文字列が RFC 6381 の形で固定されていること
@@ -256,6 +279,18 @@ mod tests {
         assert!(
             VpxEncoder::new(VpxCodec::Vp8, 64, 48, 0, 500, 1).is_err(),
             "fps が 0 の場合はエラーになること"
+        );
+    }
+
+    /// キーフレーム間隔が 0 の場合はエラーになること
+    ///
+    /// 0 を上限として渡すと libvpx の `NonZeroUsize` が `None` になり、上限無しとして
+    /// 扱われて安全弁が消える。
+    #[test]
+    fn zero_keyframe_interval_is_rejected() {
+        assert!(
+            VpxEncoder::new(VpxCodec::Vp8, 64, 48, 30, 500, 0).is_err(),
+            "キーフレーム間隔が 0 の場合はエラーになること"
         );
     }
 }

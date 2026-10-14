@@ -111,7 +111,7 @@ example が `msf` fragment から使うのは track-identifier の namespace、�
 | `--height` | | `720` | 映像高さ (px) |
 | `--fps` | | `30` | フレームレート |
 | `--bitrate` | | `2000` | 映像ターゲットビットレート (kbps) |
-| `--keyframe-interval` | | `60` | キーフレーム間隔 (フレーム数) |
+| `--gop-duration` | | `2000` | 映像の Group 長 (ms)。入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、新しい Group を開始する。Group 長は境界のフレームやカデンスのずれで 1 フレーム前後する。カタログの `maxGopDuration` / `maxGroupDuration` にはこの値 + 1 フレーム分を載せ、入力のゆらぎ・フレーム落ち・エンコーダ出力の遅延があると実測はこれを超え得る。`--input-mp4` では無視し、カタログにも載せない |
 | `--namespace` | | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--track-name` | | `video` | Track Name |
 | `--fake-capture-device` | | | 実デバイスの代わりに raden 生成の疑似映像と 440 Hz サイン波音声を使う |
@@ -127,7 +127,7 @@ example が `msf` fragment から使うのは track-identifier の namespace、�
 | `--datagram-max-size` | | `1160` | MOQT の object datagram (ヘッダ + Properties + payload) の上限サイズ (bytes)。上限を超える object は送信せず、実サイズと対処を示すエラーで終了する。既定は RFC 9000 §14 が定める経路の最小 datagram サイズ 1200 から QUIC のパケットヘッダと DATAGRAM frame のヘッダ分を引いた保守的な値である |
 | `--target-latency` | | `200` | MSF カタログの `targetLatency` (ms)。受信側は符号化時刻からこの値ぶん遅らせて表示する (draft-ietf-moq-msf-01 §5.2.8)。音声と映像には同じ値を載せ、同じ `renderGroup` で同時に再生させる (同 §5.2.11) |
 
-`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--keyframe-interval` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` / `--datagram-max-size` は無視され、警告ログが出る。
+`--input-mp4` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--gop-duration` / `--bitrate` / `--audio-device-id` / `--audio-bitrate` / `--audio-datagram` / `--datagram-max-size` は無視され、警告ログが出る。
 `--input-mp4-reencode` と同時に指定した場合、`--device-id` / `--fake-capture-device` / `--audio-device-id` は無視され、警告ログが出る。
 
 ### moq-sub

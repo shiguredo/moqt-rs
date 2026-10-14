@@ -1463,7 +1463,7 @@ mod tests {
             // 30 fps のフレーム間隔で Timestamp を進める
             video_samples.extend(
                 video_encoder
-                    .encode(&frame, index * 33_333)
+                    .encode(&frame, index * 33_333, false)
                     .expect("エンコードできること"),
             );
         }
@@ -1855,7 +1855,7 @@ mod tests {
             // 30 fps のフレーム間隔で Timestamp を進める
             samples.extend(
                 encoder
-                    .encode(&frame, index * 33_333)
+                    .encode(&frame, index * 33_333, false)
                     .expect("エンコードできること"),
             );
         }

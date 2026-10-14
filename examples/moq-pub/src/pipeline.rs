@@ -41,6 +41,7 @@ use crate::encoder::{self, EncodedFrame};
 use crate::error::{Error, Result};
 use crate::fake_audio_capture;
 use crate::fake_capture;
+use crate::gop;
 use crate::group_id;
 use crate::mp4;
 use crate::stream_writer::SubgroupWriter;
@@ -430,13 +431,17 @@ pub async fn run(
     let mut video_encoder: Option<encoder::VideoEncoder> = if config.video_enabled
         && mp4_reader.is_none()
     {
+        // エンコーダへ渡すキーフレーム間隔は、時間ベースの要求が効かない場合の安全弁として
+        // `--gop-duration` から逆算する
+        let keyframe_interval_frames =
+            gop::keyframe_interval_frames(encode_fps, config.gop_duration_ms);
         let enc = match config.video_codec {
             VideoCodec::Av1 => encoder::VideoEncoder::Av1(Box::new(encoder::av1::Av1Encoder::new(
                 encode_width,
                 encode_height,
                 encode_fps,
                 config.bitrate,
-                config.keyframe_interval,
+                keyframe_interval_frames,
             )?)),
             #[cfg(target_os = "macos")]
             VideoCodec::H264 => encoder::VideoEncoder::H264(encoder::h264::H264Encoder::new(
@@ -444,7 +449,7 @@ pub async fn run(
                 encode_height,
                 encode_fps,
                 config.bitrate,
-                config.keyframe_interval,
+                keyframe_interval_frames,
             )?),
             #[cfg(target_os = "macos")]
             VideoCodec::H265 => encoder::VideoEncoder::H265(encoder::h265::H265Encoder::new(
@@ -452,7 +457,7 @@ pub async fn run(
                 encode_height,
                 encode_fps,
                 config.bitrate,
-                config.keyframe_interval,
+                keyframe_interval_frames,
             )?),
             #[cfg(not(target_os = "macos"))]
             VideoCodec::H264 => {
@@ -468,7 +473,7 @@ pub async fn run(
                 encode_height,
                 encode_fps,
                 config.bitrate,
-                config.keyframe_interval,
+                keyframe_interval_frames,
             )?),
             VideoCodec::Vp9 => encoder::VideoEncoder::Vp9(encoder::vpx::VpxEncoder::new(
                 encoder::vpx::VpxCodec::Vp9,
@@ -476,7 +481,7 @@ pub async fn run(
                 encode_height,
                 encode_fps,
                 config.bitrate,
-                config.keyframe_interval,
+                keyframe_interval_frames,
             )?),
         };
         Some(enc)
@@ -563,6 +568,10 @@ pub async fn run(
                     height: info.height,
                     fps: info.fps,
                     bitrate: info.bitrate_kbps,
+                    // MP4 パススルーは Group が MP4 のキーフレームで進み、--gop-duration を
+                    // 使わないため、Group 長を宣言しない。MP4 から最大キーフレーム間隔を
+                    // 算出するには VideoTrackInfo に値を持たせる必要がある (本変更の範囲外)
+                    max_group_duration_ms: None,
                 })
             }
             (None, Some(enc)) => Some(catalog::VideoTrackParams {
@@ -573,6 +582,12 @@ pub async fn run(
                 height: encode_height,
                 fps: encode_fps,
                 bitrate: config.bitrate,
+                // 時間ベースの判定は入力フレームの Timestamp の差分で行うため、宣言は
+                // 公称 fps で境界の 1 フレーム分を見込んだ値にする
+                max_group_duration_ms: Some(gop::catalog_max_duration_ms(
+                    encode_fps,
+                    config.gop_duration_ms,
+                )),
             }),
             (None, None) => None,
         },
@@ -644,6 +659,10 @@ pub async fn run(
     let mut audio_group_id: u64 = group_id::allocate_initial_group_id()?;
     let mut audio_frame_count: u64 = 0;
     let mut current_video_writer: Option<SubgroupWriter> = None;
+    // 映像 Group の開始時刻を追跡する。キーフレームの要求はエンコーダを使う経路
+    // (live capture / MP4 再エンコード) でだけ行い、MP4 パススルーでは Group 長の観測
+    // (debug ログ) にだけ使う
+    let mut gop_tracker = gop::GopTracker::new(config.gop_duration_ms);
     // セッション終了を観測してループを抜けたかどうか。後始末の失敗をセッション終了に伴う
     // 失敗として扱うために使う (セッション終了後の `close` は CONNECT stream の送信失敗として
     // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
@@ -717,7 +736,15 @@ pub async fn run(
                                 frame.timestamp_us,
                                 wall_clock_now_us()?,
                             )?;
-                            (encoder.encode(&frame, timestamp_us)?, None, None)
+                            // 目標の Group 長を時間で決めるため、直前のキーフレームから
+                            // `--gop-duration` が経過した入力フレームでキーフレームを強制する
+                            let force_keyframe =
+                                gop_tracker.request_keyframe_if_due(timestamp_us);
+                            (
+                                encoder.encode(&frame, timestamp_us, force_keyframe)?,
+                                None,
+                                None,
+                            )
                         }
                         VideoInput::Encoded(frame) => (vec![frame], None, None),
                         VideoInput::Reencode { frame, timestamp } => {
@@ -729,8 +756,9 @@ pub async fn run(
                             let timescale = reencode_video_timescale
                                 .expect("re-encode video input has a timescale");
                             let media_us = media_time_to_micros(timestamp, timescale);
+                            let force_keyframe = gop_tracker.request_keyframe_if_due(media_us);
                             (
-                                encoder.encode(&frame, media_us)?,
+                                encoder.encode(&frame, media_us, force_keyframe)?,
                                 Some(timestamp),
                                 Some(timescale),
                             )
@@ -746,6 +774,12 @@ pub async fn run(
                     );
                     for ef in encoded_frames {
                         if ef.is_keyframe {
+                            // Group を開始したフレームを観測し、次のキーフレーム要求の基準に
+                            // する。エンコーダが時間ベースの要求ではなくフレーム数の上限で
+                            // キーフレームを出した場合もここで基準が進み、その直後に時間
+                            // ベースの要求が重なって 1 フレームの Group になることを防ぐ
+                            let previous_duration_us = gop_tracker
+                                .observe_keyframe(frame_timestamp_us(ef.timestamp, video_timescale));
                             // writer の作成と終端で同じ値を使うため、ここで request_id を
                             // 確定させる (`.expect()` の重複も避ける)
                             let video_request_id =
@@ -775,6 +809,14 @@ pub async fn run(
                                 )
                                 .await?,
                             );
+                            // 直前の Group の長さを出し、カタログへ宣言した
+                            // maxGopDuration / maxGroupDuration と実機で突き合わせられるようにする
+                            if let Some(previous_duration_us) = previous_duration_us {
+                                tracing::debug!(
+                                    "Previous video group lasted {} ms",
+                                    previous_duration_us / 1_000
+                                );
+                            }
                             tracing::debug!("Started new video group {}", video_group_id);
                             video_group_id += 1;
                         }
@@ -1580,6 +1622,18 @@ fn assign_input_timestamps(
     }
 }
 
+/// 出力フレームの Timestamp をマイクロ秒へ換算する
+///
+/// live capture はエンコーダが載せた値がそのまま Unix epoch マイクロ秒であり、MP4 の
+/// 経路は入力トラックのタイムスケール単位である (`PROP_TIMESCALE` に載せる値と同じ)。
+/// 時間ベースのキーフレーム要求は入力フレームのマイクロ秒と比較するため、単位を揃える。
+fn frame_timestamp_us(timestamp: u64, timescale: Option<u64>) -> u64 {
+    match timescale {
+        Some(timescale) => media_time_to_micros(timestamp, timescale),
+        None => timestamp,
+    }
+}
+
 /// フレームを読んだ時刻を Unix epoch マイクロ秒で返す
 ///
 /// メディア時刻を壁時計へ換算する対応を取るために使う。システムの時計が Unix epoch
@@ -2027,6 +2081,24 @@ mod tests {
         assert!(
             !reset_targets_open_subgroup(None, stream_id),
             "open 中の stream が無ければ通知しないこと"
+        );
+    }
+
+    /// 出力フレームの Timestamp がタイムスケール単位からマイクロ秒へ換算されること
+    ///
+    /// live capture はマイクロ秒をそのまま載せるため換算しない。MP4 の経路では
+    /// 入力トラックのタイムスケール単位であり、時間ベースの判定にはマイクロ秒が要る。
+    #[test]
+    fn frame_timestamp_is_converted_to_microseconds() {
+        assert_eq!(
+            frame_timestamp_us(1_700_000_000_000_000, None),
+            1_700_000_000_000_000,
+            "live capture はマイクロ秒をそのまま使うこと"
+        );
+        assert_eq!(
+            frame_timestamp_us(9_000, Some(90_000)),
+            100_000,
+            "90000 タイムスケールの 9000 が 100000 マイクロ秒になること"
         );
     }
 

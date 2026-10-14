@@ -49,16 +49,26 @@ pub struct H265Encoder {
 
 impl H265Encoder {
     /// H.265 エンコーダを作成する
+    ///
+    /// `keyframe_interval_frames` はキーフレーム間隔のフレーム数上限であり、時間ベースの
+    /// キーフレーム要求が効かない場合の安全弁として使う。1 以上であること。
     pub fn new(
         width: u32,
         height: u32,
         fps: u32,
         bitrate: u32,
-        keyframe_interval: u32,
+        keyframe_interval_frames: u32,
     ) -> Result<Self> {
         if fps == 0 {
             return Err(Error::Other(
                 "fps must be non-zero to compute the frame interval".to_string(),
+            ));
+        }
+        // 0 をエンコーダへ渡すと上限無しとして扱われる実装がある
+        // (`NonZeroU32` / `NonZeroUsize`)。安全弁が黙って消えないよう拒否する
+        if keyframe_interval_frames == 0 {
+            return Err(Error::Other(
+                "keyframe interval must be at least one frame".to_string(),
             ));
         }
         let config = EncoderConfig {
@@ -77,7 +87,7 @@ impl H265Encoder {
             maximize_power_efficiency: false,
             allow_frame_reordering: false,
             allow_temporal_compression: true,
-            max_key_frame_interval: NonZeroU32::new(keyframe_interval),
+            max_key_frame_interval: NonZeroU32::new(keyframe_interval_frames),
             max_key_frame_interval_duration: None,
             max_frame_delay_count: None,
         };
@@ -86,12 +96,12 @@ impl H265Encoder {
         let frame_interval_us = 1_000_000 / u64::from(fps);
 
         tracing::info!(
-            "H.265 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval={}, frame_interval_us={})",
+            "H.265 encoder created ({}x{}, {} fps, {} kbps, keyframe_interval_frames={}, frame_interval_us={})",
             width,
             height,
             fps,
             bitrate,
-            keyframe_interval,
+            keyframe_interval_frames,
             frame_interval_us
         );
 
@@ -108,10 +118,13 @@ impl H265Encoder {
     ///
     /// `timestamp_us` は入力フレームのメディア時刻 (マイクロ秒)。先頭の出力フレームへ
     /// そのまま載せ、複数の出力フレームがある場合は 1 フレームずつ進める。
+    ///
+    /// `force_keyframe` が真なら、このフレームをキーフレームとしてエンコードする。
     pub fn encode(
         &mut self,
         frame: &VideoFrameOwned,
         timestamp_us: u64,
+        force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>> {
         let data = FrameData::Nv12 {
             y: &frame.data,
@@ -119,7 +132,7 @@ impl H265Encoder {
         };
 
         let options = EncodeOptions {
-            force_key_frame: false,
+            force_key_frame: force_keyframe,
         };
 
         self.encoder.encode(&data, &options)?;
@@ -321,4 +334,38 @@ fn build_hvc_decoder_config_record(
     }
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// fps が 0 の場合はエラーになること
+    ///
+    /// 依存クレートも fps 0 を拒否するため、`is_err()` だけではこちらの検証が働いているかを
+    /// 区別できない。ローカルの検証が返すエラーであることを確かめる。
+    #[test]
+    fn zero_fps_is_rejected() {
+        let Err(error) = H265Encoder::new(64, 48, 0, 500, 60) else {
+            panic!("fps が 0 の場合はエラーになること");
+        };
+        assert!(
+            matches!(error, Error::Other(_)),
+            "ローカルの検証で拒否すること: {error:?}"
+        );
+    }
+
+    /// キーフレーム間隔が 0 の場合はエラーになること
+    ///
+    /// 0 を上限として渡すとエンコーダによっては上限無しとして扱われ、安全弁が消える。
+    /// なお NV12 入力のエンコードは、現状の依存クレートで
+    /// "plane copy dimensions exceed CVPixelBuffer plane bounds" として失敗するため、
+    /// 強制キーフレームの確認はここでは行わない。
+    #[test]
+    fn zero_keyframe_interval_is_rejected() {
+        assert!(
+            H265Encoder::new(64, 48, 30, 500, 0).is_err(),
+            "キーフレーム間隔が 0 の場合はエラーになること"
+        );
+    }
 }
