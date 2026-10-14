@@ -38,6 +38,7 @@ use crate::cli::{Config, VideoCodec};
 use crate::datagram_writer::DatagramWriter;
 use shiguredo_moqt::playout::publish_catch_up::{
     AudioPublishCatchUp, AudioPublishCatchUpChunk, AudioPublishCatchUpFrame,
+    AudioPublishCatchUpStats,
 };
 use shiguredo_moqt::playout::splice_fade::{AudioSpliceEdge, fade_splice_edge_i16};
 
@@ -145,6 +146,9 @@ const CATALOG_RENDER_GROUP: u64 = 1;
 /// relay の cache が既定で保持する時間 (10 分程度) より十分短く、かつ送り直しの負荷が
 /// 問題にならない 30 秒にする。
 const CATALOG_REPUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 音声の配信の遅れの内訳をログへ出す間隔 (ミリ秒)
+const AUDIO_STATS_INTERVAL_MS: u64 = 10_000;
 
 /// 停滞の切り分け用の診断ログを出すかどうか。
 ///
@@ -789,6 +793,8 @@ pub async fn run(
     // Audio Config を送信済みかどうかのフラグ
     // Opus は全フレームが独立してデコード可能なため、最初の audio object だけでよい
     let mut audio_config_sent = false;
+    // 直近に音声の配信の遅れの内訳を出した時刻 (開始からのミリ秒)
+    let mut audio_stats_logged_ms: u64 = 0;
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // カタログの送り直し。開始直後の 1 回は送信済みなので、1 間隔ぶん待ってから始める
@@ -1438,6 +1444,17 @@ pub async fn run(
             _ = tick_interval.tick() => {
                 let now_ms = Instant::now().duration_since(start).as_millis() as u64;
                 client.tick(now_ms);
+                // 音声の遅れがどの段で溜まっているかを定期的に 1 行で出す。遅れが伸びている
+                // 途中でも読めるようにするため、チャンクを捨てたときのログとは別に出す
+                if config.audio_enabled
+                    && now_ms.saturating_sub(audio_stats_logged_ms) >= AUDIO_STATS_INTERVAL_MS
+                {
+                    audio_stats_logged_ms = now_ms;
+                    tracing::info!(
+                        "{}",
+                        format_audio_publish_stats(&audio_publish_catch_up.snapshot())
+                    );
+                }
                 // 停滞の切り分け用の任意診断。MOQT_PUBLISH_DIAG=1 のときだけ出す。
                 // publish ループがフレームを処理し続けているかを追う
                 if publish_diag_enabled() {
@@ -1944,6 +1961,30 @@ fn frame_timestamp_us(timestamp: u64, timescale: Option<u64>) -> u64 {
     }
 }
 
+/// 音声の配信の遅れの内訳を 1 行にまとめる
+///
+/// 読み出し・符号化のキュー・送信のキューのどこで遅れが溜まっているかを、1 行で読める
+/// ようにする。
+fn format_audio_publish_stats(stats: &AudioPublishCatchUpStats) -> String {
+    format!(
+        "Audio publish stats: read_lag={}ms pending={}ms/{} lag={:?}ms limit={}ms floor={:?}ms dropped={}({}ms) catching_up={} starts={} send_queue={}ms/{} send_lag={:?} max_send_lag={:?}",
+        stats.read_lag_ms,
+        stats.pending_ms,
+        stats.pending_frames,
+        stats.lag_ms,
+        stats.limit_ms,
+        stats.floor_ms,
+        stats.dropped_frames,
+        stats.dropped_ms,
+        stats.catching_up,
+        stats.catch_up_starts,
+        stats.send_queue_ms,
+        stats.send_queue_frames,
+        stats.send_lag_ms,
+        stats.max_send_lag_ms,
+    )
+}
+
 /// フレームを読んだ時刻を Unix epoch マイクロ秒で返す
 ///
 /// メディア時刻を壁時計へ換算する対応を取るために使う。システムの時計が Unix epoch
@@ -2399,6 +2440,51 @@ mod tests {
     };
     // セッション終了の判定は `Error` の variant で行うため、`TransportError` はテストでのみ使う
     use tokio_moq::error::TransportError;
+
+    /// 音声の配信の遅れの内訳が、段ごとの値をすべて出すこと
+    ///
+    /// 遅れがどの段 (読み出し / 符号化のキュー / 送信のキュー) で溜まっているかを CI の
+    /// ログから読めるようにするため、どの値も欠かさず出す。
+    #[test]
+    fn audio_publish_stats_reports_every_stage() {
+        let stats = AudioPublishCatchUpStats {
+            policy: shiguredo_moqt::playout::publish_catch_up::AudioPublishCatchUpPolicy::Drop,
+            dropped_frames: 3,
+            dropped_ms: 60,
+            lag_ms: Some(120),
+            floor_ms: Some(20),
+            max_lag_ms: Some(200),
+            pending_ms: 100,
+            read_lag_ms: 20,
+            limit_ms: 60,
+            pending_frames: 5,
+            catching_up: true,
+            catch_up_starts: 2,
+            send_queue_ms: 40,
+            send_queue_frames: 2,
+            send_lag_ms: Some(30),
+            max_send_lag_ms: Some(50),
+        };
+        let line = format_audio_publish_stats(&stats);
+        for expected in [
+            "read_lag=20ms",
+            "pending=100ms/5",
+            "lag=Some(120)ms",
+            "limit=60ms",
+            "floor=Some(20)ms",
+            "dropped=3(60ms)",
+            "catching_up=true",
+            "starts=2",
+            "send_queue=40ms/2",
+            "send_lag=Some(30)",
+            "max_send_lag=Some(50)",
+        ] {
+            assert!(
+                line.contains(expected),
+                "内訳に {expected} が含まれること: {line}"
+            );
+        }
+    }
 
     /// Session の reset 指示が open 中の subgroup stream に一致するかを判定できること
     ///
