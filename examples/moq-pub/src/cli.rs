@@ -3,7 +3,10 @@
 //! noargs でオプションを定義し、[`Config`] にまとめる。
 
 use shiguredo_moqt::message::common::TrackNamespace;
+use shiguredo_moqt::msf::MSF_CATALOG_TRACK_NAME;
 use tokio_moq::{ServerUrl, Transport};
+
+use crate::pipeline::AUDIO_TRACK_NAME;
 
 /// 映像コーデック種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +430,25 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         );
     }
     if !args.metadata().help_mode {
+        // トラック名が音声やカタログのトラック名と衝突すると、購読の解決 (track 名 → alias) が
+        // 映像側へ倒れ、別のトラックへの購読が映像のキーフレーム要求として扱われる
+        if video_enabled && audio_enabled && track_name == AUDIO_TRACK_NAME {
+            return Err(noargs::Error::other(
+                &args,
+                format!(
+                    "--track-name must not be {AUDIO_TRACK_NAME} while the audio track is published"
+                ),
+            ));
+        }
+        if video_enabled && track_name.as_bytes() == MSF_CATALOG_TRACK_NAME {
+            return Err(noargs::Error::other(
+                &args,
+                format!(
+                    "--track-name must not be the catalog track name ({})",
+                    String::from_utf8_lossy(MSF_CATALOG_TRACK_NAME)
+                ),
+            ));
+        }
         if input_mp4.is_some() && input_mp4_reencode.is_some() {
             return Err(noargs::Error::other(
                 &args,
@@ -987,6 +1009,34 @@ mod tests {
                 "0 と数値でない値はエラーになること: {value}"
             );
         }
+    }
+
+    /// 音声やカタログのトラック名と衝突する `--track-name` はエラーになる
+    ///
+    /// トラック名が衝突すると、購読の解決が映像側へ倒れて別のトラックの購読が映像として
+    /// 扱われるため、起動時に拒否する。
+    #[test]
+    fn track_name_colliding_with_other_tracks_is_rejected() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--track-name", "audio"]);
+        assert!(
+            parse_args(&args).is_err(),
+            "音声トラックと衝突する名前はエラーになること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--track-name", "audio", "--no-audio"]);
+        assert!(
+            parse_args(&args).is_ok(),
+            "音声トラックを配信しない場合は受理すること"
+        );
+
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--track-name", "catalog"]);
+        assert!(
+            parse_args(&args).is_err(),
+            "カタログトラックと衝突する名前はエラーになること"
+        );
     }
 
     /// 削除した `--keyframe-interval` は未定義のオプションとしてエラーになる
