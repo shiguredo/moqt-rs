@@ -2,17 +2,19 @@
 //!
 //! 任意の観測列に対して、補正が規則どおりの窓の最小値へ動くこと、段差の取り直しが
 //! 「直近の窓の観測数」と「適用中の補正からの閾値」の両方を満たすときだけ起きること、
-//! 補正が観測した最小値と最大値の範囲から出ないことを検証する。あわせて、`apply` が補正を
-//! 足すだけで同じ補正の間は間隔が保たれ、負にならないこと、`reset` で観測が無い状態へ
-//! 戻ることも検証する。分岐ごとに到達を数え、検証が空振りしていないことも確かめる。
+//! 速すぎる床の上昇が保留されること、補正が観測した最小値と最大値の範囲から出ないことを
+//! 検証する。あわせて、`apply` が補正を足すだけで同じ補正の間は間隔が保たれ、負にならない
+//! こと、`reset` で観測が無い状態へ戻ることも検証する。分岐ごとに到達を数え、検証が
+//! 空振りしていないことも確かめる。
 
 use std::cell::Cell;
 
 use pbt::common::test_runner;
 use shiguredo_moqt::audio_clock::{
-    AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES, AUDIO_TIMESTAMP_OFFSET_STEP_US,
-    AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US, AUDIO_TIMESTAMP_OFFSET_WINDOW_US,
-    AUDIO_TIMESTAMP_SLOPE_LONG_WINDOW_US, AudioTimestampClock,
+    AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND, AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US,
+    AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US, AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES,
+    AUDIO_TIMESTAMP_OFFSET_STEP_US, AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US,
+    AUDIO_TIMESTAMP_OFFSET_WINDOW_US, AUDIO_TIMESTAMP_SLOPE_LONG_WINDOW_US, AudioTimestampClock,
 };
 
 /// 観測の間隔の重み (音声のフレーム間隔 / 少し空く / 直近の窓が空くほど空く)
@@ -21,8 +23,9 @@ use shiguredo_moqt::audio_clock::{
 /// 空くと、段差を見る窓に観測が入らない状態を作れる。
 const INTERVAL_WEIGHTS: [u32; 3] = [8, 3, 3];
 
-/// ずれの動かし方の重み (一定 / ゆっくりしたドリフト / 閾値未満のぶれ / 段差)
-const OFFSET_WEIGHTS: [u32; 4] = [4, 4, 3, 4];
+/// ずれの動かし方の重み (一定 / ゆっくりしたドリフト / 閾値未満のぶれ / 段差 /
+/// 読み出しの遅れが増えて続く)
+const OFFSET_WEIGHTS: [u32; 5] = [4, 4, 3, 4, 4];
 
 /// テスト側のモデルが選んだ、1 回の記録での補正の更新
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +38,8 @@ struct ModelOutcome {
     step_needs_samples: bool,
     /// 段差とみなす閾値に届かなかった
     below_threshold: bool,
+    /// 床の上昇が速すぎるため保留した (補正を動かさなかった)
+    rise_held: bool,
 }
 
 /// テスト側のモデル
@@ -50,6 +55,8 @@ struct ObservationModel {
     min_offset_us: Option<i64>,
     /// 観測した最大値 (マイクロ秒)。補正の取り直しでは消さない
     max_offset_us: Option<i64>,
+    /// 速すぎる床の上昇を保留し始めた時刻 (マイクロ秒)。保留していなければ `None`
+    rise_hold_since_us: Option<i64>,
 }
 
 impl ObservationModel {
@@ -60,6 +67,7 @@ impl ObservationModel {
             applied_us: None,
             min_offset_us: None,
             max_offset_us: None,
+            rise_hold_since_us: None,
         }
     }
 
@@ -90,34 +98,79 @@ impl ObservationModel {
             step_retake: false,
             step_needs_samples: false,
             below_threshold: false,
+            rise_held: false,
         };
+        // 段差かどうか。直近の窓がすべて適用中の値より上にあるときだけ取り直す
         if let (Some(applied_us), Some((recent_min_us, recent_count))) = (self.applied_us, recent) {
             if recent_min_us.saturating_sub(applied_us) >= AUDIO_TIMESTAMP_OFFSET_STEP_US {
                 if recent_count >= AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES {
                     outcome.applied_us = recent_min_us;
                     outcome.step_retake = true;
+                    self.rise_hold_since_us = None;
                     // 古い観測を捨てる。残すと次の記録でまた古い床へ戻ってしまう
                     self.prune(
                         read_wall_clock_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US),
                     );
-                } else {
-                    outcome.step_needs_samples = true;
+                    self.applied_us = Some(outcome.applied_us);
+                    return outcome;
                 }
+                outcome.step_needs_samples = true;
             } else if recent_count >= AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES {
                 outcome.below_threshold = true;
             }
         }
+        // 床が上がるとき。速すぎる上昇は読み出しの遅れとみなし、保留して待つ
+        if let Some(applied_us) = self.applied_us
+            && window_min_us > applied_us
+        {
+            if let Some(rise_hold_since_us) = self.rise_hold_since_us {
+                if read_wall_clock_us.saturating_sub(rise_hold_since_us)
+                    < AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US
+                {
+                    outcome.applied_us = applied_us;
+                    outcome.rise_held = true;
+                    return outcome;
+                }
+            } else if self.rise_is_too_fast_for_clock(read_wall_clock_us, window_min_us) {
+                self.rise_hold_since_us = Some(read_wall_clock_us);
+                outcome.applied_us = applied_us;
+                outcome.rise_held = true;
+                return outcome;
+            }
+        }
+        // 床へ合わせる。下がる方向は待たずに合わせる
+        self.rise_hold_since_us = None;
         self.applied_us = Some(outcome.applied_us);
         outcome
     }
 
-    /// 指定した窓 (両端を含む) の最小値と観測の数
+    /// 床の上がり方が、時計のドリフトとして速すぎるかどうか
+    fn rise_is_too_fast_for_clock(&self, read_wall_clock_us: i64, window_min_us: i64) -> bool {
+        let until_us = read_wall_clock_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US);
+        let since_us = until_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_WINDOW_US);
+        let Some((previous_min_us, _)) = self.window_between(since_us, until_us) else {
+            return false;
+        };
+        let limit_us = AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND
+            * AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US
+            / 1_000_000;
+        window_min_us.saturating_sub(previous_min_us) > limit_us
+    }
+
+    /// 指定した窓 (今から `window_us` 前まで) の最小値と観測の数
     fn window(&self, read_wall_clock_us: i64, window_us: i64) -> Option<(i64, usize)> {
-        let since_us = read_wall_clock_us.saturating_sub(window_us);
+        self.window_between(
+            read_wall_clock_us.saturating_sub(window_us),
+            read_wall_clock_us,
+        )
+    }
+
+    /// 指定した範囲 (両端を含む) の最小値と観測の数
+    fn window_between(&self, since_us: i64, until_us: i64) -> Option<(i64, usize)> {
         let mut min_us: Option<i64> = None;
         let mut count = 0usize;
         for &(read_us, offset_us) in &self.observations {
-            if read_us < since_us || read_us > read_wall_clock_us {
+            if read_us < since_us || read_us > until_us {
                 continue;
             }
             min_us = Some(min_us.map_or(offset_us, |min_us| min_us.min(offset_us)));
@@ -191,6 +244,7 @@ fn applied_offset_follows_the_window_and_step_rules() -> noprop::TestResult {
     let saw_step_retake = Cell::new(false);
     let saw_step_needs_samples = Cell::new(false);
     let saw_below_threshold = Cell::new(false);
+    let saw_rise_hold = Cell::new(false);
     let saw_slope = Cell::new(false);
     let saw_no_slope = Cell::new(false);
     let mut runner = test_runner()?;
@@ -250,7 +304,7 @@ fn applied_offset_follows_the_window_and_step_rules() -> noprop::TestResult {
                         jitter = true;
                         hold = noprop::sample_usize_in(ctx, 5..=30);
                     }
-                    _ => {
+                    3 => {
                         let magnitude_us = noprop::sample_usize_in(
                             ctx,
                             AUDIO_TIMESTAMP_OFFSET_STEP_US as usize..=1_000_000,
@@ -263,6 +317,15 @@ fn applied_offset_follows_the_window_and_step_rules() -> noprop::TestResult {
                         drift_per_record_us = 0;
                         jitter = false;
                         hold = noprop::sample_usize_in(ctx, 5..=40);
+                    }
+                    _ => {
+                        // 読み出しの遅れが増えて続く。保留の長さ (5 秒) を超える長さも混ぜ、
+                        // 定着した場合 (待った後で合わせる) も通す
+                        let magnitude_us = noprop::sample_usize_in(ctx, 20_000..=200_000) as i64;
+                        offset_us += magnitude_us;
+                        drift_per_record_us = 0;
+                        jitter = false;
+                        hold = noprop::sample_usize_in(ctx, 5..=400);
                     }
                 }
             }
@@ -290,13 +353,17 @@ fn applied_offset_follows_the_window_and_step_rules() -> noprop::TestResult {
                 (all_min_us..=all_max_us).contains(&applied_us),
                 "補正が観測した範囲から出た: applied={applied_us} min={all_min_us} max={all_max_us}"
             );
-            // 補正は常に窓の最小値であり、直近の窓の最小値を超えない
+            // 補正は窓の最小値以下である。保留中は窓の最小値が上がっても動かないため、値が
+            // 窓の最小値より小さくなることがある
             let (window_min_us, recent_min_us) = model.window_bounds_us(read_us);
             assert!(
-                (window_min_us..=recent_min_us).contains(&applied_us),
-                "補正が窓の最小値の範囲から出た: applied={applied_us} window={window_min_us} recent={recent_min_us}"
+                applied_us <= window_min_us,
+                "補正が窓の最小値を超えた: applied={applied_us} window={window_min_us} recent={recent_min_us}"
             );
 
+            if outcome.rise_held {
+                saw_rise_hold.set(true);
+            }
             if outcome.step_retake {
                 saw_step_retake.set(true);
             } else {
@@ -396,6 +463,10 @@ fn applied_offset_follows_the_window_and_step_rules() -> noprop::TestResult {
     assert!(
         saw_below_threshold.get(),
         "閾値未満で取り直さない場合を一度も検証していない\n{runner}"
+    );
+    assert!(
+        saw_rise_hold.get(),
+        "速すぎる床の上昇を保留する場合を一度も検証していない\n{runner}"
     );
     assert!(
         saw_slope.get(),

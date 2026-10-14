@@ -11,15 +11,21 @@
 //! これは「音声の時計と壁時計のずれ」と「撮ってから読むまでの遅れ (0 以上)」の和である。
 //! 遅れの最小値を窓で取ることで、ずれに最小の遅れを足した値を推定する。
 //!
-//! 窓の最小値は 2 つの動きに追従する。
+//! 窓の最小値は 3 つの動きに追従する。
 //!
 //! - ゆっくりしたドリフト: 窓が滑るにつれて最小値が動く
 //! - 段差: 直近の窓の最小値が適用中の値より [`AUDIO_TIMESTAMP_OFFSET_STEP_US`] 以上
 //!   大きくなったら、古い観測を捨ててその値へ取り直す。段差は音声の時計そのものが飛んだ
 //!   のであり、遅れが増えたのではない。取り直しを入れるのは、窓が埋まるまで TIMESTAMP が
 //!   実際より古いままになり、受信側の再生の目標が過去へずれて音が捨てられるためである。
+//! - 読み出しの遅れ: 読み出しが一瞬遅れると、窓がその遅れで入れ替わって最小値が上がる。
+//!   そのまま合わせると送る TIMESTAMP が遅れの分だけ動き、受信側は時計がずれたものとして
+//!   基準の共有を 30 秒解除する。上がり方が時計のドリフトとして速すぎるとき
+//!   ([`AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND`]) は
+//!   [`AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US`] だけ保留し、それでも上がったままなら合わせる。
+//!   下がる方向は待たずに合わせる
 //!
-//! この 2 つの規則でも、補正の値は「観測した最大値と最小値の差」の範囲でしか動かない。
+//! この 3 つの規則でも、補正の値は「観測した最大値と最小値の差」の範囲でしか動かない。
 //! 段差やドリフトの量そのものは [`AudioTimestampClock::snapshot`] が返す生の観測の統計
 //! (現在値・最小・最大・傾き) で確かめる。
 //!
@@ -50,6 +56,23 @@ pub const AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US: i64 = 500_000;
 /// 音声は 20 ms ごとに届くため、0.5 秒の窓には約 25 個入る。5 個未満では
 /// 「たまたま遅れて読めた数個」だけで取り直してしまう。
 pub const AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES: usize = 5;
+
+/// 床 (窓の最小値) の上がり方を見る直近の窓 (マイクロ秒)
+pub const AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US: i64 = 500_000;
+
+/// 時計のドリフトとして許す、床の上がりの速さ (マイクロ秒 / 秒)
+///
+/// 実測したドリフトは 20〜50 ms/秒 であり、その 2 倍を置く。これを超える上昇は、時計が
+/// 飛んだのではなく読み出しの遅れが増えたものとみなす。
+pub const AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND: i64 = 100_000;
+
+/// 速すぎる床の上昇を保留する長さ (マイクロ秒)
+///
+/// 2 秒の窓 ([`AUDIO_TIMESTAMP_OFFSET_WINDOW_US`]) が読み出しの遅れで入れ替わる分と合わせ、
+/// 読み出しの遅れが 7 秒未満なら補正を動かさない長さである。読み出しの遅れが定着した場合
+/// (機械が遅くなった、読み出しの経路が変わった) は、待った後でその水準へ合わせる。合わせない
+/// と、送る TIMESTAMP が実際より古いままになり、受信側の基準の遅れがその分だけ伸びる。
+pub const AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US: i64 = 5_000_000;
 
 /// 傾きを求める短い窓 (マイクロ秒)
 pub const AUDIO_TIMESTAMP_SLOPE_WINDOW_US: i64 = 10_000_000;
@@ -88,6 +111,8 @@ pub struct AudioTimestampClock {
     min_offset_us: Option<i64>,
     /// 観測した最大値 (マイクロ秒)。補正の取り直しでは消さない
     max_offset_us: Option<i64>,
+    /// 速すぎる床の上昇を保留し始めた時刻 (マイクロ秒)。保留していなければ `None`
+    rise_hold_since_us: Option<i64>,
     /// 観測した数 (セッション中)
     sample_count: u64,
 }
@@ -100,6 +125,7 @@ impl AudioTimestampClock {
             applied_offset_us: None,
             min_offset_us: None,
             max_offset_us: None,
+            rise_hold_since_us: None,
             sample_count: 0,
         }
     }
@@ -179,15 +205,22 @@ impl AudioTimestampClock {
         self.applied_offset_us = None;
         self.min_offset_us = None;
         self.max_offset_us = None;
+        self.rise_hold_since_us = None;
         self.sample_count = 0;
     }
 
-    /// 補正を窓の最小値へ合わせる。段差なら窓を取り直す
+    /// 補正を窓の最小値へ合わせる。段差なら窓を取り直し、速すぎる上昇は保留する
     ///
     /// 窓の最小値へ合わせるのは、ゆっくりしたドリフトでも補正が止まらないようにするためで
     /// ある (窓が滑るにつれて最小値が動く)。段差 (時計そのものが飛んだ) のときだけ、2 秒の
     /// 窓が埋まるのを待たずに直近の窓から取り直す。待つと、その間だけ TIMESTAMP が実際より
     /// 古くなり、受信側の再生の目標が過去へずれて音が捨てられる。
+    ///
+    /// 段差に届かない上昇でも、時計のドリフトとして速すぎるなら読み出しの遅れが増えたので
+    /// あり、合わせると受信側が時計のずれとみなす。保留して
+    /// [`AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US`] だけ待ち、それでも上がったままなら合わせる。
+    /// 下がる方向 (より早く読めた) は待たずに合わせる。補正が実際より大きくなる (TIMESTAMP が
+    /// 実際より新しくなる) と、受信側の再生の目標が過去になって音が捨てられるためである。
     fn update_applied_offset(&mut self, read_wall_clock_us: i64) {
         let Some(window) = self.offset_window(read_wall_clock_us, AUDIO_TIMESTAMP_OFFSET_WINDOW_US)
         else {
@@ -202,18 +235,50 @@ impl AudioTimestampClock {
                 && recent.min_us.saturating_sub(applied_us) >= AUDIO_TIMESTAMP_OFFSET_STEP_US
             {
                 self.applied_offset_us = Some(recent.min_us);
+                self.rise_hold_since_us = None;
                 // 古い観測を捨てる。残すと次の記録でまた古い床へ戻ってしまう
                 self.prune(
                     read_wall_clock_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US),
                 );
                 return;
             }
+            // 床が上がるとき。ドリフトならゆっくりであり、読み出しの遅れの増加なら一過性で
+            // ある。速すぎる上昇は読み出しの遅れとみなし、保留して待つ
+            if window.min_us > applied_us {
+                if let Some(rise_hold_since_us) = self.rise_hold_since_us {
+                    if read_wall_clock_us.saturating_sub(rise_hold_since_us)
+                        < AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US
+                    {
+                        return;
+                    }
+                } else if self.rise_is_too_fast_for_clock(read_wall_clock_us, window.min_us) {
+                    self.rise_hold_since_us = Some(read_wall_clock_us);
+                    return;
+                }
+            }
         }
 
-        // 床へ合わせる。下がる方向 (より早く読めた) も上がる方向 (ドリフト) も同じ規則で
-        // ある。補正が実際より大きくなる (TIMESTAMP が実際より新しくなる) と、受信側の
-        // 再生の目標が過去になって音が捨てられるため、常に観測した床を超えない値にする
+        // 床へ合わせる。下がる方向は待たずに合わせる
+        self.rise_hold_since_us = None;
         self.applied_offset_us = Some(window.min_us);
+    }
+
+    /// 床の上がり方が、時計のドリフトとして速すぎるかどうか
+    ///
+    /// 直近の窓 ([`AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US`]) より前の窓の最小値との差を、
+    /// [`AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND`] から求めた上限と比べる。
+    /// 超えるなら読み出しの遅れが増えたのであり、時計が飛んだのではない。前の窓が無ければ
+    /// 速くないものとする (比べる相手が無い)。
+    fn rise_is_too_fast_for_clock(&self, read_wall_clock_us: i64, window_min_us: i64) -> bool {
+        let until_us = read_wall_clock_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US);
+        let since_us = until_us.saturating_sub(AUDIO_TIMESTAMP_OFFSET_WINDOW_US);
+        let Some(previous) = self.offset_window_between(since_us, until_us) else {
+            return false;
+        };
+        let limit_us = AUDIO_TIMESTAMP_OFFSET_MAX_CLOCK_RISE_US_PER_SECOND
+            .saturating_mul(AUDIO_TIMESTAMP_OFFSET_RISE_CHECK_US)
+            / 1_000_000;
+        window_min_us.saturating_sub(previous.min_us) > limit_us
     }
 
     /// 直近の窓の最小値と観測の数

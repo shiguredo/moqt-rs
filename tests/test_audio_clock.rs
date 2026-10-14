@@ -6,8 +6,9 @@
 //! それぞれで、補正の動きを固定する。
 
 use shiguredo_moqt::audio_clock::{
-    AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES, AUDIO_TIMESTAMP_OFFSET_STEP_US,
-    AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US, AUDIO_TIMESTAMP_OFFSET_WINDOW_US, AudioTimestampClock,
+    AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US, AUDIO_TIMESTAMP_OFFSET_STEP_MIN_SAMPLES,
+    AUDIO_TIMESTAMP_OFFSET_STEP_US, AUDIO_TIMESTAMP_OFFSET_STEP_WINDOW_US,
+    AUDIO_TIMESTAMP_OFFSET_WINDOW_US, AudioTimestampClock,
 };
 
 /// 2026-09-25 付近の壁時計 (マイクロ秒)。`performance.timeOrigin + performance.now()` に相当する
@@ -237,6 +238,71 @@ fn apply_follows_a_forward_step_immediately() {
         applied_offset_us(&clock),
         CLOCK_LAG_US - 500_000 + MIN_READ_DELAY_US,
         "前に飛ぶ段差へ即座に合わせること"
+    );
+}
+
+/// 一過性の読み出しの遅れでは補正を動かさない
+///
+/// 読み出しが一瞬遅れると、2 秒の窓がその遅れで入れ替わって最小値が上がる。合わせると
+/// 送る TIMESTAMP が遅れの分だけ動き、受信側は時計がずれたものとして A/V の基準の共有を
+/// 30 秒解除する。ドリフトとして速すぎる上昇は保留して待つ。
+#[test]
+fn apply_keeps_the_offset_on_a_transient_read_delay() {
+    let mut clock = AudioTimestampClock::new();
+    for index in 0..100 {
+        record_steady_frame(&mut clock, index, MIN_READ_DELAY_US);
+    }
+    assert_eq!(
+        applied_offset_us(&clock),
+        CLOCK_LAG_US + MIN_READ_DELAY_US,
+        "遅れの前は一定のずれへ合っていること"
+    );
+
+    // 読み出しが 95 ms 遅れた状態が 3 秒続く (窓の 2 秒を超えるが保留の 5 秒には届かない)
+    let transient_delay_us = 95_000;
+    let transient_frames = 3_000_000 / FRAME_US;
+    for index in 100..100 + transient_frames {
+        record_steady_frame(&mut clock, index, MIN_READ_DELAY_US + transient_delay_us);
+    }
+    assert_eq!(
+        applied_offset_us(&clock),
+        CLOCK_LAG_US + MIN_READ_DELAY_US,
+        "一過性の遅れでは補正を動かさないこと"
+    );
+
+    // 遅れが戻っても補正は動かない
+    for index in 100 + transient_frames..100 + transient_frames + 100 {
+        record_steady_frame(&mut clock, index, MIN_READ_DELAY_US);
+    }
+    assert_eq!(
+        applied_offset_us(&clock),
+        CLOCK_LAG_US + MIN_READ_DELAY_US,
+        "遅れが戻っても補正を動かさないこと"
+    );
+}
+
+/// 読み出しの遅れが定着したら、待った後でその水準へ合わせる
+///
+/// 機械が遅くなった、読み出しの経路が変わった場合である。合わせないと、送る TIMESTAMP が
+/// 実際より古いままになり、受信側の基準の遅れがその分だけ伸びる。
+#[test]
+fn apply_follows_a_persistent_read_delay_after_the_hold() {
+    let mut clock = AudioTimestampClock::new();
+    for index in 0..100 {
+        record_steady_frame(&mut clock, index, MIN_READ_DELAY_US);
+    }
+
+    // 読み出しが 95 ms 遅れた状態が、保留の長さと窓の長さの合計より長く続く
+    let persistent_delay_us = 95_000;
+    let persistent_frames =
+        (AUDIO_TIMESTAMP_OFFSET_RISE_HOLD_US + AUDIO_TIMESTAMP_OFFSET_WINDOW_US) / FRAME_US;
+    for index in 100..100 + persistent_frames {
+        record_steady_frame(&mut clock, index, MIN_READ_DELAY_US + persistent_delay_us);
+    }
+    assert_eq!(
+        applied_offset_us(&clock),
+        CLOCK_LAG_US + MIN_READ_DELAY_US + persistent_delay_us,
+        "遅れが定着したらその水準へ合わせること"
     );
 }
 
