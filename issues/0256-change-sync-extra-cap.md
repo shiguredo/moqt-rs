@@ -1,7 +1,7 @@
 # A/V 同期で足す遅延に上限を入れる
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-sync-extra-cap
 - Polished: {YYYY-MM-DD}
 
@@ -49,4 +49,24 @@ moqt-rs の `PlayoutTimeline::align_sync_extras` にも同じ欠陥がある。�
 
 ## 解決方法
 
-(対応時に記入)
+- `src/playout/timeline.rs` の `PlayoutTimeline::align_sync_extras` で、先行する側へ
+  代入する 2 箇所を `min(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US)` で切った
+- 足りない分は相手側の戻し (`decay_sync_extras`) に任せ、A/V のずれとして残す。doc に
+  「目標は既に足している分を含む表示時刻から計算するため、足りない分が上限を超えることが
+  ある」という理由を書いた
+- テスト: `src/playout/timeline.rs` の単体テストに
+  `sync_never_adds_more_than_the_compensation_limit` を追加した。音声へ既に上限いっぱい
+  足している状態で、映像へ足す計算が上限を超える入力を直接与え、両側とも上限を超えない
+  ことを固定した
+- PBT: `pbt/tests/prop_playout/timeline.rs` の生成器を広げた。基準の差を ±300 ms から
+  ±800 ms へ、ドリフトを ±40 ms/秒 から ±100 ms/秒 へ広げ、共有が続く範囲で差が反転する
+  入力を通すようにした。あわせて `sync_extra_delay_us` が上限以内であることを検証する
+  assert を足した
+- PBT: 上限で切った分は 2 つの表示時刻の差として残るため、差の上限を
+  「目標の差 + `TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`」へ直した (修正前は「目標の差」で、
+  上限で切った分を説明できていなかった)
+- 検証: クランプを外した状態で PBT が上限超過 (`sync_extra_delay_us` が 100,466 µs) を
+  検出することを確かめ、戻したうえで成功することを確かめた
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
