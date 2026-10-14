@@ -58,4 +58,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 音声が重複するため、修正が入った canary を使う
 shiguredo_audio_toolbox = "2026.2.0-canary.2"
 # H.264 / H.265 ハードウェアエンコーダ (Apple Video Toolbox)
-shiguredo_video_toolbox = "2026.1"
+# 2026.1.1 は NV12 入力の UV プレーンの大きさをバイト数とピクセル数で比較する不具合があり、
+# 必ず "plane copy dimensions exceed CVPixelBuffer plane bounds" で失敗するため、
+# 修正が入った canary を使う
+shiguredo_video_toolbox = "2026.2.0-canary.4"

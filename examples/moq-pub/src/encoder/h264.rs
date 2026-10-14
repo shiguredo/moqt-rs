@@ -4,15 +4,23 @@
 //! H.264 (avc1) をエンコードする。
 
 use std::num::NonZeroU32;
+use std::sync::mpsc;
 
 use shiguredo_video_device::VideoFrameOwned;
 use shiguredo_video_toolbox::{
-    CodecConfig, EncodeOptions, Encoder, EncoderConfig, FrameData, H264EncoderConfig,
-    H264EntropyMode, H264Profile, PixelFormat,
+    CodecConfig, EncodeOptions, Encoder, EncoderConfig, FnEncodeHandler, FrameData,
+    H264EncoderConfig, H264EntropyMode, H264Profile, PictureType, PixelFormat,
 };
 
 use super::EncodedFrame;
 use crate::error::{Error, Result};
+
+/// Video Toolbox のコールバックが返すエンコード結果
+///
+/// このモジュールの [`EncodedFrame`] とは別の型である。ハンドラは Video Toolbox の
+/// コールバックスレッドから呼ばれるため、結果はチャネルを経由して運ぶ。
+/// `()` は `Encoder::encode` へ渡すユーザーデータである。
+type ToolboxEncodeResult = std::result::Result<shiguredo_video_toolbox::EncodedFrame<()>, Error>;
 
 /// 既定の H.264 catalog codec 文字列 (High@L4.0, 4:2:0 8-bit)
 ///
@@ -28,7 +36,12 @@ const AVCC_LENGTH_SIZE: u8 = 4;
 
 /// H.264 エンコーダ (Apple Video Toolbox)
 pub struct H264Encoder {
-    encoder: Encoder,
+    encoder: Encoder<FnEncodeHandler<(), Error>>,
+    /// エンコード結果を受け取るチャネルの受信側
+    ///
+    /// Video Toolbox はエンコード結果をコールバックスレッドから通知するため、
+    /// [`H264Encoder::encode`] の呼び出し時に溜まっている分を取り出す。
+    results: mpsc::Receiver<ToolboxEncodeResult>,
     /// 1 フレームの表示間隔 (マイクロ秒)
     ///
     /// 1 つの入力から複数の出力フレームが出たときに Timestamp を進める量。
@@ -67,24 +80,34 @@ impl H264Encoder {
             width,
             height,
             codec: CodecConfig::H264(H264EncoderConfig {
-                profile: H264Profile::High,
-                entropy_mode: H264EntropyMode::Cabac,
+                profile: Some(H264Profile::High),
+                entropy_mode: Some(H264EntropyMode::Cabac),
             }),
             pixel_format: PixelFormat::Nv12,
             average_bitrate: Some(bitrate as u64 * 1000),
             fps_numerator: fps,
             fps_denominator: 1,
-            prioritize_encoding_speed_over_quality: false,
-            real_time: true,
-            maximize_power_efficiency: false,
-            allow_frame_reordering: false,
-            allow_temporal_compression: true,
+            prioritize_encoding_speed_over_quality: Some(false),
+            real_time: Some(true),
+            maximize_power_efficiency: Some(false),
+            allow_frame_reordering: Some(false),
+            allow_temporal_compression: Some(true),
             max_key_frame_interval: NonZeroU32::new(keyframe_interval_frames),
             max_key_frame_interval_duration: None,
             max_frame_delay_count: None,
+            data_rate_limits: Vec::new(),
         };
 
-        let encoder = Encoder::new(config)?;
+        // ハンドラは Video Toolbox のコールバックスレッドから呼ばれるため、
+        // 結果はチャネルへ送り、encode() を呼び出したスレッドで取り出す
+        let (results_tx, results) = mpsc::channel();
+        let encoder = Encoder::new(
+            config,
+            FnEncodeHandler::new(move |result: ToolboxEncodeResult| {
+                // 受信側が破棄された後 (エンコーダ破棄時) の通知は捨てる
+                let _ = results_tx.send(result);
+            }),
+        )?;
         let frame_interval_us = 1_000_000 / u64::from(fps);
 
         tracing::info!(
@@ -99,6 +122,7 @@ impl H264Encoder {
 
         Ok(Self {
             encoder,
+            results,
             frame_interval_us,
             catalog_codec_string: DEFAULT_AVC_CATALOG_CODEC_STRING.to_string(),
         })
@@ -127,14 +151,25 @@ impl H264Encoder {
             force_key_frame: force_keyframe,
         };
 
-        self.encoder.encode(&data, &options)?;
+        self.encoder.encode(&data, &options, ())?;
 
+        self.drain_encoded_frames(timestamp_us)
+    }
+
+    /// ハンドラが受け取ったエンコード結果のうち、今取り出せる分を [`EncodedFrame`] へ詰め替える
+    ///
+    /// Video Toolbox はエンコード結果をコールバックスレッドから通知するため、`encode()` の
+    /// 呼び出し時点で届いていない結果は次の呼び出し以降で取り出す。これは、内部で
+    /// `try_recv()` する非ブロッキングな取り出しを繰り返していた従来の挙動と同じである。
+    fn drain_encoded_frames(&mut self, timestamp_us: u64) -> Result<Vec<EncodedFrame>> {
         let mut frames = Vec::new();
         let mut output_index: u64 = 0;
-        while let Some(encoded) = self.encoder.next_frame()? {
+        while let Ok(result) = self.results.try_recv() {
+            let encoded = result?;
             let timestamp =
                 super::output_timestamp_us(timestamp_us, output_index, self.frame_interval_us);
-            let is_keyframe = encoded.keyframe;
+            // キーフレームかどうかはピクチャータイプで判定する
+            let is_keyframe = encoded.picture_type == PictureType::I;
             let video_config = if is_keyframe {
                 if encoded.sps_list.is_empty() {
                     return Err(Error::Other("H.264 keyframe is missing SPS".to_string()));
@@ -266,6 +301,8 @@ fn build_avc_decoder_config_record(sps_list: &[Vec<u8>], pps_list: &[Vec<u8>]) -
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     /// fps が 0 の場合はエラーになること
@@ -286,14 +323,96 @@ mod tests {
     /// キーフレーム間隔が 0 の場合はエラーになること
     ///
     /// 0 を上限として渡すとエンコーダによっては上限無しとして扱われ、安全弁が消える。
-    /// なお NV12 入力のエンコードは、現状の依存クレートで
-    /// "plane copy dimensions exceed CVPixelBuffer plane bounds" として失敗するため、
-    /// 強制キーフレームの確認はここでは行わない。
+    /// 実際に NV12 入力をエンコードできることは
+    /// [`tests::forced_frame_is_encoded_as_a_keyframe`] で確認する。
     #[test]
     fn zero_keyframe_interval_is_rejected() {
         assert!(
             H264Encoder::new(64, 48, 30, 500, 0).is_err(),
             "キーフレーム間隔が 0 の場合はエラーになること"
         );
+    }
+
+    /// キーフレームを強制したフレームがキーフレームとして出力されること
+    ///
+    /// Group 長を時間ベースで守るには、任意のフレームでキーフレームを要求できる必要がある。
+    /// Video Toolbox の出力は入力より遅れるため、強制した入力の出力は数フレーム後になる。
+    /// キーフレーム間隔の上限を 600 フレームにして、先頭フレーム以外でキーフレームが
+    /// 出るのが強制した 6 番目の入力の出力だけであることを固定する。
+    /// NV12 入力のエンコードは依存クレートの 2026.1.1 では必ず失敗していたが、
+    /// 現在の canary では成功する。
+    #[test]
+    fn forced_frame_is_encoded_as_a_keyframe() {
+        const FRAME_COUNT: usize = 12;
+        const FORCED_INDEX: usize = 5;
+
+        let mut encoder =
+            H264Encoder::new(64, 48, 30, 500, 600).expect("H.264 エンコーダを作成できること");
+        let frame = crate::encoder::test_frame(64, 48);
+        let mut frames = Vec::new();
+        for index in 0..FRAME_COUNT {
+            let encoded = encoder
+                .encode(&frame, index as u64 * 33_333, index == FORCED_INDEX)
+                .expect("H.264 のエンコードに成功すること");
+            frames.extend(encoded);
+        }
+        // Video Toolbox が保持している出力をフラッシュして受け取る
+        encoder
+            .encoder
+            .finish()
+            .expect("H.264 エンコーダをフラッシュできること");
+        frames.extend(collect_frames(&mut encoder, FRAME_COUNT - frames.len()));
+
+        assert!(
+            frames[0].is_keyframe,
+            "先頭フレームがキーフレームであること"
+        );
+        assert!(
+            frames[1..FORCED_INDEX]
+                .iter()
+                .all(|frame| !frame.is_keyframe),
+            "強制しなければキーフレームが出ないこと: {:?}",
+            frame_types(&frames)
+        );
+        assert!(
+            frames[FORCED_INDEX].is_keyframe,
+            "強制したフレームがキーフレームとして出力されること: {:?}",
+            frame_types(&frames)
+        );
+        assert!(
+            !frames[FORCED_INDEX + 1].is_keyframe,
+            "強制した次のフレームはキーフレームにならないこと: {:?}",
+            frame_types(&frames)
+        );
+    }
+
+    /// 期限までに届いたエンコード結果を集める
+    ///
+    /// Video Toolbox はエンコード結果をコールバックスレッドから通知するため、
+    /// フラッシュの直後でも結果が届いていないことがある。
+    fn collect_frames(encoder: &mut H264Encoder, expected: usize) -> Vec<EncodedFrame> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frames = Vec::new();
+        while frames.len() < expected && Instant::now() < deadline {
+            frames.extend(
+                encoder
+                    .drain_encoded_frames(0)
+                    .expect("エンコード結果を取り出せること"),
+            );
+            if frames.len() < expected {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert_eq!(
+            frames.len(),
+            expected,
+            "エンコード結果が {expected} 件届くこと"
+        );
+        frames
+    }
+
+    /// テストの失敗時にキーフレームの並びを分かるようにする
+    fn frame_types(frames: &[EncodedFrame]) -> Vec<bool> {
+        frames.iter().map(|frame| frame.is_keyframe).collect()
     }
 }
