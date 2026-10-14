@@ -1,7 +1,7 @@
 # 配信側の音声が遅れたらフレームを捨てて live へ戻す
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/add-publish-catch-up
 - Polished: {YYYY-MM-DD}
 
@@ -83,4 +83,34 @@ A/V の基準の差を開かせる。
 
 ## 解決方法
 
-(対応時に記入)
+- 新規モジュール `src/playout/publish_catch_up.rs` に `AudioPublishCatchUp` を追加した。
+  時刻と値は引数で受ける純粋な状態機械であり、符号化器には触れない
+  - 入力 `AudioPublishCatchUpFrame` (now_ms / timestamp_us / read_wall_clock_us /
+    applied_offset_us / duration_us)。`evaluate` が真を返したら符号化へ渡し、偽なら捨てる
+  - 定数は上限の下限 60 ms、床からの増加 40 ms、再開の長さ 20 ms、持続の確認 100 ms、
+    キューの確認 2 フレーム、クールダウン 1 秒、記録の期限 5 秒
+  - 読み出しの遅れは `read_wall_clock_us − timestamp_us − applied_offset_us` である。
+    補正がまだ決まっていないフレームでは測れないため 0 とする
+  - 上限は `max(60 ms, 床 + 40 ms)` である。床は観測した遅れの最小値
+  - 読み出しの遅れが上限を超えたフレームは、その場で捨てる (状態を持ち越さない)
+  - 追いつきの最中は、キューが 1 パケット以下まで減るか記録が空になるまで捨て続ける
+  - 始めるのは、キューが単独で上限を超えた状態が 2 フレーム続いたか、遅れが上限を超えた
+    状態が 100 ms 続いたときである。遅れだけのときは、やめた直後のクールダウン (1 秒) を
+    守る。キューが単独で超過している場合は実時間に追いつかない状態そのものであり、
+    待つと遅れが伸びるため直ちに始める
+  - 投入の記録は `VecDeque` で持ち、符号化の出力とは順番で対応づける。同じ TIMESTAMP の
+    フレームが続いても記録が上書きされない
+  - 出力が返らない記録は 5 秒で捨てる。送信のキュー (読んでから送り終えるまで) も同じ
+    期限で捨て、計器として残す
+  - 方針 (`drop` / `keep`) を選べる。`keep` は観測だけを続ける
+- テスト: `tests/test_playout/publish_catch_up.rs` に 8 件 (健全な遅れ・キューが伸びた
+  ときの棄却と再開・読み出しの遅れによる即時の棄却・同じ TIMESTAMP の記録・記録が空に
+  なったときの解除・クールダウン・`keep`・リセット) 追加した
+- PBT: `pbt/tests/prop_playout/publish_catch_up.rs` に 2 件追加した。任意の観測列の後に
+  キューをはけさせて読み出しを健全にすると必ず投入を再開すること、すべてのフレームが
+  符号化か棄却のどちらかであることを検証する
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
+- 備考: `examples/moq-pub` への配線は、読み出しの遅れの求め方が live capture (音声の時計の
+  補正を通す) と再エンコード (入力のタイムスケール) で異なるため、別の issue で行う
