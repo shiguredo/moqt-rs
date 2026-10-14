@@ -6,7 +6,7 @@
 
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::splice_fade::{
-    AudioSpliceEdge, fade_splice_edge, splice_fade_samples,
+    AudioSpliceEdge, fade_splice_edge, fade_splice_edge_i16, splice_fade_samples,
 };
 
 /// ばらつきのある音声を作る (-1.0 以上 1.0 以下)
@@ -104,6 +104,107 @@ fn fading_decreases_toward_the_edge() -> noprop::TestResult {
         }
         // 落とす長さの外があるときだけ、元の値のままであることを確かめる
         // (バッファが落とす長さ以下なら外側は無い)
+        if fade_samples < length {
+            let outside = match edge {
+                AudioSpliceEdge::Head => faded[fade_samples],
+                AudioSpliceEdge::Tail => faded[length - 1 - fade_samples],
+            };
+            assert_eq!(outside, value, "落とす長さの外は元の値のままであること");
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 16 bit PCM のフェードでも、落とす長さの外のサンプルは変わらないこと
+#[test]
+fn fading_i16_never_touches_the_samples_outside_the_edge() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let length = noprop::sample_usize_in(ctx, 1..=512);
+        let sample_rate = noprop::sample_with_boundaries(
+            ctx,
+            &[8_000, 44_100, 48_000],
+            noprop::Ratio::one_nth(4),
+            |ctx| noprop::sample_usize_in(ctx, 1..=96_000) as u32,
+        );
+        let edge = if noprop::sample_bool(ctx) {
+            AudioSpliceEdge::Head
+        } else {
+            AudioSpliceEdge::Tail
+        };
+        // 16 bit の全範囲を含める (負の値でも同じ規則で落ちること)
+        let original: Vec<i16> = (0..length)
+            .map(|_| noprop::sample_usize_in(ctx, 0..=65_535) as i16)
+            .collect();
+        let mut faded = original.clone();
+        fade_splice_edge_i16(&mut [faded.as_mut_slice()], sample_rate, edge);
+
+        let fade_samples = splice_fade_samples(length, sample_rate);
+        assert!(fade_samples >= 1 && fade_samples <= length);
+        // 落とす長さの外は元のまま
+        let (faded_outside, original_outside) = match edge {
+            AudioSpliceEdge::Head => (&faded[fade_samples..], &original[fade_samples..]),
+            AudioSpliceEdge::Tail => (
+                &faded[..length - fade_samples],
+                &original[..length - fade_samples],
+            ),
+        };
+        assert_eq!(
+            faded_outside, original_outside,
+            "落とす長さの外は変わらないこと: length={length}, sample_rate={sample_rate}"
+        );
+        // 端は 0
+        let edge_position = match edge {
+            AudioSpliceEdge::Head => 0,
+            AudioSpliceEdge::Tail => length - 1,
+        };
+        assert_eq!(faded[edge_position], 0, "端が 0 になること");
+        // 元の絶対値を超えない (掛け算で増幅しない)
+        for (index, (&before, &after)) in original.iter().zip(faded.iter()).enumerate() {
+            assert!(
+                i32::from(after).abs() <= i32::from(before).abs(),
+                "元の絶対値を超えないこと: index={index}, before={before}, after={after}"
+            );
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 16 bit PCM のフェードでも、端へ向けて単調に小さくなること
+#[test]
+fn fading_i16_decreases_toward_the_edge() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let length = noprop::sample_usize_in(ctx, 2..=512);
+        let sample_rate = noprop::sample_with_boundaries(
+            ctx,
+            &[8_000, 44_100, 48_000],
+            noprop::Ratio::one_nth(4),
+            |ctx| noprop::sample_usize_in(ctx, 1..=96_000) as u32,
+        );
+        let edge = if noprop::sample_bool(ctx) {
+            AudioSpliceEdge::Head
+        } else {
+            AudioSpliceEdge::Tail
+        };
+        // 同じ値で埋める。係数だけが変化するため、単調性を比べられる
+        let value = 10_000i16;
+        let mut faded = vec![value; length];
+        fade_splice_edge_i16(&mut [faded.as_mut_slice()], sample_rate, edge);
+
+        let fade_samples = splice_fade_samples(length, sample_rate);
+        for index in 1..fade_samples {
+            let (previous, current) = match edge {
+                AudioSpliceEdge::Head => (faded[index - 1], faded[index]),
+                AudioSpliceEdge::Tail => (faded[length - index], faded[length - 1 - index]),
+            };
+            assert!(
+                previous <= current,
+                "端へ向けて単調に小さくなること: index={index}, previous={previous}, current={current}"
+            );
+        }
         if fade_samples < length {
             let outside = match edge {
                 AudioSpliceEdge::Head => faded[fade_samples],

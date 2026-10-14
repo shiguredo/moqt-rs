@@ -39,6 +39,7 @@ use crate::datagram_writer::DatagramWriter;
 use shiguredo_moqt::playout::publish_catch_up::{
     AudioPublishCatchUp, AudioPublishCatchUpChunk, AudioPublishCatchUpFrame,
 };
+use shiguredo_moqt::playout::splice_fade::{AudioSpliceEdge, fade_splice_edge_i16};
 
 use crate::encoder::audio::AudioEncoder;
 use crate::encoder::{self, EncodedFrame};
@@ -766,6 +767,12 @@ pub async fn run(
     // `Error::WebTransport` に畳まれる経路があり、エラーの variant だけでは判別できない)
     let mut session_ended = false;
     let mut audio_pcm_buf: Vec<i16> = Vec::new();
+    // 棄却で飛んだ境目をフェードで繋ぐために保持しているチャンク (PCM と TIMESTAMP)。
+    // 捨てるかどうかは次のチャンクの判定を見るまで分からないため、符号化へ渡すチャンクを
+    // 1 つ保持する (先読みの分だけ符号化が 1 フレーム遅れる)
+    let mut audio_fade_pending: Option<(Vec<i16>, u64)> = None;
+    // 直前にチャンクを捨てたかどうか。捨てた直後のチャンクの先頭を落とす
+    let mut audio_fade_next_head = false;
     // live capture のメディア時刻を epoch マイクロ秒へ換算する。capture の時刻の起源は
     // 音声と映像 (さらにデバイスと OS) で異なるため、それぞれ別に持つ。映像は対応を小さく
     // する向きにだけ動かす `WallClockMapper`、音声はドリフトへ窓を滑らせて追従し段差では
@@ -963,6 +970,63 @@ pub async fn run(
             audio_input = audio_input_rx.recv(), if config.audio_enabled => {
                 let Some(audio_input) = audio_input else {
                     tracing::info!("Audio input channel closed");
+                    // フェードのために符号化へ渡すチャンクを 1 つ保持している。送らないと
+                    // 最後の 1 フレームが失われるため、符号化してから閉じる
+                    let outcome: Result<()> = async {
+                        let Some((chunk, timestamp)) = audio_fade_pending.take() else {
+                            return Ok(());
+                        };
+                        let encoder = audio_encoder.as_mut().expect("audio encoder enabled");
+                        let encoded = encoder.encode(&chunk).await?;
+                        let audio_config = if audio_config_sent {
+                            None
+                        } else {
+                            audio_config.as_deref()
+                        };
+                        let properties =
+                            build_audio_loc_properties(timestamp, audio_timescale, audio_config);
+                        if config.audio_datagram {
+                            let mut writer = DatagramWriter::new(
+                                &handle,
+                                &data_plane,
+                                audio_request_id.expect("audio request_id enabled"),
+                                AUDIO_TRACK_ALIAS,
+                                audio_group_id,
+                                DEFAULT_PUBLISHER_PRIORITY,
+                                config.datagram_max_size,
+                            );
+                            let outcome = writer.write_object(&encoded, &properties).await?;
+                            if outcome == ObjectFilterOutcome::Pass {
+                                audio_config_sent = true;
+                            }
+                        } else {
+                            let audio_request_id =
+                                audio_request_id.expect("audio request_id enabled");
+                            let mut writer = SubgroupWriter::new(
+                                &handle,
+                                &data_plane,
+                                audio_request_id,
+                                AUDIO_TRACK_ALIAS,
+                                audio_group_id,
+                                DEFAULT_PUBLISHER_PRIORITY,
+                                true,
+                                client.subscription_filter_start(audio_request_id),
+                            )
+                            .await?;
+                            let outcome = writer.write_object(&encoded, &properties).await?;
+                            if outcome == ObjectFilterOutcome::Pass {
+                                audio_config_sent = true;
+                            }
+                            writer
+                                .finish(client.subscription_filter_start(audio_request_id))
+                                .await?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = outcome {
+                        tracing::warn!("Failed to flush the held audio chunk: {e}");
+                    }
                     break;
                 };
                 // 扱いは video 分岐と同じである。音声は 20 ms ごとに新しいストリームを開くため、
@@ -1054,8 +1118,42 @@ pub async fn run(
                                     stats.catch_up_starts,
                                 );
                             }
-                            continue;
                         }
+                        // 棄却で飛んだ境目をフェードで繋ぐ。保持しているチャンクを符号化する
+                        // 直前に、次のチャンクの判定を見て末尾を落とす。捨てた直後のチャンクは
+                        // 先頭を落とす
+                        let to_encode = match (audio_fade_pending.take(), accepted) {
+                            (Some((mut held, held_timestamp)), false) => {
+                                fade_splice_edge_i16(
+                                    &mut [held.as_mut_slice()],
+                                    AUDIO_SAMPLE_RATE,
+                                    AudioSpliceEdge::Tail,
+                                );
+                                audio_fade_next_head = true;
+                                Some((held, held_timestamp))
+                            }
+                            (Some((held, held_timestamp)), true) => {
+                                audio_fade_pending = Some((
+                                    fade_chunk_head_if_dropped(chunk, &mut audio_fade_next_head),
+                                    timestamp,
+                                ));
+                                Some((held, held_timestamp))
+                            }
+                            (None, false) => {
+                                audio_fade_next_head = true;
+                                None
+                            }
+                            (None, true) => {
+                                audio_fade_pending = Some((
+                                    fade_chunk_head_if_dropped(chunk, &mut audio_fade_next_head),
+                                    timestamp,
+                                ));
+                                None
+                            }
+                        };
+                        let Some((chunk, timestamp)) = to_encode else {
+                            continue;
+                        };
                         let encoded = encoder.encode(&chunk).await?;
                         audio_publish_catch_up.record_encoded_chunk(AudioPublishCatchUpChunk {
                             timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
@@ -2114,6 +2212,22 @@ fn map_audio_capture_timestamp_us(
 /// 時刻をサンプル数から求める。`sample_rate` は 0 にはならない (呼び出し元は 48 kHz 固定)。
 fn samples_to_micros(samples: u64, sample_rate: u32) -> u64 {
     samples.saturating_mul(1_000_000) / u64::from(sample_rate)
+}
+
+/// 直前にチャンクを捨てていれば、その直後のチャンクの先頭を落とす
+///
+/// 捨てた境目の波形が飛ぶとクリックとして聞こえるため、繋ぎ目を滑らかにする。落としたら
+/// 印を消す (落とすのは 1 チャンクだけである)。
+fn fade_chunk_head_if_dropped(mut chunk: Vec<i16>, next_head: &mut bool) -> Vec<i16> {
+    if *next_head {
+        *next_head = false;
+        fade_splice_edge_i16(
+            &mut [chunk.as_mut_slice()],
+            AUDIO_SAMPLE_RATE,
+            AudioSpliceEdge::Head,
+        );
+    }
+    chunk
 }
 
 /// マイクロ秒を timescale 単位のメディア時刻へ戻す

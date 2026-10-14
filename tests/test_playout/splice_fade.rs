@@ -5,7 +5,7 @@
 //! を移植する。
 
 use shiguredo_moqt::playout::splice_fade::{
-    AudioSpliceEdge, fade_splice_edge, splice_fade_samples,
+    AudioSpliceEdge, fade_splice_edge, fade_splice_edge_i16, splice_fade_samples,
 };
 
 /// 0.5 で埋めた音声を作る
@@ -124,4 +124,90 @@ fn nothing_happens_for_an_empty_buffer() {
     assert!(empty.is_empty(), "空のバッファは変わらないこと");
     // チャンネルが 1 つも無いときも落ちない
     fade_splice_edge(&mut [], 48_000, AudioSpliceEdge::Tail);
+}
+
+#[test]
+fn fading_i16_head_makes_the_edge_silent() {
+    let mut buffer = vec![10_000i16; 960];
+    fade_splice_edge_i16(&mut [buffer.as_mut_slice()], 48_000, AudioSpliceEdge::Head);
+    assert_eq!(buffer[0], 0, "端が 0 になること");
+    assert_eq!(
+        buffer[96], 10_000,
+        "落とす長さだけ離れた位置は元の値のままであること"
+    );
+    assert_eq!(buffer[959], 10_000, "落とす長さの外は変わらないこと");
+    assert!(
+        buffer[1] < buffer[2] && buffer[2] < buffer[94],
+        "端へ向けて小さくなること: 1={}, 2={}, 94={}",
+        buffer[1],
+        buffer[2],
+        buffer[94]
+    );
+}
+
+#[test]
+fn fading_i16_tail_makes_the_edge_silent() {
+    let mut buffer = vec![-10_000i16; 960];
+    let original = -10_000i16;
+    fade_splice_edge_i16(&mut [buffer.as_mut_slice()], 48_000, AudioSpliceEdge::Tail);
+    assert_eq!(buffer[959], 0, "末尾が 0 になること");
+    assert_eq!(
+        buffer[863], original,
+        "落とす長さだけ離れた位置は元の値のままであること"
+    );
+    assert_eq!(buffer[0], original, "落とす長さの外は変わらないこと");
+    // 負の値でも絶対値が減る
+    assert!(
+        buffer[958].abs() < buffer[957].abs() && buffer[957].abs() < buffer[865].abs(),
+        "絶対値が末尾へ向けて小さくなること"
+    );
+}
+
+#[test]
+fn fading_i16_covers_every_channel() {
+    let mut left = vec![10_000i16; 960];
+    let mut right = vec![5_000i16; 960];
+    fade_splice_edge_i16(
+        &mut [left.as_mut_slice(), right.as_mut_slice()],
+        48_000,
+        AudioSpliceEdge::Head,
+    );
+    assert_eq!(left[0], 0, "左チャンネルの端が 0 になること");
+    assert_eq!(right[0], 0, "右チャンネルの端が 0 になること");
+    assert_eq!(left[96], 10_000, "左チャンネルの外側は変わらないこと");
+    assert_eq!(right[96], 5_000, "右チャンネルの外側は変わらないこと");
+}
+
+#[test]
+fn fading_i16_leaves_short_and_empty_buffers_alone() {
+    // バッファが落とす長さより短いときは全体をフェードする
+    let mut short = vec![1_000i16; 10];
+    fade_splice_edge_i16(&mut [short.as_mut_slice()], 48_000, AudioSpliceEdge::Head);
+    assert_eq!(short[0], 0, "端が 0 になること");
+    assert_eq!(short[9], 900, "全体をフェードすること");
+
+    // 空のバッファでは何もしない
+    let mut empty: Vec<i16> = Vec::new();
+    fade_splice_edge_i16(&mut [empty.as_mut_slice()], 48_000, AudioSpliceEdge::Tail);
+    assert!(empty.is_empty(), "空のバッファは変わらないこと");
+    fade_splice_edge_i16(&mut [], 48_000, AudioSpliceEdge::Head);
+}
+
+#[test]
+fn fading_i16_never_grows_the_sample() {
+    // 最大値でも掛け算が溢れないこと (16 bit の範囲を超えない)
+    let mut buffer = vec![i16::MAX; 960];
+    fade_splice_edge_i16(&mut [buffer.as_mut_slice()], 48_000, AudioSpliceEdge::Head);
+    assert!(
+        buffer.iter().all(|&sample| sample >= 0),
+        "符号が反転しないこと"
+    );
+    assert_eq!(buffer[0], 0, "端が 0 になること");
+    assert_eq!(buffer[96], i16::MAX, "外側は元の値のままであること");
+    for index in 1..96 {
+        assert!(
+            buffer[index] <= buffer[index + 1],
+            "端へ向けて単調に大きくなること: index={index}"
+        );
+    }
 }

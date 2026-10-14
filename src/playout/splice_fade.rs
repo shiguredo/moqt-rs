@@ -70,3 +70,37 @@ pub fn fade_splice_edge(channels: &mut [&mut [f32]], sample_rate: u32, edge: Aud
         }
     }
 }
+
+/// 端を線形に 0 へ落とす (16 bit PCM)
+///
+/// [`fade_splice_edge`] と同じ規則を 16 bit PCM に対して行う。符号化器へ渡す音声は
+/// 16 bit PCM であり、浮動小数点数へ変換して戻すと量子化の誤差が乗るため、整数のまま
+/// 丸める。
+pub fn fade_splice_edge_i16(channels: &mut [&mut [i16]], sample_rate: u32, edge: AudioSpliceEdge) {
+    let Some(length) = channels.first().map(|channel| channel.len()) else {
+        return;
+    };
+    let fade_samples = splice_fade_samples(length, sample_rate);
+    if fade_samples == 0 {
+        return;
+    }
+    for channel in channels.iter_mut() {
+        // チャンネルごとに長さが違っても、それぞれの端から落とす
+        let fade_samples = fade_samples.min(channel.len());
+        if fade_samples == 0 {
+            continue;
+        }
+        for index in 0..fade_samples {
+            let position = match edge {
+                AudioSpliceEdge::Head => index,
+                AudioSpliceEdge::Tail => channel.len() - 1 - index,
+            };
+            // 0 から 1 へ戻る係数を整数で掛ける。端は 0、落とす長さだけ離れた位置は元の値に
+            // なる。`|sample| <= 32767` かつ `index < fade_samples` であるため、掛けた結果は
+            // 元の絶対値を超えず 16 bit に収まる
+            let sample = i32::from(channel[position]);
+            let faded = sample.saturating_mul(index as i32) / fade_samples as i32;
+            channel[position] = faded as i16;
+        }
+    }
+}
