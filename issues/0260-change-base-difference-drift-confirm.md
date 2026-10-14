@@ -1,7 +1,7 @@
 # A/V 同期の解除を、動きの持続と水準の復帰で決める
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/change-base-difference-drift-confirm
 - Polished: {YYYY-MM-DD}
 
@@ -76,4 +76,37 @@ moqt-js の最新 (2026-10-13) の判定を移植する。
 
 ## 解決方法
 
-(対応時に記入)
+- `src/playout/timeline.rs` に定数 7 つを追加した。動きとみなさない変化
+  (`TIMELINE_BASE_DIFFERENCE_QUIET_US` の 5 ms)、水準を観測したとみなすまでの時間
+  (`TIMELINE_BASE_DIFFERENCE_SETTLE_US` の 3 秒) と上限
+  (`TIMELINE_BASE_DIFFERENCE_START_US` の 10 秒)、段差とみなす離れ幅
+  (`TIMELINE_BASE_DIFFERENCE_JUMP_US` の 150 ms)、離れたまま時計のずれとみなすまでに
+  要求する時間 (`TIMELINE_BASE_DRIFT_CONFIRM_US` の 6 秒)、待たずに判定する離れ幅
+  (`TIMELINE_BASE_DRIFT_STEP_US` の 200 ms)、保持を早く解除するまでの時間
+  (`TIMELINE_BASE_UNSHARED_RELEASE_US` の 2 秒)
+- `PlayoutTimeline` に状態を追加した。動きが止まっている開始時刻、最初の記録の時刻、
+  水準、離れている開始時刻、離れ始めの参照、判定の結果、解除のきっかけに動きがあったか、
+  差が戻っている開始時刻
+- `update_base_difference_drift` を追加し、`record_base_difference` から呼ぶようにした。
+  水準は「動きが戻ったとき」と「落ち着いた水準を観測してから (3 秒または 10 秒)」だけ
+  取り直し、参照 (表示時刻が使う基準の差) から取る
+- 離れ幅が [`TIMELINE_BASE_DRIFT_US`] 以下へ戻ったら判定を消して水準を取り直す。離れ幅が
+  `TIMELINE_BASE_DRIFT_STEP_US` を超え、1 回で `TIMELINE_BASE_DIFFERENCE_JUMP_US` を
+  超えて離れたか、参照が同じ向きに `TIMELINE_BASE_DRIFT_US` を超えて動いたなら待たずに
+  解除する。そうでなければ 6 秒の持続で解除する
+- `refresh_unshared_state` で「解除のきっかけに動きがあったか」を記録し、
+  `update_unshared_release` を `observe` の最後 (同期の制御の後) に呼ぶようにした。
+  きっかけが動きであり、判定が解け、差が閾値の中へ戻り、水準へ復帰した状態が 2 秒続いたら
+  保持をやめる。差が同じ水準のまま閾値だけが動いた解除では戻さない
+- `clear_base_differences` で新しい状態も消すようにした
+- テスト: `tests/test_playout/timeline.rs` の `a_moving_basis_is_treated_as_a_clock_drift`
+  を、水準を決める 11 秒の観測を先に置く形へ直した (判定は落ち着いた水準を観測してから
+  始まるため)。あわせて、保持を待たずに戻る場合 / 一過性の動きでは解除しない場合 /
+  段差で待たずに解除する場合 / 閾値だけが動いた解除は保持する場合の 4 件を追加した
+- 検証: `cargo fmt --all --check` / `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 / 7 に変えても property が成功する
+- 備考: 段差 (1 回で大きく離れた場合) の判定は、その記録のときだけ成り立つ。次の記録では
+  離れ幅が変わらないため持続の確認へ移る。解除そのものは保持 (30 秒) で維持される。
+  テストも「段差の直後に一度 Drift になること」と「その後は保持されること」を分けて
+  確かめている
