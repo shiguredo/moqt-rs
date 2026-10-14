@@ -24,7 +24,7 @@
 use std::collections::VecDeque;
 
 use moq_sub::jitter_buffer::AudioJitterBuffer;
-use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline};
+use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline, wall_clock_us};
 use shiguredo_moqt::name::serialize_namespace;
 use shiguredo_moqt::playout::buffer::PlayoutBuffer;
 use shiguredo_moqt::playout::scheduler::{
@@ -1209,14 +1209,6 @@ fn enqueue_pcm(
         }
     }
     true
-}
-
-/// 現在時刻を Unix epoch からのマイクロ秒で返す
-fn wall_clock_us() -> i64 {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
 }
 
 /// `&[i16]` をリトルエンディアンのバイト列に変換する

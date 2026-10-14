@@ -206,6 +206,18 @@ impl AudioDecoder {
         }
     }
 
+    /// 復号器を作り直す
+    ///
+    /// 中に溜まった未処理の入力を捨てて live へ戻す。受信側の追いつきで、遅れが固定された
+    /// ときに使う ([`crate::pipeline`] を参照)。
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        match self {
+            AudioDecoder::Opus(d) => d.reset(),
+            #[cfg(target_os = "macos")]
+            AudioDecoder::Aac(d) => d.reset(),
+        }
+    }
+
     /// デコード後の出力チャンネル数を返す
     ///
     /// AAC は AudioToolbox の出力がステレオ固定であるため常に 2 になる。

@@ -39,6 +39,10 @@ pub(crate) struct AacDecoder {
     /// AudioToolbox のデコーダは入力のサンプルレートと同じレートで出力する
     /// (リサンプリングは行わない)。
     sample_rate: u32,
+    /// catalog が宣言した入力のチャンネル数
+    ///
+    /// 作り直すときに使う (出力はステレオ固定である)。
+    input_channels: u8,
 }
 
 impl AacDecoder {
@@ -67,6 +71,7 @@ impl AacDecoder {
                 request_tx: Some(request_tx),
                 thread: Some(thread),
                 sample_rate,
+                input_channels: channels,
             }),
             Ok(Err(e)) => {
                 // 生成に失敗した場合もスレッドを join してから返す
@@ -118,6 +123,19 @@ impl AacDecoder {
     /// 常に [`OUTPUT_CHANNELS`] を返す。
     pub(crate) fn channels(&self) -> u8 {
         OUTPUT_CHANNELS
+    }
+
+    /// デコーダを作り直す
+    ///
+    /// 専用スレッドごと作り直し、中に溜まった要求を捨てて live へ戻す。受信側の追いつきで、
+    /// 遅れが固定されたときに使う。
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        let sample_rate = self.sample_rate;
+        let input_channels = self.input_channels;
+        // 代入は右辺を先に評価するため、新しいデコーダを作ってから古いほうを drop する
+        // (drop では送信側を閉じてスレッドを join する)
+        *self = Self::new(sample_rate, input_channels)?;
+        Ok(())
     }
 
     /// 出力のサンプルレート (Hz) を返す

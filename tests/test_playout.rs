@@ -5,6 +5,8 @@
 
 #[path = "test_playout/buffer.rs"]
 mod buffer;
+#[path = "test_playout/catch_up.rs"]
+mod catch_up;
 #[path = "test_playout/delay.rs"]
 mod delay;
 #[path = "test_playout/feedback.rs"]

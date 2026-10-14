@@ -5,6 +5,7 @@
 //! 置く。I/O・出力デバイス・タイマーには触れず、時刻やサンプルは呼び出し側が引数で渡す。
 
 pub mod buffer;
+pub mod catch_up;
 pub mod delay;
 pub mod feedback;
 pub mod scheduler;

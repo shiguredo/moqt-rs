@@ -21,6 +21,15 @@ impl OpusDecoder {
         })
     }
 
+    /// 復号器を作り直す
+    ///
+    /// 中に溜まった未処理の入力を捨てて live へ戻す。受信側の追いつきで、遅れが固定された
+    /// ときに使う。
+    pub fn reset(&mut self) -> Result<()> {
+        self.decoder = Decoder::new(DecoderConfig::new(self.sample_rate, self.channels))?;
+        Ok(())
+    }
+
     /// 1 Opus パケットをデコードして PCM (S16 interleaved) を返す
     pub fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         Ok(self.decoder.decode(data)?)

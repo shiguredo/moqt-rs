@@ -21,6 +21,17 @@ pub mod pipeline;
 // 呼び出し側がチャネルの型として必要とするため、クレート直下へ再公開する
 pub use decoder::{DecodedAudioFrame, DecodedVideoFrame};
 
+/// 現在時刻を Unix epoch からのマイクロ秒で返す
+///
+/// 受信側の時刻と、復号の出力が送られた TIMESTAMP からどれだけ遅れているかの観測に使う。
+/// 呼び出し側のプレイヤーも同じ時計を使う。
+pub fn wall_clock_us() -> i64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
+}
+
 // パイプラインの内部実装
 mod catalog;
 mod decoder;

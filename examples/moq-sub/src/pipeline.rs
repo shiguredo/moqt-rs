@@ -25,6 +25,7 @@ use shiguredo_moqt::loc::{
 use shiguredo_moqt::pending_subgroup_buffer::{
     DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS, PendingNotifyReason, PendingSubgroupBuffer,
 };
+use shiguredo_moqt::playout::catch_up::{AudioReceiveCatchUp, AudioReceiveCatchUpObservation};
 use shiguredo_moqt::session::types::{DatagramAcceptance, SessionError, TrackDataAcceptance};
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::subgroup::SubgroupHeader;
@@ -87,6 +88,11 @@ struct AudioDelivery<'a> {
     recorder: Option<&'a RecorderSender>,
     /// 書式違反によるセッション終了を main ループへ依頼するチャネル
     termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+    /// 受信側の音声の追いつき (購読で 1 つ共有する)
+    ///
+    /// 復号器の中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。
+    /// 状態はストリーム経路と datagram 経路で共有する。
+    catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
 }
 
 impl AudioDelivery<'_> {
@@ -179,14 +185,60 @@ impl AudioDelivery<'_> {
         // サンプルレートとチャンネル数はデコーダの出力を使う。AAC は AudioToolbox の出力が
         // ステレオ固定で catalog の channelConfig と食い違うことがあるが、そのまま再生を
         // 継続する (validate_audio_config の警告と同じ方針)
+        let sample_rate = decoder.sample_rate();
+        let channels = decoder.channels();
+        let pts_us = loc_timestamp_us(timestamp, timescale);
+        // 復号の出力が送られた TIMESTAMP からどれだけ遅れて出てきたかを観測する。復号器の
+        // 中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。壁時計の
+        // TIMESTAMP を持たない音 (Timescale 付き) では遅れを測れないため観測しない
+        if let Some(pts_us) = pts_us {
+            let now_us = crate::wall_clock_us();
+            let lag_ms = now_us.saturating_sub(pts_us) / 1_000;
+            // ロックは await をまたがない (観測と判定だけの同期処理)
+            let (decision, catch_up_starts) = {
+                let mut catch_up = self
+                    .catch_up
+                    .lock()
+                    .expect("audio catch up lock is not poisoned");
+                let decision = catch_up.observe(AudioReceiveCatchUpObservation {
+                    now_ms: now_us / 1_000,
+                    lag_ms,
+                    duration_ms: pcm_duration_ms(pcm.len(), usize::from(channels), sample_rate),
+                    timestamp_us: pts_us,
+                });
+                (decision, catch_up.snapshot().catch_up_starts)
+            };
+            if decision.rebuild_decoder {
+                tracing::info!(
+                    "Rebuilding the audio decoder to catch up (lag {lag_ms}ms, starts {catch_up_starts})"
+                );
+                if let Err(e) = decoder.reset() {
+                    tracing::warn!("Failed to rebuild the audio decoder: {e}");
+                }
+            }
+        }
         let frame = DecodedAudioFrame {
             pcm,
-            sample_rate: decoder.sample_rate(),
-            channels: decoder.channels(),
-            pts_us: loc_timestamp_us(timestamp, timescale).unwrap_or(0),
+            sample_rate,
+            channels,
+            pts_us: pts_us.unwrap_or(0),
         };
         self.audio_tx.send(frame).is_ok()
     }
+}
+
+/// PCM (S16 interleaved) の長さをミリ秒で返す
+///
+/// チャンネル数とサンプルレートが 0 のときは 0 を返す。
+fn pcm_duration_ms(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
+    if channels == 0 || sample_rate == 0 {
+        return 0;
+    }
+    let frames = pcm_len / channels;
+    i64::try_from(frames)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000)
+        / i64::from(sample_rate)
 }
 
 /// stream task の終了を待つ上限
@@ -343,6 +395,7 @@ fn spawn_stream_task(
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -359,6 +412,7 @@ fn spawn_stream_task(
     let video_decode_order = std::sync::Arc::clone(video_decode_order);
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
+    let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
     let termination_tx = termination_tx.clone();
     let catalog_tx = catalog_tx.clone();
     let pending_subgroups = std::sync::Arc::clone(pending_subgroups);
@@ -378,6 +432,7 @@ fn spawn_stream_task(
             &video_decode_order,
             audio_decoder.as_ref(),
             &audio_config_handled,
+            &audio_catch_up,
             &termination_tx,
             &catalog_tx,
             &pending_subgroups,
@@ -881,6 +936,8 @@ pub async fn run(
     let audio_decoder =
         audio_decoder.map(|decoder| std::sync::Arc::new(tokio::sync::Mutex::new(decoder)));
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
+    let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
 
     let track_map: Arc<HashMap<u64, TrackKind>> = Arc::new(track_map);
 
@@ -944,6 +1001,7 @@ pub async fn run(
     let recorder_for_datagram = recorder_sender.clone();
     let termination_tx_for_datagram = termination_tx.clone();
     let audio_tx_for_datagram = audio_tx.clone();
+    let audio_catch_up_for_datagram = Arc::clone(&audio_catch_up);
     let datagram_task = tokio::spawn(task_monitor.clone().instrument(async move {
         // Audio Config の処理とデコードは subgroup stream と共有する。datagram の音声は
         // 購読した audio track でしか届かないため、catalog の値はここで確定できる
@@ -959,6 +1017,7 @@ pub async fn run(
             catalog_channels: audio_params.map_or(0, |(_, channels)| channels),
             recorder: recorder_for_datagram.as_ref(),
             termination_tx: &termination_tx_for_datagram,
+            catch_up: audio_catch_up_for_datagram.as_ref(),
         };
         // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
         let mut unsupported_aliases: HashSet<u64> = HashSet::new();
@@ -1074,6 +1133,7 @@ pub async fn run(
                 &video_decode_order,
                 audio_decoder.as_ref(),
                 &audio_config_handled,
+                &audio_catch_up,
                 &termination_tx,
                 &catalog_tx,
                 &pending_subgroups,
@@ -2213,6 +2273,7 @@ async fn handle_incoming_stream(
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -2238,6 +2299,7 @@ async fn handle_incoming_stream(
         video_decode_order,
         audio_decoder,
         audio_config_handled,
+        audio_catch_up,
         termination_tx,
         catalog_tx,
         pending_subgroups,
@@ -2305,6 +2367,7 @@ async fn handle_stream_body(
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -2495,6 +2558,7 @@ async fn handle_stream_body(
                             catalog_channels: channels,
                             recorder,
                             termination_tx,
+                            catch_up: audio_catch_up.as_ref(),
                         },
                     )
                     .await;
@@ -4681,6 +4745,7 @@ mod tests {
         audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
         audio_config_handled: &'a std::sync::atomic::AtomicBool,
         termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
+        catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
         recorder: Option<&'a RecorderSender>,
     ) -> AudioDelivery<'a> {
         AudioDelivery {
@@ -4691,6 +4756,7 @@ mod tests {
             catalog_channels: 1,
             recorder,
             termination_tx,
+            catch_up,
         }
     }
 
@@ -4723,7 +4789,14 @@ mod tests {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
-        let delivery = test_audio_delivery(&audio_tx, &audio_config_handled, &termination_tx, None);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            None,
+        );
         let mut decoder =
             AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
 
@@ -4826,7 +4899,14 @@ mod tests {
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
-        let delivery = test_audio_delivery(&audio_tx, &audio_config_handled, &termination_tx, None);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            None,
+        );
 
         // Properties Length の宣言に対して実データが足りない壊れたバイト列
         let deliver = delivery
@@ -4876,10 +4956,12 @@ mod tests {
         let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
             &termination_tx,
+            &catch_up,
             Some(&recorder_sender),
         );
 
