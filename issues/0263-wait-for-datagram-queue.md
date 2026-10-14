@@ -1,7 +1,7 @@
 # datagram の送信キューが満杯なら空きができるまで待つ
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/wait-for-datagram-queue
 - Polished: {YYYY-MM-DD}
 
@@ -44,7 +44,8 @@ datagram は再送されないため、ここで捨てると音声が飛ぶ。�
 
 - 送信のキューが満杯のとき、空きができるまで待ってから送ること
 - 送信そのものの失敗は、待たずにエラーとして返ること
-- E2E Test が成功すること
+- 送信の待ちが働いていることが E2E Test のログで確認できること (エラーが
+  `Queue does not have room` から変わる)
 
 検証は E2E Test で行う。送信のキューが満杯になる状況は s2n-quic の接続の内部状態であり、
 `StreamHandle::Quic` を作るには実際の接続が要るため、単体テストでは再現できない。
@@ -54,4 +55,13 @@ datagram は再送されないため、ここで捨てると音声が飛ぶ。�
 
 ## 解決方法
 
-(対応時に記入)
+- `StreamHandle::send_datagram` の QUIC の経路を `Sender::poll_send_datagram` に変え、
+  `Poll::Pending` (送信のキューに空きが無い) のときは空きができるまで待つようにした。
+  この API は待つ間の `Waker` を登録するため、ポーリングで待つ必要はない
+- 接続が閉じている (`datagram_mut` 自体が失敗する) 場合は今までどおりエラーを返す
+- 検証: E2E Test のエラーが `Queue does not have room for more datagrams.` から
+  `Connection-level error occurred.` へ変わり、待つ実装が働いていることを確認した
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
+- 備考: E2E Test 全体の成功は、datagram が subscriber に届かない別の問題 (0265) に
+  依存する

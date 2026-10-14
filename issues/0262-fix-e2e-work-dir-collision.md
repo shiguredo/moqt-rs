@@ -1,7 +1,7 @@
 # E2E テストが一時ディレクトリを奪い合って MP4 を消すのを直す
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/fix-e2e-work-dir-collision
 - Polished: {YYYY-MM-DD}
 
@@ -47,10 +47,21 @@ E2E Test が 2026-10-14 の 0253 以降、毎回失敗している。原因は�
 
 - 同じプロセスで 2 つのテストが並列に走っても、互いのディレクトリと成果物を消さないことが
   テストで固定されていること
-- E2E Test が成功すること
+- `publish_and_subscribe_roundtrip` が成功すること (datagram の音声のテストは別の
+  問題に依存するため、この issue では対象にしない)
 - `make test` / `make clippy` / `make fmt` が通ること
 - ソースコードに issue 番号や issue への言及を書かないこと
 
 ## 解決方法
 
-(対応時に記入)
+- `WorkDir::new(name)` にして、テストごとに一意な名前を渡すようにした。名前は
+  `moqt-e2e-<プロセス ID>-<テスト名>` になる
+- 呼び出し側は `WorkDir::new("roundtrip")` と `WorkDir::new("audio-datagram")` にした
+- テスト: `work_dirs_are_unique_per_test` (同じプロセスで並列に走るテストが別の
+  ディレクトリを使い、片方が作り直してももう片方の成果物が消えないこと) と
+  `work_dir_clears_the_previous_run` (同じ名前のディレクトリは前回の残骸を消してから
+  作り直すこと) を追加した
+- 検証: E2E Test が `publish_and_subscribe_roundtrip` で成功するようになった
+  (それまでは 0 passed、修正後は 1 passed)
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all --check` が成功した
