@@ -389,14 +389,43 @@ impl StreamHandle {
         match self {
             StreamHandle::Quic(handle) => {
                 let mut datagrams = Vec::new();
-                let result = handle.datagram_mut(
-                    |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
-                        while let Some(bytes) = receiver.recv_datagram() {
-                            datagrams.push(bytes.to_vec());
+                let mut query_error: Option<String> = None;
+                // 1 つも無いときに即座に返すと、呼び出し側の受信ループが空回りして CPU を
+                // 1 コア使い切り、同じ runtime で動く QUIC エンドポイントの I/O を飢えさせる
+                // (受信パケットが落ち、relay 側の輻輳ウィンドウも崩壊する)。最初の 1 つは
+                // 届くまで待ち、続けて届いている分はまとめて取る
+                let first = std::future::poll_fn(|cx| {
+                    let received = handle.datagram_mut(
+                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                            receiver.poll_recv_datagram(cx)
+                        },
+                    );
+                    match received {
+                        Ok(received) => received,
+                        Err(e) => {
+                            // `datagram_mut` 自体の失敗 (接続が既に閉じている) は待っても
+                            // 直らない。空の datagram で打ち切って呼び出し側へ伝える
+                            query_error = Some(format!("datagram query error: {e}"));
+                            std::task::Poll::Ready(Ok(Bytes::new()))
                         }
-                    },
-                );
-                result.map_err(|e| TransportError::Quic(format!("datagram query error: {e}")))?;
+                    }
+                })
+                .await
+                .map_err(|e| TransportError::Quic(format!("datagram receive error: {e}")))?;
+                if let Some(e) = query_error {
+                    return Err(TransportError::Quic(e));
+                }
+                datagrams.push(first.to_vec());
+                // 続けて届いている分を取る (空になったら返す)
+                handle
+                    .datagram_mut(
+                        |receiver: &mut s2n_quic::provider::datagram::default::Receiver| {
+                            while let Some(next) = receiver.recv_datagram() {
+                                datagrams.push(next.to_vec());
+                            }
+                        },
+                    )
+                    .map_err(|e| TransportError::Quic(format!("datagram query error: {e}")))?;
                 Ok(datagrams)
             }
             StreamHandle::WtH3(session) => {
