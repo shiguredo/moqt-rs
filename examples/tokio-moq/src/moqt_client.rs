@@ -673,6 +673,10 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層 (example) の
             // 責務であり、ここで捨てると fill に応答できないため、アプリへ届ける
             | SessionEvent::OpenFillFetchStream { .. }
+            // FetchOkReceived は自側が FETCH を発行したときの応答である
+            // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。End Location と End of Track は
+            // アプリが応答 stream を読む範囲の決定に使うため、アプリへ届ける
+            | SessionEvent::FetchOkReceived { .. }
     )
 }
 
@@ -1024,8 +1028,8 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 ///
 /// draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization): track に紐づくトークンは、
 /// その track に関係する AUTHORIZATION TOKEN パラメータを受け付けるすべての制御
-/// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE。
-/// 本 client が送るのは SUBSCRIBE / FETCH を除いた経路である) へ MUST 付与する。
+/// メッセージ (subscriber は SUBSCRIBE / SUBSCRIBE_NAMESPACE / FETCH / REQUEST_UPDATE)
+/// へ MUST 付与する。
 /// SETUP に載せていても免除されない。
 ///
 /// 本 client (`MoqtClient`) は catalog を解析しないため、送信時点で track とトークンの
@@ -1043,7 +1047,7 @@ fn authorization_parameter(token: &AuthorizationToken) -> MessageParameter {
 /// MALFORMED_AUTH_TOKEN で拒否) の対象にもなりうる。付与漏れ
 /// (draft-ietf-moq-msf-01 §11.4.3 の MUST) を避ける側に倒す。
 ///
-/// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) /
+/// PUBLISH (`publish_track`) / SUBSCRIBE (`subscribe_track_inner`) / FETCH (`fetch`) /
 /// REQUEST_UPDATE (`send_request_update`) は本関数の単一経路でトークンを付与する。
 /// 送信経路を追加するときも本関数を通すこと。なお SETUP は `establish_*` の `c4m_tokens`
 /// 引数から `crate::build_setup_options` が option として組み立てる別経路である。
@@ -1572,6 +1576,40 @@ impl MoqtClient {
             track_alias,
             largest_object,
         })
+    }
+
+    /// FETCH を発行する (subscriber 側)
+    ///
+    /// draft-ietf-moq-transport-22 §9.11 (FETCH)。取り出す範囲は LOCATION_FILTER パラメータで
+    /// 指定する。応答は [`ClientEvent::Session`] の [`SessionEvent::FetchOkReceived`]
+    /// (End Location / End of Track) または [`SessionEvent::RequestErrorReceived`] として届く。
+    /// FETCH_OK のあと、応答の Object と End of Range は peer が開いた uni stream に載るため、
+    /// [`DataPlaneHandle::recv_data_stream_type`] などで読む。
+    ///
+    /// track に紐づく C4M 認可トークンは、SUBSCRIBE / REQUEST_UPDATE と同じく
+    /// AUTHORIZATION_TOKEN (0x03) としてすべて付与する
+    /// (draft-ietf-moq-msf-01 §11.4.3 (Presenting Authorization))。
+    ///
+    /// # Errors
+    ///
+    /// Session が確立していない場合、peer の GOAWAY を受信済みの場合、パラメータが
+    /// §9.11 / §9.20 の規則に反する場合に [`TransportError`] になる。
+    pub async fn fetch(
+        &mut self,
+        namespace: TrackNamespace,
+        track_name: Vec<u8>,
+        parameters: MessageParameters,
+    ) -> Result<u64> {
+        let parameters = with_auth_parameters(parameters, &self.auth_tokens);
+        let request_id = {
+            let mut session = lock_session(&self.session);
+            session
+                .send_fetch(namespace, track_name, parameters)
+                .map_err(|e| TransportError::Internal(format!("send_fetch: {e}")))?
+        };
+        tracing::info!("Sent FETCH: request_id={request_id}");
+        self.drain_events().await?;
+        Ok(request_id)
     }
 
     async fn wait_subscription_resolved(&mut self, request_id: u64) -> Result<()> {
@@ -2173,11 +2211,29 @@ impl MoqtClient {
                         }
                         self.bidi_sends.insert(request_id, send);
                         self.bidi_stop_txs.insert(request_id, stop_tx);
-                        tracing::info!("Received peer request: request_id={request_id}");
-                        self.incoming_requests.push_back(IncomingRequest {
-                            request_id,
-                            message,
-                        });
+                        // Session が受理しなかった FETCH はアプリへ渡さない。§3.2 の MUST 2 条件
+                        // (publish 実績が無い / Start Location が Largest Object より大きい) と
+                        // 空 range の INVALID_RANGE は Session が送済みで、request は `fetches` に
+                        // 登録されていない。アプリが重ねて応答すると `send_fetch_ok` /
+                        // `send_request_error` が未登録の Request ID を拒否して致命終了する
+                        let accepted_fetch = match &message {
+                            ControlMessage::Fetch(_) => {
+                                let session = lock_session(&self.session);
+                                session.fetch(request_id).is_some()
+                            }
+                            _ => true,
+                        };
+                        if accepted_fetch {
+                            tracing::info!("Received peer request: request_id={request_id}");
+                            self.incoming_requests.push_back(IncomingRequest {
+                                request_id,
+                                message,
+                            });
+                        } else {
+                            tracing::info!(
+                                "Peer FETCH was rejected by the session; not delivering it to the application: request_id={request_id}"
+                            );
+                        }
                         // 受理時に Session が自動応答 (REQUEST_ERROR 等) を積むことがある
                         self.drain_events().await?;
                     }
@@ -2638,7 +2694,11 @@ impl MoqtClient {
                 // uni stream を開く」指示である (draft-ietf-moq-transport-22 §3.4)。
                 // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層
                 // (example) の責務であり、ここで捨てると fill に応答できない
-                | SessionEvent::OpenFillFetchStream { .. }) => {
+                | SessionEvent::OpenFillFetchStream { .. }
+                // FetchOkReceived は自側が FETCH を発行したときの応答である
+                // (draft-ietf-moq-transport-22 §9.12)。I/O 層で行うことは無く、
+                // アプリが End Location / End of Track を使って応答 stream を読む
+                | SessionEvent::FetchOkReceived { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
                     // `take_notable_event` が取り出せない
                     // (配送キューへ積むのはこの drain だけ)。
@@ -2654,7 +2714,6 @@ impl MoqtClient {
                 | SessionEvent::RequestTerminated { .. }
                 | SessionEvent::RequestOkReceived { .. }
                 | SessionEvent::PublishStateNotifyReceived { .. }
-                | SessionEvent::FetchOkReceived { .. }
                 | SessionEvent::SendPaddingStream { .. }
                 | SessionEvent::SendPaddingDatagram { .. }) => {
                     // ここに列挙したイベントはアプリへ配送しない。この列挙も網羅性の担保であり、
@@ -2667,10 +2726,8 @@ impl MoqtClient {
                     // PublishStateNotifyReceived は peer publisher の通知であり、
                     // 本 example では特別な処理を行わない
                     // (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY))。
-                    // FetchOkReceived は自側が FETCH を発行したときだけ発火する。本 example は
-                    // FETCH を発行しないため到達しない (SessionEvent の網羅性のために arm は残す)
-                    // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。
-                    // SendPaddingStream / SendPaddingDatagram も padding を要求していないため到達しない。
+                    // SendPaddingStream / SendPaddingDatagram は padding を要求していないため
+                    // 到達しない。
                     // その他の Received 系 / Established / RequestTerminated は本 example では特別な処理を行わない。
                 }
                 SessionEvent::RequestErrorReceived {
