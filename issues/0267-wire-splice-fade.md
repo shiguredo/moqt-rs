@@ -1,7 +1,7 @@
 # moq-pub の音声の配信で、棄却で飛んだ境目をフェードで繋ぐ
 
 - Created: 2026-10-14
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-14
 - Branch: feature/wire-splice-fade
 - Polished: {YYYY-MM-DD}
 
@@ -47,4 +47,29 @@
 
 ## 解決方法
 
-(対応時に記入)
+- `src/playout/splice_fade.rs` に `fade_splice_edge_i16` を追加した。`fade_splice_edge` と
+  同じ規則を 16 bit PCM に対して行い、整数のまま丸める (`f32` を経由しない)。
+  `|sample| <= 32767` かつ `index < fade_samples` であるため、掛けた結果は元の絶対値を
+  超えず 16 bit に収まる
+- `examples/moq-pub/src/pipeline.rs` の音声のループで、符号化へ渡すチャンクを 1 つ
+  (`audio_fade_pending`) 保持するようにした。次のチャンクの判定を見てから符号化する
+  - 次のチャンクが捨てられる → 保持していたチャンクの**末尾**を落として符号化へ渡し、
+    その次に符号化するチャンクの**先頭**を落とす (`audio_fade_next_head`)
+  - 次のチャンクが符号化される → 保持していたチャンクをそのまま符号化へ渡し、新しい
+    チャンクを保持する
+- 先読みの分だけ符号化が 1 フレーム遅れる。配信の終了時 (音声の入力チャネルが閉じたとき) に
+  保持しているチャンクを符号化して送ってから閉じるようにした。送らないと最後の 1 フレーム
+  が失われる
+- 符号化と送信のコードは、保持していたチャンクを符号化する 1 箇所にまとめた。終了時の
+  フラッシュだけは同じ処理をもう 1 度書く必要があるため、`audio_fade_pending` を
+  `take()` して同じ手順を踏む
+- テスト: `tests/test_playout/splice_fade.rs` に 5 件 (先頭と末尾・複数チャンネル・短い
+  バッファと空のバッファ・最大値で符号が反転しないこと) 追加した
+- PBT: `pbt/tests/prop_playout/splice_fade.rs` に 2 件追加した。落とす長さの外のサンプルを
+  変えないこと、端へ向けて単調に小さくなること、元の絶対値を超えないことを 16 bit PCM でも
+  検証する
+- 検証: ローカルで sora-moq の relay を立てて moq-pub と moq-sub を繋ぎ、700 個の音声
+  チャンクを受信して MP4 (228807 バイト) が作られることを確認した
+- 検証: `cargo test --workspace` / `cargo test -p pbt` /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all --check` が成功した
+- 検証: `PBT_SEED` を 1 / 3 / 5 に変えても property が成功する
