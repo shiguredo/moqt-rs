@@ -1009,6 +1009,7 @@ pub async fn run(
                                 audio_group_id,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 config.datagram_max_size,
+                                config.audio_redundancy,
                             );
                             let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;
@@ -1211,6 +1212,7 @@ pub async fn run(
                                 audio_group_id,
                                 DEFAULT_PUBLISHER_PRIORITY,
                                 config.datagram_max_size,
+                                config.audio_redundancy,
                             );
                             let object_location = writer.next_object_location();
                             let outcome = writer.write_object(&encoded, &properties).await?;

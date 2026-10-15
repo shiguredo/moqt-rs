@@ -113,6 +113,13 @@ pub struct Config {
     /// 音声を届けるより落とす方が A/V のずれを残さない。映像は 1 group = 1 unidirectional
     /// stream で送る (§4.2)。`--audio-subgroup` で subgroup 配送へ切り替える。
     pub audio_datagram: bool,
+    /// 音声 Object を 1 つにつき何回 datagram で送るか (1〜3)
+    ///
+    /// datagram は再送されない (RFC 9221 §3) ため、n 回送るとすべての copy が落ちる確率が
+    /// 損失率の n 乗になる。損失の無い経路では品質が変わらない代わりに、音声の帯域と
+    /// datagram の数が n 倍になる。4 以上は帯域を無駄にし、0 は音が届かないため 1〜3 に
+    /// 限る。subgroup 配送 (`--audio-subgroup`) は Data Stream が再送されるため使わない。
+    pub audio_redundancy: u8,
     /// object datagram の上限サイズ (bytes)
     ///
     /// 1 つの QUIC パケットに収まる必要があるため (draft-ietf-moq-loc-04 §4.1)、
@@ -162,6 +169,12 @@ pub(crate) const DEFAULT_GOP_DURATION_MS: u32 = 2_000;
 /// 参加したときに、直近のキーフレームまで遡れる長さとして 5 秒にする。Group 長の既定
 /// (`DEFAULT_GOP_DURATION_MS`) より長くないと、現在の Group を保持できない。
 pub(crate) const DEFAULT_CACHE_DURATION_MS: u64 = 5_000;
+
+/// `--audio-redundancy` の既定値 (回)
+///
+/// datagram は再送されない (RFC 9221 §3) ため、損失のある経路では同じ Object を複数回
+/// 送ると届く確率が上がる。既定は 1 回であり、冗長化するかどうかは利用者が選ぶ。
+pub(crate) const DEFAULT_AUDIO_REDUNDANCY: u8 = 1;
 
 /// ユーザーが明示的に指定したオプションかどうかを判定する
 ///
@@ -405,6 +418,32 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         .is_present();
     let audio_datagram = !audio_subgroup;
 
+    // `.default()` は `&'static str` しか取れないため、`DEFAULT_AUDIO_REDUNDANCY` と
+    // 一致する値を文字列で渡す (一致は単体テストで固定する)
+    let audio_redundancy_opt = noargs::opt("audio-redundancy")
+        .ty("N")
+        .doc(
+            "Number of copies of each audio object sent as datagrams (1-3). Ignored with \
+             --audio-subgroup, which uses subgroup streams",
+        )
+        .default("1")
+        .take(&mut args);
+    let audio_redundancy_explicit = is_explicit(&audio_redundancy_opt);
+    let audio_redundancy = audio_redundancy_opt.then(|o| {
+        let value = o.value();
+        let count = value
+            .parse::<u8>()
+            .map_err(|_| format!("invalid --audio-redundancy: {value}"))?;
+        // 0 は音が届かず、4 以上は音声の帯域を無駄にする
+        if !(1..=3).contains(&count) {
+            return Err(format!(
+                "--audio-redundancy must be between 1 and 3 (default {}): {value}",
+                DEFAULT_AUDIO_REDUNDANCY
+            ));
+        }
+        Ok(count)
+    })?;
+
     // `.default()` は `&'static str` しか取れないため、`DEFAULT_TARGET_LATENCY_MS` と
     // 一致する値を文字列で渡す (一致は単体テストで固定する)
     let target_latency_opt = noargs::opt("target-latency")
@@ -465,6 +504,13 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     if datagram_max_size_explicit && (!audio_datagram || !audio_enabled) {
         tracing::warn!(
             "--datagram-max-size is ignored because the audio track is not sent as datagrams"
+        );
+    }
+    // 冗長化は datagram 配送のときだけ意味を持つ。subgroup 配送は Data Stream が再送される
+    // ため、同じ Object を 2 回以上送る意味が無い (黙って捨てずに警告する)
+    if audio_redundancy_explicit && (!audio_datagram || !audio_enabled) {
+        tracing::warn!(
+            "--audio-redundancy is ignored because the audio track is not sent as datagrams"
         );
     }
     if !args.metadata().help_mode {
@@ -607,6 +653,7 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
         audio_codec,
         audio_bitrate,
         audio_datagram,
+        audio_redundancy,
         datagram_max_size,
         target_latency_ms,
         cache_duration_ms,
@@ -1169,6 +1216,65 @@ mod tests {
         assert!(
             !config.audio_datagram,
             "--audio-subgroup で subgroup stream で送ること"
+        );
+    }
+
+    /// `--audio-redundancy` は既定 1 回で、1〜3 の整数だけを受理すること
+    ///
+    /// datagram は再送されない (RFC 9221 §3) ため、n 回送るとすべての copy が落ちる確率が
+    /// 損失率の n 乗になる。0 は音が届かず、4 以上は音声の帯域を無駄にするため拒否する。
+    #[test]
+    fn audio_redundancy_is_configurable() {
+        let config = parse_args(BASE_ARGS)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.audio_redundancy, DEFAULT_AUDIO_REDUNDANCY,
+            "既定は 1 回であること"
+        );
+
+        for value in ["1", "2", "3"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--audio-redundancy", value]);
+            let config = parse_args(&args)
+                .expect("オプションの解析に成功すること")
+                .expect("設定が返ること");
+            assert_eq!(
+                config.audio_redundancy.to_string(),
+                value,
+                "指定した回数が使われること: {value}"
+            );
+        }
+
+        for value in ["0", "4", "1x", "-1", "2.0"] {
+            let mut args = BASE_ARGS.to_vec();
+            args.extend_from_slice(&["--audio-redundancy", value]);
+            assert!(
+                parse_args(&args).is_err(),
+                "範囲外と非整数はエラーになること: {value}"
+            );
+        }
+    }
+
+    /// `--audio-subgroup` と併用した `--audio-redundancy` は受理するが冗長化しないこと
+    ///
+    /// subgroup 配送は Data Stream が再送されるため、同じ Object を 2 回以上送る意味が無い。
+    /// 指定そのものはエラーにせず、警告して 1 回だけ送る (値は設定に残るが、送信側は
+    /// `--audio-subgroup` では使わない)。
+    #[test]
+    fn audio_redundancy_is_accepted_with_audio_subgroup() {
+        let mut args = BASE_ARGS.to_vec();
+        args.extend_from_slice(&["--audio-subgroup", "--audio-redundancy", "3"]);
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert!(
+            !config.audio_datagram,
+            "--audio-subgroup で subgroup stream で送ること"
+        );
+        assert_eq!(
+            config.audio_redundancy, 3,
+            "subgroup 配送でも指定そのものは受理すること"
         );
     }
 

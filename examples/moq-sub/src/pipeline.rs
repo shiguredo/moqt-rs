@@ -87,6 +87,12 @@ enum AudioDeliveryAdmission {
     Stale,
 }
 
+/// 重複の判定のために覚える直近の音声 Object の識別子の数
+///
+/// datagram は再送されないため (RFC 9221 §3)、損失に備えて publisher が同じ Object を
+/// 複数回送ることがある。同じ Object の 2 回目は直後に届くため、これだけ覚えておけば足りる。
+const AUDIO_RECENT_OBJECT_LOCATIONS_MAX: usize = 256;
+
 /// 音声 Object を送出してよいかを、購読の境界と送出済みの TIMESTAMP で決める状態機械
 ///
 /// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
@@ -96,8 +102,10 @@ enum AudioDeliveryAdmission {
 /// FETCH の range が Largest Object を含む場合にその Object を完全に含めることを定める。
 /// したがって境界の位置の Object は live と FETCH の両方で届きうる。
 ///
-/// 判定は 2 段階である。
+/// 判定は 3 段階である。
 ///
+/// - 直近に届いた Object と同じ識別子の 2 回目は捨てる ([`Self::is_duplicate`])。datagram は
+///   再送されない (RFC 9221 §3) ため、publisher が同じ Object を n 回送ることがある。
 /// - 購読の境界 (`SUBSCRIBE_OK` の Largest Object) 以下は購読より前に publish された分で
 ///   あり、送出しない ([`Self::is_before_boundary`])。境界の位置の Object が live と FETCH の
 ///   両方で届いても、どちらも境界以下であるため二重に送出されない。moqt-js の CatchUpGate が
@@ -115,6 +123,11 @@ struct AudioDeliveryOrder {
     boundary: Option<Location>,
     /// 直近に送出した音声の TIMESTAMP (マイクロ秒)。まだ送出していなければ `None`
     last_pts_us: Option<i64>,
+    /// 直近に届いた Object の識別子 (古い順)。重複の判定に使う
+    ///
+    /// `Location` が `Hash` を実装していないため、集合を別に持たず線形に探す。高々
+    /// [`AUDIO_RECENT_OBJECT_LOCATIONS_MAX`] 件であり、音声は 1 秒あたり数十件しか届かない。
+    recent_locations: std::collections::VecDeque<Location>,
 }
 
 impl AudioDeliveryOrder {
@@ -123,6 +136,7 @@ impl AudioDeliveryOrder {
         Self {
             boundary,
             last_pts_us: None,
+            recent_locations: std::collections::VecDeque::new(),
         }
     }
 
@@ -145,6 +159,28 @@ impl AudioDeliveryOrder {
         };
         // `Location` の順序は (group_id, object_id) の辞書順である (§8.2)
         location <= boundary
+    }
+
+    /// `location` の Object が直近に届いたものと同じかを判定する
+    ///
+    /// 初めて見る位置なら覚えて `false` を返し、既に覚えている位置なら `true` を返す。
+    /// 窓 ([`AUDIO_RECENT_OBJECT_LOCATIONS_MAX`] 件) から溢れた古い位置は忘れる。
+    /// 位置が分からない Object (`None`) は判定できないため覚えずに `false` を返す。
+    ///
+    /// 同じ識別子の Object は copy ごとに中身が同じであるため、2 回目は復号も送出も録画も
+    /// しない (捨てないと同じ音を 2 回鳴らし、媒体時刻が実時間より先へ進む)。
+    fn is_duplicate(&mut self, location: Option<Location>) -> bool {
+        let Some(location) = location else {
+            return false;
+        };
+        if self.recent_locations.contains(&location) {
+            return true;
+        }
+        self.recent_locations.push_back(location);
+        if self.recent_locations.len() > AUDIO_RECENT_OBJECT_LOCATIONS_MAX {
+            self.recent_locations.pop_front();
+        }
+        false
     }
 
     /// 購読の境界を返す (ログ用)
@@ -211,10 +247,10 @@ fn fetch_object_location(object: &DecodedFetchObject) -> Location {
 /// 音声 Object を再生経路へ流すための共有状態
 ///
 /// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
-/// 経路に依存しない値をここへまとめ、購読境界の判定 → 録画 → Audio Config の検証 →
-/// 送出順の判定 → デコード → catch-up の観測 → デコード済みフレームの送出という順序が
-/// 経路ごとに食い違わないようにする。境界以下は Audio Config の検証だけを行い、復号・送出・
-/// 録画・catch-up の観測をしない。
+/// 経路に依存しない値をここへまとめ、重複の判定 → 購読境界の判定 → 録画 → Audio Config の
+/// 検証 → 送出順の判定 → デコード → catch-up の観測 → デコード済みフレームの送出という順序が
+/// 経路ごとに食い違わないようにする。重複と境界以下は Audio Config の検証だけを行い、復号・
+/// 送出・録画・catch-up の観測をしない。
 struct AudioDelivery<'a> {
     /// デコード済み音声フレームの送り先
     audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
@@ -239,8 +275,9 @@ struct AudioDelivery<'a> {
     ///
     /// 購読より前に publish された Group は購読のあとに FETCH で届く。`SUBSCRIBE_OK` の
     /// Largest Object 以下の音声は送出も録画も復号もしない (境界の位置の Object が live と
-    /// FETCH の両方で届いても二重にならない)。境界より後は、送出済みの TIMESTAMP より古い
-    /// 音声を落とし、再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
+    /// FETCH の両方で届いても二重にならない)。同じ識別子の Object の 2 回目 (datagram の
+    /// 冗長化による copy) も落とす。境界より後は、送出済みの TIMESTAMP より古い音声を落とし、
+    /// 再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
     /// subgroup stream 経路、FETCH 応答経路で共有する。
     delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
 }
@@ -250,7 +287,8 @@ impl AudioDelivery<'_> {
     ///
     /// `location` は Object の位置であり、購読の境界と比べて
     /// 購読より前に publish された音声を落とす。位置が分からない場合は境界と比べられないため
-    /// live として扱う。
+    /// live として扱う。直近に届いた Object と同じ識別子であれば (publisher が datagram を
+    /// 冗長化して送った 2 回目)、購読の境界と比べる前に捨てる。
     ///
     /// `decoder` が `None` のとき (再生しない指定、デコーダを生成できないとき) は
     /// 録画だけを行う (購読の境界以下は Audio Config の検証だけを行い、録画も復号もしない)。
@@ -282,20 +320,30 @@ impl AudioDelivery<'_> {
                 return false;
             }
         };
-        // 購読の境界の判定は録画より前に行う。境界以下の音声は購読より前に publish された分で
-        // あり、送出も録画も復号もしない (境界の位置の Object が live と FETCH の両方で届いても、
-        // どちらもここで落ちるため二重にならない)。Audio Config の検証だけは Properties から
-        // 行うため、この時点では return しない
-        let (before_boundary, boundary) = {
-            let delivery_order = self
+        // 重複の判定と購読の境界の判定は録画より前に行う。境界以下の音声は購読より前に
+        // publish された分であり、送出も録画も復号もしない (境界の位置の Object が live と
+        // FETCH の両方で届いても、どちらもここで落ちるため二重にならない)。Audio Config の
+        // 検証だけは Properties から行うため、この時点では return しない。
+        //
+        // 同じ識別子の Object を publisher が複数回送ることがある (datagram は再送されない
+        // ため、RFC 9221 §3)。2 回目はここで捨て、録画・Audio Config の検証・復号・送出へ
+        // 渡さない。覚えるのは最初の 1 回だけで、重複した到着では窓を変えない
+        let (duplicate, before_boundary, boundary) = {
+            let mut delivery_order = self
                 .delivery_order
                 .lock()
                 .expect("audio delivery order lock is not poisoned");
             (
+                delivery_order.is_duplicate(location),
                 delivery_order.is_before_boundary(location),
                 delivery_order.boundary(),
             )
         };
+        if duplicate {
+            // 同じ Object の 2 回目は直後に届くため warn にはしない
+            tracing::debug!("Skipping a duplicated audio object: location={location:?}");
+            return true;
+        }
         if before_boundary {
             // 購読のたびに数 Object 出るため warn にはしない
             tracing::debug!(
@@ -6478,6 +6526,150 @@ mod tests {
             .await
     }
 
+    /// 同じ識別子の音声 Object の 2 回目は録画も復号も送出もしないこと
+    ///
+    /// datagram は再送されない (RFC 9221 §3) ため、損失に備えて publisher が同じ Object を
+    /// 複数回送ることがある。2 回目を捨てないと同じ音を 2 回鳴らし、録画も重複する。
+    #[tokio::test]
+    async fn audio_delivery_drops_a_duplicated_object() {
+        let path = std::env::temp_dir().join(format!(
+            "moq-sub-duplicated-audio-{}.mp4",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+
+        let recorder = Recorder::start(
+            path.clone(),
+            Setup {
+                video: None,
+                audio: Some(AudioSetup {
+                    sample_rate: 48_000,
+                    channels: 1,
+                }),
+            },
+        )
+        .expect("録画を開始できること");
+        let recorder_sender = recorder.sender();
+
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            Some(&recorder_sender),
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        // 同じ Object (識別子も TIMESTAMP も同じ) を 2 回配送する。冗長化した datagram の
+        // 1 回目と 2 回目がこれにあたる
+        let base_us = crate::wall_clock_us();
+        for copy in 0..2 {
+            assert!(
+                deliver_audio_at(&delivery, &mut decoder, Some(loc(5, 0)), base_us, &packet).await,
+                "重複した音声でも配送を継続すること: copy={copy}"
+            );
+        }
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+
+        // 復号と送出は 1 回だけである。2 回目も復号していれば、同じ TIMESTAMP のフレームが
+        // もう 1 つ届く
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![base_us],
+            "同じ識別子の 2 回目は復号も送出もしないこと (送出順={sent:?})"
+        );
+        assert!(
+            audio_rx.try_recv().is_err(),
+            "2 回目で追加のフレームを送出しないこと"
+        );
+
+        recorder.finish().expect("MP4 を finalize できること");
+
+        // 書き出した MP4 を読み戻し、録画も 1 サンプルだけであることを見る
+        let bytes = std::fs::read(&path).expect("MP4 ファイルを読めること");
+        let mut demuxer = shiguredo_mp4::demux::Mp4FileDemuxer::new();
+        while let Some(required) = demuxer.required_input() {
+            let position = required.position as usize;
+            demuxer.handle_input(shiguredo_mp4::demux::Input {
+                position: required.position,
+                data: &bytes[position..],
+            });
+        }
+        let mut samples = 0;
+        while demuxer
+            .next_sample()
+            .expect("サンプルを読めること")
+            .is_some()
+        {
+            samples += 1;
+        }
+        assert_eq!(
+            samples, 1,
+            "同じ識別子の 2 回目は録画もしないこと (サンプル数={samples})"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 重複の判定は直近 256 件の識別子だけを覚え、窓から溢れた古い識別子は忘れること
+    ///
+    /// 冗長化した datagram の 2 回目は 1 回目の直後に届くため、これだけ覚えておけば足りる。
+    /// 窓を無制限にすると、長時間の配信で覚える識別子が増え続ける。
+    #[test]
+    fn audio_delivery_order_forgets_locations_that_fall_out_of_the_window() {
+        let mut order = AudioDeliveryOrder::new(None);
+
+        // 位置が分からない Object は重複と判定できないため、何度届いても重複としない
+        assert!(
+            !order.is_duplicate(None),
+            "位置が分からない Object は重複としないこと"
+        );
+        assert!(
+            !order.is_duplicate(None),
+            "位置が分からない Object は 2 回目も重複としないこと"
+        );
+
+        // 窓の大きさぶんは覚えている
+        for index in 0..AUDIO_RECENT_OBJECT_LOCATIONS_MAX as u64 {
+            assert!(
+                !order.is_duplicate(Some(loc(index, 0))),
+                "初めて届いた識別子は重複としないこと: index={index}"
+            );
+        }
+        assert!(
+            order.is_duplicate(Some(loc(0, 0))),
+            "窓に入っている識別子の 2 回目は重複とすること"
+        );
+
+        // 257 件目で最も古い識別子が窓から溢れ、忘れる
+        assert!(
+            !order.is_duplicate(Some(loc(256, 0))),
+            "257 件目の識別子は重複としないこと"
+        );
+        assert!(
+            !order.is_duplicate(Some(loc(0, 0))),
+            "窓から溢れた古い識別子は覚えていないこと"
+        );
+        assert!(
+            order.is_duplicate(Some(loc(0, 0))),
+            "忘れたあとに届いた識別子は改めて覚えること"
+        );
+    }
+
     /// 音声の送出順の判定が、送出済みの TIMESTAMP との比較だけで決まること
     ///
     /// - 最初の Object は送出する
@@ -6716,6 +6908,10 @@ mod tests {
     ///
     /// 境界より後の live の音声は従来どおり送出し、TIMESTAMP による送出順の判定は境界より後の
     /// 分だけで働く。境界以下の音声は catch-up の観測へも渡さない。
+    ///
+    /// 同じ位置を 3 回届ける手順があるが、2 回目以降は同じ識別子の重複として先に落ちる
+    /// (datagram の冗長化による copy と同じ扱い)。境界以下の判定そのものは、位置の異なる
+    /// 手順で固定する。
     #[tokio::test]
     async fn audio_delivery_does_not_send_objects_before_the_subscription_boundary() {
         let packet = encode_opus_silence(48_000, 1);

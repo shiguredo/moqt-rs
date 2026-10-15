@@ -39,6 +39,10 @@ fn help_prints_help_and_exits_successfully() {
             "--namespace の説明が表示されること ({flag}): {stdout}"
         );
         assert!(
+            stdout.contains("--audio-redundancy"),
+            "--audio-redundancy の説明が表示されること ({flag}): {stdout}"
+        );
+        assert!(
             stdout.contains("moqt://"),
             "URL の形式が表示されること ({flag}): {stdout}"
         );
@@ -79,6 +83,58 @@ fn missing_namespace_is_reported_as_an_error() {
         stderr.contains("--namespace"),
         "エラーに --namespace が含まれること: {stdout}{stderr}"
     );
+}
+
+/// `--audio-redundancy` の範囲外と非整数はオプションの検証でエラーになる
+///
+/// datagram は再送されないため、同じ音声 Object を 1〜3 回送れるようにする。0 は音が届かず、
+/// 4 以上は音声の帯域を無駄にするため、接続を試みる前に拒否する。
+#[test]
+fn audio_redundancy_rejects_values_out_of_range() {
+    for value in ["0", "4", "1x"] {
+        let (code, stdout, stderr) = run(&[
+            "--url",
+            "moqt://127.0.0.1:4443#msf:moq-example--video",
+            "--audio-redundancy",
+            value,
+        ]);
+        assert_eq!(
+            code,
+            Some(1),
+            "異常終了すること ({value}): {stdout}{stderr}"
+        );
+        assert!(
+            stderr.contains("--audio-redundancy"),
+            "エラーに --audio-redundancy が含まれること ({value}): {stdout}{stderr}"
+        );
+    }
+}
+
+/// `--audio-redundancy` の 1 と 3 は受理され、後続の検証まで進む
+///
+/// 受理されたことを、オプションの検証より後に評価される `--no-video` / `--no-audio` の
+/// エラーで確かめる (接続は行わない)。
+#[test]
+fn audio_redundancy_accepts_one_and_three() {
+    for value in ["1", "3"] {
+        let (code, stdout, stderr) = run(&[
+            "--url",
+            "moqt://127.0.0.1:4443#msf:moq-example--video",
+            "--no-video",
+            "--no-audio",
+            "--audio-redundancy",
+            value,
+        ]);
+        assert_eq!(
+            code,
+            Some(1),
+            "異常終了すること ({value}): {stdout}{stderr}"
+        );
+        assert!(
+            stderr.contains("at least one of audio or video"),
+            "オプションの検証を通って次の検証まで進むこと ({value}): {stdout}{stderr}"
+        );
+    }
 }
 
 /// `--namespace` を省略しても `--url` の `msf` fragment から namespace を取れる

@@ -28,6 +28,11 @@ pub struct DatagramWriter {
     /// datagram は 1 つの QUIC パケットに収まる必要がある (draft-ietf-moq-loc-04 §4.1)。
     /// 上限を超える object は送らずにエラーにする。
     max_size: usize,
+    /// 同じ Object の datagram をワイヤへ出す回数 (1〜3)
+    ///
+    /// datagram は再送されない (RFC 9221 §3) ため、n 回送るとすべての copy が落ちる確率が
+    /// 損失率の n 乗になる。範囲の検証は CLI が行う。
+    redundancy: u8,
     /// 次に書き込むオブジェクト ID
     next_object_id: u64,
 }
@@ -36,6 +41,11 @@ impl DatagramWriter {
     /// 新しい DatagramWriter を作成する
     ///
     /// stream は開かない。datagram 送信ごとにヘッダを生成して送信する。
+    /// `redundancy` は同じ Object を送る回数 (1〜3) であり、呼び出し側が検証する。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Group の Object を datagram で送るために必要な情報を 1 回で渡すため"
+    )]
     pub fn new(
         handle: &transport::StreamHandle,
         data_plane: &DataPlaneHandle,
@@ -44,6 +54,7 @@ impl DatagramWriter {
         group_id: u64,
         publisher_priority: u8,
         max_size: usize,
+        redundancy: u8,
     ) -> Self {
         Self {
             handle: handle.clone(),
@@ -53,6 +64,7 @@ impl DatagramWriter {
             group_id,
             publisher_priority,
             max_size,
+            redundancy,
             next_object_id: 0,
         }
     }
@@ -76,6 +88,11 @@ impl DatagramWriter {
     /// only objects that pass all filters.")。フィルタ不通過
     /// (`SendRequestError::LocalFilterMismatch`) のオブジェクトはワイヤに出さず `Skip` を返す。
     /// オブジェクト ID だけ進める (datagram は絶対 ID のため delta の考慮は不要)。
+    ///
+    /// 冗長度が 2 以上なら同じ Object の datagram をその回数だけワイヤへ出す。datagram は
+    /// 再送されない (RFC 9221 §3) ため、すべての copy が落ちる確率が損失率の冗長度乗になる。
+    /// フィルタ評価とサイズ判定は 1 回だけ行い、Object ID も 1 回だけ進めるため、copy は
+    /// すべて同じ Object として届く (受信側は同じ識別子の 2 回目を捨てる)。
     ///
     /// 返り値の `ObjectFilterOutcome::Pass` はワイヤへ送信したこと、`Skip` はフィルタ
     /// 不通過で送信しなかったことを示す。呼び出し側は `Skip` をスキップとして扱い、
@@ -141,7 +158,19 @@ impl DatagramWriter {
         // 原因と対処が分かるエラーにする。
         check_datagram_size(buf.len(), self.max_size)?;
 
-        self.handle.send_datagram(&buf).await?;
+        // 同じ Object の datagram を冗長度の数だけ出す。フィルタ評価・サイズ判定・Object ID の
+        // 前進はここまでの 1 回だけで済んでおり、copy はすべて同じ Object になる
+        if self.redundancy > 1 {
+            tracing::debug!(
+                "sending redundant object datagrams: request_id={}, object_id={}, copies={}",
+                self.request_id,
+                object_id,
+                self.redundancy,
+            );
+        }
+        for _ in 0..self.redundancy {
+            self.handle.send_datagram(&buf).await?;
+        }
 
         self.next_object_id = object_id + 1;
 
