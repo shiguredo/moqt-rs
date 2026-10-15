@@ -75,11 +75,11 @@ moq-sub は映像トラックの SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ�
 
 ## 購読より前の Group の取得 (FETCH)
 
-購読を始めた時点より前に publish された Object は SUBSCRIBE では届かない。moq-sub は映像と音声を購読したあと、SUBSCRIBE_OK が告知した Largest Object (draft-ietf-moq-transport-22 §3.1.4 / §9.20.17) を基準に直近 4 Group を FETCH で要求する (§3.2 / §3.5.1)。
+購読を始めた時点より前に publish された Object は SUBSCRIBE では届かないが、音声の購読には Location Filter を載せていないため、購読が受け取る範囲は Largest Object の位置を含みうる。moq-sub は映像と音声を購読したあと、SUBSCRIBE_OK が告知した Largest Object (draft-ietf-moq-transport-22 §3.1.4 / §9.20.17) を基準に直近 4 Group を FETCH で要求する (§3.2 / §3.5.1)。
 
 - 要求 range は LOCATION_FILTER の Absolute Range (§9.20.9 Table 6 の Type 0x04) で、`{Largest Object の Group から 4 Group 前, 0}` から Largest Object までを指定する
-- 取得した Object は購読で届く Object と同じ経路 (録画 → デコード → 表示) へ流す。映像はキーフレームから復号を始めるため、すでに復号中の Group より古い Group の Object は表示しない。録画は live の最初のキーフレームを基準時刻にするため、live の録画が先に始まっていると FETCH で遡った Group は基準時刻より前として破棄される (録画に残るのは live より先に FETCH の Object が届いた場合だけ)
-- 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1)、再生の順は TIMESTAMP の順である。FETCH の応答は live の Object と並行して届くため、すでに送出した TIMESTAMP より古い音声は送出しない (TIMESTAMP が同じ音声は送出する)
+- 取得した Object は購読で届く Object と同じ経路 (録画 → デコード → 表示) へ流す (音声は下の境界の規則で選別する)。映像はキーフレームから復号を始めるため、すでに復号中の Group より古い Group の Object は表示しない。録画は live の最初のキーフレームを基準時刻にするため、live の録画が先に始まっていると FETCH で遡った Group は基準時刻より前として破棄される (録画に残るのは live より先に FETCH の Object が届いた場合だけ)
+- 音声は `SUBSCRIBE_OK` の Largest Object を購読の境界にする。境界以下の音声は購読より前に publish された分であり、Audio Config の検証だけを行い、送出も録画も復号もしない (境界の位置の Object は live と FETCH の両方で届きうるため、二重送出を防ぐ)。境界より後の live の音声は TIMESTAMP の順で送出し、並び替わって届いた古い音声は送出しない (draft-ietf-moq-transport-22 §2.1.2 / §2.3.1)
 - 応答の End of Range (Non-Existent / Unknown / Timed-Out) は「取得できなかった範囲」として info ログに残す (§11.4.1.2)
 - SUBSCRIBE_OK が Largest Object を運ばない場合と、FETCH を発行できなかった場合はログを残し、購読はそのまま続ける (example は停止しない)
 - Largest Object が告知されない publisher と、メディアの FETCH に応答しない publisher では購読より前の Group を取得できない

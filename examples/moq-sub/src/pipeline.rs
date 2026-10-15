@@ -39,6 +39,7 @@ use shiguredo_moqt::{
     message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
     msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, name::parse_namespace, name::serialize_namespace,
     session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    stream::decoder::DecodedFetchObject, stream::decoder::DecodedSubgroupObject,
     stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
 };
 
@@ -86,33 +87,69 @@ enum AudioDeliveryAdmission {
     Stale,
 }
 
-/// 音声 Object を送出してよいかを、送出済みの TIMESTAMP との比較で決める状態機械
+/// 音声 Object を送出してよいかを、購読の境界と送出済みの TIMESTAMP で決める状態機械
 ///
 /// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
-/// track))、購読より前に publish された Group は購読のあとに FETCH で届く
-/// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups))。FETCH の応答は
-/// live の Object と並行して届くため、live の Object を送出したあとに、それより前に publish
-/// された Object を送出することがある。音声の再生は TIMESTAMP の順を前提とする
-/// (映像と違い、復号の出力がそのまま提示の順になる) ため、送出済みの TIMESTAMP より古い
-/// Object は送出しない。
+/// track))、購読より前に publish された Group は購読のあとに FETCH で届く。FETCH の要求 range
+/// の終端は `SUBSCRIBE_OK` の Largest Object であり、draft-ietf-moq-transport-22 §3.1.4
+/// (Largest Object) は Largest Object が「まだ到着しうる Object」を指すこと、§3.2 (Fetch) は
+/// FETCH の range が Largest Object を含む場合にその Object を完全に含めることを定める。
+/// したがって境界の位置の Object は live と FETCH の両方で届きうる。
 ///
-/// 映像の復号順を決める `shiguredo_moqt::video_decode_order::VideoDecodeOrder` と役割は同じで
-/// あり、判定に使うのが Group と Object ID ではなく TIMESTAMP である点だけが異なる。
-/// TIMESTAMP が同じ Object は送出する (同じ TIMESTAMP を持つ別の Object を落とさないため。
-/// live と FETCH の両方で届いた同じ Object は二重に送出されうるが、TIMESTAMP は巻き戻らない)。
+/// 判定は 2 段階である。
 ///
-/// 判定に使うのは TIMESTAMP だけであり、時計も I/O も扱わない。購読ごとに 1 つ持ち、音声の
-/// 配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。
+/// - 購読の境界 (`SUBSCRIBE_OK` の Largest Object) 以下は購読より前に publish された分で
+///   あり、送出しない ([`Self::is_before_boundary`])。境界の位置の Object が live と FETCH の
+///   両方で届いても、どちらも境界以下であるため二重に送出されない。moqt-js の CatchUpGate が
+///   `SUBSCRIBE_OK` の `LARGEST_OBJECT` を境界に cache の分を再生しない扱いと同じである。
+/// - 境界より後は、送出済みの TIMESTAMP より古い Object を送出しない ([`Self::admit`])。
+///   live の datagram は並び替わって届きうる (draft-ietf-moq-transport-22 §2.1.2
+///   (Object States) / §2.3.1 (Group IDs)) ため、境界とは別の防御として持つ。
+///
+/// どちらの判定も位置と TIMESTAMP だけで決まり、時計も I/O も扱わない。購読ごとに 1 つ持ち、
+/// 音声の配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。
 #[derive(Debug)]
 struct AudioDeliveryOrder {
+    /// 購読の境界 (`SUBSCRIBE_OK` の Largest Object)。`None` は境界が無く、すべて live として
+    /// 扱う (購読の時点で Object が publish されていない場合)
+    boundary: Option<Location>,
     /// 直近に送出した音声の TIMESTAMP (マイクロ秒)。まだ送出していなければ `None`
     last_pts_us: Option<i64>,
 }
 
 impl AudioDeliveryOrder {
-    /// まだ 1 つも送出していない状態で作る
-    fn new() -> Self {
-        Self { last_pts_us: None }
+    /// 購読の境界を指定して作る (`None` は Largest Object が告知されなかった場合)
+    fn new(boundary: Option<Location>) -> Self {
+        Self {
+            boundary,
+            last_pts_us: None,
+        }
+    }
+
+    /// 購読の境界を設定する
+    ///
+    /// `None` は `SUBSCRIBE_OK` が Largest Object を告知しなかった場合であり、すべて live と
+    /// して扱う (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は Object が
+    /// publish されていれば MUST 含むと定めるため、省略は未 publish を意味する)。
+    fn set_boundary(&mut self, boundary: Option<Location>) {
+        self.boundary = boundary;
+    }
+
+    /// `location` が購読の境界以下かを判定する
+    ///
+    /// 境界が無い場合と位置が分からない場合は、境界と比べられないため `false` (live 扱い) を
+    /// 返す。状態は変えない。
+    fn is_before_boundary(&self, location: Option<Location>) -> bool {
+        let (Some(boundary), Some(location)) = (self.boundary, location) else {
+            return false;
+        };
+        // `Location` の順序は (group_id, object_id) の辞書順である (§8.2)
+        location <= boundary
+    }
+
+    /// 購読の境界を返す (ログ用)
+    fn boundary(&self) -> Option<Location> {
+        self.boundary
     }
 
     /// TIMESTAMP `pts_us` の音声 Object を送出してよいかを判定する
@@ -138,11 +175,46 @@ impl AudioDeliveryOrder {
     }
 }
 
+/// datagram で届いた音声 Object の位置
+///
+/// OBJECT_DATAGRAM のヘッダが位置を持つ (draft-ietf-moq-transport-22 §11.2.1)。
+fn datagram_object_location(datagram: &ObjectDatagram) -> Location {
+    Location {
+        group_id: datagram.group_id,
+        object_id: datagram.object_id,
+    }
+}
+
+/// subgroup stream で届いた音声 Object の位置
+///
+/// Group ID は Subgroup Header が持ち (draft-ietf-moq-transport-22 §11.3.1)、Object ID は
+/// Subgroup 内のデルタが解決済みの値を使う。呼び出し側が別の Group ID を渡せないよう、
+/// Header そのものを受け取る。
+fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObject) -> Location {
+    Location {
+        group_id: header.group_id,
+        object_id: object.object_id,
+    }
+}
+
+/// FETCH の応答で届いた音声 Object の位置
+///
+/// FETCH の応答は Group をまたぐため、位置は Object ごとに届く
+/// (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))。
+fn fetch_object_location(object: &DecodedFetchObject) -> Location {
+    Location {
+        group_id: object.group_id,
+        object_id: object.object_id,
+    }
+}
+
 /// 音声 Object を再生経路へ流すための共有状態
 ///
 /// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
-/// 経路に依存しない値をここへまとめ、録画 → Audio Config の検証 → 送出順の判定 →
-/// デコード → デコード済みフレームの送出という順序が両経路で食い違わないようにする。
+/// 経路に依存しない値をここへまとめ、購読境界の判定 → 録画 → Audio Config の検証 →
+/// 送出順の判定 → デコード → catch-up の観測 → デコード済みフレームの送出という順序が
+/// 経路ごとに食い違わないようにする。境界以下は Audio Config の検証だけを行い、復号・送出・
+/// 録画・catch-up の観測をしない。
 struct AudioDelivery<'a> {
     /// デコード済み音声フレームの送り先
     audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
@@ -163,11 +235,12 @@ struct AudioDelivery<'a> {
     /// 復号器の中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。
     /// 状態はストリーム経路と datagram 経路で共有する。
     catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
-    /// 音声の送出順の判定 (購読で 1 つ共有する)
+    /// 音声の購読境界と送出順の判定 (購読で 1 つ共有する)
     ///
-    /// 購読より前に publish された Group は購読のあとに FETCH で届くため、live の音声を
-    /// 送出したあとにそれより古い音声が届く。送出済みの TIMESTAMP より古い音声をここで
-    /// 落とし、再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
+    /// 購読より前に publish された Group は購読のあとに FETCH で届く。`SUBSCRIBE_OK` の
+    /// Largest Object 以下の音声は送出も録画も復号もしない (境界の位置の Object が live と
+    /// FETCH の両方で届いても二重にならない)。境界より後は、送出済みの TIMESTAMP より古い
+    /// 音声を落とし、再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
     /// subgroup stream 経路、FETCH 応答経路で共有する。
     delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
 }
@@ -175,15 +248,20 @@ struct AudioDelivery<'a> {
 impl AudioDelivery<'_> {
     /// 音声 Object 1 つを再生経路へ流す
     ///
+    /// `location` は Object の位置であり、購読の境界と比べて
+    /// 購読より前に publish された音声を落とす。位置が分からない場合は境界と比べられないため
+    /// live として扱う。
+    ///
     /// `decoder` が `None` のとき (再生しない指定、デコーダを生成できないとき) は
-    /// 録画だけを行う。返り値は呼び出し側が処理を継続してよいかどうかで、`false` は
-    /// LOC Properties の書式違反でセッション終了を依頼したか、デコード済みフレームの
-    /// 送り先が閉じたことを表す。
+    /// 録画だけを行う (購読の境界以下は Audio Config の検証だけを行い、録画も復号もしない)。
+    /// 返り値は呼び出し側が処理を継続してよいかどうかで、`false` は LOC Properties の書式違反で
+    /// セッション終了を依頼したか、デコード済みフレームの送り先が閉じたことを表す。
     ///
     /// Properties の書式違反は「配送する Object」だけを対象にする。フィルタ不通過などで
     /// 配送しない Object は呼び出し側がこの関数を呼ばない。
     async fn deliver(
         &self,
+        location: Option<Location>,
         properties_bytes: Option<&[u8]>,
         payload: &[u8],
         decoder: Option<&mut AudioDecoder>,
@@ -204,7 +282,27 @@ impl AudioDelivery<'_> {
                 return false;
             }
         };
-        if let Some(recorder) = self.recorder {
+        // 購読の境界の判定は録画より前に行う。境界以下の音声は購読より前に publish された分で
+        // あり、送出も録画も復号もしない (境界の位置の Object が live と FETCH の両方で届いても、
+        // どちらもここで落ちるため二重にならない)。Audio Config の検証だけは Properties から
+        // 行うため、この時点では return しない
+        let (before_boundary, boundary) = {
+            let delivery_order = self
+                .delivery_order
+                .lock()
+                .expect("audio delivery order lock is not poisoned");
+            (
+                delivery_order.is_before_boundary(location),
+                delivery_order.boundary(),
+            )
+        };
+        if before_boundary {
+            // 購読のたびに数 Object 出るため warn にはしない
+            tracing::debug!(
+                "Skipping an audio object before the subscription boundary: \
+                 location={location:?}, boundary={boundary:?}"
+            );
+        } else if let Some(recorder) = self.recorder {
             record_audio_object(
                 recorder,
                 timestamp,
@@ -249,13 +347,21 @@ impl AudioDelivery<'_> {
                 );
             }
         }
+        if before_boundary {
+            // 境界以下の音声は復号しない。復号器は datagram / subgroup stream / FETCH 応答で
+            // 1 つを共有しており、live の音声を復号したあとに古い音声で状態を進めると、次に
+            // 届く live の音声が不連続になるためである (Audio Config は Properties から検証
+            // できるため、復号しなくても適用は落ちない)。送出も録画もしない。catch-up の観測へも
+            // 渡さない (古い TIMESTAMP で遅れが跳ね、復号器が作り直される)
+            return true;
+        }
         let Some(decoder) = decoder else {
             return true;
         };
+        let pts_us = loc_timestamp_us(timestamp, timescale);
         // 送出順の判定はデコードの前に行う。送出済みの TIMESTAMP より古い音声で復号器の
         // 状態を進めると、次に届く live の音声が不連続になるためである。ロックは await を
         // またがない (判定だけの同期処理)
-        let pts_us = loc_timestamp_us(timestamp, timescale);
         let (admission, previous_pts_us) = {
             let mut delivery_order = self
                 .delivery_order
@@ -265,8 +371,9 @@ impl AudioDelivery<'_> {
             (delivery_order.admit(pts_us), previous_pts_us)
         };
         if admission == AudioDeliveryAdmission::Stale {
-            // 購読より前に publish された音声が FETCH で後から届いた場合であり、異常ではない。
-            // 購読のたびに数 Object 出るため warn にはしない
+            // 境界より後の live の音声が並び替わって届いた場合である (draft-ietf-moq-transport-22
+            // §2.1.2 (Object States) / §2.3.1 (Group IDs))。購読より前に publish された音声は
+            // 境界の判定で既に落ちている。異常ではないため warn にはしない
             tracing::debug!(
                 "Skipping an audio object that is older than the delivered frame: \
                  pts_us={pts_us:?}, last_pts_us={previous_pts_us:?}"
@@ -1000,6 +1107,9 @@ pub async fn run(
     // peer が SUBSCRIBE_OK で決める track alias は移行で変わりうるため、現在の値を保持する
     let mut video_alias: Option<u64> = None;
     let mut audio_alias: Option<u64> = None;
+    // 音声の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
+    // 音声であり、Audio Config の検証だけを行い、送出も録画も復号もしない
+    let mut audio_largest_object: Option<Location> = None;
     // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
     // ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、stream ごとに
     // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
@@ -1091,6 +1201,7 @@ pub async fn run(
         track_map.insert(audio_sub.track_alias, TrackKind::Audio);
         audio_alias = Some(audio_sub.track_alias);
         audio_request_id = Some(audio_sub.request_id);
+        audio_largest_object = audio_sub.largest_object;
 
         // 映像と同じく、購読より前に publish された Group を FETCH で埋める
         fetch_recent_groups(
@@ -1244,8 +1355,11 @@ pub async fn run(
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
     let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
-    // 音声の送出順の状態。datagram 経路と subgroup stream 経路、FETCH 応答経路で共有する
-    let audio_delivery_order = Arc::new(std::sync::Mutex::new(AudioDeliveryOrder::new()));
+    // 音声の購読境界と送出順の状態。datagram 経路と subgroup stream 経路、FETCH 応答経路で
+    // 共有する
+    let audio_delivery_order = Arc::new(std::sync::Mutex::new(AudioDeliveryOrder::new(
+        audio_largest_object,
+    )));
 
     // 移行 (GOAWAY) では peer が決める track alias が変わりうるため、書き換え可能にする。
     // 読み出しは短い区間に限り、await をまたいでロックを保持しない
@@ -1438,6 +1552,7 @@ pub async fn run(
                         };
                         if !delivery
                             .deliver(
+                                Some(datagram_object_location(&datagram)),
                                 datagram.properties_data.as_deref(),
                                 payload,
                                 decoder.as_deref_mut(),
@@ -1634,6 +1749,23 @@ pub async fn run(
                                             .await
                                             {
                                                 Ok(resubscribed) => {
+                                                    // 移行先の live を旧境界で落とさないよう、
+                                                    // datagram 受信タスクへ新しい session を渡す前に
+                                                    // 境界を張り直した購読の Largest Object へ更新する
+                                                    let audio_boundary = resubscribed
+                                                        .audio
+                                                        .as_ref()
+                                                        .and_then(|sub| sub.largest_object);
+                                                    audio_delivery_order
+                                                        .lock()
+                                                        .expect(
+                                                            "audio delivery order lock is not poisoned",
+                                                        )
+                                                        .set_boundary(audio_boundary);
+                                                    tracing::info!(
+                                                        "Updated the audio subscription boundary: \
+                                                         largest_object={audio_boundary:?}"
+                                                    );
                                                     // 旧 session の alias を外し、新しい alias を
                                                     // 登録し直す (alias は peer が決めるため変わりうる)
                                                     let datagram_map = {
@@ -3318,6 +3450,7 @@ async fn handle_stream_body(
                         stream,
                         data_plane,
                         stream_id,
+                        &header,
                         &mut sg_decoder,
                         decoder.as_deref_mut(),
                         &AudioDelivery {
@@ -4196,6 +4329,7 @@ async fn decode_audio_stream(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
+    header: &SubgroupHeader,
     sg_decoder: &mut SubgroupStreamDecoder,
     mut audio_decoder: Option<&mut AudioDecoder>,
     delivery: &AudioDelivery<'_>,
@@ -4273,6 +4407,7 @@ async fn decode_audio_stream(
         }
         if !delivery
             .deliver(
+                Some(subgroup_object_location(header, &obj)),
                 obj.properties_bytes.as_deref(),
                 &payload,
                 audio_decoder.as_deref_mut(),
@@ -4503,6 +4638,7 @@ async fn read_audio_fetch_stream(
         }
         if !delivery
             .deliver(
+                Some(fetch_object_location(obj)),
                 obj.properties_bytes.as_deref(),
                 &payload,
                 audio_decoder.as_deref_mut(),
@@ -4518,6 +4654,10 @@ async fn read_audio_fetch_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_moqt::stream::encoder::FetchObjectInput;
+    use shiguredo_moqt::stream::encoder::FetchStreamEncoder;
+    use shiguredo_moqt::stream::subgroup::SubgroupIdMode;
+    use shiguredo_moqt::stream::subgroup::SubgroupObject;
 
     /// GOAWAY の New Session URI から移行先を決める判断を固定する
     ///
@@ -5997,16 +6137,20 @@ mod tests {
     }
 
     /// テスト用: OBJECT_DATAGRAM のワイヤ表現を組み立てる
+    ///
+    /// 位置は Group ID と Object ID で指定する (取り違えを検出できるようにするため)。
     fn object_datagram_wire(
         track_alias: u64,
+        group_id: u64,
+        object_id: u64,
         properties: Option<&LocProperties>,
         payload: &[u8],
         status: Option<u64>,
     ) -> Vec<u8> {
         let datagram = ObjectDatagram {
             track_alias,
-            group_id: 0,
-            object_id: 0,
+            group_id,
+            object_id,
             publisher_priority: Some(128),
             properties_data: properties
                 .map(|props| props.encode().expect("LOC プロパティを encode できること")),
@@ -6057,7 +6201,7 @@ mod tests {
 
         let packet = encode_opus_silence(48_000, 1);
         let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
-        let raw = object_datagram_wire(AUDIO_ALIAS, Some(&properties), &packet, None);
+        let raw = object_datagram_wire(AUDIO_ALIAS, 0, 0, Some(&properties), &packet, None);
 
         // 購読では audio track の alias が Audio として登録される
         let mut track_map = HashMap::new();
@@ -6076,7 +6220,7 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
-        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
@@ -6090,6 +6234,10 @@ mod tests {
 
         let deliver = delivery
             .deliver(
+                Some(Location {
+                    group_id: datagram.group_id,
+                    object_id: datagram.object_id,
+                }),
                 datagram.properties_data.as_deref(),
                 payload,
                 Some(&mut decoder),
@@ -6133,7 +6281,7 @@ mod tests {
         track_map.insert(AUDIO_ALIAS, TrackKind::Audio);
 
         // Object Status のみ (payload なし) の Object
-        let status_only = object_datagram_wire(AUDIO_ALIAS, None, &[], Some(0x0));
+        let status_only = object_datagram_wire(AUDIO_ALIAS, 0, 0, None, &[], Some(0x0));
         assert!(
             matches!(
                 plan_datagram(&status_only, &track_map),
@@ -6145,7 +6293,7 @@ mod tests {
         // 購読していない alias
         let properties = audio_loc_properties(960, 48_000, None);
         let unknown_alias =
-            object_datagram_wire(AUDIO_ALIAS + 1, Some(&properties), b"payload", None);
+            object_datagram_wire(AUDIO_ALIAS + 1, 0, 0, Some(&properties), b"payload", None);
         assert!(
             matches!(
                 plan_datagram(&unknown_alias, &track_map),
@@ -6167,7 +6315,7 @@ mod tests {
 
         let properties = audio_loc_properties(960, 48_000, None);
         for alias in [1u64, 2u64] {
-            let raw = object_datagram_wire(alias, Some(&properties), b"payload", None);
+            let raw = object_datagram_wire(alias, 0, 0, Some(&properties), b"payload", None);
             assert!(
                 matches!(
                     plan_datagram(&raw, &track_map),
@@ -6188,7 +6336,7 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
-        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
@@ -6200,7 +6348,7 @@ mod tests {
 
         // Properties Length の宣言に対して実データが足りない壊れたバイト列
         let deliver = delivery
-            .deliver(Some(&[0xFF, 0xFF, 0xFF]), b"payload", None)
+            .deliver(Some(loc(1, 0)), Some(&[0xFF, 0xFF, 0xFF]), b"payload", None)
             .await;
 
         assert!(!deliver, "書式違反では配送を打ち切ること");
@@ -6247,7 +6395,7 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
-        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
@@ -6262,7 +6410,7 @@ mod tests {
             .encode()
             .expect("LOC プロパティを encode できること");
         let deliver = delivery
-            .deliver(Some(&properties_bytes), &packet, None)
+            .deliver(Some(loc(0, 0)), Some(&properties_bytes), &packet, None)
             .await;
         assert!(deliver, "録画のみの経路でも配送を継続すること");
         recorder.finish().expect("MP4 を finalize できること");
@@ -6301,13 +6449,22 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// テスト用: LOC の TIMESTAMP を載せた音声 Object を 1 つ配送する
+    /// テスト用: 位置を作る
+    fn loc(group_id: u64, object_id: u64) -> Location {
+        Location {
+            group_id,
+            object_id,
+        }
+    }
+
+    /// テスト用: LOC の TIMESTAMP と位置を指定して音声 Object を 1 つ配送する
     ///
     /// Timescale は 1_000_000 とする。Timestamp がそのままマイクロ秒になり、受信側の
     /// 壁時計と比べられる値 (draft-ietf-moq-loc-04 §2.3.1.1) をそのまま渡せる。
     async fn deliver_audio_at(
         delivery: &AudioDelivery<'_>,
         decoder: &mut AudioDecoder,
+        location: Option<Location>,
         pts_us: i64,
         payload: &[u8],
     ) -> bool {
@@ -6317,7 +6474,7 @@ mod tests {
             .encode()
             .expect("LOC プロパティを encode できること");
         delivery
-            .deliver(Some(&properties_bytes), payload, Some(decoder))
+            .deliver(location, Some(&properties_bytes), payload, Some(decoder))
             .await
     }
 
@@ -6330,7 +6487,7 @@ mod tests {
     /// - TIMESTAMP を持たない Object は送出し、判定の基準は変えない
     #[test]
     fn audio_delivery_order_admits_only_timestamps_that_do_not_rewind() {
-        let mut order = AudioDeliveryOrder::new();
+        let mut order = AudioDeliveryOrder::new(None);
         assert_eq!(
             order.last_pts_us(),
             None,
@@ -6413,7 +6570,7 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
-        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
@@ -6433,19 +6590,19 @@ mod tests {
 
         // 1. live の音声 (購読後に届いた最新のもの) を送出する
         assert!(
-            deliver_audio_at(&delivery, &mut decoder, pts_us(4), &packet).await,
+            deliver_audio_at(&delivery, &mut decoder, None, pts_us(4), &packet).await,
             "live の音声は配送を継続すること"
         );
         // 2. FETCH の応答が、購読より前に publish された 4 つを届ける
         for index in 0..4 {
             assert!(
-                deliver_audio_at(&delivery, &mut decoder, pts_us(index), &packet).await,
+                deliver_audio_at(&delivery, &mut decoder, None, pts_us(index), &packet).await,
                 "古い音声でも配送を継続すること"
             );
         }
         // 3. live の音声が続く
         assert!(
-            deliver_audio_at(&delivery, &mut decoder, pts_us(5), &packet).await,
+            deliver_audio_at(&delivery, &mut decoder, None, pts_us(5), &packet).await,
             "live の音声は配送を継続すること"
         );
 
@@ -6478,6 +6635,653 @@ mod tests {
                 .last_pts_us(),
             Some(pts_us(5)),
             "送出順の判定は live と FETCH の応答で共有すること"
+        );
+    }
+
+    /// 購読の境界の判定が位置だけで決まること
+    ///
+    /// - 境界が無いときは、すべて live として扱う (Largest Object を告知しない publisher)
+    /// - 位置が分からない Object は、境界と比べられないため live として扱う
+    /// - 境界と同じ位置と、境界より前の位置は「境界以下」である
+    /// - 境界より後の位置は live である
+    /// - 再購読で境界を更新すると、新しい境界で判定する
+    #[test]
+    fn audio_delivery_order_detects_objects_at_or_before_the_boundary() {
+        let mut order = AudioDeliveryOrder::new(None);
+        assert!(
+            !order.is_before_boundary(Some(loc(100, 5))),
+            "境界が無いときは live として扱うこと"
+        );
+
+        order.set_boundary(Some(Location {
+            group_id: 100,
+            object_id: 5,
+        }));
+        assert!(
+            !order.is_before_boundary(None),
+            "位置が分からない Object は live として扱うこと"
+        );
+        assert!(
+            order.is_before_boundary(Some(loc(100, 5))),
+            "境界と同じ位置は境界以下であること"
+        );
+        assert!(
+            order.is_before_boundary(Some(loc(100, 4))),
+            "境界より前の Object ID は境界以下であること"
+        );
+        assert!(
+            order.is_before_boundary(Some(loc(99, 9))),
+            "境界より前の Group は境界以下であること"
+        );
+        assert!(
+            !order.is_before_boundary(Some(loc(100, 6))),
+            "境界より後の Object ID は live であること"
+        );
+        assert!(
+            !order.is_before_boundary(Some(loc(101, 0))),
+            "境界より後の Group は live であること"
+        );
+
+        // GOAWAY の移行で張り直した購読の Largest Object へ更新する
+        order.set_boundary(Some(Location {
+            group_id: 200,
+            object_id: 0,
+        }));
+        assert!(
+            order.is_before_boundary(Some(loc(100, 6))),
+            "更新前の境界より後の位置でも、更新後の境界より前なら境界以下であること"
+        );
+        assert!(
+            order.is_before_boundary(Some(loc(200, 0))),
+            "更新後の境界と同じ位置は境界以下であること"
+        );
+        assert!(
+            !order.is_before_boundary(Some(loc(200, 1))),
+            "更新後の境界より後の位置は live であること"
+        );
+
+        // 境界を外す (Largest Object を告知しない publisher へ張り直した場合)
+        order.set_boundary(None);
+        assert!(
+            !order.is_before_boundary(Some(loc(1, 0))),
+            "境界を外したあとは、すべて live として扱うこと"
+        );
+    }
+
+    /// 購読の境界以下の音声が再生経路へ流れないこと
+    ///
+    /// FETCH の要求 range の終端は `SUBSCRIBE_OK` の Largest Object であり、その位置の Object は
+    /// live と FETCH の両方で届きうる (draft-ietf-moq-transport-22 §3.1.4 / §3.2)。境界以下を
+    /// 送出しないため、どちらで届いても再生経路へは流れない。
+    ///
+    /// 境界より後の live の音声は従来どおり送出し、TIMESTAMP による送出順の判定は境界より後の
+    /// 分だけで働く。境界以下の音声は catch-up の観測へも渡さない。
+    #[tokio::test]
+    async fn audio_delivery_does_not_send_objects_before_the_subscription_boundary() {
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        // 購読の境界 (SUBSCRIBE_OK の Largest Object) は Group 100 / Object 0 とする
+        delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .set_boundary(Some(Location {
+                group_id: 100,
+                object_id: 0,
+            }));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        // TIMESTAMP は受信側の壁時計と比べられる (受信側の追いつきの判定)。実際に受信するときと
+        // 同じく現在時刻を基準にする
+        let base_us = crate::wall_clock_us();
+        let pts_us = |index: i64| base_us + index * 20_000;
+
+        // 1. 境界の位置の Object が FETCH の応答で届く
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 0)),
+                pts_us(0),
+                &packet
+            )
+            .await,
+            "境界以下の音声でも配送を継続すること"
+        );
+        // 2. 境界より前の Group の Object が届く
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(99, 3)),
+                pts_us(1),
+                &packet
+            )
+            .await,
+            "境界以下の音声でも配送を継続すること"
+        );
+
+        // 境界以下の音声は復号も送出もしないため、catch-up の観測にも渡らない
+        assert_eq!(
+            catch_up
+                .lock()
+                .expect("audio catch up lock is not poisoned")
+                .snapshot()
+                .lag_ms,
+            None,
+            "境界以下の音声を catch-up の観測へ渡さないこと"
+        );
+
+        // 3. live の音声が届く
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 1)),
+                pts_us(2),
+                &packet
+            )
+            .await,
+            "live の音声は配送を継続すること"
+        );
+        // 4. 境界の位置の Object が live でも届く (1. と同じ位置)
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 0)),
+                pts_us(0),
+                &packet
+            )
+            .await,
+            "境界の位置の音声でも配送を継続すること"
+        );
+        // 5. live の音声が続く
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 2)),
+                pts_us(3),
+                &packet
+            )
+            .await,
+            "live の音声は配送を継続すること"
+        );
+        // 6. 境界以下の音声が、live よりずっと古い TIMESTAMP で届く (FETCH の応答が遅れた場合)。
+        // 復号も観測もしないため、追いつきの遅れは live の値から動かない
+        let lag_after_live = catch_up
+            .lock()
+            .expect("audio catch up lock is not poisoned")
+            .snapshot()
+            .lag_ms;
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 0)),
+                base_us - 5_000_000,
+                &packet
+            )
+            .await,
+            "境界以下の音声でも配送を継続すること"
+        );
+        assert_eq!(
+            catch_up
+                .lock()
+                .expect("audio catch up lock is not poisoned")
+                .snapshot()
+                .lag_ms,
+            lag_after_live,
+            "境界以下の音声で catch-up の遅れを更新しないこと"
+        );
+
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![pts_us(2), pts_us(3)],
+            "境界以下の音声は再生経路へ流さないこと (送出順={sent:?})"
+        );
+        assert_eq!(
+            delivery_order
+                .lock()
+                .expect("audio delivery order lock is not poisoned")
+                .last_pts_us(),
+            Some(pts_us(3)),
+            "境界より後の live だけで送出順の基準を進めること"
+        );
+    }
+
+    /// Largest Object を告知しない購読では、すべての音声を live として送出すること
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) は Object が publish
+    /// されていれば LARGEST_OBJECT を MUST 含むと定めるため、省略は未 publish を意味する。
+    /// 境界が無いことを理由に無音にしない。
+    #[tokio::test]
+    async fn audio_delivery_sends_objects_when_there_is_no_boundary() {
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        // 境界を設定しない (Largest Object が告知されなかった購読)
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        let base_us = crate::wall_clock_us();
+        let pts_us = |index: i64| base_us + index * 20_000;
+
+        // 位置が分からない Object も live として送出する
+        assert!(
+            deliver_audio_at(&delivery, &mut decoder, None, pts_us(0), &packet).await,
+            "位置が分からない音声でも配送を継続すること"
+        );
+        // 位置が分かる Object も、境界が無いため live として送出する
+        assert!(
+            deliver_audio_at(&delivery, &mut decoder, Some(loc(1, 0)), pts_us(1), &packet).await,
+            "境界が無いときの音声でも配送を継続すること"
+        );
+
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![pts_us(0), pts_us(1)],
+            "境界が無いときはすべての音声を送出すること (送出順={sent:?})"
+        );
+    }
+
+    /// 購読の境界以下の音声でも Audio Config の検証が行われること
+    ///
+    /// 境界以下は送出も録画も復号もしないが、Audio Config は Properties から検証する。
+    /// 途中参加の購読では OpusHead が FETCH の応答だけで届くことがあるためである。
+    #[tokio::test]
+    async fn audio_delivery_validates_audio_config_before_the_subscription_boundary() {
+        let packet = encode_opus_silence(48_000, 1);
+        let properties = audio_loc_properties(960, 48_000, Some(&opus_head(48_000, 1)));
+        let properties_bytes = properties
+            .encode()
+            .expect("LOC プロパティを encode できること");
+
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .set_boundary(Some(Location {
+                group_id: 10,
+                object_id: 0,
+            }));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        let deliver = delivery
+            .deliver(
+                Some(loc(10, 0)),
+                Some(&properties_bytes),
+                &packet,
+                Some(&mut decoder),
+            )
+            .await;
+
+        assert!(deliver, "境界以下の音声でも配送を継続すること");
+        assert!(
+            audio_config_handled.load(Ordering::Acquire),
+            "境界以下の音声でも Audio Config を処理済みとして記録すること"
+        );
+        assert!(
+            audio_rx.try_recv().is_err(),
+            "境界以下の音声は復号済みフレームを送出しないこと"
+        );
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+    }
+
+    /// 購読の境界以下の音声が MP4 へ保存されないこと
+    ///
+    /// 録画は復号の可否に関わらず行うが、購読より前に publish された音声は購読の時点で
+    /// 不要である。境界以下を録画しないため、同じ Object が live と FETCH の両方で届いても
+    /// MP4 に重複が残らない。
+    #[tokio::test]
+    async fn audio_delivery_does_not_record_objects_before_the_subscription_boundary() {
+        let path =
+            std::env::temp_dir().join(format!("moq-sub-audio-boundary-{}.mp4", std::process::id()));
+        std::fs::remove_file(&path).ok();
+
+        let recorder = Recorder::start(
+            path.clone(),
+            Setup {
+                video: None,
+                audio: Some(AudioSetup {
+                    sample_rate: 48_000,
+                    channels: 1,
+                }),
+            },
+        )
+        .expect("録画を開始できること");
+        let recorder_sender = recorder.sender();
+
+        // 境界以下の音声 (FETCH の応答) と live の音声で TIMESTAMP と payload を変える。
+        // MP4 の先頭サンプルの decode timestamp は 0 になるため、保存された Object は
+        // payload で見分ける
+        let boundary_below = audio_loc_properties(960, 48_000, None)
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        let live = audio_loc_properties(1_920, 48_000, None)
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        let boundary_below_payload = b"boundary-before-live";
+        let live_payload = b"live";
+
+        let (audio_tx, _audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .set_boundary(Some(Location {
+                group_id: 10,
+                object_id: 0,
+            }));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            Some(&recorder_sender),
+        );
+
+        // 境界以下の音声は録画しない
+        assert!(
+            delivery
+                .deliver(
+                    Some(loc(10, 0)),
+                    Some(&boundary_below),
+                    boundary_below_payload,
+                    None
+                )
+                .await,
+            "境界以下の音声でも配送を継続すること"
+        );
+        // 境界より後の live の音声は録画する
+        assert!(
+            delivery
+                .deliver(Some(loc(10, 1)), Some(&live), live_payload, None)
+                .await,
+            "live の音声でも配送を継続すること"
+        );
+        recorder.finish().expect("MP4 を finalize できること");
+
+        // 書き出した MP4 を読み戻し、live の音声だけが 1 サンプル入っていることを見る
+        let bytes = std::fs::read(&path).expect("MP4 ファイルを読めること");
+        let mut demuxer = shiguredo_mp4::demux::Mp4FileDemuxer::new();
+        while let Some(required) = demuxer.required_input() {
+            let position = required.position as usize;
+            demuxer.handle_input(shiguredo_mp4::demux::Input {
+                position: required.position,
+                data: &bytes[position..],
+            });
+        }
+        let mut samples = 0;
+        let mut recorded: Vec<u8> = Vec::new();
+        while let Some(sample) = demuxer.next_sample().expect("サンプルを読めること") {
+            samples += 1;
+            let start = sample.data_offset as usize;
+            recorded.extend_from_slice(&bytes[start..start + sample.data_size]);
+        }
+        assert_eq!(
+            samples, 1,
+            "境界以下の音声は保存せず、live の音声だけを保存すること"
+        );
+        assert_eq!(
+            recorded,
+            live_payload.to_vec(),
+            "保存された音声が live の Object であること"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 音声 Object の位置が 3 経路それぞれの Group ID と Object ID から取れること
+    ///
+    /// datagram / subgroup stream / FETCH 応答は位置の持ち方が異なるため、取り違えを
+    /// ここで固定する。位置を取り違えると、購読の境界と比べられず境界以下の音声が
+    /// 再生経路へ流れる。
+    #[test]
+    fn audio_object_location_comes_from_each_paths_group_and_object_id() {
+        const AUDIO_ALIAS: u64 = 7;
+        const GROUP_ID: u64 = 1_000;
+        const OBJECT_ID: u64 = 42;
+
+        // datagram は OBJECT_DATAGRAM のヘッダが位置を持つ
+        let properties = audio_loc_properties(960, 48_000, None);
+        let raw = object_datagram_wire(
+            AUDIO_ALIAS,
+            GROUP_ID,
+            OBJECT_ID,
+            Some(&properties),
+            b"payload",
+            None,
+        );
+        let mut track_map = HashMap::new();
+        track_map.insert(AUDIO_ALIAS, TrackKind::Audio);
+        let DatagramAction::DeliverAudio { datagram, .. } = plan_datagram(&raw, &track_map) else {
+            panic!("音声トラックの datagram は配送対象になること");
+        };
+        assert_eq!(
+            datagram_object_location(&datagram),
+            loc(GROUP_ID, OBJECT_ID),
+            "datagram の位置はヘッダの Group ID と Object ID であること"
+        );
+
+        // subgroup stream は Group ID を Subgroup Header が持ち、Object ID はデルタ解決済みである。
+        // 実エンコーダで組み立てたバイト列を実デコーダで復号した値を使う
+        let header = SubgroupHeader {
+            track_alias: AUDIO_ALIAS,
+            group_id: GROUP_ID,
+            subgroup_id: SubgroupIdMode::Zero,
+            publisher_priority: Some(128),
+            has_properties: false,
+            end_of_group: false,
+            first_object: true,
+        };
+        let mut bytes = header.encode();
+        let object = SubgroupObject {
+            object_id_delta: OBJECT_ID,
+            payload_length: 1,
+            status: None,
+        };
+        object
+            .encode(false, None, &mut bytes)
+            .expect("SUBGROUP_OBJECT を encode できること");
+        bytes.extend_from_slice(b"x");
+        let mut decoder = SubgroupStreamDecoder::new();
+        decoder.push(&bytes);
+        let decoded_header = decoder
+            .try_decode_header()
+            .expect("SUBGROUP_HEADER を decode できること")
+            .expect("SUBGROUP_HEADER が揃っていること");
+        let decoded_object = decoder
+            .try_decode_object()
+            .expect("SUBGROUP_OBJECT を decode できること")
+            .expect("SUBGROUP_OBJECT が揃っていること");
+        assert_eq!(
+            subgroup_object_location(&decoded_header, &decoded_object),
+            loc(GROUP_ID, OBJECT_ID),
+            "subgroup stream の位置は Header の Group ID と解決済みの Object ID であること"
+        );
+
+        // FETCH の応答は Group をまたぐため、位置は Object ごとに届く。
+        // 同じく実エンコーダと実デコーダを通す
+        let mut encoder = FetchStreamEncoder::new(1);
+        let mut bytes = encoder.encode_header();
+        encoder
+            .encode_object(
+                &FetchObjectInput {
+                    group_id: GROUP_ID,
+                    subgroup_id: 3,
+                    object_id: OBJECT_ID,
+                    publisher_priority: 128,
+                    has_properties: false,
+                    is_datagram_origin: true,
+                    payload_length: 1,
+                },
+                None,
+                &mut bytes,
+            )
+            .expect("FETCH の Object を encode できること");
+        bytes.extend_from_slice(b"x");
+        let mut decoder = FetchStreamDecoder::new();
+        decoder.push(&bytes);
+        decoder
+            .try_decode_header()
+            .expect("FETCH_HEADER を decode できること")
+            .expect("FETCH_HEADER が揃っていること");
+        let DecodedFetchEntry::Object(decoded_object) = decoder
+            .try_decode_entry()
+            .expect("FETCH の Object を decode できること")
+            .expect("FETCH の Object が揃っていること")
+        else {
+            panic!("FETCH の応答の先頭は Object であること");
+        };
+        assert_eq!(
+            fetch_object_location(&decoded_object),
+            loc(GROUP_ID, OBJECT_ID),
+            "FETCH の応答の位置は Object ごとの Group ID と Object ID であること"
+        );
+    }
+
+    /// 境界より後の live の音声が並び替わって届いたときも、TIMESTAMP が巻き戻らないこと
+    ///
+    /// 境界の判定は購読より前の音声だけを落とすため、境界より後の並び替え
+    /// (draft-ietf-moq-transport-22 §2.1.2 (Object States) / §2.3.1 (Group IDs)) は
+    /// TIMESTAMP の判定が防ぐ。GOAWAY の移行直後などに起こりうる。
+    #[tokio::test]
+    async fn audio_delivery_drops_reordered_live_objects_after_the_boundary() {
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(Some(loc(100, 0))));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        let base_us = crate::wall_clock_us();
+        let pts_us = |index: i64| base_us + index * 20_000;
+
+        // 1. 境界より後の live の音声を送出する
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 1)),
+                pts_us(5),
+                &packet
+            )
+            .await,
+            "live の音声は配送を継続すること"
+        );
+        // 2. 境界より後の live の音声が、古い TIMESTAMP で届く (並び替え)
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 2)),
+                pts_us(3),
+                &packet
+            )
+            .await,
+            "並び替わった音声でも配送を継続すること"
+        );
+        // 3. live の音声が続く
+        assert!(
+            deliver_audio_at(
+                &delivery,
+                &mut decoder,
+                Some(loc(100, 3)),
+                pts_us(6),
+                &packet
+            )
+            .await,
+            "live の音声は配送を継続すること"
+        );
+
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![pts_us(5), pts_us(6)],
+            "境界より後に並び替わって届いた古い音声は送出しないこと (送出順={sent:?})"
+        );
+        assert_eq!(
+            delivery_order
+                .lock()
+                .expect("audio delivery order lock is not poisoned")
+                .last_pts_us(),
+            Some(pts_us(6)),
+            "送出しなかった音声で基準を戻さないこと"
         );
     }
 }
