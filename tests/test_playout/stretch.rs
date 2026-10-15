@@ -358,6 +358,78 @@ fn supported_sample_rates_are_stretched() {
     }
 }
 
+/// 実リレーの E2E が使う音と同じ条件 (48 kHz、20 ms のフレーム)
+const SAMPLE_RATE: u32 = 48_000;
+/// 20 ms のフレームのサンプル数
+const FRAME_SAMPLES: usize = 960;
+/// 補間する穴の長さ (20 ms)
+const HOLE_US: i64 = 20_000;
+
+/// 周波数 `frequency_hz` の正弦波 (20 ms、48 kHz、振幅 0.5) から 20 ms の穴を補間したサンプル数
+///
+/// 実リレーの E2E が使う音は正弦波であるため、補間の可否を周波数ごとに見るために使う。
+fn conceal_for_frequency(frequency_hz: f64) -> isize {
+    let mut frame = vec![0.0f32; FRAME_SAMPLES];
+    for (index, sample) in frame.iter_mut().enumerate() {
+        let phase =
+            2.0 * std::f64::consts::PI * frequency_hz * index as f64 / f64::from(SAMPLE_RATE);
+        *sample = (0.5 * phase.sin()) as f32;
+    }
+    let mut output = vec![0.0f32; FRAME_SAMPLES];
+    let channels: [&[f32]; 1] = [frame.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    conceal(&channels, &mut outputs, SAMPLE_RATE, HOLE_US)
+}
+
+#[test]
+fn conceal_depends_on_whether_the_tail_period_lands_on_the_4khz_grid() {
+    // 補間の可否は、末尾の周期が 4 kHz へ間引いたときの格子に乗るかで決まる。格子から外れた
+    // 純音では、求めた周期が真の周期とずれ、末尾の周期 1 つ分を繰り返す継ぎ目で波形が飛ぶ
+    // (クリックとして聞こえる)。そのため is_seam_smooth が継ぎ目の段差を「末尾の周期の自然な
+    // 段差の 2 倍」と比べ、超えるときは補間しない。
+    //
+    // 探索するずらし幅は 4 kHz のサンプル数で 10〜60 である (find_tail_lag は末尾の 2 周期分が
+    // 取れる範囲に限るため、20 ms のフレーム (間引き後 79 サンプル) では 10〜39 になる)。
+    // 格子に乗らない音では、その範囲に入る位数 (周期の倍数) のうち相関が最も強いものが選ばれる。
+    //
+    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 1000 Hz と 440 Hz は 960 サンプルを
+    // 生成し、300 / 220 / 150 / 100 Hz は生成しない。
+    //
+    // - 1000 Hz は 4 kHz でちょうど 4 サンプルであり、位数 3 の 12 が選ばれる。継ぎ目の段差は
+    //   自然な段差と等しく (相関の二乗は 1)、補間する
+    // - 440 Hz は 4 kHz で 9.09 サンプルであり格子に乗らないが、位数 2 の 18 が探索範囲に入り、
+    //   真の周期とのずれが 2 % に収まる。継ぎ目の段差 (0.031) が許容 (自然な段差の 2 倍の
+    //   0.058) に収まるため、補間する
+    // - 300 / 220 / 150 Hz も相関は閾値 (0.9) を超えるが、周波数が低いほど自然な段差
+    //   (振幅 × 2π × 周波数 ÷ サンプルレート) が小さくなるため、同じ割合のずれでも継ぎ目の
+    //   段差が許容を超える (300 Hz は 0.098 対 0.039、220 Hz は 0.038 対 0.029、150 Hz は
+    //   0.029 対 0.020)。補間しない
+    // - 100 Hz は 4 kHz で 40 サンプルであり、末尾の 2 周期分 (80 サンプル) が末尾
+    //   (79 サンプル) に収まらないため、1 周期ちょうどの 40 は選べず、39 (0.975 周期) が
+    //   選ばれる。ずれによる段差 (0.085) が許容 (0.013) を超えるため、補間しない
+    //
+    // 実リレーの E2E では補間の量が小さいが、これは実装の欠陥ではない。E2E が使う音が正弦波で
+    // あり、周期が 4 kHz の格子に乗りにくいためである (会話や音楽では波形が複雑で周期が格子に
+    // 乗りやすく、補間が働く)。
+    assert_eq!(
+        conceal_for_frequency(1_000.0),
+        960,
+        "格子に乗る純音は補間すること"
+    );
+    assert_eq!(
+        conceal_for_frequency(440.0),
+        960,
+        "位数が探索範囲に入り継ぎ目の段差が許容に収まる純音は補間すること"
+    );
+    for frequency_hz in [300.0, 220.0, 150.0, 100.0] {
+        assert_eq!(
+            conceal_for_frequency(frequency_hz),
+            0,
+            "{frequency_hz} Hz の純音は補間しないこと"
+        );
+    }
+}
+
 #[test]
 fn conceal_repeats_the_tail_period() {
     // 48 kHz、周期 240 サンプル (5 ms) の矩形波。40 ms の隙間を 1920 サンプルで埋める
