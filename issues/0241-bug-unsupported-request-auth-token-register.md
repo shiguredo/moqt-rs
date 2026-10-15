@@ -1,7 +1,7 @@
 # 未対応 request の拒否で §8.9 の REGISTER を適用する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-15
 - Branch: feature/fix-unsupported-request-auth-token-register
 - Polished: 2026-10-14
 
@@ -102,3 +102,34 @@ invalid MUST reject that message with an MALFORMED_AUTH_TOKEN error.") も満た
 - 上記がテストで固定されていること。`tests/test_session/request_stream.rs` の既存 3 テストは
   body を共通構造 (Request ID → Track Namespace Prefix → Number of Parameters) に更新する。
 - `docs/moqt.md` と doc コメントが実装に合っていること。
+
+## 解決方法
+
+未対応 request (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) の本体を `Session` で
+解析し、拒否する場合でも適用すべき MUST を満たすようにした。
+
+- `src/session/core.rs` の `handle_unsupported_request` が本体を受け取り、次の順で処理する。
+  1. `validate_peer_request_id` で Request ID の parity と重複を検証する (draft §6.4.2.1)
+  2. `decode_unsupported_request_body` で本体 (Request ID → Track Namespace Prefix →
+     Number of Parameters → Parameters) を解析する。解析失敗は `PROTOCOL_VIOLATION` /
+     `KEY_VALUE_FORMATTING_ERROR` でセッションを閉じる (REQUEST_ERROR は送らない)
+  3. `unsupported_request_allowed_params` が返す許可集合でスコープを検証し、違反は
+     `PROTOCOL_VIOLATION` でセッションを閉じる (draft §9.20.1 (Parameter Scope))
+  4. 重複トークンは REGISTER を適用したうえで `REQUEST_ERROR(MALFORMED_AUTH_TOKEN)` で拒否する
+     (draft §8.9 (Authorization Token Compression))
+  5. REGISTER を token cache へ適用する (GOAWAY 拒否の場合も適用。draft §8.9)
+  6. `REQUEST_GOING_AWAY` (control GOAWAY 送信済み) または `REQUEST_NOT_SUPPORTED` を返す
+- 応答専用の型に Request ID を付けた手組みメッセージは `PROTOCOL_VIOLATION` で閉じる
+  (draft §6.3 (Session initialization))。
+- `SUBSCRIBE_TRACKS` の許可集合は draft §9.18 (SUBSCRIBE_TRACKS) の列挙に §3.6.2
+  (Parameters on SUBSCRIBE_TRACKS) の包括許可を重ねた和集合にした。§3.6.2 が LOCATION_FILTER と
+  FILL_PARAMETERS を SUBSCRIBE_TRACKS に載せられると明記する一方、§9.18 と各パラメータ節の
+  "MAY appear in" には現れず draft の記述が食い違うため、仕様が許容するメッセージでセッションを
+  閉じない側を選んだ。
+- テストは `tests/test_session/request_stream.rs` に追加・更新した。既存 3 テストの本体を共通
+  構造へ更新し、REGISTER 適用 (NOT_SUPPORTED / GOING_AWAY)、重複トークンの優先順 (GOING_AWAY /
+  NOT_SUPPORTED)、alias 再登録、token cache 上限、本体の解析失敗 5 ケース、スコープ違反、
+  許可集合の和集合、応答専用型の手組みを固定する 12 テストを追加した。許可集合の追随漏れは
+  `src/message.rs` の単体テスト 2 件で固定した。
+- `docs/moqt.md` の未対応 request の記述を、本体解析・拒否コードの優先順・許可集合の解釈・
+  REGISTER 適用失敗時のコードに追随させた。
