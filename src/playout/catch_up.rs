@@ -183,6 +183,20 @@ impl AudioReceiveCatchUp {
     ///
     /// 遅れが上限の中へ戻ったら追いつきを終える。超えていれば、始める条件を満たすときに
     /// [`AudioReceiveCatchUpDecision::rebuild_decoder`] を真にして返す。
+    ///
+    /// 遅れが戻るまで始め直すことと、穴 (TIMESTAMP の跳び) の直後でも始めることは、実測に
+    /// 基づく。次の実測は moqt-js が実リレー、パケロス 5 %、40 秒で測ったものである
+    /// (moqt-rs で実リレーの再測が必要になった時点で測り直す)。
+    ///
+    /// - 作り直す間隔を、遅れが戻らないまま繰り返すときだけ 2 倍にする案は効かなかった。
+    ///   損失下では遅れが一度上限へ戻ってからまた跳ぶため、間隔を伸ばす条件が成立せず、
+    ///   作り直しの回数は現行と同じ 30〜31 回だった
+    /// - 穴の直後を始めない案も効かなかった。穴は 0.4 秒ごとに空くため、直後の 1 秒を避けても
+    ///   作り直しの回数は 30 回のままだった。60 秒間避けると作り直しは 1 回になるが、遅れが
+    ///   1458 ms まで育ち、鳴らした長さも 30 秒で 27835 ms へ落ちた (捨てない分だけ遅れが
+    ///   積み上がる)
+    /// - どちらの案も採らない。作り直しは損失下でも live を保つ役目を果たしており、飛ぶ音は
+    ///   遅れを積み上げないための代価である
     pub fn observe(
         &mut self,
         observation: AudioReceiveCatchUpObservation,
@@ -338,12 +352,14 @@ impl AudioReceiveCatchUp {
     /// 音の TIMESTAMP が前の音から跳ぶことで現れる。跳びから 1 音の長さを引いた分が鳴らなかった
     /// 音である。数えるのは追いつきの最中だけであり、それ以外の跳び (配信側の欠落、relay の
     /// cache の再送など) は数えない。
+    ///
+    /// 判定は、TIMESTAMP の更新、TIMESTAMP が無い場合、1 音の長さが 0 の場合、跳びの判定、
+    /// 追いつき中かの判定の順に行う。どこで打ち切っても数える値は変わらないため、順序自体は
+    /// 観測される値に影響しない。跳びの判定を追いつき中かの判定より先に置くのは、数える対象を
+    /// 「追いつきの最中に起きた跳び」として読めるようにするためである。
     fn measure_skip(&mut self, observation: AudioReceiveCatchUpObservation) {
         let previous_us = self.last_timestamp_us;
         self.last_timestamp_us = Some(observation.timestamp_us);
-        if !self.catching_up {
-            return;
-        }
         let Some(previous_us) = previous_us else {
             return;
         };
@@ -355,6 +371,9 @@ impl AudioReceiveCatchUp {
         if step_us.saturating_sub(frame_us)
             <= AUDIO_RECEIVE_CATCH_UP_SKIP_MIN_MS.saturating_mul(1_000)
         {
+            return;
+        }
+        if !self.catching_up {
             return;
         }
         let skipped_us = step_us.saturating_sub(frame_us);
