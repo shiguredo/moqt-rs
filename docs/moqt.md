@@ -107,9 +107,33 @@ MoQ リレーには対応しないこと」)。そのため MoQ リレー専用�
 
 request stream の先頭として届く 3 種 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` /
 `SUBSCRIBE_TRACKS`) は §9 Table 5 に定義済みの request であるため、未知のメッセージ種別とは
-扱わない。`ControlMessage::Unsupported` として受理し、`REQUEST_ERROR` の `NOT_SUPPORTED`
-(`0x3`) と送信方向の FIN で拒否する (§1.6 (Modularity) の SHOULD)。セッションは維持する。
-自側が control GOAWAY を送信済みなら `GOING_AWAY` を優先する。
+扱わない。`ControlMessage::Unsupported` として受理し、本体を共通構造 (Request ID →
+Track Namespace Prefix → Number of Parameters → Parameters) に従って解析したうえで、
+`REQUEST_ERROR` の `NOT_SUPPORTED` (`0x3`) と送信方向の FIN で拒否する
+(§1.6 (Modularity) の SHOULD)。セッションは維持する。拒否コードの優先順は
+`MALFORMED_AUTH_TOKEN` > `GOING_AWAY` (自側が control GOAWAY を送信済み) > `NOT_SUPPORTED`
+である (§8.9 のメッセージ拒否は MUST、§9.2 の GOAWAY 拒否は MAY、§1.6 の NOT_SUPPORTED は
+SHOULD)。
+
+本体を解析するため、拒否する場合でも次の検証は適用される。
+
+- §9.20.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
+  `PROTOCOL_VIOLATION` でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
+  許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.18 の列挙に加えて
+  §3.6.2 (Parameters on SUBSCRIBE_TRACKS) の "Any Parameter that can be specified on a
+  Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS" を採り、SUBSCRIBE の許可
+  パラメータとの和集合とする (同節が SUBSCRIBE_TRACKS に載せられると明記する LOCATION_FILTER /
+  FILL_PARAMETERS を §9.18 の列挙が含まないため。仕様が許容するメッセージでセッションを
+  閉じない側を選ぶ)
+- §8.9 (Authorization Token Compression): Alias Type REGISTER のトークンは拒否する場合も
+  token cache へ登録し (MUST)、同一 (Token Type, Token Value) の重複は `REQUEST_ERROR` の
+  `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する。DELETE / USE_ALIAS / USE_VALUE は
+  失敗するメッセージのパラメータとして適用しない
+- 本体が共通構造に従わない場合は原因に応じたコード (`PROTOCOL_VIOLATION` /
+  `KEY_VALUE_FORMATTING_ERROR`) でセッションを閉じる
+- REGISTER の適用自体が失敗した場合はセッションを閉じる (`DUPLICATE_AUTH_TOKEN_ALIAS`:
+  登録済み alias の再登録、`AUTH_TOKEN_CACHE_OVERFLOW`: 自側が宣言した
+  `MAX_AUTH_TOKEN_CACHE_SIZE` を超える登録。REQUEST_ERROR は送らない)
 
 応答専用の 3 種 (`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は応答先の request を
 持たず Table 5 で "First" を持たないため、request stream の先頭および 2 通目以降のいずれでも

@@ -254,6 +254,77 @@ pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[];
 pub(crate) const TRACK_STATUS_ALLOWED_PARAMS: &[u64] =
     &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
 
+// ─── 未対応 request の許可パラメータ集合 ─────────────────────────
+//
+// 本ライブラリが実装しない 3 種の request も、本体を解析してパラメータのスコープを検証する。
+// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): "If a parameter appears in some other
+// type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION."
+// 未対応 request でもパラメータを解析する以上、この MUST は適用される。各集合は各メッセージ節が
+// 列挙する許可パラメータから導出している (将来 draft 改版で変わりうる)。
+
+/// PUBLISH_NAMESPACE で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE): "The only parameter that can appear
+/// in a PUBLISH_NAMESPACE is AUTHORIZATION_TOKEN."
+const PUBLISH_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+
+/// SUBSCRIBE_NAMESPACE で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-22 §9.15 (SUBSCRIBE_NAMESPACE): "The only parameter that can
+/// appear in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN."
+const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
+
+/// SUBSCRIBE_TRACKS で許可されるパラメータ型
+///
+/// draft-ietf-moq-transport-22 §9.18 (SUBSCRIBE_TRACKS) の列挙 (AUTHORIZATION_TOKEN / FORWARD /
+/// GROUP_ORDER / SUBGROUP_FILTER / OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER /
+/// TRACK_PROPERTY_FILTER / INCLUDE_PROPERTIES) と、§3.6.2 (Parameters on SUBSCRIBE_TRACKS) の
+/// "Any Parameter that can be specified on a Subscription (ie: in SUBSCRIBE) is valid in
+/// SUBSCRIBE_TRACKS, unless otherwise specified." の和集合である。
+///
+/// §3.6.2 が SUBSCRIBE_TRACKS に載せられると明記する LOCATION_FILTER / FILL_PARAMETERS は
+/// §9.18 の列挙にも §9.20.9 (LOCATION FILTER Parameter) / §9.20.15 (FILL PARAMETERS Parameter)
+/// をはじめ各パラメータ節の "MAY appear in" にも現れず、draft の記述が食い違う。仕様が許容する
+/// メッセージでセッションを閉じない側 (包括許可) を採る。TRACK_PROPERTY_FILTER は SUBSCRIBE に
+/// 出現しない SUBSCRIBE_TRACKS 固有の型である (§3.6.1 (Filtering SUBSCRIBE_TRACKS))。
+///
+/// [`SUBSCRIBE_ALLOWED_PARAMS`] を変更するときは本定数も追随させること
+/// (`subscribe_tracks_allowed_params_covers_subscribe_params` が固定する)。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
+    PARAM_AUTHORIZATION_TOKEN,
+    PARAM_RENDEZVOUS_TIMEOUT,
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_FORWARD,
+    PARAM_LOCATION_FILTER,
+    PARAM_GROUP_ORDER,
+    PARAM_NEW_GROUP_REQUEST,
+    PARAM_INCLUDE_PROPERTIES,
+    PARAM_FILL_PARAMETERS,
+    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECTID_FILTER,
+    PARAM_PRIORITY_FILTER,
+    PARAM_OBJECT_PROPERTY_FILTER,
+    PARAM_TRACK_PROPERTY_FILTER,
+];
+
+/// 未対応 request の型 ID から、そのメッセージで許可されるパラメータ集合を返す
+///
+/// 対象は `ControlMessage::Unsupported` が request として保持する 3 種
+/// ([`UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID`] と同じ集合。型を追加するときは双方を
+/// 更新すること) だけであり、応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) と
+/// 定義外の型には `None` を返す。
+pub(crate) fn unsupported_request_allowed_params(type_id: u64) -> Option<&'static [u64]> {
+    match type_id {
+        MSG_PUBLISH_NAMESPACE => Some(PUBLISH_NAMESPACE_ALLOWED_PARAMS),
+        MSG_SUBSCRIBE_NAMESPACE => Some(SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS),
+        MSG_SUBSCRIBE_TRACKS => Some(SUBSCRIBE_TRACKS_ALLOWED_PARAMS),
+        _ => None,
+    }
+}
+
 // ─── 共通型 ──────────────────────────────────────────────────
 //
 // `TrackNamespace` / `Location` は message_parameter.rs からも使用されるため、
@@ -1030,6 +1101,9 @@ pub(crate) const UNSUPPORTED_MESSAGE_TYPES: &[u64] = &[
 ];
 
 /// `UNSUPPORTED_MESSAGE_TYPES` のうち本体が Request ID (vi64) で始まる型
+///
+/// 許可パラメータ集合の対応表 ([`unsupported_request_allowed_params`]) と同じ集合である。
+/// 型を追加するときは双方を更新すること。
 pub(crate) const UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID: &[u64] = &[
     MSG_PUBLISH_NAMESPACE,
     MSG_SUBSCRIBE_NAMESPACE,
@@ -1076,6 +1150,11 @@ pub enum ControlMessage {
     /// 対象は relay 専用の namespace 発見・告知機構 (CODEBASE.md の方針で実装しない) の
     /// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS と、その応答である
     /// NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED である。
+    ///
+    /// 本体は生バイト列のまま保持するが、request として届く 3 種は
+    /// [`crate::session::core::Session::recv_request`] が本体を解析し、パラメータのスコープ検証
+    /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope)) と AUTHORIZATION_TOKEN の
+    /// 適用 (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression)) を行う。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     Unsupported {
         /// 制御メッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
@@ -1122,8 +1201,9 @@ impl ControlMessage {
     /// reject を送れないためである。
     /// `Session` を経由せずパラメータを直接扱う場合は
     /// [`crate::message_parameter::MessageParameters::validate_auth_token_uniqueness`] を
-    /// 呼ぶこと。本体を解析しない未実装 request (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-    /// SUBSCRIBE_TRACKS) は本検証の対象外である。
+    /// 呼ぶこと。`ControlMessage::decode` が本体を解析しない未実装 request
+    /// (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) も、`Session` が本体を
+    /// 解析したうえで同じ検証を行う ([`crate::session::core::Session::recv_request`])。
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
 
@@ -1308,5 +1388,52 @@ impl ControlMessage {
         }
 
         Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SUBSCRIBE_TRACKS の許可集合が SUBSCRIBE の許可集合を覆うこと
+    ///
+    /// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that
+    /// can be specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS,
+    /// unless otherwise specified." 和集合の取りこぼしで、仕様が許容するメッセージを
+    /// PROTOCOL_VIOLATION で閉じないよう、定数の追随を固定する。
+    #[test]
+    fn subscribe_tracks_allowed_params_covers_subscribe_params() {
+        for param_type in SUBSCRIBE_ALLOWED_PARAMS {
+            assert!(
+                SUBSCRIBE_TRACKS_ALLOWED_PARAMS.contains(param_type),
+                "SUBSCRIBE_TRACKS の許可集合が SUBSCRIBE のパラメータ {param_type:#x} を欠いている"
+            );
+        }
+        assert!(
+            SUBSCRIBE_TRACKS_ALLOWED_PARAMS.contains(&PARAM_TRACK_PROPERTY_FILTER),
+            "SUBSCRIBE_TRACKS 固有の TRACK_PROPERTY_FILTER が許可集合に無い"
+        );
+    }
+
+    /// 許可パラメータ集合の対応表が Request ID を持つ未対応 request の集合と一致すること
+    ///
+    /// 2 つの定数は同じ 3 型を列挙しており、片方だけを更新すると NOT_SUPPORTED のはずが
+    /// PROTOCOL_VIOLATION になる等、無言で挙動が変わる。対応表の一致を固定する。
+    #[test]
+    fn unsupported_request_allowed_params_covers_request_types() {
+        for type_id in UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID {
+            assert!(
+                unsupported_request_allowed_params(*type_id).is_some(),
+                "request 型 {type_id:#x} の許可パラメータ集合が無い"
+            );
+        }
+        for type_id in UNSUPPORTED_MESSAGE_TYPES {
+            let is_request = UNSUPPORTED_MESSAGE_TYPES_WITH_REQUEST_ID.contains(type_id);
+            assert_eq!(
+                unsupported_request_allowed_params(*type_id).is_some(),
+                is_request,
+                "型 {type_id:#x} の request 判定が対応表と一致しない"
+            );
+        }
     }
 }

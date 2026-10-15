@@ -21,20 +21,23 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, REQUEST_MALFORMED_AUTH_TOKEN,
+    MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_INTERNAL_ERROR, REQUEST_MALFORMED_AUTH_TOKEN,
     SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
-    SESSION_INVALID_PATH, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
-    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
+    SESSION_INVALID_PATH, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTHORITY,
+    SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
+    is_local_error_code,
 };
 use crate::message::{
     ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
     RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::TrackNamespace,
+    unsupported_request_allowed_params,
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
 use crate::parameter::{SetupOptions, SetupUriValidationError};
 use crate::subgroup_tracker::SubgroupTracker;
 use crate::track_properties::TrackProperties;
+use crate::varint;
 
 use crate::stream::SETUP_STREAM_TYPE;
 
@@ -1059,9 +1062,9 @@ impl Session {
     ///
     /// draft-ietf-moq-transport-22 §6.4.2.1 (Request ID): peer の Request ID の parity 違反と
     /// 重複を検証し、違反時は `INVALID_REQUEST_ID` でセッションを `Closing` に遷移させる
-    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う。本体を
-    /// 解析しない未対応 request は `accept_peer_request` を通せないため
-    /// `validate_peer_request_id` を直接呼ぶ)。
+    /// (検証は各ハンドラ先頭の `accept_peer_request` が 1 メッセージにつき 1 回行う。未対応
+    /// request は同関数を通さず、`handle_unsupported_request` が `validate_peer_request_id` を
+    /// 直接呼ぶ)。
     /// 仕様がセッション終了を MUST とするのは parity 違反と重複の 2 条件だけであり、
     /// 未到達 Request ID の保持数に上限は設けない。
     ///
@@ -1072,10 +1075,16 @@ impl Session {
     /// 閉じるかを選べる。将来 draft が変更される可能性がある。
     ///
     /// 上記 7 種類のうち本実装が扱わない 3 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
-    /// SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら
-    /// GOING_AWAY) を積んで session を維持する (draft §1.6 (Modularity): "Limited endpoints
-    /// SHOULD respond to any unsupported messages with the appropriate NOT_SUPPORTED error
-    /// code, rather than ignoring them.")。7 種類以外の message type
+    /// SUBSCRIBE_TRACKS) は本体を解析したうえで `REQUEST_ERROR` (NOT_SUPPORTED、control
+    /// GOAWAY を送信済みなら GOING_AWAY) を積んで session を維持する
+    /// (draft §1.6 (Modularity): "Limited endpoints SHOULD respond to any unsupported messages
+    /// with the appropriate NOT_SUPPORTED error code, rather than ignoring them.")。
+    /// 本体の解析に失敗した場合 (フレーミング違反 / Track Namespace の書式不正)、許可されない
+    /// パラメータを含む場合 (draft §9.20.1 (Parameter Scope))、REGISTER が token cache の上限や
+    /// alias 重複に触れる場合は、原因に応じた終了コード
+    /// (`PROTOCOL_VIOLATION` / `KEY_VALUE_FORMATTING_ERROR` / `AUTH_TOKEN_CACHE_OVERFLOW` /
+    /// `DUPLICATE_AUTH_TOKEN_ALIAS`) で session を closing に遷移させる。
+    /// 7 種類以外の message type
     /// (draft §6.3 (Session initialization) 違反) は `PROTOCOL_VIOLATION` で session を
     /// closing に遷移させる。
     pub fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError> {
@@ -1095,9 +1104,9 @@ impl Session {
             ControlMessage::Unsupported {
                 type_id,
                 request_id,
-                ..
+                body,
             } => {
-                self.handle_unsupported_request(type_id, request_id)?;
+                self.handle_unsupported_request(type_id, request_id, &body)?;
             }
             _ => {
                 let err = SessionError::new(
@@ -1119,30 +1128,95 @@ impl Session {
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR(NOT_SUPPORTED)` で拒否し、
     /// セッションは維持する。
     ///
+    /// 要求として届く 3 種は本体を解析しないまま拒否できない。拒否しても §8.9
+    /// (Authorization Token Compression) の REGISTER 適用 MUST と §9.20.1 (Parameter Scope) の
+    /// スコープ検証 MUST は成立し、不正な本体は原因に応じた終了コードでセッションを閉じる
+    /// 必要がある。そのため次の順序で処理する
+    /// (セッション終了を招く検証を先に置き、メッセージ単位の reject を GOAWAY 拒否 (MAY) と
+    /// NOT_SUPPORTED (SHOULD) より先に置く。`accept_peer_request` と同じ整理)。
+    ///
+    /// 1. Request ID の parity と重複 (`validate_peer_request_id`)
+    /// 2. 本体の解析 (`decode_unsupported_request_body`)。失敗は原因に応じた終了コードで
+    ///    セッションを閉じる (REQUEST_ERROR は送らない)
+    /// 3. パラメータのスコープ検証 (draft §9.20.1 (Parameter Scope) の MUST。違反は
+    ///    PROTOCOL_VIOLATION でセッションを閉じる)
+    /// 4. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。違反は REGISTER を適用したうえで
+    ///    REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する)
+    /// 5. REGISTER の token cache への適用 (draft §8.9 の MUST。GOAWAY 拒否の場合も適用する)
+    /// 6. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
+    ///
     /// 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は応答先の request を
-    /// 持たないため `PROTOCOL_VIOLATION` でセッションを閉じる。拒否コードの優先順は
-    /// parity と重複 → GOING_AWAY → NOT_SUPPORTED である。
+    /// 持たないため `PROTOCOL_VIOLATION` でセッションを閉じる。公開 enum を手組みして
+    /// 応答専用の型に Request ID を付けた場合も同じ扱いにする。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     fn handle_unsupported_request(
         &mut self,
         type_id: u64,
         request_id: Option<u64>,
+        body: &[u8],
     ) -> Result<(), SessionError> {
-        let Some(request_id) = request_id else {
-            // 応答専用の型が request stream の先頭に来るのは §6.3 (Session initialization) の
-            // 7 種に反する (Table 5 で First を持たない)
+        // 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) が request stream の
+        // 先頭に来るのは §6.3 (Session initialization) の 7 種に反する (Table 5 で "First" を
+        // 持たない)。公開 enum を手組みして Request ID を付けた場合も同じ扱いにする。
+        let (Some(request_id), Some(allowed_params)) =
+            (request_id, unsupported_request_allowed_params(type_id))
+        else {
             let err = SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "response-only control message received as a request stream start",
+                "control message type cannot start a request stream",
             );
             self.fail(err.clone());
             return Err(err);
         };
         // draft §6.4.2.1 (Request ID): parity と重複は他の request と同じく検証する
         self.validate_peer_request_id(request_id)?;
+        let (body_request_id, parameters) = match decode_unsupported_request_body(body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let err = session_error_from_request_body(err);
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        // 本体の先頭の Request ID はメッセージ decode が取り出した値と一致しなければならない。
+        // `ControlMessage::decode` を通った場合は同じバイト列に由来するため必ず一致する。
+        if body_request_id != request_id {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "unsupported request body has a different request id",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §9.20.1 (Parameter Scope): メッセージ型ごとに許可されるパラメータ以外の受信は
+        // PROTOCOL_VIOLATION で閉じる (MUST)。NOT_SUPPORTED の判断は変えない。
+        if parameters.validate_scope(allowed_params).is_err() {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "parameter is not allowed in the unsupported request",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft §8.9 (Authorization Token Compression): 構造は正しいが内容が不正なトークン
+        // (同一 (Token Type, Token Value) の重複) は REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で
+        // メッセージ単位に拒否する。REGISTER の MUST (失敗したメッセージでも alias を登録する)
+        // を先に適用する。
+        if parameters.validate_auth_token_uniqueness().is_err() {
+            self.apply_peer_message_auth_token_registers_only(&parameters)?;
+            self.emit_request_error(
+                request_id,
+                REQUEST_MALFORMED_AUTH_TOKEN,
+                "malformed AUTHORIZATION_TOKEN",
+            );
+            return Ok(());
+        }
+        // draft §8.9 (Authorization Token Compression) の REGISTER MUST を GOING_AWAY より先に
+        // 適用する。MUST の対象は REGISTER のみ (DELETE / USE_ALIAS / USE_VALUE は failed
+        // request のパラメータとして触らない)。REGISTER 適用中に session error が発生した場合は
+        // session error 優先で Err を返し、REQUEST_ERROR は発行しない。
+        self.apply_peer_message_auth_token_registers_only(&parameters)?;
         // draft §9.2 (GOAWAY): control GOAWAY を送信済みなら GOING_AWAY を優先する。
-        // 未対応 request は本体を解析しないため `accept_peer_request` を通せない
-        // (同関数は AUTHORIZATION_TOKEN の適用に MessageParameters を要求する)。
         let error_code = if self.goaway.local_sent {
             crate::error::REQUEST_GOING_AWAY
         } else {
@@ -1151,7 +1225,6 @@ impl Session {
         // request_streams に登録しないため、後続の終端通知は
         // `rejected_request_ids` の no-op 経路で吸収される (`emit_request_error` が記録する)
         self.emit_request_error(request_id, error_code, "control message not supported");
-        let _ = type_id;
         Ok(())
     }
 
@@ -2494,6 +2567,65 @@ impl Session {
             }
         }
         Ok(())
+    }
+}
+
+/// 未対応 request の本体を解析して Request ID とパラメータを取り出す
+///
+/// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE) /
+/// §9.18 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) → Track Namespace Prefix →
+/// Number of Parameters → Parameters の順に直列化する。`ControlMessage::Unsupported` は本体を
+/// 生バイト列で保持するだけなので、3 種の構造を知るセッション層が本関数で解析する。
+///
+/// Request ID はメッセージ decode が取り出した値と一致することを呼び出し側が確認する
+/// (公開 enum を手組みして食い違わせた場合は PROTOCOL_VIOLATION)。
+/// Track Namespace Prefix は prefix 一致に使うだけで保持しないため読み飛ばす。
+/// 予約名前空間 (draft §2.4.3 (Reserved Namespaces)) の `DOES_NOT_EXIST` 検証は、未対応 request を
+/// NOT_SUPPORTED で拒否する本経路では行わない (SUBSCRIBE 系の受理経路が別途検証する)。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+///
+/// # Errors
+///
+/// - Request ID / Track Namespace / パラメータのデコード失敗: 各デコーダのエラー
+///   (Track Namespace の書式不正は `ProtocolViolation`)
+/// - パラメータブロックを読み切ったあとに余剰バイトがある (draft §9 Table 5 の Length の
+///   不一致): `ProtocolViolation`
+fn decode_unsupported_request_body(body: &[u8]) -> Result<(u64, MessageParameters), MessageError> {
+    let mut pos = 0;
+    let (request_id, n) = varint::decode(body)?;
+    pos += n;
+    let _prefix = TrackNamespace::decode_from(body, &mut pos)?;
+    let (parameters, consumed) = MessageParameters::decode(&body[pos..])?;
+    if pos + consumed != body.len() {
+        return Err(MessageError::ProtocolViolation(
+            "unsupported request has trailing bytes after parameters",
+        ));
+    }
+    Ok((request_id, parameters))
+}
+
+/// 未対応 request の本体解析エラーをセッション終了コードへ写す
+///
+/// - draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の値の直列化不整合:
+///   `KEY_VALUE_FORMATTING_ERROR`
+/// - draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) /
+///   §9.20 (Control Message Parameters) のフレーミング違反: `PROTOCOL_VIOLATION`
+///
+/// 値の長さプレフィックスが残りバッファを超える場合は codec が `UnexpectedEof` を返すため
+/// `PROTOCOL_VIOLATION` に写る (§8.3 の MUST は KEY_VALUE_FORMATTING_ERROR であり、
+/// codec 層の扱いは現行のまま)。`MalformedAuthToken` は SETUP の decode だけが返すため、
+/// 本経路の catch-all は `PROTOCOL_VIOLATION` で足りる。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+fn session_error_from_request_body(err: MessageError) -> SessionError {
+    match err {
+        MessageError::KeyValueFormattingError(msg) => {
+            SessionError::new(SESSION_KEY_VALUE_FORMATTING_ERROR, msg)
+        }
+        MessageError::ProtocolViolation(msg) => SessionError::new(SESSION_PROTOCOL_VIOLATION, msg),
+        _ => SessionError::new(
+            SESSION_PROTOCOL_VIOLATION,
+            "unsupported request body decode error",
+        ),
     }
 }
 

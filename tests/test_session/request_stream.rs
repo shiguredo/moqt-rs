@@ -1,4 +1,10 @@
 use super::*;
+use shiguredo_moqt::error::{
+    REQUEST_GOING_AWAY, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS,
+    SESSION_KEY_VALUE_FORMATTING_ERROR,
+};
+use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
 
 // ─── request_streams lifecycle ─────────────────────
 //
@@ -395,6 +401,112 @@ fn recv_many_out_of_order_request_ids_keeps_session_open() {
     );
 }
 
+// ─── 未対応 request の本体 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) ───
+//
+// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE) /
+// §9.18 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) → Track Namespace Prefix (..) →
+// Number of Parameters (vi64) → Parameters (..) の順に直列化する。Track Namespace の encode API は
+// crate 内に閉じているため、wire 表現を直接組み立てる。
+
+/// Track Namespace Prefix "live" のワイヤ表現 (フィールド数 1 + フィールド長 4 + "live")
+fn live_namespace_prefix() -> Vec<u8> {
+    let mut bytes = vec![0x01, 0x04];
+    bytes.extend_from_slice(b"live");
+    bytes
+}
+
+/// 未対応 request の本体を共通構造で組み立てる
+fn unsupported_request_body(request_id: u64, parameters: &MessageParameters) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    parameters
+        .encode(&mut encoded)
+        .expect("テストフィクスチャの前提条件を満たす");
+    unsupported_request_body_with_raw_parameters(request_id, &encoded)
+}
+
+/// パラメータブロックの生バイト列から未対応 request の本体を組み立てる
+///
+/// 重複トークンなど自側の `MessageParameters::encode` が拒否するパラメータは wire 表現を
+/// 直接組み立てる必要があるため、生バイト列を受け取る経路を用意する。
+fn unsupported_request_body_with_raw_parameters(request_id: u64, parameters: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    shiguredo_moqt::varint::encode(request_id, &mut body);
+    body.extend_from_slice(&live_namespace_prefix());
+    body.extend_from_slice(parameters);
+    body
+}
+
+/// 未対応 request の `ControlMessage::Unsupported` を組み立てる
+fn unsupported_request(
+    type_id: u64,
+    request_id: u64,
+    parameters: &MessageParameters,
+) -> ControlMessage {
+    ControlMessage::Unsupported {
+        type_id,
+        request_id: Some(request_id),
+        body: unsupported_request_body(request_id, parameters),
+    }
+}
+
+/// AUTHORIZATION_TOKEN の REGISTER 1 件 (alias / Token Type 2 / Token Value "tok") を持つパラメータ
+fn register_token_parameters(alias: u64) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(AuthorizationToken::Register {
+            alias,
+            token_type: 2,
+            token_value: b"tok".to_vec(),
+        }),
+    });
+    parameters
+}
+
+/// 同一 (Token Type, Token Value) の REGISTER 2 件 (alias 1 / 2) のパラメータブロック
+///
+/// 構造自体は健全な Token であり、内容 (alias 解決後の Token Type と Token Value の組) が
+/// 重複しているため §8.9 の「well-formed Token structure that is otherwise invalid」に該当する。
+/// 重複トークンは自側の `MessageParameters::encode` が拒否するため、wire 表現を直接組み立てる。
+fn duplicate_register_token_parameters() -> Vec<u8> {
+    vec![
+        0x02, // Number of Parameters
+        0x03, 0x06, 0x01, 0x01, 0x02, b't', b'o', b'k', // REGISTER alias=1 / Type=2 / "tok"
+        0x00, 0x06, 0x01, 0x02, 0x02, b't', b'o', b'k', // REGISTER alias=2 / Type=2 / "tok"
+    ]
+}
+
+/// 送出された REQUEST_ERROR が指定のコードで FIN されていることを検証する
+fn assert_request_error(server: &mut Session, request_id: u64, error_code: u64) {
+    let (err_rid, message, fin) = take_send_on_stream_with_fin(server);
+    assert_eq!(
+        err_rid, request_id,
+        "REQUEST_ERROR は request と同じ stream に載ること"
+    );
+    match message {
+        ControlMessage::RequestError(err) => {
+            assert_eq!(
+                err.error_code, error_code,
+                "REQUEST_ERROR のコードが期待どおりであること"
+            );
+        }
+        other => panic!("REQUEST_ERROR を期待したが {other:?} を受け取った"),
+    }
+    assert!(fin, "拒否は最終応答として FIN すること");
+}
+
+/// 登録された alias の解決結果を検証する
+fn assert_token_alias(server: &Session, alias: u64) {
+    assert_eq!(
+        server
+            .peer_auth_token_cache()
+            .resolve(alias)
+            .map(|(token_type, value)| (token_type, value.to_vec())),
+        Some((2, b"tok".to_vec())),
+        "alias={alias} が token cache に登録されていること"
+    );
+}
+
 /// 定義済みだが未実装の request は NOT_SUPPORTED で拒否し、セッションを維持する
 ///
 /// draft-ietf-moq-transport-22 §1.6 (Modularity): "Limited endpoints SHOULD respond to any
@@ -403,19 +515,11 @@ fn recv_many_out_of_order_request_ids_keeps_session_open() {
 /// SUBSCRIBE_TRACKS) が対象である。
 #[test]
 fn unsupported_request_is_rejected_with_not_supported() {
-    use shiguredo_moqt::error::REQUEST_NOT_SUPPORTED;
-    use shiguredo_moqt::varint;
     let (_client, mut server) = establish_pair();
 
     for (i, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
         let rid = (i as u64) * 2; // Client 役の採番 (偶数)
-        let mut body = Vec::new();
-        varint::encode(rid, &mut body);
-        let msg = ControlMessage::Unsupported {
-            type_id,
-            request_id: Some(rid),
-            body,
-        };
+        let msg = unsupported_request(type_id, rid, &MessageParameters::new());
         let bytes = msg.encode().expect("encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         server
@@ -460,17 +564,10 @@ fn unsupported_request_is_rejected_with_not_supported() {
 /// 未対応 request の parity 違反と重複は INVALID_REQUEST_ID でセッションを閉じる
 #[test]
 fn unsupported_request_parity_and_duplicate_close_session() {
-    use shiguredo_moqt::varint;
     // parity 違反: Server 役の client に対して奇数 id を送る
     let (_client, mut server) = establish_pair();
-    let mut body = Vec::new();
-    varint::encode(1, &mut body);
     let err = server
-        .recv_request(ControlMessage::Unsupported {
-            type_id: 0x06,
-            request_id: Some(1),
-            body,
-        })
+        .recv_request(unsupported_request(0x06, 1, &MessageParameters::new()))
         .unwrap_err();
     assert_eq!(
         err.as_session_error()
@@ -483,13 +580,7 @@ fn unsupported_request_parity_and_duplicate_close_session() {
     // 重複: 同じ id を 2 回送る
     let (_client, mut server) = establish_pair();
     for _ in 0..2 {
-        let mut body = Vec::new();
-        varint::encode(0, &mut body);
-        let result = server.recv_request(ControlMessage::Unsupported {
-            type_id: 0x50,
-            request_id: Some(0),
-            body,
-        });
+        let result = server.recv_request(unsupported_request(0x50, 0, &MessageParameters::new()));
         if let Err(err) = result {
             assert_eq!(
                 err.as_session_error()
@@ -508,8 +599,6 @@ fn unsupported_request_parity_and_duplicate_close_session() {
 /// 自側が control GOAWAY を送信済みなら未対応 request は GOING_AWAY で拒否する
 #[test]
 fn unsupported_request_after_local_goaway_returns_going_away() {
-    use shiguredo_moqt::error::REQUEST_GOING_AWAY;
-    use shiguredo_moqt::varint;
     let (_client, mut server) = establish_pair();
     // server が control GOAWAY を送信する
     server
@@ -518,33 +607,463 @@ fn unsupported_request_after_local_goaway_returns_going_away() {
     let _ = take_send_control(&mut server);
 
     let rid = 0u64;
-    let mut body = Vec::new();
-    varint::encode(rid, &mut body);
+    server
+        .recv_request(unsupported_request(0x51, rid, &MessageParameters::new()))
+        .expect("GOING_AWAY 拒否は Result::Ok であること");
+    assert_request_error(&mut server, rid, REQUEST_GOING_AWAY);
+}
+
+/// 未対応 request の本体に載った REGISTER は、拒否後も §8.9 の MUST で alias が登録される
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a
+/// message carrying an Authorization Token with Alias Type REGISTER that does not result in a
+/// Session error MUST register the Token Alias in the token cache, even if the message fails
+/// for other reasons, including Unauthorized."
+#[test]
+fn unsupported_request_registers_auth_token_alias() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    server
+        .recv_request(unsupported_request(0x06, 0, &register_token_parameters(1)))
+        .expect("未対応 request の拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+    assert_token_alias(&server, 1);
+}
+
+/// control GOAWAY 送信済みの GOING_AWAY 拒否でも REGISTER は適用される
+///
+/// §8.9 の REGISTER MUST は「Session error にならない限り」適用されるため、GOAWAY (MAY) による
+/// 拒否でも token cache への登録は行う。
+#[test]
+fn unsupported_request_after_goaway_registers_auth_token_alias() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    server
+        .send_goaway(Vec::new(), 10_000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+
+    server
+        .recv_request(unsupported_request(0x50, 0, &register_token_parameters(3)))
+        .expect("GOING_AWAY 拒否は Result::Ok であること");
+    assert_request_error(&mut server, 0, REQUEST_GOING_AWAY);
+    assert_token_alias(&server, 3);
+}
+
+/// 未対応 request の重複トークンは MALFORMED_AUTH_TOKEN で拒否し、GOING_AWAY より優先する
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
+/// §9.2 (GOAWAY) の新規 request 拒否は MAY のため、両方が成立する場合は MALFORMED_AUTH_TOKEN を
+/// 返す。失敗したメッセージでも REGISTER は適用する (§8.9)。
+#[test]
+fn unsupported_request_with_duplicate_tokens_is_rejected_with_malformed_auth_token() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    server
+        .send_goaway(Vec::new(), 10_000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+
     server
         .recv_request(ControlMessage::Unsupported {
             type_id: 0x51,
-            request_id: Some(rid),
+            request_id: Some(0),
+            body: unsupported_request_body_with_raw_parameters(
+                0,
+                &duplicate_register_token_parameters(),
+            ),
+        })
+        .expect("メッセージ単位の reject は Ok (セッションは維持)");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_MALFORMED_AUTH_TOKEN);
+    assert_token_alias(&server, 1);
+    assert_token_alias(&server, 2);
+}
+
+/// 未対応 request で登録済み alias を再登録すると DUPLICATE_AUTH_TOKEN_ALIAS でセッションを閉じる
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a
+/// message attempting to register an Alias which is already registered MUST close the Session
+/// with DUPLICATE_AUTH_TOKEN_ALIAS."
+#[test]
+fn unsupported_request_reregistering_alias_closes_session() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    // 1 通目で alias=5 を登録する (未対応 request として NOT_SUPPORTED で拒否される)
+    server
+        .recv_request(unsupported_request(0x06, 0, &register_token_parameters(5)))
+        .expect("1 通目の拒否は Result::Ok であること");
+    let _ = take_send_on_stream_with_fin(&mut server);
+
+    // 2 通目で同じ alias を再登録する
+    let err = server
+        .recv_request(unsupported_request(0x06, 2, &register_token_parameters(5)))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_DUPLICATE_AUTH_TOKEN_ALIAS
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// 自側が MAX_AUTH_TOKEN_CACHE_SIZE を宣言していないセッションでは REGISTER で
+/// AUTH_TOKEN_CACHE_OVERFLOW となり、REQUEST_ERROR は送らない
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "If a registration
+/// outside of SETUP is attempted that would cause this limit to be exceeded, the receiver MUST
+/// terminate the Session with an AUTH_TOKEN_CACHE_OVERFLOW error."
+#[test]
+fn unsupported_request_register_without_cache_closes_session() {
+    // establish_pair は MAX_AUTH_TOKEN_CACHE_SIZE を宣言しない (自側の上限は既定 0)
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .recv_request(unsupported_request(0x06, 0, &register_token_parameters(1)))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_AUTH_TOKEN_CACHE_OVERFLOW
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+    while let Some(event) = server.poll_event() {
+        assert!(
+            !matches!(
+                event,
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                }
+            ),
+            "session error では REQUEST_ERROR を送らないこと"
+        );
+    }
+}
+
+/// 未対応 request の本体が共通構造に従わない場合は原因に応じた終了コードでセッションを閉じる
+///
+/// draft-ietf-moq-transport-22 §9 Table 5 (Length と本体の不一致) は PROTOCOL_VIOLATION、
+/// §8.3 (Key-Value-Pair Structure) の Token 直列化の不整合は KEY_VALUE_FORMATTING_ERROR で閉じる。
+#[test]
+fn unsupported_request_body_decode_errors_close_session() {
+    // 本体が Request ID で終わっている (Track Namespace Prefix とパラメータが無い)
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body: vec![0x00],
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+
+    // Track Namespace Prefix の書式不正 (フィールド数 1 に対してフィールドが無い)
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body: vec![0x00, 0x01],
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+
+    // パラメータブロックの後ろに余剰バイトがある (count=0 のあとに 1 バイト)
+    let (_client, mut server) = establish_pair();
+    let mut body = Vec::new();
+    shiguredo_moqt::varint::encode(0, &mut body);
+    body.extend_from_slice(&live_namespace_prefix());
+    body.push(0x00);
+    body.push(0x00);
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
             body,
         })
-        .expect("GOING_AWAY 拒否は Result::Ok であること");
-    let mut saw_reject = false;
-    while let Some(e) = server.poll_event() {
-        if let SessionEvent::SendOnStream {
-            message: ControlMessage::RequestError(err),
-            ..
-        } = e
-        {
-            assert_eq!(err.error_code, REQUEST_GOING_AWAY);
-            saw_reject = true;
-        }
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+
+    // AUTHORIZATION_TOKEN の内部直列化が壊れている (DELETE なのに alias が無い)
+    let (_client, mut server) = establish_pair();
+    let mut body = Vec::new();
+    shiguredo_moqt::varint::encode(0, &mut body);
+    body.extend_from_slice(&live_namespace_prefix());
+    let mut token_parameter = Vec::new();
+    shiguredo_moqt::varint::encode(1, &mut token_parameter); // Number of Parameters
+    shiguredo_moqt::varint::encode(PARAM_AUTHORIZATION_TOKEN, &mut token_parameter); // Parameter Type
+    shiguredo_moqt::varint::encode(1, &mut token_parameter); // Token の Length
+    token_parameter.push(0x00); // DELETE なのに alias が無い Token
+    body.extend_from_slice(&token_parameter);
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body,
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_KEY_VALUE_FORMATTING_ERROR
+    );
+
+    // 本体の先頭の Request ID が `ControlMessage::Unsupported` の request_id と食い違う
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body: unsupported_request_body(2, &MessageParameters::new()),
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+}
+
+/// 未対応 request でもメッセージ型ごとの許可パラメータ集合を検証する
+///
+/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): "If a parameter appears in some other
+/// type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION."
+#[test]
+fn unsupported_request_rejects_out_of_scope_parameter() {
+    use shiguredo_moqt::message_parameter::{
+        PARAM_FILL_TIMEOUT, PARAM_GROUP_ORDER, PARAM_SUBSCRIBER_PRIORITY,
+    };
+
+    // PUBLISH_NAMESPACE が許可するのは AUTHORIZATION_TOKEN だけ (§9.14)
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(128),
+    });
+    let err = server
+        .recv_request(unsupported_request(0x06, 0, &parameters))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+
+    // SUBSCRIBE_TRACKS は GROUP_ORDER を許可する (§9.18) ため、同じ種類のパラメータでも拒否だけになる
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(1),
+    });
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("許可されたパラメータを持つ未対応 request は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+
+    // SUBSCRIBE_TRACKS でも FILL_TIMEOUT は許可されない
+    // (draft-ietf-moq-transport-22 §9.20.5 (FILL TIMEOUT Parameter) は FETCH と
+    // FILL_PARAMETERS 内だけに出現を認める)
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_TIMEOUT,
+        value: MessageParameterValue::VarInt(1000),
+    });
+    let err = server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// 未対応 request の重複トークンは NOT_SUPPORTED よりも MALFORMED_AUTH_TOKEN を優先する
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) のメッセージ拒否は MUST、
+/// §1.6 (Modularity) の NOT_SUPPORTED は SHOULD のため、両方が成立する場合は
+/// MALFORMED_AUTH_TOKEN を返す。失敗したメッセージでも REGISTER は適用する (§8.9)。
+#[test]
+fn unsupported_request_with_duplicate_tokens_prefers_malformed_over_not_supported() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x51,
+            request_id: Some(0),
+            body: unsupported_request_body_with_raw_parameters(
+                0,
+                &duplicate_register_token_parameters(),
+            ),
+        })
+        .expect("メッセージ単位の reject は Ok (セッションは維持)");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_MALFORMED_AUTH_TOKEN);
+    assert_token_alias(&server, 1);
+    assert_token_alias(&server, 2);
+}
+
+/// SUBSCRIBE_TRACKS は §3.6.2 の包括許可により SUBSCRIBE のパラメータも載せられる
+///
+/// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that can
+/// be specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS, unless
+/// otherwise specified." 同節は LOCATION_FILTER と FILL_PARAMETERS を SUBSCRIBE_TRACKS に
+/// 載せられると明記しており (§9.18 の列挙には無い)、スコープ違反としてセッションを閉じない。
+#[test]
+fn subscribe_tracks_with_subscribe_parameters_is_rejected_with_not_supported() {
+    use shiguredo_moqt::message_parameter::{LocationFilter, PARAM_LOCATION_FILTER};
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
+    });
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("§3.6.2 の包括許可に入るパラメータでセッションを閉じないこと");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+}
+
+/// SUBSCRIBE_TRACKS は TRACK_PROPERTY_FILTER と他の許可パラメータを同時に載せられる
+///
+/// draft-ietf-moq-transport-22 §9.18 (SUBSCRIBE_TRACKS) は TRACK_PROPERTY_FILTER と
+/// GROUP_ORDER 等を同じ列挙で許可し、§3.6.1 (Filtering SUBSCRIBE_TRACKS) は同メッセージの
+/// Track Property Filter による絞り込みを定める。許可集合は §3.6.2 の包括許可との和集合なので、
+/// 複数の型を組み合わせてもスコープ違反にしない。
+#[test]
+fn subscribe_tracks_allows_track_property_filter_with_other_parameters() {
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, PARAM_GROUP_ORDER, PARAM_LOCATION_FILTER, PARAM_TRACK_PROPERTY_FILTER,
+    };
+
+    // TRACK_PROPERTY_FILTER 単独 (§9.18 の列挙のうち SUBSCRIBE に無い型)
+    let mut alone = MessageParameters::new();
+    alone.push(MessageParameter {
+        param_type: PARAM_TRACK_PROPERTY_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
+    });
+    // TRACK_PROPERTY_FILTER + LOCATION_FILTER + GROUP_ORDER (§9.18 と §3.6.2 の両方にまたがる)
+    let mut combined = MessageParameters::new();
+    combined.push(MessageParameter {
+        param_type: PARAM_TRACK_PROPERTY_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
+    });
+    combined.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
+    });
+    combined.push(MessageParameter {
+        param_type: PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(1),
+    });
+
+    for parameters in [alone, combined] {
+        let (_client, mut server) = establish_pair();
+        server
+            .recv_request(unsupported_request(0x51, 0, &parameters))
+            .expect("許可集合の和集合に入るパラメータでセッションを閉じないこと");
+        assert_eq!(server.state(), SessionState::Established);
+        assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
     }
-    assert!(saw_reject, "GOING_AWAY が優先されること");
+}
+
+/// SUBSCRIBE_NAMESPACE の許可集合は AUTHORIZATION_TOKEN だけである
+///
+/// draft-ietf-moq-transport-22 §9.15 (SUBSCRIBE_NAMESPACE): "The only parameter that can appear
+/// in a SUBSCRIBE_NAMESPACE is AUTHORIZATION_TOKEN." 許可されないパラメータの受信は §9.20.1
+/// (Parameter Scope) の MUST により PROTOCOL_VIOLATION でセッションを閉じる。
+#[test]
+fn subscribe_namespace_parameter_scope_is_validated() {
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY;
+
+    // AUTHORIZATION_TOKEN は許可される (値は USE_VALUE で alias 登録を伴わない)
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+            token_type: 2,
+            token_value: b"tok".to_vec(),
+        }),
+    });
+    server
+        .recv_request(unsupported_request(0x50, 0, &parameters))
+        .expect("許可されたパラメータを持つ未対応 request は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+
+    // SUBSCRIBER_PRIORITY は許可されない
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(128),
+    });
+    let err = server
+        .recv_request(unsupported_request(0x50, 0, &parameters))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// 未登録 alias を参照する USE_ALIAS を含む未対応 request は NOT_SUPPORTED で拒否し、
+/// セッションを維持する
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の REGISTER 適用 MUST は
+/// REGISTER だけを対象とし、DELETE / USE_ALIAS / USE_VALUE は失敗するメッセージのパラメータと
+/// して適用しない (`apply_peer_message_auth_token_registers_only` の doc 参照)。GOAWAY 拒否の
+/// 経路と同じ扱いであり、未登録 alias を理由にした UNKNOWN_AUTH_TOKEN_ALIAS でのセッション終了は
+/// 起こさない。
+#[test]
+fn unsupported_request_with_unknown_alias_is_rejected_with_not_supported() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseAlias { alias: 7 }),
+    });
+    server
+        .recv_request(unsupported_request(0x06, 0, &parameters))
+        .expect("未対応 request の拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
 }
 
 /// 応答専用の型を request stream の先頭で受けるとセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §9 Table 5 で NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED は
-/// "First" を持たず、応答先の request も存在しない。
+/// "First" を持たず、応答先の request も存在しない。`ControlMessage::decode` は応答専用の型に
+/// Request ID を付けないが、公開 enum を手組みして付けた場合も §6.3 (Session initialization)
+/// 違反として扱う。
 #[test]
 fn response_only_message_as_request_start_closes_session() {
     for type_id in [0x08u64, 0x0E, 0x0F] {
@@ -562,6 +1081,26 @@ fn response_only_message_as_request_start_closes_session() {
                 .code,
             SESSION_PROTOCOL_VIOLATION,
             "応答専用の型は PROTOCOL_VIOLATION になること: {type_id:#x}"
+        );
+        assert_eq!(server.state(), SessionState::Closing);
+    }
+
+    // 公開 enum を手組みして Request ID を付けた場合も同じ扱いにする
+    for type_id in [0x08u64, 0x0E, 0x0F] {
+        let (_client, mut server) = establish_pair();
+        let err = server
+            .recv_request(ControlMessage::Unsupported {
+                type_id,
+                request_id: Some(0),
+                body: unsupported_request_body(0, &MessageParameters::new()),
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error()
+                .expect("Session エラーであること")
+                .code,
+            SESSION_PROTOCOL_VIOLATION,
+            "応答専用の型に Request ID を付けても PROTOCOL_VIOLATION になること: {type_id:#x}"
         );
         assert_eq!(server.state(), SessionState::Closing);
     }
