@@ -62,7 +62,7 @@ fn parse_finite_f64(v: nojson::RawJsonValue<'_, '_>) -> Result<f64, nojson::Json
 
 /// RFC 5646 §2.1 (Syntax) の `irregular` (grandfathered) タグの固定リスト
 ///
-/// 同節が "These tags were registered under [RFC3066] and are a fixed list that can never
+/// 同節が "These tags were registered under \[RFC3066\] and are a fixed list that can never
 /// change." と述べる固定リストの一部であり、IANA Language Subtag Registry の更新では増えない
 /// (この文は `regular` と `irregular` を合わせた grandfathered タグ全体について述べており、
 /// `irregular` はその一部である)。
