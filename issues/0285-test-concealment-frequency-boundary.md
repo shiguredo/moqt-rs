@@ -1,7 +1,7 @@
 # 音声の補間の可否を周波数の境界でテストに固定する
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/test-concealment-frequency-boundary
 - Polished: {YYYY-MM-DD}
 
@@ -43,3 +43,19 @@ E2E 音では周期が格子に乗りにくいためである)。moqt-rs の `sr
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- `tests/test_playout/stretch.rs` に、正弦波の周波数ごとに補間したサンプル数を返す補助
+  (`conceal_for_frequency`) を置き、48 kHz / 20 ms のフレーム / 振幅 0.5 / 20 ms の穴で、
+  1000 Hz と 440 Hz は 960、300 / 220 / 150 / 100 Hz は 0 になることを固定した
+- テストのコメントに境界の理由を書いた。4 kHz の格子と探索範囲 (10〜60、20 ms のフレームでは
+  末尾の 2 周期分が取れる範囲に限られるため 10〜39)、格子に乗らない音では探索範囲に入る位数
+  (周期の倍数) のうち相関が最も強いものが選ばれること、440 Hz は位数 2 の 18 で継ぎ目の段差が
+  許容に収まること、300 / 220 / 150 Hz は周波数が低いほど小さくなる自然な段差の許容を超える
+  こと、100 Hz は 1 周期ちょうどの 40 が選べないこと、実リレーの E2E の正弦波では補間が
+  働きにくいことを書いた
+- 実装 (`src/playout/stretch.rs` の `conceal`) は変更していない。事前確認のとおり
+  1000 Hz / 440 Hz が 960、300 / 220 / 150 / 100 Hz が 0 を返すことをテストで確認した
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が成功した
