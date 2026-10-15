@@ -10,8 +10,8 @@ use shiguredo_moqt::playout::feedback::{
 use shiguredo_moqt::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use shiguredo_moqt::playout::timeline::{
     PlayoutTimeline, TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US,
-    TIMELINE_BASE_DRIFT_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TimelineConfig, Track,
-    UnsharedReason, audio_arrival_delay_us,
+    TIMELINE_BASE_DRIFT_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TIMELINE_SYNC_MIN_DELTA_US,
+    TimelineConfig, Track, UnsharedReason, audio_arrival_delay_us,
 };
 use shiguredo_moqt::playout::timing::{
     AudioDelayFeedbackObservation, AudioPlayoutTimingStats, TimingSummary,
@@ -511,9 +511,62 @@ fn video_follows_the_audio_arrival_delay_when_the_audio_drifts() {
         timeline.presentation_delay_us(Track::Audio).is_none(),
         "ずれている側の表示時刻は決めない"
     );
-    // 映像は音声の到着基準の遅れ (80 ms) から不感帯 (30 ms) を引いた 50 ms へ上げる
-    assert_eq!(timeline.presentation_delay_us(Track::Video), Some(50_000));
+    // 映像は音声の到着基準の遅れ (80 ms) から不感帯 (5 ms) を引いた 75 ms へ上げる
+    assert_eq!(timeline.presentation_delay_us(Track::Video), Some(75_000));
     assert_eq!(timeline.audio_arrival_delay_us(), Some(80_000));
+}
+
+/// A/V 同期の不感帯の境界で、ちょうどは動かさず、超えた分だけ合わせること
+///
+/// 不感帯の中では遅延を変えないため、2 つのトラックは最大この値だけ離れたままになる。
+/// 超えた分は先行する側へ足して不感帯へ収める。
+#[test]
+fn sync_deadband_boundary_is_exact() {
+    assert_eq!(
+        TIMELINE_SYNC_MIN_DELTA_US, 5_000,
+        "A/V 同期の不感帯は 5 ms であること"
+    );
+    // 音声の素の表示の遅れは 80 ms (揺らぎの学習の初期値)、映像は 0 ms である。映像の基準を
+    // 音声より 85 ms 遅らせると、表示時刻の差はちょうど不感帯 (5 ms) になる
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    timeline.observe(Track::Video, 10_085_000, 1_000_000);
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Audio),
+        Some(80_000),
+        "不感帯ちょうどの差では音声を遅らせないこと"
+    );
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Video),
+        Some(0),
+        "不感帯ちょうどの差では映像を動かさないこと"
+    );
+
+    // 差を 1 µs だけ超えさせると、先行する音声へ超えた分 (1 µs) を足して不感帯へ収める
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    timeline.observe(Track::Video, 10_085_001, 1_000_000);
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Audio),
+        Some(80_001),
+        "不感帯を超えた分だけ音声を遅らせること"
+    );
+    assert_eq!(
+        timeline.presentation_delay_us(Track::Video),
+        Some(0),
+        "映像は動かさないこと"
+    );
+    let audio_present_us = timeline
+        .present_us(Track::Audio, 1_000_000)
+        .expect("基準がある");
+    let video_present_us = timeline
+        .present_us(Track::Video, 1_000_000)
+        .expect("基準がある");
+    assert_eq!(
+        video_present_us - audio_present_us,
+        TIMELINE_SYNC_MIN_DELTA_US,
+        "合わせた後の差は不感帯ちょうどになること"
+    );
 }
 
 #[test]
