@@ -94,3 +94,9 @@ moqt-js は 2026-10-15 の変更 (`origin/develop` の #492「音声の再生遅
   定数を参照しているため値の追随だけを行った
 - 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` / `make pbt` が成功した
+- 独立検証の指摘による修正: `AUDIO_PLAYOUT_DELAY_US` を直値 50_000 から
+  `TIMELINE_AUDIO_DELAY_FLOOR_US` の導出に変えた (moqt-js の `AUDIO_PLAYOUT_DELAY_SECONDS`
+  が `AUDIO_PLAYOUT_DELAY_FLOOR_MS` から導出されているのと同じ形)。rustdoc の「定義は時間軸
+  側に置く」という記述と実装が一致する。値を 50_000 のまま保つことと、合計が 300 ms のまま
+  であることを `tests/test_playout/scheduler.rs` の `playout_delay_follows_the_timeline_floor`
+  で固定した
