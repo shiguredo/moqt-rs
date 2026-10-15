@@ -1,7 +1,7 @@
 # 音声の再生遅延の下限を 50 ms に下げる
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/change-audio-delay-floor
 - Polished: {YYYY-MM-DD}
 
@@ -70,3 +70,27 @@ moqt-js は 2026-10-15 の変更 (`origin/develop` の #492「音声の再生遅
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- 3 つの下限を 80 ms から 50 ms にした。`src/playout/timeline.rs` の
+  `TIMELINE_AUDIO_DELAY_FLOOR_US`、`src/playout/feedback.rs` の
+  `AUDIO_DELAY_FEEDBACK_MIN_US`、`src/playout/scheduler.rs` の `AUDIO_PLAYOUT_DELAY_US` で
+  ある。閉ループの値は到着基準で鳴らすときの遅れと、映像を合わせる先の両方に効くため、
+  3 つを同時に変えた
+- `src/playout/scheduler.rs` の `AUDIO_PLAYOUT_BACKLOG_US` を、300 ms から
+  `AUDIO_PLAYOUT_DELAY_US` を引いた 250 ms にした (並べすぎとみなす合計は 300 ms のまま)。
+  `AUDIO_DELAY_START_MS` (80 ms) と上限 (100 ms) は変えていない
+- 実測の表と棄却した 30 ms の理由を `TIMELINE_AUDIO_DELAY_FLOOR_US` の rustdoc に書き、
+  `AUDIO_DELAY_FEEDBACK_MIN_US` からはその表を参照するようにした。
+  `examples/moq-sub/src/main.rs` の `arrange` の到着基準の遅れのコメントを
+  [50 ms, 100 ms] へ追随させた
+- テスト: 下限の境界 (ちょうど 50 ms は切らない、50 ms 未満は 50 ms にする) を
+  `tests/test_playout/timeline.rs` の `audio_arrival_delay_is_clamped_between_the_floor_and_the_cap`、
+  `tests/test_playout/feedback.rs` の `target_stays_between_the_floor_and_the_ceiling`、
+  `tests/test_playout/scheduler.rs` の `arrival_based_uses_the_arrival_delay` で固定した。
+  並べすぎの余裕が 250 ms で、合計が 300 ms のままであることを
+  `tests/test_playout/scheduler.rs` の `limit_boundary_is_played` に追加した。PBT は下限の
+  定数を参照しているため値の追随だけを行った
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` / `make pbt` が成功した
