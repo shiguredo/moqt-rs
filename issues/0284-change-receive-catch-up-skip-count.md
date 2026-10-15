@@ -1,7 +1,7 @@
 # 受信側の追いつきで飛んだ音を数える位置を moqt-js に合わせ、棄却した案を記録する
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/change-receive-catch-up-skip-count
 - Polished: {YYYY-MM-DD}
 
@@ -49,3 +49,20 @@ moqt-rs の `src/playout/catch_up.rs` にも同じ形で残しておく価値が
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- `src/playout/catch_up.rs` の `measure_skip` の判定順を、TIMESTAMP の更新 → TIMESTAMP が無い
+  場合 → 1 音の長さが 0 の場合 → 跳びの判定 → 追いつき中かの判定の順に変えた。跳びの判定と
+  追いつき中かの判定の間に副作用が無いため、観測される値は変わらない。順序を入れ替えても値が
+  変わらないことと、この順序にした理由は `measure_skip` の rustdoc に書いた
+- 追いつきを始め直す間隔を伸ばす案と穴 (TIMESTAMP の跳び) の直後を避ける案を実測して棄却した
+  理由を `AudioReceiveCatchUp::observe` の rustdoc に書いた。出典が moqt-js の実測 (実リレー、
+  パケロス 5 %、40 秒) であること、moqt-rs で実リレーの再測が必要になった時点で測り直すこと、
+  作り直しが損失下でも live を保つ役目を果たしていることを明記した
+- 追いつき中でない跳びを数えないことと、追いつき中の跳びを数えることは、既存の
+  `tests/test_playout/catch_up.rs` の `skipped_audio_is_counted_only_during_the_catch_up` が
+  両方を固定していたためテストは追加していない。判定順の変更の前後でこのテストが通ることも
+  確認した
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が成功した
