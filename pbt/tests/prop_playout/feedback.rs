@@ -66,7 +66,7 @@ fn observation(
 
 /// 明示の上限から、目標の範囲 (下限, 上限) を求める
 ///
-/// 明示の上限が下限 (80 ms) を下回るときは上限を優先する (moqt-js と同じ)。
+/// 明示の上限が下限 (50 ms) を下回るときは上限を優先する (moqt-js と同じ)。
 fn target_limits(ceiling_us: Option<i64>) -> (i64, i64) {
     let upper_us =
         AUDIO_DELAY_FEEDBACK_MAX_US.min(ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_US));

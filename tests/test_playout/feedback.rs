@@ -239,8 +239,12 @@ fn tolerance_decreases_the_target_proportionally_to_elapsed_time() {
 
 #[test]
 fn target_stays_between_the_floor_and_the_ceiling() {
-    // 目標は下限 (80 ms) から上限 (300 ms) の間に収める。下限より下げると揺らぎを
+    // 目標は下限 (50 ms) から上限 (300 ms) の間に収める。下限より下げると揺らぎを
     // 吸収できず、上限より上げると常に大きく遅れて鳴る
+    assert_eq!(
+        AUDIO_DELAY_FEEDBACK_MIN_US, 50_000,
+        "目標遅延の下限は 50 ms であること"
+    );
     let mut feedback = AudioDelayFeedback::new();
 
     // 十分な回数を減らしても下限を下回らない
@@ -258,10 +262,18 @@ fn target_stays_between_the_floor_and_the_ceiling() {
         "下限で止まる"
     );
 
+    // 下限ちょうどの目標は切らない。さらに下げる判断を重ねても下限のままである
+    feedback.update(observation(1_000_000_000, Some(0), 0, 0));
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_MIN_US,
+        "下限ちょうどの目標は切らないこと"
+    );
+
     // 十分な回数を増やしても上限を超えない
     for index in 0..100 {
         feedback.update(observation(
-            1_000_000_000 + index * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+            2_000_000_000 + index * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
             Some(400_000),
             0,
             0,
@@ -325,11 +337,15 @@ fn explicit_ceiling_below_the_floor_wins_over_the_floor() {
     // このとき実際に使う目標は、明示の値をそのまま使う
     let mut feedback = AudioDelayFeedback::new();
     feedback.update(observation(0, Some(400_000), 0, 0));
-    feedback.set_ceiling_us(Some(50_000));
-    assert_eq!(feedback.feedback_target_us(), 50_000, "上限まで下がる");
+    feedback.set_ceiling_us(Some(AUDIO_DELAY_FEEDBACK_MIN_US - 20_000));
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_MIN_US - 20_000,
+        "上限まで下がる"
+    );
     assert_eq!(
         feedback.target_delay_us(0),
-        50_000,
+        AUDIO_DELAY_FEEDBACK_MIN_US - 20_000,
         "明示の上限をそのまま使う"
     );
     // 上限を外すと、下限より下にあった目標は下限まで戻る (自動で増やすのは次の判断から)

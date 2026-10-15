@@ -591,7 +591,7 @@ impl AudioPlayoutAssembly {
         let delay_us = timeline
             .learned_delay_us(Track::Audio)
             .max(AUDIO_PLAYOUT_DELAY_US);
-        // 到着基準で鳴らすときの遅れは、学習した遅れを [80 ms, 100 ms] に切った値にする。
+        // 到着基準で鳴らすときの遅れは、学習した遅れを [50 ms, 100 ms] に切った値にする。
         // 学習した値には TIMESTAMP の壁時計からのずれが混じるため、そのまま使うと音がその分
         // だけ遅れて鳴る
         let arrival_delay_us = audio_arrival_delay_us(delay_us);

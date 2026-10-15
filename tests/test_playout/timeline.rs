@@ -518,9 +518,33 @@ fn video_follows_the_audio_arrival_delay_when_the_audio_drifts() {
 
 #[test]
 fn audio_arrival_delay_is_clamped_between_the_floor_and_the_cap() {
+    // 下限は 50 ms である。到着基準の遅れと、映像を合わせる先の両方がこの値を使うため、
+    // 値そのものを固定する
+    assert_eq!(
+        TIMELINE_AUDIO_DELAY_FLOOR_US, 50_000,
+        "音声の再生の遅れの下限は 50 ms であること"
+    );
+    // 下限ちょうどは切らない
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US),
+        TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "下限ちょうどの遅れはそのまま使うこと"
+    );
+    // 下限の 1 µs 手前は下限まで上げる
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US - 1),
+        TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "下限を下回る遅れは下限まで上げること"
+    );
     assert_eq!(audio_arrival_delay_us(0), TIMELINE_AUDIO_DELAY_FLOOR_US);
     assert_eq!(audio_arrival_delay_us(90_000), 90_000);
     assert_eq!(audio_arrival_delay_us(1_000_000), TIMELINE_ARRIVAL_DELAY_US);
+    // 上限ちょうどは切らない
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_ARRIVAL_DELAY_US),
+        TIMELINE_ARRIVAL_DELAY_US,
+        "上限ちょうどの遅れはそのまま使うこと"
+    );
     // 観測が無ければ読めない
     let timeline = PlayoutTimeline::new();
     assert_eq!(timeline.audio_arrival_delay_us(), None);

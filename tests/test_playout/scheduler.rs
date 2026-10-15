@@ -8,7 +8,9 @@ use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_STRETCH_MIN_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutDropReason,
     AudioPlayoutInput, AudioPlayoutScheduler,
 };
-use shiguredo_moqt::playout::timeline::{TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US};
+use shiguredo_moqt::playout::timeline::{
+    TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US, audio_arrival_delay_us,
+};
 
 /// 目標あり (守る) の入力を作る
 ///
@@ -183,7 +185,7 @@ fn compression_returns_to_the_target() {
 #[test]
 fn too_many_queued_sounds_are_dropped() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 上限 (80 ms + 220 ms = 300 ms) を 1 µs 超えた目標は捨てる
+    // 上限 (50 ms + 250 ms = 300 ms) を 1 µs 超えた目標は捨てる
     let decision = scheduler.schedule(input(
         0,
         0,
@@ -246,7 +248,7 @@ fn a_late_sound_keeps_playing_while_the_previous_one_is_sounding() {
 fn a_late_sound_is_rebased_by_arrival_when_the_sound_stopped() {
     let mut scheduler = AudioPlayoutScheduler::new();
     // 目標 (0) から 500 ms を超えて離れて届いた。まだ一度も鳴らしていない (音が途切れて
-    // いる) ため、捨てずに到着基準の小さな目標 (到着 520 ms + 80 ms) へ並べ直して鳴らす
+    // いる) ため、捨てずに到着基準の小さな目標 (到着 520 ms + 下限 50 ms) へ並べ直して鳴らす
     let decision = scheduler.schedule(input(
         AUDIO_PLAYOUT_MAX_LATENESS_US + 20_000,
         0,
@@ -256,7 +258,7 @@ fn a_late_sound_is_rebased_by_arrival_when_the_sound_stopped() {
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: 600_000,
+            start_at_us: 570_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
@@ -374,16 +376,16 @@ fn arrival_based_places_sounds_by_timestamp() {
 #[test]
 fn arrival_based_places_the_first_sound_from_the_arrival_position() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 今の時刻は 150 ms だが、音が届いた時点で実際に鳴っている位置は 100 ms である。
-    // 到着基準の遅れ (80 ms) は到着の位置から数えるため 180 ms から鳴る (今の時刻から
-    // 数えると 230 ms になる)
-    let mut request = input(150_000, 0, 20_000, None);
+    // 今の時刻は 140 ms だが、音が届いた時点で実際に鳴っている位置は 100 ms である。
+    // 到着基準の遅れ (50 ms) は到着の位置から数えるため 150 ms から鳴る (今の時刻から
+    // 数えると 190 ms になる)
+    let mut request = input(140_000, 0, 20_000, None);
     request.arrival_us = 100_000;
     let decision = scheduler.schedule(request);
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: 180_000,
+            start_at_us: 150_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
@@ -418,7 +420,12 @@ fn arrival_based_uses_the_arrival_delay() {
         "到着基準の遅れの上限 (100 ms) を使うこと"
     );
 
-    // 下限 (80 ms) のときは到着 + 80 ms から鳴る
+    // 下限ちょうど (50 ms) では到着 + 50 ms から鳴る。到着基準の遅れを下限で切るのは
+    // 時間軸 (`audio_arrival_delay_us`) の役割であり、ここへは切った後の値が渡る
+    assert_eq!(
+        TIMELINE_AUDIO_DELAY_FLOOR_US, 50_000,
+        "到着基準の遅れの下限は 50 ms であること"
+    );
     let mut scheduler = AudioPlayoutScheduler::new();
     let mut request = input(1_000_000, 0, 20_000, None);
     request.arrival_us = 1_000_000;
@@ -426,13 +433,34 @@ fn arrival_based_uses_the_arrival_delay() {
     assert_eq!(
         scheduler.schedule(request),
         AudioPlayoutDecision::Play {
-            start_at_us: 1_080_000,
+            start_at_us: 1_050_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
             gap_us: 0,
         },
-        "到着基準の遅れの下限 (80 ms) を使うこと"
+        "到着基準の遅れの下限 (50 ms) を使うこと"
+    );
+
+    // 学習した遅れが下限を下回るときも、時間軸が下限まで上げた値で鳴らす
+    let mut scheduler = AudioPlayoutScheduler::new();
+    let mut request = input(1_000_000, 0, 20_000, None);
+    request.arrival_us = 1_000_000;
+    request.arrival_delay_us = audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US - 1);
+    assert_eq!(
+        request.arrival_delay_us, TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "下限の 1 µs 手前は下限まで上げること"
+    );
+    assert_eq!(
+        scheduler.schedule(request),
+        AudioPlayoutDecision::Play {
+            start_at_us: 1_050_000,
+            basis: AudioPlayoutBasis::Arrival,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "下限を下回る遅れでは下限の位置から鳴らすこと"
     );
 }
 
@@ -445,7 +473,7 @@ fn arrival_based_rebases_after_a_late_sound() {
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: 280_000,
+            start_at_us: 250_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
@@ -458,7 +486,7 @@ fn arrival_based_rebases_after_a_late_sound() {
 #[test]
 fn resync_jump_below_the_minimum_is_not_counted_as_a_rebase() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 1 つ目は到着基準で 80 ms から鳴り、100 ms まで鳴る
+    // 1 つ目は到着基準で 50 ms から鳴り、70 ms まで鳴る
     let first = scheduler.schedule(input(0, 0, 20_000, None));
     assert_eq!(
         first,
@@ -470,11 +498,11 @@ fn resync_jump_below_the_minimum_is_not_counted_as_a_rebase() {
             gap_us: 0,
         }
     );
-    // 出力のバッファが到着 + 再生の遅れ (110 ms) より先に進んでおり、予約できる最も早い
+    // 出力のバッファが到着 + 再生の遅れ (105 ms) より先に進んでおり、予約できる最も早い
     // 時刻 (今 + 10 ms = 110 ms) へずらすだけになる。ずらす幅は 105 ms から 5 ms であり、
     // 10 ms 未満なので基準を取り直した回数に数えない
-    let mut request = input(100_000, 25_000, 20_000, None);
-    request.arrival_us = 30_000;
+    let mut request = input(100_000, 55_000, 20_000, None);
+    request.arrival_us = 55_000;
     let second = scheduler.schedule(request);
     assert_eq!(
         second,
@@ -521,7 +549,7 @@ fn arrival_based_rebases_on_a_big_timestamp_jump() {
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: 180_000,
+            start_at_us: 150_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
@@ -550,7 +578,18 @@ fn arrival_based_drops_when_the_rebase_cannot_fit() {
 #[test]
 fn limit_boundary_is_played() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 上限ちょうど (80 ms + 220 ms) は捨てない
+    // 並べすぎとみなす余裕は 250 ms であり、再生の遅れの下限 (50 ms) を足した合計は
+    // 変えていない (300 ms)
+    assert_eq!(
+        AUDIO_PLAYOUT_BACKLOG_US, 250_000,
+        "並べすぎとみなす余裕は 250 ms であること"
+    );
+    assert_eq!(
+        AUDIO_PLAYOUT_DELAY_US + AUDIO_PLAYOUT_BACKLOG_US,
+        300_000,
+        "並べすぎとみなす合計は 300 ms のままであること"
+    );
+    // 上限ちょうど (50 ms + 250 ms) は捨てない
     let decision = scheduler.schedule(input(
         0,
         0,
@@ -612,7 +651,7 @@ fn mode_switch_flushes_the_pending_stretch() {
     assert_eq!(
         arrival,
         AudioPlayoutDecision::Play {
-            start_at_us: 120_000,
+            start_at_us: 90_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,
@@ -644,7 +683,7 @@ fn presentation_delay_raises_the_backlog_limit() {
     let mut scheduler = AudioPlayoutScheduler::new();
     let mut request = input(0, 0, 20_000, Some(300_001));
     request.presentation_delay_us = 500_000;
-    // 上限は max(80 ms, 500 ms) + 220 ms = 720 ms なので、300.001 ms 先の目標は捨てない
+    // 上限は max(50 ms, 500 ms) + 250 ms = 750 ms なので、300.001 ms 先の目標は捨てない
     assert_eq!(
         scheduler.schedule(request),
         AudioPlayoutDecision::Play {
@@ -787,17 +826,17 @@ fn gap_before_the_lead_is_not_concealed() {
 #[test]
 fn arrival_based_reports_the_gap() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 到着基準: 最初の音は 80 ms から 100 ms まで鳴る
+    // 到着基準: 最初の音は 50 ms から 70 ms まで鳴る
     scheduler.schedule(input(0, 0, 20_000, None));
     // 1 つ抜けた音 (TIMESTAMP が 40 ms) が届く。前の音の終わりから 20 ms 空く
     let second = scheduler.schedule(input(20_000, 40_000, 20_000, None));
     assert_eq!(
         second,
         AudioPlayoutDecision::Play {
-            start_at_us: 120_000,
+            start_at_us: 90_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 100_000,
+            gap_start_us: 70_000,
             gap_us: 20_000,
         }
     );
@@ -1017,7 +1056,7 @@ fn last_play_follows_the_arrival_basis() {
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: 580_000,
+            start_at_us: 550_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
             gap_start_us: 0,

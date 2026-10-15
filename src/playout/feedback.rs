@@ -40,8 +40,18 @@ use crate::playout::timing::AudioDelayFeedbackObservation;
 
 /// 目標遅延の下限 (マイクロ秒)
 ///
-/// これより下げると到着の揺らぎを吸収できず、音が途切れる。
-pub const AUDIO_DELAY_FEEDBACK_MIN_US: i64 = 80_000;
+/// 閉ループが「遅れが許容の中に収まり、捨てが無い」と判断して下げ続けても、これ以下には
+/// しない。時間軸側の下限
+/// ([`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`]) と同じ値にする。閉ループの
+/// 値は到着基準で鳴らすときの遅れと、映像を合わせる先の両方に効くため、片方だけを変えると
+/// 基準を共有できない状態で A/V のずれが残る。
+///
+/// 値は実リレーの実測で決めた (表と根拠は
+/// [`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`] にある)。観測が無い間の
+/// 揺らぎの学習の初期値 ([`crate::playout::delay::AUDIO_DELAY_START_MS`] の 80 ms) とは
+/// 別の値であり、揃える必要はない。初期値は閉ループの観測が始まる前にだけ使われ、閉ループは
+/// 観測が 1 つでも届けば目標を実測から動かす。
+pub const AUDIO_DELAY_FEEDBACK_MIN_US: i64 = 50_000;
 
 /// 目標遅延の上限 (マイクロ秒)
 ///

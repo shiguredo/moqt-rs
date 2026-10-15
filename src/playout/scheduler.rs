@@ -9,13 +9,17 @@
 
 /// 再生の遅れの下限 (マイクロ秒)
 ///
-/// 揺らぎから求めた遅れがまだ無いときの値 ([`crate::playout::delay::AUDIO_DELAY_START_MS`]
-/// と同じ 80 ms)。呼び出し側が `delay_us` へ渡す。下限の [`AUDIO_PLAYOUT_MIN_LEAD_US`]
-/// 以上を渡すこと。
-pub const AUDIO_PLAYOUT_DELAY_US: i64 = 80_000;
+/// 揺らぎから求めた遅れがまだ無いときの値。呼び出し側が `delay_us` へ渡す。共有の時間軸が
+/// 使う下限 ([`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`] の 50 ms) と同じ
+/// 値であり、定義は時間軸側に置く (揺らぎから求めた遅れをその値で下限にするため)。下限の
+/// [`AUDIO_PLAYOUT_MIN_LEAD_US`] 以上を渡すこと。
+pub const AUDIO_PLAYOUT_DELAY_US: i64 = 50_000;
 
 /// 並べすぎとみなす余裕 (マイクロ秒)
-pub const AUDIO_PLAYOUT_BACKLOG_US: i64 = 220_000;
+///
+/// 並べすぎの判定は「再生の遅れ + この余裕」で行い、その合計を 300 ms に保つ。合計の方を
+/// 固定したいため、300 ms から [`AUDIO_PLAYOUT_DELAY_US`] を引いた値にする。
+pub const AUDIO_PLAYOUT_BACKLOG_US: i64 = 300_000 - AUDIO_PLAYOUT_DELAY_US;
 
 /// 鳴らす時刻の下限 (今からどれだけ先にするか、マイクロ秒)
 pub const AUDIO_PLAYOUT_MIN_LEAD_US: i64 = 10_000;

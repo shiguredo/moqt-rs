@@ -59,7 +59,7 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                 |ctx| noprop::sample_usize_in(ctx, 0..600) as i64 * 1_000 - 300_000,
             );
             let arrival_us = now_us + arrival_offset_us;
-            // 到着基準の遅れは [80 ms, 100 ms] の境界を必ず含める (呼び出し側が
+            // 到着基準の遅れは [50 ms, 100 ms] の境界を必ず含める (呼び出し側が
             // `audio_arrival_delay_us` で求めた値)
             let arrival_delay_us = noprop::sample_with_boundaries(
                 ctx,
