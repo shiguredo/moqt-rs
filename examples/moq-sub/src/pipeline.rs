@@ -77,11 +77,72 @@ struct FrameSink<'a> {
     display_backlog: &'a std::sync::atomic::AtomicI64,
 }
 
+/// 音声 Object を送出してよいかの判定結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioDeliveryAdmission {
+    /// 送出してよい
+    Deliver,
+    /// 送出済みの TIMESTAMP より古いため送出しない
+    Stale,
+}
+
+/// 音声 Object を送出してよいかを、送出済みの TIMESTAMP との比較で決める状態機械
+///
+/// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
+/// track))、購読より前に publish された Group は購読のあとに FETCH で届く
+/// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups))。FETCH の応答は
+/// live の Object と並行して届くため、live の Object を送出したあとに、それより前に publish
+/// された Object を送出することがある。音声の再生は TIMESTAMP の順を前提とする
+/// (映像と違い、復号の出力がそのまま提示の順になる) ため、送出済みの TIMESTAMP より古い
+/// Object は送出しない。
+///
+/// 映像の復号順を決める `shiguredo_moqt::video_decode_order::VideoDecodeOrder` と役割は同じで
+/// あり、判定に使うのが Group と Object ID ではなく TIMESTAMP である点だけが異なる。
+/// TIMESTAMP が同じ Object は送出する (同じ TIMESTAMP を持つ別の Object を落とさないため。
+/// live と FETCH の両方で届いた同じ Object は二重に送出されうるが、TIMESTAMP は巻き戻らない)。
+///
+/// 判定に使うのは TIMESTAMP だけであり、時計も I/O も扱わない。購読ごとに 1 つ持ち、音声の
+/// 配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。
+#[derive(Debug)]
+struct AudioDeliveryOrder {
+    /// 直近に送出した音声の TIMESTAMP (マイクロ秒)。まだ送出していなければ `None`
+    last_pts_us: Option<i64>,
+}
+
+impl AudioDeliveryOrder {
+    /// まだ 1 つも送出していない状態で作る
+    fn new() -> Self {
+        Self { last_pts_us: None }
+    }
+
+    /// TIMESTAMP `pts_us` の音声 Object を送出してよいかを判定する
+    ///
+    /// `pts_us` が `None` の Object (LOC の TIMESTAMP を持たない) は順序を判定できないため
+    /// 送出する。この場合、状態は変えない。
+    fn admit(&mut self, pts_us: Option<i64>) -> AudioDeliveryAdmission {
+        let Some(pts_us) = pts_us else {
+            return AudioDeliveryAdmission::Deliver;
+        };
+        if let Some(last_pts_us) = self.last_pts_us
+            && pts_us < last_pts_us
+        {
+            return AudioDeliveryAdmission::Stale;
+        }
+        self.last_pts_us = Some(pts_us);
+        AudioDeliveryAdmission::Deliver
+    }
+
+    /// 直近に送出した音声の TIMESTAMP (マイクロ秒)。まだ送出していなければ `None`
+    fn last_pts_us(&self) -> Option<i64> {
+        self.last_pts_us
+    }
+}
+
 /// 音声 Object を再生経路へ流すための共有状態
 ///
 /// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
-/// 経路に依存しない値をここへまとめ、録画 → Audio Config の検証 → デコード →
-/// デコード済みフレームの送出という順序が両経路で食い違わないようにする。
+/// 経路に依存しない値をここへまとめ、録画 → Audio Config の検証 → 送出順の判定 →
+/// デコード → デコード済みフレームの送出という順序が両経路で食い違わないようにする。
 struct AudioDelivery<'a> {
     /// デコード済み音声フレームの送り先
     audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
@@ -102,6 +163,13 @@ struct AudioDelivery<'a> {
     /// 復号器の中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。
     /// 状態はストリーム経路と datagram 経路で共有する。
     catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
+    /// 音声の送出順の判定 (購読で 1 つ共有する)
+    ///
+    /// 購読より前に publish された Group は購読のあとに FETCH で届くため、live の音声を
+    /// 送出したあとにそれより古い音声が届く。送出済みの TIMESTAMP より古い音声をここで
+    /// 落とし、再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
+    /// subgroup stream 経路、FETCH 応答経路で共有する。
+    delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
 }
 
 impl AudioDelivery<'_> {
@@ -184,6 +252,27 @@ impl AudioDelivery<'_> {
         let Some(decoder) = decoder else {
             return true;
         };
+        // 送出順の判定はデコードの前に行う。送出済みの TIMESTAMP より古い音声で復号器の
+        // 状態を進めると、次に届く live の音声が不連続になるためである。ロックは await を
+        // またがない (判定だけの同期処理)
+        let pts_us = loc_timestamp_us(timestamp, timescale);
+        let (admission, previous_pts_us) = {
+            let mut delivery_order = self
+                .delivery_order
+                .lock()
+                .expect("audio delivery order lock is not poisoned");
+            let previous_pts_us = delivery_order.last_pts_us();
+            (delivery_order.admit(pts_us), previous_pts_us)
+        };
+        if admission == AudioDeliveryAdmission::Stale {
+            // 購読より前に publish された音声が FETCH で後から届いた場合であり、異常ではない。
+            // 購読のたびに数 Object 出るため warn にはしない
+            tracing::debug!(
+                "Skipping an audio object that is older than the delivered frame: \
+                 pts_us={pts_us:?}, last_pts_us={previous_pts_us:?}"
+            );
+            return true;
+        }
         let pcm = match decoder.decode(payload).await {
             Ok(pcm) => pcm,
             Err(e) => {
@@ -196,7 +285,6 @@ impl AudioDelivery<'_> {
         // 継続する (validate_audio_config の警告と同じ方針)
         let sample_rate = decoder.sample_rate();
         let channels = decoder.channels();
-        let pts_us = loc_timestamp_us(timestamp, timescale);
         // 復号の出力が送られた TIMESTAMP からどれだけ遅れて出てきたかを観測する。復号器の
         // 中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。壁時計の
         // TIMESTAMP を持たない音 (Timescale 付き) では遅れを測れないため観測しない
@@ -405,6 +493,7 @@ fn spawn_stream_task(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -423,6 +512,7 @@ fn spawn_stream_task(
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
+    let audio_delivery_order = std::sync::Arc::clone(audio_delivery_order);
     let termination_tx = termination_tx.clone();
     let catalog_tx = catalog_tx.clone();
     let pending_subgroups = std::sync::Arc::clone(pending_subgroups);
@@ -444,6 +534,7 @@ fn spawn_stream_task(
             audio_decoder.as_ref(),
             &audio_config_handled,
             &audio_catch_up,
+            &audio_delivery_order,
             &termination_tx,
             &catalog_tx,
             &pending_subgroups,
@@ -1153,6 +1244,8 @@ pub async fn run(
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
     let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
+    // 音声の送出順の状態。datagram 経路と subgroup stream 経路、FETCH 応答経路で共有する
+    let audio_delivery_order = Arc::new(std::sync::Mutex::new(AudioDeliveryOrder::new()));
 
     // 移行 (GOAWAY) では peer が決める track alias が変わりうるため、書き換え可能にする。
     // 読み出しは短い区間に限り、await をまたいでロックを保持しない
@@ -1233,6 +1326,7 @@ pub async fn run(
     let termination_tx_for_datagram = termination_tx.clone();
     let audio_tx_for_datagram = audio_tx.clone();
     let audio_catch_up_for_datagram = Arc::clone(&audio_catch_up);
+    let audio_delivery_order_for_datagram = Arc::clone(&audio_delivery_order);
     let datagram_task = tokio::spawn(task_monitor.clone().instrument(async move {
         // Audio Config の処理とデコードは subgroup stream と共有する。datagram の音声は
         // 購読した audio track でしか届かないため、catalog の値はここで確定できる
@@ -1249,6 +1343,7 @@ pub async fn run(
             recorder: recorder_for_datagram.as_ref(),
             termination_tx: &termination_tx_for_datagram,
             catch_up: audio_catch_up_for_datagram.as_ref(),
+            delivery_order: audio_delivery_order_for_datagram.as_ref(),
         };
         // メディアとして扱えないトラックの datagram を 1 回だけ記録するための alias
         let mut unsupported_aliases: HashSet<u64> = HashSet::new();
@@ -1420,6 +1515,7 @@ pub async fn run(
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &audio_catch_up,
+                &audio_delivery_order,
                 &termination_tx,
                 &catalog_tx,
                 &pending_subgroups,
@@ -2793,6 +2889,7 @@ async fn handle_incoming_stream(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -2820,6 +2917,7 @@ async fn handle_incoming_stream(
         audio_decoder,
         audio_config_handled,
         audio_catch_up,
+        audio_delivery_order,
         termination_tx,
         catalog_tx,
         pending_subgroups,
@@ -2889,6 +2987,7 @@ async fn handle_stream_body(
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
+    audio_delivery_order: &std::sync::Arc<std::sync::Mutex<AudioDeliveryOrder>>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     catalog_tx: &tokio::sync::mpsc::Sender<catalog::CatalogObject>,
     pending_subgroups: &SharedPendingSubgroupBuffer,
@@ -3058,6 +3157,7 @@ async fn handle_stream_body(
                                 recorder,
                                 termination_tx,
                                 catch_up: audio_catch_up.as_ref(),
+                                delivery_order: audio_delivery_order.as_ref(),
                             };
                             read_audio_fetch_stream(
                                 stream,
@@ -3229,6 +3329,7 @@ async fn handle_stream_body(
                             recorder,
                             termination_tx,
                             catch_up: audio_catch_up.as_ref(),
+                            delivery_order: audio_delivery_order.as_ref(),
                         },
                     )
                     .await;
@@ -5922,12 +6023,14 @@ mod tests {
     /// テスト用: 音声 Object を配送する `AudioDelivery` を作る
     ///
     /// catalog は 48 kHz / 1ch の Opus を宣言しているものとする。`recorder` が `None` のときは
-    /// 録画しない。
+    /// 録画しない。`delivery_order` は購読で共有する送出順の状態であり、呼び出し側が
+    /// `AudioDelivery` より長く保持する。
     fn test_audio_delivery<'a>(
         audio_tx: &'a std::sync::mpsc::Sender<DecodedAudioFrame>,
         audio_config_handled: &'a std::sync::atomic::AtomicBool,
         termination_tx: &'a tokio::sync::mpsc::Sender<SessionError>,
         catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
+        delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
         recorder: Option<&'a RecorderSender>,
     ) -> AudioDelivery<'a> {
         AudioDelivery {
@@ -5939,6 +6042,7 @@ mod tests {
             recorder,
             termination_tx,
             catch_up,
+            delivery_order,
         }
     }
 
@@ -5972,11 +6076,13 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
             &termination_tx,
             &catch_up,
+            &delivery_order,
             None,
         );
         let mut decoder =
@@ -6082,11 +6188,13 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
             &termination_tx,
             &catch_up,
+            &delivery_order,
             None,
         );
 
@@ -6139,11 +6247,13 @@ mod tests {
         let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
         let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
         let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
         let delivery = test_audio_delivery(
             &audio_tx,
             &audio_config_handled,
             &termination_tx,
             &catch_up,
+            &delivery_order,
             Some(&recorder_sender),
         );
 
@@ -6189,5 +6299,185 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// テスト用: LOC の TIMESTAMP を載せた音声 Object を 1 つ配送する
+    ///
+    /// Timescale は 1_000_000 とする。Timestamp がそのままマイクロ秒になり、受信側の
+    /// 壁時計と比べられる値 (draft-ietf-moq-loc-04 §2.3.1.1) をそのまま渡せる。
+    async fn deliver_audio_at(
+        delivery: &AudioDelivery<'_>,
+        decoder: &mut AudioDecoder,
+        pts_us: i64,
+        payload: &[u8],
+    ) -> bool {
+        let timestamp = u64::try_from(pts_us).expect("TIMESTAMP は 0 以上であること");
+        let properties = audio_loc_properties(timestamp, 1_000_000, None);
+        let properties_bytes = properties
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        delivery
+            .deliver(Some(&properties_bytes), payload, Some(decoder))
+            .await
+    }
+
+    /// 音声の送出順の判定が、送出済みの TIMESTAMP との比較だけで決まること
+    ///
+    /// - 最初の Object は送出する
+    /// - 進んだ TIMESTAMP は送出し、判定の基準を更新する
+    /// - 古い TIMESTAMP は送出しない (判定の基準は変えない)
+    /// - 同じ TIMESTAMP は送出する (同じ TIMESTAMP を持つ別の Object でありうる)
+    /// - TIMESTAMP を持たない Object は送出し、判定の基準は変えない
+    #[test]
+    fn audio_delivery_order_admits_only_timestamps_that_do_not_rewind() {
+        let mut order = AudioDeliveryOrder::new();
+        assert_eq!(
+            order.last_pts_us(),
+            None,
+            "最初は送出済みの TIMESTAMP を持たないこと"
+        );
+
+        assert_eq!(
+            order.admit(Some(2_000)),
+            AudioDeliveryAdmission::Deliver,
+            "最初の Object は送出すること"
+        );
+        assert_eq!(
+            order.last_pts_us(),
+            Some(2_000),
+            "送出した TIMESTAMP を基準にすること"
+        );
+
+        assert_eq!(
+            order.admit(Some(2_020)),
+            AudioDeliveryAdmission::Deliver,
+            "進んだ TIMESTAMP は送出すること"
+        );
+        assert_eq!(
+            order.last_pts_us(),
+            Some(2_020),
+            "基準を新しい TIMESTAMP へ進めること"
+        );
+
+        // FETCH の応答で購読より前の音声が届く場合がこれにあたる
+        assert_eq!(
+            order.admit(Some(1_920)),
+            AudioDeliveryAdmission::Stale,
+            "送出済みの TIMESTAMP より古い音声は送出しないこと"
+        );
+        assert_eq!(
+            order.last_pts_us(),
+            Some(2_020),
+            "送出しなかった Object で基準を戻さないこと"
+        );
+
+        assert_eq!(
+            order.admit(Some(2_020)),
+            AudioDeliveryAdmission::Deliver,
+            "同じ TIMESTAMP の音声は送出すること"
+        );
+
+        // TIMESTAMP を持たない Object は順序を判定できないため、基準を変えずに送出する
+        assert_eq!(
+            order.admit(None),
+            AudioDeliveryAdmission::Deliver,
+            "TIMESTAMP を持たない音声は送出すること"
+        );
+        assert_eq!(
+            order.last_pts_us(),
+            Some(2_020),
+            "TIMESTAMP を持たない音声で基準を変えないこと"
+        );
+        assert_eq!(
+            order.admit(Some(2_040)),
+            AudioDeliveryAdmission::Deliver,
+            "TIMESTAMP を持たない音声の後でも、基準より新しい音声は送出すること"
+        );
+    }
+
+    /// 購読のあとに FETCH で届いた古い音声が、送出済みの TIMESTAMP を巻き戻さないこと
+    ///
+    /// 購読より前に publish された Group は SUBSCRIBE では届かない。moq-sub は SUBSCRIBE_OK が
+    /// 告知した Largest Object を基準に直近 4 Group を FETCH で要求し、応答の Object を live と
+    /// 同じ配送経路へ流す (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups))。
+    /// FETCH の応答は live の Object と並行して届くため、live の音声を送出したあとに、それより
+    /// 前に publish された音声が届く。音声の再生は TIMESTAMP の順を前提とする
+    /// (映像と違い、復号の出力がそのまま提示の順になる) ため、古い音声は送出しない。
+    ///
+    /// 判定が無いと、FETCH で遡った 4 つの TIMESTAMP が再生経路へ流れ、送出済みの TIMESTAMP
+    /// から巻き戻る。
+    #[tokio::test]
+    async fn audio_delivery_does_not_send_objects_older_than_the_delivered_one() {
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new());
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        // TIMESTAMP は受信側の壁時計と比べられる (受信側の追いつきの判定)。大きく離れていると
+        // 復号器の作り直しが動くため、実際に受信するときと同じく現在時刻を基準にする
+        let base_us = crate::wall_clock_us();
+        // 20 ms 間隔の音声。0 から 3 が購読より前、4 以降が購読のあとである
+        let pts_us = |index: i64| base_us + index * 20_000;
+
+        // 1. live の音声 (購読後に届いた最新のもの) を送出する
+        assert!(
+            deliver_audio_at(&delivery, &mut decoder, pts_us(4), &packet).await,
+            "live の音声は配送を継続すること"
+        );
+        // 2. FETCH の応答が、購読より前に publish された 4 つを届ける
+        for index in 0..4 {
+            assert!(
+                deliver_audio_at(&delivery, &mut decoder, pts_us(index), &packet).await,
+                "古い音声でも配送を継続すること"
+            );
+        }
+        // 3. live の音声が続く
+        assert!(
+            deliver_audio_at(&delivery, &mut decoder, pts_us(5), &packet).await,
+            "live の音声は配送を継続すること"
+        );
+
+        // 4. Object Status のみの Object と違反ではないため、セッション終了は依頼されない
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        for pair in sent.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "音声の PTS が巻き戻らないこと: {} -> {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(
+            sent,
+            vec![pts_us(4), pts_us(5)],
+            "送出済みの TIMESTAMP より古い音声は再生経路へ流さないこと (送出順={sent:?})"
+        );
+        assert_eq!(
+            delivery_order
+                .lock()
+                .expect("audio delivery order lock is not poisoned")
+                .last_pts_us(),
+            Some(pts_us(5)),
+            "送出順の判定は live と FETCH の応答で共有すること"
+        );
     }
 }
