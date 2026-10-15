@@ -1,7 +1,7 @@
 # 音声 Object を冗長化して送り、受信側で 2 回目を捨てる
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/add-audio-redundancy
 - Polished: {YYYY-MM-DD}
 
@@ -73,3 +73,48 @@ moqt-rs の moq-pub は音声を datagram で 1 回だけ送り、moq-sub は同
   `cargo fmt --all -- --check` が通ること。
 - ログは英語、コメントは日本語で書くこと。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- publisher (`examples/moq-pub`)
+  - `cli.rs` に `--audio-redundancy <N>` (1〜3 の整数、既定 1) を追加し、`Config` に
+    `audio_redundancy: u8` を持たせた。範囲外と非整数はオプションの検証で拒否する。
+    `--audio-subgroup` では冗長化しないため、指定された場合は無視する旨を warn で出す
+    (指定そのものは受理し、値は設定に残すが subgroup 配送では使わない)
+  - `datagram_writer.rs` の `DatagramWriter` が冗長度を持つようにし、`write_object` が同じ
+    Object ID の datagram を冗長度の数だけワイヤへ出すようにした。フィルタ評価
+    (`DataPlaneHandle::send_object_datagram`) とサイズ判定は 1 回だけで、`next_object_id` は
+    1 回だけ進める。フィルタ不通過 (`Skip`) のときは 1 回も送らない
+  - `pipeline.rs` の `DatagramWriter::new` の 2 箇所 (通常の音声経路と終端のフェード経路) へ
+    `config.audio_redundancy` を渡す
+- subscriber (`examples/moq-sub`)
+  - `pipeline.rs` の `AudioDeliveryOrder` に直近の Object の識別子 (`group_id`, `object_id`)
+    の窓 (256 件) を持たせ、`AudioDelivery::deliver` の入口 (最初のロックを取る箇所) で
+    2 回目を捨てるようにした。判定は録画・Audio Config の検証・復号・送出より前に行う。
+    購読境界の判定と TIMESTAMP の順序の判定は変えていない
+  - 窓から溢れた古い識別子は忘れる。位置が分からない Object (`None`) は重複と判定できない
+    ため覚えず、従来どおり配送する
+  - `Location` が `Hash` を実装していないため、窓は `VecDeque` にして線形に探す (高々 256 件)
+- テスト
+  - `examples/moq-pub/src/cli.rs`: `--audio-redundancy` の既定が 1 であること、1 / 2 / 3 を
+    受理すること、0 / 4 / 非整数 / 負の値を拒否すること、`--audio-subgroup` との併用を
+    受理すること
+  - `examples/moq-pub/tests/test_cli.rs`: 実行ファイル経由で 0 / 4 / 非整数がエラーになり
+    (`--audio-redundancy` がエラーに含まれる)、1 と 3 は後続の検証まで進むこと、`--help` に
+    説明が表示されること
+  - `examples/moq-sub/src/pipeline.rs`: 同じ識別子の音声 Object を 2 回配送しても録画・復号・
+    送出が 1 回になることを、実 Opus の符号化と復号、実 MP4 の書き出しと読み戻しで固定した。
+    256 件の窓から溢れた古い識別子は覚えていないこと (忘れたあとに再び覚えること) も固定した。
+    モックやスタブは使っていない
+- 検証: `cargo test --workspace` (61 スイート) /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が成功した
+- 確認できなかった点
+  - datagram の送信回数は実トランスポート (`transport::StreamHandle` と `DataPlaneHandle`) が
+    必要であり、example の pipeline を通すテストには実リレーが要るため、単体テストでは固定して
+    いない。CLI の検証と `DatagramWriter::write_object` の構造 (冗長度の数だけ
+    `handle.send_datagram` を呼び、フィルタ評価・サイズ判定・Object ID の前進は 1 回だけ) で
+    担保する
+  - 受信側の重複の除去は、実リレーで冗長化した datagram を受ける経路ではなく、同じ識別子の
+    Object を 2 回 `deliver` へ渡すテストで固定している
+  - 実リレー越しの E2E は `e2e-tests/` の `#[ignore]` であり、この環境では `MOQT_E2E_URL` が
+    無いため実行していない (変更もしていない)
