@@ -400,6 +400,22 @@ fn arrival_based_places_the_first_sound_from_the_arrival_position() {
     );
 }
 
+/// 再生の遅れの下限が時間軸側の定義から導出されていること
+///
+/// 時間軸の下限を動かしたときに、こちらが追随せずに rustdoc と実装が食い違うのを防ぐ。
+#[test]
+fn playout_delay_follows_the_timeline_floor() {
+    assert_eq!(
+        AUDIO_PLAYOUT_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "再生の遅れの下限は時間軸の下限と同じ値であること"
+    );
+    assert_eq!(
+        AUDIO_PLAYOUT_DELAY_US + AUDIO_PLAYOUT_BACKLOG_US,
+        300_000,
+        "導出した下限でも並べすぎとみなす合計は 300 ms であること"
+    );
+}
+
 #[test]
 fn arrival_based_uses_the_arrival_delay() {
     // 学習した再生の遅れ (delay_us) が大きくても、到着基準の遅れで並べる

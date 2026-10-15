@@ -10,10 +10,10 @@
 /// 再生の遅れの下限 (マイクロ秒)
 ///
 /// 揺らぎから求めた遅れがまだ無いときの値。呼び出し側が `delay_us` へ渡す。共有の時間軸が
-/// 使う下限 ([`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`] の 50 ms) と同じ
-/// 値であり、定義は時間軸側に置く (揺らぎから求めた遅れをその値で下限にするため)。下限の
-/// [`AUDIO_PLAYOUT_MIN_LEAD_US`] 以上を渡すこと。
-pub const AUDIO_PLAYOUT_DELAY_US: i64 = 50_000;
+/// 使う下限 ([`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`]) と同じ値であり、
+/// 定義は時間軸側に置く (揺らぎから求めた遅れをその値で下限にするため)。ここではその定義を
+/// そのまま使う。下限の [`AUDIO_PLAYOUT_MIN_LEAD_US`] 以上を渡すこと。
+pub const AUDIO_PLAYOUT_DELAY_US: i64 = crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US;
 
 /// 並べすぎとみなす余裕 (マイクロ秒)
 ///
