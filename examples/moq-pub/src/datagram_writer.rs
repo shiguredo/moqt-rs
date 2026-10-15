@@ -28,10 +28,10 @@ pub struct DatagramWriter {
     /// datagram は 1 つの QUIC パケットに収まる必要がある (draft-ietf-moq-loc-04 §4.1)。
     /// 上限を超える object は送らずにエラーにする。
     max_size: usize,
-    /// 同じ Object の datagram をワイヤへ出す回数 (1〜3)
+    /// 同じ Object の datagram をワイヤへ出す回数
     ///
     /// datagram は再送されない (RFC 9221 §3) ため、n 回送るとすべての copy が落ちる確率が
-    /// 損失率の n 乗になる。範囲の検証は CLI が行う。
+    /// 損失率の n 乗になる。1〜3 の範囲は送信時に [`datagram_copies`] で制限する。
     redundancy: u8,
     /// 次に書き込むオブジェクト ID
     next_object_id: u64,
@@ -41,7 +41,8 @@ impl DatagramWriter {
     /// 新しい DatagramWriter を作成する
     ///
     /// stream は開かない。datagram 送信ごとにヘッダを生成して送信する。
-    /// `redundancy` は同じ Object を送る回数 (1〜3) であり、呼び出し側が検証する。
+    /// `redundancy` は同じ Object を送る回数であり、1〜3 の外は送信時に
+    /// [`datagram_copies`] で制限する (CLI は 1〜3 の整数だけを受理する)。
     #[expect(
         clippy::too_many_arguments,
         reason = "Group の Object を datagram で送るために必要な情報を 1 回で渡すため"
@@ -94,9 +95,18 @@ impl DatagramWriter {
     /// フィルタ評価とサイズ判定は 1 回だけ行い、Object ID も 1 回だけ進めるため、copy は
     /// すべて同じ Object として届く (受信側は同じ識別子の 2 回目を捨てる)。
     ///
+    /// copy は間隔を空けずに連続して送る。2 個目以降を間隔を空けて送る案は、moqt-js の
+    /// devtools (`devtools/src/hooks/usePublisher.ts`) が実測で棄却している。遅れて届く復旧の
+    /// 分が受信側の遅れの推定を膨らませ、交互に各 3 回の比較で鳴り始めの遅れが 64〜67 ms から
+    /// 120〜122 ms へ上がった (位置の順序で除く案でも改善しなかった)。
+    ///
     /// 返り値の `ObjectFilterOutcome::Pass` はワイヤへ送信したこと、`Skip` はフィルタ
     /// 不通過で送信しなかったことを示す。呼び出し側は `Skip` をスキップとして扱い、
     /// 送信を継続する (その他のエラーは伝播する)。
+    ///
+    /// 検証: 送信回数の決定は [`datagram_copies`] の単体テストで固定する。トランスポートへ
+    /// 実際に何回出たかは実トランスポート (`transport::StreamHandle`) と実リレーが要るため
+    /// 単体テストでは固定しない (`e2e-tests/` の担当である)。
     ///
     /// 検証 (手動): OBJECT_PROPERTY_FILTER 付きの subscription に対して、
     /// フィルタ外のオブジェクトが subscriber に届かず publisher が生存すること、
@@ -158,17 +168,18 @@ impl DatagramWriter {
         // 原因と対処が分かるエラーにする。
         check_datagram_size(buf.len(), self.max_size)?;
 
-        // 同じ Object の datagram を冗長度の数だけ出す。フィルタ評価・サイズ判定・Object ID の
+        // 同じ Object の datagram を決めた回数だけ出す。フィルタ評価・サイズ判定・Object ID の
         // 前進はここまでの 1 回だけで済んでおり、copy はすべて同じ Object になる
-        if self.redundancy > 1 {
+        let copies = datagram_copies(self.redundancy);
+        if copies > 1 {
             tracing::debug!(
                 "sending redundant object datagrams: request_id={}, object_id={}, copies={}",
                 self.request_id,
                 object_id,
-                self.redundancy,
+                copies,
             );
         }
-        for _ in 0..self.redundancy {
+        for _ in 0..copies {
             self.handle.send_datagram(&buf).await?;
         }
 
@@ -187,6 +198,16 @@ fn check_datagram_size(size: usize, max_size: usize) -> Result<()> {
         return Err(Error::DatagramTooLarge { size, max_size });
     }
     Ok(())
+}
+
+/// 同じ Object を datagram で送る回数を決める
+///
+/// 回数は 1〜3 に制限する。0 は datagram が 1 つも送られず、音が届かないことに気づけない
+/// まま `ObjectFilterOutcome::Pass` を返してしまう。4 以上は音声の帯域と datagram の数を
+/// 無駄にする。CLI も 1〜3 の整数だけを受理するが、`Config` は公開されており、呼び出し側が
+/// 直接組み立てて `pipeline::run` へ渡せるため、送信側でも同じ範囲に制限する (二重の防御)。
+fn datagram_copies(redundancy: u8) -> u8 {
+    redundancy.clamp(1, 3)
 }
 
 #[cfg(test)]
@@ -220,5 +241,25 @@ mod tests {
             ),
             "実サイズと上限が保持されること: {error}"
         );
+    }
+
+    /// 送信回数は 1〜3 に制限される
+    ///
+    /// CLI は 1〜3 の整数だけを受理するが、`Config` を直接組み立てて `pipeline::run` へ渡す
+    /// 利用では範囲外の値が入りうる。0 のままだと datagram が 1 つも送られずに `Pass` を
+    /// 返し、音が無いことに気づけないため、送信側でも同じ範囲に制限する。
+    ///
+    /// トランスポートへ実際に何回出たかは実トランスポートと実リレーが要るため固定しない。
+    /// ここでは回数の決定だけを固定する。
+    #[test]
+    fn datagram_copies_clamps_redundancy() {
+        let cases: &[(u8, u8)] = &[(0, 1), (1, 1), (2, 2), (3, 3), (4, 3), (u8::MAX, 3)];
+        for &(redundancy, expected) in cases {
+            assert_eq!(
+                datagram_copies(redundancy),
+                expected,
+                "送信回数が 1〜3 に制限されること: redundancy={redundancy}"
+            );
+        }
     }
 }
