@@ -1,7 +1,7 @@
 # A/V 同期の不感帯を 5 ms に下げる
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/change-sync-deadband
 - Polished: {YYYY-MM-DD}
 
@@ -58,3 +58,24 @@ moqt-rs は `TIMELINE_SYNC_MIN_DELTA_US` が 30_000 のままであり、実測�
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- `src/playout/timeline.rs` の `TIMELINE_SYNC_MIN_DELTA_US` を 30 ms から 5 ms にした。
+  rustdoc に実測の表 (30 ms と 5 ms の交互 2 回) と、libwebrtc の `kMinDeltaMs` (30 ms) を
+  そのまま採らなかった理由 (実測のずれが ITU-R BT.1359-1 の許容を外れる、ずれの推定の揺れは
+  250 ms ごとの観測で 10 ms 程度であり 5 ms でも制御は暴れない、不感帯 15 ms も測ったが
+  30 ms と同じか悪かった) を書いた
+- `src/playout/scheduler.rs` の `AUDIO_PLAYOUT_STRETCH_MIN_US` の rustdoc から「時計の
+  対応付けが意図して無視する幅 (30 ms) の内側」という記述を消し、時間圧縮を始めるかどうかの
+  閾値そのものであり、A/V 同期の不感帯とは独立に決めた値であること (不感帯より広いため、
+  時計の対応付けが無視した誤差を音の加工で打ち消すという関係にはない) を書いた。値 (20 ms) の
+  根拠である moqt-js の実測はそのまま残した
+- テスト: 不感帯の境界 (5 ms ちょうどは動かさない、5 ms を 1 µs 超えたら超えた分だけ先行する
+  側へ足して不感帯に収める) を `tests/test_playout/timeline.rs` の
+  `sync_deadband_boundary_is_exact` に追加した。不感帯を変えた影響で、基準を共有できない
+  ときに映像を音声の到着基準の遅れへ合わせる `video_follows_the_audio_arrival_delay_when_the_audio_drifts`
+  の期待値が 50 ms から 75 ms へ変わるため追随させた。PBT は不感帯の定数を参照して同じ式を
+  検証しているため値の追随のみ行った
+- 検証: `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` / `make pbt` が成功した
