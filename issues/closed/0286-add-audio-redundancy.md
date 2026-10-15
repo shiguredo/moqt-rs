@@ -106,14 +106,24 @@ moqt-rs の moq-pub は音声を datagram で 1 回だけ送り、moq-sub は同
     送出が 1 回になることを、実 Opus の符号化と復号、実 MP4 の書き出しと読み戻しで固定した。
     256 件の窓から溢れた古い識別子は覚えていないこと (忘れたあとに再び覚えること) も固定した。
     モックやスタブは使っていない
+- 独立検証 (task-4) の指摘による修正
+  - 送信回数を `datagram_copies` で 1〜3 に制限するようにした。`Config` は公開されており、
+    呼び出し側が `audio_redundancy: 0` を直接組み立てて渡すと datagram が 1 つも送られない
+    まま `ObjectFilterOutcome::Pass` を返し、音が消えたことに気づけないためである
+    (moqt-js の送信側の clamp と同じ二重の防御)。CLI の検証 (1〜3、既定 1) はそのまま残す
+  - 回数の決定は `#[cfg(test)]` で 0→1 / 1→1 / 2→2 / 3→3 / 4→3 を固定した。トランスポートへ
+    実際に何回出たかは実トランスポートと実リレーが要るため単体テストでは固定しない
+  - 2 個目以降を間隔を空けて送る案を実測で棄却した理由 (moqt-js の devtools の実測であり、
+    遅れて届く復旧の分が遅れの推定を膨らませて鳴り始めの遅れが 64〜67 ms から 120〜122 ms へ
+    上がった) も `write_object` の rustdoc に残した
 - 検証: `cargo test --workspace` (61 スイート) /
   `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が成功した
 - 確認できなかった点
   - datagram の送信回数は実トランスポート (`transport::StreamHandle` と `DataPlaneHandle`) が
     必要であり、example の pipeline を通すテストには実リレーが要るため、単体テストでは固定して
-    いない。CLI の検証と `DatagramWriter::write_object` の構造 (冗長度の数だけ
-    `handle.send_datagram` を呼び、フィルタ評価・サイズ判定・Object ID の前進は 1 回だけ) で
-    担保する
+    いない。CLI の検証、`datagram_copies` の単体テスト、`DatagramWriter::write_object` の構造
+    (決めた回数だけ `handle.send_datagram` を呼び、フィルタ評価・サイズ判定・Object ID の前進は
+    1 回だけ) で担保する
   - 受信側の重複の除去は、実リレーで冗長化した datagram を受ける経路ではなく、同じ識別子の
     Object を 2 回 `deliver` へ渡すテストで固定している
   - 実リレー越しの E2E は `e2e-tests/` の `#[ignore]` であり、この環境では `MOQT_E2E_URL` が
