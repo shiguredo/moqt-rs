@@ -790,7 +790,13 @@ impl PlayoutTimeline {
     /// 揺らぎの学習 ([`crate::playout::delay`]) は「直近で最も早く届いた音との差」しか
     /// 見ないため、ストリーム全体が一様に遅れている分を見つけられない。この観測がその分を
     /// 補う。遅れが許容の中に収まっていれば目標を減らすため、正常時は遅延が増えない。
-    pub fn observe_audio_playout(&mut self, observation: AudioDelayFeedbackObservation) {
+    ///
+    /// 揺らぎだけから求めた目標遅延は時間軸が持っているため、計器の観測へここで足す。
+    /// 閉ループはこれを使って、圧縮が止まったときに適用する上限を 100 ms へ戻してよいかを
+    /// 判断する (経路が 100 ms を超えているまま戻すと往復する)。
+    pub fn observe_audio_playout(&mut self, mut observation: AudioDelayFeedbackObservation) {
+        let state = &mut self.tracks[Track::Audio.index()];
+        observation.jitter_target_us = state.delay.target_delay_ms().saturating_mul(1_000);
         self.audio_delay_feedback.update(observation);
         let state = &mut self.tracks[Track::Audio.index()];
         if state.base_us.is_some() {

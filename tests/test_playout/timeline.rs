@@ -4,8 +4,8 @@
 
 use shiguredo_moqt::playout::delay::AUDIO_DELAY_START_MS;
 use shiguredo_moqt::playout::feedback::{
-    AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-    AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
+    AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+    AUDIO_DELAY_FEEDBACK_START_US, AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedbackReason,
 };
 use shiguredo_moqt::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use shiguredo_moqt::playout::timeline::{
@@ -40,6 +40,8 @@ fn feedback_observation(at_us: i64, lateness_p50_us: Option<i64>) -> AudioDelayF
         }),
         backlog_misses: 0,
         backlog_us: 0,
+        compression_us: 0,
+        jitter_target_us: 0,
     }
 }
 
@@ -733,9 +735,20 @@ fn reset_track_keeps_the_closed_loop_target() {
     // (戻すと、その間だけ遅れが戻る)
     let mut timeline = PlayoutTimeline::new();
     timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
-    let raised_us = AUDIO_DELAY_FEEDBACK_MAX_TARGET_US;
-    assert_eq!(timeline.learned_delay_us(Track::Audio), raised_us);
+    // 収束 (遅れが許容の中) の観測を 2 つ渡し、目標を 1 回だけ下げる。適用する上限が初期値と
+    // 同じ 100 ms であるため、遅れでは増やせない (増やす余地は、圧縮が続いて上限を広げた
+    // ときにだけ生まれる)
+    timeline.observe_audio_playout(feedback_observation(
+        10_020_000,
+        Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+    ));
+    timeline.observe_audio_playout(feedback_observation(
+        11_020_000,
+        Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+    ));
+    let lowered_us =
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US - AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND;
+    assert_eq!(timeline.learned_delay_us(Track::Audio), lowered_us);
 
     timeline.reset_track(Track::Audio);
     assert!(
@@ -744,13 +757,12 @@ fn reset_track_keeps_the_closed_loop_target() {
     );
     let breakdown = timeline.delay_breakdown();
     assert_eq!(
-        breakdown.audio_delay_feedback.target_us,
-        AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        breakdown.audio_delay_feedback.target_us, lowered_us,
         "閉ループの目標 (内部値) は残る"
     );
     assert_eq!(
         breakdown.audio_delay_feedback.reason,
-        AudioDelayFeedbackReason::Lateness,
+        AudioDelayFeedbackReason::Settled,
         "理由も残る"
     );
     assert_eq!(
@@ -762,7 +774,7 @@ fn reset_track_keeps_the_closed_loop_target() {
     timeline.observe(Track::Audio, 20_000_000, 11_000_000);
     assert_eq!(
         timeline.learned_delay_us(Track::Audio),
-        raised_us,
+        lowered_us,
         "購読のやり直しで目標を戻さない"
     );
 
@@ -770,7 +782,7 @@ fn reset_track_keeps_the_closed_loop_target() {
     timeline.reset();
     assert_eq!(
         timeline.delay_breakdown().audio_delay_feedback.target_us,
-        AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        lowered_us,
         "全リセットでも閉ループの目標は残る"
     );
 }
@@ -806,19 +818,23 @@ fn delay_breakdown_reports_the_closed_loop_state() {
         }),
         backlog_misses: 0,
         backlog_us: 0,
+        compression_us: 0,
+        jitter_target_us: 0,
     });
     let after = timeline.delay_breakdown().audio_delay_feedback;
+    // 閉ループの内部の目標も、実際に適用する上限 (100 ms) で切る。初期値が既にその上限で
+    // あるため、遅れが続いても増えない。適用されない値へ育てると、遅れが収まってから
+    // 減らし切る (毎秒 10 ms) までの時間だけ復帰が遅れる
     assert_eq!(
-        after.target_us,
-        AUDIO_DELAY_FEEDBACK_START_US + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
-        "閉ループの目標が出る"
+        after.target_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+        "閉ループの目標は適用する上限で止まる"
     );
     assert_eq!(after.reason, AudioDelayFeedbackReason::Lateness);
     assert_eq!(
-        after.last_change_us, AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
-        "直前の増分が出る"
+        after.last_change_us, 0,
+        "既に適用する上限にあるため増分は出ない"
     );
-    assert_eq!(after.adjustments, 1, "動かした回数が出る");
+    assert_eq!(after.adjustments, 0, "既に適用する上限にあるため動かさない");
     assert_eq!(
         after.lateness_p50_us,
         Some(40_000),

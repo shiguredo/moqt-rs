@@ -226,6 +226,12 @@ pub struct AudioPlayoutTimingSnapshot {
 /// [`AudioPlayoutTimingStats::audio_delay_feedback`] が返す。分布は短い窓
 /// ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値から求める。捨てた量は購読の開始からの累積
 /// であり、差を取るのは呼び出し側の仕事である。
+///
+/// 圧縮 (時間圧縮) の増分と、揺らぎだけから求めた目標遅延は、この計器では分からない。
+/// 前者は購読側 (再生の経路) が、後者は時間軸
+/// ([`PlayoutTimeline::observe_audio_playout`](crate::playout::timeline::PlayoutTimeline::observe_audio_playout))
+/// が埋める。どちらも既定は 0 であり、埋めなければ「圧縮なし」「経路は 100 ms 以内」と
+/// みなされる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioDelayFeedbackObservation {
     /// 観測した時刻 (マイクロ秒)
@@ -240,6 +246,21 @@ pub struct AudioDelayFeedbackObservation {
     pub backlog_misses: u64,
     /// 累積で並べすぎて捨てた音の長さ (マイクロ秒)
     pub backlog_us: i64,
+    /// 前の観測から増えた圧縮 (時間圧縮 = 粗さ) の長さ (マイクロ秒、増分)
+    ///
+    /// 購読側が
+    /// [`AudioPlayoutScheduler::compressed_us`](crate::playout::scheduler::AudioPlayoutScheduler::compressed_us)
+    /// の増分を渡す。観測は音ごとに来るが、目標を動かすのは毎秒 1 回であるため、閉ループが
+    /// 制御までの間を足し合わせて速さ (マイクロ秒 / 秒) を求める。累積ではなく増分を渡すのは、
+    /// 購読のやり直しで累積が 0 に戻っても負の差を作らないためである。分からなければ 0
+    /// (圧縮なし) とみなす。
+    pub compression_us: i64,
+    /// 揺らぎだけから求めた目標遅延 (マイクロ秒)
+    ///
+    /// 上限を [`crate::playout::feedback::AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] へ戻してよいかの
+    /// 判断に使う。「圧縮が 0」だけでは、揺らぎが 100 ms を超えている経路で上限を戻した直後に
+    /// 圧縮が再発する (往復になる)。この値が 100 ms 以下であることを戻す条件に加える。
+    pub jitter_target_us: i64,
 }
 
 /// 記録した時刻の順に並んだ値の列 (マイクロ秒)
@@ -482,6 +503,11 @@ impl AudioPlayoutTimingStats {
     /// ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) である。目標を増やした結果がそこへ現れるまで
     /// には数秒かかるため、制御には短い窓 ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値を使う。
     /// 捨てた量は購読の開始からの累積であり、差を取るのは呼び出し側の仕事である。
+    ///
+    /// 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からないため 0 にする。
+    /// 呼び出し側 (購読側と時間軸) が埋めること
+    /// ([`AudioDelayFeedbackObservation::compression_us`] と
+    /// [`AudioDelayFeedbackObservation::jitter_target_us`] を参照)。
     pub fn audio_delay_feedback(&mut self, now_us: i64) -> AudioDelayFeedbackObservation {
         // 表示用の分布と同じ長さまでを残し、制御にはその中でも短い窓を使う
         self.prune(now_us);
@@ -493,6 +519,8 @@ impl AudioPlayoutTimingStats {
             slack_us: summarize_timings(self.slacks_us.since(control_min_us)),
             backlog_misses: self.missed_totals.backlog.count,
             backlog_us: self.missed_totals.backlog.duration_us,
+            compression_us: 0,
+            jitter_target_us: 0,
         }
     }
 

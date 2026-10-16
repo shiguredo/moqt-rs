@@ -580,6 +580,16 @@ fn audio_delay_feedback_returns_the_short_window_and_cumulative_backlog() {
     );
     assert_eq!(feedback.backlog_misses, 1, "累積の捨てた数を返すこと");
     assert_eq!(feedback.backlog_us, 20_000, "累積の捨てた長さを返すこと");
+    // 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からない。購読側と時間軸が
+    // 埋めるまで 0 である (閉ループは 0 を「圧縮なし」「経路は 100 ms 以内」とみなす)
+    assert_eq!(
+        feedback.compression_us, 0,
+        "圧縮の増分は計器では分からないため 0 にすること"
+    );
+    assert_eq!(
+        feedback.jitter_target_us, 0,
+        "揺らぎだけの目標遅延は計器では分からないため 0 にすること"
+    );
 
     // 表示用の窓 (10 秒) より外に出れば None になり、累積の捨てた量は残る
     let later = stats.audio_delay_feedback(20_000_000);

@@ -9,6 +9,9 @@ use std::cell::Cell;
 
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::feedback::{
+    AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US, AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US,
+    AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US,
+    AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND,
     AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_INTERVAL_US,
     AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
     AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_STEP_US, AUDIO_DELAY_FEEDBACK_MIN_US,
@@ -38,6 +41,9 @@ const LATENESS_WEIGHTS: [u32; 4] = [2, 3, 5, 2];
 /// 「戻る」は購読のやり直しで累積が 0 に戻る場合であり、負の差で増やさないことを見る。
 const BACKLOG_WEIGHTS: [u32; 4] = [5, 3, 2, 2];
 
+/// 圧縮の増分の選び方の重み (無し / 閾値未満 / 閾値を超える / 大きく超える)
+const COMPRESSION_WEIGHTS: [u32; 4] = [5, 3, 3, 1];
+
 /// 1 件の値だけを持つ分布
 fn summary(value_us: i64) -> TimingSummary {
     TimingSummary {
@@ -48,6 +54,8 @@ fn summary(value_us: i64) -> TimingSummary {
 }
 
 /// 観測を 1 つ作る
+///
+/// 圧縮は無し (0)、揺らぎだけの目標は 0 (経路は 100 ms 以内で足りている) として作る。
 fn observation(
     at_us: i64,
     lateness_p50_us: Option<i64>,
@@ -61,16 +69,87 @@ fn observation(
         slack_us: Some(summary(20_000)),
         backlog_misses,
         backlog_us,
+        compression_us: 0,
+        jitter_target_us: 0,
     }
 }
 
-/// 明示の上限から、目標の範囲 (下限, 上限) を求める
+/// 圧縮の増分と、揺らぎだけの目標遅延を指定して観測を作る
+fn observation_with_compression(
+    at_us: i64,
+    lateness_p50_us: Option<i64>,
+    backlog_misses: u64,
+    backlog_us: i64,
+    compression_us: i64,
+    jitter_target_us: i64,
+) -> AudioDelayFeedbackObservation {
+    let mut observation = observation(at_us, lateness_p50_us, backlog_misses, backlog_us);
+    observation.compression_us = compression_us;
+    observation.jitter_target_us = jitter_target_us;
+    observation
+}
+
+/// 明示設定と、上限を広げているかから、実際に適用する上限を求める
+///
+/// 広げていないときは [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (100 ms)。広げているときは
+/// `max(100 ms, min(160 ms, 明示設定 ?? 160 ms))` である。
+fn applied_ceiling_us(ceiling_us: Option<i64>, widened: bool) -> i64 {
+    if !widened {
+        return AUDIO_DELAY_FEEDBACK_MAX_TARGET_US;
+    }
+    AUDIO_DELAY_FEEDBACK_MAX_TARGET_US.max(
+        AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US
+            .min(ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US)),
+    )
+}
+
+/// 明示の上限と、実際に適用する上限から、目標の範囲 (下限, 上限) を求める
 ///
 /// 明示の上限が下限 (50 ms) を下回るときは上限を優先する (moqt-js と同じ)。
-fn target_limits(ceiling_us: Option<i64>) -> (i64, i64) {
-    let upper_us =
-        AUDIO_DELAY_FEEDBACK_MAX_US.min(ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_US));
+fn target_limits(ceiling_us: Option<i64>, applied_ceiling_us: i64) -> (i64, i64) {
+    let upper_us = AUDIO_DELAY_FEEDBACK_MAX_US
+        .min(ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_US))
+        .min(applied_ceiling_us);
     (AUDIO_DELAY_FEEDBACK_MIN_US.min(upper_us), upper_us)
+}
+
+/// 閉ループと同じ規則で、適用する上限の状態を 1 回進める
+///
+/// 引数は (広げているか, 圧縮の連続時間, 静かな連続時間) と、今回の制御で観測した
+/// (制御からの時間, その間に増えた圧縮, 揺らぎだけの目標遅延) である。同じ 3 つ組を返す。
+/// 速さは「制御の間に増えた圧縮 / 制御からの時間」であり、時間が 0 以下のときは 0 とする。
+fn advance_ceiling(
+    widened: bool,
+    compression_streak_us: i64,
+    quiet_streak_us: i64,
+    span_us: i64,
+    compression_us: i64,
+    jitter_target_us: i64,
+) -> (bool, i64, i64) {
+    // i64 の整除で丸まらないよう、先に掛けてから割る
+    let rate_us_per_second = if span_us > 0 {
+        compression_us.saturating_mul(1_000_000) / span_us
+    } else {
+        0
+    };
+    let (compression_streak_us, quiet_streak_us) =
+        if rate_us_per_second > AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND {
+            // 100 ms では足りていない証拠が続いている
+            (compression_streak_us.saturating_add(span_us), 0)
+        } else if compression_us == 0 && jitter_target_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US {
+            // 圧縮が無く、経路も 100 ms 以内で足りている
+            (0, quiet_streak_us.saturating_add(span_us))
+        } else {
+            // 圧縮は出ているが閾値未満、または経路がまだ 100 ms を必要としている
+            (0, 0)
+        };
+    let mut widened = widened;
+    if !widened && compression_streak_us >= AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US {
+        widened = true;
+    } else if widened && quiet_streak_us >= AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US {
+        widened = false;
+    }
+    (widened, compression_streak_us, quiet_streak_us)
 }
 
 /// 増える向きの理由の増分が規則の範囲に収まっていることを確かめる
@@ -128,6 +207,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
     let saw_backlog_returned = Cell::new(false);
     let saw_reset_after_adjustment = Cell::new(false);
     let saw_reset_clears_the_observation = Cell::new(false);
+    let saw_compression_rate = Cell::new(false);
 
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
@@ -139,6 +219,12 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
         // 前回「判断した」観測の累積 (間隔が空いていない観測は累積を読まずに戻る)
         let mut consumed_backlog_misses = 0u64;
         let mut consumed_backlog_us = 0i64;
+        // SUT と同じ規則で、適用する上限の状態を写し取る。観測のたびに圧縮の増分を足し、
+        // 制御 (間隔が空いた観測) のたびに速さを求めて、広げる / 戻すを判断する
+        let mut widened_ceiling = false;
+        let mut compression_streak_us = 0i64;
+        let mut quiet_streak_us = 0i64;
+        let mut pending_compression_us = 0i64;
         let mut now_us = noprop::sample_usize_in(ctx, 0..1_000_000) as i64;
 
         for _ in 0..noprop::sample_usize_in(ctx, 1..=24) {
@@ -150,7 +236,12 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
                     "観測を受ける前は学習値をそのまま使う"
                 );
-                let (lower_us, upper_us) = target_limits(feedback.ceiling_us());
+                let applied_ceiling_us = feedback.snapshot().applied_ceiling_us;
+                assert_eq!(
+                    applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                    "観測を受ける前は上限を広げない"
+                );
+                let (lower_us, upper_us) = target_limits(feedback.ceiling_us(), applied_ceiling_us);
                 assert!(
                     (lower_us..=upper_us).contains(&feedback.feedback_target_us()),
                     "観測を受ける前の目標が範囲の外に出た: target={} lower={lower_us} upper={upper_us}",
@@ -184,7 +275,8 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     }
                     // 上限を掛けた時点で、既に超えていればその場で収まる
                     let snapshot = feedback.snapshot();
-                    let (lower_us, upper_us) = target_limits(Some(ceiling_us));
+                    let (lower_us, upper_us) =
+                        target_limits(Some(ceiling_us), snapshot.applied_ceiling_us);
                     assert!(
                         (lower_us..=upper_us).contains(&snapshot.target_us),
                         "上限の設定で目標が範囲の外に出た: target={} lower={lower_us} upper={upper_us}",
@@ -199,7 +291,8 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     saw_ceiling_removed.set(true);
                     assert_eq!(feedback.ceiling_us(), None, "上限の解除が反映されない");
                     let snapshot = feedback.snapshot();
-                    let (lower_us, upper_us) = target_limits(None);
+                    let (lower_us, upper_us) =
+                        target_limits(None, snapshot.applied_ceiling_us);
                     assert!(
                         (lower_us..=upper_us).contains(&snapshot.target_us),
                         "上限の解除で目標が範囲の外に出た: target={}",
@@ -215,14 +308,24 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     backlog_us = 0;
                     consumed_backlog_misses = 0;
                     consumed_backlog_us = 0;
+                    // 広げた上限と連続時間も初期状態へ戻る
+                    widened_ceiling = false;
+                    compression_streak_us = 0;
+                    quiet_streak_us = 0;
+                    pending_compression_us = 0;
 
                     let snapshot = feedback.snapshot();
-                    let (lower_us, upper_us) = target_limits(ceiling_us);
+                    let (lower_us, upper_us) = target_limits(ceiling_us, snapshot.applied_ceiling_us);
                     let expected_us = AUDIO_DELAY_FEEDBACK_START_US.max(lower_us).min(upper_us);
                     assert_eq!(
                         snapshot.target_us, expected_us,
                         "リセットで初期値へ戻らない: {snapshot:?}"
                     );
+                    assert_eq!(
+                        snapshot.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                        "リセットで広げた上限が戻らない: {snapshot:?}"
+                    );
+                    assert_eq!(snapshot.compression_us_per_second, 0, "リセットで速さが残る");
                     assert_eq!(
                         snapshot.reason,
                         AudioDelayFeedbackReason::Initial,
@@ -328,6 +431,47 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         }
                     }
 
+                    // 圧縮 (時間圧縮) の増分。購読側が累積の差として渡す値である。0 (圧縮なし)
+                    // と、閾値 (5 ms/秒) の前後、大きな値を混ぜる
+                    let compression_us = match noprop::sample_weighted_index(ctx, &COMPRESSION_WEIGHTS)
+                    {
+                        0 => 0,
+                        1 => noprop::sample_with_boundaries(
+                            ctx,
+                            &[0, AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND],
+                            noprop::Ratio::one_nth(3),
+                            |ctx| {
+                                noprop::sample_usize_in(
+                                    ctx,
+                                    0..=AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND as usize,
+                                ) as i64
+                            },
+                        ),
+                        2 => noprop::sample_with_boundaries(
+                            ctx,
+                            &[
+                                AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND,
+                                AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND + 1,
+                            ],
+                            noprop::Ratio::one_nth(3),
+                            |ctx| noprop::sample_usize_in(ctx, 0..=20_000) as i64,
+                        ),
+                        _ => noprop::sample_usize_in(ctx, 0..=200_000) as i64,
+                    };
+                    // 揺らぎだけから求めた目標遅延。上限を戻してよいかの判断に使うため、
+                    // 境界 (100 ms) の前後を必ず含める
+                    let jitter_target_us = noprop::sample_with_boundaries(
+                        ctx,
+                        &[
+                            0,
+                            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US - 1,
+                            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US + 1,
+                        ],
+                        noprop::Ratio::one_nth(3),
+                        |ctx| noprop::sample_usize_in(ctx, 0..=300_000) as i64,
+                    );
+
                     let previous_target_us = feedback.feedback_target_us();
                     let previous_adjustments = feedback.snapshot().adjustments;
                     let elapsed_us = last_update_at_us
@@ -341,11 +485,36 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     let backlog_returned = interval_passed
                         && (backlog_misses < consumed_backlog_misses
                             || backlog_us < consumed_backlog_us);
-                    feedback.update(observation(
+                    // 適用する上限の状態を、閉ループと同じ規則で写し取る。圧縮の増分は制御
+                    // (間隔が空いた観測) まで積み、制御のたびに速さを求めて判断する
+                    pending_compression_us =
+                        pending_compression_us.saturating_add(compression_us.max(0));
+                    if interval_passed {
+                        let span_us = elapsed_us.unwrap_or(0);
+                        let consumed_us = pending_compression_us;
+                        pending_compression_us = 0;
+                        let (widened, compression_streak, quiet_streak) = advance_ceiling(
+                            widened_ceiling,
+                            compression_streak_us,
+                            quiet_streak_us,
+                            span_us,
+                            consumed_us,
+                            jitter_target_us,
+                        );
+                        widened_ceiling = widened;
+                        compression_streak_us = compression_streak;
+                        quiet_streak_us = quiet_streak;
+                        if span_us > 0 && consumed_us > 0 {
+                            saw_compression_rate.set(true);
+                        }
+                    }
+                    feedback.update(observation_with_compression(
                         now_us,
                         lateness_p50_us,
                         backlog_misses,
                         backlog_us,
+                        compression_us,
+                        jitter_target_us,
                     ));
                     if interval_passed {
                         last_update_at_us = Some(now_us);
@@ -358,7 +527,36 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
 
                     let snapshot = feedback.snapshot();
                     let ceiling_us = feedback.ceiling_us();
-                    let (lower_us, upper_us) = target_limits(ceiling_us);
+                    // 適用する上限も、写し取った状態と同じ規則で求める
+                    let expected_applied_ceiling_us =
+                        applied_ceiling_us(ceiling_us, widened_ceiling);
+                    let (lower_us, upper_us) =
+                        target_limits(ceiling_us, snapshot.applied_ceiling_us);
+                    assert_eq!(
+                        snapshot.applied_ceiling_us, expected_applied_ceiling_us,
+                        "適用する上限が規則と違う: widened={widened_ceiling} ceiling={ceiling_us:?} {snapshot:?}"
+                    );
+                    // 規則を写し取った値だけでなく、値そのものの範囲も確かめる
+                    assert!(
+                        (AUDIO_DELAY_FEEDBACK_MAX_TARGET_US..=AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US)
+                            .contains(&snapshot.applied_ceiling_us),
+                        "適用する上限が 100 ms から 160 ms の外に出た: {snapshot:?}"
+                    );
+                    // 明示設定があるときは、広げる分もその値までに切る (既定の上限は下回らない)。
+                    // 定数の大小はここで固定されているため clamp を使ってよい
+                    let widened_limit_us = ceiling_us.map_or(
+                        AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+                        |ceiling_us| {
+                            ceiling_us.clamp(
+                                AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                                AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+                            )
+                        },
+                    );
+                    assert!(
+                        snapshot.applied_ceiling_us <= widened_limit_us,
+                        "適用する上限が明示設定を超えた: ceiling={ceiling_us:?} limit={widened_limit_us} {snapshot:?}"
+                    );
                     // 計器に出す遅れは、閉ループが判断に使った値 (不感帯を引いた後) である
                     assert_eq!(
                         snapshot.lateness_p50_us, effective_lateness_p50_us,
@@ -382,25 +580,31 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     if snapshot.target_us == upper_us {
                         saw_upper.set(true);
                     }
-                    // 実際に使う値は、学習値と閉ループの目標の大きい方である
-                    // 実際に使う値は、学習値と閉ループの目標の大きい方を上限 (100 ms) で
+                    // 実際に使う値は、学習値と閉ループの目標の大きい方を、いま適用する上限で
                     // 切った値である
                     let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
                     let applied_us = feedback.target_delay_us(jitter_us);
                     assert!(
-                        applied_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-                        "実際に使う値が上限を超えた: jitter={jitter_us} applied={applied_us}"
+                        applied_us <= snapshot.applied_ceiling_us,
+                        "実際に使う値が適用する上限を超えた: jitter={jitter_us} applied={applied_us} ceiling={} {snapshot:?}",
+                        snapshot.applied_ceiling_us
                     );
                     assert!(
-                        applied_us >= jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
-                        "実際に使う値が学習値 (上限の内側) を下回った: jitter={jitter_us} applied={applied_us}"
+                        applied_us >= jitter_us.min(snapshot.applied_ceiling_us),
+                        "実際に使う値が学習値 (上限の内側) を下回った: jitter={jitter_us} applied={applied_us} {snapshot:?}"
                     );
+                    // 学習値が適用する上限を超えるときは、その上限ちょうどになる
+                    if jitter_us >= snapshot.applied_ceiling_us {
+                        assert_eq!(
+                            applied_us, snapshot.applied_ceiling_us,
+                            "学習値が上限を超えたら上限ちょうどになる: jitter={jitter_us} {snapshot:?}"
+                        );
+                    }
                     // 観測を受けた後は、閉ループの目標 (上限の内側) も反映する。観測を
                     // 受ける前は閉ループの目標を使わないため確かめない
                     if !matches!(snapshot.reason, AudioDelayFeedbackReason::Initial) {
                         assert!(
-                            applied_us
-                                >= snapshot.target_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+                            applied_us >= snapshot.target_us.min(snapshot.applied_ceiling_us),
                             "実際に使う値が閉ループの目標 (上限の内側) を下回った: target={} applied={applied_us}",
                             snapshot.target_us
                         );
@@ -578,6 +782,10 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
         "並べすぎの累積が戻る場合を通っていない\n{runner}"
     );
     assert!(
+        saw_compression_rate.get(),
+        "圧縮の速さを観測する場合を通っていない\n{runner}"
+    );
+    assert!(
         saw_reset_after_adjustment.get(),
         "目標を動かした後のリセットを通っていない\n{runner}"
     );
@@ -622,11 +830,15 @@ fn reset_restores_the_initial_state_and_keeps_the_ceiling() -> noprop::TestResul
         feedback.reset();
 
         let snapshot = feedback.snapshot();
-        let (lower_us, upper_us) = target_limits(ceiling_us);
+        let (lower_us, upper_us) = target_limits(ceiling_us, snapshot.applied_ceiling_us);
         let expected_us = AUDIO_DELAY_FEEDBACK_START_US.max(lower_us).min(upper_us);
         assert_eq!(
             snapshot.target_us, expected_us,
             "リセットで初期値 (明示の上限の中) へ戻らない: {snapshot:?}"
+        );
+        assert_eq!(
+            snapshot.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+            "リセットで適用する上限が既定へ戻らない: {snapshot:?}"
         );
         assert_eq!(
             snapshot.reason,
@@ -670,6 +882,147 @@ fn reset_restores_the_initial_state_and_keeps_the_ceiling() -> noprop::TestResul
     assert!(
         saw_reset_without_ceiling.get(),
         "明示の上限が無い状態のリセットを通っていない\n{runner}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_ceiling_widens_with_compression_and_returns_when_quiet() -> noprop::TestResult {
+    // 圧縮が続く区間と、静かな区間を任意の長さで作る。適用する上限が、広げる条件 (圧縮の
+    // 速さが 5 ms/秒 を超える状態が 2 秒) と戻す条件 (圧縮が 0 で、揺らぎだけの目標が
+    // 100 ms 以下である状態が 15 秒) を満たしたときにだけ変わることを確かめる。ここでは
+    // 観測を 1 秒間隔で渡すため、1 回の制御が 1 秒ぶんになる
+    let saw_widened = Cell::new(false);
+    let saw_released = Cell::new(false);
+    let saw_kept_widened_by_the_path = Cell::new(false);
+
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        let mut feedback = AudioDelayFeedback::new();
+        // 明示設定を混ぜる。適用する上限は、広げる分にもこの値を掛ける
+        let ceiling_us = if noprop::sample_bool(ctx) {
+            let ceiling_us = noprop::sample_usize_in(ctx, 0..=300_000) as i64;
+            feedback.set_ceiling_us(Some(ceiling_us));
+            Some(ceiling_us)
+        } else {
+            None
+        };
+        // 閉ループと同じ規則で写し取る。最初の制御は前回が無いため、制御からの時間を 0 と
+        // して扱う (速さを求められない)
+        let mut widened = false;
+        let mut compression_streak_us = 0i64;
+        let mut quiet_streak_us = 0i64;
+        let mut last_control_at_us: Option<i64> = None;
+        let mut now_us = 0i64;
+
+        // 圧縮が続く区間。速さは 20 ms/秒 以上にする (閾値の 5 ms/秒 を必ず超える)。長さは
+        // 広げる条件を必ず満たすようにする (最初の制御は前回が無いため、連続時間を数えない)
+        let confirm_steps =
+            (AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US / AUDIO_DELAY_FEEDBACK_INTERVAL_US) as usize;
+        let compression_span = confirm_steps + 1 + noprop::sample_usize_in(ctx, 0..=5);
+        for _ in 0..compression_span {
+            now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+            let compression_us = noprop::sample_usize_in(ctx, 20_000..=100_000) as i64;
+            let span_us = last_control_at_us.map_or(0, |last_control_at_us| {
+                now_us.saturating_sub(last_control_at_us)
+            });
+            feedback.update(observation_with_compression(
+                now_us,
+                Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+                0,
+                0,
+                compression_us,
+                0,
+            ));
+            let was_widened = widened;
+            (widened, compression_streak_us, quiet_streak_us) = advance_ceiling(
+                widened,
+                compression_streak_us,
+                quiet_streak_us,
+                span_us,
+                compression_us,
+                0,
+            );
+            last_control_at_us = Some(now_us);
+            if !was_widened && widened {
+                saw_widened.set(true);
+            }
+            assert_eq!(
+                feedback.snapshot().applied_ceiling_us,
+                applied_ceiling_us(ceiling_us, widened),
+                "圧縮が続く区間で適用する上限が規則と違う: compression_span={compression_span} span={span_us} widened={widened} {ceiling_us:?}"
+            );
+        }
+
+        // 圧縮が 0 で、揺らぎだけの目標が 100 ms 以下の区間。長さは戻す条件を必ず満たすように
+        // する (経路がまだ 100 ms を必要としている回を混ぜ、その回で数え直すことも確かめる)
+        let release_steps =
+            (AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US / AUDIO_DELAY_FEEDBACK_INTERVAL_US) as usize;
+        let quiet_span = release_steps + 2 + noprop::sample_usize_in(ctx, 0..=20);
+        // 経路が乱れる回は先頭に置く (後ろに戻す条件ぶんの長さを残す)
+        let disturbed_at = noprop::sample_usize_in(ctx, 0..=1);
+        for index in 0..quiet_span {
+            now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+            let disturbed = index == disturbed_at;
+            let jitter_target_us = if disturbed {
+                AUDIO_DELAY_FEEDBACK_MAX_TARGET_US + 50_000
+            } else {
+                noprop::sample_usize_in(ctx, 0..=AUDIO_DELAY_FEEDBACK_MAX_TARGET_US as usize)
+                    as i64
+            };
+            let span_us = last_control_at_us.map_or(0, |last_control_at_us| {
+                now_us.saturating_sub(last_control_at_us)
+            });
+            feedback.update(observation_with_compression(
+                now_us,
+                Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+                0,
+                0,
+                0,
+                jitter_target_us,
+            ));
+            let was_widened = widened;
+            (widened, compression_streak_us, quiet_streak_us) = advance_ceiling(
+                widened,
+                compression_streak_us,
+                quiet_streak_us,
+                span_us,
+                0,
+                jitter_target_us,
+            );
+            last_control_at_us = Some(now_us);
+            if disturbed {
+                // 経路がまだ 100 ms を必要としているため、どちらの条件も満たさない
+                saw_kept_widened_by_the_path.set(true);
+            }
+            if was_widened && !widened {
+                saw_released.set(true);
+            }
+            assert_eq!(
+                feedback.snapshot().applied_ceiling_us,
+                applied_ceiling_us(ceiling_us, widened),
+                "静かな区間で適用する上限が規則と違う: index={index} disturbed={disturbed} widened={widened} {ceiling_us:?}"
+            );
+            // 内部の目標は、常に適用する上限を超えない
+            assert!(
+                feedback.feedback_target_us() <= feedback.snapshot().applied_ceiling_us,
+                "内部の目標が適用する上限を超えた"
+            );
+        }
+        Ok(())
+    })?;
+
+    assert!(
+        saw_widened.get(),
+        "圧縮が続いて上限を広げる場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_released.get(),
+        "静かな状態が続いて上限を戻す場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_kept_widened_by_the_path.get(),
+        "経路が 100 ms を超えるため戻さない場合を通っていない\n{runner}"
     );
     Ok(())
 }

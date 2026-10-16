@@ -548,6 +548,8 @@ struct AudioPlayoutAssembly {
     last_played: Option<PlayedAudio>,
     /// 再生機器へ積んだ音の位置の対応
     position: AudioPlayoutPosition,
+    /// 直前に観測へ渡した、累積で詰めた長さ (マイクロ秒)。差を取って圧縮の速さを求める
+    last_compressed_us: i64,
 }
 
 impl AudioPlayoutAssembly {
@@ -559,6 +561,7 @@ impl AudioPlayoutAssembly {
             stats: AudioPlayoutTimingStats::new(),
             last_played: None,
             position: AudioPlayoutPosition::new(),
+            last_compressed_us: 0,
         }
     }
 
@@ -737,11 +740,19 @@ impl AudioPlayoutAssembly {
 
     /// 計器の観測を閉ループへ渡し、決まった目標を時間軸へ反映させる
     ///
-    /// 鳴らした結果 (予定をどれだけ過ぎて鳴ったか、並べすぎで捨てた量) から目標遅延を
-    /// 決め直す。渡した観測は [`PlayoutTimeline::observe_audio_playout`] がその場で音声の
+    /// 鳴らした結果 (予定をどれだけ過ぎて鳴ったか、並べすぎで捨てた量、詰めた長さ) から目標
+    /// 遅延を決め直す。渡した観測は [`PlayoutTimeline::observe_audio_playout`] がその場で音声の
     /// 表示の遅れへ反映するため、次の音から新しい目標で並ぶ。
+    ///
+    /// 圧縮 (時間圧縮) は累積で数えられているため、前回の観測からの増分にして渡す。閉ループ
+    /// はこれが続くときだけ目標遅延の上限を 160 ms へ広げる。購読のやり直しで累積が 0 に
+    /// 戻っても負の差を作らないよう、0 で止める。
     fn feed_feedback(&mut self, timeline: &mut PlayoutTimeline, now_us: i64) {
-        timeline.observe_audio_playout(self.stats.audio_delay_feedback(now_us));
+        let mut observation = self.stats.audio_delay_feedback(now_us);
+        let compressed_us = self.scheduler.compressed_us();
+        observation.compression_us = compressed_us.saturating_sub(self.last_compressed_us).max(0);
+        self.last_compressed_us = compressed_us;
+        timeline.observe_audio_playout(observation);
     }
 
     /// 計器の観測値を求める
@@ -752,12 +763,13 @@ impl AudioPlayoutAssembly {
     /// 計器と閉ループの値をログ用の文字列にする
     ///
     /// 鳴るはずの時刻 (絶対値)、到着から鳴り始めるまでと予定に対する余裕の分布 (p50 /
-    /// p95)、理由別の捨ての件数と長さ、いま使っている目標遅延とその理由を出す。
+    /// p95)、理由別の捨ての件数と長さ、いま使っている目標遅延とその理由、いま適用している
+    /// 上限と、直近に観測した圧縮の速さを出す。
     fn log_fields(&mut self, timeline: &PlayoutTimeline, now_us: i64) -> String {
         let snapshot = self.snapshot(now_us);
         let feedback = timeline.delay_breakdown().audio_delay_feedback;
         format!(
-            "playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} feedback_target={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={}",
+            "playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} feedback_target={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={} feedback_ceiling={}ms feedback_compression={}ms_per_second",
             time_log(snapshot.last_target_us),
             time_log(snapshot.last_arrival_us),
             time_log(snapshot.last_start_us),
@@ -781,6 +793,8 @@ impl AudioPlayoutAssembly {
             feedback.reason,
             feedback.last_change_us / 1000,
             feedback.adjustments,
+            feedback.applied_ceiling_us / 1000,
+            feedback.compression_us_per_second / 1000,
         )
     }
 
@@ -1330,7 +1344,7 @@ fn samples_to_us(samples: usize, sample_rate: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use shiguredo_moqt::playout::feedback::{
-        AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US, AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
     };
 
     use super::*;
@@ -1989,7 +2003,10 @@ mod tests {
             Some(AudioMissReason::Backlog),
             "直近の捨ての理由が並べすぎであること"
         );
-        // 捨てた量は閉ループへ渡り、目標遅延を増やす判断に使われる
+        // 捨てた量は閉ループへ渡り、目標遅延を増やす判断に使われる。ただし閉ループの内部の
+        // 目標も、実際に適用する上限 (圧縮が無いときは 100 ms) で切る。初期値がその上限と
+        // 同じであるため、この観測では値が動かない (適用されない値へ育てると、遅れが収まって
+        // から減らし切るまでの時間だけ復帰が遅れる)
         let feedback = timeline.delay_breakdown().audio_delay_feedback;
         assert_eq!(
             feedback.reason,
@@ -1997,9 +2014,16 @@ mod tests {
             "並べすぎの捨てが閉ループへ届くこと"
         );
         assert_eq!(
-            feedback.target_us,
-            AUDIO_DELAY_FEEDBACK_START_US + 40_000,
-            "捨てた長さと余白ぶん目標を増やすこと"
+            feedback.target_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+            "内部の目標が適用する上限 (100 ms) に収まること"
+        );
+        assert_eq!(
+            feedback.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+            "圧縮が無いため上限を広げないこと"
+        );
+        assert_eq!(
+            feedback.last_change_us, 0,
+            "既に適用する上限にあるため増えないこと"
         );
     }
 
