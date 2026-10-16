@@ -1,7 +1,7 @@
 # examples の moq-pub / moq-sub に QMux 経由の接続を追加する
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/add-moqt-over-qmux
 - Polished: 2026-10-16
 - Updated: 2026-10-16
@@ -87,3 +87,50 @@ QMux の実装はまだタグが無く、当面タグを打つ予定も無い。
 - 3 経路を列挙している README と doc コメントが 4 経路に追随していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
 - PR が `[WIP]` 付きで作成され、依存する qmux-rs の rev、rev 固定で取り込む理由、QMux 経路に残る制約 (datagram が信頼配送になること、RESET_STREAM_AT 未実装のため `reliable_size` が常に `None` になること) が PR 本文に書かれていること。
+
+## 解決方法
+
+`--transport qmux` で moq-pub / moq-sub が QMux (draft-ietf-quic-qmux-02) 経由で接続できるようにした。
+
+### 追加
+
+- `examples/tokio-moq/src/qmux.rs`: TCP + TLS (ALPN は native QUIC と同じ `moqt-22`) で `tokio_qmux::Connection` を確立する
+  - `Config` は `max_idle_timeout` を 30 秒、フロー制御のクレジットを QUIC 直接接続に相当する量、`max_datagram_frame_size` を `max_record_size` の既定 (16382) に設定する
+  - peer 起動ストリームの受理と STOP_SENDING の観測は接続を共有したタスクで待ち、接続が閉じた場合とアプリがアクセプターを drop した場合にタスクを終了させる (タスクが接続を握り続けるとドライバが終了しない)
+  - DATAGRAM の上限はピアの `max_datagram_frame_size` と `max_record_size` の両方と突き合わせ、既定 1160 の OBJECT_DATAGRAM (フレーム全体 1163) が収まらない場合に警告ログを出す
+  - 破棄された受信 DATAGRAM は `dropped_datagrams` から警告ログに出す
+- `examples/tokio-moq/src/tls.rs`: QMux と WebTransport over HTTP/2 が共有する rustls のクライアント設定
+- `refs/quic/draft-ietf-quic-qmux-02.txt`
+
+### 変更
+
+- `examples/tokio-moq/Cargo.toml`: qmux-rs の `shiguredo_qmux` と `tokio-qmux` を同じ rev (`c53b862`) の git 依存として追加する (タグが無く crates.io に未公開のため)
+- `examples/tokio-moq/src/transport.rs`: `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor` と `StopSendingTransport` に QMux を追加する。`RecvStream::stop_sending` は QMux の API に合わせて非同期にする
+- `examples/tokio-moq/src/error.rs`: `TransportError::Qmux` を追加し、`Error::Stopped` を `StreamReset`、接続クローズを `ConnectionClosed` に写す
+- `examples/tokio-moq/src/lib.rs`: `Transport::Qmux` (`--transport qmux`) と `connect` の QMux の腕、`ConnectParams::datagram_max_size` を追加する
+- `examples/tokio-moq/src/moqt_client.rs`: `MoqtClient::establish_qmux` を追加する (`establish_quic` と同じ結線)
+- `src/session/types.rs`: 本体の `Transport` に `Qmux` を追加する
+- `examples/moq-pub` / `examples/moq-sub`: CLI の `--transport` の説明、experimental の警告、`TransportError` の表示を追随させる
+- README・doc コメント・`docs/missing-features.md`・`skills/shiguredo-moqt/SKILL.md` を 4 経路に追随させる
+
+### テスト
+
+- `qmux.rs`: TCP + TLS + QMux のテスト peer (`peer_harness.rs` の `QmuxTestPeerServer`) を使い、SETUP の交換と PUBLISH / SUBSCRIBE の成立、subgroup stream と DATAGRAM (既定の 1160 を含む) の往復、ピアの STOP_SENDING が接続単位の観測と送信ストリームの終端の双方に現れることを検証する。DATAGRAM の上限判定は純関数として両方の上限を検証する
+- `lib.rs` / `cli.rs`: `Transport::parse` / `as_str` の逆写像、`connection=q` / `connection=wt` と `--transport qmux` の矛盾検出、`--transport qmux` の解釈
+- `transport.rs`: `StopSendingTransport::Qmux` が remap しないこと
+
+### 確認
+
+`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `prek run --files` / no_std ビルド / aws-lc-rs feature の clippy と rustdoc が通ることを確認した。
+
+### 残る制約
+
+- ALPN は native QUIC と同じ `moqt-22` を使う (draft-ietf-quic-qmux-02 Section 8.1 の MUST からは外れる。individual draft Section 3.2 に従う)
+- DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、QMux は速やかに配送できない DATAGRAM の破棄を許すため (Section 6)、受信側のバッファが溢れると欠落しうる
+- `RESET_STREAM_AT` 未実装のため `reset` の `reliable_size` は常に `None` になる
+- 制御ストリームは peer 起動の最初の単方向ストリームとして扱う (QUIC 直接接続と同じ)
+- 「datagram が信頼配送になること」ではなく「経路での損失は下位の TCP が再送するが、QMux は速やかに配送できない DATAGRAM の破棄を許す」が正しい (Section 6)
+- qmux-rs のドライバは、自側の `close` の後もピアの shutdown を待つため終了しない (ピアが読み取りを止めると `flush` の `write_all` にも timeout が無い)
+  - `Connection` の drop がドライバ終了の引き金であるため、双方向 accept タスクは `MoqtClient` 内の detached な受理タスクが `bi_rx` を保持し続ける限り `tx.closed()` も `connection.closed()` も成立せず、接続・タスク・TCP ソケットが残る
+  - 単方向 accept と STOP_SENDING のタスクはアプリ側の receiver の drop で終了する
+  - qmux-rs 側でドライバに linger の上限を設けるか、`close` でドライバを終了できるようにするのが本筋である (example 側では解消できない)
