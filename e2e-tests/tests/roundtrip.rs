@@ -270,19 +270,37 @@ fn start_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
 ///
 /// 音声は既定で OBJECT_DATAGRAM 配送になる
 /// (draft-ietf-moq-loc-04 §4.1 (Application with one audio track))。namespace の解決は
-/// [`start_publisher`] と同じく MSF fragment から行う。
+/// [`start_publisher`] と同じく MSF fragment から行う。冗長度は既定 (1) を使う。
 fn start_audio_publisher(url: &str, transport: &str, namespace: &str) -> Publisher {
+    start_audio_publisher_with_redundancy(url, transport, namespace, None)
+}
+
+/// 音声だけを datagram で配信する publisher を、冗長度を指定して起動する
+///
+/// `redundancy` が `None` のときは `--audio-redundancy` を渡さず既定 (1) を使う。datagram は
+/// 再送されない (RFC 9221 §3) ため、2 以上にすると同じ Object がその回数だけ送られ、受信側は
+/// 同じ識別子の 2 回目を捨てる。
+fn start_audio_publisher_with_redundancy(
+    url: &str,
+    transport: &str,
+    namespace: &str,
+    redundancy: Option<&str>,
+) -> Publisher {
     let url = msf_url(url, namespace, MSF_TRACK_NAME);
-    let config = moq_pub::cli::parse_args(&[
+    let mut args = vec![
         "--url",
         url.as_str(),
         "--transport",
         transport,
         "--fake-capture-device",
         "--no-video",
-    ])
-    .expect("publisher のオプションを解釈できること")
-    .expect("publisher の設定が返ること");
+    ];
+    if let Some(redundancy) = redundancy {
+        args.extend_from_slice(&["--audio-redundancy", redundancy]);
+    }
+    let config = moq_pub::cli::parse_args(&args)
+        .expect("publisher のオプションを解釈できること")
+        .expect("publisher の設定が返ること");
 
     spawn_publisher(config)
 }
@@ -587,6 +605,119 @@ async fn publish_and_subscribe_audio_datagram_roundtrip() {
     assert!(
         received >= MIN_AUDIO_FRAMES,
         "音声フレームを継続して受信できること: received={received}"
+    );
+    assert!(
+        last_received.elapsed() < LAST_FRAME_TIMEOUT,
+        "配信の終了間際まで音声フレームが届くこと: 最後の受信から {:?} (received={received}, publisher_finished={})",
+        last_received.elapsed(),
+        publisher.is_finished()
+    );
+    // 20 ms 間隔の音声が続いていること。数フレームしか届いていない場合と、
+    // 同じ Object を繰り返し届けている場合を PTS の幅で切り分ける
+    let span_us = last_pts.expect("音声フレームの PTS を観測していること")
+        - first_pts.expect("音声フレームの PTS を観測していること");
+    assert!(
+        span_us >= 1_000_000,
+        "音声の PTS が 1 秒以上進むこと: {span_us}us (received={received})"
+    );
+
+    // 4. datagram で届いた音声が MP4 に保存されている
+    let mp4_size = std::fs::metadata(&mp4_path)
+        .expect("MP4 ファイルが作成されていること")
+        .len();
+    assert!(
+        mp4_size > 0,
+        "MP4 に datagram の音声が保存されていること: {mp4_size} バイト"
+    );
+
+    // 5. どちらも graceful shutdown で正常終了する
+    subscriber.stop().await;
+    publisher.stop().await;
+}
+
+/// relay を介して冗長化した datagram 音声を購読し、同じ音を 2 回鳴らさないことを検証する
+///
+/// publisher は同じ音声 Object を 2 回送る (`--audio-redundancy 2`)。datagram は再送されない
+/// (RFC 9221 §3) ため、経路の損失に備えて同じ Object を複数回送る。受信側は同じ識別子
+/// (Group ID と Object ID) の 2 回目を捨てるため、鳴る音は冗長度 1 のときと同じである。
+///
+/// 2 回目が再生へ渡れば、同じ TIMESTAMP の音声フレームが 2 つ届く。既存の音声の E2E は
+/// 同じ TIMESTAMP を許す検査 (`>=`) のため重複を検出できないが、このテストは PTS が厳密に
+/// 進むことを検査する。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "MOQT_E2E_URL を設定したうえで --ignored を付けて実行する"]
+async fn publish_and_subscribe_audio_redundancy_roundtrip() {
+    init_tracing();
+    let url = e2e_url();
+    let transport = e2e_transport();
+    let namespace = e2e_namespace("audio-redundancy");
+    let dir = WorkDir::new("audio-redundancy");
+    let mp4_path = dir.path().join("subscriber-audio-redundancy.mp4");
+
+    // 1. 音声だけを datagram で、同じ Object を 2 回送る publisher を起動する
+    let mut publisher =
+        start_audio_publisher_with_redundancy(&url, &transport, &namespace, Some("2"));
+
+    // 2. subscriber を起動し、最初の音声フレームが届くまで待つ
+    let subscriber = start_subscriber(
+        &url,
+        &transport,
+        &namespace,
+        &mp4_path,
+        &mut publisher,
+        TestTrack::Audio,
+    )
+    .await;
+    assert_eq!(
+        subscriber.first_audio_params,
+        Some((AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)),
+        "publisher が配信した音声のサンプルレートとチャンネル数でデコードできること"
+    );
+
+    // 3. 音声フレームを受け取り続ける
+    let mut received: u64 = 1;
+    let mut first_pts: Option<i64> = None;
+    let mut last_pts: Option<i64> = None;
+    let mut last_received = Instant::now();
+    let deadline = Instant::now() + STREAM_DURATION;
+    while Instant::now() < deadline {
+        match tokio::task::block_in_place(|| {
+            subscriber
+                .audio_frames
+                .recv_timeout(Duration::from_millis(500))
+        }) {
+            Ok(frame) => {
+                received += 1;
+                last_received = Instant::now();
+                if first_pts.is_none() {
+                    first_pts = Some(frame.pts_us);
+                }
+                // 冗長化した 2 回目が再生へ渡っていれば、同じ TIMESTAMP のフレームが届く。
+                // 購読の境界より前の Object と、送出済みより古い TIMESTAMP の Object は
+                // moq-sub が落とすため、届くフレームの PTS は厳密に進む
+                if let Some(previous) = last_pts {
+                    assert!(
+                        frame.pts_us > previous,
+                        "冗長化した 2 回目を鳴らさないこと (同じ PTS のフレームが届いた): \
+                         {previous} -> {} (received={received})",
+                        frame.pts_us
+                    );
+                }
+                last_pts = Some(frame.pts_us);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // pipeline が終了している。理由を取り出して報告する
+                let result = tokio::time::timeout(SHUTDOWN_TIMEOUT, subscriber.task).await;
+                panic!(
+                    "音声フレームのチャネルが閉じました (pipeline が終了しました): received={received}, result={result:?}"
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    assert!(
+        received >= MIN_AUDIO_FRAMES,
+        "冗長化しても音声フレームを継続して受信できること: received={received}"
     );
     assert!(
         last_received.elapsed() < LAST_FRAME_TIMEOUT,

@@ -4,16 +4,17 @@
 
 `moq-pub` と `moq-sub` の lib API を使い、publisher と subscriber のパイプラインを同一プロセス内で起動します。バイナリを起動してログを照合する方法は取らず、判定はチャネルで受け取るフレームと MP4 の実体で行います。
 
-2 つのテストがあります。
+3 つのテストがあります。
 
 - `publish_and_subscribe_roundtrip`：映像を subgroup stream で配信し、購読側でデコードして MP4 へ保存するまでを検証する
 - `publish_and_subscribe_audio_datagram_roundtrip`：音声を datagram で配信し (`moq-pub` の既定 (音声は datagram 配送))、購読側でデコードして MP4 へ保存するまでを検証する
+- `publish_and_subscribe_audio_redundancy_roundtrip`：音声を `--audio-redundancy 2` (同じ Object を 2 回送る) で配信し、購読側が 2 回目を捨てて同じ音を 2 回鳴らさないこと (PTS が厳密に進むこと) を検証する
 
 検証する内容は次の 5 点です。
 
 1. publisher のパイプラインが SETUP と PUBLISH を完了する
 2. subscriber のパイプラインが catalog を取得して SUBSCRIBE を完了する (最初のフレームが publisher の生成するパラメータでデコードできること)
-3. subscriber がデコード済みのフレームを継続して受け取る (5 秒間で映像は 30 フレーム以上、音声は 50 フレーム以上。配信の終了間際まで届き、音声は PTS が 1 秒以上進むこと)
+3. subscriber がデコード済みのフレームを継続して受け取る (5 秒間で映像は 30 フレーム以上、音声は 50 フレーム以上。配信の終了間際まで届き、音声は PTS が 1 秒以上進むこと。冗長化した音声のテストでは、さらに PTS が厳密に進むこと = 同じ Object を 2 回鳴らさないこと)
 4. subscriber が書き出した MP4 が 0 バイトより大きい
 5. どちらのパイプラインも shutdown で正常終了する
 
@@ -25,8 +26,9 @@ Track Namespace は実行ごとに一意な値を使うため、同じ MoQ リ�
 
 ```console
 $ MOQT_E2E_URL=moqt://<HOST>/ cargo test -p e2e-tests -- --ignored
-running 2 tests
+running 3 tests
 test publish_and_subscribe_audio_datagram_roundtrip ... ok
+test publish_and_subscribe_audio_redundancy_roundtrip ... ok
 test publish_and_subscribe_roundtrip ... ok
 ```
 
