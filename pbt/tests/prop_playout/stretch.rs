@@ -299,3 +299,71 @@ fn concealment_end_gain_is_monotone_and_bounded() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// 隣り合うサンプルの差の最大値 (波形の連続性)
+fn max_step(samples: &[f32]) -> f32 {
+    let mut maximum = 0.0f32;
+    for (before, after) in samples.iter().zip(&samples[1..]) {
+        maximum = maximum.max((after - before).abs());
+    }
+    maximum
+}
+
+/// 周期が探索の範囲にある音は補間され、生成した音は元の振幅と段差の範囲に収まる
+///
+/// 端数まで周期を求めて線形補間で繰り返すため、格子に乗らない周期 (4 kHz の間引き率 12 の
+/// 倍数でない周期) でも位相が合い、継ぎ目で波形が飛ばない。振幅は元の音のピークを超えず、
+/// 段差は元の音の最大段差の 2 倍以下になる (継ぎ目の段差は `is_seam_smooth` がこの倍率で
+/// 制限する)。
+#[test]
+fn conceal_of_a_periodic_wave_keeps_the_amplitude_and_the_step() -> noprop::TestResult {
+    // 48 kHz、20 ms のフレーム。探索するずらし幅は 4 kHz の 10〜40 (120〜480 サンプル)
+    const SAMPLE_RATE: u32 = 48_000;
+    const LENGTH: usize = 960;
+    const HOLE_US: i64 = 40_000;
+    // 探索の範囲にある周期 (120 = 下限、480 = 上限、160 / 320 = 4 kHz の格子に乗らない端数)
+    const PERIODS: [usize; 5] = [120, 160, 240, 320, 480];
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let period = PERIODS[noprop::sample_usize_in(ctx, 0..PERIODS.len())];
+        let amplitude = noprop::sample_f32_in(ctx, 0.1, 1.0);
+        let channel: Vec<f32> = (0..LENGTH)
+            .map(|index| {
+                if index % period < period / 2 {
+                    amplitude
+                } else {
+                    -amplitude
+                }
+            })
+            .collect();
+        let requested = ((HOLE_US * i64::from(SAMPLE_RATE) + 500_000) / 1_000_000) as usize;
+        let mut output = vec![0.0f32; requested];
+        let channels: [&[f32]; 1] = [channel.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        let change = conceal(&channels, &mut outputs, SAMPLE_RATE, HOLE_US);
+        assert_eq!(
+            change, requested as isize,
+            "周期 {period} の矩形波は補間すること"
+        );
+        // 生成した音は元の音の振幅を超えない (線形補間とゲインは振幅を増やさない)
+        let peak = channel
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        for sample in &output[..requested] {
+            assert!(sample.is_finite());
+            assert!(
+                sample.abs() <= peak,
+                "振幅を超えた: sample={sample} peak={peak} period={period}"
+            );
+        }
+        // 継ぎ目で波形が飛ばない (元の最大段差の 2 倍以下)
+        let source_step = max_step(&channel);
+        let generated_step = max_step(&output[..requested]);
+        assert!(
+            generated_step <= source_step * 2.0 + 1e-6,
+            "段差が大きい: generated={generated_step} source={source_step} period={period}"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}

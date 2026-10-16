@@ -1,10 +1,13 @@
 //! 音声の波形の周期による時間圧縮・伸長と、欠落した区間の補間のテスト
 //!
 //! 公開 API (`compress` / `expand` / `conceal` / `concealment_end_gain`) の契約を確認する。
+//! 補間では、4 kHz へ間引いた粗い格子の周辺を元のサンプルレートの相関で評価して端数まで
+//! 周期を求めるため、格子に乗らない周期でも穴の終わりで位相がずれない。周期の推定が確かで
+//! ない音では、生成した音の末尾を短くフェードして段差を消す。
 
 use shiguredo_moqt::playout::stretch::{
-    TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, conceal,
-    concealment_end_gain, expand,
+    TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MAX_LAG,
+    TIME_STRETCH_MIN_LAG, compress, conceal, concealment_end_gain, expand,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -50,6 +53,113 @@ fn noise(length: usize) -> Vec<f32> {
         *sample = (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
     }
     samples
+}
+
+/// 正弦波の `index` 番目のサンプル (振幅 `amplitude`)
+fn sine_sample(index: usize, frequency_hz: f64, sample_rate: u32, amplitude: f64) -> f32 {
+    (amplitude
+        * (2.0 * std::f64::consts::PI * frequency_hz * index as f64 / f64::from(sample_rate)).sin())
+        as f32
+}
+
+/// 周波数 `frequency_hz` の正弦波を `length` サンプル作る
+fn sine_wave(length: usize, frequency_hz: f64, sample_rate: u32, amplitude: f64) -> Vec<f32> {
+    (0..length)
+        .map(|index| sine_sample(index, frequency_hz, sample_rate, amplitude))
+        .collect()
+}
+
+/// 基本周波数 `frequency_hz` の有声 (倍音を 1 / 次数で重ねた周期波) を 48 kHz の 20 ms で作る
+///
+/// 実際の声に近づけるため、整数次の倍音を 4 kHz (音声の帯域) まで重ねる。振幅は 0.5 に揃える。
+fn voiced_wave(frequency_hz: f64) -> Vec<f32> {
+    const MAX_HARMONIC_HZ: f64 = 4_000.0;
+    let mut norm = 0.0;
+    let mut harmonic = 1;
+    while harmonic as f64 * frequency_hz < MAX_HARMONIC_HZ {
+        norm += 1.0 / harmonic as f64;
+        harmonic += 1;
+    }
+    (0..FRAME_SAMPLES)
+        .map(|index| {
+            let mut value = 0.0;
+            let mut harmonic = 1;
+            while harmonic as f64 * frequency_hz < MAX_HARMONIC_HZ {
+                value += (1.0 / harmonic as f64)
+                    * (2.0 * std::f64::consts::PI * harmonic as f64 * frequency_hz * index as f64
+                        / f64::from(SAMPLE_RATE))
+                    .sin();
+                harmonic += 1;
+            }
+            ((0.5 * value) / norm) as f32
+        })
+        .collect()
+}
+
+/// 1 極フィルタ (係数 `coefficient`) を通した有色雑音のフレームを作る
+///
+/// 白色雑音を `y[n] = a * y[n-1] + (1 - a) * x[n]` でならしたもの。相関は `a` のラグ乗で
+/// 減るため、周期の探索が短いずらし幅を選ぶと 400 Hz のブザーになる。moqt-js の実測と
+/// 同じ音にするため、乱数は moqt-js と同じ合同式 (`state = state * 1103515245 + 12345` を
+/// 2^31 で割った余り) を f64 で計算する。
+fn colored_noise_frame(length: usize, coefficient: f64, seed: f64) -> Vec<f32> {
+    let mut state = seed;
+    let mut previous = 0.0f64;
+    let mut samples = vec![0.0f32; length];
+    for sample in samples.iter_mut() {
+        state = (state * 1_103_515_245.0 + 12_345.0) % 2_147_483_648.0;
+        let white = (state / 2_147_483_648.0) * 2.0 - 1.0;
+        previous = coefficient * previous + (1.0 - coefficient) * white;
+        *sample = previous as f32;
+    }
+    samples
+}
+
+/// 純音に白色雑音を混ぜたフレームを作る (周期の推定が確かでない音)
+fn noisy_sine_wave(frequency_hz: f64, noise_amplitude: f64) -> Vec<f32> {
+    let mut samples = sine_wave(FRAME_SAMPLES, frequency_hz, SAMPLE_RATE, 0.5);
+    let mut state = 987_654_321.0f64;
+    for sample in samples.iter_mut() {
+        state = (state * 1_103_515_245.0 + 12_345.0) % 2_147_483_648.0;
+        *sample =
+            (*sample as f64 + ((state / 2_147_483_648.0) * 2.0 - 1.0) * noise_amplitude) as f32;
+    }
+    samples
+}
+
+/// 隣り合うサンプルの差の最大値 (波形の連続性)
+fn max_step(samples: &[f32]) -> f32 {
+    let mut maximum = 0.0f32;
+    for (before, after) in samples.iter().zip(&samples[1..]) {
+        maximum = maximum.max((after - before).abs());
+    }
+    maximum
+}
+
+/// 生成した音が `period` サンプルの周期で繰り返しているか
+///
+/// 先頭から半分の範囲だけで比べる (末尾は短くフェードすることがあり、位相の検査には
+/// 使えないため)。補間した音には長さに応じて振幅を下げるゲインが掛かるため、ゲインを
+/// 戻してから比べる。
+fn repeats_at_period(generated: &[f32], period: usize, conceal_us: i64, tolerance: f32) -> bool {
+    let target = generated.len();
+    // 周期が生成した長さを超えると比較する位置が無い (`target - period` が負になる)。呼び出し
+    // 側の取り違えを、比較を飛ばして黙って通さないよう、ここで落とす
+    assert!(
+        period <= target,
+        "周期が生成した長さを超えている: period={period} len={target}"
+    );
+    let end_gain = concealment_end_gain(conceal_us);
+    for index in 0..(target / 2).min(target - period) {
+        let gain_before = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / target as f32);
+        let gain_after = 1.0 - (1.0 - end_gain) * (((index + period) as f32 + 1.0) / target as f32);
+        let before = generated[index] / gain_before;
+        let after = generated[index + period] / gain_after;
+        if (after - before).abs() > tolerance {
+            return false;
+        }
+    }
+    true
 }
 
 #[test]
@@ -365,85 +475,170 @@ const FRAME_SAMPLES: usize = 960;
 /// 補間する穴の長さ (20 ms)
 const HOLE_US: i64 = 20_000;
 
-/// 周波数 `frequency_hz` の正弦波 (20 ms、48 kHz、振幅 0.5) から 20 ms の穴を補間したサンプル数
+/// 周波数 `frequency_hz` の正弦波 (20 ms、48 kHz、振幅 0.5) から `hole_us` の穴を補間した
+/// サンプル数
 ///
 /// 実リレーの E2E が使う音は正弦波であるため、補間の可否を周波数ごとに見るために使う。
-fn conceal_for_frequency(frequency_hz: f64) -> isize {
-    let mut frame = vec![0.0f32; FRAME_SAMPLES];
-    for (index, sample) in frame.iter_mut().enumerate() {
-        let phase =
-            2.0 * std::f64::consts::PI * frequency_hz * index as f64 / f64::from(SAMPLE_RATE);
-        *sample = (0.5 * phase.sin()) as f32;
-    }
-    let mut output = vec![0.0f32; FRAME_SAMPLES];
+fn conceal_for_frequency(frequency_hz: f64, hole_us: i64) -> isize {
+    let frame = sine_wave(FRAME_SAMPLES, frequency_hz, SAMPLE_RATE, 0.5);
+    let target = ((hole_us * i64::from(SAMPLE_RATE) + 500_000) / 1_000_000) as usize;
+    let mut output = vec![0.0f32; target];
     let channels: [&[f32]; 1] = [frame.as_slice()];
     let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    conceal(&channels, &mut outputs, SAMPLE_RATE, HOLE_US)
+    conceal(&channels, &mut outputs, SAMPLE_RATE, hole_us)
+}
+
+/// 穴の終わりの段差を、振幅で正規化して返す
+///
+/// 穴の終わりでは、次に鳴る音が本来の続き (穴の分だけ進んだ音) であるとして、生成した音の
+/// 最後のサンプルとの差を測る。段差が大きいとクリックとして聞こえる。
+///
+/// 生成した音には、長さに応じて末尾の振幅を [`concealment_end_gain`] まで下げるゲインが
+/// 掛かる (これは周期のずれとは別の、意図した減衰である)。段差の原因が周期のずれかどうかを
+/// 見るため、ゲインを戻してから比べる。最後のサンプルに掛かるゲインはちょうど
+/// [`concealment_end_gain`] になる。
+fn end_step_ratio(frequency_hz: f64, hole_us: i64) -> f64 {
+    const AMPLITUDE: f64 = 0.5;
+    let frame = sine_wave(FRAME_SAMPLES, frequency_hz, SAMPLE_RATE, AMPLITUDE);
+    let target = ((hole_us * i64::from(SAMPLE_RATE) + 500_000) / 1_000_000) as usize;
+    let mut output = vec![0.0f32; target];
+    let channels: [&[f32]; 1] = [frame.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, hole_us),
+        target as isize,
+        "{frequency_hz} Hz、穴 {hole_us} µs を補間すること"
+    );
+    let last = f64::from(output[target - 1]) / f64::from(concealment_end_gain(hole_us));
+    let next = f64::from(sine_sample(
+        FRAME_SAMPLES + target,
+        frequency_hz,
+        SAMPLE_RATE,
+        AMPLITUDE,
+    ));
+    (last - next).abs() / AMPLITUDE
 }
 
 #[test]
-fn conceal_depends_on_whether_the_tail_period_lands_on_the_4khz_grid() {
-    // 補間の可否は、末尾の周期が 4 kHz へ間引いたときの格子に乗るかで決まる。格子から外れた
-    // 純音では、求めた周期が真の周期とずれ、末尾の周期 1 つ分を繰り返す継ぎ目で波形が飛ぶ
-    // (クリックとして聞こえる)。そのため is_seam_smooth が継ぎ目の段差を「末尾の周期の自然な
-    // 段差の 2 倍」と比べ、超えるときは補間しない。
+fn conceal_finds_the_tail_period_at_the_full_sample_rate() {
+    // 補間の周期は、4 kHz へ間引いた粗い格子で探したあと、その周辺 (±1 格子) を元の
+    // サンプルレートの相関で評価し、ピークを放物線補間して端数まで求める。そのため格子に
+    // 乗らない純音でも、格子の倍数で繰り返すのではなく本当の周期で繰り返し、穴の終わりで
+    // 位相が合う。
     //
-    // 探索するずらし幅は 4 kHz のサンプル数で 10〜60 である (find_tail_lag は末尾の 2 周期分が
-    // 取れる範囲に限るため、20 ms のフレーム (間引き後 79 サンプル) では 10〜39 になる)。
-    // 格子に乗らない音では、その範囲に入る位数 (周期の倍数) のうち相関が最も強いものが選ばれる。
+    // 探索するずらし幅の上限は、窓の長さ (4 kHz の 39 サンプル) を引いた範囲で最大化する。
+    // 20 ms のフレームは 48 kHz では 4 kHz へ間引くと 79 サンプルであり、ずらし幅は
+    // 10〜40 (2.5 ms〜10 ms = 400 Hz〜100 Hz) になる。
     //
-    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 1000 Hz と 440 Hz は 960 サンプルを
-    // 生成し、300 / 220 / 150 / 100 Hz は生成しない。
-    //
-    // - 1000 Hz は 4 kHz でちょうど 4 サンプルであり、位数 3 の 12 が選ばれる。継ぎ目の段差は
-    //   自然な段差と等しく (相関の二乗は 1)、補間する
-    // - 440 Hz は 4 kHz で 9.09 サンプルであり格子に乗らないが、位数 2 の 18 が探索範囲に入る
-    //   (2 周期ぶんの 18.18 との差は 0.18 サンプルで、1 周期の 2 %)。継ぎ目の段差 (0.031) が
-    //   許容 (自然な段差の 2 倍の 0.058) に収まるため、補間する
-    // - 300 / 220 / 150 Hz も相関は閾値 (0.9) を超えるが、周波数が低いほど自然な段差
-    //   (振幅 × 2π × 周波数 ÷ サンプルレート) が小さくなるため、位数のずれによる継ぎ目の段差が
-    //   許容 (自然な段差の 2 倍) を超える (300 Hz は 0.098 対 0.039、220 Hz は 0.038 対 0.029、
-    //   150 Hz は 0.029 対 0.020)。補間しない
-    // - 100 Hz は 4 kHz で 40 サンプルであり、末尾の 2 周期分 (80 サンプル) が末尾
-    //   (79 サンプル) に収まらないため、1 周期ちょうどの 40 は選べず、39 (0.975 周期) が
-    //   選ばれる。ずれによる段差 (0.085) が許容 (0.013) を超えるため、補間しない
-    //
-    // 実リレーの E2E では補間の量が小さいが、これは実装の欠陥ではない。E2E が使う音が正弦波で
-    // あり、周期が 4 kHz の格子に乗りにくいためである (会話や音楽では波形が複雑で周期が格子に
-    // 乗りやすく、補間が働く)。
-    assert_eq!(
-        conceal_for_frequency(1_000.0),
-        960,
-        "格子に乗る純音は補間すること"
-    );
-    assert_eq!(
-        conceal_for_frequency(440.0),
-        960,
-        "位数が探索範囲に入り継ぎ目の段差が許容に収まる純音は補間すること"
-    );
-    for frequency_hz in [300.0, 220.0, 150.0, 100.0] {
+    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 1000 / 440 / 300 / 220 / 150 /
+    // 100 Hz のすべてで 960 サンプルを生成する。格子のままで末尾の 2 周期分だけを探して
+    // いたときは 1000 Hz と 440 Hz だけが 960 で、300 / 220 / 150 / 100 Hz は 0 だった
+    // (求めた周期が真の周期とずれ、継ぎ目の段差が自然な段差の 2 倍を超えていたため)。
+    for frequency_hz in [1_000.0, 440.0, 300.0, 220.0, 150.0, 100.0] {
         assert_eq!(
-            conceal_for_frequency(frequency_hz),
-            0,
-            "{frequency_hz} Hz の純音は補間しないこと"
+            conceal_for_frequency(frequency_hz, HOLE_US),
+            960,
+            "{frequency_hz} Hz の純音を補間すること"
         );
     }
 }
 
 #[test]
-fn conceal_repeats_the_tail_period() {
-    // 48 kHz、周期 240 サンプル (5 ms) の矩形波。40 ms の隙間を 1920 サンプルで埋める
-    let original = square_wave(960, 240, 0.5);
+fn conceal_keeps_the_grid_period_when_the_peak_is_at_the_search_boundary() {
+    // 細探索の下限そのものの周期 (400 Hz = 120 サンプル) では、放物線の頂点を求める 3 点の
+    // うち片側が探索の外になる。端で外挿すると、評価していないずらし幅 (探索の下限の外側) を
+    // 返して周期が 0.5 サンプルずれ、穴が長いほど位相がずれる (実測: 48 kHz、20 ms の
+    // フレームで穴 100 ms の段差が振幅の 85.2 % になった)。端では格子のままにする。
+    //
+    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 周期は 120 サンプルのままで、
+    // 生成の先頭は末尾の 1 周期前のサンプルと一致する (差 6.1e-19)。120 サンプルで繰り返す。
+    let frame = sine_wave(FRAME_SAMPLES, 400.0, SAMPLE_RATE, 0.5);
+    let mut output = vec![0.0f32; 960];
+    let channels: [&[f32]; 1] = [frame.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, SAMPLE_RATE, HOLE_US), 960);
+    assert!(
+        (output[0] - frame[FRAME_SAMPLES - 120]).abs() < 1e-6,
+        "先頭は末尾の 1 周期前のサンプルであること: {} 対 {}",
+        output[0],
+        frame[FRAME_SAMPLES - 120]
+    );
+    assert!(
+        repeats_at_period(&output, 120, HOLE_US, 1e-4),
+        "120 サンプルの周期で繰り返すこと"
+    );
+}
+
+#[test]
+fn conceal_removes_the_step_at_the_end_of_a_long_hole() {
+    // 格子に乗らない 440 Hz (周期 109.09 サンプル) では、求めた周期が真の周期とずれると
+    // 穴が長いほど位相がずれ、次の音との段差が大きくなる。端数まで周期を求めると段差は
+    // 振幅の 10 % 以下に収まる。
+    //
+    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、穴の終わりの段差 ÷ 振幅): 4 kHz の格子の
+    // 周期 (108 サンプル) で繰り返していたときは 20 ms で 34.4 %、40 ms で 101.8 %、
+    // 100 ms で 195.1 % だった (moqt-js の実測)。端数まで求めると 4.7 / 4.5 / 1.6 % に
+    // なる。4 kHz の格子に乗る 200 Hz (周期 240 サンプル) は 2.6 % である。
+    for (frequency_hz, hole_us) in [
+        (440.0, 20_000),
+        (440.0, 40_000),
+        (440.0, 100_000),
+        (200.0, 100_000),
+    ] {
+        let ratio = end_step_ratio(frequency_hz, hole_us);
+        assert!(
+            ratio <= 0.1,
+            "{frequency_hz} Hz、穴 {hole_us} µs の段差が振幅の 10 % 以下であること: {ratio}"
+        );
+    }
+}
+
+#[test]
+fn conceal_finds_the_fractional_period_of_a_low_pitch() {
+    // 有声の低いピッチでは、窓の長さ + ずらし幅がフレームに収まる範囲までずらし幅を広げ
+    // (20 ms のフレームでは 4 kHz の 40 サンプル = 100 Hz まで)、端数まで周期を求める。
+    //
+    // 末尾の周期は端数を含む。100 Hz の有声では真の 480 サンプルに対して 479.9 サンプルに
+    // なる (moqt-js の実測)。120 Hz は 400.0 サンプルである。4 kHz の格子だけで探して
+    // いたときは 120 Hz が 396 であり、100 Hz は探索の上限 (137.9 Hz) に届かず補間そのものを
+    // しなかった。
+    for (frequency_hz, period) in [(100.0, 480usize), (120.0, 400)] {
+        let frame = voiced_wave(frequency_hz);
+        let mut output = vec![0.0f32; 1_920];
+        let channels: [&[f32]; 1] = [frame.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        assert_eq!(
+            conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000),
+            1_920,
+            "{frequency_hz} Hz の有声を補間すること"
+        );
+        assert!(
+            repeats_at_period(&output, period, 40_000, 0.05),
+            "{frequency_hz} Hz が本当の周期 {period} サンプルで繰り返すこと"
+        );
+        assert!(
+            !repeats_at_period(&output, 396, 40_000, 0.05),
+            "{frequency_hz} Hz が 4 kHz の格子の周期 396 サンプルで繰り返さないこと"
+        );
+    }
+}
+
+#[test]
+fn conceal_repeats_the_tail_period_with_the_fractional_phase() {
+    // 48 kHz、200 Hz (周期 240 サンプル) の正弦波。40 ms の隙間を 1920 サンプルで埋める。
+    // 求めた周期は端数 (240.0002 サンプル) を含むため、生成した音は末尾の周期 1 つ分を
+    // 線形補間で繰り返したものになる。位相が合っていることを、穴の続きになる理想の音
+    // (フレームの続きの正弦波) と比べて確かめる (実測の最大差は 1.6e-5)。
+    let original = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
     let mut output = vec![0.0f32; 1_928];
     let channels: [&[f32]; 1] = [original.as_slice()];
     let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
     assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 1_920);
-    // 生成の先頭は、末尾の周期 1 つ分の先頭 (960 - 240) から始まる
     let end_gain = concealment_end_gain(40_000);
     for (index, sample) in output[..1_920].iter().enumerate() {
         let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / 1_920.0);
-        let expected = original[720 + index % 240] * gain;
-        assert!((sample - expected).abs() < 1e-6, "index={index}");
+        let expected = sine_sample(FRAME_SAMPLES + index, 200.0, SAMPLE_RATE, 0.5) * gain;
+        assert!((sample - expected).abs() < 1e-4, "index={index}");
     }
     // 埋める長さを超える範囲には書かない
     assert!(output[1_920..].iter().all(|sample| *sample == 0.0));
@@ -451,39 +646,186 @@ fn conceal_repeats_the_tail_period() {
 
 #[test]
 fn conceal_uses_the_tail_period_when_the_earlier_part_differs() {
-    // 前半だけ周期が違っても、末尾の周期 (240 サンプル) で繰り返す
-    let mut original = square_wave(960, 240, 0.5);
-    // 置き換えるのは 400 サンプルまでにする。末尾の周期を求める範囲 (最後の 2 周期分) に
-    // 掛からない位置であり、間引きのフィルタの窓も越えない
-    let first_part = square_wave(400, 260, 0.5);
-    original[..400].copy_from_slice(&first_part);
-
+    // 前半だけ周期が違っても、末尾の周期 (240 サンプル) で繰り返す。ただし周期の変わる位置が
+    // 末尾から「相関の窓 (4 kHz の 39 サンプル = 48 kHz で 468 サンプル) + 1 周期」より近いと、
+    // 末尾が繰り返しているかを確かめられないため補間しない。
+    //
+    // 実測 (48 kHz、40 ms の穴): 先頭 240 サンプルを周期 260 へ変えた音は補間し、480 サンプルを
+    // 変えた音は相関が 0.83 になり補間しない。
+    let mut original = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
+    for (index, sample) in original.iter_mut().take(240).enumerate() {
+        *sample = (0.5 * (2.0 * std::f64::consts::PI * index as f64 / 260.0).sin()) as f32;
+    }
     let mut output = vec![0.0f32; 1_920];
     let channels: [&[f32]; 1] = [original.as_slice()];
     let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(conceal(&channels, &mut outputs, 48_000, 40_000), 1_920);
-    let end_gain = concealment_end_gain(40_000);
-    for (index, sample) in output.iter().enumerate() {
-        let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / 1_920.0);
-        let expected = original[720 + index % 240] * gain;
-        assert!((sample - expected).abs() < 1e-6, "index={index}");
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000),
+        1_920,
+        "末尾の周期で補間すること"
+    );
+    // 継ぎ目は末尾の周期の自然な段差と同程度になる
+    assert!(
+        max_step(&output[..1_920]) <= max_step(&original[720..]) * 1.2,
+        "波形が飛ばないこと"
+    );
+
+    // 周期の変わる位置が末尾に近すぎると、末尾が繰り返しているかを確かめられない
+    let mut late = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
+    for (index, sample) in late.iter_mut().take(480).enumerate() {
+        *sample = (0.5 * (2.0 * std::f64::consts::PI * index as f64 / 260.0).sin()) as f32;
     }
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [late.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000),
+        0,
+        "繰り返しを確かめられない音では補間しないこと"
+    );
+    assert!(output.iter().all(|sample| *sample == 0.0));
 }
 
 #[test]
 fn conceal_fills_every_channel_from_its_own_tail() {
-    let left = square_wave(960, 240, 0.5);
-    let right = square_wave(960, 240, 0.25);
+    // 各チャンネルは自分の末尾の周期 1 つ分から埋める (周期は第 1 チャンネルだけで決める)
+    let left = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
+    let right = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.25);
     let mut output_left = vec![0.0f32; 960];
     let mut output_right = vec![0.0f32; 960];
     let channels: [&[f32]; 2] = [left.as_slice(), right.as_slice()];
     let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
     assert_eq!(conceal(&channels, &mut outputs, 48_000, 20_000), 960);
-    // どちらのチャンネルも、自分の末尾の周期 1 つ分から埋める
+    // 生成の先頭は、末尾の周期 1 つ分の先頭 (端数を含む位置) から始まる
     let end_gain = concealment_end_gain(20_000);
     let gain = 1.0 - (1.0 - end_gain) * (1.0 / 960.0);
-    assert!((output_left[0] - left[720] * gain).abs() < 1e-6);
-    assert!((output_right[0] - right[720] * gain).abs() < 1e-6);
+    assert!((output_left[0] - left[720] * gain).abs() < 1e-4);
+    assert!((output_right[0] - right[720] * gain).abs() < 1e-4);
+}
+
+#[test]
+fn conceal_checks_the_seam_of_every_channel() {
+    // 周期は第 1 チャンネルだけで決めるが、繰り返しの継ぎ目の段差はどのチャンネルでも
+    // クリックになるため、全チャンネルで確かめる。
+    //
+    // 実測 (48 kHz、40 ms の穴): 第 1 チャンネルが 5 ms の正弦で第 2 チャンネルがランプの
+    // とき、第 1 チャンネルだけを見ていたときは 1920 サンプル生成し、全チャンネルを見ると
+    // 生成しない。
+    let sine = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
+    let ramp: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| (index as f32 / FRAME_SAMPLES as f32) * 0.9 - 0.45)
+        .collect();
+    // 第 1 チャンネルだけなら補間する
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [sine.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000), 1_920);
+    // 第 2 チャンネルの継ぎ目の段差が大きいと補間しない
+    let mut output_left = vec![0.0f32; 1_920];
+    let mut output_right = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 2] = [sine.as_slice(), ramp.as_slice()];
+    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000),
+        0,
+        "第 2 チャンネルの段差で補間しないこと"
+    );
+    assert!(output_left.iter().all(|sample| *sample == 0.0));
+    assert!(output_right.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn conceal_does_not_choose_the_shortest_lag_for_colored_noise() {
+    // 相関の窓を候補のずらし幅に比例させると、窓が短い (= ずらし幅が短い) 候補ほど相関が
+    // 高く出て、有色雑音で最短のずらし幅 (4 kHz の 10 サンプル = 120 サンプル = 400 Hz) を
+    // 選び、ブザーになる。窓を固定長 (4 kHz の 39 サンプル) にすると誤検出が消える。
+    //
+    // 実測 (48 kHz、20 ms のフレーム、40 ms の穴、40 フレームずつ): 補間が働いたフレームは
+    // 係数 0.99 が 0 件、0.999 が 4 件であり、いずれも最短のずらし幅では繰り返していない。
+    // 窓を比例させていたときの moqt-js の実測では、補間が 5.5 % / 19.5 % のフレームで働き、
+    // 最短のずらし幅を選んだフレームが 6 件あった。
+    for coefficient in [0.99f64, 0.999] {
+        let mut concealed = 0;
+        for frame in 0..40 {
+            let samples = colored_noise_frame(
+                FRAME_SAMPLES,
+                coefficient,
+                12_345.0 + frame as f64 * 7_919.0,
+            );
+            let mut output = vec![0.0f32; 1_920];
+            let channels: [&[f32]; 1] = [samples.as_slice()];
+            let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+            if conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000) == 0 {
+                continue;
+            }
+            concealed += 1;
+            assert!(
+                !repeats_at_period(&output, 120, 40_000, 1e-6),
+                "係数 {coefficient} の {frame} 番目が最短のずらし幅で繰り返している"
+            );
+        }
+        // 補間が働くのは稀である。実測 (0.99 が 0 件、0.999 が 4 件) に 1 件の余裕を足した
+        // 上限で固定する。窓を比例させていた旧挙動 (5.5 % / 19.5 % = 2 件 / 8 件) に戻れば
+        // どちらも超える
+        let limit = if coefficient >= 0.999 { 5 } else { 1 };
+        assert!(
+            concealed <= limit,
+            "係数 {coefficient} で補間が働きすぎている: {concealed}/40 (上限 {limit})"
+        );
+    }
+}
+
+#[test]
+fn conceal_fades_the_tail_when_the_period_is_uncertain() {
+    // 周期の推定が確かでない音では、穴の終わりで次に鳴る音の位相が分からず段差が残る。
+    // 補間をやめるのではなく、生成した音の末尾を 2 ms で 0 へ落とす。
+    //
+    // 実測 (48 kHz、40 ms の穴、振幅 0.5 の 440 Hz に振幅 0.15 の白色雑音を混ぜた音):
+    // 末尾のサンプルは 0 になり、その直前の振幅も下がる。きれいな 440 Hz では相関が 1.0 の
+    // ためフェードせず、末尾は次の音の続き (差は 3.3e-4 以下) になる。
+    let frame = noisy_sine_wave(440.0, 0.15);
+    let mut output = vec![0.0f32; 1_920];
+    let channels: [&[f32]; 1] = [frame.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, 40_000),
+        1_920,
+        "補間すること"
+    );
+    assert_eq!(output[1_919], 0.0, "末尾のサンプルが 0 になること");
+    // フェードは末尾の 2 ms だけに掛ける (その前は振幅が残る)
+    let fade = ((f64::from(TIME_STRETCH_CONCEAL_FADE_MS) / 1_000.0) * f64::from(SAMPLE_RATE))
+        .round() as usize;
+    let faded_peak = output[1_920 - fade / 4..]
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let full_peak = output[..100]
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(
+        faded_peak < full_peak * 0.3,
+        "フェードした末尾の振幅が下がること: faded={faded_peak} full={full_peak}"
+    );
+
+    // きれいな純音ではフェードしない (末尾が次の音の続きのまま)
+    let frame = sine_wave(FRAME_SAMPLES, 440.0, SAMPLE_RATE, 0.5);
+    let target = 4_800usize;
+    let mut output = vec![0.0f32; target];
+    let channels: [&[f32]; 1] = [frame.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(
+        conceal(&channels, &mut outputs, SAMPLE_RATE, 100_000),
+        target as isize
+    );
+    // 100 ms の穴では末尾の振幅を [concealment_end_gain] まで下げるため、続きの音もその
+    // ゲインで比べる
+    let end_gain = concealment_end_gain(100_000);
+    let next = sine_sample(FRAME_SAMPLES + target - 1, 440.0, SAMPLE_RATE, 0.5) * end_gain;
+    assert!(
+        (output[target - 1] - next).abs() <= 1e-3,
+        "相関が高い音ではフェードしないこと: {} 対 {next}",
+        output[target - 1]
+    );
 }
 
 #[test]
@@ -583,13 +925,20 @@ fn conceal_is_ignored_when_the_seam_step_is_too_large() {
 
 #[test]
 fn conceal_with_a_short_input_is_ignored() {
-    // 8 kHz: 間引き後 18 サンプルでは末尾の 2 周期分 (下限の 2 倍) が取れない
-    let original = square_wave(40, 20, 0.5);
+    // 8 kHz: 4 kHz へ間引くと 10 サンプルであり、窓の長さが 0 になるため末尾の周期を探せない
+    let original = square_wave(24, 20, 0.5);
     let mut output = vec![0.0f32; 160];
     let channels: [&[f32]; 1] = [original.as_slice()];
     let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
     assert_eq!(conceal(&channels, &mut outputs, 8_000, 20_000), 0);
     assert!(output.iter().all(|sample| *sample == 0.0));
+
+    // 8 kHz: 間引いて 11 サンプルあれば、窓の長さが 1 サンプルでも繰り返しが見えれば埋める
+    let original = square_wave(26, 20, 0.5);
+    let mut output = vec![0.0f32; 160];
+    let channels: [&[f32]; 1] = [original.as_slice()];
+    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+    assert_eq!(conceal(&channels, &mut outputs, 8_000, 20_000), 160);
 }
 
 #[test]
@@ -656,7 +1005,7 @@ fn conceal_with_empty_or_mismatched_input_is_ignored() {
 
 #[test]
 fn supported_sample_rates_are_concealed() {
-    // (サンプルレート, 元の長さ, 周期, 埋めるサンプル数)
+    // (サンプルレート, 元の長さ, 周期 (5 ms), 埋めるサンプル数)
     let cases = [
         (8_000u32, 160usize, 40usize, 160usize),
         (16_000, 320, 80, 320),
@@ -664,7 +1013,9 @@ fn supported_sample_rates_are_concealed() {
         (48_000, 960, 240, 960),
     ];
     for (sample_rate, length, period, expected) in cases {
-        let original = square_wave(length, period, 0.5);
+        // 5 ms (200 Hz) の正弦波。端数まで周期を求めるため、生成の先頭は末尾の周期 1 つ分の
+        // 先頭 (端数を含む位置) になる
+        let original = sine_wave(length, 200.0, sample_rate, 0.5);
         let mut output = vec![0.0f32; expected];
         let channels: [&[f32]; 1] = [original.as_slice()];
         let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
@@ -678,7 +1029,7 @@ fn supported_sample_rates_are_concealed() {
         let end_gain = concealment_end_gain(20_000);
         let gain = 1.0 - (1.0 - end_gain) * (1.0 / expected as f32);
         assert!(
-            (output[0] - original[length - period] * gain).abs() < 1e-6,
+            (output[0] - original[length - period] * gain).abs() < 1e-4,
             "sample_rate={sample_rate}"
         );
     }
