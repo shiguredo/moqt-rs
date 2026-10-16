@@ -13,10 +13,11 @@ use shiguredo_moqt::playout::scheduler::{
 use shiguredo_moqt::playout::timeline::{TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US};
 
 /// 鳴らすと決めた音は今から下限以上先に鳴り、詰める長さは音の長さの半分以内。
-/// 詰めるのは遅れが不感帯に届いたときだけである。
+/// 詰めるのは遅れが不感帯に届いたときだけであり、詰める量はキューの余裕
+/// (直前の音の終わり − (今 + 最小の余裕)) 以内である。
 /// 補間する隙間は下限より長く上限以内で、補間しないときは開始も 0。
 /// 破棄の統計は捨てた回数と一致し、詰めた合計と補間した合計は実際に適用した量と一致する。
-/// 決定の計画 (目標の時刻か到着基準か) の両方と、捨てる決定に到達していること
+/// 決定の計画 (目標の時刻か到着基準か) の両方と、捨てる決定と詰める決定に到達していること
 #[test]
 fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
     // 目標の時刻で並べた決定と到着基準で並べた決定の両方を通ったことを数える。どちらかが
@@ -24,6 +25,8 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
     let timestamp_basis_seen = std::cell::Cell::new(0usize);
     let arrival_basis_seen = std::cell::Cell::new(0usize);
     let dropped_seen = std::cell::Cell::new(0usize);
+    // 詰める決定も同じ理由で数える (キューの余裕の検証が空振りしていないことを確かめる)
+    let compressed_seen = std::cell::Cell::new(0usize);
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let mut scheduler = AudioPlayoutScheduler::new();
@@ -31,6 +34,9 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
         let mut expected_compressed_us = 0i64;
         let mut expected_concealed_us = 0i64;
         let mut expected_concealments = 0u64;
+        // 直前の音の終わり (schedule が記録する値) を呼び出し側でも持つ。キューが空の状態を
+        // 作らない検証 (summary を参照) を、鳴り始めではなく本当の余裕で行うためである
+        let mut previous_end_us: Option<i64> = None;
         for _ in 0..noprop::sample_usize_in(ctx, 1..16) {
             now_us += noprop::sample_usize_in(ctx, 0..100) as i64 * 1_000;
             let timestamp_us = noprop::sample_usize_in(ctx, 0..1_000_000) as i64;
@@ -138,6 +144,25 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                         "不感帯の中で詰めた: compress_us={compress_us} lateness_us={}",
                         scheduler.lateness_us()
                     );
+                    // 詰める量はキューの余裕 (直前の音の終わり − (今 + 最小の余裕)) 以内で
+                    // ある。鳴り始めは直前の音の終わり以上であるため、鳴り始めを上限に使うと
+                    // 余裕を過大に見積もる。呼び出し側でも schedule と同じ式で直前の音の終わりを
+                    // 写し取り、本当の余裕で検査する
+                    if compress_us > 0 {
+                        // 直前の音が無ければ余裕も無い (moqt-js の「直前の音の終わり =
+                        // -Infinity」に相当する)
+                        let slack_us = previous_end_us.map_or(0, |previous_end_us| {
+                            previous_end_us
+                                .saturating_sub(now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US))
+                        });
+                        assert!(
+                            compress_us <= slack_us,
+                            "キューの余裕を超えて詰めた: compress_us={compress_us} slack_us={slack_us} now_us={now_us}"
+                        );
+                    }
+                    if compress_us > 0 {
+                        compressed_seen.set(compressed_seen.get() + 1);
+                    }
                     // 補間する隙間は、下限を超えて上限以内である
                     assert!(
                         gap_us == 0 || gap_us > AUDIO_PLAYOUT_MIN_CONCEAL_US,
@@ -166,6 +191,15 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                     let applied_us = compress_us / 2;
                     expected_compressed_us += applied_us;
                     scheduler.confirm_stretch(applied_us);
+                    // 直前の音の終わりを写し取る。schedule は要求した詰める量を反映した終わりを
+                    // 記録し、confirm_stretch が実際に詰めた長さとの差を反映する (実装と同じ 2 段。
+                    // 到着基準で並べた決定は圧縮しないため、この式でも同じ値になる)
+                    previous_end_us = Some(
+                        start_at_us
+                            .saturating_add(duration_us)
+                            .saturating_sub(compress_us)
+                            .saturating_add(compress_us.saturating_sub(applied_us)),
+                    );
                     let concealed_us = gap_us / 2;
                     if concealed_us > 0 {
                         expected_concealments += 1;
@@ -204,6 +238,10 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
     assert!(
         dropped_seen.get() > 0,
         "並べすぎで捨てる決定に到達していない\n{runner}"
+    );
+    assert!(
+        compressed_seen.get() > 0,
+        "詰める決定に到達していない\n{runner}"
     );
     Ok(())
 }

@@ -1,7 +1,8 @@
 //! 復号した音声を鳴らす時刻を決める
 //!
 //! 目標の時刻に従って音を並べる。目標に間に合わない音も捨てず、今から鳴らせる最も
-//! 早い時刻へずらして鳴らし、ずらした分を時間圧縮で目標へ戻す。前の音の終わりと今回の
+//! 早い時刻へずらして鳴らし、ずらした分を、遅れと音の長さの半分とキューの余裕の最小値
+//! まで時間圧縮で目標へ戻す (キューの余裕が無いときは詰めない)。前の音の終わりと今回の
 //! 開始の間に空いた分は、呼び出し側が直前の音を時間伸長して埋められるよう隙間として
 //! 返す。目標から離れすぎた音も捨てず、直前の音がまだ鳴っている間は遅れたまま鳴らし、
 //! 音が途切れているときだけ到着基準へ並べ直す。時刻はすべて呼び出し側が引数で渡し、
@@ -40,7 +41,21 @@ pub const AUDIO_PLAYOUT_MIN_LEAD_US: i64 = 10_000;
 ///
 /// 閉ループ ([`crate::playout::feedback`]) は、この閾値の内側で意図して残した遅れを
 /// 目標を動かす根拠にしない。
+///
+/// 不感帯を超えていても、詰める量はキューの余裕 (直前の音の終わり − (今 +
+/// [`AUDIO_PLAYOUT_MIN_LEAD_US`])) までに切る ([`AudioPlayoutScheduler::schedule`] を参照)。
 pub const AUDIO_PLAYOUT_STRETCH_MIN_US: i64 = 20_000;
+
+/// キューの余裕を判定する許容 (マイクロ秒)
+///
+/// キューの余裕も「直前の音の終わり − (今 + [`AUDIO_PLAYOUT_MIN_LEAD_US`])」の引き算で
+/// 求めるため、境目ちょうどの値が僅かにずれる。moqt-js は時刻を秒の浮動小数点数で扱い、
+/// このずれを吸収する許容 (`AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_SECONDS` = 1e-9 秒) を
+/// 置いている。この許容以下の余裕で詰めても、削れる長さは 48 kHz の 1 サンプル
+/// (約 21 マイクロ秒) にも満たないため、詰めないものとして扱う。マイクロ秒の整数では
+/// 1e-9 秒を表現できないため、表現できる最小の正の値である 1 マイクロ秒を置く
+/// (余裕が 1 マイクロ秒以下のときは詰めない)。
+pub const AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US: i64 = 1;
 
 /// 目標から離れすぎとみなす量 (マイクロ秒)
 ///
@@ -161,6 +176,12 @@ pub enum AudioPlayoutDecision {
         /// ときは、時間軸の再生予定時刻に従っていない (予定そのものは観測値として渡してよい)
         basis: AudioPlayoutBasis,
         /// 波形の周期で詰める長さ (マイクロ秒)。0 なら詰めない
+        ///
+        /// 遅れと音の長さの半分とキューの余裕 (直前の音の終わり − (今 +
+        /// [`AUDIO_PLAYOUT_MIN_LEAD_US`])) の最小値であり、キューの余裕が
+        /// [`AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US`] 以下 (直前の音が無いときも含む) のときは
+        /// 0 である。実際に詰められるかは波形しだいであり、適用した結果を
+        /// [`AudioPlayoutScheduler::confirm_stretch`] で返す
         compress_us: i64,
         /// 補間する隙間の開始時刻 (今と同じ軸のマイクロ秒)。`gap_us` が 0 のときは使わない
         gap_start_us: i64,
@@ -237,10 +258,12 @@ impl AudioPlayoutScheduler {
     /// 前の音に要求した詰める量と補間の長さが返ってきていなければ、適用されなかった
     /// ものとして扱う (どちらの並べ方でも同じ)。
     ///
-    /// 目標に間に合わない音へ要求する詰める量は、遅れが
-    /// [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときは 0 にする。返した `compress_us` は
-    /// 削ってよい長さの上限でもあるため、呼び出し側はそのまま
-    /// [`crate::playout::stretch::compress`] へ渡すこと。
+    /// 目標に間に合わない音へ要求する詰める量は、遅れと音の長さの半分とキューの余裕
+    /// (直前の音の終わり − (今 + [`AUDIO_PLAYOUT_MIN_LEAD_US`])) の最小値にする。遅れが
+    /// [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときと、キューの余裕が
+    /// [`AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US`] 以下 (直前の音が無いときも含む) のときは
+    /// 0 にする。返した `compress_us` は削ってよい長さの上限でもあるため、呼び出し側は
+    /// そのまま [`crate::playout::stretch::compress`] へ渡すこと。
     pub fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision {
         // 前の音に要求した詰める量が返ってきていなければ、適用されなかったものとして扱う
         self.confirm_stretch(0);
@@ -288,14 +311,35 @@ impl AudioPlayoutScheduler {
             }
         }
         self.lateness_us = lateness_us;
-        // 詰める量は、遅れの分と音の長さの半分の小さい方にする (1 つの音で詰めすぎない)。
-        // 遅れが [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときは詰めない (不感帯)。削れる
-        // 長さは波形の周期で決まるため、周期がこの量を超える音でも詰めない (呼び出し側が
+        // キューの余裕 = 直前の音の終わり − (今 + 最小の余裕)。既に並べてある音のうち、
+        // 予約できる最も早い時刻 (今 + 最小の余裕) より先に置かれている分である。詰めると
+        // この音の終わりが早くなり、次に並べる音の下限がその分だけ前へ動くため、余裕の
+        // 範囲でだけ遅れを減らせる。余裕が 0 以下 (出力のバッファが下限を決めている) ときは、
+        // 次に並べる音が今 + 最小の余裕で決まり、その下限は実時間と同じ速さで進むため、
+        // 詰めても遅れは減らない。削った分は次の音の開始との間の穴になる。moqt-js の実測
+        // (2026-10-16、実装を直接駆動。出力のリード 95.5 ms、表示の遅れ 66 ms、10 ms の音
+        // 100 フレーム) では、100 件すべてが圧縮を要求して 5 ms ずつ削れ、99 件・495 ms の
+        // 穴が空き、遅れは 39.5 ms のまま 1 ms も減らなかった。直前の音が無いときは余裕も
+        // 無いものとして扱う (moqt-js の「直前の音の終わり = -Infinity」に相当する)。
+        // 最初の音は鳴り始めが今 + 最小の余裕で決まるため、詰めても遅れは減らない
+        let queue_slack_us = previous_end_us.map(|previous_end_us| {
+            previous_end_us.saturating_sub(input.now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US))
+        });
+        // 詰める量は「遅れ」「音の長さの半分」「キューの余裕」の最小値にする (1 つの音で
+        // 詰めすぎない。余裕を超えて詰めると、削った分がそのまま無音の穴になる)。遅れが
+        // [`AUDIO_PLAYOUT_STRETCH_MIN_US`] 未満のときは詰めない (不感帯)。削れる長さは
+        // 波形の周期で決まるため、周期がこの量を超える音でも詰めない (呼び出し側が
         // [`crate::playout::stretch::compress`] へ上限として渡す)
-        let compress_us = if lateness_us >= AUDIO_PLAYOUT_STRETCH_MIN_US {
-            lateness_us.min(input.duration_us.max(0) / 2)
-        } else {
-            0
+        let compress_us = match queue_slack_us {
+            Some(queue_slack_us)
+                if queue_slack_us > AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US
+                    && lateness_us >= AUDIO_PLAYOUT_STRETCH_MIN_US =>
+            {
+                lateness_us
+                    .min(input.duration_us.max(0) / 2)
+                    .min(queue_slack_us)
+            }
+            _ => 0,
         };
         self.requested_us = compress_us;
         self.last_end_us = Some(

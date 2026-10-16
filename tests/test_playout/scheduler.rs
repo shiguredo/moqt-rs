@@ -4,9 +4,9 @@
 
 use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_BACKLOG_US, AUDIO_PLAYOUT_DELAY_US, AUDIO_PLAYOUT_MAX_CONCEAL_US,
-    AUDIO_PLAYOUT_MAX_LATENESS_US, AUDIO_PLAYOUT_MIN_CONCEAL_US, AUDIO_PLAYOUT_MIN_LEAD_US,
-    AUDIO_PLAYOUT_STRETCH_MIN_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutDropReason,
-    AudioPlayoutInput, AudioPlayoutScheduler,
+    AUDIO_PLAYOUT_MAX_LATENESS_US, AUDIO_PLAYOUT_MIN_CONCEAL_US,
+    AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US, AUDIO_PLAYOUT_STRETCH_MIN_US, AudioPlayoutBasis,
+    AudioPlayoutDecision, AudioPlayoutDropReason, AudioPlayoutInput, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::timeline::{
     TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US, audio_arrival_delay_us,
@@ -35,6 +35,26 @@ fn input(
     }
 }
 
+/// 直前の音を 1 つ並べた状態を作る
+///
+/// 目標 100 ms に間に合う長さ 20 ms の音であり、120 ms まで鳴る。呼び出し側は、この後ろへ
+/// 続く音の遅れとキューの余裕 (直前の音の終わり − (今 + 最小の余裕)) を確かめる。並べた音が
+/// 目標どおりに鳴ることもここで確かめる。
+fn schedule_queued_sound(scheduler: &mut AudioPlayoutScheduler) {
+    let first = scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
+    assert_eq!(
+        first,
+        AudioPlayoutDecision::Play {
+            start_at_us: 100_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "並べてある音を作ること"
+    );
+}
+
 #[test]
 fn sound_in_time_plays_at_the_target() {
     let mut scheduler = AudioPlayoutScheduler::new();
@@ -53,22 +73,33 @@ fn sound_in_time_plays_at_the_target() {
     assert_eq!(scheduler.lateness_us(), 0);
 }
 
+/// 直前の音が無いときは詰めない
+///
+/// 鳴り始めは今 + 最小の余裕で決まるため、詰めても遅れは減らず、削った分がそのまま音の
+/// 後ろの穴になる。moqt-js の「直前の音の終わり = -Infinity」に相当し、キューの余裕が
+/// 常に負になる場合である。
 #[test]
-fn late_sound_is_shifted_and_compressed() {
+fn late_sound_without_a_previous_sound_is_not_compressed() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 目標 100 ms を 60 ms 過ぎて届いた。今 + 10 ms へずらし、10 ms (音の半分) 詰める
+    // 目標 100 ms を 60 ms 過ぎて届いた。今 + 10 ms へずらすが、並べてある音が無いため詰めない
     let decision = scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
             start_at_us: 160_000,
             basis: AudioPlayoutBasis::Timestamp,
-            compress_us: 10_000,
+            compress_us: 0,
             gap_start_us: 0,
             gap_us: 0,
-        }
+        },
+        "直前の音が無いときは詰めないこと"
     );
-    assert_eq!(scheduler.lateness_us(), 60_000);
+    assert_eq!(
+        scheduler.lateness_us(),
+        60_000,
+        "遅れはそのまま記録すること"
+    );
+    assert_eq!(scheduler.compressed_us(), 0, "詰めた合計が増えないこと");
 }
 
 /// 遅れが不感帯の内側にあるときは時間圧縮しない
@@ -81,13 +112,14 @@ fn late_sound_is_shifted_and_compressed() {
 #[test]
 fn lateness_inside_the_stretch_deadband_is_not_compressed() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 今 + 10 ms へずらすと、遅れが不感帯の 1 µs 手前になる目標を置く
-    let target_us = AUDIO_PLAYOUT_MIN_LEAD_US - (AUDIO_PLAYOUT_STRETCH_MIN_US - 1);
-    let decision = scheduler.schedule(input(0, 0, 20_000, Some(target_us)));
+    schedule_queued_sound(&mut scheduler);
+    // 遅れが不感帯の 1 µs 手前 (19_999 µs) になる目標を置く。前の音の終わり (120 ms) へ
+    // 繋げるため、キューの余裕 (110 ms) は足りている
+    let decision = scheduler.schedule(input(0, 20_000, 20_000, Some(100_001)));
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: AUDIO_PLAYOUT_MIN_LEAD_US,
+            start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
             gap_start_us: 0,
@@ -106,13 +138,14 @@ fn lateness_inside_the_stretch_deadband_is_not_compressed() {
 #[test]
 fn lateness_at_the_stretch_deadband_is_compressed() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 遅れがちょうど不感帯になる目標を置く
-    let target_us = AUDIO_PLAYOUT_MIN_LEAD_US - AUDIO_PLAYOUT_STRETCH_MIN_US;
-    let decision = scheduler.schedule(input(0, 0, 20_000, Some(target_us)));
+    schedule_queued_sound(&mut scheduler);
+    // 遅れがちょうど不感帯になる目標を置く。今は 100 ms であり、キューの余裕は
+    // 120 ms − (100 ms + 10 ms) = 10 ms である
+    let decision = scheduler.schedule(input(100_000, 20_000, 20_000, Some(100_000)));
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
-            start_at_us: AUDIO_PLAYOUT_MIN_LEAD_US,
+            start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
             gap_start_us: 0,
@@ -123,21 +156,163 @@ fn lateness_at_the_stretch_deadband_is_compressed() {
     assert_eq!(scheduler.lateness_us(), AUDIO_PLAYOUT_STRETCH_MIN_US);
 }
 
+/// 直前の音へ繋げて鳴らすときは、キューの余裕の範囲で詰める
 #[test]
-fn overlapping_sound_is_appended_to_the_previous_one() {
+fn overlapping_sound_is_appended_to_the_previous_one_and_compressed() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    let first = scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
+    schedule_queued_sound(&mut scheduler);
+    // 前の音の終わり (120 ms) が目標 (100 ms) より後ろにあるため、そこへ繋げて 10 ms 詰める。
+    // キューの余裕 (120 ms − 10 ms = 110 ms) は詰める量 (10 ms) を上回る
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     assert_eq!(
-        first,
+        second,
         AudioPlayoutDecision::Play {
-            start_at_us: 100_000,
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 10_000,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "直前の音の終わりへ繋げて詰めること"
+    );
+}
+
+/// 詰める量はキューの余裕までに切る
+///
+/// 余裕を超えて詰めると、削った分がそのまま次の音との間の無音の穴になる。遅れがもっと
+/// 大きくても、余裕の分しか遅れは減らせない。
+#[test]
+fn compression_is_capped_by_the_queue_slack() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    // 遅れは 40 ms だが、キューの余裕は 120 ms − (80 ms + 10 ms) = 30 ms しかない。
+    // 音の長さの半分 (100 ms の半分 = 50 ms) よりも余裕が小さい
+    let decision = scheduler.schedule(input(80_000, 20_000, 100_000, Some(80_000)));
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 30_000,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "キューの余裕までしか詰めないこと"
+    );
+    assert_eq!(
+        scheduler.lateness_us(),
+        40_000,
+        "余裕を超える分の遅れは減らないこと"
+    );
+}
+
+/// キューの余裕がちょうど 0 のときは詰めない
+///
+/// 直前の音の終わりが、予約できる最も早い時刻 (今 + 最小の余裕) と重なっている。次に並べる
+/// 音の下限は実時間と同じ速さで進むため、詰めても遅れは減らず、削った分が穴になる。
+#[test]
+fn zero_queue_slack_is_not_compressed() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    // 直前の音の終わり (120 ms) は、今 + 最小の余裕 (110 ms + 10 ms) とちょうど同じである
+    let decision = scheduler.schedule(input(110_000, 20_000, 20_000, Some(100_000)));
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
             gap_start_us: 0,
             gap_us: 0,
-        }
+        },
+        "キューの余裕が 0 のときは詰めないこと"
     );
-    // 前の音の終わり (120 ms) が目標 (100 ms) より後ろにあるため、そこへ繋げて 10 ms 詰める
+    assert_eq!(
+        scheduler.lateness_us(),
+        20_000,
+        "遅れはそのまま記録すること"
+    );
+}
+
+/// キューの余裕が負のときは詰めない
+///
+/// 直前の音が既に鳴り終わっており、鳴り始めは今 + 最小の余裕で決まる。詰めても遅れは
+/// 減らず (削った分だけ音が短くなる)、削った分がそのまま穴になる。
+#[test]
+fn negative_queue_slack_is_not_compressed() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    // 直前の音の終わり (120 ms) は、今 + 最小の余裕 (120 ms + 10 ms) より前である
+    let decision = scheduler.schedule(input(120_000, 20_000, 20_000, Some(100_000)));
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 130_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "キューの余裕が負のときは詰めないこと"
+    );
+    assert_eq!(
+        scheduler.lateness_us(),
+        30_000,
+        "遅れはそのまま記録すること"
+    );
+}
+
+/// キューの余裕が許容以下のときは詰めない
+///
+/// 余裕も引き算で求めるため、境目ちょうどの値が僅かにずれる。moqt-js は 1e-9 秒の許容を
+/// 置いており、この許容以下で詰めても削れるのは 48 kHz の 1 サンプル (約 21 マイクロ秒) に
+/// も満たない。マイクロ秒の整数では 1e-9 秒を表現できないため、表現できる最小の正の値で
+/// ある 1 マイクロ秒を許容にする。
+#[test]
+fn queue_slack_at_the_epsilon_is_not_compressed() {
+    assert_eq!(
+        AUDIO_PLAYOUT_STRETCH_MIN_EPSILON_US, 1,
+        "許容は表現できる最小の正の値 (1 マイクロ秒) であること"
+    );
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    // 直前の音の終わり (120 ms) と今 + 最小の余裕 (119.999 ms) の差がちょうど許容 (1 µs) ある
+    let decision = scheduler.schedule(input(109_999, 20_000, 20_000, Some(100_000)));
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "キューの余裕が許容ちょうどのときは詰めないこと"
+    );
+
+    // 許容を 1 µs 超える余裕 (2 µs) があれば、その分だけ詰める
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    let decision = scheduler.schedule(input(109_998, 20_000, 20_000, Some(100_000)));
+    assert_eq!(
+        decision,
+        AudioPlayoutDecision::Play {
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 2,
+            gap_start_us: 0,
+            gap_us: 0,
+        },
+        "許容を超えた余裕の分だけ詰めること"
+    );
+}
+
+#[test]
+fn compression_returns_to_the_target() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    schedule_queued_sound(&mut scheduler);
+    // 目標 100 ms を 20 ms 過ぎた状態で届き、前の音の終わり (120 ms) へ繋げる。遅れの分を
+    // 詰めるが、1 つの音で詰める量は音の長さの半分 (10 ms) までにする
     let second = scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     assert_eq!(
         second,
@@ -149,37 +324,21 @@ fn overlapping_sound_is_appended_to_the_previous_one() {
             gap_us: 0,
         }
     );
-}
-
-#[test]
-fn compression_returns_to_the_target() {
-    let mut scheduler = AudioPlayoutScheduler::new();
-    // 目標 (-10 ms) を 10 ms 過ぎた状態で届き、今 + 10 ms へずらす (遅れは 20 ms)。
-    // 遅れの分を詰めるが、1 つの音で詰める量は音の長さの半分 (10 ms) までにする
-    let first = scheduler.schedule(input(0, 0, 20_000, Some(-10_000)));
-    assert_eq!(
-        first,
-        AudioPlayoutDecision::Play {
-            start_at_us: 10_000,
-            basis: AudioPlayoutBasis::Timestamp,
-            compress_us: 10_000,
-            gap_start_us: 0,
-            gap_us: 0,
-        }
-    );
     scheduler.confirm_stretch(10_000);
-    // 詰めた分だけ前の音の終わりが早くなり、次の音は目標どおりに鳴る
-    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(20_000)));
+    // 詰めた分だけ前の音の終わりが早くなる (詰めなければ 140 ms まで鳴るはずが 130 ms で終わる)。
+    // 次の音はその終わりを目標どおりに鳴る
+    let third = scheduler.schedule(input(0, 40_000, 20_000, Some(130_000)));
     assert_eq!(
-        second,
+        third,
         AudioPlayoutDecision::Play {
-            start_at_us: 20_000,
+            start_at_us: 130_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
             gap_start_us: 0,
             gap_us: 0,
         }
     );
+    assert_eq!(scheduler.lateness_us(), 0, "目標どおりに戻ること");
 }
 
 #[test]
@@ -218,7 +377,8 @@ fn a_late_sound_keeps_playing_while_the_previous_one_is_sounding() {
         }
     );
     // 2 つ目は目標 200 ms に対して 900 ms 遅れるが、直前の音 (1_100 ms まで) がまだ
-    // 鳴っている。音が連続しているため到着基準へ並べ直さず、その終わりへ繋げて鳴らす
+    // 鳴っている。音が連続しているため到着基準へ並べ直さず、その終わりへ繋げて鳴らす。
+    // キューの余裕は 1_100 ms − (0 + 10 ms) = 1_090 ms あり、詰める量 (10 ms) を上回る
     let second = scheduler.schedule(input(0, 20_000, 20_000, Some(200_000)));
     assert_eq!(
         second,
@@ -278,12 +438,14 @@ fn a_late_sound_is_rebased_by_arrival_when_the_sound_stopped() {
 #[test]
 fn unapplied_compression_remains_as_lateness() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 目標 (-20 ms) を 30 ms 過ぎた状態で届き、今 + 10 ms へずらす (遅れは 30 ms)
-    let first = scheduler.schedule(input(0, 0, 60_000, Some(-20_000)));
+    schedule_queued_sound(&mut scheduler);
+    // 目標 90 ms を 30 ms 過ぎた状態で届き、前の音の終わり (120 ms) へ繋げる。キューの余裕は
+    // 110 ms あり、詰める量は遅れと音の長さの半分 (60 ms の半分 = 30 ms) の小さい方になる
+    let second = scheduler.schedule(input(0, 20_000, 60_000, Some(90_000)));
     assert_eq!(
-        first,
+        second,
         AudioPlayoutDecision::Play {
-            start_at_us: 10_000,
+            start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 30_000,
             gap_start_us: 0,
@@ -293,14 +455,14 @@ fn unapplied_compression_remains_as_lateness() {
     // 30 ms の要求に対して 10 ms しか詰められなかった
     scheduler.confirm_stretch(10_000);
     assert_eq!(scheduler.compressed_us(), 10_000);
-    // 詰められなかった 20 ms は音が後ろへ伸び、次の音は 60 ms から鳴り、その分を詰める
-    let second = scheduler.schedule(input(0, 20_000, 60_000, Some(40_000)));
+    // 詰められなかった 20 ms は音が後ろへ伸び、次の音は 170 ms から鳴り、その分を詰める
+    let third = scheduler.schedule(input(0, 80_000, 20_000, Some(150_000)));
     assert_eq!(
-        second,
+        third,
         AudioPlayoutDecision::Play {
-            start_at_us: 60_000,
+            start_at_us: 170_000,
             basis: AudioPlayoutBasis::Timestamp,
-            compress_us: 20_000,
+            compress_us: 10_000,
             gap_start_us: 0,
             gap_us: 0,
         }
@@ -310,12 +472,13 @@ fn unapplied_compression_remains_as_lateness() {
 #[test]
 fn over_applied_compression_moves_the_previous_end_earlier() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 目標 (-10 ms) に対して 20 ms 遅れて届くため、10 ms 詰める要求が出る
-    let first = scheduler.schedule(input(0, 0, 20_000, Some(-10_000)));
+    schedule_queued_sound(&mut scheduler);
+    // 目標 100 ms に対して 20 ms 遅れて届き、前の音の終わり (120 ms) へ繋げて 10 ms 詰める
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     assert_eq!(
-        first,
+        second,
         AudioPlayoutDecision::Play {
-            start_at_us: 10_000,
+            start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
             gap_start_us: 0,
@@ -329,16 +492,16 @@ fn over_applied_compression_moves_the_previous_end_earlier() {
         20_000,
         "実際に詰めた長さを記録すること"
     );
-    // 前の音の終わりが予定 (20 ms) より 10 ms 手前の 10 ms になるため、次の音 (目標 30 ms)
+    // 前の音の終わりが予定 (130 ms) より 10 ms 手前の 120 ms になるため、次の音 (目標 140 ms)
     // との間に 20 ms の隙間ができる。詰めすぎた分を戻さないと 10 ms と見積もって補間しない
-    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(30_000)));
+    let third = scheduler.schedule(input(0, 40_000, 20_000, Some(140_000)));
     assert_eq!(
-        second,
+        third,
         AudioPlayoutDecision::Play {
-            start_at_us: 30_000,
+            start_at_us: 140_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 10_000,
+            gap_start_us: 120_000,
             gap_us: 20_000,
         }
     );
@@ -619,13 +782,25 @@ fn limit_boundary_is_played() {
 #[test]
 fn lateness_boundary_is_played() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 遅れが 500 ms ちょうどになる音は捨てない
-    let now_us = AUDIO_PLAYOUT_MAX_LATENESS_US - 10_000;
-    let decision = scheduler.schedule(input(now_us, 0, 20_000, Some(0)));
+    // 1 つ目は目標 100 ms に間に合い、700 ms まで鳴る
+    let first = scheduler.schedule(input(0, 0, 600_000, Some(100_000)));
     assert_eq!(
-        decision,
+        first,
         AudioPlayoutDecision::Play {
-            start_at_us: AUDIO_PLAYOUT_MAX_LATENESS_US,
+            start_at_us: 100_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 0,
+            gap_start_us: 0,
+            gap_us: 0,
+        }
+    );
+    // 遅れが 500 ms ちょうどになる音は捨てない。直前の音 (700 ms まで) がまだ鳴っているため
+    // 到着基準へ並べ直さず、その終わりへ繋げて鳴らす (キューの余裕は 690 ms)
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(200_000)));
+    assert_eq!(
+        second,
+        AudioPlayoutDecision::Play {
+            start_at_us: 700_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
             gap_start_us: 0,
@@ -633,20 +808,38 @@ fn lateness_boundary_is_played() {
         }
     );
     assert_eq!(scheduler.lateness_us(), AUDIO_PLAYOUT_MAX_LATENESS_US);
+    assert_eq!(
+        scheduler.rebases(),
+        0,
+        "音がまだ鳴っている間は到着基準へ並べ直さないこと"
+    );
 }
 
 #[test]
 fn unconfirmed_stretch_is_treated_as_unapplied() {
     let mut scheduler = AudioPlayoutScheduler::new();
-    // 目標 (-10 ms) に対して 20 ms 遅れて届き、10 ms の詰めを要求する
-    scheduler.schedule(input(0, 0, 20_000, Some(-10_000)));
-    // confirm せずに次の音を予約すると、要求は適用されなかったものとして扱われる。
-    // 適用されていれば 20 ms から鳴るはずが、前の音が伸びたままの 30 ms から鳴る
-    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(20_000)));
+    schedule_queued_sound(&mut scheduler);
+    // 目標 100 ms に対して 20 ms 遅れて届き、前の音の終わり (120 ms) へ繋げて 10 ms の詰めを
+    // 要求する
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     assert_eq!(
         second,
         AudioPlayoutDecision::Play {
-            start_at_us: 30_000,
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 10_000,
+            gap_start_us: 0,
+            gap_us: 0,
+        }
+    );
+    // confirm せずに次の音を予約すると、要求は適用されなかったものとして扱われる。
+    // 適用されていれば前の音は 130 ms で終わり、次の音も 130 ms から鳴るはずが、前の音が
+    // 伸びたままの 140 ms から鳴る
+    let third = scheduler.schedule(input(0, 40_000, 20_000, Some(130_000)));
+    assert_eq!(
+        third,
+        AudioPlayoutDecision::Play {
+            start_at_us: 140_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
             gap_start_us: 0,
@@ -952,13 +1145,15 @@ fn last_play_returns_the_decided_sound() {
         "まだ鳴らすと決めていなければ None であること"
     );
 
-    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    schedule_queued_sound(&mut scheduler);
+    // 目標 100 ms に対して 20 ms 遅れて届き、前の音の終わり (120 ms) へ繋げて 10 ms 詰める
+    scheduler.schedule(input(100_000, 20_000, 20_000, Some(100_000)));
     let play = scheduler.last_play().expect("鳴らすと決めた音の値がある");
     assert_eq!(
-        play.start_at_us, 160_000,
+        play.start_at_us, 120_000,
         "決定した鳴り始める時刻を返すこと"
     );
-    assert_eq!(play.arrival_us, 150_000, "到着の基準を返すこと");
+    assert_eq!(play.arrival_us, 100_000, "到着の基準を返すこと");
     assert_eq!(
         play.target_start_us,
         Some(100_000),
@@ -981,7 +1176,8 @@ fn last_play_returns_the_decided_sound() {
 fn last_play_follows_the_applied_stretch() {
     // 実際に詰めた長さが返ってきたら、鳴る長さをその分だけ直すこと
     let mut scheduler = AudioPlayoutScheduler::new();
-    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    schedule_queued_sound(&mut scheduler);
+    scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     // 要求した 10 ms のうち 5 ms しか詰められなかった。残りの 5 ms は音が後ろへ伸びる
     scheduler.confirm_stretch(5_000);
     assert_eq!(
@@ -995,7 +1191,8 @@ fn last_play_follows_the_applied_stretch() {
 
     // 要求より長く詰められたときは、詰めすぎた分だけ手前で終わる
     let mut scheduler = AudioPlayoutScheduler::new();
-    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    schedule_queued_sound(&mut scheduler);
+    scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
     scheduler.confirm_stretch(12_000);
     assert_eq!(
         scheduler
@@ -1008,14 +1205,15 @@ fn last_play_follows_the_applied_stretch() {
 
     // 確認が返ってこないまま次の音を並べたときは、適用されなかったものとして扱う
     let mut scheduler = AudioPlayoutScheduler::new();
-    scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
-    scheduler.schedule(input(150_000, 25_000, 20_000, Some(200_000)));
+    schedule_queued_sound(&mut scheduler);
+    scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
+    scheduler.schedule(input(0, 40_000, 20_000, Some(140_000)));
     let previous = scheduler.last_play().expect("鳴らすと決めた音の値がある");
     assert_eq!(
         previous.played_us, 20_000,
         "詰められなかった音は長さがそのままになること"
     );
-    assert_eq!(previous.start_at_us, 200_000, "直近の決定で置き換わること");
+    assert_eq!(previous.start_at_us, 140_000, "直近の決定で置き換わること");
 }
 
 #[test]

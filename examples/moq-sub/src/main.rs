@@ -1742,13 +1742,14 @@ mod tests {
             "実際に埋めた長さを返すこと"
         );
 
-        // 3 つ目は目標を過ぎて届く。遅れの分だけ詰める
+        // 3 つ目は目標を過ぎて届く。直前の音の終わり (1_050_000) へ繋げて、遅れの分だけ詰める。
+        // キューの余裕 = 1_050_000 − (1_030_000 + 10_000) = 10_000 の範囲で詰める
         let third = scheduler.schedule(AudioPlayoutInput {
-            now_us: 1_100_000,
-            arrival_us: 1_100_000,
+            now_us: 1_030_000,
+            arrival_us: 1_030_000,
             timestamp_us: 50_000,
             duration_us: 20_000,
-            target_start_us: Some(1_090_000),
+            target_start_us: Some(1_020_000),
             enforce_target: true,
             delay_us: 80_000,
             arrival_delay_us: 80_000,
@@ -1822,10 +1823,25 @@ mod tests {
         let target_us = timeline
             .present_us(Track::Audio, audio.pts_us)
             .expect("観測したので音声の目標が決まること");
-        // 目標の時刻に届いた音を、10 ms 過ぎた時点で予約する。今から鳴らせる最も早い時刻
-        // (今 + 10 ms) へずれ、ずれた分 (20 ms) だけ詰める要求が出る
+        // 先に 1 つ鳴る音を並べておく。詰めるにはキューの余裕 (直前の音の終わり −
+        // (今 + 最小の余裕)) が要り、直前の音が無いときは詰めないためである。この音は目標の
+        // 時刻 (target_us) に間に合い、target_us + 20 ms まで鳴る。計器へは記録しない
+        let queued = assembly
+            .arrange(
+                &mut timeline,
+                &audio,
+                target_us - 10_000,
+                target_us - 10_000,
+                true,
+            )
+            .expect("先に並べる音が鳴ると決まること");
+        assert_eq!(queued.duration_us, 20_000, "先に並べる音の長さを返すこと");
+        // 目標の時刻に届いた音を、その時刻に予約する。直前の音の終わり (target_us + 20 ms) へ
+        // 繋がるため、今から鳴らせる最も早い時刻 (今 + 10 ms) ではなくその終わりへずれる。
+        // ずれは 20 ms であり、音の長さの半分 (10 ms) とキューの余裕 (10 ms) の小さい方の
+        // 10 ms だけ詰める要求が出る
         let arrangement = assembly
-            .arrange(&mut timeline, &audio, target_us + 10_000, target_us, true)
+            .arrange(&mut timeline, &audio, target_us, target_us, true)
             .expect("目標に間に合う音は鳴ると決まること");
         assert_eq!(arrangement.duration_us, 20_000, "音の長さを返すこと");
         let play = assembly
