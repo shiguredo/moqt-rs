@@ -15,6 +15,14 @@ shiguredo_http2 = "2026.1.0-canary.16"
 shiguredo_http3 = "2026.1.0-canary.9"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
+# QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装
+#
+# qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (tokio-qmux は
+# publish = false)。このためバージョンではなく git の rev で固定する。rev を上げるときは
+# tokio-qmux と揃え、追随が必要な API 変更をまとめて反映する。
+shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "c53b86200158afaffac1c105cbf0eadc7ec425bb" }
+# QMux の tokio ラッパー
+tokio-qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "c53b86200158afaffac1c105cbf0eadc7ec425bb" }
 
 # 外部クレート
 

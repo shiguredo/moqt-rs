@@ -1,7 +1,7 @@
 //! トランスポート抽象化層
 //!
-//! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 を統一的に扱うための型を
-//! 定義する。
+//! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux を統一的に扱うための
+//! 型を定義する。
 //!
 //! publisher (送信側) と subscriber (受信側) の双方が利用する union API を提供し、
 //! 各バイナリは必要なメソッドだけを呼び出す。
@@ -30,6 +30,8 @@ pub enum SendStream {
     Quic(s2n_quic::stream::SendStream),
     WtH3(WtSendStream),
     WtH2(WtH2SendStream),
+    /// QMux (draft-ietf-quic-qmux-02)
+    Qmux(tokio_qmux::SendStream),
 }
 
 impl SendStream {
@@ -41,6 +43,14 @@ impl SendStream {
             }),
             SendStream::WtH3(s) => s.send(&data).await,
             SendStream::WtH2(s) => s.send(&data).await,
+            SendStream::Qmux(s) => {
+                // tokio-qmux の `write` は渡したデータをすべて受け付けるまで待つ
+                // (フロー制御の調整はドライバが行う)。戻り値は常に `data.len()` になる
+                s.write(&data)
+                    .await
+                    .map(|_| ())
+                    .map_err(TransportError::from_qmux)
+            }
         }
     }
 
@@ -50,6 +60,7 @@ impl SendStream {
             SendStream::Quic(s) => s.id(),
             SendStream::WtH3(s) => s.stream_id(),
             SendStream::WtH2(s) => s.stream_id(),
+            SendStream::Qmux(s) => s.id().as_u64(),
         }
     }
 
@@ -64,6 +75,7 @@ impl SendStream {
             }),
             SendStream::WtH3(s) => s.finish(),
             SendStream::WtH2(s) => s.finish().await,
+            SendStream::Qmux(s) => s.finish().await.map_err(TransportError::from_qmux),
         }
     }
 
@@ -82,6 +94,7 @@ impl SendStream {
             }
             SendStream::WtH3(s) => s.reset(error_code),
             SendStream::WtH2(s) => s.reset(error_code).await,
+            SendStream::Qmux(s) => s.reset(error_code).await.map_err(TransportError::from_qmux),
         }
     }
 }
@@ -91,9 +104,26 @@ pub enum RecvStream {
     Quic(s2n_quic::stream::ReceiveStream),
     WtH3(WtRecvStream),
     WtH2(WtH2RecvStream),
+    /// QMux (draft-ietf-quic-qmux-02)
+    ///
+    /// `tokio_qmux::RecvStream::read` は呼び出し側のバッファへ書くため、読み出しごとの
+    /// 確保を避けてストリームごとに 1 本持つ ([`RecvStream::new_qmux`])。
+    Qmux {
+        /// QMux の受信ストリーム
+        stream: tokio_qmux::RecvStream,
+        /// 読み出し用のバッファ (初回の読み出しまで確保しない)
+        buf: Option<Box<[u8]>>,
+    },
 }
 
 impl RecvStream {
+    /// QMux の受信ストリームを作る
+    ///
+    /// 読み出し用のバッファは初回の読み出しで確保する。受理したまま読まれないストリームが
+    /// 積まれても、ストリームごとの 64 KiB を先行確保しないためである。
+    pub(crate) fn new_qmux(stream: tokio_qmux::RecvStream) -> Self {
+        Self::Qmux { stream, buf: None }
+    }
     /// データまたは終端を受信する
     pub async fn receive_chunk(&mut self) -> Result<RecvChunk, TransportError> {
         match self {
@@ -121,6 +151,27 @@ impl RecvStream {
                 }
                 crate::webtransport_h2::RecvChunk::End(end) => Ok(RecvChunk::End(end)),
             },
+            // `tokio_qmux::RecvStream::read` は await 点の前で内部状態を変えないため
+            // cancel safe である (qmux-rs の doc には明記されていないが、呼び出し側が
+            // 破棄しても読み出し済みのバイトは失われない)。moq-sub は `select!` で
+            // この future を破棄しうる
+            RecvStream::Qmux { stream, buf } => {
+                let buf = buf.get_or_insert_with(|| {
+                    vec![0u8; crate::qmux::READ_BUFFER_SIZE].into_boxed_slice()
+                });
+                match stream.read(buf).await {
+                    Ok(Some(len)) => Ok(RecvChunk::Data(Bytes::copy_from_slice(&buf[..len]))),
+                    Ok(None) => Ok(RecvChunk::End(RequestStreamEnd::Fin)),
+                    // QMux は RESET_STREAM_AT 拡張を実装しないため reliable_size は常に None
+                    Err(tokio_qmux::Error::Reset(error_code)) => {
+                        Ok(RecvChunk::End(RequestStreamEnd::Reset {
+                            error_code: Some(error_code),
+                            reliable_size: None,
+                        }))
+                    }
+                    Err(e) => Err(TransportError::from_qmux(e)),
+                }
+            }
         }
     }
 
@@ -129,7 +180,7 @@ impl RecvStream {
     /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn stop_sending(&mut self, error_code: u64) -> Result<(), TransportError> {
+    pub async fn stop_sending(&mut self, error_code: u64) -> Result<(), TransportError> {
         match self {
             RecvStream::Quic(s) => {
                 let code = s2n_quic::application::Error::new(error_code)
@@ -139,6 +190,10 @@ impl RecvStream {
             }
             RecvStream::WtH3(s) => s.stop_sending(error_code),
             RecvStream::WtH2(s) => s.stop_sending(error_code),
+            RecvStream::Qmux { stream, .. } => stream
+                .stop_sending(error_code)
+                .await
+                .map_err(TransportError::from_qmux),
         }
     }
 
@@ -148,6 +203,7 @@ impl RecvStream {
             RecvStream::Quic(s) => s.id(),
             RecvStream::WtH3(s) => s.stream_id(),
             RecvStream::WtH2(s) => s.stream_id(),
+            RecvStream::Qmux { stream, .. } => stream.id().as_u64(),
         }
     }
 }
@@ -164,11 +220,16 @@ pub(crate) enum StopSendingTransport {
     /// WebTransport over HTTP/2。capsule がアプリケーションエラーコードを直接運ぶため
     /// remap しない (draft-ietf-webtrans-http2-15 §6.3)
     WtH2,
+    /// QMux。QUIC version 1 のフレームをそのまま多重化するため QUIC の code space を
+    /// 共有し、remap しない (draft-ietf-quic-qmux-02 Section 4)
+    Qmux,
 }
 
 /// peer から受信した STOP_SENDING の wire コードを MOQT のコードへ写す
 ///
 /// QUIC 直接接続は QUIC の code space を共有するため remap しない。
+/// QMux は QUIC version 1 のフレーム (STOP_SENDING / RESET_STREAM) をそのまま多重化するため
+/// remap しない (draft-ietf-quic-qmux-02 Section 4)。
 /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードをそのまま運ぶため
 /// remap しない (draft-ietf-webtrans-http2-15 §6.3)。
 /// WebTransport over HTTP/3 は HTTP/3 の code space を共有するため §4.4 の remap を行い、
@@ -181,7 +242,9 @@ pub(crate) fn remap_stop_sending_error_code(
     wire_code: u64,
 ) -> Option<u64> {
     match transport {
-        StopSendingTransport::Quic | StopSendingTransport::WtH2 => Some(wire_code),
+        StopSendingTransport::Quic | StopSendingTransport::WtH2 | StopSendingTransport::Qmux => {
+            Some(wire_code)
+        }
         StopSendingTransport::WtH3 => crate::webtransport_h3::wt_stop_sending_error_code(wire_code),
     }
 }
@@ -204,6 +267,12 @@ pub enum StreamHandle {
     Quic(s2n_quic::connection::Handle),
     WtH3(Arc<Mutex<WtSession>>),
     WtH2(Arc<Mutex<WtH2Session>>),
+    /// QMux (draft-ietf-quic-qmux-02)
+    ///
+    /// `tokio_qmux::Connection` は Clone できないが、接続を必要とするメソッドはすべて
+    /// `&self` を取るため `Arc` で共有できる。accept の待機は接続を共有した別タスクが行い、
+    /// 結果を receiver へ流す (`StreamAcceptor::Qmux` / `BidiStreamAcceptor::Qmux`)。
+    Qmux(Arc<crate::qmux::QmuxHandle>),
 }
 
 impl StreamHandle {
@@ -228,6 +297,14 @@ impl StreamHandle {
                 let stream = session.open_uni_stream().await?;
                 Ok(SendStream::WtH2(stream))
             }
+            StreamHandle::Qmux(handle) => {
+                let stream = handle
+                    .connection()
+                    .open_unidirectional()
+                    .await
+                    .map_err(TransportError::from_qmux)?;
+                Ok(SendStream::Qmux(stream))
+            }
         }
     }
 
@@ -237,14 +314,15 @@ impl StreamHandle {
     /// 受信を通知する必要がある (draft-ietf-webtrans-http3-16 §4.4 (Resetting Data Streams))。
     /// QUIC 直接接続は h3 層を持たず、WebTransport over HTTP/2 は driver が capsule を
     /// 受信して自ら状態を更新するため、どちらも何もしない
-    /// (draft-ietf-webtrans-http2-15 §6.3)。
+    /// (draft-ietf-webtrans-http2-15 §6.3)。QMux も h3 層を持たないため何もしない
+    /// (QMux 自身がストリーム状態を管理する)。
     pub(crate) async fn notify_received_stop_sending(
         &self,
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), TransportError> {
         match self {
-            StreamHandle::Quic(_) | StreamHandle::WtH2(_) => Ok(()),
+            StreamHandle::Quic(_) | StreamHandle::WtH2(_) | StreamHandle::Qmux(_) => Ok(()),
             StreamHandle::WtH3(session) => {
                 let mut session = session.lock().await;
                 session.notify_received_stop_sending(stream_id, error_code)
@@ -266,6 +344,7 @@ impl StreamHandle {
             StreamHandle::Quic(_) => StopSendingTransport::Quic,
             StreamHandle::WtH3(_) => StopSendingTransport::WtH3,
             StreamHandle::WtH2(_) => StopSendingTransport::WtH2,
+            StreamHandle::Qmux(_) => StopSendingTransport::Qmux,
         }
     }
 
@@ -294,6 +373,14 @@ impl StreamHandle {
                 let mut session = session.lock().await;
                 let (send, recv) = session.open_bi_stream().await?;
                 Ok((SendStream::WtH2(send), RecvStream::WtH2(recv)))
+            }
+            StreamHandle::Qmux(handle) => {
+                let (send, recv) = handle
+                    .connection()
+                    .open_bidirectional()
+                    .await
+                    .map_err(TransportError::from_qmux)?;
+                Ok((SendStream::Qmux(send), RecvStream::new_qmux(recv)))
             }
         }
     }
@@ -335,6 +422,14 @@ impl StreamHandle {
                 let mut session = session.lock().await;
                 session.close(code, reason).await
             }
+            StreamHandle::Qmux(handle) => {
+                // QMux の CONNECTION_CLOSE のエラーコードは QUIC version 1 の code space を
+                // 共有するため、MOQT のコードをそのまま載せる (draft-ietf-quic-qmux-02 Section 4)。
+                // tokio-qmux の `close` は容量 1 の専用チャネルへ要求を渡すだけで失敗を返さない
+                // ため、常に成功として扱う (接続の終了は `closed()` で観測する)
+                handle.connection().close(code, reason);
+                Ok(())
+            }
         }
     }
 
@@ -374,6 +469,16 @@ impl StreamHandle {
             StreamHandle::WtH2(session) => {
                 let session = session.lock().await;
                 session.send_datagram(data).await
+            }
+            StreamHandle::Qmux(handle) => {
+                // tokio-qmux の `send_datagram` が返すのはドライバへのコマンド送信の成否だけで、
+                // 実際の送出の成否 (ピアの上限超過など) は呼び出し元へ返らない。上限の不足は
+                // 接続確立時に `qmux::warn_if_datagram_too_large` が警告する
+                handle
+                    .connection()
+                    .send_datagram(data)
+                    .await
+                    .map_err(TransportError::from_qmux)
             }
         }
     }
@@ -436,6 +541,19 @@ impl StreamHandle {
                 let session = session.lock().await;
                 session.take_buffered_datagrams()
             }
+            StreamHandle::Qmux(handle) => {
+                // 破棄された datagram が増えていれば記録する (QMux は速やかに配送できない
+                // DATAGRAM の破棄を許すため、取りこぼしを追えるようにする)
+                handle.log_dropped_datagrams();
+                match handle.connection().recv_datagrams().await {
+                    // 1 件以上届くまで待ち、到着済みをまとめて返す。取り出しと返却の間に
+                    // await が無いため、呼び出し側が `select!` で future を捨てても
+                    // 取り出し済みの datagram は失われない (cancel safe)
+                    Ok(Some(datagrams)) => Ok(datagrams),
+                    Ok(None) => Err(TransportError::ConnectionClosed),
+                    Err(e) => Err(TransportError::from_qmux(e)),
+                }
+            }
         }
     }
 }
@@ -458,6 +576,15 @@ pub enum StreamAcceptor {
         uni_rx: mpsc::UnboundedReceiver<WtH2RecvStream>,
         /// セッション状態 (§6.12 の終了 / 接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
+    },
+    /// QMux (draft-ietf-quic-qmux-02)
+    ///
+    /// accept の待機は接続を共有した別タスクが行い、結果を `uni_rx` へ流す
+    /// (`qmux::spawn_accept_unidirectional`)。接続が閉じると channel も閉じるため、
+    /// 待ち手は [`TransportError::ConnectionClosed`] を得る。
+    Qmux {
+        /// 単方向受信ストリームの receiver
+        uni_rx: mpsc::UnboundedReceiver<RecvStream>,
     },
 }
 
@@ -516,6 +643,11 @@ impl StreamAcceptor {
                     }
                 }
             }
+            StreamAcceptor::Qmux { uni_rx } => match uni_rx.recv().await {
+                Some(stream) => Ok(Some(stream)),
+                // accept タスクが終了した = QMux 接続が閉じた
+                None => Err(TransportError::ConnectionClosed),
+            },
         }
     }
 }
@@ -542,6 +674,14 @@ pub enum BidiStreamAcceptor {
         bi_rx: mpsc::UnboundedReceiver<(WtH2SendStream, WtH2RecvStream)>,
         /// セッション状態 (§6.12 の終了 / 接続エラー) の観測用 (ロック外で待つ)
         session_state: watch::Receiver<WtSessionState>,
+    },
+    /// QMux (draft-ietf-quic-qmux-02)
+    ///
+    /// `StreamAcceptor::Qmux` と同じく、accept の待機は接続を共有した別タスクが行う
+    /// (`qmux::spawn_accept_bidirectional`)。
+    Qmux {
+        /// 双方向受信ストリームの receiver
+        bi_rx: mpsc::UnboundedReceiver<(SendStream, RecvStream)>,
     },
 }
 
@@ -613,6 +753,11 @@ impl BidiStreamAcceptor {
                     }
                 }
             }
+            BidiStreamAcceptor::Qmux { bi_rx } => match bi_rx.recv().await {
+                Some(stream) => Ok(Some(stream)),
+                // accept タスクが終了した = QMux 接続が閉じた
+                None => Err(TransportError::ConnectionClosed),
+            },
         }
     }
 }
@@ -624,6 +769,8 @@ mod tests {
     /// HTTP/3 以外の transport は wire のコードをそのまま MOQT のコードとして使う
     ///
     /// QUIC 直接接続は QUIC の code space を MOQT と共有するため remap しない。
+    /// QMux も QUIC version 1 のフレーム (STOP_SENDING / RESET_STREAM) をそのまま多重化するため
+    /// remap しない (draft-ietf-quic-qmux-02 Section 4)。
     /// WebTransport over HTTP/2 は capsule がアプリケーションエラーコードを直接運ぶため
     /// remap しない (wt-h2 の driver が capsule で受けたコードを MOQT のコードとして使う)。
     /// 32 ビットを超える値も切り詰めない。
@@ -634,6 +781,11 @@ mod tests {
                 remap_stop_sending_error_code(StopSendingTransport::Quic, wire_code),
                 Some(wire_code),
                 "QUIC のコードは remap せずそのまま使うこと: {wire_code:#x}"
+            );
+            assert_eq!(
+                remap_stop_sending_error_code(StopSendingTransport::Qmux, wire_code),
+                Some(wire_code),
+                "QMux のコードは remap せずそのまま使うこと: {wire_code:#x}"
             );
             assert_eq!(
                 remap_stop_sending_error_code(StopSendingTransport::WtH2, wire_code),

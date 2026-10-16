@@ -1613,6 +1613,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_qmux"
+version = "2026.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=c53b86200158afaffac1c105cbf0eadc7ec425bb#c53b86200158afaffac1c105cbf0eadc7ec425bb"
+
+[[package]]
 name = "shiguredo_toml"
 version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1861,10 +1866,21 @@ dependencies = [
  "shiguredo_http2",
  "shiguredo_http3",
  "shiguredo_moqt",
+ "shiguredo_qmux",
  "tokio",
  "tokio-metrics",
+ "tokio-qmux",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "tokio-qmux"
+version = "0.0.0"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=c53b86200158afaffac1c105cbf0eadc7ec425bb#c53b86200158afaffac1c105cbf0eadc7ec425bb"
+dependencies = [
+ "shiguredo_qmux",
+ "tokio",
 ]
 
 [[package]]

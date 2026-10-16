@@ -10,15 +10,17 @@
 //! ため、`examples/moq-pub` / `examples/moq-sub` からは参照できない (検証はこの crate の中で
 //! 行う)。
 //!
-//! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) である。WebTransport over HTTP/3 /
-//! HTTP/2 のハーネスは必要になった時点で別途追加する。
+//! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) と QMux (`MoqtClient::establish_qmux`)
+//! である。QMux は TCP + TLS を待ち受ける [`QmuxTestPeerServer`] を使う。WebTransport over
+//! HTTP/3 / HTTP/2 のハーネスは必要になった時点で別途追加する。
 //!
 //! 提供するのは SETUP 交換 (送る SETUP の差し替え、SETUP を送らない control stream の終端を
 //! 含む)、peer 起点 request stream へのメッセージ送信、peer 起点 request stream に届く応答の
 //! 読み出し、client 起点 request stream の受理と REQUEST_OK による応答、client が送る終了
 //! コード (CONNECTION_CLOSE) の観測である。次は提供しない (必要になった時点で拡張する)。
 //!
-//! - peer が送る STOP_SENDING の観測
+//! - peer が送る STOP_SENDING の観測 (QMux 経路は `QmuxTestPeerServer` と `qmux` モジュールの
+//!   テストで観測する)
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -224,6 +226,83 @@ impl TestPeerServer {
     }
 }
 
+/// QMux (TCP + TLS) のテスト用サーバー
+///
+/// [`TestPeerServer`] の QMux 版である。UDP を使わない経路を実行で検証するために置く。
+/// TCP を 127.0.0.1 で待ち受け、TLS (ALPN は [`crate::MOQT_PROTOCOL`]) で受理してから
+/// `tokio_qmux::Connection` を作る。QMux 自体はハンドシェイクを持たないため、接続が
+/// 確立した時点でクライアントの制御ストリームを受理できる。
+pub(crate) struct QmuxTestPeerServer {
+    /// client の接続を待ち受ける TCP リスナー
+    listener: tokio::net::TcpListener,
+    /// TLS の受理器 (server 証明書は自己署名)
+    tls: tokio_rustls::TlsAcceptor,
+    /// 待ち受けているアドレス
+    local_addr: SocketAddr,
+}
+
+impl QmuxTestPeerServer {
+    /// 127.0.0.1 で待ち受けるテスト用の QMux サーバーを立てる
+    pub(crate) async fn start() -> Result<Self> {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
+                TransportError::Internal(format!("failed to generate certificate: {e}"))
+            })?;
+        // ALPN は client と同じ MOQT のプロトコル識別子を広告する。QMux は ALPN を定義せず、
+        // 下位トランスポートを接続そのもので区別するためである
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certified.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    certified.signing_key.serialize_der().into(),
+                ),
+            )
+            .map_err(|e| TransportError::Internal(format!("failed to set certificate: {e}")))?;
+        tls_config.alpn_protocols = vec![crate::MOQT_PROTOCOL.as_bytes().to_vec()];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| TransportError::Internal(format!("failed to bind TCP socket: {e}")))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| TransportError::Internal(format!("failed to get local address: {e}")))?;
+
+        Ok(Self {
+            listener,
+            tls: tokio_rustls::TlsAcceptor::from(Arc::new(tls_config)),
+            local_addr,
+        })
+    }
+
+    /// 待ち受けているアドレス
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// client の接続を 1 つ受理し、QMux 接続を確立する
+    pub(crate) async fn accept(&mut self) -> Result<TestPeer> {
+        let (tcp, _) = self
+            .listener
+            .accept()
+            .await
+            .map_err(|e| TransportError::Internal(format!("failed to accept TCP: {e}")))?;
+        tcp.set_nodelay(true)
+            .map_err(|e| TransportError::Internal(format!("failed to set nodelay: {e}")))?;
+        let tls = self
+            .tls
+            .accept(tcp)
+            .await
+            .map_err(|e| TransportError::Internal(format!("failed to accept TLS: {e}")))?;
+        let connection = crate::qmux::build_server_connection(tls)
+            .map_err(|e| TransportError::Internal(format!("failed to build QMux: {e}")))?;
+        TestPeer::new_qmux(crate::qmux::split_connection(
+            connection,
+            &tokio_metrics::TaskMonitor::new(),
+        ))
+    }
+}
+
 /// peer から受理した request stream
 ///
 /// 送信半と reader の両方を保持する。s2n-quic では送信半の drop で FIN、受信半の drop で
@@ -289,6 +368,34 @@ pub(crate) struct TestPeer {
 }
 
 impl TestPeer {
+    /// 確立した QMux 接続から peer を作る
+    ///
+    /// QUIC 経路と違い、ストリームの受理は接続を共有した別タスクが行い、その結果が
+    /// `uni_rx` / `bi_rx` に流れる ([`crate::qmux::split_connection`])。
+    fn new_qmux(session: crate::qmux::QmuxSession) -> Result<Self> {
+        let crate::qmux::QmuxSession {
+            handle,
+            uni_rx,
+            bi_rx,
+            // peer 側は client の STOP_SENDING を観測しない (観測するのは client 側)
+            stop_sending_rx: _,
+        } = session;
+        let session = Session::new_server(MoqtTransport::Qmux, SetupOptions::new())?;
+        Ok(Self {
+            session,
+            handle: StreamHandle::Qmux(handle),
+            bidi_acceptor: BidiStreamAcceptor::Qmux { bi_rx },
+            recv_acceptor: StreamAcceptor::Qmux { uni_rx },
+            control_send: None,
+            control_recv: None,
+            opened_requests: Vec::new(),
+            accepted_requests: Vec::new(),
+            // QMux 経路は終了コードの観測タスクを持たない (QUIC の ConnectionObserver に相当する
+            // 仕組みが無い)。必要になった時点で `Connection::closed` を待つタスクを足す
+            close_codes: Arc::new(StdMutex::new(Vec::new())),
+        })
+    }
+
     /// 受理した QUIC 接続から peer を作る
     fn new(
         connection: s2n_quic::connection::Connection,
@@ -383,6 +490,31 @@ impl TestPeer {
             reader: ControlStream::new(recv),
         });
         Ok(())
+    }
+
+    /// peer 起動の uni stream を 1 つ受理する
+    ///
+    /// 受理したストリームの受信方向から STOP_SENDING を送るテストが使う
+    /// ([`Self::recv_uni_data_stream`] は終端まで読み切るため、ストリームを返さない)。
+    pub(crate) async fn accept_recv_stream(&mut self) -> Result<crate::transport::RecvStream> {
+        self.recv_acceptor
+            .accept_recv_stream()
+            .await?
+            .ok_or_else(|| TransportError::Internal("data stream acceptor closed".into()))
+    }
+
+    /// datagram を 1 つ送る
+    ///
+    /// 音声の OBJECT_DATAGRAM が QMux 経由で届くことを検証するテストが使う。
+    pub(crate) async fn send_datagram(&self, data: &[u8]) -> Result<()> {
+        self.handle.send_datagram(data).await
+    }
+
+    /// datagram を 1 つ以上受信する
+    ///
+    /// 1 件届くまで待ち、到着済みをまとめて返す (`StreamHandle::recv_datagrams` と同じ契約)。
+    pub(crate) async fn recv_datagrams(&self) -> Result<Vec<Vec<u8>>> {
+        self.handle.recv_datagrams().await
     }
 
     /// peer が開いた request stream に届いたメッセージを 1 つ読む
@@ -1451,6 +1583,8 @@ mod tests {
                         cert: None,
                         impl_name: "test-peer",
                         receive_datagrams: false,
+                        // QMux 経路は使わない (QUIC 直接接続の試験基盤)
+                        datagram_max_size: None,
                     },
                     &connect_monitor,
                 )
@@ -1550,6 +1684,8 @@ mod tests {
                         cert: None,
                         impl_name: "test-peer",
                         receive_datagrams: false,
+                        // QMux 経路は使わない (QUIC 直接接続の試験基盤)
+                        datagram_max_size: None,
                     },
                     &connect_monitor,
                 )
@@ -1619,6 +1755,8 @@ mod tests {
                         cert: None,
                         impl_name: "test-peer",
                         receive_datagrams: false,
+                        // QMux 経路は使わない (QUIC 直接接続の試験基盤)
+                        datagram_max_size: None,
                     },
                     &connect_monitor,
                 )
@@ -1702,6 +1840,8 @@ mod tests {
                         cert: None,
                         impl_name: "test-peer",
                         receive_datagrams: false,
+                        // QMux 経路は使わない (QUIC 直接接続の試験基盤)
+                        datagram_max_size: None,
                     },
                     &target_monitor,
                 )

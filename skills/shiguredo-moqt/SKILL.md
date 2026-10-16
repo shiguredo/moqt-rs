@@ -237,7 +237,7 @@ fn set_peer_alias_retention_ms(&mut self, retention_ms: u64)
 ### 利用者が match / 引数で使う enum
 
 ```rust
-pub enum Transport { Quic, WebTransport }
+pub enum Transport { Quic, WebTransport, Qmux }
 pub enum Role { Client, Server }
 pub enum SessionState { LocalSetupSent, Established, Closing, Closed }
 pub enum TrackRole { Publisher, Subscriber }

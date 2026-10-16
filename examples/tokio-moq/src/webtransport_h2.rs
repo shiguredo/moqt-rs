@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustls::pki_types::pem::PemObject;
 use shiguredo_http2::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 use shiguredo_http2::webtransport::stream::stream_id as wt_stream_id;
 use shiguredo_http2::webtransport::{
@@ -152,99 +151,13 @@ impl std::fmt::Debug for ClientConfig {
 
 /// rustls のクライアント設定を構築する (ALPN `h2` 固定)
 ///
-/// `disable_cert_validation` が true の場合と CA 証明書が指定されていない場合は
-/// 証明書検証を行わない (開発用)。両方指定された場合は無効化を優先する。
+/// TLS の組み立ては QMux 経路と共通である (`crate::tls::build_client_config`)。
 fn build_tls_client_config(config: &ClientConfig) -> Result<Arc<rustls::ClientConfig>> {
-    let use_insecure = config.disable_cert_validation || config.ca_cert_pem.is_none();
-    let mut tls_config = if use_insecure {
-        if config.ca_cert_pem.is_some() {
-            tracing::warn!(
-                "TLS certificate verification is disabled by ClientConfig::insecure; the CA certificate is ignored"
-            );
-        }
-        // 開発用: 証明書検証を無効化する (QUIC / HTTP/3 経路と対称の警告は呼び出し側が出す)
-        rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
-            .with_no_client_auth()
-    } else {
-        // `use_insecure` が false のときは CA 証明書が必ずある
-        let pem = config
-            .ca_cert_pem
-            .as_ref()
-            .expect("ca_cert_pem is present when certificate verification is enabled");
-        let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
-            let cert = cert.map_err(|e| {
-                TransportError::Internal(format!("failed to parse the CA certificate: {e}"))
-            })?;
-            roots.add(cert).map_err(|e| {
-                TransportError::Internal(format!("failed to add the CA certificate: {e}"))
-            })?;
-        }
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
-    };
-    tls_config.alpn_protocols = vec![H2_ALPN.to_vec()];
-    Ok(Arc::new(tls_config))
-}
-
-/// 証明書を検証しない `ServerCertVerifier` (開発用)
-///
-/// 署名検証だけは既定のプロバイダに委ね、証明書チェーンとサーバー名の検証を行わない。
-#[derive(Debug)]
-struct NoCertificateVerification(Arc<rustls::crypto::CryptoProvider>);
-
-impl NoCertificateVerification {
-    fn new() -> Self {
-        Self(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-    }
-}
-
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
+    crate::tls::build_client_config(
+        config.ca_cert_pem.as_deref(),
+        config.disable_cert_validation,
+        H2_ALPN,
+    )
 }
 
 // ---------------------------------------------------------------------------

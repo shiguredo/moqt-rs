@@ -2,7 +2,7 @@
 
 `moq-pub` / `moq-sub` が共有するトランスポート層のライブラリ。crates.io へは公開しない (`publish = false`)。
 
-QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。
+QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux の接続確立と、Sans I/O な `shiguredo_moqt::session::core::Session` を Tokio の I/O と結線する `MoqtClient` を提供する。`--url` と `--transport` の解釈もこのクレートが担う。
 
 ## 提供する範囲
 
@@ -11,11 +11,11 @@ QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 の接続確立と、
   - `resolve_transport`：`--transport` の指定と `msf` fragment の `connection` から `Transport` を解決する
   - `resolve_namespace`：`--namespace` の指定と `msf` fragment の track-identifier から Track Namespace を解決する
   - `ServerUrl`：authority / path / fragment / MSF fragment の解釈結果 / C4M 認可トークン (`c4m_tokens`) を保持する
-- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` の各モジュールが TLS とハンドシェイクを行う
-- `transport`：3 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
-- `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` / `establish_wt` (wt-h3) / `establish_wt_h2` で確立し、`publish_track` / `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで MOQT メッセージをやり取りする
+- 接続確立：`quic` / `webtransport_h3` / `webtransport_h2` / `qmux` の各モジュールが TLS とハンドシェイクを行う
+- `transport`：4 経路を統一的に扱う `SendStream` / `RecvStream` / `StreamHandle` / `StreamAcceptor` / `BidiStreamAcceptor`
+- `moqt_client::MoqtClient`：control stream と bidi request stream を駆動する。`establish_quic` / `establish_wt` (wt-h3) / `establish_wt_h2` / `establish_qmux` (qmux) で確立し、`publish_track` / `subscribe_track` / `send_subscribe_ok` / `send_request_error` / `next_event` / `tick` などで MOQT メッセージをやり取りする
 - `moqt_client::DataPlaneHandle`：subgroup stream (`send_subgroup_header` / `send_subgroup_object`) と datagram (`send_object_datagram` / `recv_datagram`) を `Session` へ通知する
-- `error::TransportError`：3 経路と MOQT メッセージのエラーを 1 つに統一する
+- `error::TransportError`：4 経路と MOQT メッセージのエラーを 1 つに統一する
 - `metrics`：`tokio-metrics` のタスクメトリクスを一定間隔でログ出力するヘルパー
 
 ## URL スキーム
@@ -54,16 +54,18 @@ scheme は RFC 3986 §3.1 に従い大文字小文字を区別しない (`MOQT:/
 
 接続経路は `--transport` で選ぶ。`--transport` を省略した場合は `--url` の `msf` fragment の
 `connection` (`q`: native QUIC / `wt`: WebTransport) を使い、それも無ければ `quic` になる
-(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。WebTransport 経路は experimental の
-ため、`--transport` も `connection` も無いときの既定にはしない。`connection=wt` のときの既定は
-`wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。`connection` と矛盾する `--transport`
-および `connection=q` と `connection=wt` の併記はエラーになる。
+(draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters))。WebTransport 経路と QMux 経路は
+experimental のため、`--transport` も `connection` も無いときの既定にはしない。`connection=wt` の
+ときの既定は `wt-h3` (HTTP/2 にする場合は `--transport wt-h2` を明示する)。`connection` と矛盾する
+`--transport`、`connection=q` と `connection=wt` の併記、`connection=q` / `connection=wt` と
+`--transport qmux` の組み合わせはエラーになる。
 
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
 | `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-22` |
 | `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。experimental |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2`。experimental |
+| `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-22`。UDP が使えない環境向け。experimental |
 
 WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-22`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-22 §6.2)。
 
@@ -72,6 +74,14 @@ WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。draft
 このため `wt-h3` の reset は `RESET_STREAM` へのフォールバックになり、WebTransport ヘッダが確実に届く保証が無い。`wt-h2` は `WT_RESET_STREAM` capsule で reset するため `RESET_STREAM_AT` は不要だが、MoQ リレーの capsule 対応に依存する。
 reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) は MoQ リレーによっては成立しない。
 この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
+
+QMux 経路 (`qmux`) は experimental として扱う。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で (draft-ietf-quic-qmux-02)、UDP が使えない環境でも MOQT を試せるようにするためのものである。
+QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-22` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
+DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる (破棄は `dropped_datagrams` として警告ログに出る)。QMux は `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
+送る DATAGRAM がピアの広告する `max_datagram_frame_size` に収まらない場合、QMux は送信の失敗を呼び出し側へ返さず音声が無言で落ちる。このため接続確立時に警告ログ (英語) を出す (`--datagram-max-size` の既定 1160 の音声 Object は、QMux の DATAGRAM フレーム全体では 1163 バイトになる)。
+`--cert` の扱いは WebTransport over HTTP/2 経路と同じで、省略すると証明書検証をスキップする (TCP + TLS の組み立てを共有し、ALPN だけが異なる)。
+この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
+実装は `qmux.rs` に閉じており、[qmux-rs](https://github.com/shiguredo/qmux-rs) の `shiguredo_qmux` と `tokio-qmux` を git の rev 固定で取り込む (タグが無く crates.io にも未公開のため)。
 
 ## C4M 認可トークン
 
@@ -97,4 +107,6 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 ## テスト
 
-`peer_harness` (テスト専用、`#[cfg(test)]`) が s2n-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリと example の公開 API だけを使う。対象は QUIC 直接接続である。
+`peer_harness` (テスト専用、`#[cfg(test)]`) が s2n-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリと example の公開 API だけを使う。対象は QUIC 直接接続と QMux である。
+
+QMux は `QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-22`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。

@@ -1000,6 +1000,17 @@ pub async fn run(
         );
     }
 
+    // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
+    // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
+    // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
+    // (`dropped_datagrams` を警告ログに出して追えるようにしている)。
+    // `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
+    if config.transport == Transport::Qmux {
+        tracing::warn!(
+            "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
+        );
+    }
+
     // 1. 接続確立と SETUP ハンドシェイク
     //
     // 名前解決、解決したアドレスのフォールバック、transport ごとの分岐は
@@ -1012,6 +1023,8 @@ pub async fn run(
             impl_name: "moq-sub",
             // subscriber は WebTransport 経路で datagram を継続受信する
             receive_datagrams: true,
+            // subscriber は datagram を送らない
+            datagram_max_size: None,
         },
         &task_monitor,
     )
@@ -1781,6 +1794,8 @@ pub async fn run(
                                             // subscriber は WebTransport 経路で datagram を
                                             // 継続受信する
                                             receive_datagrams: true,
+                                            // subscriber は datagram を送らない
+                                            datagram_max_size: None,
                                         },
                                         &task_monitor,
                                     )
@@ -2339,16 +2354,18 @@ async fn receive_registered_stream_data(
         error_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
             // Session 側は破棄対象として会計を閉じている。送出に失敗しても読み取りは打ち切る
             // (peer は応答の reset を返すか、遅延した FIN で終端する)。
-            // 送出後に指示の登録を破棄し、同じ stream へ STOP_SENDING を二重に送らない
-            // (同じ stream を読み直す呼び出し元 (保留 subgroup の保持ループなど) でも再送されない)
-            if let Err(e) = stream.stop_sending(error_code) {
+            // 送出の前に指示の登録を破棄し、同じ stream へ STOP_SENDING を二重に送らない
+            // (同じ stream を読み直す呼び出し元 (保留 subgroup の保持ループなど) でも再送されない)。
+            // 送出は QMux 経路では await を伴うため、この関数を包む timeout で中断されても
+            // 登録が残らないようにする (残ると読み直しのたびに再送される)
+            data_plane.clear_data_stream_stop_sending(stream_id);
+            if let Err(e) = stream.stop_sending(error_code).await {
                 tracing::warn!(
                     "Failed to send STOP_SENDING for timed out data stream: \
                      stream_id={}, error_code={error_code:#x} {e}",
                     stream_id.0
                 );
             }
-            data_plane.clear_data_stream_stop_sending(stream_id);
             Ok(None)
         }
         chunk = stream.receive_chunk() => match chunk? {

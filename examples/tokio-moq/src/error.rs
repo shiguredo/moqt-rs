@@ -1,6 +1,6 @@
 //! 共有トランスポート層のエラー型
 //!
-//! QUIC / WebTransport の全戻り値をこの `TransportError` に統一する。
+//! QUIC / WebTransport / QMux の全戻り値をこの `TransportError` に統一する。
 //! 各バイナリのアプリケーションエラー型は `From<TransportError>` を実装して
 //! `?` で伝播できるようにする。
 //!
@@ -54,18 +54,21 @@ pub enum TransportError {
     Http2(shiguredo_http2::Error),
     /// WebTransport over HTTP/2 のセッション / ストリームエラー
     WtH2(shiguredo_http2::webtransport::WtError),
+    /// QMux (draft-ietf-quic-qmux-02) の接続 / ストリームエラー
+    Qmux(tokio_qmux::Error),
     /// 接続がクローズ済み
     ConnectionClosed,
     /// peer がこのストリームの送信方向を終端した (STOP_SENDING)
     ///
     /// s2n-quic は peer の STOP_SENDING を受信したストリームの送信 API (send / finish /
-    /// reset) を `StreamError::StreamReset` で失敗させる。これは該当ストリームだけの終端で
-    /// ありセッションは継続するため (draft-ietf-moq-transport-22 §6.4.2.3 (Request
-    /// Cancellation and Rejection))、アプリはセッション終了と区別して扱う必要がある。
-    /// `error_code` は transport 依存の wire コードであり、QUIC 直接接続は QUIC の code space、
-    /// WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ戻すには
-    /// `StreamHandle::remap_stop_sending_error_code` を通す)。WebTransport over HTTP/2 は
-    /// capsule が MOQT のコードをそのまま運ぶため remap は不要である
+    /// reset) を `StreamError::StreamReset` で失敗させ、tokio-qmux は同じ条件で
+    /// `Error::Stopped` を返す。これは該当ストリームだけの終端でありセッションは継続するため
+    /// (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))、
+    /// アプリはセッション終了と区別して扱う必要がある。
+    /// `error_code` は transport 依存の wire コードであり、QUIC 直接接続と QMux は QUIC の
+    /// code space、WebTransport over HTTP/3 は HTTP/3 の code space になる (MOQT のコードへ
+    /// 戻すには `StreamHandle::remap_stop_sending_error_code` を通す)。WebTransport over
+    /// HTTP/2 は capsule が MOQT のコードをそのまま運ぶため remap は不要である
     /// (draft-ietf-webtrans-http2-15 §6.3)。受信方向の終端 (RESET_STREAM) は
     /// `RequestStreamEnd::Reset` が運ぶ。
     StreamReset {
@@ -122,6 +125,25 @@ impl TransportError {
             e => fallback(e),
         }
     }
+
+    /// QMux (tokio-qmux) のエラーを transport エラーへ写す
+    ///
+    /// peer が STOP_SENDING を送った後の送信 API は `Error::Stopped` を返す。s2n-quic の
+    /// `StreamError::StreamReset` と同じく該当ストリームだけの終端でありセッションは継続する
+    /// ため、[`Self::StreamReset`] にして切断と区別する (draft-ietf-moq-transport-22
+    /// §6.4.2.3 (Request Cancellation and Rejection))。
+    pub(crate) fn from_qmux(e: tokio_qmux::Error) -> Self {
+        match e {
+            tokio_qmux::Error::Stopped(error_code) => Self::StreamReset { error_code },
+            // 接続が閉じた場合とドライバが停止した場合は、セッション終了として variant で
+            // 判定する経路 (moq-pub / moq-sub の `is_transport_session_end` 等) があるため、
+            // QUIC 経路と同じ ConnectionClosed に写す
+            tokio_qmux::Error::ConnectionClosed | tokio_qmux::Error::DriverStopped => {
+                Self::ConnectionClosed
+            }
+            e => Self::Qmux(e),
+        }
+    }
 }
 
 impl std::fmt::Display for TransportError {
@@ -134,6 +156,7 @@ impl std::fmt::Display for TransportError {
             Self::Http3(e) => write!(f, "http3 error: {e}"),
             Self::Http2(e) => write!(f, "http2 error: {e}"),
             Self::WtH2(e) => write!(f, "webtransport over http2 error: {e}"),
+            Self::Qmux(e) => write!(f, "QMux error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
             Self::StreamReset { error_code } => {
                 write!(f, "stream reset by peer (error code {error_code:#x})")
@@ -171,6 +194,12 @@ impl From<shiguredo_http2::Error> for TransportError {
 impl From<shiguredo_http2::webtransport::WtError> for TransportError {
     fn from(e: shiguredo_http2::webtransport::WtError) -> Self {
         Self::WtH2(e)
+    }
+}
+
+impl From<tokio_qmux::Error> for TransportError {
+    fn from(e: tokio_qmux::Error) -> Self {
+        Self::from_qmux(e)
     }
 }
 

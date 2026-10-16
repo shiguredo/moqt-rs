@@ -21,6 +21,9 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fa
 # WebTransport over HTTP/3 で起動する
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h3 --fake-capture-device
 
+# QMux (TCP+TLS。UDP が使えない環境向け。experimental) で起動する
+cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport qmux --fake-capture-device
+
 # MP4 ファイルの映像トラックを再エンコードせずに配信する
 # 対応する映像コーデックは AV1 / H.264 / H.265
 cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --input-mp4 input.mp4
@@ -40,7 +43,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` / `wt-h2` / `qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--device-id` | | カメラデバイス ID |
 | `--width` | `1280` | 映像幅 (px) |
@@ -94,6 +97,10 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--fake-capture-device`
   - `--audio-device-id`
 
+QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
+DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。ピアの `max_datagram_frame_size` に `--datagram-max-size` の Object が収まらない場合は接続確立時に警告ログが出る。
+詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+
 ## 購読者からの新しい Group の要求
 
 映像の Group はキーフレームから始まる。そのため Group の途中で視聴を始めた購読者は、次のキーフレームが届くまで映像を表示できない。`--gop-duration` を長くするほど、この待ち時間も長くなる。
@@ -130,7 +137,7 @@ moq-pub は FETCH を次のように扱う。
 
 ## ログ
 
-環境変数 `RUST_LOG` でログレベルを制御できる。未設定の場合の既定は `error` である。WebTransport が experimental である旨などの警告ログを見るには `RUST_LOG=warn` 以上を指定する。
+環境変数 `RUST_LOG` でログレベルを制御できる。未設定の場合の既定は `error` である。WebTransport や QMux が experimental である旨などの警告ログを見るには `RUST_LOG=warn` 以上を指定する。
 
 ```bash
 RUST_LOG=debug cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device

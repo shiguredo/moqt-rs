@@ -42,6 +42,8 @@ test publish_and_subscribe_roundtrip ... ok
 
 `MOQT_E2E_URL` が未設定の場合は、何が必要かを示すメッセージでテストが失敗します。受信した MP4 は一時ディレクトリ (OS の一時ディレクトリ配下の `moqt-e2e-<PID>/subscriber.mp4`) に置き、終了時に削除します。
 
+QMux 経路 (`qmux`) は対象外です。これらのテストは実リレーを介するため、`MOQT_E2E_TRANSPORT` は `quic` / `wt-h3` / `wt-h2` のままにしています。
+
 ## CI
 
 `.github/workflows/e2e-test.yml` がこのテストを実行します。接続先は `secrets.TEST_MOQT_URI`、トランスポートは `vars.TEST_MOQT_TRANSPORT` から渡し、`secrets.TEST_MOQT_URI` が未設定の場合はテストを実行しません (fork からの PR など)。

@@ -256,11 +256,12 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
         .doc(
-            "Transport (quic | wt-h3 | wt-h2; wt-h3 / wt-h2 (WebTransport) are experimental). If \
-             --transport is omitted, uses the 'connection' parameter of the --url MSF fragment \
-             (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with --transport wt-h2 for \
-             HTTP/2); otherwise defaults to quic. A conflicting --transport, or 'connection=q' \
-             with 'connection=wt', is an error",
+            "Transport (quic | wt-h3 | wt-h2 | qmux; wt-h3 / wt-h2 (WebTransport) and qmux \
+             (QMux over TCP+TLS) are experimental). If --transport is omitted, uses the \
+             'connection' parameter of the --url MSF fragment (q: native QUIC, wt: WebTransport \
+             over HTTP/3, or wt-h2 with --transport wt-h2 for HTTP/2); otherwise defaults to \
+             quic. A conflicting --transport, or 'connection=q' with 'connection=wt', is an \
+             error",
         )
         .take(&mut args)
         .present_and_then(|o| Transport::parse(o.value()))?;
@@ -750,6 +751,28 @@ mod tests {
             config.transport,
             Transport::Quic,
             "connection=q は native QUIC になること"
+        );
+    }
+
+    /// `--transport qmux` は QMux 経路になる
+    ///
+    /// QMux は MSF fragment の `connection` に対応する値を持たない (native QUIC でも
+    /// WebTransport でもない) ため、fragment が接続種別を指定していないときだけ選べる。
+    #[test]
+    fn transport_accepts_explicit_qmux() {
+        let args = [
+            "--url",
+            "moqt://127.0.0.1:4443#msf:spam-egg--video",
+            "--transport",
+            "qmux",
+        ];
+        let config = parse_args(&args)
+            .expect("オプションの解析に成功すること")
+            .expect("設定が返ること");
+        assert_eq!(
+            config.transport,
+            Transport::Qmux,
+            "--transport qmux がそのまま使われること"
         );
     }
 

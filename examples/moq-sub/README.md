@@ -25,6 +25,9 @@ cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 # WebTransport over HTTP/2 で起動する
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport wt-h2
 
+# QMux (TCP+TLS。UDP が使えない環境向け。experimental) で起動する
+cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --transport qmux
+
 # 受信した音声 / 映像を MP4 に保存する (再生しない)
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example --mp4 out.mp4 --no-play
 
@@ -42,7 +45,7 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
 | `--url` | (必須) | 接続先 URL (`moqt://`) |
-| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2`) |
+| `--transport` | (省略時は `--url` の `msf` fragment の `connection`、無ければ `quic`) | 接続経路 (`quic` / `wt-h3` / `wt-h2` / `qmux`)。`wt-h3` / `wt-h2` / `qmux` は experimental |
 | `--cert` | | TLS CA 証明書パス |
 | `--namespace` | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--no-video` | | 映像トラックの購読を無効化する |
@@ -55,6 +58,9 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video'
 
 - `--no-play` と `--mp4` を併用した場合はデコードをスキップし、MP4 への保存だけを行う
 - `--no-play` を `--mp4` なしで指定した場合は受信したメディアを破棄する (警告ログが出る)
+
+QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
+音声の datagram は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ## 再生と遅延
 

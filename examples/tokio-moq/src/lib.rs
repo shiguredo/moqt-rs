@@ -1,7 +1,7 @@
 //! examples 共有トランスポート crate
 //!
-//! `moq-pub` / `moq-sub` の両バイナリが共通で利用する
-//! QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 のトランスポート層を提供する。
+//! `moq-pub` / `moq-sub` の両バイナリが共通で利用する QUIC / WebTransport over HTTP/3 /
+//! WebTransport over HTTP/2 / QMux のトランスポート層を提供する。
 //! URL の scheme は `moqt://` に統一し、トランスポートは [`Transport`] (`--transport`) で選ぶ。
 //! `--transport` を省略した場合は `--url` の MSF fragment の `connection` で決める
 //! ([`resolve_transport`])。
@@ -12,6 +12,15 @@
 //! s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きの
 //! データストリーム reset を行えないため (draft-ietf-webtrans-http3-16 §4.4)、reset を伴う経路は
 //! relay によっては成立しない。
+//!
+//! QMux 経路 ([`Transport::Qmux`]) も experimental である。QMux は順序保証された 1 本の
+//! バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する
+//! ため (draft-ietf-quic-qmux-02)、経路での損失は下位の TCP が再送するが、TCP の再送で
+//! 遅延が伸びる。
+//! `RESET_STREAM_AT` を実装しないため、reset の `reliable_size` は常に `None` になる。
+//! QMux 上の MOQT を扱う individual draft
+//! (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) は MOQT draft-16 を前提としており、
+//! 本 crate は QUIC version 1 との 1 対 1 の対応を採る。
 //!
 //! publisher は能動的に送信ストリームを open する側、subscriber は受動的に
 //! 受信ストリームを accept する側という非対称があるため、両者の union API を
@@ -103,11 +112,15 @@ pub const MOQT_PROTOCOL: &str = "moqt-22";
 pub mod error;
 pub mod metrics;
 pub mod moqt_client;
+pub mod qmux;
 pub mod quic;
 pub mod transport;
 pub mod webtransport;
 pub mod webtransport_h2;
 pub mod webtransport_h3;
+
+// TCP + TLS のクライアント設定 (QMux と WebTransport over HTTP/2 が共有する)
+pub(crate) mod tls;
 
 // in-process の MOQT peer 試験基盤 (テスト専用)
 #[cfg(test)]
@@ -135,6 +148,19 @@ pub enum Transport {
     /// experimental。reset は `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は
     /// 不要だが、relay の capsule 対応に依存する。
     WtH2,
+    /// QMux (TCP+TLS 上の ALPN `moqt-22`)
+    ///
+    /// experimental。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で
+    /// QUIC version 1 のストリーム操作と DATAGRAM 操作を多重化する
+    /// (draft-ietf-quic-qmux-02)。UDP が使えない環境でも MOQT を試せるようにするための経路で
+    /// あり、QMux 上の MOQT は individual draft
+    /// (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) の範囲である。
+    ///
+    /// native QUIC との差: 経路での損失は下位の TCP が再送するため起きないが、TCP の再送で
+    /// 遅延が伸び、輻輳時は後続のストリームもまとめて遅れる。加えて QMux はアプリへ速やかに
+    /// 配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側の
+    /// バッファが溢れると欠落しうる。破棄は `dropped_datagrams` として警告ログに出る。
+    Qmux,
 }
 
 impl Transport {
@@ -142,14 +168,15 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// `quic` / `wt-h3` / `wt-h2` 以外の値はエラーになる。
+    /// `quic` / `wt-h3` / `wt-h2` / `qmux` 以外の値はエラーになる。
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "quic" => Ok(Self::Quic),
             "wt-h3" => Ok(Self::WtH3),
             "wt-h2" => Ok(Self::WtH2),
+            "qmux" => Ok(Self::Qmux),
             other => Err(format!(
-                "unknown transport '{other}' (expected quic, wt-h3, or wt-h2)"
+                "unknown transport '{other}' (expected quic, wt-h3, wt-h2, or qmux)"
             )),
         }
     }
@@ -160,6 +187,7 @@ impl Transport {
             Self::Quic => "quic",
             Self::WtH3 => "wt-h3",
             Self::WtH2 => "wt-h2",
+            Self::Qmux => "qmux",
         }
     }
 }
@@ -191,8 +219,8 @@ pub struct MoqtFragment {
 
 /// パース済みの接続先情報
 ///
-/// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は [`Transport`] で
-/// 選ぶため、ここには持たない。`--transport` が指定されていればそれを使い、無ければ `msf` fragment
+/// 接続経路 (QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux) は
+/// [`Transport`] で選ぶため、ここには持たない。`--transport` が指定されていればそれを使い、無ければ `msf` fragment
 /// の `connection`、どちらも無ければ native QUIC になる ([`resolve_transport`])。
 #[derive(Debug, Clone)]
 pub struct ServerUrl {
@@ -968,8 +996,9 @@ pub fn migration_target(
 
 /// 接続の確立に必要な設定
 ///
-/// 接続経路ごとの分岐 (native QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2) は
-/// [`connect`] が担う。moq-pub / moq-sub は初回接続と GOAWAY 後の移行の双方で同じ設定を使う。
+/// 接続経路ごとの分岐 (native QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 /
+/// QMux) は [`connect`] が担う。moq-pub / moq-sub は初回接続と GOAWAY 後の移行の双方で
+/// 同じ設定を使う。
 #[derive(Debug, Clone)]
 pub struct ConnectParams<'a> {
     /// 接続先 (authority / path / MSF fragment / C4M 認可トークン)
@@ -982,6 +1011,12 @@ pub struct ConnectParams<'a> {
     pub impl_name: &'a str,
     /// WebTransport 経路で datagram の継続受信を有効にする (subscriber が使う)
     pub receive_datagrams: bool,
+    /// QMux 経路で送る予定の datagram の上限 (MOQT メッセージ全体の長さ。publisher が使う)
+    ///
+    /// QMux は DATAGRAM の送信失敗を呼び出し元へ返さないため、ピアが広告した
+    /// `max_datagram_frame_size` に収まるかを接続確立時に確認して警告する。`None` は
+    /// datagram を送らない経路 (subscriber) を表す。
+    pub datagram_max_size: Option<usize>,
 }
 
 /// URL と接続設定から MOQT セッションを確立する
@@ -1015,6 +1050,7 @@ pub async fn connect(
     let cert = params.cert.map(str::to_string);
     let impl_name = params.impl_name.to_string();
     let receive_datagrams = params.receive_datagrams;
+    let datagram_max_size = params.datagram_max_size;
     let authority = url.authority.clone();
     let task_monitor = task_monitor.clone();
 
@@ -1086,6 +1122,29 @@ pub async fn connect(
                         &task_monitor,
                     )
                     .await
+                }
+                Transport::Qmux => {
+                    let session = crate::qmux::connect(
+                        socket_addr,
+                        &server_name,
+                        cert.as_deref(),
+                        &task_monitor,
+                    )
+                    .await?;
+                    // 制御ストリームを開いた後はピアのトランスポートパラメータが届いている
+                    // ため、確立直後に datagram の上限を確認できる
+                    let handle = std::sync::Arc::clone(&session.handle);
+                    let (client, acceptor) = crate::moqt_client::MoqtClient::establish_qmux(
+                        session,
+                        &url.path,
+                        &authority_url,
+                        &impl_name,
+                        &url.c4m_tokens,
+                        &task_monitor,
+                    )
+                    .await?;
+                    crate::qmux::warn_if_datagram_too_large(&handle, datagram_max_size);
+                    Ok((client, acceptor))
                 }
             }
         }
@@ -1359,6 +1418,10 @@ mod tests {
         assert_eq!(
             Transport::parse("wt-h2").expect("wt-h2 は受理されること"),
             Transport::WtH2
+        );
+        assert_eq!(
+            Transport::parse("qmux").expect("qmux は受理されること"),
+            Transport::Qmux
         );
     }
 
@@ -1678,7 +1741,12 @@ mod tests {
     /// `Transport::as_str` は `Transport::parse` の逆写像である
     #[test]
     fn transport_as_str_is_the_inverse_of_parse() {
-        for transport in [Transport::Quic, Transport::WtH3, Transport::WtH2] {
+        for transport in [
+            Transport::Quic,
+            Transport::WtH3,
+            Transport::WtH2,
+            Transport::Qmux,
+        ] {
             assert_eq!(
                 Transport::parse(transport.as_str()).expect("解釈できること"),
                 transport,
@@ -1686,6 +1754,38 @@ mod tests {
                 transport.as_str()
             );
         }
+    }
+
+    /// `connection=q` / `connection=wt` と `--transport qmux` は矛盾する
+    ///
+    /// draft-ietf-moq-msf-01 §11.1.1 (Reserved fragment parameters) の `q` は native QUIC、
+    /// `wt` は WebTransport を MUST で要求する。QMux はどちらでもないため、fragment が
+    /// 接続種別を指定しているときは `--transport qmux` を受け付けない
+    /// (どちらを優先するかを決められないため)。
+    #[test]
+    fn resolve_transport_rejects_qmux_with_connection_parameter() {
+        for connection in ["q", "wt"] {
+            let url = parse_url(&format!(
+                "moqt://example.com/app#msf:moq-example--video&connection={connection}"
+            ))
+            .expect("URL のパースに成功すること");
+            let err = resolve_transport(Some(Transport::Qmux), &url)
+                .expect_err("矛盾するためエラーになること");
+            assert!(
+                err.contains("--transport qmux conflicts"),
+                "エラーに理由が含まれること: {err}"
+            );
+        }
+    }
+
+    /// `connection` が無ければ `--transport qmux` はそのまま使われる
+    #[test]
+    fn resolve_transport_accepts_qmux_without_connection_parameter() {
+        let url = parse_url("moqt://example.com/app").expect("URL のパースに成功すること");
+        assert_eq!(
+            resolve_transport(Some(Transport::Qmux), &url).expect("受理されること"),
+            Transport::Qmux
+        );
     }
 
     /// `connection=q` は native QUIC を要求する

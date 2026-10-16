@@ -20,7 +20,7 @@ shiguredo_mp4 = "2026.6.0-canary.2"
 # Opus デコーダ
 shiguredo_opus = "2026.4"
 
-# examples 共有トランスポート crate (QUIC / WebTransport)
+# examples 共有トランスポート crate (QUIC / WebTransport / QMux)
 tokio-moq = { path = "../tokio-moq" }
 
 # 外部クレート

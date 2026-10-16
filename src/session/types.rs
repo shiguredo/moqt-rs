@@ -27,6 +27,18 @@ pub enum Transport {
     Quic,
     /// WebTransport over HTTP/3
     WebTransport,
+    /// QMux (draft-ietf-quic-qmux-02) 経由
+    ///
+    /// 順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で、QUIC version 1 の
+    /// ストリーム操作と DATAGRAM 操作を多重化する。draft-ietf-moq-transport-22 §6.2 は
+    /// 「TCP など他のトランスポート上で直接動かす方法は定義しない」としており、QMux 上の
+    /// MOQT を扱うのは individual draft (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) で
+    /// ある。同 draft は MOQT draft-16 を前提としているため、本実装は QUIC version 1 との
+    /// 1 対 1 の対応を採る。
+    ///
+    /// §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は AUTHORITY / PATH を native QUIC に限るため、
+    /// QMux がこれらを送ることは同節の範囲外である (QMux は WebTransport ではない)。
+    Qmux,
 }
 
 /// この endpoint から見た 1 本の `Transport Session` の状態
@@ -571,7 +583,7 @@ impl DataStreamResetReason {
 
 /// caller が `Session` に渡す受信 uni data stream の識別子
 ///
-/// QUIC / WebTransport の stream ID をそのまま使ってもよいし、caller 独自の
+/// QUIC / WebTransport / QMux の stream ID をそのまま使ってもよいし、caller 独自の
 /// stable な整数 ID を使ってもよい。`Session` は値の意味を解釈せず、
 /// 同一 stream を同一値で通知されることだけを前提にする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

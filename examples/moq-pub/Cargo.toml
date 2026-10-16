@@ -26,7 +26,7 @@ shiguredo_opus = "2026.4"
 # カメラキャプチャ
 shiguredo_video_device = "2026.3"
 
-# examples 共有トランスポート crate (QUIC / WebTransport)
+# examples 共有トランスポート crate (QUIC / WebTransport / QMux)
 tokio-moq = { path = "../tokio-moq" }
 
 # 外部クレート

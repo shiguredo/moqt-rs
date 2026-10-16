@@ -1,6 +1,6 @@
 //! `shiguredo_moqt::session::core::Session` を tokio I/O 層と結線する MOQT クライアント
 //!
-//! sans-I/O な [`Session`] を核に、QUIC / WebTransport の制御ストリームと
+//! sans-I/O な [`Session`] を核に、QUIC / WebTransport / QMux の制御ストリームと
 //! bidi request stream を駆動する。publisher / subscriber の双方が共有する。
 //!
 //! # 構造
@@ -40,6 +40,7 @@ use shiguredo_moqt::{
 
 use crate::c4m_authorization_token;
 use crate::error::{Result, TransportError, session_error_code};
+use crate::qmux::QmuxSession;
 use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::transport::{
     BidiStreamAcceptor, RecvChunk, RecvStream, SendStream, StreamAcceptor, StreamHandle,
@@ -418,8 +419,10 @@ impl ControlStream {
     /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection): 受信方向の
     /// cancel は STOP_SENDING で行う。error code は §12.5 (Stream Reset Error Codes) から選ぶ。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-    pub fn stop_sending(&mut self, error_code: u64) -> Result<()> {
-        self.stream.stop_sending(error_code)
+    ///
+    /// QMux 経路は QMux の接続へコマンドを渡すため非同期になる。
+    pub async fn stop_sending(&mut self, error_code: u64) -> Result<()> {
+        self.stream.stop_sending(error_code).await
     }
 }
 
@@ -908,7 +911,7 @@ fn spawn_bidi_recv_task(
                 command = stop_rx.recv() => {
                     // 停止指示を受けたら受信半に STOP_SENDING を送出し、結果を依頼元へ返す
                     if let Some(command) = command {
-                        let result = stream.stop_sending(command.error_code);
+                        let result = stream.stop_sending(command.error_code).await;
                         let _ = command.ack.send(result);
                     }
                     break;
@@ -1012,7 +1015,7 @@ fn spawn_peer_bidi_accept_task(
                         biased;
                         command = stop_rx.recv() => {
                             if let Some(command) = command {
-                                let result = stream.stop_sending(command.error_code);
+                                let result = stream.stop_sending(command.error_code).await;
                                 let _ = command.ack.send(result);
                             }
                             break;
@@ -1239,6 +1242,78 @@ impl MoqtClient {
         )
         .await?;
         Ok((client, StreamAcceptor::Quic(recv_acceptor)))
+    }
+
+    /// QMux (draft-ietf-quic-qmux-02) 接続で MOQT client を確立する
+    ///
+    /// QMux は QUIC version 1 のストリームを順序保証された 1 本のバイトストリームへ多重化する
+    /// ため、ストリームの種類は QUIC 直接接続と同じになる。制御ストリームは単方向
+    /// (draft-ietf-moq-transport-22 §6.4.1、stream type 0x2F00)、request stream は双方向である
+    /// (§6.4.2)。
+    ///
+    /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) は AUTHORITY / PATH を
+    /// native QUIC に限る。QMux は WebTransport ではないため、QUIC 直接接続と同じく
+    /// PATH / AUTHORITY を送る (この扱いは同節の範囲外である)。
+    ///
+    /// `stop_sending_rx` は [`crate::qmux::connect`] が起動した観測タスクが流す peer の
+    /// STOP_SENDING で、該当する送信ストリームの終端として扱う。QMux は QUIC version 1 の
+    /// code space を共有するため、QUIC のコードがそのまま流れる。
+    ///
+    /// 戻り値の [`StreamAcceptor`] は data stream を受信する側 (subscriber) が使う。
+    /// peer 起動の request stream は MoqtClient 内部の受理タスクが受け取るため、
+    /// publisher も本 API を使える。
+    pub async fn establish_qmux(
+        session: QmuxSession,
+        path: &str,
+        authority: &str,
+        impl_name: &str,
+        c4m_tokens: &[Vec<u8>],
+        task_monitor: &tokio_metrics::TaskMonitor,
+    ) -> Result<(Self, StreamAcceptor)> {
+        let QmuxSession {
+            handle,
+            mut uni_rx,
+            bi_rx,
+            stop_sending_rx,
+        } = session;
+        let handle = StreamHandle::Qmux(handle);
+
+        // 自側 uni stream (control 送信側) を開く
+        let mut control_send = handle.open_send_stream().await?;
+
+        // Session を生成 (初期の SendControl(Setup) イベントが積まれる)
+        let options =
+            crate::build_setup_options(Some(path), Some(authority), impl_name, c4m_tokens);
+        let mut session = Session::new_client(MoqtTransport::Qmux, options)?;
+
+        // SETUP を取り出して送信する
+        let setup_msg = pop_send_control(&mut session)?;
+        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        tracing::info!("Sent SETUP message");
+
+        // peer uni stream の先頭が制御ストリームである。受理は接続を共有した別タスクが
+        // 行っているため、ここでは流れてきた先頭を取り出す
+        let recv_stream = uni_rx
+            .recv()
+            .await
+            .ok_or(TransportError::ConnectionClosed)?;
+        let mut control_recv = ControlStream::new(recv_stream);
+        recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
+
+        let client = Self::finish_handshake(
+            session,
+            HandshakeIo {
+                control_send,
+                handle,
+                stop_sending_rx: Some(stop_sending_rx),
+                control_recv,
+                bidi_acceptor: BidiStreamAcceptor::Qmux { bi_rx },
+            },
+            c4m_tokens,
+            task_monitor,
+        )
+        .await?;
+        Ok((client, StreamAcceptor::Qmux { uni_rx }))
     }
 
     /// WebTransport over HTTP/3 接続で MOQT client を確立する
@@ -2596,8 +2671,10 @@ impl MoqtClient {
     ///
     /// 破棄された時点で送信中だったメッセージは、Session のイベントキューから既に
     /// 取り出されているため再送されない。送られたかどうかは transport の実装に依存する。
-    /// 現在の 3 経路は、QUIC / WebTransport over HTTP/3 が送信バッファに載るまで待つため
-    /// 破棄された分は送られず、WebTransport over HTTP/2 は driver へ投入済みのため送られる。
+    /// 現在の 4 経路は、QUIC / WebTransport over HTTP/3 が送信バッファに載るまで待つため
+    /// 破棄された分は送られず、WebTransport over HTTP/2 と QMux は driver へ投入済みのため
+    /// 送られる (QMux はドライバへコマンドを渡す await と受理を待つ await の 2 段であり、
+    /// 後者で破棄されてもコマンドは投入済みである)。
     /// いずれもメッセージ単位で書き込むため部分送信は起きないが、`SendStream::send` の
     /// 契約として保証されているわけではない。
     ///

@@ -169,12 +169,12 @@ Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline 
 
 ## サンプル
 
-サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs)、[shiguredo_http2](https://github.com/shiguredo/http2-rs) を利用しています。
+サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs)、[shiguredo_http2](https://github.com/shiguredo/http2-rs)、[qmux-rs](https://github.com/shiguredo/qmux-rs) を利用しています。
 引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
 
-- [`moq-pub`](examples/moq-pub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で MoQ リレーに接続し、catalog / audio / video track を PUBLISH する
-- [`moq-sub`](examples/moq-sub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 で MoQ リレーに接続し、catalog を SUBSCRIBE して取得し、audio / video を SUBSCRIBE して再生する
-- [`tokio-moq`](examples/tokio-moq/README.md)：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 トランスポート層 (ライブラリ)
+- [`moq-pub`](examples/moq-pub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux で MoQ リレーに接続し、catalog / audio / video track を PUBLISH する
+- [`moq-sub`](examples/moq-sub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux で MoQ リレーに接続し、catalog を SUBSCRIBE して取得し、audio / video を SUBSCRIBE して再生する
+- [`tokio-moq`](examples/tokio-moq/README.md)：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux トランスポート層 (ライブラリ)
 
 前提条件は Rust 1.95 以降です。
 サンプルが使う `s2n-quic` が 1.95 を要求するためです。
@@ -188,12 +188,17 @@ cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fa
 cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
 ```
 
-接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2`) で選びます。
+接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2` / `qmux`) で選びます。
 `--transport` を省略した場合は `--url` の `msf` fragment の `connection` (`q`: native QUIC /
 `wt`: WebTransport) を使い、それも無ければ `quic` が既定になります。`connection` と矛盾する
 `--transport` および `connection=q` と `connection=wt` の併記はエラーになります。
 
 `wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/tokio-moq/README.md`](examples/tokio-moq/README.md) を参照してください)。
+
+`qmux` (QMux) も experimental です。TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境でも接続できます。
+DATAGRAM は経路での損失を下位の TCP が再送するため起きませんが、TCP の再送で遅延が伸びます。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しえます (破棄は警告ログに出ます)。
+`--cert` の扱いは WebTransport over HTTP/2 と同じです。また、ピアが広告する DATAGRAM の上限が足りない場合は接続確立時に警告ログが出ます。
+`connection=q` / `connection=wt` と `--transport qmux` は矛盾するためエラーになります (詳細は [`examples/tokio-moq/README.md`](examples/tokio-moq/README.md) を参照してください)。
 
 URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP と各制御メッセージ (PUBLISH / SUBSCRIBE / REQUEST_UPDATE) の AUTHORIZATION_TOKEN として送信できます。
 `--namespace` を省略した場合は MSF fragment の track-identifier が示す namespace を Track Namespace として使います (`--namespace` と MSF fragment のどちらも無い場合はエラーになります)。

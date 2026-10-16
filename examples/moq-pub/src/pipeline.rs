@@ -347,6 +347,10 @@ async fn establish_publisher_session(
             impl_name: "moq-pub",
             // publisher は datagram を受信しない
             receive_datagrams: false,
+            // QMux 経路で音声の OBJECT_DATAGRAM がピアの上限に収まるかを確立時に確認する。
+            // datagram を送らない設定では確認しない (`--datagram-max-size` が使われないため)
+            datagram_max_size: (config.audio_enabled && config.audio_datagram)
+                .then_some(config.datagram_max_size),
         },
         task_monitor,
     )
@@ -468,6 +472,17 @@ pub async fn run(
         tracing::warn!(
             "WebTransport transport ({:?}) is experimental: RESET_STREAM_AT is unavailable, so stream resets may not work",
             config.transport
+        );
+    }
+
+    // QMux 経路も experimental である。DATAGRAM は経路での損失を下位の TCP が再送するため
+    // 起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を
+    // 許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる
+    // (`dropped_datagrams` を警告ログに出して追えるようにしている)。
+    // `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
+    if config.transport == Transport::Qmux {
+        tracing::warn!(
+            "QMux transport is experimental: DATAGRAM and stream resets are carried over TCP, so latency can grow when the connection is congested"
         );
     }
 

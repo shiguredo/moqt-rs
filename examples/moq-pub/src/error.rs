@@ -183,6 +183,8 @@ impl From<tokio_moq::error::TransportError> for Error {
             // encode / decode 失敗は main ループが終了コード (PROTOCOL_VIOLATION など) を
             // 決めるため MessageError の variant を保って伝える
             tokio_moq::error::TransportError::Moqt(e) => Self::Moqt(e),
+            // QMux 経路のエラーは WebTransport と区別して表示する
+            tokio_moq::error::TransportError::Qmux(e) => Self::Other(format!("QMux: {e}")),
             other => Self::WebTransport(other.to_string()),
         }
     }

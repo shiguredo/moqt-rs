@@ -431,6 +431,18 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
 - `wt-h2` の reset は `WT_RESET_STREAM` capsule に依存し、リレーの対応が要る。
   また §6.2 により datagram が reliable / ordered になるため、音声を datagram で
   送る既定の遅延特性が変わる
+- `qmux` は QMux (draft-ietf-quic-qmux-02) 経由であり、MOQT 側に QMux 用の ALPN 登録が
+  無いため native QUIC と同じ `moqt-22` を広告する。QMux 自身の §8.1 は「QUIC マッピングと
+  異なる識別子」を MUST で求めるため、この選択は同節から外れる (interop を優先した)。
+  両 draft が決着したら見直す
+- `qmux` の DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP が再送した
+  分だけ遅延が伸びる。加えて QMux はアプリへ速やかに配送できない DATAGRAM の破棄を許すため
+  (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる。また
+  `RESET_STREAM_AT` を実装しないため、reset の `reliable_size` は常に `None` になる
+- QMux 上の MOQT を扱う individual draft
+  (`refs/moq/draft-nandakumar-moq-qmux-moqt-00.txt`) は MOQT draft-16 を前提としており、
+  同 draft の control stream (双方向 stream 0) は draft-ietf-moq-transport-22 §6.4.1
+  (control stream は単方向) と矛盾する。本実装は QUIC version 1 との 1 対 1 の対応を採る
 - `--cert` を省略すると証明書検証をスキップする。mTLS (§15.3.1) には対応しない
 - 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' examples/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、
