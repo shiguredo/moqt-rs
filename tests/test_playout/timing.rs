@@ -7,8 +7,9 @@ use shiguredo_moqt::playout::scheduler::{
     AudioPlayoutPlay, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::timing::{
-    AudioMissReason, AudioMissTotal, AudioPlayoutMiss, AudioPlayoutTimingSnapshot,
-    AudioPlayoutTimingStats, MAX_RECENT_AUDIO_MISSES, TimingSummary, summarize_timings,
+    AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissReason, AudioMissTotal, AudioPlayoutMiss,
+    AudioPlayoutTimingSnapshot, AudioPlayoutTimingStats, MAX_RECENT_AUDIO_MISSES, TimingSummary,
+    summarize_timings,
 };
 
 /// 鳴らすと決めた音の値を作る
@@ -649,6 +650,42 @@ fn reset_returns_to_the_initial_state() {
         stats.snapshot(100_000),
         AudioPlayoutTimingSnapshot::default(),
         "すべての記録を捨てて初期状態へ戻すこと"
+    );
+}
+
+#[test]
+fn record_stretch_unavailable_counts_cumulatively_and_resets() {
+    let mut stats = AudioPlayoutTimingStats::new();
+    // 数える前は 0 である (0 なら時間圧縮と補間が使えている)
+    assert_eq!(
+        stats.snapshot(0).stretch_unavailable_frames,
+        0,
+        "数える前は 0 であること"
+    );
+    // 呼んだ回数だけ数える
+    stats.record_stretch_unavailable();
+    stats.record_stretch_unavailable();
+    assert_eq!(
+        stats.snapshot(1_000).stretch_unavailable_frames,
+        2,
+        "呼んだ回数だけ数えること"
+    );
+    // 累積であり、分布の窓の外へ出ても残る
+    assert_eq!(
+        stats
+            .snapshot(AUDIO_PLAYOUT_TIMING_WINDOW_US * 2)
+            .stretch_unavailable_frames,
+        2,
+        "窓の外へ出ても累積を残すこと"
+    );
+    // 購読のやり直しでは 0 に戻る
+    stats.reset();
+    assert_eq!(
+        stats
+            .snapshot(AUDIO_PLAYOUT_TIMING_WINDOW_US * 2)
+            .stretch_unavailable_frames,
+        0,
+        "reset で 0 に戻ること"
     );
 }
 

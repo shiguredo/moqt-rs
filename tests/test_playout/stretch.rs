@@ -1,13 +1,15 @@
 //! 音声の波形の周期による時間圧縮・伸長と、欠落した区間の補間のテスト
 //!
-//! 公開 API (`compress` / `expand` / `conceal` / `concealment_end_gain`) の契約を確認する。
-//! 補間では、4 kHz へ間引いた粗い格子の周辺を元のサンプルレートの相関で評価して端数まで
-//! 周期を求めるため、格子に乗らない周期でも穴の終わりで位相がずれない。周期の推定が確かで
-//! ない音では、生成した音の末尾を短くフェードして段差を消す。
+//! 公開 API (`compress` / `expand` / `conceal` / `concealment_end_gain` /
+//! `is_time_stretch_available`) の契約を確認する。補間では、4 kHz へ間引いた粗い格子の周辺を
+//! 元のサンプルレートの相関で評価して端数まで周期を求めるため、格子に乗らない周期でも穴の
+//! 終わりで位相がずれない。周期の推定が確かでない音では、生成した音の末尾を短くフェードして
+//! 段差を消す。
 
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MAX_LAG,
     TIME_STRETCH_MIN_LAG, compress, conceal, concealment_end_gain, expand,
+    is_time_stretch_available,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -1044,4 +1046,30 @@ fn concealment_end_gain_ramps_to_the_end_gain() {
     assert!((concealment_end_gain(TIME_STRETCH_MAX_CONCEAL_US) - 0.5).abs() < 1e-6);
     // 上限を超える長さでも下限より下げない
     assert!((concealment_end_gain(TIME_STRETCH_MAX_CONCEAL_US * 2) - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn is_time_stretch_available_accepts_only_the_downsample_table_rates() {
+    // 4 kHz へ間引くフィルタの表にある 8 / 16 / 32 / 48 kHz だけが使える
+    for sample_rate in [8_000u32, 16_000, 32_000, 48_000] {
+        assert!(
+            is_time_stretch_available(sample_rate),
+            "sample_rate={sample_rate} は時間圧縮と補間を使えること"
+        );
+    }
+    // 表に無いレートは使えない。44.1 kHz (AAC など) とその半分の 22.05 kHz、レートとして
+    // 成り立たない 0 がこれにあたる
+    for sample_rate in [44_100u32, 22_050, 0] {
+        assert!(
+            !is_time_stretch_available(sample_rate),
+            "sample_rate={sample_rate} は時間圧縮と補間を使えないこと"
+        );
+    }
+    // 判定は表の完全一致にする。4 kHz の倍数へ丸めると、8.2 kHz のような表に無いレートを
+    // 8 kHz とみなして「使える」と答えてしまうが、compress と expand はサンプルレート
+    // そのものでフィルタを引くため実際には動かない
+    assert!(
+        !is_time_stretch_available(8_200),
+        "表に無いレートは表の近くでも使えないこと"
+    );
 }

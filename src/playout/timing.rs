@@ -219,6 +219,14 @@ pub struct AudioPlayoutTimingSnapshot {
     pub missed_by_reason: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順、最大 [`MAX_RECENT_AUDIO_MISSES`] 件)
     pub recent_misses: Vec<AudioMissEvent>,
+    /// 時間圧縮と補間を使えないサンプルレートで受け取った音の数 (累積)
+    ///
+    /// 4 kHz へ間引くフィルタの表 (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレート
+    /// (44.1 kHz の AAC など) では、ピッチの周期を求められないため時間圧縮も補間も働かない。
+    /// 落ちずに「操作しない」を返すので、この数が増えていることで気付く
+    /// ([`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available))。
+    /// 0 なら使えている
+    pub stretch_unavailable_frames: u64,
 }
 
 /// 目標遅延を閉ループで決めるための観測
@@ -386,6 +394,8 @@ pub struct AudioPlayoutTimingStats {
     missed_totals: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順)
     recent_misses: Vec<AudioMissEvent>,
+    /// 時間圧縮と補間を使えないサンプルレートで受け取った音の数
+    stretch_unavailable_frames: u64,
 }
 
 impl AudioPlayoutTimingStats {
@@ -413,6 +423,7 @@ impl AudioPlayoutTimingStats {
             missed_us: 0,
             missed_totals: AudioMissTotals::default(),
             recent_misses: Vec::new(),
+            stretch_unavailable_frames: 0,
         }
     }
 
@@ -550,7 +561,19 @@ impl AudioPlayoutTimingStats {
         snapshot.missed_us = self.missed_us;
         snapshot.missed_by_reason = self.missed_totals;
         snapshot.recent_misses = self.recent_misses.clone();
+        snapshot.stretch_unavailable_frames = self.stretch_unavailable_frames;
         snapshot
+    }
+
+    /// 時間圧縮と補間を使えないサンプルレートの音を 1 つ数える
+    ///
+    /// 4 kHz へ間引くフィルタの表に無いサンプルレート (44.1 kHz の AAC など) では、ピッチの
+    /// 周期を求められないため時間圧縮も補間も働かない。落ちずに「操作しない」を返すので、
+    /// この数が増えていることで気付く。鳴らす側が、復号した音を受け取った時点で
+    /// [`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available) を
+    /// 確かめて呼ぶ。数えるだけで鳴らし方は変えない
+    pub fn record_stretch_unavailable(&mut self) {
+        self.stretch_unavailable_frames += 1;
     }
 
     /// 記録をすべて捨てて初期状態に戻す (購読のやり直し)
@@ -568,6 +591,7 @@ impl AudioPlayoutTimingStats {
         self.missed_us = 0;
         self.missed_totals = AudioMissTotals::default();
         self.recent_misses.clear();
+        self.stretch_unavailable_frames = 0;
     }
 
     /// 窓より古い記録を分布から落とす

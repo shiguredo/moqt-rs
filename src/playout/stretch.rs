@@ -105,6 +105,25 @@ fn downsample_filter(sample_rate: u32) -> Option<DownsampleFilter> {
     Some(filter)
 }
 
+/// 時間圧縮と補間を使えるサンプルレートか
+///
+/// ピッチの周期は 4 kHz へ間引いた信号の自己相関から求めるため、間引きのフィルタの表
+/// (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレートでは周期を求められない。44.1 kHz
+/// (AAC など) がこれにあたり、**時間圧縮 ([`compress`]) も伸長 ([`expand`]) も補間
+/// ([`conceal`]) も働かない**。落ちずに「操作しない」を返すため呼び出し側からは区別できない
+/// ので、先にこの関数で確かめて計器へ出す
+/// ([`record_stretch_unavailable`](crate::playout::timing::AudioPlayoutTimingStats::record_stretch_unavailable)
+/// を参照)。
+///
+/// 判定はフィルタの表の完全一致にする。moqt-js は `Math.round(sampleRate / 4_000) * 4_000` で
+/// 4 kHz の倍数へ丸めてから表を引くが、その丸めは写さない。moqt-js の時間圧縮は 4 kHz へ
+/// 間引いた信号だけで周期を求めるため丸めた値でも動くのに対し、このモジュールの [`compress`]
+/// と [`expand`] はサンプルレートそのもので間引きフィルタを引く。丸めを写すと 44.1 kHz を
+/// 「使える」と答えながら、実際には [`compress`] も [`expand`] も動かない状態になる。
+pub fn is_time_stretch_available(sample_rate: u32) -> bool {
+    downsample_filter(sample_rate).is_some()
+}
+
 /// フィルタ係数の和 (正規化に使う)
 fn coefficient_sum(filter: &DownsampleFilter) -> f32 {
     filter
