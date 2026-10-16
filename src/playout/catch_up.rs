@@ -168,6 +168,9 @@ pub struct AudioReceiveCatchUpStats {
 ///
 /// [`AudioReceiveCatchUp::observe`] に復号の出力の観測を渡し、返ってきた判定が真なら
 /// 呼び出し側が復号器を作り直す。
+///
+/// 判定の閾値はすべてこのモジュールの定数であり、実測で決めた値である。購読ごとに変える
+/// ものではないため、設定は受け取らない。
 pub struct AudioReceiveCatchUp {
     /// 床を求める観測 (古い順)
     floor_samples: VecDeque<FloorSample>,

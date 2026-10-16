@@ -43,9 +43,10 @@ moqt-js は 2026-10-17 の変更 (`5fed7505`「playout のレビュー指摘を�
   動きの幅」としている。値そのものは `TIMELINE_BASE_DRIFT_US` であり、判定
   (`update_base_difference_drift`) が見るのは水準からの隔たり (`deviation_us`) の幅である。
   同じ並びにある `base_drift_us_per_second` は動きの速さであり、次元が違う。
-- moqt-js は `AudioReceiveCatchUp` の設定オブジェクトを削除し、閾値が実測で決めた値であり
-  購読ごとに変えないことを doc に書いている。moqt-rs の `AudioReceiveCatchUp` は元から設定を
-  受け取らないが、その理由は書かれていない。
+- moqt-js は 28a6001f「playout の使われていない API と設定を削除する」で `AudioReceiveCatchUp`
+  の設定オブジェクトを削除し、閾値が実測で決めた値であり購読ごとに変えないことを doc に
+  書いている。moqt-rs の `AudioReceiveCatchUp` は元から設定を受け取らないが、その理由は
+  書かれていない。
 
 ## 設計方針
 

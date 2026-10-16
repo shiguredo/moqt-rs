@@ -256,8 +256,12 @@ pub struct AudioDelayFeedback {
     adjustments: u64,
     /// 直近の観測
     latest: Option<AudioDelayFeedbackObservation>,
-    /// 実際に鳴った結果を 1 つでも観測したか。観測が無い間は閉ループの目標を使わない
-    observed: bool,
+    /// 閉ループへ観測が 1 つでも届いたか。届くまでは閉ループの目標を使わない
+    ///
+    /// 鳴っていない音の観測 (捨てた音や、鳴り終わっていない音を止めたときの通知) でも
+    /// `true` になるため、「実際に鳴った結果を観測したか」ではない
+    /// ([`AudioDelayFeedback::target_delay_us`] が参照する)。
+    received_observation: bool,
     /// 圧縮が続くため上限を広げているか
     widened_ceiling: bool,
     /// 上限を上げる根拠 (圧縮の速さが閾値を超えた状態) が続いている時間 (マイクロ秒)
@@ -284,7 +288,7 @@ impl AudioDelayFeedback {
             last_change_us: 0,
             adjustments: 0,
             latest: None,
-            observed: false,
+            received_observation: false,
             widened_ceiling: false,
             compression_streak_us: 0,
             quiet_streak_us: 0,
@@ -331,12 +335,12 @@ impl AudioDelayFeedback {
     /// は、学習値も含めて掛ける。到着が大きく跳ねた分まで目標にすると、その分だけ常に遅れて
     /// 鳴るためである。
     ///
-    /// 実際に鳴った結果をまだ 1 つも観測していないときは、閉ループの目標を使わず
-    /// `jitter_target_us` だけを切って返す。閉ループは観測を入力にする制御であり、観測が
-    /// 無い間に目標を動かすと、まだ鳴らしていない間の表示の遅れ (購読を始めた直後の基準) が
-    /// 変わるためである。
+    /// 閉ループへ観測がまだ 1 つも届いていないときは、閉ループの目標を使わず
+    /// `jitter_target_us` を上限 ([`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] = 100 ms) で切って
+    /// 返す。閉ループは観測を入力にする制御であり、観測が無い間に目標を動かすと、まだ
+    /// 鳴らしていない間の表示の遅れ (購読を始めた直後の基準) が変わるためである。
     pub fn target_delay_us(&self, jitter_target_us: i64) -> i64 {
-        if !self.observed {
+        if !self.received_observation {
             return jitter_target_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US);
         }
         jitter_target_us
@@ -389,8 +393,8 @@ impl AudioDelayFeedback {
                 .max(0);
         }
         self.latest = Some(observation);
-        // 1 つでも観測を受けたら、以降は閉ループの目標を使う
-        self.observed = true;
+        // 1 つでも観測を受けたら、以降は閉ループの目標を使う (鳴っていない音の観測でも同じ)
+        self.received_observation = true;
         // 圧縮の増分を、次の制御 (毎秒 1 回) まで積む。音ごとの増分をそのまま速さとして見ると、
         // 1 秒間に出た圧縮を取りこぼす。負の値は 0 とみなす (購読のやり直しで累積が戻っても
         // 負の差を作らない)
@@ -573,7 +577,7 @@ impl AudioDelayFeedback {
         self.last_change_us = 0;
         self.adjustments = 0;
         self.latest = None;
-        self.observed = false;
+        self.received_observation = false;
         self.widened_ceiling = false;
         self.compression_streak_us = 0;
         self.quiet_streak_us = 0;

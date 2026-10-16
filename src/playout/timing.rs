@@ -205,9 +205,14 @@ pub struct AudioPlayoutTimingSnapshot {
     pub played_us: i64,
     /// 到着基準の計画で鳴らした音の数 (累積)
     ///
-    /// 時間軸が目標を決められていない (TIMESTAMP が壁時計からずれているなど) ことを、
-    /// この数と [`AudioPlayoutTimingSnapshot::unplanned_frames`] が 0 であることの組み合わせで
-    /// 読む。
+    /// 到着基準になるのは、時間軸の再生予定時刻を使えなかった音 (基準がまだ無い、基準が
+    /// ずれている、目標から離れすぎて基準を取り直した) だけではない。予定を決められても
+    /// 使わなかった音 (呼び出し側が `enforce_target` を false にしたとき。配信が終わった
+    /// あとに保持している音を吐き出すときなど) も到着基準で鳴らす。したがって、この数だけ
+    /// では「時間軸が目標を決められていない」と読めない。予定を決められた音が 1 つも無ければ
+    /// [`AudioPlayoutTimingSnapshot::slack_us`] と
+    /// [`AudioPlayoutTimingSnapshot::lateness_us`] のどちらも None になるため、時間軸が予定を
+    /// 決められているかはその 2 つで読む。
     pub arrival_planned_frames: u64,
     /// 到着基準の計画も持たないまま鳴らした音の数 (累積。通常は 0)
     pub unplanned_frames: u64,
@@ -346,7 +351,7 @@ struct LastPlayRecord {
     lateness_us: Option<i64>,
 }
 
-/// 予約したが、まだ鳴り始めていない音の区間 (マイクロ秒)
+/// まだ鳴り終わっていない音の区間 (マイクロ秒)
 #[derive(Debug, Clone, Copy)]
 struct PendingSound {
     /// 鳴り始める時刻
@@ -376,7 +381,9 @@ pub struct AudioPlayoutTimingStats {
     latenesses_us: TimedValues,
     /// 直近に鳴らすと決めた音の値
     last_play: Option<LastPlayRecord>,
-    /// 予約したが、まだ鳴り始めていない音の区間。鳴らさずに止めた分を数えるために持つ
+    /// まだ鳴り終わっていない音の区間。鳴らさずに止めた分を数えるために持つ
+    /// (鳴り始めていても終わっていない区間を含む。[`AudioPlayoutTimingStats::record_stopped`]
+    /// が残りの長さを数える)
     pending: Vec<PendingSound>,
     /// 鳴らすと決めた音の数
     played_frames: u64,

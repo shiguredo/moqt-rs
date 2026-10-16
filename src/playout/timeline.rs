@@ -285,7 +285,10 @@ pub enum UnsharedReason {
 pub struct TrackBreakdown {
     /// 基準の遅れ (マイクロ秒)。送受信の時計のずれと、経路と復号の最小遅延。未観測なら None
     pub base_delay_us: Option<i64>,
-    /// jitter buffer の遅延 (マイクロ秒)。自分の揺らぎから求めた値。未観測なら None
+    /// jitter buffer の遅延 (マイクロ秒)。揺らぎから求めた値と、実際に鳴った結果から閉ループが
+    /// 決めた目標の大きい方を、適用の上限
+    /// ([`applied_ceiling_us`](crate::playout::feedback::AudioDelayFeedback::applied_ceiling_us))
+    /// で切った値。観測が届く前は揺らぎから求めた値だけを同じ上限で切る。未観測なら None
     pub jitter_delay_us: Option<i64>,
     /// 同期の制御が足した分 (マイクロ秒)。0 以上
     pub sync_extra_delay_us: i64,
@@ -311,7 +314,13 @@ pub struct DelayBreakdown {
     pub unshared_reason: UnsharedReason,
     /// 直近の基準の差の動き (マイクロ秒/秒)。まだ履歴が無ければ None
     pub base_drift_us_per_second: Option<i64>,
-    /// 時計のずれとみなす、基準の差の動きの幅 (マイクロ秒)
+    /// 時計のずれとみなす、基準の差の水準からの隔たりの幅 (マイクロ秒)
+    ///
+    /// [`DelayBreakdown::base_drift_us_per_second`] と並ぶが**次元が違う** (あちらは動きの
+    /// 速さ、こちらは隔たりの幅)。判定 (`base_difference_drifted`) が使うのは隔たりの幅で
+    /// あり、動きの速さは計器として出すだけで判定には使わない。隔たりがこの幅を超えたまま
+    /// [`TIMELINE_BASE_DRIFT_CONFIRM_US`] 続いたとき (または 1 回の記録で段差
+    /// ([`TIMELINE_BASE_DRIFT_STEP_US`]) として現れたとき) に時計のずれとみなす
     pub base_drift_limit_us: i64,
     /// jitter buffer の遅延を切り下げる上限 (マイクロ秒)
     pub presentation_delay_cap_us: i64,
