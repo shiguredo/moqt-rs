@@ -1,12 +1,15 @@
-//! 波形の周期による音声の時間圧縮・時間伸長と、欠落した区間の補間
+//! 波形の周期による音声の時間圧縮と、欠落した区間の補間
 //!
 //! 到着の間隔が揺らいだ音声を目標の時刻に合わせるため、波形の周期 (ピッチ) 1 つ分を
-//! 削ったり挿したりして音の長さをわずかに変える。音声が欠落した区間は、直前の音の末尾の
-//! 周期を繰り返して埋める。周期は第 1 チャンネルを 4 kHz へ間引いた自己相関から求める。
+//! 削って音の長さをわずかに詰める。音声が欠落した区間は、直前の音の末尾の周期を
+//! 繰り返して埋める。周期は第 1 チャンネルを 4 kHz へ間引いた自己相関から求める。
 //! 欠落した区間の補間では、その 4 kHz の粗い格子の周辺を元のサンプルレートの相関で評価し、
 //! ピークを放物線補間して端数まで周期を求める (4 kHz の格子では 48 kHz で 12 サンプル単位に
 //! 量子化され、格子に乗らない音では穴が長いほど位相がずれるため)。時刻や出力デバイスには
 //! 触れない。
+//!
+//! 時間伸長は持たない。この再生は音を伸ばす場面を持たないためである (目標より早く届いた音は
+//! 前の音の終わりより後ろに置けばよく、足りない区間は補間 ([`conceal`]) が埋める)。
 
 /// 相関を測る長さ (4 kHz のサンプル数、12.5 ms)
 pub const TIME_STRETCH_CORRELATION_LEN: usize = 50;
@@ -109,18 +112,18 @@ fn downsample_filter(sample_rate: u32) -> Option<DownsampleFilter> {
 ///
 /// ピッチの周期は 4 kHz へ間引いた信号の自己相関から求めるため、間引きのフィルタの表
 /// (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレートでは周期を求められない。44.1 kHz
-/// (AAC など) がこれにあたり、**時間圧縮 ([`compress`]) も伸長 ([`expand`]) も補間
-/// ([`conceal`]) も働かない**。落ちずに「操作しない」を返すため呼び出し側からは区別できない
-/// ので、先にこの関数で確かめて計器へ出す
+/// (AAC など) がこれにあたり、**時間圧縮 ([`compress`]) も補間 ([`conceal`]) も働かない**。
+/// 落ちずに「操作しない」を返すため呼び出し側からは区別できないので、先にこの関数で確かめて
+/// 計器へ出す
 /// ([`record_stretch_unavailable`](crate::playout::timing::AudioPlayoutTimingStats::record_stretch_unavailable)
 /// を参照)。
 ///
 /// 判定はフィルタの表の完全一致にする。moqt-js は `Math.round(sampleRate / 4_000) * 4_000` で
 /// 4 kHz の倍数へ丸めてから表を引くが、その丸めは写さない。moqt-js の時間圧縮は丸めた値を
 /// キーに使うため、表のレートの近傍 (47.999 kHz など) でも 48 kHz のフィルタで動く。この
-/// モジュールの [`compress`] と [`expand`] はサンプルレートそのもので間引きフィルタを引く
-/// ため、丸めを写すと 47.999 kHz を「使える」と答えながら実際には動かない、という食い違いが
-/// 生じる。44.1 kHz は丸めても 44 kHz になり表に無いため、どちらの判定でも false である。
+/// モジュールの [`compress`] はサンプルレートそのもので間引きフィルタを引くため、丸めを
+/// 写すと 47.999 kHz を「使える」と答えながら実際には動かない、という食い違いが生じる。
+/// 44.1 kHz は丸めても 44 kHz になり表に無いため、どちらの判定でも false である。
 ///
 /// 無音の入力では [`conceal`] がフィルタを引く前に無音と判定して要求どおり 0 を書くため、
 /// この判定が false でも補間そのものは起きる (無音を埋めるだけなので実害はない)。
@@ -547,7 +550,7 @@ fn is_channel_seam_smooth(channel: &[f32], period: f64) -> bool {
 /// 操作するピッチの周期を求める (操作しないときは None)
 ///
 /// 波形が繰り返していない場所で切ると耳につくため、相関が足りないときは操作しない。
-/// 無音は詰めても伸ばしても聞こえないため、そのまま操作する。無音かどうかは、相関が
+/// 無音は詰めても聞こえないため、そのまま操作する。無音かどうかは、相関が
 /// 足りないときだけ `channels_are_silent` で調べる。
 fn pitch_period_of(
     reference: &[f32],
@@ -630,57 +633,6 @@ pub fn compress(
     -(removed as isize)
 }
 
-/// 音声を時間伸長する (ピッチ周期 1 つ分を挿す)
-///
-/// `channels` はチャンネルごとの音声で、すべて同じ長さであること。サンプルはおおむね
-/// `[-1.0, 1.0]` に正規化された有限値であること。結果は `output` へ書く (`output` の
-/// 長さと順序は `channels` に対応させる)。`output` の各要素には、元の長さに
-/// `TIME_STRETCH_MAX_LAG` (60) × 間引き率を足した長さ以上を用意すること。間引き率は
-/// 8 kHz / 16 kHz / 32 kHz / 48 kHz でそれぞれ 2 / 4 / 8 / 12。
-///
-/// # 戻り値
-///
-/// 長さの変化 (サンプル数)。正が伸長、0 が操作なし。0 のとき `output` には何も書かない。
-/// 0 になるのは、[compress] と同じ条件に加え、`output` の長さが `channels` と合わない
-/// とき、`output` が短すぎるとき。
-pub fn expand(channels: &[&[f32]], output: &mut [&mut [f32]], sample_rate: u32) -> isize {
-    if channels.is_empty() {
-        return 0;
-    }
-    let length = channels[0].len();
-    if length == 0
-        || channels.iter().any(|channel| channel.len() != length)
-        || output.len() != channels.len()
-    {
-        return 0;
-    }
-    let reference: &[f32] = channels[0];
-    let splice = length / 2;
-    let pitch = match pitch_period_of(reference, sample_rate, splice, || {
-        is_silent(channels.iter().copied())
-    }) {
-        Some(pitch) => pitch,
-        None => return 0,
-    };
-    let added = pitch.samples;
-    if output.iter().any(|channel| channel.len() < length + added) {
-        return 0;
-    }
-    for (channel, destination) in channels.iter().zip(output.iter_mut()) {
-        // 切れ目までと、挿す分 (切れ目の直前の周期) を写す
-        destination[..splice + added].copy_from_slice(&channel[..splice + added]);
-        // 挿した分の先頭を、切れ目の直前の音とクロスフェードする
-        cross_fade(
-            &mut destination[splice..splice + added],
-            &channel[splice - added..splice],
-            added,
-        );
-        // 切れ目より後を写す
-        destination[splice + added..length + added].copy_from_slice(&channel[splice..length]);
-    }
-    added as isize
-}
-
 /// 補間した音の末尾の振幅を、補間する長さ (マイクロ秒) から求める
 ///
 /// 長い補間ほど末尾の振幅を [`TIME_STRETCH_CONCEAL_END_GAIN`] まで下げる。補間の長さが
@@ -713,7 +665,7 @@ fn conceal_samples(conceal_us: i64, sample_rate: u32) -> Option<usize> {
 /// に相当するサンプル数以上の長さを用意すること。サンプルレートは [compress] と同じ
 /// 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する。
 ///
-/// 周期は末尾の相関から求める ([compress] や [expand] が操作する位置の前の相関窓で求める
+/// 周期は末尾の相関から求める ([compress] が操作する位置の前の相関窓で求める
 /// のとは別。繰り返しの継ぎ目は末尾にあるため、末尾の周期を直接評価する)。4 kHz へ間引いた
 /// 信号で粗く探したあと、その周辺を元のサンプルレートの相関で評価して端数まで求める。
 /// 周期どおりに繰り返せているときは、繰り返しの先頭が末尾の続きになるため継ぎ目は波形が

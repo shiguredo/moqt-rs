@@ -1,4 +1,4 @@
-//! 波形の周期による時間圧縮・伸長と、欠落した区間の補間のプロパティテスト
+//! 波形の周期による時間圧縮と、欠落した区間の補間のプロパティテスト
 //!
 //! 任意の音声サンプル列に対して、長さの変化の契約とバッファ操作の構造が
 //! 保たれることを検証する。
@@ -6,7 +6,7 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_END_GAIN, TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, conceal,
-    concealment_end_gain, expand,
+    concealment_end_gain,
 };
 
 /// 対応しているサンプルレートと間引き率の組
@@ -56,7 +56,7 @@ fn sample_max_length_change_samples(
 /// 任意の音声のサンプル列を 1 チャンネル分生成する
 ///
 /// ノイズ (操作されない経路)、周期的な矩形波 (操作される経路)、無音 (相関に関係なく
-/// 操作される経路) を混ぜて、時間伸縮の分岐をひととおり踏む。
+/// 操作される経路) を混ぜて、時間圧縮の分岐をひととおり踏む。
 fn sample_signal(ctx: &mut noprop::TestCaseContext, length: usize) -> Vec<f32> {
     match noprop::sample_usize_in(ctx, 0..3) {
         0 => (0..length)
@@ -155,58 +155,6 @@ fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::Test
                     &original_channel[splice + removed..length]
                 );
                 for sample in channel {
-                    assert!(sample.is_finite());
-                }
-            }
-        }
-        Ok(())
-    })?;
-    Ok(())
-}
-
-/// expand は 0 または正の長さの変化を返し、挿した範囲の後ろが元のサンプルと一致する
-#[test]
-fn expand_reports_length_change_and_keeps_buffers_consistent() -> noprop::TestResult {
-    let mut runner = test_runner()?;
-    runner.run(256, |ctx| {
-        let (sample_rate, factor) = sample_supported_rate(ctx);
-        let length = sample_length(ctx);
-        let channel_count = noprop::sample_usize_in(ctx, 1..=2);
-        let channels = sample_channels(ctx, length, channel_count);
-        // 挿入しうる最大長 (60 × 間引き率) を足した出力を用意する
-        let mut output = vec![vec![0.0f32; length + TIME_STRETCH_MAX_LAG * factor]; channel_count];
-        let references: Vec<&[f32]> = channels.iter().map(|channel| channel.as_slice()).collect();
-        let mut outputs: Vec<&mut [f32]> = output
-            .iter_mut()
-            .map(|channel| channel.as_mut_slice())
-            .collect();
-        let change = expand(&references, &mut outputs, sample_rate);
-        assert!(change >= 0);
-        if change == 0 {
-            // 操作しなかったときは出力へ何も書かない
-            assert!(
-                output
-                    .iter()
-                    .all(|channel| channel.iter().all(|sample| *sample == 0.0))
-            );
-        } else {
-            let added = change as usize;
-            assert_eq!(added % factor, 0);
-            assert!(
-                (TIME_STRETCH_MIN_LAG * factor..=TIME_STRETCH_MAX_LAG * factor).contains(&added)
-            );
-            let splice = length / 2;
-            // 挿す長さは音の中央までである
-            assert!(added <= splice);
-            for (output_channel, channel) in output.iter().zip(channels.iter()) {
-                // 切れ目までは元のまま (フェードする範囲を除く)
-                assert_eq!(&output_channel[..splice], &channel[..splice]);
-                // 切れ目より後ろは挿した分だけ後ろへずれる
-                assert_eq!(
-                    &output_channel[splice + added..length + added],
-                    &channel[splice..length]
-                );
-                for sample in output_channel {
                     assert!(sample.is_finite());
                 }
             }

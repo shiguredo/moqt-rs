@@ -1129,29 +1129,3 @@ fn the_stretch_deadband_is_not_counted_as_lateness() {
         "不感帯を超えた分だけを遅れとして残すこと"
     );
 }
-
-#[test]
-fn reset_restores_the_initial_state_and_keeps_the_ceiling() {
-    // 学習を消すと初期状態に戻る (テストと、購読を作り直す呼び出し側のためのもの)
-    let mut feedback = AudioDelayFeedback::new();
-    feedback.set_ceiling_us(Some(200_000));
-    feedback.update(observation(0, Some(100_000), 0, 0));
-    feedback.reset();
-
-    let snapshot = feedback.snapshot();
-    assert_eq!(
-        snapshot.target_us, AUDIO_DELAY_FEEDBACK_START_US,
-        "初期値へ戻る"
-    );
-    assert_eq!(
-        snapshot.reason,
-        AudioDelayFeedbackReason::Initial,
-        "理由も戻る"
-    );
-    assert_eq!(snapshot.adjustments, 0, "回数も戻る");
-    assert_eq!(snapshot.lateness_p50_us, None, "観測も消える");
-    // 明示設定の上限は残す (呼び出し側が決めた値である)
-    assert_eq!(feedback.ceiling_us(), Some(200_000), "明示設定は残る");
-    // リセット後は観測が無い扱いへ戻るため、学習値をそのまま使う
-    assert_eq!(feedback.target_delay_us(0), 0, "観測が無い扱いへ戻る");
-}

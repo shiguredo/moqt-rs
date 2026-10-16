@@ -1,6 +1,6 @@
 //! 音声の目標遅延の閉ループのプロパティテスト
 //!
-//! 任意の操作列 (観測・明示の上限の設定と解除・リセット) に対して、目標が上下限と明示の
+//! 任意の操作列 (観測・明示の上限の設定と解除) に対して、目標が上下限と明示の
 //! 上限の中に収まり、実際に使う値が jitter buffer の学習値以上になり、1 回の増分が
 //! 20〜40 ms に収まり、減少量が毎秒 10 ms を超えず、並べすぎの累積が戻っても増えないことを
 //! 検証する。分岐ごとに到達を数え、検証が空振りしていないことも確かめる。
@@ -15,23 +15,21 @@ use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_INTERVAL_US,
     AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
     AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_STEP_US, AUDIO_DELAY_FEEDBACK_MIN_US,
-    AUDIO_DELAY_FEEDBACK_START_US, AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback,
-    AudioDelayFeedbackReason, AudioDelayFeedbackSnapshot,
+    AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback, AudioDelayFeedbackReason,
+    AudioDelayFeedbackSnapshot,
 };
 use shiguredo_moqt::playout::scheduler::AUDIO_PLAYOUT_STRETCH_MIN_US;
 use shiguredo_moqt::playout::timing::{AudioDelayFeedbackObservation, TimingSummary};
 
-/// 操作の重み (観測 / 明示の上限の設定 / 明示の上限の解除 / リセット)
+/// 操作の重み (観測 / 明示の上限の設定 / 明示の上限の解除)
 ///
-/// 観測を主にし、上限の設定 / 解除とリセットも混ぜる。観測は添字 0 である。
-const OP_WEIGHTS: [u32; 4] = [10, 2, 1, 1];
+/// 観測を主にし、上限の設定 / 解除も混ぜる。観測は添字 0 である。
+const OP_WEIGHTS: [u32; 3] = [10, 2, 1];
 
 /// 明示の上限を設定する操作の添字 ([`OP_WEIGHTS`])
 const OP_SET_CEILING: usize = 1;
 /// 明示の上限を解除する操作の添字 ([`OP_WEIGHTS`])
 const OP_CLEAR_CEILING: usize = 2;
-/// リセットする操作の添字 ([`OP_WEIGHTS`])
-const OP_RESET: usize = 3;
 
 /// 鳴り遅れの分布の選び方の重み (まだ鳴らしていない / 許容の中 / 許容の上 / 大きな遅れ)
 const LATENESS_WEIGHTS: [u32; 4] = [2, 3, 5, 2];
@@ -205,8 +203,6 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
     let saw_ceiling_below_floor = Cell::new(false);
     let saw_ceiling_clamp = Cell::new(false);
     let saw_backlog_returned = Cell::new(false);
-    let saw_reset_after_adjustment = Cell::new(false);
-    let saw_reset_clears_the_observation = Cell::new(false);
     let saw_compression_rate = Cell::new(false);
 
     let mut runner = test_runner()?;
@@ -298,60 +294,6 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         "上限の解除で目標が範囲の外に出た: target={}",
                         snapshot.target_us
                     );
-                }
-                OP_RESET => {
-                    let adjustments_before_reset = feedback.snapshot().adjustments;
-                    let ceiling_us = feedback.ceiling_us();
-                    feedback.reset();
-                    last_update_at_us = None;
-                    backlog_misses = 0;
-                    backlog_us = 0;
-                    consumed_backlog_misses = 0;
-                    consumed_backlog_us = 0;
-                    // 広げた上限と連続時間も初期状態へ戻る
-                    widened_ceiling = false;
-                    compression_streak_us = 0;
-                    quiet_streak_us = 0;
-                    pending_compression_us = 0;
-
-                    let snapshot = feedback.snapshot();
-                    let (lower_us, upper_us) = target_limits(ceiling_us, snapshot.applied_ceiling_us);
-                    let expected_us = AUDIO_DELAY_FEEDBACK_START_US.max(lower_us).min(upper_us);
-                    assert_eq!(
-                        snapshot.target_us, expected_us,
-                        "リセットで初期値へ戻らない: {snapshot:?}"
-                    );
-                    assert_eq!(
-                        snapshot.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-                        "リセットで広げた上限が戻らない: {snapshot:?}"
-                    );
-                    assert_eq!(snapshot.compression_us_per_second, 0, "リセットで速さが残る");
-                    assert_eq!(
-                        snapshot.reason,
-                        AudioDelayFeedbackReason::Initial,
-                        "リセットで理由が戻らない: {snapshot:?}"
-                    );
-                    assert_eq!(snapshot.adjustments, 0, "リセットで回数が戻らない");
-                    assert_eq!(snapshot.last_change_us, 0, "リセットで増分が残る");
-                    assert_eq!(snapshot.lateness_p50_us, None, "リセットで観測が残る");
-                    assert_eq!(snapshot.start_delay_p50_us, None, "リセットで観測が残る");
-                    assert_eq!(snapshot.slack_p50_us, None, "リセットで観測が残る");
-                    assert_eq!(
-                        feedback.ceiling_us(),
-                        ceiling_us,
-                        "リセットで明示の上限が消えた"
-                    );
-                    // 観測が無い扱いへ戻るため、学習値 (上限の内側) をそのまま使う
-                    let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
-                    assert_eq!(
-                        feedback.target_delay_us(jitter_us),
-                        jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
-                        "リセットで観測が無い扱いへ戻らない"
-                    );
-                    saw_reset_clears_the_observation.set(true);
-                    if adjustments_before_reset > 0 {
-                        saw_reset_after_adjustment.set(true);
-                    }
                 }
                 _ => {
                     // 残るのは観測 (添字 0) だけである
@@ -784,104 +726,6 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
     assert!(
         saw_compression_rate.get(),
         "圧縮の速さを観測する場合を通っていない\n{runner}"
-    );
-    assert!(
-        saw_reset_after_adjustment.get(),
-        "目標を動かした後のリセットを通っていない\n{runner}"
-    );
-    assert!(
-        saw_reset_clears_the_observation.get(),
-        "リセットで観測が消える場合を通っていない\n{runner}"
-    );
-    Ok(())
-}
-
-#[test]
-fn reset_restores_the_initial_state_and_keeps_the_ceiling() -> noprop::TestResult {
-    let saw_reset_after_adjustment = Cell::new(false);
-    let saw_reset_with_ceiling = Cell::new(false);
-    let saw_reset_without_ceiling = Cell::new(false);
-
-    let mut runner = test_runner()?;
-    runner.run(128, |ctx| {
-        let mut feedback = AudioDelayFeedback::new();
-        if noprop::sample_bool(ctx) {
-            let ceiling_us =
-                noprop::sample_usize_in(ctx, 0..=AUDIO_DELAY_FEEDBACK_MAX_US as usize) as i64;
-            feedback.set_ceiling_us(Some(ceiling_us));
-        }
-        let mut now_us = 0i64;
-        for _ in 0..noprop::sample_usize_in(ctx, 0..=8) {
-            now_us = now_us.saturating_add(noprop::sample_with_boundaries(
-                ctx,
-                &[0, AUDIO_DELAY_FEEDBACK_INTERVAL_US],
-                noprop::Ratio::one_nth(3),
-                |ctx| noprop::sample_usize_in(ctx, 0..=2_000_000) as i64,
-            ));
-            let lateness_p50_us = match noprop::sample_weighted_index(ctx, &LATENESS_WEIGHTS) {
-                0 => None,
-                _ => Some(noprop::sample_usize_in(ctx, 0..=400_000) as i64),
-            };
-            feedback.update(observation(now_us, lateness_p50_us, 0, 0));
-        }
-
-        let adjustments_before_reset = feedback.snapshot().adjustments;
-        let ceiling_us = feedback.ceiling_us();
-        feedback.reset();
-
-        let snapshot = feedback.snapshot();
-        let (lower_us, upper_us) = target_limits(ceiling_us, snapshot.applied_ceiling_us);
-        let expected_us = AUDIO_DELAY_FEEDBACK_START_US.max(lower_us).min(upper_us);
-        assert_eq!(
-            snapshot.target_us, expected_us,
-            "リセットで初期値 (明示の上限の中) へ戻らない: {snapshot:?}"
-        );
-        assert_eq!(
-            snapshot.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-            "リセットで適用する上限が既定へ戻らない: {snapshot:?}"
-        );
-        assert_eq!(
-            snapshot.reason,
-            AudioDelayFeedbackReason::Initial,
-            "リセットで理由が戻らない: {snapshot:?}"
-        );
-        assert_eq!(snapshot.adjustments, 0, "リセットで回数が戻らない");
-        assert_eq!(snapshot.last_change_us, 0, "リセットで増分が残る");
-        assert_eq!(snapshot.lateness_p50_us, None, "リセットで観測が残る");
-        assert_eq!(snapshot.start_delay_p50_us, None, "リセットで観測が残る");
-        assert_eq!(snapshot.slack_p50_us, None, "リセットで観測が残る");
-        // 明示設定の上限は呼び出し側が決めた値であるため残す
-        assert_eq!(feedback.ceiling_us(), ceiling_us, "リセットで上限が消えた");
-        // 観測が無い扱いへ戻るため、学習値 (上限の内側) をそのまま使う
-        let jitter_us = noprop::sample_usize_in(ctx, 0..500_000) as i64;
-        assert_eq!(
-            feedback.target_delay_us(jitter_us),
-            jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
-            "リセットで観測が無い扱いへ戻らない"
-        );
-
-        if adjustments_before_reset > 0 {
-            saw_reset_after_adjustment.set(true);
-        }
-        if ceiling_us.is_some() {
-            saw_reset_with_ceiling.set(true);
-        } else {
-            saw_reset_without_ceiling.set(true);
-        }
-        Ok(())
-    })?;
-
-    assert!(
-        saw_reset_after_adjustment.get(),
-        "目標を動かした後のリセットを通っていない\n{runner}"
-    );
-    assert!(
-        saw_reset_with_ceiling.get(),
-        "明示の上限がある状態のリセットを通っていない\n{runner}"
-    );
-    assert!(
-        saw_reset_without_ceiling.get(),
-        "明示の上限が無い状態のリセットを通っていない\n{runner}"
     );
     Ok(())
 }

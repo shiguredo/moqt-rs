@@ -563,28 +563,6 @@ impl AudioDelayFeedback {
         }
     }
 
-    /// 学習を消して初期状態に戻す
-    ///
-    /// 目標は「到着から鳴るまでの経路」の学習であり購読のやり直しでは変わらないため、
-    /// 通常は呼ばない (購読のやり直しで目標を初期値へ戻すと、その間だけ遅れが戻る)。
-    /// 明示設定の上限は呼び出し側が決めた値であるため残す。
-    pub fn reset(&mut self) {
-        self.target_us = AUDIO_DELAY_FEEDBACK_START_US;
-        self.reason = AudioDelayFeedbackReason::Initial;
-        self.last_update_at_us = None;
-        self.last_backlog_misses = 0;
-        self.last_backlog_us = 0;
-        self.last_change_us = 0;
-        self.adjustments = 0;
-        self.latest = None;
-        self.received_observation = false;
-        self.widened_ceiling = false;
-        self.compression_streak_us = 0;
-        self.quiet_streak_us = 0;
-        self.compression_since_update_us = 0;
-        self.compression_us_per_second = 0;
-    }
-
     /// 閉ループの目標を持つのに使える上限 (マイクロ秒)
     ///
     /// 実際に適用する値の上限と同じにする。適用は

@@ -1,15 +1,13 @@
-//! 音声の波形の周期による時間圧縮・伸長と、欠落した区間の補間のテスト
+//! 音声の波形の周期による時間圧縮と、欠落した区間の補間のテスト
 //!
-//! 公開 API (`compress` / `expand` / `conceal` / `concealment_end_gain` /
-//! `is_time_stretch_available`) の契約を確認する。補間では、4 kHz へ間引いた粗い格子の周辺を
-//! 元のサンプルレートの相関で評価して端数まで周期を求めるため、格子に乗らない周期でも穴の
-//! 終わりで位相がずれない。周期の推定が確かでない音では、生成した音の末尾を短くフェードして
-//! 段差を消す。
+//! 公開 API (`compress` / `conceal` / `concealment_end_gain` / `is_time_stretch_available`)
+//! の契約を確認する。補間では、4 kHz へ間引いた粗い格子の周辺を元のサンプルレートの相関で
+//! 評価して端数まで周期を求めるため、格子に乗らない周期でも穴の終わりで位相がずれない。
+//! 周期の推定が確かでない音では、生成した音の末尾を短くフェードして段差を消す。
 
 use shiguredo_moqt::playout::stretch::{
-    TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MAX_LAG,
-    TIME_STRETCH_MIN_LAG, compress, conceal, concealment_end_gain, expand,
-    is_time_stretch_available,
+    TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MIN_LAG, compress,
+    conceal, concealment_end_gain, is_time_stretch_available,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -310,13 +308,6 @@ fn noise_is_not_stretched() {
     assert_eq!(compress(&mut channels, 48_000, usize::MAX), 0);
     // 操作しなかったのでバッファは変わらない
     assert_eq!(channel, original);
-
-    let mut output = vec![7.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [original.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-    // 操作しなかったので出力へは何も書かない
-    assert!(output.iter().all(|sample| *sample == 7.0));
 }
 
 #[test]
@@ -328,116 +319,6 @@ fn silence_is_stretched() {
         compress(&mut channels, 48_000, usize::MAX),
         -(TIME_STRETCH_MIN_LAG as isize * 12)
     );
-
-    let input = vec![0.0f32; 960];
-    let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [input.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(
-        expand(&channels, &mut outputs, 48_000),
-        TIME_STRETCH_MIN_LAG as isize * 12
-    );
-}
-
-#[test]
-fn expand_inserts_one_pitch_period() {
-    let original = square_wave(960, 240, 0.5);
-    let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [original.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    let change = expand(&channels, &mut outputs, 48_000);
-    assert_eq!(change, 240);
-    // 周期と同じ長さを挿すため、使用する範囲は元の波形のまま
-    for index in 0..960 + 240 {
-        assert!((output[index] - original[index % 240]).abs() < 1e-6);
-    }
-}
-
-#[test]
-fn expand_mixes_splice_with_cross_fade() {
-    // 周期ごとに値が違う波形で、クロスフェードの適用位置と重みを固定する
-    let original = varied_square_wave(960, 240, 0.5);
-    let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [original.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    let change = expand(&channels, &mut outputs, 48_000);
-    assert_eq!(change, 240);
-
-    let added = 240usize;
-    let splice = 480usize;
-    // 切れ目までは変わらない
-    assert_eq!(&output[..splice], &original[..splice]);
-    // 挿した分の先頭は、切れ目の直前の音へ重み (index + 1) / (added + 1) で寄る
-    for index in 0..added {
-        let weight = (index as f32 + 1.0) / (added as f32 + 1.0);
-        let expected =
-            (1.0 - weight) * original[splice + index] + weight * original[splice - added + index];
-        assert!(
-            (output[splice + index] - expected).abs() < 1e-5,
-            "index={index}"
-        );
-    }
-    // 切れ目より後ろは挿した分だけ後ろへずれる
-    assert_eq!(&output[splice + added..960 + added], &original[splice..960]);
-}
-
-#[test]
-fn expand_with_mismatched_channel_lengths_is_ignored() {
-    let left = square_wave(960, 240, 0.5);
-    let right = square_wave(480, 240, 0.5);
-    let mut output_left = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let mut output_right = vec![0.0f32; 480 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 2] = [left.as_slice(), right.as_slice()];
-    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-    assert!(output_left.iter().all(|sample| *sample == 0.0));
-    assert!(output_right.iter().all(|sample| *sample == 0.0));
-}
-
-#[test]
-fn expand_with_different_output_channel_count_is_ignored() {
-    let channel = square_wave(960, 240, 0.5);
-    let mut output_left = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let mut output_right = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [channel.as_slice()];
-    let mut outputs: [&mut [f32]; 2] = [output_left.as_mut_slice(), output_right.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-    assert!(output_left.iter().all(|sample| *sample == 0.0));
-    assert!(output_right.iter().all(|sample| *sample == 0.0));
-}
-
-#[test]
-fn expand_with_empty_channel_is_ignored() {
-    let channels: [&[f32]; 0] = [];
-    let mut outputs: [&mut [f32]; 0] = [];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-
-    let channel: Vec<f32> = Vec::new();
-    let mut output: Vec<f32> = Vec::new();
-    let channels: [&[f32]; 1] = [channel.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-}
-
-#[test]
-fn expand_with_unsupported_sample_rate_is_ignored() {
-    let channel = square_wave(960, 240, 0.5);
-    let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-    let channels: [&[f32]; 1] = [channel.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 44_100), 0);
-    assert!(output.iter().all(|sample| *sample == 0.0));
-}
-
-#[test]
-fn expand_without_enough_output_is_ignored() {
-    let original = square_wave(960, 240, 0.5);
-    // 挿入される長さ (240) に足りない出力では操作しない
-    let mut output = vec![0.0f32; 960 + 240 - 1];
-    let channels: [&[f32]; 1] = [original.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(expand(&channels, &mut outputs, 48_000), 0);
-    assert!(output.iter().all(|sample| *sample == 0.0));
 }
 
 #[test]
@@ -450,21 +331,11 @@ fn supported_sample_rates_are_stretched() {
         (48_000, 960, 240, 240),
     ];
     for (sample_rate, length, period, expected) in cases {
-        let original = square_wave(length, period, 0.5);
-        let mut channel = original.clone();
+        let mut channel = square_wave(length, period, 0.5);
         let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
         assert_eq!(
             compress(&mut channels, sample_rate, usize::MAX),
             -expected,
-            "sample_rate={sample_rate}"
-        );
-
-        let mut output = vec![0.0f32; length + TIME_STRETCH_MAX_LAG * 12];
-        let channels: [&[f32]; 1] = [original.as_slice()];
-        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-        assert_eq!(
-            expand(&channels, &mut outputs, sample_rate),
-            expected,
             "sample_rate={sample_rate}"
         );
     }
@@ -854,7 +725,7 @@ fn conceal_lowers_the_amplitude_towards_the_end() {
 #[test]
 fn conceal_fills_silence_with_zeros() {
     // 無音に近い入力では相関が常に 0 になり周期が求まらない。周期の代わりに 0 を書き、
-    // 埋めた長さは要求どおりにする (時間圧縮・時間伸長は無音でも操作するのと同じ扱い)
+    // 埋めた長さは要求どおりにする (時間圧縮が無音でも操作するのと同じ扱い)
     let silence = vec![0.0f32; 960];
     let mut output = vec![7.0f32; 1_920];
     let channels: [&[f32]; 1] = [silence.as_slice()];
@@ -1066,15 +937,15 @@ fn is_time_stretch_available_accepts_only_the_downsample_table_rates() {
         );
     }
     // 判定は表の完全一致にする。4 kHz の倍数へ丸めると、8.2 kHz のような表に無いレートを
-    // 8 kHz とみなして「使える」と答えてしまうが、compress と expand はサンプルレート
-    // そのものでフィルタを引くため実際には動かない
+    // 8 kHz とみなして「使える」と答えてしまうが、compress はサンプルレートそのもので
+    // フィルタを引くため実際には動かない
     assert!(
         !is_time_stretch_available(8_200),
         "表に無いレートは表の近くでも使えないこと"
     );
     // 判定と実際の操作が一致することを固定する。丸めと完全一致で結論が分かれるレート
     // (8.2 kHz は丸めると 8 kHz、47.999 kHz は丸めると 48 kHz) では、判定が false である
-    // だけでなく compress / expand / conceal がどれも何もしないことを確かめる
+    // だけでなく compress / conceal がどれも何もしないことを確かめる
     for sample_rate in [8_200u32, 47_999] {
         assert!(
             !is_time_stretch_available(sample_rate),
@@ -1091,14 +962,6 @@ fn is_time_stretch_available_accepts_only_the_downsample_table_rates() {
         assert_eq!(
             channel, original,
             "sample_rate={sample_rate} では音を変えないこと"
-        );
-        let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
-        let channels: [&[f32]; 1] = [original.as_slice()];
-        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-        assert_eq!(
-            expand(&channels, &mut outputs, sample_rate),
-            0,
-            "sample_rate={sample_rate} では時間伸長をしないこと"
         );
         let mut concealed = vec![0.0f32; 1_764];
         let channels: [&[f32]; 1] = [original.as_slice()];
