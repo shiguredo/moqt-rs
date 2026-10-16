@@ -1137,9 +1137,14 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 
 ```rust
 // playout::stretch
-use shiguredo_moqt::playout::stretch::{compress, conceal, concealment_end_gain, expand};
-fn compress(channels: &mut [&mut [f32]], sample_rate: u32) -> isize
-fn expand(channels: &[&[f32]], output: &mut [&mut [f32]], sample_rate: u32) -> isize
+use shiguredo_moqt::playout::stretch::{
+    compress, conceal, concealment_end_gain, is_time_stretch_available,
+};
+fn compress(
+    channels: &mut [&mut [f32]],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+) -> isize
 fn conceal(
     channels: &[&[f32]],
     output: &mut [&mut [f32]],
@@ -1147,6 +1152,7 @@ fn conceal(
     conceal_us: i64,
 ) -> isize
 fn concealment_end_gain(conceal_us: i64) -> f32
+fn is_time_stretch_available(sample_rate: u32) -> bool
 ```
 
 ```rust
@@ -1225,7 +1231,7 @@ fn reset_track(&mut self, track: Track)
 fn reset(&mut self)
 ```
 
-`playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する。戻り値は長さの変化 (圧縮は負、伸長は正、0 は操作なし)。`expand` の `output` には元の長さ + 60 × 間引き率 (2 / 4 / 8 / 12) 以上の長さを用意する。
+`playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する (`is_time_stretch_available` で確かめられる)。戻り値は長さの変化 (圧縮は負、0 は操作なし)。時間伸長は持たない (この再生は音を伸ばす場面を持たず、足りない区間は `conceal` が埋める)。
 `conceal` は末尾の 2 周期分の相関から求めた周期で末尾を繰り返し、`conceal_us` 分を埋めた長さを返す (0 なら `output` に何も書かない)。利得は末尾へ向けて `concealment_end_gain` まで下げる。
 
 `playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。
