@@ -32,10 +32,11 @@ moqt-js は 2026-10-17 の変更 (`dd77381a`「時間圧縮を使えないサン
   フィルタの表を引けるかどうかを返す。
 - 判定は表の完全一致 (`downsample_filter(sample_rate).is_some()`) にする。moqt-js は
   `Math.round(sampleRate / 4_000) * 4_000` で 4 kHz の倍数へ丸めてから表を引くが、この丸めは
-  写さない。moqt-js の時間圧縮は 4 kHz へ間引いた信号だけで周期を求めるため丸めた値でも
-  動くのに対し、moqt-rs の `compress` / `expand` はサンプルレートそのもので
-  `downsample_filter` を引く。丸めを写すと、44.1 kHz を「使える」と答えながら実際には
-  `compress` も `expand` も動かない状態を作る (表に無いレートでは 0 を返す)。
+  写さない。moqt-js の時間圧縮は丸めた値をキーに使うため、表のレートの近傍 (47.999 kHz など)
+  でも 48 kHz のフィルタで動くのに対し、moqt-rs の `compress` / `expand` はサンプルレート
+  そのもので `downsample_filter` を引く。丸めを写すと 47.999 kHz を「使える」と答えながら
+  実際には動かない、という食い違いが生じる。44.1 kHz は丸めても 44 kHz になり表に無いため、
+  どちらの判定でも false である。
 - `AudioPlayoutTimingStats` に累積の `stretch_unavailable_frames` と
   `record_stretch_unavailable` を追加し、`snapshot` へ出して `reset` で 0 に戻す。到着の
   遅れと同じく購読の開始からの累積にする。
@@ -69,10 +70,19 @@ moqt-js は 2026-10-17 の変更 (`dd77381a`「時間圧縮を使えないサン
   累積であり、分布の窓の外へ出ても残る
 - `examples/moq-sub/src/main.rs` の `AudioPlayoutAssembly::arrange` の先頭で
   `stretch::is_time_stretch_available` を確かめ、使えないレートの音を計器へ数えるように
-  した。鳴らすかどうかの決定より前に数えるため、捨てた音も数える。`log_fields` に
-  `stretch_unavailable=` を追加した
+  した。鳴らすかどうかの決定より前に数える。`log_fields` に `stretch_unavailable=` を
+  追加した
+  - 数えるのは「鳴らす組み立てへ渡した音」である。受信側の待ち行列 (example の jitter
+    buffer) の溢れで捨てられた音は `arrange` へ届かないため含まない。moqt-js は復号の出力を
+    直接受け取るため間に捨てる経路が無く、この点だけ構成が違う (計器の doc にも書いた)
 - テスト: `is_time_stretch_available_accepts_only_the_downsample_table_rates` (表の 4 レートが
-  true、44.1 kHz / 22.05 kHz / 0 / 8.2 kHz が false)、
+  true、44.1 kHz / 22.05 kHz / 0 / 8.2 kHz が false。加えて丸めと完全一致で結論が分かれる
+  8.2 kHz と 47.999 kHz で `compress` / `expand` / `conceal` がどれも何もしないことを固定)、
   `record_stretch_unavailable_counts_cumulatively_and_resets` (数える / 窓の外でも累積 /
   `reset` で 0)、`playout_assembly_counts_only_the_stretch_unavailable_sample_rates`
-  (44.1 kHz は数え、48 kHz は数えない) を追加した
+  (44.1 kHz は数え、48 kHz は数えない。数えても予約が返ることを確かめ、鳴らし方を変えない
+  ことも固定)
+- 独立レビューの指摘による修正: 丸めの例が誤っていたため 47.999 kHz に直し (44.1 kHz は
+  丸めても false)、計器の契約を「鳴らす組み立てへ渡した音の数」に直して jitter buffer の
+  溢れで捨てられた音を含まないことを明記し、数えるだけで鳴らし方を変えないことをテストで
+  確かめるようにした

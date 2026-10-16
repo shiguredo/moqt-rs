@@ -571,8 +571,9 @@ impl AudioPlayoutAssembly {
     /// スケジューラへ渡す。鳴らさないと決まったときは、その理由 (並べすぎ) と長さを
     /// 計器へ記録し、閉ループへ観測を渡して `None` を返す。
     ///
-    /// 復号した音を受け取った時点で、時間圧縮と補間を使えるサンプルレートかも確かめる。
-    /// 使えないレートの音は計器へ数える (鳴らし方は変えない)。
+    /// 鳴らす組み立てへ渡す時点で、時間圧縮と補間を使えるサンプルレートかも確かめる。
+    /// 使えないレートの音は計器へ数える (鳴らし方は変えない)。受信側の待ち行列 (jitter
+    /// buffer) の溢れで捨てられた音はここへ届かないため、この数には含まれない。
     ///
     /// `arrival_us` は到着した音がまだ鳴っていない位置である。`now_us` は既に出力へ積んだ
     /// 分だけ先に進んでいるため、到着基準の遅れはその位置から数える。
@@ -586,7 +587,8 @@ impl AudioPlayoutAssembly {
     ) -> Option<AudioPlayoutArrangement> {
         // 4 kHz へ間引くフィルタの表に無いサンプルレート (44.1 kHz の AAC など) では、ピッチの
         // 周期を求められないため時間圧縮も補間も働かない。落ちずに「操作しない」を返して区別
-        // できないので、計器に数えて気付けるようにする。数えるだけで鳴らし方は変えない
+        // できないので、計器に数えて気付けるようにする。数えるだけで鳴らし方は変えない。
+        // 受信側の待ち行列 (jitter buffer) の溢れで捨てられた音はここへ届かないため数えない
         if !stretch::is_time_stretch_available(audio.sample_rate) {
             self.stats.record_stretch_unavailable();
         }
@@ -1926,7 +1928,7 @@ mod tests {
     ///
     /// 44.1 kHz (AAC など) は 4 kHz へ間引くフィルタの表に無く、時間圧縮も補間も働かない。
     /// 落ちずに「操作しない」を返すため、数えることで気付けるようにする。表にある 48 kHz の
-    /// 音は数えない。数えるだけで鳴らし方は変えない。
+    /// 音は数えない。数えるだけで鳴らし方 (予約が返るか) を変えない。
     #[test]
     fn playout_assembly_counts_only_the_stretch_unavailable_sample_rates() {
         let mut timeline = PlayoutTimeline::new();
@@ -1934,18 +1936,25 @@ mod tests {
         let arrival_us = 10_000_000;
         // 到着の記録は受信側 (jitter buffer) が行う
         timeline.observe(Track::Audio, arrival_us, 0);
-        // 44.1 kHz の音 (20 ms で 882 サンプル) を受け取ると数える。鳴らすかどうかの決定とは
-        // 別に数えるため、返った予約は使わない
+        // 44.1 kHz の音 (20 ms で 882 サンプル) を受け取ると数える
         let audio = audio_frame(882, 44_100);
-        let _ = assembly.arrange(&mut timeline, &audio, arrival_us, arrival_us, true);
+        let arrangement = assembly.arrange(&mut timeline, &audio, arrival_us, arrival_us, true);
+        assert!(
+            arrangement.is_some(),
+            "数えるだけで鳴らし方 (予約の有無) を変えないこと"
+        );
         assert_eq!(
             assembly.snapshot(arrival_us).stretch_unavailable_frames,
             1,
             "時間圧縮と補間を使えないサンプルレートの音を数えること"
         );
-        // 表にある 48 kHz の音は数えない
+        // 表にある 48 kHz の音は数えない (鳴らし方も変わらない)
         let audio = audio_frame(960, 48_000);
-        let _ = assembly.arrange(&mut timeline, &audio, arrival_us, arrival_us, true);
+        let arrangement = assembly.arrange(&mut timeline, &audio, arrival_us, arrival_us, true);
+        assert!(
+            arrangement.is_some(),
+            "使えるサンプルレートの音も同じく鳴らすこと"
+        );
         assert_eq!(
             assembly.snapshot(arrival_us).stretch_unavailable_frames,
             1,

@@ -224,13 +224,14 @@ pub struct AudioPlayoutTimingSnapshot {
     pub missed_by_reason: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順、最大 [`MAX_RECENT_AUDIO_MISSES`] 件)
     pub recent_misses: Vec<AudioMissEvent>,
-    /// 時間圧縮と補間を使えないサンプルレートで受け取った音の数 (累積)
+    /// 時間圧縮と補間を使えないサンプルレートで、鳴らす組み立てへ渡した音の数 (累積)
     ///
     /// 4 kHz へ間引くフィルタの表 (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレート
     /// (44.1 kHz の AAC など) では、ピッチの周期を求められないため時間圧縮も補間も働かない。
     /// 落ちずに「操作しない」を返すので、この数が増えていることで気付く
     /// ([`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available))。
-    /// 0 なら使えている
+    /// 0 なら使えている。受信側の待ち行列 (example の jitter buffer) の溢れで捨てられた音は、
+    /// この数える位置へ届かないため含まない
     pub stretch_unavailable_frames: u64,
 }
 
@@ -576,7 +577,7 @@ impl AudioPlayoutTimingStats {
     ///
     /// 4 kHz へ間引くフィルタの表に無いサンプルレート (44.1 kHz の AAC など) では、ピッチの
     /// 周期を求められないため時間圧縮も補間も働かない。落ちずに「操作しない」を返すので、
-    /// この数が増えていることで気付く。鳴らす側が、復号した音を受け取った時点で
+    /// この数が増えていることで気付く。鳴らす側が、復号した音を鳴らす組み立てへ渡す時点で
     /// [`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available) を
     /// 確かめて呼ぶ。数えるだけで鳴らし方は変えない
     pub fn record_stretch_unavailable(&mut self) {

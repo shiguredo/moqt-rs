@@ -1072,4 +1072,42 @@ fn is_time_stretch_available_accepts_only_the_downsample_table_rates() {
         !is_time_stretch_available(8_200),
         "表に無いレートは表の近くでも使えないこと"
     );
+    // 判定と実際の操作が一致することを固定する。丸めと完全一致で結論が分かれるレート
+    // (8.2 kHz は丸めると 8 kHz、47.999 kHz は丸めると 48 kHz) では、判定が false である
+    // だけでなく compress / expand / conceal がどれも何もしないことを確かめる
+    for sample_rate in [8_200u32, 47_999] {
+        assert!(
+            !is_time_stretch_available(sample_rate),
+            "sample_rate={sample_rate} は時間圧縮と補間を使えないこと"
+        );
+        let original = square_wave(960, 240, 0.5);
+        let mut channel = original.clone();
+        let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
+        assert_eq!(
+            compress(&mut channels, sample_rate, usize::MAX),
+            0,
+            "sample_rate={sample_rate} では時間圧縮をしないこと"
+        );
+        assert_eq!(
+            channel, original,
+            "sample_rate={sample_rate} では音を変えないこと"
+        );
+        let mut output = vec![0.0f32; 960 + TIME_STRETCH_MAX_LAG * 12];
+        let channels: [&[f32]; 1] = [original.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        assert_eq!(
+            expand(&channels, &mut outputs, sample_rate),
+            0,
+            "sample_rate={sample_rate} では時間伸長をしないこと"
+        );
+        let mut concealed = vec![0.0f32; 1_764];
+        let channels: [&[f32]; 1] = [original.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [concealed.as_mut_slice()];
+        assert_eq!(
+            conceal(&channels, &mut outputs, sample_rate, 40_000),
+            0,
+            "sample_rate={sample_rate} では補間をしないこと"
+        );
+        assert!(concealed.iter().all(|sample| *sample == 0.0));
+    }
 }
