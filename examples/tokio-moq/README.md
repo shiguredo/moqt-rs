@@ -78,7 +78,7 @@ reset を伴う経路 (request stream の cancel や、送信中の subgroup / d
 QMux 経路 (`qmux`) は experimental として扱う。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で (draft-ietf-quic-qmux-02)、UDP が使えない環境でも MOQT を試せるようにするためのものである。
 QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-22` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
 DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる (破棄は `dropped_datagrams` として警告ログに出る)。QMux は `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
-送る DATAGRAM がピアの広告する `max_datagram_frame_size` に収まらない場合、QMux は送信の失敗を呼び出し側へ返さず音声が無言で落ちる。このため接続確立時に警告ログ (英語) を出す (`--datagram-max-size` の既定 1160 の音声 Object は、QMux の DATAGRAM フレーム全体では 1163 バイトになる)。
+送る DATAGRAM がピアの広告する `max_datagram_frame_size` か `max_record_size` (QMux はフレーム全体を両方と比較する) に収まらない場合、QMux は送信の失敗を呼び出し側へ返さず音声が無言で落ちる。このため接続確立時に警告ログ (英語) を出す (`--datagram-max-size` の既定 1160 の音声 Object は、QMux の DATAGRAM フレーム全体では 1163 バイトになる)。
 `--cert` の扱いは WebTransport over HTTP/2 経路と同じで、省略すると証明書検証をスキップする (TCP + TLS の組み立てを共有し、ALPN だけが異なる)。
 この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
 実装は `qmux.rs` に閉じており、[qmux-rs](https://github.com/shiguredo/qmux-rs) の `shiguredo_qmux` と `tokio-qmux` を git の rev 固定で取り込む (タグが無く crates.io にも未公開のため)。

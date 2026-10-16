@@ -98,7 +98,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--audio-device-id`
 
 QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
-DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。ピアの `max_datagram_frame_size` に `--datagram-max-size` の Object が収まらない場合は接続確立時に警告ログが出る。
+DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。ピアの `max_datagram_frame_size` か `max_record_size` (QMux は両方と比較する) に `--datagram-max-size` の Object が収まらない場合は接続確立時に警告ログが出る。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
 
 ## 購読者からの新しい Group の要求
