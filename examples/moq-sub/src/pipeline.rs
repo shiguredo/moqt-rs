@@ -297,6 +297,10 @@ impl AudioDelivery<'_> {
     ///
     /// Properties の書式違反は「配送する Object」だけを対象にする。フィルタ不通過などで
     /// 配送しない Object は呼び出し側がこの関数を呼ばない。
+    ///
+    /// 復号の出力を観測するときは、受信の入口の入力の遅れ (Object の到着 − LOC TIMESTAMP) も
+    /// 渡す。判定は、出力の遅れから入力の遅れを引いた「復号が足している遅れ」で行う
+    /// ([`shiguredo_moqt::playout::catch_up`] を参照)。
     async fn deliver(
         &self,
         location: Option<Location>,
@@ -428,6 +432,10 @@ impl AudioDelivery<'_> {
             );
             return true;
         }
+        // 受信の入口で測った入力の遅れを求めるため、復号へ渡す直前の到着の壁時計を残す。
+        // 復号は入力と 1 対 1 で対応するため (Opus は同期、AAC は専用スレッドの完了待ち)、
+        // この観測はそのまま復号の出力の観測と対応する
+        let arrival_us = crate::wall_clock_us();
         let pcm = match decoder.decode(payload).await {
             Ok(pcm) => pcm,
             Err(e) => {
@@ -442,12 +450,15 @@ impl AudioDelivery<'_> {
         let channels = decoder.channels();
         // 復号の出力が送られた TIMESTAMP からどれだけ遅れて出てきたかを観測する。復号器の
         // 中に溜まった音で遅れが固定されたら、復号器を作り直して live へ戻す。壁時計の
-        // TIMESTAMP を持たない音 (Timescale 付き) では遅れを測れないため観測しない
+        // TIMESTAMP を持つ音でだけ、受信の入口の入力の遅れ (Object の到着 − TIMESTAMP) を
+        // 測って渡す。判定は、出力の遅れから入力の遅れを引いた「復号が足している遅れ」で
+        // 行うため、経路が遅いだけの状態では作り直さない
         if let Some(pts_us) = pts_us {
             let now_us = crate::wall_clock_us();
             let lag_ms = now_us.saturating_sub(pts_us) / 1_000;
+            let input_lag_ms = receive_input_lag_ms(timestamp, timescale, arrival_us, pts_us);
             // ロックは await をまたがない (観測と判定だけの同期処理)
-            let (decision, catch_up_starts) = {
+            let (decision, stats) = {
                 let mut catch_up = self
                     .catch_up
                     .lock()
@@ -455,14 +466,19 @@ impl AudioDelivery<'_> {
                 let decision = catch_up.observe(AudioReceiveCatchUpObservation {
                     now_ms: now_us / 1_000,
                     lag_ms,
+                    input_lag_ms,
                     duration_ms: pcm_duration_ms(pcm.len(), usize::from(channels), sample_rate),
                     timestamp_us: pts_us,
                 });
-                (decision, catch_up.snapshot().catch_up_starts)
+                (decision, catch_up.snapshot())
             };
             if decision.rebuild_decoder {
                 tracing::info!(
-                    "Rebuilding the audio decoder to catch up (lag {lag_ms}ms, starts {catch_up_starts})"
+                    "Rebuilding the audio decoder to catch up (lag {}ms, input_lag {}ms, decode_lag {}ms, starts {})",
+                    lag_ms,
+                    optional_ms_log(stats.input_lag_ms),
+                    optional_ms_log(stats.decode_lag_ms),
+                    stats.catch_up_starts,
                 );
                 if let Err(e) = decoder.reset() {
                     tracing::warn!("Failed to rebuild the audio decoder: {e}");
@@ -491,6 +507,14 @@ fn pcm_duration_ms(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
         .unwrap_or(i64::MAX)
         .saturating_mul(1_000)
         / i64::from(sample_rate)
+}
+
+/// ミリ秒の観測値をログ用の文字列にする
+///
+/// 測れなかった値 (`None`) は `none` にする。追いつきの観測値は測れない場合があり、そのまま
+/// 数を出すと測れなかったことがログから分からなくなるためである。
+fn optional_ms_log(value: Option<i64>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
 /// stream task の終了を待つ上限
@@ -4255,6 +4279,38 @@ fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i6
     Some(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
+/// 受信の入口で測った入力の遅れ (ミリ秒) を求める
+///
+/// Object の到着の壁時計 − LOC TIMESTAMP である。受信側の追いつき
+/// ([`shiguredo_moqt::playout::catch_up`]) が、復号の出力の遅れからこの値を引いた
+/// 「復号が足している遅れ」で復号器を作り直すかどうかを決める。経路が遅いだけの状態では
+/// この値も同じだけ上がるため作り直さず、受信側が溜めたまま戻らない状態 (この値は健全で
+/// 出力の遅れだけが大きい) で作り直す。
+///
+/// 壁時計の TIMESTAMP を持つ音でだけ測れる。判定は [`loc_timestamp_us`] と同じ規則
+/// (Timescale が無いか 0 なら Timestamp は Unix epoch からのマイクロ秒である) に従う。
+/// TIMESTAMP が無い音は表示の時刻を決められず、Timescale がある音はメディア時刻であり
+/// 壁時計と対応しないため、どちらも `None` を返す。`None` のときの判定は出力の遅れを
+/// そのまま使う (入力の遅れを導入する前と同じ挙動)。
+///
+/// `timestamp` と `timescale` は LOC の Timestamp / Timescale (無い場合は `None`)、
+/// `arrival_us` は Object の到着の壁時計 (マイクロ秒)、`pts_us` は TIMESTAMP から求めた
+/// 時刻 (マイクロ秒) である。
+fn receive_input_lag_ms(
+    timestamp: Option<u64>,
+    timescale: Option<u64>,
+    arrival_us: i64,
+    pts_us: i64,
+) -> Option<i64> {
+    // TIMESTAMP が無い音では測れない
+    timestamp?;
+    if matches!(timescale, Some(timescale) if timescale > 0) {
+        // Timescale がある音はメディア時刻であり、壁時計の到着と対応しない
+        return None;
+    }
+    Some(arrival_us.saturating_sub(pts_us) / 1_000)
+}
+
 /// OpusHead (RFC 7845 §5.1) をパースする
 ///
 /// magic "OpusHead"・ version 1 ・ 19 バイト以上・ Channel Count > 0 を検証する。
@@ -5273,6 +5329,48 @@ mod tests {
         );
     }
 
+    // 壁時計の TIMESTAMP (Timescale が無い) では、到着と TIMESTAMP の差を入力の遅れとする
+    #[test]
+    fn receive_input_lag_ms_measures_the_wall_clock_timestamp() {
+        assert_eq!(
+            receive_input_lag_ms(Some(1_000_000), None, 1_250_000, 1_000_000),
+            Some(250),
+            "到着の壁時計から TIMESTAMP を引いた値をミリ秒で返す"
+        );
+        // Timescale が 0 のときも Timescale が無いものとして扱う (loc_timestamp_us と同じ規則)
+        assert_eq!(
+            receive_input_lag_ms(Some(1_000_000), Some(0), 1_250_000, 1_000_000),
+            Some(250),
+            "Timescale が 0 なら壁時計として測る"
+        );
+        // 到着が TIMESTAMP より前の音 (配信側の時計が先へ進んでいる) は負になる
+        assert_eq!(
+            receive_input_lag_ms(Some(2_000_000), None, 1_000_000, 2_000_000),
+            Some(-1_000),
+            "到着のほうが早いときは負の遅れになる"
+        );
+    }
+
+    // TIMESTAMP が無い音と、Timescale がある (メディア時刻である) 音では測れない
+    #[test]
+    fn receive_input_lag_ms_returns_none_when_the_timestamp_is_not_a_wall_clock() {
+        assert_eq!(
+            receive_input_lag_ms(None, None, 1_250_000, 0),
+            None,
+            "TIMESTAMP が無い音では測れない"
+        );
+        assert_eq!(
+            receive_input_lag_ms(None, Some(48_000), 1_250_000, 0),
+            None,
+            "TIMESTAMP が無い音では Timescale があっても測れない"
+        );
+        assert_eq!(
+            receive_input_lag_ms(Some(48_000), Some(48_000), 1_250_000, 1_000_000),
+            None,
+            "Timescale がある音はメディア時刻であり壁時計と対応しないため測れない"
+        );
+    }
+
     /// テスト用: OpusHead を構築する (RFC 7845 §5.1 のフォーマット)
     ///
     /// publisher 側 (examples/moq-pub の `build_opus_head`) と同じ形式。
@@ -6201,6 +6299,28 @@ mod tests {
         props
     }
 
+    /// テスト用: Timescale を載せない LOC プロパティ (壁時計の TIMESTAMP) を組み立てる
+    ///
+    /// Timescale が無いときの Timestamp は Unix epoch からのマイクロ秒である
+    /// (draft-ietf-moq-loc-04 §2.3.1.1)。受信の入口の入力の遅れを測れる音はこの形である。
+    fn audio_loc_properties_without_timescale(
+        timestamp: u64,
+        audio_config: Option<&[u8]>,
+    ) -> LocProperties {
+        let mut props = LocProperties::new();
+        props.push(LocProperty {
+            prop_id: PROP_TIMESTAMP,
+            value: LocPropertyValue::VarInt(timestamp),
+        });
+        if let Some(config) = audio_config {
+            props.push(LocProperty {
+                prop_id: PROP_AUDIO_CONFIG,
+                value: LocPropertyValue::Bytes(config.to_vec()),
+            });
+        }
+        props
+    }
+
     /// テスト用: OBJECT_DATAGRAM のワイヤ表現を組み立てる
     ///
     /// 位置は Group ID と Object ID で指定する (取り違えを検出できるようにするため)。
@@ -7080,6 +7200,107 @@ mod tests {
                 .last_pts_us(),
             Some(pts_us(3)),
             "境界より後の live だけで送出順の基準を進めること"
+        );
+    }
+
+    /// 受信の入口の入力の遅れが、復号の出力の遅れから引かれた「復号が足している遅れ」として
+    /// 追いつきの観測へ渡ること
+    ///
+    /// 壁時計の TIMESTAMP (Timescale なし) を持つ音では、復号へ渡す直前の到着から入力の遅れを
+    /// 測り、復号の出力の遅れから引いた値を統計へ残す。TIMESTAMP に Timescale がある
+    /// (メディア時刻である) 音では測れず、出力の遅れをそのまま使う。
+    #[tokio::test]
+    async fn audio_delivery_passes_the_input_lag_to_the_catch_up() {
+        let packet = encode_opus_silence(48_000, 1);
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+        let mut decoder =
+            AudioDecoder::build("opus", 48_000, 1).expect("Opus デコーダを生成できること");
+
+        // 1. 壁時計の TIMESTAMP (Timescale なし) を持つ音。配送の直前に測った壁時計を
+        // TIMESTAMP にするため、入力の遅れは 0 前後になる
+        let base_us = crate::wall_clock_us();
+        let timestamp = u64::try_from(base_us).expect("壁時計は 0 以上であること");
+        let properties = audio_loc_properties_without_timescale(timestamp, None);
+        let properties_bytes = properties
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        assert!(
+            delivery
+                .deliver(None, Some(&properties_bytes), &packet, Some(&mut decoder))
+                .await,
+            "壁時計の TIMESTAMP を持つ音でも配送を継続すること"
+        );
+        let stats = catch_up
+            .lock()
+            .expect("audio catch up lock is not poisoned")
+            .snapshot();
+        let lag_ms = stats.lag_ms.expect("復号の出力の遅れを観測すること");
+        let input_lag_ms = stats
+            .input_lag_ms
+            .expect("壁時計の TIMESTAMP では入力の遅れを測ること");
+        let decode_lag_ms = stats
+            .decode_lag_ms
+            .expect("「復号が足している遅れ」を残すこと");
+        assert!(
+            (0..=1_000).contains(&input_lag_ms),
+            "配送の直前の TIMESTAMP なので入力の遅れは 0 前後になること: {input_lag_ms}"
+        );
+        assert_eq!(
+            lag_ms - input_lag_ms,
+            decode_lag_ms,
+            "出力の遅れから入力の遅れを引いた値が「復号が足している遅れ」であること"
+        );
+
+        // 2. Timescale がある (メディア時刻である) 音。入力の遅れは測れないため、出力の遅れを
+        // そのまま使う
+        let media_pts_us = base_us + 20_000;
+        let media_timestamp = u64::try_from(media_pts_us).expect("時刻は 0 以上であること");
+        let properties = audio_loc_properties(media_timestamp, 1_000_000, None);
+        let properties_bytes = properties
+            .encode()
+            .expect("LOC プロパティを encode できること");
+        assert!(
+            delivery
+                .deliver(None, Some(&properties_bytes), &packet, Some(&mut decoder))
+                .await,
+            "メディア時刻の音でも配送を継続すること"
+        );
+        let stats = catch_up
+            .lock()
+            .expect("audio catch up lock is not poisoned")
+            .snapshot();
+        assert_eq!(
+            stats.input_lag_ms, None,
+            "Timescale がある音では入力の遅れを測らないこと"
+        );
+        assert_eq!(
+            stats.decode_lag_ms, stats.lag_ms,
+            "測れないときは出力の遅れをそのまま使うこと"
+        );
+
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "書式違反が無いためセッション終了は依頼されないこと"
+        );
+        let sent: Vec<i64> = std::iter::from_fn(|| audio_rx.try_recv().ok())
+            .map(|frame| frame.pts_us)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![base_us, media_pts_us],
+            "どちらの音も再生経路へ流すこと (送出順={sent:?})"
         );
     }
 

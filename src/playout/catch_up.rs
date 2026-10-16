@@ -5,8 +5,30 @@
 //! 鳴らす音を捨てても、捨てた分は復号器から出てきた後の音であり、中の分は減らない。そこで
 //! 遅れが健全な値から外れたら復号器の作り直しを求め、溜まった分を捨てて live へ戻す。
 //!
+//! 判定に使う遅れは、復号の出力の遅れ ([`AudioReceiveCatchUpObservation::lag_ms`]) そのもの
+//! ではなく、そこから受信の入口で測った入力の遅れ
+//! ([`AudioReceiveCatchUpObservation::input_lag_ms`]、Object の到着の壁時計 − LOC TIMESTAMP)
+//! を引いた「復号が足している遅れ」である。出力の遅れだけでは、次の 2 つを区別できない。
+//!
+//! - 経路が恒久的に悪化した: Object の到着も復号の出力も同じだけ遅れる。復号器の中に溜まった
+//!   分は増えていないため、作り直しても遅れは戻らない (moqt-js の実測: メインスレッドを 2 秒
+//!   止めると、到着の遅れも復号の出力の遅れも 2017.9 ms になり、止めた後に溜まった分を復号し
+//!   終えると 20 ms 前後へ戻った)。ここで作り直しを繰り返すと、音を飛ばすだけになる
+//! - 受信側が溜めたまま戻らない: Object は到着している (入力の遅れは健全) のに、復号の出力
+//!   だけが遅れている。復号器の中に溜まった音は実時間でしか出てこないため、作り直して捨て
+//!   ない限り戻らない。これがこの判定が直す状態である
+//!
+//! 入力の遅れが測れないとき (TIMESTAMP が無い、Timescale がある) は、出力の遅れをそのまま
+//! 使う。入力の遅れを導入する前と同じ挙動であり、測れないことを理由に作り直しを止めない。
+//!
 //! - 健全な遅れ (床) は直近 [`AUDIO_RECEIVE_CATCH_UP_FLOOR_WINDOW_MS`] の最小値である。
-//!   経路の遅延はここへ吸収され、その上での増加だけを見る
+//!   経路の遅延はここへ吸収され、その上での増加だけを見る。床を求める値も「復号が足している
+//!   遅れ」である。入力の遅れを引かないと、受信側が溜めたまま戻らない状態でも床が出力の遅れ
+//!   へ追いつく (moqt-js の実測: 8〜20 秒を 250 ms に固定し、20 秒以降も復号器に溜まったまま
+//!   にすると、13 秒で床が 250 ms へ追いつき、20〜60 秒の 40 秒間は作り直しが 0 回のまま
+//!   250 ms で固定された)。入力の遅れを引けば、経路が遅いだけの状態 (入力の遅れも同じだけ
+//!   上がる) では床が上がらず、受信側が溜めた状態では床が上がる前に作り直しが要求される
+//!   (同じ実測で、段差の直後に 1 回で 30 ms へ復帰した)
 //! - 上限は `max(`[`AUDIO_RECEIVE_CATCH_UP_MIN_MS`]`, 床 + `[`AUDIO_RECEIVE_CATCH_UP_GROWTH_MS`]`)`
 //!   である。遅れが上限の中へ戻ったら追いつきを終える
 //! - 始める条件は 2 つある。床から [`AUDIO_RECEIVE_CATCH_UP_JUMP_MS`] を超えて遅れている
@@ -44,9 +66,10 @@ pub const AUDIO_RECEIVE_CATCH_UP_GROWTH_MS: i64 = 40;
 ///
 /// A/V の同期で合わせられる量の上限
 /// ([`crate::playout::timeline::TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] の 100 ms) と
-/// 同じ値である。復号の出力が健全な遅れからこれを超えて遅れているとき、受信側は音声を
-/// 映像へ合わせられない。待たずに始めて溜まった分を捨てる方が、遅れた音を鳴らし続けるより
-/// 良い。
+/// 同じ値である。復号が足している遅れ (出力の遅れ − 入力の遅れ) が健全な遅れからこれを
+/// 超えているとき、受信側は音声を映像へ合わせられない。待たずに始めて溜まった分を捨てる
+/// 方が、遅れた音を鳴らし続けるより良い。経路そのものが遅いだけの状態では、入力の遅れも
+/// 同じだけ上がるためここへは来ない (作り直しても戻らないため、来ないのが正しい)。
 pub const AUDIO_RECEIVE_CATCH_UP_JUMP_MS: i64 = 100;
 
 /// 追いつきを始める前に、上限を超えた状態が続くことを要求する時間 (ミリ秒)
@@ -74,7 +97,7 @@ pub const AUDIO_RECEIVE_CATCH_UP_SKIP_MIN_MS: i64 = 1;
 struct FloorSample {
     /// 観測した時刻
     at_ms: i64,
-    /// そのときの遅れ
+    /// そのときの「復号が足している遅れ」
     lag_ms: i64,
 }
 
@@ -85,9 +108,18 @@ pub struct AudioReceiveCatchUpObservation {
     pub now_ms: i64,
     /// 復号の出力の遅れ (ミリ秒)
     ///
-    /// 到着の壁時計 − TIMESTAMP である。壁時計の TIMESTAMP を持たない音では測れないため、
-    /// 呼び出し側が観測しない。
+    /// 到着の壁時計 − TIMESTAMP である。入力の遅れが測れるときは生のまま統計に出し、判定には
+    /// 使わない ([`AudioReceiveCatchUpObservation::input_lag_ms`] を引いた「復号が足している
+    /// 遅れ」を使う)。入力の遅れが測れないときはこの値をそのまま判定に使う。TIMESTAMP が無い
+    /// 音ではこの値自体を測れないため、呼び出し側は観測しない
     pub lag_ms: i64,
+    /// 受信の入口で測った入力の遅れ (ミリ秒)。測れないときは `None`
+    ///
+    /// Object の到着の壁時計 − LOC TIMESTAMP である。判定は、この値を `lag_ms` から引いた
+    /// 「復号が足している遅れ」で行う (このモジュールの先頭のコメントを参照)。TIMESTAMP が
+    /// 無い / Timescale がある (メディア時刻である) 音では測れないため、呼び出し側が `None`
+    /// を渡す。`None` のときは `lag_ms` をそのまま使う (入力の遅れを導入する前と同じ挙動)。
+    pub input_lag_ms: Option<i64>,
     /// 音の長さ (ミリ秒)
     pub duration_ms: i64,
     /// 復号の出力の TIMESTAMP (マイクロ秒)。追いつきで飛んだ長さを測る
@@ -104,11 +136,19 @@ pub struct AudioReceiveCatchUpDecision {
 /// 受信側の音声の追いつきの観測値 (統計とログに出す)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioReceiveCatchUpStats {
-    /// 直近に観測した遅れ (ミリ秒)。まだ観測していなければ `None`
+    /// 直近に観測した、復号の出力の遅れ (ミリ秒)。まだ観測していなければ `None`
     pub lag_ms: Option<i64>,
-    /// 直近の窓で観測した健全な遅れ (床、ミリ秒)。まだ観測していなければ `None`
+    /// 直近に観測した、受信の入口の入力の遅れ (ミリ秒)。測れなければ `None`
+    pub input_lag_ms: Option<i64>,
+    /// 直近に観測した、復号が足している遅れ (ミリ秒)。まだ観測していなければ `None`
+    ///
+    /// 出力の遅れ − 入力の遅れである。判定 (床と上限) はこの値で行う。入力の遅れが測れない
+    /// ときは出力の遅れそのものになり、負の遅れもそのまま残る。測れたときに負になった場合は
+    /// 2 つの遅れを別の時点で測った丸めであり、0 に寄せる
+    pub decode_lag_ms: Option<i64>,
+    /// 健全時に観測した、復号が足している遅れ (床、ミリ秒)。まだ観測していなければ `None`
     pub floor_ms: Option<i64>,
-    /// 観測した最大の遅れ (ミリ秒)。まだ観測していなければ `None`
+    /// 観測した最大の、復号の出力の遅れ (ミリ秒)。まだ観測していなければ `None`
     pub max_lag_ms: Option<i64>,
     /// いまの遅れの上限 (ミリ秒)
     pub limit_ms: i64,
@@ -132,10 +172,16 @@ pub struct AudioReceiveCatchUp {
     /// 床を求める観測 (古い順)
     floor_samples: VecDeque<FloorSample>,
     /// 直近の窓の最小の遅れ (ミリ秒)。まだ観測していなければ `None`
+    ///
+    /// 「復号が足している遅れ」の最小値である (出力の遅れではない)
     floor_ms: Option<i64>,
-    /// 直近に観測した遅れ (ミリ秒)
+    /// 直近に観測した、復号の出力の遅れ (ミリ秒)
     last_lag_ms: Option<i64>,
-    /// 観測した最大の遅れ (ミリ秒)
+    /// 直近に観測した、受信の入口の入力の遅れ (ミリ秒)。測れなければ `None`
+    last_input_lag_ms: Option<i64>,
+    /// 直近に観測した、「復号が足している遅れ」 (ミリ秒)
+    last_decode_lag_ms: Option<i64>,
+    /// 観測した最大の、復号の出力の遅れ (ミリ秒)
     max_lag_ms: Option<i64>,
     /// 上限を超え始めた時刻 (ミリ秒)。超えていなければ `None`
     over_limit_since_ms: Option<i64>,
@@ -164,6 +210,8 @@ impl AudioReceiveCatchUp {
             floor_samples: VecDeque::new(),
             floor_ms: None,
             last_lag_ms: None,
+            last_input_lag_ms: None,
+            last_decode_lag_ms: None,
             max_lag_ms: None,
             over_limit_since_ms: None,
             catching_up: false,
@@ -180,6 +228,10 @@ impl AudioReceiveCatchUp {
     }
 
     /// 復号の出力 1 つを観測し、復号器を作り直すかを決める
+    ///
+    /// 判定に使うのは、出力の遅れから入力の遅れを引いた「復号が足している遅れ」である
+    /// (このモジュールの先頭のコメントを参照)。入力の遅れが測れないときは出力の遅れを
+    /// そのまま使う。
     ///
     /// 遅れが上限の中へ戻ったら追いつきを終える。超えていれば、始める条件を満たすときに
     /// [`AudioReceiveCatchUpDecision::rebuild_decoder`] を真にして返す。
@@ -204,23 +256,37 @@ impl AudioReceiveCatchUp {
     /// ため改善せず、位置 (Group ID と Object ID) の順序で見分ける形でも副作用は消えなかった。
     /// 除く案では捉えきれないため、遅れは到着の壁時計と TIMESTAMP の差のまま測る (moqt-rs で
     /// 実リレーの再測が必要になった時点で測り直す)。
+    ///
+    /// 復号が入力と 1 対 1 で対応し、中に複数の入力を溜めない呼び出し側 (このリポジトリの
+    /// example が使う復号器) では、復号が足している遅れは復号の処理そのものの遅れになる。
+    /// そのため作り直しが要求されるのは、復号の後段 (書き出しや再生) が詰まって復号の出力が
+    /// 遅れている場合である。経路が遅いだけの状態では要求しない。
     pub fn observe(
         &mut self,
         observation: AudioReceiveCatchUpObservation,
     ) -> AudioReceiveCatchUpDecision {
         let lag_ms = observation.lag_ms;
+        // 復号が足している遅れ。入力の遅れが測れないときは出力の遅れそのものを使い、負の
+        // 遅れ (配信側の時計が先へ進んでいる) もそのまま残す。測れたときは 2 つの遅れを
+        // 別の時点で測った丸めで負になりうるため、健全な状態として 0 に寄せる
+        let input_lag_ms = observation.input_lag_ms;
+        let decode_lag_ms = input_lag_ms.map_or(lag_ms, |input_lag_ms| {
+            lag_ms.saturating_sub(input_lag_ms).max(0)
+        });
         self.last_lag_ms = Some(lag_ms);
+        self.last_input_lag_ms = input_lag_ms;
+        self.last_decode_lag_ms = Some(decode_lag_ms);
         self.max_lag_ms = Some(
             self.max_lag_ms
                 .map_or(lag_ms, |max_lag_ms| max_lag_ms.max(lag_ms)),
         );
-        self.update_floor(observation.now_ms, lag_ms);
+        self.update_floor(observation.now_ms, decode_lag_ms);
         let limit_ms = self.limit_ms();
 
         // 追いつきで飛んだ音を、TIMESTAMP の跳びから測る (遅れが戻る判定より先に行う)
         self.measure_skip(observation);
 
-        if lag_ms <= limit_ms {
+        if decode_lag_ms <= limit_ms {
             // 上限の中へ戻った (作り直しが効いた)。次に上限を超えたら、また始められる
             self.catching_up = false;
             self.over_limit_since_ms = None;
@@ -231,7 +297,7 @@ impl AudioReceiveCatchUp {
         if self.over_limit_since_ms.is_none() {
             self.over_limit_since_ms = Some(observation.now_ms);
         }
-        if !self.should_start(observation.now_ms, lag_ms) {
+        if !self.should_start(observation.now_ms, decode_lag_ms) {
             return AudioReceiveCatchUpDecision {
                 rebuild_decoder: false,
             };
@@ -249,6 +315,8 @@ impl AudioReceiveCatchUp {
     pub fn snapshot(&self) -> AudioReceiveCatchUpStats {
         AudioReceiveCatchUpStats {
             lag_ms: self.last_lag_ms,
+            input_lag_ms: self.last_input_lag_ms,
+            decode_lag_ms: self.last_decode_lag_ms,
             floor_ms: self.floor_ms,
             max_lag_ms: self.max_lag_ms,
             limit_ms: self.limit_ms(),
@@ -265,6 +333,8 @@ impl AudioReceiveCatchUp {
         self.floor_samples.clear();
         self.floor_ms = None;
         self.last_lag_ms = None;
+        self.last_input_lag_ms = None;
+        self.last_decode_lag_ms = None;
         self.max_lag_ms = None;
         self.over_limit_since_ms = None;
         self.catching_up = false;
@@ -294,13 +364,15 @@ impl AudioReceiveCatchUp {
     /// 合わせられない状態であり、その場で始める。上限を超えた状態が
     /// [`AUDIO_RECEIVE_CATCH_UP_CONFIRM_MS`] 続いた場合も始める。どちらも、直近に始めて
     /// いれば [`AUDIO_RECEIVE_CATCH_UP_COOLDOWN_MS`] たっていることを要求する。
-    fn should_start(&self, now_ms: i64, lag_ms: i64) -> bool {
+    ///
+    /// 見る値は「復号が足している遅れ」である ([`AudioReceiveCatchUp::observe`] を参照)。
+    fn should_start(&self, now_ms: i64, decode_lag_ms: i64) -> bool {
         if let Some(started_at_ms) = self.started_at_ms
             && now_ms.saturating_sub(started_at_ms) < AUDIO_RECEIVE_CATCH_UP_COOLDOWN_MS
         {
             return false;
         }
-        if lag_ms
+        if decode_lag_ms
             > self
                 .floor_ms
                 .unwrap_or(0)
@@ -319,7 +391,11 @@ impl AudioReceiveCatchUp {
     /// 窓より古い観測は捨てる。観測が窓の長さより途切れたときは、途切れる前の床を窓の長さの
     /// 分だけ保つ。途切れている間に溜まった分をそのまま床にすると、遅れが健全な値とみなされ、
     /// 追いつきが始まらなくなる。
-    fn update_floor(&mut self, now_ms: i64, lag_ms: i64) {
+    ///
+    /// `decode_lag_ms` は「復号が足している遅れ」 (出力の遅れ − 入力の遅れ) である。入力の
+    /// 遅れを引かずに出力の遅れで床を求めると、受信側が溜めたまま戻らない状態でも床が出力の
+    /// 遅れへ追いつき、作り直しが要求されなくなる (このモジュールの先頭のコメントを参照)。
+    fn update_floor(&mut self, now_ms: i64, decode_lag_ms: i64) {
         let previous_at_ms = self.last_observed_at_ms;
         self.last_observed_at_ms = Some(now_ms);
         if let Some(previous_at_ms) = previous_at_ms
@@ -331,7 +407,7 @@ impl AudioReceiveCatchUp {
         }
         self.floor_samples.push_back(FloorSample {
             at_ms: now_ms,
-            lag_ms,
+            lag_ms: decode_lag_ms,
         });
         let oldest_ms = now_ms.saturating_sub(AUDIO_RECEIVE_CATCH_UP_FLOOR_WINDOW_MS);
         while let Some(sample) = self.floor_samples.front() {
@@ -340,7 +416,7 @@ impl AudioReceiveCatchUp {
             }
             self.floor_samples.pop_front();
         }
-        let mut floor_ms = lag_ms;
+        let mut floor_ms = decode_lag_ms;
         for sample in &self.floor_samples {
             floor_ms = floor_ms.min(sample.lag_ms);
         }
