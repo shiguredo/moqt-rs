@@ -45,7 +45,7 @@ use crate::cli::{Config, VideoCodec};
 use crate::datagram_writer::DatagramWriter;
 use shiguredo_moqt::playout::publish_catch_up::{
     AudioPublishCatchUp, AudioPublishCatchUpChunk, AudioPublishCatchUpFrame,
-    AudioPublishCatchUpStats,
+    AudioPublishCatchUpSendComplete, AudioPublishCatchUpSendStart, AudioPublishCatchUpStats,
 };
 use shiguredo_moqt::playout::splice_fade::{AudioSpliceEdge, fade_splice_edge_i16};
 
@@ -1142,12 +1142,15 @@ pub async fn run(
                         // マイクロ秒であるため、補正は 0 として渡す
                         let now_us = wall_clock_now_us()?;
                         let duration_us = samples_to_micros(samples_per_frame as u64, AUDIO_SAMPLE_RATE);
+                        // TIMESTAMP と長さは、判定・符号化・送信の記録で同じ値を使う
+                        let send_timestamp_us = i64::try_from(timestamp).unwrap_or(i64::MAX);
+                        let send_duration_us = i64::try_from(duration_us).unwrap_or(i64::MAX);
                         let accepted = audio_publish_catch_up.evaluate(AudioPublishCatchUpFrame {
                             now_ms: now_us / 1_000,
-                            timestamp_us: i64::try_from(timestamp).unwrap_or(i64::MAX),
+                            timestamp_us: send_timestamp_us,
                             read_wall_clock_us: now_us,
                             applied_offset_us: if is_reencode { None } else { Some(0) },
-                            duration_us: Some(i64::try_from(duration_us).unwrap_or(i64::MAX)),
+                            duration_us: Some(send_duration_us),
                         });
                         // 捨てる場合もバッファからは取り出す (符号化へ渡さない)
                         let chunk: Vec<i16> = audio_pcm_buf.drain(..samples_per_frame).collect();
@@ -1219,6 +1222,9 @@ pub async fn run(
                             build_audio_loc_properties(timestamp, audio_timescale, audio_config);
                         // LOC draft-ietf-moq-loc-04 §4.1 (Application with one audio track): 1 audio frame = 1 Object = 1 Group
                         if config.audio_datagram {
+                            // datagram の送信は完了が返らない (fire-and-forget)。書き込みの
+                            // 戻りを完了とみなすため、投入の直前の時刻を控える
+                            let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
                             let mut writer = DatagramWriter::new(
                                 &handle,
                                 &data_plane,
@@ -1240,6 +1246,19 @@ pub async fn run(
                                     &properties,
                                     &encoded,
                                 )?;
+                                // 送れなかった Object (フィルタで Skip) は送信のキューへ
+                                // 入っていないため記録しない。TIMESTAMP が壁時計でない
+                                // (再エンコード) 音も、読んだ時刻との差が遅れにならない
+                                // ため記録しない
+                                if !is_reencode {
+                                    record_audio_send(
+                                        &mut audio_publish_catch_up,
+                                        send_timestamp_us,
+                                        send_duration_us,
+                                        queued_wall_clock_ms,
+                                        wall_clock_now_us()? / 1_000,
+                                    );
+                                }
                             }
                         } else {
                             // has_properties は SUBGROUP_HEADER の PROPERTIES ビットに対応し、
@@ -1247,6 +1266,8 @@ pub async fn run(
                             // 音声ストリームには毎フレーム LOC プロパティを付与するため true を渡す
                             let audio_request_id =
                                 audio_request_id.expect("audio request_id enabled");
+                            // ストリームの生成と書き込みの待ち (backpressure) を含めて測る
+                            let queued_wall_clock_ms = wall_clock_now_us()? / 1_000;
                             let mut writer = SubgroupWriter::new(
                                 &handle,
                                 &data_plane,
@@ -1273,6 +1294,18 @@ pub async fn run(
                             writer
                                 .finish(client.subscription_filter_start(audio_request_id))
                                 .await?;
+                            // 送れなかった Object (フィルタで Skip) は記録しない。TIMESTAMP が
+                            // 壁時計でない (再エンコード) 音も、読んだ時刻との差が遅れに
+                            // ならないため記録しない
+                            if outcome == ObjectFilterOutcome::Pass && !is_reencode {
+                                record_audio_send(
+                                    &mut audio_publish_catch_up,
+                                    send_timestamp_us,
+                                    send_duration_us,
+                                    queued_wall_clock_ms,
+                                    wall_clock_now_us()? / 1_000,
+                                );
+                            }
                         }
                         audio_group_id += 1;
                         audio_frame_count += 1;
@@ -2474,6 +2507,44 @@ fn wall_clock_now_us() -> Result<i64> {
         .map_err(|_| Error::Other("system clock is out of the supported range".to_string()))
 }
 
+/// 音声 Object の送信の遅れを記録する
+///
+/// 受信側の到着の遅れは「配信側が足した分」と「経路」の合計である。前者を測らないと、
+/// 到着の裾が配信側の符号化や送信の詰まりから来ているのか経路から来ているのかを分けられず、
+/// どちらを直すべきかを判断できない。そのため、送信のキューへ入れた時刻と送出が終わった
+/// 時刻を残す。
+///
+/// datagram の送信は完了が返らない (fire-and-forget) ため、書き込みの戻りを完了とみなす。
+/// そのため `send_queue_ms` は datagram では 0 のままになる (writer の `write` は投入で
+/// 解決し、ワイヤに出た時刻は分からない)。測っているのは「読んでから投入するまでの遅れ」
+/// である (`AudioPublishCatchUp::record_send_start` / `record_send_complete` を参照)。
+///
+/// `queued_wall_clock_ms` と `completed_wall_clock_ms` は壁時計のミリ秒で渡す。他の記録
+/// (`AudioPublishCatchUp::evaluate` の `now_ms` と、完了が返らない記録を捨てる判定) と
+/// 同じ時計に揃えるためである。`timestamp_us` は送るフレームの TIMESTAMP であり、記録の
+/// 対応づけに使う。1 つのフレームの開始と完了を同じ値で対応させるため、符号化のキューへ
+/// 入れた記録 (`AudioPublishCatchUp::record_encoded_chunk`) が返す「覆った最初の投入の
+/// TIMESTAMP」は使わない。
+fn record_audio_send(
+    catch_up: &mut AudioPublishCatchUp,
+    timestamp_us: i64,
+    duration_us: i64,
+    queued_wall_clock_ms: i64,
+    completed_wall_clock_ms: i64,
+) {
+    catch_up.record_send_start(AudioPublishCatchUpSendStart {
+        now_ms: queued_wall_clock_ms,
+        timestamp_us,
+        captured_wall_clock_ms: timestamp_us / 1_000,
+        duration_ms: duration_us / 1_000,
+    });
+    catch_up.record_send_complete(AudioPublishCatchUpSendComplete {
+        now_ms: completed_wall_clock_ms,
+        timestamp_us,
+        completed_wall_clock_ms,
+    });
+}
+
 /// 残差の要約を出す間隔 (マイクロ秒)
 const CAPTURE_RESIDUAL_REPORT_US: i64 = 5_000_000;
 
@@ -3066,6 +3137,78 @@ mod tests {
                 "内訳に {expected} が含まれること: {line}"
             );
         }
+    }
+
+    /// 音声 Object の送信の遅れが、読んでから送り終えるまでとして記録されること
+    ///
+    /// 受信側の到着の遅れを「配信側が足した分」と「経路」に分けるために要る値である。
+    /// 捕捉の時刻は TIMESTAMP (LOC TIMESTAMP、Unix epoch マイクロ秒) から取り、完了は送出の
+    /// 直後の壁時計から取る。
+    #[test]
+    fn audio_send_records_the_delay_from_capture_to_completion() {
+        let mut catch_up = AudioPublishCatchUp::new();
+        // 捕捉は 1_700_000_000_000 ms、送出の完了はその 10 ms 後である
+        record_audio_send(
+            &mut catch_up,
+            1_700_000_000_000_000,
+            20_000,
+            1_700_000_000_000,
+            1_700_000_000_010,
+        );
+        let stats = catch_up.snapshot();
+        assert_eq!(
+            stats.send_lag_ms,
+            Some(10),
+            "読んでから送り終えるまでを測ること"
+        );
+        assert_eq!(stats.max_send_lag_ms, Some(10), "最大も同じ値になること");
+        assert_eq!(stats.send_queue_frames, 0, "完了した分は待ちに残らないこと");
+        assert_eq!(stats.send_queue_ms, 0, "待ちの長さも残らないこと");
+    }
+
+    /// 送信の遅れが、観測した最大を保つこと
+    ///
+    /// 到着の裾を分解するときは、直近の値ではなく最大を見る。ばらつきの原因を追うためである。
+    #[test]
+    fn audio_send_keeps_the_max_delay() {
+        let mut catch_up = AudioPublishCatchUp::new();
+        record_audio_send(
+            &mut catch_up,
+            1_700_000_000_000_000,
+            20_000,
+            1_700_000_000_000,
+            1_700_000_000_010,
+        );
+        record_audio_send(
+            &mut catch_up,
+            1_700_000_000_020_000,
+            20_000,
+            1_700_000_000_020,
+            1_700_000_000_060,
+        );
+        let stats = catch_up.snapshot();
+        assert_eq!(stats.send_lag_ms, Some(40), "直近の値を返すこと");
+        assert_eq!(stats.max_send_lag_ms, Some(40), "観測した最大を保つこと");
+        assert_eq!(stats.send_queue_frames, 0, "完了した分は待ちに残らないこと");
+    }
+
+    /// 送出が終わっていない音は、送信の待ちとして見えること
+    ///
+    /// datagram では書き込みの戻りを完了とみなすため待ちは残らないが、ストリームでは
+    /// 書き込みの待ち (backpressure) の間だけ待ちに数える。
+    #[test]
+    fn audio_send_shows_the_queue_until_completion() {
+        let mut catch_up = AudioPublishCatchUp::new();
+        catch_up.record_send_start(AudioPublishCatchUpSendStart {
+            now_ms: 1_700_000_000_000,
+            timestamp_us: 1_700_000_000_000_000,
+            captured_wall_clock_ms: 1_700_000_000_000,
+            duration_ms: 20,
+        });
+        let stats = catch_up.snapshot();
+        assert_eq!(stats.send_queue_frames, 1, "完了前は待ちに数えること");
+        assert_eq!(stats.send_queue_ms, 20, "完了前は長さも待ちに数えること");
+        assert_eq!(stats.send_lag_ms, None, "完了前は遅れを出さないこと");
     }
 
     /// Session の reset 指示が open 中の subgroup stream に一致するかを判定できること
