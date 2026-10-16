@@ -1,7 +1,7 @@
 # 音声の冗長化を実リレーの E2E で固定する
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-16
 - Branch: feature/test-audio-redundancy-e2e
 - Polished: {YYYY-MM-DD}
 
@@ -54,3 +54,27 @@
   `cargo fmt --all -- --check` が通ること。
 - ホスト名をリポジトリに残していないこと。
 - ソースコードに issue 番号や issue への言及を書かないこと。
+
+## 解決方法
+
+- `e2e-tests/tests/roundtrip.rs` に `publish_and_subscribe_audio_redundancy_roundtrip` を
+  追加した。音声だけを `--audio-redundancy 2` で配信する publisher と音声を購読する
+  subscriber を起動し、受信した音声フレームの PTS が厳密に進むこと (同じ PTS のフレームが
+  届かないこと) を固定する。継続性・MP4 への保存・graceful shutdown は既存の音声の E2E と
+  同じ条件で確かめる
+- 冗長度を指定して publisher を起動する `start_audio_publisher_with_redundancy` を足し、
+  既存の `start_audio_publisher` は既定 (1) のまま使うようにした
+- `e2e-tests/README.md` を 3 テストに追随させ、冗長化した音声では PTS が厳密に進むことも
+  検証内容として書いた
+- 送信側が実際に冗長化していることは、実リレーでこのテストを単独実行し、受信側が重複として
+  捨てた Object を観測して確かめた。冗長度 2 では 253 件であり、5 秒間に届く約 250 Object の
+  ほぼ全てで 2 回目が届いて捨てられている。冗長度 1 (既定) の音声の E2E を単独実行した
+  ときは 1 件であり、これは購読境界の Object が live と replay の両方で届いた分である
+- テストの感度も確かめた。重複の判定を無効にする変更 (`is_duplicate` が常に `false` を返す)
+  を一時的に入れてこのテストを実行すると、同じ PTS のフレームが届いて 1.20 秒で失敗する
+  (`冗長化した 2 回目を鳴らさないこと`)。確認後に変更を戻し、ファイルの SHA-256 が元と
+  一致することを確かめた
+- 実リレーでの E2E は 3 件とも成功した (7.26 秒)。`cargo test --workspace` (2927 passed /
+  0 failed)、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo fmt --all -- --check` も成功した
+- 接続先は環境変数 `MOQT_E2E_URL` のみで渡し、ホスト名はリポジトリに残していない
