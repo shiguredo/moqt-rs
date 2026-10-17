@@ -78,3 +78,8 @@ moqt-rs では `AudioPublishCatchUp::record_send_start` / `record_send_complete`
 - テスト: `capture_to_completion` (捕捉から完了までの遅れ) / `keeps_the_max_delay` (最大の
   保持) / `shows_the_queue_until_completion` (完了前は待ちに数える) を
   `examples/moq-pub/src/pipeline.rs` に追加した
+- 実リレーでの確認 (合成入力、音声のみ): datagram 配送の 300 秒の実行で `send_lag` は
+  0〜2 ms、`max_send_lag` は 4〜8 ms を出した。subgroup 配送の 40 秒の実行でも `send_lag` は
+  0〜1 ms、`max_send_lag` は 6 ms を出した。どちらの配送でも `lag` は 20 ms、`limit` は 60 ms、
+  `dropped` は 0 であり、捕捉から送出の完了までの遅れが数 ms であることと、queue が空いて
+  いることが計器から読めることを確かめた

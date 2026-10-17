@@ -143,3 +143,7 @@ moqt-js のコミット 39d3fb7a (#496「playout のノイズの原因を修正�
 - moqt-js と意図的に変えた点: 圧縮の増分は観測の必須フィールド (0 が既定) とし、揺らぎだけの
   目標は時間軸が埋める形にした (TypeScript の `Omit` が使えないため)。計器の値は
   `AudioDelayFeedbackSnapshot` に足した (moqt-js と同じ)
+- 実リレーでの確認 (合成入力、音声のみ、300 秒): 静かな経路では閉ループの目標が下限
+  (50 ms) に落ち着き (`feedback_reason=Settled`)、`feedback_ceiling` は 100 ms のまま、
+  `feedback_compression` は 0 ms/秒のままだった。上限を広げる経路 (圧縮が 2 秒続く場合) は
+  この経路では起きないため、そちらは依然として実測で確かめていない
