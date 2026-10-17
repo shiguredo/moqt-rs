@@ -18,7 +18,7 @@
 //! `--transport` はエラーになる。
 //!
 //! 受信とデコードの本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
-//! Ctrl+C の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの
+//! Ctrl+C と SIGTERM の待ち受け、タスクメトリクスのログ出力、tokio ランタイムの構築、フレームチャネルの
 //! 準備、macOS の SDL プレイヤーの実行、終了コードの決定を行う。
 
 use std::collections::VecDeque;
@@ -48,6 +48,20 @@ const AUDIO_OUTPUT_LEAD_US: i64 = 40_000;
 const AUDIO_BUFFER_LOG_INTERVAL_MS: u128 = 5_000;
 
 fn main() {
+    // SDL3 は初期化のときに SIGINT と SIGTERM のハンドラを自前で入れ、受け取った
+    // シグナルを SDL の終了イベントへ変えてしまう。この example は SDL のイベントを
+    // 回さないため、ハンドラが入ると SIGTERM が捨てられて終了できなくなる
+    // (Ctrl+C も、あとから登録した tokio のハンドラが上書きするまで効かない)。
+    // SDL の初期化 (`raw_player::init`) より前に環境変数で止めて、シグナルは
+    // tokio のハンドラだけが扱うようにする
+    //
+    // SAFETY: ここはまだどのスレッドも起動していない (tokio ランタイムも
+    // `raw_player` もこの後で作る)。環境変数を読むスレッドが無いため、他の
+    // スレッドと競合しない
+    unsafe {
+        std::env::set_var("SDL_NO_SIGNAL_HANDLERS", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -118,16 +132,16 @@ fn main() {
             // タスクメトリクスを定期的にログ出力する
             tokio_moq::metrics::spawn_task_metrics_logger(task_monitor.clone());
 
-            // Ctrl+C で graceful shutdown を起動する
+            // Ctrl+C (SIGINT) と SIGTERM で graceful shutdown を起動する
             tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                tracing::info!("Received Ctrl+C, initiating graceful shutdown");
+                let received = wait_for_shutdown_signal().await;
+                tracing::info!("Received {received}, initiating graceful shutdown");
                 // shutdown が完了しない場合 (peer が stream を閉じない等) に備え、
-                // 2 回目の Ctrl+C を待ちながら graceful shutdown する
+                // 2 回目のシグナルを待ちながら graceful shutdown する
                 tokio::select! {
                     _ = shutdown.shutdown() => {}
-                    _ = tokio::signal::ctrl_c() => {
-                        tracing::warn!("Received second Ctrl+C, forcing exit");
+                    _ = wait_for_shutdown_signal() => {
+                        tracing::warn!("Received second shutdown signal, forcing exit");
                         std::process::exit(130);
                     }
                 }
@@ -150,7 +164,7 @@ fn main() {
 
     let mut failed = false;
     if no_play {
-        // プレイヤーを動かさず、pipeline の終了 (Ctrl+C / relay からの切断) を待つ
+        // プレイヤーを動かさず、pipeline の終了 (Ctrl+C / SIGTERM / relay からの切断) を待つ
         tracing::info!("Playback is disabled, waiting for the session to finish");
     } else {
         // メインスレッドで raw_player を動かす
@@ -182,6 +196,44 @@ fn main() {
     }
     if failed {
         std::process::exit(1);
+    }
+}
+
+/// 終了を要求するシグナルを待ち、受け取ったシグナルの名前を返す
+///
+/// Ctrl+C (SIGINT) と SIGTERM を待つ。どちらも graceful shutdown の起動に使う。
+/// SIGTERM を登録できない環境では Ctrl+C だけを待つ (終了の手段を残すため)。
+///
+/// SDL が自前のハンドラを入れるとシグナルが SDL の終了イベントへ変わり、ここへ
+/// 届かなくなる。`main` が SDL の初期化より前に `SDL_NO_SIGNAL_HANDLERS` を
+/// 設定しているのはそのためである。
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(terminate) => Some(terminate),
+            Err(e) => {
+                tracing::warn!("Failed to listen for SIGTERM: {e}");
+                None
+            }
+        };
+        match terminate.as_mut() {
+            Some(terminate) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => "Ctrl+C",
+                _ = terminate.recv() => "SIGTERM",
+            },
+            None => {
+                tokio::signal::ctrl_c().await.ok();
+                "Ctrl+C"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+        "Ctrl+C"
     }
 }
 

@@ -18,7 +18,7 @@
 //! `--transport` はエラーになる。
 //!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
-//! Ctrl+C の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。
+//! Ctrl+C と SIGTERM の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。
 
 use moq_pub::{cli, pipeline};
 
@@ -44,15 +44,49 @@ async fn main() {
     // タスクメトリクスを定期的にログ出力する
     tokio_moq::metrics::spawn_task_metrics_logger(task_monitor.clone());
 
-    // Ctrl+C で graceful shutdown を起動する
+    // Ctrl+C (SIGINT) と SIGTERM で graceful shutdown を起動する
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Received Ctrl+C, initiating graceful shutdown");
+        let received = wait_for_shutdown_signal().await;
+        tracing::info!("Received {received}, initiating graceful shutdown");
         shutdown.shutdown().await;
     });
 
     if let Err(e) = pipeline::run(config, task_monitor, shutdown_monitor).await {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
+    }
+}
+
+/// 終了を要求するシグナルを待ち、受け取ったシグナルの名前を返す
+///
+/// Ctrl+C (SIGINT) と SIGTERM を待つ。どちらも graceful shutdown の起動に使う。
+/// SIGTERM を登録できない環境では Ctrl+C だけを待つ (終了の手段を残すため)。
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(terminate) => Some(terminate),
+            Err(e) => {
+                tracing::warn!("Failed to listen for SIGTERM: {e}");
+                None
+            }
+        };
+        match terminate.as_mut() {
+            Some(terminate) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => "Ctrl+C",
+                _ = terminate.recv() => "SIGTERM",
+            },
+            None => {
+                tokio::signal::ctrl_c().await.ok();
+                "Ctrl+C"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+        "Ctrl+C"
     }
 }
