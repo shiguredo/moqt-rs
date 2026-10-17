@@ -12,7 +12,7 @@ publish = false
 # HTTP/2 / WebTransport over HTTP/2 クライアント
 shiguredo_http2 = "2026.1.0-canary.16"
 # HTTP/3 / WebTransport over HTTP/3 クライアント
-shiguredo_http3 = "2026.1.0-canary.9"
+shiguredo_http3 = "2026.1.0-canary.12"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # QMux (draft-ietf-quic-qmux-02) の Sans I/O 実装
@@ -33,7 +33,7 @@ bytes = "1.12"
 # TLS バックエンド (s2n-quic provider と WebTransport over HTTP/2 の rustls で使う)
 rustls = "0.23"
 # QUIC クライアント
-s2n-quic = { version = "1.90", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
 tokio = { version = "1.53", features = ["full"] }
 # Tokio タスクメトリクス計測

@@ -12,7 +12,7 @@ publish = false
 # AV1 デコーダ (dav1d)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
-shiguredo_http3 = "2026.1.0-canary.9"
+shiguredo_http3 = "2026.1.0-canary.12"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 mux (録画)
@@ -32,7 +32,7 @@ noargs = "0.4"
 # 映像プレイヤー (メインスレッド実行)
 raw_player = "2026.2"
 # QUIC クライアント
-s2n-quic = { version = "1.90", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
+s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
 tokio = { version = "1.53", features = ["full"] }
 # Tokio タスクメトリクス計測
@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # libvpx の Windows ビルド (MSVC) は動作しないため、Windows 以外に限って依存させる
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 # VP8 / VP9 デコーダ (libvpx)
-shiguredo_libvpx = "2026.2.0-canary.2"
+shiguredo_libvpx = "2026.2.0-canary.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # AAC-LC デコーダ (Apple Audio Toolbox)
