@@ -97,6 +97,11 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
   - `--fake-capture-device`
   - `--audio-device-id`
 
+WebTransport 経路 (`--transport wt-h3` / `--transport wt-h2`) は experimental であり、正常に動作しない。
+`wt-h3` は s2n-quic が reset stream (`RESET_STREAM_AT`) を実装していないため、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えない。`reset_stream_at` を要求する MoQ リレーとは接続できず、reset を伴う経路 (request stream の cancel や、送信中の subgroup / data stream の中断) も成立しない。
+`wt-h2` は reset を `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は不要だが、MoQ リレーの capsule 対応に依存しており、実リレーでの動作を確認していない。
+詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。
+
 QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境向けである。
 DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。QMux は速やかに配送できない DATAGRAM の破棄を許すため、受信側のバッファが溢れると欠落しうる。ピアの `max_datagram_frame_size` か `max_record_size` (QMux は両方と比較する) に `--datagram-max-size` の Object が収まらない場合は接続確立時に警告ログが出る。
 詳細は [tokio-moq](../tokio-moq/README.md) を参照すること。

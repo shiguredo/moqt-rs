@@ -256,12 +256,14 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let transport_opt: Option<Transport> = noargs::opt("transport")
         .ty("TYPE")
         .doc(
-            "Transport (quic | wt-h3 | wt-h2 | qmux; wt-h3 / wt-h2 (WebTransport) and qmux \
-             (QMux over TCP+TLS) are experimental). If --transport is omitted, uses the \
-             'connection' parameter of the --url MSF fragment (q: native QUIC, wt: WebTransport \
-             over HTTP/3, or wt-h2 with --transport wt-h2 for HTTP/2); otherwise defaults to \
-             quic. A conflicting --transport, or 'connection=q' with 'connection=wt', is an \
-             error",
+            "Transport (quic | wt-h3 | wt-h2 | qmux; wt-h3 / wt-h2 (WebTransport) are \
+             experimental and do not work properly: wt-h3 requires RESET_STREAM_AT, which \
+             s2n-quic does not implement, and wt-h2 depends on relay support for \
+             WT_RESET_STREAM capsules; qmux (QMux over TCP+TLS) is also experimental). If \
+             --transport is omitted, uses the 'connection' parameter of the --url MSF \
+             fragment (q: native QUIC, wt: WebTransport over HTTP/3, or wt-h2 with \
+             --transport wt-h2 for HTTP/2); otherwise defaults to quic. A conflicting \
+             --transport, or 'connection=q' with 'connection=wt', is an error",
         )
         .take(&mut args)
         .present_and_then(|o| Transport::parse(o.value()))?;
