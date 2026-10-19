@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    name: "Build moq-pub on Windows"
+    name: "Build moq-pub / moq-sub on Windows"
     timeout-minutes: 60
     runs-on: windows-2025-vs2026
     steps:
