@@ -1,11 +1,11 @@
 # GitHub Actions による Windows コンパイル確認 (手動実行専用)
 #
-# - Windows で moq-pub がビルドできるかを手動で確認するための workflow
+# - Windows で moq-pub と moq-sub がビルドできるかを手動で確認するための workflow
 # - 通常の push / pull_request では実行しない (workflow_dispatch のみ)
-# - 対象は moq-pub のみ。workspace 全体は e2e-tests が Windows でビルドできない
-#   (shiguredo_video_device の Windows 実装が !Send のため、tokio::spawn(pipeline::run) が
-#   型検査で失敗する) ため対象外にする
-# - aom / dav1d / opus は既定で GitHub Releases の prebuilt を使うため、
+# - 対象は examples の moq-pub / moq-sub のみ。workspace 全体は e2e-tests が Windows で
+#   ビルドできない (shiguredo_video_device の Windows 実装が !Send のため、
+#   tokio::spawn(pipeline::run) が型検査で失敗する) ため対象外にする
+# - aom / dav1d / opus / SDL3 は既定で GitHub Releases の prebuilt を使うため、
 #   runner に meson などのビルドツールを追加する必要はない
 # - 実デバイス (WASAPI / Media Foundation) の実行は行わず、コンパイルだけを確認する
 # - runner は windows-2025-vs2026 を使う
@@ -27,5 +27,5 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: moq-pub とそのテストをビルドする
-        run: cargo build -p moq-pub --all-targets
+      - name: moq-pub / moq-sub とそのテストをビルドする
+        run: cargo build -p moq-pub -p moq-sub --all-targets
