@@ -1522,9 +1522,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_audio_device"
-version = "2026.4.0-canary.0"
+version = "2026.4.0-canary.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa952c2bc9559691b408247c03a8af106252f725f2f0b196aa2a483d5d80a7ff"
+checksum = "d724b9ee261c6809d4c750b153677bfd79f001962aa52e78db772a19e78e5409"
 dependencies = [
  "bindgen 0.72.1",
  "cc",

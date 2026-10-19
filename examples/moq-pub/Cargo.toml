@@ -12,7 +12,9 @@ publish = false
 # AV1 エンコーダ (libaom)
 shiguredo_aom = "2026.3"
 # 音声キャプチャ
-shiguredo_audio_device = "2026.4.0-canary.0"
+# 2026.4.0-canary.0 は WASAPI のキャプチャでタイムスタンプ計算が i64 オーバーフローし、
+# Windows の実マイクを使うと落ちるため、修正が入った canary.1 を使う
+shiguredo_audio_device = "2026.4.0-canary.1"
 # AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント

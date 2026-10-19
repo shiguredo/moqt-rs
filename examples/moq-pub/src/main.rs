@@ -18,7 +18,8 @@
 //! `--transport` はエラーになる。
 //!
 //! パイプライン本体は lib ターゲット (`lib.rs`) にあり、このバイナリは tracing の初期化、
-//! Ctrl+C と SIGTERM の待ち受け、タスクメトリクスのログ出力、終了コードの決定を行う。
+//! Ctrl+C と SIGTERM の待ち受け、タスクメトリクスのログ出力、終了コードの決定、
+//! オーディオライブラリを利用する main スレッドの初期化 (Windows の COM MTA) を行う。
 
 use moq_pub::{cli, pipeline};
 
@@ -33,6 +34,17 @@ async fn main() {
         Ok(None) => return,
         Err(e) => {
             eprintln!("{e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    // Windows では WASAPI を使うスレッドの先頭で COM を MTA モードで初期化する必要がある。
+    // パイプラインはこの main のスレッドで実行するため、終了までガードを保持する。
+    // macOS / Linux では初期化は不要で、呼んでも何もしない。
+    let _audio_device_thread_guard = match shiguredo_audio_device::initialize_thread() {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::error!("Failed to initialize the audio device library: {e}");
             std::process::exit(1);
         }
     };

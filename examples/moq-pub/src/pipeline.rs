@@ -429,6 +429,10 @@ async fn establish_publisher_session(
 /// `config` は接続先・トランスポート・送信するトラック・入力の指定を持つ。
 /// `task_monitor` は生成されるタスクのメトリクスを収集する。
 /// `shutdown_monitor` は graceful shutdown の契機を受信する。
+///
+/// Windows で実マイクから音声を配信する場合、呼び出し側のスレッドで
+/// `shiguredo_audio_device::initialize_thread` を呼び、返り値をパイプラインの終了まで
+/// 保持しておく必要がある (macOS / Linux では不要)。この関数自体はスレッドの初期化を行わない。
 pub async fn run(
     mut config: Config,
     task_monitor: tokio_metrics::TaskMonitor,
