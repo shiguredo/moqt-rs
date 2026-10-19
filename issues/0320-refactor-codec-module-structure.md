@@ -3,7 +3,7 @@
 - Created: 2026-10-19
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-codec-module-structure
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-20
 
 ## 目的
 
@@ -12,20 +12,26 @@
 
 ## 現状
 
-- `src/parameter.rs` の URI 検証関数群は Setup Options とは独立した関心事である。
-- `src/message_parameter.rs` は約 2,000 行で、変更時に無関係なテストを同時に触る必要がある。
+- `src/parameter.rs` の URI 検証関数群は Setup Options の符号化とは独立した関心事であり、`SetupOptions` の本体と同居している。
+- `src/message_parameter.rs` は約 2,000 行で、AuthorizationToken / LocationFilter / MessageParameters / RangeFilter の 4 系統の型・実装・共有ヘルパが 1 ファイルに混在している。テストは `tests/test_message_parameter.rs` にテーマ別モジュールとして分かれており、本 issue の変更対象ではない。
 - `src/decoder.rs` の `try_decode_message` は Type + 16 bit Length を自前で読み、`ControlMessage::decode` が同じフレームを再度読む。
 - 影響: 仕様変更時の修正範囲が読みにくく、フレーム形式の変更で片方だけ直す事故が起きやすい。
 
 ## 設計方針
 
-- URI 検証を `setup_uri.rs` などの別モジュールへ移す。
+- URI 検証を crate 内部モジュール `src/setup_uri.rs` へ移す。`lib.rs` では `pub(crate) mod setup_uri;` とし、`pub mod` にしない。`SetupUriValidationError` は `pub(crate)` のまま `setup_uri.rs` に移し、URI 検証関数も `pub(crate)` にして `parameter.rs` から呼ぶ。`session/core.rs` の import を追随させる。
 - `message_parameter` を `message_parameter.rs` + `message_parameter/{authorization_token,location_filter,range_filter}.rs` に分割する。`mod.rs` は使わない。
-- 制御メッセージのフレーム長を返す `pub(crate)` ヘルパを `message` 側に置き、`MessageDecoder` と `ControlMessage::decode` で共用する。
+  - 公開型 (`AuthorizationToken` / `LocationFilter` / `LocationFilterContext` / `LocationFilterUpdate` / `RangeFilterSet` / `MessageParameter` / `MessageParameterValue` / `MessageParameters`) の定義は `message_parameter.rs` に残す。
+  - サブモジュールには `AuthorizationToken` / `LocationFilter` / `RangeFilterSet` の `impl` と private ヘルパだけを置き、`message_parameter.rs` から `mod authorization_token;` などで宣言する。`MessageParameters` の `impl` は `message_parameter.rs` に残す。`pub use` による re-export は追加しない。これにより公開パスを変えずに公開 API を維持する。
+  - 共有の定数・ヘルパ (`FILL_PARAMETERS_ALLOWED_PARAMS` / `validate_auth_token_uniqueness` など) は `message_parameter.rs` に残す。サブモジュール内のヘルパは `pub(super)` に留め、クレート外へ公開しない。
+  - 親モジュールから呼ぶ `LocationFilter::decode_partial` / `LocationFilter::validate` は `pub(super)` に上げ、クレート外へ公開しない。
+  - 移動するヘルパを参照するコメント (`pbt/src/common.rs` の `is_range_filter_type` の同期先) は新しいパスへ更新する。
+- 制御メッセージのフレームヘッダを解析する `pub(crate)` ヘルパを `message` 側に置き、`MessageDecoder` と `ControlMessage::decode` で共用する。ヘルパは Type、payload length、header length を返し、フレーム未完成は `Ok(None)`、varint 不正は `Err` とする。`MessageDecoder` の「外側フレームが揃った後の body 不正は `Err`」という現在の挙動を維持する。
 - 公開 API と挙動は変えない。
 
 ## 完了条件
 
 - 上記の分割後も `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
-- `rustdoc` の警告が無いこと。
-- 公開 API の re-export を追加していないこと。
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。
+- `cargo build -p shiguredo_moqt --target thumbv7em-none-eabihf` が通ること。
+- 公開 API のパス・型・シグネチャが変わっていないこと。`pub use` による re-export を追加していないこと。
