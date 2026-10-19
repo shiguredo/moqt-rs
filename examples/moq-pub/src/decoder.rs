@@ -3,7 +3,10 @@
 //! MP4 再エンコード配信の入力デコードに使う。codec ごとの実装を [`VideoDecoder`] の
 //! variant に持ち、`match` で分岐する。具体実装は codec 別サブモジュールに分離する。
 
-use crate::error::{Error, Result};
+use crate::error::Result;
+// Error は macOS 限定の read_ps_nal でのみ使う
+#[cfg(target_os = "macos")]
+use crate::error::Error;
 
 pub(crate) mod av1;
 #[cfg(target_os = "macos")]
