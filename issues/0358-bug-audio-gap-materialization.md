@@ -1,7 +1,7 @@
 # 音声 playout が隙間を材料化せず、境界の段差と再生位置の記録不整合を生む
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: develop
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -40,3 +40,11 @@ qmux 経由の音声がプチプチする、という報告がある。moqt-js �
 - `src/playout/stretch.rs` の `conceal`
 - `examples/moq-sub/src/main.rs` の `play_decoded_audio` / `apply_audio_playout` / `conceal_gap` / `AudioPlayoutPosition`
 - moqt-js の `docs/AUDIO_PLAYOUT_GAPS_AND_TAIL.md` と `issues/0868-bug-playout-silence-gap-click.md`
+
+## 解決方法
+
+- `src/playout/scheduler.rs` の再生決定を、隙間の全長 `gap_us` と補間してよい長さ `conceal_us` に分けた。`gap_us` は 5 ms 下限や 100 ms 上限で切り捨てない。`last_end_us` と `note_underrun` を追加し、出力が枯れた時間を隙間として二重に数えないようにした。
+- `src/playout/gap.rs` を追加した。`materialize` は要求した隙間の全長ぶんの音を必ず返し、補間できた分を直前の音の周期で、残りを無音で埋める。隙間の先頭は直前の音の最終サンプルから 0 へ、末尾は 0 へ、今回の音の先頭は 0 からフェードする。
+- `src/playout/timing.rs` に隙間とアンダーランの計器 (回数・合計・最大) を追加した。
+- example は隙間を必ず積み、補間チャンクの位置を enqueue 前の累積サンプル数で記録し、PTS は直前の音の媒体終端から求めるようにした。受信経路の見直しとあわせて変更している。
+- 単体テストと PBT を追加し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
