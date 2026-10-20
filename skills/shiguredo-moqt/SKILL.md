@@ -1156,6 +1156,18 @@ fn is_time_stretch_available(sample_rate: u32) -> bool
 ```
 
 ```rust
+// playout::gap
+use shiguredo_moqt::playout::gap::{AUDIO_GAP_FADE_US, MaterializedGap, materialize};
+fn materialize(
+    previous: Option<&[Vec<f32>]>,
+    current: &mut [&mut [f32]],
+    sample_rate: u32,
+    gap_us: i64,
+    conceal_us: i64,
+) -> MaterializedGap
+```
+
+```rust
 // playout::buffer
 use shiguredo_moqt::playout::buffer::{JITTER_BUFFER_MAX_QUEUED_FRAMES, PlayoutBuffer};
 fn new(max_queued_frames: usize, track: Track) -> PlayoutBuffer<T>
@@ -1200,6 +1212,8 @@ fn new() -> AudioPlayoutScheduler
 fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision
 fn confirm_stretch(&mut self, applied_us: i64)
 fn confirm_concealment(&mut self, applied_us: i64)
+fn last_end_us(&self) -> Option<i64>
+fn note_underrun(&mut self, now_us: i64)
 fn rebases(&self) -> u64
 fn drops(&self) -> u64
 fn compressed_us(&self) -> i64
@@ -1234,9 +1248,12 @@ fn reset(&mut self)
 `playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する (`is_time_stretch_available` で確かめられる)。戻り値は長さの変化 (圧縮は負、0 は操作なし)。時間伸長は持たない (この再生は音を伸ばす場面を持たず、足りない区間は `conceal` が埋める)。
 `conceal` は末尾の 2 周期分の相関から求めた周期で末尾を繰り返し、`conceal_us` 分を埋めた長さを返す (0 なら `output` に何も書かない)。利得は末尾へ向けて `concealment_end_gain` まで下げる。
 
+`playout::gap` は再生の隙間を材料化する。出力が FIFO (積んだ順に鳴らす) の場合は隙間を積まないと後続が早く鳴って出力が枯れるため、`materialize` は要求した隙間の全長ぶんの音を必ず返す。`conceal_us` の分は直前の音の末尾の周期で埋め、残りは無音にする。隙間の末尾と今回の音の先頭は `AUDIO_GAP_FADE_US` で 0 へ落とし、隙間の先頭は直前の音の最終サンプルから 0 へ向かう重みで繋ぐ。`current` の先頭にはフェードインが掛かるため `&mut` で渡す。
+
 `playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。
 
-`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`compress_us` を実際に適用したら `confirm_stretch` へ、隙間 (`gap_us`) を埋めたら `confirm_concealment` へ実測を返す。
+`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`Play` の `gap_us` は前の音の終わりから今回の開始までの全長 (5 ms や 100 ms で切り捨てない)、`conceal_us` はそのうち補間してよい長さである。
+`compress_us` を実際に適用したら `confirm_stretch` へ、隙間を材料化したら `confirm_concealment` へ実測を返す。出力が枯れたときは、枯れた時間を隙間として二重に数えないよう `note_underrun` に今の時刻を渡す。並べた音の終わりは `last_end_us` で読める。
 
 `playout::buffer` は復号したフレームを表示時刻に合わせて選ぶキューである。表示時刻を過ぎたフレームのうち最新の 1 枚を描き、`MAX_PRESENTATION_LAG_US` を超えて遅れたフレームは捨てる。表示時刻を決められないフレームと、積んだときの世代が今と違うフレームは届いた順に 1 枚ずつ描く。上限 (`JITTER_BUFFER_MAX_QUEUED_FRAMES`) を超えたフレームは `enqueue` が古い方から返す。
 

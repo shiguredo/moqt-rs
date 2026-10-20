@@ -23,10 +23,10 @@
 
 use std::collections::VecDeque;
 
-use moq_sub::jitter_buffer::AudioJitterBuffer;
 use moq_sub::{DecodedAudioFrame, DecodedVideoFrame, cli, error, pipeline, wall_clock_us};
 use shiguredo_moqt::name::serialize_namespace;
 use shiguredo_moqt::playout::buffer::PlayoutBuffer;
+use shiguredo_moqt::playout::gap;
 use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_DELAY_US, AudioPlayoutBasis, AudioPlayoutDecision, AudioPlayoutDropReason,
     AudioPlayoutInput, AudioPlayoutScheduler,
@@ -38,13 +38,14 @@ use shiguredo_moqt::playout::timing::{
     AudioPlayoutTimingStats, TimingSummary,
 };
 
-/// 音声を再生機器へ積むときに先行させる分 (マイクロ秒)
+/// 出力が枯れたと判定する許容 (マイクロ秒)
 ///
-/// SDL のストリームが空になると音が途切れるため、Opus の 1 フレーム (20 ms) の
-/// 2 枚分を先行させて積む。目標遅延がこれより短いときは、到着した音をそのまま積む。
-const AUDIO_OUTPUT_LEAD_US: i64 = 40_000;
+/// 音声を処理するのは 1 ms 間隔のループであり、ループの処理時間で「最後に並べた音の
+/// 終わり」をわずかに過ぎることがある。この揺れをアンダーランとして数えないための余裕で
+/// ある。これを超えて過ぎたときだけ、出力が実際に枯れたものとして扱う。
+const AUDIO_UNDERRUN_ALLOWANCE_US: i64 = 1_000;
 
-/// jitter buffer の状態をログに出す間隔 (ミリ秒)
+/// 音声の再生の状態をログに出す間隔 (ミリ秒)
 const AUDIO_BUFFER_LOG_INTERVAL_MS: u128 = 5_000;
 
 fn main() {
@@ -257,7 +258,7 @@ fn player_window_title(namespace: &str) -> String {
 ///
 /// `audio_output_device` が [`cli::AudioOutputDevice::None`] のときは SDL の音声出力デバイスを
 /// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。このときは
-/// 鳴らす時刻を決める必要が無いため、jitter buffer へも入れない。
+/// 時間軸への観測も再生の組み立ても行わない。
 fn run_raw_player(
     namespace: &str,
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
@@ -293,13 +294,13 @@ fn run_raw_player(
     let video_queue_limit = timeline.config().video_queue_limit;
     let mut video_buffer = PlayoutBuffer::<DecodedVideoFrame>::new(video_queue_limit, Track::Video);
 
-    // 音声は到着後すぐ鳴らさず、鳴らす時刻 (LOC の TIMESTAMP と学習した目標遅延から
-    // 決まる) まで保持する。到着の揺らぎがそのまま音の途切れにならないようにするためである
-    let mut audio_buffer = AudioJitterBuffer::new();
-    // 保持から出した音をどの順でいつ鳴らすかは、スケジューラが決める。jitter buffer は
-    // 鳴らす時刻まで保持する役割であり、順番・詰め・隙間はここへ集める
+    // 音声は受信したその場で鳴らす時刻を決めて積む。積んだ順に鳴る FIFO であるため、
+    // 最初の音の開始時刻に達するまでのフレームは再生機器の内部キューに先行バッファとして
+    // 溜まる。順番・詰め・隙間はスケジューラが決め、その結果をここへ集める
     let mut audio_state = AudioPlayoutAssembly::new();
-    let mut released_audio: u64 = 0;
+    // 前回のログ以降に観測した再生機器のバッファ量の最小値 (ミリ秒)。枯れに近づいたかを
+    // ログで読むために残す。再生を開始する前はバッファ量に意味が無いため数えない
+    let mut player_buffer_min_ms: Option<f64> = None;
     let mut last_audio_log = std::time::Instant::now();
 
     // wall-clock PTS: 再生開始からの経過時間を映像 PTS として使用する
@@ -408,6 +409,12 @@ fn run_raw_player(
                         frame.height,
                         &player_window_title(namespace),
                     )?;
+                    // 音声の積み込みと映像の表示を同じスレッドで行うため、表示の垂直同期
+                    // (vsync) を待つとその間だけ音声の積み込みが止まり、出力が枯れる。
+                    // vsync を無効にして、表示を待たずに次のループへ進めるようにする
+                    if let Err(e) = player.set_vsync(0) {
+                        tracing::warn!("Failed to disable video vsync: {e}");
+                    }
                     player.play()?;
                     video_player = Some(player);
                 }
@@ -439,74 +446,75 @@ fn run_raw_player(
             }
         }
 
-        match audio_rx.try_recv() {
-            Ok(audio) => {
-                // 音声出力を行わない指定では再生機器が無いため、保持も観測もしない
-                if audio_output_enabled {
-                    audio_buffer.push(audio, wall_clock_us(), &mut timeline);
-                }
-                audio_chunk_count += 1;
-                if audio_chunk_count.is_multiple_of(100) {
-                    if audio_output_enabled {
-                        tracing::info!("Received {audio_chunk_count} audio chunks");
-                    } else {
-                        tracing::info!(
-                            "Decoded {audio_chunk_count} audio chunks (audio output disabled)"
-                        );
-                    }
-                }
+        // 出力が枯れていないかを、音声を処理する前に確かめる。スケジューラが並べた最後の
+        // 音の終わりより今が後なら、その間は既に無音が鳴ってしまっている (事後には埋め
+        // られない)。枯れている間は毎ループ note_underrun を呼び、最後に並べた音の終わり
+        // を今へ進めて、枯れた区間を次の音の隙間として二重に材料化させない。枯れていた
+        // 長さは、音を積み直した時点 ([`AudioPlayoutAssembly::commit`]) で 1 回だけ数える
+        if audio_output_enabled && audio_state.started {
+            let now_us = wall_clock_us();
+            if let Some(underrun_us) = underrun_us(audio_state.scheduler.last_end_us(), now_us) {
+                audio_state.note_underrun(underrun_us, now_us);
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                if !audio_disconnected {
-                    tracing::info!("Audio channel disconnected");
-                    audio_disconnected = true;
-                    // 保持している音をすべて吐き出す。末尾の音を捨てないためである。
-                    // 配信が終わったあとは目標に従う意味が無く、目標より先の音を捨てると
-                    // 末尾が欠けるため、到着順に鳴らす
+        }
+
+        // 音声は毎ループ溜まっている分をすべて取り出す。1 回に 1 件しか取り出さないと、
+        // バーストで届いた音を積むのが遅れて出力が枯れる。時間軸への観測には復号の
+        // 完了時刻を使う。player スレッドが取り出した時刻はループの揺れを含み、
+        // 遅延の学習を乱すためである
+        loop {
+            match audio_rx.try_recv() {
+                Ok(audio) => {
+                    audio_chunk_count += 1;
                     if let Some(audio_player) = audio_player.as_ref() {
                         let now_us = wall_clock_us();
-                        while let Some(audio) = audio_buffer.pop_oldest() {
-                            released_audio += 1;
-                            play_decoded_audio(
-                                audio_player,
-                                &mut audio_state,
-                                &mut timeline,
-                                &audio,
-                                now_us,
-                                false,
+                        timeline.observe(Track::Audio, audio.decoded_us, audio.pts_us);
+                        play_decoded_audio(
+                            audio_player,
+                            &mut audio_state,
+                            &mut timeline,
+                            &audio,
+                            now_us,
+                        );
+                    }
+                    if audio_chunk_count.is_multiple_of(100) {
+                        if audio_output_enabled {
+                            tracing::info!("Received {audio_chunk_count} audio chunks");
+                        } else {
+                            tracing::info!(
+                                "Decoded {audio_chunk_count} audio chunks (audio output disabled)"
                             );
                         }
                     }
                 }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // 保持キューは無く、届いたフレームはすべて再生機器へ積み終えている。
+                    // 末尾の音を捨てないための吐き出しは要らないため、切断を知らせるだけに
+                    // する
+                    if !audio_disconnected {
+                        tracing::info!("Audio channel disconnected");
+                        audio_disconnected = true;
+                    }
+                    break;
+                }
             }
         }
 
-        // 鳴らす時刻まで保持していた音声を再生機器へ渡す。鳴らすかどうかの判断は
-        // スケジューラへ任せ、ここでは取り出すだけにする
+        // 積んだ音声を再生機器へ渡す。最初の音の開始時刻に達するまでは play を呼ばず、
+        // それまでのフレームを先行バッファとして内部キューに溜める
         if let Some(audio_player) = audio_player.as_ref() {
             let now_us = wall_clock_us();
-            // 鳴らす時刻を過ぎた音もここでは捨てない。遅れたまま鳴らすか、音が途切れた
-            // ときに到着基準へ並べ直すかはスケジューラが音ごとに決める。
-            //
-            // 鳴らす時刻を決めるのは、保持から出したこの時点にする。到着時に決めると、
-            // 保持している間 (再生の遅れぶん) に決めた時刻が古くなり、実際に積む時点の
-            // 遅れを反映できない。詰めと隙間の補間は決めた直後に適用し、適用した長さを
-            // その場でスケジューラと計器へ返す
-            while let Some(audio) = audio_buffer.pop_releasable(now_us, AUDIO_OUTPUT_LEAD_US) {
-                released_audio += 1;
-                play_decoded_audio(
-                    audio_player,
-                    &mut audio_state,
-                    &mut timeline,
-                    &audio,
-                    now_us,
-                    true,
-                );
+            audio_state.try_start_playback(audio_player, now_us);
+            // いま鳴っているサンプルの PTS を実績として記録する。再生を開始するまでは
+            // まだ鳴っていないため、実績にしない
+            if audio_state.started {
+                record_sounding_audio(audio_player, &mut audio_state, &mut timeline);
+                // 再生中のバッファ量の最小値を残す。0 に近づいた回数と深さをログで読む
+                let buffer_ms = audio_player.stats().audio_buffer_ms;
+                player_buffer_min_ms =
+                    Some(player_buffer_min_ms.map_or(buffer_ms, |min| min.min(buffer_ms)));
             }
-            // いま鳴っているサンプルの PTS を実績として記録する。予定時刻ではなく、再生機器が
-            // 鳴らし終えたサンプル数から求めるため、実際の再生位置に追従する
-            record_sounding_audio(audio_player, &mut audio_state, &mut timeline);
             if let Err(e) = audio_player.process() {
                 tracing::warn!("Failed to process audio queue: {e}");
             }
@@ -514,20 +522,23 @@ fn run_raw_player(
                 last_audio_log = std::time::Instant::now();
                 // player_buffer は再生機器へ積んだまま鳴っていない長さである。これが 0 に
                 // 近づくと音が途切れるため、目標遅延が足りているかをここで確認できる。
+                // player_buffer_min は前回のログ以降の最小値であり、一瞬の枯れも読める。
                 // concealed と compressed は実際に適用できた長さの合計であり、skew_us は
                 // 実績から求めた A/V のずれ (映像が音声より遅れていれば正) である。
                 // 末尾の audio_state.log_fields は、鳴るはずの時刻・到着から鳴り始めるまで・
-                // 予定に対する余裕 (p50 / p95)・理由別の捨て・閉ループが決めた目標遅延である
+                // 予定に対する余裕 (p50 / p95)・理由別の捨て・隙間とアンダーランの計器・
+                // 閉ループが決めた目標遅延である
                 let skew_us = timeline
                     .skew_us()
                     .map_or_else(|| "none".to_string(), |skew_us| skew_us.to_string());
+                let player_buffer_min = player_buffer_min_ms
+                    .take()
+                    .map_or_else(|| "none".to_string(), |min| format!("{min:.0}ms"));
                 tracing::info!(
-                    "Audio jitter buffer: target_delay={}ms pending={} player_buffer={:.0}ms released={} dropped_overflow={} dropped={} concealed={}ms concealments={} compressed={}ms skew_us={} {}",
+                    "Audio jitter buffer: target_delay={}ms player_buffer={:.0}ms player_buffer_min={} dropped={} concealed={}ms concealments={} compressed={}ms skew_us={} {}",
                     timeline.presentation_delay_us(Track::Audio).unwrap_or(0) / 1000,
-                    audio_buffer.len(),
                     audio_player.stats().audio_buffer_ms,
-                    released_audio,
-                    audio_buffer.dropped_overflow(),
+                    player_buffer_min,
                     audio_state.scheduler.drops(),
                     audio_state.scheduler.concealed_us() / 1000,
                     audio_state.scheduler.concealments(),
@@ -553,6 +564,8 @@ fn run_raw_player(
     // その分を計器へ記録し、最後の値 (理由別の捨てと閉ループの目標) をログに出す
     if audio_output_enabled {
         let stopped_us = wall_clock_us();
+        // 枯れたまま終わった場合も、その長さを計器へ残す
+        audio_state.end_underrun(stopped_us);
         audio_state.record_stopped(&mut timeline, stopped_us);
         tracing::info!(
             "Audio playout stopped: {}",
@@ -566,23 +579,15 @@ fn run_raw_player(
     Ok(())
 }
 
-/// 直前に鳴らした音の波形 (欠落した隙間を埋めるのに使う)
-struct PlayedAudio {
-    /// チャンネルごとの波形 (f32、おおむね `[-1.0, 1.0]`)
-    channels: Vec<Vec<f32>>,
-    /// サンプルレート (Hz)
-    sample_rate: u32,
-}
-
 /// 音声の再生の組み立て (時間軸・スケジューラ・計器・閉ループを 1 か所で扱う)
 ///
 /// 1 つの音について、目標の開始時刻の決定 ([`AudioPlayoutAssembly::arrange`])、実際に
 /// 適用した欠落の補間と詰めの反映 ([`AudioPlayoutAssembly::commit`])、計器への記録、
-/// 閉ループへの観測の引き渡しをここへ集める。再生機器へ積む順序 (補間した音、今回の音)
+/// 閉ループへの観測の引き渡しをここへ集める。再生機器へ積む順序 (隙間の音、今回の音)
 /// だけは [`play_decoded_audio`] が受け持つ。
 ///
-/// 時間軸への到着の記録は受信側 ([`AudioJitterBuffer::push`]) が済ませているため、
-/// ここでは行わない。時間軸から読むのは目標の開始時刻と遅れだけである。
+/// 時間軸への到着の記録は受信側 ([`run_raw_player`]) が済ませているため、ここでは行わ
+/// ない。時間軸から読むのは目標の開始時刻と遅れだけである。
 ///
 /// 再生機器へ積むための状態 (再生を開始したか、積んだ音の位置の対応、直前に鳴らした
 /// 波形) も、音声の再生の経路で 1 つに持ち回るためここに置く。
@@ -590,16 +595,32 @@ struct PlayedAudio {
 /// 再生を止めるときは [`AudioPlayoutAssembly::record_stopped`] を呼ぶ。予約したまま
 /// 鳴り始めなかった音は、ここで数えないとどの統計にも現れない。
 struct AudioPlayoutAssembly {
-    /// 最初の 1 枚で再生を開始したか
+    /// 再生を開始したか
     started: bool,
+    /// 最初に積んだ音の開始時刻 (マイクロ秒)。ここに達したら `play()` を呼ぶ
+    playback_start_at_us: Option<i64>,
+    /// 再生の開始に失敗したことを既にログに出したか
+    ///
+    /// 開始できるまで毎ループ試すため、失敗が続くときにログを溢れさせないようにする
+    play_failure_logged: bool,
     /// 鳴らす時刻・詰め・隙間を決める
     scheduler: AudioPlayoutScheduler,
     /// 鳴るはずの時刻・到着・鳴り始めと、理由別の捨てを記録する計器
     stats: AudioPlayoutTimingStats,
-    /// 直前に鳴らした音の波形。欠落した隙間をこの末尾の周期で埋める
-    last_played: Option<PlayedAudio>,
+    /// 直前に鳴らした音の波形 (チャンネルごと)。欠落した隙間はこの末尾を繰り返して
+    /// 埋める
+    last_played: Option<Vec<Vec<f32>>>,
     /// 再生機器へ積んだ音の位置の対応
     position: AudioPlayoutPosition,
+    /// 直前に積んだ音の媒体終端の PTS (マイクロ秒)。次の隙間の PTS に使う
+    last_media_end_pts_us: Option<i64>,
+    /// 枯れ始めた時刻 (マイクロ秒)。枯れていないときは None
+    underrun_start_us: Option<i64>,
+    /// 閉ループへまだ渡していない、枯れていた長さ (マイクロ秒)
+    ///
+    /// 枯れは 1 回の観測でまとめて閉ループへ渡す。目標を動かすのは毎秒 1 回であるため、
+    /// 枯れ明けから次の観測までのぶんを足し合わせて渡す。渡したら 0 に戻す
+    unfed_underrun_us: i64,
     /// 直前に観測へ渡した、累積で詰めた長さ (マイクロ秒)。差を取って圧縮の速さを求める
     last_compressed_us: i64,
 }
@@ -609,10 +630,15 @@ impl AudioPlayoutAssembly {
     fn new() -> Self {
         Self {
             started: false,
+            playback_start_at_us: None,
+            play_failure_logged: false,
             scheduler: AudioPlayoutScheduler::new(),
             stats: AudioPlayoutTimingStats::new(),
             last_played: None,
             position: AudioPlayoutPosition::new(),
+            last_media_end_pts_us: None,
+            underrun_start_us: None,
+            unfed_underrun_us: 0,
             last_compressed_us: 0,
         }
     }
@@ -624,8 +650,7 @@ impl AudioPlayoutAssembly {
     /// 計器へ記録し、閉ループへ観測を渡して `None` を返す。
     ///
     /// 鳴らす組み立てへ渡す時点で、時間圧縮と補間を使えるサンプルレートかも確かめる。
-    /// 使えないレートの音は計器へ数える (鳴らし方は変えない)。受信側の待ち行列 (jitter
-    /// buffer) の溢れで捨てられた音はここへ届かないため、この数には含まれない。
+    /// 使えないレートの音は計器へ数える (鳴らし方は変えない)。
     ///
     /// `arrival_us` は到着した音がまだ鳴っていない位置である。`now_us` は既に出力へ積んだ
     /// 分だけ先に進んでいるため、到着基準の遅れはその位置から数える。
@@ -639,8 +664,7 @@ impl AudioPlayoutAssembly {
     ) -> Option<AudioPlayoutArrangement> {
         // 4 kHz へ間引くフィルタの表に無いサンプルレート (44.1 kHz の AAC など) では、ピッチの
         // 周期を求められないため時間圧縮も補間も働かない。落ちずに「操作しない」を返して区別
-        // できないので、計器に数えて気付けるようにする。数えるだけで鳴らし方は変えない。
-        // 受信側の待ち行列 (jitter buffer) の溢れで捨てられた音はここへ届かないため数えない
+        // できないので、計器に数えて気付けるようにする。数えるだけで鳴らし方は変えない
         if !stretch::is_time_stretch_available(audio.sample_rate) {
             self.stats.record_stretch_unavailable();
         }
@@ -671,22 +695,23 @@ impl AudioPlayoutAssembly {
             timestamp_us: audio.pts_us,
             duration_us,
             target_start_us,
-            // 目標が決まっているときだけ目標を守る。無いときと、配信が終わったあとの
-            // 吐き出し (`enforce_target` が false) では到着基準で並べる
+            // 目標が決まっているときだけ目標を守る。無いときと、目標を使わない指定の
+            // ときは到着基準で並べる
             enforce_target: enforce_target && target_start_us.is_some(),
             delay_us,
             arrival_delay_us,
             presentation_delay_us,
         });
-        let (start_at_us, basis, compress_us, gap_us) = match decision {
+        let (start_at_us, basis, compress_us, gap_us, conceal_us) = match decision {
             AudioPlayoutDecision::Play {
                 start_at_us,
                 basis,
                 compress_us,
+                // 隙間は前の音の終わりから今回の開始までの全長であり、切り捨てない。
+                // 補間してよい長さは conceal_us として別に返る
                 gap_us,
-                // 補間する隙間の開始時刻は使わない。再生機器へ積む順で位置が決まる
-                gap_start_us: _,
-            } => (start_at_us, basis, compress_us, gap_us),
+                conceal_us,
+            } => (start_at_us, basis, compress_us, gap_us, conceal_us),
             AudioPlayoutDecision::Drop { reason } => {
                 // 鳴らさなかった理由を計器の理由へ移す。並べすぎで捨てた長さを残すことで、
                 // 閉ループが「捨てた長さぶん目標を増やす」判断に使える
@@ -713,11 +738,13 @@ impl AudioPlayoutAssembly {
             tracing::debug!("Scheduled an audio chunk by arrival at {start_at_us}us");
         }
         Some(AudioPlayoutArrangement {
+            start_at_us,
             duration_us,
             target_start_us,
             arrival_us,
             compress_us,
             gap_us,
+            conceal_us,
         })
     }
 
@@ -726,16 +753,18 @@ impl AudioPlayoutAssembly {
         self.scheduler.confirm_concealment(applied_us);
     }
 
-    /// 予約した音へ実際に適用した詰めを、スケジューラ・計器・閉ループへ反映する
+    /// 予約した音へ実際に適用した詰めと隙間を、スケジューラ・計器・閉ループへ反映する
     ///
     /// 計器へ渡す値は `confirm_stretch` の後に `scheduler.last_play()` から読む。要求した
     /// 詰める長さと実際に詰めた長さは一致せず、実際に鳴る長さを記録する必要があるためで
-    /// ある。`now_us` は今の時刻 (受信側の壁時計) であり、閉ループへ渡す観測の時刻になる。
+    /// ある。`gap_us` は材料化した隙間の全長であり、補間できた長さ (concealed_us) ではなく
+    /// 無音で埋めた分も含む。`now_us` は今の時刻 (受信側の壁時計) であり、閉ループへ渡す
+    /// 観測の時刻になる。
     fn commit(
         &mut self,
         timeline: &mut PlayoutTimeline,
-        audio: &DecodedAudioFrame,
         applied: AppliedAudioPlayout,
+        gap_us: i64,
         now_us: i64,
     ) {
         self.scheduler.confirm_stretch(applied.compressed_us);
@@ -744,12 +773,78 @@ impl AudioPlayoutAssembly {
         if let Some(play) = self.scheduler.last_play() {
             self.stats.record_play(play);
         }
+        // 隙間は全長で数える。補間できなかった分も無音で材料化しており、聴感上の欠落と
+        // しては同じ長さだからである
+        if gap_us > 0 {
+            self.stats.record_gap(gap_us);
+        }
+        // 音声を積み直したため、枯れていた区間はここで終わる
+        self.end_underrun(now_us);
         self.feed_feedback(timeline, now_us);
         // 直前に鳴らした音として保持する。次の隙間はこの音の末尾を繰り返して埋める
-        self.last_played = Some(PlayedAudio {
-            channels: applied.channels,
-            sample_rate: audio.sample_rate,
-        });
+        self.last_played = Some(applied.channels);
+    }
+
+    /// 最初の音の開始時刻に達していれば再生を開始する
+    ///
+    /// 開始前でも PCM は積める (`raw_player` は再生を開始するまで内部キューに溜める) ため、
+    /// 開始までのフレームが先行バッファとして蓄積される。開始に失敗したときは開始済みに
+    /// せず、次のループでやり直す。
+    fn try_start_playback(&mut self, audio_player: &raw_player::AudioPlayer, now_us: i64) {
+        if self.started || !should_start_playback(self.playback_start_at_us, now_us) {
+            return;
+        }
+        match audio_player.play() {
+            Ok(()) => {
+                self.started = true;
+                tracing::info!("Audio playback started");
+            }
+            Err(e) => {
+                // 開始できるまで次のループでも試す。失敗が続くたびに警告を出すとログが
+                // 溢れるため、最初の失敗だけ知らせる
+                if !self.play_failure_logged {
+                    self.play_failure_logged = true;
+                    tracing::warn!("Failed to start audio playback: {e}");
+                }
+            }
+        }
+    }
+
+    /// 出力が枯れていることをスケジューラへ伝える
+    ///
+    /// 枯れている間は毎ループ呼ぶ。`note_underrun` は最後に並べた音の終わりを今へ進める
+    /// ため、枯れた区間が次の音の隙間として二重に材料化されない。計器へは枯れが明けた
+    /// ときに、枯れていた長さを 1 回だけ渡す ([`AudioPlayoutAssembly::end_underrun`])。
+    fn note_underrun(&mut self, underrun_us: i64, now_us: i64) {
+        if self.underrun_start_us.is_none() {
+            // 枯れ始めた時刻は、いまから枯れている長さだけ戻った時刻 (直前の音の終わり)
+            self.underrun_start_us = Some(now_us.saturating_sub(underrun_us));
+        }
+        self.scheduler.note_underrun(now_us);
+    }
+
+    /// 枯れていた区間を計器へ記録する (枯れた長さを 1 回だけ数える)
+    ///
+    /// 記録した長さは、閉ループへ渡すまで `unfed_underrun_us` に積む。閉ループは枯れを
+    /// 目標遅延の増加の根拠にする
+    /// ([`crate::playout::timing::AudioDelayFeedbackObservation::underrun_ms`])。
+    fn end_underrun(&mut self, now_us: i64) {
+        let Some(start_us) = self.underrun_start_us.take() else {
+            return;
+        };
+        let underrun_us = now_us.saturating_sub(start_us);
+        self.stats.record_underrun(underrun_us);
+        self.unfed_underrun_us = self.unfed_underrun_us.saturating_add(underrun_us);
+    }
+
+    /// 閉ループへまだ渡していない枯れの長さをミリ秒で取り出す
+    ///
+    /// 取り出した分は 0 に戻す。枯れていないときは 0 を返す。ミリ秒未満は切り捨てる
+    /// (検出の許容が 1 ms であるため、枯れとして数えた長さは 1 ms 以上である)。
+    fn take_unfed_underrun_ms(&mut self) -> i64 {
+        let underrun_ms = self.unfed_underrun_us / 1_000;
+        self.unfed_underrun_us = 0;
+        underrun_ms
     }
 
     /// 鳴らす準備の途中で失敗した音を計器へ記録する
@@ -810,11 +905,15 @@ impl AudioPlayoutAssembly {
     /// 圧縮 (時間圧縮) は累積で数えられているため、前回の観測からの増分にして渡す。閉ループ
     /// はこれが続くときだけ目標遅延の上限を 160 ms へ広げる。購読のやり直しで累積が 0 に
     /// 戻っても負の差を作らないよう、0 で止める。
+    ///
+    /// アンダーランも前回の観測からの増分にして渡す。アンダーランは事後には埋められない
+    /// ため、閉ループはこれを根拠に目標遅延を上げる。
     fn feed_feedback(&mut self, timeline: &mut PlayoutTimeline, now_us: i64) {
         let mut observation = self.stats.audio_delay_feedback(now_us);
         let compressed_us = self.scheduler.compressed_us();
         observation.compression_us = compressed_us.saturating_sub(self.last_compressed_us).max(0);
         self.last_compressed_us = compressed_us;
+        observation.underrun_ms = self.take_unfed_underrun_ms();
         timeline.observe_audio_playout(observation);
     }
 
@@ -825,15 +924,21 @@ impl AudioPlayoutAssembly {
 
     /// 計器と閉ループの値をログ用の文字列にする
     ///
-    /// 鳴るはずの時刻 (絶対値)、到着から鳴り始めるまでと予定に対する余裕の分布 (p50 /
-    /// p95)、理由別の捨ての件数と長さ、時間圧縮と補間を使えないサンプルレートで受け取った
-    /// 音の数、いま使っている目標遅延とその理由、いま適用している上限と、直近に観測した
-    /// 圧縮の速さを出す。
+    /// 材料化した隙間と検出したアンダーランの回数・合計・最大、鳴るはずの時刻 (絶対値)、
+    /// 到着から鳴り始めるまでと予定に対する余裕の分布 (p50 / p95)、理由別の捨ての件数と
+    /// 長さ、時間圧縮と補間を使えないサンプルレートで受け取った音の数、いま使っている
+    /// 目標遅延とその理由、いま適用している上限と、直近に観測した圧縮の速さを出す。
     fn log_fields(&mut self, timeline: &PlayoutTimeline, now_us: i64) -> String {
         let snapshot = self.snapshot(now_us);
         let feedback = timeline.delay_breakdown().audio_delay_feedback;
         format!(
-            "playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} stretch_unavailable={} feedback_target={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={} feedback_ceiling={}ms feedback_compression={}ms_per_second",
+            "gaps={} gap_ms={} gap_max_ms={} underruns={} underrun_ms={} underrun_max_ms={} playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} stretch_unavailable={} feedback_target={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={} feedback_ceiling={}ms feedback_compression={}ms_per_second",
+            snapshot.gaps,
+            snapshot.gap_total_us / 1000,
+            snapshot.gap_max_us / 1000,
+            snapshot.underruns,
+            snapshot.underrun_total_us / 1000,
+            snapshot.underrun_max_us / 1000,
             time_log(snapshot.last_target_us),
             time_log(snapshot.last_arrival_us),
             time_log(snapshot.last_start_us),
@@ -906,6 +1011,8 @@ impl AudioPlayoutAssembly {
 /// `scheduler.last_play()` から読む (実際に詰めた長さが反映されているため)。ここには
 /// 鳴らせなかったときの記録と、隙間と詰めの適用に必要な値だけを持つ。
 struct AudioPlayoutArrangement {
+    /// 鳴り始める時刻 (マイクロ秒)。最初の 1 音では再生開始の判定にも使う
+    start_at_us: i64,
     /// 音の長さ (マイクロ秒)
     duration_us: i64,
     /// 目標の開始時刻。無いこともある
@@ -914,8 +1021,10 @@ struct AudioPlayoutArrangement {
     arrival_us: i64,
     /// 波形の周期で詰める長さ (マイクロ秒)。0 なら詰めない
     compress_us: i64,
-    /// 補間する隙間の長さ (マイクロ秒)。0 なら補間しない
+    /// 前の音の終わりから今回の開始までの隙間の全長 (マイクロ秒)。0 なら隙間は無い
     gap_us: i64,
+    /// 隙間のうち補間してよい長さ (マイクロ秒)。必ず `gap_us` 以下
+    conceal_us: i64,
 }
 
 /// 時刻をログ用の値にする (マイクロ秒のまま。値が無ければ none)
@@ -1011,10 +1120,10 @@ impl AudioPlayoutPosition {
 /// デコード済みの音声を 1 つ、スケジューラの決めた時刻へ向けて再生機器へ積む
 ///
 /// 鳴らす時刻の決定・計器への記録・閉ループへの観測の引き渡しは
-/// [`AudioPlayoutAssembly`] が行う。ここは再生機器へ積む順序 (補間した音、今回の音) を
-/// 受け持つ。`now_us` は今の時刻 (受信側の壁時計)。隙間は直前の音の末尾を周期で
-/// 繰り返して埋め、詰めは波形の周期 1 つ分を削って行う。実際に適用した長さは
-/// `confirm_concealment` と `confirm_stretch` で返す。
+/// [`AudioPlayoutAssembly`] が行う。ここは再生機器へ積む順序 (隙間の音、今回の音) を
+/// 受け持つ。`now_us` は今の時刻 (受信側の壁時計)。詰めは波形の周期 1 つ分を削り、
+/// 隙間は [`gap::materialize`] で全長を材料化する (補間できなかった分は無音で埋まる)。
+/// 実際に適用した長さは `confirm_concealment` と `confirm_stretch` で返す。
 ///
 /// スケジューラが鳴らさないと決めた音は積まずに捨て、捨てた数と理由をログに出す
 /// (鳴らせない音を積むと、その分だけ音が遅れたままになる)。
@@ -1024,60 +1133,55 @@ fn play_decoded_audio(
     timeline: &mut PlayoutTimeline,
     audio: &DecodedAudioFrame,
     now_us: i64,
-    enforce_target: bool,
 ) {
     let channels = usize::from(audio.channels);
     let sample_rate = audio.sample_rate;
     // 到着の基準は、音声出力が実際に鳴っている位置から求める。`now_us` は既に出力へ積んだ
     // 分だけ先に進んでいるため、到着基準の遅れはこの位置から数える
     let arrival_us = state.sounding_position_us(audio_player, timeline, now_us);
-    let Some(arrangement) = state.arrange(timeline, audio, now_us, arrival_us, enforce_target)
-    else {
+    let Some(arrangement) = state.arrange(timeline, audio, now_us, arrival_us, true) else {
         return;
     };
 
-    // 隙間の補間と詰めを音声へ適用する。埋めた音は今回の音の直前へ積むため、再生機器の
-    // キューでは前の音の直後、今回の音の直前になる (キューは積んだ順に鳴る)。隙間の開始
-    // 時刻 (gap_start_us) は使わない。積む順で位置が決まるためである
+    // 隙間の材料化と詰めを音声へ適用する。返った隙間の音は今回の音の直前へ積むため、
+    // 再生機器のキューでは前の音の直後、今回の音の直前になる (キューは積んだ順に鳴る)
     let applied = apply_audio_playout(
         audio,
-        state.last_played.as_ref(),
+        state.last_played.as_deref(),
         arrangement.gap_us,
+        arrangement.conceal_us,
         arrangement.compress_us,
     );
-    let concealment_enqueued = if applied.concealment.is_empty() {
-        if arrangement.gap_us > 0 {
-            // 周期が求まらないと埋められない (無音のときは 0 で埋まる)。無音のまま続ける
-            tracing::info!(
-                "Could not conceal the {}us gap in the audio",
-                arrangement.gap_us
-            );
-        }
+
+    // 隙間の音を積む。PTS は直前の音の媒体終端であり、まだ一度も音を積んでいなければ
+    // 今回の音の PTS から隙間の全長だけ戻した値にする
+    let gap_enqueued = if applied.gap_channels.is_empty() {
         false
     } else {
-        // 埋めた音は今回の TIMESTAMP の直前を占める。PTS は今回の音から埋めた長さだけ
-        // 戻した値にする
-        let pts_us = audio.pts_us.saturating_sub(applied.concealed_us);
-        let enqueued = enqueue_pcm(
+        let pts_us = gap_start_pts_us(
+            state.last_media_end_pts_us,
+            audio.pts_us,
+            arrangement.gap_us,
+        );
+        // 累積サンプル数は enqueue の前に読む。enqueue の後に読むと、積んだ隙間の分だけ
+        // 後ろへ進んだ値になり、鳴り始める位置の対応が壊れる
+        let start_samples = audio_player.stats().total_samples_enqueued;
+        let frames = applied.gap_channels.len() / channels.max(1);
+        if enqueue_pcm(
             audio_player,
-            &mut state.started,
-            &applied.concealment,
+            &applied.gap_channels,
             pts_us,
             sample_rate,
             audio.channels,
-        );
-        if enqueued {
-            let start_samples = audio_player.stats().total_samples_enqueued;
-            state.position.record(
-                start_samples,
-                pts_us,
-                (applied.concealment.len() / channels.max(1)) as i64,
-            );
+        ) {
+            state.position.record(start_samples, pts_us, frames as i64);
+            true
+        } else {
+            false
         }
-        enqueued
     };
     // 積めた長さだけを補間したものとして返す。要求した長さを超える分は confirm が切る
-    state.confirm_concealment(if concealment_enqueued {
+    state.confirm_concealment(if gap_enqueued {
         applied.concealed_us
     } else {
         0
@@ -1092,7 +1196,6 @@ fn play_decoded_audio(
     let start_samples = audio_player.stats().total_samples_enqueued;
     if !enqueue_pcm(
         audio_player,
-        &mut state.started,
         &pcm,
         audio.pts_us,
         sample_rate,
@@ -1105,8 +1208,18 @@ fn play_decoded_audio(
     state
         .position
         .record(start_samples, audio.pts_us, frames as i64);
-    // 適用した詰めをスケジューラへ返し、鳴らした結果を計器と閉ループへ反映する
-    state.commit(timeline, audio, applied, now_us);
+    // 最初に積んだ音の開始時刻を控える。メインループはこの時刻に達したら play() を呼ぶ。
+    // それまでのフレームは再生機器の内部キューに先行バッファとして溜まる
+    if state.playback_start_at_us.is_none() {
+        state.playback_start_at_us = Some(arrangement.start_at_us);
+    }
+    // 次の隙間の PTS に使う、今回の音の媒体終端。詰めた分を引かないのは、この音が表現
+    // している媒体上の範囲の終端だからである
+    state.last_media_end_pts_us = Some(audio.pts_us.saturating_add(arrangement.duration_us));
+    // 適用した詰めと隙間をスケジューラへ返し、鳴らした結果を計器と閉ループへ反映する。
+    // 隙間の計器は実際に積めた長さで記録する (積めなかった分を材料化したと数えない)
+    let materialized_gap_us = if gap_enqueued { arrangement.gap_us } else { 0 };
+    state.commit(timeline, applied, materialized_gap_us, now_us);
 }
 
 /// いま鳴っているサンプルの PTS を実績として時間軸へ記録する
@@ -1133,43 +1246,37 @@ fn record_sounding_audio(
     timeline.record_presentation(Track::Audio, pts_us, wall_clock_us());
 }
 
-/// スケジューラが決めた隙間の補間と詰めを音声へ適用した結果
+/// スケジューラが決めた隙間の材料化と詰めを音声へ適用した結果
 struct AppliedAudioPlayout {
     /// 詰めた後の今回の音 (チャンネルごと、f32)
     channels: Vec<Vec<f32>>,
-    /// 埋めた隙間の音 (f32 interleaved)。埋めていないときは空
-    concealment: Vec<f32>,
-    /// 埋めた長さ (マイクロ秒)。埋めていないときは 0
+    /// 材料化した隙間の音 (f32 interleaved)。隙間が無いときは空
+    gap_channels: Vec<f32>,
+    /// 補間できた長さ (マイクロ秒)。補間できなければ 0
     concealed_us: i64,
     /// 詰めた長さ (マイクロ秒)。詰めていないときは 0
     compressed_us: i64,
 }
 
-/// スケジューラが決めた隙間の補間と詰めを音声へ適用する (再生機器には触れない)
+/// スケジューラが決めた隙間の材料化と詰めを音声へ適用する (再生機器には触れない)
 ///
-/// `gap_us` の隙間は `last_played_audio` の末尾を周期で繰り返して埋める。埋められなかった
-/// ときは `concealment` を空にし `concealed_us` を 0 にする。`compress_us` は波形の周期
-/// 1 つ分を削って詰める。削れる長さは周期 (2.5 ms 以上 15 ms 以下) で決まり、要求された
-/// 長さとは一致しないため、実際に削れた長さを `compressed_us` として返す。どちらも
-/// `confirm_stretch` と `confirm_concealment` へそのまま渡せる。
+/// まず `compress_us` まで波形の周期 1 つ分を削って今回の音を詰める。削れる長さは周期
+/// (2.5 ms 以上 15 ms 以下) で決まり、要求された長さとは一致しないため、実際に削れた
+/// 長さを `compressed_us` として返す。次に `gap_us` の隙間を [`gap::materialize`] で
+/// 全長ぶん材料化する。補間できなかった分は無音で埋まり、隙間の末尾と今回の音の先頭は
+/// フェードで繋がる。`concealed_us` は補間できた長さである。
 ///
 /// 削ってよい長さは `compress_us` までとする。周期がこれを超える音では削らない
 /// ([`stretch::compress`] が上限で判断する)。
 fn apply_audio_playout(
     audio: &DecodedAudioFrame,
-    last_played_audio: Option<&PlayedAudio>,
+    last_played_audio: Option<&[Vec<f32>]>,
     gap_us: i64,
+    conceal_us: i64,
     compress_us: i64,
 ) -> AppliedAudioPlayout {
     let channels = usize::from(audio.channels);
     let sample_rate = audio.sample_rate;
-    let (concealment, concealed_us) = if gap_us > 0 {
-        conceal_gap(last_played_audio, channels, sample_rate, gap_us)
-            .unwrap_or_else(|| (Vec::new(), 0))
-    } else {
-        (Vec::new(), 0)
-    };
-
     // stretch は f32 のチャンネルごとの波形を扱う。S16 interleaved から直して分ける
     let mut channel_pcm = pcm_f32_to_channels(&pcm_i16_to_f32(&audio.pcm), channels);
     let mut compressed_us = 0;
@@ -1197,67 +1304,65 @@ fn apply_audio_playout(
             }
         }
     }
+
+    // 隙間を材料化する。返る音は要求した全長 (gap_us) であり、補間できなかった分は無音で
+    // 埋まる。今回の音の先頭にはフェードインが掛かる
+    let mut gap_channels = Vec::new();
+    let mut concealed_us = 0;
+    if gap_us > 0 && channels > 0 {
+        let mut channel_slices: Vec<&mut [f32]> = channel_pcm
+            .iter_mut()
+            .map(|channel| channel.as_mut_slice())
+            .collect();
+        let materialized = gap::materialize(
+            last_played_audio,
+            &mut channel_slices,
+            sample_rate,
+            gap_us,
+            conceal_us,
+        );
+        concealed_us = materialized.concealed_us;
+        let gap_frames = materialized.channels.first().map_or(0, Vec::len);
+        gap_channels = pcm_channels_to_f32(&materialized.channels, gap_frames);
+    }
+
     AppliedAudioPlayout {
         channels: channel_pcm,
-        concealment,
+        gap_channels,
         concealed_us,
         compressed_us,
     }
 }
 
-/// 直前の音の末尾を周期で繰り返して隙間を埋める
+/// 隙間の音を積むときの PTS (マイクロ秒) を求める
 ///
-/// 戻り値は埋めた音 (f32 interleaved) と埋めた長さ (マイクロ秒)。埋められないときは
-/// `None` であり、[`stretch::conceal`] が 0 を返したとき (無音、末尾に周期が無い、
-/// 継ぎ目の段差が大きいなど) と、直前の音の形式が今の音と違うときに返る。
-fn conceal_gap(
-    previous: Option<&PlayedAudio>,
-    channels: usize,
-    sample_rate: u32,
-    gap_us: i64,
-) -> Option<(Vec<f32>, i64)> {
-    let previous = previous?;
-    // 形式が変わると周期もサンプル数も変わるため、同じ形式のときだけ埋める
-    if previous.sample_rate != sample_rate || previous.channels.len() != channels {
-        return None;
-    }
-    // stretch::conceal は埋める長さ以上の出力を要求する。マイクロ秒からサンプル数への
-    // 丸めが切り捨てでも足りるよう、切り上げた長さを用意する
-    let capacity = us_to_samples_ceil(gap_us, sample_rate);
-    let mut concealment: Vec<Vec<f32>> = previous
-        .channels
-        .iter()
-        .map(|_| vec![0.0f32; capacity])
-        .collect();
-    let references: Vec<&[f32]> = previous
-        .channels
-        .iter()
-        .map(|channel| channel.as_slice())
-        .collect();
-    let mut outputs: Vec<&mut [f32]> = concealment
-        .iter_mut()
-        .map(|channel| channel.as_mut_slice())
-        .collect();
-    let samples = stretch::conceal(&references, &mut outputs, sample_rate, gap_us);
-    let Ok(samples) = usize::try_from(samples) else {
-        return None;
-    };
-    if samples == 0 {
-        return None;
-    }
-    for channel in &mut concealment {
-        channel.truncate(samples);
-    }
-    let applied_us = samples_to_us(samples, sample_rate);
-    Some((pcm_channels_to_f32(&concealment, samples), applied_us))
+/// 隙間は直前の音の直後を占めるため、直前の音の媒体終端を使う。まだ一度も音を積んで
+/// いなければ、今回の音の PTS から隙間の全長だけ戻した値にする。
+fn gap_start_pts_us(last_media_end_pts_us: Option<i64>, pts_us: i64, gap_us: i64) -> i64 {
+    last_media_end_pts_us.unwrap_or_else(|| pts_us.saturating_sub(gap_us))
 }
 
-/// f32 interleaved の音声を再生機器へ積み、最初の 1 枚で再生を開始する
+/// 出力が枯れた長さを求める (枯れていなければ None)
 ///
-/// 積むことができたときだけ true を返す。
+/// まだ 1 音も並べていない (`last_end_us` が None) ときと、最後に並べた音の終わりから
+/// [`AUDIO_UNDERRUN_ALLOWANCE_US`] 以内のときは、枯れていないものとして None を返す。
+fn underrun_us(last_end_us: Option<i64>, now_us: i64) -> Option<i64> {
+    let last_end_us = last_end_us?;
+    let underrun_us = now_us.checked_sub(last_end_us)?;
+    (underrun_us >= AUDIO_UNDERRUN_ALLOWANCE_US).then_some(underrun_us)
+}
+
+/// 最初の音の開始時刻に達して、再生を開始してよければ true
+fn should_start_playback(start_at_us: Option<i64>, now_us: i64) -> bool {
+    start_at_us.is_some_and(|start_at_us| now_us >= start_at_us)
+}
+
+/// f32 interleaved の音声を再生機器の内部キューへ積む
+///
+/// 積むことができたときだけ true を返す。再生の開始 (`play`) はここでは呼ばない。最初の
+/// 音の開始時刻まで積み続けることで、先行バッファが内部キューに蓄積される。
 fn enqueue_pcm(
     audio_player: &raw_player::AudioPlayer,
-    audio_started: &mut bool,
     pcm: &[f32],
     pts_us: i64,
     sample_rate: u32,
@@ -1276,16 +1381,6 @@ fn enqueue_pcm(
     ) {
         tracing::warn!("Failed to enqueue audio chunk: {e}");
         return false;
-    }
-    // 空のキューで play すると SDL のデバイスを開くだけで音は出ないため、積んでから呼ぶ
-    if !*audio_started {
-        match audio_player.play() {
-            Ok(()) => {
-                *audio_started = true;
-                tracing::info!("Audio playback started");
-            }
-            Err(e) => tracing::warn!("Failed to start audio playback: {e}"),
-        }
     }
     true
 }
@@ -1365,18 +1460,6 @@ fn pcm_duration_us(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
         / i64::from(sample_rate)
 }
 
-/// マイクロ秒に相当するサンプル数 (切り上げ)
-///
-/// サンプル数を必要とするバッファを確保するために使う。0 以下とサンプルレートが 0 の
-/// ときは 0 を返す。
-fn us_to_samples_ceil(us: i64, sample_rate: u32) -> usize {
-    if us <= 0 || sample_rate == 0 {
-        return 0;
-    }
-    let scaled = us.saturating_mul(i64::from(sample_rate));
-    usize::try_from(scaled.saturating_add(999_999) / 1_000_000).unwrap_or(usize::MAX)
-}
-
 /// マイクロ秒に相当するサンプル数 (四捨五入)
 ///
 /// 時間圧縮で削ってよい長さの上限を求めるときに使う (`samples_to_us` と逆向きの丸め)。
@@ -1434,7 +1517,7 @@ mod tests {
     /// テスト用の周期のある音を作る
     ///
     /// 48 kHz のサンプルレートで `frequency_hz` が整数の周期になる (400 Hz なら 120
-    /// サンプル) ため、`stretch::conceal` が末尾の周期をそのまま見つけられる。
+    /// サンプル) ため、時間圧縮と隙間の補間が末尾の周期をそのまま見つけられる。
     fn periodic_audio(frequency_hz: f64, sample_rate: u32, length: usize) -> Vec<f32> {
         (0..length)
             .map(|index| {
@@ -1553,23 +1636,6 @@ mod tests {
     #[test]
     fn sample_and_microsecond_conversions_round() {
         assert_eq!(
-            us_to_samples_ceil(20_000, 48_000),
-            960,
-            "20 ms は 48 kHz で 960 サンプルであること"
-        );
-        assert_eq!(
-            us_to_samples_ceil(10, 48_000),
-            1,
-            "1 サンプルに満たない長さも 1 サンプルへ切り上げること"
-        );
-        assert_eq!(us_to_samples_ceil(0, 48_000), 0, "0 は 0 であること");
-        assert_eq!(us_to_samples_ceil(-1, 48_000), 0, "負の長さは 0 であること");
-        assert_eq!(
-            us_to_samples_ceil(1_000, 0),
-            0,
-            "サンプルレート 0 は 0 であること"
-        );
-        assert_eq!(
             us_to_samples(20_000, 48_000),
             960,
             "20 ms は 48 kHz で 960 サンプルであること"
@@ -1605,34 +1671,74 @@ mod tests {
         assert_eq!(samples_to_us(960, 0), 0, "サンプルレート 0 は 0 であること");
     }
 
-    /// 周期のある音から隙間を組み立てること
+    /// 直前の音の末尾を周期で繰り返して隙間を材料化すること
+    ///
+    /// 隙間は要求した全長ぶん材料化され、補間できた長さが concealed_us として返る。
+    /// 隙間の先頭は直前の音の末尾へ連続し、今回の音は短くならない。
     #[test]
-    fn conceal_gap_repeats_the_previous_tail() {
+    fn apply_audio_playout_materializes_the_gap_from_the_previous_tail() {
         let sample_rate = 48_000;
         // 400 Hz は 48 kHz で 120 サンプル周期であり、末尾の周期がそのまま見つかる
         let period = 120;
-        let previous = PlayedAudio {
-            channels: vec![periodic_audio(400.0, sample_rate, 4_800)],
-            sample_rate,
-        };
-        let (pcm, applied_us) = conceal_gap(Some(&previous), 1, sample_rate, 20_000)
-            .expect("周期のある音からは隙間を埋められること");
-        assert_eq!(pcm.len(), 960, "20 ms ぶんの音を組み立てること");
-        assert_eq!(applied_us, 20_000, "埋めた長さをマイクロ秒で返すこと");
-        // 末尾の周期を繰り返していること (末尾の利得が下がるぶんだけ差が出る)
-        for index in 0..pcm.len() - period {
-            let difference = (pcm[index] - pcm[index + period]).abs();
+        let previous = vec![periodic_audio(400.0, sample_rate, 4_800)];
+        let audio = audio_frame(960, sample_rate);
+        let applied = apply_audio_playout(&audio, Some(previous.as_slice()), 20_000, 20_000, 0);
+        assert_eq!(
+            applied.gap_channels.len(),
+            960,
+            "20 ms ぶんの隙間を材料化すること"
+        );
+        assert_eq!(
+            applied.concealed_us, 20_000,
+            "補間できた長さをマイクロ秒で返すこと"
+        );
+        assert_eq!(applied.channels[0].len(), 960, "今回の音は短くならないこと");
+        // 直前の音の末尾と隙間の先頭が連続していること (周期ぶん離れたサンプルは同位相)
+        let previous_tail = previous[0][4_800 - 1];
+        assert!(
+            (applied.gap_channels[0] - previous_tail).abs() < 0.05,
+            "隙間の先頭が直前の音の末尾の続きであること gap={} tail={previous_tail}",
+            applied.gap_channels[0]
+        );
+        // 隙間は末尾の周期を繰り返していること。先頭は直前の音の末尾へ繋ぐフェードの
+        // ため、末尾は 0 へ落とすフェードのため、その範囲を除いて確かめる
+        let fade_frames = 96;
+        for index in fade_frames..applied.gap_channels.len() - period - fade_frames {
+            let difference =
+                (applied.gap_channels[index] - applied.gap_channels[index + period]).abs();
             assert!(
                 difference < 0.05,
                 "{index} 番目が周期ぶん後の音と一致すること difference={difference}"
             );
         }
-        // 組み立てた先頭は直前の音の末尾 1 周期ぶんの先頭であること
-        let previous_tail = previous.channels[0][4_800 - period];
+    }
+
+    /// 補間できない隙間も無音で全長ぶん材料化されること
+    ///
+    /// 隙間を空けたままにすると、後続の音がその分だけ早く鳴って段差になる。直前の音が
+    /// 無い (最初の音の前) ときも、要求された全長を無音で埋める。
+    #[test]
+    fn apply_audio_playout_fills_an_unconcealable_gap_with_silence() {
+        let audio = audio_frame(960, 48_000);
+        let applied = apply_audio_playout(&audio, None, 10_000, 10_000, 0);
+        assert_eq!(
+            applied.gap_channels.len(),
+            480,
+            "補間できなくても 10 ms ぶんの隙間を材料化すること"
+        );
+        assert_eq!(
+            applied.concealed_us, 0,
+            "補間できなかったため補間した長さは 0 であること"
+        );
         assert!(
-            (pcm[0] - previous_tail).abs() < 0.01,
-            "先頭は直前の音の末尾の続きであること pcm={} tail={previous_tail}",
-            pcm[0]
+            applied.gap_channels.iter().all(|sample| *sample == 0.0),
+            "補間できない隙間は無音で埋めること"
+        );
+        // 隙間が無ければ材料化しない
+        let applied = apply_audio_playout(&audio, None, 0, 0, 0);
+        assert!(
+            applied.gap_channels.is_empty(),
+            "隙間が無いときは材料化しないこと"
         );
     }
 
@@ -1691,43 +1797,156 @@ mod tests {
         );
     }
 
-    /// 埋められないときは隙間を組み立てないこと
+    /// 隙間の音を積むときの PTS を求めること
+    ///
+    /// 直前の音を積んでいればその媒体終端を使う。まだ一度も積んでいなければ、今回の音の
+    /// PTS から隙間の全長だけ戻した値にする。
     #[test]
-    fn conceal_gap_returns_none_when_it_cannot_fill() {
-        // 無音は周期が求まらないが、0 で埋まる (長さは要求どおり)
-        let silent = PlayedAudio {
-            channels: vec![vec![0.0f32; 4_800]],
-            sample_rate: 48_000,
-        };
-        let (pcm, concealed_us) =
-            conceal_gap(Some(&silent), 1, 48_000, 20_000).expect("無音でも長さは埋まること");
-        assert_eq!(concealed_us, 20_000, "要求どおりの長さを埋めること");
-        assert!(
-            pcm.iter().all(|sample| *sample == 0.0),
-            "無音の隙間は 0 で埋まること"
+    fn gap_start_pts_uses_the_previous_media_end() {
+        assert_eq!(
+            gap_start_pts_us(Some(1_020_000), 1_030_000, 10_000),
+            1_020_000,
+            "直前の音の媒体終端を使うこと"
         );
-        // 直前の音が無ければ埋められない
-        assert!(
-            conceal_gap(None, 1, 48_000, 20_000).is_none(),
-            "直前の音が無ければ埋めないこと"
+        assert_eq!(
+            gap_start_pts_us(None, 1_030_000, 10_000),
+            1_020_000,
+            "直前の音が無ければ今回の音の PTS から隙間の全長だけ戻すこと"
         );
-        // 形式が違うと周期もサンプル数も変わるため埋めない
-        let stereo = PlayedAudio {
-            channels: vec![periodic_audio(400.0, 48_000, 4_800); 2],
-            sample_rate: 48_000,
-        };
+        assert_eq!(
+            gap_start_pts_us(None, 10_000, 20_000),
+            -10_000,
+            "隙間が音の先頭より前になるときは負の PTS になること"
+        );
+    }
+
+    /// 出力が枯れた長さの判定が境界で正しいこと
+    ///
+    /// まだ 1 音も並べていないとき (None) と、最後に並べた音の終わりより前 (負) は枯れて
+    /// いない。許容ちょうどから枯れたものとして数える。
+    #[test]
+    fn underrun_us_checks_the_boundaries() {
+        let allowance = AUDIO_UNDERRUN_ALLOWANCE_US;
+        assert_eq!(
+            underrun_us(None, 10_000_000),
+            None,
+            "まだ 1 音も並べていなければ枯れていないこと"
+        );
+        assert_eq!(
+            underrun_us(Some(10_000_500), 10_000_500),
+            None,
+            "最後の音の終わりちょうどでは枯れていないこと"
+        );
+        assert_eq!(
+            underrun_us(Some(10_001_000), 10_000_000),
+            None,
+            "最後の音の終わりより前 (負) は枯れていないこと"
+        );
+        assert_eq!(
+            underrun_us(Some(10_000_000 - (allowance - 1)), 10_000_000),
+            None,
+            "許容未満は枯れていないこと"
+        );
+        assert_eq!(
+            underrun_us(Some(10_000_000 - allowance), 10_000_000),
+            Some(allowance),
+            "許容ちょうどから枯れたものとして数えること"
+        );
+        assert_eq!(
+            underrun_us(Some(9_950_000), 10_000_000),
+            Some(50_000),
+            "過ぎた長さを枯れた長さとして返すこと"
+        );
+    }
+
+    /// 再生開始の判定が最初の音の開始時刻で切り替わること
+    #[test]
+    fn should_start_playback_waits_for_the_first_start_time() {
         assert!(
-            conceal_gap(Some(&stereo), 1, 48_000, 20_000).is_none(),
-            "チャンネル数が違えば埋めないこと"
+            !should_start_playback(None, 10_000_000),
+            "まだ音を積んでいなければ開始しないこと"
         );
         assert!(
-            conceal_gap(Some(&stereo), 2, 16_000, 20_000).is_none(),
-            "サンプルレートが違えば埋めないこと"
+            !should_start_playback(Some(10_000_001), 10_000_000),
+            "最初の音の開始時刻の前は開始しないこと"
         );
-        // 隙間の長さが 0 なら埋めない
         assert!(
-            conceal_gap(Some(&stereo), 2, 48_000, 0).is_none(),
-            "隙間が無ければ埋めないこと"
+            should_start_playback(Some(10_000_000), 10_000_000),
+            "最初の音の開始時刻ちょうどで開始すること"
+        );
+        assert!(
+            should_start_playback(Some(9_999_999), 10_000_000),
+            "最初の音の開始時刻を過ぎたら開始すること"
+        );
+    }
+
+    /// 計器が隙間の全長とアンダーランの枯れた長さを数えること
+    ///
+    /// 隙間は補間した長さではなく材料化した全長で数える。アンダーランは枯れている間の
+    /// 検出 (毎ループ) ではなく、枯れが明けたときに 1 回だけ数える。
+    #[test]
+    fn playout_assembly_counts_the_gaps_and_the_underruns() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        let now_us = 10_000_000;
+        timeline.observe(Track::Audio, now_us, 0);
+        let audio = audio_frame(960, 48_000);
+        // 隙間の全長は 20 ms、補間できたのは 10 ms だけという組み立てを反映する
+        assembly.commit(
+            &mut timeline,
+            AppliedAudioPlayout {
+                channels: pcm_f32_to_channels(
+                    &pcm_i16_to_f32(&audio.pcm),
+                    usize::from(audio.channels),
+                ),
+                gap_channels: vec![0.0; 480],
+                concealed_us: 10_000,
+                compressed_us: 0,
+            },
+            20_000,
+            now_us,
+        );
+        let snapshot = assembly.snapshot(now_us);
+        assert_eq!(snapshot.gaps, 1, "材料化した隙間を数えること");
+        assert_eq!(
+            snapshot.gap_total_us, 20_000,
+            "補間した長さではなく材料化した全長を合計すること"
+        );
+        assert_eq!(snapshot.gap_max_us, 20_000, "最長の隙間を記録すること");
+
+        // 枯れている間は毎ループ検出されるが、明けたときに 1 回だけ数える
+        assembly.note_underrun(5_000, 10_020_000);
+        assembly.note_underrun(1_000, 10_021_000);
+        let snapshot = assembly.snapshot(now_us);
+        assert_eq!(snapshot.underruns, 0, "枯れている間はまだ計上しないこと");
+        assembly.end_underrun(10_040_000);
+        let snapshot = assembly.snapshot(now_us);
+        assert_eq!(snapshot.underruns, 1, "枯れた区間を 1 回だけ数えること");
+        assert_eq!(
+            snapshot.underrun_total_us, 25_000,
+            "枯れ始め (10_015_000) から明ける (10_040_000) までの長さを合計すること"
+        );
+        assert_eq!(
+            snapshot.underrun_max_us, 25_000,
+            "最長の枯れた区間を記録すること"
+        );
+        // 枯れた長さは閉ループへ 1 回だけ渡す
+        assert_eq!(
+            assembly.take_unfed_underrun_ms(),
+            25,
+            "枯れた長さをミリ秒で閉ループへ渡すこと"
+        );
+        assert_eq!(
+            assembly.take_unfed_underrun_ms(),
+            0,
+            "同じ枯れを二重に渡さないこと"
+        );
+        // 続けて枯れが無いループで呼んでも二重に数えない
+        assembly.end_underrun(10_041_000);
+        assert_eq!(
+            assembly.snapshot(now_us).underruns,
+            1,
+            "枯れていないときに呼んで二重に数えないこと"
         );
     }
 
@@ -1742,6 +1961,8 @@ mod tests {
             sample_rate,
             channels: 1,
             pts_us: 0,
+            arrival_us: 0,
+            decoded_us: 0,
         }
     }
 
@@ -1753,10 +1974,7 @@ mod tests {
         let sample_rate = 48_000;
         let mut scheduler = AudioPlayoutScheduler::new();
         // 直前の音 (20 ms) を鳴らし終えた状態にする
-        let previous = PlayedAudio {
-            channels: vec![periodic_audio(400.0, sample_rate, 960)],
-            sample_rate,
-        };
+        let previous = vec![periodic_audio(400.0, sample_rate, 960)];
 
         // 1 つ目は目標の時刻にそのまま鳴る (詰めも隙間も無し)
         let first = scheduler.schedule(AudioPlayoutInput {
@@ -1776,8 +1994,8 @@ mod tests {
                 start_at_us: 1_000_000,
                 basis: AudioPlayoutBasis::Timestamp,
                 compress_us: 0,
-                gap_start_us: 0,
                 gap_us: 0,
+                conceal_us: 0,
             },
             "1 つ目は目標の時刻にそのまま鳴ること"
         );
@@ -1798,19 +2016,21 @@ mod tests {
         let AudioPlayoutDecision::Play {
             compress_us: 0,
             gap_us,
+            conceal_us,
             ..
         } = second
         else {
             panic!("2 つ目は鳴ると決まること decision={second:?}");
         };
         assert_eq!(gap_us, 10_000, "1 つ目の終わりから 10 ms の隙間が空くこと");
+        assert_eq!(conceal_us, 10_000, "隙間は補間してよい長さであること");
         let audio = audio_frame(960, sample_rate);
-        let applied = apply_audio_playout(&audio, Some(&previous), gap_us, 0);
-        assert_eq!(applied.concealed_us, 10_000, "隙間を 10 ms 埋めること");
+        let applied = apply_audio_playout(&audio, Some(previous.as_slice()), gap_us, conceal_us, 0);
+        assert_eq!(applied.concealed_us, 10_000, "隙間を 10 ms 補間すること");
         assert_eq!(
-            applied.concealment.len(),
+            applied.gap_channels.len(),
             480,
-            "埋めた音は 10 ms ぶんであること"
+            "材料化した隙間は 10 ms ぶんであること"
         );
         assert_eq!(applied.compressed_us, 0, "詰めは要求されていないこと");
         assert_eq!(applied.channels[0].len(), 960, "音は短くならないこと");
@@ -1818,7 +2038,7 @@ mod tests {
         assert_eq!(
             scheduler.concealed_us(),
             10_000,
-            "実際に埋めた長さを返すこと"
+            "実際に補間した長さを返すこと"
         );
 
         // 3 つ目は目標を過ぎて届く。直前の音の終わり (1_050_000) へ繋げて、遅れの分だけ詰める。
@@ -1834,11 +2054,18 @@ mod tests {
             arrival_delay_us: 80_000,
             presentation_delay_us: 80_000,
         });
-        let AudioPlayoutDecision::Play { compress_us, .. } = third else {
+        let AudioPlayoutDecision::Play {
+            compress_us,
+            gap_us,
+            ..
+        } = third
+        else {
             panic!("3 つ目は鳴ると決まること decision={third:?}");
         };
         assert!(compress_us > 0, "目標を過ぎた分だけ詰めること");
-        let applied = apply_audio_playout(&audio, Some(&previous), 0, compress_us);
+        assert_eq!(gap_us, 0, "前の音の終わりへ繋がるため隙間は空かないこと");
+        let applied =
+            apply_audio_playout(&audio, Some(previous.as_slice()), gap_us, 0, compress_us);
         assert!(
             applied.compressed_us > 0,
             "実際に削れた長さを返すこと compressed_us={}",
@@ -1850,8 +2077,8 @@ mod tests {
             applied.channels[0].len()
         );
         assert!(
-            applied.concealment.is_empty(),
-            "隙間が空かないときは埋めないこと"
+            applied.gap_channels.is_empty(),
+            "隙間が空かないときは材料化しないこと"
         );
         scheduler.confirm_stretch(applied.compressed_us);
         assert_eq!(
@@ -1861,14 +2088,57 @@ mod tests {
         );
     }
 
-    /// テスト用に、隙間を埋めずに詰めだけを適用した結果を作る
+    /// 圧縮と隙間の材料化を同時に適用し、長さの合計が合うこと
+    ///
+    /// 詰めた今回の音と隙間の長さの合計が「元の音の長さ + 隙間 - 詰めた長さ」になること。
+    /// どちらか片方だけを適用したときの長さの勘定がずれると、後続の音がその分だけ早く
+    /// 鳴るか遅れて鳴る。
+    #[test]
+    fn playout_applies_the_compression_and_the_gap_together() {
+        let sample_rate = 48_000;
+        let previous = vec![periodic_audio(400.0, sample_rate, 4_800)];
+        let audio = audio_frame(960, sample_rate);
+        let applied =
+            apply_audio_playout(&audio, Some(previous.as_slice()), 10_000, 10_000, 10_000);
+        assert_eq!(
+            applied.gap_channels.len(),
+            480,
+            "隙間は要求どおり 10 ms ぶん材料化すること"
+        );
+        assert_eq!(
+            applied.concealed_us, 10_000,
+            "周期のある音から隙間を補間すること"
+        );
+        assert!(
+            applied.compressed_us > 0,
+            "要求した分のうち周期 1 つぶんを削ること compressed_us={}",
+            applied.compressed_us
+        );
+        assert!(
+            applied.channels[0].len() < 960,
+            "圧縮した分だけ今回の音が短くなること length={}",
+            applied.channels[0].len()
+        );
+        let played_us = samples_to_us(applied.channels[0].len(), sample_rate)
+            + samples_to_us(applied.gap_channels.len(), sample_rate);
+        assert_eq!(
+            played_us,
+            20_000 + 10_000 - applied.compressed_us,
+            "詰めた音と隙間の合計が、元の長さ + 隙間 - 詰めた長さになること              current={} gap={} compressed_us={}",
+            applied.channels[0].len(),
+            applied.gap_channels.len(),
+            applied.compressed_us,
+        );
+    }
+
+    /// テスト用に、隙間を材料化せずに詰めだけを適用した結果を作る
     ///
     /// 組み立てへ渡す値は、実際に音声へ適用した長さと同じ形にする。再生機器へ積む代わりに
     /// この値をそのまま `commit` へ渡す。
     fn applied_audio(audio: &DecodedAudioFrame, compressed_us: i64) -> AppliedAudioPlayout {
         AppliedAudioPlayout {
             channels: pcm_f32_to_channels(&pcm_i16_to_f32(&audio.pcm), usize::from(audio.channels)),
-            concealment: Vec::new(),
+            gap_channels: Vec::new(),
             concealed_us: 0,
             compressed_us,
         }
@@ -1876,7 +2146,8 @@ mod tests {
 
     /// テスト用に、時間軸が決めた目標の時刻へ 1 つ鳴らすと予約して計器へ記録する
     ///
-    /// 再生機器を使わないため、詰めも補間も無し (`compressed_us` は 0) として反映する。
+    /// 再生機器を使わないため、詰めも隙間の材料化も無し (`compressed_us` と `gap_us` は 0)
+    /// として反映する。
     fn commit_one_play(
         assembly: &mut AudioPlayoutAssembly,
         timeline: &mut PlayoutTimeline,
@@ -1886,7 +2157,7 @@ mod tests {
         assembly
             .arrange(timeline, audio, now_us, now_us, true)
             .expect("目標の時刻に鳴ると決まること");
-        assembly.commit(timeline, audio, applied_audio(audio, 0), now_us);
+        assembly.commit(timeline, applied_audio(audio, 0), 0, now_us);
     }
 
     /// 組み立てが、鳴らすと決めた音を実際に詰めた長さで計器へ記録すること
@@ -1896,7 +2167,7 @@ mod tests {
         let mut assembly = AudioPlayoutAssembly::new();
         let sample_rate = 48_000;
         let arrival_us = 10_000_000;
-        // 到着の記録は受信側 (jitter buffer) が行う
+        // 到着の記録は受信側 (run_raw_player) が行う
         timeline.observe(Track::Audio, arrival_us, 0);
         let audio = audio_frame(960, sample_rate);
         let target_us = timeline
@@ -1933,12 +2204,7 @@ mod tests {
         );
         // 実際に詰められた長さは要求より短い (波形の周期でしか削れない)。実際の長さだけを
         // 記録すること
-        assembly.commit(
-            &mut timeline,
-            &audio,
-            applied_audio(&audio, 5_000),
-            target_us,
-        );
+        assembly.commit(&mut timeline, applied_audio(&audio, 5_000), 0, target_us);
         let snapshot = assembly.snapshot(target_us);
         assert_eq!(snapshot.played_frames, 1, "鳴らすと決めた音を計上すること");
         assert_eq!(
@@ -1986,7 +2252,7 @@ mod tests {
         let mut timeline = PlayoutTimeline::new();
         let mut assembly = AudioPlayoutAssembly::new();
         let arrival_us = 10_000_000;
-        // 到着の記録は受信側 (jitter buffer) が行う
+        // 到着の記録は受信側 (run_raw_player) が行う
         timeline.observe(Track::Audio, arrival_us, 0);
         // 44.1 kHz の音 (20 ms で 882 サンプル) を受け取ると数える
         let audio = audio_frame(882, 44_100);
@@ -2228,6 +2494,12 @@ mod tests {
         );
         let line = assembly.log_fields(&timeline, now_us);
         for key in [
+            "gaps=",
+            "gap_ms=",
+            "gap_max_ms=",
+            "underruns=",
+            "underrun_ms=",
+            "underrun_max_ms=",
             "last_target_us=",
             "last_arrival_us=",
             "last_start_us=",

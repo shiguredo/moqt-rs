@@ -42,9 +42,20 @@ fn observation(
         slack_us: Some(summary(20_000)),
         backlog_misses,
         backlog_us,
+        underrun_ms: 0,
         compression_us: 0,
         jitter_target_us: 0,
     }
+}
+
+/// アンダーランの長さを指定して観測を作る
+///
+/// `underrun_ms` は前回の制御からの出力が枯れた合計 (ミリ秒) である。遅れは許容の中に
+/// 収めた観測にする (枯れだけで目標が上がることを確かめるため)。
+fn observation_with_underrun(at_us: i64, underrun_ms: i64) -> AudioDelayFeedbackObservation {
+    let mut observation = observation(at_us, Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US), 0, 0);
+    observation.underrun_ms = underrun_ms;
+    observation
 }
 
 /// 圧縮と、揺らぎだけの目標遅延を指定して観測を作る
@@ -1127,5 +1138,159 @@ fn the_stretch_deadband_is_not_counted_as_lateness() {
         feedback.snapshot().lateness_p50_us,
         Some(20_000),
         "不感帯を超えた分だけを遅れとして残すこと"
+    );
+}
+
+#[test]
+fn underrun_alone_raises_the_target() {
+    // 枯れは事後には埋められないため、遅れが許容の中に収まっていても目標を上げる
+    let mut feedback = AudioDelayFeedback::new();
+    widen_ceiling(&mut feedback);
+
+    let before_adjustments = feedback.snapshot().adjustments;
+    // 100 ms 枯れた。1 回で増やす上限 (40 ms) まで増える
+    feedback.update(observation_with_underrun(
+        3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+        100,
+    ));
+    let snapshot = feedback.snapshot();
+    assert_eq!(
+        snapshot.reason,
+        AudioDelayFeedbackReason::Underrun,
+        "枯れが理由になること"
+    );
+    assert_eq!(
+        snapshot.last_change_us, AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "枯れた長さは 1 回で増やす上限までにすること"
+    );
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_START_US - AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND * 2
+            + AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "枯れた長さぶん目標を上げること"
+    );
+    assert_eq!(
+        snapshot.adjustments,
+        before_adjustments + 1,
+        "動かした回数を数えること"
+    );
+
+    // さらに枯れた。適用する上限 (160 ms) で止まる
+    feedback.update(observation_with_underrun(
+        4 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+        100,
+    ));
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+        "上限を超えないこと"
+    );
+    // 上限に張り付いた後に枯れても、それ以上は上がらない
+    feedback.update(observation_with_underrun(
+        5 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+        100,
+    ));
+    let snapshot = feedback.snapshot();
+    assert_eq!(
+        feedback.feedback_target_us(),
+        AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+        "上限を超えないこと"
+    );
+    assert_eq!(snapshot.last_change_us, 0, "上限に張り付いたら動かないこと");
+}
+
+#[test]
+fn underrun_does_not_raise_the_target_beyond_the_explicit_ceiling() {
+    // 明示された `targetLatency` は、枯れによる増加にも掛かる
+    let mut feedback = AudioDelayFeedback::new();
+    widen_ceiling(&mut feedback);
+    feedback.set_ceiling_us(Some(120_000));
+    feedback.update(observation_with_underrun(
+        3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+        100,
+    ));
+    assert_eq!(
+        feedback.feedback_target_us(),
+        120_000,
+        "明示の上限で止まること"
+    );
+    assert_eq!(
+        feedback.snapshot().reason,
+        AudioDelayFeedbackReason::Underrun,
+        "枯れが理由になること"
+    );
+}
+
+#[test]
+fn underrun_uses_the_larger_of_it_and_the_existing_increase() {
+    // 既存の増加 (鳴り遅れ) の方が大きければ、その量を使う。理由は枯れを優先する
+    let mut feedback = AudioDelayFeedback::new();
+    widen_ceiling(&mut feedback);
+    let mut observation = observation_with_underrun(3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US, 10);
+    // 不感帯 (20 ms) を引いた後に許容 (10 ms) を超える遅れにする
+    observation.lateness_us = Some(summary(AUDIO_PLAYOUT_STRETCH_MIN_US + 80_000));
+    feedback.update(observation);
+    let snapshot = feedback.snapshot();
+    assert_eq!(
+        snapshot.reason,
+        AudioDelayFeedbackReason::Underrun,
+        "理由は枯れを優先すること"
+    );
+    assert_eq!(
+        snapshot.last_change_us, AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "遅れによる増加の方が大きいこと"
+    );
+
+    // 枯れの方が大きければ、枯れの量を使う
+    let mut feedback = AudioDelayFeedback::new();
+    widen_ceiling(&mut feedback);
+    let mut observation = observation_with_underrun(3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US, 100);
+    // 並べすぎによる増加 (30 ms) を混ぜる
+    observation.backlog_misses = 1;
+    observation.backlog_us = 10_000;
+    feedback.update(observation);
+    let snapshot = feedback.snapshot();
+    assert_eq!(snapshot.reason, AudioDelayFeedbackReason::Underrun);
+    assert_eq!(
+        snapshot.last_change_us, AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+        "枯れによる増加 (40 ms) を選ぶこと"
+    );
+}
+
+#[test]
+fn no_underrun_keeps_the_existing_behavior() {
+    // 枯れが無ければ、従来の増減の規則とまったく同じになる
+    let mut with_underrun = AudioDelayFeedback::new();
+    let mut without_underrun = AudioDelayFeedback::new();
+    let observations = [
+        observation(0, Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US), 0, 0),
+        observation(
+            AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+            Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+            0,
+            0,
+        ),
+        observation(
+            2 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+            Some(AUDIO_PLAYOUT_STRETCH_MIN_US + 60_000),
+            0,
+            0,
+        ),
+        observation(
+            3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+            Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+            1,
+            10_000,
+        ),
+    ];
+    for observation in observations {
+        // どちらも枯れ無し (underrun_ms は 0) の同じ観測を渡す
+        with_underrun.update(observation);
+        without_underrun.update(observation);
+    }
+    assert_eq!(
+        with_underrun.snapshot(),
+        without_underrun.snapshot(),
+        "枯れが無ければ従来と同じ結果になること"
     );
 }

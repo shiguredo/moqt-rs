@@ -40,6 +40,7 @@ fn feedback_observation(at_us: i64, lateness_p50_us: Option<i64>) -> AudioDelayF
         }),
         backlog_misses: 0,
         backlog_us: 0,
+        underrun_ms: 0,
         compression_us: 0,
         jitter_target_us: 0,
     }
@@ -456,13 +457,13 @@ fn a_step_away_from_the_level_unshares_immediately() {
     );
 }
 
-/// 閾値だけが動いた解除は、差が戻っても保持を待たずには戻さない
+/// 閾値だけが動いた解除も、差が戻れば 2 秒で共有へ戻ること
 ///
-/// 差が同じ水準のまま、jitter buffer の目標遅延が動いて閾値が下がると解除される。この
-/// 解除は動きがきっかけではないため、閾値が戻っても差は元の水準の側にある。往復を防ぐ
-/// ために保持する。
+/// 差が同じ水準のまま、jitter buffer の目標遅延が動いて閾値が下がると解除される。解除の
+/// きっかけが動きだったかは見ない。差が水準へ戻り、直近に往復していなければ、同じ水準へ
+/// 留まる理由が無いため保持を待たずに戻す。
 #[test]
-fn a_threshold_only_unshare_is_held() {
+fn a_threshold_only_unshare_is_released_when_the_difference_returns() {
     let mut timeline = PlayoutTimeline::new();
     let mut wall_us = 10_000_000;
     // 映像が 200 ms 遅い状態で水準を決める (差は 250 ms で一定)
@@ -488,7 +489,68 @@ fn a_threshold_only_unshare_is_held() {
         "動かない差でも、閾値を超えたら解除する"
     );
 
-    // 閾値を戻しても、差が戻った状態が続くだけでは保持を待たずには戻さない
+    // 閾値を戻すと、差が戻った状態が 2 秒続いた時点で保持を待たずに戻る
+    timeline.set_target_latency_ms(0);
+    wall_us += 100_000;
+    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::Hold,
+        "戻った状態が続くまでは保持すること"
+    );
+    for _ in 0..30 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    }
+    assert_eq!(
+        timeline.unshared_reason(),
+        UnsharedReason::None,
+        "原因が去って差が戻ったら保持を待たずに戻す"
+    );
+    assert!(timeline.sharing_bases(), "共有へ戻ること");
+}
+
+/// 30 秒以内に再び解除したら、差が戻っても保持を待つこと
+///
+/// 往復のたびに、同期が足した分を戻して (間に合わないフレームを捨てる) すぐ足し直す
+/// (表示が待って止まる) ことになる。2 回の解除が保持の時間の内側で起きたら、閾値が動き
+/// 続けているとみなして落ち着くまで解かない。
+#[test]
+fn a_repeated_unshare_within_the_hold_is_kept() {
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    for _ in 0..110 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    }
+
+    // 1 回目の解除。きっかけは閾値だけで、差は動いていない
+    timeline.set_target_latency_ms(400);
+    wall_us += 100_000;
+    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+
+    // 閾値を戻すと、原因が去って差が戻るため 2 秒で保持が解ける (1 回目の解除の時刻は残る)
+    timeline.set_target_latency_ms(0);
+    for _ in 0..30 {
+        wall_us += 100_000;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    }
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::None);
+
+    // 30 秒の内側で 2 回目の解除をする
+    timeline.set_target_latency_ms(400);
+    wall_us += 100_000;
+    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+
+    // 閾値を戻しても、直近に往復しているため保持を待たずには戻さない
     timeline.set_target_latency_ms(0);
     for _ in 0..30 {
         wall_us += 100_000;
@@ -498,8 +560,9 @@ fn a_threshold_only_unshare_is_held() {
     assert_eq!(
         timeline.unshared_reason(),
         UnsharedReason::Hold,
-        "動きがきっかけでない解除は保持する"
+        "30 秒以内の再解除は保持すること"
     );
+    assert!(!timeline.sharing_bases());
 }
 
 #[test]
@@ -818,6 +881,7 @@ fn delay_breakdown_reports_the_closed_loop_state() {
         }),
         backlog_misses: 0,
         backlog_us: 0,
+        underrun_ms: 0,
         compression_us: 0,
         jitter_target_us: 0,
     });
@@ -875,4 +939,106 @@ fn closed_loop_accepts_the_observation_from_the_timing_stats() {
         AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
         "計器の観測でも閉ループが動く"
     );
+}
+
+/// 学習に使うかの判定は、中央値ではなく現フレームの TIMESTAMP 間隔で行うこと
+///
+/// 間隔の長いフレームが続いた後でも、現フレームの間隔が短ければ、その半分未満で届いた
+/// 観測は学習しない。間隔の中央値で判定すると、短い間隔で届いた観測を学習してしまい、
+/// 1 フレーム遅れて届いただけの揺らぎを経路の揺らぎとして取り込む。
+#[test]
+fn learns_uses_the_current_frame_interval() {
+    let mut timeline = PlayoutTimeline::new();
+    let mut wall_us = 10_000_000;
+    let mut timestamp_us = 1_000_000;
+    // 40 ms 間隔で届く映像を 30 枚流し、間隔の中央値を 40 ms にし、追いつきを終わらせる
+    for _ in 0..30 {
+        timeline.observe(Track::Video, wall_us, timestamp_us);
+        wall_us += 40_000;
+        timestamp_us += 40_000;
+    }
+    // 以降は 40 ms 間隔のフレームの後に、TIMESTAMP が 10 ms しか進んでいないフレームが
+    // 19 ms 後に届く組を繰り返す。現フレームの間隔 (10 ms) の半分 (5 ms) 以上なので
+    // 学習し、9 ms の遅れとして目標に現れる。中央値 (40 ms) の半分 (20 ms) 未満なので、
+    // 中央値で判定すると学習しない
+    for _ in 0..10 {
+        // 間隔の長いフレーム (40 ms、到着は 31 ms 後) で中央値を保つ
+        wall_us += 31_000;
+        timestamp_us += 40_000;
+        timeline.observe(Track::Video, wall_us, timestamp_us);
+        // 間隔の短いフレーム (10 ms、到着は 19 ms 後)
+        wall_us += 19_000;
+        timestamp_us += 10_000;
+        timeline.observe(Track::Video, wall_us, timestamp_us);
+    }
+    assert_eq!(
+        timeline.learned_delay_us(Track::Video),
+        9_000,
+        "現フレームの間隔で学習を判定し、9 ms の遅れを学習すること"
+    );
+}
+
+/// 共有へ戻った直後に A/V のずれをそろえ直すこと
+///
+/// 共有を解除している間は相手がいないものとして足した分を戻すだけであり、共有へ戻った
+/// 最初の観測で足し直さないと、表示時刻の差が目標より 1 観測分だけ大きいまま残る。
+/// プロパティテストで見つかった入力 (13.72 ms 間隔、音声 +94.418 ms/秒、映像
+/// -100 ms/秒、基準の差 300 ms、197 ステップ) を固定して、共有中は差が不感帯と
+/// 補償上限の和を超えないことを確かめる。
+#[test]
+fn sharing_resumption_realigns_the_sync_delays() {
+    /// 共有中なら、表示時刻の差が目標の差 + 補償上限以内であることを確かめる
+    fn check(timeline: &PlayoutTimeline, label: &str) {
+        let breakdown = timeline.delay_breakdown();
+        if !breakdown.sharing_bases {
+            return;
+        }
+        let (Some(audio_delay_us), Some(video_delay_us)) = (
+            breakdown.audio.presentation_delay_us,
+            breakdown.video.presentation_delay_us,
+        ) else {
+            return;
+        };
+        // 自然な差は基準の遅れと自分の揺らぎの和の差である
+        let natural_audio_us = breakdown
+            .audio
+            .base_delay_us
+            .unwrap_or(0)
+            .saturating_add(breakdown.audio.jitter_delay_us.unwrap_or(0));
+        let natural_video_us = breakdown
+            .video
+            .base_delay_us
+            .unwrap_or(0)
+            .saturating_add(breakdown.video.jitter_delay_us.unwrap_or(0));
+        let difference_us = natural_audio_us
+            .saturating_sub(natural_video_us)
+            .saturating_abs();
+        let desired_us = TIMELINE_SYNC_MIN_DELTA_US
+            .max(difference_us.saturating_sub(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US));
+        let gap_us = audio_delay_us
+            .saturating_sub(video_delay_us)
+            .saturating_abs();
+        assert!(
+            gap_us <= desired_us + TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+            "{label}: 共有へ戻った直後にずれが残っている: gap={gap_us} desired={desired_us} {breakdown:?}"
+        );
+    }
+
+    let mut timeline = PlayoutTimeline::new();
+    let interval_us = 13_720_i64;
+    let mut audio_offset_us = 997_952_i64;
+    // 映像の基準は音声より 300 ms 遅い状態から、毎秒 100 ms ずつ音声へ近づく
+    let mut video_offset_us = audio_offset_us + 300_000;
+    let mut wall_us = 100_000_000_i64;
+    for _ in 0..197 {
+        wall_us = wall_us.saturating_add(interval_us);
+        audio_offset_us += 94_418 * interval_us / 1_000_000;
+        video_offset_us -= 100_000 * interval_us / 1_000_000;
+        let audio_timestamp_us = wall_us.saturating_sub(audio_offset_us);
+        let video_timestamp_us = wall_us.saturating_sub(video_offset_us);
+        timeline.observe(Track::Audio, wall_us, audio_timestamp_us);
+        check(&timeline, "音声の観測の後");
+        timeline.observe(Track::Video, wall_us, video_timestamp_us);
+        check(&timeline, "映像の観測の後");
+    }
 }

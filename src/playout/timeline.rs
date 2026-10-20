@@ -26,7 +26,9 @@
 //!   ([`audio_arrival_delay_us`]) へ合わせる。合わせないと相対関係を見る相手がいなくなり、
 //!   音声と映像が別々の基準で並ぶ
 //! - いったん共有をやめたら [`TIMELINE_BASE_UNSHARED_HOLD_US`] の間は戻さない。閾値は
-//!   表示の遅れで動くため、差が変わらなくても共有と解除を往復し得る
+//!   表示の遅れで動くため、差が変わらなくても共有と解除を往復し得る。解除の原因が去って
+//!   差が戻った状態が続き、かつ直近に解除と解除を往復していないときだけ、保持を待たずに
+//!   戻す
 //! - 遅延の内訳 (基準の遅れ・揺らぎ・足した分・共有できているかとその理由・差の動き) は
 //!   [`PlayoutTimeline::delay_breakdown`] が返す
 
@@ -605,11 +607,12 @@ pub struct PlayoutTimeline {
     base_difference_deviation_reference_us: Option<i64>,
     /// いま基準の差を時計のずれとみなしているか
     base_difference_drifted_value: bool,
-    /// 直近の解除のきっかけに動きがあったか
+    /// その前の解除の時刻 (マイクロ秒)
     ///
-    /// 差が同じ水準のまま閾値だけが動いた解除では、きっかけが去っても差は元の水準の側に
-    /// ある。早期の解除の対象にしない。
-    unshared_trigger_moved_value: bool,
+    /// 直近に共有と解除を往復しているかを見るために持つ。保持が満了して戻した場合も含める
+    /// (往復の検出に使う)。解除の原因が動きだったかは見ない (購読の直後の cache の再生では
+    /// 差が静かに動いて解除されることがあり、原因が去って差が戻れば保持を待たずに戻せる)。
+    previous_unshared_at_us: Option<i64>,
     /// きっかけが去って差が戻っている状態の開始時刻 (マイクロ秒)
     unshared_returned_since_us: Option<i64>,
     /// 基準を取り直した回数
@@ -648,7 +651,7 @@ impl PlayoutTimeline {
             base_difference_deviation_since_us: None,
             base_difference_deviation_reference_us: None,
             base_difference_drifted_value: false,
-            unshared_trigger_moved_value: false,
+            previous_unshared_at_us: None,
             unshared_returned_since_us: None,
             generation: 0,
             presented: [None, None],
@@ -720,10 +723,11 @@ impl PlayoutTimeline {
                     state.frame_intervals_us.pop_front();
                 }
             }
-            // まとまって届いた観測 (前の観測からフレーム間隔の半分未満) は学習に使わない。
-            // フレーム間隔は直近の中央値を使う (まだ 1 つも無ければ今回の差)
-            let frame_interval_us = state.frame_interval_us().unwrap_or(interval_us);
-            learns = wall_clock_us.saturating_sub(last_arrival_us) >= frame_interval_us / 2;
+            // まとまって届いた観測 (前の観測から、現フレームの TIMESTAMP 間隔の半分未満) は
+            // 学習に使わない。間隔の中央値ではなく現フレームの間隔で判定する。中央値を使うと、
+            // 間隔の長いフレームの後に短い間隔で届いた観測を学習してしまい、1 フレーム遅れて
+            // 届いただけの揺らぎを経路の揺らぎとして取り込む
+            learns = wall_clock_us.saturating_sub(last_arrival_us) >= interval_us / 2;
         }
         state.last_arrival_us = Some(wall_clock_us);
         state.last_timestamp_us = Some(timestamp_us);
@@ -782,11 +786,21 @@ impl PlayoutTimeline {
         // 基準の差の動きを見るために記録する (基準がそろってから意味を持つ)
         self.record_base_difference(wall_clock_us);
 
+        // 同期の制御の前後で共有の可否が変わったかを見るために、制御の前の状態を残す
+        let shared_before_sync = self.drifted_track().is_none();
+
         // ここまでの更新で表示の遅れが変わったため、A/V 同期の制御をそろえる
         self.update_sync_delays(wall_clock_us);
 
         // 解除のきっかけが去って差が戻ったら、保持を待たずに共有を戻す
         self.update_unshared_release(wall_clock_us);
+
+        // 保持していた間は相手がいないものとして足した分を戻すだけであり、共有へ戻った
+        // 最初の観測では足し直しが行われない。そのままにすると、表示時刻の差が目標より
+        // 1 観測分だけ大きい状態が残るため、共有へ戻ったらもう一度そろえる
+        if !shared_before_sync && self.drifted_track().is_none() {
+            self.update_sync_delays(wall_clock_us);
+        }
     }
 
     /// 音声を実際に鳴らした結果の観測を渡す (購読側が鳴らすたびに呼ぶ)
@@ -1337,6 +1351,10 @@ impl PlayoutTimeline {
     ///
     /// 判定そのものは [`PlayoutTimeline::drifted_track`] が毎回計算する。保持の起点だけを
     /// ここで記録する。基準の差は観測のたびにしか動かないため、観測のたびに呼べば足りる。
+    ///
+    /// 新しく解除するときだけ、前回の解除の時刻を控える
+    /// ([`PlayoutTimeline::is_unshared_repeatedly`])。既に保持している間は解除の時刻を
+    /// 進めるだけであり、前回の解除の時刻は変えない。
     fn refresh_unshared_state(&mut self) {
         let Some(difference_us) = self.current_base_difference_us() else {
             return;
@@ -1345,15 +1363,18 @@ impl PlayoutTimeline {
         if difference_us.saturating_abs() <= self.base_difference_limit_us() && !drifted {
             return;
         }
+        if self.held_unshared_track().is_none() {
+            // 新しく解除する。前の解除の時刻を控え、前の解除の判断 (戻った状態を数えた分) は
+            // 持ち越さない
+            self.previous_unshared_at_us = self.last_unshared_at_us;
+            self.unshared_returned_since_us = None;
+        }
         self.last_unshared_at_us = self.last_base_difference_at_us;
         self.last_unshared_track = Some(if difference_us > 0 {
             Track::Audio
         } else {
             Track::Video
         });
-        // 解除のきっかけに動きがあったか。差が同じ水準のまま閾値だけが動いた解除では、
-        // きっかけが去っても差は元の水準の側にあり、早期に戻すと往復する
-        self.unshared_trigger_moved_value = drifted;
     }
 
     /// 解除のきっかけが去って差が戻ったら、保持を待たずに共有を戻す
@@ -1374,9 +1395,8 @@ impl PlayoutTimeline {
         if now_us.saturating_sub(returned_since_us) < TIMELINE_BASE_UNSHARED_RELEASE_US {
             return;
         }
+        // 基準を戻す。解除の時刻は残す (直近に往復していないかを次の解除で見る)
         self.last_unshared_track = None;
-        self.last_unshared_at_us = None;
-        self.unshared_trigger_moved_value = false;
         self.unshared_returned_since_us = None;
     }
 
@@ -1386,19 +1406,23 @@ impl PlayoutTimeline {
     /// 解除を往復し得る。
     ///
     /// - 保持していること
-    /// - 解除のきっかけに動きがあったこと ([`PlayoutTimeline::refresh_unshared_state`])。
-    ///   差が同じ水準のまま閾値だけが動いた解除では解除しない
     /// - 動きの判定が解けていること。離れた幅が続いている間 (真のドリフト) は、その幅が
     ///   元の水準へ戻ったことにならない
+    /// - 直近に解除と解除を往復していないこと ([`PlayoutTimeline::is_unshared_repeatedly`])。
+    ///   閾値が動き続けている間は、差が閾値の内側にあっても解除と解除を繰り返す
     /// - 差が閾値を超えていないこと (超えていれば合わせられない)
     /// - 差が水準へ戻っていること。記録の間隔ごとの変化ではなく水準への復帰を見るのは、
     ///   負荷のある環境では差が数十 ms の幅で細かく動き続け、変化が 0 になる瞬間が来ない
     ///   ためである
+    ///
+    /// 解除のきっかけが動きだったかは見ない。購読の直後の cache の再生では差が静かに動き
+    /// (記録 1 回あたり 5 ms 以下)、時計のずれと判定されて解除されることがある。この場合も
+    /// 差が水準へ戻れば原因は去っている。
     fn can_release_unshared_hold(&self) -> bool {
         if self.last_unshared_track.is_none() || self.held_unshared_track().is_none() {
             return false;
         }
-        if !self.unshared_trigger_moved_value || self.base_difference_drifted() {
+        if self.base_difference_drifted() || self.is_unshared_repeatedly() {
             return false;
         }
         let Some(difference_us) = self.current_base_difference_us() else {
@@ -1408,6 +1432,21 @@ impl PlayoutTimeline {
             return false;
         }
         self.base_difference_deviation_since_us.is_none()
+    }
+
+    /// 直近に共有と解除を往復しているか
+    ///
+    /// 2 回の解除が [`TIMELINE_BASE_UNSHARED_HOLD_US`] の内側で起きていれば、閾値 (表示の
+    /// 遅れの上限 − 再生の遅れ) が動き続けており、解除してもまた解除される。往復のたびに、
+    /// 同期が足した分を戻して (間に合わないフレームを捨てる) すぐ足し直す (表示が待って
+    /// 止まる) ことになるため、落ち着くまで解かない。
+    fn is_unshared_repeatedly(&self) -> bool {
+        let (Some(previous_unshared_at_us), Some(last_unshared_at_us)) =
+            (self.previous_unshared_at_us, self.last_unshared_at_us)
+        else {
+            return false;
+        };
+        last_unshared_at_us.saturating_sub(previous_unshared_at_us) < TIMELINE_BASE_UNSHARED_HOLD_US
     }
 
     /// 直近の基準の差の動き (マイクロ秒/秒)。まだ履歴が無ければ None
@@ -1652,7 +1691,8 @@ impl PlayoutTimeline {
         self.base_difference_deviation_since_us = None;
         self.base_difference_deviation_reference_us = None;
         self.base_difference_drifted_value = false;
-        self.unshared_trigger_moved_value = false;
+        // 解除を早める判断のうち、差の記録を数える分はやり直す。保持そのもの
+        // (解除の時刻と側) は残す (基準を取り直しても、原因が去ったかどうかの判断は続ける)
         self.unshared_returned_since_us = None;
     }
 
@@ -1691,10 +1731,14 @@ impl Default for PlayoutTimeline {
 ///
 /// 学習に使う観測の (遅れ − 基準の遅れ) を並べ、百分位の値を返す。観測が無いときは 0。
 fn video_target_us(state: &TrackState, base_us: i64, frame_interval_us: Option<i64>) -> i64 {
+    // 表示の遅れの上限を超える揺らぎは吸収できないため、分位点へ入れる前に除外する。
+    // 上限で切るだけでは、バーストで 500 ms を超える遅れが混ざったときに目標が上限へ
+    // 張り付き、A/V 同期が音声へ最大 100 ms を即座に足してしまう
     let mut jitters: Vec<i64> = state
         .learning_offsets
         .values()
         .map(|offset_us| offset_us.saturating_sub(base_us).max(0))
+        .filter(|jitter_us| *jitter_us <= TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000)
         .collect();
     if jitters.is_empty() {
         return 0;
@@ -1985,11 +2029,14 @@ mod tests {
         assert_eq!(timeline.learned_delay_us(Track::Video), 33_333);
     }
 
-    /// 表示の遅れの上限 (500 ms) では吸収できない揺らぎが目標を超えないこと
+    /// 表示の遅れの上限 (500 ms) を超える揺らぎは分位点へ入れないこと
+    ///
+    /// 上限で切るだけでは、バーストで 500 ms を超える遅れが混ざったときに目標が上限へ
+    /// 張り付く。超える揺らぎは吸収できないため、分位点へ入れる前に除外する。
     #[test]
     fn video_delay_is_capped_by_the_maximum() {
         let mut timeline = PlayoutTimeline::new();
-        // 2 枚に 1 枚が 600 ms 遅れて届く
+        // 2 枚に 1 枚が 600 ms 遅れて届く。超えた分は分位点へ入れないため、残る 0 ms だけを見る
         for index in 0..300i64 {
             let jitter_us = if index % 2 == 0 { 600_000 } else { 0 };
             let wall_us = 10_000_000 + index * 33_333 + jitter_us;
@@ -1998,7 +2045,30 @@ mod tests {
         }
         assert_eq!(
             timeline.learned_delay_us(Track::Video),
-            TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000
+            0,
+            "上限を超える揺らぎを分位点へ入れないこと"
+        );
+    }
+
+    /// 上限ちょうどの揺らぎは残ること
+    #[test]
+    fn video_delay_keeps_a_jitter_at_the_maximum() {
+        let mut timeline = PlayoutTimeline::new();
+        // 2 枚に 1 枚がちょうど 500 ms 遅れて届く。上限ちょうどは除外しない
+        for index in 0..300i64 {
+            let jitter_us = if index % 2 == 0 {
+                TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000
+            } else {
+                0
+            };
+            let wall_us = 10_000_000 + index * 33_333 + jitter_us;
+            let timestamp_us = 1_000_000 + index * 33_333;
+            timeline.observe(Track::Video, wall_us, timestamp_us);
+        }
+        assert_eq!(
+            timeline.learned_delay_us(Track::Video),
+            TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000,
+            "上限ちょうどの揺らぎは残ること"
         );
     }
 

@@ -67,9 +67,20 @@ fn observation(
         slack_us: Some(summary(20_000)),
         backlog_misses,
         backlog_us,
+        underrun_ms: 0,
         compression_us: 0,
         jitter_target_us: 0,
     }
+}
+
+/// アンダーランの長さを指定して観測を作る
+///
+/// `underrun_ms` は前回の制御からの出力が枯れた合計 (ミリ秒) である。遅れは許容の中に
+/// 収めた観測にする (枯れだけで目標が上がることを確かめるため)。
+fn observation_with_underrun(at_us: i64, underrun_ms: i64) -> AudioDelayFeedbackObservation {
+    let mut observation = observation(at_us, Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US), 0, 0);
+    observation.underrun_ms = underrun_ms;
+    observation
 }
 
 /// 圧縮の増分と、揺らぎだけの目標遅延を指定して観測を作る
@@ -653,6 +664,10 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                                 saw_waiting_for_the_first_settled.set(true);
                             }
                         }
+                        AudioDelayFeedbackReason::Underrun => {
+                            // このテストは枯れを渡していない (枯れの分岐は別のテストで見る)
+                            panic!("枯れを渡していないのに理由が枯れになった: {snapshot:?}");
+                        }
                         AudioDelayFeedbackReason::Initial => {
                             panic!("観測を渡した後に理由が初期状態になった: {snapshot:?}");
                         }
@@ -867,6 +882,120 @@ fn the_ceiling_widens_with_compression_and_returns_when_quiet() -> noprop::TestR
     assert!(
         saw_kept_widened_by_the_path.get(),
         "経路が 100 ms を超えるため戻さない場合を通っていない\n{runner}"
+    );
+    Ok(())
+}
+
+/// アンダーランは目標を上げ、適用する上限を超えない
+///
+/// 枯れが無い観測では従来どおり減る。枯れがある観測では、枯れた長さ (1 回の増加の上限まで)
+/// だけ目標が上がり、理由は枯れを優先する。適用する上限 (圧縮が続くときだけ広げた 160 ms)
+/// を超えない。
+#[test]
+fn underruns_raise_the_target_within_the_ceiling() -> noprop::TestResult {
+    let saw_underrun = std::cell::Cell::new(0usize);
+    let saw_no_underrun = std::cell::Cell::new(0usize);
+    let saw_ceiling = std::cell::Cell::new(0usize);
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let mut feedback = AudioDelayFeedback::new();
+        // 適用する上限を 160 ms へ広げる (これが無いと初期値が上限と同じで増える余地が無い)
+        for index in 0..3 {
+            feedback.update(observation_with_compression(
+                index * AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+                Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+                0,
+                0,
+                AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND + 1_000,
+                0,
+            ));
+        }
+        assert_eq!(
+            feedback.snapshot().applied_ceiling_us,
+            AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+            "上限を広げられていない"
+        );
+        let mut now_us = 3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+        // 枯れで上限まで上げる場合を確実に通す (この後の増分が上限で切られることも見る)
+        for _ in 0..2 {
+            now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+            feedback.update(observation_with_underrun(now_us, 1_000));
+        }
+        assert_eq!(
+            feedback.feedback_target_us(),
+            AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+            "枯れで上限まで上がらない"
+        );
+        saw_ceiling.set(1);
+        let mut previous_target_us = feedback.feedback_target_us();
+        // 15 秒で上限が戻らない範囲にとどめる (静かな状態が続くと 15 秒で戻る)
+        for _ in 0..noprop::sample_usize_in(ctx, 1..=8) {
+            now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+            // 0 (枯れなし) と、1 ms、1 回の増加の上限 (40 ms)、その前後、大きな値を混ぜる
+            let underrun_ms = noprop::sample_with_boundaries(
+                ctx,
+                &[
+                    0,
+                    1,
+                    AUDIO_DELAY_FEEDBACK_MAX_STEP_US / 1_000,
+                    AUDIO_DELAY_FEEDBACK_MAX_STEP_US / 1_000 + 1,
+                    1_000,
+                ],
+                noprop::Ratio::one_nth(3),
+                |ctx| noprop::sample_usize_in(ctx, 0..=1_000) as i64,
+            );
+            feedback.update(observation_with_underrun(now_us, underrun_ms));
+            let snapshot = feedback.snapshot();
+            let target_us = feedback.feedback_target_us();
+            assert!(
+                target_us <= snapshot.applied_ceiling_us,
+                "目標が適用する上限を超えた: target={target_us} ceiling={} {snapshot:?}",
+                snapshot.applied_ceiling_us
+            );
+            if underrun_ms > 0 {
+                saw_underrun.set(saw_underrun.get() + 1);
+                assert_eq!(
+                    snapshot.reason,
+                    AudioDelayFeedbackReason::Underrun,
+                    "枯れが理由にならない: {snapshot:?}"
+                );
+                // 枯れた長さ (上限まで) だけ増える。上限に張り付いたときは残りの分だけ動く
+                let step_us = underrun_ms
+                    .min(AUDIO_DELAY_FEEDBACK_MAX_STEP_US / 1_000)
+                    .saturating_mul(1_000);
+                let expected_us = previous_target_us
+                    .saturating_add(step_us)
+                    .max(AUDIO_DELAY_FEEDBACK_MIN_US)
+                    .min(snapshot.applied_ceiling_us);
+                assert_eq!(
+                    target_us, expected_us,
+                    "枯れによる増分が規則と違う: underrun_ms={underrun_ms} previous={previous_target_us} {snapshot:?}"
+                );
+                if target_us == snapshot.applied_ceiling_us {
+                    saw_ceiling.set(saw_ceiling.get() + 1);
+                }
+            } else {
+                saw_no_underrun.set(saw_no_underrun.get() + 1);
+                assert!(
+                    target_us <= previous_target_us,
+                    "枯れが無いのに目標が上がった: previous={previous_target_us} target={target_us} {snapshot:?}"
+                );
+            }
+            previous_target_us = target_us;
+        }
+        Ok(())
+    })?;
+    assert!(
+        saw_underrun.get() > 0,
+        "枯れで目標が上がる場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_no_underrun.get() > 0,
+        "枯れが無い場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_ceiling.get() > 0,
+        "上限に張り付く場合を通っていない\n{runner}"
     );
     Ok(())
 }

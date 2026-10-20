@@ -898,3 +898,87 @@ fn audio_delay_feedback_uses_the_short_window() -> noprop::TestResult {
     );
     Ok(())
 }
+
+/// 隙間とアンダーランの計器が、記録した回数・合計・最大と一致すること
+///
+/// 0 以下の長さは記録しない。累積はリセットでのみ 0 に戻り、途中の分布の窓には依存しない。
+#[test]
+fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let mut stats = AudioPlayoutTimingStats::new();
+        let mut gaps = 0u64;
+        let mut gap_total_us = 0i64;
+        let mut gap_max_us = 0i64;
+        let mut underruns = 0u64;
+        let mut underrun_total_us = 0i64;
+        let mut underrun_max_us = 0i64;
+        let mut now_us = 0i64;
+        for _ in 0..noprop::sample_usize_in(ctx, 1..=16) {
+            now_us += noprop::sample_usize_in(ctx, 0..=5_000_000) as i64;
+            match noprop::sample_usize_in(ctx, 0..3) {
+                0 => {
+                    // 隙間の長さ。0 と負は記録しない
+                    let gap_us = noprop::sample_with_boundaries(
+                        ctx,
+                        &[0, 1, 5_000, 100_001],
+                        noprop::Ratio::one_nth(3),
+                        |ctx| noprop::sample_usize_in(ctx, 0..=200_000) as i64 - 2,
+                    );
+                    stats.record_gap(gap_us);
+                    if gap_us > 0 {
+                        gaps += 1;
+                        gap_total_us += gap_us;
+                        gap_max_us = gap_max_us.max(gap_us);
+                    }
+                }
+                1 => {
+                    // 出力が枯れた長さ。0 と負は記録しない
+                    let underrun_us = noprop::sample_with_boundaries(
+                        ctx,
+                        &[0, 1, 10_000],
+                        noprop::Ratio::one_nth(3),
+                        |ctx| noprop::sample_usize_in(ctx, 0..=200_000) as i64 - 2,
+                    );
+                    stats.record_underrun(underrun_us);
+                    if underrun_us > 0 {
+                        underruns += 1;
+                        underrun_total_us += underrun_us;
+                        underrun_max_us = underrun_max_us.max(underrun_us);
+                    }
+                }
+                _ => {
+                    // 購読のやり直しでは累積を 0 に戻す
+                    stats.reset();
+                    gaps = 0;
+                    gap_total_us = 0;
+                    gap_max_us = 0;
+                    underruns = 0;
+                    underrun_total_us = 0;
+                    underrun_max_us = 0;
+                }
+            }
+            let snapshot = stats.snapshot(now_us);
+            assert_eq!(snapshot.gaps, gaps, "隙間の回数が記録と違う");
+            assert_eq!(
+                snapshot.gap_total_us, gap_total_us,
+                "隙間の合計が記録と違う"
+            );
+            assert_eq!(snapshot.gap_max_us, gap_max_us, "隙間の最大が記録と違う");
+            assert_eq!(
+                snapshot.underruns, underruns,
+                "アンダーランの回数が記録と違う"
+            );
+            assert_eq!(
+                snapshot.underrun_total_us, underrun_total_us,
+                "アンダーランの合計が記録と違う"
+            );
+            assert_eq!(
+                snapshot.underrun_max_us, underrun_max_us,
+                "アンダーランの最大が記録と違う"
+            );
+        }
+        Ok(())
+    })?;
+    Ok(())
+}

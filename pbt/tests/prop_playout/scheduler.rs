@@ -1,6 +1,6 @@
 //! 鳴らす時刻の決定のプロパティテスト
 //!
-//! 任意の入力列で、鳴らすと決めた音の時刻と詰める長さと補間する隙間が契約の範囲に収まり、
+//! 任意の入力列で、鳴らすと決めた音の時刻と詰める長さと隙間が契約の範囲に収まり、
 //! 統計が実測と一致することを検証する。目標の時刻で並べた決定と到着基準で並べた決定の
 //! 両方に到達したことと、捨てる理由が常に並べすぎであることも確かめる。
 
@@ -92,8 +92,8 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                     start_at_us,
                     basis,
                     compress_us,
-                    gap_start_us,
                     gap_us,
+                    conceal_us,
                 } => {
                     // どちらの計画で並べたかを数える (検証と同じ場所で数える)
                     match basis {
@@ -163,25 +163,45 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                     if compress_us > 0 {
                         compressed_seen.set(compressed_seen.get() + 1);
                     }
-                    // 補間する隙間は、下限を超えて上限以内である
+                    // 隙間の全長は、直前の音の終わりから今回の開始までである。下限でも
+                    // 上限でも切り捨てない (材料化する長さそのものを返す)
+                    let expected_gap_us = previous_end_us.map_or(0, |previous_end_us| {
+                        start_at_us.saturating_sub(previous_end_us).max(0)
+                    });
+                    assert_eq!(
+                        gap_us, expected_gap_us,
+                        "隙間の全長が開始と直前の音の終わりの差でない: start_at_us={start_at_us} previous_end_us={previous_end_us:?}"
+                    );
+                    assert!(gap_us >= 0, "隙間の全長が負になった: gap_us={gap_us}");
+                    // 補間してよい長さは隙間の全長以下で、上限以内である
                     assert!(
-                        gap_us == 0 || gap_us > AUDIO_PLAYOUT_MIN_CONCEAL_US,
-                        "補間する隙間が下限以下になった: gap_us={gap_us}"
+                        conceal_us >= 0 && conceal_us <= gap_us,
+                        "補間してよい長さが隙間の全長を超えた: gap_us={gap_us} conceal_us={conceal_us}"
                     );
                     assert!(
-                        gap_us <= AUDIO_PLAYOUT_MAX_CONCEAL_US,
-                        "補間する隙間が上限を超えた: gap_us={gap_us}"
+                        conceal_us <= AUDIO_PLAYOUT_MAX_CONCEAL_US,
+                        "補間してよい長さが上限を超えた: conceal_us={conceal_us}"
                     );
-                    // 補間しないときは開始も返さない
-                    assert!(
-                        gap_us != 0 || gap_start_us == 0,
-                        "補間しないのに隙間の開始が返った: gap_us={gap_us} gap_start_us={gap_start_us}"
-                    );
-                    // 隙間は今回の開始より前で終わる
-                    assert!(
-                        gap_start_us.saturating_add(gap_us) <= start_at_us,
-                        "隙間が今回の開始を越えた: gap_start_us={gap_start_us} gap_us={gap_us} start_at_us={start_at_us}"
-                    );
+                    // 補間するのは、隙間が下限を超え、直前の音の終わりが今から予約できる
+                    // 位置以降であるときだけである
+                    if conceal_us > 0 {
+                        assert!(
+                            gap_us > AUDIO_PLAYOUT_MIN_CONCEAL_US,
+                            "下限以下の隙間を補間しようとした: gap_us={gap_us}"
+                        );
+                        assert!(
+                            previous_end_us.is_some_and(|previous_end_us| {
+                                previous_end_us
+                                    >= now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US)
+                            }),
+                            "予約できない隙間を補間しようとした: previous_end_us={previous_end_us:?} now_us={now_us}"
+                        );
+                        assert_eq!(
+                            conceal_us,
+                            gap_us.min(AUDIO_PLAYOUT_MAX_CONCEAL_US),
+                            "補間してよい長さの決め方が違う: gap_us={gap_us} conceal_us={conceal_us}"
+                        );
+                    }
                     assert_eq!(
                         scheduler.drops(),
                         drops_before,
@@ -200,7 +220,8 @@ fn play_decisions_are_bounded_and_stats_match() -> noprop::TestResult {
                             .saturating_sub(compress_us)
                             .saturating_add(compress_us.saturating_sub(applied_us)),
                     );
-                    let concealed_us = gap_us / 2;
+                    // 隙間の半分を補間したものとして返す (要求した長さまでに切られる)
+                    let concealed_us = (gap_us / 2).min(conceal_us);
                     if concealed_us > 0 {
                         expected_concealments += 1;
                         expected_concealed_us += concealed_us;

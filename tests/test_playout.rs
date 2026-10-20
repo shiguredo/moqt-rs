@@ -11,6 +11,8 @@ mod catch_up;
 mod delay;
 #[path = "test_playout/feedback.rs"]
 mod feedback;
+#[path = "test_playout/gap.rs"]
+mod gap;
 #[path = "test_playout/publish_catch_up.rs"]
 mod publish_catch_up;
 #[path = "test_playout/scheduler.rs"]

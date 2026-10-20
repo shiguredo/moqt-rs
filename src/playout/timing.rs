@@ -224,6 +224,27 @@ pub struct AudioPlayoutTimingSnapshot {
     pub missed_by_reason: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順、最大 [`MAX_RECENT_AUDIO_MISSES`] 件)
     pub recent_misses: Vec<AudioMissEvent>,
+    /// 隙間を材料化した回数 (累積)
+    ///
+    /// 呼び出し側が隙間の音を積むたびに
+    /// [`AudioPlayoutTimingStats::record_gap`] で数える。出力が FIFO の場合、隙間を積まないと
+    /// 後続の音がその分だけ早く鳴るため、隙間は必ず材料化する。この数だけでは「隙間が
+    /// 埋まったか」は分からないため、長さも数える。
+    pub gaps: u64,
+    /// 材料化した隙間の長さの合計 (マイクロ秒、累積)
+    pub gap_total_us: i64,
+    /// 材料化した隙間の長さの最大 (マイクロ秒)
+    pub gap_max_us: i64,
+    /// 出力が枯れた回数 (累積)
+    ///
+    /// 呼び出し側が枯れが明けたときに 1 回だけ
+    /// [`AudioPlayoutTimingStats::record_underrun`] で数える。アンダーランは事後には埋められ
+    /// ないため、閉ループの目標遅延を上げる根拠になる。
+    pub underruns: u64,
+    /// 出力が枯れた長さの合計 (マイクロ秒、累積)
+    pub underrun_total_us: i64,
+    /// 出力が枯れた長さの最大 (マイクロ秒)
+    pub underrun_max_us: i64,
     /// 時間圧縮と補間を使えないサンプルレートで、鳴らす組み立てへ渡した音の数 (累積)
     ///
     /// 4 kHz へ間引くフィルタの表 (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレート
@@ -241,11 +262,11 @@ pub struct AudioPlayoutTimingSnapshot {
 /// ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値から求める。捨てた量は購読の開始からの累積
 /// であり、差を取るのは呼び出し側の仕事である。
 ///
-/// 圧縮 (時間圧縮) の増分と、揺らぎだけから求めた目標遅延は、この計器では分からない。
-/// 前者は購読側 (再生の経路) が、後者は時間軸
+/// 圧縮 (時間圧縮) の増分と、出力が枯れた長さと、揺らぎだけから求めた目標遅延は、この計器
+/// では分からない。圧縮と枯れは購読側 (再生の経路) が、揺らぎだけの目標は時間軸
 /// ([`PlayoutTimeline::observe_audio_playout`](crate::playout::timeline::PlayoutTimeline::observe_audio_playout))
-/// が埋める。どちらも既定は 0 であり、埋めなければ「圧縮なし」「経路は 100 ms 以内」と
-/// みなされる。
+/// が埋める。どれも既定は 0 であり、埋めなければ「圧縮なし」「枯れなし」「経路は 100 ms
+/// 以内」とみなされる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioDelayFeedbackObservation {
     /// 観測した時刻 (マイクロ秒)
@@ -260,6 +281,14 @@ pub struct AudioDelayFeedbackObservation {
     pub backlog_misses: u64,
     /// 累積で並べすぎて捨てた音の長さ (マイクロ秒)
     pub backlog_us: i64,
+    /// 前回の観測から、出力が枯れた合計 (ミリ秒)
+    ///
+    /// 購読側が、出力が枯れていた長さの増分を渡す。アンダーランは事後には埋められないため、
+    /// 閉ループはこれを根拠に目標遅延を上げる以外に減らせない。観測は音ごとに来るが、目標を
+    /// 動かすのは毎秒 1 回であるため、制御までの間ぶんを足し合わせて渡す。分からなければ 0
+    /// (枯れていない) とみなす。購読のやり直しで累積が 0 に戻っても負の差を作らないよう、
+    /// 累積ではなく増分を渡す。
+    pub underrun_ms: i64,
     /// 前の観測から増えた圧縮 (時間圧縮 = 粗さ) の長さ (マイクロ秒、増分)
     ///
     /// 購読側が
@@ -402,6 +431,18 @@ pub struct AudioPlayoutTimingStats {
     missed_totals: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順)
     recent_misses: Vec<AudioMissEvent>,
+    /// 隙間を材料化した回数
+    gaps: u64,
+    /// 材料化した隙間の長さの合計
+    gap_total_us: i64,
+    /// 材料化した隙間の長さの最大
+    gap_max_us: i64,
+    /// 出力が枯れた回数
+    underruns: u64,
+    /// 出力が枯れた長さの合計
+    underrun_total_us: i64,
+    /// 出力が枯れた長さの最大
+    underrun_max_us: i64,
     /// 時間圧縮と補間を使えないサンプルレートで受け取った音の数
     stretch_unavailable_frames: u64,
 }
@@ -431,6 +472,12 @@ impl AudioPlayoutTimingStats {
             missed_us: 0,
             missed_totals: AudioMissTotals::default(),
             recent_misses: Vec::new(),
+            gaps: 0,
+            gap_total_us: 0,
+            gap_max_us: 0,
+            underruns: 0,
+            underrun_total_us: 0,
+            underrun_max_us: 0,
             stretch_unavailable_frames: 0,
         }
     }
@@ -538,6 +585,7 @@ impl AudioPlayoutTimingStats {
             slack_us: summarize_timings(self.slacks_us.since(control_min_us)),
             backlog_misses: self.missed_totals.backlog.count,
             backlog_us: self.missed_totals.backlog.duration_us,
+            underrun_ms: 0,
             compression_us: 0,
             jitter_target_us: 0,
         }
@@ -569,6 +617,12 @@ impl AudioPlayoutTimingStats {
         snapshot.missed_us = self.missed_us;
         snapshot.missed_by_reason = self.missed_totals;
         snapshot.recent_misses = self.recent_misses.clone();
+        snapshot.gaps = self.gaps;
+        snapshot.gap_total_us = self.gap_total_us;
+        snapshot.gap_max_us = self.gap_max_us;
+        snapshot.underruns = self.underruns;
+        snapshot.underrun_total_us = self.underrun_total_us;
+        snapshot.underrun_max_us = self.underrun_max_us;
         snapshot.stretch_unavailable_frames = self.stretch_unavailable_frames;
         snapshot
     }
@@ -582,6 +636,38 @@ impl AudioPlayoutTimingStats {
     /// 確かめて呼ぶ。数えるだけで鳴らし方は変えない
     pub fn record_stretch_unavailable(&mut self) {
         self.stretch_unavailable_frames += 1;
+    }
+
+    /// 材料化した隙間を 1 つ記録する
+    ///
+    /// 呼び出し側が隙間の音を積むたびに、その全長 (`gap_us`) で呼ぶ。0 以下の長さは
+    /// 材料化していないため数えない。隙間の長さは回数だけでは分からないため、合計と最大も
+    /// 残す。購読の開始 ([`AudioPlayoutTimingStats::reset`]) からの累積である。
+    pub fn record_gap(&mut self, gap_us: i64) {
+        let gap_us = gap_us.max(0);
+        if gap_us == 0 {
+            return;
+        }
+        self.gaps += 1;
+        self.gap_total_us = self.gap_total_us.saturating_add(gap_us);
+        self.gap_max_us = self.gap_max_us.max(gap_us);
+    }
+
+    /// 出力が枯れた区間を 1 つ記録する
+    ///
+    /// 呼び出し側が枯れが明けたときに 1 回だけ、枯れていた長さ (`underrun_us`) で呼ぶ。
+    /// 0 以下の長さは枯れていないため数えない。アンダーランは事後には埋められないため、
+    /// 長さは閉ループが目標遅延を上げる根拠になる
+    /// ([`AudioDelayFeedbackObservation::underrun_ms`])。購読の開始
+    /// ([`AudioPlayoutTimingStats::reset`]) からの累積である。
+    pub fn record_underrun(&mut self, underrun_us: i64) {
+        let underrun_us = underrun_us.max(0);
+        if underrun_us == 0 {
+            return;
+        }
+        self.underruns += 1;
+        self.underrun_total_us = self.underrun_total_us.saturating_add(underrun_us);
+        self.underrun_max_us = self.underrun_max_us.max(underrun_us);
     }
 
     /// 記録をすべて捨てて初期状態に戻す (購読のやり直し)
@@ -599,6 +685,12 @@ impl AudioPlayoutTimingStats {
         self.missed_us = 0;
         self.missed_totals = AudioMissTotals::default();
         self.recent_misses.clear();
+        self.gaps = 0;
+        self.gap_total_us = 0;
+        self.gap_max_us = 0;
+        self.underruns = 0;
+        self.underrun_total_us = 0;
+        self.underrun_max_us = 0;
         self.stretch_unavailable_frames = 0;
     }
 

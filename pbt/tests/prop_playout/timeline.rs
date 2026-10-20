@@ -4,9 +4,10 @@
 
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::timeline::{
-    PlayoutTimeline, TIMELINE_BASE_DRIFT_US, TIMELINE_DISCONTINUITY_US,
-    TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TIMELINE_MAX_PRESENTATION_DELAY_MS,
-    TIMELINE_SYNC_MIN_DELTA_US, TimelineConfig, Track, UnsharedReason,
+    PlayoutTimeline, TIMELINE_BASE_DRIFT_US, TIMELINE_BASE_UNSHARED_RELEASE_US,
+    TIMELINE_DISCONTINUITY_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+    TIMELINE_MAX_PRESENTATION_DELAY_MS, TIMELINE_SYNC_MIN_DELTA_US, TimelineConfig, Track,
+    UnsharedReason,
 };
 
 /// 表示時刻は TIMESTAMP の差だけ動き、観測が無いトラックは返らない
@@ -282,5 +283,74 @@ fn sync_never_moves_more_than_the_compensation_limit() -> noprop::TestResult {
         unshared_seen.get() > 0,
         "共有しないケースが生成されなかった\n{runner}"
     );
+    Ok(())
+}
+
+/// 差が戻ってからの早期解除は、戻った状態が 2 秒続いてから起きること
+///
+/// 閾値だけが動いた解除でも、解除のきっかけが動きだったかは見ない。差が水準へ戻った状態が
+/// [`TIMELINE_BASE_UNSHARED_RELEASE_US`] 続いた時点で保持を待たずに共有へ戻る。観測の間隔を
+/// 変えても、解除が早すぎたり遅すぎたりしないことを確かめる。
+#[test]
+fn the_unshared_hold_is_released_after_the_return_streak() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let interval_us = noprop::sample_u64_in(ctx, 20_000..=200_000) as i64;
+        let mut timeline = PlayoutTimeline::new();
+        let mut wall_us = 10_000_000;
+        // 映像が 250 ms 遅い状態で水準を決める
+        for _ in 0..110 {
+            wall_us += interval_us;
+            timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+            timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+        }
+        assert!(timeline.sharing_bases(), "差が閾値の中なら共有すること");
+
+        // 明示の `targetLatency` を上げると、差は動いていないのに閾値が下がって解除される
+        timeline.set_target_latency_ms(400);
+        wall_us += interval_us;
+        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+        assert_eq!(
+            timeline.unshared_reason(),
+            UnsharedReason::Difference,
+            "閾値を超えたら解除すること"
+        );
+
+        // 閾値を戻す。差が戻った状態が 2 秒続くまでは保持し、続いたら戻る
+        timeline.set_target_latency_ms(0);
+        let steps = (TIMELINE_BASE_UNSHARED_RELEASE_US / interval_us) + 2;
+        let mut released = false;
+        for step in 1..=steps {
+            wall_us += interval_us;
+            timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
+            timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+            // 戻った状態を数え始めた時刻は、閾値を戻した後の最初の観測である
+            let returned_us = (step - 1).saturating_mul(interval_us);
+            if returned_us < TIMELINE_BASE_UNSHARED_RELEASE_US {
+                assert!(
+                    !timeline.sharing_bases(),
+                    "戻った状態が 2 秒続く前に共有へ戻った: step={step} interval_us={interval_us}"
+                );
+                assert_eq!(
+                    timeline.unshared_reason(),
+                    UnsharedReason::Hold,
+                    "保持していること: step={step}"
+                );
+            } else {
+                assert!(
+                    timeline.sharing_bases(),
+                    "戻った状態が 2 秒続いたら共有へ戻ること: step={step} interval_us={interval_us}"
+                );
+                released = true;
+                break;
+            }
+        }
+        assert!(
+            released,
+            "早期解除に到達していない: interval_us={interval_us}"
+        );
+        Ok(())
+    })?;
     Ok(())
 }

@@ -3,10 +3,11 @@
 //! 目標の時刻に従って音を並べる。目標に間に合わない音も捨てず、今から鳴らせる最も
 //! 早い時刻へずらして鳴らし、ずらした分を、遅れと音の長さの半分とキューの余裕の最小値
 //! まで時間圧縮で目標へ戻す (キューの余裕が無いときは詰めない)。前の音の終わりと今回の
-//! 開始の間に空いた分は、呼び出し側が直前の音を時間伸長して埋められるよう隙間として
-//! 返す。目標から離れすぎた音も捨てず、直前の音がまだ鳴っている間は遅れたまま鳴らし、
-//! 音が途切れているときだけ到着基準へ並べ直す。時刻はすべて呼び出し側が引数で渡し、
-//! デバイス API やタイマーには触れない。
+//! 開始の間に空いた分は、その全長と補間してよい長さに分けて返し、呼び出し側が隙間を
+//! 材料化できるようにする。目標から離れすぎた音も捨てず、直前の音がまだ鳴っている間は
+//! 遅れたまま鳴らし、音が途切れているときだけ到着基準へ並べ直す。出力が枯れた時間は
+//! 隙間として二重に数えないよう、呼び出し側が [`AudioPlayoutScheduler::note_underrun`] で
+//! 知らせる。時刻はすべて呼び出し側が引数で渡し、デバイス API やタイマーには触れない。
 
 /// 再生の遅れの下限 (マイクロ秒)
 ///
@@ -75,14 +76,16 @@ pub const AUDIO_PLAYOUT_RESYNC_MIN_JUMP_US: i64 = 10_000;
 
 /// 補間する隙間の下限 (マイクロ秒)
 ///
-/// これ以下の隙間は補間の継ぎ目が耳につくため補間せず、無音のまま残す。
+/// これ以下の隙間は補間の継ぎ目が耳につくため補間しない。隙間そのものは無音のフェードで
+/// 材料化する (呼び出し側が [`crate::playout::gap::materialize`] へ全長を渡す)。
 pub const AUDIO_PLAYOUT_MIN_CONCEAL_US: i64 = 5_000;
 
 /// 補間する隙間の上限 (マイクロ秒)
 ///
 /// これより長い欠落は補間で埋めきらず、超えた分は無音のまま残す。埋めた音の末尾の振幅を
 /// 下げきる長さ ([`crate::playout::stretch::TIME_STRETCH_MAX_CONCEAL_US`]) と同じにする。
-/// これより長く埋めても繰り返しの音を抑える効果が増えないためである。
+/// これより長く埋めても繰り返しの音を抑える効果が増えないためである。隙間の全長はこの値で
+/// 切り捨てない ([`AudioPlayoutDecision::Play::gap_us`] を参照)。
 pub const AUDIO_PLAYOUT_MAX_CONCEAL_US: i64 = crate::playout::stretch::TIME_STRETCH_MAX_CONCEAL_US;
 
 /// 1 つの音を鳴らすかを決める入力 (すべてマイクロ秒)
@@ -165,7 +168,7 @@ pub struct AudioPlayoutPlay {
     pub basis: AudioPlayoutBasis,
 }
 
-/// 鳴らす時刻と詰める長さと補間する隙間 (マイクロ秒)、または捨てる
+/// 鳴らす時刻と詰める長さと隙間 (マイクロ秒)、または捨てる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlayoutDecision {
     /// 鳴らす
@@ -183,10 +186,19 @@ pub enum AudioPlayoutDecision {
         /// 0 である。実際に詰められるかは波形しだいであり、適用した結果を
         /// [`AudioPlayoutScheduler::confirm_stretch`] で返す
         compress_us: i64,
-        /// 補間する隙間の開始時刻 (今と同じ軸のマイクロ秒)。`gap_us` が 0 のときは使わない
-        gap_start_us: i64,
-        /// 補間する隙間の長さ (マイクロ秒)。上限で切った値であり、0 なら補間しない
+        /// 直前の音の終わりから今回の開始までの隙間の全長 (マイクロ秒)。0 なら隙間が無い
+        ///
+        /// [`AUDIO_PLAYOUT_MIN_CONCEAL_US`] の下限でも [`AUDIO_PLAYOUT_MAX_CONCEAL_US`] の
+        /// 上限でも切り捨てない。呼び出し側が隙間を必ず材料化する
+        /// ([`crate::playout::gap::materialize`]) ために、材料化する長さそのものを返す
         gap_us: i64,
+        /// 隙間のうち補間してよい長さ (マイクロ秒)。0 なら補間しない
+        ///
+        /// 隙間が [`AUDIO_PLAYOUT_MIN_CONCEAL_US`] 以下のとき、直前の音の終わりが今 +
+        /// [`AUDIO_PLAYOUT_MIN_LEAD_US`] より前のとき (予約できない)、
+        /// [`AUDIO_PLAYOUT_MAX_CONCEAL_US`] を超える分は切る。常に `gap_us` 以下である。
+        /// 実際に補間できた長さは [`AudioPlayoutScheduler::confirm_concealment`] で返す
+        conceal_us: i64,
     },
     /// 捨てる
     Drop {
@@ -348,8 +360,7 @@ impl AudioPlayoutScheduler {
                 .saturating_sub(compress_us),
         );
         self.last_timestamp_us = Some(input.timestamp_us);
-        let (gap_start_us, gap_us) =
-            self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        let (gap_us, conceal_us) = self.gap_of(input.now_us, previous_end_us, start_at_us);
         self.remember_play(
             &input,
             start_at_us,
@@ -360,8 +371,8 @@ impl AudioPlayoutScheduler {
             start_at_us,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us,
-            gap_start_us,
             gap_us,
+            conceal_us,
         }
     }
 
@@ -417,6 +428,42 @@ impl AudioPlayoutScheduler {
         }
         self.conceal_count += 1;
         self.concealed_us = self.concealed_us.saturating_add(applied_us);
+    }
+
+    /// 直前に鳴らすと決めた音の終わり (今と同じ軸のマイクロ秒)
+    ///
+    /// まだ一度も鳴らすと決めていなければ None。次に鳴らす音の隙間の起点であり、出力が
+    /// 枯れているかどうかを呼び出し側が判定するのにも使う
+    /// ([`AudioPlayoutScheduler::note_underrun`])。詰める長さを実際に適用した後
+    /// ([`AudioPlayoutScheduler::confirm_stretch`]) に読むと、適用した長さで直った値になる。
+    /// 購読のやり直し ([`AudioPlayoutScheduler::reset`]) で消える。
+    pub fn last_end_us(&self) -> Option<i64> {
+        self.last_end_us
+    }
+
+    /// 出力が枯れていることを知らせる (枯れている間、呼び出し側が呼ぶ)
+    ///
+    /// 前に並べた音の終わり (`last_end_us`) が今より前 (出力が枯れている) ときは、終わりを
+    /// 今へ進め、要求中の詰める長さ・補間の長さ・遅れを 0 にする。枯れた時間は音として
+    /// 鳴っていないため、次の音の隙間として数え直すと、実際には無音だった時間を補間で
+    /// 埋めようとする (二重に材料化する)。終わりを今へ進めることで、次の音の隙間は今から
+    /// 並べた分だけになる。
+    ///
+    /// 枯れていないときは何もしない。枯れている間は毎回呼んでよい (呼ぶたびに終わりを
+    /// 今へ進める)。計器へ枯れた長さを記録するのは呼び出し側の責務であり、枯れが明けた
+    /// ときに 1 回だけ記録する
+    /// ([`crate::playout::timing::AudioPlayoutTimingStats::record_underrun`])。
+    pub fn note_underrun(&mut self, now_us: i64) {
+        let Some(last_end_us) = self.last_end_us else {
+            return;
+        };
+        if last_end_us >= now_us {
+            return;
+        }
+        self.last_end_us = Some(now_us);
+        self.requested_us = 0;
+        self.requested_conceal_us = 0;
+        self.lateness_us = 0;
     }
 
     /// 基準と前の音の終わりと現在の遅れを消す (購読のやり直し)。累積統計は消さない
@@ -482,14 +529,17 @@ impl AudioPlayoutScheduler {
         self.last_play
     }
 
-    /// 前の音の終わりと今回の開始の間から、補間する隙間を求める
+    /// 前の音の終わりと今回の開始の間から、隙間の全長と補間してよい長さを求める
     ///
-    /// 下限 (`AUDIO_PLAYOUT_MIN_CONCEAL_US`) 以下の隙間と、開始 (`previous_end_us`) が
-    /// 今 + 余裕 (`AUDIO_PLAYOUT_MIN_LEAD_US`) より前の隙間 (予約できない。過去も含む) は
-    /// 補間しない。上限 (`AUDIO_PLAYOUT_MAX_CONCEAL_US`) を超える分は切り、残りは無音の
-    /// まま残す。見つかった隙間は `confirm_concealment` で実際に補間した長さを返す要求と
-    /// して記録する。補間しないときは開始も長さも 0 にする。
-    fn concealment_of(
+    /// 全長 (`gap_us`) は下限でも上限でも切り捨てない。呼び出し側がその長さぶんの音を
+    /// 必ず材料化するため、材料化する長さそのものを返す必要がある。
+    ///
+    /// 補間してよい長さ (`conceal_us`) は、全長が `AUDIO_PLAYOUT_MIN_CONCEAL_US` を
+    /// 超え、開始 (`previous_end_us`) が今 + 余裕 (`AUDIO_PLAYOUT_MIN_LEAD_US`) 以降で
+    /// あるときだけ全長の `AUDIO_PLAYOUT_MAX_CONCEAL_US` までの分にする。それ以外は 0 に
+    /// する。返した長さは `confirm_concealment` で実際に補間した長さを返す要求として
+    /// 記録する (補間する長さが 0 のときは記録しない)。
+    fn gap_of(
         &mut self,
         now_us: i64,
         previous_end_us: Option<i64>,
@@ -498,16 +548,17 @@ impl AudioPlayoutScheduler {
         let Some(previous_end_us) = previous_end_us else {
             return (0, 0);
         };
-        let gap_us = start_at_us.saturating_sub(previous_end_us);
+        // 重なっているとき (今回の開始が前の音の終わりより前) は隙間が無い
+        let gap_us = start_at_us.saturating_sub(previous_end_us).max(0);
         if gap_us <= AUDIO_PLAYOUT_MIN_CONCEAL_US {
-            return (0, 0);
+            return (gap_us, 0);
         }
         if previous_end_us < now_us.saturating_add(AUDIO_PLAYOUT_MIN_LEAD_US) {
-            return (0, 0);
+            return (gap_us, 0);
         }
-        let capped_us = gap_us.min(AUDIO_PLAYOUT_MAX_CONCEAL_US);
-        self.requested_conceal_us = capped_us;
-        (previous_end_us, capped_us)
+        let conceal_us = gap_us.min(AUDIO_PLAYOUT_MAX_CONCEAL_US);
+        self.requested_conceal_us = conceal_us;
+        (gap_us, conceal_us)
     }
 
     /// 目標を使わないときの決め方
@@ -557,15 +608,14 @@ impl AudioPlayoutScheduler {
         }
         self.last_end_us = Some(start_at_us.saturating_add(input.duration_us));
         self.last_timestamp_us = Some(input.timestamp_us);
-        let (gap_start_us, gap_us) =
-            self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        let (gap_us, conceal_us) = self.gap_of(input.now_us, previous_end_us, start_at_us);
         self.remember_play(&input, start_at_us, 0, AudioPlayoutBasis::Arrival);
         AudioPlayoutDecision::Play {
             start_at_us,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us,
             gap_us,
+            conceal_us,
         }
     }
 
@@ -594,15 +644,14 @@ impl AudioPlayoutScheduler {
         // 到着基準へ移ったため、目標に対する遅れは無い (詰めない)
         self.lateness_us = 0;
         self.requested_us = 0;
-        let (gap_start_us, gap_us) =
-            self.concealment_of(input.now_us, previous_end_us, start_at_us);
+        let (gap_us, conceal_us) = self.gap_of(input.now_us, previous_end_us, start_at_us);
         self.remember_play(&input, start_at_us, 0, AudioPlayoutBasis::Arrival);
         AudioPlayoutDecision::Play {
             start_at_us,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us,
             gap_us,
+            conceal_us,
         }
     }
 

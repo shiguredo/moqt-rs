@@ -644,6 +644,8 @@ fn reset_returns_to_the_initial_state() {
         Some(0),
     ));
     stats.record_stopped(40_000);
+    stats.record_gap(20_000);
+    stats.record_underrun(10_000);
     stats.reset();
 
     assert_eq!(
@@ -686,6 +688,100 @@ fn record_stretch_unavailable_counts_cumulatively_and_resets() {
             .stretch_unavailable_frames,
         0,
         "reset で 0 に戻ること"
+    );
+}
+
+#[test]
+fn record_gap_counts_the_count_total_and_maximum() {
+    let mut stats = AudioPlayoutTimingStats::new();
+    // 数える前はすべて 0 である
+    let initial = stats.snapshot(0);
+    assert_eq!(initial.gaps, 0);
+    assert_eq!(initial.gap_total_us, 0);
+    assert_eq!(initial.gap_max_us, 0);
+
+    stats.record_gap(20_000);
+    stats.record_gap(40_000);
+    stats.record_gap(10_000);
+    let snapshot = stats.snapshot(1_000_000);
+    assert_eq!(snapshot.gaps, 3, "材料化した回数を数えること");
+    assert_eq!(
+        snapshot.gap_total_us, 70_000,
+        "材料化した長さの合計を数えること"
+    );
+    assert_eq!(
+        snapshot.gap_max_us, 40_000,
+        "材料化した長さの最大を返すこと"
+    );
+
+    // 0 以下の長さは材料化していないため数えない
+    stats.record_gap(0);
+    stats.record_gap(-1);
+    assert_eq!(stats.snapshot(2_000_000).gaps, 3);
+
+    // 累積であり、分布の窓の外へ出ても残る
+    let snapshot = stats.snapshot(AUDIO_PLAYOUT_TIMING_WINDOW_US * 2);
+    assert_eq!(snapshot.gaps, 3);
+    assert_eq!(snapshot.gap_total_us, 70_000);
+
+    // 購読のやり直しでは 0 に戻る
+    stats.reset();
+    let snapshot = stats.snapshot(AUDIO_PLAYOUT_TIMING_WINDOW_US * 2);
+    assert_eq!(snapshot.gaps, 0);
+    assert_eq!(snapshot.gap_total_us, 0);
+    assert_eq!(snapshot.gap_max_us, 0);
+}
+
+#[test]
+fn record_underrun_counts_the_count_total_and_maximum() {
+    let mut stats = AudioPlayoutTimingStats::new();
+    let initial = stats.snapshot(0);
+    assert_eq!(initial.underruns, 0);
+    assert_eq!(initial.underrun_total_us, 0);
+    assert_eq!(initial.underrun_max_us, 0);
+
+    stats.record_underrun(5_000);
+    stats.record_underrun(25_000);
+    let snapshot = stats.snapshot(1_000_000);
+    assert_eq!(snapshot.underruns, 2, "出力が枯れた回数を数えること");
+    assert_eq!(
+        snapshot.underrun_total_us, 30_000,
+        "枯れた長さの合計を数えること"
+    );
+    assert_eq!(
+        snapshot.underrun_max_us, 25_000,
+        "枯れた長さの最大を返すこと"
+    );
+
+    // 0 以下の長さは枯れていないため数えない
+    stats.record_underrun(0);
+    stats.record_underrun(-1);
+    assert_eq!(stats.snapshot(2_000_000).underruns, 2);
+
+    // 購読のやり直しでは 0 に戻る
+    stats.reset();
+    let snapshot = stats.snapshot(2_000_000);
+    assert_eq!(snapshot.underruns, 0);
+    assert_eq!(snapshot.underrun_total_us, 0);
+    assert_eq!(snapshot.underrun_max_us, 0);
+}
+
+#[test]
+fn audio_delay_feedback_has_no_underrun_by_default() {
+    // 枯れた長さは購読側が増分として渡すため、計器が作る観測では 0 である
+    let mut stats = AudioPlayoutTimingStats::new();
+    stats.record_play(play(
+        0,
+        Some(10_000),
+        20_000,
+        20_000,
+        AudioPlayoutBasis::Timestamp,
+    ));
+    stats.record_underrun(10_000);
+    assert_eq!(
+        stats.audio_delay_feedback(30_000).underrun_ms,
+        0,
+        "計器の観測では枯れた長さを埋めないこと"
     );
 }
 
@@ -743,8 +839,8 @@ fn scheduler_play_is_recorded_without_conversion() {
             start_at_us: 180_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "目標に間に合う音は目標の時刻で鳴らすこと"
     );

@@ -12,7 +12,9 @@
 //!
 //! - 遅れが続くなら目標を増やす (乱れと、到着から鳴るまでの経路の分を吸収する)
 //! - 並べすぎで捨てたなら、捨てた長さぶんを吸収できるだけ増やす
-//! - 遅れが許容の中に収まり、捨てが無いなら目標を減らす (必要以上に遅らせない)
+//! - 出力が枯れたなら、枯れた長さぶんを吸収できるだけ増やす。アンダーランは事後には
+//!   埋められないため、目標を上げる以外に減らせない
+//! - 遅れが許容の中に収まり、捨ても枯れも無いなら目標を減らす (必要以上に遅らせない)
 //! - 増減は毎秒 1 回までとし、1 回の増加は [`AUDIO_DELAY_FEEDBACK_MAX_STEP_US`] までにする
 //!   (数秒スケール。行き過ぎを防ぐ)
 //! - 目標は [`AUDIO_DELAY_FEEDBACK_MIN_US`] から、実際に適用する上限
@@ -180,6 +182,11 @@ pub enum AudioDelayFeedbackReason {
     Initial,
     /// 並べすぎで捨てたため増やした
     Backlog,
+    /// 出力が枯れたため増やした
+    ///
+    /// 並べすぎの捨てや鳴り遅れと同時に起きたときも、事後には埋められないアンダーランの
+    /// 方を優先してこの理由にする。
+    Underrun,
     /// 予定を過ぎて鳴ったため増やした
     Lateness,
     /// 遅れが許容の中に収まり、捨てが無いため減らした
@@ -372,6 +379,12 @@ impl AudioDelayFeedback {
     ///
     /// 並べすぎの累積は、購読のやり直しで 0 に戻っても負の差で増やさない。
     ///
+    /// 出力が枯れた ([`AudioDelayFeedbackObservation::underrun_ms`] が 0 より大きい) ときは、
+    /// 既存の増加判断と独立に、枯れた長さ (1 回の増加の上限まで) だけ目標を上げる。並べすぎや
+    /// 鳴り遅れによる増加と同時なら大きい方を使い、理由は
+    /// [`AudioDelayFeedbackReason::Underrun`] を優先する。枯れは事後には埋められないため、
+    /// 遅れが許容の中に収まっていても減らさずに増やす。
+    ///
     /// 遅れの p50 からは、時間圧縮の不感帯 ([`AUDIO_PLAYOUT_STRETCH_MIN_US`]) の分を引く。
     /// 不感帯の中で意図して残した遅れは「予定の方が僅かにずれている」だけであり、目標を
     /// 上げても playout は詰めないため、目標だけが上がり続けて遅延が伸びる。裾 (p95 と max)
@@ -427,9 +440,16 @@ impl AudioDelayFeedback {
         // 上げてよい)
         self.update_artifact_ceiling(elapsed_us, observation.jitter_target_us);
 
+        // 枯れた長さはミリ秒で渡る。1 回で増やす上限をミリ秒へ直した値と比べてから、
+        // マイクロ秒へ戻す (枯れた長さが上限を超えても、1 回の増加は上限までにする)
+        let underrun_step_us = observation
+            .underrun_ms
+            .clamp(0, AUDIO_DELAY_FEEDBACK_MAX_STEP_US / 1_000)
+            .saturating_mul(1_000);
         let lateness_p50_us = observation.lateness_us.map(|summary| summary.p50);
         let previous_target_us = self.feedback_target_us();
-        let change_us = if backlog_delta > 0 {
+        // 増やす向きの根拠 (並べすぎ / 鳴り遅れ)。無ければ 0 である
+        let increase_us = if backlog_delta > 0 {
             // 並べすぎで捨てた。捨てた長さぶんを吸収できるだけ増やす
             self.reason = AudioDelayFeedbackReason::Backlog;
             clamp_target_us(
@@ -449,6 +469,16 @@ impl AudioDelayFeedback {
                 AUDIO_DELAY_FEEDBACK_MIN_STEP_US,
                 AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
             )
+        } else {
+            0
+        };
+        let change_us = if increase_us > 0 || underrun_step_us > 0 {
+            // アンダーランは既存の増加判断と独立に目標を上げる。両方あるときは大きい方を使い、
+            // 理由は事後には埋められないアンダーランを優先する
+            if underrun_step_us > 0 {
+                self.reason = AudioDelayFeedbackReason::Underrun;
+            }
+            increase_us.max(underrun_step_us)
         } else if lateness_p50_us.is_some() {
             // 遅れが許容の中に収まり、捨てが無い。余裕が続くため減らす。減らす速さは前回の
             // 観測からの時間で決めるため、前回が無いときは動かさない (1 回の観測だけで

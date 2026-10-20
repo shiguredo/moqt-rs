@@ -48,8 +48,8 @@ fn schedule_queued_sound(scheduler: &mut AudioPlayoutScheduler) {
             start_at_us: 100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "並べてある音を作ること"
     );
@@ -65,8 +65,8 @@ fn sound_in_time_plays_at_the_target() {
             start_at_us: 100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "目標どおりに鳴らすときは目標の時刻を基準にすること"
     );
@@ -89,8 +89,8 @@ fn late_sound_without_a_previous_sound_is_not_compressed() {
             start_at_us: 160_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "直前の音が無いときは詰めないこと"
     );
@@ -122,8 +122,8 @@ fn lateness_inside_the_stretch_deadband_is_not_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "不感帯の中では詰めないこと"
     );
@@ -148,8 +148,8 @@ fn lateness_at_the_stretch_deadband_is_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "不感帯ちょうどでは詰めること"
     );
@@ -170,8 +170,8 @@ fn overlapping_sound_is_appended_to_the_previous_one_and_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "直前の音の終わりへ繋げて詰めること"
     );
@@ -194,8 +194,8 @@ fn compression_is_capped_by_the_queue_slack() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 30_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "キューの余裕までしか詰めないこと"
     );
@@ -222,8 +222,8 @@ fn zero_queue_slack_is_not_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "キューの余裕が 0 のときは詰めないこと"
     );
@@ -250,10 +250,10 @@ fn negative_queue_slack_is_not_compressed() {
             start_at_us: 130_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 10_000,
+            conceal_us: 0,
         },
-        "キューの余裕が負のときは詰めないこと"
+        "キューの余裕が負のときは詰めないこと (隙間は全長を返す)"
     );
     assert_eq!(
         scheduler.lateness_us(),
@@ -284,8 +284,8 @@ fn queue_slack_at_the_epsilon_is_not_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "キューの余裕が許容ちょうどのときは詰めないこと"
     );
@@ -300,8 +300,8 @@ fn queue_slack_at_the_epsilon_is_not_compressed() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 2,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "許容を超えた余裕の分だけ詰めること"
     );
@@ -320,8 +320,8 @@ fn compression_returns_to_the_target() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     scheduler.confirm_stretch(10_000);
@@ -334,8 +334,8 @@ fn compression_returns_to_the_target() {
             start_at_us: 130_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.lateness_us(), 0, "目標どおりに戻ること");
@@ -372,8 +372,8 @@ fn a_late_sound_keeps_playing_while_the_previous_one_is_sounding() {
             start_at_us: 100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 2 つ目は目標 200 ms に対して 900 ms 遅れるが、直前の音 (1_100 ms まで) がまだ
@@ -386,8 +386,8 @@ fn a_late_sound_keeps_playing_while_the_previous_one_is_sounding() {
             start_at_us: 1_100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "直前の音の終わりへ繋げて順序と連続性を保つこと"
     );
@@ -421,8 +421,8 @@ fn a_late_sound_is_rebased_by_arrival_when_the_sound_stopped() {
             start_at_us: 570_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "音が途切れているときは到着基準へ並べ直すこと"
     );
@@ -448,8 +448,8 @@ fn unapplied_compression_remains_as_lateness() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 30_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 30 ms の要求に対して 10 ms しか詰められなかった
@@ -463,8 +463,8 @@ fn unapplied_compression_remains_as_lateness() {
             start_at_us: 170_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
 }
@@ -481,8 +481,8 @@ fn over_applied_compression_moves_the_previous_end_earlier() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 波形の周期が要求より長く、20 ms 詰められた (要求より 10 ms 長く削れた)
@@ -501,8 +501,8 @@ fn over_applied_compression_moves_the_previous_end_earlier() {
             start_at_us: 140_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 120_000,
             gap_us: 20_000,
+            conceal_us: 20_000,
         }
     );
 }
@@ -517,8 +517,8 @@ fn arrival_based_places_sounds_by_timestamp() {
             start_at_us: AUDIO_PLAYOUT_DELAY_US,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "目標が無いときは到着 + 到着基準の遅れから鳴らすこと"
     );
@@ -530,8 +530,8 @@ fn arrival_based_places_sounds_by_timestamp() {
             start_at_us: AUDIO_PLAYOUT_DELAY_US + 20_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
 }
@@ -551,8 +551,8 @@ fn arrival_based_places_the_first_sound_from_the_arrival_position() {
             start_at_us: 150_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "到着の位置から到着基準の遅れだけ後ろに置くこと"
     );
@@ -593,8 +593,8 @@ fn arrival_based_uses_the_arrival_delay() {
             start_at_us: 1_100_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "到着基準の遅れの上限 (100 ms) を使うこと"
     );
@@ -615,8 +615,8 @@ fn arrival_based_uses_the_arrival_delay() {
             start_at_us: 1_050_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "到着基準の遅れの下限 (50 ms) を使うこと"
     );
@@ -636,8 +636,8 @@ fn arrival_based_uses_the_arrival_delay() {
             start_at_us: 1_050_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "下限を下回る遅れでは下限の位置から鳴らすこと"
     );
@@ -649,14 +649,15 @@ fn arrival_based_rebases_after_a_late_sound() {
     scheduler.schedule(input(0, 0, 20_000, None));
     // 過ぎてから届いた音で基準を取り直す
     let decision = scheduler.schedule(input(200_000, 40_000, 20_000, None));
+    // 前の音の終わり (70 ms) から 250 ms まで空く。予約できない隙間なので補間はしない
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
             start_at_us: 250_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 180_000,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.rebases(), 1);
@@ -673,8 +674,8 @@ fn resync_jump_below_the_minimum_is_not_counted_as_a_rebase() {
             start_at_us: AUDIO_PLAYOUT_DELAY_US,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 出力のバッファが到着 + 再生の遅れ (105 ms) より先に進んでおり、予約できる最も早い
@@ -683,14 +684,15 @@ fn resync_jump_below_the_minimum_is_not_counted_as_a_rebase() {
     let mut request = input(100_000, 55_000, 20_000, None);
     request.arrival_us = 55_000;
     let second = scheduler.schedule(request);
+    // 前の音の終わり (70 ms) から 110 ms まで空く。予約できない隙間なので補間はしない
     assert_eq!(
         second,
         AudioPlayoutDecision::Play {
             start_at_us: 110_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 40_000,
+            conceal_us: 0,
         }
     );
     assert_eq!(
@@ -706,14 +708,15 @@ fn resync_jump_below_the_minimum_is_not_counted_as_a_rebase() {
     request.arrival_us = 80_000;
     request.arrival_delay_us = TIMELINE_ARRIVAL_DELAY_US;
     let second = scheduler.schedule(request);
+    // 前の音の終わり (70 ms) から 180 ms まで空く。予約できない隙間なので補間はしない
     assert_eq!(
         second,
         AudioPlayoutDecision::Play {
             start_at_us: 180_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 110_000,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.rebases(), 1, "10 ms 以上のずらしは数えること");
@@ -725,14 +728,15 @@ fn arrival_based_rebases_on_a_big_timestamp_jump() {
     scheduler.schedule(input(0, 0, 20_000, None));
     // TIMESTAMP が大きく飛んだ。前の音のすぐ後ろ (か到着 + 再生の遅れ) から並べ直す
     let decision = scheduler.schedule(input(100_000, 1_000_000, 20_000, None));
+    // 前の音の終わり (70 ms) から 150 ms まで空く。予約できない隙間なので補間はしない
     assert_eq!(
         decision,
         AudioPlayoutDecision::Play {
             start_at_us: 150_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 80_000,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.rebases(), 1);
@@ -790,8 +794,8 @@ fn lateness_boundary_is_played() {
             start_at_us: 100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 遅れが 500 ms ちょうどになる音は捨てない。直前の音 (700 ms まで) がまだ鳴っているため
@@ -803,8 +807,8 @@ fn lateness_boundary_is_played() {
             start_at_us: 700_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.lateness_us(), AUDIO_PLAYOUT_MAX_LATENESS_US);
@@ -828,8 +832,8 @@ fn unconfirmed_stretch_is_treated_as_unapplied() {
             start_at_us: 120_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 10_000,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // confirm せずに次の音を予約すると、要求は適用されなかったものとして扱われる。
@@ -842,8 +846,8 @@ fn unconfirmed_stretch_is_treated_as_unapplied() {
             start_at_us: 140_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
 }
@@ -863,8 +867,8 @@ fn mode_switch_flushes_the_pending_stretch() {
             start_at_us: 90_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
 }
@@ -879,8 +883,8 @@ fn negative_duration_does_not_panic() {
             start_at_us: 10_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 次の予約でも panic しない
@@ -899,8 +903,8 @@ fn presentation_delay_raises_the_backlog_limit() {
             start_at_us: 300_001,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
 }
@@ -934,8 +938,8 @@ fn gap_between_sounds_is_reported() {
             start_at_us: 100_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 次の音の目標は 160 ms。前の音の終わりから 40 ms 空く
@@ -946,18 +950,19 @@ fn gap_between_sounds_is_reported() {
             start_at_us: 160_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 120_000,
             gap_us: 40_000,
+            conceal_us: 40_000,
         }
     );
     assert_eq!(scheduler.concealments(), 0);
 }
 
 #[test]
-fn gap_is_capped_at_the_max_concealment() {
+fn gap_is_reported_in_full_and_only_the_concealment_is_capped() {
     let mut scheduler = AudioPlayoutScheduler::new();
     scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
-    // 前の音の終わり (120 ms) から 200 ms 空く。上限 (100 ms) で切り、残りは無音のまま残す
+    // 前の音の終わり (120 ms) から 200 ms 空く。隙間の全長は 200 ms のまま返し、補間して
+    // よい長さだけを上限 (100 ms) で切る。残りは無音として材料化する
     let second = scheduler.schedule(input(50_000, 20_000, 20_000, Some(320_000)));
     assert_eq!(
         second,
@@ -965,8 +970,8 @@ fn gap_is_capped_at_the_max_concealment() {
             start_at_us: 320_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 120_000,
-            gap_us: AUDIO_PLAYOUT_MAX_CONCEAL_US,
+            gap_us: 200_000,
+            conceal_us: AUDIO_PLAYOUT_MAX_CONCEAL_US,
         }
     );
 }
@@ -975,7 +980,8 @@ fn gap_is_capped_at_the_max_concealment() {
 fn gap_at_the_minimum_is_not_concealed() {
     let mut scheduler = AudioPlayoutScheduler::new();
     scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
-    // 隙間がちょうど下限 (5 ms) なら補間しない (継ぎ目が耳につくため)
+    // 隙間がちょうど下限 (5 ms) なら補間しない (継ぎ目が耳につくため)。隙間の全長は
+    // 材料化するために返す
     let second = scheduler.schedule(input(
         0,
         20_000,
@@ -988,8 +994,8 @@ fn gap_at_the_minimum_is_not_concealed() {
             start_at_us: 120_000 + AUDIO_PLAYOUT_MIN_CONCEAL_US,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: AUDIO_PLAYOUT_MIN_CONCEAL_US,
+            conceal_us: 0,
         }
     );
     assert_eq!(scheduler.concealments(), 0);
@@ -1007,8 +1013,8 @@ fn gap_just_above_the_minimum_is_concealed() {
             start_at_us: 126_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 120_000,
             gap_us: 6_000,
+            conceal_us: 6_000,
         }
     );
 }
@@ -1026,8 +1032,8 @@ fn gap_before_the_lead_is_not_concealed() {
             start_at_us: 40_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
-            gap_us: 0,
+            gap_us: 10_000,
+            conceal_us: 0,
         }
     );
 }
@@ -1045,8 +1051,8 @@ fn arrival_based_reports_the_gap() {
             start_at_us: 90_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 70_000,
             gap_us: 20_000,
+            conceal_us: 20_000,
         }
     );
 }
@@ -1069,8 +1075,8 @@ fn confirm_concealment_counts_only_the_applied_length() {
             start_at_us: 200_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 180_000,
             gap_us: 20_000,
+            conceal_us: 20_000,
         }
     );
     scheduler.confirm_concealment(40_000);
@@ -1091,8 +1097,8 @@ fn unconfirmed_concealment_is_treated_as_unapplied() {
             start_at_us: 180_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         }
     );
     // 前の要求は適用されなかったものとして扱う
@@ -1273,8 +1279,8 @@ fn last_play_follows_the_arrival_basis() {
             start_at_us: 550_000,
             basis: AudioPlayoutBasis::Arrival,
             compress_us: 0,
-            gap_start_us: 0,
             gap_us: 0,
+            conceal_us: 0,
         },
         "目標から離れすぎた音は到着基準へ並べ直すこと"
     );
@@ -1292,5 +1298,131 @@ fn last_play_follows_the_arrival_basis() {
     assert_eq!(
         play.played_us, 20_000,
         "到着基準では詰めないため音の長さがそのままになること"
+    );
+}
+
+#[test]
+fn last_end_us_tracks_the_queued_sound() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    assert_eq!(
+        scheduler.last_end_us(),
+        None,
+        "まだ並べていなければ終わりは無いこと"
+    );
+    // 目標 100 ms に間に合う長さ 20 ms の音は 120 ms まで鳴る
+    schedule_queued_sound(&mut scheduler);
+    assert_eq!(
+        scheduler.last_end_us(),
+        Some(120_000),
+        "並べた音の終わりを返すこと"
+    );
+    // 実際に詰めた長さが返ってくると、その分だけ終わりが手前になる
+    scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
+    scheduler.confirm_stretch(10_000);
+    assert_eq!(
+        scheduler.last_end_us(),
+        Some(130_000),
+        "詰めた長さを反映した終わりを返すこと"
+    );
+    // 購読のやり直しでは消える
+    scheduler.reset();
+    assert_eq!(scheduler.last_end_us(), None, "購読のやり直しで消えること");
+}
+
+#[test]
+fn note_underrun_moves_the_end_to_now_and_clears_the_requests() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    // まだ並べていなければ何もしない
+    scheduler.note_underrun(50_000);
+    assert_eq!(scheduler.last_end_us(), None);
+
+    schedule_queued_sound(&mut scheduler);
+    // 目標 100 ms に対して 20 ms 遅れて届き、前の音の終わり (120 ms) へ繋げて 10 ms の詰めを
+    // 要求する
+    let second = scheduler.schedule(input(0, 20_000, 20_000, Some(100_000)));
+    assert_eq!(
+        second,
+        AudioPlayoutDecision::Play {
+            start_at_us: 120_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 10_000,
+            gap_us: 0,
+            conceal_us: 0,
+        }
+    );
+
+    // 出力が枯れた。終わりを今 (500 ms) へ進め、要求中の詰めと遅れを捨てる
+    scheduler.note_underrun(500_000);
+    assert_eq!(
+        scheduler.last_end_us(),
+        Some(500_000),
+        "枯れた時間を終わりへ進めること"
+    );
+    assert_eq!(scheduler.lateness_us(), 0, "遅れを消すこと");
+    // 要求を捨てても実際に詰めた扱いにはしない
+    scheduler.confirm_stretch(10_000);
+    assert_eq!(
+        scheduler.compressed_us(),
+        0,
+        "枯れたときに要求していた詰めを適用扱いにしないこと"
+    );
+
+    // 次の音の隙間は、枯れた時間を含まず今から並べた分だけになる
+    let third = scheduler.schedule(input(500_000, 40_000, 20_000, Some(520_000)));
+    assert_eq!(
+        third,
+        AudioPlayoutDecision::Play {
+            start_at_us: 520_000,
+            basis: AudioPlayoutBasis::Timestamp,
+            compress_us: 0,
+            gap_us: 20_000,
+            conceal_us: 0,
+        },
+        "枯れた時間を隙間として数え直さないこと"
+    );
+}
+
+#[test]
+fn note_underrun_does_not_touch_a_sound_that_is_still_queued() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    // 1 つ目は目標 100 ms に間に合わず 60 ms 遅れて届き、今 (150 ms) から 160 ms に鳴る
+    let decision = scheduler.schedule(input(150_000, 5_000, 20_000, Some(100_000)));
+    assert!(matches!(decision, AudioPlayoutDecision::Play { .. }));
+    assert_eq!(scheduler.lateness_us(), 60_000);
+
+    // 直前の音 (180 ms まで) がまだ鳴っている間は、枯れていないので何もしない
+    scheduler.note_underrun(170_000);
+    assert_eq!(
+        scheduler.last_end_us(),
+        Some(180_000),
+        "鳴っている音の終わりを動かさないこと"
+    );
+    assert_eq!(
+        scheduler.lateness_us(),
+        60_000,
+        "鳴っている間は遅れを消さないこと"
+    );
+}
+
+#[test]
+fn gap_concealment_never_exceeds_the_gap() {
+    let mut scheduler = AudioPlayoutScheduler::new();
+    // 前の音の終わり (120 ms) から 200 ms 空く
+    scheduler.schedule(input(0, 0, 20_000, Some(100_000)));
+    let decision = scheduler.schedule(input(50_000, 20_000, 20_000, Some(320_000)));
+    let AudioPlayoutDecision::Play {
+        gap_us, conceal_us, ..
+    } = decision
+    else {
+        panic!("鳴らす決定になること");
+    };
+    assert_eq!(gap_us, 200_000);
+    assert!(
+        conceal_us <= gap_us,
+        "補間してよい長さは隙間の全長を超えないこと: gap_us={gap_us} conceal_us={conceal_us}"
+    );
+    assert_eq!(
+        conceal_us, AUDIO_PLAYOUT_MAX_CONCEAL_US,
+        "補間してよい長さは上限で切ること"
     );
 }

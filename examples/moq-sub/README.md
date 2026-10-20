@@ -71,7 +71,8 @@ QMux 経路 (`--transport qmux`) は experimental である。QMux は TCP + TLS
 
 受信した音声 / 映像は catalog の情報を使って再生する。catalog の `targetLatency` は表示の遅れの下限として使う (draft-ietf-moq-msf-01 §5.2.8)。
 
-- 音声：jitter buffer が到着の揺らぎに合わせた遅延までデコード済みの音声を保持してから鳴らす
+- 音声：復号した音声をその場で出力のキューへ積み、最初の音の目標時刻に達してから再生を開始する。到着の揺らぎは目標遅延ぶんの先行バッファで吸収する
+- 音声の隙間：鳴らす時刻の差として生じた隙間は、直前の音の周期による補間か、フェード付きの無音で材料化する（積んだ順に鳴らす出力が、隙間の分だけ早く鳴りすぎないようにする）
 - 映像：共通の時間軸が決めた表示時刻に合わせて表示する
 
 ## 購読者からの新しい Group の要求
@@ -101,7 +102,7 @@ moq-sub は映像トラックの SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ�
 
 音声トラックは subgroup stream と datagram の両方で届きうる。LOC は音声について「1 audio chunk = 1 Object = 1 Group」の datagram 配送を例示しており (draft-ietf-moq-loc-04 §4.1)、moq-pub は `--audio-datagram` でこの配送を選べる。
 
-moq-sub は datagram で届いた OBJECT_DATAGRAM を自ら decode し、subgroup stream と同じ経路 (録画 → Audio Config の検証 → デコード → jitter buffer) へ流す。
+moq-sub は datagram で届いた OBJECT_DATAGRAM を自ら decode し、subgroup stream と同じ経路 (録画 → Audio Config の検証 → デコード → 音声の再生の組み立て) へ流す。
 
 - フィルタを通過しなかった Object とキャンセル済み subscription の Object、Object Status のみの Object は再生しない
 - 映像とカタログの datagram には対応しない (LOC の映像は 1 group = 1 unidirectional stream で配送される。同 §4.2)。届いた場合はトラックごとに警告を 1 回出す

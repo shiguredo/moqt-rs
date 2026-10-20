@@ -93,6 +93,22 @@ enum AudioDeliveryAdmission {
 /// 複数回送ることがある。同じ Object の 2 回目は直後に届くため、これだけ覚えておけば足りる。
 const AUDIO_RECENT_OBJECT_LOCATIONS_MAX: usize = 256;
 
+/// 音声配送の判定で落とした Object の累計
+///
+/// 再生経路へ流さなかった Object の内訳を、原因の切り分けに使えるようにする。落下は
+/// 正常な動作 (datagram の冗長化・購読前の配信・並び替え) でも起きるため、1 件ごとの
+/// debug ログだけでは傾向を掴めない。累計を 100 ms の tick で比較し、増えたときだけ
+/// info で出す ([`log_audio_delivery_counters`] を参照)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AudioDeliveryCounters {
+    /// 直近に届いた Object と同じ識別子だったため捨てた Object の累計
+    duplicate_objects: u64,
+    /// 送出済みの TIMESTAMP より古いため捨てた Object の累計
+    stale_objects: u64,
+    /// 購読の境界以下だったため捨てた Object の累計
+    before_boundary_objects: u64,
+}
+
 /// 音声 Object を送出してよいかを、購読の境界と送出済みの TIMESTAMP で決める状態機械
 ///
 /// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
@@ -115,7 +131,8 @@ const AUDIO_RECENT_OBJECT_LOCATIONS_MAX: usize = 256;
 ///   (Object States) / §2.3.1 (Group IDs)) ため、境界とは別の防御として持つ。
 ///
 /// どちらの判定も位置と TIMESTAMP だけで決まり、時計も I/O も扱わない。購読ごとに 1 つ持ち、
-/// 音声の配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。
+/// 音声の配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。落とした Object の
+/// 内訳は累計 ([`Self::counters`]) に残し、原因の切り分けに使う。
 #[derive(Debug)]
 struct AudioDeliveryOrder {
     /// 購読の境界 (`SUBSCRIBE_OK` の Largest Object)。`None` は境界が無く、すべて live として
@@ -128,6 +145,12 @@ struct AudioDeliveryOrder {
     /// `Location` が `Hash` を実装していないため、集合を別に持たず線形に探す。高々
     /// [`AUDIO_RECENT_OBJECT_LOCATIONS_MAX`] 件であり、音声は 1 秒あたり数十件しか届かない。
     recent_locations: std::collections::VecDeque<Location>,
+    /// 重複として捨てた Object の累計 (原因の切り分け用)
+    duplicate_objects: u64,
+    /// 送出済みの TIMESTAMP より古いため捨てた Object の累計 (原因の切り分け用)
+    stale_objects: u64,
+    /// 購読の境界以下として捨てた Object の累計 (原因の切り分け用)
+    before_boundary_objects: u64,
 }
 
 impl AudioDeliveryOrder {
@@ -137,6 +160,9 @@ impl AudioDeliveryOrder {
             boundary,
             last_pts_us: None,
             recent_locations: std::collections::VecDeque::new(),
+            duplicate_objects: 0,
+            stale_objects: 0,
+            before_boundary_objects: 0,
         }
     }
 
@@ -152,13 +178,18 @@ impl AudioDeliveryOrder {
     /// `location` が購読の境界以下かを判定する
     ///
     /// 境界が無い場合と位置が分からない場合は、境界と比べられないため `false` (live 扱い) を
-    /// 返す。状態は変えない。
-    fn is_before_boundary(&self, location: Option<Location>) -> bool {
+    /// 返す。状態は変えない。境界以下だったときは、原因の切り分け用の累計
+    /// (`before_boundary_objects`) を進める。
+    fn is_before_boundary(&mut self, location: Option<Location>) -> bool {
         let (Some(boundary), Some(location)) = (self.boundary, location) else {
             return false;
         };
         // `Location` の順序は (group_id, object_id) の辞書順である (§8.2)
-        location <= boundary
+        if location <= boundary {
+            self.before_boundary_objects += 1;
+            return true;
+        }
+        false
     }
 
     /// `location` の Object が直近に届いたものと同じかを判定する
@@ -168,12 +199,14 @@ impl AudioDeliveryOrder {
     /// 位置が分からない Object (`None`) は判定できないため覚えずに `false` を返す。
     ///
     /// 同じ識別子の Object は copy ごとに中身が同じであるため、2 回目は復号も送出も録画も
-    /// しない (捨てないと同じ音を 2 回鳴らし、媒体時刻が実時間より先へ進む)。
+    /// しない (捨てないと同じ音を 2 回鳴らし、媒体時刻が実時間より先へ進む)。重複と判定した
+    /// ときは、原因の切り分け用の累計 (`duplicate_objects`) を進める。
     fn is_duplicate(&mut self, location: Option<Location>) -> bool {
         let Some(location) = location else {
             return false;
         };
         if self.recent_locations.contains(&location) {
+            self.duplicate_objects += 1;
             return true;
         }
         self.recent_locations.push_back(location);
@@ -191,7 +224,8 @@ impl AudioDeliveryOrder {
     /// TIMESTAMP `pts_us` の音声 Object を送出してよいかを判定する
     ///
     /// `pts_us` が `None` の Object (LOC の TIMESTAMP を持たない) は順序を判定できないため
-    /// 送出する。この場合、状態は変えない。
+    /// 送出する。この場合、状態は変えない。送出済みの TIMESTAMP より古いと判定したときは、
+    /// 原因の切り分け用の累計 (`stale_objects`) を進める。
     fn admit(&mut self, pts_us: Option<i64>) -> AudioDeliveryAdmission {
         let Some(pts_us) = pts_us else {
             return AudioDeliveryAdmission::Deliver;
@@ -199,6 +233,7 @@ impl AudioDeliveryOrder {
         if let Some(last_pts_us) = self.last_pts_us
             && pts_us < last_pts_us
         {
+            self.stale_objects += 1;
             return AudioDeliveryAdmission::Stale;
         }
         self.last_pts_us = Some(pts_us);
@@ -209,6 +244,39 @@ impl AudioDeliveryOrder {
     fn last_pts_us(&self) -> Option<i64> {
         self.last_pts_us
     }
+
+    /// 落とした Object の累計を返す
+    ///
+    /// 原因の切り分け用に、100 ms の tick で前回のログから増えていれば info で出す
+    /// ([`log_audio_delivery_counters`] を参照)。
+    fn counters(&self) -> AudioDeliveryCounters {
+        AudioDeliveryCounters {
+            duplicate_objects: self.duplicate_objects,
+            stale_objects: self.stale_objects,
+            before_boundary_objects: self.before_boundary_objects,
+        }
+    }
+}
+
+/// 音声配送の累計が前回のログから増えていれば info で出す
+///
+/// 落とした Object の内訳は原因の切り分けに使う。1 件ごとの debug ログは既定の RUST_LOG では
+/// 消えるため、累計が増えたときだけ info に出す。`previous` は前回ログを出した時点の累計で、
+/// 増えていないときは更新しない (同じ内容を出し続けてログを埋もれさせないため)。
+fn log_audio_delivery_counters(
+    previous: &mut AudioDeliveryCounters,
+    current: AudioDeliveryCounters,
+) {
+    if current == *previous {
+        return;
+    }
+    tracing::info!(
+        "Audio delivery counters: duplicated={}, stale={}, before_boundary={}",
+        current.duplicate_objects,
+        current.stale_objects,
+        current.before_boundary_objects,
+    );
+    *previous = current;
 }
 
 /// datagram で届いた音声 Object の位置
@@ -337,11 +405,11 @@ impl AudioDelivery<'_> {
                 .delivery_order
                 .lock()
                 .expect("audio delivery order lock is not poisoned");
-            (
-                delivery_order.is_duplicate(location),
-                delivery_order.is_before_boundary(location),
-                delivery_order.boundary(),
-            )
+            let duplicate = delivery_order.is_duplicate(location);
+            // 重複は境界と比べる前に落とすため、重複した Object で境界以下の累計を二重に
+            // 数えない (累計は「落とした理由」の内訳として読む)
+            let before_boundary = !duplicate && delivery_order.is_before_boundary(location);
+            (duplicate, before_boundary, delivery_order.boundary())
         };
         if duplicate {
             // 同じ Object の 2 回目は直後に届くため warn にはしない
@@ -443,6 +511,10 @@ impl AudioDelivery<'_> {
                 return true;
             }
         };
+        // 復号の出力が揃った時刻を測り、フレームへ載せる。受信側のプレイヤーは時間軸を
+        // この時刻で観測するため、プレイヤースレッドがキューから取り出した時刻を混ぜない
+        // (復号と無関係なスレッドの揺れが遅延学習へ入る)
+        let decoded_us = crate::wall_clock_us();
         // サンプルレートとチャンネル数はデコーダの出力を使う。AAC は AudioToolbox の出力が
         // ステレオ固定で catalog の channelConfig と食い違うことがあるが、そのまま再生を
         // 継続する (validate_audio_config の警告と同じ方針)
@@ -490,6 +562,8 @@ impl AudioDelivery<'_> {
             sample_rate,
             channels,
             pts_us: pts_us.unwrap_or(0),
+            arrival_us,
+            decoded_us,
         };
         self.audio_tx.send(frame).is_ok()
     }
@@ -1606,6 +1680,11 @@ pub async fn run(
                     datagrams.len()
                 );
             }
+            // 空のバッチのときだけ受信ループを休める。`recv_datagrams` は QUIC と QMux では
+            // 1 件以上届くまで待つため、バッチがあるときの sleep はそのまま受信から再生までの
+            // 遅延になる。WebTransport の `take_buffered_datagrams` はバッファが空でも即座に
+            // 返りうるため、空のときだけ sleep して空回りを防ぐ
+            let batch_len = datagrams.len();
             for raw in datagrams {
                 // type 分岐は Session が行う。未知 type は
                 // draft-ietf-moq-transport-22 §11 (Data Streams and Datagrams) に従いセッションクローズになる。
@@ -1662,7 +1741,9 @@ pub async fn run(
                     DatagramAction::Ignore => {}
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if should_sleep_after_datagram_batch(batch_len) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         }
     }));
 
@@ -1679,6 +1760,8 @@ pub async fn run(
     // transport 自体のエラーで受信ループを抜けたか。後始末 (stream task の join と録画の
     // finalize) を終えてから `run` の戻り値として返す
     let mut fatal_error: Option<Error> = None;
+    // 音声配送の累計を最後にログへ出した時点の値。100 ms の tick で増えたときだけ出す
+    let mut logged_audio_delivery_counters = AudioDeliveryCounters::default();
 
     'main: loop {
         // 空いた枠のぶんだけ待機中の stream を処理へ回す。permit は使った分だけ
@@ -2176,6 +2259,14 @@ pub async fn run(
                         join_set.len(),
                     );
                 }
+                // 音声の配送で落とした Object の累計が、前回のログから増えていれば出す。
+                // 1 件ごとの debug ログは既定の RUST_LOG で消えるため、原因の切り分けには
+                // 増えたときだけ info で出す
+                let counters = audio_delivery_order
+                    .lock()
+                    .expect("audio delivery order lock is not poisoned")
+                    .counters();
+                log_audio_delivery_counters(&mut logged_audio_delivery_counters, counters);
             }
             _ = shutdown_monitor.recv() => {
                 tracing::info!("Shutdown signal received");
@@ -4389,6 +4480,18 @@ fn validate_audio_config(
     }
     warnings
 }
+
+/// datagram の受信バッチが空のときに、受信ループを休めるかを返す
+///
+/// `recv_datagrams` は QUIC と QMux では 1 件以上届くまで待つため、バッチがあるときの
+/// sleep はそのまま受信から再生までの遅延になる。WebTransport の
+/// `take_buffered_datagrams` はバッファが空でも即座に返りうるため、空のバッチのときだけ
+/// sleep して空回りを防ぐ。sleep の有無を直接テストするのは難しいため、判定を純粋関数に
+/// 切り出して固定する。
+fn should_sleep_after_datagram_batch(batch_len: usize) -> bool {
+    batch_len == 0
+}
+
 /// 受信した OBJECT_DATAGRAM をメディアとしてどう扱うか
 enum DatagramAction<'a> {
     /// 音声トラックの Object。音声の配送経路へ流す
@@ -6444,6 +6547,25 @@ mod tests {
             frame.pts_us, 20_000,
             "LOC の Timestamp がマイクロ秒へ換算されること"
         );
+        // 復号へ渡す直前の到着時刻は、復号の出力が揃った時刻以前である
+        assert!(
+            frame.arrival_us <= frame.decoded_us,
+            "復号へ渡す直前の到着時刻は復号の完了時刻以前であること: \
+             arrival_us={}, decoded_us={}",
+            frame.arrival_us,
+            frame.decoded_us,
+        );
+        // どちらも受信側の壁時計 (Unix epoch マイクロ秒) であり、このテストの実行時刻を
+        // 大きく超えない
+        let now_us = crate::wall_clock_us();
+        assert!(
+            frame.arrival_us > 0 && frame.decoded_us <= now_us,
+            "到着時刻と復号の完了時刻は受信側の壁時計であること: \
+             arrival_us={}, decoded_us={}, now_us={}",
+            frame.arrival_us,
+            frame.decoded_us,
+            now_us,
+        );
         assert!(
             audio_config_handled.load(Ordering::Acquire),
             "Audio Config を処理済みとして記録すること"
@@ -6507,6 +6629,26 @@ mod tests {
                     DatagramAction::Unsupported { track_alias } if track_alias == alias
                 ),
                 "映像 / カタログの datagram は非対応として報告すること: alias={alias}"
+            );
+        }
+    }
+
+    /// datagram 受信ループは空バッチのときだけ休むこと
+    ///
+    /// `recv_datagrams` は QUIC と QMux では 1 件以上届くまで待つため、バッチがあるときに
+    /// sleep するとそのまま受信から再生までの遅延になる。WebTransport の
+    /// `take_buffered_datagrams` はバッファが空でも即座に返りうるため、空のときだけ sleep して
+    /// 空回りを防ぐ。
+    #[test]
+    fn datagram_receive_loop_sleeps_only_for_an_empty_batch() {
+        assert!(
+            should_sleep_after_datagram_batch(0),
+            "空のバッチでは sleep して空回りを防ぐこと"
+        );
+        for batch_len in [1, 2, 10, 1_000] {
+            assert!(
+                !should_sleep_after_datagram_batch(batch_len),
+                "1 件以上届いたバッチでは sleep しないこと: batch_len={batch_len}"
             );
         }
     }
@@ -6733,6 +6875,23 @@ mod tests {
             audio_rx.try_recv().is_err(),
             "2 回目で追加のフレームを送出しないこと"
         );
+        // 重複として落とした 1 件を累計に残す。原因の切り分け用の内訳である
+        let counters = delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .counters();
+        assert_eq!(
+            counters.duplicate_objects, 1,
+            "重複として落とした Object を累計に数えること"
+        );
+        assert_eq!(
+            counters.stale_objects, 0,
+            "重複の経路では stale を数えないこと"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 0,
+            "境界が無いため境界以下を数えないこと"
+        );
 
         recorder.finish().expect("MP4 を finalize できること");
 
@@ -6760,6 +6919,36 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// 音声配送の累計が増えたときだけログ用に更新すること
+    ///
+    /// 100 ms の tick で累計を前回のログと比べ、増えたときだけ info を出す。増えていないときに
+    /// 同じ内容を出し続けるとログが埋もれ、原因の切り分けに使えなくなる。
+    #[test]
+    fn audio_delivery_counters_are_logged_only_when_they_increase() {
+        let mut previous = AudioDeliveryCounters::default();
+        log_audio_delivery_counters(&mut previous, AudioDeliveryCounters::default());
+        assert_eq!(
+            previous,
+            AudioDeliveryCounters::default(),
+            "増えていないときはログを出さず、前回の値を変えないこと"
+        );
+
+        let current = AudioDeliveryCounters {
+            duplicate_objects: 2,
+            stale_objects: 3,
+            before_boundary_objects: 4,
+        };
+        log_audio_delivery_counters(&mut previous, current);
+        assert_eq!(
+            previous, current,
+            "増えたときはログを出して前回の値を更新すること"
+        );
+
+        // 同じ累計をもう一度渡しても、ログは出さず前回の値も変えない
+        log_audio_delivery_counters(&mut previous, current);
+        assert_eq!(previous, current, "同じ累計では前回の値を変えないこと");
     }
 
     /// 重複の判定は直近 256 件の識別子だけを覚え、窓から溢れた古い識別子は忘れること
@@ -6804,6 +6993,21 @@ mod tests {
         assert!(
             order.is_duplicate(Some(loc(0, 0))),
             "忘れたあとに届いた識別子は改めて覚えること"
+        );
+
+        // 落とした理由の内訳として、重複の累計だけが 2 になる
+        let counters = order.counters();
+        assert_eq!(
+            counters.duplicate_objects, 2,
+            "重複と判定した Object だけを数えること"
+        );
+        assert_eq!(
+            counters.stale_objects, 0,
+            "重複の判定では stale を数えないこと"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 0,
+            "重複の判定では境界以下を数えないこと"
         );
     }
 
@@ -6878,6 +7082,21 @@ mod tests {
             order.admit(Some(2_040)),
             AudioDeliveryAdmission::Deliver,
             "TIMESTAMP を持たない音声の後でも、基準より新しい音声は送出すること"
+        );
+
+        // 古い TIMESTAMP で落とした 1 件だけを stale の累計に数える
+        let counters = order.counters();
+        assert_eq!(
+            counters.stale_objects, 1,
+            "送出済みの TIMESTAMP より古い音声だけを数えること"
+        );
+        assert_eq!(
+            counters.duplicate_objects, 0,
+            "送出順の判定では重複を数えないこと"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 0,
+            "送出順の判定では境界以下を数えないこと"
         );
     }
 
@@ -6965,6 +7184,23 @@ mod tests {
             Some(pts_us(5)),
             "送出順の判定は live と FETCH の応答で共有すること"
         );
+        // 送出済みの TIMESTAMP より古い 4 件を累計に残す
+        let counters = delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .counters();
+        assert_eq!(
+            counters.stale_objects, 4,
+            "送出済みの TIMESTAMP より古い音声を累計に数えること"
+        );
+        assert_eq!(
+            counters.duplicate_objects, 0,
+            "位置が分からない Object は重複として数えないこと"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 0,
+            "境界が無いため境界以下を数えないこと"
+        );
     }
 
     /// 購読の境界の判定が位置だけで決まること
@@ -7034,6 +7270,21 @@ mod tests {
         assert!(
             !order.is_before_boundary(Some(loc(1, 0))),
             "境界を外したあとは、すべて live として扱うこと"
+        );
+
+        // 境界以下と判定した 5 件を累計に数える (境界を外したあとの 1 件は数えない)
+        let counters = order.counters();
+        assert_eq!(
+            counters.before_boundary_objects, 5,
+            "境界以下と判定した Object だけを数えること"
+        );
+        assert_eq!(
+            counters.duplicate_objects, 0,
+            "境界の判定では重複を数えないこと"
+        );
+        assert_eq!(
+            counters.stale_objects, 0,
+            "境界の判定では stale を数えないこと"
         );
     }
 
@@ -7200,6 +7451,24 @@ mod tests {
                 .last_pts_us(),
             Some(pts_us(3)),
             "境界より後の live だけで送出順の基準を進めること"
+        );
+        // 落とした理由の内訳を固定する。境界の位置を 3 回届けているが、2 回目以降は重複として
+        // 先に落ちるため、境界以下の累計は重複と二重に数えない
+        let counters = delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .counters();
+        assert_eq!(
+            counters.duplicate_objects, 2,
+            "同じ識別子の 2 回目を重複として数えること"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 2,
+            "境界以下と判定した Object を数えること"
+        );
+        assert_eq!(
+            counters.stale_objects, 0,
+            "境界以下の音声は送出順の判定まで至らないこと"
         );
     }
 
@@ -7716,6 +7985,23 @@ mod tests {
                 .last_pts_us(),
             Some(pts_us(6)),
             "送出しなかった音声で基準を戻さないこと"
+        );
+        // 並び替わって届いた古い 1 件を stale の累計に残す
+        let counters = delivery_order
+            .lock()
+            .expect("audio delivery order lock is not poisoned")
+            .counters();
+        assert_eq!(
+            counters.stale_objects, 1,
+            "並び替わって届いた古い音声を累計に数えること"
+        );
+        assert_eq!(
+            counters.duplicate_objects, 0,
+            "位置が異なるため重複では数えないこと"
+        );
+        assert_eq!(
+            counters.before_boundary_objects, 0,
+            "境界より後だけを届けるため境界以下では数えないこと"
         );
     }
 }
