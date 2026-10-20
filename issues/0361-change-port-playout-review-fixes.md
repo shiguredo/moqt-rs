@@ -1,7 +1,7 @@
 # moqt-js の映像 jitter 上限と共有解除の修正を移植する
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: develop
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -31,3 +31,11 @@ moqt-rs の `src/playout/timeline.rs` は moqt-js の `src/playout/timeline.ts` 
 
 - `src/playout/timeline.rs` の `video_target_us` / `refresh_unshared_state` / `can_release_unshared_hold` / `update_unshared_release` / `observe`
 - moqt-js の `src/playout/timeline.ts` の `observe` / `holdUnsharedStream` / `canReleaseUnsharedHold` / `isUnsharedRepeatedly`
+
+## 解決方法
+
+- 映像の jitter 目標を求める `video_target_us` で、表示の遅れの上限を超える揺らぎを分位点へ入れる前に除外した。
+- 基準の共有解除を moqt-js の修正に合わせ、解除のきっかけが動きだったかを見ず、直近の解除との間隔で往復を検出するようにした。解除の時刻は往復検出のために残す。
+- 映像の学習判定 `learns` を、フレーム間隔の中央値ではなく現フレームの TIMESTAMP 間隔で行うようにした。
+- 共有へ戻った直後にもう一度同期をそろえ直すようにした。プロパティテストで、保持が明けた最初の観測だけ表示時刻の差が目標より大きいまま残る不具合を見つけ、固定入力を単体テストへ追加した。
+- 単体テストと PBT を更新・追加し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
