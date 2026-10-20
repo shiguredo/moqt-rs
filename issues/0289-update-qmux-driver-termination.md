@@ -1,7 +1,7 @@
 # qmux-rs のドライバの終了条件の修正を取り込み、QMux 経路の接続とタスクの解放を解消する
 
 - Created: 2026-10-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: feature/update-qmux-driver-termination
 - Polished: {YYYY-MM-DD}
 - Updated: 2026-10-16
@@ -31,3 +31,28 @@ QMux 経路で、自側の `close` の後も接続・タスク・TCP ソケッ�
 - qmux-rs の修正を取り込んだ rev で、`close` の後にドライバと 3 つのタスクが終了し、下位トランスポートが解放されることがテストで固定されていること。
 - `examples/tokio-moq/src/qmux.rs` の制約のコメントと `docs/missing-features.md` の QMux の記述が実態に追随していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/tokio-moq/Cargo.toml` の `shiguredo_qmux` と `tokio-qmux` の git rev を `c53b862` から
+  `3e0dc0f6a7404b940a67a42e04f986a79811a046` (qmux-rs develop、2026-10-19) へ上げ、`Cargo.lock` を
+  更新した。`3e0dc0f` にはドライバが自側の `close` の後に linger (既定 3 秒) の上限つきで終了する
+  修正 (qmux-rs の `dd8f18a`) が入っている。
+- `examples/tokio-moq/src/qmux.rs` に `QmuxHandle::closed` を追加し、`peer_harness` の `TestPeer` に
+  `wait_qmux_closed` を足した。`qmux_close_releases_the_driver_and_accept_tasks` で、close の後に
+  ドライバと 3 つのタスクが終了し、ピアが CONNECTION_CLOSE を `CloseReason::Peer` として観測する
+  ことを固定した。
+- 協力的な peer のテストだけでは旧 rev でも通るため、TLS のハンドシェイクだけ応答して読み取りも
+  shutdown もしない peer を立てる `qmux_close_terminates_the_driver_without_peer_shutdown` を
+  追加した。linger の上限でドライバが終了すること (3 秒以上待ってから `CloseReason::Local` が
+  返る) と、受理タスクと STOP_SENDING の観測タスクが終了することを固定する。この経路は linger の
+  修正が無い rev ではタイムアウトする。
+- API の追随: `tokio_qmux::Error::Io` の廃止に伴い接続確立前の TCP / TLS の失敗を
+  `TransportError::Transport` へ写し、`Connection::close` の戻り値 (可変長整数で表せないコードの
+  失敗) を伝播し、`send_datagram` の上限超過・非対応がエラーで返るようになったことに合わせて
+  コメントと README を更新した。
+- 受理ストリームのあふれをドライバが保持するようになったことと、ドライバが close 後に linger の
+  上限つきで終了することをコメントへ反映した。`docs/missing-features.md` の QMux の記述には
+  ドライバ終了に関する古い制約が無く、変更を要しなかった。
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo test --workspace` は通過した。
