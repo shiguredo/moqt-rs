@@ -1,7 +1,7 @@
 # 音声の受信から再生開始までの経路を見直す
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: develop
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -43,3 +43,11 @@ qmux 経由の音声がプチプチする。QMux の DATAGRAM は TCP 1 本の�
 - `examples/moq-sub/src/pipeline.rs` の datagram 受信タスク
 - `examples/tokio-moq/src/transport.rs` の `recv_datagrams`
 - `raw_player` の `AudioPlayer` / `VideoPlayer`
+
+## 解決方法
+
+- `AudioJitterBuffer` を削除し、復号した音声を受信したその場で時間軸へ観測して出力のキューへ積むようにした。再生開始は最初の音の `start_at_us` に達してから行い、それまでのフレームを先行バッファとして蓄える。
+- `DecodedAudioFrame` に復号直前の到着時刻 `arrival_us` と復号完了時刻 `decoded_us` を追加した。時間軸への観測には `decoded_us` を使い、プレイヤースレッドの揺れを遅延学習へ入れない。
+- datagram 受信タスクの sleep を空バッチのときだけにし、メインループは音声を毎回全件取り出すようにした。映像の vsync を無効にし、同じスレッドの表示待ちで音声供給が止まらないようにした。
+- 出力が枯れたら `note_underrun` で並べる基準を戻し、枯れが明けた長さを計器へ記録する。
+- 単体テストを追加し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ることを確認した。
