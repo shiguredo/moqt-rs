@@ -425,9 +425,14 @@ impl StreamHandle {
             StreamHandle::Qmux(handle) => {
                 // QMux の CONNECTION_CLOSE のエラーコードは QUIC version 1 の code space を
                 // 共有するため、MOQT のコードをそのまま載せる (draft-ietf-quic-qmux-02 Section 4)。
-                // tokio-qmux の `close` は容量 1 の専用チャネルへ要求を渡すだけで失敗を返さない
-                // ため、常に成功として扱う (接続の終了は `closed()` で観測する)
-                handle.connection().close(code, reason);
+                // tokio-qmux の `close` は可変長整数で表せないコードだけをエラーにし、要求は
+                // 送らない (RFC 9000 Section 19.19)。黙って閉じないよう、その失敗を返す。
+                // close 要求を送った後のドライバの終了は `closed()` で観測する
+                // (ピアの shutdown を待つ上限は tokio-qmux の既定で 3 秒)
+                handle
+                    .connection()
+                    .close(code, reason)
+                    .map_err(TransportError::from_qmux)?;
                 Ok(())
             }
         }
@@ -471,9 +476,10 @@ impl StreamHandle {
                 session.send_datagram(data).await
             }
             StreamHandle::Qmux(handle) => {
-                // tokio-qmux の `send_datagram` が返すのはドライバへのコマンド送信の成否だけで、
-                // 実際の送出の成否 (ピアの上限超過など) は呼び出し元へ返らない。上限の不足は
-                // 接続確立時に `qmux::warn_if_datagram_too_large` が警告する
+                // tokio-qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合や
+                // フレームが `max_datagram_frame_size` / `max_record_size` を超える場合に
+                // エラーを返す。黙って捨てる経路は無いため、そのまま伝播する。上限の不足は
+                // 接続確立時に `qmux::warn_if_datagram_too_large` が 1 度だけ警告する
                 handle
                     .connection()
                     .send_datagram(data)

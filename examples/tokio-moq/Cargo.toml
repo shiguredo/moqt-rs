@@ -20,9 +20,9 @@ shiguredo_moqt = { path = "../../" }
 # qmux-rs は当面タグを打つ予定が無く、crates.io にも公開されていない (tokio-qmux は
 # publish = false)。このためバージョンではなく git の rev で固定する。rev を上げるときは
 # tokio-qmux と揃え、追随が必要な API 変更をまとめて反映する。
-shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "c53b86200158afaffac1c105cbf0eadc7ec425bb" }
+shiguredo_qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046" }
 # QMux の tokio ラッパー
-tokio-qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "c53b86200158afaffac1c105cbf0eadc7ec425bb" }
+tokio-qmux = { git = "https://github.com/shiguredo/qmux-rs", rev = "3e0dc0f6a7404b940a67a42e04f986a79811a046" }
 
 # 外部クレート
 

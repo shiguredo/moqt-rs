@@ -137,7 +137,7 @@ impl TransportError {
             tokio_qmux::Error::Stopped(error_code) => Self::StreamReset { error_code },
             // 接続が閉じた場合は、セッション終了として variant で判定する経路
             // (moq-pub / moq-sub の `is_transport_session_end` 等) があるため、QUIC 経路と
-            // 同じ ConnectionClosed に写す。`DriverStopped` は終端済みストリームへの書き込みで
+            // 同じ ConnectionClosed に写す。`StreamFinished` は終端済みストリームへの書き込みで
             // 返るストリーム単位の失敗であり (tokio-qmux の `SendStream::write`)、セッション
             // 終了ではないため写像しない
             tokio_qmux::Error::ConnectionClosed => Self::ConnectionClosed,

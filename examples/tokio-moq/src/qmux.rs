@@ -83,6 +83,15 @@ impl QmuxHandle {
         &self.connection
     }
 
+    /// 接続が閉じるまで待ち、閉じた理由を返す
+    ///
+    /// 自側の close、ピアの CONNECTION_CLOSE、下位トランスポートの終了のいずれでも解決する。
+    /// close の後にドライバと受理タスクが終了したことを確かめるために使う。
+    #[cfg(test)]
+    pub(crate) async fn closed(&self) -> shiguredo_qmux::event::CloseReason {
+        self.connection.closed().await
+    }
+
     /// 破棄された受信 DATAGRAM が増えていればログへ出す
     pub(crate) fn log_dropped_datagrams(&self) {
         let dropped = self.connection.dropped_datagrams();
@@ -131,11 +140,14 @@ pub(crate) async fn connect(
 ) -> Result<QmuxSession> {
     // TCP。QMux は 1 本のバイトストリームを多重化するため、Nagle による遅延が全ストリームに
     // 乗る。音声の datagram を 20 ms ごとに送るため無効化する。
+    //
+    // tokio-qmux は接続確立前の I/O エラーを表す variant を持たない (接続後の I/O エラーは
+    // 下位トランスポートの閉塞として `Connection::closed` の `CloseReason::TransportClosed`
+    // で通知する)。接続確立前の失敗は他経路と同じ `TransportError::Transport` に写す。
     let tcp = TcpStream::connect(socket_addr)
         .await
-        .map_err(|e| TransportError::from_qmux(tokio_qmux::Error::Io(e)))?;
-    tcp.set_nodelay(true)
-        .map_err(|e| TransportError::from_qmux(tokio_qmux::Error::Io(e)))?;
+        .map_err(TransportError::transport)?;
+    tcp.set_nodelay(true).map_err(TransportError::transport)?;
 
     // TLS。CA 証明書の読み込みと検証の有無は WebTransport over HTTP/2 経路と同じ扱いにする。
     let ca_cert_pem = match cert {
@@ -153,7 +165,7 @@ pub(crate) async fn connect(
     let tls = TlsConnector::from(tls_config)
         .connect(server_name, tcp)
         .await
-        .map_err(|e| TransportError::from_qmux(tokio_qmux::Error::Io(e)))?;
+        .map_err(TransportError::transport)?;
 
     // draft-ietf-quic-qmux-02 Section 8.1 は QMux の client に「ALPN 交渉に失敗した場合は
     // ハンドシェイクを中断する」ことを MUST で求める。rustls が ALPN 未交渉でハンドシェイクを
@@ -185,9 +197,10 @@ pub(crate) fn split_connection(
     connection: Arc<tokio_qmux::Connection>,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> QmuxSession {
-    // 受理チャネルは上限を設けない。上限を設けて待つと `accept_unidirectional` を呼ばなくなり、
-    // QMux 側の受理チャネル (容量 16) があふれてストリームが無言で破棄されるためである
-    // (qmux-rs の `accept_unidirectional` はあふれたストリームを破棄する)
+    // 受理チャネルは上限を設けない。tokio-qmux の受理チャネルは容量 16 だが、あふれた
+    // ストリームはドライバが保持し、空きができ次第配送する (失われない)。ここで上限を
+    // 設けると受理タスクが channel の空き待ちで止まり、制御ストリームや data stream の
+    // 引き取りが遅れるため、上限なしで即座に流す。受信量は QMux のフロー制御で抑えられる。
     let (uni_tx, uni_rx) = mpsc::unbounded_channel();
     let (bi_tx, bi_rx) = mpsc::unbounded_channel();
     let (stop_sending_tx, stop_sending_rx) = mpsc::unbounded_channel();
@@ -250,8 +263,8 @@ fn build_config() -> Config {
 
 /// peer 起動の単方向ストリームを受理して receiver へ流すタスクを起動する
 ///
-/// accept の待機は接続を共有して別タスクで行う (QMux の受理チャネルは容量 16 で、
-/// あふれたストリームは破棄されるため、引き取り続ける必要がある)。
+/// accept の待機は接続を共有して別タスクで行う。tokio-qmux は受理待ちのストリームを
+/// ドライバ内に保持するため、引き取りが遅れてもストリームは失われない。
 fn spawn_accept_unidirectional(
     connection: Arc<tokio_qmux::Connection>,
     tx: mpsc::UnboundedSender<RecvStream>,
@@ -262,9 +275,9 @@ fn spawn_accept_unidirectional(
         loop {
             let accepted = tokio::select! {
                 biased;
-                // アプリがアクセプターを drop したら止める。タスクが接続を握ったままだと
-                // ドライバが終了できない (qmux-rs のドライバは `Connection` がすべて drop
-                // されるまで動き続ける)
+                // アプリがアクセプターを drop したら止める。タスクが接続を握り続けると、
+                // close されないままアプリが終了した場合にドライバが動き続ける
+                // (tokio-qmux のドライバは close 後は linger の上限つきで終了する)
                 _ = tx.closed() => break,
                 // 自側 / ピアの close を観測したら止める
                 _ = connection.closed() => break,
@@ -385,9 +398,10 @@ enum DatagramLimit {
 
 /// ピアが広告した DATAGRAM の上限に対して、送る予定の datagram が収まるかを判定する
 ///
-/// tokio-qmux は `send_datagram` の失敗を呼び出し元へ返さない (ドライバが結果を捨てる)
-/// ため、上限が足りないと音声が無言で落ちる。接続確立後 (制御ストリームを開いた後) に
-/// 1 度確認して警告する。
+/// tokio-qmux の `send_datagram` は、ピアが DATAGRAM を広告していない場合やフレームが
+/// 上限を超える場合にエラーを返す。音声は 20 ms ごとに送るため、そのエラーを毎回
+/// ログへ出すと量大になる。接続確立後 (制御ストリームを開いた後) に 1 度だけ判定して
+/// 警告し、原因と対処が分かるようにする。
 ///
 /// qmux-rs の `Connection::send_datagram` は DATAGRAM フレーム全体の大きさを
 /// ピアの `max_datagram_frame_size` と `max_record_size` の両方と比較する
@@ -560,8 +574,8 @@ mod tests {
     /// ピアの上限に対する判定が両方の上限を見る
     ///
     /// qmux-rs は DATAGRAM フレーム全体の大きさをピアの `max_datagram_frame_size` と
-    /// `max_record_size` の両方と比較し、超過時は送信を拒否する。その失敗は呼び出し元へ
-    /// 返らないため、警告の判定が両方を見ていないと音声が無言で落ちる。
+    /// `max_record_size` の両方と比較し、超過時は送信を拒否する。どちらの上限に当たったかで
+    /// 対処が変わるため、警告の判定も両方を見る必要がある。
     #[test]
     fn datagram_limit_violation_checks_both_limits() {
         let mut peer = shiguredo_qmux::transport_params::TransportParameters::default();
@@ -832,6 +846,92 @@ mod tests {
                 "peer が載せたコードがそのまま観測されること"
             ),
             other => panic!("StreamReset として観測されること: {other}"),
+        }
+    }
+
+    /// 自側の close でドライバと受理タスクが終了し、下位トランスポートが解放される
+    ///
+    /// tokio-qmux のドライバは、自側の `close` で CONNECTION_CLOSE を送って下位トランスポートの
+    /// 送信側を shutdown し、ピアの shutdown を linger (既定 3 秒) の上限つきで待って終了する。
+    /// ドライバが終了すれば [`split_connection`] が起こした受理タスクも `closed()` の観測で
+    /// 終了し、channel が閉じる (接続と TCP ソケットを握り続けない)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qmux_close_releases_the_driver_and_accept_tasks() {
+        let mut server = QmuxTestPeerServer::start()
+            .await
+            .expect("サーバーを起動できること");
+        let addr = server.local_addr();
+        let connect = tokio::spawn(async move {
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+            connect(addr, "localhost", None, &task_monitor).await
+        });
+        let peer = server.accept().await.expect("接続を受理できること");
+        let session = connect
+            .await
+            .expect("接続タスクが終了すること")
+            .expect("接続できること");
+        let QmuxSession {
+            handle,
+            mut uni_rx,
+            mut bi_rx,
+            mut stop_sending_rx,
+        } = session;
+
+        // 自側から close する。ドライバは CONNECTION_CLOSE を送り、下位トランスポートの
+        // 送信側を shutdown する
+        handle
+            .connection()
+            .close(0, "test close")
+            .expect("close 要求を送れること");
+
+        // ピアは CONNECTION_CLOSE を観測して下位トランスポートを閉じるため、client の
+        // ドライバは linger の上限を待たずに終了する
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(10), handle.closed())
+            .await
+            .expect("ドライバが終了すること");
+        assert!(
+            matches!(reason, shiguredo_qmux::event::CloseReason::Local { .. }),
+            "自側の close として観測されること: {reason:?}"
+        );
+
+        // 受理タスクと STOP_SENDING の観測タスクは接続の終了で抜け、channel が閉じる
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), uni_rx.recv())
+                .await
+                .expect("単方向ストリームの受理タスクが終了すること")
+                .is_none(),
+            "単方向ストリームの受理タスクが終了すること"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), bi_rx.recv())
+                .await
+                .expect("双方向ストリームの受理タスクが終了すること")
+                .is_none(),
+            "双方向ストリームの受理タスクが終了すること"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stop_sending_rx.recv())
+                .await
+                .expect("STOP_SENDING の観測タスクが終了すること")
+                .is_none(),
+            "STOP_SENDING の観測タスクが終了すること"
+        );
+
+        // ピアは client の CONNECTION_CLOSE を観測する
+        match peer.wait_qmux_closed().await.expect("QMux 接続であること") {
+            shiguredo_qmux::event::CloseReason::Peer {
+                application,
+                error_code,
+                reason,
+            } => {
+                assert!(application, "アプリケーションエラーとして観測されること");
+                assert_eq!(error_code, 0, "client が載せたコードがそのまま届くこと");
+                assert_eq!(
+                    reason, "test close",
+                    "client が載せた理由がそのまま届くこと"
+                );
+            }
+            other => panic!("Peer として観測されること: {other:?}"),
         }
     }
 

@@ -391,7 +391,7 @@ impl TestPeer {
             opened_requests: Vec::new(),
             accepted_requests: Vec::new(),
             // QMux 経路は終了コードの観測タスクを持たない (QUIC の ConnectionObserver に相当する
-            // 仕組みが無い)。必要になった時点で `Connection::closed` を待つタスクを足す
+            // 仕組みが無い)。終了は `wait_qmux_closed` で `CloseReason` として観測する
             close_codes: Arc::new(StdMutex::new(Vec::new())),
         })
     }
@@ -801,6 +801,18 @@ impl TestPeer {
         });
         let head = shiguredo_moqt::stream::encode_control_stream_setup(&setup)?;
         self.send_control_stream_head(head).await
+    }
+
+    /// QMux 接続が閉じた理由を待つ
+    ///
+    /// QMux 経路以外では `None` を返す。QMux の接続終了は `Connection::closed` で観測でき、
+    /// ピアが CONNECTION_CLOSE を受けた場合は `CloseReason::Peer`、下位トランスポートの
+    /// 終了の場合は `CloseReason::PeerShutdown` などになる。
+    pub(crate) async fn wait_qmux_closed(&self) -> Option<shiguredo_qmux::event::CloseReason> {
+        match &self.handle {
+            StreamHandle::Qmux(handle) => Some(handle.closed().await),
+            _ => None,
+        }
     }
 
     /// peer が観測した client の終了コード (CONNECTION_CLOSE) を待つ

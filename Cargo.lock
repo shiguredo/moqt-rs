@@ -1616,7 +1616,7 @@ dependencies = [
 [[package]]
 name = "shiguredo_qmux"
 version = "2026.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=c53b86200158afaffac1c105cbf0eadc7ec425bb#c53b86200158afaffac1c105cbf0eadc7ec425bb"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
 
 [[package]]
 name = "shiguredo_toml"
@@ -1878,7 +1878,7 @@ dependencies = [
 [[package]]
 name = "tokio-qmux"
 version = "0.0.0"
-source = "git+https://github.com/shiguredo/qmux-rs?rev=c53b86200158afaffac1c105cbf0eadc7ec425bb#c53b86200158afaffac1c105cbf0eadc7ec425bb"
+source = "git+https://github.com/shiguredo/qmux-rs?rev=3e0dc0f6a7404b940a67a42e04f986a79811a046#3e0dc0f6a7404b940a67a42e04f986a79811a046"
 dependencies = [
  "shiguredo_qmux",
  "tokio",
