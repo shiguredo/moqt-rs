@@ -1,7 +1,7 @@
 # 音声遅延の閉ループにアンダーランを入力する
 
 - Created: 2026-10-20
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: develop
 - Polished: {YYYY-MM-DD}
 - Reporter: @voluntas
@@ -33,3 +33,10 @@
 - `src/playout/feedback.rs` の `AudioDelayFeedback::update` / `AudioDelayFeedbackReason` / `AudioDelayFeedbackObservation`
 - `src/playout/timing.rs` の `AudioPlayoutTimingStats::audio_delay_feedback`
 - `src/playout/timeline.rs` の `PlayoutTimeline::observe_audio_playout`
+
+## 解決方法
+
+- `AudioDelayFeedbackObservation` に `underrun_ms` を、`AudioDelayFeedbackReason` に `Underrun` を追加した。
+- 閉ループは `underrun_ms` が正のとき、既存の増加判断と独立に `min(underrun_ms, 最大増分)` だけ目標を上げる。既存の増加があるときは大きい方を使い、上限・毎秒 1 回・戻す速さは既存の規則を変えない。
+- example は枯れが明けた長さを前回の観測からの増分にして渡す。
+- 単体テストと PBT で、枯れだけで目標が上がること、上限を超えないこと、枯れが無ければ従来と同じであることを固定した。
