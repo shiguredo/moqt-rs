@@ -935,6 +935,103 @@ mod tests {
         }
     }
 
+    /// ピアが shutdown しない場合でも close 後にドライバが終了する
+    ///
+    /// tokio-qmux のドライバは、自側の `close` の後に下位トランスポートの送信側を shutdown し、
+    /// ピアの shutdown を linger (既定 3 秒) の上限つきで待つ。ピアが CONNECTION_CLOSE を
+    /// 読まずに shutdown もしない場合、linger が無いとドライバは終了せず、接続と TCP
+    /// ソケットが残る。ここでは QMux を話さず読み取りもしない peer を立て、linger の上限で
+    /// ドライバが終了することを固定する。協力的な peer を使う
+    /// [`qmux_close_releases_the_driver_and_accept_tasks`] だけでは、旧 rev でも通るため
+    /// この経路を固定できない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qmux_close_terminates_the_driver_without_peer_shutdown() {
+        // QMux を話さない peer。TLS のハンドシェイクだけ応答し、その後の読み取りと
+        // shutdown を行わない
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("証明書を生成できること");
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certified.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    certified.signing_key.serialize_der().into(),
+                ),
+            )
+            .expect("証明書を設定できること");
+        tls_config.alpn_protocols = vec![crate::MOQT_PROTOCOL.as_bytes().to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP を待ち受けられること");
+        let addr = listener
+            .local_addr()
+            .expect("待ち受けアドレスを取得できること");
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("接続を受理できること");
+            tcp.set_nodelay(true).expect("Nagle を無効化できること");
+            // ハンドシェイクだけ応答し、以後は読まずに shutdown もしない
+            let tls = acceptor.accept(tcp).await.expect("TLS を受理できること");
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            drop(tls);
+        });
+
+        let task_monitor = tokio_metrics::TaskMonitor::new();
+        let session = connect(addr, "localhost", None, &task_monitor)
+            .await
+            .expect("接続できること");
+        let QmuxSession {
+            handle,
+            mut uni_rx,
+            mut bi_rx,
+            mut stop_sending_rx,
+        } = session;
+
+        // 自側から close する。ピアは shutdown しないため、ドライバは linger の上限まで待つ
+        handle
+            .connection()
+            .close(0, "peer does not shut down")
+            .expect("close 要求を送れること");
+        let started = std::time::Instant::now();
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(6), handle.closed())
+            .await
+            .expect("linger の上限でドライバが終了すること");
+        assert!(
+            matches!(reason, shiguredo_qmux::event::CloseReason::Local { .. }),
+            "自側の close として観測されること: {reason:?}"
+        );
+        assert!(
+            started.elapsed() >= tokio_qmux::DEFAULT_LINGER,
+            "ピアが shutdown しない場合は linger の上限まで待つこと: {:?}",
+            started.elapsed()
+        );
+
+        // 受理タスクと STOP_SENDING の観測タスクもドライバの終了で抜ける
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), uni_rx.recv())
+                .await
+                .expect("単方向ストリームの受理タスクが終了すること")
+                .is_none(),
+            "単方向ストリームの受理タスクが終了すること"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), bi_rx.recv())
+                .await
+                .expect("双方向ストリームの受理タスクが終了すること")
+                .is_none(),
+            "双方向ストリームの受理タスクが終了すること"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stop_sending_rx.recv())
+                .await
+                .expect("STOP_SENDING の観測タスクが終了すること")
+                .is_none(),
+            "STOP_SENDING の観測タスクが終了すること"
+        );
+
+        peer.abort();
+    }
+
     /// 設定が QUIC 直接接続の上限に相当する量を持つ
     #[test]
     fn config_has_flow_control_credits() {
