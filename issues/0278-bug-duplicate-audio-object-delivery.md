@@ -1,7 +1,7 @@
 # 音声 Object が live と FETCH の両方で届いたときに二重に送出される
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-20
 - Branch: feature/fix-audio-playback-boundary
 - Polished: 2026-10-15
 
@@ -64,3 +64,19 @@ FETCH 応答が live より後に届く場合の巻き戻りは、送出済み T
 残る隙間として次を記録する。3 経路の呼び出し側 (位置を渡す箇所) と再購読の配線は transport の stream を必要とするためユニットテストでは囲えない。購読直後と FETCH 応答の経路は E2E のログで確認するが、datagram / subgroup stream の呼び出し側と再購読の配線は移行の E2E が無いためコードの確認に留める。
 
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/moq-sub/src/pipeline.rs` の音声配送に購読境界 (`SUBSCRIBE_OK` の Largest Object) の判定を追加した。`AudioDeliveryOrder::is_before_boundary` が位置を境界と比較し、`AudioDelivery::deliver` は境界以下の Object を送出・録画・復号・catch-up の観測から外して Audio Config の検証だけを行う。境界の位置の Object は live と FETCH の両方で届いても、どちらもこの判定で落ちる。
+- 境界は `AudioDeliveryOrder::set_boundary` で保持し、datagram / subgroup stream / FETCH 応答の 3 経路で Group ID と Object ID から求めた位置 (`datagram_object_location` / `subgroup_object_location` / `fetch_object_location`) で判定する。再購読 (GOAWAY 移行) では移行先の live が流れる前に新しい Largest Object で境界を更新する。
+- TIMESTAMP による送出順の判定 (`admit`) は境界より後の live にだけ適用し、並び替わって届いた古い音声を落とす。Largest Object が無い場合と位置が分からない Object は live として扱い、送出・録画する。
+- テスト:
+  - `audio_delivery_does_not_send_objects_before_the_subscription_boundary`
+  - `audio_delivery_does_not_record_objects_before_the_subscription_boundary` (実 Recorder で MP4 を読み戻してサンプル数を確認する)
+  - `audio_delivery_validates_audio_config_before_the_subscription_boundary`
+  - `audio_delivery_sends_objects_when_there_is_no_boundary`
+  - `audio_delivery_order_detects_objects_at_or_before_the_boundary`
+  - `audio_object_location_comes_from_each_paths_group_and_object_id` (実エンコーダと実デコーダを使用する)
+  - `audio_delivery_drops_reordered_live_objects_after_the_boundary`
+- 実 relay の E2E (`publish_and_subscribe_audio_datagram_roundtrip`) は実装コミット `878e580` の時点と現在の develop の CI の双方で通過している。境界以下の音声が実 relay で落ちることは、0281 に記録された計測 (「FETCH で届いた 4 Object は全て購読境界の規則で落ち、relay の replay が運ぶ境界の Object も落ちる」) で確認している。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` は `878e580` の時点と現在の develop の CI で通過している。
