@@ -26,6 +26,9 @@
 ## 完了条件
 
 - `with_config` に正の targetLatency を渡した場合も閉ループの上限が設定されること。`delay_breakdown().audio_delay_feedback.ceiling_us` が `Some(target_latency_ms.saturating_mul(1_000))` になることをテストで固定する。0 以下は setter と同じく上限を外す (`None`) ことも固定する。
-- setter 経路との等価性がテストで固定されていること。`PlayoutTimeline::new()` で作った時間軸に `set_target_latency_ms` を呼んだ場合と `with_config` に同じ値を渡した場合で、音声の `observe` と、閉ループの目標が targetLatency を超えようとする `observe_audio_playout` を含む同じ観測列に対する `ceiling_us` / `target_us` / `learned_delay_us` / `presentation_delay_us` が一致すること。0 と負の値のときも両経路で `ceiling_us` が `None` になること。
+- setter 経路との等価性がテストで固定されていること。`PlayoutTimeline::new()` で作った時間軸に `set_target_latency_ms` を呼んだ場合と `with_config`
+  に同じ値を渡した場合で、音声の `observe` と、閉ループの目標が targetLatency を超えようとする `observe_audio_playout` を含む同じ観測列に対する
+  `ceiling_us` / `target_us` / `learned_delay_us` / `presentation_delay_us` が一致すること。0 と負の値のときも両経路で
+  `ceiling_us` が `None` になること。
 - `with_config` の doc に、targetLatency が閉ループの上限になることと、0 以下は上限を外すことが書かれていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p shiguredo_moqt` が通ること。

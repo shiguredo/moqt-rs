@@ -46,6 +46,7 @@ Group 順序違反も同じく `ProtocolViolation` を返す。
 これは closed 0111 (`issues/closed/0111-bug-malformed-track-cancel-classification.md`) が意図的に行った分類である。0111 の「解決方法」は次のとおり。
 
 > 分類しなかった検出 (`ProtocolViolation` のまま):
+>
 > - `FetchStreamDecoder::validate_fetch_object` の Object ID 昇順違反 (§2.2 (Subgroups)) と Group 順序違反 (§9.11 (FETCH))
 
 0111 の完了条件も「昇順違反と Group 順序違反では `MessageError::ProtocolViolation` が返ることがテストで固定されていること」としており、`tests/test_stream/decoder.rs` の `test_fetch_rejects_ascending_group_in_descending_mode` が `Err(MessageError::ProtocolViolation(_))` を期待している。

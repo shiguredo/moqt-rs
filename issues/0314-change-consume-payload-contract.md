@@ -7,7 +7,10 @@
 
 ## 目的
 
-`SubgroupStreamDecoder` / `FetchStreamDecoder` の `consume_payload` は、モジュール doc と `try_decode_object` / `try_decode_entry` の doc が「バッファからペイロードを読み出した後に呼ぶ」と案内する一方、実装は `self.buf` を drain せず状態だけを戻す。`consume_payload` 自身の doc は「呼び出し側が外部で読み出した場合に呼ぶ」と書いており、案内が矛盾している。`try_read_payload` との使い分けが利用者に伝わらず、誤用するとペイロード先頭を次の Object ヘッダとして解釈する。公開 API の契約を「外部読み出し専用」に厳密化し、誤用を `ProtocolViolation` で検出できるようにする。あわせて未テストの経路をテストで固定する。
+`SubgroupStreamDecoder` / `FetchStreamDecoder` の `consume_payload` は、モジュール doc と `try_decode_object` /
+`try_decode_entry` の doc が「バッファからペイロードを読み出した後に呼ぶ」と案内する一方、実装は `self.buf` を drain せず状態だけを戻す。`consume_payload`
+自身の doc は「呼び出し側が外部で読み出した場合に呼ぶ」と書いており、案内が矛盾している。`try_read_payload` との使い分けが利用者に伝わらず、誤用するとペイロード先頭を次の Object
+ヘッダとして解釈する。公開 API の契約を「外部読み出し専用」に厳密化し、誤用を `ProtocolViolation` で検出できるようにする。あわせて未テストの経路をテストで固定する。
 
 ## 現状
 
@@ -44,7 +47,10 @@
   - 判定順は状態 → 長さ → バッファの順とし、最初に違反した条件で `ProtocolViolation` を返す。
 - `src/stream/decoder.rs` の `SubgroupStreamDecoder::consume_payload` / `FetchStreamDecoder::consume_payload` に、状態 → 長さ → バッファの順の検証を実装する。バッファが空でない場合は `ProtocolViolation` を返し、状態を変えない。
 - `try_read_payload` の後に `consume_payload` を呼ぶのは誤用であり、状態違いの `ProtocolViolation` になる。`payload_length == 0` の Object と EndOfRange エントリでは `consume_payload` を呼ばない。これらを doc に明記する。
-- `src/stream/decoder.rs` の `SubgroupStreamDecoder` / `FetchStreamDecoder` のモジュール doc、`try_decode_object` / `try_decode_entry` の doc、`consume_payload` の doc、疑似コードを更新する。モジュール doc の主な疑似コードは `try_read_payload` を使う形にし、`consume_payload` の外部読み出し例を別に示す。`try_decode_object` / `try_decode_entry` の doc は「バッファから読み出す場合は `try_read_payload`、外部で読み出す場合は `consume_payload`」と書き分ける。
+- `src/stream/decoder.rs` の `SubgroupStreamDecoder` / `FetchStreamDecoder` のモジュール doc、`try_decode_object` /
+  `try_decode_entry` の doc、`consume_payload` の doc、疑似コードを更新する。モジュール doc の主な疑似コードは `try_read_payload` を使う形にし、
+  `consume_payload` の外部読み出し例を別に示す。`try_decode_object` / `try_decode_entry` の doc は「バッファから読み出す場合は
+  `try_read_payload`、外部で読み出す場合は `consume_payload`」と書き分ける。
 - `README.md` の `SubgroupStreamDecoder` の説明と `skills/shiguredo-moqt/SKILL.md` のデコーダ API 一覧・説明を、上記の使い分けに合わせる。0324（docs / README / SKILL.md を実装に合わせる）と 0321（公開 API の doc を整備する）は、本 issue の契約変更に伴う該当箇所を対象外とし、本 issue で更新する。
 - `tests/test_stream/decoder.rs` の `encode_subgroup_stream` の doc コメントを、`try_read_payload` が drain する実装に合わせる。
 - `tests/test_stream/decoder.rs` に `SubgroupStreamDecoder` / `FetchStreamDecoder` の両方で次の 4 経路を追加する。
