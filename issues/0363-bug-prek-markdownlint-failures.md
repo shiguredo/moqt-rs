@@ -1,7 +1,7 @@
 # prek の markdownlint が issues 配下の Markdown で失敗し続ける
 
 - Created: 2026-10-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-21
 - Branch: develop
 - Polished: {YYYY-MM-DD}
 
@@ -50,3 +50,13 @@ develop の CI の prek ジョブが markdownlint-cli2 で失敗し続けてお�
 - `prek run --all-files` が成功すること
 - 折り返しと空行の追加以外に Markdown の内容が変わっていないこと
 - CI の prek ジョブが成功すること
+
+## 解決方法
+
+1. `issues/0302` / `0305` / `0306` / `0308` / `0311` / `0314` / `0331` / `0348` の
+   300 文字を超える行を、内容を変えずに文節境界で折り返した。折り返し幅は既存本文に
+   合わせて約 90〜110 文字とし、インラインコードとリンクの内部では折らないようにした
+2. `issues/closed/0310` の blockquote 内リストの直前に空行 (`>`) を追加した
+3. `.markdownlint.jsonc` のルールは変更していない
+4. 検証として `prek run markdownlint-cli2 --all-files` と `prek run --all-files` が
+   成功することを確認した。折り返しの前後で空白を除いた本文が一致することも確認している
