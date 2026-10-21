@@ -30,7 +30,9 @@ bytes = "1.12"
 # CLI 引数パース
 noargs = "0.4"
 # 映像プレイヤー (メインスレッド実行)
-raw_player = "2026.2"
+# 2026.2 は映像のみ再生で再生時計が PTS からずれると描画が止まり続けるため、
+# 最新フレームへ復帰する処理と理由別ドロップ数が入った canary を使う
+raw_player = "2026.3.0-canary.1"
 # QUIC クライアント
 s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム

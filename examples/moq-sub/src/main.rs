@@ -247,6 +247,203 @@ fn player_window_title(namespace: &str) -> String {
     format!("{namespace} - MOQT Subscriber")
 }
 
+/// 映像の描画が停止したと判定するまでの時間 (マイクロ秒)
+///
+/// raw_player 2026.3 は映像のみ経路で描画が止まったとき最新フレームへ復帰するが、この
+/// example はそれより前のプレイヤーでも動くよう保険を持つ。描画がこの時間だけ進まなければ、
+/// キューと時計の基準を捨てて次の投入から再生し直す
+/// ([`raw_player::video_player::VideoPlayer::drain_video`])。
+const VIDEO_STALL_TIMEOUT_US: u64 = 1_000_000;
+
+/// 停止と判定するために、描画が止まっている間に必要な投入フレーム数
+///
+/// 1 枚だけでは、まだ描画の機会が来ていないだけかもしれない。2 枚以上を投入しても描画が
+/// 進まなければ、プレイヤーの再生時計がずれていると判断できる。
+const VIDEO_STALL_MIN_ENQUEUED: u64 = 2;
+
+/// 映像の描画会計をログに出す間隔 (ミリ秒)
+const VIDEO_PLAYER_LOG_INTERVAL_MS: u128 = 1_000;
+
+/// 映像の描画会計と停止判定
+///
+/// raw_player は映像のキュー先頭から 1 フレームずつ描画し、キュー上限を超えた分と再生時計
+/// から遅れすぎた分は先頭から捨てる。どのフレームが実際に描画されたかを知るために、投入した
+/// フレームの TIMESTAMP を投入順に保持し、`stats()` が示す描画数・破棄数の差分を先頭から
+/// 取り除く。
+///
+/// `Instant` を内部に持たず、単調増加する時刻 (マイクロ秒) を引数で受け取るため、SDL も
+/// プレイヤーも使わずに単体テストできる。
+#[derive(Default)]
+struct VideoPlayoutAccounting {
+    /// プレイヤーの映像キューに残っていると考えられるフレームの TIMESTAMP
+    ///
+    /// TIMESTAMP の無いフレームも、描画・破棄の差分とキューの位置をずらさないために
+    /// `None` として積む。時間軸へ記録するのは `Some` のフレームだけである。
+    pending_timestamps: VecDeque<Option<i64>>,
+    /// 前回観測した `total_frames_rendered`
+    last_rendered: i64,
+    /// 前回観測した `dropped_frames`
+    last_dropped: i64,
+    /// 投入時にキュー上限を超えて先頭を捨てた数
+    ///
+    /// この破棄は次の `stats()` の差分にも現れる。投入の時点で FIFO からも取り除いて
+    /// いるため、差分を処理するときに二重に取り除かないよう数えておく。
+    unobserved_enqueue_drops: u64,
+    /// プレイヤーの映像キューの上限 (0 は無制限)
+    max_queue: usize,
+    /// 最後に描画を観測した時刻 (単調増加マイクロ秒)
+    last_render_us: u64,
+    /// 最後に描画を観測してから投入したフレーム数
+    enqueued_since_render: u64,
+    /// drain_video で復帰した回数
+    recoveries: u64,
+    /// 観測した描画フレーム数の累計 (プレイヤーの作り直しをまたいで数える)
+    rendered_total: u64,
+    /// 観測した破棄フレーム数の累計 (プレイヤーの作り直しをまたいで数える)
+    dropped_total: u64,
+}
+
+/// [`VideoPlayoutAccounting::observe`] が返す、1 回の観測の結果
+struct VideoPlayoutObservation {
+    /// この観測で描画されたフレームの TIMESTAMP (描画順。TIMESTAMP の無いフレームは含まない)
+    rendered_timestamps: Vec<i64>,
+    /// 描画が止まっていると判定したか
+    stalled: bool,
+    /// 最後に描画を観測してからの経過時間 (マイクロ秒)。停止していなければ 0
+    stalled_for_us: u64,
+}
+
+impl VideoPlayoutAccounting {
+    /// プレイヤーを作り直したときに、実績の基準と FIFO をリセットする
+    ///
+    /// 作り直したプレイヤーの `stats()` は 0 から始まるため、基準を取り直す。復帰回数と
+    /// 描画・破棄の累計は、プレイヤーの作り直しをまたいで数え続ける。
+    ///
+    /// `rendered` / `dropped` は新しいプレイヤーの `stats()` が示す描画数・破棄数である。
+    /// 会計はプレイヤーの型に依存させず、数値だけを受け取る (`VideoPlayerStats` の
+    /// フィールドが増減しても、この会計とそのテストは影響を受けない)。
+    ///
+    /// `now_us` は単調増加する時刻 (マイクロ秒) で、停止判定の起点になる。
+    fn reset_for_player(&mut self, max_queue: usize, rendered: i64, dropped: i64, now_us: u64) {
+        self.pending_timestamps.clear();
+        self.last_rendered = rendered;
+        self.last_dropped = dropped;
+        self.unobserved_enqueue_drops = 0;
+        self.max_queue = max_queue;
+        self.last_render_us = now_us;
+        self.enqueued_since_render = 0;
+    }
+
+    /// プレイヤーへ投入したフレームを記録する
+    ///
+    /// プレイヤーが投入を受け付けたフレームについてだけ呼ぶ。投入に失敗したフレームは
+    /// プレイヤーのキューに残らないため、対応付けに含めてはいけない。
+    fn record_enqueue(&mut self, timestamp_us: Option<i64>) {
+        self.enqueued_since_render += 1;
+        // raw_player はキューが上限に達した状態で投入されると、先頭を 1 枚捨ててから
+        // 積む。その破棄は次の `stats()` の差分に現れるため、ここでは FIFO の先頭も
+        // 同じように取り除き、差分を処理するときに二重に取り除かないよう数を残す
+        if self.max_queue > 0 && self.pending_timestamps.len() >= self.max_queue {
+            self.pending_timestamps.pop_front();
+            self.unobserved_enqueue_drops += 1;
+        }
+        self.pending_timestamps.push_back(timestamp_us);
+    }
+
+    /// `stats()` の差分から描画・破棄を会計へ反映する
+    ///
+    /// `current_rendered` / `current_dropped` は `stats()` が示す累計値である。
+    /// `now_us` は単調増加する時刻 (マイクロ秒)。描画の差分があれば、その時刻を
+    /// 「最後に描画を観測した時刻」として停止判定をやり直す。
+    fn observe(
+        &mut self,
+        current_rendered: i64,
+        current_dropped: i64,
+        now_us: u64,
+    ) -> VideoPlayoutObservation {
+        let rendered = counter_increase(current_rendered, self.last_rendered);
+        let dropped = counter_increase(current_dropped, self.last_dropped);
+        self.last_rendered = current_rendered;
+        self.last_dropped = current_dropped;
+
+        // 投入時に上限超過で捨てた分は、投入の時点で FIFO から取り除いてある。同じ
+        // 破棄が stats の差分にも含まれるため、その分だけ差し引いてから残りを取り除く
+        let already_removed = self.unobserved_enqueue_drops.min(dropped);
+        self.unobserved_enqueue_drops -= already_removed;
+        for _ in 0..(dropped - already_removed) {
+            self.pending_timestamps.pop_front();
+        }
+
+        // 破棄はすべて描画より前 (投入時、または描画ループの先頭) に起きるため、
+        // 描画された分は破棄を取り除いた後の先頭から順に対応する
+        let mut rendered_timestamps = Vec::new();
+        for _ in 0..rendered {
+            if let Some(Some(timestamp_us)) = self.pending_timestamps.pop_front() {
+                rendered_timestamps.push(timestamp_us);
+            }
+        }
+
+        self.rendered_total += rendered;
+        self.dropped_total += dropped;
+        if rendered > 0 {
+            self.last_render_us = now_us;
+            self.enqueued_since_render = 0;
+        }
+
+        let stalled_for_us = now_us.saturating_sub(self.last_render_us);
+        let stalled = self.enqueued_since_render >= VIDEO_STALL_MIN_ENQUEUED
+            && stalled_for_us >= VIDEO_STALL_TIMEOUT_US;
+        VideoPlayoutObservation {
+            rendered_timestamps,
+            stalled,
+            stalled_for_us: if stalled { stalled_for_us } else { 0 },
+        }
+    }
+
+    /// `drain_video` で停止から復帰したことを記録する
+    ///
+    /// `drain_video` はキューを空にし、再生時計の基準を捨てる。ただし `stats()` の描画数・
+    /// 破棄数はリセットしないため、基準だけを取り直して二重に数えないようにする。キューに
+    /// 残っていたフレームは描画されないまま消えるが、プレイヤーはそれを破棄として数えない
+    /// ので、ここでも破棄には加えない。
+    fn note_recovered(&mut self, rendered: i64, dropped: i64, now_us: u64) {
+        self.pending_timestamps.clear();
+        self.unobserved_enqueue_drops = 0;
+        self.last_rendered = rendered;
+        self.last_dropped = dropped;
+        self.last_render_us = now_us;
+        self.enqueued_since_render = 0;
+        self.recoveries += 1;
+    }
+
+    /// 停止から復帰した回数
+    fn recoveries(&self) -> u64 {
+        self.recoveries
+    }
+
+    /// 実際に描画されたと観測したフレーム数の累計
+    fn rendered_total(&self) -> u64 {
+        self.rendered_total
+    }
+
+    /// プレイヤーが破棄したと観測したフレーム数の累計
+    fn dropped_total(&self) -> u64 {
+        self.dropped_total
+    }
+
+    /// 最後に描画を観測してから投入したフレーム数
+    fn enqueued_since_render(&self) -> u64 {
+        self.enqueued_since_render
+    }
+}
+
+/// 単調増加するはずのカウンタの増分を求める
+///
+/// プレイヤーを作り直した直後など、基準を取り直す前に値が減った場合は 0 として扱う。
+fn counter_increase(current: i64, previous: i64) -> u64 {
+    u64::try_from(current.saturating_sub(previous)).unwrap_or(0)
+}
+
 /// メインスレッドで raw_player のイベントループを実行する
 ///
 /// macOS では SDL のウィンドウ操作がメインスレッドでしか動作しないため、
@@ -270,12 +467,12 @@ fn run_raw_player(
     raw_player::init()?;
     tracing::info!("Player initialized, waiting for frames...");
 
-    let mut video_player: Option<raw_player::VideoPlayer> = None;
+    let mut video_player: Option<raw_player::video_player::VideoPlayer> = None;
     // 音声出力を行わない指定では AudioPlayer を作らない。
     // raw_player の AudioPlayer は生成時点ではデバイスを開かず play() で開くが、
     // 生成自体を避けることで音声出力の経路へ一切入らないようにする。
     let audio_player = match audio_output_device {
-        cli::AudioOutputDevice::Default => Some(raw_player::AudioPlayer::new()),
+        cli::AudioOutputDevice::Default => Some(raw_player::audio_player::AudioPlayer::new()),
         cli::AudioOutputDevice::None => {
             tracing::info!("Audio output disabled, decoded audio is not played");
             None
@@ -305,7 +502,18 @@ fn run_raw_player(
 
     // wall-clock PTS: 再生開始からの経過時間を映像 PTS として使用する
     let start_time = std::time::Instant::now();
-    let mut frame_count: u64 = 0;
+    // プレイヤーへ投入した映像フレーム数。実際に描画された数ではない
+    let mut video_enqueued_count: u64 = 0;
+    // 映像の描画会計。プレイヤーを作った時点で実績の基準を取り直す
+    let mut video_accounting = VideoPlayoutAccounting::default();
+    // 直近の観測でプレイヤーの映像キューに残っていたフレーム数 (定期ログ用)
+    let mut video_queue_size: usize = 0;
+    // 直近の観測でプレイヤーが示した破棄の内訳と復帰回数 (定期ログ用)
+    let mut video_player_dropped_queue_full: i64 = 0;
+    let mut video_player_dropped_late: i64 = 0;
+    let mut video_player_dropped_resync: i64 = 0;
+    let mut video_player_resyncs: i64 = 0;
+    let mut last_video_log = std::time::Instant::now();
     let mut audio_chunk_count: u64 = 0;
     // 直近に時間軸へ反映した targetLatency (-1 は未反映)
     let mut applied_target_latency_ms: i64 = -1;
@@ -322,9 +530,10 @@ fn run_raw_player(
         if player_diag && last_diag.elapsed() >= std::time::Duration::from_secs(1) {
             last_diag = std::time::Instant::now();
             tracing::info!(
-                "PLAYERDIAG t={}ms frames={} audio={} backlog={}",
+                "PLAYERDIAG t={}ms enqueued={} rendered={} audio={} backlog={}",
                 player_start.elapsed().as_millis(),
-                frame_count,
+                video_enqueued_count,
+                video_accounting.rendered_total(),
                 audio_chunk_count,
                 display_backlog.load(std::sync::atomic::Ordering::Relaxed),
             );
@@ -341,18 +550,75 @@ fn run_raw_player(
         }
 
         if let Some(ref p) = video_player {
-            match p.poll_events() {
-                Ok(true) => {}
-                _ => {
-                    tracing::info!("Player window closed");
-                    break;
-                }
+            let poll_result = p.poll_events();
+            // 実際の描画は poll_events の中で起きる。投入した時点で数えると描画が
+            // 止まっていても実績が進んでしまうため、直後に stats を読んで差分を取る
+            let stats = p.stats();
+            video_queue_size = stats.video_queue_size;
+            // 破棄の内訳とプレイヤー側の復帰回数も、原因の切り分け用に残す
+            video_player_dropped_queue_full = stats.dropped_frames_queue_full;
+            video_player_dropped_late = stats.dropped_frames_late;
+            video_player_dropped_resync = stats.dropped_frames_resync;
+            video_player_resyncs = stats.resync_count;
+            // 停止判定には単調増加する経過時間を使う (壁時計は補正で飛び得る)
+            let now_mono_us = start_time.elapsed().as_micros() as u64;
+            let observation = video_accounting.observe(
+                stats.total_frames_rendered,
+                stats.dropped_frames,
+                now_mono_us,
+            );
+            // 描画を観測した時点で、そのフレームの TIMESTAMP を表示の実績として記録する
+            let now_us = wall_clock_us();
+            for timestamp_us in observation.rendered_timestamps {
+                timeline.record_presentation(Track::Video, timestamp_us, now_us);
             }
+            // ウィンドウを閉じた場合も、終了ログのためにここまでの実績を反映してから抜ける
+            if !matches!(poll_result, Ok(true)) {
+                tracing::info!("Player window closed");
+                break;
+            }
+            if observation.stalled {
+                // raw_player 2026.3 は映像のみ経路の停止から自力で復帰するが、それより前の
+                // プレイヤーでも描画を再開できるよう、ここでもキューと時計の基準を捨てる
+                let enqueued_since_render = video_accounting.enqueued_since_render();
+                p.drain_video();
+                video_accounting.note_recovered(
+                    stats.total_frames_rendered,
+                    stats.dropped_frames,
+                    now_mono_us,
+                );
+                tracing::warn!(
+                    "Video playback stalled: no frame rendered for {}ms with {} frames enqueued; drained the video queue to recover (recoveries={})",
+                    observation.stalled_for_us / 1_000,
+                    enqueued_since_render,
+                    video_accounting.recoveries(),
+                );
+            }
+        }
+
+        // 描画の実績を 1 秒に 1 回だけ出す。投入数と描画数・破棄数を区別して、
+        // プレイヤーが詰まっていないかを読めるようにする
+        if video_player.is_some()
+            && last_video_log.elapsed().as_millis() >= VIDEO_PLAYER_LOG_INTERVAL_MS
+        {
+            last_video_log = std::time::Instant::now();
+            tracing::info!(
+                "Video player: enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) queue={} drain_recoveries={} player_resyncs={}",
+                video_enqueued_count,
+                video_accounting.rendered_total(),
+                video_accounting.dropped_total(),
+                video_player_dropped_queue_full,
+                video_player_dropped_late,
+                video_player_dropped_resync,
+                video_queue_size,
+                video_accounting.recoveries(),
+                video_player_resyncs,
+            );
         }
 
         match video_rx.try_recv() {
             Ok(frame) => {
-                // 表示した分だけ受信側の待ちフレーム数を減らす
+                // プレイヤーが引き取った分だけ、受信側が数える待ちフレーム数を減らす
                 display_backlog.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 // 復号の出力を時間軸へ観測し、表示時刻が決まるまで保持する。TIMESTAMP が
                 // 無いフレームは表示時刻を決められないため、届いた順に表示する
@@ -404,7 +670,7 @@ fn run_raw_player(
                 };
                 if need_recreate {
                     tracing::info!("Creating player window: {}x{}", frame.width, frame.height);
-                    let player = raw_player::VideoPlayer::new(
+                    let player = raw_player::video_player::VideoPlayer::new(
                         frame.width,
                         frame.height,
                         &player_window_title(namespace),
@@ -416,13 +682,22 @@ fn run_raw_player(
                         tracing::warn!("Failed to disable video vsync: {e}");
                     }
                     player.play()?;
+                    // プレイヤーを作り直すと stats が 0 に戻るため、会計の基準値と
+                    // 対応付けの FIFO をこの時点でリセットする
+                    let stats = player.stats();
+                    video_accounting.reset_for_player(
+                        player.max_video_queue_size(),
+                        stats.total_frames_rendered,
+                        stats.dropped_frames,
+                        start_time.elapsed().as_micros() as u64,
+                    );
                     video_player = Some(player);
                 }
 
                 if let Some(ref p) = video_player {
                     // 表示時刻を過ぎたフレームを渡すため、PTS は再生側のいまの時刻にする
                     let pts_us = start_time.elapsed().as_micros() as i64;
-                    if let Err(e) = p.enqueue_video_i420(
+                    match p.enqueue_video_i420(
                         &frame.y,
                         &frame.u,
                         &frame.v,
@@ -430,17 +705,13 @@ fn run_raw_player(
                         frame.height,
                         pts_us,
                     ) {
-                        tracing::warn!("Failed to enqueue video frame: {e}");
-                    }
-
-                    frame_count += 1;
-                    // 表示の実績を時間軸へ記録する。予定時刻ではなく、実際に再生機器へ
-                    // 渡した時刻を使う。TIMESTAMP の無いフレームは記録できない
-                    if let Some(timestamp_us) = frame.timestamp_us {
-                        timeline.record_presentation(Track::Video, timestamp_us, now_us);
-                    }
-                    if frame_count.is_multiple_of(100) {
-                        tracing::info!("Rendered {frame_count} video frames");
+                        Ok(()) => {
+                            // 受け付けたフレームだけを会計へ積む。失敗したフレームは
+                            // プレイヤーのキューに残らないため、対応付けに含めない
+                            video_enqueued_count += 1;
+                            video_accounting.record_enqueue(frame.timestamp_us);
+                        }
+                        Err(e) => tracing::warn!("Failed to enqueue video frame: {e}"),
                     }
                 }
             }
@@ -557,8 +828,40 @@ fn run_raw_player(
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
+    // 最後の観測以降に描画・破棄された分を会計へ取り込み、終了ログを実測値にする。
+    // ここで記録する描画はループを抜ける直前に実際に表示されたフレームである
+    if let Some(ref p) = video_player {
+        let stats = p.stats();
+        video_queue_size = stats.video_queue_size;
+        video_player_dropped_queue_full = stats.dropped_frames_queue_full;
+        video_player_dropped_late = stats.dropped_frames_late;
+        video_player_dropped_resync = stats.dropped_frames_resync;
+        video_player_resyncs = stats.resync_count;
+        let observation = video_accounting.observe(
+            stats.total_frames_rendered,
+            stats.dropped_frames,
+            start_time.elapsed().as_micros() as u64,
+        );
+        let now_us = wall_clock_us();
+        for timestamp_us in observation.rendered_timestamps {
+            timeline.record_presentation(Track::Video, timestamp_us, now_us);
+        }
+    }
+
+    // 投入数と描画数・破棄数を区別する。描画が止まったまま終わった場合も、
+    // 投入だけが進んだことがこの行で分かる。破棄の内訳と復帰回数も出す
     tracing::info!(
-        "Player stopped after {frame_count} video frames / {audio_chunk_count} audio chunks"
+        "Player stopped after enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) video frames / {} audio chunks (queue={} drain_recoveries={} player_resyncs={})",
+        video_enqueued_count,
+        video_accounting.rendered_total(),
+        video_accounting.dropped_total(),
+        video_player_dropped_queue_full,
+        video_player_dropped_late,
+        video_player_dropped_resync,
+        audio_chunk_count,
+        video_queue_size,
+        video_accounting.recoveries(),
+        video_player_resyncs,
     );
     // 音声の再生を止める。予約したまま鳴り始めなかった音はここで切り捨てられるため、
     // その分を計器へ記録し、最後の値 (理由別の捨てと閉ループの目標) をログに出す
@@ -790,7 +1093,11 @@ impl AudioPlayoutAssembly {
     /// 開始前でも PCM は積める (`raw_player` は再生を開始するまで内部キューに溜める) ため、
     /// 開始までのフレームが先行バッファとして蓄積される。開始に失敗したときは開始済みに
     /// せず、次のループでやり直す。
-    fn try_start_playback(&mut self, audio_player: &raw_player::AudioPlayer, now_us: i64) {
+    fn try_start_playback(
+        &mut self,
+        audio_player: &raw_player::audio_player::AudioPlayer,
+        now_us: i64,
+    ) {
         if self.started || !should_start_playback(self.playback_start_at_us, now_us) {
             return;
         }
@@ -976,7 +1283,7 @@ impl AudioPlayoutAssembly {
     /// いない、再生位置の対応が切れている、時間軸が音声の基準を持たない) は今の時刻を使う。
     fn sounding_position_us(
         &mut self,
-        audio_player: &raw_player::AudioPlayer,
+        audio_player: &raw_player::audio_player::AudioPlayer,
         timeline: &PlayoutTimeline,
         now_us: i64,
     ) -> i64 {
@@ -1128,7 +1435,7 @@ impl AudioPlayoutPosition {
 /// スケジューラが鳴らさないと決めた音は積まずに捨て、捨てた数と理由をログに出す
 /// (鳴らせない音を積むと、その分だけ音が遅れたままになる)。
 fn play_decoded_audio(
-    audio_player: &raw_player::AudioPlayer,
+    audio_player: &raw_player::audio_player::AudioPlayer,
     state: &mut AudioPlayoutAssembly,
     timeline: &mut PlayoutTimeline,
     audio: &DecodedAudioFrame,
@@ -1228,7 +1535,7 @@ fn play_decoded_audio(
 /// 累積サンプル数」の対応から、いま鳴っているサンプルの PTS が求まる。予定時刻ではなく
 /// 実際の再生位置を使うことで、`skew_us` が計画ではなく実測になる。
 fn record_sounding_audio(
-    audio_player: &raw_player::AudioPlayer,
+    audio_player: &raw_player::audio_player::AudioPlayer,
     state: &mut AudioPlayoutAssembly,
     timeline: &mut PlayoutTimeline,
 ) {
@@ -1362,7 +1669,7 @@ fn should_start_playback(start_at_us: Option<i64>, now_us: i64) -> bool {
 /// 積むことができたときだけ true を返す。再生の開始 (`play`) はここでは呼ばない。最初の
 /// 音の開始時刻まで積み続けることで、先行バッファが内部キューに蓄積される。
 fn enqueue_pcm(
-    audio_player: &raw_player::AudioPlayer,
+    audio_player: &raw_player::audio_player::AudioPlayer,
     pcm: &[f32],
     pts_us: i64,
     sample_rate: u32,
@@ -1377,7 +1684,7 @@ fn enqueue_pcm(
         pts_us,
         sample_rate as i32,
         channels as i32,
-        raw_player::AudioFormat::S16,
+        raw_player::audio_format::AudioFormat::S16,
     ) {
         tracing::warn!("Failed to enqueue audio chunk: {e}");
         return false;
@@ -1511,6 +1818,180 @@ mod tests {
             player_window_title("example.2ecom"),
             "example.2ecom - MOQT Subscriber",
             "エスケープを含む §8.8 表現でもそのままタイトルへ出ること"
+        );
+    }
+
+    /// 描画差分 1 で FIFO の先頭の TIMESTAMP が記録対象として返ること
+    #[test]
+    fn video_accounting_returns_the_rendered_timestamp() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        // プレイヤーを作った直後 (実績 0) を基準にする
+        accounting.reset_for_player(5, 0, 0, 0);
+        // 2 枚投入し、先頭の 1 枚が実際に描画された
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        let observation = accounting.observe(1, 0, 10_000);
+        assert_eq!(
+            observation.rendered_timestamps,
+            vec![1_000],
+            "描画されたのは先頭のフレームであり、その TIMESTAMP が記録対象として返ること"
+        );
+        assert!(
+            !observation.stalled,
+            "描画が進んでいるため停止と判定しないこと"
+        );
+        assert_eq!(
+            accounting.rendered_total(),
+            1,
+            "描画数の累計に観測した分を足すこと"
+        );
+    }
+
+    /// 破棄差分で FIFO の先頭が取り除かれ、記録対象にならないこと
+    #[test]
+    fn video_accounting_removes_the_dropped_timestamp() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        // 先頭の 1 枚が破棄された。破棄されたフレームは描画されない
+        let observation = accounting.observe(0, 1, 10_000);
+        assert!(
+            observation.rendered_timestamps.is_empty(),
+            "破棄だけでは記録対象が返らないこと"
+        );
+        // 次の観測で描画されたのは、破棄された先頭ではなく 2 枚目
+        let observation = accounting.observe(1, 1, 20_000);
+        assert_eq!(
+            observation.rendered_timestamps,
+            vec![2_000],
+            "破棄されたフレームの次のフレームが記録対象になること"
+        );
+    }
+
+    /// 投入時にキュー上限を超えて捨てた分を、破棄差分から二重に取り除かないこと
+    #[test]
+    fn video_accounting_subtracts_the_enqueue_drop() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        // 上限 2 のキューに 3 枚投入すると、3 枚目の投入で先頭が捨てられる
+        accounting.reset_for_player(2, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(3_000));
+        // プレイヤーは投入時に先頭を 1 枚捨てる。FIFO は既に取り除いているため、
+        // ここでさらに取り除くと描画されたフレームの TIMESTAMP を取り違える
+        let observation = accounting.observe(0, 1, 10_000);
+        assert!(
+            observation.rendered_timestamps.is_empty(),
+            "破棄だけでは記録対象が返らないこと"
+        );
+        let observation = accounting.observe(1, 1, 20_000);
+        assert_eq!(
+            observation.rendered_timestamps,
+            vec![2_000],
+            "キューに残った先頭のフレームが記録対象になること"
+        );
+    }
+
+    /// プレイヤーを作り直すと実績の基準と FIFO がリセットされること
+    ///
+    /// 解像度が変わってプレイヤーを作り直すと stats は 0 に戻る。基準を取り直さないと
+    /// 描画数の差分が負になり、作り直す前のフレームが描画として記録されてしまう。
+    #[test]
+    fn video_accounting_resets_for_a_new_player() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        // 解像度が変わってプレイヤーを作り直した。新しいプレイヤーの実績は 0 から始まる
+        accounting.reset_for_player(5, 0, 0, 50_000);
+        // 作り直す前のフレームは対応付けに残らない
+        accounting.record_enqueue(Some(3_000));
+        let observation = accounting.observe(1, 0, 60_000);
+        assert_eq!(
+            observation.rendered_timestamps,
+            vec![3_000],
+            "作り直した後に描画されたのは、作り直した後に投入したフレームであること"
+        );
+    }
+
+    /// 描画が 1 秒未満しか止まっていなければ停止と判定しないこと
+    #[test]
+    fn video_accounting_does_not_detect_a_stall_before_the_timeout() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        let observation = accounting.observe(0, 0, 999_999);
+        assert!(
+            !observation.stalled,
+            "描画が止まっている時間が 1 秒未満なら停止と判定しないこと"
+        );
+        assert_eq!(
+            observation.stalled_for_us, 0,
+            "停止していなければ止まっていた時間を報告しないこと"
+        );
+    }
+
+    /// 描画が 1 秒以上増えず、その間に 2 フレーム以上投入していれば停止と判定すること
+    #[test]
+    fn video_accounting_detects_a_stall_after_the_timeout() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        let observation = accounting.observe(0, 0, 1_000_000);
+        assert!(
+            observation.stalled,
+            "1 秒以上描画が進まず、その間に 2 枚投入していれば停止と判定すること"
+        );
+        assert_eq!(
+            observation.stalled_for_us, 1_000_000,
+            "停止していた時間を報告すること"
+        );
+    }
+
+    /// 1 秒以上描画が増えていなくても、投入が無ければ停止と判定しないこと
+    #[test]
+    fn video_accounting_does_not_detect_a_stall_without_enqueues() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        let observation = accounting.observe(0, 0, 2_000_000);
+        assert!(
+            !observation.stalled,
+            "投入が無ければ描画の機会が来ていないだけかもしれないため、停止と判定しないこと"
+        );
+    }
+
+    /// 復帰後にカウンタがリセットされ、復帰回数が増えること
+    #[test]
+    fn video_accounting_resets_after_recovery() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(Some(1_000));
+        accounting.record_enqueue(Some(2_000));
+        // drain_video の呼び出し直前の実績。drain_video は描画数・破棄数を戻さない
+        let observation = accounting.observe(0, 0, 1_000_000);
+        assert!(
+            observation.stalled,
+            "復帰の前提として、1 秒以上描画が進まず 2 枚投入していれば停止と判定されること"
+        );
+        // drain_video でキューと時計を捨てた直後の状態を記録する
+        accounting.note_recovered(0, 0, 1_000_000);
+        assert_eq!(accounting.recoveries(), 1, "復帰回数を数えること");
+        // 復帰で投入からの経過がリセットされるため、投入が無ければ停止と判定しない
+        let observation = accounting.observe(0, 0, 3_000_000);
+        assert!(
+            !observation.stalled,
+            "復帰後に投入が無ければ、時間が経っても停止と判定しないこと"
+        );
+        // FIFO も空になっているため、復帰前のフレームが描画として記録されないこと
+        accounting.record_enqueue(Some(3_000));
+        let observation = accounting.observe(1, 0, 3_100_000);
+        assert_eq!(
+            observation.rendered_timestamps,
+            vec![3_000],
+            "復帰後に描画されたのは復帰後に投入したフレームであること"
         );
     }
 

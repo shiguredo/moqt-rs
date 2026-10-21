@@ -1198,11 +1198,11 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "raw_player"
-version = "2026.2.0"
+version = "2026.3.0-canary.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb965dfbf440afb6ea2315bf3cd5e0a5b28f6375a8cce9f02f1296c89d1caf07"
+checksum = "f601bfea3cd77100391e10f20b11181d78e5476a65b871f7d829a3abd53ae9ec"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen 0.73.2",
  "shiguredo_cmake",
  "shiguredo_toml",
 ]

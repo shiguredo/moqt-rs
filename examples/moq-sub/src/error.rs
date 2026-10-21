@@ -21,7 +21,7 @@ pub enum Error {
     /// Opus デコードエラー
     Opus(shiguredo_opus::Error),
     /// raw_player (SDL) エラー
-    Player(raw_player::Error),
+    Player(raw_player::error::Error),
     /// Apple Video Toolbox エラー (H.264 / H.265 デコード)
     #[cfg(target_os = "macos")]
     VideoToolbox(shiguredo_video_toolbox::Error),
@@ -104,8 +104,8 @@ impl From<shiguredo_opus::Error> for Error {
     }
 }
 
-impl From<raw_player::Error> for Error {
-    fn from(e: raw_player::Error) -> Self {
+impl From<raw_player::error::Error> for Error {
+    fn from(e: raw_player::error::Error) -> Self {
         Self::Player(e)
     }
 }
