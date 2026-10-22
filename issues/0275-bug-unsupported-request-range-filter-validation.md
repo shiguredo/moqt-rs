@@ -1,7 +1,7 @@
 # 未対応 request の Range Filter を §3.3.2 の MUST で検証する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-unsupported-request-range-filter-validation
 - Polished: 2026-10-23
 
@@ -134,3 +134,39 @@ SUBSCRIBE_TRACKS は §3.6.2 (Parameters on SUBSCRIBE_TRACKS) により SUBSCRIB
 - doc と実装が一致していること。「設計方針」に列挙した doc を更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+未対応 request の経路でも §3.3.2 (Range Filters) の 2 つの MUST を満たすようにした。
+
+- `src/session/core.rs` の `handle_unsupported_request` で `check_incoming_range_filters` を
+  呼び、違反時は `Session::emit_request_error` で `REQUEST_ERROR` の `INVALID_FILTER` (0x36) を
+  FIN 付きで送ってメッセージ単位に拒否し、セッションを維持するようにした。検証順は
+  0273 で確定した順序を引き継ぎ、Request ID → 本体解析 → 本体 Request ID 一致 →
+  スコープ検証 → AUTHORIZATION_TOKEN 一意性 → REGISTER 適用 → Range Filter →
+  予約・セッション名前空間 → `GOING_AWAY` / `NOT_SUPPORTED` の順で、Range Filter の検証を
+  REGISTER 適用の後ろ・予約・セッション名前空間の前に置いた。メッセージ単位の拒否の優先順は
+  `MALFORMED_AUTH_TOKEN` > `INVALID_FILTER` > `DOES_NOT_EXIST` > `GOING_AWAY` >
+  `NOT_SUPPORTED` である。
+- `PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は Range Filter を許可しないため、載っていた
+  場合はスコープ検証 (§9.20.1) が先に `PROTOCOL_VIOLATION` でセッションを閉じる。3 種共通で
+  検証を呼ぶが、`INVALID_FILTER` に到達するのは `SUBSCRIBE_TRACKS` だけである。
+- 未対応 request は subscription を作らないため、Range 総数は 1 メッセージ内 (FILL_PARAMETERS
+  の内側を含む) の検証に限る。Length=0 の Range Filter は既存方針どおり上限判定を通過し、
+  `NOT_SUPPORTED` のまま拒否する。
+- doc を実装に合わせて更新した。対象は `Session::recv_request` /
+  `Session::handle_unsupported_request` / `check_incoming_range_filters`、`RequestKind`、
+  `ControlMessage::Unsupported`、example の `BidiMessage::PeerRequestRejected`、
+  `docs/moqt.md` の「未対応」節である。拒否コードの優先順と §3.3.2 の検証を明記した。
+- `tests/test_session/request_stream.rs` にテストを追加した。重複検出 (server の
+  `MAX_FILTER_RANGES=2` で 1 Range のフィルタ 2 個、reason
+  `"Range Filter validation failed"`)、上限超過 (`MAX_FILTER_RANGES=1` で 2 Range、reason
+  `"Range Filters exceed MAX_FILTER_RANGES"`)、既定 0、FILL 内側の重複 (reason
+  `"Range Filter validation failed inside FILL_PARAMETERS"`)、Length=0 の `NOT_SUPPORTED`、
+  `PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` のスコープ違反、優先順 (重複トークン / `.` /
+  GOAWAY / スコープ違反)、`INVALID_FILTER` 拒否時の REGISTER 適用を固定した。既存テスト
+  `subscribe_tracks_allows_track_property_filter_with_other_parameters` は server の
+  `MAX_FILTER_RANGES` を 1 に宣言して `NOT_SUPPORTED` を維持するよう更新した。Range Filter
+  検証を無効化する変異で新しい 6 テストが失敗することも確認した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通る。
