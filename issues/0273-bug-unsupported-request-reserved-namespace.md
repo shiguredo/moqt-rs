@@ -1,7 +1,7 @@
 # 未対応 request の `.` と `.session` 名前空間を DOES_NOT_EXIST で拒否する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-unsupported-request-reserved-namespace
 - Polished: 2026-10-23
 
@@ -123,3 +123,34 @@ REQUEST_ERROR using error code DOES_NOT_EXIST rather than passing it to the Appl
 - doc と実装が一致していること。「設計方針」に列挙した doc を更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+未対応 request の経路で、`.` 単独の予約名前空間と `.session` のセッション名前空間を
+`DOES_NOT_EXIST` で拒否するようにした。
+
+- `src/session/core.rs` の `decode_unsupported_request_body` が Track Namespace Prefix も
+  返すようにし、`handle_unsupported_request` で `is_single_period` と `is_session_level` を
+  検証した。該当時は `REQUEST_ERROR` の `DOES_NOT_EXIST` (0x10) でメッセージ単位に拒否し、
+  セッションは維持する。検証順は Request ID → 本体解析 → 本体 Request ID 一致 → スコープ検証
+  → AUTHORIZATION_TOKEN 一意性 → REGISTER 適用 → 予約・セッション名前空間 →
+  `GOING_AWAY` / `NOT_SUPPORTED` である。§8.9 の REGISTER 適用 MUST (失敗したメッセージでも
+  登録する) を先に満たすため REGISTER 適用の後ろに置き、§2.4.3 / §6.5 の MUST を §9.2 の MAY /
+  §1.6 の SHOULD より優先した。0275 が同じ関数に追加する Range Filter 検証は、受理経路と
+  同じく `INVALID_FILTER` を予約名前空間の検証より前に置く。
+- `.foo` などその他の `.` 始まりの予約名前空間は、§2.4.3 第 1 段落 3 文目の Application 委譲
+  MUST を本ライブラリが満たせない (未対応 request を Application へ渡す経路が無い) ため、
+  従来どおり `NOT_SUPPORTED` のままとした。
+- doc を実装に合わせて更新した。対象は `Session::recv_request` /
+  `Session::handle_unsupported_request` / `decode_unsupported_request_body`、`RequestKind`、
+  `ControlMessage::Unsupported`、`docs/moqt.md` の「未対応」節、example の
+  `BidiMessage::PeerRequestRejected` である。拒否コードの優先順は `MALFORMED_AUTH_TOKEN` >
+  `DOES_NOT_EXIST` > `GOING_AWAY` > `NOT_SUPPORTED` と明記した。
+- `tests/test_session/request_stream.rs` にテストを追加した。3 種 × `.` / `.session` の
+  `DOES_NOT_EXIST`、`.foo` の `NOT_SUPPORTED`、`["." , "x"]` の `DOES_NOT_EXIST`、および
+  優先順 (`MALFORMED_AUTH_TOKEN` / `GOING_AWAY` / スコープ違反 / REGISTER 適用失敗 /
+  REGISTER 適用) を固定した。Track Namespace Prefix を指定できるヘルパ (`namespace_prefix` /
+  `unsupported_request_with_namespace*`) を追加した。予約名前空間の検証を無効化する変異で
+  新テストが失敗することも確認した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通る。
