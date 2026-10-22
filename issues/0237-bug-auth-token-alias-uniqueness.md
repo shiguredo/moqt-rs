@@ -1,7 +1,7 @@
 # alias 解決後も含めた AUTHORIZATION_TOKEN の一意性を検証する
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-auth-token-alias-uniqueness
 - Polished: 2026-10-23
 
@@ -128,3 +128,39 @@ MUST reject that message with an MALFORMED_AUTH_TOKEN error." と MUST を課す
 - doc と実装が一致していること。「設計方針」に列挙した doc・コメントを更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+session 層に alias 解決後まで含めた AUTHORIZATION_TOKEN の一意性検証を追加し、受理経路と
+拒否経路のすべてで適用した。
+
+- `Session::validate_peer_message_auth_token_uniqueness` (`src/session/core.rs`) を追加した。
+  peer の token cache を変更せず、メッセージ内で REGISTER / DELETE された alias だけを持つ
+  オーバーレイを実キャッシュへのフォールバックと組み合わせて USE_ALIAS を解決する。解決できた
+  USE_ALIAS と REGISTER / USE_VALUE の (Token Type, Token Value) の重複を `hashbrown::HashSet`
+  で判定する。トークンを 1 つも持たないメッセージでは即 `Ok(())` を返すため、受信ホットパスに
+  余分なコストを追加しない。解決できない alias は判定対象から外し、本検証では session error を
+  発生させない。
+- 呼び出しを 3 関数 5 経路で置き換えた。`Session::accept_peer_request` (SUBSCRIBE / PUBLISH /
+  FETCH / TRACK_STATUS)、`Session::handle_peer_request_update` (REQUEST_UPDATE)、
+  `Session::handle_unsupported_request` (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
+  SUBSCRIBE_TRACKS)。重複時は従来どおり `MALFORMED_AUTH_TOKEN` の REQUEST_ERROR で
+  メッセージ単位に拒否し、セッションを維持する。
+- 未登録 alias の扱いは既存の経路のまま変えない。受理経路は適用経路が
+  `UNKNOWN_AUTH_TOKEN_ALIAS` でセッションを閉じ、拒否経路は `GOING_AWAY` / `NOT_SUPPORTED` の
+  メッセージ拒否で終わる。未登録 alias と重複が同じメッセージに同居する場合は
+  `MALFORMED_AUTH_TOKEN` のメッセージ単位 reject を優先する。この優先順位は doc とテストで
+  固定した。
+- 同一メッセージ内の先行 REGISTER だけでなく DELETE の反映も alias 解決に含めた。
+- doc を更新した。`MessageParameters::validate_auth_token_uniqueness` は alias 解決を要さない
+  範囲の検証として残し、`encode` の送信値検証で使うことを明記した。
+  `Session::accept_peer_request` / `Session::handle_unsupported_request` /
+  `Session::handle_peer_request_update` の doc・コメントを実装に合わせた。`docs/moqt.md` の
+  §8.9 の記述を更新し、`docs/missing-features.md` の「認可トークンの alias 解決後の一意性」の
+  行を削除した。`pbt/tests/prop_message_parameter.rs` と `tests/test_message_parameter.rs` の
+  「未実装」「現状の検証対象外」という記述を codec 層の範囲に限定した。
+- テストは `tests/test_session/auth_token.rs` と `tests/test_session/request_stream.rs` に追加
+  した。同一 alias の USE_ALIAS の繰り返し、USE_ALIAS と USE_VALUE の一致、同一メッセージ内の
+  REGISTER と USE_ALIAS の一致、異なる alias が同じ値に解決する併用、同一メッセージ内の
+  DELETE の反映、一意な USE_ALIAS の受理、経路別の未登録 alias の挙動、未登録 alias と重複の
+  優先順位、wire バイト列の decode 経由を固定した。
