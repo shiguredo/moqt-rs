@@ -1153,8 +1153,10 @@ pub enum ControlMessage {
     ///
     /// 本体は生バイト列のまま保持するが、request として届く 3 種は
     /// [`crate::session::core::Session::recv_request`] が本体を解析し、パラメータのスコープ検証
-    /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope)) と AUTHORIZATION_TOKEN の
-    /// 適用 (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression)) を行う。
+    /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))、`.` 単独または `.session` の
+    /// Track Namespace Prefix の検証 (§2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
+    /// Tracks and Namespaces))、AUTHORIZATION_TOKEN の適用 (§8.9 (Authorization Token
+    /// Compression)) を行う。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     Unsupported {
         /// 制御メッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)

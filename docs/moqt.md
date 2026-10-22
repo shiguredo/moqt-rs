@@ -109,14 +109,21 @@ request stream の先頭として届く 3 種 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_
 `SUBSCRIBE_TRACKS`) は §9 Table 5 に定義済みの request であるため、未知のメッセージ種別とは
 扱わない。`ControlMessage::Unsupported` として受理し、本体を共通構造 (Request ID →
 Track Namespace Prefix → Number of Parameters → Parameters) に従って解析したうえで、
-`REQUEST_ERROR` の `NOT_SUPPORTED` (`0x3`) と送信方向の FIN で拒否する
-(§1.6 (Modularity) の SHOULD)。セッションは維持する。拒否コードの優先順は
-`MALFORMED_AUTH_TOKEN` > `GOING_AWAY` (自側が control GOAWAY を送信済み) > `NOT_SUPPORTED`
-である (§8.9 のメッセージ拒否は MUST、§9.2 の GOAWAY 拒否は MAY、§1.6 の NOT_SUPPORTED は
-SHOULD)。
+`REQUEST_ERROR` の `NOT_SUPPORTED` (`0x3`、`.` 単独または `.session` なら `DOES_NOT_EXIST`
+(`0x10`)) と送信方向の FIN で拒否する (§1.6 (Modularity) の SHOULD、§2.4.3 (Reserved
+Namespaces) / §6.5 (Session-Level Tracks and Namespaces) の拒否は MUST)。セッションは維持する。
+拒否コードの優先順は `MALFORMED_AUTH_TOKEN` > `DOES_NOT_EXIST` > `GOING_AWAY` (自側が control
+GOAWAY を送信済み) > `NOT_SUPPORTED` である (§8.9 のメッセージ拒否は MUST、§2.4.3 / §6.5 の
+拒否は MUST、§9.2 の GOAWAY 拒否は MAY、§1.6 の NOT_SUPPORTED は SHOULD)。
 
 本体を解析するため、拒否する場合でも次の検証は適用される。
 
+- §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks and Namespaces): 先頭フィールドが
+  `.` 単独または `.session` の Track Namespace Prefix を持つ request は `DOES_NOT_EXIST`
+  (`0x10`) でメッセージ単位に拒否する (MUST)。`.foo` などその他の `.` 始まりの予約名前空間への
+  request は、§2.4.3 第 1 段落が未認識の予約名前空間を Application へ渡すことを MUST とするが、
+  本ライブラリには未対応 request を Application へ渡す経路が無いため `NOT_SUPPORTED` のまま
+  とする
 - §9.20.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
   `PROTOCOL_VIOLATION` でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
   許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.18 の列挙に加えて

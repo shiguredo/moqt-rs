@@ -645,7 +645,8 @@ pub enum DatagramAcceptance {
 /// §6.3 は bidi request stream の先頭メッセージを 7 種類 (TRACK_STATUS / SUBSCRIBE / PUBLISH /
 /// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限る。本実装が
 /// 受理するのはこのうち以下の 4 種類である (残り 3 種類は `Session::recv_request` が
-/// `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら GOING_AWAY) で拒否する)。
+/// `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら GOING_AWAY、`.` 単独または
+/// `.session` の Track Namespace Prefix なら DOES_NOT_EXIST) で拒否する)。
 /// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {

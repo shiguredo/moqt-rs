@@ -1,7 +1,7 @@
 use super::*;
 use shiguredo_moqt::error::{
-    REQUEST_GOING_AWAY, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED,
-    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS,
+    REQUEST_DOES_NOT_EXIST, REQUEST_GOING_AWAY, REQUEST_MALFORMED_AUTH_TOKEN,
+    REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS,
     SESSION_KEY_VALUE_FORMATTING_ERROR,
 };
 use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
@@ -429,11 +429,82 @@ fn unsupported_request_body(request_id: u64, parameters: &MessageParameters) -> 
 /// 重複トークンなど自側の `MessageParameters::encode` が拒否するパラメータは wire 表現を
 /// 直接組み立てる必要があるため、生バイト列を受け取る経路を用意する。
 fn unsupported_request_body_with_raw_parameters(request_id: u64, parameters: &[u8]) -> Vec<u8> {
+    unsupported_request_body_with_namespace_prefix_and_raw_parameters(
+        request_id,
+        &live_namespace_prefix(),
+        parameters,
+    )
+}
+
+/// Track Namespace Prefix のワイヤ表現を組み立てる
+///
+/// Track Namespace の encode API は crate 内に閉じているため、フィールド列から wire 表現を
+/// 直接組み立てる。`.` 単独や `.session` のような予約名前空間のテストに使う。
+fn namespace_prefix(fields: &[&[u8]]) -> Vec<u8> {
+    assert!(
+        !fields.is_empty(),
+        "Track Namespace は 1 フィールド以上であること"
+    );
+    let mut bytes = Vec::new();
+    shiguredo_moqt::varint::encode(fields.len() as u64, &mut bytes);
+    for field in fields {
+        shiguredo_moqt::varint::encode(field.len() as u64, &mut bytes);
+        bytes.extend_from_slice(field);
+    }
+    bytes
+}
+
+/// 任意の Track Namespace Prefix と生パラメータブロックから未対応 request の本体を組み立てる
+fn unsupported_request_body_with_namespace_prefix_and_raw_parameters(
+    request_id: u64,
+    namespace_prefix: &[u8],
+    parameters: &[u8],
+) -> Vec<u8> {
     let mut body = Vec::new();
     shiguredo_moqt::varint::encode(request_id, &mut body);
-    body.extend_from_slice(&live_namespace_prefix());
+    body.extend_from_slice(namespace_prefix);
     body.extend_from_slice(parameters);
     body
+}
+
+/// Track Namespace Prefix を指定して未対応 request の `ControlMessage::Unsupported` を組み立てる
+fn unsupported_request_with_namespace(
+    type_id: u64,
+    request_id: u64,
+    namespace_prefix: &[u8],
+    parameters: &MessageParameters,
+) -> ControlMessage {
+    let mut encoded = Vec::new();
+    parameters
+        .encode(&mut encoded)
+        .expect("テストフィクスチャの前提条件を満たす");
+    ControlMessage::Unsupported {
+        type_id,
+        request_id: Some(request_id),
+        body: unsupported_request_body_with_namespace_prefix_and_raw_parameters(
+            request_id,
+            namespace_prefix,
+            &encoded,
+        ),
+    }
+}
+
+/// Track Namespace Prefix と生パラメータブロックを指定して未対応 request を組み立てる
+fn unsupported_request_with_namespace_and_raw_parameters(
+    type_id: u64,
+    request_id: u64,
+    namespace_prefix: &[u8],
+    parameters: &[u8],
+) -> ControlMessage {
+    ControlMessage::Unsupported {
+        type_id,
+        request_id: Some(request_id),
+        body: unsupported_request_body_with_namespace_prefix_and_raw_parameters(
+            request_id,
+            namespace_prefix,
+            parameters,
+        ),
+    }
 }
 
 /// 未対応 request の `ControlMessage::Unsupported` を組み立てる
@@ -559,6 +630,237 @@ fn unsupported_request_is_rejected_with_not_supported() {
             "終端通知でセッションを閉じないこと"
         );
     }
+}
+
+/// 未対応 request の `.` 単独予約名前空間は DOES_NOT_EXIST で拒否し、セッションを維持する
+///
+/// draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): "A Track Namespace whose first
+/// field is exactly . (a single period, 0x2e) is reserved and MUST NOT be used for any purpose;
+/// endpoints MUST NOT publish tracks or namespaces under it and MUST reject requests
+/// referencing it with DOES_NOT_EXIST." 先頭フィールドが `.` 単独かの判定は
+/// `TrackNamespace::is_single_period` と同じであり、`.foo` は対象外である。
+#[test]
+fn unsupported_request_single_period_namespace_is_rejected_with_does_not_exist() {
+    let (_client, mut server) = establish_pair();
+    let single_period = namespace_prefix(&[b"."]);
+    for (i, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
+        let rid = (i as u64) * 2;
+        let msg = unsupported_request_with_namespace(
+            type_id,
+            rid,
+            &single_period,
+            &MessageParameters::new(),
+        );
+        let bytes = msg.encode().expect("encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+        server
+            .recv_request(decoded)
+            .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "予約名前空間の拒否でセッションを閉じないこと: {type_id:#x}"
+        );
+        assert_request_error(&mut server, rid, REQUEST_DOES_NOT_EXIST);
+        // 後続の終端通知は no-op で吸収される
+        server
+            .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+            .expect("拒否済み request の終端通知は no-op であること");
+        assert_eq!(server.state(), SessionState::Established);
+    }
+
+    // 先頭フィールドが `.` 単独であれば、後続フィールドがあっても予約名前空間である
+    let rid = 6u64;
+    server
+        .recv_request(unsupported_request_with_namespace(
+            0x06,
+            rid,
+            &namespace_prefix(&[b".", b"ext"]),
+            &MessageParameters::new(),
+        ))
+        .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
+    assert_request_error(&mut server, rid, REQUEST_DOES_NOT_EXIST);
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// 未対応 request の `.session` 名前空間は DOES_NOT_EXIST で拒否する
+///
+/// draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces): "An endpoint that
+/// receives a request for an unrecognized session-level track or namespace MUST reject it with
+/// REQUEST_ERROR using error code DOES_NOT_EXIST rather than passing it to the Application."
+#[test]
+fn unsupported_request_session_namespace_is_rejected_with_does_not_exist() {
+    let (_client, mut server) = establish_pair();
+    let session_namespace = namespace_prefix(&[b".session"]);
+    for (i, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
+        let rid = (i as u64) * 2;
+        let msg = unsupported_request_with_namespace(
+            type_id,
+            rid,
+            &session_namespace,
+            &MessageParameters::new(),
+        );
+        let bytes = msg.encode().expect("encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+        server
+            .recv_request(decoded)
+            .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "セッション名前空間の拒否でセッションを閉じないこと: {type_id:#x}"
+        );
+        assert_request_error(&mut server, rid, REQUEST_DOES_NOT_EXIST);
+        server
+            .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+            .expect("拒否済み request の終端通知は no-op であること");
+    }
+}
+
+/// `.foo` など `.` 単独でも `.session` でもないプレフィックスは NOT_SUPPORTED のままとする
+///
+/// draft-ietf-moq-transport-22 §2.4.3 第 1 段落は未認識の予約名前空間への request を
+/// Application へ渡すことを MUST とするが、本ライブラリには未対応 request を Application へ
+/// 渡す経路が無い。そのため該当するプレフィックスは従来どおり NOT_SUPPORTED で拒否し、
+/// `.` 単独と `.session` だけを DOES_NOT_EXIST にする。
+#[test]
+fn unsupported_request_other_reserved_namespace_is_rejected_with_not_supported() {
+    let (_client, mut server) = establish_pair();
+    for (i, prefix) in [
+        namespace_prefix(&[b".foo"]),
+        namespace_prefix(&[b".foo", b"bar"]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (j, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
+            let rid = ((i * 3 + j) as u64) * 2;
+            let msg = unsupported_request_with_namespace(
+                type_id,
+                rid,
+                &prefix,
+                &MessageParameters::new(),
+            );
+            let bytes = msg.encode().expect("encode できること");
+            let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
+            server
+                .recv_request(decoded)
+                .expect("NOT_SUPPORTED 拒否は Result::Ok であること");
+            assert_request_error(&mut server, rid, REQUEST_NOT_SUPPORTED);
+            assert_eq!(server.state(), SessionState::Established);
+        }
+    }
+}
+
+/// `.` 単独の予約名前空間は GOING_AWAY (MAY) より DOES_NOT_EXIST (MUST) を優先する
+#[test]
+fn unsupported_request_single_period_prefers_does_not_exist_over_going_away() {
+    let (_client, mut server) = establish_pair();
+    server
+        .send_goaway(Vec::new(), 10_000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+
+    let rid = 0u64;
+    server
+        .recv_request(unsupported_request_with_namespace(
+            0x51,
+            rid,
+            &namespace_prefix(&[b"."]),
+            &MessageParameters::new(),
+        ))
+        .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
+    assert_request_error(&mut server, rid, REQUEST_DOES_NOT_EXIST);
+}
+
+/// `.` 単独の予約名前空間でも MALFORMED_AUTH_TOKEN (MUST) の判定を先に行う
+#[test]
+fn unsupported_request_single_period_with_duplicate_tokens_is_rejected_with_malformed() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    let rid = 0u64;
+    server
+        .recv_request(unsupported_request_with_namespace_and_raw_parameters(
+            0x06,
+            rid,
+            &namespace_prefix(&[b"."]),
+            &duplicate_register_token_parameters(),
+        ))
+        .expect("MALFORMED_AUTH_TOKEN 拒否は Result::Ok であること");
+    assert_request_error(&mut server, rid, REQUEST_MALFORMED_AUTH_TOKEN);
+    assert_eq!(server.state(), SessionState::Established);
+    // 失敗したメッセージでも REGISTER は適用する (§8.9)
+    assert_token_alias(&server, 1);
+    assert_token_alias(&server, 2);
+}
+
+/// `.` 単独の予約名前空間でもスコープ違反 (セッション終了) を先に処理する
+#[test]
+fn unsupported_request_single_period_with_out_of_scope_parameter_closes_session() {
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBER_PRIORITY;
+
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBER_PRIORITY,
+        value: MessageParameterValue::Uint8(128),
+    });
+    let err = server
+        .recv_request(unsupported_request_with_namespace(
+            0x06,
+            0,
+            &namespace_prefix(&[b"."]),
+            &parameters,
+        ))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// `.` 単独の予約名前空間でも REGISTER の cache 容量超過はセッション終了を優先する
+#[test]
+fn unsupported_request_single_period_register_without_cache_closes_session() {
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .recv_request(unsupported_request_with_namespace(
+            0x06,
+            0,
+            &namespace_prefix(&[b"."]),
+            &register_token_parameters(1),
+        ))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_AUTH_TOKEN_CACHE_OVERFLOW
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// `.` 単独の予約名前空間で拒否しても REGISTER は token cache に登録される
+///
+/// draft-ietf-moq-transport-22 §8.9: "The receiver of a message carrying an Authorization Token
+/// with Alias Type REGISTER that does not result in a Session error MUST register the Token
+/// Alias in the token cache, even if the message fails for other reasons, including
+/// Unauthorized."
+#[test]
+fn unsupported_request_single_period_registers_auth_token_alias() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    server
+        .recv_request(unsupported_request_with_namespace(
+            0x06,
+            0,
+            &namespace_prefix(&[b"."]),
+            &register_token_parameters(5),
+        ))
+        .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
+    assert_request_error(&mut server, 0, REQUEST_DOES_NOT_EXIST);
+    assert_token_alias(&server, 5);
 }
 
 /// 未対応 request の parity 違反と重複は INVALID_REQUEST_ID でセッションを閉じる
