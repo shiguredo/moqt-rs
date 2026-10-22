@@ -947,9 +947,11 @@ impl Session {
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
     /// - `validate_peer_request_id` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
-    /// - 構造は正しいが内容が不正な AUTHORIZATION_TOKEN (同一 (Token Type, Token Value) の
-    ///   重複) を含む場合は REQUEST_ERROR(MALFORMED_AUTH_TOKEN) を送信し `Ok(false)` を返す
-    ///   (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))
+    /// - 構造は正しいが内容が不正な AUTHORIZATION_TOKEN を含む場合は
+    ///   REQUEST_ERROR(MALFORMED_AUTH_TOKEN) を送信し `Ok(false)` を返す
+    ///   (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))。
+    ///   「内容が不正」は alias 解決後の (Token Type, Token Value) の重複であり、判定は
+    ///   `Session::validate_peer_message_auth_token_uniqueness` が行う
     /// - control GOAWAY 送信済み (`local_sent`) なら REQUEST_ERROR(GOING_AWAY) を送信し
     ///   `Ok(false)` を返す (draft §9.2 (GOAWAY))
     ///
@@ -1010,13 +1012,17 @@ impl Session {
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver
         // of a message containing a well-formed Token structure that is otherwise invalid
         // MUST reject that message with an MALFORMED_AUTH_TOKEN error."
-        // 本ライブラリが検出できる「構造は正しいが内容が不正」は REGISTER / USE_VALUE の
-        // (Token Type, Token Value) 重複である。USE_ALIAS を含む重複 (alias 解決後の一意性)
-        // は解決結果を持つセッション層で判定する必要があり、現状未実装である
-        // (`MessageParameters::validate_auth_token_uniqueness` の doc 参照)。
+        // 「構造は正しいが内容が不正」は alias 解決後の (Token Type, Token Value) の重複であり、
+        // 判定は `Session::validate_peer_message_auth_token_uniqueness` が行う。alias を解決
+        // できない USE_ALIAS は判定対象から外し、未登録 alias の扱いは下の適用経路
+        // (`apply_peer_message_auth_tokens`) に委ねる。そのため未登録 alias と重複が同居する
+        // メッセージでは、この reject が優先される。
         // メッセージ単位の reject は request を処理せず REQUEST_ERROR を返すことで表す。
         // REGISTER の MUST (失敗したメッセージでも alias を登録する) を先に適用する。
-        if parameters.validate_auth_token_uniqueness().is_err() {
+        if self
+            .validate_peer_message_auth_token_uniqueness(parameters)
+            .is_err()
+        {
             self.apply_peer_message_auth_token_registers_only(parameters)?;
             self.emit_request_error(
                 request_id,
@@ -1140,8 +1146,11 @@ impl Session {
     ///    セッションを閉じる (REQUEST_ERROR は送らない)
     /// 3. パラメータのスコープ検証 (draft §9.20.1 (Parameter Scope) の MUST。違反は
     ///    PROTOCOL_VIOLATION でセッションを閉じる)
-    /// 4. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。違反は REGISTER を適用したうえで
-    ///    REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する)
+    /// 4. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。alias 解決後の (Token Type,
+    ///    Token Value) の重複を対象とする。違反は REGISTER を適用したうえで REQUEST_ERROR
+    ///    (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する。alias を解決できない
+    ///    USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり 5. 以降の拒否経路に
+    ///    委ねる)
     /// 5. REGISTER の token cache への適用 (draft §8.9 の MUST。GOAWAY 拒否の場合も適用する)
     /// 6. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
     ///
@@ -1199,10 +1208,16 @@ impl Session {
             return Err(err);
         }
         // draft §8.9 (Authorization Token Compression): 構造は正しいが内容が不正なトークン
-        // (同一 (Token Type, Token Value) の重複) は REQUEST_ERROR (MALFORMED_AUTH_TOKEN) で
-        // メッセージ単位に拒否する。REGISTER の MUST (失敗したメッセージでも alias を登録する)
-        // を先に適用する。
-        if parameters.validate_auth_token_uniqueness().is_err() {
+        // (alias 解決後の (Token Type, Token Value) の重複) は REQUEST_ERROR
+        // (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否する。未対応 request として受理しない
+        // ため USE_ALIAS を適用しないが、一意性の判定には alias 解決後の値を用いる。alias を
+        // 解決できない USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり
+        // GOING_AWAY / NOT_SUPPORTED の拒否に委ねる。
+        // REGISTER の MUST (失敗したメッセージでも alias を登録する) を先に適用する。
+        if self
+            .validate_peer_message_auth_token_uniqueness(&parameters)
+            .is_err()
+        {
             self.apply_peer_message_auth_token_registers_only(&parameters)?;
             self.emit_request_error(
                 request_id,
@@ -2441,6 +2456,102 @@ impl Session {
         self.events.push_back(SessionEvent::CloseSession(err));
     }
 
+    /// 受信メッセージの AUTHORIZATION_TOKEN を alias 解決後まで含めて一意性検証する
+    ///
+    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は "An
+    /// Authorization Token MAY be repeated within a message as long as the combination of
+    /// Token Type and Token Value are unique after resolving any aliases." と定め、同節は
+    /// "The receiver of a message containing a well-formed Token structure that is otherwise
+    /// invalid MUST reject that message with an MALFORMED_AUTH_TOKEN error." と MUST を課す。
+    /// 本メソッドはこの MUST を満たすために alias 解決後の重複を検出する。重複が無ければ
+    /// `Ok(())`、重複があれば `Err(MessageError::MalformedAuthToken)` を返す。呼び出し側は
+    /// 重複時に REQUEST_ERROR (`MALFORMED_AUTH_TOKEN`) でメッセージ単位に拒否し、
+    /// セッションを維持する。
+    ///
+    /// alias の解決は実キャッシュを変更せずに行う。メッセージ内で REGISTER / DELETE された
+    /// alias だけをオーバーレイに保持し、USE_ALIAS はオーバーレイを優先して実キャッシュへ
+    /// フォールバックして解決する。トークンを 1 つも持たないメッセージでは何もしないため、
+    /// 受信ホットパスに余分なコストを追加しない。
+    /// `Session::apply_peer_message_auth_tokens` はメッセージ内の Token をワイヤ順に適用する
+    /// ため、一意性判定も同じ順序で解決する。draft の "previously registered" は
+    /// 「メッセージ内の先行 REGISTER を含む、その時点で登録済みの alias」と解釈する。
+    ///
+    /// 解決できない alias (未登録) は判定対象から外す。未登録 alias の扱いは既存の経路
+    /// (受理経路は `apply_peer_message_auth_tokens` が `UNKNOWN_AUTH_TOKEN_ALIAS` でセッションを
+    /// 閉じ、拒否経路はメッセージ単位の拒否で終わる) に委ねる。本検証では session error を
+    /// 発生させないため、未登録 alias と重複が同じメッセージに同居する場合は
+    /// `MALFORMED_AUTH_TOKEN` のメッセージ単位 reject が優先される。
+    ///
+    /// REGISTER の登録失敗 (alias 重複 / cache 容量超過) も本検証では扱わない。
+    /// `apply_peer_message_auth_tokens` / `apply_peer_message_auth_token_registers_only` が
+    /// 従来どおり session error として扱う。
+    ///
+    /// メッセージ内の Token 数は高々数件であるが、細工されたメッセージでも 2 乗の比較を
+    /// 強いられないよう `hashbrown::HashSet` で重複を判定する。
+    pub(super) fn validate_peer_message_auth_token_uniqueness(
+        &self,
+        parameters: &MessageParameters,
+    ) -> Result<(), MessageError> {
+        let tokens = parameters.authorization_tokens();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        // 実キャッシュを変更しないよう、メッセージ内で登録・削除された alias だけを
+        // オーバーレイに保持する。`None` は DELETE された alias (tombstone) を表す。
+        let mut overlay: HashMap<u64, Option<(u64, Vec<u8>)>> = HashMap::new();
+        let mut seen: HashSet<(u64, Vec<u8>)> = HashSet::new();
+        for token in tokens {
+            match token {
+                AuthorizationToken::Register {
+                    alias,
+                    token_type,
+                    token_value,
+                } => {
+                    // 登録の成否 (alias 重複 / cache 容量超過) は一意性の判定に影響しない。
+                    // 成否の session error 化は適用経路の責務である。
+                    overlay.insert(*alias, Some((*token_type, token_value.clone())));
+                    if !seen.insert((*token_type, token_value.clone())) {
+                        return Err(MessageError::MalformedAuthToken(
+                            "duplicate (Token Type, Token Value) after resolving aliases",
+                        ));
+                    }
+                }
+                AuthorizationToken::Delete { alias } => {
+                    overlay.insert(*alias, None);
+                }
+                AuthorizationToken::UseAlias { alias } => {
+                    // オーバーレイを優先し、無ければ実キャッシュから解決する。解決できない
+                    // alias は判定対象から外し、扱いを適用経路と拒否経路に委ねる。
+                    let resolved =
+                        match overlay.get(alias) {
+                            Some(value) => value.clone(),
+                            None => self.auth.peer_token_cache.resolve(*alias).map(
+                                |(token_type, token_value)| (token_type, token_value.to_vec()),
+                            ),
+                        };
+                    if let Some((token_type, token_value)) = resolved
+                        && !seen.insert((token_type, token_value))
+                    {
+                        return Err(MessageError::MalformedAuthToken(
+                            "duplicate (Token Type, Token Value) after resolving aliases",
+                        ));
+                    }
+                }
+                AuthorizationToken::UseValue {
+                    token_type,
+                    token_value,
+                } => {
+                    if !seen.insert((*token_type, token_value.clone())) {
+                        return Err(MessageError::MalformedAuthToken(
+                            "duplicate (Token Type, Token Value) after resolving aliases",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 非 SETUP メッセージに含まれる AUTHORIZATION_TOKEN を `peer_auth_token_cache` に反映する
     ///
     /// draft-ietf-moq-transport-22 §9.20.2 (AUTHORIZATION TOKEN Parameter) により
@@ -2460,7 +2571,7 @@ impl Session {
     /// - USE_VALUE: cache 操作なし。
     ///
     /// (Token Type, Token Value) の重複 (`MALFORMED_AUTH_TOKEN`) は呼び出し元が
-    /// `MessageParameters::validate_auth_token_uniqueness` で判定済みであり、本関数は
+    /// `Session::validate_peer_message_auth_token_uniqueness` で判定済みであり、本関数は
     /// 重複の無い Token 構造のみを扱う (message_parameter の decode は重複を検出しないため、
     /// 保証は呼び出し元の事前検証が担う)。
     pub(super) fn apply_peer_message_auth_tokens(

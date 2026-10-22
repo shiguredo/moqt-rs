@@ -909,6 +909,8 @@ impl MessageParameters {
     /// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を返す責務がセッション層にある。ここで
     /// decode を失敗させると Request ID が得られずメッセージ単位の reject を送れないため、
     /// [`MessageParameters::validate_auth_token_uniqueness`] を別途呼ぶこと。
+    /// セッション層は peer の token cache を使って alias 解決後まで含めた
+    /// `Session::validate_peer_message_auth_token_uniqueness` で検証する。
     ///
     /// # Errors
     ///
@@ -1014,7 +1016,9 @@ impl MessageParameters {
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN の
         // (Token Type, Token Value) 重複はここでは検出しない。decode を失敗させると
         // Request ID が得られず、メッセージ単位の REQUEST_ERROR (MALFORMED_AUTH_TOKEN) を
-        // 送れなくなるため、`MessageParameters::validate_auth_token_uniqueness` で検証する。
+        // 送れなくなるため、`MessageParameters::validate_auth_token_uniqueness` (alias 解決を
+        // 要さない範囲) または `Session::validate_peer_message_auth_token_uniqueness`
+        // (alias 解決後まで含む) で検証する。
         Ok((Self(params), pos))
     }
 
@@ -1361,12 +1365,14 @@ impl MessageParameters {
     /// 対象は alias 解決を要さない Token に限る。§8.9 が定める「alias 解決後の一意性」
     /// ("unique after resolving any aliases") のうち、USE_ALIAS を含む重複 (同一 Alias の
     /// USE_ALIAS の繰り返し、同一メッセージ内の REGISTER とそれを参照する USE_ALIAS の
-    /// 組み合わせ) は alias 解決を要するため本検証の対象外である (現状未実装。解決結果を
-    /// 保持するセッション層で判定する必要がある)。
+    /// 組み合わせ) は alias 解決を要するため本検証の対象外である。受信メッセージに対しては
+    /// セッション層の `Session::validate_peer_message_auth_token_uniqueness` が peer の
+    /// token cache を使って alias 解決後まで含めた検証を行う。本メソッドは alias 解決を
+    /// 要さない範囲の検証として残し、[`MessageParameters::encode`] の送信値検証でも使う。
     ///
-    /// [`MessageParameters::decode`] は本検証を行わない。reject するかどうかは
-    /// メッセージ単位の判断であり、Request ID を持つ request では `REQUEST_ERROR`
-    /// (MALFORMED_AUTH_TOKEN) を返すセッション層が本メソッドを呼ぶ。
+    /// [`MessageParameters::decode`] は本検証を行わない。受信 request の reject はセッション層が
+    /// `Session::validate_peer_message_auth_token_uniqueness` で判定する。本メソッドの呼び出し元は
+    /// [`MessageParameters::encode`] の送信値検証である。
     pub fn validate_auth_token_uniqueness(&self) -> Result<(), MessageError> {
         validate_auth_token_uniqueness(self.0.iter().filter_map(|p| {
             if p.param_type == PARAM_AUTHORIZATION_TOKEN

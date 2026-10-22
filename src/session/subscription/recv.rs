@@ -773,16 +773,23 @@ impl Session {
         // MUST reject that message with an MALFORMED_AUTH_TOKEN error."
         // REQUEST_UPDATE は Request ID を持つ request メッセージのため、メッセージ単位の
         // reject は §9.5 (REQUEST_UPDATE) が MUST とする REQUEST_ERROR で表す。
-        // 判定は token cache の適用より先に行う。reject するメッセージの DELETE / USE_ALIAS を
-        // 適用すると、未登録 alias の USE_ALIAS が UNKNOWN_AUTH_TOKEN_ALIAS として session を
-        // kill し、reject のはずの失敗を session error に格上げしてしまう (GOAWAY 拒否経路と
-        // 同じ理由。`apply_peer_message_auth_token_registers_only` の doc 参照)。
+        // 内容の不正は alias 解決後の (Token Type, Token Value) の重複であり
+        // `Session::validate_peer_message_auth_token_uniqueness` が判定する。判定は token cache
+        // の適用より先に行う。reject するメッセージの DELETE / USE_ALIAS を適用すると、
+        // 未登録 alias の USE_ALIAS が UNKNOWN_AUTH_TOKEN_ALIAS として session を kill し、
+        // reject のはずの失敗を session error に格上げしてしまう (GOAWAY 拒否経路と同じ理由。
+        // `apply_peer_message_auth_token_registers_only` の doc 参照)。この検証は一時
+        // キャッシュで alias を解決するだけで実キャッシュを変更せず、解決できない alias も
+        // 判定対象から外すため、未登録 alias の扱いは適用経路のまま変わらない。
         // セッション終了の検証 (§9.20.1 の context スコープ / §9.5 と §3.1・§3.2 の
         // state・role / §9.20.18 の FORWARD 値域) は上で済ませてある。§9.20.19
         // (NEW_GROUP_REQUEST) だけは対象 subscription のトラックプロパティを要するため
         // dispatch 側に残る (メッセージ単位の reject が先行し得る。受信側の close は
         // 実装判断であり MUST ではない)。
-        if update.parameters.validate_auth_token_uniqueness().is_err() {
+        if self
+            .validate_peer_message_auth_token_uniqueness(&update.parameters)
+            .is_err()
+        {
             // §8.9 の REGISTER MUST は「session error にならないメッセージの失敗」に適用される
             self.apply_peer_message_auth_token_registers_only(&update.parameters)?;
             // ローカル終端済みの request は送信方向を reset 済みで拒否応答を送れないため、

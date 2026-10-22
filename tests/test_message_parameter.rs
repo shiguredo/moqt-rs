@@ -454,10 +454,11 @@ mod auth_token_uniqueness {
 
     #[test]
     fn validate_auth_token_uniqueness_ignores_use_alias() {
-        // 現状の実装は alias 解決を要する Token を検証対象外としている。§8.9 が定める
+        // codec 層の本検証は alias 解決を要する Token を検証対象外としている。§8.9 が定める
         // 「alias 解決後の一意性」のうち USE_ALIAS を含む重複 (同一 alias の繰り返しや、
-        // 同一メッセージ内の REGISTER とそれを参照する USE_ALIAS の組み合わせ) は未実装で
-        // あり、解決結果を保持するセッション層で扱う必要がある。本テストは現状の境界を固定する。
+        // 同一メッセージ内の REGISTER とそれを参照する USE_ALIAS の組み合わせ) は、peer の
+        // token cache を持つセッション層の `Session::validate_peer_message_auth_token_uniqueness`
+        // が検証する。本テストは codec 層の境界を固定する。
         let mut params = MessageParameters::new();
         params.push(MessageParameter {
             param_type: PARAM_AUTHORIZATION_TOKEN,

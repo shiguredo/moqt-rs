@@ -50,7 +50,6 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 | WebTransport over HTTP/3 の `RESET_STREAM_AT` | draft-ietf-webtrans-http3-16 §4.4 (MUST) | s2n-quic が送出できず `RESET_STREAM` にフォールバックする | `issues/pending/0094-bug-webtransport-reset-stream-at-unsupported.md` |
 | DPoP proof の送信 | C4M §3.2.2 | ライブラリに発行 API はあるが、example の URL 経路では送らない | 未起票 |
 | C4M の複合クレーム / RSA / CWT 形式 proof | C4M §2 | 未実装 (docs/c4m.md の「未対応」に記載) | docs/c4m.md |
-| 認可トークンの alias 解決後の一意性 | §8.9 | 部分実装。REGISTER / USE_VALUE のみ検証し、alias 解決後の (Token Type, Token Value) の重複は検出しない | `issues/0237-bug-auth-token-alias-uniqueness.md` |
 
 ## 3. ライブラリの API 露出と example での未使用
 

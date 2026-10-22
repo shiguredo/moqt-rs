@@ -126,9 +126,11 @@ SHOULD)。
   FILL_PARAMETERS を §9.18 の列挙が含まないため。仕様が許容するメッセージでセッションを
   閉じない側を選ぶ)
 - §8.9 (Authorization Token Compression): Alias Type REGISTER のトークンは拒否する場合も
-  token cache へ登録し (MUST)、同一 (Token Type, Token Value) の重複は `REQUEST_ERROR` の
-  `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する。DELETE / USE_ALIAS / USE_VALUE は
-  失敗するメッセージのパラメータとして適用しない
+  token cache へ登録し (MUST)、(Token Type, Token Value) の重複は alias 解決後まで含めて判定し
+  `REQUEST_ERROR` の `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する。alias は peer の
+  token cache とメッセージ内の先行 REGISTER / DELETE から解決する。解決できない alias は
+  一意性の判定対象から外し、未登録 alias の扱いは経路ごとの現行挙動のまま変えない。
+  DELETE / USE_ALIAS / USE_VALUE は失敗するメッセージのパラメータとして適用しない
 - 本体が共通構造に従わない場合は原因に応じたコード (`PROTOCOL_VIOLATION` /
   `KEY_VALUE_FORMATTING_ERROR`) でセッションを閉じる
 - REGISTER の適用自体が失敗した場合はセッションを閉じる (`DUPLICATE_AUTH_TOKEN_ALIAS`:

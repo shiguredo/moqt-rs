@@ -1201,7 +1201,9 @@ impl ControlMessage {
     /// reject を送れないためである。
     /// `Session` を経由せずパラメータを直接扱う場合は
     /// [`crate::message_parameter::MessageParameters::validate_auth_token_uniqueness`] を
-    /// 呼ぶこと。`ControlMessage::decode` が本体を解析しない未実装 request
+    /// 呼ぶこと。`Session` は alias 解決後まで含めた
+    /// `Session::validate_peer_message_auth_token_uniqueness` で検証する。
+    /// `ControlMessage::decode` が本体を解析しない未実装 request
     /// (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) も、`Session` が本体を
     /// 解析したうえで同じ検証を行う ([`crate::session::core::Session::recv_request`])。
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {

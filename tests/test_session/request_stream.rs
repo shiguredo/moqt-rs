@@ -1058,6 +1058,59 @@ fn unsupported_request_with_unknown_alias_is_rejected_with_not_supported() {
     assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
 }
 
+/// alias 解決後の重複を持つ未対応 request は MALFORMED_AUTH_TOKEN で拒否すること
+///
+/// 未対応 request の拒否経路でも AUTHORIZATION_TOKEN の一意性は alias 解決後まで含めて検証する。
+/// 未登録 alias の扱い (NOT_SUPPORTED でセッション維持) は変えないが、解決できる alias の
+/// 重複は draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) の MUST に従って
+/// `MALFORMED_AUTH_TOKEN` のメッセージ単位 reject を `NOT_SUPPORTED` より優先する。
+#[test]
+fn unsupported_request_with_duplicate_resolved_alias_is_rejected() {
+    let (mut client, mut server) = establish_pair_with_self_auth_cache(1024);
+    // alias 7 を server 側の peer cache に登録する
+    let mut register = MessageParameters::new();
+    register.push(MessageParameter {
+        param_type: PARAM_AUTHORIZATION_TOKEN,
+        value: MessageParameterValue::AuthorizationToken(AuthorizationToken::Register {
+            alias: 7,
+            token_type: 2,
+            token_value: b"tok".to_vec(),
+        }),
+    });
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), register)
+        .expect("REGISTER 付き SUBSCRIBE の送信に成功すること");
+    let (_, msg) = take_send_request(&mut client);
+    server
+        .recv_request(msg)
+        .expect("REGISTER 付き SUBSCRIBE は受理されること");
+    assert_eq!(
+        server
+            .peer_auth_token_cache()
+            .resolve(7)
+            .map(|(token_type, value)| (token_type, value.to_vec())),
+        Some((2, b"tok".to_vec())),
+        "alias=7 が peer cache に登録されること"
+    );
+    let _ = rid;
+
+    let mut parameters = MessageParameters::new();
+    for _ in 0..2 {
+        parameters.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(AuthorizationToken::UseAlias {
+                alias: 7,
+            }),
+        });
+    }
+    // 直前に受理させた SUBSCRIBE の Request ID (0) と重複しない ID を使う
+    server
+        .recv_request(unsupported_request(0x06, 4, &parameters))
+        .expect("未対応 request の拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 4, REQUEST_MALFORMED_AUTH_TOKEN);
+}
+
 /// 応答専用の型を request stream の先頭で受けるとセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §9 Table 5 で NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED は

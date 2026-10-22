@@ -415,7 +415,8 @@ fn sample_auth_token_spec(ctx: &mut noprop::TestCaseContext) -> AuthTokenSpec {
 /// alias 解決なしで (Token Type, Token Value) を決められる Token の値を返す
 ///
 /// §8.9 の一意性検証は alias 解決後の値を対象とするが、USE_ALIAS / DELETE は
-/// セッション状態を要するため現状の `validate_auth_token_uniqueness()` の対象外である。
+/// セッション状態を要するため codec 層の `validate_auth_token_uniqueness()` の対象外である
+/// (alias 解決後まで含めた検証は peer の token cache を持つセッション層が行う)。
 fn auth_spec_type_value(spec: AuthTokenSpec) -> Option<(u64, u8)> {
     match spec {
         AuthTokenSpec::Register(_, token_type, token_value)
@@ -453,8 +454,9 @@ fn params_from_auth_specs(specs: &[AuthTokenSpec]) -> MessageParameters {
 
 /// 生成指示から独立に (Token Type, Token Value) の重複を判定する参照モデル
 ///
-/// §8.9 の一意性検証の対象は alias 解決を要さない REGISTER / USE_VALUE のみである
-/// (USE_ALIAS / DELETE はセッション状態を要するため対象外)。
+/// codec 層の `validate_auth_token_uniqueness()` の対象は alias 解決を要さない
+/// REGISTER / USE_VALUE のみである (USE_ALIAS / DELETE はセッション状態を要するため対象外。
+/// alias 解決後まで含む検証は peer の token cache を持つセッション層が行う)。
 fn has_duplicate_type_value(specs: &[AuthTokenSpec]) -> bool {
     let mut seen = Vec::new();
     for &spec in specs {
@@ -472,7 +474,7 @@ fn has_duplicate_type_value(specs: &[AuthTokenSpec]) -> bool {
 /// `validate_auth_token_uniqueness()` は alias 解決を要さない Token (REGISTER / USE_VALUE) の
 /// (Token Type, Token Value) が重複するとき、かつそのときに限り `MalformedAuthToken` を返す。
 ///
-/// USE_ALIAS / DELETE は現状の検証対象外であり、いくつ並んでも結果に影響しないことも
+/// USE_ALIAS / DELETE は codec 層の検証対象外であり、いくつ並んでも結果に影響しないことも
 /// あわせて確認する。重複あり / 重複なし / USE_ALIAS・DELETE を含む入力の 3 つを
 /// カバレッジゲートで検証する。
 #[test]
