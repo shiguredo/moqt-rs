@@ -912,6 +912,13 @@ impl MessageParameters {
     /// セッション層は peer の token cache を使って alias 解決後まで含めた
     /// `Session::validate_peer_message_auth_token_uniqueness` で検証する。
     ///
+    /// 呼び出し側はパラメータブロックの終端までのスライスを渡すこと。Track Properties が後続する
+    /// メッセージ (REQUEST_OK / SUBSCRIBE_OK / PUBLISH / FETCH_OK) は payload の残り全体を渡す
+    /// ため、KVP の宣言長がパラメータブロックの終端を超えても Track Properties の範囲に収まる
+    /// 場合は本メソッドでは検出できず、Track Properties 側の検証に委ねる。KVP の Length varint は
+    /// 読めるが宣言長が渡されたスライスの残りを超える場合は、Type を理解したうえで Length/Value が
+    /// 直列化と一致しないため `KeyValueFormattingError` にする (§8.3 の MUST)。
+    ///
     /// # Errors
     ///
     /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 7 外の
@@ -923,8 +930,12 @@ impl MessageParameters {
     ///   オーバーフロー、count がバッファ容量を超える場合、値長が 2^16-1 バイトを超える KVP
     ///   (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))): `ProtocolViolation`
     /// - 値の直列化 (Length/Value) が型の定義と一致しない場合 (FILL_PARAMETERS の値が空、内側の
-    ///   余剰バイト、壊れた AUTHORIZATION_TOKEN): `KeyValueFormattingError`
-    /// - バッファが途中で切れている場合 (LOCATION_FILTER の必須フィールド欠落を含む): `UnexpectedEof`
+    ///   余剰バイト、壊れた AUTHORIZATION_TOKEN、宣言長が残りバッファを超える KVP):
+    ///   `KeyValueFormattingError`
+    /// - ヘッダや値の varint が途中で切れている場合 (count / delta key / Type varint / Length
+    ///   varint / 偶数型の値 varint の途中終端、LOCATION_FILTER の必須フィールド欠落、
+    ///   TRACK_NAMESPACE_PREFIX の Track Namespace 値が途中で切れている場合、
+    ///   FILL_PARAMETERS 内側の count / varint 終端): `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         Self::decode_inner(buf, true)
     }
@@ -1607,9 +1618,12 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
 ///   より先に行うため、既知型だが Table 7 に無いパラメータが同時にある場合はこちらが優先になる。
 ///   未知の型と入れ子の FILL_PARAMETERS は `decode_inner` の段階で先に PROTOCOL_VIOLATION になる
 /// - Table 7 外のパラメータだけがある場合は §9.20.15 の MUST に従い PROTOCOL_VIOLATION を返す
-/// - 値が途中で切れた場合と count がバッファ容量を超える場合は 1 番目 (値が空の場合) の規則の
-///   対象外であり、フレーミング違反として外側のパラメータブロックと同じ分類 (`UnexpectedEof` /
-///   `ProtocolViolation`) のまま扱う
+/// - 内側の count がバッファ容量を超える場合はフレーミング違反として外側と同じく
+///   `ProtocolViolation`、内側の varint (count / delta key / Type / Length / 偶数型の値) が
+///   途中で切れている場合は `UnexpectedEof` になる
+/// - 内側の長さプレフィックス付き値の宣言長が内側スコープの残りを超える場合は、Type を理解した
+///   うえで Length/Value が直列化と一致しないため、外側と同じく `KeyValueFormattingError` に
+///   なる
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn decode_fill_parameters(bytes: &[u8]) -> Result<MessageParameters, MessageError> {
@@ -1720,7 +1734,15 @@ fn decode_value(
                     "message parameter value length exceeds 65535",
                 ));
             }
-            let len_usize = varint::checked_len(len, buf[n..].len())?;
+            // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解した
+            // うえで Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR。
+            // `varint::checked_len` は他の用途と共有しているため、ここで文脈に応じた
+            // variant へ写す。
+            let len_usize = varint::checked_len(len, buf[n..].len()).map_err(|_| {
+                MessageError::KeyValueFormattingError(
+                    "message parameter value length exceeds remaining buffer",
+                )
+            })?;
             let bytes = buf[n..n + len_usize].to_vec();
             Ok((MessageParameterValue::LengthPrefixed(bytes), n + len_usize))
         }

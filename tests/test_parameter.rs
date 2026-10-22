@@ -195,9 +195,37 @@ mod error_cases {
     }
 
     #[test]
-    fn unexpected_eof_in_value() {
-        // delta=1 (odd type), length=10, but only 3 bytes of data
+    fn length_prefix_exceeding_remaining_is_key_value_formatting_error() {
+        // delta=1 (奇数型)、宣言長 10、データは 3 バイトのみ。
+        // Type を理解したうえで Length/Value が直列化と一致しないため KEY_VALUE_FORMATTING_ERROR。
         let buf = vec![0x01, 0x0A, 0x01, 0x02, 0x03];
+        assert_eq!(
+            SetupOptions::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "setup option value length exceeds remaining buffer"
+            ))
+        );
+    }
+
+    #[test]
+    fn truncated_length_varint_is_unexpected_eof() {
+        // delta=1 (odd type) の直後で Length varint が途中で切れている。
+        // Length を読めない段階の終端は UnexpectedEof のままである。
+        let buf = vec![0x01, 0x80];
+        assert_eq!(SetupOptions::decode(&buf), Err(MessageError::UnexpectedEof));
+    }
+
+    #[test]
+    fn truncated_delta_key_varint_is_unexpected_eof() {
+        // 先頭の delta key (Type) の varint が途中で切れている。
+        let buf = vec![0x80];
+        assert_eq!(SetupOptions::decode(&buf), Err(MessageError::UnexpectedEof));
+    }
+
+    #[test]
+    fn truncated_even_type_value_varint_is_unexpected_eof() {
+        // delta=2 (even type) の値 varint が途中で切れている。
+        let buf = vec![0x02, 0x80];
         assert_eq!(SetupOptions::decode(&buf), Err(MessageError::UnexpectedEof));
     }
 

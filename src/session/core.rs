@@ -2698,7 +2698,8 @@ impl Session {
 /// # Errors
 ///
 /// - Request ID / Track Namespace / パラメータのデコード失敗: 各デコーダのエラー
-///   (Track Namespace の書式不正は `ProtocolViolation`)
+///   (Track Namespace の書式不正は `ProtocolViolation`、KVP の宣言長が残りバッファを超える
+///   場合は `KeyValueFormattingError`)
 /// - パラメータブロックを読み切ったあとに余剰バイトがある (draft §9 Table 5 の Length の
 ///   不一致): `ProtocolViolation`
 fn decode_unsupported_request_body(body: &[u8]) -> Result<(u64, MessageParameters), MessageError> {
@@ -2722,9 +2723,9 @@ fn decode_unsupported_request_body(body: &[u8]) -> Result<(u64, MessageParameter
 /// - draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) /
 ///   §9.20 (Control Message Parameters) のフレーミング違反: `PROTOCOL_VIOLATION`
 ///
-/// 値の長さプレフィックスが残りバッファを超える場合は codec が `UnexpectedEof` を返すため
-/// `PROTOCOL_VIOLATION` に写る (§8.3 の MUST は KEY_VALUE_FORMATTING_ERROR であり、
-/// codec 層の扱いは現行のまま)。`MalformedAuthToken` は SETUP の decode だけが返すため、
+/// 値の長さプレフィックスが残りバッファを超える場合は codec が
+/// `KeyValueFormattingError` を返すため `KEY_VALUE_FORMATTING_ERROR` に写る
+/// (§8.3 の MUST)。`MalformedAuthToken` は SETUP の decode だけが返すため、
 /// 本経路の catch-all は `PROTOCOL_VIOLATION` で足りる。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 fn session_error_from_request_body(err: MessageError) -> SessionError {

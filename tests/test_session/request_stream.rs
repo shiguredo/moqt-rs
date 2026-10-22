@@ -840,6 +840,55 @@ fn unsupported_request_body_decode_errors_close_session() {
     );
 }
 
+/// 未対応 request のパラメータ KVP の宣言長で終了コードが分かれること
+///
+/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解したうえで
+/// Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR、値長が 2^16-1 バイトを
+/// 超える場合は PROTOCOL_VIOLATION でセッションを閉じる。
+#[test]
+fn unsupported_request_kvp_length_errors_close_with_mapped_code() {
+    // count=1, AUTHORIZATION_TOKEN (0x03)、宣言長 10、データ 3 バイト
+    let (_client, mut server) = establish_pair();
+    let body =
+        unsupported_request_body_with_raw_parameters(0, &[0x01, 0x03, 0x0A, 0x01, 0x02, 0x03]);
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body,
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_KEY_VALUE_FORMATTING_ERROR,
+        "宣言長が残りバッファを超える場合は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+    );
+    assert!(matches!(
+        server.state(),
+        SessionState::Closing | SessionState::Closed
+    ));
+
+    // count=1, AUTHORIZATION_TOKEN (0x03)、宣言長 65536 (2^16-1 超)
+    let (_client, mut server) = establish_pair();
+    let body = unsupported_request_body_with_raw_parameters(0, &[0x01, 0x03, 0xC1, 0x00, 0x00]);
+    let err = server
+        .recv_request(ControlMessage::Unsupported {
+            type_id: 0x06,
+            request_id: Some(0),
+            body,
+        })
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION,
+        "値長が 2^16-1 を超える場合は PROTOCOL_VIOLATION (0x3) のままであること"
+    );
+}
+
 /// 未対応 request でもメッセージ型ごとの許可パラメータ集合を検証する
 ///
 /// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): "If a parameter appears in some other

@@ -497,12 +497,25 @@ impl SetupOptions {
     /// バッファの先頭から末尾まで Setup Options をデコードし `SetupOptions` を返す
     /// (draft-ietf-moq-transport-22 §9.1 (SETUP))
     ///
-    /// カウントプレフィックスなし。バッファ末尾まで KVP を読む。
+    /// カウントプレフィックスなし。バッファ末尾まで KVP を読む。完全な Setup Options ブロック
+    /// (メッセージ payload の残り全体) を受け取る前提である。
     ///
     /// 注意: この関数はワイヤフォーマットのデコードのみを行う。
     /// draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY) / §9.1.2 (PATH) が要求する以下の検証は上位層で行うこと:
     /// - server から PATH / AUTHORITY を受信した場合は INVALID_PATH / INVALID_AUTHORITY で閉じる
     /// - WebTransport 上で PATH / AUTHORITY を受信した場合は INVALID_PATH / INVALID_AUTHORITY で閉じる
+    ///
+    /// # Errors
+    ///
+    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS)、2^16-1 バイトを超える
+    ///   値長 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))、既知の Setup Option
+    ///   型の重複、KVP Type の delta オーバーフロー: `ProtocolViolation`
+    /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
+    /// - AUTHORIZATION_TOKEN の Token 構造が不正な場合 (未知の Alias Type など):
+    ///   `KeyValueFormattingError`
+    /// - 奇数型の値で Length varint は読めるが宣言長が残りバッファを超える場合 (Type を理解した
+    ///   うえで Length/Value が直列化と一致しないため §8.3 の MUST): `KeyValueFormattingError`
+    /// - delta key / Type / Length / 偶数型の値の varint が途中で切れている場合: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
         let mut options = Vec::new();
@@ -527,7 +540,15 @@ impl SetupOptions {
                         "setup option value too long",
                     ));
                 }
-                let len = varint::checked_len(len, buf[pos..].len())?;
+                // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解した
+                // うえで Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR。
+                // `varint::checked_len` は他の用途と共有しているため、ここで文脈に応じた
+                // variant へ写す。
+                let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
+                    MessageError::KeyValueFormattingError(
+                        "setup option value length exceeds remaining buffer",
+                    )
+                })?;
                 let bytes = buf[pos..pos + len].to_vec();
                 pos += len;
 

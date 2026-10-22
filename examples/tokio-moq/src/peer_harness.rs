@@ -1336,6 +1336,45 @@ mod tests {
         .await;
     }
 
+    /// 初回 SETUP の Setup Options で KVP の宣言長が残りを超えると
+    /// KEY_VALUE_FORMATTING_ERROR を送ること
+    ///
+    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): "If a receiver understands a
+    /// Type, and the following Value or Length/Value does not match the serialization defined by
+    /// that Type, the receiver MUST close the session with error code
+    /// KEY_VALUE_FORMATTING_ERROR." Type を理解している (option type 0x03) が、宣言長 10 に対して
+    /// 値が 3 バイトしかない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_kvp_length_exceeding_options_closes_with_key_value_formatting_error()
+     {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // Setup Options: option type 0x03 (delta 3)、値長 10、値は 3 バイトしかない
+            peer.send_control_stream_head(setup_head(vec![0x03, 0x0A, 0x01, 0x02, 0x03]))
+                .await
+                .expect("control stream を書けること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("SETUP の decode 失敗で確立が失敗すること");
+            assert!(
+                matches!(error, TransportError::Moqt(_)),
+                "decode 失敗として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_KEY_VALUE_FORMATTING_ERROR,
+                "KVP の宣言長超過は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+            );
+        })
+        .await;
+    }
+
     /// 初回 SETUP のトークン重複で MALFORMED_AUTH_TOKEN を送ること
     ///
     /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は Authorization Token の

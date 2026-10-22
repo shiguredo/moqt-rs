@@ -102,8 +102,11 @@ mod error_cases {
     }
 
     #[test]
-    fn unexpected_eof_in_length_prefixed() {
-        // count=1, type=PARAM_AUTHORIZATION_TOKEN (length-prefixed) だがデータが足りない
+    fn length_prefix_exceeding_remaining_is_key_value_formatting_error() {
+        // count=1, type=PARAM_AUTHORIZATION_TOKEN (length-prefixed) で宣言長 10 だが
+        // 残りは 3 バイトしかない。Type を理解したうえで Length/Value が直列化と一致しないため、
+        // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST により
+        // KEY_VALUE_FORMATTING_ERROR になる。
         let mut buf = Vec::new();
         // count = 1
         buf.push(0x01);
@@ -116,7 +119,67 @@ mod error_cases {
 
         assert_eq!(
             MessageParameters::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "message parameter value length exceeds remaining buffer"
+            ))
+        );
+    }
+
+    #[test]
+    fn truncated_length_varint_is_unexpected_eof() {
+        // count=1, type=PARAM_AUTHORIZATION_TOKEN, その直後で Length varint が途中で切れている。
+        // Length を読めない段階の終端は UnexpectedEof のままである。
+        let buf = vec![0x01, 0x03, 0x80];
+
+        assert_eq!(
+            MessageParameters::decode(&buf),
             Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn truncated_track_namespace_prefix_value_is_unexpected_eof() {
+        use shiguredo_moqt::message_parameter::PARAM_TRACK_NAMESPACE_PREFIX;
+
+        // count=1, delta=PARAM_TRACK_NAMESPACE_PREFIX、Track Namespace のフィールド数 1、
+        // フィールド長 5 に対して値が 1 バイトしかない。フィールド長 varint は読めるが
+        // 値が途中で切れているため UnexpectedEof になる。
+        let mut buf = vec![0x01];
+        shiguredo_moqt::varint::encode(PARAM_TRACK_NAMESPACE_PREFIX, &mut buf);
+        buf.extend_from_slice(&[0x01, 0x05, b'x']);
+
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::UnexpectedEof),
+            "Track Namespace 値の途中終端は UnexpectedEof であること"
+        );
+    }
+
+    #[test]
+    fn fill_parameters_inner_length_exceeding_is_key_value_formatting_error() {
+        use shiguredo_moqt::message_parameter::{PARAM_FILL_PARAMETERS, PARAM_SUBGROUP_FILTER};
+        use shiguredo_moqt::varint;
+
+        // 内側: count=1, delta=PARAM_SUBGROUP_FILTER、宣言長 10、データ 3 バイト
+        let mut inner = Vec::new();
+        varint::encode(1, &mut inner);
+        varint::encode(PARAM_SUBGROUP_FILTER, &mut inner);
+        varint::encode(10, &mut inner);
+        inner.extend_from_slice(&[0x01, 0x02, 0x03]);
+
+        // 外側: count=1, delta=PARAM_FILL_PARAMETERS, Length=inner.len(), inner
+        let mut buf = Vec::new();
+        varint::encode(1, &mut buf);
+        varint::encode(PARAM_FILL_PARAMETERS, &mut buf);
+        varint::encode(inner.len() as u64, &mut buf);
+        buf.extend_from_slice(&inner);
+
+        assert_eq!(
+            MessageParameters::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "message parameter value length exceeds remaining buffer"
+            )),
+            "FILL_PARAMETERS 内側の Length 超過も KEY_VALUE_FORMATTING_ERROR であること"
         );
     }
 

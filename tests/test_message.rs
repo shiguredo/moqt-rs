@@ -546,6 +546,35 @@ mod error_cases {
     }
 
     #[test]
+    fn subscribe_with_kvp_length_exceeding_payload_is_key_value_formatting_error() {
+        // payload 長は実際のバイト数と一致しているが、パラメータの KVP が宣言長 10 に対して
+        // 3 バイトしか持たない。外側フレームは正常で、Type を理解したうえで Length/Value が
+        // 直列化と一致しないため、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
+        // の MUST により KEY_VALUE_FORMATTING_ERROR になる。
+        let payload: Vec<u8> = vec![
+            0x00, // Request ID
+            0x01, 0x04, b'l', b'i', b'v', b'e', // Track Namespace (1 field)
+            0x03, b'c', b'a', b'm', // Track Name
+            0x01, // Number of Parameters
+            0x03, // delta = AUTHORIZATION_TOKEN
+            0x0A, // Length = 10
+            0x01, 0x02, 0x03, // 3 バイトしかない
+        ];
+        let mut wire = vec![0x03]; // MSG_SUBSCRIBE
+        wire.push((payload.len() >> 8) as u8);
+        wire.push(payload.len() as u8);
+        wire.extend_from_slice(&payload);
+
+        assert!(
+            matches!(
+                ControlMessage::decode(&wire),
+                Err(MessageError::KeyValueFormattingError(_))
+            ),
+            "KVP の宣言長超過は KEY_VALUE_FORMATTING_ERROR であること"
+        );
+    }
+
+    #[test]
     fn invalid_fetch_namespace() {
         // FETCH ペイロードの namespace フィールド数が後続バイトを超える場合は失敗する。
         // (旧形式の fetch_type バイトは namespace フィールド数として読まれるため、
