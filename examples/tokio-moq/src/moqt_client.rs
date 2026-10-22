@@ -101,7 +101,8 @@ pub(crate) enum BidiMessage {
     /// decode できる先頭メッセージのうち、本実装が扱う 4 種類以外を運ぶ。§6.3 (Session
     /// initialization) の 7 種類のうち未対応の 3 種類 (PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY
-    /// を送信済みなら GOING_AWAY) で拒否してセッションを維持し、7 種類以外は
+    /// を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix なら
+    /// DOES_NOT_EXIST) で拒否してセッションを維持し、7 種類以外は
     /// `PROTOCOL_VIOLATION` でセッションを閉じる。どちらの判定も `Session::recv_request` が
     /// 持つため、main ループはこの variant をそのまま `Session::recv_request` へ渡す。アプリへ
     /// 要求として渡さないのは、未対応 request にアプリが応答すると
