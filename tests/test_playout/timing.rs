@@ -549,6 +549,9 @@ fn audio_delay_feedback_returns_the_short_window_and_cumulative_backlog() {
         Some(5_700_000),
         Some(5_500_000),
     ));
+    // 材料化した隙間。閉ループはこれを穴の累積として目標を増やす根拠にする
+    stats.record_gap(30_000);
+    stats.record_gap(10_000);
 
     let feedback = stats.audio_delay_feedback(6_000_000);
     assert_eq!(feedback.at_us, 6_000_000, "観測した時刻を返すこと");
@@ -581,6 +584,15 @@ fn audio_delay_feedback_returns_the_short_window_and_cumulative_backlog() {
     );
     assert_eq!(feedback.backlog_misses, 1, "累積の捨てた数を返すこと");
     assert_eq!(feedback.backlog_us, 20_000, "累積の捨てた長さを返すこと");
+    assert_eq!(feedback.gap_count, 2, "累積の材料化した隙間の数を返すこと");
+    assert_eq!(
+        feedback.gap_us, 40_000,
+        "累積の材料化した隙間の長さを返すこと"
+    );
+    assert_eq!(
+        feedback.arrival_delay_floor_us, None,
+        "到着基準の再生の下限は計器では分からないため None にすること"
+    );
     // 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からない。購読側と時間軸が
     // 埋めるまで 0 である (閉ループは 0 を「圧縮なし」「経路は 100 ms 以内」とみなす)
     assert_eq!(
@@ -600,6 +612,89 @@ fn audio_delay_feedback_returns_the_short_window_and_cumulative_backlog() {
     );
     assert_eq!(later.backlog_misses, 1, "累積は窓に関係なく残ること");
     assert_eq!(later.backlog_us, 20_000);
+    assert_eq!(later.gap_count, 2, "隙間の累積も窓に関係なく残ること");
+    assert_eq!(later.gap_us, 40_000);
+}
+
+#[test]
+fn audio_delay_feedback_since_excludes_before_restart_and_snapshot_keeps_it() {
+    // 音声の再生を取り直したとき、再開前の遅れを新しい再生の制御へ混ぜない。表示用の分布と
+    // 累積は残すため、snapshot は過去の実績を消さない
+    let mut stats = AudioPlayoutTimingStats::with_window_us(AUDIO_PLAYOUT_TIMING_WINDOW_US);
+    // 遅れ 100 ms (予定 100 / 鳴り始め 200)
+    stats.record_play(play(
+        100_000,
+        Some(100_000),
+        200_000,
+        20_000,
+        AudioPlayoutBasis::Timestamp,
+    ));
+    // 遅れ 100 ms (予定 120 / 鳴り始め 220)
+    stats.record_play(play(
+        120_000,
+        Some(120_000),
+        220_000,
+        20_000,
+        AudioPlayoutBasis::Timestamp,
+    ));
+    // 遅れ 0 ms (予定 250 / 鳴り始め 250)
+    stats.record_play(play(
+        200_000,
+        Some(250_000),
+        250_000,
+        20_000,
+        AudioPlayoutBasis::Timestamp,
+    ));
+    // 累積は再開の前後で残る
+    stats.record_miss(miss(210_000, AudioMissReason::Backlog, 20_000, None, None));
+    stats.record_gap(10_000);
+
+    // 窓の先頭から求めた分布は、3 件の遅れの p50 (0 / 100 / 100) で 100 ms になる
+    assert_eq!(
+        stats.audio_delay_feedback(220_000).lateness_us,
+        Some(TimingSummary {
+            p50: 100_000,
+            p95: 100_000,
+            max: 100_000,
+        }),
+        "再開前の実績を含む分布を返すこと"
+    );
+    // 再開時刻 (150 ms) より後の記録だけを使うと、遅れ 0 の 1 件だけになる
+    let after_restart = stats.audio_delay_feedback_since(220_000, 150_000);
+    assert_eq!(
+        after_restart.lateness_us,
+        Some(TimingSummary {
+            p50: 0,
+            p95: 0,
+            max: 0,
+        }),
+        "再開後の分布だけで制御すること"
+    );
+    assert_eq!(
+        after_restart.backlog_misses, 1,
+        "累積は since に関係なく返すこと"
+    );
+    assert_eq!(
+        after_restart.gap_count, 1,
+        "隙間の累積も since に関係なく返すこと"
+    );
+    // 表示用の分布は過去の実績を消さない
+    assert_eq!(
+        stats.snapshot(220_000).lateness_us,
+        Some(TimingSummary {
+            p50: 100_000,
+            p95: 100_000,
+            max: 100_000,
+        }),
+        "表示用の過去の実績を消さないこと"
+    );
+
+    // since が窓の先頭より古いときは、窓の先頭から使う (分布が窓より広がらない)
+    assert_eq!(
+        stats.audio_delay_feedback_since(220_000, 0).lateness_us,
+        stats.audio_delay_feedback(220_000).lateness_us,
+        "since が窓の先頭より古ければ窓の先頭から使うこと"
+    );
 }
 
 #[test]

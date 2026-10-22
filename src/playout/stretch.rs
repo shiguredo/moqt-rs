@@ -290,9 +290,11 @@ fn full_rate_correlation_squared(
 /// 440 Hz の周期 109.09 サンプルを 108 としか求められず、100 ms の穴で 0.44 周期ずれて次の
 /// 音との段差が振幅の 195 % になる (端数まで求めると 1.6 % になる)。
 ///
-/// 放物線の頂点は細探索した 3 点から求めるため、最大が細探索の端にあるときは求められない。
-/// 端では格子のままにする (端で外挿すると探索の下限の外側のずらし幅を返し、周期が 0.5
-/// サンプルずれる)。400 Hz の周期 120 サンプルは細探索の下限そのものであり、この経路を通る。
+/// 放物線の頂点には、実際に評価した隣接 3 点の相関を使う。細探索の範囲は上下へ 1 サンプル
+/// ずつ広げて評価し、端で最大になったときは評価していない点を最大値で代用して架空の頂点を
+/// 作らず、格子のまま返す (端で外挿すると評価していないずらし幅を返し、周期が 0.5 サンプル
+/// ずれる)。整数ラグが丸め誤差の範囲で完全相関のときも、有限窓の前後の相関は非対称に
+/// なり得るため、頂点へずらさず整数の周期を維持する。
 ///
 /// 窓の長さは [`TIME_STRETCH_TAIL_CORRELATION_LEN`] に固定し、窓の長さ + ずらし幅が音の長さに
 /// 収まる範囲でずらし幅の上限を最大化する。音が短すぎる (窓の長さが取れない)、正の相関が
@@ -331,20 +333,21 @@ fn find_tail_period(
     };
     // 粗いずらし幅の周辺 (±1 格子) を元のサンプルレートで評価する
     let length = reference.len();
+    // 間引き率は整数のレートだけに対応するため、moqt-js の Math.floor に当たる切り捨ては
+    // 起きない (整数の範囲で同じ値になる)
     let full_window =
         (window * filter.factor).min(length.saturating_sub(TIME_STRETCH_MIN_LAG * filter.factor));
     let center = coarse_lag * filter.factor;
-    if full_window == 0 {
+    // 放物線補間に必要な隣接 1 サンプルも実際に評価できるよう、細探索の下限は切り捨てて
+    // さらに 1 サンプル手前へ、上限は切り上げてさらに 1 サンプル先へ広げる。丸めで探索の
+    // 内側へ寄せると、端数を含む正しい周期が探索の外へ落ちる。
+    let first_lag = (TIME_STRETCH_MIN_LAG * filter.factor)
+        .max(center.saturating_sub(filter.factor))
+        .saturating_sub(1)
+        .max(1);
+    let last_lag = (center + filter.factor + 1).min(length.saturating_sub(full_window));
+    if full_window == 0 || last_lag < first_lag {
         // 元のサンプルレートで評価できない (音が短すぎる) ときは粗い格子のまま使う
-        return Some(TailPeriod {
-            samples: center as f64,
-            correlation_squared: coarse_correlation_squared,
-        });
-    }
-    let first_lag = (TIME_STRETCH_MIN_LAG * filter.factor).max(center - filter.factor);
-    let last_lag = (length - full_window).min(center + filter.factor);
-    if last_lag < first_lag {
-        // 元のサンプルレートで評価できる幅が無いときは粗い格子のまま使う
         return Some(TailPeriod {
             samples: center as f64,
             correlation_squared: coarse_correlation_squared,
@@ -364,12 +367,9 @@ fn find_tail_period(
         // 元のサンプルレートでは正の相関が取れない (粗い格子でだけ相関があった)
         return None;
     };
-    // ピークの前後と最大の 3 点から放物線の頂点を求めて端数まで詰める。頂点は 3 点が揃わないと
-    // 求められないため、最大が細探索の端にあるときは格子のままにする。端で外挿すると、評価して
-    // いないずらし幅 (探索の下限の外側) を返して周期が 0.5 サンプルずれ、穴の終わりで位相が
-    // 合わなくなる (実測: 48 kHz、20 ms のフレーム、400 Hz = 周期 120 サンプルは細探索の下限
-    // そのもので、穴 100 ms の段差が振幅の 85.2 % になった)。上に凸でない (曲率が 0 以上) ときも
-    // 頂点を求められないため、同じく格子のままにする
+    // ピークの前後と最大の 3 点から放物線の頂点を求めて端数まで詰める。最大が細探索の端に
+    // あるときは前後の点を評価していないため、最大値で代用して架空の頂点を作らず、格子の
+    // ままにする。上に凸でない (曲率が 0 以上) ときも同じく格子のままにする
     let has_both_neighbors = best_lag > first_lag && best_lag < last_lag;
     let before = if has_both_neighbors {
         full_rate_correlation_squared(reference, length, full_window, best_lag - 1).unwrap_or(0.0)
@@ -382,7 +382,11 @@ fn find_tail_period(
         best_correlation_squared
     };
     let curvature = before - 2.0 * best_correlation_squared + after;
-    let offset = if has_both_neighbors && curvature < 0.0 {
+    // 整数ラグが丸め誤差の範囲で完全相関なら、その周期を維持する。有限窓の前後の相関は
+    // 非対称になり得るため、正しい整数周期まで放物線の頂点へずらすと位相を壊す。この
+    // モジュールは相関を二乗で持つため、閾値も二乗で比べる
+    let exact_period = best_correlation_squared >= (1.0 - 1e-12) * (1.0 - 1e-12);
+    let offset = if !exact_period && has_both_neighbors && curvature < 0.0 {
         0.5 * (before - after) / curvature
     } else {
         0.0
@@ -423,6 +427,9 @@ fn analyze(reference: &[f32], sample_rate: u32, splice: usize) -> Option<PitchPe
         *sample = downsampled_at(reference, &filter, sum, index);
     }
     let lag = find_lag(&scratch, max_lag);
+    // 4 kHz の格子の間引き率はこのモジュールが対応するレートではすべて整数であり、周期は
+    // 整数のサンプル数になる。moqt-js は 44.1 kHz の解析用に非整数の間引き率を持ち、周期を
+    // 元のサンプルレートへ戻すときに四捨五入するが、その換算は持たない
     let samples = lag * filter.factor;
     if samples > splice {
         // ピッチ周期が音の中央に収まらない (音が短すぎる)

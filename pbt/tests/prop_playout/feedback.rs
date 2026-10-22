@@ -12,7 +12,8 @@ use shiguredo_moqt::playout::feedback::{
     AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US, AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US,
     AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US,
     AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND,
-    AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_INTERVAL_US,
+    AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND, AUDIO_DELAY_FEEDBACK_GAP_QUIET_US,
+    AUDIO_DELAY_FEEDBACK_INTERVAL_US, AUDIO_DELAY_FEEDBACK_MARGIN_US,
     AUDIO_DELAY_FEEDBACK_MAX_STEP_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
     AUDIO_DELAY_FEEDBACK_MAX_US, AUDIO_DELAY_FEEDBACK_MIN_STEP_US, AUDIO_DELAY_FEEDBACK_MIN_US,
     AUDIO_DELAY_FEEDBACK_TOLERANCE_US, AudioDelayFeedback, AudioDelayFeedbackReason,
@@ -42,6 +43,11 @@ const BACKLOG_WEIGHTS: [u32; 4] = [5, 3, 2, 2];
 /// 圧縮の増分の選び方の重み (無し / 閾値未満 / 閾値を超える / 大きく超える)
 const COMPRESSION_WEIGHTS: [u32; 4] = [5, 3, 3, 1];
 
+/// 穴の累積の選び方の重み (増えない / 小さく増える / 大きく増える / 0 に戻る)
+///
+/// 「0 に戻る」は購読のやり直しで累積が 0 に戻る場合であり、負の差で増やさないことを見る。
+const GAP_WEIGHTS: [u32; 4] = [5, 3, 2, 2];
+
 /// 1 件の値だけを持つ分布
 fn summary(value_us: i64) -> TimingSummary {
     TimingSummary {
@@ -53,7 +59,8 @@ fn summary(value_us: i64) -> TimingSummary {
 
 /// 観測を 1 つ作る
 ///
-/// 圧縮は無し (0)、揺らぎだけの目標は 0 (経路は 100 ms 以内で足りている) として作る。
+/// 圧縮は無し (0)、揺らぎだけの目標は 0 (経路は 100 ms 以内で足りている)、穴も無し、
+/// 到着基準の追加の下限も無しとして作る。
 fn observation(
     at_us: i64,
     lateness_p50_us: Option<i64>,
@@ -70,6 +77,9 @@ fn observation(
         underrun_ms: 0,
         compression_us: 0,
         jitter_target_us: 0,
+        gap_count: 0,
+        gap_us: 0,
+        arrival_delay_floor_us: None,
     }
 }
 
@@ -243,7 +253,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     jitter_us.min(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
                     "観測を受ける前は学習値をそのまま使う"
                 );
-                let applied_ceiling_us = feedback.snapshot().applied_ceiling_us;
+                let applied_ceiling_us = feedback.snapshot(0).applied_ceiling_us;
                 assert_eq!(
                     applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
                     "観測を受ける前は上限を広げない"
@@ -281,7 +291,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         saw_ceiling_below_floor.set(true);
                     }
                     // 上限を掛けた時点で、既に超えていればその場で収まる
-                    let snapshot = feedback.snapshot();
+                    let snapshot = feedback.snapshot(0);
                     let (lower_us, upper_us) =
                         target_limits(Some(ceiling_us), snapshot.applied_ceiling_us);
                     assert!(
@@ -297,7 +307,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     feedback.set_ceiling_us(None);
                     saw_ceiling_removed.set(true);
                     assert_eq!(feedback.ceiling_us(), None, "上限の解除が反映されない");
-                    let snapshot = feedback.snapshot();
+                    let snapshot = feedback.snapshot(0);
                     let (lower_us, upper_us) =
                         target_limits(None, snapshot.applied_ceiling_us);
                     assert!(
@@ -426,7 +436,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                     );
 
                     let previous_target_us = feedback.feedback_target_us();
-                    let previous_adjustments = feedback.snapshot().adjustments;
+                    let previous_adjustments = feedback.snapshot(0).adjustments;
                     let elapsed_us = last_update_at_us
                         .map(|last_update_at_us| now_us.saturating_sub(last_update_at_us).max(0));
                     let interval_passed = elapsed_us
@@ -478,7 +488,7 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                         }
                     }
 
-                    let snapshot = feedback.snapshot();
+                    let snapshot = feedback.snapshot(0);
                     let ceiling_us = feedback.ceiling_us();
                     // 適用する上限も、写し取った状態と同じ規則で求める
                     let expected_applied_ceiling_us =
@@ -664,6 +674,10 @@ fn target_stays_within_the_limits_and_moves_by_the_rules() -> noprop::TestResult
                                 saw_waiting_for_the_first_settled.set(true);
                             }
                         }
+                        AudioDelayFeedbackReason::Gap => {
+                            // このテストは穴を渡していない (穴の分岐は別のテストで見る)
+                            panic!("穴を渡していないのに理由が穴になった: {snapshot:?}");
+                        }
                         AudioDelayFeedbackReason::Underrun => {
                             // このテストは枯れを渡していない (枯れの分岐は別のテストで見る)
                             panic!("枯れを渡していないのに理由が枯れになった: {snapshot:?}");
@@ -807,7 +821,7 @@ fn the_ceiling_widens_with_compression_and_returns_when_quiet() -> noprop::TestR
                 saw_widened.set(true);
             }
             assert_eq!(
-                feedback.snapshot().applied_ceiling_us,
+                feedback.snapshot(0).applied_ceiling_us,
                 applied_ceiling_us(ceiling_us, widened),
                 "圧縮が続く区間で適用する上限が規則と違う: compression_span={compression_span} span={span_us} widened={widened} {ceiling_us:?}"
             );
@@ -858,13 +872,13 @@ fn the_ceiling_widens_with_compression_and_returns_when_quiet() -> noprop::TestR
                 saw_released.set(true);
             }
             assert_eq!(
-                feedback.snapshot().applied_ceiling_us,
+                feedback.snapshot(0).applied_ceiling_us,
                 applied_ceiling_us(ceiling_us, widened),
                 "静かな区間で適用する上限が規則と違う: index={index} disturbed={disturbed} widened={widened} {ceiling_us:?}"
             );
             // 内部の目標は、常に適用する上限を超えない
             assert!(
-                feedback.feedback_target_us() <= feedback.snapshot().applied_ceiling_us,
+                feedback.feedback_target_us() <= feedback.snapshot(0).applied_ceiling_us,
                 "内部の目標が適用する上限を超えた"
             );
         }
@@ -911,13 +925,14 @@ fn underruns_raise_the_target_within_the_ceiling() -> noprop::TestResult {
             ));
         }
         assert_eq!(
-            feedback.snapshot().applied_ceiling_us,
+            feedback.snapshot(0).applied_ceiling_us,
             AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
             "上限を広げられていない"
         );
         let mut now_us = 3 * AUDIO_DELAY_FEEDBACK_INTERVAL_US;
-        // 枯れで上限まで上げる場合を確実に通す (この後の増分が上限で切られることも見る)
-        for _ in 0..2 {
+        // 枯れで上限まで上げる場合を確実に通す (この後の増分が上限で切られることも見る)。
+        // 初期値は下限 (50 ms) であるため、40 ms ずつ 3 回で 160 ms に達する
+        for _ in 0..3 {
             now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
             feedback.update(observation_with_underrun(now_us, 1_000));
         }
@@ -945,7 +960,7 @@ fn underruns_raise_the_target_within_the_ceiling() -> noprop::TestResult {
                 |ctx| noprop::sample_usize_in(ctx, 0..=1_000) as i64,
             );
             feedback.update(observation_with_underrun(now_us, underrun_ms));
-            let snapshot = feedback.snapshot();
+            let snapshot = feedback.snapshot(0);
             let target_us = feedback.feedback_target_us();
             assert!(
                 target_us <= snapshot.applied_ceiling_us,
@@ -996,6 +1011,316 @@ fn underruns_raise_the_target_within_the_ceiling() -> noprop::TestResult {
     assert!(
         saw_ceiling.get() > 0,
         "上限に張り付く場合を通っていない\n{runner}"
+    );
+    Ok(())
+}
+
+/// 穴で広げた上限の保持中も、現在の明示上限を適用する
+///
+/// 穴より前に明示上限を設定しても、保持中に下げても、次の適用値は同じ予算に収まる。
+/// 揺らぎだけの目標が内部目標より大きい場合を通し、内部目標だけの切り下げでは通らない
+/// 検証にする (moqt-js の `audioDelayFeedback.prop.ts` と同じ)。
+#[test]
+fn gap_ceiling_uses_the_current_explicit_ceiling() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        // 既定の上限 (100 ms) 以上、artifact ceiling (160 ms) 未満の予算を選ぶ
+        let ceiling_us =
+            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US + noprop::sample_usize_in(ctx, 0..60_000) as i64;
+        let mut feedback = AudioDelayFeedback::new();
+        // 穴より前に広げた状態を作る。揺らぎだけの目標の方を大きくし、内部目標だけを
+        // 切り下げても通らない検証にする
+        for index in 0..2 {
+            let mut observation =
+                observation(index as i64 * AUDIO_DELAY_FEEDBACK_INTERVAL_US, None, 0, 0);
+            observation.jitter_target_us = AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US;
+            observation.gap_count = index as u64;
+            observation.gap_us = index as i64 * 60_000;
+            feedback.update(observation);
+        }
+        assert_eq!(
+            feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US),
+            AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
+            "穴で広げた上限まで実際に使うこと"
+        );
+        feedback.set_ceiling_us(Some(ceiling_us));
+        assert_eq!(
+            feedback.target_delay_us(AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US),
+            ceiling_us,
+            "保持中の穴の上限にも新しい予算を使うこと: ceiling={ceiling_us}"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 穴で広げた上限の保持と、穴が続く間の artifact ceiling の広がりを検証する
+///
+/// 観測を 1 秒間隔で渡す。穴で広げた上限は最後の穴から 5 秒の間だけ保持し、穴が 2 秒続くと
+/// artifact ceiling を広げ、穴が止まって 15 秒続くと 100 ms へ戻す。明示設定があるときは、
+/// 広げる分もその値で切る。
+#[test]
+fn gap_ceiling_holds_and_returns_by_the_rules() -> noprop::TestResult {
+    let saw_gap = Cell::new(false);
+    let saw_hold = Cell::new(false);
+    let saw_release = Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        // 明示設定を混ぜる (穴の上限も artifact ceiling もこの値で切る)
+        let ceiling_us = match noprop::sample_usize_in(ctx, 0..3) {
+            0 => None,
+            1 => Some(
+                noprop::sample_usize_in(
+                    ctx,
+                    0..=AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US as usize,
+                ) as i64,
+            ),
+            _ => {
+                Some(noprop::sample_usize_in(ctx, 0..=AUDIO_DELAY_FEEDBACK_MAX_US as usize) as i64)
+            }
+        };
+        // 穴や圧縮で広げてよい上限
+        let artifact_limit_us = AUDIO_DELAY_FEEDBACK_MAX_TARGET_US.max(
+            AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US
+                .min(ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US)),
+        );
+        let mut feedback = AudioDelayFeedback::new();
+        if let Some(ceiling_us) = ceiling_us {
+            feedback.set_ceiling_us(Some(ceiling_us));
+        }
+
+        // 操作列を作る。最初の 3 回の穴で artifact ceiling を広げ、その直後の穴なしの観測で
+        // 保持に入ることを確かめる。最後に 20 秒の静かな区間を置き、戻ることを保証する
+        let mut steps = vec![
+            // (累積の穴の数, 累積の穴の長さ, 揺らぎだけの目標遅延)
+            (1, 20_000, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+            (2, 40_000, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+            (3, 60_000, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+            (3, 60_000, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+        ];
+        let mut gap_count = 3u64;
+        let mut gap_us = 60_000i64;
+        for _ in 0..noprop::sample_usize_in(ctx, 0..=12) {
+            match noprop::sample_weighted_index(ctx, &GAP_WEIGHTS) {
+                0 => {}
+                1 => {
+                    gap_count += 1;
+                    gap_us += noprop::sample_usize_in(ctx, 1_000..=40_000) as i64;
+                }
+                2 => {
+                    gap_count += noprop::sample_usize_in(ctx, 2..=3) as u64;
+                    gap_us += noprop::sample_usize_in(ctx, 60_000..=200_000) as i64;
+                }
+                _ => {
+                    // 購読のやり直しで累積が 0 に戻った状態 (負の差で増やさない)
+                    gap_count = 0;
+                    gap_us = 0;
+                }
+            }
+            let jitter_target_us = noprop::sample_with_boundaries(
+                ctx,
+                &[
+                    0,
+                    AUDIO_DELAY_FEEDBACK_MAX_TARGET_US - 1,
+                    AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+                    AUDIO_DELAY_FEEDBACK_MAX_TARGET_US + 1,
+                ],
+                noprop::Ratio::one_nth(4),
+                |ctx| {
+                    noprop::sample_usize_in(
+                        ctx,
+                        0..=AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US as usize,
+                    ) as i64
+                },
+            );
+            steps.push((gap_count, gap_us, jitter_target_us));
+        }
+        // 静かな区間。穴は出さず、揺らぎだけの目標も 100 ms 以下にする (戻る条件を満たす)
+        for _ in 0..20 {
+            steps.push((gap_count, gap_us, 0));
+        }
+
+        // SUT と同じ規則で、穴で広げた上限と artifact ceiling を写し取る
+        let mut previous_gap_count = 0u64;
+        let mut previous_gap_us = 0i64;
+        let mut last_gap_at_us: Option<i64> = None;
+        let mut gap_ceiling_us: Option<i64> = None;
+        let mut gap_ceiling_until_us = 0i64;
+        let mut widened = false;
+        let mut compression_streak_us = 0i64;
+        let mut quiet_streak_us = 0i64;
+        let mut last_control_at_us: Option<i64> = None;
+        let mut now_us = 0i64;
+
+        for (step_index, (step_gap_count, step_gap_us, jitter_target_us)) in
+            steps.iter().enumerate()
+        {
+            now_us += AUDIO_DELAY_FEEDBACK_INTERVAL_US;
+            let step_gap_count = *step_gap_count;
+            let step_gap_us = *step_gap_us;
+            let jitter_target_us = *jitter_target_us;
+            let gap_delta = step_gap_count.saturating_sub(previous_gap_count);
+            let gap_us_delta = step_gap_us.saturating_sub(previous_gap_us).max(0);
+            let span_us = last_control_at_us
+                .map(|last_control_at_us| now_us.saturating_sub(last_control_at_us))
+                .unwrap_or(0);
+            let mut observation = observation(
+                now_us,
+                Some(AUDIO_DELAY_FEEDBACK_TOLERANCE_US),
+                0,
+                0,
+            );
+            observation.gap_count = step_gap_count;
+            observation.gap_us = step_gap_us;
+            observation.jitter_target_us = jitter_target_us;
+            let previous_target_us = feedback.feedback_target_us();
+            let previous_adjustments = feedback.snapshot(0).adjustments;
+            // 穴への対処の基点 (SUT と同じく、今回の観測を反映する前の実際の深さ)
+            let previous_applied_us = feedback.target_delay_us(jitter_target_us).max(0);
+
+            // 穴 1 個で広げる上限のモデル (SUT と同じ式)
+            if gap_delta > 0 {
+                let widened_gap_us = artifact_limit_us.min(
+                    previous_applied_us
+                        .saturating_add(gap_us_delta)
+                        .saturating_add(AUDIO_DELAY_FEEDBACK_MARGIN_US)
+                        .max(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+                );
+                gap_ceiling_us = Some(gap_ceiling_us.unwrap_or(0).max(widened_gap_us));
+                gap_ceiling_until_us =
+                    now_us.saturating_add(AUDIO_DELAY_FEEDBACK_GAP_QUIET_US);
+                last_gap_at_us = Some(now_us);
+            } else if gap_ceiling_us.is_some() && now_us >= gap_ceiling_until_us {
+                gap_ceiling_us = None;
+            }
+            // artifact ceiling のモデル (圧縮は 0 である)
+            if gap_delta > 0 {
+                compression_streak_us = compression_streak_us.saturating_add(span_us);
+                quiet_streak_us = 0;
+            } else if jitter_target_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US {
+                quiet_streak_us = quiet_streak_us.saturating_add(span_us);
+                compression_streak_us = 0;
+            } else {
+                compression_streak_us = 0;
+                quiet_streak_us = 0;
+            }
+            let was_widened = widened;
+            if !widened && compression_streak_us >= AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US {
+                widened = true;
+            } else if widened && quiet_streak_us >= AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US {
+                widened = false;
+            }
+            if was_widened && !widened {
+                saw_release.set(true);
+            }
+
+            feedback.update(observation);
+            last_control_at_us = Some(now_us);
+            previous_gap_count = step_gap_count;
+            previous_gap_us = step_gap_us;
+
+            let snapshot = feedback.snapshot(jitter_target_us);
+            // 適用する上限は、artifact ceiling と穴で広げた上限の大きい方である
+            let expected_applied_ceiling_us = (if widened {
+                artifact_limit_us
+            } else {
+                AUDIO_DELAY_FEEDBACK_MAX_TARGET_US
+            })
+            .max(if gap_ceiling_us.is_some() && now_us < gap_ceiling_until_us {
+                gap_ceiling_us
+                    .unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US)
+                    .min(artifact_limit_us)
+            } else {
+                0
+            });
+            assert_eq!(
+                snapshot.applied_ceiling_us, expected_applied_ceiling_us,
+                "適用する上限が規則と違う: step={step_index} {snapshot:?}"
+            );
+            assert!(
+                (AUDIO_DELAY_FEEDBACK_MAX_TARGET_US..=artifact_limit_us)
+                    .contains(&snapshot.applied_ceiling_us),
+                "適用する上限が範囲の外に出た: step={step_index} {snapshot:?}"
+            );
+            let (lower_us, upper_us) = target_limits(ceiling_us, snapshot.applied_ceiling_us);
+            assert!(
+                (lower_us..=upper_us).contains(&snapshot.target_us),
+                "目標が上下限の外に出た: step={step_index} target={} lower={lower_us} upper={upper_us} {snapshot:?}",
+                snapshot.target_us
+            );
+            // 実際に使う値は、受け取った揺らぎだけの目標との大きい方を適用の上限で切った値
+            assert_eq!(
+                snapshot.jitter_target_us, jitter_target_us,
+                "揺らぎだけの目標をそのまま出す: step={step_index} {snapshot:?}"
+            );
+            assert_eq!(
+                snapshot.applied_us,
+                feedback.target_delay_us(jitter_target_us),
+                "実際に使う値が snapshot と違う: step={step_index} {snapshot:?}"
+            );
+            assert!(
+                snapshot.applied_us <= snapshot.applied_ceiling_us,
+                "実際に使う値が適用する上限を超えた: step={step_index} {snapshot:?}"
+            );
+
+            if gap_delta > 0 {
+                saw_gap.set(true);
+                assert_eq!(
+                    snapshot.reason,
+                    AudioDelayFeedbackReason::Gap,
+                    "穴が理由にならない: step={step_index} {snapshot:?}"
+                );
+                assert_eq!(
+                    snapshot.adjustments,
+                    previous_adjustments + u64::from(snapshot.last_change_us != 0),
+                    "動かした回数の数え方が変わった: step={step_index} {snapshot:?}"
+                );
+            } else if last_gap_at_us.is_some_and(|last_gap_at_us| {
+                now_us.saturating_sub(last_gap_at_us) < AUDIO_DELAY_FEEDBACK_GAP_QUIET_US
+            }) {
+                // 穴の後のホールド中は、遅れが許容内でも下げない
+                saw_hold.set(true);
+                assert_eq!(
+                    snapshot.reason,
+                    AudioDelayFeedbackReason::Waiting,
+                    "穴の後のホールドで待たない: step={step_index} {snapshot:?}"
+                );
+                assert_eq!(
+                    snapshot.target_us, previous_target_us,
+                    "穴の後のホールドで目標が動いた: step={step_index} {snapshot:?}"
+                );
+                assert_eq!(
+                    snapshot.adjustments, previous_adjustments,
+                    "穴の後のホールドで動かした回数が増えた: step={step_index} {snapshot:?}"
+                );
+            } else {
+                assert_eq!(
+                    snapshot.reason,
+                    AudioDelayFeedbackReason::Settled,
+                    "穴が無くホールドの外では減らす判断へ進む: step={step_index} {snapshot:?}"
+                );
+            }
+        }
+
+        // 静かな区間の最後では、artifact ceiling も穴で広げた上限も戻っている
+        assert_eq!(
+            feedback.snapshot(0).applied_ceiling_us,
+            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
+            "静かな状態が続いた後に上限が戻っていない"
+        );
+        Ok(())
+    })?;
+    assert!(
+        saw_gap.get(),
+        "穴で目標を上げる場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_hold.get(),
+        "穴の後のホールドで下げない場合を通っていない\n{runner}"
+    );
+    assert!(
+        saw_release.get(),
+        "静かな状態が続いて上限を戻す場合を通っていない\n{runner}"
     );
     Ok(())
 }

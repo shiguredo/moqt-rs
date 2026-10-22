@@ -945,19 +945,6 @@ async fn resubscribe_tracks(
     })
 }
 
-/// パイプラインを実行する
-///
-/// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
-/// `frame_tx` と `audio_tx` はデコード済みフレームの受け渡しに使う。再生しない
-/// 呼び出し側は受け取ったフレームを破棄すればよい。
-/// `task_monitor` は生成されるタスクのメトリクスを収集する。
-/// `shutdown_monitor` は graceful shutdown の契機を受信する。
-/// `display_backlog` は表示待ちの映像フレーム数であり、閾値を超えると古い group を捨てる。
-/// 録画中は読み切って保存するため捨てない。
-/// `player_stop` は再生側の終了を伝える。sender が drop されるとパイプラインは停止する。
-/// `target_latency_ms` はカタログの `targetLatency` を渡すセルであり、値があるときだけ格納する
-/// (対象は実際に購読する track の `renderGroup` に属する track。§5.2.8)。購読する group が
-/// 複数あるときは最大値をすべての購読 track に掛ける。
 /// 映像トラックの SUBSCRIBE に載せるメッセージパラメータ
 ///
 /// 購読の確立と同時に新しい Group の開始を要求する。`NEW_GROUP_REQUEST=0` は「購読者が
@@ -1071,6 +1058,32 @@ async fn fetch_recent_groups(
     }
 }
 
+/// 音声だけを購読しているか
+///
+/// 映像トラックを購読しない構成 (catalog に無い、または `--no-video`) で音声だけが有効な
+/// とき true である。音声の再生はこのときだけ到着基準の再生の遅れに下限を足し、目標の
+/// 時刻を守らない並べ方にする (プレイヤーの `AudioPlayoutAssembly::set_audio_only`)。
+fn is_audio_only_subscription(subscribe_video: bool, subscribe_audio: bool) -> bool {
+    subscribe_audio && !subscribe_video
+}
+
+/// パイプラインを実行する
+///
+/// `config` は接続先・トランスポート・購読するトラック・録画と再生の指定を持つ。
+/// `frame_tx` と `audio_tx` はデコード済みフレームの受け渡しに使う。再生しない
+/// 呼び出し側は受け取ったフレームを破棄すればよい。
+/// `task_monitor` は生成されるタスクのメトリクスを収集する。
+/// `shutdown_monitor` は graceful shutdown の契機を受信する。
+/// `display_backlog` は表示待ちの映像フレーム数であり、閾値を超えると古い group を捨てる。
+/// 録画中は読み切って保存するため捨てない。
+/// `player_stop` は再生側の終了を伝える。sender が drop されるとパイプラインは停止する。
+/// `target_latency_ms` はカタログの `targetLatency` を渡すセルであり、値があるときだけ格納する
+/// (対象は実際に購読する track の `renderGroup` に属する track。§5.2.8)。購読する group が
+/// 複数あるときは最大値をすべての購読 track に掛ける。
+/// `video_subscribed` は映像トラックを購読しているかをプレイヤーへ渡すセルであり、
+/// カタログを読み終えて購読の有無が決まった時点で格納する。プレイヤーは音声だけの購読で
+/// 到着基準の再生の遅れに下限を足し、目標の時刻を守らない並べ方にする。カタログを読む前の
+/// 初期値は呼び出し側が決める (映像があるものとして扱う)。
 #[expect(clippy::too_many_arguments)]
 pub async fn run(
     mut config: Config,
@@ -1080,6 +1093,7 @@ pub async fn run(
     mut shutdown_monitor: tokio_utils::ShutdownMonitor,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     target_latency_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_subscribed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     mut player_stop: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     // 再生を行わない場合はデコードをスキップし、録画だけを行う
@@ -1226,6 +1240,15 @@ pub async fn run(
             "no tracks to subscribe (catalog does not provide enabled video/audio track)"
                 .to_string(),
         ));
+    }
+    // 映像トラックを購読しているかをプレイヤーへ渡す。音声だけの購読では、プレイヤーが
+    // 到着基準の再生の遅れに下限を足し、目標の時刻を守らない並べ方にする
+    let audio_only_subscription = is_audio_only_subscription(subscribe_video, subscribe_audio);
+    video_subscribed.store(subscribe_video, std::sync::atomic::Ordering::Relaxed);
+    if audio_only_subscription {
+        tracing::info!(
+            "Subscribing to the audio track only; the audio playout uses the audio-only arrival delay floor"
+        );
     }
 
     // カタログの targetLatency をプレイヤーへ渡す。プレイヤーは時間軸の表示の遅れの下限として
@@ -8002,6 +8025,30 @@ mod tests {
         assert_eq!(
             counters.before_boundary_objects, 0,
             "境界より後だけを届けるため境界以下では数えないこと"
+        );
+    }
+
+    /// 音声だけの購読かどうかの判定
+    ///
+    /// 映像トラックを購読しない構成で音声だけが有効なときだけ true になる。プレイヤーは
+    /// このときだけ到着基準の再生の遅れに下限を足し、目標の時刻を守らない。
+    #[test]
+    fn audio_only_subscription_requires_audio_without_video() {
+        assert!(
+            is_audio_only_subscription(false, true),
+            "映像を購読せず音声だけを購読するときは音声だけの再生であること"
+        );
+        assert!(
+            !is_audio_only_subscription(true, true),
+            "映像も購読しているときは音声だけの再生ではないこと"
+        );
+        assert!(
+            !is_audio_only_subscription(false, false),
+            "何も購読していないときは音声だけの再生ではないこと"
+        );
+        assert!(
+            !is_audio_only_subscription(true, false),
+            "映像だけを購読しているときは音声だけの再生ではないこと"
         );
     }
 }

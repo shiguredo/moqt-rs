@@ -259,8 +259,8 @@ pub struct AudioPlayoutTimingSnapshot {
 /// 目標遅延を閉ループで決めるための観測
 ///
 /// [`AudioPlayoutTimingStats::audio_delay_feedback`] が返す。分布は短い窓
-/// ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値から求める。捨てた量は購読の開始からの累積
-/// であり、差を取るのは呼び出し側の仕事である。
+/// ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値から求める。捨てた量と、材料化した隙間の累積は
+/// 購読の開始からの値であり、差を取るのは呼び出し側の仕事である。
 ///
 /// 圧縮 (時間圧縮) の増分と、出力が枯れた長さと、揺らぎだけから求めた目標遅延は、この計器
 /// では分からない。圧縮と枯れは購読側 (再生の経路) が、揺らぎだけの目標は時間軸
@@ -304,6 +304,23 @@ pub struct AudioDelayFeedbackObservation {
     /// 判断に使う。「圧縮が 0」だけでは、揺らぎが 100 ms を超えている経路で上限を戻した直後に
     /// 圧縮が再発する (往復になる)。この値が 100 ms 以下であることを戻す条件に加える。
     pub jitter_target_us: i64,
+    /// 購読の開始からの、材料化した隙間の数 (累積)
+    ///
+    /// 計器が [`AudioPlayoutTimingStats::record_gap`] で数えた累積である。閉ループは前回の
+    /// 観測との差を取る。moqt-js の `AudioDelayFeedbackObservation.gapCount` に対応する。
+    pub gap_count: u64,
+    /// 購読の開始からの、材料化した隙間の長さの合計 (マイクロ秒、累積)
+    ///
+    /// moqt-js の `AudioDelayFeedbackObservation.gapMs` に対応する。隙間は事後には埋められ
+    /// ないため、閉ループはこれを根拠に目標遅延を上げる以外に減らせない。
+    pub gap_us: i64,
+    /// 到着基準の再生に別の下限がある場合、その値から穴を吸収する分を増やす (マイクロ秒)
+    ///
+    /// moqt-js の `arrivalDelayFloorMs` に対応する。音声だけを購読するときに到着基準の再生へ
+    /// 足す下限 ([`crate::playout::timeline::TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US`]) が
+    /// これにあたる。購読側が音声だけのときに埋める。None なら閉ループの目標だけを実際の
+    /// 深さとみなす。
+    pub arrival_delay_floor_us: Option<i64>,
 }
 
 /// 記録した時刻の順に並んだ値の列 (マイクロ秒)
@@ -568,16 +585,45 @@ impl AudioPlayoutTimingStats {
     /// 表示用の分布 ([`AudioPlayoutTimingStats::snapshot`]) は直近の窓
     /// ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) である。目標を増やした結果がそこへ現れるまで
     /// には数秒かかるため、制御には短い窓 ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値を使う。
-    /// 捨てた量は購読の開始からの累積であり、差を取るのは呼び出し側の仕事である。
+    /// 捨てた量と隙間の累積は購読の開始からの値であり、差を取るのは呼び出し側の仕事である。
     ///
     /// 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からないため 0 にする。
     /// 呼び出し側 (購読側と時間軸) が埋めること
     /// ([`AudioDelayFeedbackObservation::compression_us`] と
     /// [`AudioDelayFeedbackObservation::jitter_target_us`] を参照)。
     pub fn audio_delay_feedback(&mut self, now_us: i64) -> AudioDelayFeedbackObservation {
+        self.audio_delay_feedback_since(
+            now_us,
+            now_us.saturating_sub(AUDIO_DELAY_FEEDBACK_WINDOW_US),
+        )
+    }
+
+    /// 目標遅延を閉ループで決めるための観測を求める (制御の開始時刻を指定する)
+    ///
+    /// 表示用の分布 ([`AudioPlayoutTimingStats::snapshot`]) と累積は残したまま、制御へ渡す
+    /// 分布だけを `since_us` より後の記録に限る。音声の再生を取り直したとき、再開前の遅れを
+    /// 新しい再生の制御へ混ぜないために使う (moqt-js の
+    /// `audioDelayFeedback(nowMs, sinceMs)` と同じ)。`since_us` は再開した時刻 (観測の
+    /// `at_us` と同じ軸のマイクロ秒) を渡す。
+    ///
+    /// 窓の先頭 (`now_us - AUDIO_DELAY_FEEDBACK_WINDOW_US`) より `since_us` が古いときは、
+    /// 窓の先頭から使う (分布が短い窓より広がることはない)。
+    ///
+    /// # 引数
+    ///
+    /// - `now_us`: 求める時刻 (マイクロ秒)
+    /// - `since_us`: 制御へ渡す分布の開始時刻。この時刻以前の記録は分布に使わない
+    pub fn audio_delay_feedback_since(
+        &mut self,
+        now_us: i64,
+        since_us: i64,
+    ) -> AudioDelayFeedbackObservation {
         // 表示用の分布と同じ長さまでを残し、制御にはその中でも短い窓を使う
         self.prune(now_us);
-        let control_min_us = now_us.saturating_sub(AUDIO_DELAY_FEEDBACK_WINDOW_US);
+        // 表示用の分布と累積は残す一方、再開前の遅れを新しい再生の制御へ混ぜない
+        let control_min_us = now_us
+            .saturating_sub(AUDIO_DELAY_FEEDBACK_WINDOW_US)
+            .max(since_us);
         AudioDelayFeedbackObservation {
             at_us: now_us,
             lateness_us: summarize_timings(self.latenesses_us.since(control_min_us)),
@@ -588,6 +634,11 @@ impl AudioPlayoutTimingStats {
             underrun_ms: 0,
             compression_us: 0,
             jitter_target_us: 0,
+            // 材料化した隙間を、閉ループが目標を増やす根拠として渡す
+            gap_count: self.gaps,
+            gap_us: self.gap_total_us,
+            // 到着基準の再生に別の下限がある場合、購読側が上書きする。計器では分からない
+            arrival_delay_floor_us: None,
         }
     }
 

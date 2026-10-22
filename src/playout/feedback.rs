@@ -12,6 +12,13 @@
 //!
 //! - 遅れが続くなら目標を増やす (乱れと、到着から鳴るまでの経路の分を吸収する)
 //! - 並べすぎで捨てたなら、捨てた長さぶんを吸収できるだけ増やす
+//! - 補間で埋まらなかった無音の穴が空いたなら、穴の長さぶんを吸収できるだけ増やす。穴は
+//!   事後には埋められないため、次に同じ揺らぎが来ても穴にならないよう、先に目標を増やす
+//! - 穴による増加は、圧縮が 2 秒続くのを待たずに適用する。穴 1 個でも「経路の揺らぎが
+//!   目標を超えた」証拠であり、穴は事後には埋められないためである。適用の上限を穴の長さ +
+//!   余白まで一時的に広げ、最後の穴から [`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] の間だけ保持する
+//! - 穴が空いた後は、最後の穴から [`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] が経つまで目標を
+//!   下げない (下げた直後に同じ揺らぎで穴が再発する往復を避ける)
 //! - 出力が枯れたなら、枯れた長さぶんを吸収できるだけ増やす。アンダーランは事後には
 //!   埋められないため、目標を上げる以外に減らせない
 //! - 遅れが許容の中に収まり、捨ても枯れも無いなら目標を減らす (必要以上に遅らせない)
@@ -54,11 +61,9 @@ use crate::playout::timing::AudioDelayFeedbackObservation;
 /// 値は到着基準で鳴らすときの遅れと、映像を合わせる先の両方に効くため、片方だけを変えると
 /// 基準を共有できない状態で A/V のずれが残る。
 ///
-/// 値は実リレーの実測で決めた (表と根拠は
-/// [`crate::playout::timeline::TIMELINE_AUDIO_DELAY_FLOOR_US`] にある)。観測が無い間の
-/// 揺らぎの学習の初期値 ([`crate::playout::delay::AUDIO_DELAY_START_MS`] の 80 ms) とは
-/// 別の値であり、揃える必要はない。初期値は閉ループの観測が始まる前にだけ使われ、閉ループは
-/// 観測が 1 つでも届けば目標を実測から動かす。
+/// 値は実リレーの実測で決めた安全下限である。閉ループはこの値から始める
+/// ([`AUDIO_DELAY_FEEDBACK_START_US`])。到着の分布がまだ無い間は、到着の推定の開始値
+/// ([`crate::playout::delay::AUDIO_DELAY_START_MS`] の 80 ms) を使って初期の音切れを抑える。
 pub const AUDIO_DELAY_FEEDBACK_MIN_US: i64 = 50_000;
 
 /// 目標遅延の上限 (マイクロ秒)
@@ -85,15 +90,16 @@ pub const AUDIO_DELAY_FEEDBACK_MAX_US: i64 = 300_000;
 ///
 /// この上限は閉ループの内部値にも掛ける。適用する値の上限と同じ値で切らないと、超えた分は
 /// 決して適用されないまま残り、遅れが収まってから減らし切るまでの時間だけ復帰が遅れる。
-/// 圧縮が続くときだけ [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] へ広げる
+/// 圧縮か穴が続くときだけ [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] へ広げる
 /// ([`AudioDelayFeedback::applied_ceiling_us`])。
 pub const AUDIO_DELAY_FEEDBACK_MAX_TARGET_US: i64 = 100_000;
 
-/// 圧縮 (時間圧縮 = 粗さ) が続くときにだけ使う上限 (マイクロ秒)
+/// 圧縮 (時間圧縮 = 粗さ) か穴 (補間で埋まらない無音) が続くときにだけ使う上限 (マイクロ秒)
 ///
 /// 既定の上限 ([`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] の 100 ms) を超えて目標を上げてよいのは、
-/// 圧縮が続いているときだけである。圧縮は「経路が 100 ms では足りていない」証拠であり、
-/// 目標を上げれば遅れて届く音が減って圧縮そのものが減る。moqt-js の実測 (2026-10-16、実リレー
+/// 圧縮か穴が続いているときだけである。どちらも「経路が 100 ms では足りていない」証拠であり、
+/// 目標を上げれば遅れて届く音が減って圧縮も穴も減る。穴は 1 回でもその揺らぎが目標を超えた
+/// 証拠になり、0.5 ms の穴でもクリックとして聞こえる。moqt-js の実測 (2026-10-16、実リレー
 /// 60 秒) では揺らぎだけの目標が 100〜340 ms に育ち、上限 100 ms が常時拘束されて時間圧縮が
 /// 60 秒で 550〜1000 ms (静かな回でも 556〜996 ms) 続いた。上限を静的に 160 ms へ上げると
 /// 圧縮は約 3 割減る回がある一方、鳴り始めが 115 ms から 155 ms へ +40 ms になる。160 ms は、
@@ -110,7 +116,9 @@ pub const AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US: i64 = 160_000;
 /// その半分以下である。不感帯 ([`AUDIO_PLAYOUT_STRETCH_MIN_US`]) を超える遅れが続く正常な
 /// 状態でも数 ms/秒 の圧縮は出るため (実測: 圧縮が 0 だった秒は 59 秒中 4〜7 秒)、これを
 /// 下回る圧縮で上限を上げると遅延の代償だけを払うことになる。逆に、これを超える圧縮が
-/// 続くなら 100 ms では足りていないと判断できる。
+/// 続くなら 100 ms では足りていないと判断できる。補間で埋まらなかった穴が空いたときは、
+/// この速さに関係なく「100 ms では足りていない」証拠になる (穴は事後には埋められず、
+/// クリックとして聞こえるためである)。
 pub const AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND: i64 = 5_000;
 
 /// 上限を上げるまでに、圧縮が続くのを待つ時間 (マイクロ秒)
@@ -135,15 +143,14 @@ pub const AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US: i64 = 15_000_000;
 
 /// 最初の目標遅延 (マイクロ秒)
 ///
-/// 観測がまだ無いときに使う。jitter buffer の学習の初期値
-/// ([`crate::playout::delay::AUDIO_DELAY_START_MS`] の 80 ms) より少し大きくし、到着から
-/// 鳴るまでの経路の分を最初から見込む。
+/// 閉ループは安全下限 ([`AUDIO_DELAY_FEEDBACK_MIN_US`]) から始める。最初の再生の観測だけで
+/// 固定の 100 ms を適用すると、静かな経路でも映像が跳ねて遅れる。経路と出力に必要な分は
+/// 観測から増やす。
 ///
-/// [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (適用する上限) と同じ値であるため、既定の構成では
-/// 内部の目標が初期値で上限に張り付き、増やす規則 (遅れや並べすぎ) で目標が上がる余地が無い。
-/// 増えるのは、圧縮が続いて上限を [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] へ広げた後か、
-/// 収束で下げた後に再び遅れが出たときである (moqt-js も同じ関係である)。
-pub const AUDIO_DELAY_FEEDBACK_START_US: i64 = 100_000;
+/// 観測が無い間は、揺らぎの学習の初期値
+/// ([`crate::playout::delay::AUDIO_DELAY_START_MS`] の 80 ms) が使われるため、初期の音切れは
+/// そちらで抑える。両者は別の値であり、揃える必要はない。
+pub const AUDIO_DELAY_FEEDBACK_START_US: i64 = AUDIO_DELAY_FEEDBACK_MIN_US;
 
 /// 目標を動かす間隔 (マイクロ秒)
 ///
@@ -175,6 +182,19 @@ pub const AUDIO_DELAY_FEEDBACK_MAX_STEP_US: i64 = 40_000;
 /// (観測の窓が追いつく前に) 遅れを作り直す。
 pub const AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND: i64 = 10_000;
 
+/// 穴が空いた後、目標を下げない時間 (マイクロ秒)
+///
+/// 目標を上げてもすぐ下げると、負荷時に穴が周期的に再発する。moqt-js の実リレーの計測
+/// (2026-10-20、load average 8.8、61 秒) では、目標が 100 → 154 → 139 → 120 → 102 → 100 →
+/// 109 → 160 → 108 → 131 → 113 ms と往復し、下げた区間で受信の遅れの裾 (最大 118 ms) が
+/// 目標を超えて穴が再発した (gap 3 → 24、unrecoverable 2 → 18、concealments 2 → 13)。穴は
+/// 一度出た経路では数秒おきに再発するため、最後の穴から 5 秒は「深めに構える」。5 秒は制御の
+/// 間隔 (1 秒) の数回ぶんであり、実測の穴の再発間隔 (数秒) より長い。
+///
+/// この間も目標を上げる向き (遅れ / 並べすぎ / 穴) は許す。穴 1 個で広げた適用の上限
+/// ([`AudioDelayFeedback::applied_ceiling_us`]) も同じ時間だけ保持する。
+pub const AUDIO_DELAY_FEEDBACK_GAP_QUIET_US: i64 = 5_000_000;
+
 /// 目標を動かした理由
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioDelayFeedbackReason {
@@ -182,6 +202,11 @@ pub enum AudioDelayFeedbackReason {
     Initial,
     /// 並べすぎで捨てたため増やした
     Backlog,
+    /// 補間で埋まらなかった無音の穴が空いたため増やした
+    ///
+    /// 穴は事後には埋められないため、次に同じ揺らぎが来ても穴にならないよう先に増やす。
+    /// 並べすぎの捨てと同時に起きたときは [`AudioDelayFeedbackReason::Backlog`] を優先する。
+    Gap,
     /// 出力が枯れたため増やした
     ///
     /// 並べすぎの捨てや鳴り遅れと同時に起きたときも、事後には埋められないアンダーランの
@@ -191,7 +216,8 @@ pub enum AudioDelayFeedbackReason {
     Lateness,
     /// 遅れが許容の中に収まり、捨てが無いため減らした
     Settled,
-    /// 動かす条件がそろっていない (観測が無い、または前回から間隔が空いていない)
+    /// 動かす条件がそろっていない (観測が無い、前回から間隔が空いていない、または穴の後の
+    /// ホールド中)
     Waiting,
 }
 
@@ -203,6 +229,12 @@ pub enum AudioDelayFeedbackReason {
 pub struct AudioDelayFeedbackSnapshot {
     /// 閉ループが決めた目標遅延 (マイクロ秒)。下限と上限と明示の上限を適用した値
     pub target_us: i64,
+    /// 揺らぎだけから求めた目標遅延 (マイクロ秒)。実際に使う値はこの値との大きい方
+    pub jitter_target_us: i64,
+    /// 実際に使う目標遅延 (マイクロ秒)
+    ///
+    /// [`AudioDelayFeedback::target_delay_us`] に `jitter_target_us` を渡した値である。
+    pub applied_us: i64,
     /// 直前に目標を動かした理由
     pub reason: AudioDelayFeedbackReason,
     /// 明示設定の上限 (マイクロ秒)。無ければ None
@@ -219,11 +251,13 @@ pub struct AudioDelayFeedbackSnapshot {
     pub slack_p50_us: Option<i64>,
     /// いま実際に適用している値の上限 (マイクロ秒)
     ///
-    /// 圧縮が続いていないときは [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (100 ms)。圧縮が
-    /// 続くと [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] (160 ms) まで広がるが、明示設定
+    /// 広げていないときは [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (100 ms)。穴が空いたときは
+    /// 「穴の長さ + 余白」を吸収できる値まで一時的に広がり (最後の穴から
+    /// [`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] の間だけ保持する)、圧縮か穴が続くと
+    /// [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] (160 ms) まで広がる。明示設定
     /// ([`AudioDelayFeedback::set_ceiling_us`]) があるときはその値までに切る (既定の
-    /// 100 ms は下回らない)。実際に適用された値は [`AudioDelayFeedback::target_delay_us`] が
-    /// 返す。
+    /// 100 ms は下回らない)。実際に適用された値は
+    /// [`AudioDelayFeedbackSnapshot::applied_us`] に出る。
     pub applied_ceiling_us: i64,
     /// 直近の制御で観測した圧縮 (時間圧縮) の速さ (マイクロ秒 / 秒)。上限を上げる判断に
     /// 使った値
@@ -241,8 +275,8 @@ fn clamp_target_us(value_us: i64, lower_us: i64, upper_us: i64) -> i64 {
 /// 音声の目標遅延を、実際に鳴った結果から決める
 ///
 /// 音声トラックごとではなく、共有の時間軸 ([`crate::playout::timeline::PlayoutTimeline`]) に
-/// 1 つ持つ。目標は到着から鳴るまでの経路 (復号・予約・出力のバッファ) の学習であり、
-/// 購読のやり直しや TIMESTAMP の段差では変わらないためである。
+/// 1 つ持つ。目標は到着から鳴るまでの経路を学ぶ。音声の再生を取り直したときは、過去の穴と
+/// 遅れを持ち込まないように初期化する ([`AudioDelayFeedback::reset`])。
 #[derive(Debug)]
 pub struct AudioDelayFeedback {
     /// 閉ループが決めた目標遅延 (マイクロ秒)
@@ -257,6 +291,16 @@ pub struct AudioDelayFeedback {
     last_backlog_misses: u64,
     /// 直前に読んだ、累積で並べすぎて捨てた音の長さ (マイクロ秒)
     last_backlog_us: i64,
+    /// 直前に読んだ、累積で補間できなかった穴の数
+    last_gap_count: u64,
+    /// 直前に読んだ、累積で補間できなかった穴の長さ (マイクロ秒)
+    last_gap_us: i64,
+    /// 最後に穴が空いたと観測した時刻 (マイクロ秒)。この時刻から一定時間は目標を下げない
+    last_gap_at_us: Option<i64>,
+    /// 穴 1 個で一時的に広げた適用の上限 (マイクロ秒)。広げていないときは None
+    gap_ceiling_us: Option<i64>,
+    /// 穴で広げた上限を保持する期限 (観測の at_us と同じ軸、マイクロ秒)
+    gap_ceiling_until_us: i64,
     /// 直前の制御で動かした量 (マイクロ秒)
     last_change_us: i64,
     /// 目標を動かした回数
@@ -269,6 +313,8 @@ pub struct AudioDelayFeedback {
     /// `true` になるため、「実際に鳴った結果を観測したか」ではない
     /// ([`AudioDelayFeedback::target_delay_us`] が参照する)。
     received_observation: bool,
+    /// 再開時の最初の累積は前の再生の実績を含みうるため、差分の基準としてだけ使う
+    restarting: bool,
     /// 圧縮が続くため上限を広げているか
     widened_ceiling: bool,
     /// 上限を上げる根拠 (圧縮の速さが閾値を超えた状態) が続いている時間 (マイクロ秒)
@@ -292,10 +338,16 @@ impl AudioDelayFeedback {
             last_update_at_us: None,
             last_backlog_misses: 0,
             last_backlog_us: 0,
+            last_gap_count: 0,
+            last_gap_us: 0,
+            last_gap_at_us: None,
+            gap_ceiling_us: None,
+            gap_ceiling_until_us: 0,
             last_change_us: 0,
             adjustments: 0,
             latest: None,
             received_observation: false,
+            restarting: false,
             widened_ceiling: false,
             compression_streak_us: 0,
             quiet_streak_us: 0,
@@ -309,11 +361,11 @@ impl AudioDelayFeedback {
     /// 自動で決めた目標がこれを超えないようにする。値が変わった時点で、既に超えていれば
     /// その場で収める。`None` を渡すと上限を外す。負の値は 0 として扱う。
     ///
-    /// 圧縮が続いて上限を広げている間も、広げた分はこの値を超えない
-    /// ([`AudioDelayFeedback::applied_ceiling_us`])。ただし既定の
-    /// [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] は下回らない。揺らぎだけの目標
-    /// ([`AudioDelayFeedback::target_delay_us`] へ渡す値) に明示設定を掛けない既存の規則を
-    /// 変えないためである。
+    /// 圧縮か穴が続いて上限を広げている間も、広げた分はこの値を超えない
+    /// ([`AudioDelayFeedback::applied_ceiling_us`])。穴の保持中に値を変えた場合も、その場から
+    /// 新しい予算で切る。ただし既定の [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] は下回らない。
+    /// 揺らぎだけの目標 ([`AudioDelayFeedback::target_delay_us`] へ渡す値) に明示設定を
+    /// 掛けない既存の規則を変えないためである。
     pub fn set_ceiling_us(&mut self, ceiling_us: Option<i64>) {
         self.ceiling_us = ceiling_us.map(|ceiling_us| ceiling_us.max(0));
         self.target_us =
@@ -331,6 +383,34 @@ impl AudioDelayFeedback {
     /// 収める。適用されない値へ育てないためである。
     pub fn feedback_target_us(&self) -> i64 {
         clamp_target_us(self.target_us, AUDIO_DELAY_FEEDBACK_MIN_US, self.upper_us())
+    }
+
+    /// 再生を止めたとき、前の穴と制御の待ち時間を次の再生へ持ち込まない
+    ///
+    /// moqt-js の `AudioDelayFeedback.reset` と同じ規則である。明示設定の上限 (`targetLatency`)
+    /// は同じ配信の設定であるため残す。再開後の最初の観測 ([`AudioDelayFeedback::update`]) は、
+    /// 累積の差分の基準をその観測の値へ合わせ直す (`restarting`)。
+    pub fn reset(&mut self) {
+        self.target_us = AUDIO_DELAY_FEEDBACK_START_US;
+        self.reason = AudioDelayFeedbackReason::Initial;
+        self.last_update_at_us = None;
+        self.last_backlog_misses = 0;
+        self.last_backlog_us = 0;
+        self.last_gap_count = 0;
+        self.last_gap_us = 0;
+        self.last_gap_at_us = None;
+        self.gap_ceiling_us = None;
+        self.gap_ceiling_until_us = 0;
+        self.last_change_us = 0;
+        self.adjustments = 0;
+        self.latest = None;
+        self.received_observation = false;
+        self.restarting = true;
+        self.widened_ceiling = false;
+        self.compression_streak_us = 0;
+        self.quiet_streak_us = 0;
+        self.compression_since_update_us = 0;
+        self.compression_us_per_second = 0;
     }
 
     /// 実際に使う目標遅延 (マイクロ秒)
@@ -357,13 +437,42 @@ impl AudioDelayFeedback {
 
     /// いま適用している値の上限 (マイクロ秒)
     ///
-    /// 圧縮が続いていないときは [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (100 ms)。圧縮が
-    /// 続いて上限を広げているときは `max(100 ms, min(160 ms, 明示設定 ?? 160 ms))` である。
-    /// 利用者が宣言した予算を超えず、既定の 100 ms を下回らない。
+    /// 広げていないときは [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (100 ms)。穴が空いたときは
+    /// 「穴の長さ + 余白」を吸収できる値まで一時的に広がり (最後の穴から
+    /// [`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] の間だけ保持する)、圧縮か穴が続くと
+    /// [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] (160 ms) まで広がる。明示設定
+    /// ([`AudioDelayFeedback::set_ceiling_us`]) があるときはその値までに切る (既定の
+    /// 100 ms は下回らない)。実際に適用された値は
+    /// [`AudioDelayFeedback::target_delay_us`] が返す。
+    ///
+    /// 穴の保持中に明示設定を下げた場合も、現在の設定を即座に適用する (穴の上限と、広げて
+    /// よい上限の小さい方を使う)。保持の判定は最後に受け取った観測の時刻で行うため、観測が
+    /// 来るまで解除されない。
     pub fn applied_ceiling_us(&self) -> i64 {
-        if !self.widened_ceiling {
-            return AUDIO_DELAY_FEEDBACK_MAX_TARGET_US;
-        }
+        let artifact_ceiling_us = if self.widened_ceiling {
+            self.artifact_ceiling_limit_us()
+        } else {
+            AUDIO_DELAY_FEEDBACK_MAX_TARGET_US
+        };
+        let gap_ceiling_held = self.gap_ceiling_us.is_some()
+            && self
+                .latest
+                .is_some_and(|latest| latest.at_us < self.gap_ceiling_until_us);
+        artifact_ceiling_us.max(if gap_ceiling_held {
+            self.gap_ceiling_us
+                .unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US)
+                .min(self.artifact_ceiling_limit_us())
+        } else {
+            0
+        })
+    }
+
+    /// 圧縮か穴が続くときに広げてよい上限 (マイクロ秒)
+    ///
+    /// 明示設定 (`targetLatency`) があるときはその値で切るが、既定の上限 (100 ms) は
+    /// 下回らない。100 ms を下回ると、既定より小さい明示設定を渡したときに、適用する値が
+    /// 既定より小さくなるためである。
+    fn artifact_ceiling_limit_us(&self) -> i64 {
         AUDIO_DELAY_FEEDBACK_MAX_TARGET_US.max(
             AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US.min(
                 self.ceiling_us
@@ -378,6 +487,18 @@ impl AudioDelayFeedback {
     /// 窓が短いため、間隔を空けずに動かすと、増やした結果が現れる前に増やし続ける。
     ///
     /// 並べすぎの累積は、購読のやり直しで 0 に戻っても負の差で増やさない。
+    ///
+    /// 同じく、補間で埋まらなかった穴の累積 ([`AudioDelayFeedbackObservation::gap_count`] /
+    /// [`AudioDelayFeedbackObservation::gap_us`]) の差が増えたなら、穴の長さ + 余白だけ目標を
+    /// 増やし、理由を [`AudioDelayFeedbackReason::Gap`] にする。穴は事後には埋められないため、
+    /// 1 個でも増やす。穴 1 個で一時的に広げた適用の上限は、最後の穴から
+    /// [`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] の間だけ保持し、その間は減らす向きへ進まない。
+    ///
+    /// 再開直後の最初の観測 ([`AudioDelayFeedback::reset`] の後) は、累積の差分の基準を
+    /// その観測の値へ合わせ直す。計器が累積を残す場合と、購読をやり直して 0 に戻す場合の
+    /// どちらでも、過去の穴や捨てを新しい増加と数えないためである。到着の推定の方が深い
+    /// ときは [`AudioDelayFeedbackObservation::arrival_delay_floor_us`] を穴への対処の基点に
+    /// する (内部の目標へ足すだけでは実際の再生の深さが変わらない)。
     ///
     /// 出力が枯れた ([`AudioDelayFeedbackObservation::underrun_ms`] が 0 より大きい) ときは、
     /// 既存の増加判断と独立に、枯れた長さ (1 回の増加の上限まで) だけ目標を上げる。並べすぎや
@@ -405,7 +526,22 @@ impl AudioDelayFeedback {
                 .saturating_sub(AUDIO_PLAYOUT_STRETCH_MIN_US)
                 .max(0);
         }
+        // 穴への対処は内部目標ではなく、その音へ実際に適用していた深さから増やす。到着の
+        // 推定の方が深い場合、内部目標へ足すだけでは再生の深さが変わらない。この値は
+        // 今回の観測を反映する前の状態で求める (穴の保持の判定を前回の観測時点で行うため)
+        let previous_applied_us = self
+            .target_delay_us(observation.jitter_target_us)
+            .max(observation.arrival_delay_floor_us.unwrap_or(0));
         self.latest = Some(observation);
+        if self.restarting {
+            // 計器が累積を残す場合と、購読をやり直して 0 に戻す場合の両方を扱う。過去の穴を
+            // 新しい穴と数えると、再開直後にまた目標が広がってしまう
+            self.last_backlog_misses = observation.backlog_misses;
+            self.last_backlog_us = observation.backlog_us;
+            self.last_gap_count = observation.gap_count;
+            self.last_gap_us = observation.gap_us;
+            self.restarting = false;
+        }
         // 1 つでも観測を受けたら、以降は閉ループの目標を使う (鳴っていない音の観測でも同じ)
         self.received_observation = true;
         // 圧縮の増分を、次の制御 (毎秒 1 回) まで積む。音ごとの増分をそのまま速さとして見ると、
@@ -434,11 +570,37 @@ impl AudioDelayFeedback {
             .max(0);
         self.last_backlog_misses = observation.backlog_misses;
         self.last_backlog_us = observation.backlog_us;
+        // 穴も同じく前回からの差にする。購読のやり直しで累積が 0 に戻っても負にしない
+        let gap_delta = observation.gap_count.saturating_sub(self.last_gap_count);
+        let gap_us_delta = observation.gap_us.saturating_sub(self.last_gap_us).max(0);
+        self.last_gap_count = observation.gap_count;
+        self.last_gap_us = observation.gap_us;
+        if gap_delta > 0 {
+            // 穴が空いた。この時刻から一定時間は目標を下げない (下げた直後の再発を避ける)
+            self.last_gap_at_us = Some(observation.at_us);
+            // 穴は事後には埋められない。1 個でも「経路の揺らぎが目標を超えた」証拠であるため、
+            // 圧縮が 2 秒続くのを待たずに、その穴を吸収できる上限まで一時的に広げる
+            // ([`AUDIO_DELAY_FEEDBACK_GAP_QUIET_US`] の間だけ保持する)。広げ幅は穴の長さ +
+            // 余白であり、広げてよい上限 (artifact_ceiling_limit_us) と 100 ms の間で切る
+            let widened_us = self.artifact_ceiling_limit_us().min(
+                previous_applied_us
+                    .saturating_add(gap_us_delta)
+                    .saturating_add(AUDIO_DELAY_FEEDBACK_MARGIN_US)
+                    .max(AUDIO_DELAY_FEEDBACK_MAX_TARGET_US),
+            );
+            self.gap_ceiling_us = Some(self.gap_ceiling_us.unwrap_or(0).max(widened_us));
+            self.gap_ceiling_until_us = observation
+                .at_us
+                .saturating_add(AUDIO_DELAY_FEEDBACK_GAP_QUIET_US);
+        } else if self.gap_ceiling_us.is_some() && observation.at_us >= self.gap_ceiling_until_us {
+            // 最後の穴から 5 秒が経った。穴で広げた上限を戻す (目標は減らす規則が下げる)
+            self.gap_ceiling_us = None;
+        }
         self.last_update_at_us = Some(observation.at_us);
 
-        // 圧縮が続くときだけ上限を広げる。目標を動かす前に判断する (同じ観測で新しい上限まで
-        // 上げてよい)
-        self.update_artifact_ceiling(elapsed_us, observation.jitter_target_us);
+        // 圧縮か穴が続くときだけ上限を広げる。目標を動かす前に判断する (同じ観測で新しい
+        // 上限まで上げてよい)
+        self.update_artifact_ceiling(elapsed_us, observation.jitter_target_us, gap_delta);
 
         // 枯れた長さはミリ秒で渡る。1 回で増やす上限をミリ秒へ直した値と比べてから、
         // マイクロ秒へ戻す (枯れた長さが上限を超えても、1 回の増加は上限までにする)
@@ -448,12 +610,21 @@ impl AudioDelayFeedback {
             .saturating_mul(1_000);
         let lateness_p50_us = observation.lateness_us.map(|summary| summary.p50);
         let previous_target_us = self.feedback_target_us();
-        // 増やす向きの根拠 (並べすぎ / 鳴り遅れ)。無ければ 0 である
+        // 増やす向きの根拠 (並べすぎ / 穴 / 鳴り遅れ)。無ければ 0 である
         let increase_us = if backlog_delta > 0 {
             // 並べすぎで捨てた。捨てた長さぶんを吸収できるだけ増やす
             self.reason = AudioDelayFeedbackReason::Backlog;
             clamp_target_us(
                 backlog_us_delta.saturating_add(AUDIO_DELAY_FEEDBACK_MARGIN_US),
+                AUDIO_DELAY_FEEDBACK_MIN_STEP_US,
+                AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
+            )
+        } else if gap_delta > 0 {
+            // 補間で埋まらなかった無音の穴が空いた。穴の長さぶんを吸収できるだけ増やす。
+            // 穴は事後には埋められないため、次に同じ揺らぎが来ても穴にならないよう先に増やす
+            self.reason = AudioDelayFeedbackReason::Gap;
+            clamp_target_us(
+                gap_us_delta.saturating_add(AUDIO_DELAY_FEEDBACK_MARGIN_US),
                 AUDIO_DELAY_FEEDBACK_MIN_STEP_US,
                 AUDIO_DELAY_FEEDBACK_MAX_STEP_US,
             )
@@ -487,6 +658,15 @@ impl AudioDelayFeedback {
                 self.reason = AudioDelayFeedbackReason::Waiting;
                 return;
             };
+            // 最後の穴から一定時間は下げない。負荷時に目標を下げた直後、同じ揺らぎで穴が
+            // 再発して目標を上げ直す往復になるためである (この間も上げる向きは許す)
+            if let Some(last_gap_at_us) = self.last_gap_at_us
+                && observation.at_us.saturating_sub(last_gap_at_us)
+                    < AUDIO_DELAY_FEEDBACK_GAP_QUIET_US
+            {
+                self.reason = AudioDelayFeedbackReason::Waiting;
+                return;
+            }
             self.reason = AudioDelayFeedbackReason::Settled;
             AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND
                 .saturating_mul(elapsed_us)
@@ -497,8 +677,15 @@ impl AudioDelayFeedback {
             self.reason = AudioDelayFeedbackReason::Waiting;
             return;
         };
+        // 穴への対処は「実際に適用していた深さ」を下回らないようにする。内部の目標が到着の
+        // 推定より浅いとき、内部目標へ足すだけでは実際の再生の深さが変わらない
+        let base_us = if gap_delta > 0 {
+            self.target_us.max(previous_applied_us)
+        } else {
+            self.target_us
+        };
         self.target_us = clamp_target_us(
-            self.target_us.saturating_add(change_us),
+            base_us.saturating_add(change_us),
             AUDIO_DELAY_FEEDBACK_MIN_US,
             self.upper_us(),
         );
@@ -508,16 +695,18 @@ impl AudioDelayFeedback {
         }
     }
 
-    /// 圧縮 (時間圧縮 = 粗さ) が続くときだけ、適用する上限を上げる / 戻す
+    /// 圧縮 (時間圧縮 = 粗さ) か穴が続くときだけ、適用する上限を上げる / 戻す
     ///
     /// - 上げる: 圧縮の速さが [`AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND`] を超える
-    ///   状態が [`AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US`] 続いたとき。100 ms では
-    ///   足りない証拠がそろったということである
+    ///   状態か、補間で埋まらなかった穴が空いた状態が
+    ///   [`AUDIO_DELAY_FEEDBACK_COMPRESSION_CONFIRM_US`] 続いたとき。100 ms では足りない
+    ///   証拠がそろったということである。穴は 1 回でも「その揺らぎが目標を超えた」証拠であり、
+    ///   0.5 ms の穴でもクリックになる
     /// - 戻す: 揺らぎだけの目標 ([`AudioDelayFeedbackObservation::jitter_target_us`]) が
-    ///   [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] 以下であり、かつ圧縮が 0 の状態が
-    ///   [`AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US`] 続いたとき。圧縮が 0 だけでは戻さない。
-    ///   揺らぎが 100 ms を超えている経路では、戻した直後に圧縮が再発して 2 秒でまた上げる
-    ///   往復になる (このファイルの定数のコメントを参照)
+    ///   [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] 以下であり、かつ圧縮も穴も 0 の状態が
+    ///   [`AUDIO_DELAY_FEEDBACK_ARTIFACT_RELEASE_US`] 続いたとき。片方だけでは戻さない。
+    ///   揺らぎが 100 ms を超えている経路では、戻した直後に圧縮や穴が再発して 2 秒でまた
+    ///   上げる往復になる (このファイルの定数のコメントを参照)
     ///
     /// どちらの条件も満たさないとき (圧縮は出ているが閾値未満、または経路がまだ 100 ms を
     /// 必要としている) は、両方の連続時間を 0 に戻す。
@@ -527,8 +716,13 @@ impl AudioDelayFeedback {
     /// 既存の減らす規則 ([`AUDIO_DELAY_FEEDBACK_DECREASE_US_PER_SECOND`]) に任せる。
     ///
     /// `elapsed_us` は前回の制御からの時間 (マイクロ秒)。前回が無ければ None であり、そのとき
-    /// は速さを求められないため 0 とする。
-    fn update_artifact_ceiling(&mut self, elapsed_us: Option<i64>, jitter_target_us: i64) {
+    /// は速さを求められないため 0 とする。`gap_delta` は前回の制御から増えた穴の数である。
+    fn update_artifact_ceiling(
+        &mut self,
+        elapsed_us: Option<i64>,
+        jitter_target_us: i64,
+        gap_delta: u64,
+    ) {
         let span_us = elapsed_us.unwrap_or(0);
         let compression_us = self.compression_since_update_us;
         self.compression_since_update_us = 0;
@@ -541,12 +735,16 @@ impl AudioDelayFeedback {
             0
         };
         self.compression_us_per_second = rate_us_per_second;
-        if rate_us_per_second > AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND {
-            // 100 ms では足りていない証拠が続いている
+        if rate_us_per_second > AUDIO_DELAY_FEEDBACK_COMPRESSION_MIN_US_PER_SECOND || gap_delta > 0
+        {
+            // 圧縮か穴が出ており、100 ms では足りていない証拠が続いている
             self.compression_streak_us = self.compression_streak_us.saturating_add(span_us);
             self.quiet_streak_us = 0;
-        } else if compression_us == 0 && jitter_target_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US {
-            // 圧縮が無く、経路も 100 ms 以内で足りている
+        } else if compression_us == 0
+            && gap_delta == 0
+            && jitter_target_us <= AUDIO_DELAY_FEEDBACK_MAX_TARGET_US
+        {
+            // 圧縮も穴も無く、経路も 100 ms 以内で足りている
             self.quiet_streak_us = self.quiet_streak_us.saturating_add(span_us);
             self.compression_streak_us = 0;
         } else {
@@ -569,9 +767,15 @@ impl AudioDelayFeedback {
     }
 
     /// 閉ループの状態を求める (計器用)
-    pub fn snapshot(&self) -> AudioDelayFeedbackSnapshot {
+    ///
+    /// `jitter_target_us` は揺らぎだけから求めた目標遅延 (マイクロ秒) である。実際に使う値
+    /// ([`AudioDelayFeedbackSnapshot::applied_us`]) は、この値と閉ループの目標の大きい方を
+    /// 適用の上限で切った値になる。
+    pub fn snapshot(&self, jitter_target_us: i64) -> AudioDelayFeedbackSnapshot {
         AudioDelayFeedbackSnapshot {
             target_us: self.feedback_target_us(),
+            jitter_target_us,
+            applied_us: self.target_delay_us(jitter_target_us),
             reason: self.reason,
             ceiling_us: self.ceiling_us,
             last_change_us: self.last_change_us,
@@ -595,11 +799,11 @@ impl AudioDelayFeedback {
 
     /// 閉ループの目標を持つのに使える上限 (マイクロ秒)
     ///
-    /// 実際に適用する値の上限と同じにする。適用は
-    /// [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] (広げているときは
-    /// [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`]) で切られるため、それより大きい目標を
-    /// 持っても適用されない。持つと、遅れが収まった後に減らし切るまでの時間だけ復帰が
-    /// 遅れる。
+    /// 実際に適用する値の上限 ([`AudioDelayFeedback::applied_ceiling_us`]) と同じにする。
+    /// 適用は [`AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`]、穴で一時的に広げた上限、圧縮か穴が
+    /// 続くときの [`AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] のいずれかで切られるため、
+    /// それより大きい目標を持っても適用されない。持つと、遅れが収まった後に減らし切るまでの
+    /// 時間だけ復帰が遅れる。
     fn upper_us(&self) -> i64 {
         AUDIO_DELAY_FEEDBACK_MAX_US
             .min(self.ceiling_us.unwrap_or(AUDIO_DELAY_FEEDBACK_MAX_US))

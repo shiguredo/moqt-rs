@@ -3,7 +3,9 @@
 //! 公開 API (`compress` / `conceal` / `concealment_end_gain` / `is_time_stretch_available`)
 //! の契約を確認する。補間では、4 kHz へ間引いた粗い格子の周辺を元のサンプルレートの相関で
 //! 評価して端数まで周期を求めるため、格子に乗らない周期でも穴の終わりで位相がずれない。
-//! 周期の推定が確かでない音では、生成した音の末尾を短くフェードして段差を消す。
+//! 整数ラグが丸め誤差の範囲で完全相関のときは放物線の頂点へずらさず整数の周期を維持し、
+//! 細探索の端で最大になったときは評価していない点で外挿しない。周期の推定が確かでない音では、
+//! 生成した音の末尾を短くフェードして段差を消す。
 
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MIN_LAG, compress,
@@ -60,6 +62,23 @@ fn sine_sample(index: usize, frequency_hz: f64, sample_rate: u32, amplitude: f64
     (amplitude
         * (2.0 * std::f64::consts::PI * frequency_hz * index as f64 / f64::from(sample_rate)).sin())
         as f32
+}
+
+/// 位相 `phase` (1 周期を 1 とした割合) を持つ正弦波の `index` 番目のサンプル (振幅 `amplitude`)
+///
+/// フレームの先頭の位相を変えても、周期を求める経路が位相に依存しないことを確かめるために使う。
+fn sine_sample_with_phase(
+    index: usize,
+    frequency_hz: f64,
+    sample_rate: u32,
+    amplitude: f64,
+    phase: f64,
+) -> f32 {
+    (amplitude
+        * (2.0
+            * std::f64::consts::PI
+            * ((frequency_hz * index as f64) / f64::from(sample_rate) + phase))
+            .sin()) as f32
 }
 
 /// 周波数 `frequency_hz` の正弦波を `length` サンプル作る
@@ -417,11 +436,12 @@ fn conceal_finds_the_tail_period_at_the_full_sample_rate() {
 }
 
 #[test]
-fn conceal_keeps_the_grid_period_when_the_peak_is_at_the_search_boundary() {
-    // 細探索の下限そのものの周期 (400 Hz = 120 サンプル) では、放物線の頂点を求める 3 点の
-    // うち片側が探索の外になる。端で外挿すると、評価していないずらし幅 (探索の下限の外側) を
-    // 返して周期が 0.5 サンプルずれ、穴が長いほど位相がずれる (実測: 48 kHz、20 ms の
-    // フレームで穴 100 ms の段差が振幅の 85.2 % になった)。端では格子のままにする。
+fn conceal_keeps_the_exact_integer_period_of_the_lowest_pitch() {
+    // 探索の下限 (4 kHz の 10 サンプル = 400 Hz、48 kHz で周期 120 サンプル) は 4 kHz の
+    // 格子にちょうど乗る。細探索の範囲は下限の 1 サンプル外側 (119) まで広げるため、最大の
+    // 120 は範囲の内側になり、前後の 119 / 121 も実際に評価される。整数ラグが丸め誤差の
+    // 範囲で完全相関のときは放物線の頂点へずらさない。有限窓の前後の相関は位相によって
+    // 非対称になり得るため、正しい整数周期を頂点へずらすと長い補間で位相がずれる。
     //
     // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 周期は 120 サンプルのままで、
     // 生成の先頭は末尾の 1 周期前のサンプルと一致する (差 6.1e-19)。120 サンプルで繰り返す。
@@ -440,6 +460,101 @@ fn conceal_keeps_the_grid_period_when_the_peak_is_at_the_search_boundary() {
         repeats_at_period(&output, 120, HOLE_US, 1e-4),
         "120 サンプルの周期で繰り返すこと"
     );
+}
+
+#[test]
+fn conceal_preserves_an_exact_integer_period_for_any_phase() {
+    // 400 Hz は 4 kHz の格子にちょうど乗り、対応するどのレートでも周期が整数になる
+    // (8 kHz で 20、16 kHz で 40、32 kHz で 80、48 kHz で 120 サンプル)。整数ラグが丸め
+    // 誤差の範囲で完全相関のときは、放物線の頂点へずらさず整数の周期を維持する。有限窓の
+    // 前後の相関は位相によって非対称になり得るため、頂点へずらすと長い補間で位相がずれる。
+    //
+    // moqt-js の PBT と同じく、フレーム先頭の位相を 0〜99 の 100 通り変えて確かめる。実測
+    // (各レート、20 ms のフレーム、振幅 0.5、100 ms の穴): 生成する長さは 8 / 16 / 32 / 48 kHz
+    // で 800 / 1600 / 3200 / 4800 サンプルであり、理想の続き (フレームの続きの正弦波に末尾の
+    // ゲインを掛けたもの) との最大差は 1.1e-14 である。
+    for sample_rate in [8_000u32, 16_000, 32_000, 48_000] {
+        let length = (sample_rate / 50) as usize;
+        let target = (sample_rate / 10) as usize;
+        for phase_percent in 0..100 {
+            let sample = |index: usize| {
+                sine_sample_with_phase(index, 400.0, sample_rate, 0.5, phase_percent as f64 / 100.0)
+            };
+            let reference: Vec<f32> = (0..length).map(sample).collect();
+            let mut output = vec![0.0f32; target];
+            let channels: [&[f32]; 1] = [reference.as_slice()];
+            let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+            assert_eq!(
+                conceal(&channels, &mut outputs, sample_rate, 100_000),
+                target as isize,
+                "sample_rate={sample_rate} phase={phase_percent} の純音を補間すること"
+            );
+            // 生成した音は、末尾のゲインを掛けた理想の続きと一致する
+            let end_gain = concealment_end_gain(100_000);
+            let mut maximum_error = 0.0f32;
+            for (index, generated) in output.iter().enumerate() {
+                let gain = 1.0 - (1.0 - end_gain) * ((index as f32 + 1.0) / target as f32);
+                let expected = sample(length + index) * gain;
+                maximum_error = maximum_error.max((generated - expected).abs());
+            }
+            assert!(
+                maximum_error < 1e-5,
+                "sample_rate={sample_rate} phase={phase_percent} で整数周期をずらさないこと: 最大差 {maximum_error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn conceal_does_not_fabricate_a_vertex_at_the_search_boundary() {
+    // 4 kHz の下限 (400 Hz = 120 サンプル) のすぐ上にピッチがある音では、細探索の最大が
+    // 探索範囲の下端に来る。真の周期 119 サンプル (403.4 Hz) の純音は、細探索を 1 サンプル
+    // 外側へ広げた 119 サンプルで相関が完全になる。広げていなければ探索の下限は 120 なので、
+    // 周期は 120 サンプルへ丸められていた。
+    //
+    // 周期をさらに短い 118.6 サンプル (404.7 Hz) にすると、119 サンプルの相関が最大だが
+    // 完全相関ではない。このとき、評価していない 118 サンプルの相関を最大値で代用して
+    // 放物線の頂点を求めると、架空の頂点 118.5 サンプルを返してしまう。実際に評価した点
+    // だけで補間する (両隣が無いときは補間しない) ため、周期は整数の 119 サンプルになる。
+    //
+    // 実測 (48 kHz、20 ms のフレーム、振幅 0.5、20 ms の穴): 生成の先頭は末尾の 119 サンプル
+    // 前のサンプルと一致する (差 0)。架空の頂点 118.5 サンプルなら先頭は 841 と 842 の
+    // 中間 (差 0.011) になる。119 サンプルで繰り返し、120 サンプルでは繰り返さない。
+    for period in [119.0f64, 118.6] {
+        let frequency_hz = f64::from(SAMPLE_RATE) / period;
+        let frame = sine_wave(FRAME_SAMPLES, frequency_hz, SAMPLE_RATE, 0.5);
+        let mut output = vec![0.0f32; 960];
+        let channels: [&[f32]; 1] = [frame.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        assert_eq!(
+            conceal(&channels, &mut outputs, SAMPLE_RATE, HOLE_US),
+            960,
+            "周期 {period} サンプルの純音を補間すること"
+        );
+        let end_gain = concealment_end_gain(HOLE_US);
+        let gain = 1.0 - (1.0 - end_gain) * (1.0 / 960.0);
+        let expected = frame[FRAME_SAMPLES - 119] * gain;
+        assert!(
+            (output[0] - expected).abs() < 1e-6,
+            "周期 {period} サンプルでは先頭が末尾の 119 サンプル前のサンプルであること: {} 対 {expected}",
+            output[0]
+        );
+        // 架空の頂点 (118.5 サンプル) を返していたら、先頭は 841 と 842 の中間になる
+        let fabricated = 0.5 * (frame[FRAME_SAMPLES - 119] + frame[FRAME_SAMPLES - 118]) * gain;
+        assert!(
+            (output[0] - fabricated).abs() > 1e-3,
+            "架空の頂点を作らないこと: {} 対 {fabricated}",
+            output[0]
+        );
+        assert!(
+            repeats_at_period(&output, 119, HOLE_US, 1e-6),
+            "周期 {period} サンプルでは 119 サンプルで繰り返すこと"
+        );
+        assert!(
+            !repeats_at_period(&output, 120, HOLE_US, 1e-6),
+            "周期 {period} サンプルでは 120 サンプルで繰り返さないこと"
+        );
+    }
 }
 
 #[test]

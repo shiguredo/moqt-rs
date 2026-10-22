@@ -11,8 +11,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -374,6 +374,8 @@ async fn start_subscriber(
         let backlog = Arc::new(AtomicI64::new(0));
         // 再生を行わないためカタログの targetLatency は使わない。-1 は「カタログに無い」
         let target_latency_ms = Arc::new(AtomicI64::new(-1));
+        // 再生を行わないため音声だけの購読の判定も使わない。初期値のまま (映像あり) にする
+        let video_subscribed = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(moq_sub::pipeline::run(
             config,
             frame_tx,
@@ -382,6 +384,7 @@ async fn start_subscriber(
             shutdown.subscribe(),
             Arc::clone(&backlog),
             target_latency_ms,
+            video_subscribed,
             player_stop_rx,
         ));
 

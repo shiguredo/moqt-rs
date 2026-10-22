@@ -32,7 +32,10 @@ use shiguredo_moqt::playout::scheduler::{
     AudioPlayoutInput, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::stretch;
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track, audio_arrival_delay_us};
+use shiguredo_moqt::playout::timeline::{
+    PlayoutTimeline, TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US, Track, audio_arrival_delay_us,
+    audio_only_arrival_delay_us,
+};
 use shiguredo_moqt::playout::timing::{
     AudioMissReason, AudioMissTotal, AudioPlayoutMiss, AudioPlayoutTimingSnapshot,
     AudioPlayoutTimingStats, TimingSummary,
@@ -111,6 +114,11 @@ fn main() {
     // pipeline がカタログを読んだ時点で入れ、プレイヤーが時間軸へ反映する
     let target_latency_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1));
     let target_latency_ms_for_pipeline = std::sync::Arc::clone(&target_latency_ms);
+    // 映像トラックを購読しているか。プレイヤーは音声だけの購読で到着基準の再生の遅れに
+    // 下限を足し、目標の時刻を守らない。カタログを読むまでは映像があるものとして扱い
+    // (true)、pipeline が購読の有無を入れる
+    let video_subscribed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let video_subscribed_for_pipeline = std::sync::Arc::clone(&video_subscribed);
 
     // tokio runtime の構築はメインスレッドで行う。
     //
@@ -156,6 +164,7 @@ fn main() {
                 shutdown_monitor,
                 display_backlog_for_pipeline,
                 target_latency_ms_for_pipeline,
+                video_subscribed_for_pipeline,
                 player_stop_rx,
             )
             .await
@@ -175,6 +184,7 @@ fn main() {
             audio_rx,
             display_backlog,
             target_latency_ms,
+            video_subscribed,
             audio_output_device,
         ) {
             tracing::error!("Fatal: {e}");
@@ -456,12 +466,17 @@ fn counter_increase(current: i64, previous: i64) -> u64 {
 /// `audio_output_device` が [`cli::AudioOutputDevice::None`] のときは SDL の音声出力デバイスを
 /// 開かず、受信済みの音声チャンクを数えるだけにする (スピーカーへ音を出さない)。このときは
 /// 時間軸への観測も再生の組み立ても行わない。
+///
+/// `video_subscribed` は映像トラックを購読しているかである。pipeline がカタログを読んだ
+/// 時点で入れる。音声だけの購読では、到着基準の再生の遅れに下限を足し、目標の時刻を
+/// 守らない並べ方にする (`AudioPlayoutAssembly::set_audio_only`)。
 fn run_raw_player(
     namespace: &str,
     video_rx: std::sync::mpsc::Receiver<DecodedVideoFrame>,
     audio_rx: std::sync::mpsc::Receiver<DecodedAudioFrame>,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     target_latency_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    video_subscribed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_output_device: cli::AudioOutputDevice,
 ) -> error::Result<()> {
     raw_player::init()?;
@@ -495,6 +510,9 @@ fn run_raw_player(
     // 最初の音の開始時刻に達するまでのフレームは再生機器の内部キューに先行バッファとして
     // 溜まる。順番・詰め・隙間はスケジューラが決め、その結果をここへ集める
     let mut audio_state = AudioPlayoutAssembly::new();
+    // 閉ループへ渡す分布は、この再生の開始以降に限る。計器を作り直さない経路でも、
+    // 前の再生の実績を新しい制御へ混ぜないための起点である
+    audio_state.restart_feedback_window(wall_clock_us());
     // 前回のログ以降に観測した再生機器のバッファ量の最小値 (ミリ秒)。枯れに近づいたかを
     // ログで読むために残す。再生を開始する前はバッファ量に意味が無いため数えない
     let mut player_buffer_min_ms: Option<f64> = None;
@@ -517,6 +535,8 @@ fn run_raw_player(
     let mut audio_chunk_count: u64 = 0;
     // 直近に時間軸へ反映した targetLatency (-1 は未反映)
     let mut applied_target_latency_ms: i64 = -1;
+    // 直近に再生の組み立てへ反映した「音声だけの購読」か。初期値は映像ありとして扱う
+    let mut applied_audio_only = false;
     let mut video_disconnected = false;
     let mut audio_disconnected = false;
     // 停滞の切り分け用。MOQT_PLAYER_DIAG=1 のときだけ、1 秒ごとに
@@ -547,6 +567,15 @@ fn run_raw_player(
             applied_target_latency_ms = catalog_target_latency_ms;
             timeline.set_target_latency_ms(catalog_target_latency_ms);
             tracing::info!("Applied targetLatency: {catalog_target_latency_ms}ms");
+        }
+
+        // 映像トラックを購読しているかが届いていれば、音声だけの再生の組み立てへ反映する。
+        // カタログの解決後に 1 回だけ変わる
+        let audio_only_now = !video_subscribed.load(std::sync::atomic::Ordering::Relaxed);
+        if audio_only_now != applied_audio_only {
+            applied_audio_only = audio_only_now;
+            audio_state.set_audio_only(audio_only_now);
+            tracing::info!("Applied audio-only playout: {audio_only_now}");
         }
 
         if let Some(ref p) = video_player {
@@ -738,15 +767,22 @@ fn run_raw_player(
                 Ok(audio) => {
                     audio_chunk_count += 1;
                     if let Some(audio_player) = audio_player.as_ref() {
-                        let now_us = wall_clock_us();
-                        timeline.observe(Track::Audio, audio.decoded_us, audio.pts_us);
-                        play_decoded_audio(
-                            audio_player,
-                            &mut audio_state,
-                            &mut timeline,
-                            &audio,
-                            now_us,
-                        );
+                        if has_audio_frames(&audio) {
+                            let now_us = wall_clock_us();
+                            timeline.observe(Track::Audio, audio.decoded_us, audio.pts_us);
+                            play_decoded_audio(
+                                audio_player,
+                                &mut audio_state,
+                                &mut timeline,
+                                &audio,
+                                now_us,
+                            );
+                        } else {
+                            // 復号の出力が空の音 (AAC の priming など) は鳴らせない。時間軸への
+                            // 観測と予約へ渡すと基準の学習と計器が壊れるため、その前に弾き、
+                            // 長さ 0 の失敗として件数だけを記録する
+                            audio_state.record_invalid_decode(wall_clock_us());
+                        }
                     }
                     if audio_chunk_count.is_multiple_of(100) {
                         if audio_output_enabled {
@@ -926,6 +962,21 @@ struct AudioPlayoutAssembly {
     unfed_underrun_us: i64,
     /// 直前に観測へ渡した、累積で詰めた長さ (マイクロ秒)。差を取って圧縮の速さを求める
     last_compressed_us: i64,
+    /// 音声だけを購読しているか
+    ///
+    /// 映像に合わせる相手がいないため、到着基準の再生の遅れに下限を足し、目標の時刻を
+    /// 守らない。catalog の解決後に pipeline から届く
+    audio_only: bool,
+    /// 閉ループへ渡す分布の開始時刻 (マイクロ秒)。0 は「制限なし」
+    ///
+    /// 音声の再生を始め直したときに取り直す。計器 (`AudioPlayoutTimingStats`) が前の
+    /// 再生の分布を残していても、閉ループへはこの時刻以降だけを渡す
+    feedback_started_at_us: i64,
+    /// 直前に時間軸へ実績を記録した音声 chunk の識別子
+    ///
+    /// 鳴っているサンプルは chunk の中で動き続けるため、chunk ごとに 1 回だけ記録する
+    /// ための目印である。同じ chunk のままなら記録しない
+    last_recorded_chunk_id: Option<u64>,
 }
 
 impl AudioPlayoutAssembly {
@@ -943,7 +994,41 @@ impl AudioPlayoutAssembly {
             underrun_start_us: None,
             unfed_underrun_us: 0,
             last_compressed_us: 0,
+            audio_only: false,
+            feedback_started_at_us: 0,
+            last_recorded_chunk_id: None,
         }
+    }
+
+    /// 音声だけの購読かどうかを設定する (catalog の解決後に 1 回だけ変わる)
+    fn set_audio_only(&mut self, audio_only: bool) {
+        self.audio_only = audio_only;
+    }
+
+    /// 閉ループへ渡す分布の開始時刻を取り直す (再生の開始・再開)
+    ///
+    /// 開始より前の実績を閉ループの制御に混ぜない。計器の表示用の分布と累積は残す。
+    fn restart_feedback_window(&mut self, now_us: i64) {
+        self.feedback_started_at_us = now_us;
+        self.last_recorded_chunk_id = None;
+    }
+
+    /// 時間軸へ実績を記録すべき音を返す (chunk ごとに 1 回だけ)
+    ///
+    /// 鳴っているサンプルは同じ chunk の中で動き続けるため、毎ループ記録すると同じ音を
+    /// 何度も上書きしてしまう。chunk が次へ進んだときだけ返す。返した chunk は記録済みと
+    /// して覚える。
+    fn next_sounding_to_record(
+        &mut self,
+        played_samples: i64,
+        sample_rate: u32,
+    ) -> Option<SoundingAudio> {
+        let sounding = self.position.sounding(played_samples, sample_rate)?;
+        if self.last_recorded_chunk_id == Some(sounding.chunk_id) {
+            return None;
+        }
+        self.last_recorded_chunk_id = Some(sounding.chunk_id);
+        Some(sounding)
     }
 
     /// 1 つの音を鳴らす時刻へ予約する
@@ -986,8 +1071,17 @@ impl AudioPlayoutAssembly {
             .max(AUDIO_PLAYOUT_DELAY_US);
         // 到着基準で鳴らすときの遅れは、学習した遅れを [50 ms, 100 ms] に切った値にする。
         // 学習した値には TIMESTAMP の壁時計からのずれが混じるため、そのまま使うと音がその分
-        // だけ遅れて鳴る
-        let arrival_delay_us = audio_arrival_delay_us(delay_us);
+        // だけ遅れて鳴る。音声だけの購読では、揺らぎの推定が届いていない周期的な停滞を
+        // 先に吸収するため、下限 140 ms を確保し、穴を観測して閉ループが広げた目標を
+        // 上限 160 ms まで使う (映像を購読しているときは下限を足さない)
+        let arrival_delay_us = if self.audio_only {
+            audio_arrival_delay_us(delay_us).max(audio_only_arrival_delay_us(
+                delay_us,
+                TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US,
+            ))
+        } else {
+            audio_arrival_delay_us(delay_us)
+        };
         // 表示の遅れは時間軸が返す値をそのまま渡す。まだ観測が無いときは既定値を使う
         let presentation_delay_us = timeline
             .presentation_delay_us(Track::Audio)
@@ -999,8 +1093,9 @@ impl AudioPlayoutAssembly {
             duration_us,
             target_start_us,
             // 目標が決まっているときだけ目標を守る。無いときと、目標を使わない指定の
-            // ときは到着基準で並べる
-            enforce_target: enforce_target && target_start_us.is_some(),
+            // ときは到着基準で並べる。音声だけの購読では映像に合わせる相手がいないため、
+            // 目標を守らず到着基準で並べる
+            enforce_target: enforce_target && !self.audio_only && target_start_us.is_some(),
             delay_us,
             arrival_delay_us,
             presentation_delay_us,
@@ -1215,13 +1310,39 @@ impl AudioPlayoutAssembly {
     ///
     /// アンダーランも前回の観測からの増分にして渡す。アンダーランは事後には埋められない
     /// ため、閉ループはこれを根拠に目標遅延を上げる。
+    ///
+    /// 音声だけの購読では、到着基準の再生に足している下限も閉ループへ渡す。閉ループは穴への
+    /// 対処を「実際に適用している深さ」から増やすため、内部の目標だけを増やしても実際の
+    /// 再生の深さが変わらない ([`AudioDelayFeedbackObservation::arrival_delay_floor_us`])。
     fn feed_feedback(&mut self, timeline: &mut PlayoutTimeline, now_us: i64) {
-        let mut observation = self.stats.audio_delay_feedback(now_us);
+        // この再生を始めた時刻より前の実績は、新しい再生の制御へ混ぜない
+        let mut observation = self
+            .stats
+            .audio_delay_feedback_since(now_us, self.feedback_started_at_us);
         let compressed_us = self.scheduler.compressed_us();
         observation.compression_us = compressed_us.saturating_sub(self.last_compressed_us).max(0);
         self.last_compressed_us = compressed_us;
         observation.underrun_ms = self.take_unfed_underrun_ms();
+        observation.arrival_delay_floor_us = if self.audio_only {
+            Some(TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US)
+        } else {
+            None
+        };
         timeline.observe_audio_playout(observation);
+    }
+
+    /// 鳴らせない復号出力を、長さ 0 の失敗として計器へ記録する
+    ///
+    /// 空の PCM は時間軸へ観測せず、予約へも渡さない (基準の学習と計器が壊れるため)。
+    /// 閉ループへは渡さない。
+    fn record_invalid_decode(&mut self, now_us: i64) {
+        self.stats.record_miss(AudioPlayoutMiss {
+            at_us: now_us,
+            reason: AudioMissReason::Error,
+            duration_us: 0,
+            target_us: None,
+            arrival_us: None,
+        });
     }
 
     /// 計器の観測値を求める
@@ -1233,13 +1354,21 @@ impl AudioPlayoutAssembly {
     ///
     /// 材料化した隙間と検出したアンダーランの回数・合計・最大、鳴るはずの時刻 (絶対値)、
     /// 到着から鳴り始めるまでと予定に対する余裕の分布 (p50 / p95)、理由別の捨ての件数と
-    /// 長さ、時間圧縮と補間を使えないサンプルレートで受け取った音の数、いま使っている
-    /// 目標遅延とその理由、いま適用している上限と、直近に観測した圧縮の速さを出す。
+    /// 長さ、時間圧縮と補間を使えないサンプルレートで受け取った音の数、音声だけの購読かと
+    /// その到着基準の下限、いま使っている目標遅延とその理由・揺らぎだけの目標・実際に
+    /// 適用している値、いま適用している上限、直近に観測した圧縮の速さ、予約の予定から
+    /// 実際の出力までの残差を出す。
     fn log_fields(&mut self, timeline: &PlayoutTimeline, now_us: i64) -> String {
         let snapshot = self.snapshot(now_us);
-        let feedback = timeline.delay_breakdown().audio_delay_feedback;
+        let breakdown = timeline.delay_breakdown();
+        let feedback = breakdown.audio_delay_feedback;
         format!(
-            "gaps={} gap_ms={} gap_max_ms={} underruns={} underrun_ms={} underrun_max_ms={} playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} stretch_unavailable={} feedback_target={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={} feedback_ceiling={}ms feedback_compression={}ms_per_second",
+            "audio_only={} arrival_delay_floor={}ms gaps={} gap_ms={} gap_max_ms={} underruns={} underrun_ms={} underrun_max_ms={} playout last_target_us={} last_arrival_us={} last_start_us={} last_slack={}ms last_start_delay={}ms last_lateness={}ms slack_p50_p95={}ms start_delay_p50_p95={}ms lateness_p50_p95={}ms played={} played_ms={} arrival_planned={} unplanned={} missed={} missed_ms={} missed_backlog={} missed_catch_up={} missed_error={} missed_stopped={} stretch_unavailable={} feedback_target={}ms feedback_jitter={}ms feedback_applied={}ms feedback_reason={:?} feedback_change={}ms feedback_adjustments={} feedback_ceiling={}ms feedback_compression={}ms_per_second audio_playout_correction={}ms",
+            self.audio_only,
+            duration_log(
+                self.audio_only
+                    .then_some(TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US)
+            ),
             snapshot.gaps,
             snapshot.gap_total_us / 1000,
             snapshot.gap_max_us / 1000,
@@ -1267,11 +1396,14 @@ impl AudioPlayoutAssembly {
             miss_total_log(snapshot.missed_by_reason.stopped),
             snapshot.stretch_unavailable_frames,
             feedback.target_us / 1000,
+            feedback.jitter_target_us / 1000,
+            feedback.applied_us / 1000,
             feedback.reason,
             feedback.last_change_us / 1000,
             feedback.adjustments,
             feedback.applied_ceiling_us / 1000,
             feedback.compression_us_per_second / 1000,
+            breakdown.audio_playout_correction_us / 1000,
         )
     }
 
@@ -1294,12 +1426,13 @@ impl AudioPlayoutAssembly {
         let Ok(sample_rate) = u32::try_from(stats.sample_rate) else {
             return now_us;
         };
-        let Some(sounding_pts_us) = self
+        let Some(sounding) = self
             .position
-            .sounding_pts_us(stats.total_samples_played, sample_rate)
+            .sounding(stats.total_samples_played, sample_rate)
         else {
             return now_us;
         };
+        let sounding_pts_us = sounding.pts_us;
         // 表示の遅れを引くと、そのトラックの TIMESTAMP を壁時計へ移した値になる
         let Some(presentation_delay_us) = timeline.presentation_delay_us(Track::Audio) else {
             return now_us;
@@ -1366,19 +1499,45 @@ fn miss_total_log(total: AudioMissTotal) -> String {
 /// 累積サンプル数と PTS を残し、いま鳴っているサンプルの PTS をここから求める。詰めたり
 /// 補間したりした後の実際のサンプル数で記録するため、宣言した PTS を線形に外挿するより
 /// 正しく求まる。
+///
+/// 時間軸へ実績を記録するときは、その音を予約したときの開始予定も要る。予定を鳴っている
+/// 時点で timeline に問い直すと、その間に動いた補償や閉ループの目標が混ざり、予約時の
+/// 予定でなくなるため、積んだ時点の値を chunk に残す。
 struct AudioPlayoutPosition {
     /// まだ鳴り終わっていない音 (積んだ順)
     pending: VecDeque<AudioPlayoutChunk>,
+    /// 次に記録する chunk の識別子
+    next_chunk_id: u64,
 }
 
 /// 再生機器へ積んだ音 1 つ分の位置
 struct AudioPlayoutChunk {
+    /// この音の識別子。chunk ごとに 1 回だけ実績を記録するために使う
+    chunk_id: u64,
     /// この音が鳴り始める累積サンプル数
     start_samples: i64,
     /// この音の PTS (マイクロ秒)
     pts_us: i64,
     /// この音のサンプル数 (チャンネルごと)
     samples: i64,
+    /// この音を積んだときに決まっていた開始予定 (受信側の壁時計、マイクロ秒)
+    ///
+    /// 音声の音は [`AudioPlayoutArrangement::start_at_us`]、隙間の音は予定を持たないため
+    /// None。予約後に timeline の値が動いても、ここでは測り直さない
+    start_at_us: Option<i64>,
+}
+
+/// いま鳴っている音の値
+struct SoundingAudio {
+    /// この音の識別子
+    chunk_id: u64,
+    /// 鳴っているサンプルの PTS (マイクロ秒)
+    pts_us: i64,
+    /// そのサンプルの予定の時刻 (受信側の壁時計、マイクロ秒)。予定が無ければ None
+    ///
+    /// 予約した開始予定に、chunk の先頭 PTS から鳴っている位置までの差を足した値である。
+    /// 出力の実績 (`presented`) と組にして時間軸へ渡すと、予定から実際の出力までの残差になる
+    target_us: Option<i64>,
 }
 
 impl AudioPlayoutPosition {
@@ -1386,24 +1545,32 @@ impl AudioPlayoutPosition {
     fn new() -> Self {
         Self {
             pending: VecDeque::new(),
+            next_chunk_id: 0,
         }
     }
 
     /// 積んだ音を記録する
-    fn record(&mut self, start_samples: i64, pts_us: i64, samples: i64) {
+    ///
+    /// `start_at_us` はその音を積んだときに決まっていた開始予定である。予定を持たない音
+    /// (隙間) は None を渡す。
+    fn record(&mut self, start_samples: i64, pts_us: i64, samples: i64, start_at_us: Option<i64>) {
+        let chunk_id = self.next_chunk_id;
+        self.next_chunk_id = self.next_chunk_id.saturating_add(1);
         self.pending.push_back(AudioPlayoutChunk {
+            chunk_id,
             start_samples,
             pts_us,
             samples,
+            start_at_us,
         });
     }
 
-    /// いま鳴っているサンプルの PTS (マイクロ秒)
+    /// いま鳴っている音の値 (PTS と予定) を求める
     ///
     /// `played_samples` は再生機器が鳴らし終えたサンプル数。鳴り終えた音は捨てる。すべて
     /// 鳴り終えたときと、再生位置が積んだ範囲より前へ戻ったとき (デバイスの作り直し) は
     /// `None` を返す。後者は対応が切れているため、記録を捨てて次の積み込みからやり直す。
-    fn sounding_pts_us(&mut self, played_samples: i64, sample_rate: u32) -> Option<i64> {
+    fn sounding(&mut self, played_samples: i64, sample_rate: u32) -> Option<SoundingAudio> {
         while self.pending.front().is_some_and(|chunk| {
             chunk.start_samples.saturating_add(chunk.samples) <= played_samples
         }) {
@@ -1416,11 +1583,16 @@ impl AudioPlayoutPosition {
             return None;
         }
         let elapsed_samples = usize::try_from(elapsed_samples).ok()?;
-        Some(
-            chunk
-                .pts_us
-                .saturating_add(samples_to_us(elapsed_samples, sample_rate)),
-        )
+        let elapsed_us = samples_to_us(elapsed_samples, sample_rate);
+        // 予約した開始予定に、鳴っている位置の分だけ進めた時刻が、このサンプルの予定である
+        let target_us = chunk
+            .start_at_us
+            .map(|start_at_us| start_at_us.saturating_add(elapsed_us));
+        Some(SoundingAudio {
+            chunk_id: chunk.chunk_id,
+            pts_us: chunk.pts_us.saturating_add(elapsed_us),
+            target_us,
+        })
     }
 }
 
@@ -1481,7 +1653,10 @@ fn play_decoded_audio(
             sample_rate,
             audio.channels,
         ) {
-            state.position.record(start_samples, pts_us, frames as i64);
+            // 隙間の音は予定を持たない (時間軸へ実績を記録しない)
+            state
+                .position
+                .record(start_samples, pts_us, frames as i64, None);
             true
         } else {
             false
@@ -1512,9 +1687,12 @@ fn play_decoded_audio(
         state.record_error(timeline, &arrangement, now_us);
         return;
     }
-    state
-        .position
-        .record(start_samples, audio.pts_us, frames as i64);
+    state.position.record(
+        start_samples,
+        audio.pts_us,
+        frames as i64,
+        Some(arrangement.start_at_us),
+    );
     // 最初に積んだ音の開始時刻を控える。メインループはこの時刻に達したら play() を呼ぶ。
     // それまでのフレームは再生機器の内部キューに先行バッファとして溜まる
     if state.playback_start_at_us.is_none() {
@@ -1529,11 +1707,16 @@ fn play_decoded_audio(
     state.commit(timeline, applied, materialized_gap_us, now_us);
 }
 
-/// いま鳴っているサンプルの PTS を実績として時間軸へ記録する
+/// いま鳴っている音の PTS と予定を実績として時間軸へ記録する
 ///
 /// `raw_player` は積んだ順にサンプルを鳴らすため、鳴らし終えたサンプル数と「積んだ時点の
 /// 累積サンプル数」の対応から、いま鳴っているサンプルの PTS が求まる。予定時刻ではなく
 /// 実際の再生位置を使うことで、`skew_us` が計画ではなく実測になる。
+///
+/// 時間軸へは、実際に鳴っている壁時計 (`presented`) と、その音を予約したときの開始予定に
+/// 鳴っている位置の差を足した時刻 (`target`) を組にして渡す。両者の差が、予約の予定から
+/// 実際の出力までの残差になり、映像の合わせ先に使われる。予定は積んだ時点の値であり、
+/// ここで timeline に問い直さない。chunk ごとに 1 回だけ記録する。
 fn record_sounding_audio(
     audio_player: &raw_player::audio_player::AudioPlayer,
     state: &mut AudioPlayoutAssembly,
@@ -1544,13 +1727,16 @@ fn record_sounding_audio(
         return;
     }
     let played_samples = stats.total_samples_played;
-    let Some(pts_us) = state
-        .position
-        .sounding_pts_us(played_samples, stats.sample_rate as u32)
+    let Some(sounding) = state.next_sounding_to_record(played_samples, stats.sample_rate as u32)
     else {
         return;
     };
-    timeline.record_presentation(Track::Audio, pts_us, wall_clock_us());
+    timeline.record_presentation_with_target(
+        Track::Audio,
+        sounding.pts_us,
+        wall_clock_us(),
+        sounding.target_us,
+    );
 }
 
 /// スケジューラが決めた隙間の材料化と詰めを音声へ適用した結果
@@ -1767,6 +1953,17 @@ fn pcm_duration_us(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
         / i64::from(sample_rate)
 }
 
+/// 復号の出力に鳴らせるサンプルがあるか
+///
+/// 空の PCM (AAC の priming など) や、チャンネル数・サンプルレートが 0 のフレームは
+/// 鳴らせない。時間軸へ観測し予約へ渡すと、基準の学習と計器が壊れるため、その前に弾く。
+fn has_audio_frames(audio: &DecodedAudioFrame) -> bool {
+    if audio.channels == 0 || audio.sample_rate == 0 {
+        return false;
+    }
+    audio.pcm.len() / usize::from(audio.channels) > 0
+}
+
 /// マイクロ秒に相当するサンプル数 (四捨五入)
 ///
 /// 時間圧縮で削ってよい長さの上限を求めるときに使う (`samples_to_us` と逆向きの丸め)。
@@ -1798,8 +1995,9 @@ fn samples_to_us(samples: usize, sample_rate: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use shiguredo_moqt::playout::delay::AUDIO_DELAY_START_MS;
     use shiguredo_moqt::playout::feedback::{
-        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US, AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
+        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US, AudioDelayFeedbackReason,
     };
 
     use super::*;
@@ -2223,38 +2421,72 @@ mod tests {
         );
     }
 
-    /// 積んだ位置の対応から、いま鳴っているサンプルの PTS が求まること
+    /// 積んだ位置の対応から、いま鳴っているサンプルの PTS と予定が求まること
     #[test]
     fn audio_playout_position_follows_the_played_samples() {
         let mut position = AudioPlayoutPosition::new();
-        // 0 サンプル目から 20 ms (48 kHz で 960 サンプル) の音を PTS 1_000_000 で積む
-        position.record(0, 1_000_000, 960);
+        // 0 サンプル目から 20 ms (48 kHz で 960 サンプル) の音を PTS 1_000_000、
+        // 予約した開始予定 1_100_000 で積む
+        position.record(0, 1_000_000, 960, Some(1_100_000));
+        let sounding = position
+            .sounding(0, 48_000)
+            .expect("まだ鳴っていなくても先頭の値が分かること");
         assert_eq!(
-            position.sounding_pts_us(0, 48_000),
-            Some(1_000_000),
+            sounding.pts_us, 1_000_000,
             "まだ鳴っていなければ積んだ先頭の PTS になること"
         );
         assert_eq!(
-            position.sounding_pts_us(480, 48_000),
-            Some(1_010_000),
+            sounding.target_us,
+            Some(1_100_000),
+            "まだ鳴っていなければ予約した開始予定になること"
+        );
+        let sounding = position
+            .sounding(480, 48_000)
+            .expect("480 サンプル鳴った位置が分かること");
+        assert_eq!(
+            sounding.pts_us, 1_010_000,
             "480 サンプル (10 ms) 鳴れば PTS も 10 ms 進むこと"
         );
-        // 次の音を続けて積む
-        position.record(960, 1_020_000, 960);
         assert_eq!(
-            position.sounding_pts_us(960, 48_000),
+            sounding.target_us,
+            Some(1_110_000),
+            "予定も鳴っている位置の分だけ進むこと"
+        );
+        // 次の音を続けて積む
+        position.record(960, 1_020_000, 960, Some(1_120_000));
+        assert_eq!(
+            position
+                .sounding(960, 48_000)
+                .map(|sounding| sounding.pts_us),
             Some(1_020_000),
             "次の音の先頭の PTS になること"
         );
         assert_eq!(
-            position.sounding_pts_us(1_440, 48_000),
-            Some(1_030_000),
-            "次の音の途中も追従すること"
+            position
+                .sounding(1_440, 48_000)
+                .map(|sounding| (sounding.pts_us, sounding.target_us)),
+            Some((1_030_000, Some(1_130_000))),
+            "次の音の途中も PTS と予定が追従すること"
         );
-        assert_eq!(
-            position.sounding_pts_us(1_920, 48_000),
-            None,
+        assert!(
+            position.sounding(1_920, 48_000).is_none(),
             "すべて鳴り終えたら分からないこと"
+        );
+    }
+
+    /// 予定を持たない音 (隙間) では予定が None になること
+    #[test]
+    fn audio_playout_position_reports_no_target_for_a_gap() {
+        let mut position = AudioPlayoutPosition::new();
+        // 隙間の音は開始予定を持たない
+        position.record(0, 1_000_000, 480, None);
+        let sounding = position
+            .sounding(240, 48_000)
+            .expect("隙間の音でも鳴っている位置は分かること");
+        assert_eq!(sounding.pts_us, 1_005_000, "PTS は進むこと");
+        assert_eq!(
+            sounding.target_us, None,
+            "予定を持たない音は予定を返さないこと"
         );
     }
 
@@ -2262,20 +2494,49 @@ mod tests {
     #[test]
     fn audio_playout_position_clears_when_the_play_position_goes_back() {
         let mut position = AudioPlayoutPosition::new();
-        position.record(5_000, 2_000_000, 960);
+        position.record(5_000, 2_000_000, 960, Some(2_100_000));
         // デバイスが作り直され、鳴らし終えたサンプル数が積んだ範囲より前へ戻った
-        assert_eq!(
-            position.sounding_pts_us(0, 48_000),
-            None,
+        assert!(
+            position.sounding(0, 48_000).is_none(),
             "対応が切れたら分からないこと"
         );
         // 捨てたあとは次の積み込みからやり直す
-        position.record(0, 3_000_000, 960);
+        position.record(0, 3_000_000, 960, Some(3_100_000));
         assert_eq!(
-            position.sounding_pts_us(0, 48_000),
-            Some(3_000_000),
+            position
+                .sounding(0, 48_000)
+                .map(|sounding| (sounding.pts_us, sounding.target_us)),
+            Some((3_000_000, Some(3_100_000))),
             "積み直した位置から求まること"
         );
+    }
+
+    /// chunk が次へ進んだときだけ時間軸へ記録すること
+    ///
+    /// 鳴っているサンプルは同じ chunk の中で動き続けるため、毎ループ記録すると同じ音を
+    /// 何度も上書きしてしまう。
+    #[test]
+    fn sounding_audio_is_recorded_once_per_chunk() {
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.position.record(0, 1_000_000, 960, Some(1_100_000));
+        let first = assembly
+            .next_sounding_to_record(480, 48_000)
+            .expect("最初は記録すること");
+        assert_eq!(first.pts_us, 1_010_000);
+        assert_eq!(first.target_us, Some(1_110_000));
+        assert!(
+            assembly.next_sounding_to_record(600, 48_000).is_none(),
+            "同じ chunk の間は記録しないこと"
+        );
+        // 次の音へ進んだら記録する
+        assembly
+            .position
+            .record(960, 1_020_000, 960, Some(1_120_000));
+        let second = assembly
+            .next_sounding_to_record(1_100, 48_000)
+            .expect("次の chunk へ進んだら記録すること");
+        assert_eq!(second.pts_us, 1_022_917);
+        assert_eq!(second.target_us, Some(1_122_917));
     }
 
     /// 隙間の音を積むときの PTS を求めること
@@ -2805,12 +3066,12 @@ mod tests {
             Some(0),
             "予定を過ぎて鳴った量が閉ループへ届くこと (不感帯の 20 ms を引いた後)"
         );
-        // 閉ループが決めた目標 (観測が届いた後は初期値の 100 ms) が時間軸へ反映され、
-        // 以降の音はその目標で並ぶ
+        // 閉ループの目標は 50 ms から始まるが、到着の分布が揃うまでは到着推定の開始値
+        // (80 ms) との大きい方が使われる。時間軸へ反映されるのもその値である
         assert_eq!(
             timeline.learned_delay_us(Track::Audio),
-            AUDIO_DELAY_FEEDBACK_START_US,
-            "閉ループが決めた目標が時間軸へ反映されること"
+            AUDIO_DELAY_START_MS * 1_000,
+            "到着の分布が揃うまでは到着推定の開始値が目標になること"
         );
     }
 
@@ -2853,10 +3114,9 @@ mod tests {
             Some(AudioMissReason::Backlog),
             "直近の捨ての理由が並べすぎであること"
         );
-        // 捨てた量は閉ループへ渡り、目標遅延を増やす判断に使われる。ただし閉ループの内部の
-        // 目標も、実際に適用する上限 (圧縮が無いときは 100 ms) で切る。初期値がその上限と
-        // 同じであるため、この観測では値が動かない (適用されない値へ育てると、遅れが収まって
-        // から減らし切るまでの時間だけ復帰が遅れる)
+        // 捨てた量は閉ループへ渡り、目標遅延を増やす判断に使われる。閉ループは安全下限
+        // (50 ms) から始まり、捨てた長さ (20 ms) と余白 (20 ms) の分だけ増やす。ただし
+        // 実際に適用する上限 (圧縮が無いときは 100 ms) は超えない
         let feedback = timeline.delay_breakdown().audio_delay_feedback;
         assert_eq!(
             feedback.reason,
@@ -2864,16 +3124,16 @@ mod tests {
             "並べすぎの捨てが閉ループへ届くこと"
         );
         assert_eq!(
-            feedback.target_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-            "内部の目標が適用する上限 (100 ms) に収まること"
+            feedback.target_us, 90_000,
+            "安全下限の 50 ms から捨てた量の分だけ増やすこと"
         );
         assert_eq!(
             feedback.applied_ceiling_us, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
             "圧縮が無いため上限を広げないこと"
         );
         assert_eq!(
-            feedback.last_change_us, 0,
-            "既に適用する上限にあるため増えないこと"
+            feedback.last_change_us, 40_000,
+            "捨てた長さと余白の分だけ目標を増やすこと"
         );
     }
 
@@ -2975,6 +3235,8 @@ mod tests {
         );
         let line = assembly.log_fields(&timeline, now_us);
         for key in [
+            "audio_only=",
+            "arrival_delay_floor=",
             "gaps=",
             "gap_ms=",
             "gap_max_ms=",
@@ -2990,9 +3252,210 @@ mod tests {
             "missed_backlog=",
             "missed_stopped=",
             "feedback_target=",
+            "feedback_jitter=",
+            "feedback_applied=",
             "feedback_reason=",
+            "audio_playout_correction=",
         ] {
             assert!(line.contains(key), "ログに {key} が出ること line={line}");
         }
+    }
+
+    /// 音声だけの購読では、ログに下限と音声だけの状態が出ること
+    #[test]
+    fn audio_playout_log_reports_the_audio_only_floor() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.set_audio_only(true);
+        let now_us = 10_000_000;
+        timeline.observe(Track::Audio, now_us, 0);
+        let audio = audio_frame(960, 48_000);
+        commit_one_play(&mut assembly, &mut timeline, &audio, now_us);
+        let line = assembly.log_fields(&timeline, now_us);
+        assert!(
+            line.contains("audio_only=true"),
+            "音声だけの購読であることがログに出ること line={line}"
+        );
+        assert!(
+            line.contains("arrival_delay_floor=140ms"),
+            "音声だけの到着基準の下限がログに出ること line={line}"
+        );
+    }
+
+    /// 音声だけの購読では、到着基準の再生の遅れに下限を足すこと
+    ///
+    /// 映像に合わせる相手がいないため、揺らぎの推定が届いていない周期的な停滞を先に
+    /// 吸収する。目標の時刻は守らない。
+    #[test]
+    fn playout_assembly_uses_the_audio_only_arrival_floor() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.set_audio_only(true);
+        let arrival_us = 10_000_000;
+        timeline.observe(Track::Audio, arrival_us, 0);
+        let audio = audio_frame(960, 48_000);
+        let arrangement = assembly
+            .arrange(&mut timeline, &audio, arrival_us, arrival_us, false)
+            .expect("音声だけの購読でも鳴ると決まること");
+        assert_eq!(
+            arrangement.start_at_us, 10_140_000,
+            "到着 + 140 ms から鳴らすこと (学習値の 80 ms ではなく下限を使う)"
+        );
+        let play = assembly
+            .scheduler
+            .last_play()
+            .expect("鳴らすと決めた音が残ること");
+        assert_eq!(
+            play.basis,
+            AudioPlayoutBasis::Arrival,
+            "音声だけの購読では到着基準で並べること"
+        );
+    }
+
+    /// 音声だけの購読では、穴を観測して閉ループが広げた目標まで遅らせること
+    ///
+    /// 下限の 140 ms だけでは 140 ms を超える跳ねを吸収できない。穴が空いたら閉ループが
+    /// 適用する上限を一時的に広げ、広げた目標 (最大 160 ms) まで到着基準の遅れを深くする。
+    #[test]
+    fn playout_assembly_uses_the_widened_audio_only_arrival_delay() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.set_audio_only(true);
+        let start_us = 10_000_000;
+        assembly.restart_feedback_window(start_us);
+        timeline.observe(Track::Audio, start_us, 0);
+        let audio = audio_frame(960, 48_000);
+        // 1 回目の観測で閉ループの制御を開始する (穴は無い)
+        assembly.commit(&mut timeline, applied_audio(&audio, 0), 0, start_us);
+        // 1 秒後に 20 ms の穴を観測する。閉ループは穴を吸収できる上限まで目標を広げる
+        let gap_us = 20_000;
+        assembly.commit(
+            &mut timeline,
+            applied_audio(&audio, 0),
+            gap_us,
+            start_us + 1_000_000,
+        );
+        assert_eq!(
+            timeline.learned_delay_us(Track::Audio),
+            160_000,
+            "穴を観測したら音声だけの上限 (160 ms) まで目標を広げること"
+        );
+        let arrival_us = start_us + 2_000_000;
+        let arrangement = assembly
+            .arrange(&mut timeline, &audio, arrival_us, arrival_us, false)
+            .expect("広げた目標でも鳴ると決まること");
+        assert_eq!(
+            arrangement.start_at_us,
+            arrival_us + 160_000,
+            "穴で広げた目標 (160 ms) まで遅らせること"
+        );
+    }
+
+    /// 映像を購読しているときは、音声だけの下限を足さないこと
+    #[test]
+    fn playout_assembly_keeps_the_learned_arrival_delay_without_audio_only() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        let arrival_us = 10_000_000;
+        timeline.observe(Track::Audio, arrival_us, 0);
+        let audio = audio_frame(960, 48_000);
+        let arrangement = assembly
+            .arrange(&mut timeline, &audio, arrival_us, arrival_us, false)
+            .expect("映像を購読していても鳴ると決まること");
+        assert_eq!(
+            arrangement.start_at_us, 10_080_000,
+            "学習した 80 ms をそのまま使うこと"
+        );
+    }
+
+    /// 音声だけの購読では、目標の時刻を守らず到着基準で並べること
+    #[test]
+    fn playout_assembly_does_not_enforce_the_target_for_audio_only() {
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        let arrival_us = 10_000_000;
+        timeline.observe(Track::Audio, arrival_us, 0);
+        let audio = audio_frame(960, 48_000);
+        let arrangement = assembly
+            .arrange(&mut timeline, &audio, arrival_us, arrival_us, true)
+            .expect("映像を購読していれば鳴ると決まること");
+        assert_eq!(
+            assembly
+                .scheduler
+                .last_play()
+                .expect("鳴らすと決めた音が残ること")
+                .basis,
+            AudioPlayoutBasis::Timestamp,
+            "映像を購読しているときは目標の時刻を守ること"
+        );
+        assert_eq!(
+            arrangement.start_at_us, 10_080_000,
+            "目標の時刻から鳴らすこと"
+        );
+
+        let mut timeline = PlayoutTimeline::new();
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.set_audio_only(true);
+        timeline.observe(Track::Audio, arrival_us, 0);
+        let arrangement = assembly
+            .arrange(&mut timeline, &audio, arrival_us, arrival_us, true)
+            .expect("音声だけの購読でも鳴ると決まること");
+        assert_eq!(
+            assembly
+                .scheduler
+                .last_play()
+                .expect("鳴らすと決めた音が残ること")
+                .basis,
+            AudioPlayoutBasis::Arrival,
+            "音声だけの購読では目標の時刻を守らないこと"
+        );
+        assert_eq!(
+            arrangement.start_at_us, 10_140_000,
+            "到着基準の下限から鳴らすこと"
+        );
+    }
+
+    /// 鳴らせない復号出力を、時間軸へ観測する前に失敗として数えること
+    #[test]
+    fn empty_decoded_audio_is_rejected_before_observation() {
+        let now_us = 10_000_000;
+        let audio = audio_frame(960, 48_000);
+        assert!(has_audio_frames(&audio), "通常の音声は鳴らせること");
+
+        let mut empty = audio_frame(960, 48_000);
+        empty.pcm.clear();
+        assert!(!has_audio_frames(&empty), "空の PCM は鳴らせないこと");
+
+        let mut no_channels = audio_frame(960, 48_000);
+        no_channels.channels = 0;
+        assert!(
+            !has_audio_frames(&no_channels),
+            "チャンネル数 0 は鳴らせないこと"
+        );
+
+        let mut no_rate = audio_frame(960, 48_000);
+        no_rate.sample_rate = 0;
+        assert!(
+            !has_audio_frames(&no_rate),
+            "サンプルレート 0 は鳴らせないこと"
+        );
+
+        // 空の復号出力は、長さ 0 の失敗として件数だけを記録する
+        let mut assembly = AudioPlayoutAssembly::new();
+        assembly.record_invalid_decode(now_us);
+        let snapshot = assembly.snapshot(now_us);
+        assert_eq!(
+            snapshot.played_frames, 0,
+            "鳴らせない音を鳴らしたことにしないこと"
+        );
+        assert_eq!(snapshot.missed_frames, 1, "鳴らせない音を計上すること");
+        assert_eq!(
+            snapshot.missed_by_reason.error,
+            AudioMissTotal {
+                count: 1,
+                duration_us: 0,
+            },
+            "長さが分からない失敗として理由別に数えること"
+        );
     }
 }

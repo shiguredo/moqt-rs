@@ -14,10 +14,13 @@
 //!   明示された `targetLatency` は閉ループの目標の上限にだけ掛け、学習値には掛けない。
 //! - 表示の遅れ (映像): (遅れ − 基準の遅れ) の揺らぎの百分位。表示時刻の後に届く
 //!   フレームが 1 秒に [`TIMELINE_LATE_FRAMES_PER_SECOND`] 枚までになる値である
-//! - A/V 同期: 表示の遅れの差が [`TIMELINE_SYNC_MIN_DELTA_US`] を超えたら、先行する側へ
-//!   足して合わせる (観測のたび)。足した分は毎秒
-//!   [`TIMELINE_DELAY_DECAY_US_PER_SECOND`] までで戻す。相手側へ移す分は
-//!   [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] までにする
+//! - A/V 同期: 2 つのトラックの表示時刻の差が [`TIMELINE_SYNC_MIN_DELTA_US`] を超えた
+//!   ときだけ、先行する側へ足して合わせる (観測のたび)。合わせる量は「基準の遅れ +
+//!   表示の遅れ」の差そのものであり、経路の相対遅延 (直近の観測) ではない。ただし基準の
+//!   差を補償する量は [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] までにする。既知の
+//!   バッファの差と出力の残差は別に補償する。時計のずれの証拠を見たかどうかに関わらず
+//!   常に掛ける。共有する表示時刻の下限は即座に上げ、下げるのは毎秒
+//!   [`TIMELINE_DELAY_DECAY_US_PER_SECOND`] までにする
 //! - 基準を共有しない判定: 2 つのトラックの基準の差が、表示の遅れの上限から求まる
 //!   閾値を超えたときと、差が [`TIMELINE_BASE_DRIFT_US`] を超えて動き続けている
 //!   (TIMESTAMP が壁時計からずれている) ときである。共有しない間は、その時点までに
@@ -81,6 +84,13 @@ pub const TIMELINE_FRAME_INTERVAL_SAMPLES: usize = 32;
 /// 実績を A/V のずれの推定に使う期間 (マイクロ秒)
 pub const TIMELINE_SKEW_WINDOW_US: i64 = 1_000_000;
 
+/// 出力の残差を平滑化する時定数 (マイクロ秒)
+///
+/// 単発の予約の揺れを抑え、数フレームで追従する。
+/// [`PlayoutTimeline::record_presentation_with_target`] の重み
+/// `elapsed / (SMOOTHING + elapsed)` に使う。
+const TIMELINE_AUDIO_PLAYOUT_CORRECTION_SMOOTHING_US: i64 = 250_000;
+
 /// 追いつき中かを確かめる間隔 (マイクロ秒)
 pub const TIMELINE_CATCH_UP_CHECK_INTERVAL_US: i64 = 250_000;
 
@@ -118,6 +128,26 @@ pub const TIMELINE_DELAY_DECAY_US_PER_SECOND: i64 = 20_000;
 /// 同じか悪かった)。
 pub const TIMELINE_SYNC_MIN_DELTA_US: i64 = 5_000;
 
+/// 実際に先行する側へ足してよい補償量 (マイクロ秒)
+///
+/// 基準の差には [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] の保護を掛け、同じ方向の既知の
+/// バッファ差は別に補償する。バッファが基準の差を相殺している場合、その分をさらに予算へ
+/// 足すことはしない。先行側は必ず両方を合成した実際の表示時刻から決める。
+///
+/// `buffer_difference_us` は「音声の自分の遅れ − 映像の自分の遅れ」である。
+pub fn sync_compensation_limit_us(base_difference_us: i64, buffer_difference_us: i64) -> i64 {
+    // JS の Math.sign(base + buffer) * buffer と同じ結果を、乗算を使わずに求める
+    let total_difference_us = base_difference_us.saturating_add(buffer_difference_us);
+    let allowance_us = if total_difference_us > 0 {
+        buffer_difference_us.max(0)
+    } else if total_difference_us < 0 {
+        buffer_difference_us.saturating_neg().max(0)
+    } else {
+        0
+    };
+    TIMELINE_MAX_COMPENSATED_DIFFERENCE_US.saturating_add(allowance_us)
+}
+
 /// 音声の再生の遅れの下限 (マイクロ秒)
 ///
 /// 到着基準で並べるときも、共有の時間軸で並べるときも、これより短くは並べない。閉ループの
@@ -150,6 +180,40 @@ pub const TIMELINE_AUDIO_DELAY_FLOOR_US: i64 = 50_000;
 /// 合わせ先がずれる。
 pub const TIMELINE_ARRIVAL_DELAY_US: i64 = 100_000;
 
+/// 音声だけを購読するときの、到着基準で並べる再生の遅れの下限 (マイクロ秒)
+///
+/// 音声だけの購読は映像に合わせる相手が無く、到着基準で並べる。このときの再生の遅れは
+/// 閉ループの目標に追随するが、目標の適用上限は 100 ms であり、圧縮か無音の穴が 2 秒
+/// 続いたときだけ 160 ms へ広がる
+/// ([`crate::playout::feedback::AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`])。Wi-Fi の
+/// 周期的な停滞 (実測: 約 0.5 秒ごとに 100 ms 前後) は孤立した穴として現れるため上限が
+/// 広がらず、遅れが 100 ms に張り付いて停滞を吸収しきれない (実測: 60 秒に 1 回 109 ms の
+/// 無音の穴、うち復旧できない分 32 ms)。
+///
+/// 揃える相手がいない音声だけの購読では、経路の停滞を先に吸収するためにこの下限まで
+/// 遅らせる。値は moqt-js の実リレー Wi-Fi 計測の A/B (0 / 120 / 140 ms を各 6 回、60 秒)
+/// で決めた。0 ms は 6 回すべてで無音の穴 (最大 116 ms、復旧できない分 28〜43 ms) と境界の
+/// 段差が出た。120 ms は穴が 1〜12 ms まで縮んだが 6 回すべてで境界の段差が 1 回出た。
+/// 140 ms は 4 回で穴も段差も 0、残る 2 回は経路が 140 ms を超えて跳ねた回で 33 ms の穴
+/// (復旧できない分 16〜17 ms) が 1 回だけであった。再生開始は 186〜192 ms から 226 ms へ
+/// +40 ms 遅くなるが、音声だけの購読は映像に合わせる相手がいないため許容する。160 ms まで
+/// 上げても 140 ms を超える跳ねは残るため、遅延の代償が増えるだけで止まらない。
+///
+/// 映像を購読しているときは、この下限を渡さない (A/V のずれになる)。
+pub const TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US: i64 = 140_000;
+
+/// 音声だけを購読するときの、学習した再生の遅れを使える上限 (マイクロ秒)
+///
+/// 映像に合わせる相手がいないため、閉ループが穴を観測して広げた目標 (最大
+/// [`crate::playout::feedback::AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] = 160 ms) まで
+/// 到着基準の遅れに使う。共有の基準があるトラックの上限 ([`TIMELINE_ARRIVAL_DELAY_US`] =
+/// 100 ms) はそのままにする。TIMESTAMP の時計のずれを揺らぎとして学習するトラックでは、
+/// 100 ms を超える分を使うと遅延だけが増えるためである。
+///
+/// 値は [`crate::playout::feedback::AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US`] と一致させる
+/// (テストで一致を固定する)。循環参照を避けるため、定数そのものは参照せず数値で持つ。
+pub const TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US: i64 = 160_000;
+
 /// 2 つのトラックの基準の差が、この幅を超えて動いたら時計がずれているとみなす (マイクロ秒)
 ///
 /// 差が大きいだけなら「経路と復号の遅い側」であり、同期の制御で合わせられる。しかし差が
@@ -164,12 +228,12 @@ pub const TIMELINE_BASE_DRIFT_US: i64 = 50_000;
 /// 基準の差の動きを見る窓 (マイクロ秒)
 pub const TIMELINE_BASE_DRIFT_WINDOW_US: i64 = 5_000_000;
 
-/// A/V 同期で合わせる、2 つのトラックの基準の差の上限 (マイクロ秒)
+/// A/V 同期で補償する基準の差の上限 (マイクロ秒)
 ///
-/// 同じ publisher・同じ経路の 2 つのトラックで、経路と復号の「最小」遅延がこれ以上違う
-/// ことはない。これを超える差は TIMESTAMP の時計のずれであることが多く、合わせても
-/// 実際のずれは減らないまま、相手側の表示の遅れだけが伸びる。時計のずれの証拠を
-/// 見たかどうかには依らず、常に掛ける。
+/// 基準には経路の最小遅延だけでなく、送信側の時計のずれも含まれる。後者に際限なく
+/// 合わせないため、基準の差にだけ保護を掛ける。自分で決めたバッファの差と、出力の時計で
+/// 測った残差は別に補償する ([`sync_compensation_limit_us`])。最終的な待ち時間はキューと
+/// 表示の上限で切る。
 pub const TIMELINE_MAX_COMPENSATED_DIFFERENCE_US: i64 = 100_000;
 
 /// いったん基準を共有しないと決めた後、判定を戻さない時間 (マイクロ秒)
@@ -236,6 +300,20 @@ const TIMELINE_BASE_DIFFERENCE_RECENT_WINDOW_US: i64 = 2_000_000;
 /// A/V の合わせ先がずれる。
 pub fn audio_arrival_delay_us(learned_delay_us: i64) -> i64 {
     learned_delay_us.clamp(TIMELINE_AUDIO_DELAY_FLOOR_US, TIMELINE_ARRIVAL_DELAY_US)
+}
+
+/// 音声だけを購読するときの到着基準の再生の遅れを求める (マイクロ秒)
+///
+/// 下限 (`floor_us`) を必ず確保し、その上で学習した値 (`learned_delay_us`) を上限
+/// [`TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US`] まで使う。穴を観測して閉ループが目標を
+/// 広げたとき、その分だけ深く構える。`floor_us` が上限より大きい場合は下限を優先する。
+///
+/// この関数は音声だけの購読でだけ使う。映像を購読しているときは
+/// [`audio_arrival_delay_us`] を使う (A/V のずれになるため)。
+pub fn audio_only_arrival_delay_us(learned_delay_us: i64, floor_us: i64) -> i64 {
+    learned_delay_us
+        .min(TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US)
+        .max(floor_us)
 }
 
 /// 窓に保持する観測の上限
@@ -308,6 +386,12 @@ pub struct DelayBreakdown {
     pub audio: TrackBreakdown,
     /// 映像の内訳
     pub video: TrackBreakdown,
+    /// 音声の予定から実際の出力までの残差 (マイクロ秒)。映像の合わせ先にだけ足す
+    ///
+    /// 予約した時刻 (予定) と実際に鳴り始めた時刻の差を、250 ms の時定数で平滑化した値。
+    /// 音声の予測 (予定どうし) だけを揃えると、実際に鳴る音から映像が先行したままになるため、
+    /// 映像の合わせ先にはこの値を足す。表示時刻そのもの (音声の再生予定) には含めない。
+    pub audio_playout_correction_us: i64,
     /// 基準の差「音声 − 映像」(マイクロ秒)。どちらかを観測していなければ None
     pub base_difference_us: Option<i64>,
     /// 2 つのトラックで基準を共有しているか
@@ -615,6 +699,34 @@ pub struct PlayoutTimeline {
     previous_unshared_at_us: Option<i64>,
     /// きっかけが去って差が戻っている状態の開始時刻 (マイクロ秒)
     unshared_returned_since_us: Option<i64>,
+    /// 同期が決めた、共有する表示時刻の下限 (受信側の壁時計、マイクロ秒)
+    ///
+    /// 同期が足す前の表示時刻 (基準の遅れ + 自分の遅れ + 出力の残差) の最大から決め、
+    /// 必要値が増えたら即座に上げ、減ったら毎秒
+    /// [`TIMELINE_DELAY_DECAY_US_PER_SECOND`] までで戻す。過去に各トラックへ足した補償を
+    /// 必要値の算定へ戻さないため、揺らぎが上下しても待ちを積み上げない。
+    sync_presentation_floor_us: Option<i64>,
+    /// 前回の同期で使った基準の遅れ (音声, 映像、マイクロ秒)
+    ///
+    /// 共通の基準移動とバッファの減衰を分けるために残す。現在のバッファ量を旧基準へ当てた
+    /// 値と比べることで、cache から追いついて基準が下がった分を下限へ移さない。
+    sync_bases_us: Option<[i64; 2]>,
+    /// 壁時計を持たない音声でも、再生結果だけから到着基準の遅延を制御できたか
+    ///
+    /// [`PlayoutTimeline::observe_audio_playout`] が 1 度でも呼ばれたら true。音声の
+    /// 観測 ([`PlayoutTimeline::observe`]) がまだ無い間は、揺らぎの学習の開始値を閉ループの
+    /// 入力へ掛け続けない ([`PlayoutTimeline::audio_jitter_target_us`])。
+    audio_playout_observed: bool,
+    /// 予約時の予定と実際の出力の差 (マイクロ秒)。0 以上
+    ///
+    /// 予定そのものを測り直すと、補償した分が再び残差へ入るため、平滑化した値だけを持つ。
+    /// 映像の合わせ先にだけ足し、音声の表示時刻には含めない。
+    audio_playout_correction_us: i64,
+    /// 有効な出力時計で残差を測れた最後の時刻 (受信側の壁時計、マイクロ秒)
+    ///
+    /// 代用の時計での予約では延長しない。ここから
+    /// [`TIMELINE_SKEW_WINDOW_US`] を超えたら残差を失効させる。
+    audio_playout_correction_at_us: Option<i64>,
     /// 基準を取り直した回数
     generation: u64,
     /// 直近の表示の実績
@@ -653,6 +765,11 @@ impl PlayoutTimeline {
             base_difference_drifted_value: false,
             previous_unshared_at_us: None,
             unshared_returned_since_us: None,
+            sync_presentation_floor_us: None,
+            sync_bases_us: None,
+            audio_playout_observed: false,
+            audio_playout_correction_us: 0,
+            audio_playout_correction_at_us: None,
             generation: 0,
             presented: [None, None],
         }
@@ -680,6 +797,13 @@ impl PlayoutTimeline {
             } else {
                 None
             });
+        // 公開する適用値も同じ呼び出しで更新する。次の音声観測を待つと、停止中などでは
+        // 閉ループの計器だけが新しい上限になり、実際に使う保持値には古い目標が残る
+        if self.tracks[Track::Audio.index()].base_us.is_some() {
+            let jitter_target_us = self.audio_jitter_target_us();
+            self.tracks[Track::Audio.index()].own_delay_us =
+                self.audio_delay_feedback.target_delay_us(jitter_target_us);
+        }
         // 明示された値は基準を共有するかの閾値にも効くため、保持の起点を取り直す
         self.refresh_unshared_state();
         // 下限は 2 つのトラックの表示の遅れの下限になる。片方だけがこの下限に当たることが
@@ -818,16 +942,22 @@ impl PlayoutTimeline {
     /// 閉ループはこれを使って、圧縮が止まったときに適用する上限を 100 ms へ戻してよいかを
     /// 判断する (経路が 100 ms を超えているまま戻すと往復する)。
     pub fn observe_audio_playout(&mut self, mut observation: AudioDelayFeedbackObservation) {
-        let state = &mut self.tracks[Track::Audio.index()];
-        observation.jitter_target_us = state.delay.target_delay_ms().saturating_mul(1_000);
+        // 音声の観測 (observe) が無くても、再生の結果だけで閉ループを回す
+        self.audio_playout_observed = true;
+        // 揺らぎだけから求めた目標遅延を閉ループへ渡す。音声の観測が無い間は 0 を渡し、
+        // 未学習の開始値を掛け続けない
+        observation.jitter_target_us = self.audio_jitter_target_us();
+        let at_us = observation.at_us;
         self.audio_delay_feedback.update(observation);
-        let state = &mut self.tracks[Track::Audio.index()];
-        if state.base_us.is_some() {
+        if self.tracks[Track::Audio.index()].base_us.is_some() {
             // 次の音から新しい目標で並ぶように、その場で表示の遅れを取り直す
-            state.own_delay_us = self
-                .audio_delay_feedback
-                .target_delay_us(state.delay.target_delay_ms().saturating_mul(1_000));
+            let jitter_target_us = self.audio_jitter_target_us();
+            self.tracks[Track::Audio.index()].own_delay_us =
+                self.audio_delay_feedback.target_delay_us(jitter_target_us);
         }
+        // 再生結果で目標を変えた時点で同期も更新する。次の復号出力まで待つと、穴からの
+        // 復帰時にその間だけ音声と映像の時刻が離れる
+        self.update_sync_delays(at_us);
     }
 
     /// この TIMESTAMP を鳴らす・表示する時刻 (受信側の壁時計のマイクロ秒)
@@ -871,6 +1001,21 @@ impl PlayoutTimeline {
         self.tracks[track.index()].own_delay_us
     }
 
+    /// 閉ループへ渡す、揺らぎだけから求めた目標遅延 (マイクロ秒)
+    ///
+    /// 到着時刻と媒体時刻の差を測れない音声へ、未学習の推定開始値 (80 ms) を掛け続けない。
+    /// 壁時計の観測が始まれば、到着の推定と閉ループの大きい方を再び使う。
+    fn audio_jitter_target_us(&self) -> i64 {
+        if self.audio_playout_observed && self.tracks[Track::Audio.index()].base_us.is_none() {
+            0
+        } else {
+            self.tracks[Track::Audio.index()]
+                .delay
+                .target_delay_ms()
+                .saturating_mul(1_000)
+        }
+    }
+
     /// 上限に収まらず切り下げた `targetLatency` の分 (マイクロ秒)
     pub fn limited_us(&self) -> i64 {
         self.config
@@ -883,13 +1028,63 @@ impl PlayoutTimeline {
     /// 表示した実績を記録する
     ///
     /// 呼び出し側が表示時刻を決めて実行したあとに呼ぶ。実績は
-    /// [`PlayoutTimeline::skew_us`] の推定に使う。
+    /// [`PlayoutTimeline::skew_us`] の推定に使う。音声の出力の残差を測るには
+    /// [`PlayoutTimeline::record_presentation_with_target`] を使う。
     pub fn record_presentation(
         &mut self,
         track: Track,
         timestamp_us: i64,
         presented_wall_clock_us: i64,
     ) {
+        self.record_presentation_with_target(track, timestamp_us, presented_wall_clock_us, None);
+    }
+
+    /// 表示した実績と、予約した時点の予定を記録する
+    ///
+    /// `target_wall_clock_us` は音声を予約した時点の予定 (受信側の壁時計、マイクロ秒)。
+    /// 出力の時計が有効なときだけ渡す。映像では無視する。音声では、予定より遅れた分
+    /// (`presented_wall_clock_us - target_wall_clock_us`、0 以上
+    /// [`TIMELINE_MAX_PRESENTATION_DELAY_MS`] 以下) を 250 ms の時定数で平滑化し、
+    /// [`PlayoutTimeline::delay_breakdown`] の `audio_playout_correction_us` と、映像の
+    /// 合わせ先へ反映する。
+    pub fn record_presentation_with_target(
+        &mut self,
+        track: Track,
+        timestamp_us: i64,
+        presented_wall_clock_us: i64,
+        target_wall_clock_us: Option<i64>,
+    ) {
+        if track == Track::Audio
+            && let Some(target_wall_clock_us) = target_wall_clock_us
+        {
+            // 出力の都合で予定より遅れた分を、映像の合わせ先へ反映する。残差そのものを
+            // 平滑化し、既に補償した映像の遅延を入力へ戻さない。250 ms の時定数で瞬間的な
+            // 予約の揺れを抑える。最初の出力と長い停止の後は、その場で対応を作り直す
+            let elapsed_us = self
+                .audio_playout_correction_at_us
+                .map(|at_us| presented_wall_clock_us.saturating_sub(at_us));
+            let residual_us = presented_wall_clock_us
+                .saturating_sub(target_wall_clock_us)
+                .max(0)
+                .min(TIMELINE_MAX_PRESENTATION_DELAY_MS.saturating_mul(1_000));
+            let correction_us = match elapsed_us {
+                Some(elapsed_us) if elapsed_us <= TIMELINE_SKEW_WINDOW_US => {
+                    // 重み elapsed / (時定数 + elapsed) の平滑化を整数で求める。差分へ掛けて
+                    // 足す形にすると、差分が小さいときに切り捨てで 0 に収束せず残るため、
+                    // 重み付き平均の式 (correction * 時定数 + residual * elapsed) / (時定数 + elapsed)
+                    // で求める
+                    let elapsed_us = elapsed_us.max(0);
+                    self.audio_playout_correction_us
+                        .saturating_mul(TIMELINE_AUDIO_PLAYOUT_CORRECTION_SMOOTHING_US)
+                        .saturating_add(residual_us.saturating_mul(elapsed_us))
+                        / TIMELINE_AUDIO_PLAYOUT_CORRECTION_SMOOTHING_US.saturating_add(elapsed_us)
+                }
+                // 最初の出力と、前回から 1 秒以上空いた (停止の後の) 出力は、その場で作り直す
+                _ => residual_us,
+            };
+            self.audio_playout_correction_us = correction_us;
+            self.audio_playout_correction_at_us = Some(presented_wall_clock_us);
+        }
         self.presented[track.index()] = Some(PresentationRecord {
             timestamp_us,
             presented_wall_clock_us,
@@ -965,28 +1160,48 @@ impl PlayoutTimeline {
         DelayBreakdown {
             audio: self.track_breakdown(Track::Audio),
             video: self.track_breakdown(Track::Video),
+            audio_playout_correction_us: self.audio_playout_correction_us,
             base_difference_us: self.current_base_difference_us(),
             sharing_bases: self.sharing_bases(),
             unshared_reason: self.unshared_reason(),
             base_drift_us_per_second: self.base_drift_us_per_second(),
             base_drift_limit_us: TIMELINE_BASE_DRIFT_US,
             presentation_delay_cap_us: self.presentation_cap_us(),
-            audio_delay_feedback: self.audio_delay_feedback.snapshot(),
+            audio_delay_feedback: self
+                .audio_delay_feedback
+                .snapshot(self.audio_jitter_target_us()),
         }
+    }
+
+    /// 音声の jitter buffer の目標遅延の閉ループの内訳 (表示用)
+    ///
+    /// 音声だけを購読するときは A/V 同期の推定を出さないため、目標遅延がどう決まったかを
+    /// ここから読めるようにする。まだ音声を観測していなければ初期値の内訳を返す
+    /// ([`crate::playout::feedback::AudioDelayFeedbackSnapshot`])。
+    pub fn audio_delay_feedback_stats(&self) -> AudioDelayFeedbackSnapshot {
+        self.audio_delay_feedback
+            .snapshot(self.audio_jitter_target_us())
     }
 
     /// 音声の jitter buffer の遅延 (マイクロ秒、上限適用後)。まだ観測していなければ None
     ///
     /// 壁時計の TIMESTAMP を持たない音を到着基準で並べるときの再生の遅れに使う。
     /// `targetLatency` と同期の制御による下限は含まない
-    /// ([`PlayoutTimeline::presentation_delay_us`] を使う)。
+    /// ([`PlayoutTimeline::presentation_delay_us`] を使う)。音声の観測が無くても、再生の
+    /// 観測だけから決めた閉ループの目標があればそれを返す。
     pub fn playout_delay_us(&self) -> Option<i64> {
-        self.tracks[Track::Audio.index()].base_us?;
-        Some(
-            self.tracks[Track::Audio.index()]
-                .own_delay_us
-                .min(self.presentation_cap_us()),
-        )
+        let own_delay_us = if self.tracks[Track::Audio.index()].base_us.is_some() {
+            // 音声の観測がある。自分の遅れ (揺らぎの学習と閉ループの大きい方) を使う
+            self.tracks[Track::Audio.index()].own_delay_us
+        } else if self.audio_playout_observed {
+            // 壁時計を持たない音声でも、再生結果だけから決めた目標を使う。音声の観測が
+            // 無い間は jitter の入力が 0 なので、閉ループの目標 (下限 50 ms) がそのまま出る
+            self.audio_delay_feedback
+                .target_delay_us(self.audio_jitter_target_us())
+        } else {
+            return None;
+        };
+        Some(own_delay_us.min(self.presentation_cap_us()))
     }
 
     /// 音声を到着基準で並べるときの再生の遅れ (マイクロ秒)。まだ観測していなければ None
@@ -1003,17 +1218,26 @@ impl PlayoutTimeline {
     /// 世代は進めない。世代を進めると、もう片方に既に積んだフレームの表示時刻が
     /// 決められなくなるためである。`targetLatency` は設定の値であり残す。
     ///
-    /// 音声の目標遅延を決める閉ループ ([`crate::playout::feedback`]) も残す。目標は
-    /// 「到着から鳴るまでの経路」の学習であり、購読のやり直しでは変わらないためである
-    /// (消すと、その間だけ遅れが戻る)。
+    /// 音声を取り直したときは、出力の残差と閉ループの目標も初期化する。過去の穴で広げた
+    /// 目標や、停止前に測った残差を再開後へ持ち込むと、再開直後に余分な遅れが残るためで
+    /// ある ([`crate::playout::feedback::AudioDelayFeedback::reset`])。
     pub fn reset_track(&mut self, track: Track) {
         self.tracks[track.index()] = TrackState::new();
         self.presented[track.index()] = None;
+        if track == Track::Audio {
+            // 音声の再生を取り直したときは、過去の穴と遅れを持ち込まないように初期化する
+            self.audio_playout_correction_us = 0;
+            self.audio_playout_correction_at_us = None;
+            self.audio_delay_feedback.reset();
+            self.audio_playout_observed = false;
+        }
         // 同期の制御の状態も、そのトラックの観測が無い状態に戻す。もう片方に足した分は
         // 消したトラックとの差を合わせるためのものなので、足した分をすべて消す
         for state in &mut self.tracks {
             state.sync_extra_us = 0;
         }
+        self.sync_presentation_floor_us = None;
+        self.sync_bases_us = None;
         self.last_sync_us = None;
         self.last_own_floor_us = None;
         // 基準の差の履歴も消す (片方の基準が無い状態の差に意味は無い)
@@ -1022,18 +1246,15 @@ impl PlayoutTimeline {
 
     /// 基準と学習をすべて消す (TIMESTAMP の飛び、購読のやり直し)。世代を進める
     ///
-    /// 音声の目標遅延を決める閉ループ ([`crate::playout::feedback`]) と `targetLatency` は
-    /// 設定と経路の学習であり、残す ([`PlayoutTimeline::reset_track`] と同じ扱い)。
+    /// `targetLatency` は設定の値であり残す。音声の閉ループの目標と出力の残差も
+    /// [`PlayoutTimeline::reset_track`] と同じく初期化する。
     pub fn reset(&mut self) {
         self.generation = self.generation.saturating_add(1);
+        // JS の reset は 2 つのトラックへ resetStream を呼ぶ。音声側の閉ループと残差も
+        // そこで初期化されるため、同じ挙動になるよう reset_track を再利用する
         for track in [Track::Audio, Track::Video] {
-            self.tracks[track.index()] = TrackState::new();
-            self.presented[track.index()] = None;
+            self.reset_track(track);
         }
-        self.last_sync_us = None;
-        self.last_own_floor_us = None;
-        // 基準の差の履歴も消す (片方の基準が無い状態の差に意味は無い)
-        self.clear_base_differences();
     }
 
     /// 基準を取り直した回数
@@ -1075,88 +1296,89 @@ impl PlayoutTimeline {
         )
     }
 
-    /// A/V 同期の制御に使う、同期が足した分を除いた表示の遅れ (マイクロ秒)
+    /// A/V 同期の制御に使う、トラックごとの「同期が足した分を除いた表示の遅れ」(マイクロ秒)
     ///
-    /// 基準の遅れと、自分の揺らぎから求めた遅れ (`targetLatency` との大きい方) の和である。
-    /// 2 つのトラックのこの値の差が、同期で合わせる対象になる。どちらかが未観測、または
-    /// 基準がずれているときは `None` を返す。
+    /// 基準の遅れと、同期が足した分を除いた表示の遅れ (自分の jitter buffer の遅延と
+    /// `targetLatency` の大きい方) の和である。音声には出力の残差を足す (映像の合わせ先に
+    /// するため)。2 つのトラックのこの値の差が、同期で合わせる対象になる。どちらかが
+    /// 未観測、または基準がずれているときは `None` を返す。
+    ///
+    /// 補償しない差は、先行側の計算上の下限へ移してから返す。実際の表示時刻から先行側を
+    /// 決めないと、バッファが基準の差と逆向きに働くときに前後が逆転する。
     fn sync_natural_presentation_us(&self) -> Option<[i64; 2]> {
         let audio_base_us = self.tracks[Track::Audio.index()].base_us?;
         let video_base_us = self.tracks[Track::Video.index()].base_us?;
         if self.drifted_track().is_some() {
+            // TIMESTAMP が壁時計からずれているトラックがある。同期の制御は行わない
             return None;
         }
-        Some([
-            audio_base_us.saturating_add(self.natural_delay_us(Track::Audio)),
-            video_base_us.saturating_add(self.natural_delay_us(Track::Video)),
-        ])
-    }
-
-    /// ずれが目標の差を超えていれば、先行する側へ足す遅延を増やして合わせる
-    ///
-    /// 後行側の表示時刻から、目標の差 ([`PlayoutTimeline::desired_difference_us`]) だけ
-    /// 手前へ寄せる。既に足している分は減らさない (減らすのは
-    /// [`PlayoutTimeline::decay_sync_extras`] の目標へ戻す処理だけにする)。
-    ///
-    /// 足す量は [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] までにする。ずれを収める目標は
-    /// 「既に足している分を含む表示時刻」から計算するため、相手側が既に足している分だけ
-    /// 足りない分が上限を超えることがある。超えた分は合わせても実際のずれは減らないまま
-    /// そのトラックの表示の遅れだけが伸びるため、足さずに A/V のずれとして残す。
-    fn align_sync_extras(&mut self, natural_us: [i64; 2]) {
-        let audio_us = natural_us[Track::Audio.index()]
-            .saturating_add(self.tracks[Track::Audio.index()].sync_extra_us);
-        let video_us = natural_us[Track::Video.index()]
-            .saturating_add(self.tracks[Track::Video.index()].sync_extra_us);
-        let target_us = audio_us
-            .max(video_us)
-            .saturating_sub(self.desired_difference_us(natural_us));
-        if audio_us < target_us {
-            self.tracks[Track::Audio.index()].sync_extra_us = target_us
-                .saturating_sub(natural_us[Track::Audio.index()])
-                .min(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US);
-        } else if video_us < target_us {
-            self.tracks[Track::Video.index()].sync_extra_us = target_us
-                .saturating_sub(natural_us[Track::Video.index()])
-                .min(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US);
+        let cap_us = self.presentation_cap_us();
+        let audio_own_us = self
+            .natural_delay_us(Track::Audio)
+            .min(cap_us)
+            .saturating_add(self.audio_playout_correction_us);
+        let video_own_us = self.natural_delay_us(Track::Video).min(cap_us);
+        let audio_us = audio_base_us.saturating_add(audio_own_us);
+        let video_us = video_base_us.saturating_add(video_own_us);
+        let difference_us = audio_us.saturating_sub(video_us);
+        let limit_us = sync_compensation_limit_us(
+            audio_base_us.saturating_sub(video_base_us),
+            audio_own_us.saturating_sub(video_own_us),
+        );
+        // 先行側は実際の表示時刻から決める。基準を先に切ると、バッファが逆方向へ働くときに
+        // 前後が逆転する。補償しない差だけを先行側の計算上の下限へ移し、足す量を制限する
+        let uncorrected_us = difference_us
+            .saturating_abs()
+            .saturating_sub(limit_us)
+            .saturating_sub(TIMELINE_SYNC_MIN_DELTA_US)
+            .max(0);
+        if difference_us >= 0 {
+            Some([audio_us, video_us.saturating_add(uncorrected_us)])
+        } else {
+            Some([audio_us.saturating_add(uncorrected_us), video_us])
         }
     }
 
-    /// 同期の制御で目指す、2 つのトラックの表示時刻の差 (マイクロ秒)
+    /// 共有する表示時刻の下限から、各トラックへ足す遅延を求め直す
     ///
-    /// 不感帯 ([`TIMELINE_SYNC_MIN_DELTA_US`]) に収める。ただし合わせる量は
-    /// [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] までにする。それを超える差は経路の
-    /// 遅れではなく TIMESTAMP の時計のずれであることが多く、合わせても実際のずれは
-    /// 減らないまま相手側の表示の遅れだけが伸びるためである。時計のずれの証拠
-    /// ([`PlayoutTimeline::base_difference_drifted`]) を見たかどうかに関わらず常に掛ける。
-    /// 差は「足した分を含まない素の値」から決める。今の値から決めると、足すたびに目標が
-    /// 上がり続けて上限まで届くまで足してしまう。
-    fn desired_difference_us(&self, natural_us: [i64; 2]) -> i64 {
-        let difference_us = natural_us[Track::Audio.index()]
-            .saturating_sub(natural_us[Track::Video.index()])
-            .saturating_abs();
-        TIMELINE_SYNC_MIN_DELTA_US
-            .max(difference_us.saturating_sub(TIMELINE_MAX_COMPENSATED_DIFFERENCE_US))
-    }
-
-    /// 2 つのトラックの遅れが目標の差になるために、先行する側へ足す分 (マイクロ秒)
+    /// 先行側は [`TIMELINE_SYNC_MIN_DELTA_US`] だけ手前へ寄せる。共有の下限を戻す速さは
+    /// [`PlayoutTimeline::update_sync_delays`] が制限し、自分の遅延が増えた分は補償から
+    /// 差し引く。表示待ちのキューの上限 ([`PlayoutTimeline::presentation_cap_us`]) を
+    /// 超えない範囲で足す。
     ///
-    /// 素の値で先行する側 (小さい方) へ、後行側から
-    /// [`PlayoutTimeline::desired_difference_us`] だけ手前になるまでの分を足す。戻す向きは
-    /// [`PlayoutTimeline::decay_sync_extras`] だけが行う。
-    fn target_extra_us(&self, natural_us: [i64; 2]) -> [i64; 2] {
-        let desired_us = self.desired_difference_us(natural_us);
-        let audio_us = natural_us[Track::Audio.index()];
-        let video_us = natural_us[Track::Video.index()];
-        if audio_us <= video_us {
-            [
-                video_us.saturating_sub(desired_us).saturating_sub(audio_us),
-                0,
-            ]
-        } else {
-            [
-                0,
-                audio_us.saturating_sub(desired_us).saturating_sub(video_us),
-            ]
+    /// `natural_us` は同期が足した分を除いた、トラックごとの表示の遅れ (マイクロ秒)。
+    /// [`PlayoutTimeline::sync_natural_presentation_us`] の戻り値 (補償しない差を先行側へ
+    /// 移した後の値) を渡す。
+    fn align_sync_extras(&mut self, natural_us: [i64; 2]) {
+        let floor_us = self
+            .sync_presentation_floor_us
+            .unwrap_or(i64::MIN)
+            .max(natural_us[Track::Audio.index()])
+            .max(natural_us[Track::Video.index()]);
+        self.sync_presentation_floor_us = Some(floor_us);
+        for track in [Track::Audio, Track::Video] {
+            let index = track.index();
+            let other = match track {
+                Track::Audio => Track::Video,
+                Track::Video => Track::Audio,
+            };
+            // 先行する側だけ不感帯を残す
+            let margin_us = if natural_us[index] < natural_us[other.index()] {
+                TIMELINE_SYNC_MIN_DELTA_US
+            } else {
+                0
+            };
+            // 自分の jitter が既存の補償を埋めたら、その分を必ず差し引く。表示時刻そのものを
+            // 前へ動かさずに余分な補償を解消でき、共通の待ち時間も積み上がらない
+            let room_us = self
+                .presentation_cap_us()
+                .saturating_sub(self.natural_delay_us(track))
+                .max(0);
+            let wanted_us = floor_us
+                .saturating_sub(margin_us)
+                .saturating_sub(natural_us[index])
+                .max(0);
+            self.tracks[index].sync_extra_us = room_us.min(wanted_us);
         }
     }
 
@@ -1171,21 +1393,36 @@ impl PlayoutTimeline {
     ///   ([`PlayoutTimeline::update_sync_delays_to_arrival_audio`])
     /// - 基準を共有できないときは、足した分を自分の基準だけの表示時刻へ戻す (合わせる
     ///   相手がいないため)
-    /// - ずれが目標の差を超えたら、先行する側へ足して合わせる (即座に行う)
-    /// - 足した分は、目標の差から決まる値へ毎秒
-    ///   [`TIMELINE_DELAY_DECAY_US_PER_SECOND`] までで戻す。自分の下限が同時に下がって
-    ///   いるときは、その分だけ戻す量を減らす
-    /// - 戻したあとにもう一度そろえる (片側だけ戻すと、その分だけずれが開く)
+    /// - 同期が足す前の表示時刻から、共有する表示時刻の下限を 1 つだけ決める。必要値が
+    ///   増えたら即座に上げ、減ったら毎秒 [`TIMELINE_DELAY_DECAY_US_PER_SECOND`] までで
+    ///   戻す。過去の各トラックの補償を必要値へ戻さないため、揺らぎが上下しても待ちを
+    ///   積み上げない
+    /// - 各トラックの補償は共有の下限から毎回計算し直す。自分の jitter buffer が増えた分は
+    ///   既存の補償から差し引く
     fn update_sync_delays(&mut self, now_us: i64) {
         // 差と動きから共有をやめた側を記録する (観測のたびに判定し直す)
         self.refresh_unshared_state();
+
+        // 音声が止まった後に、最後の予約の残差だけを映像へ掛け続けない。有効な出力時計で
+        // 残差を測れた最後の時刻から 1 秒 ([`TIMELINE_SKEW_WINDOW_US`]) を超えたら失効させる
+        if let Some(correction_at_us) = self.audio_playout_correction_at_us
+            && now_us.saturating_sub(correction_at_us) > TIMELINE_SKEW_WINDOW_US
+        {
+            self.audio_playout_correction_us = 0;
+            self.audio_playout_correction_at_us = None;
+        }
+
         if self.drifted_track() == Some(Track::Audio) {
+            self.sync_presentation_floor_us = None;
+            self.sync_bases_us = None;
             // 音声の TIMESTAMP が信用できず、到着基準で鳴っている。基準は共有できないが、
             // 音声の並べ方は分かっているため、映像だけをその時刻へ合わせる
             self.update_sync_delays_to_arrival_audio(now_us);
             return;
         }
         let Some(natural_us) = self.sync_natural_presentation_us() else {
+            self.sync_presentation_floor_us = None;
+            self.sync_bases_us = None;
             // 2 つのトラックの基準を共有できない (基準がずれている、またはまだ観測して
             // いない)。合わせる相手がいないため、足した分を自分の基準だけの表示時刻へ
             // 戻す。戻さないと、ずれたトラックへ合わせて足した分がそのまま残り、その分
@@ -1194,16 +1431,59 @@ impl PlayoutTimeline {
             return;
         };
 
-        // 1) ずれを不感帯に収める (先行する側へ足す。即座に行う)
+        // 自然な遅延から共通の表示時刻を決める。過去の各 extra を max の入力へ戻すと、
+        // 一方の jitter や残差が上下するたびに、同じ待ち時間を重ねて足してしまう。
+        // 共有へ戻った最初だけ既存の表示待ちを引き継ぎ、その後は必要値だけから更新する
+        let previous_sync_us = self.last_sync_us;
+        let elapsed_us = previous_sync_us.map_or(0, |previous_sync_us| {
+            now_us.saturating_sub(previous_sync_us).max(0)
+        });
+        let budget_us = TIMELINE_DELAY_DECAY_US_PER_SECOND.saturating_mul(elapsed_us) / 1_000_000;
+        let required_us = natural_us[Track::Audio.index()].max(natural_us[Track::Video.index()]);
+        let previous_floor_us = self.sync_presentation_floor_us.unwrap_or_else(|| {
+            natural_us[Track::Audio.index()]
+                .saturating_add(self.tracks[Track::Audio.index()].sync_extra_us)
+                .max(
+                    natural_us[Track::Video.index()]
+                        .saturating_add(self.tracks[Track::Video.index()].sync_extra_us),
+                )
+        });
+        // 同じバッファ量に対する基準の移動だけを下限へ反映する。cache から追いついて
+        // 基準が下がった分を extra へ移すと、解消済みの遅れを数十秒保持してしまう。
+        // 片側ずつ到着するため、両側の差分の平均ではなく、現在のバッファ量を旧基準へ
+        // 当てた最大値と比較する。バッファや出力残差の変化はこの移動量に含めない
+        let cap_us = self.presentation_cap_us();
+        let previous_required_us = match self.sync_bases_us {
+            None => required_us,
+            Some([audio_base_us, video_base_us]) => {
+                let audio_natural_us = self
+                    .natural_delay_us(Track::Audio)
+                    .min(cap_us)
+                    .saturating_add(self.audio_playout_correction_us);
+                let video_natural_us = self.natural_delay_us(Track::Video).min(cap_us);
+                audio_base_us
+                    .saturating_add(audio_natural_us)
+                    .max(video_base_us.saturating_add(video_natural_us))
+            }
+        };
+        self.sync_presentation_floor_us = Some(
+            required_us.max(
+                previous_floor_us
+                    .saturating_add(required_us)
+                    .saturating_sub(previous_required_us)
+                    .saturating_sub(budget_us),
+            ),
+        );
+        self.sync_bases_us = Some([
+            self.tracks[Track::Audio.index()].base_us.unwrap_or(0),
+            self.tracks[Track::Video.index()].base_us.unwrap_or(0),
+        ]);
         self.align_sync_extras(natural_us);
-
-        // 2) 足した分を目標へ戻す (毎秒の速さまで。自分の下限が下がった分だけ減らす。
-        //    観測の間隔で按分するため、観測が疎でも速さは変わらない)
-        let target_extra_us = self.target_extra_us(natural_us);
-        self.decay_sync_extras(now_us, |track| target_extra_us[track.index()]);
-
-        // 3) 戻した後のずれをもう一度そろえる (片側だけ戻すと、その分だけずれが開く)
-        self.align_sync_extras(natural_us);
+        self.last_sync_us = Some(now_us);
+        self.last_own_floor_us = Some([
+            self.natural_delay_us(Track::Audio),
+            self.natural_delay_us(Track::Video),
+        ]);
     }
 
     /// 音声が到着基準で鳴っているときの同期の制御 (映像だけを音声へ合わせる)
@@ -1911,79 +2191,87 @@ mod tests {
         );
     }
 
-    /// 同期で足す遅延は、相手側が既に足している分があっても上限を超えないこと
+    /// 同期で足す遅延は、表示待ちのキューの上限で切られること
     ///
-    /// ずれを収める目標は「既に足している分を含む表示時刻」から計算するため、相手側が
-    /// 既に足している分だけ足りない分が上限を超えることがある。超えた分は合わせても実際の
-    /// ずれは減らないまま、そのトラックの表示の遅れだけが伸びる。
+    /// 共有する表示時刻の下限から計算し直すため、上限を超える分は足さない。旧実装は
+    /// 「相手側が既に足した分を含めて上限で切る」だったが、新実装は自分の jitter が
+    /// 補償を埋めた分を差し引く。
     #[test]
-    fn sync_never_adds_more_than_the_compensation_limit() {
+    fn align_sync_extras_is_bounded_by_the_presentation_cap() {
         let mut timeline = PlayoutTimeline::new();
         // 音声の素の表示の遅れが 1,000 ms、映像が 0 ms で、音声へは既に上限いっぱい足して
         // いる (映像が遅れていたため音声を遅らせた後、映像の遅れだけが消えた状態)
         timeline.tracks[Track::Audio.index()].sync_extra_us =
             TIMELINE_MAX_COMPENSATED_DIFFERENCE_US;
         timeline.align_sync_extras([1_000_000, 0]);
-        assert_eq!(
-            timeline.tracks[Track::Video.index()].sync_extra_us,
-            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
-            "映像へ足す量を上限で切ること"
-        );
+        // フレーム間隔がまだ分からないため、表示の遅れの上限は設定値の 500 ms になる
         assert_eq!(
             timeline.tracks[Track::Audio.index()].sync_extra_us,
-            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
-            "音声へ足した分を減らさないこと"
+            0,
+            "後行側になった音声の補償は消えること"
+        );
+        assert_eq!(
+            timeline.tracks[Track::Video.index()].sync_extra_us,
+            TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000,
+            "先行する映像へ足す量を表示の上限で切ること"
         );
     }
 
-    /// 足した遅延は、差が無くなると毎秒の速さで戻ること
+    /// 基準の差が解消したら、足した補償をその場で手放すこと
     #[test]
-    fn sync_extra_decays_toward_the_natural_floor() {
+    fn a_resolved_base_difference_releases_the_compensation() {
         let mut timeline = PlayoutTimeline::new();
         // 1 回目: 映像が 300 ms 遅れて届き、先行する音声の遅れが上がる
         observe_audio(&mut timeline, 10_010_000, 1_000_000);
         timeline.observe(Track::Video, 10_310_000, 1_000_000);
-        let raised_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
-        assert!(raised_us > 80_000, "{raised_us}");
+        assert_eq!(
+            timeline.tracks[Track::Audio.index()].sync_extra_us,
+            TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+            "先行する音声へ補償を足すこと"
+        );
+        assert_eq!(
+            timeline.presentation_delay_us(Track::Audio),
+            Some(180_000),
+            "音声の表示の遅れは自分の遅れ + 補償になること"
+        );
 
         // 2 回目: 映像が同じ遅れで届くようになる (基準の差が無くなる)
         observe_audio(&mut timeline, 11_010_000, 2_000_000);
         timeline.observe(Track::Video, 11_010_000, 2_000_000);
-        let second_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
-
-        // 3 回目: 差が無いまま 1 秒進むと、足した分が毎秒の速さだけ戻る
-        observe_audio(&mut timeline, 12_010_000, 3_000_000);
-        timeline.observe(Track::Video, 12_010_000, 3_000_000);
-        let third_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
         assert_eq!(
-            third_us,
-            second_us - TIMELINE_DELAY_DECAY_US_PER_SECOND,
-            "毎秒 {} マイクロ秒だけ戻す: second={second_us} third={third_us} raised={raised_us}",
-            TIMELINE_DELAY_DECAY_US_PER_SECOND
+            timeline.tracks[Track::Audio.index()].sync_extra_us,
+            0,
+            "基準の差が解消したら補償を戻すこと"
         );
-        assert!(
-            third_us >= timeline.learned_delay_us(Track::Audio),
-            "自分の遅れの下へは戻さない: {third_us}"
+        // 補償が消え、自分の遅れ (揺らぎの学習と閉ループの大きい方) だけになる
+        assert_eq!(
+            timeline.presentation_delay_us(Track::Audio),
+            Some(timeline.learned_delay_us(Track::Audio)),
+            "自分の遅れだけになること"
         );
     }
 
-    /// 戻す速さは観測の間隔で按分されること
+    /// 共有する表示時刻の下限は、必要値が下がれば毎秒の速さで戻ること
     #[test]
-    fn decay_is_prorated_by_elapsed_time() {
+    fn the_shared_floor_decays_by_the_budget() {
         let mut timeline = PlayoutTimeline::new();
+        // targetLatency で表示の遅れの下限を上げておく
+        timeline.set_target_latency_ms(300);
         observe_audio(&mut timeline, 10_010_000, 1_000_000);
-        timeline.observe(Track::Video, 10_310_000, 1_000_000);
+        timeline.observe(Track::Video, 10_010_000, 1_000_000);
+        let raised_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
+        assert!(raised_us >= 300_000, "下限まで遅らせる: {raised_us}");
+
+        // 下限を外して 1 秒後の観測を渡すと、毎秒の速さだけ戻る
+        timeline.set_target_latency_ms(0);
         observe_audio(&mut timeline, 11_010_000, 2_000_000);
         timeline.observe(Track::Video, 11_010_000, 2_000_000);
-        let second_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
-        // 2 秒空けると、戻す量も 2 秒ぶんになる
-        observe_audio(&mut timeline, 13_010_000, 4_000_000);
-        timeline.observe(Track::Video, 13_010_000, 4_000_000);
-        let third_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
+        let decayed_us = timeline.presentation_delay_us(Track::Audio).unwrap_or(0);
         assert_eq!(
-            third_us,
-            second_us - 2 * TIMELINE_DELAY_DECAY_US_PER_SECOND,
-            "観測が疎でも速さは変わらない"
+            decayed_us,
+            raised_us - TIMELINE_DELAY_DECAY_US_PER_SECOND,
+            "毎秒 {} マイクロ秒だけ戻す: raised={raised_us} decayed={decayed_us}",
+            TIMELINE_DELAY_DECAY_US_PER_SECOND
         );
     }
 
