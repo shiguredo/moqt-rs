@@ -1,7 +1,7 @@
 # 確立後に session 層が失敗したとき example がセッション終了コードを送る
 
 - Created: 2026-10-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-established-control-message-close-code
 - Polished: 2026-10-23
 
@@ -101,3 +101,34 @@ PROTOCOL_VIOLATION (0x3) で扱う。0240 で SETUP 交換中 (確立前) の失
 - doc: `pump_once` のコメントと `peer_harness` の module doc が実装と一致していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+確立後の `pump_once` で Session が失敗した 2 経路について、Session が積んだ
+`CloseSession` を drain してから error を返すようにした。
+
+- `examples/tokio-moq/src/moqt_client.rs` の `pump_once` で、control stream の
+  `session.recv_control(msg)` と bidi request stream の `session.recv_stream_message(rid, msg)`
+  が `Err(SessionError)` を返した場合に、`lock_session` のガードを落としてから
+  `drain_events` を呼び、`CloseSession` の処理 (`handle.close(err.code, err.reason)`) で
+  終了コードを送ってから `TransportError::Internal` を返すようにした。ガードを保持したまま
+  `drain_events().await` を呼ぶと同一 `Mutex` の再ロックで停止するため、先に落としている。
+  `next_event` は同じ呼び出しで `take_notable_event` に到達しないため、アプリは
+  `CloseSession` イベントを観測しない。終了コードは transport の close として peer が
+  観測する。この挙動を `pump_once` のコメントに明記した。
+- decode 失敗 (`TransportError::Moqt`) の扱いは変えていない。Session は `CloseSession` を
+  積まず、`moq-pub` / `moq-sub` が 0222 の経路で `session_error_code` により終了コードを
+  決めて閉じる。本 issue の対象外である。
+- `examples/tokio-moq/src/peer_harness.rs` にテスト用 API を追加した。既存 control stream へ
+  stream type prefix なしで control message を書く `send_control_message` と、peer が開いた
+  request stream へ 2 通目以降の control message を書く `send_opened_request_message` である。
+  新しい uni stream を開く `send_setup` / `send_control_stream_head` は既存 control stream を
+  FIN するため、確立後の経路には使わない。module doc の提供能力一覧と `control_send` の doc を
+  実装に合わせて更新した。
+- テストを追加した。確立後に既存 control stream へ 2 通目の SETUP を送ると `recv_control` と
+  duplicate SETUP を含む `TransportError::Internal` で終了し、peer が PROTOCOL_VIOLATION (0x3)
+  を観測することを固定した。確立後に peer が開いた request stream へ 2 通目の SUBSCRIBE
+  (Table 5 の "First" 違反) を送ると、`recv_stream_message` を含む
+  `TransportError::Internal` で終了し、peer が 0x3 を観測することを固定した。どちらも QUIC
+  直接接続の実 s2n-quic 接続を使い、モック・スタブや `#[ignore]` は使っていない。
+  `drain_events` の呼び出しを削除する変異で両テストが失敗することも確認した。
