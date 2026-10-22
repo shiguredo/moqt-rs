@@ -70,8 +70,8 @@ PROTOCOL_VIOLATION (0x3) で扱う。0240 で SETUP 交換中 (確立前) の失
   - 既存の control stream (`TestPeer::control_send`) へ stream type prefix を付けずに
     control message を書くメソッド (例: `send_control_message(&mut self, message:
     ControlMessage)`)。
-  - 受理済み request stream (`AcceptedRequest::send`) へ 2 通目以降の control message を
-    書くメソッド (例: `send_request_stream_message(&mut self, request_id: u64, message:
+  - peer が開いた request stream (`OpenedRequest::send`) へ 2 通目以降の control message を
+    書くメソッド (例: `send_opened_request_message(&mut self, request_id: u64, message:
     ControlMessage)`)。
   - 既存の `send_setup` / `send_control_stream_head` は新しい uni stream を開いて既存 control
     stream を FIN する。確立後に使うと client は control stream の終端を観測して 0x3 で閉じる
@@ -90,11 +90,11 @@ PROTOCOL_VIOLATION (0x3) で扱う。0240 で SETUP 交換中 (確立前) の失
   `recv_close_code` で 0x3 を観測し、client の error が `recv_control` と duplicate SETUP を
   含む `TransportError::Internal` であることを固定する (control stream の FIN による 0x3 と
   区別するため)。
-- 確立後に、client が SUBSCRIBE を送った request stream へ peer が REQUEST_UPDATE (peer 側
-  parity の Request ID) を送ると、subscription が Pending のため Session が
-  `REQUEST_UPDATE requires Established subscription` で PROTOCOL_VIOLATION を返す。client が
+- 確立後に、peer が開いた request stream へ 2 通目として Table 5 で "First" を持つ
+  SUBSCRIBE を送ると、Session が PROTOCOL_VIOLATION を返す。client が
   `SESSION_PROTOCOL_VIOLATION` (0x3) で CONNECTION_CLOSE を送ってから終了し、peer が
-  `recv_close_code` で 0x3 を観測することを固定する (bidi request stream の
+  `recv_close_code` で 0x3 を観測し、client の error が `recv_stream_message` を含む
+  `TransportError::Internal` であることを固定する (bidi request stream の
   `recv_stream_message` 経路)。
 - decode 失敗の扱いを変えないこと (`TransportError::Moqt` をアプリへ伝える既存契約と 0222 の
   pipeline 経路を維持する)。
