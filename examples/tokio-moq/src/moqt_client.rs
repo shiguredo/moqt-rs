@@ -102,7 +102,10 @@ pub(crate) enum BidiMessage {
     /// initialization) の 7 種類のうち未対応の 3 種類 (PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY
     /// を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix なら
-    /// DOES_NOT_EXIST) で拒否してセッションを維持し、7 種類以外は
+    /// DOES_NOT_EXIST) で拒否してセッションを維持する。SUBSCRIBE_TRACKS の Range Filter が
+    /// §3.3.2 に違反する場合は INVALID_FILTER で拒否し、PUBLISH_NAMESPACE /
+    /// SUBSCRIBE_NAMESPACE が Range Filter を載せている場合は §9.20.1 (Parameter Scope) 違反で
+    /// セッションを閉じる。7 種類以外は
     /// `PROTOCOL_VIOLATION` でセッションを閉じる。どちらの判定も `Session::recv_request` が
     /// 持つため、main ループはこの variant をそのまま `Session::recv_request` へ渡す。アプリへ
     /// 要求として渡さないのは、未対応 request にアプリが応答すると

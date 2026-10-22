@@ -22,10 +22,10 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
-    REQUEST_MALFORMED_AUTH_TOKEN, SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INTERNAL_ERROR,
-    SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH, SESSION_KEY_VALUE_FORMATTING_ERROR,
-    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION,
-    SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
+    REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
+    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH,
+    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
+    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
     ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
@@ -1083,7 +1083,8 @@ impl Session {
     /// 上記 7 種類のうち本実装が扱わない 3 種類 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE /
     /// SUBSCRIBE_TRACKS) は本体を解析したうえで `REQUEST_ERROR` (NOT_SUPPORTED、control
     /// GOAWAY を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix
-    /// なら DOES_NOT_EXIST) を積んで session を維持する
+    /// なら DOES_NOT_EXIST、Range Filter が §3.3.2 に違反するなら INVALID_FILTER) を積んで
+    /// session を維持する
     /// (draft §1.6 (Modularity): "Limited endpoints SHOULD respond to any unsupported messages
     /// with the appropriate NOT_SUPPORTED error code, rather than ignoring them."
     /// 予約名前空間の拒否は draft §2.4.3 (Reserved Namespaces) / §6.5 (Session-Level Tracks
@@ -1136,15 +1137,16 @@ impl Session {
     /// them." §9 の Table 5 に定義済みの request 型 (PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) は `REQUEST_ERROR` (NOT_SUPPORTED、control
     /// GOAWAY を送信済みなら GOING_AWAY、`.` 単独または `.session` の Track Namespace Prefix
-    /// なら DOES_NOT_EXIST) で拒否し、セッションは維持する。本体の解析失敗や REGISTER の適用
-    /// 失敗は原因に応じた終了コードでセッションを閉じる。
+    /// なら DOES_NOT_EXIST、Range Filter が §3.3.2 に違反するなら INVALID_FILTER) で拒否し、
+    /// セッションは維持する。本体の解析失敗や REGISTER の適用失敗は原因に応じた終了コードで
+    /// セッションを閉じる。
     ///
     /// 要求として届く 3 種は本体を解析しないまま拒否できない。拒否しても §8.9
     /// (Authorization Token Compression) の REGISTER 適用 MUST と §9.20.1 (Parameter Scope) の
     /// スコープ検証 MUST は成立し、不正な本体は原因に応じた終了コードでセッションを閉じる
     /// 必要がある。そのため次の順序で処理する
     /// (セッション終了を招く検証を先に置き、メッセージ単位の reject のうち MUST の
-    /// MALFORMED_AUTH_TOKEN / DOES_NOT_EXIST を MUST でない GOING_AWAY (MAY) /
+    /// MALFORMED_AUTH_TOKEN / INVALID_FILTER / DOES_NOT_EXIST を MUST でない GOING_AWAY (MAY) /
     /// NOT_SUPPORTED (SHOULD) より先に置く。`accept_peer_request` と同じ整理)。
     ///
     /// 1. Request ID の parity と重複 (`validate_peer_request_id`)
@@ -1157,13 +1159,16 @@ impl Session {
     /// 5. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。alias 解決後の (Token Type,
     ///    Token Value) の重複を対象とする。違反は REGISTER を適用したうえで REQUEST_ERROR
     ///    (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する。alias を解決できない
-    ///    USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり 6. 以降の拒否経路に
+    ///    USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり 7. 以降の拒否経路に
     ///    委ねる)
     /// 6. REGISTER の token cache への適用 (draft §8.9 の MUST。拒否の場合も適用する)
-    /// 7. 予約・セッション名前空間の検証 (draft §2.4.3 (Reserved Namespaces) / §6.5
+    /// 7. Range Filter の検証 (draft §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES) の
+    ///    MUST。重複と MAX_FILTER_RANGES 超過は REQUEST_ERROR (INVALID_FILTER) で拒否し、
+    ///    セッションは維持する。subscription を作らないため 1 メッセージ内の検証に限る)
+    /// 8. 予約・セッション名前空間の検証 (draft §2.4.3 (Reserved Namespaces) / §6.5
     ///    (Session-Level Tracks and Namespaces) の MUST。`.` 単独または `.session` の Track
     ///    Namespace Prefix は REQUEST_ERROR (DOES_NOT_EXIST) で拒否し、セッションは維持する)
-    /// 8. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
+    /// 9. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
     ///
     /// 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は応答先の request を
     /// 持たないため `PROTOCOL_VIOLATION` でセッションを閉じる。公開 enum を手組みして
@@ -1224,7 +1229,8 @@ impl Session {
         // (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否する。未対応 request として受理しない
         // ため USE_ALIAS を適用しないが、一意性の判定には alias 解決後の値を用いる。alias を
         // 解決できない USE_ALIAS は判定対象から外し、未登録 alias の扱いは現行どおり後続の
-        // 予約・セッション名前空間 / GOING_AWAY / NOT_SUPPORTED の拒否経路に委ねる。
+        // Range Filter (INVALID_FILTER) / 予約・セッション名前空間 (DOES_NOT_EXIST) /
+        // GOING_AWAY / NOT_SUPPORTED の拒否経路に委ねる。
         // REGISTER の MUST (失敗したメッセージでも alias を登録する) を先に適用する。
         if self
             .validate_peer_message_auth_token_uniqueness(&parameters)
@@ -1239,11 +1245,24 @@ impl Session {
             return Ok(());
         }
         // draft §8.9 (Authorization Token Compression) の REGISTER MUST をメッセージ単位の拒否
-        // (予約名前空間の DOES_NOT_EXIST、GOING_AWAY、NOT_SUPPORTED) より先に適用する。
+        // (Range Filter の INVALID_FILTER、予約名前空間の DOES_NOT_EXIST、GOING_AWAY、
+        // NOT_SUPPORTED) より先に適用する。
         // MUST の対象は REGISTER のみ (DELETE / USE_ALIAS / USE_VALUE は failed request の
         // パラメータとして触らない)。REGISTER 適用中に session error が発生した場合は
         // session error 優先で Err を返し、REQUEST_ERROR は発行しない。
         self.apply_peer_message_auth_token_registers_only(&parameters)?;
+        // draft-ietf-moq-transport-22 §3.3.2 (Range Filters) / §9.1.6 (MAX FILTER RANGES):
+        // 重複と MAX_FILTER_RANGES の超過は REQUEST_ERROR (INVALID_FILTER) でメッセージ単位に
+        // 拒否する (MUST)。未対応 request は subscription を作らないため、累積ではなく
+        // 1 メッセージ内 (FILL_PARAMETERS の内側を含む) の検証に限る。スコープ検証 (§9.20.1)
+        // を先に通しているため、Range Filter を許可しない PUBLISH_NAMESPACE /
+        // SUBSCRIBE_NAMESPACE はここへ到達しない (§9.14 / §9.15 は AUTHORIZATION_TOKEN のみを
+        // 許可する)。INVALID_FILTER は MUST のため GOING_AWAY (MAY) / NOT_SUPPORTED (SHOULD)
+        // より優先する。
+        if let Err(reason) = self.check_incoming_range_filters(&parameters) {
+            self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
+            return Ok(());
+        }
         // draft-ietf-moq-transport-22 §2.4.3 (Reserved Namespaces): 先頭フィールドが `.` 単独の
         // 予約名前空間への request は REQUEST_ERROR (DOES_NOT_EXIST) で拒否する (MUST)。
         // draft-ietf-moq-transport-22 §6.5 (Session-Level Tracks and Namespaces): 未認識の
@@ -2271,7 +2290,9 @@ impl Session {
     ///
     /// 違反時は拒否理由 (`&'static str`) を返す。REQUEST_ERROR の送出と後始末は呼び出し元が行う
     /// (REQUEST_UPDATE の Range Filter 拒否は role によって終端方法が異なるため、
-    /// 呼び出し元が subscription の文脈を知っている必要がある)。
+    /// 呼び出し元が subscription の文脈を知っている必要がある)。未対応 request の拒否経路
+    /// (`Session::recv_request` の `handle_unsupported_request`) からも呼ばれ、違反は
+    /// `INVALID_FILTER` で拒否される。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub(super) fn check_incoming_range_filters(
         &self,

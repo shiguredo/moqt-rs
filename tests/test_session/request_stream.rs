@@ -1,10 +1,13 @@
 use super::*;
 use shiguredo_moqt::error::{
-    REQUEST_DOES_NOT_EXIST, REQUEST_GOING_AWAY, REQUEST_MALFORMED_AUTH_TOKEN,
-    REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS,
-    SESSION_KEY_VALUE_FORMATTING_ERROR,
+    REQUEST_DOES_NOT_EXIST, REQUEST_GOING_AWAY, REQUEST_INVALID_FILTER,
+    REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
+    SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_KEY_VALUE_FORMATTING_ERROR,
 };
-use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
+use shiguredo_moqt::message_parameter::{
+    PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT, PARAM_SUBGROUP_FILTER,
+};
+use shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES;
 
 // ─── request_streams lifecycle ─────────────────────
 //
@@ -566,6 +569,57 @@ fn assert_request_error(server: &mut Session, request_id: u64, error_code: u64) 
     assert!(fin, "拒否は最終応答として FIN すること");
 }
 
+/// 送出された REQUEST_ERROR のコードと reason を検証する
+fn assert_request_error_with_reason(
+    server: &mut Session,
+    request_id: u64,
+    error_code: u64,
+    expected_reason: &str,
+) {
+    let (err_rid, message, fin) = take_send_on_stream_with_fin(server);
+    assert_eq!(
+        err_rid, request_id,
+        "REQUEST_ERROR は request と同じ stream に載ること"
+    );
+    match message {
+        ControlMessage::RequestError(err) => {
+            assert_eq!(
+                err.error_code, error_code,
+                "REQUEST_ERROR のコードが期待どおりであること"
+            );
+            assert_eq!(
+                err.reason.as_str(),
+                expected_reason,
+                "REQUEST_ERROR の reason が期待どおりであること"
+            );
+        }
+        other => panic!("REQUEST_ERROR を期待したが {other:?} を受け取った"),
+    }
+    assert!(fin, "拒否は最終応答として FIN すること");
+}
+
+/// Range 2 個の SUBGROUP_FILTER (SetID 0) のパラメータ
+///
+/// `MessageParameter` を返す点を名前に含める (sibling module の
+/// `two_range_subgroup_filter` は `MessageParameters` を返す)。
+fn two_range_subgroup_filter_param() -> MessageParameter {
+    MessageParameter {
+        param_type: PARAM_SUBGROUP_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01, 0x00, 0x01]),
+    }
+}
+
+/// 生パラメータブロックに Range 1 個の SUBGROUP_FILTER を追記する
+///
+/// 重複トークンは自側の `MessageParameters::encode` が拒否するため、wire 表現を直接組み立てた
+/// ブロックに追記する。`prev_type` は直前のパラメータ型 (delta エンコーディング用) である。
+/// Number of Parameters は呼び出し側が更新する。
+fn append_subgroup_filter_one_range(bytes: &mut Vec<u8>, prev_type: u64) {
+    shiguredo_moqt::varint::encode(PARAM_SUBGROUP_FILTER - prev_type, bytes);
+    shiguredo_moqt::varint::encode(3, bytes);
+    bytes.extend_from_slice(&[0x00, 0x00, 0x01]);
+}
+
 /// 登録された alias の解決結果を検証する
 fn assert_token_alias(server: &Session, alias: u64) {
     assert_eq!(
@@ -861,6 +915,261 @@ fn unsupported_request_single_period_registers_auth_token_alias() {
         .expect("DOES_NOT_EXIST 拒否は Result::Ok であること");
     assert_request_error(&mut server, 0, REQUEST_DOES_NOT_EXIST);
     assert_token_alias(&server, 5);
+}
+
+/// SUBSCRIBE_TRACKS の重複 Range Filter は INVALID_FILTER で拒否する
+///
+/// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): "If the same combination of Parameter
+/// Type, SetID, and Property Type ... repeat in any message, an endpoint MUST reject this with
+/// REQUEST_ERROR with error code INVALID_FILTER." 上限判定に落ちないよう、server の
+/// MAX_FILTER_RANGES は Range 総数 (2) 以上に宣言する。
+#[test]
+fn unsupported_request_duplicate_range_filters_is_rejected_with_invalid_filter() {
+    let (_client, mut server) = establish_pair_with_options(
+        SetupOptions::new(),
+        opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 2),
+    );
+    let mut parameters = MessageParameters::new();
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filter validation failed",
+    );
+}
+
+/// SUBSCRIBE_TRACKS の MAX_FILTER_RANGES 超過は INVALID_FILTER で拒否する
+///
+/// draft-ietf-moq-transport-22 §3.3.2 / §9.1.6 (MAX FILTER RANGES): 上限は "the total number of
+/// Ranges allowed in all Range Filter parameters" であり、超過は REQUEST_ERROR の
+/// INVALID_FILTER で拒否する MUST。
+#[test]
+fn unsupported_request_range_filters_exceeding_max_is_rejected_with_invalid_filter() {
+    let (_client, mut server) = establish_pair_with_options(
+        SetupOptions::new(),
+        opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 1),
+    );
+    let mut parameters = MessageParameters::new();
+    parameters.push(two_range_subgroup_filter_param());
+
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+}
+
+/// MAX_FILTER_RANGES の既定値 0 では Range を 1 つでも持つ Range Filter を拒否する
+#[test]
+fn unsupported_request_range_filters_with_default_max_is_rejected_with_invalid_filter() {
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+}
+
+/// FILL_PARAMETERS の内側の重複 Range Filter も INVALID_FILTER で拒否する
+///
+/// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): FILL の内側のパラメータも
+/// 同じ検証を受ける。Range 総数は内側も合算されるため、合計 2 Range を上限内に収めた
+/// MAX_FILTER_RANGES=2 で重複検出そのものを固定する。
+#[test]
+fn unsupported_request_fill_parameters_inner_duplicate_range_filters_is_rejected() {
+    let (_client, mut server) = establish_pair_with_options(
+        SetupOptions::new(),
+        opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 2),
+    );
+    let mut inner = MessageParameters::new();
+    inner.push(one_range_subgroup_filter_with_set_id(0));
+    inner.push(one_range_subgroup_filter_with_set_id(0));
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    });
+
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filter validation failed inside FILL_PARAMETERS",
+    );
+}
+
+/// Length=0 の Range Filter (Range 0 個) は上限判定を通過し NOT_SUPPORTED のまま拒否する
+///
+/// draft-ietf-moq-transport-22 §3.3.2 は受信側に Range 数 0 の拒否 MUST を課していないため、
+/// `check_incoming_range_filters` の既存方針どおり受理する。
+#[test]
+fn unsupported_request_empty_range_filter_is_rejected_with_not_supported() {
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_SUBGROUP_FILTER,
+        value: MessageParameterValue::LengthPrefixed(Vec::new()),
+    });
+
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("NOT_SUPPORTED 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+}
+
+/// PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE の Range Filter はスコープ検証で
+/// PROTOCOL_VIOLATION になる
+///
+/// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE): "The only
+/// parameter that can appear ... is AUTHORIZATION_TOKEN." §9.20.1 (Parameter Scope) の MUST は
+/// Range Filter の検証より先に評価される (検証順 4 → 7)。
+#[test]
+fn unsupported_request_range_filter_in_namespace_request_closes_session() {
+    for type_id in [0x06u64, 0x50] {
+        let (_client, mut server) = establish_pair();
+        let mut parameters = MessageParameters::new();
+        parameters.push(one_range_subgroup_filter_with_set_id(0));
+        let err = server
+            .recv_request(unsupported_request(type_id, 0, &parameters))
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error()
+                .expect("Session エラーであること")
+                .code,
+            SESSION_PROTOCOL_VIOLATION,
+            "Range Filter を許可しない request はスコープ違反で閉じること: {type_id:#x}"
+        );
+        assert_eq!(server.state(), SessionState::Closing);
+    }
+}
+
+/// Range Filter の拒否はメッセージ単位の優先順に従う
+///
+/// `MALFORMED_AUTH_TOKEN` > `INVALID_FILTER` > `DOES_NOT_EXIST` > `GOING_AWAY` >
+/// `NOT_SUPPORTED`。セッション終了を招くスコープ違反はこれらより先である。
+#[test]
+fn unsupported_request_range_filter_rejection_prefers_session_terminating_checks_and_must_codes() {
+    // 重複トークン + Range Filter 違反: MALFORMED_AUTH_TOKEN (§8.9 の MUST)
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    let mut raw = duplicate_register_token_parameters();
+    raw[0] = 0x03; // Number of Parameters を 3 に更新する
+    append_subgroup_filter_one_range(&mut raw, PARAM_AUTHORIZATION_TOKEN);
+    server
+        .recv_request(unsupported_request_with_namespace_and_raw_parameters(
+            0x51,
+            0,
+            &live_namespace_prefix(),
+            &raw,
+        ))
+        .expect("MALFORMED_AUTH_TOKEN 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error(&mut server, 0, REQUEST_MALFORMED_AUTH_TOKEN);
+
+    // `.` 単独の予約名前空間 + Range Filter 違反: INVALID_FILTER が先 (§3.3.2 の MUST)
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+    server
+        .recv_request(unsupported_request_with_namespace(
+            0x51,
+            0,
+            &namespace_prefix(&[b"."]),
+            &parameters,
+        ))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+
+    // control GOAWAY 送信済み + Range Filter 違反: INVALID_FILTER が先 (§3.3.2 の MUST >
+    // §9.2 の MAY)
+    let (_client, mut server) = establish_pair();
+    server
+        .send_goaway(Vec::new(), 10_000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+    let mut parameters = MessageParameters::new();
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+
+    // スコープ違反 + Range Filter 違反: PROTOCOL_VIOLATION でセッション終了
+    let (_client, mut server) = establish_pair();
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_TIMEOUT,
+        value: MessageParameterValue::VarInt(1000),
+    });
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+    let err = server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .unwrap_err();
+    assert_eq!(
+        err.as_session_error()
+            .expect("Session エラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// INVALID_FILTER で拒否する場合も REGISTER は token cache に登録される
+///
+/// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver of a message
+/// carrying an Authorization Token with Alias Type REGISTER that does not result in a Session
+/// error MUST register the Token Alias in the token cache, even if the message fails for other
+/// reasons, including Unauthorized."
+#[test]
+fn unsupported_request_invalid_filter_registers_auth_token_alias() {
+    let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+    let mut parameters = register_token_parameters(7);
+    parameters.push(one_range_subgroup_filter_with_set_id(0));
+    server
+        .recv_request(unsupported_request(0x51, 0, &parameters))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+    assert_token_alias(&server, 7);
 }
 
 /// 未対応 request の parity 違反と重複は INVALID_REQUEST_ID でセッションを閉じる
@@ -1333,7 +1642,12 @@ fn subscribe_tracks_allows_track_property_filter_with_other_parameters() {
     });
 
     for parameters in [alone, combined] {
-        let (_client, mut server) = establish_pair();
+        // Range Filter を含むため、server の MAX_FILTER_RANGES を Range 総数 (1) 以上に宣言する
+        // (未宣言の既定値 0 では §3.3.2 の上限超過で INVALID_FILTER になる)
+        let (_client, mut server) = establish_pair_with_options(
+            SetupOptions::new(),
+            opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 1),
+        );
         server
             .recv_request(unsupported_request(0x51, 0, &parameters))
             .expect("許可集合の和集合に入るパラメータでセッションを閉じないこと");

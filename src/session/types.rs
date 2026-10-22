@@ -646,7 +646,10 @@ pub enum DatagramAcceptance {
 /// FETCH / PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) に限る。本実装が
 /// 受理するのはこのうち以下の 4 種類である (残り 3 種類は `Session::recv_request` が
 /// `REQUEST_ERROR` (NOT_SUPPORTED、control GOAWAY を送信済みなら GOING_AWAY、`.` 単独または
-/// `.session` の Track Namespace Prefix なら DOES_NOT_EXIST) で拒否する)。
+/// `.session` の Track Namespace Prefix なら DOES_NOT_EXIST) で拒否する。
+/// `SUBSCRIBE_TRACKS` は Range Filter を載せられるため、§3.3.2 に違反する場合は
+/// `INVALID_FILTER` で拒否する。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は Range Filter を
+/// 許可しないため、載っていた場合は §9.20.1 (Parameter Scope) 違反でセッションを閉じる)。
 /// `request_id` からどの種別で開始されたかを逆引きする用途に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {

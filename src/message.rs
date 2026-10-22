@@ -1155,7 +1155,8 @@ pub enum ControlMessage {
     /// [`crate::session::core::Session::recv_request`] が本体を解析し、パラメータのスコープ検証
     /// (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))、`.` 単独または `.session` の
     /// Track Namespace Prefix の検証 (§2.4.3 (Reserved Namespaces) / §6.5 (Session-Level
-    /// Tracks and Namespaces))、AUTHORIZATION_TOKEN の適用 (§8.9 (Authorization Token
+    /// Tracks and Namespaces))、Range Filter の検証 (§3.3.2 (Range Filters) / §9.1.6
+    /// (MAX FILTER RANGES))、AUTHORIZATION_TOKEN の適用 (§8.9 (Authorization Token
     /// Compression)) を行う。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     Unsupported {
