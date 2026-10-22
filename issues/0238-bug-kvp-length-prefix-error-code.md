@@ -1,7 +1,7 @@
 # Message Parameters と SETUP Options の宣言長超過を KEY_VALUE_FORMATTING_ERROR で閉じる
 
 - Created: 2026-10-12
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-kvp-length-prefix-error-code
 - Polished: 2026-10-23
 
@@ -134,3 +134,37 @@ Length (型が奇数のときの値長) に限る。
   一致していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+KVP の宣言長が残りバッファを超える場合の分類を draft-ietf-moq-transport-22 §8.3
+(Key-Value-Pair Structure) の MUST に合わせ、Message Parameters と SETUP Options の 2 経路で
+KEY_VALUE_FORMATTING_ERROR にした。
+
+- `src/message_parameter.rs` の `decode_value` の `ValueEncoding::LengthPrefixed` で、Length
+  varint は読めるが宣言長が残りバッファを超える場合に `MessageError::KeyValueFormattingError`
+  を返すようにした。宣言長が 2^16-1 を超える場合の `ProtocolViolation` は維持した。
+  `varint::checked_len` の意味は変えず、呼び出し側で文脈に応じた variant へ写している。
+- `src/parameter.rs` の `SetupOptions::decode` の奇数型分岐も同じく
+  `KeyValueFormattingError` を返すようにした。
+- FILL_PARAMETERS の内側の KVP も同じ `decode_value` を通るため、内側の宣言長超過も
+  `KeyValueFormattingError` になる。varint の途中終端 (count / delta key / Type / Length /
+  偶数型の値、LOCATION_FILTER の必須フィールド欠落、TRACK_NAMESPACE_PREFIX の値の途中終端、
+  FILL_PARAMETERS 内側の varint) は `UnexpectedEof` のまま維持した。
+- 写像コード (`session_error_from_request_body` / `session_error_code`) は変更していない。
+  `KeyValueFormattingError` が既存の写像で 0x6 に写るため、未対応 request の body 経由の
+  session と example の SETUP 経路で 0x6 で閉じる。
+- doc を更新した。`MessageParameters::decode` の `# Errors` と入力契約 (Track Properties が
+  後続するメッセージの呼び出し規約と検出限界)、`decode_fill_parameters`、
+  `SetupOptions::decode` の `# Errors` 新設、`session_error_from_request_body` の doc、
+  `decode_unsupported_request_body` の `# Errors`。
+- テストを更新・追加した。`tests/test_message_parameter.rs` の
+  `unexpected_eof_in_length_prefixed` と `tests/test_parameter.rs` の
+  `unexpected_eof_in_value` を `KeyValueFormattingError` 期待へ更新し、Length / delta key /
+  偶数型の値の varint 途中終端、TRACK_NAMESPACE_PREFIX の値の途中終端、FILL_PARAMETERS 内側の
+  宣言長超過、wire SUBSCRIBE の decode、未対応 request body 経由の session (0x6、2^16-1 超は
+  0x3)、example の初回 SETUP 経由 (0x6) を追加した。
+- Properties 系 (Track / Object / LOC Properties) の KVP Length は本 issue の対象外とした。
+  `ObjectProperties::decode_exact` は `decode` の全エラーを `ProtocolViolation` に畳み、
+  data plane の失敗は subscription 終端になる。`TrackProperties::decode` の内側 KVP の宣言長
+  超過は現行どおり 0x3 のままで、分類の変更は別 issue とする。
