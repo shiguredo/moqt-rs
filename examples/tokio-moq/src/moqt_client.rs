@@ -2320,10 +2320,20 @@ impl MoqtClient {
                 };
                 match res? {
                     StreamRead::Value(msg) => {
-                        let mut session = lock_session(&self.session);
-                        session
-                            .recv_control(msg)
-                            .map_err(|e| TransportError::Internal(format!("recv_control: {e}")))?;
+                        let recv_result = {
+                            let mut session = lock_session(&self.session);
+                            session.recv_control(msg)
+                        };
+                        if let Err(e) = recv_result {
+                            // Session は `fail` で `CloseSession` を積んでいる。`drain_events` が
+                            // その `CloseSession` を処理して `handle.close` で終了コードを送る。
+                            // `lock_session` のガードは `drain_events` の前に落とす (同一 Mutex の
+                            // 再ロックで停止するため)。`pump_once` はこの後 error を返すので、
+                            // アプリは同じ呼び出しで `CloseSession` イベントを観測しない。
+                            // 終了コードは transport の close として peer が観測する。
+                            self.drain_events().await?;
+                            return Err(TransportError::Internal(format!("recv_control: {e}")));
+                        }
                     }
                     StreamRead::Closed(end) => {
                         let mut session = lock_session(&self.session);
@@ -2342,11 +2352,17 @@ impl MoqtClient {
                             StreamRead::Value(msg) => {
                                 let recv_result = {
                                     let mut session = lock_session(&self.session);
-                                    session
-                                    .recv_stream_message(rid, msg)
-                                        .map_err(|e| TransportError::Internal(format!("recv_stream_message: {e}")))
+                                    session.recv_stream_message(rid, msg)
                                 };
-                                recv_result?;
+                                if let Err(e) = recv_result {
+                                    // control stream と同じく、Session が積んだ `CloseSession` を
+                                    // `drain_events` で処理してから error を返す。ガードは
+                                    // `drain_events` の前に落とす。
+                                    self.drain_events().await?;
+                                    return Err(TransportError::Internal(format!(
+                                        "recv_stream_message: {e}"
+                                    )));
+                                }
                                 self.drain_events().await?;
                             }
                             StreamRead::Closed(end) => {

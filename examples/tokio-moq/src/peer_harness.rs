@@ -15,9 +15,10 @@
 //! HTTP/3 / HTTP/2 のハーネスは必要になった時点で別途追加する。
 //!
 //! 提供するのは SETUP 交換 (送る SETUP の差し替え、SETUP を送らない control stream の終端を
-//! 含む)、peer 起点 request stream へのメッセージ送信、peer 起点 request stream に届く応答の
-//! 読み出し、client 起点 request stream の受理と REQUEST_OK による応答、client が送る終了
-//! コード (CONNECTION_CLOSE) の観測である。次は提供しない (必要になった時点で拡張する)。
+//! 含む)、確立済み control stream への追加 control message の送信、peer 起点 request stream への
+//! メッセージ送信、peer 起点 request stream に届く応答の読み出し、peer が開いた request stream への
+//! 追加メッセージの送信、client 起点 request stream の受理と REQUEST_OK による応答、client が
+//! 送る終了コード (CONNECTION_CLOSE) の観測である。次は提供しない (必要になった時点で拡張する)。
 //!
 //! - peer が送る STOP_SENDING の観測 (QMux 経路は `QmuxTestPeerServer` と `qmux` モジュールの
 //!   テストで観測する)
@@ -350,8 +351,9 @@ pub(crate) struct TestPeer {
     recv_acceptor: StreamAcceptor,
     /// 自側 control stream (uni) の送信半
     ///
-    /// フィールドは読み出さないが、この値が drop されるまで SETUP を送ったストリームを
-    /// 保持する (drop すると制御ストリームが終端され、peer がセッション終了として観測する)。
+    /// SETUP の送信後に保持し、`send_goaway` / `send_control_message` による追加 control
+    /// message の送信と `finish_control_stream` の FIN に使う。drop すると制御ストリームが
+    /// 終端され、peer がセッション終了として観測するため保持する。
     control_send: Option<SendStream>,
     /// 自側 control stream (uni) の受信半
     ///
@@ -721,6 +723,41 @@ impl TestPeer {
         Ok(())
     }
 
+    /// 確立済みの control stream に control message を書く
+    ///
+    /// stream type prefix は付けない (control stream の先頭で送信済みのため)。確立後に届く
+    /// 2 通目の SETUP など、本来送られない control message を再現するために使う。
+    /// 新しい uni stream を開く [`TestPeer::send_setup`] / [`TestPeer::send_control_stream_head`]
+    /// は既存の control stream を FIN するため、この用途には使えない。
+    pub(crate) async fn send_control_message(&mut self, message: ControlMessage) -> Result<()> {
+        let control_send = self
+            .control_send
+            .as_mut()
+            .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
+        control_send.send(Bytes::from(message.encode()?)).await?;
+        Ok(())
+    }
+
+    /// 自側が開いた request stream に 2 通目以降の control message を書く
+    ///
+    /// `Session` の状態機械を経由せず wire を直接書く。確立後の request stream に届く
+    /// 不正なメッセージ (Table 5 で "First" を持つ型の 2 通目など) を再現するために使う。
+    pub(crate) async fn send_opened_request_message(
+        &mut self,
+        request_id: u64,
+        message: ControlMessage,
+    ) -> Result<()> {
+        let request = self
+            .opened_requests
+            .iter_mut()
+            .find(|request| request.request_id == Some(request_id))
+            .ok_or_else(|| {
+                TransportError::Internal(format!("opened request not found: {request_id}"))
+            })?;
+        request.send.send(Bytes::from(message.encode()?)).await?;
+        Ok(())
+    }
+
     /// peer が開いた request stream の送信方向を FIN で閉じる
     ///
     /// example が拒否した request のストリーム終端を通知する経路を確かめるために使う。
@@ -982,6 +1019,131 @@ mod tests {
                 }
                 other => panic!("peer 起点の request が受理されること: {other:?}"),
             }
+        })
+        .await;
+    }
+
+    /// client の main ループを error まで回す
+    ///
+    /// `pump_once` は Session の失敗を drain したうえで `TransportError::Internal` を返すため、
+    /// その error を受け取るまで `next_event` を呼び続ける。
+    async fn next_event_until_error(client: &mut MoqtClient) -> TransportError {
+        loop {
+            match client.next_event().await {
+                Ok(_) => continue,
+                Err(e) => return e,
+            }
+        }
+    }
+
+    /// 確立後に届いた 2 通目の SETUP で PROTOCOL_VIOLATION の終了コードを送ること
+    ///
+    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は「各 peer は SETUP で始まる
+    /// control stream を 1 本だけ開く」とし、§9.1 (SETUP) も SETUP を control stream の最初の
+    /// メッセージとする。確立後に届いた 2 通目の SETUP は Session が PROTOCOL_VIOLATION で
+    /// 閉じる。`pump_once` は Session が積んだ `CloseSession` を drain してから error を返す。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn established_duplicate_setup_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // 既存の control stream に 2 通目の SETUP を書く (stream type prefix は付けない)
+            peer.send_control_message(ControlMessage::Setup(Setup {
+                options: SetupOptions::new(),
+            }))
+            .await
+            .expect("control stream を書けること");
+
+            let error = next_event_until_error(&mut client).await;
+            let message = match &error {
+                TransportError::Internal(message) => message.clone(),
+                other => panic!("TransportError::Internal を期待したが {other:?} だった"),
+            };
+            assert!(
+                message.contains("recv_control"),
+                "recv_control 経路の error であること: {message}"
+            );
+            assert!(
+                message.contains("duplicate SETUP"),
+                "duplicate SETUP の error であること: {message}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "duplicate SETUP は PROTOCOL_VIOLATION (0x3) であること"
+            );
+        })
+        .await;
+    }
+
+    /// 確立後の request stream で Session が失敗したときも終了コードを送ること
+    ///
+    /// draft-ietf-moq-transport-22 §9 Table 5 は "Messages marked \"First\" MUST be the first
+    /// message on a new request stream." と定める。確立後の request stream に 2 通目の
+    /// SUBSCRIBE が届くと Session は PROTOCOL_VIOLATION で閉じる。`pump_once` は
+    /// `recv_stream_message` の失敗で `CloseSession` を drain してから error を返す。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn established_request_stream_error_closes_with_protocol_violation() {
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // peer が request stream を開き、SUBSCRIBE を先頭メッセージとして送る
+            let request_id = peer.next_request_id().expect("Request ID を採番できること");
+            peer.send_request_start(ControlMessage::Subscribe(Subscribe {
+                request_id,
+                track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("名前空間を作れること"),
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .await
+            .expect("request stream を開けること");
+
+            // アプリへ要求が渡るまで main ループを回す
+            loop {
+                match client.next_event().await.expect("イベントを取得できること") {
+                    Some(ClientEvent::Request(request)) => {
+                        assert_eq!(request.request_id, request_id, "Request ID が一致すること");
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => panic!("request が配送されること"),
+                }
+            }
+
+            // 同じ request stream に 2 通目の SUBSCRIBE を書く (Table 5 の "First" 違反)
+            let second_request_id = peer.next_request_id().expect("Request ID を採番できること");
+            peer.send_opened_request_message(
+                request_id,
+                ControlMessage::Subscribe(Subscribe {
+                    request_id: second_request_id,
+                    track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("名前空間を作れること"),
+                    track_name: b"video".to_vec(),
+                    parameters: MessageParameters::new(),
+                }),
+            )
+            .await
+            .expect("request stream に書けること");
+
+            let error = next_event_until_error(&mut client).await;
+            let message = match &error {
+                TransportError::Internal(message) => message.clone(),
+                other => panic!("TransportError::Internal を期待したが {other:?} だった"),
+            };
+            assert!(
+                message.contains("recv_stream_message"),
+                "recv_stream_message 経路の error であること: {message}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_PROTOCOL_VIOLATION,
+                "request stream の \"First\" 違反は PROTOCOL_VIOLATION (0x3) であること"
+            );
         })
         .await;
     }
