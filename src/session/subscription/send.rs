@@ -343,8 +343,9 @@ impl Session {
             }
         };
         // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): Track に Object を
-        // publish 済みなら Publisher は LARGEST_OBJECT を必ず含めなければならない。自側が
-        // publisher 役で確立した同一 Track の購読から観測最大値を引き、補完する
+        // publish 済みなら Publisher は LARGEST_OBJECT を必ず含めなければならない。
+        // `publisher_track_largest` が返す Track 最大 (live な publisher 役 subscription 群の
+        // 最大値と、Track 単位で保持した自側 publish 済み最大の大きい方) で補完する
         // (`update_largest_object_in_parameters` はアプリ指定値との max を取るため上書きしない)。
         // 補完は request_id の発行より前に置き、他のパラメータ検証と同じく
         // 「検証と補完が済んでから採番する」順序を保つ。
@@ -900,8 +901,9 @@ impl Session {
             )
         })?;
         // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter):
-        // LARGEST_OBJECT は Track 単位の値であるため、同一 Track の publisher 役
-        // subscription 群の最大値 (publisher_track_largest) を使う。
+        // LARGEST_OBJECT は Track 単位の値であるため、`publisher_track_largest` が返す
+        // Track 最大 (live な publisher 役 subscription 群の最大値と、Track 単位で保持した
+        // 自側 publish 済み最大の大きい方) を使う。
         // self の可変借用より前に求める (不変借用が必要なため)。
         let track_largest =
             self.publisher_track_largest(&subscription.track_namespace, &subscription.track_name);
