@@ -214,7 +214,14 @@ REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイ
 - 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下、二重送信・二重受信は PROTOCOL_VIOLATION です。`tick(now_ms)` が期限を進め、
   open request が残ったまま期限を過ぎると `CloseSession(GOAWAY_TIMEOUT)` を積みます (control stream)。request stream の GOAWAY は期限で当該 request stream を `GOING_AWAY` で reset します。
 - drain 完了: 自側が control GOAWAY を送ったあと、open request が無くなると `GoawayDrainReady` を 1 回発行します (`goaway_drain_ready()` でも参照可能)。アプリはこの時点で NO_ERROR で閉じるのが RECOMMENDED です (§6.6.1)。期限まで待つ必要はありません。
-- example の client は受信した control GOAWAY で新 session を確立し、購読 / 配信を張り直してから旧 session を NO_ERROR で閉じます。New Session URI が空なら現在の URI を再利用します。認可トークンは同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
+- example の client は受信した control GOAWAY で新 session をバックグラウンドで確立し、期限付きで
+  再試行しながら購読 / 配信を張り直してから旧 session を NO_ERROR で閉じます。subscriber は
+  移行中に届いた catalog を fill fetch stream から `CatalogState` へ適用し、音声は最後に受信した
+  Location から再開します。publisher は移行先の c4m が変わったとき catalog の authInfo を
+  再構築します。request stream の GOAWAY は session を維持し、空 URI (subscriber は現在と同じ
+  URL を含む) なら当該 request を再発行します。非空 URI の単一 request 移行は 2 session の
+  併走が必要なため未対応です。New Session URI が空なら現在の URI を再利用します。認可トークンは
+  同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
 
 送信側の運用手順:
 

@@ -2,7 +2,7 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
-最終更新: 2026-10-23 (§6.6 の GOAWAY によるセッション移行のみ現状に更新)。
+最終更新: 2026-10-24 (§6.6 の GOAWAY によるセッション移行のみ現状に更新)。
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-22`、LOC `draft-ietf-moq-loc-04`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
@@ -339,22 +339,27 @@ moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可�
 バックグラウンドで新 session を確立し、Established な購読 / 配信を張り直してから旧 session を
 NO_ERROR で閉じる。接続は GOAWAY の Timeout を期限に指数バックオフで再試行し、認可トークンは
 同一 origin のときだけ引き継ぐ。旧 session は移行の完了を待たずに timeout 分 sleep することはなく、
-StopSending / PUBLISH_DONE のあとすぐに閉じる。request stream の GOAWAY は session を維持し、
+StopSending / PUBLISH_DONE のあとすぐに閉じる。移行先の確立や購読の張り直しが一時的に失敗した
+場合は期限が残っている限り接続からやり直す。request stream の GOAWAY は session を維持し、
 空 URI (subscriber は現在と同じ URL を指定された場合を含む) なら当該 request を現在の
-session で再発行する。非空 URI の request 単位移行は 2 session の
-併走が必要なため未対応である。
+session で再発行する。
 
 残る制約:
 
-- catalog の移行は Next Object + FILL の再同期に依存する。移行直後の完全な catalog は
-  次の publish まで届かないことがある (移行前からの fill fetch stream の読み捨て制約)。
-- 音声の移行は購読境界を新 session の Largest Object に更新するため、移行中の音声は
-  live から再開する (古い音声を再生しない既存方針)。
-- 移行先の fragment の c4m が変わっても catalog の authInfo は起動時のままである。
+- request stream GOAWAY の非空 URI による単一 request 移行は未対応である。指定 URI の session を
+  別に確立し、track 単位に data plane / datagram / alias / peer request を振り分ける設計が必要に
+  なる。現状は移行せず warn ログを残す。
+- subscriber は移行後の catalog 購読で届く fill fetch stream を `CatalogState` へ適用する。
+  publisher が fill に応答しない場合は次の catalog publish まで完全な catalog が届かない
+  (外部要因)。
+- 音声は移行境界を最後に受信した Location にして Absolute Start で再購読する。移行先が同じ
+  publisher の続きとして TIMESTAMP を進める前提であり、別 publisher へ移って TIMESTAMP が
+  巻き戻る場合は live 音声が stale として落ちる。
+- 移行先の c4m が変わった場合、publisher は catalog の authInfo を新しいトークンで再構築する。
 - 移行先がまた GOAWAY を返す連鎖は `MigrationLimiter` (10 分で 5 回) で制限する。
 - transport (HTTP/3 / HTTP/2) の GOAWAY と WT_DRAIN_SESSION は `WtSessionState::Draining` として
   観測し、現在 URL への移行を開始する。QUIC / QMux は drain 通知が無いため MOQT GOAWAY 起点のみ。
-- 移行に失敗した場合は従来どおり終了する (旧 session を生かしたままの再試行はしない)。
+- 期限を過ぎても移行できない場合は従来どおり終了する。
 
 ### 6.7 REQUEST_ERROR の Redirect に追随しない
 
@@ -486,7 +491,7 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
 
 利用者に直接見える欠落から順に並べる。
 
-1. GOAWAY 移行の連続性 (6.6) — 移行中の catalog 再同期、音声の欠落、c4m 変更時の authInfo 再構築
+1. request stream GOAWAY の非空 URI による単一 request 移行 (6.6) — 2 session の併走が必要
 2. メディアの FETCH 不在 (5.8 / 6.1) — シーク、巻き戻し、欠落回収ができない
 3. 配信終了のシグナリング (5.1) — 正常終了・VOD 化・恒久終了を伝えられない (MSF §11.3)
 4. authInfo と変数置換 (6.4) — 認可付き配信が example 同士でも成立しない
