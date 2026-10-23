@@ -1,7 +1,6 @@
 # moqt-rs
 
 [![shiguredo_moqt](https://img.shields.io/crates/v/shiguredo_moqt.svg)](https://crates.io/crates/shiguredo_moqt)
-[![Documentation](https://docs.rs/shiguredo_moqt/badge.svg)](https://docs.rs/shiguredo_moqt)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/shiguredo)
 
@@ -23,29 +22,38 @@ Please read <https://github.com/shiguredo/oss> before use.
 
 ## 概要
 
-Rust で実装した Sans I/O かつ no_std 対応の Media over QUIC Transport (MOQT) ライブラリです。
-MOQT / LOC / MSF / C4M の codec と、1 本の Transport Session に閉じたセッション状態機械を提供します。
+Media over QUIC Transport (MOQT) を Rust で利用するためのライブラリです。MOQT は、QUIC と WebTransport の上で動作する、配信と購読のためのプロトコルです。
+
+MOQT のクライアントやサーバーを実装する場合に利用できます。
 
 ## 特徴
 
-- Sans I/O
-- no_std 対応
-- 依存は `hashbrown` / `noflate` / `nojson` / `base64ct` の 4 つのみ (暗号処理は optional feature `aws-lc-rs`)
-- 1 本の Transport Session に閉じた endpoint-local な `Session` 状態機械
-  - I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含まない
-- バッファ付きインクリメンタルデコーダー (`MessageDecoder` / `SubgroupStreamDecoder` / `FetchStreamDecoder`)
-- FETCH 応答のデルタ圧縮エンコーダー (`FetchStreamEncoder`)
+- Sans I/O で実装しており、ネットワーク、タイマー、スレッドを扱いません
+- no_std に対応しており、`alloc` だけで動作します
+- 依存は `hashbrown` / `noflate` / `nojson` / `base64ct` のみです
+- インクリメンタルデコーダー
+  - 受信バッファにデータを追加しながら、メッセージやオブジェクトを 1 つずつデコードできます
+- FETCH 応答の差分圧縮エンコーダー
+  - 同じ値の繰り返しを省いて、FETCH 応答を小さくエンコードできます
+- 受信側の再生
+  - 音声は、到着の遅れからジッターバッファの目標遅延を自動で調整します
+  - 間に合わない音は波形の周期で少しずつ詰め、欠けた区間は直前の音を繰り返して補間します
+  - 映像は、表示時刻に合わせて表示待ちのキューからフレームを選びます
+  - 音声と映像の表示時刻のずれを補正し、ライブ配信から遅れたら追いつきます
+- C4M の署名検証と発行
+  - オプション機能 `aws-lc-rs` で有効になります
 - 対応仕様
-  - Media over QUIC Transport (MOQT) `draft-22`
-  - Low Overhead Container (LOC) `draft-04`
-  - MOQT Streaming Format (MSF) `draft-01`
-  - Authorization scheme for MOQT using Common Access Tokens (C4M) `draft-01`
+  - [Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-22) `draft-22`
+  - [Low Overhead Container](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04) `draft-04`
+  - [MOQT Streaming Format](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01) `draft-01`
+  - [Authorization scheme for MOQT using Common Access Tokens](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01) `draft-01`
 
 ## 使い方
 
-### 制御メッセージの encode / decode
+### MOQT のメッセージを扱う
 
-`ControlMessage` は `Type (varint) | Length (u16 big-endian) | Message Body` 形式で encode / decode します。
+MOQT では、接続の確立や購読の開始などを「制御メッセージ」という単位でやり取りします。
+このライブラリは、メッセージをバイト列に変換して送信できるようにし、受信したバイト列からメッセージを取り出せるようにします。
 
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
@@ -66,9 +74,10 @@ fn main() -> Result<(), MessageError> {
 }
 ```
 
-### インクリメンタルデコード
+### 受信したデータを少しずつデコードする
 
-QUIC / WebTransport のフレーム境界とメッセージ境界は一致しないため、受信バッファに蓄積しながらデコードします。
+ネットワークからは、メッセージやオブジェクトが一度に全部届くとは限りません。
+受信した分をバッファに追加しながら、メッセージが揃うたびに 1 つずつ取り出せます。データストリームのオブジェクトも同じ方法で扱えます。
 
 ```rust,no_run
 use shiguredo_moqt::decoder::MessageDecoder;
@@ -76,9 +85,13 @@ use shiguredo_moqt::error::MessageError;
 
 fn main() -> Result<(), MessageError> {
     let mut decoder = MessageDecoder::new();
-    // 受信データを追記する
-    // decoder.push(&data);
-    if let Some(msg) = decoder.try_decode_message()? {
+
+    // 受信したバイト列を追加する
+    let data: &[u8] = &[];
+    decoder.push(data);
+
+    // メッセージが揃うたびに 1 つずつ取り出す
+    while let Some(msg) = decoder.try_decode_message()? {
         // msg を Session::recv_control 等に渡す
         let _ = msg;
     }
@@ -86,16 +99,10 @@ fn main() -> Result<(), MessageError> {
 }
 ```
 
-Data stream も同じ push + try_decode パターンです。
+### 接続の状態を管理する
 
-- `SubgroupStreamDecoder`：`try_decode_header()` でヘッダー、`try_decode_object()` でオブジェクトを順次デコードし、ペイロードは `try_read_payload()` / `consume_payload()` で進める
-- `FetchStreamDecoder`：FETCH 応答のデコード
-- `FetchStreamEncoder`：FETCH 応答のデルタ圧縮エンコード
-
-### セッション (SETUP 確立とイベント駆動)
-
-`Session` は I/O を持たない純粋な状態機械です。
-`new_client` / `new_server` で生成し、`poll_event()` で取り出した `SessionEvent::SendControl` 等を I/O 層に渡して送信します。
+接続の確立、購読の開始と終了、データの到着など、MOQT の接続ではさまざまな状態を管理する必要があります。
+このライブラリの `Session` がその状態を管理し、アプリケーションは「次に何を送るべきか」をイベントとして受け取ります。
 
 ```rust,no_run
 use shiguredo_moqt::parameter::SetupOptions;
@@ -104,6 +111,8 @@ use shiguredo_moqt::session::types::{SessionError, SessionEvent, Transport};
 
 fn main() -> Result<(), SessionError> {
     let mut session = Session::new_client(Transport::Quic, SetupOptions::new())?;
+
+    // 送信が必要なものはイベントとして取り出せる。I/O 層がそれに従って書き出す
     while let Some(event) = session.poll_event() {
         match event {
             SessionEvent::SendControl(msg) => {
@@ -124,133 +133,128 @@ fn main() -> Result<(), SessionError> {
 }
 ```
 
-受信側：
+### LOC のプロパティを扱う
 
-- bidi request stream の先頭メッセージ：`recv_request()`
-- bidi request stream の応答：`recv_stream_message(request_id, msg)`
-- uni data stream：`recv_data_stream_type()` / `recv_subgroup_header()` / `recv_subgroup_object()` / `recv_fetch_header()`
-  - `recv_subgroup_header()` / `recv_subgroup_object()` は `TrackDataAcceptance` を返す。`recv_subgroup_object()` は受信 Object ごとに購読フィルタを再適用し、フィルタ不通過は `FilteredOut`、キャンセル済み subscription への不要 Object は `Discarded` になる
-- datagram：`recv_object_datagram()`
+LOC は Low Overhead Container の略で、音声や映像のデータを運ぶための軽量なコンテナ形式です。タイムスタンプやコーデックの設定などをプロパティとして持ちます。
+このライブラリは、これらのプロパティのエンコードとデコードに対応しています。
 
-送信側：
+```rust,no_run
+use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::loc::{LocProperties, LocProperty, LocPropertyValue, PROP_TIMESTAMP};
 
-- `send_subscribe()` / `send_publish()` / `send_fetch()` 等
-- `tick(now_ms)` で GOAWAY drain や delivery timeout の期限を進める
+fn main() -> Result<(), MessageError> {
+    // Object のプロパティ。タイムスタンプ (マイクロ秒) を持たせる
+    let mut properties = LocProperties::new();
+    properties.push(LocProperty {
+        prop_id: PROP_TIMESTAMP,
+        value: LocPropertyValue::VarInt(1_700_000_000_000_000),
+    });
 
-### カタログとタイムライン (MSF)
+    // Object Properties のバイト列に変換する
+    let bytes = properties.encode()?;
+
+    // 受信したバイト列からプロパティを読み出す
+    let (decoded, _) = LocProperties::decode(&bytes)?;
+    for property in decoded.iter() {
+        // タイムスタンプなどの ID と値を取り出せる
+        let _ = (property.prop_id, &property.value);
+    }
+    Ok(())
+}
+```
+
+### MSF のカタログ、タイムライン、URI を扱う
+
+MSF は MOQT Streaming Format の略で、MOQT で音声や映像を配信するための形式です。メディアのパッケージ方法、カタログ、タイムライン、配信の手順を定めます。
+
+このライブラリは、カタログ、メディアタイムライン、イベントタイムラインの JSON を読み書きできます。URI と fragment の解釈にも対応しています。
 
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::msf::MsfCatalogDocument;
 
 fn main() -> Result<(), MessageError> {
-    // Full / Delta を自動判別してデコード
-    let bytes = Vec::new();
-    let doc = MsfCatalogDocument::decode(&bytes)?;
+    // 受信したカタログの JSON。配信するトラックの一覧などを含む
+    let json: &[u8] = br#"{"version": "draft-01", "tracks": []}"#;
+
+    // 全体カタログと差分更新を自動で判別してデコードする
+    let doc = MsfCatalogDocument::decode(json)?;
+
+    // 全体カタログなら、トラックの名前とコーデックを一覧できる
+    if let MsfCatalogDocument::Full(catalog) = &doc {
+        for track in &catalog.tracks {
+            let _ = (&track.name, &track.codec);
+        }
+    }
+
+    // JSON に戻す
     let encoded = doc.encode()?;
     let _ = encoded;
     Ok(())
 }
 ```
 
-Media / Event Timeline は `msf::{encode_media_timeline / decode_media_timeline / encode_event_timeline / decode_event_timeline}` で JSON と相互変換します。
-`TimelineEncodingOptions { gzip: true }` で gzip 圧縮し、デコード時は gzip magic (`0x1F 0x8B`) を検出して自動展開します。
+### C4M の認可トークンを扱う
 
-## 実装状況
+C4M は Common Access Token for MOQT の略で、MOQT で配信や購読を許可するための認可トークンです。
+このライブラリは、トークンのデコードと、署名の検証、トークンの発行に対応しています。署名の検証と発行には、オプション機能 `aws-lc-rs` を有効にする必要があります。
 
-対応仕様ごとの実装状況です。
+```rust,no_run
+use shiguredo_moqt::c4m::cat::{CatError, CatToken, MOQT_AUTH_TOKEN_TYPE_CAT};
 
-- [Media over QUIC Transport (MOQT)](docs/moqt.md)
-- [MOQT Streaming Format (MSF)](docs/msf.md)
-- [Low Overhead Container (LOC)](docs/loc.md)
-- [C4M (Common Access Token for MoQ)](docs/c4m.md)
+fn main() -> Result<(), CatError> {
+    // SETUP や SUBSCRIBE の AUTHORIZATION_TOKEN に載る Type と値
+    let token_type = MOQT_AUTH_TOKEN_TYPE_CAT;
+    let token: &[u8] = b"";
 
-モジュール構成とアーキテクチャは [`docs/moqt.md`](docs/moqt.md) を参照してください。
+    // C4M トークンとしてデコードする
+    let decoded = CatToken::decode_moqt_auth_token(token_type, token)?;
+
+    // 発行者や有効期限などのクレームを確認できる
+    let claims = decoded.claims();
+    let _ = (&claims.issuer, claims.expiration);
+    Ok(())
+}
+```
+
+### 音声と映像を再生する
+
+受信した音声と映像を、到着の揺らぎに合わせて鳴らす・表示するための処理です。
+
+- 音声は、到着の遅れと実際の再生結果を見て、再生開始までの遅延を自動で調整します。間に合わない音は波形の周期で少しずつ詰め、欠けた区間は直前の音を繰り返して埋めます
+- 映像は、決めた表示時刻に合わせて、表示待ちのキューからフレームを選びます
+- 音声と映像は、表示時刻のずれを補正し、ライブ配信から遅れたら追いつきます
+
+```rust,no_run
+use shiguredo_moqt::playout::buffer::{JITTER_BUFFER_MAX_QUEUED_FRAMES, PlayoutBuffer};
+use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
+
+fn main() {
+    let mut timeline = PlayoutTimeline::new();
+
+    // 受信側の時刻と、送信側が付けた時刻。どちらもマイクロ秒
+    let (wall_clock_us, timestamp_us) = (0, 0);
+
+    // 音声: 復号した音声の時刻を記録すると、鳴らす時刻が返る
+    timeline.observe(Track::Audio, wall_clock_us, timestamp_us);
+    let play_at_us = timeline.present_us(Track::Audio, timestamp_us);
+
+    // 映像: 復号したフレームを積み、表示時刻が来たものを取り出す
+    let mut buffer: PlayoutBuffer<u32> = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    let _ = buffer.enqueue(0, Some(timestamp_us), &timeline);
+    let selection = buffer.select(wall_clock_us, &timeline);
+
+    let _ = (play_at_us, selection);
+}
+```
+
+実際に組み込んだ例が [moq-sub](examples/moq-sub/README.md) です。詳しい仕組みと制約は [docs/audio-playout.md](docs/audio-playout.md) に書いています。
 
 ## サンプル
 
-サンプルは [Tokio](https://github.com/tokio-rs/tokio)、[s2n-quic](https://github.com/aws/s2n-quic)、[shiguredo_http3](https://github.com/shiguredo/http3-rs)、[shiguredo_http2](https://github.com/shiguredo/http2-rs)、[qmux-rs](https://github.com/shiguredo/qmux-rs) を利用しています。
-引数のパースには [noargs](https://github.com/sile/noargs)、ログには tracing を利用しています。
+実際に動くサンプルとして、配信側の [moq-pub](examples/moq-pub/README.md)、受信側の [moq-sub](examples/moq-sub/README.md)、両者が共有するトランスポート層の [tokio-moq](examples/tokio-moq/README.md) があります。
 
-- [`moq-pub`](examples/moq-pub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux で MoQ リレーに接続し、catalog / audio / video track を PUBLISH する
-- [`moq-sub`](examples/moq-sub/README.md)：QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux で MoQ リレーに接続し、catalog を SUBSCRIBE して取得し、audio / video を SUBSCRIBE して再生する
-- [`tokio-moq`](examples/tokio-moq/README.md)：publisher / subscriber が共有する QUIC / WebTransport over HTTP/3 / WebTransport over HTTP/2 / QMux トランスポート層 (ライブラリ)
-
-前提条件は Rust 1.95 以降です。
-サンプルが使う `s2n-quic` が 1.95 を要求するためです。
-`shiguredo_moqt` ライブラリと `pbt` だけであれば 1.93 で構築できます。
-
-```bash
-# publisher (疑似キャプチャ)
-cargo run -p moq-pub -- --url moqt://127.0.0.1:4443 --namespace moq-example --fake-capture-device
-
-# subscriber
-cargo run -p moq-sub -- --url moqt://127.0.0.1:4443 --namespace moq-example
-```
-
-接続経路は `--url` の scheme ではなく `--transport` (`quic` / `wt-h3` / `wt-h2` / `qmux`) で選びます。
-`--transport` を省略した場合は `--url` の `msf` fragment の `connection` (`q`: native QUIC /
-`wt`: WebTransport) を使い、それも無ければ `quic` が既定になります。`connection` と矛盾する
-`--transport` および `connection=q` と `connection=wt` の併記はエラーになります。
-
-`wt-h3` / `wt-h2` (WebTransport) は experimental です。s2n-quic が `RESET_STREAM_AT` を送出できず、WebTransport が MUST とする Reliable Size 付きのデータストリーム reset を行えないためです (詳細は [`examples/tokio-moq/README.md`](examples/tokio-moq/README.md) を参照してください)。
-
-`qmux` (QMux) も experimental です。TCP + TLS の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で、UDP が使えない環境でも接続できます。
-DATAGRAM は経路での損失を下位の TCP が再送するため起きませんが、TCP の再送で遅延が伸びます。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しえます (破棄は警告ログに出ます)。
-`--cert` の扱いは WebTransport over HTTP/2 と同じです。また、ピアが広告する DATAGRAM の上限が足りない場合は接続確立時に警告ログが出ます。
-`connection=q` / `connection=wt` と `--transport qmux` は矛盾するためエラーになります (詳細は [`examples/tokio-moq/README.md`](examples/tokio-moq/README.md) を参照してください)。
-
-URL の MSF fragment (`#msf:<track-identifier>&c4m=<base64 token>`) で C4M 認可トークンを SETUP と各制御メッセージ (PUBLISH / SUBSCRIBE / REQUEST_UPDATE) の AUTHORIZATION_TOKEN として送信できます。
-`--namespace` を省略した場合は MSF fragment の track-identifier が示す namespace を Track Namespace として使います (`--namespace` と MSF fragment のどちらも無い場合はエラーになります)。
-
-接続先となる MoQ リレーは別途用意してください。
-詳細なオプションは [`examples/moq-pub/README.md`](examples/moq-pub/README.md) / [`examples/moq-sub/README.md`](examples/moq-sub/README.md) と各クレートの `--help` を参照してください。
-
-## Agent Skills
-
-[Agent Skills](https://agentskills.io/) 形式のスキルを同梱しています。
-`gh skill install` コマンドで対応する AI エージェント (Claude Code, Cursor, GitHub Copilot, Gemini CLI 等) にインストールできます。
-エージェントはこのライブラリの API や準拠仕様を理解した上で支援できます。
-
-```bash
-gh skill install shiguredo/moqt-rs shiguredo-moqt
-```
-
-スキルの内容は [`skills/shiguredo-moqt/SKILL.md`](skills/shiguredo-moqt/SKILL.md) を参照してください。
-
-## 規格書
-
-このライブラリが準拠している主な IETF draft です。
-
-- [draft-ietf-moq-transport-22](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-22)：Media over QUIC Transport
-- [draft-ietf-moq-loc-04](https://datatracker.ietf.org/doc/html/draft-ietf-moq-loc-04)：Media over QUIC - Low Overhead Container
-- [draft-ietf-moq-msf-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-01)：MOQT Streaming Format
-- [draft-ietf-moq-c4m-01](https://datatracker.ietf.org/doc/html/draft-ietf-moq-c4m-01)：Authorization scheme for MOQT using Common Access Tokens
-
-## ビルドとテスト
-
-```bash
-# 全テスト実行
-make test
-
-# PBT のみ実行
-make pbt
-
-# カバレッジ付きで全テスト実行
-make cover
-
-# Fuzzing を全ターゲットで 30 秒ずつ実行
-make fuzzing
-
-# clippy
-make clippy
-
-# フォーマット
-make fmt
-
-# ビルド確認
-make check
-```
+実行方法、前提、接続設定は [examples/README.md](examples/README.md) を参照してください。
 
 ## ライセンス
 
