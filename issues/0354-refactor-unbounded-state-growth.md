@@ -29,7 +29,7 @@
 
 ## 設計方針
 
-- `SubgroupTracker` に `track_alias` ごとの追跡キー数の上限 `MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS` を設ける。値は `MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION` (100,000) と同じ 100,000 とする。1 キーあたりの保持量は小さく (キー 3 つの u64 と enum / Option<u64>)、100,000 件でも数十 MB に収まる。30 fps で 1 Group あたり 1 Subgroup なら約 1 時間分の検出窓になる。
+- `SubgroupTracker` に `track_alias` ごとの追跡キー数の上限 `MAX_TRACKED_SUBGROUP_KEYS_PER_TRACK_ALIAS` を設ける。値は `MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION` (100,000) と同じ 100,000 とする。1 キーあたりの保持量は小さく (キー 3 つの `u64` と enum / `Option<u64>`)、100,000 件でも数十 MB に収まる。30 fps で 1 Group あたり 1 Subgroup なら約 1 時間分の検出窓になる。
 - 追跡キー数は `entries` / `priorities` / `fin_last_object_ids` のキーの和集合の件数とする。
 - `open` / `mark_fin` / `mark_reset` / `mark_stop_sending` / `record_priority`、および 0352 で追加される recovery メソッドなど、
   キーを追加するか終端状態にするすべての操作の後、当該 `track_alias` の追跡キー数が上限を超えたら、
