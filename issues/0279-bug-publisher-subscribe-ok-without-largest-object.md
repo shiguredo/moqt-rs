@@ -1,7 +1,7 @@
 # publisher 役 subscription を forget した後も Track 最大を LARGEST_OBJECT に載せる
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-23
 - Branch: feature/fix-largest-object-in-subscribe-ok
 - Polished: 2026-10-23
 
@@ -103,3 +103,38 @@ subscription をすべて forget すると、以降の SUBSCRIBE_OK に LARGEST_
   LARGEST_OBJECT の節が実装と一致していること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+publisher 役 subscription をすべて forget した後も §9.20.17 (LARGEST OBJECT Parameter) の MUST を
+満たすようにした。
+
+- `Session` に `published_track_largest` (Track Namespace + Track Name → Location) を追加し、
+  `send_subgroup_object` と `send_object_datagram` で自側が publisher 役として送信した Object の
+  Location の最大を記録した。subscriber 役で受信した Object は含めない。比較は `Location` の
+  (group_id, object_id) の辞書順最大であり、保持はセッション終了までで、エントリ数はセッション中に
+  publish した Track 数に比例する。
+- `publisher_track_largest` は live な publisher 役 subscription 群の最大値と保持値の大きい方を
+  返すようにした。これにより SUBSCRIBE_OK / PUBLISH / 購読の REQUEST_UPDATE_OK /
+  PUBLISH_STATE_NOTIFY / FETCH の range 解決 / fill range / 相対フィルタ解決の全経路で同じ
+  Track 最大を使う。
+- アプリが明示した LARGEST_OBJECT は従来どおり `update_largest_object_in_parameters` の max 合流で
+  扱い、観測値より小さければ観測値まで引き上げ、大きければそのまま載せる (アプリ指定値を
+  上書き・削除しない)。
+- relay の上流受信 Object の集約は行わない。CODEBASE.md の「クライアントとサーバーのみで MoQ
+  リレーには対応しない」に従い、relay の下流 SUBSCRIBE_OK は relay の責務とする。元の実測
+  (relay 経由の 1 人目の購読で FETCH が出ない) は relay の下流 SUBSCRIBE_OK の挙動を指しており、
+  本 issue の対象外である。
+- doc を実装に合わせて更新した。対象は `Session::publisher_track_largest` /
+  `record_published_track_largest` の doc、`docs/moqt.md` の Message Parameters の Largest Object、
+  `issues/0304-draft-22-track-status-largest-object.md` の「Track 単位の永続保持はスコープ外」
+  という記述である。
+- `tests/test_session/subscription/largest_object_track_aggregate.rs` にテストを追加した。
+  subgroup で publish した後と datagram で publish した後に publisher 役 subscription を forget
+  しても SUBSCRIBE_OK に保持値が載ること、より古い Location を送っても最大が変わらないこと、
+  forget 後に新しい subscription で publish した値で単調に更新されること、未 publish では自動
+  補完せずアプリ指定値はそのまま載ること、アプリ指定値が観測値より小さい場合は引き上げることを
+  固定した。subgroup 経路と datagram 経路の記録を無効化する変異で対応するテストが失敗することも
+  確認した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通る。
