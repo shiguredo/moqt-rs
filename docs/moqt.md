@@ -204,3 +204,21 @@ MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TI
 uni data stream と datagram の送受信 state も扱います。
 REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイクと drain、delivery timeout などの deadline 管理 (`tick` 駆動) も行います。
 一方で I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含みません。
+
+## GOAWAY によるセッション移行
+
+`Session` は GOAWAY を移行の合図として扱い、接続の張り替え自体は I/O 層とアプリに任せます (Sans-I/O)。仕様と実装の責務は次のとおりです。
+
+- 受信側: `GoawayReceived { new_session_uri, timeout, on_request_stream }` を発行し、`peer_goaway()` でも同じ情報を参照できます。control stream の GOAWAY は session 全体、request stream の GOAWAY は当該 request だけが対象です (`on_request_stream`)。control GOAWAY の受信後、自側からの
+  新規 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS は `SendRequestError::PeerGoawayReceived` で拒否されます (draft-ietf-moq-transport-22 §9.2 の SHOULD NOT)。
+- 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下、二重送信・二重受信は PROTOCOL_VIOLATION です。`tick(now_ms)` が期限を進め、
+  open request が残ったまま期限を過ぎると `CloseSession(GOAWAY_TIMEOUT)` を積みます (control stream)。request stream の GOAWAY は期限で当該 request stream を `GOING_AWAY` で reset します。
+- drain 完了: 自側が control GOAWAY を送ったあと、open request が無くなると `GoawayDrainReady` を 1 回発行します (`goaway_drain_ready()` でも参照可能)。アプリはこの時点で NO_ERROR で閉じるのが RECOMMENDED です (§6.6.1)。期限まで待つ必要はありません。
+- example の client は受信した control GOAWAY で新 session を確立し、購読 / 配信を張り直してから旧 session を NO_ERROR で閉じます。New Session URI が空なら現在の URI を再利用します。認可トークンは同一 origin のときだけ引き継ぎます (draft-ietf-moq-msf-01 §11.4.4)。
+
+送信側の運用手順:
+
+1. 移行先 (New Session URI) を受け付けられる状態にしてから GOAWAY を送る。
+2. 新規 request は GOING_AWAY で拒否しつつ、既存の購読 / 配信は継続する。
+3. `GoawayDrainReady` または `goaway_drain_ready()` を観測したら NO_ERROR で閉じる。
+4. 期限内に drain できない場合は `GOAWAY_TIMEOUT` で閉じる (Session が `tick` で発行する `CloseSession` に従う)。

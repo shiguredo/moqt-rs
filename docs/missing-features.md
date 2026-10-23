@@ -2,6 +2,8 @@
 
 調査日: 2026-10-14 (develop の f91baf3 時点)。
 
+最終更新: 2026-10-23 (§6.6 の GOAWAY によるセッション移行のみ現状に更新)。
+
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-22`、LOC `draft-ietf-moq-loc-04`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
 対象コードは `src/` (ライブラリ)、`examples/moq-pub`、`examples/moq-sub`、
@@ -27,9 +29,9 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
    FETCH (要求側 API は transport 層で削除済み)、TRACK_STATUS、Media / Event Timeline、
    MSF の変数置換、パディング、`publishTracks`、Audio Level、`END_OF_GROUP`、
    Range Filters を有効にする `MAX_FILTER_RANGES` など。
-3. **アプリ機能として欠けているもの**: GOAWAY の New Session URI による移行、
-   REQUEST_ERROR の Redirect 追随、トラック選択と切替、シーク / 巻き戻し、
-   ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
+3. **アプリ機能として欠けているもの**: request stream GOAWAY の非空 URI による個別 request
+   移行 (2 session の併走が必要)、REQUEST_ERROR の Redirect 追随、トラック選択と切替、
+   シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
 4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` の探索 (§10.7)、
    `isLive=false` の `targetLatency` (MSF §5.2.8)、catalog 更新をまたいだ
    `isLive` の False → True (MSF §5.2.7)、`connectionUri` の検証と新規接続 (MSF §5.2.36)、
@@ -331,15 +333,28 @@ moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可�
 `moqmetrics`) の track を購読しても LOC として解釈するため、受信後にデコードで失敗する。
 `isLive=false` の track も live と同じ経路で購読する (4.2 も参照)。
 
-### 6.6 GOAWAY の New Session URI を使わない
+### 6.6 GOAWAY によるセッション移行
 
-両 example とも `GoawayReceived` の `new_session_uri` を無視して終了する
-(`examples/moq-pub/src/pipeline.rs:1257`、`examples/moq-sub/src/pipeline.rs:1204`)。
-§9.2 はサーバーが New Session URI を提示した場合、client がその URI を
-新しい session に使う MUST を定める。ライブラリは `SessionEvent::GoawayReceived` に
-`new_session_uri` と `on_request_stream` を載せている (`src/session/types.rs:318-327`) ため、
-example 側の実装漏れである。request stream 上の GOAWAY による
-個別 request の再発行 (§9.2) にも対応しない。
+両 example は control stream の GOAWAY を受けると、New Session URI (空なら現在の URI) へ
+バックグラウンドで新 session を確立し、Established な購読 / 配信を張り直してから旧 session を
+NO_ERROR で閉じる。接続は GOAWAY の Timeout を期限に指数バックオフで再試行し、認可トークンは
+同一 origin のときだけ引き継ぐ。旧 session は移行の完了を待たずに timeout 分 sleep することはなく、
+StopSending / PUBLISH_DONE のあとすぐに閉じる。request stream の GOAWAY は session を維持し、
+空 URI (subscriber は現在と同じ URL を指定された場合を含む) なら当該 request を現在の
+session で再発行する。非空 URI の request 単位移行は 2 session の
+併走が必要なため未対応である。
+
+残る制約:
+
+- catalog の移行は Next Object + FILL の再同期に依存する。移行直後の完全な catalog は
+  次の publish まで届かないことがある (移行前からの fill fetch stream の読み捨て制約)。
+- 音声の移行は購読境界を新 session の Largest Object に更新するため、移行中の音声は
+  live から再開する (古い音声を再生しない既存方針)。
+- 移行先の fragment の c4m が変わっても catalog の authInfo は起動時のままである。
+- 移行先がまた GOAWAY を返す連鎖は `MigrationLimiter` (10 分で 5 回) で制限する。
+- transport (HTTP/3 / HTTP/2) の GOAWAY と WT_DRAIN_SESSION は `WtSessionState::Draining` として
+  観測し、現在 URL への移行を開始する。QUIC / QMux は drain 通知が無いため MOQT GOAWAY 起点のみ。
+- 移行に失敗した場合は従来どおり終了する (旧 session を生かしたままの再試行はしない)。
 
 ### 6.7 REQUEST_ERROR の Redirect に追随しない
 
@@ -471,7 +486,7 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
 
 利用者に直接見える欠落から順に並べる。
 
-1. GOAWAY の New Session URI による移行 (6.6) — リレー再起動で配信が切れる (§9.2 / §6.6.1)
+1. GOAWAY 移行の連続性 (6.6) — 移行中の catalog 再同期、音声の欠落、c4m 変更時の authInfo 再構築
 2. メディアの FETCH 不在 (5.8 / 6.1) — シーク、巻き戻し、欠落回収ができない
 3. 配信終了のシグナリング (5.1) — 正常終了・VOD 化・恒久終了を伝えられない (MSF §11.3)
 4. authInfo と変数置換 (6.4) — 認可付き配信が example 同士でも成立しない

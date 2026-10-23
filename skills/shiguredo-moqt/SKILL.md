@@ -202,6 +202,16 @@ fn close(&mut self, code: u64, reason: &'static str)
 fn state(&self) -> SessionState
 fn role(&self) -> Role
 fn transport(&self) -> Transport
+fn peer_goaway(&self) -> Option<&PeerGoawayInfo>
+fn goaway_drain_snapshot(&self) -> GoawayDrainSnapshot
+fn goaway_drain_ready(&self) -> bool
+fn send_goaway(&mut self, new_session_uri: Vec<u8>, timeout: u64) -> Result<(), SessionError>
+fn send_goaway_on_request_stream(
+    &mut self,
+    request_id: u64,
+    new_session_uri: Vec<u8>,
+    timeout: u64,
+) -> Result<(), SessionError>
 ```
 
 `tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / GOAWAY のセッション全体の
@@ -220,6 +230,9 @@ request stream 上の GOAWAY の timeout はセッションを閉じず、
 当該 request の `ResetRequestStream { error_code: STREAM_GOING_AWAY }` を積む。さらに期限到達時には、
 まだ終端していない request を終端して `RequestTerminated { reason: GoawayTimeout }` を 1 回だけ積む
 (reset 後は PUBLISH_DONE を送れないため)。既に終端済みの request には reset イベントだけを積む。
+自側が control stream で GOAWAY を送信済みの場合、open request が無くなった時点
+(`goaway_drain_ready() == true`) で `GoawayDrainReady` を 1 回だけ積む。受信側は
+`peer_goaway()` で `new_session_uri` / `timeout` をいつでも参照でき、移行判断に使える。
 
 タイマーと Auth Token:
 
@@ -274,6 +287,7 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `RequestErrorReceived { request_id, error_code, retry_interval, reason, redirect }` | REQUEST_ERROR 受信 |
 | `RequestTerminated { request_id, kind, reason }` | request が Terminated に遷移 |
 | `GoawayReceived { new_session_uri, timeout, on_request_stream }` | GOAWAY 受信 |
+| `GoawayDrainReady` | 自側 GOAWAY の drain 完了 (open request が無くなった。NO_ERROR で閉じてよい) |
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
