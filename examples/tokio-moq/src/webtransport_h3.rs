@@ -145,12 +145,15 @@ struct H3FeedOutcome {
 
 struct ClientConnectionState {
     h3_conn: ClientConnection,
+    /// バックグラウンドのイベント処理後も、購読処理が取り出すまで保持する datagram
+    received_datagrams: Vec<Vec<u8>>,
 }
 
 impl ClientConnectionState {
     fn new(settings: H3Settings) -> Self {
         Self {
             h3_conn: ClientConnection::new(settings),
+            received_datagrams: Vec::new(),
         }
     }
 
@@ -221,12 +224,28 @@ impl ClientConnectionState {
         }
     }
 
-    /// h3 層のイベントを取り出す
+    /// h3 層のイベントを取り出し、datagram は購読処理用に保持する
     ///
+    /// 受信タスクがイベントを先に処理しても payload を失わないよう、同じロック保持中に
+    /// datagram を分離する。CONNECT 応答で確立前の datagram が解放される経路もここを通る。
     /// 失敗は h3 層のエラーをそのまま返す。`Error::ConnectionError` であり得るため、呼び出し側は
     /// 接続エラーとして切り分けられる (`connection_error_code`)。
     fn drain_events(&mut self) -> std::result::Result<Vec<Event>, shiguredo_http3::Error> {
-        self.h3_conn.drain_events()
+        let mut events = Vec::new();
+        for event in self.h3_conn.drain_events()? {
+            match event {
+                Event::WebTransport(WebTransportEvent::Datagram { payload, .. }) => {
+                    self.received_datagrams.push(payload);
+                }
+                event => events.push(event),
+            }
+        }
+        Ok(events)
+    }
+
+    /// 購読処理へ未配送の datagram を受信順で一度だけ取り出す
+    fn take_datagrams(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.received_datagrams)
     }
 
     /// h3 層のイベントを入力なしで取り出し、結果を [`H3FeedOutcome`] の形に揃える
@@ -338,7 +357,7 @@ fn process_h3_result(
 /// 受信タスク / 制御・QPACK ストリームのルーティングタスク / datagram 受信タスク) が
 /// 共通で使う。feed がエラーでも drain したイベントは必ず `process_h3_events` へ渡す
 /// (取りこぼすとセッション終了を検知できず、MOQT 層の受信ループが待ち続ける)。
-/// 戻り値の datagram payload はこの経路では使わないため捨てる。
+/// datagram payload は `ClientConnectionState::drain_events` が購読処理用に保持する。
 ///
 /// エラーの切り分けと接続クローズは [`process_h3_result`] に集約する。接続エラーは
 /// この関数の中で接続を閉じて共有状態を [`WtSessionState::ConnectionFailed`] へ進めるところまで
@@ -367,8 +386,8 @@ fn process_h3_outcome(
 /// どのストリームを MOQT 層へ渡すかの判定であり、ここでの照合とは役割が異なる
 /// (両方で照合すると同じ前提を二重に管理することになる)。
 ///
-/// datagram の扱いは呼び出し元ごとに異なる (MOQT 層へ渡す / s2n-quic の受信バッファを空に
-/// するために捨てる) ため、戻り値として返して状態の反映だけをここに集約する。
+/// 実際の受信経路では `ClientConnectionState::drain_events` が datagram を先に保持するため、
+/// ここにはセッション状態などのイベントだけが渡る。
 fn process_h3_events(
     events: Vec<Event>,
     session_state: &watch::Sender<WtSessionState>,
@@ -1083,8 +1102,7 @@ impl WtClient {
                                     .expect("connection state mutex must not be poisoned");
                                 s.feed_datagram(&bytes)
                             };
-                            // このタスクは s2n-quic の datagram 受信バッファを空にする
-                            // ために起動しており、payload はここでは使わない。セッション
+                            // payload は共有状態に保持し、MOQT 層が取り出すまで残す。セッション
                             // 状態の反映 (`SessionClosed` / `SessionDraining`) と、h3 層が
                             // 返したエラーの切り分けだけを行う。feed がエラーでも
                             // イベントは処理済みである。
@@ -1797,10 +1815,10 @@ impl WtSession {
     ///
     /// `drain_events` は h3 層が接続エラーを返した接続では同じエラーを返す (`process_h3_result`
     /// が接続エラーの発生源であり、この関数はその接続エラーを観測する経路の 1 つ)。イベントを
-    /// 1 つも取り出せないため datagram は空で返り、接続エラーは他の受信経路と同じ
-    /// `ConnectionClosed` に畳んで返す。
+    /// 取り出せなくても、既に保持した datagram は先に返す。保持分がなくなったら、
+    /// 接続エラーは他の受信経路と同じ `ConnectionClosed` に畳んで返す。
     pub fn take_buffered_datagrams(&self) -> Result<Vec<Vec<u8>>> {
-        let events = {
+        let (events, datagrams) = {
             let mut s = self
                 .state
                 .lock()
@@ -1808,15 +1826,19 @@ impl WtSession {
             // 接続エラーは接続を閉じた終了であり、読み出し側には「このセッションではもう受信
             // できない」ことだけを伝える (接続エラーの内容は `process_h3_result` が warn に
             // 残している)。それ以外のエラーは原因を保持したまま返し、購読を静かに止めない
-            match s.drain_events() {
+            let events = match s.drain_events() {
                 Ok(events) => events,
                 Err(e) if connection_error_code(&e).is_some() => {
-                    return Err(TransportError::ConnectionClosed);
+                    return resolve_buffered_datagrams(
+                        s.take_datagrams(),
+                        WtSessionState::ConnectionFailed,
+                    );
                 }
                 Err(e) => return Err(TransportError::Http3(e)),
-            }
+            };
+            (events, s.take_datagrams())
         };
-        let datagrams = process_h3_events(events, &self.session_state);
+        let _ = process_h3_events(events, &self.session_state);
         resolve_buffered_datagrams(datagrams, self.session_state())
     }
 
@@ -3049,6 +3071,98 @@ mod tests {
             "peer の SETTINGS を受信した状態になること"
         );
         state
+    }
+
+    /// 受信タスクが先にイベントを処理しても、datagram は終了後まで取り出せる
+    ///
+    /// 実際の h3 クライアントとサーバーで SETTINGS と CONNECT を交換する。受信側の
+    /// イベント処理を購読側の取り出しより先に進め、音声が全件失われる順序を再現する。
+    #[test]
+    fn background_event_processing_keeps_received_datagrams_until_consumed() {
+        let mut state = negotiated_connection_state();
+        let mut server = shiguredo_http3::ServerConnection::new(test_peer_settings());
+        server
+            .set_webtransport_transport_verified(true, true)
+            .expect("サーバーの transport parameter を設定できること");
+        server
+            .init_h3_streams(3, 7, 11)
+            .expect("サーバーの h3 ストリームを初期化できること");
+        let client_init = state
+            .h3_conn
+            .init_h3_streams(2, 6, 10)
+            .expect("クライアントの h3 ストリームを初期化できること");
+        server
+            .feed_stream(2, &client_init.control_data, false)
+            .expect("クライアントの SETTINGS を交換できること");
+
+        let request = ConnectRequest::new("https", "example.com", "/")
+            .available_protocols(vec![crate::MOQT_PROTOCOL.to_string()])
+            .to_headers()
+            .expect("CONNECT のヘッダーを生成できること");
+        let session_id = state
+            .h3_conn
+            .send_request(&request, false)
+            .expect("CONNECT を送信できること");
+        while let Some((data, fin)) = state.h3_conn.take_stream_data(session_id) {
+            server
+                .feed_stream(session_id, &data, fin)
+                .expect("サーバーが CONNECT を受信できること");
+        }
+        let response = shiguredo_http3::webtransport::connect::ConnectResponse::new(200)
+            .with_protocol(crate::MOQT_PROTOCOL)
+            .to_headers()
+            .expect("CONNECT 応答のヘッダーを生成できること");
+        server
+            .send_response(session_id, &response, false)
+            .expect("サーバーが CONNECT を受理できること");
+        let (session_state, session_receiver) = watch::channel(WtSessionState::Active);
+        let mut observation = ConnectObservation::default();
+        while let Some((data, fin)) = server.take_stream_data(session_id) {
+            let outcome = state.feed_stream_and_drain(session_id, &data, fin);
+            outcome.result.expect("CONNECT 応答を受信できること");
+            observation.observe_events(&outcome.events);
+            let _ = process_h3_events(outcome.events, &session_state);
+        }
+        assert_eq!(
+            connect_outcome(&observation),
+            ConnectOutcome::Established,
+            "プロトコル交渉を含めてセッションが確立すること"
+        );
+
+        // 空の payload も含め、受信順と一度だけ取り出す性質を確認する。
+        let payloads = vec![vec![0xaa, 0xbb], vec![], vec![0xcc]];
+        for payload in &payloads {
+            let datagram = server
+                .send_datagram(session_id, payload)
+                .expect("サーバーが datagram を生成できること");
+            let outcome = state.feed_datagram(&datagram);
+            outcome.result.expect("datagram を受信できること");
+            let _ = process_h3_events(outcome.events, &session_state);
+        }
+
+        // 購読側が取り出す前に終了イベントを処理しても、直前までの受信分は捨てない。
+        server
+            .send_body(session_id, &[], true)
+            .expect("CONNECT の FIN を送信できること");
+        while let Some((data, fin)) = server.take_stream_data(session_id) {
+            let outcome = state.feed_stream_and_drain(session_id, &data, fin);
+            outcome.result.expect("CONNECT の FIN を受信できること");
+            let _ = process_h3_events(outcome.events, &session_state);
+        }
+        assert_eq!(
+            *session_receiver.borrow(),
+            WtSessionState::ClosedByPeer,
+            "FIN による終了もイベント処理へ伝わること"
+        );
+        assert_eq!(
+            state.take_datagrams(),
+            payloads,
+            "イベント処理後も全 payload を受信順で取り出せること"
+        );
+        assert!(
+            state.take_datagrams().is_empty(),
+            "一度取り出した datagram を重複して配送しないこと"
+        );
     }
 
     /// h3 層の接続エラーだけが接続を閉じる判断になる (RFC 9114 §8)
