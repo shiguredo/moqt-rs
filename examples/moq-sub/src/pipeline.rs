@@ -175,23 +175,21 @@ impl AudioDeliveryOrder {
         self.boundary = boundary;
     }
 
-    /// session 移行のために状態を作り直す
+    /// session 移行のために購読の境界だけを更新する
     ///
-    /// 移行先では購読が別 session になり、音声の届き方が変わる。旧 session で覚えた
-    /// 「送出済みの TIMESTAMP」と「直近に届いた Object」を持ち越すと、移行先の live の音声を
-    /// 古い (Stale) として拒否しかねない (移行先が別の公開元で TIMESTAMP の起点が違う場合も
-    /// ある) ため、両方を捨てる。境界は移行先で張り直した購読の Largest Object に更新する。
-    /// 移行先の live はこの境界より後に届くため、ここで捨てた状態で正しく通る。
+    /// 旧 session で最後に受信した Object の Location を新しい境界にする。移行先の購読は
+    /// その位置を Location Filter の Absolute Start (0x02) にして張り直すため
+    /// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
+    /// Parameter) Table 6。draft 由来の仕様であり将来変更されうる)、境界と同じ位置の
+    /// Object だけが再送される。境界を「最後に受信した位置」にすることで、移行中に抜けた
+    /// それ以降の音声は live として通り、移行前の音声を再生し直さずに済む。
     ///
-    /// この境界の更新により、再購読の Location Filter (Absolute Start) で再送された
-    /// 移行中の音声のうち、移行先の Largest Object 以下は境界以下として落ちる。音声は
-    /// 移行の瞬間に途切れるが、移行先の live から再開する。移行先の購読より前に publish
-    /// された音声を再生すると、既に再生した音声との重複や時計の逆行になるためである。
-    /// 映像は境界による足切りを持たず、直近 Group の FETCH と復号順の判定で補填する。
+    /// 送出済みの TIMESTAMP (`last_pts_us`) と直近の Object の記憶 (`recent_locations`) は
+    /// 維持する。移行先は同じ publisher の続きであり TIMESTAMP は単調に進むため、維持すると
+    /// 再送された Object を重複として落とし、TIMESTAMP が巻き戻る Object を Stale として
+    /// 落とせる。ここで捨てると、再送された移行前の音声を再生し直すことになる。
     fn reset_for_migration(&mut self, boundary: Option<Location>) {
         self.boundary = boundary;
-        self.last_pts_us = None;
-        self.recent_locations.clear();
     }
 
     /// `location` が購読の境界以下かを判定する
@@ -634,6 +632,21 @@ const MIGRATION_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_se
 /// [`MIGRATION_LIMIT_WINDOW`] の中で許す移行回数
 const MIGRATION_LIMIT_MAX: usize = 5;
 
+/// 移行の購読張り直しに失敗したときの再試行で、最初に待つ時間
+const MIGRATION_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 移行の購読張り直しに失敗したときの再試行で待つ時間の上限
+///
+/// 期限が長い場合でも、失敗した移行先へ間隔を空けずに接続し直さないようにする。
+const MIGRATION_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// 移行の 1 回の購読張り直しに与える時間の上限
+///
+/// 残り時間の全部を 1 回の試行に使うと、張り直しがタイムアウトした時点で期限も尽きて
+/// 再試行できなくなる。張り直しは SUBSCRIBE の応答待ちだけであり数秒で終わるため、
+/// 1 回の試行に上限を設けて再試行の余地を残す。
+const MIGRATION_RESUBSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// catalog の更新を stream task から main ループへ渡すチャネルの容量
 ///
 /// catalog は 1 Group あたり数 Object であり、容量が小さいと埋まった時点で
@@ -1001,6 +1014,9 @@ async fn resubscribe_tracks(
     );
 
     let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
+    // catalog 購読の fill fetch stream をカタログとして適用するため、Request ID を登録する
+    // (移行中に更新された catalog が fill の完全な catalog で届く)
+    media_fetch_targets.insert(catalog.request_id, TrackKind::Catalog);
     let video = match &plan.video {
         Some(target) => {
             let sub = client
@@ -1305,6 +1321,29 @@ fn begin_migration(
     MigrationStart::Start
 }
 
+/// 移行の再試行を続けてよいかを、移行期限と現在時刻から決める
+///
+/// 期限が切れていれば `false` を返し、呼び出し側は最後の失敗を返す (試行回数の上限は
+/// 設けず、期限で打ち切る)。再試行の間には必ず待ち時間を入れるため、期限内でも
+/// タイトループにはならない。
+fn should_retry_migration(deadline: MigrationDeadline, now: Instant) -> bool {
+    !deadline.expired_at(now)
+}
+
+/// 移行の再試行で待つ時間を、試行回数と残り時間から決める
+///
+/// 指数バックオフ (初回 [`MIGRATION_RETRY_INITIAL_DELAY`]、倍々) を
+/// [`MIGRATION_RETRY_MAX_DELAY`] で頭打ちにし、残り時間を超えないよう cap する。
+/// 残り時間が 0 なら 0 を返し、呼び出し側は再試行しない。
+fn migration_retry_delay(attempt: u32, remaining: std::time::Duration) -> std::time::Duration {
+    // 指数部を飽和させてから掛ける (巨大な attempt でもオーバーフローしない)
+    let factor = 1u32 << attempt.min(16);
+    MIGRATION_RETRY_INITIAL_DELAY
+        .saturating_mul(factor)
+        .min(MIGRATION_RETRY_MAX_DELAY)
+        .min(remaining)
+}
+
 /// バックグラウンドの移行タスクへ渡す要求
 struct MigrationRequest {
     /// 移行先の URL
@@ -1368,12 +1407,15 @@ type MigrationResult = std::result::Result<MigrationOutcome, MigrationFailure>;
 /// 移行先の session を確立し、購読を張り直す
 ///
 /// 期限 ([`MigrationDeadline`]) は GOAWAY を受信した時刻から起算する。接続は
-/// [`tokio_moq::connect_with_retry`] が期限内で指数バックオフ再試行し、購読の張り直しも
-/// 残り時間で打ち切る。期限超過と再試行不能なエラーは移行の失敗として返し、main ループは
-/// 旧 session の終了経路へ進む。
+/// [`tokio_moq::connect_with_retry`] が期限内で指数バックオフ再試行する。
 ///
-/// 途中まで確立した session (接続はできたが購読の張り直しに失敗した場合) は、peer が
-/// timeout まで資源を保持しないよう NO_ERROR で閉じる。
+/// 接続のあとの購読の張り直しは、一時的な失敗 (SUBSCRIBE のタイムアウトなど) で移行全体を
+/// 諦めないよう、期限が残っている限り connect からやり直す。待ち時間は
+/// [`migration_retry_delay`] が指数バックオフ (上限 1 秒) と残り時間から決める。期限が
+/// 切れたら最後の失敗を返し、main ループは旧 session の終了経路へ進む。
+///
+/// 途中まで確立した session (接続はできたが購読の張り直しに失敗した場合) は、試行ごとに
+/// NO_ERROR で閉じる。放置すると peer が timeout まで資源を保持するためである。
 ///
 /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) は
 /// draft 由来の仕様であり、将来変更される可能性がある。
@@ -1391,63 +1433,112 @@ async fn migrate_to_target(
         // subscriber は datagram を送らない
         datagram_max_size: None,
     };
-    let (mut new_client, new_acceptor) = tokio_moq::connect_with_retry(
-        &params,
-        request.deadline,
-        RetryPolicy::default(),
-        task_monitor,
-    )
-    .await
-    .map_err(|e| {
-        MigrationFailure::new(format!("failed to connect to the migration target: {e}"))
-    })?;
-    new_client.set_control_message_timeout_ms(Some(30000));
-    new_client.set_data_stream_timeout_ms(Some(30000));
-    let new_data_plane = new_client.data_plane();
+    let mut attempt: u32 = 0;
+    loop {
+        // 接続の失敗は connect_with_retry が期限内で再試行済みであるため、ここでは再試行
+        // しない (同じ設定で失敗し続けるだけになる)
+        let (mut new_client, new_acceptor) = tokio_moq::connect_with_retry(
+            &params,
+            request.deadline,
+            RetryPolicy::default(),
+            task_monitor,
+        )
+        .await
+        .map_err(|e| {
+            MigrationFailure::new(format!("failed to connect to the migration target: {e}"))
+        })?;
+        new_client.set_control_message_timeout_ms(Some(30000));
+        new_client.set_data_stream_timeout_ms(Some(30000));
+        let new_data_plane = new_client.data_plane();
 
-    // 接続に要した時間は期限から差し引かれている。張り直しの残り時間が無ければ
-    // 接続だけ確立した session を閉じ、移行の失敗として扱う
-    let remaining = request.deadline.remaining();
-    if remaining.is_zero() {
-        if let Err(e) = new_client.close(0, "").await {
-            tracing::debug!("Failed to close the new session after an expired migration: {e}");
-        }
-        return Err(MigrationFailure::new(
-            "the migration deadline expired before resubscribing",
-        ));
-    }
-    let resubscribed = match tokio::time::timeout(
-        remaining,
-        resubscribe_tracks(&mut new_client, &request.plan, &request.last_locations),
-    )
-    .await
-    {
-        Ok(Ok(resubscribed)) => resubscribed,
-        Ok(Err(e)) => {
-            if let Err(e) = new_client.close(0, "").await {
-                tracing::debug!("Failed to close the new session after a failed migration: {e}");
-            }
-            return Err(MigrationFailure::new(format!(
-                "failed to resubscribe on the new session: {e}"
-            )));
-        }
-        Err(_) => {
-            if let Err(e) = new_client.close(0, "").await {
-                tracing::debug!("Failed to close the new session after a timed out migration: {e}");
-            }
+        // 接続に要した時間は期限から差し引かれている。残り時間が無ければ張り直しはできない
+        let remaining = request.deadline.remaining();
+        if remaining.is_zero() {
+            close_abandoned_migration_session(&mut new_client).await;
             return Err(MigrationFailure::new(
-                "the migration deadline expired while resubscribing",
+                "the migration deadline expired before resubscribing",
             ));
         }
-    };
+        // 1 回の試行に上限を設けて再試行の余地を残す (残り時間が短ければ残り時間)
+        let attempt_timeout = remaining.min(MIGRATION_RESUBSCRIBE_TIMEOUT);
+        let resubscribed = match tokio::time::timeout(
+            attempt_timeout,
+            resubscribe_tracks(&mut new_client, &request.plan, &request.last_locations),
+        )
+        .await
+        {
+            Ok(Ok(resubscribed)) => resubscribed,
+            Ok(Err(e)) => {
+                close_abandoned_migration_session(&mut new_client).await;
+                let failure =
+                    MigrationFailure::new(format!("failed to resubscribe on the new session: {e}"));
+                if !wait_before_migration_retry(request.deadline, attempt, &failure).await {
+                    return Err(failure);
+                }
+                attempt = attempt.saturating_add(1);
+                continue;
+            }
+            Err(_) => {
+                close_abandoned_migration_session(&mut new_client).await;
+                let failure = MigrationFailure::new(
+                    "the resubscribe did not complete within the migration deadline",
+                );
+                if !wait_before_migration_retry(request.deadline, attempt, &failure).await {
+                    return Err(failure);
+                }
+                attempt = attempt.saturating_add(1);
+                continue;
+            }
+        };
 
-    Ok(MigrationOutcome {
-        client: new_client,
-        recv_acceptor: new_acceptor,
-        data_plane: new_data_plane,
-        resubscribed,
-        url: request.url,
-    })
+        return Ok(MigrationOutcome {
+            client: new_client,
+            recv_acceptor: new_acceptor,
+            data_plane: new_data_plane,
+            resubscribed,
+            url: request.url,
+        });
+    }
+}
+
+/// 移行の途中で確立した session を閉じる
+///
+/// 購読の張り直しに失敗した試行の session を放置すると、peer が GOAWAY の Timeout まで
+/// 資源を保持する。NO_ERROR で閉じる (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session
+/// Migration)。draft 由来の仕様であり将来変更されうる)。
+async fn close_abandoned_migration_session(client: &mut MoqtClient) {
+    if let Err(e) = client.close(0, "").await {
+        tracing::debug!(
+            "Failed to close the new session after an unsuccessful migration attempt: {e}"
+        );
+    }
+}
+
+/// 購読の張り直しに失敗したあと、次の試行まで待つ
+///
+/// 期限が残っていなければ `false` を返し、呼び出し側は最後の失敗を返す。残っていれば
+/// [`migration_retry_delay`] の時間だけ待って `true` を返す。タイトループを避けるため、
+/// 待ち時間が 0 になる場合 (残り時間が無い) も `false` を返す。
+async fn wait_before_migration_retry(
+    deadline: MigrationDeadline,
+    attempt: u32,
+    failure: &MigrationFailure,
+) -> bool {
+    let remaining = deadline.remaining();
+    if !should_retry_migration(deadline, Instant::now()) {
+        return false;
+    }
+    let delay = migration_retry_delay(attempt, remaining);
+    if delay.is_zero() {
+        return false;
+    }
+    tracing::warn!(
+        "Retrying the migration after a failed resubscribe (attempt={}, delay_ms={}): {failure}",
+        attempt.saturating_add(1),
+        delay.as_millis(),
+    );
+    tokio::time::sleep(delay).await;
+    true
 }
 
 /// バックグラウンドの移行タスクを起動する
@@ -1544,13 +1635,17 @@ async fn reissue_request(
     let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
     let subscription = match kind {
         TrackKind::Catalog => {
-            client
+            let sub = client
                 .subscribe_track_with_parameters(
                     plan.catalog_namespace.clone(),
                     MSF_CATALOG_TRACK_NAME.to_vec(),
                     catalog_subscribe_parameters(),
                 )
-                .await?
+                .await?;
+            // 再発行した catalog 購読の fill fetch stream をカタログとして適用するため、
+            // Request ID を対応表に登録する
+            media_fetch_targets.insert(sub.request_id, TrackKind::Catalog);
+            sub
         }
         TrackKind::Video => {
             let Some(target) = plan.video.as_ref() else {
@@ -1827,9 +1922,14 @@ pub async fn run(
     // 自側が発行したメディア FETCH の対応表 (Request ID → トラック種別)。応答 Object は
     // 通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の FETCH_HEADER が
     // 運ぶ Request ID でしか分からないため、ここで記録する。
+    // catalog 購読の Request ID も登録する。FILL_PARAMETERS 付き SUBSCRIBE には publisher が
+    // fill fetch stream を返し (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その
+    // FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ。移行後に catalog を張り直したとき
+    // の fill をカタログとして適用するため、種別をここで対応づける。
     // 移行 (GOAWAY) では、張り直した購読に対して発行した FETCH の対応表へ差し替える
     // (Request ID は session ごとに払い出される)
     let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
+    media_fetch_targets.insert(catalog_sub.request_id, TrackKind::Catalog);
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
     let mut audio_request_id: Option<u64> = None;
@@ -2644,24 +2744,28 @@ pub async fn run(
                                                             audio_alias = Some(new_alias);
                                                             // 同じ session で購読を張り直した
                                                             // ため、送出順の状態は引き継ぎ、
-                                                            // 境界だけを新しい購読の Largest
-                                                            // Object へ進める
+                                                            // 境界だけを再発行前の最後の受信
+                                                            // 位置へ更新する。新しい購読の Largest
+                                                            // Object を使うと再発行中に届いた音声を
+                                                            // 境界以下として捨ててしまう
                                                             audio_delivery_order
                                                                 .lock()
                                                                 .expect(
                                                                     "audio delivery order lock is not poisoned",
                                                                 )
                                                                 .set_boundary(
-                                                                    reissued
-                                                                        .subscription
-                                                                        .largest_object,
+                                                                    last_locations
+                                                                        .get(TrackKind::Audio),
                                                                 );
                                                         }
                                                     }
-                                                    // 再発行に伴うメディア FETCH の対応表を足す
-                                                    media_fetch_targets.extend(
-                                                        reissued.media_fetch_targets,
-                                                    );
+                                                    // 再発行に伴うメディア FETCH の対応表を足す。
+                                                    // 同じ track の旧 Request ID は、遅延して届く
+                                                    // FETCH / fill stream を誤配送しないよう先に外す
+                                                    media_fetch_targets
+                                                        .retain(|_, track| *track != kind);
+                                                    media_fetch_targets
+                                                        .extend(reissued.media_fetch_targets);
                                                     // datagram 受信タスクへ新しい alias 表を渡す
                                                     let datagram_map = Arc::new(
                                                         track_map
@@ -2883,18 +2987,23 @@ pub async fn run(
                             .lock()
                             .expect("audio catch up lock is not poisoned")
                             .reset();
-                        // 音声の購読境界を移行先の購読へ更新し、送出順と重複の記憶を捨てる
-                        let audio_boundary = outcome
-                            .resubscribed
-                            .audio
-                            .as_ref()
-                            .and_then(|sub| sub.largest_object);
+                        // 音声の購読境界を「旧 session で最後に受信した Location」へ更新する。
+                        // 移行先の購読はその位置を Location Filter の Absolute Start (0x02) に
+                        // して張り直すため、境界と同じ位置だけが再送される。移行先の Largest
+                        // Object を境界にすると、移行中に抜けた音声 (最後の受信位置より後) を
+                        // 境界以下として捨ててしまう (draft-ietf-moq-transport-22 §9.20.9
+                        // (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来
+                        // 変更されうる)
+                        let audio_boundary = last_received_locations
+                            .lock()
+                            .expect("last locations lock is not poisoned")
+                            .audio;
                         audio_delivery_order
                             .lock()
                             .expect("audio delivery order lock is not poisoned")
                             .reset_for_migration(audio_boundary);
                         tracing::info!(
-                            "Reset the playback state for the migrated session: audio_boundary={audio_boundary:?}"
+                            "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
                         );
                         // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
                         let datagram_map = {
@@ -3670,6 +3779,23 @@ async fn read_catalog_fetch_stream(
             fetch_header.request_id,
         )));
     }
+    read_catalog_fetch_objects(stream, data_plane, stream_id, &mut decoder).await
+}
+
+/// FETCH_HEADER を登録済みの fetch stream から catalog Object を読み切る
+///
+/// FETCH_HEADER の decode と `DataPlaneHandle::recv_fetch_header` による登録は呼び出し側の
+/// 責務である。登録済みの stream へ同じヘッダを再登録すると
+/// `session error` になるため、ヘッダの扱いは [`read_catalog_fetch_stream`] と
+/// [`handle_stream_body`] に残し、本関数は entry のループだけを担う。読み出しの終端検知は
+/// [`receive_registered_stream_data`] に任せる (同関数が `recv_data_stream_closed` で終端を
+/// 通知しており、ここで改めて drain すると二重通知になる)。
+async fn read_catalog_fetch_objects(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    decoder: &mut FetchStreamDecoder,
+) -> Result<Vec<catalog::CatalogObject>> {
     let mut objects = Vec::new();
     loop {
         let entry = match decoder.try_decode_entry()? {
@@ -4192,10 +4318,10 @@ async fn handle_stream_body(
     }
     match stream_type {
         StreamType::Fetch => {
-            // FETCH 応答 stream は、自側が発行したメディア FETCH のものだけを配送経路へ流す。
-            // それ以外は FILL_PARAMETERS 付き SUBSCRIBE への fill fetch stream
-            // (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)) であり、購読でも同じ
-            // カタログが届くため従来どおり読み捨てる
+            // FETCH 応答 stream は、自側が発行したメディア FETCH の応答と、catalog 購読への
+            // fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)) を配送経路へ
+            // 流す。移行後に catalog を張り直すと fill で完全なカタログが届くため、これを
+            // CatalogState へ適用する。どちらでもない stream は読み捨てる
             let mut fetch_decoder = FetchStreamDecoder::new();
             fetch_decoder.push(&buf);
             let fetch_header = loop {
@@ -4224,17 +4350,18 @@ async fn handle_stream_body(
                 }
             };
             match fetch_stream_action(fetch_header.request_id, media_fetch_targets) {
-                // 自側が発行したメディア FETCH の応答ではない。fill fetch stream は
-                // カタログの購読でも同じ内容が届くため読み捨てる
+                // 自側の要求に対応しない FETCH 応答である。読み捨てる
                 FetchStreamAction::Ignore => {
                     tracing::debug!(
                         "Stream #{stream_num}: dropping a fetch stream \
-                         (request_id={} is not a media fetch)",
+                         (request_id={} does not belong to this subscriber)",
                         fetch_header.request_id,
                     );
                     let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                 }
-                action @ (FetchStreamAction::DeliverVideo | FetchStreamAction::DeliverAudio) => {
+                action @ (FetchStreamAction::DeliverVideo
+                | FetchStreamAction::DeliverAudio
+                | FetchStreamAction::DeliverCatalog) => {
                     // 自側が発行した FETCH の応答であるため、Session には受理される
                     // (FETCH の状態と stream の会計を対応づける)
                     if let Err(e) = data_plane.recv_fetch_header(stream_id, &fetch_header) {
@@ -4344,6 +4471,48 @@ async fn handle_stream_body(
                                 last_received_locations,
                             )
                             .await;
+                        }
+                        FetchStreamAction::DeliverCatalog => {
+                            // fill fetch stream で届く完全な catalog を、購読で届く catalog と
+                            // 同じ `CatalogState` へ適用するため main ループへ渡す
+                            // (draft-ietf-moq-msf-01 §5 (Catalog))。移行後に catalog 購読を
+                            // 張り直すと、移行中に更新された catalog が fill で届く
+                            match read_catalog_fetch_objects(
+                                stream,
+                                data_plane,
+                                stream_id,
+                                &mut fetch_decoder,
+                            )
+                            .await
+                            {
+                                Ok(objects) => {
+                                    for object in objects {
+                                        // 移行後の再購読の Location Filter に使う位置も記録する
+                                        record_last_location(
+                                            last_received_locations,
+                                            TrackKind::Catalog,
+                                            object.location,
+                                        );
+                                        if catalog_tx.send(object).await.is_err() {
+                                            // main ループが終了した
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Stream #{stream_num}: failed to read catalog fetch stream: {e}"
+                                    );
+                                    // 読み切れなかった stream を Session の会計から外す
+                                    // (既存の Fetch 失敗経路と同じ扱い。残すと timeout まで
+                                    // open のままで cleanup が進まない)
+                                    let _ = data_plane.send_data_stream_stop_sending(stream_id);
+                                    let _ = drain_registered_stream_to_end(
+                                        stream, data_plane, stream_id,
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                         // 上の or パターンで配送先は決まっている
                         FetchStreamAction::Ignore => {}
@@ -5525,23 +5694,27 @@ async fn decode_audio_stream(
     }
 }
 
-/// メディア FETCH の応答 stream をどう扱うか
+/// FETCH 応答 stream をどう扱うか
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchStreamAction {
     /// 映像の FETCH 応答。映像の配送経路へ流す
     DeliverVideo,
     /// 音声の FETCH 応答。音声の配送経路へ流す
     DeliverAudio,
-    /// 自側が発行したメディア FETCH の応答ではない。読み捨てる
+    /// catalog 購読の fill fetch 応答。カタログの状態へ適用する
+    DeliverCatalog,
+    /// 自側が発行した要求への応答ではない。読み捨てる
     Ignore,
 }
 
 /// FETCH 応答 stream の Request ID から配送先を決める
 ///
-/// `media_fetch_targets` は自側が発行したメディア FETCH の「Request ID → トラック種別」の
-/// 対応表である。表に無い Request ID の stream は FILL_PARAMETERS 付き SUBSCRIBE への
-/// fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)) であり、
-/// カタログは購読でも届くため読み捨てる。
+/// `media_fetch_targets` は自側が発行したメディア FETCH の Request ID と、catalog 購読の
+/// Request ID を「Request ID → トラック種別」で記録した対応表である。FILL_PARAMETERS 付き
+/// SUBSCRIBE へは publisher が fill fetch stream を返すため
+/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その Request ID も登録して
+/// カタログとして適用する。表に無い Request ID の stream は自側の要求と対応しないため
+/// 読み捨てる。
 fn fetch_stream_action(
     request_id: u64,
     media_fetch_targets: &HashMap<u64, TrackKind>,
@@ -5549,9 +5722,8 @@ fn fetch_stream_action(
     match media_fetch_targets.get(&request_id) {
         Some(TrackKind::Video) => FetchStreamAction::DeliverVideo,
         Some(TrackKind::Audio) => FetchStreamAction::DeliverAudio,
-        // カタログの FETCH は本 example では発行しないため `Catalog` は到達しない。
-        // 未知の Request ID と同じく読み捨てる
-        Some(TrackKind::Catalog) | None => FetchStreamAction::Ignore,
+        Some(TrackKind::Catalog) => FetchStreamAction::DeliverCatalog,
+        None => FetchStreamAction::Ignore,
     }
 }
 
@@ -5980,28 +6152,33 @@ mod tests {
         );
     }
 
-    /// 移行時に音声の送出順の状態を作り直すこと
+    /// 移行時に音声の購読境界だけを「最後に受信した Location」へ更新すること
     ///
-    /// 旧 session の「送出済みの TIMESTAMP」と「直近に届いた Object」を捨て、購読の境界を
-    /// 移行先の複製へ更新する。新 session の live を古いものとして誤って拒否しないために
-    /// 必要である (draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter))。
+    /// 移行先の購読はその位置を Location Filter の Absolute Start にして張り直すため、
+    /// 境界と同じ位置だけが再送される。移行中に抜けた Object (境界より後) は live として
+    /// 通り、移行前の音声は再生し直さない。
+    ///
+    /// 送出済みの TIMESTAMP と直近の Object の記憶は維持し、再送された Object の重複と
+    /// TIMESTAMP の巻き戻りを落とす (draft-ietf-moq-transport-22 §3.3.1 (Location Filters)
+    /// / §9.20.9 (LOCATION FILTER Parameter) Table 6。draft 由来の仕様であり将来変更
+    /// されうる)。
     #[test]
-    fn audio_delivery_order_reset_for_migration_accepts_new_objects() {
+    fn audio_delivery_order_reset_for_migration_updates_only_the_boundary() {
         let mut order = AudioDeliveryOrder::new(Some(Location {
             group_id: 1,
             object_id: 0,
         }));
         // 旧 session で位置 5 の音声を送出済みにしておく
-        let delivered = Location {
+        let last_received = Location {
             group_id: 5,
             object_id: 0,
         };
         assert!(
-            !order.is_before_boundary(Some(delivered)),
+            !order.is_before_boundary(Some(last_received)),
             "旧 session の境界より後であること"
         );
         assert!(
-            !order.is_duplicate(Some(delivered)),
+            !order.is_duplicate(Some(last_received)),
             "初めて見る位置であること"
         );
         assert_eq!(
@@ -6011,44 +6188,49 @@ mod tests {
         );
         assert_eq!(order.last_pts_us(), Some(50_000));
 
-        // 移行先の購読は Largest Object が位置 3 である
-        let new_boundary = Location {
-            group_id: 3,
-            object_id: 0,
-        };
-        order.reset_for_migration(Some(new_boundary));
+        // 移行では最後に受信した位置を新しい境界にする
+        order.reset_for_migration(Some(last_received));
         assert_eq!(
             order.boundary(),
-            Some(new_boundary),
-            "境界を移行先の購読へ更新すること"
+            Some(last_received),
+            "境界を最後に受信した位置へ更新すること"
         );
         assert_eq!(
             order.last_pts_us(),
-            None,
-            "旧 session の TIMESTAMP を捨てること"
+            Some(50_000),
+            "送出済みの TIMESTAMP を維持すること"
+        );
+        assert!(
+            order.is_duplicate(Some(last_received)),
+            "直近に届いた Object の記憶を維持すること"
         );
 
-        // 移行先の live は、旧 session で送出した TIMESTAMP より小さくても送出すること
-        let live = Location {
-            group_id: 3,
-            object_id: 1,
+        // 境界と同じ位置 (Absolute Start の再送) は境界以下として落とす
+        assert!(
+            order.is_before_boundary(Some(last_received)),
+            "境界と同じ位置は再送されても落とすこと"
+        );
+
+        // 移行中に抜けた位置は、TIMESTAMP が進んでいれば送出すること
+        let gap = Location {
+            group_id: 6,
+            object_id: 0,
         };
         assert!(
-            !order.is_before_boundary(Some(live)),
-            "移行先の境界より後であること"
+            !order.is_before_boundary(Some(gap)),
+            "移行中に抜けた位置は境界より後であること"
         );
         assert_eq!(
-            order.admit(Some(10_000)),
+            order.admit(Some(60_000)),
             AudioDeliveryAdmission::Deliver,
-            "移行先の live を古いとして拒否しないこと"
+            "移行中に抜けた音声を送出すること"
         );
-        // 移行先の境界以下は従来どおり落とすこと
-        assert!(
-            order.is_before_boundary(Some(Location {
-                group_id: 2,
-                object_id: 0,
-            })),
-            "移行先の購読より前の位置は境界以下として落とすこと"
+
+        // TIMESTAMP が巻き戻る Object は従来どおり Stale として落とす
+        assert_eq!(
+            order.admit(Some(55_000)),
+            AudioDeliveryAdmission::Stale,
+            "送出済みの TIMESTAMP より古い Object は落とすこと"
         );
     }
 
@@ -6148,6 +6330,79 @@ mod tests {
             ),
             MigrationStart::Start,
             "時間窓を過ぎたら移行できること"
+        );
+    }
+
+    /// 移行の再試行は期限が残っている間だけ続けること
+    ///
+    /// 試行回数の上限は設けず、移行期限 (`MigrationDeadline`) で打ち切る。
+    #[test]
+    fn should_retry_migration_uses_the_deadline() {
+        let base = Instant::now();
+        let deadline = MigrationDeadline::after_goaway(base, 1000);
+        assert!(
+            should_retry_migration(deadline, base + std::time::Duration::from_millis(500)),
+            "期限内なら再試行すること"
+        );
+        assert!(
+            should_retry_migration(deadline, base + std::time::Duration::from_millis(999)),
+            "期限の直前までは再試行すること"
+        );
+        assert!(
+            !should_retry_migration(deadline, base + std::time::Duration::from_millis(1000)),
+            "期限に達したら再試行しないこと"
+        );
+        assert!(
+            !should_retry_migration(deadline, base + std::time::Duration::from_secs(2)),
+            "期限を過ぎたら再試行しないこと"
+        );
+    }
+
+    /// 移行の再試行の待ち時間は指数バックオフし、上限と残り時間で cap されること
+    ///
+    /// タイトループを避けるため、待ち時間は必ず正になる (残り時間がある場合)。
+    #[test]
+    fn migration_retry_delay_backs_off_and_is_capped() {
+        let enough = std::time::Duration::from_secs(10);
+        assert_eq!(
+            migration_retry_delay(0, enough),
+            std::time::Duration::from_millis(200),
+            "初回は 200ms 待つこと"
+        );
+        assert_eq!(
+            migration_retry_delay(1, enough),
+            std::time::Duration::from_millis(400),
+            "2 回目は倍の 400ms 待つこと"
+        );
+        assert_eq!(
+            migration_retry_delay(2, enough),
+            std::time::Duration::from_millis(800),
+            "3 回目は倍の 800ms 待つこと"
+        );
+        assert_eq!(
+            migration_retry_delay(3, enough),
+            std::time::Duration::from_millis(1000),
+            "上限の 1 秒で頭打ちにすること"
+        );
+        assert_eq!(
+            migration_retry_delay(u32::MAX, enough),
+            std::time::Duration::from_millis(1000),
+            "試行回数が大きくてもオーバーフローせず上限で頭打ちにすること"
+        );
+        assert_eq!(
+            migration_retry_delay(0, std::time::Duration::from_millis(50)),
+            std::time::Duration::from_millis(50),
+            "残り時間が短ければ残り時間を上限にすること"
+        );
+        assert_eq!(
+            migration_retry_delay(10, std::time::Duration::from_millis(300)),
+            std::time::Duration::from_millis(300),
+            "バックオフより残り時間が短ければ残り時間を返すこと"
+        );
+        assert_eq!(
+            migration_retry_delay(0, std::time::Duration::ZERO),
+            std::time::Duration::ZERO,
+            "残り時間が無ければ待たないこと"
         );
     }
 
@@ -7498,7 +7753,7 @@ mod tests {
         );
     }
 
-    /// FETCH 応答 stream を映像 / 音声の配送経路へ振り分けること
+    /// FETCH 応答 stream を映像 / 音声 / カタログへ振り分けること
     #[test]
     fn fetch_stream_action_routes_media_fetches() {
         let mut media_fetch_targets = HashMap::new();
@@ -7516,21 +7771,31 @@ mod tests {
         );
     }
 
+    /// catalog 購読の fill fetch stream はカタログの配送経路へ流すこと
+    ///
+    /// 移行後に catalog を張り直すと、FILL_PARAMETERS 付き SUBSCRIBE への fill fetch stream
+    /// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)。draft 由来の仕様であり将来変更
+    /// されうる) で完全な catalog が届く。これを読み捨てると移行中に更新された catalog が
+    /// 反映されないため、カタログとして適用する。
+    #[test]
+    fn fetch_stream_action_delivers_the_catalog_fill() {
+        let mut media_fetch_targets = HashMap::new();
+        media_fetch_targets.insert(11, TrackKind::Catalog);
+        assert_eq!(
+            fetch_stream_action(11, &media_fetch_targets),
+            FetchStreamAction::DeliverCatalog,
+            "catalog 購読の fill fetch 応答はカタログへ流すこと"
+        );
+    }
+
     /// 自側が発行していない FETCH の応答 stream は読み捨てること
     ///
-    /// 対応表に無い Request ID の stream は FILL_PARAMETERS 付き SUBSCRIBE への
-    /// fill fetch stream (カタログ) である。
+    /// 対応表に無い Request ID の stream は自側の要求と対応しない。
     #[test]
     fn fetch_stream_action_ignores_unknown_request_ids() {
         let mut media_fetch_targets = HashMap::new();
         media_fetch_targets.insert(10, TrackKind::Video);
-        // カタログの FETCH は本 example では発行しないが、表に混ざっても配送しない
         media_fetch_targets.insert(11, TrackKind::Catalog);
-        assert_eq!(
-            fetch_stream_action(11, &media_fetch_targets),
-            FetchStreamAction::Ignore,
-            "カタログの FETCH 応答は読み捨てること"
-        );
         assert_eq!(
             fetch_stream_action(0, &media_fetch_targets),
             FetchStreamAction::Ignore,
