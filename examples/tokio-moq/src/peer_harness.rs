@@ -1892,7 +1892,7 @@ mod tests {
             let connect = tokio::spawn(async move {
                 crate::connect(
                     &crate::ConnectParams {
-                        url: &target,
+                        url: &target.url,
                         transport: crate::Transport::Quic,
                         cert: None,
                         impl_name: "test-peer",
@@ -2037,16 +2037,20 @@ mod tests {
             let target = crate::migration_target(&new_session_uri, on_request_stream, &url_a)
                 .expect("移行先を決められること")
                 .expect("移行先があること");
+            assert_eq!(target.scope, crate::MigrationScope::Session);
             assert_eq!(
-                target.authority,
+                target.url.authority,
                 format!("127.0.0.1:{}", addr_b.port()),
                 "GOAWAY の URI が移行先になること"
             );
+            let target = target.url;
 
-            // 移行先へ接続して購読を張り直す
+            // 移行先へ接続して購読を張り直す。実際の example は期限付きの再試行経路で
+            // 接続するため、テストでも同じ connect_with_retry を使う
             let target_monitor = task_monitor.clone();
+            let deadline = crate::MigrationDeadline::after_goaway(Instant::now(), 5000);
             let connect_b = tokio::spawn(async move {
-                crate::connect(
+                crate::connect_with_retry(
                     &crate::ConnectParams {
                         url: &target,
                         transport: crate::Transport::Quic,
@@ -2056,6 +2060,8 @@ mod tests {
                         // QMux 経路は使わない (QUIC 直接接続の試験基盤)
                         datagram_max_size: None,
                     },
+                    deadline,
+                    crate::RetryPolicy::default(),
                     &target_monitor,
                 )
                 .await
@@ -2524,6 +2530,75 @@ mod tests {
                 "拒否された FETCH がアプリへ渡らないこと"
             );
             drive.abort();
+        })
+        .await;
+    }
+
+    /// 応答を返さない peer でも control message timeout が発火して購読待ちが戻ること
+    ///
+    /// 受信待ちで `Session::tick` が止まると、期限が来ても購読待ちが返らない。待ち経路でも
+    /// 時刻を進めることを固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscribe_wait_times_out_without_peer_response() {
+        run_with_timeout(async {
+            let (_peer, mut client) = connect_pair().await;
+            client.set_control_message_timeout_ms(Some(100));
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                client.subscribe_track(namespace, b"video".to_vec()),
+            )
+            .await
+            .expect("control message timeout で 2 秒以内に購読待ちが戻ること");
+            assert!(result.is_err(), "応答の無い購読は失敗すること");
+        })
+        .await;
+    }
+
+    /// 移行先への接続再試行が期限で打ち切られること
+    ///
+    /// 到達不能な移行先に対して無限に再試行しないことを固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_with_retry_stops_at_the_migration_deadline() {
+        run_with_timeout(async {
+            // 未使用の UDP ポートを選ぶ (QUIC の接続先として到達不能にする)
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("UDP を bind できること");
+            let port = socket
+                .local_addr()
+                .expect("ローカルアドレスを取得できること")
+                .port();
+            drop(socket);
+
+            let url = crate::parse_url(&format!("moqt://127.0.0.1:{port}/"))
+                .expect("URL をパースできること");
+            let deadline = crate::MigrationDeadline::after_goaway(Instant::now(), 300);
+            let policy = crate::RetryPolicy {
+                initial_delay: Duration::from_millis(20),
+                max_delay: Duration::from_millis(50),
+            };
+            let task_monitor = tokio_metrics::TaskMonitor::new();
+            let started = Instant::now();
+            let result = crate::connect_with_retry(
+                &crate::ConnectParams {
+                    url: &url,
+                    transport: crate::Transport::Quic,
+                    cert: None,
+                    impl_name: "test-peer",
+                    receive_datagrams: false,
+                    datagram_max_size: None,
+                },
+                deadline,
+                policy,
+                &task_monitor,
+            )
+            .await;
+            assert!(result.is_err(), "到達不能な移行先への接続は失敗すること");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "期限で打ち切ること: {:?}",
+                started.elapsed()
+            );
         })
         .await;
     }

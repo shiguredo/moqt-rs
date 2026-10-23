@@ -12,9 +12,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex as TokioMutex, Notify, mpsc, oneshot, watch};
 
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::session::types::{
@@ -704,6 +705,16 @@ pub struct MoqtClient {
     /// この一覧をすべて載せる。SETUP に載せる分はここではなく、`establish_*` の
     /// `c4m_tokens` 引数から `crate::build_setup_options` が別に組み立てる。
     auth_tokens: Vec<AuthorizationToken>,
+    /// `tick` / `tick_now` の時刻起点
+    ///
+    /// Session の deadline は単調増加ミリ秒で管理される。クライアントごとに起点を持ち、
+    /// 受信待ちの内部ループでも `tick_now` を呼べるようにする。
+    tick_epoch: Instant,
+    /// WebTransport セッションの drain 状態 (QUIC / QMux では `None`)
+    ///
+    /// HTTP/3 / HTTP/2 の GOAWAY や WT_DRAIN_SESSION を契機に `Draining` へ遷移する。
+    /// アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
+    wt_session_state: Option<watch::Receiver<crate::webtransport::WtSessionState>>,
     session: Arc<StdMutex<Session>>,
     control_send: SendStream,
     handle: StreamHandle,
@@ -765,6 +776,7 @@ fn is_notable_event(event: &SessionEvent) -> bool {
     matches!(
         event,
         SessionEvent::GoawayReceived { .. }
+            | SessionEvent::GoawayDrainReady
             | SessionEvent::CloseSession(_)
             | SessionEvent::PublishDoneReceived { .. }
             // ResetDataStream は「I/O 層が当該 uni data stream を RESET_STREAM で閉じる」指示であり、
@@ -1179,6 +1191,8 @@ struct HandshakeIo {
     control_recv: ControlStream,
     /// peer 起動の bidi request stream の受理
     bidi_acceptor: BidiStreamAcceptor,
+    /// WebTransport セッションの drain 状態 (QUIC / QMux では `None`)
+    wt_session_state: Option<watch::Receiver<crate::webtransport::WtSessionState>>,
 }
 
 impl MoqtClient {
@@ -1240,6 +1254,7 @@ impl MoqtClient {
                 stop_sending_rx: Some(stop_sending_rx),
                 control_recv,
                 bidi_acceptor: BidiStreamAcceptor::Quic(bidi_acceptor),
+                wt_session_state: None,
             },
             c4m_tokens,
             task_monitor,
@@ -1312,6 +1327,7 @@ impl MoqtClient {
                 stop_sending_rx: Some(stop_sending_rx),
                 control_recv,
                 bidi_acceptor: BidiStreamAcceptor::Qmux { bi_rx },
+                wt_session_state: None,
             },
             c4m_tokens,
             task_monitor,
@@ -1393,6 +1409,7 @@ impl MoqtClient {
                     bi_rx: wt_bi_rx,
                     session_state: session_state.clone(),
                 },
+                wt_session_state: Some(session_state.clone()),
             },
             c4m_tokens,
             task_monitor,
@@ -1477,6 +1494,7 @@ impl MoqtClient {
                     bi_rx: wt_bi_rx,
                     session_state: session_state.clone(),
                 },
+                wt_session_state: Some(session_state.clone()),
             },
             c4m_tokens,
             task_monitor,
@@ -1504,6 +1522,7 @@ impl MoqtClient {
             stop_sending_rx,
             mut control_recv,
             bidi_acceptor,
+            wt_session_state,
         } = io;
         // peer SETUP 受信
         let peer_setup = match control_recv.recv_message().await {
@@ -1573,6 +1592,8 @@ impl MoqtClient {
                 .iter()
                 .map(|token_value| c4m_authorization_token(token_value.as_slice()))
                 .collect(),
+            tick_epoch: Instant::now(),
+            wt_session_state,
             session,
             control_send,
             handle,
@@ -1597,6 +1618,16 @@ impl MoqtClient {
     /// ストリーム開設用ハンドルのクローン
     pub fn handle(&self) -> StreamHandle {
         self.handle.clone()
+    }
+
+    /// WebTransport セッションの drain 状態を購読する receiver を返す
+    ///
+    /// draft-ietf-webtrans-http3-16 §4.7 / draft-ietf-webtrans-http2-15 §6.13: HTTP/3 /
+    /// HTTP/2 の GOAWAY や `WT_DRAIN_SESSION` を受けると [`WtSessionState::Draining`] へ
+    /// 遷移する。アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
+    /// QUIC 直接接続と QMux では drain の通知が無いため `None` を返す。
+    pub fn wt_session_state(&self) -> Option<watch::Receiver<crate::webtransport::WtSessionState>> {
+        self.wt_session_state.clone()
     }
 
     /// data plane 通知用ハンドルのクローン
@@ -1789,6 +1820,19 @@ impl MoqtClient {
 
     async fn wait_subscription_resolved(&mut self, request_id: u64) -> Result<()> {
         loop {
+            // 応答を待つ間も Session の期限を進める。これがないと、応答を返さない peer に
+            // 対して control message timeout が発火せず、移行処理が transport の切断まで
+            // 戻らなくなる。
+            self.tick_now();
+            self.drain_events().await?;
+            {
+                let session = lock_session(&self.session);
+                if session.state() != SessionState::Established {
+                    return Err(TransportError::Internal(
+                        "session closed while waiting for a request response".to_string(),
+                    ));
+                }
+            }
             let state = {
                 let session = lock_session(&self.session);
                 session.subscription(request_id).map(|sub| sub.state)
@@ -1808,7 +1852,15 @@ impl MoqtClient {
                 }
                 _ => {}
             }
-            self.pump_once().await?;
+            // メッセージ到着だけを待つと、応答を返さない peer に対して tick が進まず
+            // control message timeout が発火しない。短い周期で待ちを区切り、次のループ
+            // 先頭で時刻を進める (`pump_once` は select! で作られており、キャンセルしても
+            // チャネルからメッセージを取りこぼさない)。
+            match tokio::time::timeout(Duration::from_millis(50), self.pump_once()).await {
+                Ok(result) => result?,
+                // タイムアウトしたら次のループ先頭で tick を進める
+                Err(_) => continue,
+            }
         }
     }
 
@@ -2130,6 +2182,16 @@ impl MoqtClient {
     pub fn tick(&mut self, now_ms: u64) {
         let mut session = lock_session(&self.session);
         session.tick(now_ms);
+    }
+
+    /// クライアント生成時からの経過時間で [`Session::tick`] を呼び出す
+    ///
+    /// `tick` は呼び出し側が単調増加ミリ秒を渡す設計だが、受信待ちの内部ループ
+    /// ([`Self::wait_subscription_resolved`]) はアプリの tick 周期に依存できない。
+    /// 本メソッドでクライアント自身の起点から時刻を進める。
+    pub fn tick_now(&mut self) {
+        let now_ms = self.tick_epoch.elapsed().as_millis() as u64;
+        self.tick(now_ms);
     }
 
     /// bidi 受信タスクへ STOP_SENDING を指示する (失敗は warn のみ)
@@ -2909,6 +2971,7 @@ impl MoqtClient {
                     });
                 }
                 ev @ (SessionEvent::GoawayReceived { .. }
+                | SessionEvent::GoawayDrainReady
                 | SessionEvent::PublishDoneReceived { .. }
                 | SessionEvent::ResetDataStream { .. }
                 // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE を受けた publisher が

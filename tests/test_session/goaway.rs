@@ -2022,3 +2022,54 @@ fn request_stream_goaway_simultaneous_expiry_orders_by_request_id() {
         "同時期限は request_id 昇順で発行されること"
     );
 }
+
+/// peer から受信した GOAWAY の情報を getter で取得できること
+///
+/// イベントを取りこぼしても移行判断に必要な情報を参照できるようにする。
+#[test]
+fn peer_goaway_returns_the_received_info() {
+    let (mut client, mut server) = establish_pair();
+    assert!(client.peer_goaway().is_none(), "受信前は None であること");
+
+    deliver_goaway_from_server(
+        &mut server,
+        &mut client,
+        b"moqt://relay.example/".to_vec(),
+        5000,
+    );
+    let info = client.peer_goaway().expect("受信後は情報が取得できること");
+    assert_eq!(info.new_session_uri, b"moqt://relay.example/");
+    assert_eq!(info.timeout, 5000);
+}
+
+/// 自側 GOAWAY の drain 完了を 1 回だけイベントで通知すること
+///
+/// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): open request が
+/// 無くなった時点で NO_ERROR で閉じてよい。アプリが毎 tick ポーリングしなくて済むよう、
+/// 完了時に 1 回だけ `GoawayDrainReady` を発行する。
+#[test]
+fn goaway_drain_ready_is_emitted_once() {
+    let (_client, mut server) = establish_pair();
+    server
+        .send_goaway(Vec::new(), 1000)
+        .expect("GOAWAY の送信に成功すること");
+    let _ = take_send_control(&mut server);
+
+    server.tick(1_000);
+    let mut ready = 0;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::GoawayDrainReady) {
+            ready += 1;
+        }
+    }
+    assert_eq!(ready, 1, "drain 完了時に 1 回だけ発行されること");
+
+    server.tick(2_000);
+    let mut ready_again = 0;
+    while let Some(e) = server.poll_event() {
+        if matches!(e, SessionEvent::GoawayDrainReady) {
+            ready_again += 1;
+        }
+    }
+    assert_eq!(ready_again, 0, "同じ drain 完了を繰り返さないこと");
+}

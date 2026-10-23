@@ -337,6 +337,14 @@ pub enum SessionEvent {
         /// (ワイヤ上の Request ID ではなく、セッション層が受信ストリームを識別する値)
         on_request_stream: Option<u64>,
     },
+    /// 自側が送信した GOAWAY の drain が完了した
+    ///
+    /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): GOAWAY を送った側は、
+    /// open request が無くなった時点で NO_ERROR でセッションを閉じるのが RECOMMENDED である。
+    /// [`Session::goaway_drain_ready`](crate::session::core::Session::goaway_drain_ready) を
+    /// ポーリングする代わりに、このイベントで早期 close の契機を得る。同じセッションで
+    /// 1 回だけ発行する。
+    GoawayDrainReady,
     /// パディングストリーム (全 0x00 ペイロード) を送信する (draft §11.5.1 (Padding Streams))
     ///
     /// I/O 層は stream type `PADDING_STREAM_TYPE` の単方向ストリームを開き、

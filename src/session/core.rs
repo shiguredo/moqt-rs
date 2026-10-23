@@ -317,6 +317,11 @@ pub(super) struct GoawayState {
     pub(super) peer: Option<PeerGoawayInfo>,
     pub(super) local_deadline_ms: Option<u64>,
     pub(super) local_pending_timeout_ms: Option<u64>,
+    /// 自側 GOAWAY の drain 完了イベントを発行済みか
+    ///
+    /// drain 完了は tick のたびに成立しうるため、同じイベントを繰り返し発行しないよう
+    /// 記録する。GOAWAY は 1 セッションに 1 回しか送れないので、セッション中に 1 回だけ立つ。
+    pub(super) local_drain_ready_emitted: bool,
     /// request_id ごとの request stream GOAWAY の reset deadline
     ///
     /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream 上の GOAWAY は timeout 経過後に
@@ -665,6 +670,7 @@ impl Session {
                 peer: None,
                 local_deadline_ms: None,
                 local_pending_timeout_ms: None,
+                local_drain_ready_emitted: false,
                 request_stream_deadlines: HashMap::new(),
             },
             timing: TimingState {

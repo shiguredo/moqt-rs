@@ -26,8 +26,9 @@
 //! 受信ストリームを accept する側という非対称があるため、両者の union API を
 //! ここに置き、各バイナリは必要なメソッドだけを呼び出す。
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64ct::{Base64, Base64Unpadded, Base64Url, Base64UrlUnpadded, Encoding};
 
@@ -952,18 +953,21 @@ where
     Err(last.expect("resolve_socket_addrs must return at least one address"))
 }
 
-/// GOAWAY の New Session URI から移行先の URL を決める
+/// GOAWAY の New Session URI から移行先を決める
 ///
 /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) / §6.6.1 (Graceful Session Migration) に従う。
 ///
-/// - request stream 単位の GOAWAY (`on_request_stream` が `Some`) では移行せず、
-///   現在の session を維持する (`Ok(None)`)。§9.2 は該当 request の再発行を SHOULD とするが、
-///   受信ループが 2 つの session を併走させる設計が要るため example では対応しない
-///   (request の終端は Session が deadline で行う)
-/// - `new_session_uri` が空のときは現在の URL を再利用する
-/// - 非空のときは [`parse_url`] と同じ規則で解釈する。移行先の fragment に `c4m` が無い場合は
-///   元の URL の認可トークンを引き継ぐ (draft-ietf-moq-msf-01 §11.4.3 は track に紐づく
-///   トークンを同じ track の制御メッセージへ載せる MUST を課すため)
+/// - control stream の GOAWAY (`on_request_stream` が `None`) は session 全体を移行する
+///   ([`MigrationScope::Session`])。
+/// - request stream の GOAWAY (`on_request_stream` が `Some`) は当該 request だけを移行する
+///   対象として返す ([`MigrationScope::Request`])。request 単位の移行は 2 session の併走が
+///   必要なため、呼び出し側が対応可否を決める。URI が不正な場合は session を維持できるよう
+///   `Ok(None)` にする。
+/// - `new_session_uri` が空のときは現在の URL を再利用する (空 URI は request stream の
+///   GOAWAY でも「現在の session で再発行する」ことを意味する)。
+/// - 非空のときは [`parse_url`] と同じ規則で解釈する。認可トークン (`c4m`) は
+///   **現在の URL と同じ origin (host / port) のときだけ** 引き継ぐ。別 origin へ
+///   credential を送らないためである。移行先が自前の `c4m` を持つ場合はそちらを優先する。
 ///
 /// 移行先 URI の `connection` (draft-ietf-moq-msf-01 §11.1.1) と msf の track-identifier は
 /// ここでは解釈しない。接続経路は呼び出し側が [`resolve_transport`] で現在の解決結果と
@@ -971,27 +975,332 @@ where
 ///
 /// # Errors
 ///
-/// `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が解釈できない場合に
-/// [`TransportError`] になる。
+/// control stream の GOAWAY で `new_session_uri` が UTF-8 でない場合と、[`parse_url`] が
+/// 解釈できない場合に [`TransportError`] になる。
 pub fn migration_target(
     new_session_uri: &[u8],
     on_request_stream: Option<u64>,
     current: &ServerUrl,
-) -> Result<Option<ServerUrl>, TransportError> {
-    if on_request_stream.is_some() {
-        return Ok(None);
-    }
+) -> Result<Option<MigrationTarget>, TransportError> {
+    let scope = match on_request_stream {
+        Some(request_id) => MigrationScope::Request(request_id),
+        None => MigrationScope::Session,
+    };
     if new_session_uri.is_empty() {
-        return Ok(Some(current.clone()));
+        return Ok(Some(MigrationTarget {
+            scope,
+            url: current.clone(),
+        }));
     }
-    let uri = std::str::from_utf8(new_session_uri)
-        .map_err(|e| TransportError::Internal(format!("new session URI is not UTF-8: {e}")))?;
-    let mut target = parse_url(uri)
-        .map_err(|e| TransportError::Internal(format!("invalid new session URI '{uri}': {e}")))?;
-    if target.c4m_tokens.is_empty() {
+    let uri = match std::str::from_utf8(new_session_uri) {
+        Ok(uri) => uri,
+        Err(e) => {
+            if on_request_stream.is_some() {
+                // request 単位移行は未対応である。URI が壊れていても session を維持し、
+                // 該当 request の終端は Session の deadline に任せる。
+                return Ok(None);
+            }
+            return Err(TransportError::Internal(format!(
+                "new session URI is not UTF-8: {e}"
+            )));
+        }
+    };
+    let mut target = match parse_url(uri) {
+        Ok(target) => target,
+        Err(e) => {
+            if on_request_stream.is_some() {
+                return Ok(None);
+            }
+            return Err(TransportError::Internal(format!(
+                "invalid new session URI '{uri}': {e}"
+            )));
+        }
+    };
+    // 認可トークンは同一 origin のときだけ引き継ぐ。別 origin へ送ると credential の
+    // 漏洩になるため、移行先で再取得する (draft-ietf-moq-msf-01 §11.4.4)。
+    if target.c4m_tokens.is_empty() && same_origin(&target, current) {
         target.c4m_tokens = current.c4m_tokens.clone();
     }
-    Ok(Some(target))
+    Ok(Some(MigrationTarget { scope, url: target }))
+}
+
+/// 2 つの [`ServerUrl`] が同じ origin を指すか
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) は New Session URI に同じ scheme を使うことを
+/// SHOULD とする。scheme は [`parse_url`] が `moqt://` に固定しているため、ここでは host と
+/// port を比較する。host は RFC 3986 §3.2.2 により大文字小文字を区別せず、port の省略時は
+/// 既定ポート 443 を使う (draft-ietf-moq-transport-22 §6.1.2)。
+fn same_origin(a: &ServerUrl, b: &ServerUrl) -> bool {
+    let (Ok(a), Ok(b)) = (authority_parts(&a.authority), authority_parts(&b.authority)) else {
+        return false;
+    };
+    a.port == b.port && a.host.eq_ignore_ascii_case(b.host)
+}
+
+/// 移行先の適用範囲
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationScope {
+    /// control stream の GOAWAY。session 全体を移行する
+    Session,
+    /// request stream の GOAWAY。指定した request だけを移行する
+    Request(u64),
+}
+
+/// GOAWAY が示す移行先
+#[derive(Debug, Clone)]
+pub struct MigrationTarget {
+    /// 移行の適用範囲
+    pub scope: MigrationScope,
+    /// 移行先の URL
+    pub url: ServerUrl,
+}
+
+/// GOAWAY の Timeout を移行期限として管理する
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の Timeout は、GOAWAY を送った側が
+/// セッションを閉じるまで待つ時間 (ミリ秒) である。受信側は「GOAWAY を受信した時刻 +
+/// Timeout」を移行期限として扱い、期限を過ぎたら移行を打ち切る。
+///
+/// Timeout が 0 のときは送信側に specific timeout が無いことを意味する
+/// ("the recipient SHOULD migrate as quickly as possible")。期限なしで無限に再試行しないよう、
+/// ローカルの既定値 ([`Self::DEFAULT_TIMEOUT`]) を使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationDeadline {
+    /// 移行を打ち切る時刻
+    deadline: Instant,
+    /// Timeout 0 のためローカル既定値を用いたか
+    local_default: bool,
+}
+
+impl MigrationDeadline {
+    /// Timeout 0 のときに使うローカル既定の移行期限
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Timeout の上限
+    ///
+    /// 仕様上は任意のミリ秒を受け取れるが、移行期限として 24 時間を超える値は扱わない。
+    /// `Instant` の加算でオーバーフローさせないための防御でもある。
+    pub const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// GOAWAY の受信時刻と Timeout から期限を作る
+    pub fn after_goaway(received_at: Instant, timeout_ms: u64) -> Self {
+        let (timeout, local_default) = if timeout_ms == 0 {
+            (Self::DEFAULT_TIMEOUT, true)
+        } else {
+            (
+                Duration::from_millis(timeout_ms).min(Self::MAX_TIMEOUT),
+                false,
+            )
+        };
+        Self {
+            deadline: received_at + timeout,
+            local_default,
+        }
+    }
+
+    /// 指定時刻から見た残り時間
+    pub fn remaining_at(&self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
+
+    /// 指定時刻で期限切れか
+    pub fn expired_at(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    /// 現在時刻から見た残り時間
+    pub fn remaining(&self) -> Duration {
+        self.remaining_at(Instant::now())
+    }
+
+    /// 現在時刻で期限切れか
+    pub fn expired(&self) -> bool {
+        self.expired_at(Instant::now())
+    }
+
+    /// Timeout 0 のためローカル既定値を使ったか
+    pub fn uses_local_default(&self) -> bool {
+        self.local_default
+    }
+}
+
+/// 移行先への接続を再試行するときの待ち時間
+///
+/// 移行は GOAWAY の Timeout 内に完了させる必要がある。初回は短い待ち時間で試し、
+/// 失敗するたびに倍にする。上限を設けて、期限までに複数回試せるようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// 初回の待ち時間
+    pub initial_delay: Duration,
+    /// 待ち時間の上限
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(2),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// `attempt` 回目 (0 始まり) の待ち時間を返す
+    ///
+    /// 同期した再試行を避けるため、指数バックオフの範囲内で 0 から 1/4 の jitter を加える。
+    /// jitter は暗号用途ではなく、同時に移行するクライアントの再試行をずらすためだけに使う。
+    pub fn delay(&self, attempt: u32) -> Duration {
+        let factor = 1u32 << attempt.min(16);
+        let base = self
+            .initial_delay
+            .saturating_mul(factor)
+            .min(self.max_delay);
+        base + jitter(base / 4)
+    }
+}
+
+/// `max` 以下の擬似乱数を作る
+fn jitter(max: Duration) -> Duration {
+    if max.is_zero() {
+        return Duration::ZERO;
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    hasher.write_u64(nanos);
+    Duration::from_millis(hasher.finish() % (max.as_millis() as u64 + 1))
+}
+
+/// 移行先への接続エラーが再試行可能か
+///
+/// URI / authority の解釈エラー、プロトコル交渉の失敗、認可に起因する 4xx 応答は
+/// 同じ設定で再試行しても成功しないため除外する。ネットワーク到達不能、名前解決の一時失敗、
+/// 5xx / 429 などは再試行する。
+pub fn is_retryable_connect_error(error: &TransportError) -> bool {
+    match error {
+        TransportError::InvalidAuthority(_) => false,
+        TransportError::ProtocolNegotiationFailed { .. } => false,
+        TransportError::Moqt(_) | TransportError::InvalidState(_) | TransportError::Internal(_) => {
+            false
+        }
+        TransportError::ConnectFailed { status } => {
+            matches!(status, None | Some(408 | 425 | 429) | Some(500..=599))
+        }
+        TransportError::Quic(_)
+        | TransportError::ResolutionFailed(_)
+        | TransportError::Transport(_)
+        | TransportError::Http3(_)
+        | TransportError::Http2(_)
+        | TransportError::WtH2(_)
+        | TransportError::Qmux(_)
+        | TransportError::ConnectionClosed
+        | TransportError::StreamReset { .. }
+        | TransportError::StreamClosed => true,
+    }
+}
+
+/// 移行期限まで接続を再試行する
+///
+/// 1 回の試行が移行期限を超えて待ち続けないよう、[`tokio::time::timeout`] で残り時間を
+/// 上限にする。再試行不能なエラーはそのまま返し、期限切れの場合は最後のエラーを返す。
+///
+/// # Errors
+///
+/// 再試行不能なエラー、または移行期限までに接続できなかった場合に [`TransportError`] になる。
+pub async fn connect_with_retry(
+    params: &ConnectParams<'_>,
+    deadline: MigrationDeadline,
+    policy: RetryPolicy,
+    task_monitor: &tokio_metrics::TaskMonitor,
+) -> Result<
+    (
+        crate::moqt_client::MoqtClient,
+        crate::transport::StreamAcceptor,
+    ),
+    TransportError,
+> {
+    let mut attempt = 0u32;
+    let mut last_error = None;
+    loop {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(last_error.unwrap_or_else(|| {
+                TransportError::Internal("migration deadline expired".to_string())
+            }));
+        }
+        match tokio::time::timeout(remaining, connect(params, task_monitor)).await {
+            Ok(Ok(connected)) => return Ok(connected),
+            Ok(Err(error)) if !is_retryable_connect_error(&error) => return Err(error),
+            Ok(Err(error)) => {
+                tracing::warn!("Migration connection attempt failed: {error}");
+                last_error = Some(error);
+            }
+            Err(_) => {
+                tracing::warn!("Migration connection attempt timed out");
+                last_error = Some(TransportError::Internal(
+                    "connection attempt timed out".to_string(),
+                ));
+            }
+        }
+        let delay = policy.delay(attempt).min(deadline.remaining());
+        if delay.is_zero() {
+            return Err(last_error.unwrap_or_else(|| {
+                TransportError::Internal("migration deadline expired".to_string())
+            }));
+        }
+        tokio::time::sleep(delay).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// 短期間に連続する GOAWAY 移行を制限する
+///
+/// 移行先がまた GOAWAY を返す構成では、移行を無制限に繰り返すと再接続ストームになる。
+/// 直近 `window` の間に `max_migrations` 回を超える移行を拒否する。
+#[derive(Debug)]
+pub struct MigrationLimiter {
+    /// 制限を数える時間窓
+    window: Duration,
+    /// 時間窓内で許す移行回数
+    max_migrations: usize,
+    /// 移行した時刻 (古い順)
+    occurred: VecDeque<Instant>,
+}
+
+impl MigrationLimiter {
+    /// 制限を設定する
+    ///
+    /// `max_migrations` が 0 の場合は常に拒否する。呼び出し側が移行を無効化したい場合に使う。
+    pub fn new(window: Duration, max_migrations: usize) -> Self {
+        Self {
+            window,
+            max_migrations,
+            occurred: VecDeque::new(),
+        }
+    }
+
+    /// 指定時刻で移行してよいかを判定し、よい場合は記録する
+    ///
+    /// 時間窓の外に出た記録は捨てる。判定と記録を 1 回で行うため、呼び出し側は
+    /// 戻り値が `true` のときだけ移行を開始する。
+    pub fn check_and_record(&mut self, now: Instant) -> bool {
+        while let Some(front) = self.occurred.front() {
+            if now.saturating_duration_since(*front) >= self.window {
+                self.occurred.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.occurred.len() >= self.max_migrations {
+            return false;
+        }
+        self.occurred.push_back(now);
+        true
+    }
 }
 
 /// 接続の確立に必要な設定
@@ -2683,5 +2992,124 @@ mod tests {
             resolve.to_string(),
             "failed to resolve 'relay.invalid': no address"
         );
+    }
+
+    /// origin の比較は host の大文字小文字とポート省略を正規化すること
+    #[test]
+    fn same_origin_normalizes_host_case_and_default_port() {
+        let a = parse_url("moqt://relay.example/live").expect("URL をパースできること");
+        let b = parse_url("moqt://RELAY.example:443/other").expect("URL をパースできること");
+        assert!(same_origin(&a, &b), "同じ origin と判定すること");
+
+        let other_port =
+            parse_url("moqt://relay.example:4443/live").expect("URL をパースできること");
+        assert!(!same_origin(&a, &other_port), "ポートが違えば別 origin");
+
+        let other_host = parse_url("moqt://other.example/live").expect("URL をパースできること");
+        assert!(!same_origin(&a, &other_host), "host が違えば別 origin");
+    }
+
+    /// Timeout 0 はローカル既定値を使い、通常の Timeout はそのまま期限にすること
+    #[test]
+    fn migration_deadline_uses_timeout_and_local_default() {
+        let base = Instant::now();
+        let deadline = MigrationDeadline::after_goaway(base, 5000);
+        assert!(!deadline.uses_local_default());
+        assert_eq!(
+            deadline.remaining_at(base + Duration::from_secs(1)),
+            Duration::from_secs(4)
+        );
+        assert!(deadline.expired_at(base + Duration::from_secs(5)));
+        assert!(!deadline.expired_at(base + Duration::from_millis(4999)));
+
+        let no_timeout = MigrationDeadline::after_goaway(base, 0);
+        assert!(no_timeout.uses_local_default());
+        assert_eq!(
+            no_timeout.remaining_at(base),
+            MigrationDeadline::DEFAULT_TIMEOUT
+        );
+    }
+
+    /// 再試行の待ち時間は指数で増え、上限と jitter の範囲に収まること
+    #[test]
+    fn retry_policy_grows_and_caps() {
+        let policy = RetryPolicy {
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(800),
+        };
+        let first = policy.delay(0);
+        assert!(
+            first >= Duration::from_millis(100) && first <= Duration::from_millis(125),
+            "初回は 100ms から jitter の範囲に収まること: {first:?}"
+        );
+        let late = policy.delay(20);
+        assert!(
+            late >= Duration::from_millis(800) && late <= Duration::from_millis(1000),
+            "上限と jitter の範囲に収まること: {late:?}"
+        );
+    }
+
+    /// 時間窓内の移行回数を制限すること
+    #[test]
+    fn migration_limiter_enforces_the_window() {
+        let base = Instant::now();
+        let mut limiter = MigrationLimiter::new(Duration::from_secs(10), 2);
+        assert!(limiter.check_and_record(base));
+        assert!(limiter.check_and_record(base + Duration::from_secs(1)));
+        assert!(
+            !limiter.check_and_record(base + Duration::from_secs(2)),
+            "窓内の上限を超えたら拒否すること"
+        );
+        assert!(
+            limiter.check_and_record(base + Duration::from_secs(11)),
+            "窓の外に出た記録は捨てること"
+        );
+    }
+
+    /// request stream の GOAWAY でも URI を解釈し、scope を区別すること
+    #[test]
+    fn migration_target_reports_request_scope() {
+        let current = parse_url("moqt://relay.example/live").expect("URL をパースできること");
+        let target = migration_target(b"moqt://other.example/live", Some(7), &current)
+            .expect("判断に成功すること")
+            .expect("移行先があること");
+        assert_eq!(target.scope, MigrationScope::Request(7));
+        assert_eq!(target.url.authority, "other.example");
+        assert!(
+            target.url.c4m_tokens.is_empty(),
+            "別 origin へトークンを引き継がないこと"
+        );
+    }
+
+    /// request stream の GOAWAY で URI が不正なら session を維持できるよう None にすること
+    #[test]
+    fn migration_target_keeps_session_for_invalid_request_uri() {
+        let current = parse_url("moqt://relay.example/live").expect("URL をパースできること");
+        let target = migration_target(b"https://other.example/live", Some(7), &current)
+            .expect("request 単位移行ではエラーにしないこと");
+        assert!(target.is_none(), "session を維持すること");
+    }
+
+    /// 再試行可能な接続エラーの分類が仕様どおりであること
+    #[test]
+    fn retryable_connect_errors_are_classified() {
+        assert!(!is_retryable_connect_error(
+            &TransportError::InvalidAuthority("invalid".to_string())
+        ));
+        assert!(is_retryable_connect_error(
+            &TransportError::ResolutionFailed("temporary".to_string())
+        ));
+        assert!(is_retryable_connect_error(
+            &TransportError::ConnectionClosed
+        ));
+        assert!(!is_retryable_connect_error(
+            &TransportError::ConnectFailed { status: Some(401) }
+        ));
+        assert!(is_retryable_connect_error(&TransportError::ConnectFailed {
+            status: Some(503)
+        }));
+        assert!(!is_retryable_connect_error(
+            &TransportError::ProtocolNegotiationFailed { error_code: 0 }
+        ));
     }
 }

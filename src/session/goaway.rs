@@ -101,6 +101,14 @@ impl Session {
         self.goaway_drain_snapshot().ready()
     }
 
+    /// peer から受信した GOAWAY の情報を返す
+    ///
+    /// [`SessionEvent::GoawayReceived`] を取りこぼしても、移行判断に必要な
+    /// `new_session_uri` / `timeout` をここから取得できる。受信していない場合は `None`。
+    pub fn peer_goaway(&self) -> Option<&PeerGoawayInfo> {
+        self.goaway.peer.as_ref()
+    }
+
     // ─── 送信 API ──────────────────────────────────────────
 
     /// GOAWAY を送信する (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
@@ -258,6 +266,17 @@ impl Session {
                 });
                 self.discard_timed_out_subgroup_stream(stream_id);
             }
+        }
+        // draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): 自側が GOAWAY を
+        // 送った場合、open request が無くなった時点で NO_ERROR で閉じてよい。drain 完了を
+        // 1 回だけイベントで知らせ、アプリが `goaway_drain_ready` を毎 tick ポーリングしなくて
+        // 済むようにする。
+        if self.goaway.local_sent
+            && !self.goaway.local_drain_ready_emitted
+            && self.goaway_drain_ready()
+        {
+            self.goaway.local_drain_ready_emitted = true;
+            self.events.push_back(SessionEvent::GoawayDrainReady);
         }
         // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される GOAWAY_TIMEOUT
         // (発生条件は §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) を参照)
