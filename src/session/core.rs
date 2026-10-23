@@ -29,8 +29,8 @@ use crate::error::{
 };
 use crate::message::{
     ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
-    RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::TrackNamespace,
-    unsupported_request_allowed_params,
+    RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location,
+    common::TrackNamespace, unsupported_request_allowed_params,
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
@@ -383,6 +383,14 @@ pub struct Session {
     pub(super) request_ids: RequestIdState,
     pub(super) subscriptions: HashMap<u64, Subscription>,
     pub(super) aliases: AliasState,
+    /// Track 単位で保持する自側 publish 済み最大 Location
+    ///
+    /// draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST OBJECT
+    /// Parameter): LARGEST_OBJECT は Track 単位の値であり、publisher 役 subscription を
+    /// forget した後も自側が publish した Track 最大として残る必要がある。subscriber 役で
+    /// 受信した Object は含めない (relay の上流受信の集約は relay の責務)。セッション終了まで
+    /// 保持し、エントリ数はセッション中に publish した Track 数に比例する。
+    pub(super) published_track_largest: HashMap<(TrackNamespace, Vec<u8>), Location>,
     /// Fetch の管理 (Request ID 索引)
     pub(super) fetches: HashMap<u64, Fetch>,
     /// TRACK_STATUS の管理
@@ -625,6 +633,7 @@ impl Session {
                 peer_tracker: RequestIdTracker::new(peer_role),
             },
             subscriptions: HashMap::new(),
+            published_track_largest: HashMap::new(),
             aliases: AliasState {
                 my_publisher_aliases: HashMap::new(),
                 peer_publisher_aliases: HashMap::new(),

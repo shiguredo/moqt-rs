@@ -194,9 +194,10 @@ impl Session {
         // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): LARGEST_OBJECT は actual received 以上でなければならない
         // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) /
         // §3.1.4 (Largest Object): LARGEST_OBJECT は Track 単位の値である。
-        // 自側 publisher 役では同一 Track の publisher 役 subscription 群の最大値
-        // (publisher_track_largest) を使い、自側 subscriber 役では従来どおり
-        // 当該 subscription の effective_largest_object を使う
+        // 自側 publisher 役では `publisher_track_largest` が返す Track 最大 (live な
+        // subscription 群の最大値と、Track 単位で保持した自側 publish 済み最大の大きい方) を
+        // 使い、自側 subscriber 役では従来どおり当該 subscription の
+        // effective_largest_object を使う
         // (subscriber 役は peer から受信した値を保持しており、購読横断の集約は対象外)。
         // self の可変借用より前に求める (不変借用が必要なため)。
         let track_largest = self

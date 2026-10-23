@@ -567,18 +567,33 @@ impl Session {
                 group_id,
                 object_id,
             };
-            if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-                subscription.record_largest_received_location(published_location);
-                // delivery_timeouts.effective_object_ms が Some かつ未記録の場合のみ記録。
-                // last_tick_ms が None の場合は None で挿入し、最初の tick で確定する。
-                // draft-ietf-moq-transport-22 §5.2: object 単位で object header 提供完了時刻を保持する (MUST)。
-                // `send_subgroup_object` 呼び出し tick が last header byte 提供時刻の近似になる。
-                if subscription.delivery_timeouts.effective_object_ms.is_some() {
-                    self.timing
-                        .object_delivery_header_complete_ms
-                        .entry((stream_id, object_id))
-                        .or_insert(self.timing.last_tick_ms);
+            let track = self.subscriptions.get(&request_id).map(|subscription| {
+                (
+                    subscription.track_namespace.clone(),
+                    subscription.track_name.clone(),
+                )
+            });
+            if let Some((track_namespace, track_name)) = track {
+                if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+                    subscription.record_largest_received_location(published_location);
+                    // delivery_timeouts.effective_object_ms が Some かつ未記録の場合のみ記録。
+                    // last_tick_ms が None の場合は None で挿入し、最初の tick で確定する。
+                    // draft-ietf-moq-transport-22 §5.2: object 単位で object header 提供完了時刻を保持する (MUST)。
+                    // `send_subgroup_object` 呼び出し tick が last header byte 提供時刻の近似になる。
+                    if subscription.delivery_timeouts.effective_object_ms.is_some() {
+                        self.timing
+                            .object_delivery_header_complete_ms
+                            .entry((stream_id, object_id))
+                            .or_insert(self.timing.last_tick_ms);
+                    }
                 }
+                // publisher 役 subscription を forget した後も Track 最大を応答に載せるため、
+                // Track 単位でも最大を保持する (§9.20.17 の MUST)。
+                self.record_published_track_largest(
+                    &track_namespace,
+                    &track_name,
+                    published_location,
+                );
             }
         }
         Ok(())
@@ -2395,8 +2410,19 @@ impl Session {
             group_id,
             object_id,
         };
-        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
-            subscription.record_largest_received_location(published_location);
+        let track = self.subscriptions.get(&request_id).map(|subscription| {
+            (
+                subscription.track_namespace.clone(),
+                subscription.track_name.clone(),
+            )
+        });
+        if let Some((track_namespace, track_name)) = track {
+            if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+                subscription.record_largest_received_location(published_location);
+            }
+            // publisher 役 subscription を forget した後も Track 最大を応答に載せるため、
+            // Track 単位でも最大を保持する (§9.20.17 の MUST)。
+            self.record_published_track_largest(&track_namespace, &track_name, published_location);
         }
         Ok(())
     }

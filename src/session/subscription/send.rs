@@ -485,9 +485,10 @@ impl Session {
         // "It contains the Largest Object (Section 3.1.4) in the Track from the perspective
         //  of the sending endpoint. If Objects have been published on this Track the Publisher
         //  MUST include this parameter."
-        // LARGEST_OBJECT は Track 単位の値であるため、同一 Track の publisher 役
-        // subscription 群の最大値 (publisher_track_largest) を使う。新規 subscription は
-        // 観測値を持たないが、同じ Track の別 subscription で publish 済みなら値を載せる。
+        // LARGEST_OBJECT は Track 単位の値であるため、`publisher_track_largest` が返す
+        // Track 最大 (live な publisher 役 subscription 群の最大値と、Track 単位で保持した
+        // 自側 publish 済み最大の大きい方) を使う。新規 subscription は観測値を持たないが、
+        // 同じ Track の別 subscription で publish 済み、または過去に publish 済みなら値を載せる。
         // publisher_track_largest は self を不変借用するため、subscription の可変借用より前に求める。
         let track_largest = match self.subscriptions.get(&request_id) {
             Some(subscription) => self

@@ -199,8 +199,9 @@ impl Session {
         let default_publisher_group_order = None;
         // draft §3.3.1 (Location Filters) / §3.3.2 (Range Filters): subscriber が SUBSCRIBE で
         // 指定したフィルタを publisher 側の状態として取り込む。新規 subscription は解決時点の
-        // largest を持たないため、同一 track の既存 publisher 役 subscription が観測した
-        // 最大位置 (なければ先頭) で相対フィルタを解決する。
+        // largest を持たないため、`publisher_track_largest` が返す Track 最大 (live な
+        // subscription の観測値と、Track 単位で保持した自側 publish 済み最大の大きい方。
+        // 未 publish なら先頭) で相対フィルタを解決する。
         // 仕様の Largest Object は publisher がメッセージを処理する視点で定義されるため、
         // 未配信 track では `None` 基準 (先頭から) になる。
         // この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。

@@ -25,7 +25,7 @@ TRACK_STATUS_OK だけが parameters への自動補完を行わない。また 
 - `send_request_ok` の TRACK_STATUS 分岐から `&mut parameters` を渡し、`send_ok_for_track_status` 内でアプリが明示した値より大きい場合だけ置き換える方針を他 context と揃える。
 - 最終的に parameters に載った LARGEST_OBJECT を `TrackStatusResponse::Ok.largest_location` にも反映する (`TrackStatusResponse` の doc「REQUEST_OK 受信 / 送信済み (LARGEST_OBJECT parameter があれば保持する)」に合わせる)。現在の `send_ok_for_track_status` のコメント「自側が送る応答では Largest Location を保持しない」はこの doc と矛盾するため、doc に合わせて最終値を保持する。
 - Object 未 publish の Track では自動補完しない。アプリが明示した LARGEST_OBJECT は、その Track で Object を publish していなくても上書き・削除しない (他 context の「アプリ指定値との max」と同じ)。
-- `publisher_track_largest` は publisher 役 subscription が保持する値を使うため、対象 Track の publisher 役 subscription をすべて `forget_subscription` した後は自動補完できない。Track 単位で largest を永続保持する改善は本 issue のスコープ外とする。
+- `publisher_track_largest` は publisher 役 subscription が保持する値と、Track 単位で保持した自側 publish 済み最大の大きい方を返す。Track 単位の保持は 0279 で導入済みのため、対象 Track の publisher 役 subscription をすべて `forget_subscription` した後も自動補完できる。
 
 ## 完了条件
 

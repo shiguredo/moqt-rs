@@ -271,8 +271,10 @@ impl Session {
     ///
     /// 同一 Track の全 publisher 役 subscription の `effective_largest_object` の
     /// 最大値を返す Track 単位の集約である (draft-ietf-moq-transport-22
-    /// §3.1.4 (Largest Object))。値は subscription が保持するため、forget 済みの
-    /// Track では `None` を返す (Terminated でも保持中なら寄与する)。用途:
+    /// §3.1.4 (Largest Object))。値は subscription が保持するほか、自側が publisher 役と
+    /// して送信した Object は Track 単位でも保持するため、publisher 役 subscription をすべて
+    /// forget した後も publish 済みの最大を返す (subscriber 役で受信した Object は含めない)。
+    /// 用途:
     /// - draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は
     ///   Largest Object を超えない
     /// - draft-ietf-moq-transport-22 §3.2 (Fetch): 要求 Start が Largest Object を
@@ -292,16 +294,49 @@ impl Session {
             track_name.to_vec(),
             TrackRole::Publisher,
         );
-        self.aliases
+        let from_subscriptions = self
+            .aliases
             .subscriptions_by_track
-            .get(&key)?
-            .iter()
+            .get(&key)
+            .into_iter()
+            .flatten()
             .filter_map(|id| self.subscriptions.get(id))
             // 索引キーが publisher 役を含むため現状では恒真だが、索引と本体の
             // 不整合があった場合に subscriber 役の値を混ぜないための防御
             .filter(|sub| sub.my_role == TrackRole::Publisher)
             .filter_map(effective_largest_object)
-            .max()
+            .max();
+        // publisher 役 subscription をすべて forget した後も、自側が publish した Track 最大を
+        // §9.20.17 の LARGEST_OBJECT に載せるため、Track 単位で保持した値との大きい方を返す。
+        let from_published = self
+            .published_track_largest
+            .get(&(track_namespace.clone(), track_name.to_vec()))
+            .copied();
+        match (from_subscriptions, from_published) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// 自側が publisher 役として送信した Object の Location を Track 単位の最大へ反映する
+    ///
+    /// draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST OBJECT
+    /// Parameter): LARGEST_OBJECT は Track 単位の値であり、publisher 役 subscription を
+    /// forget した後も応答に載せる必要がある。比較は `Location` の (group_id, object_id) の
+    /// 辞書順最大で、subscriber 役で受信した Object は含めない。
+    pub(crate) fn record_published_track_largest(
+        &mut self,
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+        location: Location,
+    ) {
+        let entry = self
+            .published_track_largest
+            .entry((track_namespace.clone(), track_name.to_vec()))
+            .or_insert(location);
+        if location > *entry {
+            *entry = location;
+        }
     }
 }
 

@@ -53,7 +53,7 @@
 - Forward
 - Group Order
 - Include Properties
-- Largest Object (publisher の保持 MUST 要件はなし)
+- Largest Object (SUBSCRIBE_OK / PUBLISH / 購読の REQUEST_UPDATE_OK / PUBLISH_STATE_NOTIFY では session 層が Track 単位で自動補完する。TRACK_STATUS_OK と FETCH の REQUEST_UPDATE_OK は未対応。自側が publish した最大は publisher 役 subscription を forget した後も保持する)
 - Location Filter (range を LOCATION_FILTER で指定。§9.20.9 の Location Filter Type ごとに後続フィールドが決まる符号化で、Type 0x00 (None) と 0x05 (Next Object) を区別する)
 - New Group Request
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
