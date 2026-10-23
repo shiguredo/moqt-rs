@@ -183,6 +183,12 @@ const MIGRATION_LIMIT_WINDOW: Duration = Duration::from_secs(600);
 /// 時間窓内で許す移行回数
 const MAX_MIGRATIONS_PER_WINDOW: usize = 5;
 
+/// 移行の PUBLISH 失敗後に接続からやり直すときの初回待ち時間
+const MIGRATION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
+
+/// 移行の PUBLISH 失敗後に接続からやり直すときの待ち時間の上限
+const MIGRATION_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
+
 /// 停滞の切り分け用の診断ログを出すかどうか。
 ///
 /// `MOQT_PUBLISH_DIAG=1` を設定したときだけ有効にする。100ms ごとに
@@ -354,6 +360,137 @@ fn accepted_new_group_request(
     None
 }
 
+/// カタログ JSON を組み立てるための入力
+///
+/// 起動時と GOAWAY 移行後の双方で同じ入力から MSF カタログを組み立てる。移行先の `c4m` が
+/// 変わったときは authInfo を載せ替える必要があるため
+/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))、エンコーダ / MP4 リーダーへの参照では
+/// なく、組み立てに必要な値だけを所有して保持する。
+struct CatalogContext {
+    /// Track Namespace の §8.8 表現
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.2 (Track namespace)
+    namespace_text: String,
+    /// 映像トラック名
+    track_name: String,
+    /// 音声・映像で共通の同期用メタデータ
+    sync: catalog::CatalogSyncParams,
+    /// カタログに載せる映像トラック (映像を配信しない場合は `None`)
+    video: Option<CatalogVideoTrack>,
+    /// カタログに載せる音声トラック (音声を配信しない場合は `None`)
+    audio: Option<CatalogAudioTrack>,
+}
+
+/// カタログに載せる映像トラックの値
+struct CatalogVideoTrack {
+    /// RFC 6381 形式の codec 文字列 (例: `av01.0.08M.08`)
+    codec: String,
+    /// 映像幅 (px)
+    width: u32,
+    /// 映像高さ (px)
+    height: u32,
+    /// フレームレート
+    fps: u32,
+    /// kbps
+    bitrate: u32,
+    /// 映像トラックの最大 Group 長 (ms)
+    ///
+    /// `maxGopDuration` / `maxGroupDuration` に同じ値を載せる。Group 長を宣言しない経路
+    /// (MP4 パススルー) では `None`。
+    max_group_duration_ms: Option<u64>,
+}
+
+/// カタログに載せる音声トラックの値
+struct CatalogAudioTrack {
+    /// RFC 6381 形式の codec 文字列 (例: `opus`)
+    codec: String,
+    /// サンプリングレート (Hz)
+    samplerate: u32,
+    /// MSF channelConfig (mono = "1")
+    channel_config: String,
+    /// kbps
+    bitrate: u32,
+}
+
+impl CatalogContext {
+    /// カタログの track パラメータを組み立てる
+    ///
+    /// 戻り値は [`catalog::VideoTrackParams`] と [`catalog::AudioTrackParams`] であり、
+    /// どちらも `self` の文字列を借用する。
+    fn track_params(
+        &self,
+    ) -> (
+        Option<catalog::VideoTrackParams<'_>>,
+        Option<catalog::AudioTrackParams<'_>>,
+    ) {
+        let video = self.video.as_ref().map(|video| catalog::VideoTrackParams {
+            track_name: &self.track_name,
+            namespace: &self.namespace_text,
+            codec: &video.codec,
+            width: video.width,
+            height: video.height,
+            fps: video.fps,
+            bitrate: video.bitrate,
+            max_group_duration_ms: video.max_group_duration_ms,
+        });
+        let audio = self.audio.as_ref().map(|audio| catalog::AudioTrackParams {
+            track_name: AUDIO_TRACK_NAME,
+            namespace: &self.namespace_text,
+            codec: &audio.codec,
+            samplerate: audio.samplerate,
+            channel_config: &audio.channel_config,
+            bitrate: audio.bitrate,
+        });
+        (video, audio)
+    }
+
+    /// 指定した c4m トークンでカタログ JSON を組み立てる
+    ///
+    /// 移行先の `c4m` が変わったとき、この関数で authInfo を載せ替える。
+    /// 送信は行わない (送信は [`catalog::send_catalog`] / [`republish_catalog_at_group`])。
+    fn json(&self, c4m_tokens: &[Vec<u8>]) -> Result<Vec<u8>> {
+        let (video, audio) = self.track_params();
+        catalog::build_catalog_json(video.as_ref(), audio.as_ref(), self.sync, c4m_tokens)
+    }
+}
+
+/// カタログの送信用パラメータを組み立てる
+///
+/// 起動時の初回送信で使う。JSON の組み立てと送信は [`catalog::send_catalog`] が担う。
+fn catalog_params<'a>(
+    context: &'a CatalogContext,
+    handle: &'a StreamHandle,
+    data_plane: &'a DataPlaneHandle,
+    catalog_request_id: u64,
+    group_id: u64,
+    start_location: Option<Location>,
+    c4m_tokens: &'a [Vec<u8>],
+) -> catalog::CatalogParams<'a> {
+    let (video, audio) = context.track_params();
+    catalog::CatalogParams {
+        handle,
+        data_plane,
+        catalog_request_id,
+        catalog_alias: CATALOG_TRACK_ALIAS,
+        group_id,
+        start_location,
+        sync: context.sync,
+        c4m_tokens,
+        video,
+        audio,
+    }
+}
+
+/// 移行先の c4m トークンが変わったか
+///
+/// 移行先 URL の `c4m` が変わると、catalog の track に載せる authInfo を作り直す必要がある
+/// (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。authInfo は現在トークンの有無だけを
+/// 見るため値の変化では JSON は変わらないが、将来 authInfo が値を参照する変更に備えて
+/// 並びも含めて比較する。
+fn c4m_tokens_changed(previous: &[Vec<u8>], next: &[Vec<u8>]) -> bool {
+    previous != next
+}
+
 /// 確立済みの publisher session
 ///
 /// SETUP の交換と映像 / 音声 / カタログの PUBLISH まで終えた状態である。初回接続と GOAWAY 後の
@@ -496,22 +633,59 @@ async fn establish_publisher_session(
             catalog_request_id,
         }),
         Err(e) => {
-            if let Err(close_error) = client.close(0, "").await {
-                tracing::debug!(
-                    "Failed to close the session after a failed publish: {close_error}"
-                );
-            }
+            close_session_after_failed_publish(&mut client).await;
             Err(e)
         }
     }
 }
 
+/// PUBLISH に失敗した session を閉じる (失敗はログのみ)
+///
+/// 確立済みの session を放置すると peer が timeout まで資源を保持するため、失敗を返す前に
+/// 閉じる。close 自体の失敗は、このあと session を捨てるため致命ではない。
+async fn close_session_after_failed_publish(client: &mut MoqtClient) {
+    if let Err(close_error) = client.close(0, "").await {
+        tracing::debug!("Failed to close the session after a failed publish: {close_error}");
+    }
+}
+
+/// 移行の PUBLISH 失敗を新しい接続で再試行するか
+///
+/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の移行では、新しい session の PUBLISH が一時的な
+/// 理由 (relay の切替直後、接続断、REQUEST_ERROR による拒否) で失敗しうる。新しい session を
+/// 作り直せば解消しうるため再試行する。プロトコル違反とメッセージの encode / decode 失敗は
+/// 同じコードで繰り返しても再発するため再試行しない。draft 由来の規則であり将来の draft
+/// 改版で変わる可能性がある。
+fn migration_publish_failure_is_retryable(error: &Error) -> bool {
+    !matches!(error, Error::Moqt(_))
+}
+
+/// 移行の PUBLISH 失敗後に接続からやり直すまでの待ち時間
+///
+/// 指数バックオフ (初回 [`MIGRATION_RETRY_INITIAL_DELAY`]、上限
+/// [`MIGRATION_RETRY_MAX_DELAY`]) を残り時間で cap する。残り時間が無い場合は再試行しない
+/// (`None`)。移行は 1 クライアントの 1 本の session のための処理であり、同時に移行する複数
+/// クライアントの再試行をずらす必要はないため jitter は入れない
+/// ([`connect_with_retry`] のバックオフとは役割が異なる)。
+fn migration_retry_delay(attempt: u32, remaining: Duration) -> Option<Duration> {
+    if remaining.is_zero() {
+        return None;
+    }
+    let factor = 1u32 << attempt.min(16);
+    let delay = MIGRATION_RETRY_INITIAL_DELAY
+        .saturating_mul(factor)
+        .min(MIGRATION_RETRY_MAX_DELAY);
+    Some(delay.min(remaining))
+}
+
 /// 移行期限付きで接続し、映像 / 音声 / catalog の PUBLISH を張る
 ///
 /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY):
-/// GOAWAY の Timeout を移行期限として扱い、期限まで接続を再試行する。PUBLISH の応答待ちにも
-/// 残り時間を上限として使い、期限を過ぎた移行を打ち切る。接続で時間を使った分は期限 (絶対
-/// 時刻) から自然に差し引かれる。途中まで確立した session は失敗時に閉じる。
+/// GOAWAY の Timeout を移行期限として扱う。接続は [`connect_with_retry`] が期限まで再試行し、
+/// PUBLISH が失敗した場合は確立済みの session を閉じて接続からやり直す (期限が残っている間
+/// のみ。待ち時間は [`migration_retry_delay`])。PUBLISH の応答待ちにも残り時間を上限として
+/// 使い、期限を過ぎた移行を打ち切る。接続や PUBLISH で時間を使った分は期限 (絶対時刻) から
+/// 自然に差し引かれる。期限切れの場合は最後の失敗を返す。
 /// draft 由来の規則であり将来の draft 改版で変わる可能性がある。
 async fn establish_publisher_session_with_retry(
     config: &Config,
@@ -520,52 +694,73 @@ async fn establish_publisher_session_with_retry(
     task_monitor: &tokio_metrics::TaskMonitor,
     deadline: MigrationDeadline,
 ) -> Result<PublisherSession> {
-    let (mut client, _acceptor) = connect_with_retry(
-        &publisher_connect_params(config, url),
-        deadline,
-        RetryPolicy::default(),
-        task_monitor,
-    )
-    .await?;
-    configure_publisher_session(&mut client);
+    let mut attempt = 0u32;
+    // 期限切れでループを抜けたときの最後の失敗。ループ本体は成功か接続失敗で return するか、
+    // 失敗を記録してから break するため、ループを抜けた時点で必ず設定されている
+    let mut last_error: Option<Error>;
+    loop {
+        // 接続の失敗は connect_with_retry が期限まで再試行し尽くしている。同じ条件で
+        // ここからやり直しても成功しえないため、その失敗はそのまま返す
+        let (mut client, _acceptor) = connect_with_retry(
+            &publisher_connect_params(config, url),
+            deadline,
+            RetryPolicy::default(),
+            task_monitor,
+        )
+        .await?;
+        configure_publisher_session(&mut client);
 
-    let data_plane = client.data_plane();
-    let published = tokio::time::timeout(
-        deadline.remaining(),
-        publish_all_tracks(&mut client, config, namespace),
-    )
-    .await;
-    let published = match published {
-        Ok(published) => published,
-        Err(_) => {
-            // 期限切れ。途中まで確立した session を閉じてから失敗を返す
-            if let Err(close_error) = client.close(0, "").await {
-                tracing::debug!(
-                    "Failed to close the session after the migration deadline expired: \
-                     {close_error}"
-                );
+        let data_plane = client.data_plane();
+        let published = tokio::time::timeout(
+            deadline.remaining(),
+            publish_all_tracks(&mut client, config, namespace),
+        )
+        .await;
+        match published {
+            Ok(Ok((video_request_id, audio_request_id, catalog_request_id))) => {
+                return Ok(PublisherSession {
+                    client,
+                    data_plane,
+                    video_request_id,
+                    audio_request_id,
+                    catalog_request_id,
+                });
             }
-            return Err(Error::Other(
-                "the migration deadline expired while publishing tracks".to_string(),
-            ));
-        }
-    };
-    match published {
-        Ok((video_request_id, audio_request_id, catalog_request_id)) => Ok(PublisherSession {
-            client,
-            data_plane,
-            video_request_id,
-            audio_request_id,
-            catalog_request_id,
-        }),
-        Err(e) => {
-            if let Err(close_error) = client.close(0, "").await {
-                tracing::debug!(
-                    "Failed to close the session after a failed publish: {close_error}"
-                );
+            Ok(Err(e)) => {
+                // 確立済みの session を閉じてから、期限が残っていれば接続からやり直す
+                close_session_after_failed_publish(&mut client).await;
+                if !migration_publish_failure_is_retryable(&e) {
+                    return Err(e);
+                }
+                tracing::warn!("Publishing tracks on the new session failed: {e}");
+                last_error = Some(e);
             }
-            Err(e)
+            Err(_) => {
+                // 期限切れ。途中まで確立した session を閉じてから、残り時間があればやり直す
+                close_session_after_failed_publish(&mut client).await;
+                tracing::warn!("The migration deadline expired while publishing tracks");
+                last_error = Some(Error::Other(
+                    "the migration deadline expired while publishing tracks".to_string(),
+                ));
+            }
         }
+        // 期限が残っている間だけ、指数バックオフを挟んで接続からやり直す
+        let Some(delay) = migration_retry_delay(attempt, deadline.remaining()) else {
+            break;
+        };
+        tracing::info!(
+            "Retrying the migration from a new connection in {delay:?} (retry={})",
+            attempt.saturating_add(1)
+        );
+        tokio::time::sleep(delay).await;
+        attempt = attempt.saturating_add(1);
+    }
+    // 期限切れ。最後の失敗を返す
+    match last_error {
+        Some(error) => Err(error),
+        None => Err(Error::Other(
+            "the migration deadline expired before the session was established".to_string(),
+        )),
     }
 }
 
@@ -797,27 +992,21 @@ pub async fn run(
         group_id: catalog_group_id,
         object_id: 0,
     };
-    let catalog_json = catalog::send_catalog(catalog::CatalogParams {
-        handle: &handle,
-        data_plane: &data_plane,
-        catalog_request_id,
-        catalog_alias: CATALOG_TRACK_ALIAS,
-        group_id: catalog_group_id,
-        start_location: client.subscription_filter_start(catalog_request_id),
+    // カタログの組み立てに使う入力を保持する。GOAWAY 移行で移行先の c4m が変わったときに
+    // 同じ入力から authInfo を載せ替えるため、エンコーダ / MP4 リーダーではなく値を所有する
+    let catalog_context = CatalogContext {
+        namespace_text,
+        track_name: config.track_name.clone(),
         // 音声と映像を同じ時間軸で再生するため、両トラックへ同じ値を載せる
         sync: catalog::CatalogSyncParams {
             render_group: CATALOG_RENDER_GROUP,
             target_latency_ms: u64::from(config.target_latency_ms),
         },
-        // `c4m` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
-        c4m_tokens: &config.url.c4m_tokens,
         video: match (&mp4_reader, video_encoder.as_ref()) {
             (Some(reader), _) => {
                 let info = reader.info();
-                Some(catalog::VideoTrackParams {
-                    track_name: &config.track_name,
-                    namespace: &namespace_text,
-                    codec: &info.codec,
+                Some(CatalogVideoTrack {
+                    codec: info.codec.clone(),
                     width: info.width,
                     height: info.height,
                     fps: info.fps,
@@ -828,10 +1017,8 @@ pub async fn run(
                     max_group_duration_ms: None,
                 })
             }
-            (None, Some(enc)) => Some(catalog::VideoTrackParams {
-                track_name: &config.track_name,
-                namespace: &namespace_text,
-                codec: enc.catalog_codec_string(),
+            (None, Some(enc)) => Some(CatalogVideoTrack {
+                codec: enc.catalog_codec_string().to_string(),
                 width: encode_width,
                 height: encode_height,
                 fps: encode_fps,
@@ -845,15 +1032,23 @@ pub async fn run(
             }),
             (None, None) => None,
         },
-        audio: audio_encoder.as_ref().map(|enc| catalog::AudioTrackParams {
-            track_name: AUDIO_TRACK_NAME,
-            namespace: &namespace_text,
-            codec: enc.catalog_codec_string(),
+        audio: audio_encoder.as_ref().map(|enc| CatalogAudioTrack {
+            codec: enc.catalog_codec_string().to_string(),
             samplerate: AUDIO_SAMPLE_RATE,
-            channel_config: AUDIO_CHANNEL_CONFIG,
+            channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
             bitrate: config.audio_bitrate,
         }),
-    })
+    };
+    // `c4m` が指定された配信は、映像 / 音声の track に authInfo を載せる (§5.2.42)
+    let mut catalog_json = catalog::send_catalog(catalog_params(
+        &catalog_context,
+        &handle,
+        &data_plane,
+        catalog_request_id,
+        catalog_group_id,
+        client.subscription_filter_start(catalog_request_id),
+        &config.url.c4m_tokens,
+    ))
     .await?;
 
     // 6. 映像 / 音声入力を起動する
@@ -964,6 +1159,10 @@ pub async fn run(
     // バックグラウンド移行の受信口。移行していないときは `None` であり、select の分岐は
     // [`wait_migration_result`] が永久 pending にして実質無効にする
     let mut migration_rx: Option<oneshot::Receiver<MigrationTaskResult>> = None;
+    // 進行中の移行タスク。run の終了時に打ち切る
+    let mut migration_task: Option<tokio::task::JoinHandle<()>> = None;
+    // 移行後に旧 session を終了するタスク。run の終了時に打ち切る
+    let mut old_session_closers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // 短期間に連続する GOAWAY 移行を制限する (移行先がまた GOAWAY を返す構成での
     // 再接続ストームを防ぐ)
     let mut migration_limiter =
@@ -1638,13 +1837,15 @@ pub async fn run(
                                                 "Starting a background session migration to {} (timeout={timeout}ms)",
                                                 target.url.authority
                                             );
-                                            migration_rx = Some(spawn_migration_task(
+                                            let (task, receiver) = spawn_migration_task(
                                                 config.clone(),
                                                 namespace.clone(),
                                                 target.url,
                                                 deadline,
                                                 task_monitor.clone(),
-                                            ));
+                                            );
+                                            migration_task = Some(task);
+                                            migration_rx = Some(receiver);
                                             // 新 session の PUBLISH が成立するまで旧 session の配信を
                                             // 止めない (§7.6.1)
                                             Ok(false)
@@ -1883,6 +2084,24 @@ pub async fn run(
                                 &mut catalog_request_id,
                                 new_catalog_request_id,
                             );
+                            // 移行先の c4m が変わると catalog の track の authInfo を載せ替える
+                            // 必要がある (draft-ietf-moq-msf-01 §5.2.42 (Authorization Info))。
+                            // `config.url` を新しい URL に更新する前に比較する
+                            if c4m_tokens_changed(&config.url.c4m_tokens, &url.c4m_tokens) {
+                                match catalog_context.json(&url.c4m_tokens) {
+                                    Ok(rebuilt) => {
+                                        catalog_json = rebuilt;
+                                        tracing::info!(
+                                            "Rebuilt the MSF catalog for the migrated session's c4m tokens"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to rebuild the MSF catalog for the migrated session's c4m tokens: {e}"
+                                        );
+                                    }
+                                }
+                            }
                             // 以降の送信は新しい session の handle / data plane を使う
                             data_plane = new_data_plane;
                             handle = client.handle();
@@ -1895,16 +2114,15 @@ pub async fn run(
                             // 新しい Group を開始する。エンコーダ経路は次のフレームでキーフレームを
                             // 要求し、切替の空白を短くする
                             gop_tracker.request_new_group();
-                            let monitor = task_monitor.clone();
-                            tokio::spawn(monitor.instrument(async move {
-                                shutdown_old_session(
-                                    old_client,
-                                    old_video_request_id,
-                                    old_audio_request_id,
-                                    old_catalog_request_id,
-                                )
-                                .await;
-                            }));
+                            // 旧 session の終了は main ループを止めないよう別タスクに任せる。
+                            // JoinHandle は run の終了時に打ち切るため保持する
+                            old_session_closers.push(spawn_old_session_close(
+                                &task_monitor,
+                                old_client,
+                                old_video_request_id,
+                                old_audio_request_id,
+                                old_catalog_request_id,
+                            ));
                             tracing::info!(
                                 "Migrated the publisher session to {}",
                                 config.url.authority
@@ -1928,10 +2146,13 @@ pub async fn run(
                             }
                         }
                         .await;
+                        // 結果を受け取ったタスクは完了している。JoinHandle を手放してよい
+                        migration_task = None;
                         migration_rx = None;
                     }
                     Some(Err(reason)) => {
                         tracing::warn!("Session migration failed: {reason}");
+                        migration_task = None;
                         // 移行を諦め、既存の終了経路 (後始末) へ進む
                         session_ended = true;
                         break 'main;
@@ -1966,13 +2187,15 @@ pub async fn run(
                                 "Starting a background session migration on a WebTransport drain to {}",
                                 target_url.authority
                             );
-                            migration_rx = Some(spawn_migration_task(
+                            let (task, receiver) = spawn_migration_task(
                                 config.clone(),
                                 namespace.clone(),
                                 target_url,
                                 deadline,
                                 task_monitor.clone(),
-                            ));
+                            );
+                            migration_task = Some(task);
+                            migration_rx = Some(receiver);
                         }
                     }
                     Some(
@@ -2058,6 +2281,21 @@ pub async fn run(
                 break;
             }
         }
+    }
+
+    // 進行中の移行タスクを打ち切って回収する。確立済みの移行先 session は `MoqtClient` の
+    // drop で transport が閉じる。run 自体の終了が先に決まった場合であり異常ではない
+    if let Some(handle) = migration_task.take() {
+        handle.abort();
+        let _ = handle.await;
+        tracing::debug!("Aborted the in-flight migration task");
+    }
+    // 旧 session の終了タスクは best-effort である。run の終了を待たせないよう打ち切って
+    // 回収する (旧 session の transport は `MoqtClient` の drop で閉じる)
+    for handle in old_session_closers.drain(..) {
+        handle.abort();
+        let _ = handle.await;
+        tracing::debug!("Aborted the old session close task");
     }
 
     // MP4 リーダーのスレッドを停止して実行時エラーを拾う
@@ -2271,27 +2509,59 @@ async fn migrate_publisher_session(
     }
 }
 
-/// 移行タスクを起動し、結果を受け取る oneshot を返す
+/// 移行タスクを起動し、JoinHandle と結果を受け取る oneshot を返す
 ///
 /// 移行タスクは新しい session を確立して PUBLISH を張り、結果を oneshot で main ループへ返す。
 /// main ループは結果を受け取るまで旧 session で配信を続ける (§7.6.1)。
+/// JoinHandle は run の終了時に打ち切るために呼び出し側が保持する
+/// ([`std::mem::drop`] すると detach され、移行先 session が close されないまま残る)。
 fn spawn_migration_task(
     config: Config,
     namespace: TrackNamespace,
     target_url: ServerUrl,
     deadline: MigrationDeadline,
     task_monitor: tokio_metrics::TaskMonitor,
-) -> oneshot::Receiver<MigrationTaskResult> {
+) -> (
+    tokio::task::JoinHandle<()>,
+    oneshot::Receiver<MigrationTaskResult>,
+) {
     let (tx, rx) = oneshot::channel();
     // 移行タスクのメトリクスも同じモニタで集計する
     let monitor = task_monitor.clone();
-    tokio::spawn(monitor.instrument(async move {
+    let handle = tokio::spawn(monitor.instrument(async move {
         let result =
             migrate_publisher_session(config, namespace, target_url, deadline, task_monitor).await;
-        // main ループが既に終了している場合は結果を破棄する
-        let _ = tx.send(result);
+        // main ループが既に終了している場合 (移行結果はもう誰も読まない) だけ失敗する
+        if tx.send(result).is_err() {
+            tracing::debug!("Dropping the migration result");
+        }
     }));
-    rx
+    (handle, rx)
+}
+
+/// 移行後の旧 session を終了するタスクを起動する
+///
+/// 旧 session の PUBLISH に PUBLISH_DONE を送り、NO_ERROR で閉じる
+/// (draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration) / §9.9 (PUBLISH_DONE))。
+/// GOAWAY の Timeout は待たない。待つと main ループを塞ぐためである。戻り値の JoinHandle は
+/// run の終了時に打ち切るために呼び出し側が保持する (detach すると run 終了後も旧 session の
+/// close が残る)。
+fn spawn_old_session_close(
+    task_monitor: &tokio_metrics::TaskMonitor,
+    old_client: MoqtClient,
+    video_request_id: Option<u64>,
+    audio_request_id: Option<u64>,
+    catalog_request_id: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(task_monitor.clone().instrument(async move {
+        shutdown_old_session(
+            old_client,
+            video_request_id,
+            audio_request_id,
+            catalog_request_id,
+        )
+        .await;
+    }))
 }
 
 /// 移行後の旧 session を終了する
@@ -3854,6 +4124,219 @@ mod tests {
                 publish_track_for_request(11, Some(10), None, 12),
                 PublishTrack::Unknown,
                 "音声を配信しないときは音声の id と一致しないこと"
+            );
+        }
+    }
+
+    /// 移行先の c4m トークンに合わせてカタログ JSON を組み立て直す判断を固定する
+    ///
+    /// draft-ietf-moq-msf-01 §5.2.42 (Authorization Info): 移行先 URL の `c4m` が変わると
+    /// catalog の track に載せる authInfo も変わる。
+    mod catalog_rebuild_tests {
+        use super::*;
+
+        /// テスト用の CatalogContext (音声トラック 1 本だけを持つ)
+        fn audio_only_context() -> CatalogContext {
+            CatalogContext {
+                namespace_text: "moq-example".to_string(),
+                track_name: "video".to_string(),
+                sync: catalog::CatalogSyncParams {
+                    render_group: CATALOG_RENDER_GROUP,
+                    target_latency_ms: 200,
+                },
+                video: None,
+                audio: Some(CatalogAudioTrack {
+                    codec: "opus".to_string(),
+                    samplerate: AUDIO_SAMPLE_RATE,
+                    channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
+                    bitrate: 64,
+                }),
+            }
+        }
+
+        /// c4m トークンの有無で authInfo が変わること
+        ///
+        /// 移行先の c4m が変わったとき、同じ入力から authInfo を載せ替えた JSON を
+        /// 組み立てられることを固定する。
+        #[test]
+        fn catalog_context_json_reflects_c4m_tokens() {
+            let context = audio_only_context();
+
+            let without_tokens = context.json(&[]).expect("c4m 無しでも組み立てられること");
+            let text = String::from_utf8(without_tokens).expect("UTF-8 の JSON であること");
+            assert!(
+                !text.contains("authInfo"),
+                "c4m が無いときは authInfo を載せないこと: {text}"
+            );
+
+            let with_tokens = context
+                .json(&[b"publisher-token".to_vec()])
+                .expect("c4m 有りでも組み立てられること");
+            let text = String::from_utf8(with_tokens).expect("UTF-8 の JSON であること");
+            assert!(
+                text.contains(r#""authInfo":{"cat":"%c4m%"}"#),
+                "c4m があるときは authInfo を載せること: {text}"
+            );
+            assert!(
+                !text.contains("publisher-token"),
+                "配信者のトークンそのものはカタログに載せないこと: {text}"
+            );
+        }
+
+        /// context の映像 / 音声の値がカタログのパラメータへそのまま渡ること
+        ///
+        /// 起動時のカタログ送信を context 経由に整理しても、初回の送信内容 (track 名 /
+        /// namespace / codec / 解像度 / bitrate など) が変わらないことを固定する。
+        #[test]
+        fn catalog_context_track_params_carry_the_values() {
+            let context = CatalogContext {
+                namespace_text: "moq-example".to_string(),
+                track_name: "video".to_string(),
+                sync: catalog::CatalogSyncParams {
+                    render_group: CATALOG_RENDER_GROUP,
+                    target_latency_ms: 200,
+                },
+                video: Some(CatalogVideoTrack {
+                    codec: "av01.0.08M.08".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    fps: 30,
+                    bitrate: 5_000,
+                    max_group_duration_ms: Some(2_000),
+                }),
+                audio: Some(CatalogAudioTrack {
+                    codec: "opus".to_string(),
+                    samplerate: AUDIO_SAMPLE_RATE,
+                    channel_config: AUDIO_CHANNEL_CONFIG.to_string(),
+                    bitrate: 64,
+                }),
+            };
+
+            let (video, audio) = context.track_params();
+            let video = video.expect("映像トラックのパラメータがあること");
+            assert_eq!(video.track_name, "video", "映像の track 名が渡ること");
+            assert_eq!(
+                video.namespace, "moq-example",
+                "映像の namespace が渡ること"
+            );
+            assert_eq!(
+                video.codec, "av01.0.08M.08",
+                "映像の codec 文字列が渡ること"
+            );
+            assert_eq!(video.width, 1920, "映像の幅が渡ること");
+            assert_eq!(video.height, 1080, "映像の高さが渡ること");
+            assert_eq!(video.fps, 30, "映像のフレームレートが渡ること");
+            assert_eq!(video.bitrate, 5_000, "映像の bitrate が渡ること");
+            assert_eq!(
+                video.max_group_duration_ms,
+                Some(2_000),
+                "映像の最大 Group 長が渡ること"
+            );
+
+            let audio = audio.expect("音声トラックのパラメータがあること");
+            assert_eq!(
+                audio.track_name, AUDIO_TRACK_NAME,
+                "音声の track 名が渡ること"
+            );
+            assert_eq!(
+                audio.namespace, "moq-example",
+                "音声の namespace が渡ること"
+            );
+            assert_eq!(audio.codec, "opus", "音声の codec 文字列が渡ること");
+            assert_eq!(
+                audio.samplerate, AUDIO_SAMPLE_RATE,
+                "音声のサンプリングレートが渡ること"
+            );
+            assert_eq!(
+                audio.channel_config, AUDIO_CHANNEL_CONFIG,
+                "音声の channelConfig が渡ること"
+            );
+            assert_eq!(audio.bitrate, 64, "音声の bitrate が渡ること");
+        }
+
+        /// c4m トークンの並びが同じときだけ再構築しないこと
+        #[test]
+        fn c4m_tokens_changed_compares_the_token_list() {
+            assert!(
+                !c4m_tokens_changed(&[b"abc".to_vec()], &[b"abc".to_vec()]),
+                "同じ並びなら再構築しないこと"
+            );
+            assert!(!c4m_tokens_changed(&[], &[]), "両方空なら再構築しないこと");
+            assert!(
+                c4m_tokens_changed(&[], &[b"abc".to_vec()]),
+                "トークンが増えたら再構築すること"
+            );
+            assert!(
+                c4m_tokens_changed(&[b"abc".to_vec()], &[]),
+                "トークンが消えたら再構築すること"
+            );
+            assert!(
+                c4m_tokens_changed(&[b"abc".to_vec()], &[b"abd".to_vec()]),
+                "トークンの値が変わったら再構築すること"
+            );
+        }
+    }
+
+    /// 移行の PUBLISH 失敗時に接続からやり直す判断と待ち時間を固定する
+    ///
+    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の移行は期限 (Timeout) までに完了させる
+    /// 必要がある。待ち時間は期限で cap し、期限が無ければ再試行しない。
+    mod migration_retry_tests {
+        use super::*;
+
+        /// 指数バックオフで待ち時間が伸び、上限で頭打ちになること
+        #[test]
+        fn migration_retry_delay_grows_and_is_capped() {
+            let remaining = std::time::Duration::from_secs(10);
+            assert_eq!(
+                migration_retry_delay(0, remaining),
+                Some(MIGRATION_RETRY_INITIAL_DELAY),
+                "初回は初期待ち時間であること"
+            );
+            assert_eq!(
+                migration_retry_delay(1, remaining),
+                Some(MIGRATION_RETRY_INITIAL_DELAY * 2),
+                "2 回目は初期待ち時間の 2 倍になること"
+            );
+            assert_eq!(
+                migration_retry_delay(10, remaining),
+                Some(MIGRATION_RETRY_MAX_DELAY),
+                "上限を超えないこと"
+            );
+            assert_eq!(
+                migration_retry_delay(0, std::time::Duration::from_millis(50)),
+                Some(std::time::Duration::from_millis(50)),
+                "残り時間が短ければ残り時間で cap すること"
+            );
+            assert_eq!(
+                migration_retry_delay(0, std::time::Duration::ZERO),
+                None,
+                "残り時間が無ければ再試行しないこと"
+            );
+        }
+
+        /// プロトコル違反だけは新しい接続でも再試行しないこと
+        ///
+        /// プロトコル違反とメッセージの encode / decode 失敗は、新しい session でも同じコードで
+        /// 再発するため再試行しない。セッション終了や REQUEST_ERROR による拒否は新しい接続で
+        /// 解消しうるため再試行する。
+        #[test]
+        fn migration_publish_failure_retryability() {
+            assert!(
+                migration_publish_failure_is_retryable(&Error::ConnectionClosed),
+                "セッション終了は新しい接続で再試行すること"
+            );
+            assert!(
+                migration_publish_failure_is_retryable(&Error::Other(
+                    "request rejected: code=0x4".to_string()
+                )),
+                "REQUEST_ERROR による拒否は新しい接続で再試行すること"
+            );
+            assert!(
+                !migration_publish_failure_is_retryable(&Error::Moqt(
+                    shiguredo_moqt::error::MessageError::ProtocolViolation("invalid catalog")
+                )),
+                "プロトコル違反は同じコードで再発するため再試行しないこと"
             );
         }
     }
