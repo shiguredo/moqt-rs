@@ -3,7 +3,7 @@
 - Created: 2026-10-09
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-outgoing-subgroup-reopen-blocked
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-25
 - Updated: 2026-10-10
 
 ## 目的
@@ -28,8 +28,9 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   `None` を返しても再オープンが禁止されている場合がある」と明記されている。
 - 禁止エントリは Forward State 0→1 の REQUEST_UPDATE 受理、または `Session::forget_subscription` で
   破棄される。
-- `examples/moq-pub/src/pipeline.rs` は peer の reset (`is_peer_stream_reset`) を観測すると writer を捨て、
-  自前で `video_group_id` / `audio_group_id` / `catalog_group_id` を進めている。
+- `examples/moq-pub/src/pipeline.rs` は映像の peer reset (`is_peer_stream_reset`) を観測すると
+  `current_video_writer` を捨てて `video_group_id` を進め、音声は `audio_group_id` を進める。
+  カタログは送信前に `catalog_group_id` を進める (`republish_catalog_at_next_group`)。
 
 ## 設計方針
 
@@ -38,6 +39,7 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   `subgroup_id` の `None` は FirstObjectId モードの未解決 subgroup を表す。
 - 既存の `stopped_outgoing_subgroup_error_code` との使い分け (コードを取得する / 可否だけを判定する) を
   doc に書く。alias を共有する場合の判定範囲が内部判定と一致することを明記する。
+- 利用者向け API 一覧 (`skills/shiguredo-moqt/SKILL.md`) にも新しい公開 API と使い分けを追記する。
 - example の自前管理を判定 API に置き換えるかは、同じ挙動を保てるかを確認してから決める。§11.3.2 は
   購読を再開する REQUEST_UPDATE の受理後に新しい stream を開くことを許す (MAY) ため、Forward State 0→1 の
   受理後 (禁止解除後) の再開も判定できる必要がある。
@@ -48,5 +50,9 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
 - 送信前に再オープン禁止を判定できる公開 API があること。
 - alias を共有する別 request のエントリも含めて内部判定と一致することを単体テストで固定すること。
 - 既存の `stopped_outgoing_subgroup_error_code` の挙動が変わらないこと。
+- example の自前管理を判定 API に置き換えるか判断し、置き換える場合は同じ挙動を保つこと。
+  置き換えない場合は、その理由を「## 解決方法」に記録すること。
+- `skills/shiguredo-moqt/SKILL.md` の利用者向け API 一覧に新しい公開 API と
+  `stopped_outgoing_subgroup_error_code` との使い分けが追記されていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること
