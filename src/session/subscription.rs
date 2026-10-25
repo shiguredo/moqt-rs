@@ -54,8 +54,9 @@ impl Session {
 
     /// `subscriptions_by_track` から 1 つの request_id を除去する (空になったら key ごと削除)
     ///
-    /// 購読系索引の削除を 1 箇所に集約する。`forget_subscription` /
-    /// `supersede_pending_subscriber` / `close_subscription_on_stream_end` がこのヘルパを通す。
+    /// 購読系索引の削除を 1 箇所に集約する。`forget_subscription` と
+    /// `supersede_pending_subscriber` がこのヘルパを通す。`Terminated` になっただけの
+    /// subscription は索引に残るため、同じ Track への終端処理は索引から列挙できる。
     /// subscription 本体の除去は `forget_subscription` のみが行う。
     pub(crate) fn remove_subscription_track_index(
         &mut self,
@@ -176,6 +177,11 @@ impl Session {
         self.remove_fill_request_subscriptions(request_id);
         // STOP_SENDING による再オープン禁止エントリも破棄する
         self.stopped_outgoing_subgroups.remove(&request_id);
+        // `rejected_request_ids` はここでは除去しない。drain 中の malformed 終端で登録した
+        // id は、破棄後に peer が bidi request stream の close 通知を送っても no-op で
+        // 吸収するために残す (登録の意図と除去の詳細はフィールド doc と
+        // `terminate_malformed_track` を参照。除去は forget 後に届いた close 通知の no-op
+        // 経路が行い、close が forget より先に届いた場合は記録が残る)。
         Some(subscription)
     }
 

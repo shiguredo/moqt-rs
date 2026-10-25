@@ -575,60 +575,69 @@ fn status_object(object_id: u64, status: u64) -> DecodedSubgroupObject {
     }
 }
 
-/// Malformed Track の cancel / 終端イベントを回収して検証する
+/// request_id ごとの Malformed イベント記録
 ///
-/// 返り値は (cancel イベント列, ResetDataStream 件数, RequestTerminated(MalformedTrack) 件数)。
-/// cancel は `request_id` と `STREAM_MALFORMED_TRACK` も検証する。`expected_reset_stream_id` は
-/// `ResetDataStream` の対象 stream (datagram 経路は `None`)。CloseSession はテストの前提に
-/// 反するため panic する。
-fn drain_malformed_events(
+/// (cancel 種別, RequestTerminated の種別列。件数は種別列の長さで表す)。
+type MalformedEventRecord = (Vec<&'static str>, Vec<RequestKind>);
+
+/// Malformed Track の cancel / 終端イベントを request_id ごとに回収する
+///
+/// 返り値は (request_id ごとの (cancel 種別, RequestTerminated の種別列),
+/// ResetDataStream の対象 stream_id 一覧)。cancel は STOP_SENDING → RESET_STREAM の順で記録し、
+/// request_id と `STREAM_MALFORMED_TRACK` も検証する。CloseSession はテストの前提に反するため panic する。
+fn drain_malformed_events_by_request(
     session: &mut Session,
-    request_id: u64,
-    expected_reset_stream_id: Option<DataStreamId>,
-) -> (Vec<&'static str>, usize, usize) {
+) -> (
+    std::collections::HashMap<u64, MalformedEventRecord>,
+    Vec<DataStreamId>,
+) {
     use shiguredo_moqt::error::STREAM_MALFORMED_TRACK;
-    let mut cancels = Vec::new();
-    let mut reset_data_streams = 0;
-    let mut malformed_terminations = 0;
+    let mut per_request: std::collections::HashMap<u64, MalformedEventRecord> =
+        std::collections::HashMap::new();
+    let mut reset_stream_ids = Vec::new();
     while let Some(e) = session.poll_event() {
         match e {
             SessionEvent::StopSendingRequestStream {
-                request_id: rid,
+                request_id,
                 error_code,
             } => {
-                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
                 assert_eq!(
                     error_code, STREAM_MALFORMED_TRACK,
                     "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
                 );
-                cancels.push("stop_sending");
+                per_request
+                    .entry(request_id)
+                    .or_default()
+                    .0
+                    .push("stop_sending");
             }
             SessionEvent::ResetRequestStream {
-                request_id: rid,
+                request_id,
                 error_code,
             } => {
-                assert_eq!(rid, request_id, "cancel の対象 request id が一致すること");
                 assert_eq!(
                     error_code, STREAM_MALFORMED_TRACK,
                     "cancel の error code が STREAM_MALFORMED_TRACK (0x12) であること"
                 );
-                cancels.push("reset");
+                per_request.entry(request_id).or_default().0.push("reset");
             }
-            SessionEvent::ResetDataStream { stream_id, .. } => {
-                assert_eq!(
-                    Some(stream_id),
-                    expected_reset_stream_id,
-                    "ResetDataStream の対象 stream_id が期待値と一致すること"
-                );
-                reset_data_streams += 1;
-            }
-            SessionEvent::RequestTerminated {
-                request_id: rid,
-                reason: TerminationReason::MalformedTrack { .. },
+            SessionEvent::ResetDataStream {
+                stream_id,
+                error_code,
                 ..
             } => {
-                assert_eq!(rid, request_id, "終端対象 request id が一致すること");
-                malformed_terminations += 1;
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "ResetDataStream の error code が STREAM_MALFORMED_TRACK (0x12) であること"
+                );
+                reset_stream_ids.push(stream_id);
+            }
+            SessionEvent::RequestTerminated {
+                request_id,
+                kind,
+                reason: TerminationReason::MalformedTrack { .. },
+            } => {
+                per_request.entry(request_id).or_default().1.push(kind);
             }
             SessionEvent::CloseSession(err) => {
                 panic!("CloseSession が発行された: {err:?}");
@@ -636,7 +645,45 @@ fn drain_malformed_events(
             _ => {}
         }
     }
-    (cancels, reset_data_streams, malformed_terminations)
+    (per_request, reset_stream_ids)
+}
+
+/// 単一 request を対象に Malformed Track のイベントを回収して検証する
+///
+/// 返り値は (cancel 種別, ResetDataStream 件数, RequestTerminated(MalformedTrack) 件数)。
+/// 対象外の request にイベントが発行されていないことも検証する。
+fn drain_malformed_events(
+    session: &mut Session,
+    request_id: u64,
+    expected_reset_stream_id: Option<DataStreamId>,
+) -> (Vec<&'static str>, usize, usize) {
+    let (mut per_request, reset_stream_ids) = drain_malformed_events_by_request(session);
+    let (cancels, kinds) = per_request.remove(&request_id).unwrap_or_default();
+    let terminated = kinds.len();
+    assert!(
+        per_request.is_empty(),
+        "対象外の request に malformed イベントが発行された: {:?}",
+        per_request.keys().collect::<Vec<_>>()
+    );
+    if !cancels.is_empty() {
+        assert_eq!(
+            cancels,
+            vec!["stop_sending", "reset"],
+            "cancel が受信方向 STOP_SENDING → 送信方向 RESET_STREAM の順で 1 回ずつ発行されること"
+        );
+    }
+    match expected_reset_stream_id {
+        Some(id) => assert_eq!(
+            reset_stream_ids,
+            vec![id],
+            "ResetDataStream の対象 stream_id が一致すること"
+        ),
+        None => assert!(
+            reset_stream_ids.is_empty(),
+            "ResetDataStream が発行されないこと"
+        ),
+    }
+    (cancels, reset_stream_ids.len(), terminated)
 }
 
 /// OBJECT_DELIVERY_TIMEOUT (0x02) を 1 つ持つ Object Properties のバイト列を作る

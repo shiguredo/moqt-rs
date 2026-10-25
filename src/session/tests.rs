@@ -4,6 +4,7 @@ use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::subscription::validation::extract_forward_state;
 use super::types::*;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::error::{SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_INVALID_REQUEST_ID};
 use crate::message::common::TrackNamespace;
@@ -1253,15 +1254,16 @@ fn establish_subscriber_subscription_for_data_tests(
     rid
 }
 
-/// Malformed Track 検出時は Object の帰属先 subscription を終端すること
+/// Malformed Track 検出時は同じ Track の全 subscription を終端すること
 ///
 /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 2 は FIN 済み Subgroup への
 /// 最終 Object ID 超過を Malformed とする。同一 Subgroup の再オープンは禁止されるため
 /// この条件は公開 API の通常手順では到達しない防御的検出であり、tracker に FIN 状態を
-/// 直接記録して帰属先の決定ロジックを検証する。
+/// 直接記録して帰属先の決定ロジックを検証する。帰属先の subscription だけでなく、
+/// 同じ Track の stream 所有者も sibling として終端される。
 #[test]
-fn malformed_object_after_fin_terminates_attributed_subscription() {
-    use crate::error::SESSION_PROTOCOL_VIOLATION;
+fn malformed_object_after_fin_terminates_all_track_subscriptions() {
+    use crate::error::{SESSION_PROTOCOL_VIOLATION, STREAM_MALFORMED_TRACK};
     use crate::message_parameter::PARAM_OBJECTID_FILTER;
     use crate::stream::decoder::DecodedSubgroupObject;
     use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
@@ -1316,7 +1318,7 @@ fn malformed_object_after_fin_terminates_attributed_subscription() {
         .expect("FIN 状態の記録に成功すること");
 
     // Object ID=50 は rid1 が不合格、rid2 が合格する。Malformed 検出はフィルタ判定より
-    // 優先され、帰属先の rid2 が終端される (stream 所有者 rid1 は Established のまま)
+    // 優先され、同じ Track の rid2 と rid1 がともに終端される
     let err = client
         .recv_subgroup_object(
             stream_id,
@@ -1342,8 +1344,32 @@ fn malformed_object_after_fin_terminates_attributed_subscription() {
             .subscription(rid1)
             .expect("subscription が存在すること")
             .state,
-        SubscriptionState::Established,
-        "stream 所有者 rid1 は Established のままであること"
+        SubscriptionState::Terminated,
+        "同じ Track の stream 所有者 rid1 も Terminated になること"
+    );
+    // 検出した data stream の ResetDataStream が 1 回だけ発行されること
+    let mut reset_data_streams = 0;
+    while let Some(event) = client.poll_event() {
+        match event {
+            SessionEvent::ResetDataStream {
+                stream_id: reset_stream_id,
+                error_code,
+                ..
+            } => {
+                assert_eq!(
+                    reset_stream_id, stream_id,
+                    "ResetDataStream の対象 stream_id が一致すること"
+                );
+                assert_eq!(error_code, STREAM_MALFORMED_TRACK);
+                reset_data_streams += 1;
+            }
+            SessionEvent::CloseSession(err) => panic!("CloseSession が発行された: {err:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        reset_data_streams, 1,
+        "検出した data stream の ResetDataStream が 1 回だけ発行されること"
     );
     assert_eq!(client.state(), SessionState::Established);
 }
@@ -1423,16 +1449,15 @@ fn malformed_after_fin_takes_precedence_over_filtered_out() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// FIN 時の `mark_fin` 失敗 (条件 3) の Malformed 終端対象が Object の帰属先に
-/// なること
+/// FIN 時の `mark_fin` 失敗 (条件 3) で同じ Track の全 subscription が終端されること
 ///
 /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 3 は同一 Subgroup が複数
 /// stream で FIN され最終 Object が異なる場合を Malformed とする。公開 API では
 /// 再オープン禁止により通常手順で到達しないため、tracker に 1 回目の FIN を直接記録して
-/// 検証する。終端対象は stream 所有者ではなく Object を受理した帰属先にする。
+/// 検証する。終端対象は Object を受理した帰属先に加えて、同じ Track の stream 所有者も含む。
 #[test]
-fn malformed_mark_fin_failure_terminates_attributed_subscription() {
-    use crate::error::SESSION_PROTOCOL_VIOLATION;
+fn malformed_mark_fin_failure_terminates_all_track_subscriptions() {
+    use crate::error::{SESSION_PROTOCOL_VIOLATION, STREAM_MALFORMED_TRACK};
     use crate::message_parameter::PARAM_OBJECTID_FILTER;
     use crate::stream::decoder::DecodedSubgroupObject;
     use crate::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
@@ -1501,7 +1526,8 @@ fn malformed_mark_fin_failure_terminates_attributed_subscription() {
         .expect("FIN 状態の記録に成功すること");
 
     // 2 回目の FIN が異なる最終 Object ID=50 を主張するため条件 3 で Malformed になる。
-    // 終端対象は帰属先 rid2 (stream 所有者 rid1 は Established のまま)
+    // 検出経路は FIN のため ResetDataStream は発行されず、同じ Track の rid2 と rid1 が
+    // ともに終端される
     let err = client
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect_err("同一 Subgroup の最終 Object 不一致は Malformed Track になること");
@@ -1519,8 +1545,8 @@ fn malformed_mark_fin_failure_terminates_attributed_subscription() {
             .subscription(rid1)
             .expect("subscription が存在すること")
             .state,
-        SubscriptionState::Established,
-        "stream 所有者 rid1 は Established のままであること"
+        SubscriptionState::Terminated,
+        "同じ Track の stream 所有者 rid1 も Terminated になること"
     );
     // stream は incoming から除去済みなので、mark_fin 失敗の終端経路でも所有者の
     // open 中の受信 stream 数が戻っている必要がある (残ると cleanup_ready が張り付く)
@@ -1532,6 +1558,68 @@ fn malformed_mark_fin_failure_terminates_attributed_subscription() {
             .open_incoming_subgroup_count,
         0,
         "mark_fin 失敗の終端経路でも所有者 rid1 の open 中の受信 stream 数が戻ること"
+    );
+
+    // FIN 経路で検出したため ResetDataStream は発行されず、rid1 / rid2 の両方へ
+    // cancel と RequestTerminated が 1 回ずつ発行されること
+    let mut reset_data_streams = 0;
+    let mut cancels = vec![];
+    let mut terminations = vec![];
+    while let Some(event) = client.poll_event() {
+        match event {
+            SessionEvent::ResetDataStream { .. } => reset_data_streams += 1,
+            SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "request_id={request_id} の STOP_SENDING error code が STREAM_MALFORMED_TRACK であること"
+                );
+                cancels.push((request_id, "stop_sending"));
+            }
+            SessionEvent::ResetRequestStream {
+                request_id,
+                error_code,
+            } => {
+                assert_eq!(
+                    error_code, STREAM_MALFORMED_TRACK,
+                    "request_id={request_id} の RESET_STREAM error code が STREAM_MALFORMED_TRACK であること"
+                );
+                cancels.push((request_id, "reset"));
+            }
+            SessionEvent::RequestTerminated {
+                request_id,
+                reason: TerminationReason::MalformedTrack { .. },
+                ..
+            } => terminations.push(request_id),
+            SessionEvent::CloseSession(err) => panic!("CloseSession が発行された: {err:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        reset_data_streams, 0,
+        "FIN で検出した malformed 終端では ResetDataStream を発行しないこと"
+    );
+    terminations.sort_unstable();
+    let mut expected = vec![rid1, rid2];
+    expected.sort_unstable();
+    // request ごとに STOP_SENDING → RESET_STREAM の順で 1 回ずつであること
+    for rid in [rid1, rid2] {
+        let kinds: Vec<&'static str> = cancels
+            .iter()
+            .filter(|(request_id, _)| *request_id == rid)
+            .map(|(_, kind)| *kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["stop_sending", "reset"],
+            "rid={rid} に STOP_SENDING → RESET_STREAM の順で 1 回ずつ発行されること"
+        );
+    }
+    assert_eq!(
+        terminations, expected,
+        "rid1 / rid2 のそれぞれに RequestTerminated が 1 回ずつ発行されること"
     );
     assert_eq!(client.state(), SessionState::Established);
 }

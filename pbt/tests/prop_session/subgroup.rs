@@ -1218,7 +1218,7 @@ fn discarded_object_does_not_reach_object_trackers() -> noprop::TestResult {
                         .expect("subscription が存在すること")
                         .state,
                     SubscriptionState::Terminated,
-                    "Malformed Track は該当 subscription だけを終端すること"
+                    "Malformed Track は該当 subscription を終端すること"
                 );
                 observed_seen.set(true);
             }

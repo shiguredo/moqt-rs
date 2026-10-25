@@ -418,7 +418,9 @@ pub struct Session {
     /// 相手発行 `handle_peer_*`) に insert され、`forget_*` 系、および Subscribe / Publish の
     /// bidi stream 終端 (`close_subscription_on_stream_end`) で remove される。
     pub(super) request_streams: HashMap<u64, RequestKind>,
-    /// REQUEST_ERROR で拒否した、または peer のクローズ通知前に状態を破棄した request id の集合 (`request_streams` 未登録のもの)
+    /// REQUEST_ERROR で拒否した、peer のクローズ通知前に状態を破棄した、または drain 中の
+    /// malformed 終端で request stream を残したまま終端した request id の集合 (`request_streams`
+    /// 未登録のものと、drain 中の malformed 終端で登録したものを含む)
     ///
     /// draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection):
     /// "When an endpoint rejects a request without performing any application processing,
@@ -448,8 +450,16 @@ pub struct Session {
     /// クローズ通知の受信時に削除される (2 回目以降の close 通知は unknown id として
     /// `PROTOCOL_VIOLATION` になる。QUIC では FIN 後に RESET_STREAM が遅延して届きうるが、
     /// 同一 request stream への 2 回目の close 通知を抑止する責務は I/O 層にある)。
-    /// peer がクローズ通知を送らない場合は
-    /// セッション生存中に残り続ける (サイズは「拒否後・破棄済みのうち未クローズの id 数」に比例する)。
+    /// 例外として、drain 中 (PUBLISH_DONE 受信済み) に malformed で終端した subscription は、
+    /// subscription の存続中に遅延して開かれる fill fetch stream を受理し続けるため、
+    /// `request_streams` の entry が残った状態で記録する。この記録は、`forget_subscription`
+    /// より後に届いた bidi request stream の close 通知を no-op で吸収するのにも使う。
+    /// 除去されるのは、forget 後に no-op 経路で close 通知を処理したとき、または通常の
+    /// malformed 終端 (request_streams を除去してから登録する経路) の close 通知処理時である。
+    /// close 通知が forget より先に届いて `request_streams` 経路で処理された場合は記録が
+    /// 残り、セッション終了まで保持される (いずれも malformed 異常系でのみ発生する)。
+    /// サイズは「拒否後・破棄済みのうち未クローズの id 数」と「drain 中の malformed 終端を
+    /// 経て close 済みの id 数」の合計に比例する (`terminate_malformed_track` 参照)。
     pub(super) rejected_request_ids: HashSet<u64>,
     /// 自側が responder の request で peer の FIN を受信済みの request id の集合
     ///
@@ -1545,8 +1555,10 @@ impl Session {
     ///
     /// - ローカル終端済み (`rejected_request_ids` に記録済み) の request
     /// - 自側が request stream の GOAWAY を送った request (`GoawayState::request_stream_sent`)。
-    ///   `rejected_request_ids` は peer の 1 回目の close 通知で消えるが、data stream は
-    ///   別 stream であり到着順に保証がないため、こちらも併せて見る
+    ///   `rejected_request_ids` は通常の malformed 終端では close 通知の処理で消えるが、
+    ///   drain 中に malformed で終端した subscription では close 後も記録が残る場合がある
+    ///   (詳細はフィールド doc 参照)。data stream は別 stream であり到着順に保証がないため、
+    ///   こちらも併せて見る
     ///
     /// FETCH 応答 data stream は `IncomingDataStream::Discarded` として登録し、以後の受信・
     /// 終端を no-op で吸収する。fill fetch stream は subscription への帰属を保ったまま受理し
@@ -1577,6 +1589,9 @@ impl Session {
     /// GOAWAY の deadline 満了や malformed 終端で送信方向を reset した request には、
     /// peer が reset を観測する前に送った応答・通知が遅延して届く。各ハンドラは本関数で判定し、
     /// true なら MUST 検証を済ませた後に状態遷移とイベント発行を行わず `Ok` を返す。
+    /// drain 中に malformed で終端した subscription は、close 後も記録が残る場合があるため
+    /// (詳細は `rejected_request_ids` の doc 参照)、close 後に届いた in-flight メッセージも
+    /// 同様に no-op で受理する。
     pub(super) fn is_locally_terminated_request(&self, request_id: u64) -> bool {
         self.rejected_request_ids.contains(&request_id)
     }

@@ -291,7 +291,7 @@ fn object_property_filter_evaluates_target_property_in_datagram() {
             .expect("subscription が存在すること")
             .state,
         SubscriptionState::Terminated,
-        "該当 subscription だけが Terminated になること"
+        "該当 request の subscription が Terminated になること"
     );
     assert_eq!(
         client.state(),

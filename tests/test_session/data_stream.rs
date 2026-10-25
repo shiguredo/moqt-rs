@@ -432,7 +432,9 @@ fn grease_object_property_in_mandatory_range_keeps_subscription() {
     }
 }
 
-/// Malformed Track 検出時はセッションを閉じず該当 subscription だけを終端する
+/// Malformed Track 検出時はセッションを閉じず該当 Track の subscriber 役 subscription を終端する
+///
+/// publisher 役の subscription と別 Track の request は対象外である。
 ///
 /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks): "When a subscriber detects a
 /// Malformed Track, it MUST cancel any corresponding subscription or fetches for that Track
@@ -2070,14 +2072,14 @@ fn awaiting_header_fin_is_accepted() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
-// ─── Malformed Track の request 単位終端 (draft §12.1) ─────────────────
+// ─── Malformed Track の Track 単位終端 (draft §12.1) ─────────────────
 
-/// Malformed Track を検出しても他の subscription は生き残る
+/// Malformed Track を検出しても別 Track の subscription は生き残る
 ///
 /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) は「該当 Track の subscription /
-/// fetch を cancel する」ことだけを要求しており、セッションや他 request には影響しない。
+/// fetch を cancel する」ことだけを要求しており、セッションや別 Track の request には影響しない。
 #[test]
-fn malformed_track_keeps_other_subscriptions_alive() {
+fn malformed_track_keeps_other_track_subscriptions_alive() {
     let (mut client, mut server) = establish_pair();
     // 2 本の subscription を別 Track / 別 alias で確立する
     let mut rids = Vec::new();
@@ -2160,12 +2162,663 @@ fn malformed_track_keeps_other_subscriptions_alive() {
             .expect("subscription が存在する")
             .state,
         SubscriptionState::Established,
-        "他の subscription は Established のまま生き残ること"
+        "別 Track の subscription は Established のまま生き残ること"
     );
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// datagram 経路の Malformed Track も subscription 単位で終端する
+/// 同一 Track への subscription を subscriber 役 (client) として確立して request_id を返す
+///
+/// fill fetch stream の遅延到着を検証するため、draft-ietf-moq-transport-22 §3.4.1
+/// (Opening and Closing Fill Fetch Streams) が前提とする FILL_PARAMETERS を購読に載せる。
+fn establish_subscription_as_subscriber(
+    client: &mut Session,
+    server: &mut Session,
+    track_name: &[u8],
+    alias: u64,
+) -> u64 {
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: shiguredo_moqt::message_parameter::PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(MessageParameters::new()),
+    });
+    let rid =
+        send_and_recv_subscribe_with_parameters(client, server, &[b"live"], track_name, parameters);
+    complete_subscribe(client, server, rid, alias);
+    rid
+}
+
+/// server (subscriber) から client (publisher) への subscription を確立して request_id を返す
+fn establish_subscription_as_publisher(
+    client: &mut Session,
+    server: &mut Session,
+    track_name: &[u8],
+    alias: u64,
+) -> u64 {
+    let rid = server
+        .send_subscribe(
+            ns(&[b"live"]),
+            track_name.to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(server);
+    client
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_subscribe_ok(rid, alias, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(client);
+    server
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    rid
+}
+
+/// publisher 役が Track に 1 Object を publish する
+///
+/// FETCH は Objects 未公開の Track に対して INVALID_RANGE になるため、
+/// FETCH を確立する前に publisher の Largest Object を作る必要がある。
+/// 送信した subgroup stream は終端せず、後続テストの受信には影響しない。
+fn publish_one_object_on_track(
+    session: &mut Session,
+    request_id: u64,
+    alias: u64,
+    stream_id: DataStreamId,
+) {
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(1),
+        publisher_priority: Some(0),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    session
+        .send_subgroup_header(stream_id, request_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+    session
+        .send_subgroup_object(stream_id, 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+}
+
+/// 同一 Track への FETCH を subscriber 役 (client) として確立して request_id を返す
+///
+/// 前提: 同じ Track の publisher 役 subscription が確立済みで、
+/// `publish_one_object_on_track` により Largest Object (group 1, object 0) が公開済みであること
+/// (FETCH は Objects 未公開の Track では INVALID_RANGE になる)。
+fn establish_fetch_as_subscriber(
+    client: &mut Session,
+    server: &mut Session,
+    track_name: &[u8],
+) -> u64 {
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            track_name.to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    rid
+}
+
+/// 同一 Track への FETCH を publisher 役で確立して request_id を返す
+///
+/// 前提: 同じ Track の publisher 役 subscription が確立済みで、
+/// `publish_one_object_on_track` により Largest Object (group 1, object 0) が公開済みであること。
+fn establish_fetch_as_publisher(
+    client: &mut Session,
+    server: &mut Session,
+    track_name: &[u8],
+) -> u64 {
+    let rid = server
+        .send_fetch(
+            ns(&[b"live"]),
+            track_name.to_vec(),
+            MessageParameters::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(server);
+    client
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 1,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(client);
+    server
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    rid
+}
+
+/// Malformed Track 条件 1 (Publisher Priority 不一致) を公開 API で起こす
+///
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1 は、同一 Subgroup ID の
+/// 直前 Object と Publisher Priority が異なる場合を Malformed とする。1 本目の stream を
+/// RESET で終端して再オープンを許可し、2 本目の header で Priority を変える。
+fn trigger_malformed_priority_mismatch(
+    client: &mut Session,
+    alias: u64,
+    stream1: DataStreamId,
+    stream2: DataStreamId,
+) {
+    let header1 = SubgroupHeader {
+        track_alias: alias,
+        group_id: 1,
+        subgroup_id: SubgroupIdMode::Explicit(3),
+        publisher_priority: Some(1),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream1, header1.encode()[0] as u64)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_subgroup_header(stream1, &header1)
+            .expect("テストフィクスチャの前提条件を満たす"),
+        TrackDataAcceptance::Accepted
+    );
+    client
+        .recv_subgroup_object(
+            stream1,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_data_stream_closed(
+            stream1,
+            RequestStreamEnd::Reset {
+                error_code: Some(1),
+                reliable_size: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let header2 = SubgroupHeader {
+        publisher_priority: Some(2),
+        ..header1
+    };
+    client
+        .recv_data_stream_type(stream2, header2.encode()[0] as u64)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_subgroup_header(stream2, &header2)
+        .expect_err("同一 Subgroup の Publisher Priority 変更は Malformed Track になる");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+}
+
+/// Malformed Track 検出時に同じ Track の全 subscription を cancel する
+///
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) は "cancel any corresponding
+/// subscription or fetches for that Track" を MUST とする。draft-22 は同一 Track への
+/// 複数同時 subscription を許可するため、検出した request だけでは足りない。
+/// subscription の登録順で最初の候補 (rid1) が header を受理するため、rid1 が検出対象になる。
+#[test]
+fn malformed_track_cancels_all_subscriptions_on_same_track() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 620;
+    let rid1 = establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    let rid2 = establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(31), DataStreamId(32));
+
+    let (events, reset_stream_ids) = drain_malformed_events_by_request(&mut client);
+    assert_eq!(
+        client
+            .subscription(rid1)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "malformed を検出した subscription が Terminated になること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid2)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "同じ Track の sibling subscription も Terminated になること"
+    );
+    assert_eq!(
+        reset_stream_ids,
+        vec![DataStreamId(32)],
+        "検出した data stream の ResetDataStream が 1 回だけ発行されること"
+    );
+    for rid in [rid1, rid2] {
+        let (cancels, kinds) = events
+            .get(&rid)
+            .expect("malformed イベントが発行されること");
+        assert_eq!(
+            cancels,
+            &vec!["stop_sending", "reset"],
+            "rid={rid}: STOP_SENDING → RESET_STREAM の順で 1 回ずつ発行されること"
+        );
+        assert_eq!(
+            kinds,
+            &vec![RequestKind::Subscribe],
+            "rid={rid}: RequestTerminated の種別が Subscribe であること"
+        );
+    }
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// Malformed Track 検出時に同じ Track の FETCH も cancel する
+#[test]
+fn malformed_track_cancels_same_track_fetch() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 621;
+    let subscription_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    publish_one_object_on_track(&mut server, subscription_rid, alias, DataStreamId(39));
+    let fetch_rid = establish_fetch_as_subscriber(&mut client, &mut server, b"cam");
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(33), DataStreamId(34));
+
+    let (events, reset_stream_ids) = drain_malformed_events_by_request(&mut client);
+    assert_eq!(
+        client
+            .subscription(subscription_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+    assert_eq!(
+        client.fetch(fetch_rid).expect("fetch が存在する").state,
+        FetchState::Terminated,
+        "同じ Track の FETCH も Terminated になること"
+    );
+    let (cancels, kinds) = events
+        .get(&fetch_rid)
+        .expect("FETCH の malformed イベントが発行されること");
+    assert_eq!(
+        cancels,
+        &vec!["stop_sending", "reset"],
+        "FETCH に STOP_SENDING → RESET_STREAM の順で 1 回ずつ発行されること"
+    );
+    assert_eq!(
+        kinds,
+        &vec![RequestKind::Fetch],
+        "FETCH の RequestTerminated 種別が Fetch であること"
+    );
+    assert_eq!(reset_stream_ids, vec![DataStreamId(34)]);
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// Malformed Track 検出時に別 Track と publisher 役の subscription は影響を受けない
+#[test]
+fn malformed_track_keeps_other_track_and_publisher_role_requests() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 622;
+    let subscriber_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    // 同じ Track を client が publisher 役としても購読する (別 role のため対象外)
+    let publisher_rid = establish_subscription_as_publisher(&mut client, &mut server, b"cam", 623);
+    // 別 Track の subscription も影響を受けない
+    let rid = establish_subscription_as_subscriber(&mut client, &mut server, b"mic", 624);
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(35), DataStreamId(36));
+
+    let (events, _) = drain_malformed_events_by_request(&mut client);
+    assert_eq!(
+        client
+            .subscription(subscriber_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+    assert_eq!(
+        client
+            .subscription(publisher_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "publisher 役の subscription は対象外であること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "別 Track の subscription は影響を受けないこと"
+    );
+    assert!(!events.contains_key(&publisher_rid));
+    assert!(!events.contains_key(&rid));
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// Malformed Track 検出時に別 Track と publisher 役の FETCH は影響を受けない
+#[test]
+fn malformed_track_keeps_other_track_and_publisher_role_fetches() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 625;
+    let subscriber_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    // 同じ Track の publisher 役 subscription と、client が応答する FETCH
+    let publisher_rid = establish_subscription_as_publisher(&mut client, &mut server, b"cam", 626);
+    publish_one_object_on_track(&mut client, publisher_rid, 626, DataStreamId(40));
+    let publisher_fetch_rid = establish_fetch_as_publisher(&mut client, &mut server, b"cam");
+    // 別 Track の subscription と FETCH
+    let other_rid = establish_subscription_as_subscriber(&mut client, &mut server, b"mic", 627);
+    publish_one_object_on_track(&mut server, other_rid, 627, DataStreamId(41));
+    let other_fetch_rid = establish_fetch_as_subscriber(&mut client, &mut server, b"mic");
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(42), DataStreamId(43));
+
+    let (events, reset_stream_ids) = drain_malformed_events_by_request(&mut client);
+    assert_eq!(
+        client
+            .subscription(subscriber_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+    assert_eq!(
+        client
+            .subscription(publisher_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "publisher 役の subscription は対象外であること"
+    );
+    assert_eq!(
+        client
+            .fetch(publisher_fetch_rid)
+            .expect("fetch が存在する")
+            .state,
+        FetchState::Established,
+        "publisher 役の FETCH は対象外であること"
+    );
+    assert_eq!(
+        client
+            .subscription(other_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established
+    );
+    assert_eq!(
+        client
+            .fetch(other_fetch_rid)
+            .expect("fetch が存在する")
+            .state,
+        FetchState::Established,
+        "別 Track の FETCH は影響を受けないこと"
+    );
+    assert!(!events.contains_key(&publisher_fetch_rid));
+    assert!(!events.contains_key(&other_fetch_rid));
+    assert_eq!(reset_stream_ids, vec![DataStreamId(43)]);
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// Malformed Track 検出時に drain 中の sibling は二重終端せず破棄対象へ移す
+#[test]
+fn malformed_track_clears_draining_sibling_without_duplicate_termination() {
+    let (mut client, mut server) = establish_pair();
+    let detecting_alias = 628;
+    let draining_alias = 629;
+    // header の帰属先が rid_detecting になるよう先に確立する
+    let rid_detecting =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", detecting_alias);
+    let rid_draining =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", draining_alias);
+
+    // rid_draining へ PUBLISH_DONE を送り drain 状態にする
+    server
+        .send_publish_done(
+            rid_draining,
+            shiguredo_moqt::error::PUBLISH_DONE_TRACK_ENDED,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid_draining, done_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        client
+            .subscription(rid_draining)
+            .expect("subscription が存在する")
+            .publish_done
+            .is_some(),
+        "PUBLISH_DONE 受信直後は drain 中であること"
+    );
+
+    trigger_malformed_priority_mismatch(
+        &mut client,
+        detecting_alias,
+        DataStreamId(44),
+        DataStreamId(45),
+    );
+
+    let (events, reset_stream_ids) = drain_malformed_events_by_request(&mut client);
+    assert_eq!(
+        client
+            .subscription(rid_detecting)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+    assert_eq!(
+        client
+            .subscription(rid_draining)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+    assert!(
+        !events.contains_key(&rid_draining),
+        "drain 中の sibling には終端イベントを重複発行しないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid_draining)
+            .expect("subscription が存在する")
+            .publish_done,
+        None,
+        "malformed 検出後は drain を解除して破棄対象に移ること"
+    );
+    assert_eq!(reset_stream_ids, vec![DataStreamId(45)]);
+
+    // drain 解除後は同 alias の遅延 datagram が破棄されること
+    let acceptance = client
+        .recv_object_datagram(&ObjectDatagram {
+            track_alias: draining_alias,
+            group_id: 1,
+            object_id: 0,
+            publisher_priority: Some(0),
+            properties_data: None,
+            end_of_group: false,
+            status: None,
+        })
+        .expect("遅延 datagram は破棄として受理されること");
+    assert_eq!(
+        acceptance,
+        TrackDataAcceptance::Discarded,
+        "drain 解除後の遅延 datagram が破棄されること"
+    );
+
+    // PUBLISH_DONE より後に開かれる fill fetch stream は live な stream として受理され
+    // (破棄対象化は subscription の破棄時)、セッションを閉じないこと
+    client
+        .recv_data_stream_type(DataStreamId(46), FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            DataStreamId(46),
+            &FetchHeader {
+                request_id: rid_draining,
+            },
+        )
+        .expect("遅延 fill FETCH_HEADER は破棄対象として受理されること");
+    // アプリが subscription を破棄した後も、開設済み fill stream の終端通知は no-op で
+    // 吸収され、セッションを閉じない
+    client
+        .forget_subscription(rid_draining)
+        .expect("drain 解除済みの subscription は破棄できること");
+    client
+        .recv_data_stream_closed(DataStreamId(46), RequestStreamEnd::Fin)
+        .expect("破棄後の fill stream FIN は no-op で吸収されること");
+    client
+        .recv_request_stream_closed(rid_draining, RequestStreamEnd::Fin)
+        .expect("破棄後の bidi request stream close は no-op で吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// drain 解除した sibling は request stream close 後も遅延 fill stream を受理する
+///
+/// draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): PUBLISH_DONE は late-opening stream より
+/// 先に届きうる。request stream の close が先に届いても、同じ subscription の遅延 fill fetch
+/// stream は引き続き受理し、アプリが subscription を破棄した後の終端通知も no-op で吸収する。
+#[test]
+fn malformed_track_drain_cleared_sibling_tolerates_late_fill_after_close() {
+    let (mut client, mut server) = establish_pair();
+    let detecting_alias = 630;
+    let draining_alias = 631;
+    let _rid_detecting =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", detecting_alias);
+    let rid_draining =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", draining_alias);
+
+    // rid_draining を drain 状態にしてから、rid_detecting 側で malformed を検出する
+    server
+        .send_publish_done(
+            rid_draining,
+            shiguredo_moqt::error::PUBLISH_DONE_TRACK_ENDED,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("ended")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid_draining, done_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    trigger_malformed_priority_mismatch(
+        &mut client,
+        detecting_alias,
+        DataStreamId(50),
+        DataStreamId(51),
+    );
+
+    // request stream close が先に届いても遅延 fill fetch stream を受理すること
+    client
+        .recv_request_stream_closed(rid_draining, RequestStreamEnd::Fin)
+        .expect("request stream close は受理されること");
+    client
+        .recv_data_stream_type(DataStreamId(52), FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            DataStreamId(52),
+            &FetchHeader {
+                request_id: rid_draining,
+            },
+        )
+        .expect("request stream close 後の遅延 fill FETCH_HEADER が受理されること");
+
+    // 破棄後は開設済み fill stream の終端通知を no-op で吸収すること
+    client
+        .forget_subscription(rid_draining)
+        .expect("drain 解除済みの subscription は破棄できること");
+    client
+        .recv_data_stream_closed(DataStreamId(52), RequestStreamEnd::Fin)
+        .expect("破棄後の fill stream FIN は no-op で吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// データストリーム終端済みの sibling FETCH には malformed の cancel を発行しない
+///
+/// FETCH 応答の data stream が FIN で終端すると fetch は `Terminated` になる。この状態の
+/// sibling は cancel で止める対象が残っていないため、malformed 検出時もイベントを発行しない
+/// (`terminate_request_for_malformed_track` の FETCH 分岐)。
+#[test]
+fn malformed_track_does_not_cancel_data_stream_finished_fetch() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 632;
+    let subscription_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    publish_one_object_on_track(&mut server, subscription_rid, alias, DataStreamId(53));
+    let fetch_rid = establish_fetch_as_subscriber(&mut client, &mut server, b"cam");
+
+    // FETCH 応答の data stream を開いて FIN で終端し、fetch を Terminated にする
+    server
+        .send_fetch_header(DataStreamId(54), fetch_rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_data_stream_type(DataStreamId(54), FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            DataStreamId(54),
+            &FetchHeader {
+                request_id: fetch_rid,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_data_stream_closed(DataStreamId(54))
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_data_stream_closed(DataStreamId(54), RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client.fetch(fetch_rid).expect("fetch が存在する").state,
+        FetchState::Terminated,
+        "data stream FIN で fetch が Terminated になること"
+    );
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(55), DataStreamId(56));
+
+    let (events, _) = drain_malformed_events_by_request(&mut client);
+    assert!(
+        !events.contains_key(&fetch_rid),
+        "終端済み FETCH には malformed の cancel イベントを発行しないこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// datagram 経路の Malformed Track も同じ Track の subscription を終端する
 ///
 /// datagram は stream を持たないので `ResetDataStream` は発行されない。
 #[test]
