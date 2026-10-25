@@ -1,7 +1,7 @@
 # 未知のエラーコードを文脈ごとの INTERNAL_ERROR 相当に正規化する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -48,3 +48,31 @@ REQUEST_ERROR, PUBLISH_DONE, or Data Stream Reset) MUST be treated as equivalent
 - 未知の REQUEST_ERROR / PUBLISH_DONE コードを受信してもセッションが閉じないこと。
 - `docs/missing-features.md` の該当項目が実装状況に合わせて更新されていること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/error.rs` に文脈別の公開写像関数を追加した。
+  - `normalize_session_termination_code`
+  - `normalize_request_error_code`
+  - `normalize_publish_done_code`
+  - `normalize_stream_reset_code`
+  各関数は draft-ietf-moq-transport-22 §16.11 の各レジストリに属する既知コードをそのまま返し、未知コードは
+  その文脈の `*_INTERNAL_ERROR` を返す。Stream Reset の `Option<u64>` の `None` (アプリケーションエラーコード
+  無し) は写像しない。
+- `tests/test_error.rs` に 4 文脈の既知コード / 未知コード / GREASE 値の写像テストを追加した
+  (`unknown_error_code_normalization`)。GREASE は `shiguredo_moqt::grease::generate` で生成し、`is_grease` で
+  確認している。
+- `examples/tokio-moq/src/error.rs` から写像関数を再公開し、`examples/tokio-moq/src/moqt_client.rs` が
+  REQUEST_ERROR の拒否理由を組み立てるときに生コードと正規化コードの両方を出すようにした。
+  `examples/moq-sub/src/pipeline.rs` は PUBLISH_DONE のログに生コードと正規化コードの両方を出すようにした。
+- `docs/missing-features.md` の「要確認」から、分類 helper をライブラリに置くかの検討項目を削除した
+  (実装済みのため)。
+
+## 完了条件の検証
+
+- 4 文脈の既知 / 未知 / GREASE の写像: `unknown_error_code_normalization::known_codes_are_unchanged` /
+  `unknown_codes_are_normalized_to_internal_error` / `grease_codes_are_normalized_to_internal_error`
+- 未知の REQUEST_ERROR / PUBLISH_DONE コードを受信してもセッションが閉じないことは既存の受信テスト
+  (`tests/test_session/` の REQUEST_ERROR / PUBLISH_DONE 受信テスト) が維持している。
+- `docs/missing-features.md` の該当項目を削除した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
