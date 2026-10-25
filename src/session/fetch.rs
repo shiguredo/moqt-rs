@@ -274,6 +274,7 @@ impl Session {
             track_namespace: Some(track_namespace.clone()),
             track_name: Some(track_name.clone()),
             fetch_start,
+            request_end: None,
             state: FetchState::Pending,
             end_location: None,
             end_of_track: false,
@@ -742,8 +743,9 @@ impl Session {
             my_role: TrackRole::Publisher,
             track_namespace: Some(track_ns),
             track_name: Some(track_name),
-            // publisher 側は FETCH_OK の End 検証を行わないため要求 Start を保持しない
-            fetch_start: None,
+            // 送信 Object が要求範囲の内側かを検証するため、解決済みの start / end を保持する
+            fetch_start: start,
+            request_end: end,
             state: FetchState::Pending,
             end_location: None,
             end_of_track: false,

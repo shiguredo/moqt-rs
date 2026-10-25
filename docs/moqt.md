@@ -58,6 +58,13 @@
   publisher 役 subscription の送信記録に限られ、FETCH 応答で送った Object は含まれない。TRACK_STATUS_OK は未対応。
   自側が publish した最大は publisher 役 subscription を forget した後も保持する)
 - Location Filter (range を LOCATION_FILTER で指定。§9.20.9 の Location Filter Type ごとに後続フィールドが決まる符号化で、Type 0x00 (None) と 0x05 (Next Object) を区別する)
+  - publisher の送信側は subscription に加え、FETCH 応答と fill fetch stream の Object Location を
+    要求範囲 (FETCH_OK の End Location を含む) で検証する (`send_fetch_object` が範囲外を
+    `LocalFilterMismatch` で拒否する)。End of Range は Object ではないため `send_fetch_end_of_range`
+    を使い、Location 検証の対象外とする。
+  - FETCH 応答に対する Range Filters (§3.3.2 の Subgroup / Object ID / Priority / Object Property) の
+    評価は未対応である (Location Filter のみ。FETCH Object の送信 API に Subgroup ID / Priority /
+    Properties を渡す設計が必要)
 - New Group Request
 - Range Filters (Subgroup / ObjectID / Priority / Object Property / Track Property)
   - codec と MAX_FILTER_RANGES / 重複 / 構造の検証

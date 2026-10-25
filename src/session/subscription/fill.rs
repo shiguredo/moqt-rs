@@ -167,6 +167,12 @@ impl Session {
         if let Some((start, end)) =
             should_open_fill_stream(fill, filter_view.as_ref(), largest.as_ref())
         {
+            // `send_fill_fetch_header` が Location 検証に使う effective fill range を
+            // subscription ごとに保持する (stream を開くたびに 1 件消費する)
+            self.pending_fill_ranges
+                .entry(subscription_request_id)
+                .or_default()
+                .push_back((start, end));
             self.events.push_back(SessionEvent::OpenFillFetchStream {
                 request_id: fill_request_id,
                 subscription_request_id,

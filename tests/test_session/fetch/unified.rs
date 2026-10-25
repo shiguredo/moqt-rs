@@ -758,7 +758,13 @@ fn publisher_sends_fetch_object_via_session() {
         .expect("FETCH_HEADER の送信に成功すること");
     // 登録の裏付け: 同 stream で Object 送信できる (§11: 1 本の data stream で送る)
     server
-        .send_fetch_object(stream_id)
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect("FETCH Object の送信に成功すること");
     server
         .send_fetch_data_stream_closed(stream_id)
@@ -775,9 +781,18 @@ fn publisher_sends_fetch_object_via_session() {
 fn fetch_object_before_header_is_rejected_on_send() {
     let (_client, mut server, _rid) = establish_fetch();
     let err = server
-        .send_fetch_object(DataStreamId(121))
+        .send_fetch_object(
+            DataStreamId(121),
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect_err("FETCH_HEADER 未送信では拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        err.as_session_error().expect("セッション層のエラー").code,
+        SESSION_PROTOCOL_VIOLATION
+    );
 }
 
 /// publisher 役でない FETCH に FETCH_HEADER は送れない
@@ -1010,10 +1025,22 @@ fn forget_fetch_does_not_clean_other_fetch_entries() {
         .expect("FETCH_HEADER の送信に成功すること");
     // 両 stream で Object 送信できる (登録の裏付け)
     server
-        .send_fetch_object(DataStreamId(143))
+        .send_fetch_object(
+            DataStreamId(143),
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect("rid_a の stream で送信できること");
     server
-        .send_fetch_object(DataStreamId(144))
+        .send_fetch_object(
+            DataStreamId(144),
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect("rid_b の stream で送信できること");
     // rid_a だけを STOP_SENDING 受信 → forget で掃除する
     server
@@ -1030,7 +1057,13 @@ fn forget_fetch_does_not_clean_other_fetch_entries() {
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // 他 fetch のエントリは巻き添えにされないこと
     server
-        .send_fetch_object(DataStreamId(144))
+        .send_fetch_object(
+            DataStreamId(144),
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect("他 fetch の stream では送信を継続できること");
 }
 
@@ -1749,4 +1782,101 @@ fn subscriber_accepts_late_fetch_header_after_goaway_timeout() {
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("破棄対象 stream の終端通知が吸収されること");
     assert_eq!(client.state(), SessionState::Established);
+}
+
+/// 要求範囲外の Location で FETCH Object を送ると `LocalFilterMismatch` で拒否されること
+///
+/// draft-ietf-moq-transport-22 §3.3.1 (Location Filters):
+/// "A publisher MUST NOT send objects from outside the requested range."
+#[test]
+fn fetch_object_outside_requested_range_is_rejected() {
+    let (_client, mut server, rid) = establish_fetch();
+    let stream_id = DataStreamId(150);
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = server
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 6,
+                object_id: 0,
+            },
+        )
+        .expect_err("要求範囲外の Location は拒否されること");
+    assert_eq!(
+        err,
+        shiguredo_moqt::session::types::SendRequestError::LocalFilterMismatch
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "拒否してもセッションは閉じない"
+    );
+}
+
+/// FETCH_OK の End Location を超える Location の Object は拒否されること
+#[test]
+fn fetch_object_beyond_ok_end_location_is_rejected() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+    );
+    // FETCH_OK の End Location を要求範囲より手前にする
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 2,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(151);
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = server
+        .send_fetch_object(
+            stream_id,
+            &Location {
+                group_id: 3,
+                object_id: 0,
+            },
+        )
+        .expect_err("FETCH_OK の End Location を超える Object は拒否されること");
+    assert_eq!(
+        err,
+        shiguredo_moqt::session::types::SendRequestError::LocalFilterMismatch
+    );
+}
+
+/// End of Range は Location 検証を通らずに送れること
+#[test]
+fn fetch_end_of_range_is_accepted_without_location_validation() {
+    let (_client, mut server, rid) = establish_fetch();
+    let stream_id = DataStreamId(152);
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_end_of_range(stream_id)
+        .expect("End of Range は Location 検証なしで受理されること");
+    server
+        .send_fetch_data_stream_closed(stream_id)
+        .expect("テストフィクスチャの前提条件を満たす");
 }

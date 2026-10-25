@@ -530,7 +530,13 @@ fn fill_fetch_header_object_close_flow() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 1);
     server
-        .send_fetch_object(stream_id)
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
         .expect("テストフィクスチャの前提条件を満たす");
     server
         .send_fetch_data_stream_closed(stream_id)
@@ -1627,4 +1633,43 @@ fn subscriber_accepts_late_fill_fetch_header_after_peer_close() {
         .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
         .expect("破棄後の遅延 fill stream の終端通知が吸収されること");
     assert_eq!(client.state(), SessionState::Established);
+}
+
+/// fill fetch stream の Object は effective fill range の外側なら拒否されること
+///
+/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) の fill range は
+/// FILL_PARAMETERS の LOCATION_FILTER と継承 filter から解決する。既定 (FILL なし) は
+/// Track 全体 (先頭から Largest Object まで) であり、Largest を超える Location は拒否する。
+#[test]
+fn fill_object_outside_effective_range_is_rejected() {
+    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+    let stream_id = DataStreamId(102);
+    server
+        .send_fill_fetch_header(stream_id, update_rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = server
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 1,
+                object_id: 0,
+            },
+        )
+        .expect_err("fill range 外の Location は拒否されること");
+    assert_eq!(
+        err,
+        shiguredo_moqt::session::types::SendRequestError::LocalFilterMismatch
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "拒否してもセッションは閉じない"
+    );
 }

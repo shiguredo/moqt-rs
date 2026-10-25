@@ -1595,6 +1595,12 @@ pub struct Fetch {
     /// (保持しない) のみであり、その場合は FETCH_OK 検証をスキップする。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fetch_start: Option<Location>,
+    /// publisher が FETCH で要求された範囲の終端 (draft §3.3.1 Location Filters)
+    ///
+    /// `handle_peer_fetch` が LOCATION_FILTER から解決した値を保存する。publisher 側の
+    /// 送信 Object が要求範囲を超えていないかの検証 (`send_fetch_object`) に使う。
+    /// subscriber 側は `None` (FETCH_OK の `end_location` を別途保持する)。
+    pub request_end: Option<Location>,
     /// 現在の状態
     pub state: FetchState,
     /// FETCH_OK 受信 / 送信で確定した end_location

@@ -421,6 +421,20 @@ pub struct Session {
     /// `fetch_error_late_streams` の request ID を逆引きするために保持する。
     /// 保持期間は `peer_alias_retention_ms` (`tick_discarded_data_stream_ids` が掃除する)。
     pub(super) fetch_error_late_stream_ids: HashMap<DataStreamId, u64>,
+    /// fill fetch stream の effective fill range の pending 状態
+    ///
+    /// `maybe_open_fill_stream` が `OpenFillFetchStream` を発行した時点で、
+    /// subscription の Request ID ごとに計算済みの (start, end) を積む。
+    /// `send_fill_fetch_header` が 1 件取り出して `OutgoingFetchStream::range` へ移す。
+    /// 未消費の entry は subscription の破棄時に掃除する。1 subscription に複数 stream を
+    /// 開く場合は計算順に消費する。
+    pub(super) pending_fill_ranges: HashMap<
+        u64,
+        alloc::collections::VecDeque<(
+            crate::message::common::Location,
+            crate::message::common::Location,
+        )>,
+    >,
     /// FIN で閉じた受信 data stream id の保持集合
     ///
     /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A sender might send
@@ -699,6 +713,7 @@ impl Session {
             },
             fetch_error_late_streams: HashMap::new(),
             fetch_error_late_stream_ids: HashMap::new(),
+            pending_fill_ranges: HashMap::new(),
             peer_object_properties: HashMap::new(),
             peer_object_fields: HashMap::new(),
             peer_subgroups: SubgroupTracker::new(),

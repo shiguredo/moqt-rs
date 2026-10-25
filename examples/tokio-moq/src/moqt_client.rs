@@ -312,12 +312,18 @@ impl FetchResponseWriter {
         payload: &[u8],
         properties_data: Option<&[u8]>,
     ) -> Result<()> {
+        // 要求範囲の検証を encode より先に行い、拒否時に encoder の直前 Location を進めない
+        let location = Location {
+            group_id: input.group_id,
+            object_id: input.object_id,
+        };
+        self.data_plane
+            .send_fetch_object(self.stream_id, &location)?;
         let mut buf = Vec::new();
         self.encoder
             .encode_object(input, properties_data, &mut buf)
             .map_err(|e| TransportError::Internal(format!("fetch object encode: {e}")))?;
         buf.extend_from_slice(payload);
-        self.data_plane.send_fetch_object(self.stream_id)?;
         self.stream.send(Bytes::from(buf)).await?;
         Ok(())
     }
@@ -332,11 +338,11 @@ impl FetchResponseWriter {
     ///
     /// エンコードの規則 (直前の Location との順序など) に反する場合は [`TransportError`] になる。
     pub async fn write_end_of_non_existent_range(&mut self, location: Location) -> Result<()> {
+        self.data_plane.send_fetch_end_of_range(self.stream_id)?;
         let mut buf = Vec::new();
         self.encoder
             .encode_end_of_non_existent_range(location.group_id, location.object_id, &mut buf)
             .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
-        self.data_plane.send_fetch_object(self.stream_id)?;
         self.stream.send(Bytes::from(buf)).await?;
         Ok(())
     }
@@ -350,11 +356,11 @@ impl FetchResponseWriter {
     ///
     /// エンコードの規則 (直前の Location との順序など) に反する場合は [`TransportError`] になる。
     pub async fn write_end_of_unknown_range(&mut self, location: Location) -> Result<()> {
+        self.data_plane.send_fetch_end_of_range(self.stream_id)?;
         let mut buf = Vec::new();
         self.encoder
             .encode_end_of_unknown_range(location.group_id, location.object_id, &mut buf)
             .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
-        self.data_plane.send_fetch_object(self.stream_id)?;
         self.stream.send(Bytes::from(buf)).await?;
         Ok(())
     }
@@ -576,11 +582,25 @@ impl DataPlaneHandle {
     }
 
     /// FETCH 応答 stream 上の Object 送信を Session に通知する (publisher 側)
-    pub fn send_fetch_object(&self, stream_id: DataStreamId) -> Result<()> {
+    ///
+    /// `location` は要求範囲の検証に使う (draft-ietf-moq-transport-22 §3.3.1)。
+    /// 範囲外なら `LocalFilterMismatch` 由来のエラーになる。
+    pub fn send_fetch_object(&self, stream_id: DataStreamId, location: &Location) -> Result<()> {
         let mut session = lock_session(&self.session);
         session
-            .send_fetch_object(stream_id)
+            .send_fetch_object(stream_id, location)
             .map_err(|e| TransportError::Internal(format!("send_fetch_object: {e}")))
+    }
+
+    /// FETCH 応答 stream 上の End of Range 送信を Session に通知する (publisher 側)
+    ///
+    /// End of Range は Object ではないため Location 検証は行わない
+    /// (draft-ietf-moq-transport-22 §11.4.1.2)。
+    pub fn send_fetch_end_of_range(&self, stream_id: DataStreamId) -> Result<()> {
+        let mut session = lock_session(&self.session);
+        session
+            .send_fetch_end_of_range(stream_id)
+            .map_err(|e| TransportError::Internal(format!("send_fetch_end_of_range: {e}")))
     }
 
     /// FETCH 応答 stream の終端を Session に通知する (publisher 側)
@@ -2046,7 +2066,13 @@ impl MoqtClient {
             .map_err(|e| TransportError::Internal(format!("fetch object encode: {e}")))?;
         buf.extend_from_slice(payload);
 
-        data_plane.send_fetch_object(stream_id)?;
+        data_plane.send_fetch_object(
+            stream_id,
+            &Location {
+                group_id,
+                object_id,
+            },
+        )?;
         stream.send(Bytes::from(buf)).await?;
         stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;
@@ -2131,7 +2157,13 @@ impl MoqtClient {
             .map_err(|e| TransportError::Internal(format!("fill fetch object encode: {e}")))?;
         buf.extend_from_slice(payload);
 
-        data_plane.send_fetch_object(stream_id)?;
+        data_plane.send_fetch_object(
+            stream_id,
+            &Location {
+                group_id,
+                object_id,
+            },
+        )?;
         stream.send(Bytes::from(buf)).await?;
         stream.finish().await?;
         data_plane.send_fetch_data_stream_closed(stream_id)?;

@@ -190,6 +190,12 @@ impl IncomingDataStream {
 #[derive(Debug)]
 pub(super) struct OutgoingFetchStream {
     pub(super) request_id: u64,
+    /// fill fetch stream の effective fill range (start, end)
+    ///
+    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) の FILL_PARAMETERS と継承 filter から
+    /// 解決した範囲。通常の FETCH 応答 stream は `None` (要求範囲は `Fetch` が保持する)。
+    /// `send_fetch_object` の Location 検証に使う。
+    pub(super) range: Option<(Location, Location)>,
 }
 
 /// 自端点が送信中の uni subgroup data stream の内部状態
@@ -1741,9 +1747,13 @@ impl Session {
                 "outgoing fetch stream requires Established fetch",
             ));
         }
-        self.data_streams
-            .outgoing_fetch
-            .insert(stream_id, OutgoingFetchStream { request_id });
+        self.data_streams.outgoing_fetch.insert(
+            stream_id,
+            OutgoingFetchStream {
+                request_id,
+                range: None,
+            },
+        );
         Ok(())
     }
 
@@ -1823,10 +1833,23 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "published stream count overflow",
             ))?;
+        // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): `maybe_open_fill_stream` が
+        // 計算した effective fill range を取り出し、送信 Object の Location 検証に使う。
+        // 同じ subscription に複数 stream を開く場合は計算順に消費する。
+        let range = self
+            .pending_fill_ranges
+            .get_mut(&subscription_request_id)
+            .and_then(|ranges| ranges.pop_front());
+        if let Some(ranges) = self.pending_fill_ranges.get(&subscription_request_id)
+            && ranges.is_empty()
+        {
+            self.pending_fill_ranges.remove(&subscription_request_id);
+        }
         self.data_streams.outgoing_fill.insert(
             stream_id,
             OutgoingFetchStream {
                 request_id: subscription_request_id,
+                range,
             },
         );
         Ok(())
@@ -1834,18 +1857,74 @@ impl Session {
 
     /// 自端点が送る FETCH Object を Session に通知する (draft §11.4.1 (Fetch Header))
     ///
-    /// 登録済み stream への送信であることだけ検証する。Object の Location は
-    /// ペイロードと共にアプリが直接書き出す (Sans I/O のため Session は運ばない)。
-    /// fill fetch stream (draft-ietf-moq-transport-22 §3.4) 上の Object も
-    /// 本 API で通知する。
-    pub fn send_fetch_object(&mut self, stream_id: DataStreamId) -> Result<(), SessionError> {
+    /// Object の Location を要求範囲と照合し、範囲外なら `SendRequestError::LocalFilterMismatch`
+    /// で拒否する (draft-ietf-moq-transport-22 §3.3.1 (Location Filters): "A publisher MUST NOT
+    /// send objects from outside the requested range.")。判定に使う範囲は次のとおり。
+    /// - 通常の FETCH 応答: `Fetch::fetch_start` / `Fetch::request_end` と、`send_fetch_ok` が
+    ///   保存した `Fetch::end_location` (FETCH_OK の End Location を超えないこと)
+    /// - fill fetch stream: `maybe_open_fill_stream` が計算した effective fill range
+    ///   (`OutgoingFetchStream::range`)。range が不明なら判定をスキップする。
+    ///
+    /// Range Filters (§3.3.2) の評価は本 API の対象外である (Location Filter のみ)。
+    /// End of Range (§11.4.1.2) は Object ではないため
+    /// [`send_fetch_end_of_range`](Self::send_fetch_end_of_range) を使う。
+    pub fn send_fetch_object(
+        &mut self,
+        stream_id: DataStreamId,
+        location: &Location,
+    ) -> Result<(), SendRequestError> {
+        self.require_established()?;
+        if let Some(stream) = self.data_streams.outgoing_fill.get(&stream_id) {
+            if let Some((start, end)) = stream.range.as_ref()
+                && (location < start || location > end)
+            {
+                return Err(SendRequestError::LocalFilterMismatch);
+            }
+            return Ok(());
+        }
+        let Some(stream) = self.data_streams.outgoing_fetch.get(&stream_id) else {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "outgoing fetch object sent before fetch header",
+            )
+            .into());
+        };
+        let request_id = stream.request_id;
+        let Some(fetch) = self.fetches.get(&request_id) else {
+            return Err(SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "outgoing fetch stream refers to unknown fetch",
+            )
+            .into());
+        };
+        if !super::subscription::validation::location_filter_pass(
+            fetch.fetch_start.as_ref(),
+            fetch.request_end.as_ref(),
+            location,
+        ) {
+            return Err(SendRequestError::LocalFilterMismatch);
+        }
+        // FETCH_OK の End Location を超える Object は送らない
+        if let Some(end) = fetch.end_location.as_ref()
+            && location > end
+        {
+            return Err(SendRequestError::LocalFilterMismatch);
+        }
+        Ok(())
+    }
+
+    /// 自端点が送る End of Range を Session に通知する (draft §11.4.1.2 (End of Range))
+    ///
+    /// End of Range は Object ではないため Location 検証を行わず、stream が登録済みである
+    /// ことだけを検証する。通常の FETCH 応答 / fill fetch stream のどちらでも使える。
+    pub fn send_fetch_end_of_range(&mut self, stream_id: DataStreamId) -> Result<(), SessionError> {
         self.require_established()?;
         let known = self.data_streams.outgoing_fetch.contains_key(&stream_id)
             || self.data_streams.outgoing_fill.contains_key(&stream_id);
         if !known {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "outgoing fetch object sent before fetch header",
+                "outgoing fetch end of range sent before fetch header",
             ));
         }
         Ok(())

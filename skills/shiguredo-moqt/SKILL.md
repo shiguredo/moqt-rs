@@ -492,7 +492,12 @@ fn send_subgroup_object(
 fn send_data_stream_closed(&mut self, stream_id: DataStreamId, end: RequestStreamEnd) -> Result<(), SessionError>
 fn send_fetch_header(&mut self, stream_id: DataStreamId, request_id: u64) -> Result<(), SessionError>
 fn send_fill_fetch_header(&mut self, stream_id: DataStreamId, fill_request_id: u64) -> Result<(), SessionError>
-fn send_fetch_object(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
+fn send_fetch_object(
+    &mut self,
+    stream_id: DataStreamId,
+    location: &Location,
+) -> Result<(), SendRequestError>
+fn send_fetch_end_of_range(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn send_fetch_data_stream_closed(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn send_object_datagram(
     &mut self,

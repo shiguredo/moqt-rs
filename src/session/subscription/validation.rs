@@ -190,7 +190,7 @@ fn range_filters_pass(
 ///
 /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): "Only objects with Locations
 /// within the inclusive range pass the filter"。End は Location 単位の比較で inclusive。
-fn location_filter_pass(
+pub(crate) fn location_filter_pass(
     start: Option<&Location>,
     end: Option<&Location>,
     location: &Location,
