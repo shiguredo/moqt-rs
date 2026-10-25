@@ -665,7 +665,9 @@ use tokio_moq::MigrationScope;
 use tokio_moq::RetryPolicy;
 use tokio_moq::Transport;
 use tokio_moq::error::TransportError;
-use tokio_moq::error::{normalize_publish_done_code, session_error_code};
+use tokio_moq::error::{
+    data_stream_termination_code, normalize_publish_done_code, session_error_code,
+};
 use tokio_moq::moqt_client::{
     ClientEvent, DataPlaneHandle, MoqtClient, StreamRead, SubscribeResult,
 };
@@ -752,6 +754,12 @@ fn should_close_gracefully(session_terminated: bool) -> bool {
 /// 2 件目は入らない) か、main ループが受信ループを終えて受信側を drop した場合である。
 /// 複数の stream が同時に失敗した場合は最初の 1 件のコードで閉じる。受信ループの終了後は
 /// join の前に 1 件だけ回収し、それ以降に届いた依頼は破棄される。
+/// LOC Properties の書式違反を受けてセッション終了を main ループへ依頼する
+///
+/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+/// セッション終了の対象とする MUST を定める。Properties の解釈経路 (`deliver` 系) は
+/// [`request_session_termination_for_decode_error`] の分類対象外であり、従来どおり
+/// `session_error_code` で終了コードを決める。
 fn request_session_termination(
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     error: &MessageError,
@@ -766,6 +774,31 @@ fn request_session_termination(
         return;
     }
     tracing::warn!("Closing session on LOC property error: {code:#x} {reason}");
+}
+
+/// data stream の decoder が返した復号エラーを受けてセッション終了を main ループへ依頼する
+///
+/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) の
+/// MUST に従い、不正な header / Object / Properties はセッション終了を要求する。
+/// `UnexpectedEof` と `MalformedTrack` は
+/// [`tokio_moq::error::data_stream_termination_code`] が `None` を返すため依頼しない
+/// (前者はデータ不足として decoder が吸収し、後者は §12.1 の cancel 対象である)。
+fn request_session_termination_for_decode_error(
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    error: &MessageError,
+) {
+    let Some(code) = data_stream_termination_code(error) else {
+        return;
+    };
+    let reason = error.reason();
+    if termination_tx
+        .try_send(SessionError::new(code, reason))
+        .is_err()
+    {
+        tracing::debug!("Session termination is already requested or the main loop has stopped");
+        return;
+    }
+    tracing::warn!("Closing session on data stream decode error: {code:#x} {reason}");
 }
 
 /// session で共有する保留バッファ
@@ -4344,6 +4377,7 @@ async fn handle_stream_body(
                         }
                     }
                     Err(e) => {
+                        request_session_termination_for_decode_error(termination_tx, &e);
                         tracing::warn!("Stream #{stream_num}: failed to decode fetch header: {e}");
                         let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
@@ -4501,6 +4535,12 @@ async fn handle_stream_body(
                                     }
                                 }
                                 Err(e) => {
+                                    if let Error::Moqt(error) = &e {
+                                        request_session_termination_for_decode_error(
+                                            termination_tx,
+                                            error,
+                                        );
+                                    }
                                     tracing::warn!(
                                         "Stream #{stream_num}: failed to read catalog fetch stream: {e}"
                                     );
@@ -4548,6 +4588,7 @@ async fn handle_stream_body(
                         }
                     }
                     Err(e) => {
+                        request_session_termination_for_decode_error(termination_tx, &e);
                         tracing::warn!("Stream #{stream_num}: failed to read subgroup header: {e}");
                         let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
@@ -4713,6 +4754,9 @@ async fn handle_stream_body(
                             }
                         }
                         Err(e) => {
+                            if let Error::Moqt(error) = &e {
+                                request_session_termination_for_decode_error(termination_tx, error);
+                            }
                             tracing::warn!(
                                 "Stream #{stream_num}: failed to read catalog stream: {e}"
                             );
@@ -5049,6 +5093,7 @@ async fn decode_video_stream(
                     }
                 }
                 Err(e) => {
+                    request_session_termination_for_decode_error(termination_tx, &e);
                     tracing::warn!("Failed to decode object: {e}");
                     let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                     return frames;
@@ -5642,6 +5687,7 @@ async fn decode_audio_stream(
                     }
                 }
                 Err(e) => {
+                    request_session_termination_for_decode_error(delivery.termination_tx, &e);
                     tracing::warn!("Failed to decode audio object: {e}");
                     let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                     return chunks;
@@ -8111,6 +8157,36 @@ mod tests {
                 "1 件以上届いたバッチでは sleep しないこと: batch_len={batch_len}"
             );
         }
+    }
+
+    /// data stream の復号エラー分類: 終了対象のみ依頼されること
+    #[tokio::test]
+    async fn decode_error_requests_session_termination_only_for_terminating_errors() {
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
+        // 対象外: UnexpectedEof と MalformedTrack は依頼しない
+        request_session_termination_for_decode_error(&termination_tx, &MessageError::UnexpectedEof);
+        request_session_termination_for_decode_error(
+            &termination_tx,
+            &MessageError::MalformedTrack("malformed track"),
+        );
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "対象外の復号エラーではセッション終了を依頼しないこと"
+        );
+
+        // 対象: ProtocolViolation は PROTOCOL_VIOLATION (0x3) で依頼する
+        request_session_termination_for_decode_error(
+            &termination_tx,
+            &MessageError::ProtocolViolation("bad subgroup header"),
+        );
+        let termination = termination_rx
+            .try_recv()
+            .expect("セッション終了が依頼されること");
+        assert_eq!(
+            termination.code,
+            shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
+            "PROTOCOL_VIOLATION の終了コードであること"
+        );
     }
 
     /// LOC Properties の書式違反でセッション終了を依頼すること

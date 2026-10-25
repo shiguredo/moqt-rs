@@ -17,6 +17,22 @@ use shiguredo_moqt::error::{
 pub use shiguredo_moqt::error::normalize_publish_done_code;
 pub use shiguredo_moqt::error::normalize_request_error_code;
 
+/// data stream の復号エラーをセッション終了コードへ分類する
+///
+/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) は
+/// 不正な Subgroup Header / Object ID overflow / 非 Normal status への Properties 付与に
+/// セッション終了を MUST とする。一方、`MessageError::UnexpectedEof` は `try_decode_*` が
+/// データ不足として `Ok(None)` に吸収するため通常は届かず、届いてもセッション終了の対象外とする
+/// (`finish()` の `UnexpectedEof` は mid-object FIN として別に扱う)。
+/// `MessageError::MalformedTrack` は draft §12.1 (Malformed Tracks) が該当 Track の
+/// subscription / FETCH の cancel を MUST とするものであり、セッション終了の対象外とする。
+pub fn data_stream_termination_code(error: &MessageError) -> Option<u64> {
+    match error {
+        MessageError::UnexpectedEof | MessageError::MalformedTrack(_) => None,
+        other => Some(session_error_code(other)),
+    }
+}
+
 /// encode / decode 失敗を閉じる終了コード
 ///
 /// library の data plane (`src/session/data.rs` の `session_error_from_data_message`) と
@@ -311,6 +327,32 @@ mod tests {
             session_error_code(&MessageError::UnexpectedEof),
             SESSION_PROTOCOL_VIOLATION,
             "切り詰めは PROTOCOL_VIOLATION (0x3) であること"
+        );
+    }
+
+    /// data stream の復号エラー分類: 終了対象と対象外が区別されること
+    #[test]
+    fn data_stream_termination_code_classification() {
+        use shiguredo_moqt::error::{MessageError, SESSION_PROTOCOL_VIOLATION};
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::ProtocolViolation("bad header")),
+            Some(SESSION_PROTOCOL_VIOLATION)
+        );
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::KeyValueFormattingError("bad kvp")),
+            Some(shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR)
+        );
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::MalformedAuthToken("bad token")),
+            Some(shiguredo_moqt::error::SESSION_MALFORMED_AUTH_TOKEN)
+        );
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::UnexpectedEof),
+            None
+        );
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::MalformedTrack("malformed")),
+            None
         );
     }
 }
