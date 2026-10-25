@@ -1,7 +1,7 @@
 # 複数 session 併走による request 単位の GOAWAY 移行を設計する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -98,3 +98,23 @@
 - 0375 の実装そのもの (本 issue の成果物に従って 0375 で行う)。
 - ライブラリの `Session` の複数 session 対応 (CODEBASE.md の責務分界に反するため)。
 - relay 機能の追加 (CODEBASE.md のとおり client / server のみを対象とする)。
+
+## 解決方法
+
+- `docs/multi-session-request-migration.md` に設計文書を追加した。現状 (publisher / subscriber で異なる request
+  stream GOAWAY の扱い、単一 session 前提の data plane、peer harness の 2 session テストと `#[cfg(test)]` 制約)、
+  CODEBASE.md の制約 (Session API は拡張しない)、session task / `SessionHandle` / `SessionCommand` による複数
+  session 管理、`(SessionId, request_id)` の `RequestOwner`、subscriber / publisher それぞれの data plane
+  ルーティング、移行状態機械、同一 URL の扱いと URL 単位の session 共有、重複排除と順序、request 種別ごとの
+  移行手順、失敗時、観測、テスト方針、実装タスク分割、受入基準を決定した。
+- 0375 を `issues/pending/` から `issues/` へ reopened し、「reopened にした理由」を追記した。完了条件を設計の
+  受入基準に合わせて検証可能な形 (テスト名を併記) に更新し、実装タスクと変更対象ファイル
+  (`examples/tokio-moq/src/`、`examples/moq-sub/src/pipeline.rs`、`examples/moq-pub/src/pipeline.rs`、
+  `docs/moqt.md`、`docs/missing-features.md`) を明記した。
+- 設計文書は review-doc 相当のレビュー (2 観点) を実施し、指摘を反映した。
+
+## 完了条件の検証
+
+- 設計文書が上記 1〜10 の決定と実装タスク・変更対象ファイルを含むことを確認した。
+- 0375 が reopened され、完了条件・実装タスク・設計文書参照が更新されたことを確認した。
+- 本 issue ではコードを変更していない (`git diff` の対象は `docs/` と issue のみ)。
