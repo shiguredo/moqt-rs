@@ -1846,8 +1846,9 @@ impl MoqtClient {
                         .get(&request_id)
                         .map(|(code, reason)| {
                             format!(
-                                ": code={code} normalized_code={} reason={reason}",
-                                normalize_request_error_code(*code)
+                                ": code={code} normalized_code={} reason={}",
+                                normalize_request_error_code(*code),
+                                crate::sanitize_for_log(reason)
                             )
                         })
                         .unwrap_or_default();

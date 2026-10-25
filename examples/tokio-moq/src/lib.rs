@@ -49,6 +49,30 @@ use crate::error::TransportError;
 /// `c4m_tokens` は URL の MSF fragment から取り出した C4M 認可トークンで、
 /// 各要素を AUTHORIZATION_TOKEN (option type 0x03) として含める。空の場合は
 /// AUTHORIZATION_TOKEN を含めない。
+/// peer が内容を制御できる文字列をログ出力用にサニタイズする
+///
+/// draft-ietf-moq-transport-22 §15.9 (Logging of Untrusted String Fields): Reason Phrase や
+/// MOQT_IMPLEMENTATION は sender 制御のテキストであり、ログや描画の前にサニタイズすることを
+/// SHOULD とする ("an endpoint that logs or renders them SHOULD sanitize them first (for example,
+/// by escaping bytes outside the printable ASCII range)")。ANSI エスケープシーケンスによる
+/// 端末制御・ログ注入を防ぐため、printable ASCII (0x20-0x7E) 以外の文字を `\xNN` /
+/// `\u{...}` へエスケープする。タブ (0x09) も printable ASCII ではないためエスケープする。
+pub fn sanitize_for_log(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c.is_ascii() && (0x20..=0x7E).contains(&(c as u32)) {
+            sanitized.push(c);
+        } else if (c as u32) <= 0xFF {
+            use core::fmt::Write;
+            write!(sanitized, "\\x{:02X}", c as u32).expect("writing to String cannot fail");
+        } else {
+            use core::fmt::Write;
+            write!(sanitized, "\\u{{{:X}}}", c as u32).expect("writing to String cannot fail");
+        }
+    }
+    sanitized
+}
+
 pub fn build_setup_options(
     path: Option<&str>,
     authority: Option<&str>,
@@ -1012,7 +1036,8 @@ pub fn migration_target(
                 return Ok(None);
             }
             return Err(TransportError::Internal(format!(
-                "invalid new session URI '{uri}': {e}"
+                "invalid new session URI '{}': {e}",
+                sanitize_for_log(uri)
             )));
         }
     };
@@ -3111,5 +3136,19 @@ mod tests {
         assert!(!is_retryable_connect_error(
             &TransportError::ProtocolNegotiationFailed { error_code: 0 }
         ));
+    }
+
+    /// ログ用サニタイズが printable ASCII 以外をエスケープし、通常の ASCII を残すこと
+    #[test]
+    fn sanitize_for_log_escapes_untrusted_characters() {
+        assert_eq!(super::sanitize_for_log("hello world"), "hello world");
+        // ESC (0x1B) / タブ (0x09) / DEL (0x7F)
+        assert_eq!(
+            super::sanitize_for_log("\u{1b}[31m\t\u{7f}"),
+            "\\x1B[31m\\x09\\x7F"
+        );
+        // Latin-1 は \xNN、それ以外の Unicode は \u{...}
+        assert_eq!(super::sanitize_for_log("é"), "\\xE9");
+        assert_eq!(super::sanitize_for_log("あ"), "\\u{3042}");
     }
 }
