@@ -1,7 +1,7 @@
 # peer 由来の Reason Phrase をログ出力前にサニタイズする
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -48,3 +48,23 @@ injection.")。examples は peer 由来の文字列をそのまま tracing に�
 - peer 由来の Reason Phrase をログに出す examples の経路で、制御文字と ESC がそのまま出力されないこと。
 - 通常の ASCII 文字列は変更されずに出力されること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/tokio-moq/src/lib.rs` に `sanitize_for_log(&str) -> String` を追加した。printable ASCII (0x20-0x7E) 以外を
+  `\xNN` (<= 0xFF) / `\u{...}` へエスケープする。タブも printable ASCII ではないためエスケープ対象とした。
+- `examples/tokio-moq/src/moqt_client.rs` は REQUEST_ERROR の拒否理由を `TransportError::Internal` の文字列へ埋め込む
+  時点で `sanitize_for_log` を適用するようにした。
+- `examples/tokio-moq/src/lib.rs` の移行処理は GOAWAY の `new_session_uri` を埋め込むエラー文字列の URI 部分だけを
+  `sanitize_for_log` でサニタイズした (`new_session_uri` 自体は移行先 URI として使う値のため変更しない)。
+- `examples/tokio-moq/src/webtransport_h2.rs` の `WtEvent::SessionClosed.reason` は既に `{reason:?}` の Debug 表示で
+  エスケープされているため変更していない。PUBLISH_DONE の理由は現状ログに出しておらず、新たにログへは出さない。
+- `examples/tokio-moq/src/lib.rs` の unit test に、通常の ASCII がそのまま残り、ESC / タブ / DEL / Latin-1 / 非 ASCII が
+  エスケープされることを固定するテストを追加した。
+
+## 完了条件の検証
+
+- REQUEST_ERROR の理由と GOAWAY URI のエラー文字列の構築時にサニタイズされること: 実装と
+  `sanitize_for_log_escapes_untrusted_characters` で固定した。
+- 通常の ASCII 文字列が変更されないこと: 同テストの先頭ケースで固定した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
