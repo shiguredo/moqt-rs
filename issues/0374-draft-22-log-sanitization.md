@@ -3,7 +3,7 @@
 - Created: 2026-10-25
 - Completed: {YYYY-MM-DD}
 - Branch: develop
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-25
 
 ## 目的
 
@@ -15,20 +15,33 @@ injection.")。examples は peer 由来の文字列をそのまま tracing に�
 ## 現状
 
 - `src/message.rs` の `ReasonPhrase` は decode 時に UTF-8 と 1024 バイト上限のみを検証し、制御文字を含む文字列を保持する。
-- `examples/moq-pub/src/pipeline.rs` と `examples/moq-sub/src/pipeline.rs` は `Session closed: {:#x} {}` のように peer 由来の
-  `SessionError::reason` をそのまま tracing に渡す。
-- `examples/tokio-moq/src/moqt_client.rs` は SETUP 交換時の終了理由や REQUEST_ERROR の理由をそのままログへ出す箇所がある。
+- `SessionError::reason` はライブラリが生成する `&'static str` であり peer 由来ではない。peer が内容を制御できる文字列は
+  `RequestErrorReceived.reason` (REQUEST_ERROR の `ReasonPhrase`)、`PublishDoneReceived.reason`、`GoawayReceived.new_session_uri`、
+  `WtEvent::SessionClosed { reason }` である。
+- `examples/tokio-moq/src/moqt_client.rs` は `RequestErrorReceived.reason` を `request_errors` に保持し、
+  `TransportError::Internal` の文字列へ埋め込む。この文字列は moq-pub / moq-sub のログにそのまま出る。
+- `examples/moq-pub/src/pipeline.rs` と `examples/moq-sub/src/pipeline.rs` は REQUEST_ERROR の理由をログに出す。
+  PUBLISH_DONE の理由は現状どちらの example も `..` で捨てている。
+- `examples/tokio-moq/src/webtransport_h2.rs` は `WtEvent::SessionClosed { reason }` を `{reason:?}` (Debug 表示) で
+  ログに渡しており、制御文字はエスケープされる。ただし `examples/tokio-moq/src/lib.rs` の移行処理は GOAWAY の
+  `new_session_uri` を `invalid new session URI '{uri}'` のようにそのまま文字列へ埋め込んでエラーにしている。
 - `src/parameter.rs` の `SetupOptions` は MOQT_IMPLEMENTATION のバイト列を保持するが、取得 API が無いため現状 examples が表示することはない。
 - サニタイズを行う helper はライブラリにも examples にも存在しない。
 
 ## 設計方針
 
-- `examples/tokio-moq/src/lib.rs` に `sanitize_for_log(&str) -> String` を追加する。printable ASCII (0x20-0x7E) とタブ以外の文字を `\xNN` /
-  `\u{...}` 形式へエスケープし、ANSI エスケープシーケンスを無効化する。
-- examples のうち peer 由来の文字列をログに出す箇所へ適用する。対象は session close の理由、REQUEST_ERROR / PUBLISH_DONE の理由、Request Stream GOAWAY の URI
-  など、peer が内容を制御できる文字列とする。
+- `examples/tokio-moq/src/lib.rs` に `sanitize_for_log(&str) -> String` を追加する。printable ASCII (0x20-0x7E) 以外の文字を
+  `\xNN` / `\u{...}` 形式へエスケープし、ANSI エスケープシーケンスを無効化する。タブは printable ASCII ではないため
+  エスケープ対象とする (§15.9 の例も printable ASCII 範囲外のエスケープを挙げる)。
+- peer 由来の文字列は、ログ呼び出し地点ではなく文字列を構築する時点でサニタイズする。対象は
+  `examples/tokio-moq/src/moqt_client.rs` の `request_errors` に保存する REQUEST_ERROR の理由と、
+  `examples/tokio-moq/src/lib.rs` の移行処理が GOAWAY の `new_session_uri` を埋め込むエラー文字列とする。
+  `new_session_uri` 自体 (`Vec<u8>`) は移行先 URI として使う値でありサニタイズしない (ログ用の文字列だけを変換する)。
+  `examples/tokio-moq/src/webtransport_h2.rs` の `WtEvent::SessionClosed.reason` は既に Debug 表示でエスケープされて
+  いるため対象外とする。PUBLISH_DONE の理由は現状ログに出しておらず、本 issue では新たにログへ出さない。
 - ライブラリの `ReasonPhrase` にログ用メソッドは追加しない。ログ形式はアプリの関心事であり、ライブラリは値をそのまま提供する責務に留める。
-- `examples/tokio-moq` の unit test で、制御文字・ESC・非 ASCII を含む文字列がエスケープされ、通常の ASCII はそのまま残ることを固定する。
+- `examples/tokio-moq` の unit test で、制御文字・ESC・タブ・非 ASCII を含む文字列がエスケープされ、通常の ASCII はそのまま残ることを固定する。
+  あわせて REQUEST_ERROR の理由と GOAWAY URI のエラー文字列の構築時にサニタイズされることを固定する。
 
 ## 完了条件
 
