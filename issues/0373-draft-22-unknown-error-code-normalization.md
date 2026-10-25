@@ -3,7 +3,7 @@
 - Created: 2026-10-25
 - Completed: {YYYY-MM-DD}
 - Branch: develop
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-25
 
 ## 目的
 
@@ -13,17 +13,32 @@ REQUEST_ERROR, PUBLISH_DONE, or Data Stream Reset) MUST be treated as equivalent
 
 ## 現状
 
-- `src/session/types.rs` の `RequestErrorReceived` / `PublishDoneReceived` / `ResetDataStream` などのイベントは、受信したエラーコードを `u64` のまま保持する。
-- `src/error.rs` は各レジストリの定数と、ローカル専用コードを `*_INTERNAL_ERROR` へ置換する内部処理を持つが、未知コードを文脈別の INTERNAL_ERROR に写す公開の分類 helper を持たない。
+- `src/session/types.rs` の `RequestErrorReceived` / `PublishDoneReceived` は、受信したエラーコードを `u64` のまま保持する。
+  受信した Stream Reset は `TerminationReason::PeerStreamReset { error_code: Option<u64> }` と
+  `Fetch::peer_stop_sending_error_code: Option<Option<u64>>` が運ぶ (`Option` の `None` は WebTransport でアプリケーション
+  エラーコードが無い場合)。`SessionEvent::ResetDataStream` は自側が I/O 層へ出す送信指示であり、受信コードではない。
+- ライブラリは peer の Session Termination コードをアプリへ公開しない。peer の接続終了コードは examples の transport 層が
+  観測する (`SessionError.code` は自側が閉じるときの値)。
+- `src/error.rs` は各レジストリの定数と `is_local_error_code` を持ち、送信経路 (`Session::close` / `send_*`) がローカル専用コードを
+  `*_INTERNAL_ERROR` へ置換している。未知コードを文脈別の INTERNAL_ERROR に写す公開の分類 helper は持たない。
 - examples は受信コードを既知の定数と比較する箇所と、そのままログへ出す箇所が混在しており、未知コードを INTERNAL_ERROR 相当として扱う経路が統一されていない。
 - `docs/missing-features.md` の「要確認」に分類 helper をライブラリへ置くかの検討が残っている。
 
 ## 設計方針
 
-- `src/error.rs` に文脈別の写像関数を追加する。対象は Session Termination / REQUEST_ERROR / PUBLISH_DONE / Stream Reset の 4
-  文脈で、既知コードはそのまま返し、未知コードは各レジストリの `*_INTERNAL_ERROR` を返す。
+- `src/error.rs` に文脈別の写像関数を 4 つ追加する。
+  - `normalize_session_termination_code(code: u64) -> u64`
+  - `normalize_request_error_code(code: u64) -> u64`
+  - `normalize_publish_done_code(code: u64) -> u64`
+  - `normalize_stream_reset_code(code: u64) -> u64`
+  各関数は文脈のレジストリに属する既知コードをそのまま返し、未知コードはその文脈の `*_INTERNAL_ERROR` を返す。
+  Stream Reset は `Option<u64>` の `None` (アプリケーションエラーコード無し) を写像しない (呼び出し側が `None` をそのまま扱う)。
+  Session Termination の関数は examples の transport 層が観測した接続終了コードをアプリが渡す想定であり、ライブラリ内部の
+  受信経路は無い。目的の MUST を満たすのに必要な最小 API とする。
 - 未知コードでセッションを閉じない既存動作は変えない。REQUEST_ERROR / PUBLISH_DONE の未知コード受信をセッション終了にしないことをテストで固定する。
-- examples で受信コードの意味によって分岐・記録する箇所は、必要に応じて写像関数を使う。wire 上のコードをそのままログに出す箇所は、生のコードと正規化後のコードの両方を出して観測性を落とさない。
+- examples で受信コードの意味によって分岐・記録する箇所は、REQUEST_ERROR / PUBLISH_DONE のコード比較とログ出力
+  (`examples/tokio-moq/src/moqt_client.rs` の `request_errors`、`examples/moq-sub/src/pipeline.rs` の受信コード表示) を対象に
+  写像関数を使う。wire 上のコードをそのままログに出す箇所は、生のコードと正規化後のコードの両方を出して観測性を落とさない。
 - `docs/missing-features.md` の「要確認」から、この分類 helper の項目を実装済みとして整理する。
 - `tests/test_error.rs` に 4 文脈の既知コード / 未知コード / GREASE 値を含む写像のテストを追加する。
 
