@@ -1,7 +1,7 @@
 # FETCH_ERROR 受信後に遅延する in-flight FETCH data stream を破棄として受理する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -110,3 +110,45 @@ Object / FIN) が届くのは正当な競合である。§3.2.4 はこの到着�
   `PROTOCOL_VIOLATION` で閉じること。
 - 既存の FIN → REQUEST_ERROR の順序と、GOAWAY 遅延 header の既存テストが退行しないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `Session` に peer の REQUEST_ERROR で終端した fetch の request ID を保持する許容集合
+  (`fetch_error_late_streams`) と、data stream id から request ID を逆引きする対応表
+  (`fetch_error_late_stream_ids`) を追加した。各 entry は `peer_alias_retention_ms` を保持期間とする
+  `DeadlineTimer` で、`tick_discarded_data_stream_ids` が期限切れを掃除する。
+- `Session::handle_err_for_fetch` は `Pending` / `Established` の fetch を `Terminated` に遷移させたとき
+  許容集合へ登録する。`Terminated` の fetch への REQUEST_ERROR (FIN 後の遅延応答) は登録しない。
+- `Session::tolerates_late_data_stream` に許容集合の有効 entry を追加した。これにより
+  `forget_fetch` 後の `remove_incoming_data_streams_for_request` も受信 stream を破棄対象の保持集合へ
+  移し、対応表へ登録する。
+- `Session::recv_fetch_header` は、fetch entry がある場合は terminated 分岐で、ない場合 (`forget_fetch`
+  後) は fill fetch stream の解決より前に、許容対象の request ID を
+  `register_discarded_stream(stream_id, Some(request_id))` で破棄対象として登録する。単一 stream 制約
+  (draft §3.2.1) は `has_other_fetch_stream` と対応表の両方で判定し、2 本目の FETCH_HEADER を拒否する。
+- `Session::recv_fetch_entry` は破棄対象 stream への entry (`IncomingDataStream::Discarded` と保持集合の
+  stream id) を no-op で受理する。`recv_data_stream_type` は保持集合の stream id を既存どおり吸収する。
+- `Session::recv_data_stream_closed` は終端観測時に、`Discarded` の request ID、開いたままの
+  `IncomingDataStream::Fetch` の request ID、保持集合の stream id の逆引きのいずれかで許容集合と
+  対応表から除去する。`send_data_stream_stop_sending` で open 済みの遅延 stream を除去する場合も
+  破棄対象の保持集合へ移す。FETCH_HEADER 未受信の FIN は request ID を特定できず、保持期間の経過まで
+  許容が残る既知の制約を doc に明記した。
+- `tests/test_session/fetch/after_fin.rs` に、Pending / Established (REQUEST_UPDATE 失敗応答) の
+  FETCH_ERROR 後の遅延 stream (type / header / Object / End of Range / FIN)、`forget_fetch` 後、
+  2 本目 stream の拒否 (`forget_fetch` 後を含む)、FIN 後の許容解除、STOP_SENDING 後の終端吸収、
+  保持期間経過後の拒否、REQUEST_ERROR を受けていない終端済み fetch への遅延 header の拒否を
+  検証するテストを追加した。
+
+## 完了条件の検証
+
+- FETCH_ERROR 後の遅延 stream の受容: `request_error_then_late_fetch_data_stream_is_discarded` /
+  `request_error_for_established_fetch_then_late_fetch_data_stream_is_discarded`
+- `forget_fetch` 後: `request_error_then_late_fetch_data_stream_after_forget_is_discarded`
+- 許容記録のない終端済み fetch の拒否: `terminated_fetch_without_request_error_rejects_late_fetch_header`
+- 2 本目 stream の拒否: `request_error_then_concurrent_second_fetch_data_stream_is_rejected` /
+  `request_error_then_second_late_fetch_data_stream_after_forget_is_rejected`
+- FIN 後の許容解除: `late_fetch_data_stream_fin_removes_tolerance`
+- STOP_SENDING 後の終端吸収: `request_error_late_fetch_stream_stop_sending_absorbs_close`
+- 保持期間経過後の拒否: `fetch_error_late_stream_tolerance_expires`
+- 既存の FIN → REQUEST_ERROR と GOAWAY 遅延 header のテストは退行なし
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
