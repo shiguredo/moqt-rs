@@ -1,13 +1,13 @@
-# moq-pub / moq-sub の --help で省略可能な --namespace が必須として表示される
+# moq-pub / moq-sub の --help で省略可能な --namespace の必須表示と説明行を修正する
 
 - Created: 2026-10-20
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-cli-help-namespace-optional
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-25
 
 ## 目的
 
-`--help` の Usage が省略可能な `--namespace` を必須として表示し、moq-pub の説明行が空になる。利用者がオプションの必須・任意を誤解しないよう、help 表示を実装に合わせる。
+`--help` の Usage が省略可能な `--namespace` を必須として表示し、moq-pub の説明行が出ない。利用者がオプションの必須・任意を誤解しないよう、help 表示を実装に合わせる。
 
 ## 現状
 
@@ -20,16 +20,20 @@
 - `examples/moq-pub/src/cli.rs`
 - `examples/moq-sub/src/cli.rs`
 - `examples/moq-pub/Cargo.toml`
+- `examples/moq-pub/tests/test_cli.rs`
+- `examples/moq-sub/tests/test_cli.rs`
 
 ## 設計方針
 
-- `--namespace` を `Usage:` で必須として表示しない。`--namespace` の `.example` に頼らず、help モードでも namespace の解決をスキップするなどして、通常実行の `--namespace` 省略時の MSF fragment 解決は変えない
-- `examples/moq-pub/Cargo.toml` に `description` を追加し、`moq-pub --help` の説明行が出るようにする
-- `--url` の `.example` は必須オプションの help 表示のために必要なので残す
+- `--namespace` の `.example` を削除して `Usage:` に `--namespace <NS>` を表示させない。`.example` を削除すると help モードでは `resolve_namespace(None, &url)` が例の URL から namespace を解決するため、`--url` の `.example` を MSF fragment 付きの URL に変更して解決できるようにする (`Config` を返さないため解決結果は使われない)。通常実行の `--namespace` 省略時の MSF fragment 解決は変えない
+- `--namespace` の `.example` を削除すると `Example:` から `--namespace moq-example` が消えるため、`--url` の `.example` を `moqt://relay.example.com:4433/app#msf:moq-example--video` に変更し、`--namespace` を省略しても MSF fragment から namespace を解決できる例にする。`--url` の `.example` 自体は必須オプションの help 表示のために残す
+- `examples/moq-pub/Cargo.toml` に `description = "MOQT publisher client"` を追加し、`moq-pub --help` の説明行が出るようにする。`examples/moq-sub/src/cli.rs` の `app_description = "MOQT subscriber client"` と対にする
 
 ## 完了条件
 
-- `moq-pub --help` と `moq-sub --help` の `Usage:` に `--namespace <NS>` が必須オプションとして表示されないこと
+- `moq-pub --help` と `moq-sub --help` の `Usage:` に `--url <URL>` が表示され、`--namespace <NS>` が必須オプションとして表示されないこと
 - `--namespace` を省略した通常実行で、`--url` の MSF fragment から namespace が解決されること
-- `moq-pub --help` に `CARGO_PKG_DESCRIPTION` 由来の説明行が表示されること
+- `moq-pub --help` と `moq-sub --help` の `Example:` に表示される `--url` が MSF fragment を含み、`--namespace` を省略しても namespace を解決できること
+- `moq-pub --help` の先頭に `MOQT publisher client` が表示されること
+- 上記の help 表示を `examples/moq-pub/tests/test_cli.rs` / `examples/moq-sub/tests/test_cli.rs` で固定すること
 - `cargo test -p moq-pub -p moq-sub` / `cargo clippy -p moq-pub -p moq-sub --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること
