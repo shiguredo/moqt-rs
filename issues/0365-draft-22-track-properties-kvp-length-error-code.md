@@ -1,7 +1,7 @@
 # Track Properties の KVP 宣言長超過を KEY_VALUE_FORMATTING_ERROR に分類する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -63,3 +63,41 @@ Track Properties は先送りされたままである。本 issue は decode 失
 - Track Properties を含む制御メッセージの decode で宣言長超過が `MessageError::KeyValueFormattingError` になり、
   examples の `session_error_code` で KEY_VALUE_FORMATTING_ERROR (0x6) に写ること (既存の写像テストと decode テストの両方で確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/track_properties.rs` の `decode_track_kv_pairs` で、奇数 Type の宣言長が 2^16-1 以下かつ残りバイトを超える場合を
+  `MessageError::KeyValueFormattingError` ("track property value length exceeds remaining buffer") に分類した。
+  `varint::checked_len` + `map_err` で parameter.rs / message_parameter.rs と同じ実装に揃えた。2^16-1 超は
+  `ProtocolViolation`、Length フィールドの varint 途中終端は `UnexpectedEof` のままである。
+- draft §8.3 の MUST は受信側が Type を理解する場合が条件であること、未知 Type も §16.8 (Properties) の length による
+  skip が成立しないため同じ分類に揃える実装方針であること、§10.7 (Immutable Properties) の malformed Track と重なる
+  条件だが decode 層では Track / request を特定できず購読 cancel を発行できないため §8.3 のセッション終了を優先すること
+  を doc とコメントに明記した。`MessageError::KeyValueFormattingError` の doc も実態に合わせて更新した。
+- `TrackProperties::encode` は IMMUTABLE_PROPERTIES の内側 KVP 検証で `KeyValueFormattingError` が返る場合を
+  `ProtocolViolation` に写し、内側 decode の `UnexpectedEof` (呼び出し側が渡した直列化の切り詰め) は透過する。
+  `# Errors` を重複 / 型と値形式の不一致 / 既知 Type の値域違反 / トップレベルの `PayloadTooLong` /
+  内側 KVP の `ProtocolViolation` / 内側 varint の `UnexpectedEof` に更新した。
+- `tests/test_track_properties.rs` の既存テストを新しい分類に更新し、既知 Type (0x0B) と未知 Type (0x01)、
+  Length varint 途中終端 (`UnexpectedEof`)、宣言長が残りバイトと一致する成功ケース、65535 (上限内) の KVF と
+  65536 (上限超) の `ProtocolViolation`、正常 KVP の後の 2 個目で KVF、内側 KVP の decode / encode 写像、
+  encode の内側 varint 途中終端透過、既知 Type の値域違反を固定するテストを追加した。
+- `tests/test_message.rs` に、SUBSCRIBE_OK の Track Properties で宣言長超過が `KeyValueFormattingError` になる
+  テストを追加した。
+- `examples/tokio-moq/src/error.rs` に、同じ wire を decode して `session_error_code` が
+  `SESSION_KEY_VALUE_FORMATTING_ERROR` (0x6) に写すことを確認する通しテストを追加した。
+
+## 完了条件の検証
+
+- 既知 Type / 未知 Type の宣言長超過が `KeyValueFormattingError`:
+  `known_type_bytes_value_length_exceeds_buffer_is_key_value_formatting_error` /
+  `unknown_type_bytes_value_length_exceeds_buffer_is_key_value_formatting_error`
+- 2^16-1 超が `ProtocolViolation`: `value_too_long`
+- Length varint 途中終端が `UnexpectedEof`: `length_varint_truncation_is_unexpected_eof`
+- 内側 KVP の宣言長超過が `KeyValueFormattingError`: `inner_length_exceeding_buffer_is_key_value_formatting_error`
+- `TrackProperties::encode` の内側 KVP が `ProtocolViolation`:
+  `encode_maps_inner_length_exceeding_buffer_to_protocol_violation`
+- message 層と examples の通し確認:
+  `subscribe_ok_with_track_property_length_exceeding_payload_is_key_value_formatting_error` /
+  `track_property_length_error_maps_to_key_value_formatting_error`
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
