@@ -1,7 +1,7 @@
 # moq-sub が data stream の復号エラーで PROTOCOL_VIOLATION のセッション終了を要求する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -67,3 +67,29 @@ PROTOCOL_VIOLATION を MUST とする。§11.1.2 (Object Properties) も非 Norm
 - moq-sub の pipeline は transport から受け取ったヘッダを直接 decoder に渡す純関数の集合であり、不正ヘッダの受信から
   終了要求までの結合テストは既存の e2e では作れない。`data_stream_termination_code` の unit test と、各呼び出し経路が
   関数を呼ぶことのコードレビューで担保する。
+
+## 解決方法
+
+- `examples/tokio-moq/src/error.rs` に `data_stream_termination_code(&MessageError) -> Option<u64>` を追加した。
+  `UnexpectedEof` と `MalformedTrack` は `None`、それ以外は既存の `session_error_code` で写した `Some(code)` を返す。
+- `examples/moq-sub/src/pipeline.rs` に `request_session_termination_for_decode_error` を追加し、video / audio /
+  catalog / fetch / header の decoder エラー経路で呼ぶようにした。`Some(code)` のとき
+  `request_session_termination` と同じ経路で main ループへ終了を依頼し、`None` は従来どおり warn と
+  drain / STOP_SENDING だけを行う。
+- LOC Properties の書式違反経路は従来の `request_session_termination` のまま (UnexpectedEof も
+  `session_error_code` で 0x3 に写す) とし、data stream decoder の分類と混在させないようにした。
+  ログ文言は復号失敗全般を表す "Closing session on data stream decode error" を新しい関数側に置き、
+  LOC 経路は既存文言を維持した。
+- `examples/moq-sub/src/pipeline.rs` の unit test に、`UnexpectedEof` / `MalformedTrack` では依頼せず、
+  `ProtocolViolation` で 0x3 の依頼が出ることを固定するテストを追加した。
+- `examples/tokio-moq/src/error.rs` の unit test に、`ProtocolViolation` → 0x3、`KeyValueFormattingError` → 0x6、
+  `MalformedAuthToken` → 0x16、`UnexpectedEof` / `MalformedTrack` → `None` の分類テストを追加した。
+
+## 完了条件の検証
+
+- 不正な Subgroup Header / Object ID overflow / Object Properties の不正: `data_stream_termination_code` の分類と
+  `decode_error_requests_session_termination_only_for_terminating_errors` で固定した。
+- `KeyValueFormattingError` → 0x6、`UnexpectedEof` / `MalformedTrack` → 依頼なし: 同上。
+- `request_session_termination` の doc とログ: 新関数 `request_session_termination_for_decode_error` の doc と
+  ログ文言を data stream の復号失敗全般を表す形にした。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
