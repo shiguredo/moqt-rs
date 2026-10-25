@@ -3,7 +3,7 @@
 - Created: 2026-10-25
 - Completed: {YYYY-MM-DD}
 - Branch: develop
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-10-25
 
 ## 目的
 
@@ -14,27 +14,54 @@ the middle of a serialized Object, the session SHOULD be closed with a PROTOCOL_
 
 ## 現状
 
-- `src/stream/decoder.rs` の `SubgroupStreamDecoder::finish` と `FetchStreamDecoder::finish` は、途中終了なら `MessageError::UnexpectedEof`
-  を返す。
-- `src/session/data.rs` の `Session::report_mid_object_fin` は、FIN が Object のシリアライズ途中で届いたことを Session に報告し、PROTOCOL_VIOLATION
-  でセッションを fail する。破棄対象の stream では no-op で受理する。`recv_data_stream_closed` との呼び出し順序は問わない契約になっている。
-- `examples/moq-sub/src/pipeline.rs` の video / audio / catalog / fetch の各ループは、`receive_registered_stream_data` が `Ok(None)` (FIN)
-  を返すと decoder の `finish()` を呼ばずに処理を終える。
+- `src/stream/decoder.rs` の `SubgroupStreamDecoder::finish` と `FetchStreamDecoder::finish` は、header 未受信、Object header 途中、
+  payload 未消費のいずれでも `MessageError::UnexpectedEof` を返す。
+- `src/session/data.rs` の `Session::report_mid_object_fin` は、FIN が Object のシリアライズ途中で届いたことを Session に報告し、
+  PROTOCOL_VIOLATION でセッションを fail する。破棄対象の stream では no-op で受理する。RESET_STREAM による途中終了は
+  draft §11.3.2 (Closing Subgroup Streams) の正常経路であり本 API の対象ではない。`recv_data_stream_closed` との呼び出し順序は
+  問わない契約になっている。
+- `examples/moq-sub/src/pipeline.rs` の `receive_registered_stream_data` は `RecvChunk::End(end)` を受けると
+  `recv_data_stream_closed(stream_id, end)` を呼び、FIN / RESET_STREAM / Session からの STOP_SENDING 指示のいずれでも
+  `Ok(None)` を返す。呼び出し側は終端種別を受け取れない。
+- video / audio / catalog (subgroup / fetch) の各 Object ループは `Ok(None)` で処理を終えるが、decoder の `finish()` を呼ばない。
+  header 待ちループも同じ `Ok(None)` で終わるが、header 未受信は §11.3 の「シリアライズ途中の Object」ではない。
+- payload 読み出しループ (`read_catalog_payload` / `read_fetch_entry` / video / audio の payload ループ) は、payload 途中の終端で
+  `Error::Other("stream closed before ... payload")` を返して drain するため、`Ok(None)` だけを見る設計では payload 途中の
+  FIN を検出できない。
+- `examples/tokio-moq/src/moqt_client.rs` の `DataPlaneHandle` は `Session::report_mid_object_fin` のラッパーを持たない。
 - ライブラリ側の `report_mid_object_fin` と decoder の `finish` は tests で固定されているが、examples からの呼び出しは 0 件である。
 
 ## 設計方針
 
-- data stream の FIN を観測した時点で decoder の `finish()` を呼び、`Err(MessageError::UnexpectedEof)` なら `DataPlaneHandle` 経由で
-  `Session::report_mid_object_fin` を呼ぶ。
-- `finish()` の `Err` のうち `UnexpectedEof` は「シリアライズ途中の FIN」を意味するため、そのまま報告対象とする。それ以外の `MessageError` は decoder
-  の実装不整合として扱い、`report_mid_object_fin` ではなく復号エラーとしてのセッション終了要求 (別 issue の経路) に寄せる。
-- video / audio / catalog (subgroup / fetch) の全ループに適用する。`receive_registered_stream_data` が FIN 時に `recv_data_stream_closed`
-  を通知する既存経路との順序は問わない契約に従う。
-- 途中終了を検出して報告する処理を小さなヘルパに切り出し、`UnexpectedEof` でのみ報告することを unit test で固定する。
+- `receive_registered_stream_data` の戻り値を、データあり / 終端 (終端種別付き) を区別できる小さな型に変更する。
+  呼び出し側が `RequestStreamEnd::Fin` を判別できるようにし、RESET_STREAM と STOP_SENDING 指示は報告対象外とする。
+- `examples/tokio-moq/src/moqt_client.rs` の `DataPlaneHandle` に `report_mid_object_fin(stream_id)` ラッパーを追加する。
+- `examples/moq-sub/src/pipeline.rs` に純関数 `mid_object_fin_should_report(end: &RequestStreamEnd, finish: &Result<(), MessageError>) -> bool`
+  を追加する。`end` が `Fin` かつ `finish` が `Err(UnexpectedEof)` のときだけ true を返す。header 待ちループでは呼ばず、
+  header 受理後の Object ループと payload ループ (video / audio / catalog subgroup / catalog fetch / media fetch、
+  `read_catalog_payload` / `read_fetch_entry` を含む) でのみ、終端時に decoder の `finish()` を呼んだ結果を本関数へ渡し、
+  true のとき `DataPlaneHandle::report_mid_object_fin` を呼ぶ。payload ループが途中終端で `Error::Other` を返す経路も、
+  返す前に `finish()` と本関数を通す。
+- RESET_STREAM 終端と STOP_SENDING 指示 (timeout) は session が既に破棄対象として扱うため、報告しない。header 未受信の
+  `finish()` も `AwaitingHeader` として `recv_data_stream_closed` が no-op で吸収する既存契約に合わせ、報告しない。
+- `finish()` は現状 `UnexpectedEof` 以外を返さないため、それ以外の `MessageError` は防御的に「報告しない」とし、
+  復号エラーとしてのセッション終了要求 (`request_session_termination_for_decode_error`) には寄せない
+  (本 issue の対象外。将来 decoder が別エラーを返すようになったら再検討する)。
+- `tests` は純関数の unit test (Fin + UnexpectedEof → true、Fin + Ok → false、Reset + UnexpectedEof → false) と、
+  `DataPlaneHandle` のラッパー追加に対するライブラリ側既存テスト (`report_mid_object_fin` の no-op 含む) の維持で担保する。
+  `DataPlaneHandle` はテストから構築できないため、example の結合テストは追加しない (検出と報告を純関数で分離している)。
 
 ## 完了条件
 
-- moq-sub が Object のシリアライズ途中で FIN を受けたとき、`report_mid_object_fin` を経由して `PROTOCOL_VIOLATION` でのセッション終了が起きること。
-- 正常終了した stream と、Object 境界で FIN した stream ではセッションを閉じないこと。
-- 破棄対象の stream では従来どおり no-op で吸収されること。
+- `mid_object_fin_should_report` が FIN + `Err(UnexpectedEof)` でのみ true を返すこと。
+- video / audio / catalog (subgroup / fetch) / media fetch の Object ループと payload ループが、header 受理後の終端で decoder の
+  `finish()` を呼び、true のとき `DataPlaneHandle::report_mid_object_fin` を呼ぶこと (コードレビューで確認できる形にし、
+  純関数のテストで固定する)。payload 途中の終端で `Error::Other` を返す経路も同じ処理を通ること。
+- RESET_STREAM 終端、STOP_SENDING 指示、header 未受信の終端では `report_mid_object_fin` を呼ばないこと。
+- `DataPlaneHandle::report_mid_object_fin` を追加し、`Session::report_mid_object_fin` の既存契約 (破棄対象は no-op) を変えないこと。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 補足
+
+- `DataPlaneHandle` は `fn new` が private で Session のアクセサも無いため、moq-sub の `#[cfg(test)]` からは構築できない。
+  終端種別と `finish()` 結果から報告要否を決める純関数を切り出し、そちらを unit test の対象にする。
