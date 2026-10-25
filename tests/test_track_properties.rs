@@ -66,12 +66,79 @@ mod error_cases {
     use super::*;
 
     #[test]
-    fn unexpected_eof_in_bytes_value() {
-        // delta=1 (odd type), length=10, but only 3 bytes of data
+    fn unknown_type_bytes_value_length_exceeds_buffer_is_key_value_formatting_error() {
+        // delta=1 (未知の奇数 Type), Length=10 に対して実体が 3 バイトしかない。
+        // §8.3 (Key-Value-Pair Structure) の MUST は既知 Type が条件だが、未知 Type も
+        // §16.8 (Properties) の length による skip が成立しないため、同じ分類の
+        // KEY_VALUE_FORMATTING_ERROR (0x6) で拒否する (本実装の方針)
         let buf = vec![0x01, 0x0A, 0x01, 0x02, 0x03];
         assert_eq!(
             TrackProperties::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "track property value length exceeds remaining buffer"
+            ))
+        );
+    }
+
+    #[test]
+    fn length_varint_truncation_is_unexpected_eof() {
+        // 奇数 Type の Length が 2 バイト必要な vi64 だが 1 バイトしかない場合は
+        // フレーミングの切り詰めとして UnexpectedEof のまま
+        assert_eq!(
+            TrackProperties::decode(&[0x01, 0x80]),
             Err(MessageError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn length_equal_to_remaining_bytes_is_accepted() {
+        // Length が残りバイトとちょうど一致する場合は正常に受理される
+        let buf = vec![0x01, 0x03, 0xAA, 0xBB, 0xCC];
+        let props = TrackProperties::decode(&buf).expect("宣言長ちょうどの値は受理されること");
+        assert_eq!(
+            props.as_slice(),
+            &[TrackProperty {
+                prop_type: 0x01,
+                value: TrackPropertyValue::Bytes(vec![0xAA, 0xBB, 0xCC]),
+            }]
+        );
+    }
+
+    #[test]
+    fn value_length_65535_with_no_remaining_bytes_is_key_value_formatting_error() {
+        // 2^16-1 は上限内であるため ProtocolViolation ではなく、残りバイト超過として
+        // KeyValueFormattingError になる (65536 は ProtocolViolation のまま)
+        let buf = vec![0x01, 0xC0, 0xFF, 0xFF];
+        assert_eq!(
+            TrackProperties::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "track property value length exceeds remaining buffer"
+            ))
+        );
+    }
+
+    #[test]
+    fn malformed_second_kvp_is_key_value_formatting_error() {
+        // 正常な 1 個目の後に宣言長超過の 2 個目が来ても、2 個目で同じ分類になる
+        let buf = vec![0x02, 0x01, 0x01, 0x0A, 0x01, 0x02, 0x03];
+        assert_eq!(
+            TrackProperties::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "track property value length exceeds remaining buffer"
+            ))
+        );
+    }
+
+    #[test]
+    fn known_type_bytes_value_length_exceeds_buffer_is_key_value_formatting_error() {
+        // 既知の奇数 Type である IMMUTABLE_PROPERTIES (0x0B) が Length=5 を宣言するが
+        // 実体が 1 バイトしかない場合も同じ分類になること
+        let buf = vec![0x0B, 0x05, 0x01];
+        assert_eq!(
+            TrackProperties::decode(&buf),
+            Err(MessageError::KeyValueFormattingError(
+                "track property value length exceeds remaining buffer"
+            ))
         );
     }
 
@@ -459,12 +526,14 @@ mod immutable_properties {
     }
 
     #[test]
-    fn inner_unparseable_rejected_on_decode() {
-        // 内側が奇数型 len=5 を主張するが 1 バイトしかない (EOF)
+    fn inner_length_exceeding_buffer_is_key_value_formatting_error() {
+        // 内側が奇数型 len=5 を主張するが 1 バイトしかない (宣言長超過)
         let buf = vec![0x0B, 0x03, 0x01, 0x05, 0x01];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::UnexpectedEof)
+            Err(MessageError::KeyValueFormattingError(
+                "track property value length exceeds remaining buffer"
+            ))
         );
     }
 
@@ -574,6 +643,57 @@ mod immutable_properties {
             p.prop_type == PROP_IMMUTABLE_PROPERTIES
                 && p.value == TrackPropertyValue::Bytes(inner.clone())
         }));
+    }
+
+    #[test]
+    fn encode_rejects_known_type_range_violation() {
+        use shiguredo_moqt::track_properties::PROP_DYNAMIC_GROUPS;
+        // encode は既知 Type の値域も検証し、違反は ProtocolViolation になる
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_DYNAMIC_GROUPS,
+            value: TrackPropertyValue::VarInt(2),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(
+                "DYNAMIC_GROUPS must be 0 or 1"
+            ))
+        ));
+    }
+
+    #[test]
+    fn encode_passes_through_inner_varint_truncation_as_unexpected_eof() {
+        // 内側 KVP の Length varint が途中終端する場合、encode はローカル入力の
+        // 切り詰めとして UnexpectedEof をそのまま返す (# Errors の記載どおり)
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            // 内側: delta=1 (奇数型) の Length varint が 2 バイト必要だが 1 バイト
+            value: TrackPropertyValue::Bytes(vec![0x01, 0x80]),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(props.encode(&mut buf), Err(MessageError::UnexpectedEof));
+    }
+
+    #[test]
+    fn encode_maps_inner_length_exceeding_buffer_to_protocol_violation() {
+        // encode はローカル入力の検証であるため、内側 KVP の宣言長超過
+        // (decode 層では KeyValueFormattingError) を ProtocolViolation に写す
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            // 内側: delta=1 (奇数型), Length=5 だが実体は 1 バイト
+            value: TrackPropertyValue::Bytes(vec![0x01, 0x05, 0x01]),
+        });
+        let mut buf = Vec::new();
+        assert!(matches!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(
+                "immutable properties inner KVP length exceeds remaining buffer"
+            ))
+        ));
     }
 
     #[test]

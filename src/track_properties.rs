@@ -113,7 +113,14 @@ impl TrackProperties {
     /// # Errors
     ///
     /// - 同一 `prop_type` の重複: `ProtocolViolation`
-    /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
+    /// - 型と値形式の不一致: `InvalidParameter`
+    /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `ProtocolViolation`
+    /// - トップレベルのバイト列が 65535 バイトを超える: `PayloadTooLong`
+    /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過など):
+    ///   `ProtocolViolation` (decode 層の `KeyValueFormattingError` を `ProtocolViolation`
+    ///   に写す)
+    /// - IMMUTABLE_PROPERTIES の内側 KVP の varint が途中終端: `UnexpectedEof`
+    ///   (呼び出し側が渡した直列化の切り詰めであり、透過する)
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.prop_type);
@@ -155,8 +162,22 @@ impl TrackProperties {
                     // 検証する (入れ子の 0x0B を拒否)。検証のみで、バイト列はそのまま再出力する
                     // (draft-ietf-moq-transport-22 §10.7 (Immutable Properties) の "the serialization ... of
                     // the Key-Value-Pairs MUST NOT change")。
-                    if prop.prop_type == PROP_IMMUTABLE_PROPERTIES {
-                        decode_track_kv_pairs(bytes, false)?;
+                    if prop.prop_type == PROP_IMMUTABLE_PROPERTIES
+                        && let Err(err) = decode_track_kv_pairs(bytes, false)
+                    {
+                        // ローカル入力の検証である encode では、内側 KVP の書式違反
+                        // (KeyValueFormattingError) を、既存の encode 検証 (重複・2^16-1 超)
+                        // と同じ ProtocolViolation に揃える。内側 decode の切り詰め
+                        // (UnexpectedEof) は呼び出し側が渡した直列化の切り詰めであるため
+                        // そのまま透過する。
+                        return Err(match err {
+                            MessageError::KeyValueFormattingError(_) => {
+                                MessageError::ProtocolViolation(
+                                    "immutable properties inner KVP length exceeds remaining buffer",
+                                )
+                            }
+                            other => other,
+                        });
                     }
                     varint::encode(bytes.len() as u64, buf);
                     buf.extend_from_slice(bytes);
@@ -172,6 +193,17 @@ impl TrackProperties {
     /// カウントプレフィックスなし。バッファ末尾まで KVP を読む。
     /// 空バッファの場合は空の `TrackProperties` を返す。
     /// IMMUTABLE_PROPERTIES (0x0B) は内側を Track Property KVP 列として検証する (draft-ietf-moq-transport-22 §10.7 (Immutable Properties))。
+    ///
+    /// # Errors
+    ///
+    /// - delta key / 偶数 Type の値 / 奇数 Type の Length の varint 途中終端: `UnexpectedEof`
+    /// - 奇数 Type の宣言長が 2^16-1 超: `ProtocolViolation`
+    /// - 奇数 Type の宣言長が 2^16-1 以下で残りバイト超: `KeyValueFormattingError`
+    ///   (既知 Type は draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST。
+    ///   未知 Type も §16.8 (Properties) の length による skip が成立しないため同じ分類に
+    ///   揃える)
+    /// - 重複 Type / KVP Type の delta overflow / 入れ子の IMMUTABLE_PROPERTIES /
+    ///   既知 Type の値域違反: `ProtocolViolation`
     pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
         Ok(Self(decode_track_kv_pairs(buf, true)?))
     }
@@ -342,6 +374,12 @@ fn validate_track_property_value_range(
 /// カウントプレフィックスなしで `buf` 末尾まで読む。`TrackProperties::decode` 本体、
 /// IMMUTABLE_PROPERTIES (0x0B) の内側検証 (encode / decode)、統合検索の内側展開の各所から呼ばれる。
 ///
+/// 奇数 Type の宣言長が 2^16-1 以下で残りバイトを超える場合は
+/// `MessageError::KeyValueFormattingError` を返す。既知 Type は draft-ietf-moq-transport-22
+/// §8.3 (Key-Value-Pair Structure) の MUST であり、未知 Type も §16.8 (Properties) の
+/// length による skip が成立しないため同じ分類に揃える。2^16-1 超は `ProtocolViolation`、
+/// Length フィールドの varint 自体が途中で切れる場合は `UnexpectedEof` とする。
+///
 /// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する。入れ子の
 /// IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-22 §10.7 (Immutable Properties) により malformed である。なお同節の
 /// malformed 条件文は "An Object contains ..." と Object を主語にするが、同節冒頭が
@@ -391,7 +429,21 @@ fn decode_track_kv_pairs(
                     "track property value too long",
                 ));
             }
-            let len = varint::checked_len(len, buf[pos..].len())?;
+            // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 受信側が Type を
+            // 理解する場合、Length/Value が定義と一致しないときは KEY_VALUE_FORMATTING_ERROR
+            // (0x6) でセッションを閉じる MUST。Length フィールド自体の varint 途中終端は
+            // UnexpectedEof のまま (フレーミングの切り詰め) とし、宣言長が残りバイトを
+            // 超える場合だけを書式違反として分類する。§8.3 の MUST は受信側が Type を
+            // 理解する場合が条件だが、未知 Type も draft §16.8 (Properties) の length に
+            // よる skip が成立しない点は同じため、同じ分類に揃える (本実装の方針)。
+            // §10.7 (Immutable Properties) の malformed Track と重なる条件だが、decode 層は
+            // Track / request を特定できず購読 cancel を発行できないため、§8.3 のセッション
+            // 終了を優先する (本実装の判断であり、§10.7 への写像は別途対応する)。
+            let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
+                MessageError::KeyValueFormattingError(
+                    "track property value length exceeds remaining buffer",
+                )
+            })?;
             let bytes = buf[pos..pos + len].to_vec();
             pos += len;
 

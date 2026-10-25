@@ -574,6 +574,27 @@ mod error_cases {
         );
     }
 
+    /// Track Properties の KVP 宣言長超過が KEY_VALUE_FORMATTING_ERROR になること
+    ///
+    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は既知 Type の
+    /// Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを
+    /// 閉じる MUST。SUBSCRIBE_OK の Track Properties は KVP 列であり、宣言長が残りバイトを
+    /// 超える場合は TrackProperties::decode の分類がそのままメッセージ層へ返る。
+    #[test]
+    fn subscribe_ok_with_track_property_length_exceeding_payload_is_key_value_formatting_error() {
+        // SUBSCRIBE_OK (0x04), Length = 7, Track Alias = 0,
+        // Parameters: count=0,
+        // Track Properties: delta=0x0B (既知の奇数型 IMMUTABLE_PROPERTIES) /
+        // Length=10 / 実体 3 バイト
+        let wire = [0x04, 0x00, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
+        let err = ControlMessage::decode(&wire)
+            .expect_err("Track Properties の宣言長超過は decode に失敗すること");
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Track Properties の宣言長超過は KEY_VALUE_FORMATTING_ERROR であること: {err:?}"
+        );
+    }
+
     #[test]
     fn invalid_fetch_namespace() {
         // FETCH ペイロードの namespace フィールド数が後続バイトを超える場合は失敗する。

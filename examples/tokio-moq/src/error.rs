@@ -254,6 +254,27 @@ mod tests {
         );
     }
 
+    /// Track Properties の宣言長超過が decode で KEY_VALUE_FORMATTING_ERROR になり、
+    /// session_error_code がセッション終了コード 0x6 に写すこと
+    ///
+    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST を、
+    /// wire の decode からセッション終了コードへの写像まで通しで固定する。
+    #[test]
+    fn track_property_length_error_maps_to_key_value_formatting_error() {
+        use shiguredo_moqt::message::ControlMessage;
+        // SUBSCRIBE_OK (0x04), Length = 7, Track Alias = 0, Parameters: count=0,
+        // Track Properties: delta=0x0B (既知の奇数型 IMMUTABLE_PROPERTIES) /
+        // Length=10 / 実体 3 バイト
+        let wire = [0x04, 0x00, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
+        let err = ControlMessage::decode(&wire)
+            .expect_err("Track Properties の宣言長超過は decode に失敗すること");
+        assert_eq!(
+            session_error_code(&err),
+            SESSION_KEY_VALUE_FORMATTING_ERROR,
+            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+        );
+    }
+
     /// encode / decode 失敗がセッション終了コードへ写ること
     ///
     /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の

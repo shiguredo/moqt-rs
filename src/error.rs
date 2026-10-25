@@ -38,10 +38,12 @@ pub enum MessageError {
     /// 「セッションを閉じるべきか、購読だけ cancel すべきか」を判別できる。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     MalformedTrack(&'static str),
-    /// 既知 Key-Value-Pair の Value が定義された serialization と一致しない
+    /// Key-Value-Pair の Length/Value が定義された serialization と一致しない
     ///
     /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
-    /// 受信側は KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを閉じなければならない (MUST)。
+    /// 受信側が Type を理解する場合、KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを
+    /// 閉じなければならない (MUST)。宣言長が残りバイトを超える場合は、未知 Type でも
+    /// length による skip が成立しないため同じ分類に揃える (§16.8 (Properties))。
     KeyValueFormattingError(&'static str),
     /// AUTHORIZATION_TOKEN が不正 (説明付き)
     ///
