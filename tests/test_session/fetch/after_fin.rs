@@ -949,3 +949,241 @@ fn request_ok_in_pending_fails_session() {
         .expect_err("Pending 状態の REQUEST_OK は ProtocolViolation で fail すること");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
 }
+
+// ─── FETCH_ERROR 後の遅延 in-flight FETCH data stream ─────────────────
+//
+// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): "A FETCH_ERROR indicates
+// that both endpoints can immediately remove state. Since a relay can start delivering
+// FETCH Objects from cache before determining the result of the request, some Objects
+// could be received even if the FETCH results in error."
+
+/// publisher から FETCH_ERROR を送って subscriber 側の fetch を終端させる
+fn send_fetch_error(client: &mut Session, server: &mut Session, rid: u64) {
+    server
+        .send_request_error(
+            rid,
+            0x42,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("fetch failed".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, err_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(rid, err_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+}
+
+/// 遅延 FETCH data stream (type → header → Object → End of Range → FIN) が破棄され、
+/// セッションが閉じないことを検証する
+fn assert_late_fetch_stream_is_discarded(client: &mut Session, rid: u64, stream_id: DataStreamId) {
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("遅延 FETCH data stream の type 通知は受理されること");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("遅延 FETCH_HEADER は受理されること");
+    client
+        .recv_fetch_entry(stream_id)
+        .expect("破棄対象 stream の Object は no-op で受理されること");
+    client
+        .recv_fetch_entry(stream_id)
+        .expect("破棄対象 stream の End of Range は no-op で受理されること");
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("破棄対象 stream の FIN は no-op で受理されること");
+    assert_eq!(client.state(), SessionState::Established);
+    while let Some(event) = client.poll_event() {
+        assert!(
+            !matches!(event, SessionEvent::CloseSession(_)),
+            "遅延 FETCH data stream でセッションを閉じないこと"
+        );
+    }
+}
+
+/// Pending の fetch が FETCH_ERROR で終端した後、遅延 FETCH data stream が届いても
+/// セッションを閉じないこと
+#[test]
+fn request_error_then_late_fetch_data_stream_is_discarded() {
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    assert_eq!(
+        client.fetch(rid).expect("fetch が存在する").state,
+        FetchState::Terminated
+    );
+    assert_late_fetch_stream_is_discarded(&mut client, rid, DataStreamId(500));
+}
+
+/// Established の fetch が REQUEST_UPDATE 失敗応答の FETCH_ERROR で終端した後も、
+/// 遅延 FETCH data stream が届いてもセッションを閉じないこと
+#[test]
+fn request_error_for_established_fetch_then_late_fetch_data_stream_is_discarded() {
+    let (mut client, mut server, rid) = establish_fetch_and_send_request_update();
+    send_fetch_error(&mut client, &mut server, rid);
+    assert_eq!(
+        client.fetch(rid).expect("fetch が存在する").state,
+        FetchState::Terminated
+    );
+    assert_late_fetch_stream_is_discarded(&mut client, rid, DataStreamId(501));
+}
+
+/// fetch を forget した後でも FETCH_ERROR 後の遅延 FETCH data stream を受理すること
+#[test]
+fn request_error_then_late_fetch_data_stream_after_forget_is_discarded() {
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    client
+        .forget_fetch(rid)
+        .expect("終端済み fetch は忘却できること");
+    assert!(client.fetch(rid).is_none());
+    assert_late_fetch_stream_is_discarded(&mut client, rid, DataStreamId(502));
+}
+
+/// FETCH_ERROR を受けていない終端済み fetch への遅延 FETCH_HEADER は従来どおり
+/// PROTOCOL_VIOLATION で閉じること
+#[test]
+fn terminated_fetch_without_request_error_rejects_late_fetch_header() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (mut client, _server, rid) = send_fetch_pending();
+    client
+        .recv_fetch_data_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(503);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect_err("FETCH_ERROR を受けていない終端済み fetch への遅延 header は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
+/// 遅延 FETCH data stream を開いている間に同じ request ID の 2 本目が届くと
+/// 単一 stream 制約違反で閉じること
+#[test]
+fn request_error_then_concurrent_second_fetch_data_stream_is_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    let first = DataStreamId(504);
+    client
+        .recv_data_stream_type(first, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(first, &FetchHeader { request_id: rid })
+        .expect("1 本目の遅延 FETCH_HEADER は受理されること");
+    let second = DataStreamId(505);
+    client
+        .recv_data_stream_type(second, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_fetch_header(second, &FetchHeader { request_id: rid })
+        .expect_err("2 本目の FETCH_HEADER は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
+/// 遅延 FETCH data stream の終端後は同じ request ID の 2 本目を受理しないこと
+#[test]
+fn late_fetch_data_stream_fin_removes_tolerance() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    let first = DataStreamId(506);
+    client
+        .recv_data_stream_type(first, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(first, &FetchHeader { request_id: rid })
+        .expect("1 本目の遅延 FETCH_HEADER は受理されること");
+    client
+        .recv_data_stream_closed(first, RequestStreamEnd::Fin)
+        .expect("破棄対象 stream の FIN は受理されること");
+    // FIN 観測後は許容が解除され、2 本目の header は拒否される
+    let second = DataStreamId(507);
+    client
+        .recv_data_stream_type(second, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_fetch_header(second, &FetchHeader { request_id: rid })
+        .expect_err("FIN 後の 2 本目 FETCH_HEADER は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
+/// 保持期間が経過すると遅延 FETCH data stream の許容が解除されること
+#[test]
+fn fetch_error_late_stream_tolerance_expires() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    // 十分に時間を進めて保持期間を経過させる (1 回目の tick で開始時刻が確定するため 2 回進める)
+    client.tick(1_000_000);
+    client.tick(2_000_000);
+    let stream_id = DataStreamId(508);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect_err("保持期間経過後の遅延 FETCH_HEADER は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
+/// forget_fetch 後でも同じ request ID の 2 本目の遅延 FETCH_HEADER は拒否されること
+#[test]
+fn request_error_then_second_late_fetch_data_stream_after_forget_is_rejected() {
+    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    client
+        .forget_fetch(rid)
+        .expect("終端済み fetch は忘却できること");
+    let first = DataStreamId(509);
+    client
+        .recv_data_stream_type(first, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(first, &FetchHeader { request_id: rid })
+        .expect("forget 後の 1 本目の遅延 FETCH_HEADER は受理されること");
+    let second = DataStreamId(510);
+    client
+        .recv_data_stream_type(second, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_fetch_header(second, &FetchHeader { request_id: rid })
+        .expect_err("forget 後の 2 本目 FETCH_HEADER は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(client.state(), SessionState::Closing);
+}
+
+/// REQUEST_ERROR 後に open した遅延 FETCH data stream へ STOP_SENDING を送っても、
+/// 続く RESET_STREAM の終端通知が no-op で吸収されること
+#[test]
+fn request_error_late_fetch_stream_stop_sending_absorbs_close() {
+    let (mut client, mut server, rid) = send_fetch_pending();
+    send_fetch_error(&mut client, &mut server, rid);
+    let stream_id = DataStreamId(511);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("遅延 FETCH_HEADER は受理されること");
+    client
+        .send_data_stream_stop_sending(stream_id)
+        .expect("破棄対象 stream への STOP_SENDING は受理されること");
+    client
+        .recv_data_stream_closed(
+            stream_id,
+            RequestStreamEnd::Reset {
+                error_code: Some(1),
+                reliable_size: None,
+            },
+        )
+        .expect("STOP_SENDING 後の終端通知は no-op で吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}

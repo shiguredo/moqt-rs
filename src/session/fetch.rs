@@ -1178,10 +1178,12 @@ impl Session {
         // 送信されるため、`Terminated` かつフラグ未設定の fetch への REQUEST_ERROR は必ず
         // FETCH への応答であることによる (REQUEST_UPDATE 失敗応答は `Established` 分岐で
         // 処理され、フラグは FETCH_OK 受信時に設定済み)。
+        let mut tolerate_late_stream = false;
         match fetch.state {
             FetchState::Pending => {
                 fetch.state = FetchState::Terminated;
                 fetch.response_received = true;
+                tolerate_late_stream = true;
             }
             FetchState::Established => {
                 // REQUEST_UPDATE 失敗応答: §3.2.4 の "A subscriber keeps FETCH state until
@@ -1192,10 +1194,16 @@ impl Session {
                 // フラグは FETCH_OK 受信時に設定済みであり、ここでは立てない
                 // (REQUEST_ERROR を FETCH への応答として受け取ったわけではないため)。
                 fetch.state = FetchState::Terminated;
+                tolerate_late_stream = true;
             }
             FetchState::Terminated => {
                 fetch.response_received = true;
             }
+        }
+        if tolerate_late_stream {
+            // FETCH_ERROR 受信後に届く in-flight の FETCH data stream を破棄対象として
+            // 受理するための許容集合へ登録する (draft-ietf-moq-transport-22 §3.2.4)
+            self.record_fetch_error_late_stream(request_id);
         }
         Ok(())
     }

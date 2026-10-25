@@ -1964,6 +1964,11 @@ impl Session {
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub fn recv_fetch_entry(&mut self, stream_id: DataStreamId) -> Result<(), SessionError> {
         self.require_established()?;
+        // 破棄対象の保持集合に含まれる stream id (forget_fetch 後の遅延 fetch stream) は
+        // no-op で吸収する
+        if self.data_streams.discarded.contains_key(&stream_id) {
+            return Ok(());
+        }
         match self.data_streams.incoming.get_mut(&stream_id) {
             Some(IncomingDataStream::Fetch { .. }) => {
                 // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
@@ -1985,10 +1990,9 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "fetch entry received on subgroup stream",
             )),
-            Some(IncomingDataStream::Discarded { .. }) => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "fetch entry received on discarded stream",
-            )),
+            // 破棄対象 stream への entry は no-op で吸収する (遅延 in-flight stream の
+            // Object / End of Range)
+            Some(IncomingDataStream::Discarded { .. }) => Ok(()),
             None => Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "fetch entry received for unknown stream id",
@@ -2026,6 +2030,11 @@ impl Session {
         header: &FetchHeader,
     ) -> Result<(), SessionError> {
         self.require_established()?;
+        // 破棄対象の保持集合に含まれる stream id (forget_fetch 後に保持した遅延 fetch stream) は
+        // no-op で吸収する
+        if self.data_streams.discarded.contains_key(&stream_id) {
+            return Ok(());
+        }
         match self.data_streams.incoming.get(&stream_id) {
             Some(IncomingDataStream::AwaitingHeader {
                 kind: DataStreamType::Fetch,
@@ -2090,13 +2099,22 @@ impl Session {
                 self.fail(err.clone());
                 return Err(err);
             }
+            // draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 1 つの FETCH の
+            // 応答は 1 本の data stream に限る。遅延 stream の許容判定より先に検証する。
+            if self.has_other_fetch_stream(stream_id, header.request_id) {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "concurrent FETCH data streams for the same request id",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
             if state == FetchState::Terminated {
-                // ローカル終端済みの request では、peer が reset を観測する前に開いた
-                // FETCH 応答データストリームが遅延して届く。正当な in-flight stream の
-                // ため、セッションを閉じずに破棄対象 stream として吸収する
-                // (fill fetch stream と同じ扱い)。
+                // ローカル終端済み、または peer の REQUEST_ERROR で終端した fetch の
+                // in-flight data stream が遅延して届く。セッションを閉じずに破棄対象
+                // stream として吸収する。
                 if self.tolerates_late_data_stream(header.request_id) {
-                    self.register_discarded_stream(stream_id, None);
+                    self.register_fetch_error_late_stream(stream_id, header.request_id);
                     return Ok(());
                 }
                 let err = SessionError::new(
@@ -2106,15 +2124,34 @@ impl Session {
                 self.fail(err.clone());
                 return Err(err);
             }
-            if self.has_other_fetch_stream(stream_id, header.request_id) {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "concurrent FETCH data streams for the same request id",
-                );
-                self.fail(err.clone());
-                return Err(err);
-            }
         } else {
+            // peer の REQUEST_ERROR で終端した fetch は forget_fetch 後も許容集合に残るため、
+            // fill fetch stream の解決より前に遅延 FETCH data stream として吸収する
+            // (許容集合は fetch の request ID のみを持つため fill と衝突しない)。
+            if self
+                .fetch_error_late_streams
+                .get(&header.request_id)
+                .is_some_and(|timer| !timer.expired)
+            {
+                // draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 1 つの FETCH の
+                // 応答は 1 本の data stream に限る。forget_fetch 後の 1 本目は
+                // `fetch_error_late_stream_ids` で追跡されているため、同じ request ID の
+                // 2 本目を拒否する。
+                if self
+                    .fetch_error_late_stream_ids
+                    .values()
+                    .any(|existing| *existing == header.request_id)
+                {
+                    let err = SessionError::new(
+                        SESSION_PROTOCOL_VIOLATION,
+                        "concurrent FETCH data streams for the same request id",
+                    );
+                    self.fail(err.clone());
+                    return Err(err);
+                }
+                self.register_fetch_error_late_stream(stream_id, header.request_id);
+                return Ok(());
+            }
             // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill fetch stream の
             // FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
             // SUBSCRIBE / PUBLISH の Request ID (= subscription の Request ID) だが、
@@ -3144,6 +3181,10 @@ impl Session {
             // (STOP_SENDING 送信後に届く peer の FIN / RESET_STREAM など。保持期間中は
             // 吸収し続け、掃除は tick_discarded_data_stream_ids が行う)
             if self.data_streams.discarded.contains_key(&stream_id) {
+                // 遅延 fetch stream の終端を観測したため、同じ request ID の許容を解除する
+                if let Some(request_id) = self.fetch_error_late_stream_ids.remove(&stream_id) {
+                    self.fetch_error_late_streams.remove(&request_id);
+                }
                 return Ok(());
             }
             // FIN で閉じた stream に対して、その後に届く RESET_STREAM は no-op で吸収する。
@@ -3314,19 +3355,26 @@ impl Session {
                 }
                 self.close_incoming_stream_or_fail(stream.request_id)
             }
-            IncomingDataStream::Discarded { .. } => {
+            IncomingDataStream::Discarded { request_id } => {
+                // 遅延 fetch stream の終端を観測したため、同じ request ID の許容を解除する
+                if let Some(request_id) = request_id {
+                    self.forget_fetch_error_late_stream(request_id, Some(stream_id));
+                }
                 // 破棄対象 stream の終端は no-op で吸収し、id を保持集合へ移す
                 self.retain_discarded_stream_id(stream_id);
                 Ok(())
             }
             IncomingDataStream::Fetch { request_id, .. } => {
-                match self.fetches.get(&request_id).map(|fetch| fetch.state) {
+                let result = match self.fetches.get(&request_id).map(|fetch| fetch.state) {
                     // fill fetch stream は `fetches` に entry を持たない。Stream Count の
                     // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
                     None => self.close_incoming_stream_or_fail(request_id),
                     Some(FetchState::Terminated) => Ok(()),
                     Some(_) => self.recv_fetch_data_stream_closed(request_id, end),
-                }
+                };
+                // 遅延 fetch stream の終端を観測したため、同じ request ID の許容を解除する
+                self.forget_fetch_error_late_stream(request_id, Some(stream_id));
+                result
             }
         }
     }
@@ -3409,13 +3457,26 @@ impl Session {
                 Ok(())
             }
             IncomingDataStream::Fetch { request_id, .. } => {
-                match self.fetches.get(&request_id).map(|fetch| fetch.state) {
+                let result = match self.fetches.get(&request_id).map(|fetch| fetch.state) {
                     // fill fetch stream は `fetches` に entry を持たない。Stream Count の
                     // open 数を戻す (通常の FETCH 応答 stream は集計対象外のため減算しない)
                     None => self.close_incoming_stream_or_fail(request_id),
                     Some(FetchState::Terminated) => Ok(()),
                     Some(_) => self.send_fetch_stop_sending(request_id),
+                };
+                // 遅延 fetch data stream の許容対象は、STOP_SENDING 後も publisher の
+                // reset を観測して終端通知を吸収できるよう破棄対象の保持集合へ移す
+                if self.fetch_error_late_stream_ids.contains_key(&stream_id)
+                    || self
+                        .fetch_error_late_streams
+                        .get(&request_id)
+                        .is_some_and(|timer| !timer.expired)
+                {
+                    self.retain_discarded_stream_id(stream_id);
+                    self.fetch_error_late_stream_ids
+                        .insert(stream_id, request_id);
                 }
+                result
             }
         }
     }
@@ -3555,6 +3616,8 @@ impl Session {
             // unknown stream id のエラーにしない。
             if self.tolerates_late_data_stream(request_id) {
                 self.retain_discarded_stream_id(id);
+                // 遅延 fetch stream の終端観測で request ID の許容を解除できるよう逆引きを残す
+                self.fetch_error_late_stream_ids.insert(id, request_id);
             }
         }
         for id in removed_ids {
@@ -3727,6 +3790,47 @@ impl Session {
     /// delivery timeout override の所有者として参照し続けないための判定に使う。
     fn live_attribution(&self, request_id: Option<u64>) -> Option<u64> {
         live_attributed_request_id(&self.subscriptions, request_id)
+    }
+
+    /// peer の REQUEST_ERROR で終端した fetch の request ID を遅延 data stream 許容集合へ登録する
+    ///
+    /// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): FETCH_ERROR 受信後に
+    /// in-flight の FETCH data stream が届くのは正当な競合である。保持期間は
+    /// `peer_alias_retention_ms`。
+    pub(super) fn record_fetch_error_late_stream(&mut self, request_id: u64) {
+        self.fetch_error_late_streams.insert(
+            request_id,
+            super::types::DeadlineTimer::new(
+                self.timing.peer_alias_retention_ms,
+                self.timing.last_tick_ms,
+            ),
+        );
+    }
+
+    /// 許容対象の fetch data stream を破棄対象として登録する
+    ///
+    /// request ID を `IncomingDataStream::Discarded` と
+    /// `fetch_error_late_stream_ids` の両方に保持し、`forget_fetch` 後の終端吸収に使う。
+    pub(super) fn register_fetch_error_late_stream(
+        &mut self,
+        stream_id: DataStreamId,
+        request_id: u64,
+    ) {
+        self.register_discarded_stream(stream_id, Some(request_id));
+        self.fetch_error_late_stream_ids
+            .insert(stream_id, request_id);
+    }
+
+    /// 許容集合から request ID と data stream の対応を除去する
+    pub(super) fn forget_fetch_error_late_stream(
+        &mut self,
+        request_id: u64,
+        stream_id: Option<DataStreamId>,
+    ) {
+        self.fetch_error_late_streams.remove(&request_id);
+        if let Some(stream_id) = stream_id {
+            self.fetch_error_late_stream_ids.remove(&stream_id);
+        }
     }
 
     /// 破棄対象 stream を `IncomingDataStream::Discarded` として登録する
@@ -3967,6 +4071,15 @@ impl Session {
         self.data_streams
             .fin_closed
             .retain(|_, timer| !timer.expired);
+        // peer の REQUEST_ERROR で終端した fetch の遅延 data stream 許容集合も同じ tick で掃除する
+        for timer in self.fetch_error_late_streams.values_mut() {
+            timer.tick(now_ms);
+        }
+        self.fetch_error_late_streams
+            .retain(|_, timer| !timer.expired);
+        let live_request_ids: Vec<u64> = self.fetch_error_late_streams.keys().copied().collect();
+        self.fetch_error_late_stream_ids
+            .retain(|_, request_id| live_request_ids.contains(request_id));
     }
 
     /// peer publisher の Track Alias から候補 subscription をすべて解決する
@@ -4053,13 +4166,20 @@ impl Session {
             .iter()
             .any(|(existing_id, stream)| {
                 *existing_id != stream_id
-                    && matches!(
-                        stream,
+                    && match stream {
                         IncomingDataStream::Fetch {
                             request_id: existing_request_id,
                             ..
-                        } if *existing_request_id == request_id
-                    )
+                        } => *existing_request_id == request_id,
+                        // peer の REQUEST_ERROR で終端した fetch の遅延 stream は
+                        // Discarded として保持する。同じ request ID の 2 本目を
+                        // 単一 stream 制約 (§3.2.1 Fetch Object Delivery) で拒否するため
+                        // 数える。
+                        IncomingDataStream::Discarded {
+                            request_id: Some(existing_request_id),
+                        } => *existing_request_id == request_id,
+                        _ => false,
+                    }
             })
     }
 }

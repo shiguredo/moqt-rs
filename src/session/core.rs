@@ -401,6 +401,38 @@ pub struct Session {
     /// TRACK_STATUS の管理
     pub(super) track_status_requests: HashMap<u64, TrackStatusEntry>,
     pub(super) data_streams: DataStreamState,
+    /// peer の REQUEST_ERROR で終端した fetch の request ID を、遅延 data stream の許容対象として
+    /// 保持する集合
+    ///
+    /// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management): "some Objects could be
+    /// received even if the FETCH results in error." FETCH_ERROR (REQUEST_ERROR) の後に届く
+    /// in-flight の FETCH_HEADER / Object は正当な競合であり、これを `PROTOCOL_VIOLATION` で
+    /// 閉じないための受信側方針である。
+    ///
+    /// 各 entry は登録時点から `peer_alias_retention_ms` を保持期間とする
+    /// [`super::types::DeadlineTimer`] であり、`tick_discarded_data_stream_ids` が掃除する。
+    /// 対象 data stream の終端を観測した時点でも除去する
+    /// (`remove_incoming_data_streams_for_request` が移した stream は
+    /// `fetch_error_late_stream_ids` から逆引きする)。
+    pub(super) fetch_error_late_streams: HashMap<u64, super::types::DeadlineTimer>,
+    /// 遅延 data stream の許容対象の data stream id から request ID への対応表
+    ///
+    /// `recv_data_stream_closed` は stream id しか受け取らないため、終端観測時に
+    /// `fetch_error_late_streams` の request ID を逆引きするために保持する。
+    /// 保持期間は `peer_alias_retention_ms` (`tick_discarded_data_stream_ids` が掃除する)。
+    pub(super) fetch_error_late_stream_ids: HashMap<DataStreamId, u64>,
+    /// FIN で閉じた受信 data stream id の保持集合
+    ///
+    /// draft-ietf-moq-transport-22 §11.3.2 (Closing Subgroup Streams): "A sender might send
+    /// all objects in a Subgroup and the FIN on a QUIC stream, and then reset the stream.
+    /// ... If the application receives all data on the stream and the FIN, it can ignore any
+    /// subsequent reset."
+    ///
+    /// QUIC では FIN 送信後も RESET_STREAM を送れるため、FIN で閉じた id を登録時点から
+    /// `peer_alias_retention_ms` の期間だけ保持し、同じ id の終端通知を no-op で吸収する。
+    /// [`Self::discarded`] と分けているのは、破棄対象 stream の受信を広く吸収する
+    /// `discarded` に対し、本集合は終端通知の重複吸収だけを目的とするためである
+    /// (直列化途中の FIN を検出する `report_mid_object_fin` の判定を弱めない)。
     /// peer publisher 由来 track ごとの object property 検証状態 (request_id → tracker)
     pub(super) peer_object_properties: HashMap<u64, ObjectPropertyTracker>,
     /// peer publisher 由来 track ごとの重複 Object フィールド一貫性追跡 (request_id → tracker)
@@ -665,6 +697,8 @@ impl Session {
                 discarded: HashMap::new(),
                 fin_closed: HashMap::new(),
             },
+            fetch_error_late_streams: HashMap::new(),
+            fetch_error_late_stream_ids: HashMap::new(),
             peer_object_properties: HashMap::new(),
             peer_object_fields: HashMap::new(),
             peer_subgroups: SubgroupTracker::new(),
@@ -1599,6 +1633,10 @@ impl Session {
     pub(super) fn tolerates_late_data_stream(&self, request_id: u64) -> bool {
         self.rejected_request_ids.contains(&request_id)
             || self.goaway.request_stream_sent.contains(&request_id)
+            || self
+                .fetch_error_late_streams
+                .get(&request_id)
+                .is_some_and(|timer| !timer.expired)
     }
 
     /// 終端通知に載せる request 種別を決める
