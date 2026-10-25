@@ -1,7 +1,7 @@
 # Malformed Track 検出時に同じ Track の全 subscription / FETCH を cancel する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -66,3 +66,51 @@ subscription or fetches for that Track from that publisher" と MUST を課す�
   新しいテストを `tests/test_session/data_stream.rs` に追加し、sibling の request stream cancel の `error_code` が
   `STREAM_MALFORMED_TRACK` であることも検証すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/data.rs` の `Session::terminate_malformed_track` を、検出した request と同じ Track の全 request を
+  終端するエントリポイントに変更した。検出した request の Track Namespace / Track Name と自側の役割を取得し、
+  自側が subscriber 役のとき `AliasState::subscriptions_by_track` と `Session::fetches` から、同じ Track に対する
+  自側 subscriber 役の subscription と FETCH を sibling として列挙する。検出した request 自身は sibling から除外し、
+  最後に処理する。sibling の request id は昇順にソートし、HashMap の反復順に依存しない。
+- 1 件分の終端処理を `Session::terminate_request_for_malformed_track` に分離した。既存の二重終端抑止、drain 解除
+  (`publish_done` を `None` に戻す)、`StopSendingRequestStream` → `ResetRequestStream` → `RequestTerminated` の
+  発行は維持する。sibling には `stream_id` を渡さない (request stream の STOP_SENDING を受けた publisher が
+  draft §3.1.2 / §3.2.4 の MUST で data stream を reset するため)。
+- drain 中 (`publish_done` が `Some`) の sibling は `publish_done` を `None` に戻して以後のデータを破棄対象に移し、
+  `RequestTerminated` を再発行しない。あわせて `rejected_request_ids` に記録し、PUBLISH_DONE より後に開かれる
+  遅延 fill fetch stream の受理と、アプリが `forget_subscription` した後に届く bidi request stream の close 通知の
+  no-op 吸収を維持する。記録の寿命は `src/session/core.rs` のフィールド doc に実装どおりに明記した。
+- doc コメントを新挙動に更新した。`terminate_malformed_track` / `terminate_request_for_malformed_track` から
+  「他の request は生き残る」「該当 subscription だけを cancel する」を削除し、FETCH 分岐の「到達不能」記述を
+  sibling 列挙から到達する旨に直した。drain 中の早期 return 経路では §12.1 の SHOULD
+  "deliver an error to the application" のエラー通知を行わないことも明記した。
+- `src/session/tests.rs` の既存 2 テストを新挙動に更新した。open な data stream 上の Object 受信で検出する経路は
+  `ResetDataStream` が 1 回、`recv_data_stream_closed` の FIN で検出する経路は 0 回であること、request ごとに
+  `StopSendingRequestStream` → `ResetRequestStream` の順で 1 回ずつ、`RequestTerminated` が 1 回ずつ発行される
+  ことを検証する。
+- `tests/test_session/data_stream.rs` に、同一 Track の複数 subscription、subscription と FETCH の併存、
+  別 Track / publisher 役の非影響 (subscription と FETCH の両方)、drain 中 sibling、drain 解除後の遅延 datagram /
+  遅延 fill fetch stream、FIN 済み FETCH の早期 return を検証するテストを追加した。
+- `tests/test_session.rs` の malformed イベント回収ヘルパを request_id ごとに集計する形に拡張し、cancel 順序、
+  `ResetDataStream` の error code と対象 stream、対象外 request のイベント不在を検証するようにした。
+- `pbt/tests/prop_session/subgroup.rs` と `tests/test_session/datagram_object_filter.rs` のメッセージを、
+  1 subscription 前提の検証内容に合わせて修正した。
+
+## 完了条件の検証
+
+- 同一 Track の 2 subscription で open stream 検出時に両方が `Terminated`、検出 request に `ResetDataStream` 1 回、
+  sibling に `STREAM_MALFORMED_TRACK` の cancel と `RequestTerminated` 1 回ずつ:
+  `malformed_track_cancels_all_subscriptions_on_same_track`
+- FIN 検出時に `ResetDataStream` 0 回、request ごとの cancel と終端:
+  `malformed_mark_fin_failure_terminates_all_track_subscriptions`
+- subscription と FETCH の併存時に FETCH も終端されること: `malformed_track_cancels_same_track_fetch`
+- 別 Track / publisher 役の subscription と FETCH が影響を受けないこと:
+  `malformed_track_keeps_other_track_and_publisher_role_requests` /
+  `malformed_track_keeps_other_track_and_publisher_role_fetches`
+- drain 中 sibling の重複終端抑止と破棄移行:
+  `malformed_track_clears_draining_sibling_without_duplicate_termination` /
+  `malformed_track_drain_cleared_sibling_tolerates_late_fill_after_close`
+- FIN 済み FETCH の早期 return: `malformed_track_does_not_cancel_data_stream_finished_fetch`
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
