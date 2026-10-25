@@ -12,6 +12,11 @@ use shiguredo_moqt::error::{
     SESSION_PROTOCOL_VIOLATION,
 };
 
+// 未知エラーコードの文脈別正規化は library の helper をそのまま公開する
+// (draft-ietf-moq-transport-22 §13 (Grease) の MUST)。
+pub use shiguredo_moqt::error::normalize_publish_done_code;
+pub use shiguredo_moqt::error::normalize_request_error_code;
+
 /// encode / decode 失敗を閉じる終了コード
 ///
 /// library の data plane (`src/session/data.rs` の `session_error_from_data_message`) と

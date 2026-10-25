@@ -119,3 +119,67 @@ fn message_error_converts_into_boxed_error() {
     );
     assert!(err.source().is_none(), "内包するエラーは無いこと");
 }
+
+mod unknown_error_code_normalization {
+    use shiguredo_moqt::error::{
+        PUBLISH_DONE_INTERNAL_ERROR, PUBLISH_DONE_TRACK_ENDED, REQUEST_INTERNAL_ERROR,
+        REQUEST_MALFORMED_TRACK, SESSION_INTERNAL_ERROR, SESSION_NO_ERROR, STREAM_CANCELLED,
+        STREAM_INTERNAL_ERROR, normalize_publish_done_code, normalize_request_error_code,
+        normalize_session_termination_code, normalize_stream_reset_code,
+    };
+
+    /// 既知コードはそのまま返ること (4 文脈)
+    #[test]
+    fn known_codes_are_unchanged() {
+        assert_eq!(
+            normalize_session_termination_code(SESSION_NO_ERROR),
+            SESSION_NO_ERROR
+        );
+        assert_eq!(
+            normalize_request_error_code(REQUEST_MALFORMED_TRACK),
+            REQUEST_MALFORMED_TRACK
+        );
+        assert_eq!(
+            normalize_publish_done_code(PUBLISH_DONE_TRACK_ENDED),
+            PUBLISH_DONE_TRACK_ENDED
+        );
+        assert_eq!(
+            normalize_stream_reset_code(STREAM_CANCELLED),
+            STREAM_CANCELLED
+        );
+    }
+
+    /// 未知コードは文脈ごとの INTERNAL_ERROR 相当になること (4 文脈)
+    #[test]
+    fn unknown_codes_are_normalized_to_internal_error() {
+        // どのレジストリにも存在しない値を使う (Session 0x7 / REQUEST 0x7 /
+        // PUBLISH_DONE 0x3 / Stream 0x8)
+        assert_eq!(
+            normalize_session_termination_code(0x7),
+            SESSION_INTERNAL_ERROR
+        );
+        assert_eq!(normalize_request_error_code(0x7), REQUEST_INTERNAL_ERROR);
+        assert_eq!(
+            normalize_publish_done_code(0x3),
+            PUBLISH_DONE_INTERNAL_ERROR
+        );
+        assert_eq!(normalize_stream_reset_code(0x8), STREAM_INTERNAL_ERROR);
+    }
+
+    /// GREASE 値も文脈ごとの INTERNAL_ERROR 相当になること
+    #[test]
+    fn grease_codes_are_normalized_to_internal_error() {
+        let grease = shiguredo_moqt::grease::generate(13).expect("GREASE 値を生成できること");
+        assert!(shiguredo_moqt::grease::is_grease(grease));
+        assert_eq!(
+            normalize_session_termination_code(grease),
+            SESSION_INTERNAL_ERROR
+        );
+        assert_eq!(normalize_request_error_code(grease), REQUEST_INTERNAL_ERROR);
+        assert_eq!(
+            normalize_publish_done_code(grease),
+            PUBLISH_DONE_INTERNAL_ERROR
+        );
+        assert_eq!(normalize_stream_reset_code(grease), STREAM_INTERNAL_ERROR);
+    }
+}

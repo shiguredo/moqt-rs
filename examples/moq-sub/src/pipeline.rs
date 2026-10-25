@@ -665,7 +665,7 @@ use tokio_moq::MigrationScope;
 use tokio_moq::RetryPolicy;
 use tokio_moq::Transport;
 use tokio_moq::error::TransportError;
-use tokio_moq::error::session_error_code;
+use tokio_moq::error::{normalize_publish_done_code, session_error_code};
 use tokio_moq::moqt_client::{
     ClientEvent, DataPlaneHandle, MoqtClient, StreamRead, SubscribeResult,
 };
@@ -2813,7 +2813,8 @@ pub async fn run(
                             ..
                         })) => {
                             tracing::info!(
-                                "Received PUBLISH_DONE (status_code={status_code}, stream_count={stream_count})"
+                                "Received PUBLISH_DONE (status_code={status_code},                                  normalized_status_code={}, stream_count={stream_count})",
+                                normalize_publish_done_code(status_code)
                             );
                             Ok(true)
                         }

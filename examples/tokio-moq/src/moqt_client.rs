@@ -40,7 +40,7 @@ use shiguredo_moqt::{
 };
 
 use crate::c4m_authorization_token;
-use crate::error::{Result, TransportError, session_error_code};
+use crate::error::{Result, TransportError, normalize_request_error_code, session_error_code};
 use crate::qmux::QmuxSession;
 use crate::quic::{StopSendingObserved, StopSendingReceiver};
 use crate::transport::{
@@ -1844,7 +1844,12 @@ impl MoqtClient {
                     let detail = self
                         .request_errors
                         .get(&request_id)
-                        .map(|(code, reason)| format!(": code={code} reason={reason}"))
+                        .map(|(code, reason)| {
+                            format!(
+                                ": code={code} normalized_code={} reason={reason}",
+                                normalize_request_error_code(*code)
+                            )
+                        })
                         .unwrap_or_default();
                     return Err(TransportError::Internal(format!(
                         "request {request_id} rejected{detail}"

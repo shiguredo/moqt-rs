@@ -520,8 +520,6 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
   アプリ責務と解釈しているか (`src/session/types.rs:750-756` は設計として明記している)
 - moqt URI のパースをライブラリに置くか example に置くか (§6.1、URL 系の issue は
   example 側で closed になっている)
-- 未知のエラーコードを `INTERNAL_ERROR` 相当として扱う分類 helper を
-  ライブラリに置くか (§13、現在はアプリ任せ)
 - 送信パラメータ検証の残存ギャップ (`src/session/subscription/send.rs:126` / `:307` /
   `:323` / `:927` のコメント) を encode 前に閉じるか
 - リレー経由でない直接 subscriber の受け入れは、moq-pub が client 専用 (待ち受け API 無し) の

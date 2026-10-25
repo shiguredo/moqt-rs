@@ -305,3 +305,134 @@ pub const STREAM_EXPIRED_AUTH_TOKEN: u64 = 0x7;
 pub const STREAM_EXCESSIVE_LOAD: u64 = 0x9;
 /// 不正なトラック (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))
 pub const STREAM_MALFORMED_TRACK: u64 = 0x12;
+
+// ─── 未知のエラーコードの文脈別正規化 ─────────────────────────
+//
+// draft-ietf-moq-transport-22 §13 (Grease): "Receipt of an unknown error code in any error
+// context (Session Termination, REQUEST_ERROR, PUBLISH_DONE, or Data Stream Reset) MUST be
+// treated as equivalent to INTERNAL_ERROR for that context."
+//
+// 各レジストリの既知コードはそのまま返し、未知コードはその文脈の INTERNAL_ERROR を返す。
+// 受信側のアプリは正規化後のコードで分岐・ログ出力できる。wire 上の値を観測したい場合は
+// 生のコードも併せて保持すること。
+
+/// Session Termination 文脈で既知のコード (draft §16.11 の registry)
+const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
+    SESSION_NO_ERROR,
+    SESSION_INTERNAL_ERROR,
+    SESSION_UNAUTHORIZED,
+    SESSION_PROTOCOL_VIOLATION,
+    SESSION_INVALID_REQUEST_ID,
+    SESSION_DUPLICATE_TRACK_ALIAS,
+    SESSION_KEY_VALUE_FORMATTING_ERROR,
+    SESSION_INVALID_PATH,
+    SESSION_MALFORMED_PATH,
+    SESSION_GOAWAY_TIMEOUT,
+    SESSION_CONTROL_MESSAGE_TIMEOUT,
+    SESSION_DATA_STREAM_TIMEOUT,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
+    SESSION_DUPLICATE_AUTH_TOKEN_ALIAS,
+    SESSION_MALFORMED_AUTH_TOKEN,
+    SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
+    SESSION_EXPIRED_AUTH_TOKEN,
+    SESSION_INVALID_AUTHORITY,
+    SESSION_MALFORMED_AUTHORITY,
+    SESSION_TOO_MANY_REQUEST_UPDATES,
+];
+
+/// REQUEST_ERROR 文脈で既知のコード (draft §12.3 の registry)
+const KNOWN_REQUEST_ERROR_CODES: &[u64] = &[
+    REQUEST_INTERNAL_ERROR,
+    REQUEST_UNAUTHORIZED,
+    REQUEST_TIMEOUT,
+    REQUEST_NOT_SUPPORTED,
+    REQUEST_MALFORMED_AUTH_TOKEN,
+    REQUEST_EXPIRED_AUTH_TOKEN,
+    REQUEST_GOING_AWAY,
+    REQUEST_EXCESSIVE_LOAD,
+    REQUEST_DOES_NOT_EXIST,
+    REQUEST_INVALID_RANGE,
+    REQUEST_MALFORMED_TRACK,
+    REQUEST_UNINTERESTED,
+    REQUEST_PREFIX_OVERLAP,
+    REQUEST_NAMESPACE_TOO_LARGE,
+    REQUEST_UNSUPPORTED_EXTENSION,
+    REQUEST_REDIRECT,
+    REQUEST_CONFLICTING_FILTERS,
+    REQUEST_INVALID_FILTER,
+];
+
+/// PUBLISH_DONE 文脈で既知のコード (draft §12.4 の registry)
+const KNOWN_PUBLISH_DONE_CODES: &[u64] = &[
+    PUBLISH_DONE_INTERNAL_ERROR,
+    PUBLISH_DONE_UNAUTHORIZED,
+    PUBLISH_DONE_TRACK_ENDED,
+    PUBLISH_DONE_GOING_AWAY,
+    PUBLISH_DONE_TOO_FAR_BEHIND,
+    PUBLISH_DONE_EXPIRED,
+    PUBLISH_DONE_UPDATE_FAILED,
+    PUBLISH_DONE_EXCESSIVE_LOAD,
+    PUBLISH_DONE_MALFORMED_TRACK,
+];
+
+/// Stream Reset 文脈で既知のコード (draft §12.5 の registry)
+const KNOWN_STREAM_RESET_CODES: &[u64] = &[
+    STREAM_INTERNAL_ERROR,
+    STREAM_CANCELLED,
+    STREAM_DELIVERY_TIMEOUT,
+    STREAM_SESSION_CLOSED,
+    STREAM_GOING_AWAY,
+    STREAM_TOO_FAR_BEHIND,
+    STREAM_UNKNOWN_OBJECT_STATUS,
+    STREAM_EXPIRED_AUTH_TOKEN,
+    STREAM_EXCESSIVE_LOAD,
+    STREAM_MALFORMED_TRACK,
+];
+
+/// Session Termination 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
+///
+/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。`code` は examples の transport 層が
+/// 観測した接続終了コード (peer の CONNECTION_CLOSE / WebTransport close code) を想定する。
+/// ライブラリは peer の Session Termination コードをイベントとして公開しないため、本関数は
+/// アプリが transport 層から得た値を分類するために使う。
+pub fn normalize_session_termination_code(code: u64) -> u64 {
+    if KNOWN_SESSION_TERMINATION_CODES.contains(&code) {
+        code
+    } else {
+        SESSION_INTERNAL_ERROR
+    }
+}
+
+/// REQUEST_ERROR 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
+///
+/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。
+pub fn normalize_request_error_code(code: u64) -> u64 {
+    if KNOWN_REQUEST_ERROR_CODES.contains(&code) {
+        code
+    } else {
+        REQUEST_INTERNAL_ERROR
+    }
+}
+
+/// PUBLISH_DONE 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
+///
+/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。
+pub fn normalize_publish_done_code(code: u64) -> u64 {
+    if KNOWN_PUBLISH_DONE_CODES.contains(&code) {
+        code
+    } else {
+        PUBLISH_DONE_INTERNAL_ERROR
+    }
+}
+
+/// Stream Reset 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
+///
+/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。アプリケーションエラーコードが
+/// 無い (`None`) 場合は写像しないため、呼び出し側が `Option` を保持したまま扱う。
+pub fn normalize_stream_reset_code(code: u64) -> u64 {
+    if KNOWN_STREAM_RESET_CODES.contains(&code) {
+        code
+    } else {
+        STREAM_INTERNAL_ERROR
+    }
+}
