@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 use super::core::Session;
 use super::data::IncomingDataStream;
+use super::subscription::delivery::update_largest_object_in_parameters;
 use super::types::{
     DataStreamId, Fetch, FetchState, RequestKind, RequestStreamEnd, SendRequestError, SessionError,
     SessionEvent, TerminationReason, TrackRole, terminationreason_from_end,
@@ -988,7 +989,19 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn send_ok_for_fetch(&mut self, request_id: u64) -> Result<(), SessionError> {
+    /// FETCH の REQUEST_UPDATE に対する REQUEST_UPDATE_OK を検証する
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter) の "If Objects have
+    /// been published on this Track the Publisher MUST include this parameter." を満たすため、
+    /// publisher が観測した Track 最大 Location を `update_largest_object_in_parameters` で
+    /// 補完する (利用者指定値と観測最大の大きい方を載せ、指定値を下げない)。
+    /// 観測値は publisher 役 subscription の送信記録 (`send_subgroup_object` /
+    /// `send_object_datagram`) に限られ、FETCH 応答で送った Object は含まれない。
+    pub(super) fn send_ok_for_fetch(
+        &mut self,
+        request_id: u64,
+        parameters: &mut MessageParameters,
+    ) -> Result<(), SessionError> {
         let fetch = self
             .fetches
             .get(&request_id)
@@ -1004,6 +1017,19 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "request_ok (fetch) requires Established state",
             ));
+        }
+        // fetch の namespace / name は送受信経路で常に設定される契約である
+        // (types.rs の Fetch の doc 参照)
+        let track_namespace = fetch
+            .track_namespace
+            .clone()
+            .expect("fetch track_namespace is always set");
+        let track_name = fetch
+            .track_name
+            .clone()
+            .expect("fetch track_name is always set");
+        if let Some(largest) = self.publisher_track_largest(&track_namespace, &track_name) {
+            update_largest_object_in_parameters(parameters, &largest);
         }
         Ok(())
     }

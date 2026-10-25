@@ -638,3 +638,228 @@ fn terminated_fetch_absorbs_reset_via_recv_data_stream_closed() {
     // セッションが fail していないこと
     assert_eq!(client.state(), SessionState::Established);
 }
+
+/// FETCH の REQUEST_UPDATE_OK に、publish 観測済み Track の LARGEST_OBJECT が自動補完されること
+///
+/// draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): "If Objects have been
+/// published on this Track the Publisher MUST include this parameter."
+#[test]
+fn fetch_request_update_ok_includes_auto_largest_object() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server, sub_rid) = establish_subscribe_track(511);
+    // publisher 役 subscription で Object を送信し、Track 最大を観測させる
+    server
+        .send_object_datagram(sub_rid, 3, 1, None, None, false)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam1".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 5,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, update_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, request_ok_msg) = take_send_on_stream(&mut server);
+    let request_ok = match request_ok_msg {
+        ControlMessage::RequestOk(ok) => ok,
+        other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+    };
+    assert_eq!(
+        request_ok.parameters.largest_object(),
+        Some((3, 1)),
+        "publish 観測済み Track の REQUEST_UPDATE_OK に LARGEST_OBJECT が載ること"
+    );
+}
+
+/// FETCH の REQUEST_UPDATE_OK の LARGEST_OBJECT は利用者指定値を下げないこと
+#[test]
+fn fetch_request_update_ok_does_not_lower_largest_object() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server, sub_rid) = establish_subscribe_track(512);
+    server
+        .send_object_datagram(sub_rid, 3, 1, None, None, false)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam1".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 9,
+                    object_id: 9,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 9,
+                object_id: 9,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, update_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 観測最大 (3,1) より大きい指定値はそのまま
+    let mut larger = MessageParameters::new();
+    larger.set_largest_object(9, 9);
+    server
+        .send_request_ok(rid, larger, TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, request_ok_msg) = take_send_on_stream(&mut server);
+    let request_ok = match request_ok_msg {
+        ControlMessage::RequestOk(ok) => ok,
+        other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+    };
+    assert_eq!(
+        request_ok.parameters.largest_object(),
+        Some((9, 9)),
+        "観測最大より大きい指定値はそのまま載ること"
+    );
+
+    // 観測最大より小さい指定値は観測最大へ引き上げる (指定値を下げない)
+    let mut smaller = MessageParameters::new();
+    smaller.set_largest_object(1, 0);
+    server
+        .send_request_ok(rid, smaller, TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, request_ok_msg) = take_send_on_stream(&mut server);
+    let request_ok = match request_ok_msg {
+        ControlMessage::RequestOk(ok) => ok,
+        other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+    };
+    assert_eq!(
+        request_ok.parameters.largest_object(),
+        Some((3, 1)),
+        "観測最大より小さい指定値は観測最大へ引き上げられること"
+    );
+}
+
+/// publish 観測がない Track の FETCH REQUEST_UPDATE_OK には LARGEST_OBJECT を自動補完しないこと
+#[test]
+fn fetch_request_update_ok_without_publish_observation_has_no_largest_object() {
+    use shiguredo_moqt::message::common::Location;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"unpublished".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 0,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_request_update(rid, MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, update_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, update_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, request_ok_msg) = take_send_on_stream(&mut server);
+    let request_ok = match request_ok_msg {
+        ControlMessage::RequestOk(ok) => ok,
+        other => panic!("RequestOk が期待されたが {other:?} を受け取った"),
+    };
+    assert_eq!(
+        request_ok.parameters.largest_object(),
+        None,
+        "publish 観測がない Track では自動補完されないこと"
+    );
+}

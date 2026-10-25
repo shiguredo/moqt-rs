@@ -1897,7 +1897,7 @@ impl Session {
             Some(RequestTable::Subscription) => {
                 self.send_ok_for_subscription(request_id, &mut parameters)?
             }
-            Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id)?,
+            Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id, &mut parameters)?,
             Some(RequestTable::TrackStatus) => {
                 track_properties = self.send_ok_for_track_status(request_id, track_properties)?;
                 // draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The bidi stream is closed
