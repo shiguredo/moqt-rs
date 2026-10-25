@@ -1,7 +1,7 @@
 # FETCH の REQUEST_UPDATE_OK に LARGEST_OBJECT を自動補完する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -48,3 +48,24 @@ PUBLISH_STATE_NOTIFY に載りうる。session 層は SUBSCRIBE_OK / PUBLISH / s
   (指定値を下げない。`update_largest_object_in_parameters` と同じ規則)。
 - `docs/moqt.md` の記述が実装と一致すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/fetch.rs` の `send_ok_for_fetch` を `&mut MessageParameters` を受け取る形に変更し、fetch が保持する
+  `track_namespace` / `track_name` から `Session::publisher_track_largest` を引いて、既存の
+  `update_largest_object_in_parameters` で LARGEST_OBJECT を補完するようにした。同 helper は利用者指定値と観測最大の
+  大きい方を載せる (指定値を下げない)。
+- `src/session/core.rs` の `send_request_ok` の Fetch 分岐で parameters を渡すようにした。スコープ検証の順序は変えていない。
+- `tests/test_session/fetch/request_update.rs` に、publish 観測済み Track の REQUEST_UPDATE_OK に LARGEST_OBJECT が
+  自動で載ること、利用者指定値が観測最大より大きければそのまま、小さければ観測最大へ引き上げられること、
+  publish 観測がない Track では自動補完されないことを追加した。
+- `docs/moqt.md` の Largest Object の説明を、FETCH の REQUEST_UPDATE_OK も自動補完し、観測値が publish 経路に
+  限られる旨に更新した。
+
+## 完了条件の検証
+
+- 自動補完: `fetch_request_update_ok_includes_auto_largest_object`
+- 観測なし: `fetch_request_update_ok_without_publish_observation_has_no_largest_object`
+- 指定値を下げない: `fetch_request_update_ok_does_not_lower_largest_object`
+- `docs/moqt.md` を更新した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
