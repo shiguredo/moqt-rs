@@ -291,7 +291,7 @@ pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 | `SendPaddingStream { length }` | 指定長のパディングストリームを送る |
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
-| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT。`error_code` は `STREAM_CANCELLED`。timeout 後の遅延到着は保持期間の間 no-op) |
+| `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT、または subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8)。`error_code` は `STREAM_CANCELLED`。timeout 後の遅延到着は保持期間の間 no-op) |
 | `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く (`request_id` は FETCH_HEADER に載せる起因メッセージの Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済みの fill range) |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |

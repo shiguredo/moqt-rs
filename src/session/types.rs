@@ -382,7 +382,11 @@ pub enum SessionEvent {
     /// I/O 層は `stream_id` に相当する uni data stream の受信方向に `error_code` で
     /// STOP_SENDING を送る。`error_code` は §12.5 (Stream Reset Error Codes) のコードを使う。
     /// Session が本イベントを発行するのは、open な subgroup stream で新しい object header を
-    /// 待って DATA_STREAM_TIMEOUT (0x12) の期限に達した場合である。§12.2 はこの場合の措置を
+    /// 待って DATA_STREAM_TIMEOUT (0x12) の期限に達した場合と、subscriber 役 subscription への
+    /// REQUEST_ERROR 送信で当該 subscription を終端した場合 (draft §9.8 (PUBLISH) の
+    /// "abandon reading any publisher initiated streams associated with that subscription using
+    /// a STOP_SENDING frame") である。前者の `error_code` は `STREAM_CANCELLED` を使い、§12.2 は
+    /// この場合の措置を
     /// "it MAY send a STOP_SENDING on that stream or terminate the subscription" と定め、
     /// セッション全体のクローズを挙げていない (§6.6 (Termination) は単一購読の条件を
     /// セッションエラーへ昇格させることを MAY で認めているため、クローズも仕様違反ではない。

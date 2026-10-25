@@ -3935,6 +3935,60 @@ impl Session {
         self.retain_discarded_stream_id(stream_id);
     }
 
+    /// REQUEST_ERROR で拒否した subscription に属する open 受信 data stream を破棄する
+    ///
+    /// draft-ietf-moq-transport-22 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a
+    /// Track it does not wish to receive SHOULD send PUBLISH_ERROR with error code UNINTERESTED,
+    /// and abandon reading any publisher initiated streams associated with that subscription
+    /// using a STOP_SENDING frame." 拒否した subscription に現在帰属している受信 subgroup stream を
+    /// 会計から外して破棄対象の保持集合へ移し、I/O 層へ STOP_SENDING 指示を発行する。
+    /// 共有 Track Alias で別の生きた subscription に帰属する stream は破棄しない
+    /// (`discard_cancelled_subgroup_stream` の判定に従う)。既に `Discarded` の stream と
+    /// 終端通知済みの stream は `incoming` に無いため対象外である。
+    pub(super) fn discard_rejected_subscription_incoming_streams(&mut self, request_id: u64) {
+        let stream_ids: Vec<DataStreamId> = self
+            .data_streams
+            .incoming
+            .iter()
+            .filter_map(|(&stream_id, stream)| {
+                matches!(
+                    stream,
+                    IncomingDataStream::Subgroup(subgroup) if subgroup.request_id == request_id
+                )
+                .then_some(stream_id)
+            })
+            .collect();
+        for stream_id in stream_ids {
+            let Some(subgroup) = self
+                .data_streams
+                .incoming
+                .get(&stream_id)
+                .and_then(IncomingDataStream::as_subgroup)
+                .copied()
+            else {
+                continue;
+            };
+            if !self.discard_cancelled_subgroup_stream(&subgroup) {
+                // 共有 Track Alias の生きた帰属先がある stream は生きたまま残す
+                continue;
+            }
+            if let Some(subgroup_id) = subgroup.subgroup_id {
+                self.peer_subgroups.mark_stop_sending(
+                    subgroup.track_alias,
+                    subgroup.group_id,
+                    subgroup_id,
+                );
+            }
+            self.data_streams.incoming.remove(&stream_id);
+            // 以後の FIN / RESET_STREAM / 遅延 header は破棄対象として no-op で吸収する
+            self.retain_discarded_stream_id(stream_id);
+            self.events.push_back(SessionEvent::StopSendingDataStream {
+                stream_id,
+                error_code: STREAM_CANCELLED,
+            });
+        }
+    }
+
     /// 破棄対象の subgroup stream が破棄分岐に入るかどうかを判定し、入る場合は後始末する
     ///
     /// 破棄分岐へ入る条件は「キャンセル由来 `Terminated` に属し、現在も生きた Object の

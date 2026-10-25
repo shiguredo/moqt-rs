@@ -33,12 +33,13 @@ use shiguredo_moqt::video_decode_order::{
     VideoDecodeOrder, VideoObjectAdmission, VideoObjectPosition, prior_object_id_gap_of,
 };
 use shiguredo_moqt::{
-    message::common::Location, message::common::TrackNamespace, message_parameter::LocationFilter,
-    message_parameter::MessageParameter, message_parameter::MessageParameterValue,
-    message_parameter::MessageParameters, message_parameter::PARAM_FILL_PARAMETERS,
-    message_parameter::PARAM_LOCATION_FILTER, message_parameter::PARAM_NEW_GROUP_REQUEST,
-    msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack, name::parse_namespace, name::serialize_namespace,
-    session::types::DataStreamId, session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
+    message::ControlMessage, message::common::Location, message::common::TrackNamespace,
+    message_parameter::LocationFilter, message_parameter::MessageParameter,
+    message_parameter::MessageParameterValue, message_parameter::MessageParameters,
+    message_parameter::PARAM_FILL_PARAMETERS, message_parameter::PARAM_LOCATION_FILTER,
+    message_parameter::PARAM_NEW_GROUP_REQUEST, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
+    name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
+    session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedFetchObject, stream::decoder::DecodedSubgroupObject,
     stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
 };
@@ -799,6 +800,26 @@ fn request_session_termination_for_decode_error(
         return;
     }
     tracing::warn!("Closing session on data stream decode error: {code:#x} {reason}");
+}
+
+/// peer request を拒否するときの REQUEST_ERROR コードと理由を返す
+///
+/// draft-ietf-moq-transport-22 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
+/// it does not wish to receive SHOULD send PUBLISH_ERROR with error code UNINTERESTED"。
+/// PUBLISH_ERROR は §1.5 (Response Message Naming) の shorthand で wire 上は REQUEST_ERROR
+/// である。UNINTERESTED (0x20) は PUBLISH / PUBLISH_NAMESPACE への応答用 (§12.3) であり、
+/// それ以外の request は従来どおり NOT_SUPPORTED とする。
+fn request_rejection(message: &ControlMessage) -> (u64, &'static str) {
+    match message {
+        ControlMessage::Publish(_) => (
+            shiguredo_moqt::error::REQUEST_UNINTERESTED,
+            "subscriber is not interested in this track",
+        ),
+        _ => (
+            shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
+            "subscriber does not serve requests",
+        ),
+    }
 }
 
 /// session で共有する保留バッファ
@@ -2891,18 +2912,15 @@ pub async fn run(
                             Ok(false)
                         }
                         Some(ClientEvent::Request(request)) => {
-                            // subscriber は relay からの要求を受けない。届いた場合は
-                            // NOT_SUPPORTED で拒否してハングを避ける。
+                            // subscriber は relay からの要求を処理しない。PUBLISH は「不要」、
+                            // それ以外は「未対応」として拒否する。
+                            let (code, reason) = request_rejection(&request.message);
                             tracing::warn!(
-                                "Rejecting unexpected peer request: request_id={}",
+                                "Rejecting unexpected peer request: request_id={} code={code:#x}",
                                 request.request_id
                             );
                             client
-                                .send_request_error(
-                                    request.request_id,
-                                    shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
-                                    "subscriber does not serve requests",
-                                )
+                                .send_request_error(request.request_id, code, reason)
                                 .await?;
                             Ok(false)
                         }
@@ -8186,6 +8204,37 @@ mod tests {
             termination.code,
             shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
             "PROTOCOL_VIOLATION の終了コードであること"
+        );
+    }
+
+    /// peer request の拒否コード: PUBLISH だけ UNINTERESTED になり、それ以外は NOT_SUPPORTED
+    #[test]
+    fn request_rejection_uses_uninterested_only_for_publish() {
+        use shiguredo_moqt::error::{REQUEST_NOT_SUPPORTED, REQUEST_UNINTERESTED};
+        use shiguredo_moqt::message::{Publish, RequestOk};
+        use shiguredo_moqt::track_properties::TrackProperties;
+        let publish = ControlMessage::Publish(Publish {
+            request_id: 1,
+            track_namespace: TrackNamespace::new(Vec::new())
+                .expect("空の namespace を作成できること"),
+            track_name: b"cam".to_vec(),
+            track_alias: 700,
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        });
+        assert_eq!(
+            request_rejection(&publish).0,
+            REQUEST_UNINTERESTED,
+            "PUBLISH は UNINTERESTED で拒否すること"
+        );
+        let other = ControlMessage::RequestOk(RequestOk {
+            parameters: MessageParameters::new(),
+            track_properties: TrackProperties::new(),
+        });
+        assert_eq!(
+            request_rejection(&other).0,
+            REQUEST_NOT_SUPPORTED,
+            "PUBLISH 以外は NOT_SUPPORTED で拒否すること"
         );
     }
 

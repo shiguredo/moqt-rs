@@ -271,6 +271,11 @@ impl Session {
                 // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
                 // SUBSCRIBE 処理直後に開いた fill stream が残っている場合が対象。
                 self.reset_open_fill_streams(request_id);
+                // draft-ietf-moq-transport-22 §9.8 (PUBLISH): 不要な PUBLISH を拒否したとき、
+                // 当該 subscription に属する open な受信 stream の読み取りを STOP_SENDING で
+                // abandon する。PUBLISH 受理時点で Track Alias を登録するため、応答前に
+                // publisher 起点 stream が開いていることがある。
+                self.discard_rejected_subscription_incoming_streams(request_id);
                 Ok(None)
             }
             SubscriptionState::Established => {

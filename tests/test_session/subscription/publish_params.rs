@@ -559,3 +559,97 @@ fn send_publish_raises_smaller_explicit_largest_object() {
         "指定値が観測値より小さければ観測値に引き上げられること"
     );
 }
+
+/// PUBLISH を UNINTERESTED で拒否したとき、open な publisher 起点 data stream に
+/// STOP_SENDING 指示が発行され、以後の DATA_STREAM_TIMEOUT で二重発行されないこと
+///
+/// draft-ietf-moq-transport-22 §9.8 (PUBLISH): "A subscriber receiving a PUBLISH for a Track
+/// it does not wish to receive SHOULD send PUBLISH_ERROR with error code UNINTERESTED, and
+/// abandon reading any publisher initiated streams associated with that subscription using a
+/// STOP_SENDING frame."
+#[test]
+fn publishing_rejected_with_uninterested_stops_open_incoming_streams() {
+    use shiguredo_moqt::error::{REQUEST_UNINTERESTED, STREAM_CANCELLED};
+    use shiguredo_moqt::message::ReasonPhrase;
+    let (mut client, mut server) = establish_pair();
+    let track_alias = 701;
+    let rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            track_alias,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, publish_msg) = take_send_request(&mut server);
+    client
+        .recv_request(publish_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // PUBLISH_OK より前に publisher が subgroup stream を開く
+    let stream_id = DataStreamId(901);
+    let header = SubgroupHeader {
+        track_alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(0),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    // publisher 側の送信 API は Established を要求するため、受信側へ直接通知して
+    // PUBLISH_OK より前に stream が開いた状況を作る (受信 API は Pending でも受理する)
+    client
+        .recv_data_stream_type(stream_id, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // UNINTERESTED で PUBLISH を拒否する
+    client
+        .send_request_error(
+            rid,
+            REQUEST_UNINTERESTED,
+            0,
+            ReasonPhrase::new("not interested".to_string())
+                .expect("テストフィクスチャの前提条件を満たす"),
+            None,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut stop_sending = None;
+    while let Some(event) = client.poll_event() {
+        if let SessionEvent::StopSendingDataStream {
+            stream_id,
+            error_code,
+        } = event
+        {
+            stop_sending = Some((stream_id, error_code));
+            break;
+        }
+    }
+    assert_eq!(
+        stop_sending,
+        Some((stream_id, STREAM_CANCELLED)),
+        "拒否した subscription の open stream に STOP_SENDING 指示が発行されること"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+
+    // 破棄対象へ移っているため DATA_STREAM_TIMEOUT でも二重発行されない
+    client.tick(60_000);
+    client.tick(120_000);
+    while let Some(event) = client.poll_event() {
+        assert!(
+            !matches!(event, SessionEvent::StopSendingDataStream { .. }),
+            "timeout で STOP_SENDING が二重発行されないこと"
+        );
+    }
+    assert_eq!(client.state(), SessionState::Established);
+}

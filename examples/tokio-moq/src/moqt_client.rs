@@ -2954,7 +2954,7 @@ impl MoqtClient {
                         "notable event predicate is inconsistent with this arm"
                     );
                     tracing::info!(
-                        "Session requested STOP_SENDING for timed out data stream: \
+                        "Session requested STOP_SENDING for data stream: \
                          stream_id={}, error_code={:#x}",
                         stream_id.0,
                         error_code

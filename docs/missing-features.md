@@ -233,6 +233,15 @@ moq-pub の peer request 処理は SUBSCRIBE と FETCH だけを扱い、それ�
 transport 層の `send_request_ok` も Track Properties を渡せない
 (`examples/tokio-moq/src/moqt_client.rs:1697-1703`)。
 
+### 5.7.1 moq-sub の peer request 拒否方針
+
+moq-sub は peer request を処理しない。PUBLISH は「不要」として `UNINTERESTED` (0x20)、
+SUBSCRIBE / FETCH / TRACK_STATUS は `NOT_SUPPORTED` (0x3) で拒否する
+(`examples/moq-sub/src/pipeline.rs`)。PUBLISH の拒否時は、当該 subscription に属する
+open な publisher 起点 data stream を破棄対象へ移し、
+`SessionEvent::StopSendingDataStream` (`STREAM_CANCELLED`) を発行する
+(`src/session/subscription/dispatch.rs`)。STOP_SENDING フレームの送出は I/O 層が行う。
+
 ### 5.8 メディアの FETCH に応答しない
 
 FETCH に応答するのは catalog track だけで、映像 / 音声の FETCH は `DOES_NOT_EXIST` で
