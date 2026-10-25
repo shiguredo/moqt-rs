@@ -1,7 +1,7 @@
 # publisher 側 FETCH / fill 応答 Object の Location を要求範囲で検証する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -75,3 +75,35 @@ FETCH / fill fetch の応答経路は Object の Location を検証していな�
 - `skills/shiguredo-moqt/SKILL.md` の API 一覧が新しい署名に更新されていること。
 - `FetchResponseWriter` の拒否時に encoder の状態が進まず、呼び出し側が応答を中断できること (コードレビューで確認する)。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `src/session/types.rs` の `Fetch` に `request_end: Option<Location>` を追加し、`src/session/fetch.rs` の
+  `handle_peer_fetch` が解決済みの start / end を publisher 役 fetch に保存するようにした。
+- `src/session/data.rs` の `send_fetch_object` を `(stream_id, location: &Location) -> Result<(), SendRequestError>`
+  に変更した。通常の FETCH 応答は `fetch_start` / `request_end` / `end_location` で Location を検証し、
+  範囲外は `SendRequestError::LocalFilterMismatch` を返す。fill fetch stream は
+  `OutgoingFetchStream::range` (effective fill range) で検証する。
+- `OutgoingFetchStream` に `range: Option<(Location, Location)>` を追加し、送信 Object がない stream は
+  `None` とした上で、fill stream の登録時に `Session::pending_fill_ranges` から effective fill range を移す。
+  `maybe_open_fill_stream` が subscription ごとに計算結果を積み、`send_fill_fetch_header` が 1 件消費する。
+  未消費の range は `forget_subscription` で掃除する。
+- `Session::send_fetch_end_of_range(stream_id)` を追加した。End of Range は Object ではないため
+  Location 検証を行わず、stream 登録の検証だけを行う。
+- `examples/tokio-moq/src/moqt_client.rs` の `DataPlaneHandle::send_fetch_object(stream_id, location)` /
+  `send_fetch_end_of_range(stream_id)` を追加し、`FetchResponseWriter::write_object` は Session 通知を
+  encode より先に行う (拒否時に encoder の直前 Location を進めない)。`write_end_of_non_existent_range` /
+  `write_end_of_unknown_range`、`send_fetch_response` / `send_fill_fetch_response` を新 API へ追従させた。
+- `tests/test_session/fetch/unified.rs` / `fill.rs` に、範囲外 Location の拒否、FETCH_OK の End Location 超過の
+  拒否、End of Range の受理、fill の effective range 外の拒否を追加した。
+- `docs/moqt.md` と `skills/shiguredo-moqt/SKILL.md` を新しい API と検証内容に更新した。Range Filters (§3.3.2)
+  の評価は未対応であることを明記した。
+
+## 完了条件の検証
+
+- 要求範囲外の拒否: `fetch_object_outside_requested_range_is_rejected`
+- FETCH_OK の End Location 超過の拒否: `fetch_object_beyond_ok_end_location_is_rejected`
+- fill の effective range 外の拒否: `fill_object_outside_effective_range_is_rejected`
+- End of Range の受理: `fetch_end_of_range_is_accepted_without_location_validation`
+- 既存 API の呼び出し側 (`examples/tokio-moq`) を追従し、`cargo test --workspace` /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
