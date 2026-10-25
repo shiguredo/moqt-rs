@@ -1,7 +1,7 @@
 # 公開受信 API で request メッセージのパラメータスコープを検証する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -91,3 +91,48 @@ PUBLISH / FETCH / TRACK_STATUS に載った場合はトップレベルスコー�
 - 応答・通知メッセージの受信 API (issue 0305 で扱う)。
 - REQUEST_UPDATE / REQUEST_OK などのトップレベルスコープ検証 (既存の context 別検証に従う。本 issue は
   REQUEST_UPDATE の FILL_PARAMETERS 内側のみを追加する)。
+
+## 解決方法
+
+- `Session::accept_peer_request` に `allowed_params: &[u64]` と `scope_error_reason: &'static str` を追加し、
+  `validate_peer_request_id` の直後・AUTH_TOKEN 一意性検証と GOAWAY 拒否より前に `MessageParameters::validate_scope`
+  を置いた。SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の全初回 request が同じ順序で検証される。
+- `Session::accept_incoming_track_request` も `allowed_params` / `scope_error_reason` を受け取り、`accept_peer_request`
+  へ委譲するようにした。SUBSCRIBE は `SUBSCRIBE_ALLOWED_PARAMS`、TRACK_STATUS は `TRACK_STATUS_ALLOWED_PARAMS`、
+  PUBLISH は `PUBLISH_ALLOWED_PARAMS`、FETCH は `FETCH_ALLOWED_PARAMS` を渡す。
+- TRACK_STATUS が `accept_incoming_track_request` の後に呼んでいた `validate_scope` を削除した。早期 return 経路でも
+  §9.20.1 の MUST close がメッセージ単位の reject に隠れない。
+- `MessageParameters::validate_fill_parameters_scope` を追加した。FILL_PARAMETERS の全個を走査して内側を
+  `FILL_PARAMETERS_ALLOWED_PARAMS` で検証し、重複は §9.20 (Control Message Parameters) の受信側 SHOULD として
+  PROTOCOL_VIOLATION、値が `FillParameters` でない手組みは不正形として PROTOCOL_VIOLATION にする。
+  `accept_peer_request` と `Session::handle_peer_request_update` の両方から呼ぶ。
+- `Session::recv_request` の doc に、decode 済みメッセージを渡した場合も session 層で §9.20.1 / §9.20.15 を検証する
+  ことを明記した。`accept_peer_request` / `accept_incoming_track_request` / `*_ALLOWED_PARAMS` の doc も更新した。
+- `tests/test_session/parameter_rules.rs` に、SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS の許可外パラメータ、
+  許可パラメータのみの受理、予約名前空間・GOAWAY・重複 AUTH_TOKEN との複合違反、FILL_PARAMETERS の内側違反と
+  許可内受理、重複 FILL、`FillParameters` 以外の値、REQUEST_UPDATE の FILL 内側違反と許可内受理を検証するテストを
+  追加した。scope 違反では `CloseSession(PROTOCOL_VIOLATION)` が 1 回だけ発行され REQUEST_ERROR を送らないことを固定した。
+- `tests/test_session/subscription/subscription_limits.rs` の
+  `initial_requests_with_range_filter_violation_send_request_error_only` を分割し、PUBLISH + Range Filter は
+  §9.20.1 の PROTOCOL_VIOLATION、FETCH + Range Filter は `FETCH_ALLOWED_PARAMS` に含まれるため従来どおり
+  INVALID_FILTER の REQUEST_ERROR になることを固定した。
+
+## 完了条件の検証
+
+- 許可外トップレベルパラメータ: `recv_request_with_disallowed_parameter_closes_session`
+- 許可パラメータのみの受理: `recv_request_with_allowed_parameters_is_accepted`
+- 複合違反の優先順位: `recv_request_scope_violation_precedes_reserved_namespace_rejection` /
+  `recv_request_scope_violation_precedes_going_away_rejection` /
+  `recv_request_scope_violation_precedes_auth_token_rejection`
+- TRACK_STATUS の早期 return 取りこぼし: 上記の TRACK_STATUS + `.` の複合違反テスト
+- FILL_PARAMETERS の内側: `recv_request_fill_parameters_inner_scope_violation_closes_session` /
+  `recv_request_fill_parameters_with_allowed_inner_is_accepted` /
+  `recv_request_update_fill_parameters_inner_scope_violation_closes_session` /
+  `recv_request_update_fill_parameters_with_allowed_inner_is_accepted` /
+  `recv_request_duplicate_fill_parameters_closes_session` /
+  `recv_request_fill_parameters_with_invalid_value_encoding_closes_session`
+- FILL_PARAMETERS を許可しないメッセージでの外側スコープ違反: `recv_request_fill_parameters_outside_subscribe_closes_session`
+- PUBLISH / FETCH の Range Filter: `initial_publish_with_range_filter_closes_session_with_protocol_violation` /
+  `initial_fetch_with_range_filter_violation_sends_request_error_only`
+- wire 経路と未対応 request の非退行: 既存テストがすべて成功
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
