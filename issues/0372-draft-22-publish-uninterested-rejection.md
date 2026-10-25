@@ -1,7 +1,7 @@
 # moq-sub が不要な PUBLISH を UNINTERESTED で拒否する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -71,3 +71,31 @@ PUBLISH_NAMESPACE への応答用として定義され、コード値は §16.11
 - `docs/missing-features.md` に moq-sub の PUBLISH 拒否方針を追記し、`SessionEvent::StopSendingDataStream` の doc・
   `examples/tokio-moq/src/moqt_client.rs` のログ文言・`skills/shiguredo-moqt/SKILL.md` の SessionEvent 表を更新すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `examples/moq-sub/src/pipeline.rs` に `request_rejection(&ControlMessage) -> (u64, &'static str)` を追加し、
+  PUBLISH は `REQUEST_UNINTERESTED` (0x20)、それ以外の request は `REQUEST_NOT_SUPPORTED` (0x3) で拒否する
+  ようにした。unit test で両方を固定した。
+- `src/session/data.rs` に `discard_rejected_subscription_incoming_streams(request_id)` を追加した。当該
+  subscription に帰属する open 受信 subgroup stream を `discard_cancelled_subgroup_stream` の判定に従って
+  破棄対象へ移し、`peer_subgroups.mark_stop_sending`、`retain_discarded_stream_id`、
+  `SessionEvent::StopSendingDataStream { error_code: STREAM_CANCELLED }` の発行を行う。共有 Track Alias で
+  別の生きた subscription に帰属する stream は対象外とする。
+- `src/session/subscription/dispatch.rs` の `send_err_for_subscription` の Pending 分岐で、Terminated 遷移後に
+  上記 helper を呼ぶようにした。
+- `src/session/types.rs` の `StopSendingDataStream` の doc に、REQUEST_ERROR 拒否時の発行契機と
+  `STREAM_CANCELLED` の利用を追記した。`examples/tokio-moq/src/moqt_client.rs` のログ文言を発行契機を限定しない
+  "Session requested STOP_SENDING for data stream" へ更新した。
+- `skills/shiguredo-moqt/SKILL.md` の SessionEvent 表と `docs/missing-features.md` の peer request 拒否方針を更新した。
+- `tests/test_session/subscription/publish_params.rs` に、PUBLISH 受信 → PUBLISH_OK 前に開いた stream を
+  受信 → UNINTERESTED で拒否 → `StopSendingDataStream` (STREAM_CANCELLED) が 1 回だけ発行され、
+  `tick` で DATA_STREAM_TIMEOUT が来ても二重発行されないことを検証するテストを追加した。
+
+## 完了条件の検証
+
+- PUBLISH → UNINTERESTED、それ以外 → NOT_SUPPORTED: `request_rejection_uses_uninterested_only_for_publish`
+- open な受信 data stream への STOP_SENDING 指示: `publishing_rejected_with_uninterested_stops_open_incoming_streams`
+- 二重発行なし: 同テストで `tick` 後のイベントを検査した。
+- doc / SKILL.md / docs/missing-features.md を更新した。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
