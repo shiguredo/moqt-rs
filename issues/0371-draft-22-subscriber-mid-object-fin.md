@@ -1,7 +1,7 @@
 # moq-sub が data stream の FIN で decoder の途中終了を検査する
 
 - Created: 2026-10-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-25
 - Branch: develop
 - Polished: 2026-10-25
 
@@ -66,3 +66,28 @@ the middle of a serialized Object, the session SHOULD be closed with a PROTOCOL_
 
 - `DataPlaneHandle` は `fn new` が private で Session のアクセサも無いため、moq-sub の `#[cfg(test)]` からは構築できない。
   終端種別と `finish()` 結果から報告要否を決める純関数を切り出し、そちらを unit test の対象にする。
+
+## 解決方法
+
+- `examples/tokio-moq/src/moqt_client.rs` の `DataPlaneHandle` に `report_mid_object_fin(stream_id)` を追加し、
+  `Session::report_mid_object_fin` を呼べるようにした。
+- `examples/moq-sub/src/pipeline.rs` に `RegisteredStreamData` (Data / End / StoppedBySession) と
+  `receive_registered_stream_data_outcome` を追加し、`receive_registered_stream_data` は終端種別を捨てる
+  既存 API として残した (header 待ちループは従来どおり)。FIN / RESET_STREAM / STOP_SENDING 指示を区別できる。
+- `mid_object_fin_should_report(end, finish)` を追加し、`RequestStreamEnd::Fin` かつ
+  `Err(MessageError::UnexpectedEof)` のときだけ true を返すようにした。`report_mid_object_fin_if_needed` が
+  true のとき `DataPlaneHandle::report_mid_object_fin` を呼ぶ。
+- video / audio の Object ループと payload ループ、catalog subgroup の Object ループと payload ループ、
+  catalog fetch の entry ループと payload ループで、終端時に decoder の `finish()` を呼び、必要なときだけ
+  mid-object FIN を報告するようにした。RESET_STREAM と STOP_SENDING 指示、header 未受信の終端では報告しない。
+- `examples/moq-sub/src/pipeline.rs` の unit test に、FIN + UnexpectedEof のみ報告し、Object 境界の FIN
+  (`Ok(())`) と RESET_STREAM では報告しないことを固定するテストを追加した。
+
+## 完了条件の検証
+
+- FIN + UnexpectedEof のみ報告: `mid_object_fin_reports_only_fin_with_unexpected_eof`
+- Object ループ / payload ループからの報告: コードレビューと上記の純関数テストで担保する
+  (`DataPlaneHandle` はテストから構築できないため、検出と報告を分離した)。
+- RESET_STREAM / STOP_SENDING / header 未受信で報告しないこと: 純関数テストと分岐で担保する。
+- `DataPlaneHandle::report_mid_object_fin` を追加し、`Session::report_mid_object_fin` の既存契約は変更していない。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` 成功
