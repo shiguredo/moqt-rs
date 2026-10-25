@@ -972,6 +972,12 @@ impl Session {
     /// peer からの request stream の先頭メッセージを受けたときの検証を行う
     ///
     /// - `validate_peer_request_id` で parity と重複を検証 (draft §6.4.2.1 (Request ID))
+    /// - `allowed_params` に無いメッセージパラメータ、および FILL_PARAMETERS の内側に
+    ///   `FILL_PARAMETERS_ALLOWED_PARAMS` 外のパラメータが無いかを検証する (draft §9.20.1
+    ///   (Parameter Scope) / §9.20.15 (FILL PARAMETERS Parameter) の MUST close)。
+    ///   FILL_PARAMETERS の重複は §9.20 (Control Message Parameters) の受信側 SHOULD 検証として
+    ///   PROTOCOL_VIOLATION で閉じる。いずれもセッション終了を伴う検証であり、下の
+    ///   メッセージ単位の reject より先に処理する
     /// - 構造は正しいが内容が不正な AUTHORIZATION_TOKEN を含む場合は
     ///   REQUEST_ERROR(MALFORMED_AUTH_TOKEN) を送信し `Ok(false)` を返す
     ///   (draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression))。
@@ -1025,15 +1031,31 @@ impl Session {
     /// - `Ok(true)`: 受理された
     /// - `Ok(false)`: REQUEST_ERROR を送信済み (セッションは継続。MALFORMED_AUTH_TOKEN または
     ///   GOING_AWAY)
-    /// - `Err(SessionError)`: parity/重複、または REGISTER 適用時の session error
-    ///   (セッションは Closing に遷移)
+    /// - `Err(SessionError)`: parity/重複、パラメータスコープ違反、または REGISTER 適用時の
+    ///   session error (セッションは Closing に遷移)
     pub(super) fn accept_peer_request(
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
         is_publisher_request: bool,
+        allowed_params: &[u64],
+        scope_error_reason: &'static str,
     ) -> Result<bool, SessionError> {
         self.validate_peer_request_id(request_id)?;
+        // draft §9.20.1 (Parameter Scope) / §9.20.15 (FILL PARAMETERS Parameter):
+        // メッセージ型ごとの許可パラメータと FILL_PARAMETERS の内側スコープを検証する。
+        // これらはセッション終了の MUST であり、AUTH_TOKEN 一意性や GOAWAY 拒否などの
+        // メッセージ単位の reject より先に処理する (未対応 request と同じ順序)。
+        if parameters.validate_scope(allowed_params).is_err() {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, scope_error_reason);
+            self.fail(err.clone());
+            return Err(err);
+        }
+        if let Err(err) = parameters.validate_fill_parameters_scope() {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
+            self.fail(err.clone());
+            return Err(err);
+        }
         // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver
         // of a message containing a well-formed Token structure that is otherwise invalid
         // MUST reject that message with an MALFORMED_AUTH_TOKEN error."
@@ -1122,6 +1144,16 @@ impl Session {
     /// 7 種類以外の message type
     /// (draft §6.3 (Session initialization) 違反) は `PROTOCOL_VIOLATION` で session を
     /// closing に遷移させる。
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): メッセージ型ごとに許可された
+    /// パラメータ以外の受信は PROTOCOL_VIOLATION でセッションを閉じる MUST。§9.20.15
+    /// (FILL PARAMETERS Parameter) の内側パラメータも同じく検証する。wire 経路では
+    /// `ControlMessage::decode` が検証するが、本 API は decode 済みの `ControlMessage` を
+    /// 直接受け取るため、decode を通らない手組みメッセージでは session 層が検証する。
+    ///
+    /// 本 API が扱う初回 request メッセージは SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS /
+    /// 未対応 request である。REQUEST_UPDATE などは `Session::recv_stream_message` 経由で受信し、
+    /// それぞれの context 別検証に従う。
     pub fn recv_request(&mut self, msg: ControlMessage) -> Result<(), RecvRequestError> {
         if self.state != SessionState::Established {
             // draft §6.3 (Session initialization): SETUP 完了前の前置到着は session を落とさない。

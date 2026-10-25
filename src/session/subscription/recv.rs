@@ -79,8 +79,10 @@ impl Session {
     /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): "The receiver of a TRACK_STATUS
     /// message treats it identically as if it had received a SUBSCRIBE message, except it
     /// does not create downstream subscription state or send any Objects." したがって
-    /// 受信前の検証 (Request ID / AUTHORIZATION_TOKEN / Range Filter 数 / 予約名前空間 /
-    /// `.session` 名前空間) は両メッセージで共通である。
+    /// 受信前の検証 (Request ID / メッセージパラメータのスコープ / AUTHORIZATION_TOKEN /
+    /// Range Filter 数 / 予約名前空間 / `.session` 名前空間) は両メッセージで共通である。
+    /// `allowed_params` は呼び出し側のメッセージ種別が許可するパラメータ集合
+    /// (`SUBSCRIBE_ALLOWED_PARAMS` / `TRACK_STATUS_ALLOWED_PARAMS`) を渡す。
     ///
     /// `false` を返した場合は request を受理しない (REQUEST_ERROR は本関数内で発行済み、
     /// または `Err` でセッションを閉じている)。呼び出し側は `Ok(false)` で早期 return する。
@@ -91,9 +93,17 @@ impl Session {
         track_namespace: &TrackNamespace,
         track_name: &[u8],
         parameters: &MessageParameters,
+        allowed_params: &[u64],
+        scope_error_reason: &'static str,
     ) -> Result<bool, SessionError> {
         // SUBSCRIBE と TRACK_STATUS は自側が publisher として応答する request である
-        if !self.accept_peer_request(request_id, parameters, true)? {
+        if !self.accept_peer_request(
+            request_id,
+            parameters,
+            true,
+            allowed_params,
+            scope_error_reason,
+        )? {
             return Ok(false);
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
@@ -141,6 +151,8 @@ impl Session {
             &subscribe.track_namespace,
             &subscribe.track_name,
             &subscribe.parameters,
+            crate::message::SUBSCRIBE_ALLOWED_PARAMS,
+            "SUBSCRIBE parameter not allowed in this context",
         )? {
             return Ok(());
         }
@@ -293,7 +305,13 @@ impl Session {
         let request_id = publish.request_id;
         // PUBLISH は自側が subscriber として受ける request であり、§9.2 の publisher 限定の
         // 拒否 MAY の対象外である
-        if !self.accept_peer_request(request_id, &publish.parameters, false)? {
+        if !self.accept_peer_request(
+            request_id,
+            &publish.parameters,
+            false,
+            crate::message::PUBLISH_ALLOWED_PARAMS,
+            "PUBLISH parameter not allowed in this context",
+        )? {
             return Ok(());
         }
         // draft §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN Register/Delete/Use を peer cache に反映
@@ -755,6 +773,14 @@ impl Session {
         };
         if update.parameters.validate_scope(allowed).is_err() {
             let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, scope_error);
+            self.fail(err.clone());
+            return Err(err);
+        }
+        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): 内側の
+        // パラメータも許可集合に限る。wire 経路では decode 層が検証済みだが、decode 済み
+        // メッセージを直接受け取る API 経路ではここで検証する。
+        if let Err(err) = update.parameters.validate_fill_parameters_scope() {
+            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
             self.fail(err.clone());
             return Err(err);
         }

@@ -56,7 +56,8 @@ const MSG_SUBSCRIBE_TRACKS: u64 = 0x51;
 /// SUBSCRIBE で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope))
 ///
 /// 送信側の `send_subscribe` (src/session/subscription/send.rs) が request_id 発行前に
-/// スコープ検証するために `pub(crate)` で公開している。
+/// スコープ検証するため、および受信側の `Session::accept_peer_request` が API 経路で
+/// 検証するために `pub(crate)` で公開している。
 pub(crate) const SUBSCRIBE_ALLOWED_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
     // draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter):
@@ -189,7 +190,8 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 /// 伝播の構築には `MessageParameters::resulting_publish_parameters` を使う。
 ///
 /// 送信側の `send_publish` (src/session/subscription/send.rs) が request_id 発行前に
-/// スコープ検証するために `pub(crate)` で公開している。
+/// スコープ検証するため、および受信側の `Session::accept_peer_request` が API 経路で
+/// 検証するために `pub(crate)` で公開している。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub(crate) const PUBLISH_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_DELIVERY_TIMEOUT,
@@ -222,8 +224,9 @@ pub(crate) const PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS: &[u64] =
 /// Range Filter 0x25-0x28 は FETCH に出現可能 (§3.3.2 (Range Filters))。
 /// TRACK_PROPERTY_FILTER (0x29) は SUBSCRIBE_TRACKS 専用のため含めない。
 ///
-/// 送信側の `send_fetch` (src/session/fetch.rs) が request_id 発行前に
-/// スコープ検証するために `pub(crate)` で公開している。
+/// 送信側の `send_fetch` (src/session/fetch.rs) が request_id 発行前にスコープ検証するため、
+/// および受信側の `Session::accept_peer_request` が API 経路で検証するために `pub(crate)` で
+/// 公開している。
 pub(crate) const FETCH_ALLOWED_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
     PARAM_FILL_TIMEOUT,
@@ -249,8 +252,9 @@ pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[];
 
 /// TRACK_STATUS で許可されるパラメータ型
 ///
-/// 送信側の `send_track_status` (src/session/track_status.rs) が
-/// request_id 発行前にスコープ検証するために `pub(crate)` で公開している。
+/// 送信側の `send_track_status` (src/session/track_status.rs) が request_id 発行前に
+/// スコープ検証するため、および受信側の `Session::accept_peer_request` が API 経路で
+/// 検証するために `pub(crate)` で公開している。
 pub(crate) const TRACK_STATUS_ALLOWED_PARAMS: &[u64] =
     &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
 

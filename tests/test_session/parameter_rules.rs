@@ -2520,3 +2520,505 @@ fn request_ok_publish_with_largest_object_closes_session_on_recv() {
         other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
     }
 }
+
+// ─── 公開受信 API (Session::recv_request) のパラメータスコープ検証 ─────────────────
+//
+// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) は許可されないパラメータの受信に
+// PROTOCOL_VIOLATION でのセッション終了を MUST とする。wire 経路は decode 層が検証するが、
+// recv_request は decode 済みメッセージを直接受け取るため session 層でも検証する。
+// FILL_PARAMETERS の内側は §9.20.15 (FILL PARAMETERS Parameter) が同じ MUST を課す。
+
+/// EXPIRES を 1 つ持つパラメータ列 (SUBSCRIBE / TRACK_STATUS では不許可)
+fn expires_parameters() -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_EXPIRES,
+        value: MessageParameterValue::VarInt(1),
+    });
+    parameters
+}
+
+/// NEW_GROUP_REQUEST を 1 つ持つパラメータ列 (PUBLISH では不許可)
+fn new_group_request_parameters() -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_NEW_GROUP_REQUEST,
+        value: MessageParameterValue::VarInt(1),
+    });
+    parameters
+}
+
+/// LARGEST_OBJECT を 1 つ持つパラメータ列 (FETCH では不許可)
+fn largest_object_parameters() -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_LARGEST_OBJECT,
+        value: MessageParameterValue::Location {
+            group: 0,
+            object: 0,
+        },
+    });
+    parameters
+}
+
+/// FILL_PARAMETERS を 1 つ持つパラメータ列
+fn fill_parameters(inner: MessageParameters) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    });
+    parameters
+}
+
+/// 手組みメッセージを recv_request に渡し、§9.20.1 / §9.20.15 の MUST close を検証する
+fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: &str) {
+    match server.recv_request(message) {
+        Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
+            assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "{label}");
+        }
+        other => panic!("{label}: PROTOCOL_VIOLATION が期待された: {other:?}"),
+    }
+    assert_eq!(server.state(), SessionState::Closing, "{label}");
+    // MUST close がメッセージ単位の reject に隠れず、CloseSession(PROTOCOL_VIOLATION) だけが
+    // 発行され、REQUEST_ERROR を送らないこと
+    let mut close_sessions = 0;
+    let mut request_errors = 0;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::CloseSession(err) => {
+                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "{label}");
+                close_sessions += 1;
+            }
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(_),
+                ..
+            } => request_errors += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(close_sessions, 1, "{label}: CloseSession が 1 回");
+    assert_eq!(request_errors, 0, "{label}: REQUEST_ERROR を送らないこと");
+}
+
+/// 許可外トップレベルパラメータを含む手組み SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS が
+/// §9.20.1 の MUST close になる
+#[test]
+fn recv_request_with_disallowed_parameter_closes_session() {
+    use shiguredo_moqt::message::{
+        Fetch as WireFetch, Publish as WirePublish, Subscribe, TrackStatus,
+    };
+    // SUBSCRIBE + EXPIRES
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: expires_parameters(),
+        }),
+        "SUBSCRIBE + EXPIRES",
+    );
+    // PUBLISH + NEW_GROUP_REQUEST
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Publish(WirePublish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters: new_group_request_parameters(),
+            track_properties: TrackProperties::new(),
+        }),
+        "PUBLISH + NEW_GROUP_REQUEST",
+    );
+    // FETCH + LARGEST_OBJECT
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: largest_object_parameters(),
+        }),
+        "FETCH + LARGEST_OBJECT",
+    );
+    // TRACK_STATUS + EXPIRES
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::TrackStatus(TrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: expires_parameters(),
+        }),
+        "TRACK_STATUS + EXPIRES",
+    );
+}
+
+/// 許可パラメータのみを含む手組み request は従来どおり受理される
+#[test]
+fn recv_request_with_allowed_parameters_is_accepted() {
+    use shiguredo_moqt::message::{
+        Fetch as WireFetch, Publish as WirePublish, Subscribe, TrackStatus,
+    };
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_FORWARD,
+        PARAM_INCLUDE_PROPERTIES, PARAM_SUBSCRIBER_PRIORITY,
+    };
+    let param = |param_type: u64, value: MessageParameterValue| {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter { param_type, value });
+        parameters
+    };
+    let messages = [
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            // FORWARD は SUBSCRIBE で許可される
+            parameters: param(PARAM_FORWARD, MessageParameterValue::Uint8(1)),
+        }),
+        ControlMessage::Publish(WirePublish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            // EXPIRES は PUBLISH で許可される
+            parameters: param(PARAM_EXPIRES, MessageParameterValue::VarInt(1)),
+            track_properties: TrackProperties::new(),
+        }),
+        ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            // SUBSCRIBER_PRIORITY は FETCH で許可される
+            parameters: param(PARAM_SUBSCRIBER_PRIORITY, MessageParameterValue::Uint8(128)),
+        }),
+        ControlMessage::TrackStatus(TrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            // INCLUDE_PROPERTIES は TRACK_STATUS で許可される
+            parameters: param(PARAM_INCLUDE_PROPERTIES, MessageParameterValue::Uint8(1)),
+        }),
+    ];
+    for message in messages {
+        let label = format!("{message:?}");
+        let (_client, mut server) = establish_pair();
+        server.recv_request(message).unwrap_or_else(|e| {
+            panic!("許可パラメータのみの request は受理されること: {label}: {e:?}")
+        });
+        assert_eq!(server.state(), SessionState::Established, "{label}");
+    }
+}
+
+/// 許可外パラメータと予約名前空間の複合違反では scope 違反の MUST close が優先される
+#[test]
+fn recv_request_scope_violation_precedes_reserved_namespace_rejection() {
+    use shiguredo_moqt::message::{Subscribe, TrackStatus};
+    // SUBSCRIBE
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"."]),
+            track_name: b"cam".to_vec(),
+            parameters: expires_parameters(),
+        }),
+        "SUBSCRIBE + EXPIRES + 予約名前空間",
+    );
+    // TRACK_STATUS (accept_incoming_track_request の早期 return 経路で MUST close が
+    // 隠れないこと)
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::TrackStatus(TrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b"."]),
+            track_name: b"cam".to_vec(),
+            parameters: expires_parameters(),
+        }),
+        "TRACK_STATUS + EXPIRES + 予約名前空間",
+    );
+}
+
+/// 許可外パラメータと重複 AUTHORIZATION_TOKEN の複合違反では scope 違反の MUST close が
+/// MALFORMED_AUTH_TOKEN の REQUEST_ERROR より優先される
+#[test]
+fn recv_request_scope_violation_precedes_auth_token_rejection() {
+    use shiguredo_moqt::message::Subscribe;
+    use shiguredo_moqt::message_parameter::{
+        AuthorizationToken, MessageParameter, MessageParameterValue, PARAM_AUTHORIZATION_TOKEN,
+    };
+    let token = AuthorizationToken::UseValue {
+        token_type: 1,
+        token_value: vec![0x01],
+    };
+    let mut parameters = expires_parameters();
+    for _ in 0..2 {
+        parameters.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::AuthorizationToken(token.clone()),
+        });
+    }
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters,
+        }),
+        "SUBSCRIBE + EXPIRES + 重複 AUTH_TOKEN",
+    );
+}
+
+/// GOAWAY 送信後の新規 request でも scope 違反の MUST close が GOING_AWAY より優先される
+///
+/// GOING_AWAY 拒否は自側が publisher として応答する request (SUBSCRIBE / FETCH /
+/// TRACK_STATUS) に限られるため、SUBSCRIBE で検証する。
+#[test]
+fn recv_request_scope_violation_precedes_going_away_rejection() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_client, mut server) = establish_pair();
+    server
+        .send_goaway(Vec::new(), 0)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // send_goaway のイベントを読み捨てる
+    while server.poll_event().is_some() {}
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: expires_parameters(),
+        }),
+        "SUBSCRIBE + EXPIRES + GOAWAY 送信後",
+    );
+}
+
+/// FILL_PARAMETERS の内側に許可外パラメータを含む手組み SUBSCRIBE が §9.20.15 の
+/// MUST close になる
+#[test]
+fn recv_request_fill_parameters_inner_scope_violation_closes_session() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: fill_parameters(expires_parameters()),
+        }),
+        "SUBSCRIBE + FILL_PARAMETERS(EXPIRES)",
+    );
+}
+
+/// FILL_PARAMETERS の内側が許可パラメータのみの手組み SUBSCRIBE は受理される
+#[test]
+fn recv_request_fill_parameters_with_allowed_inner_is_accepted() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_client, mut server) = establish_pair();
+    server
+        .recv_request(ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: fill_parameters(MessageParameters::new()),
+        }))
+        .expect("内側が許可パラメータのみの FILL_PARAMETERS は受理されること");
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// 重複した FILL_PARAMETERS は §9.20 (Control Message Parameters) の受信側 SHOULD 検証として
+/// PROTOCOL_VIOLATION で閉じる
+#[test]
+fn recv_request_duplicate_fill_parameters_closes_session() {
+    use shiguredo_moqt::message::Subscribe;
+    let (_client, mut server) = establish_pair();
+    let mut parameters = fill_parameters(MessageParameters::new());
+    // 2 個目の FILL_PARAMETERS を追加する (push は重複を許す)
+    for p in fill_parameters(MessageParameters::new()).as_slice() {
+        parameters.push(p.clone());
+    }
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters,
+        }),
+        "SUBSCRIBE + 重複 FILL_PARAMETERS",
+    );
+}
+
+/// PARAM_FILL_PARAMETERS の値が FillParameters でない手組みは不正形として閉じる
+#[test]
+fn recv_request_fill_parameters_with_invalid_value_encoding_closes_session() {
+    use shiguredo_moqt::message::Subscribe;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::VarInt(1),
+    });
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters,
+        }),
+        "SUBSCRIBE + FILL_PARAMETERS(VarInt)",
+    );
+}
+
+/// FILL_PARAMETERS を許可しないメッセージに載せると外側スコープ違反で閉じる
+#[test]
+fn recv_request_fill_parameters_outside_subscribe_closes_session() {
+    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish, TrackStatus};
+    // PUBLISH
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Publish(WirePublish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters: fill_parameters(MessageParameters::new()),
+            track_properties: TrackProperties::new(),
+        }),
+        "PUBLISH + FILL_PARAMETERS",
+    );
+    // FETCH
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: fill_parameters(MessageParameters::new()),
+        }),
+        "FETCH + FILL_PARAMETERS",
+    );
+    // TRACK_STATUS
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::TrackStatus(TrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: fill_parameters(MessageParameters::new()),
+        }),
+        "TRACK_STATUS + FILL_PARAMETERS",
+    );
+}
+
+/// REQUEST_UPDATE の FILL_PARAMETERS 内側が許可パラメータのみなら従来どおり受理される
+#[test]
+fn recv_request_update_fill_parameters_with_allowed_inner_is_accepted() {
+    use shiguredo_moqt::message::RequestUpdate;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let update = ControlMessage::RequestUpdate(RequestUpdate {
+        request_id: rid + 2,
+        parameters: fill_parameters(MessageParameters::new()),
+    });
+    server
+        .recv_stream_message(rid, update)
+        .expect("内側が許可パラメータのみの FILL_PARAMETERS は受理されること");
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// REQUEST_UPDATE の FILL_PARAMETERS 内側も §9.20.15 の MUST close で検証される
+#[test]
+fn recv_request_update_fill_parameters_inner_scope_violation_closes_session() {
+    use shiguredo_moqt::message::RequestUpdate;
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 内側に EXPIRES を持つ FILL_PARAMETERS 付き REQUEST_UPDATE を手組みする
+    let update = ControlMessage::RequestUpdate(RequestUpdate {
+        request_id: rid + 2,
+        parameters: fill_parameters(expires_parameters()),
+    });
+    match server.recv_stream_message(rid, update) {
+        Err(err) => assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION),
+        Ok(()) => {
+            panic!("REQUEST_UPDATE の FILL_PARAMETERS 内側違反は PROTOCOL_VIOLATION になること")
+        }
+    }
+    assert_eq!(server.state(), SessionState::Closing);
+    // MUST close がメッセージ単位の reject に隠れず、REQUEST_ERROR を送らないこと
+    let mut close_sessions = 0;
+    let mut request_errors = 0;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::CloseSession(err) => {
+                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+                close_sessions += 1;
+            }
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(_),
+                ..
+            } => request_errors += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(close_sessions, 1, "CloseSession が 1 回");
+    assert_eq!(request_errors, 0, "REQUEST_ERROR を送らないこと");
+}

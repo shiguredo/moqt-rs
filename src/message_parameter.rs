@@ -1364,6 +1364,49 @@ impl MessageParameters {
         Ok(())
     }
 
+    /// FILL_PARAMETERS の内側パラメータのスコープを検証する
+    ///
+    /// draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): 内側のパラメータは
+    /// `FILL_PARAMETERS_ALLOWED_PARAMS` に限られ、それ以外の受信は PROTOCOL_VIOLATION で
+    /// セッションを閉じる MUST。また同 §9.20 (Control Message Parameters) は、同じ
+    /// パラメータ型の繰り返しを送信側の MUST NOT、受信側の SHOULD 検証 (PROTOCOL_VIOLATION で
+    /// 閉じる) と定める。wire では内側スコープを `decode_fill_parameters` が、重複を
+    /// `decode_inner` の一般規則が検証する。decode 済みメッセージを直接受け取る session API
+    /// 経路でも同じ検証を行う。
+    pub(crate) fn validate_fill_parameters_scope(&self) -> Result<(), MessageError> {
+        let mut seen = false;
+        for p in &self.0 {
+            if p.param_type != PARAM_FILL_PARAMETERS {
+                continue;
+            }
+            // 同じパラメータ型の繰り返しは §9.20 (Control Message Parameters) が送信側の
+            // MUST NOT、受信側の SHOULD 検証 (PROTOCOL_VIOLATION) と定める
+            if seen {
+                return Err(MessageError::ProtocolViolation("duplicate FILL_PARAMETERS"));
+            }
+            seen = true;
+            match &p.value {
+                MessageParameterValue::FillParameters(inner) => {
+                    inner
+                        .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
+                        .map_err(|_| {
+                            MessageError::ProtocolViolation(
+                                "FILL_PARAMETERS inner parameter not allowed in this context",
+                            )
+                        })?;
+                }
+                // wire の decode は型と値の不一致を拒否する。decode を通らない手組み
+                // メッセージも同じくセッションを閉じる (他の手組み不正パラメータと同じ扱い)
+                _ => {
+                    return Err(MessageError::ProtocolViolation(
+                        "FILL_PARAMETERS parameter has invalid value encoding",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// AUTHORIZATION_TOKEN の (Token Type, Token Value) の一意性を検証する
     ///
     /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): "The receiver

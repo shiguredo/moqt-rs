@@ -1937,63 +1937,92 @@ fn incoming_unparsable_range_filter_is_rejected() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// 初回 PUBLISH / FETCH の Range Filter 拒否も
-/// REQUEST_ERROR (INVALID_FILTER) のみで、セッションを閉じない
+/// 初回 PUBLISH の Range Filter は §9.20.1 のパラメータスコープ違反として
+/// PROTOCOL_VIOLATION でセッションを閉じる
 ///
-/// `check_incoming_range_filters` の戻り値化後も初期 request の経路が
-/// 従来どおり REQUEST_ERROR + FIN を返すことの回帰テスト
+/// PUBLISH は Range Filter (SUBGROUP_FILTER 等) を許可しない (§3.3.2 は SUBSCRIBE / FETCH /
+/// SUBSCRIBE_TRACKS / REQUEST_UPDATE に限定)。`PUBLISH_ALLOWED_PARAMS` に含まれないため、
+/// Range Filter の総数検証 (INVALID_FILTER の REQUEST_ERROR) より先に §9.20.1 の MUST close が
+/// 発火する。
+#[test]
+fn initial_publish_with_range_filter_closes_session_with_protocol_violation() {
+    use shiguredo_moqt::message::Publish as WirePublish;
+    let (_client, mut server) =
+        establish_pair_with_options(SetupOptions::new(), SetupOptions::new());
+    let result = server.recv_request(ControlMessage::Publish(WirePublish {
+        request_id: 0,
+        track_namespace: ns(&[b"live"]),
+        track_name: b"cam".to_vec(),
+        track_alias: 1,
+        parameters: one_range_subgroup_filter(),
+        track_properties: TrackProperties::new(),
+    }));
+    match result {
+        Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
+            assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        }
+        other => panic!("PUBLISH の Range Filter は PROTOCOL_VIOLATION になること: {other:?}"),
+    }
+    assert_eq!(server.state(), SessionState::Closing);
+    // MUST close がメッセージ単位の reject に隠れず、REQUEST_ERROR を送らないこと
+    let mut close_sessions = 0;
+    let mut request_errors = 0;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::CloseSession(err) => {
+                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+                close_sessions += 1;
+            }
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(_),
+                ..
+            } => request_errors += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(close_sessions, 1, "CloseSession が 1 回");
+    assert_eq!(request_errors, 0, "REQUEST_ERROR を送らないこと");
+}
+
+/// 初回 FETCH の Range Filter は許可パラメータであり、従来どおり
+/// REQUEST_ERROR (INVALID_FILTER) のみでセッションを閉じない
+///
+/// `FETCH_ALLOWED_PARAMS` は Range Filter を含むため、§9.20.1 のスコープ違反にはならず、
+/// `check_incoming_range_filters` の INVALID_FILTER 拒否が働く
 /// (SUBSCRIBE 初回は `incoming_unparsable_range_filter_is_rejected` が担う)。
 #[test]
-fn initial_requests_with_range_filter_violation_send_request_error_only() {
-    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish};
-    for (label, message) in [
-        (
-            "PUBLISH",
-            ControlMessage::Publish(WirePublish {
-                request_id: 0,
-                track_namespace: ns(&[b"live"]),
-                track_name: b"cam".to_vec(),
-                track_alias: 1,
-                parameters: one_range_subgroup_filter(),
-                track_properties: TrackProperties::new(),
-            }),
-        ),
-        (
-            "FETCH",
-            ControlMessage::Fetch(WireFetch {
-                request_id: 0,
-                track_namespace: ns(&[b"live"]),
-                track_name: b"cam".to_vec(),
-                parameters: one_range_subgroup_filter(),
-            }),
-        ),
-    ] {
-        let (_client, mut server) =
-            establish_pair_with_options(SetupOptions::new(), SetupOptions::new());
-        server
-            .recv_request(message)
-            .unwrap_or_else(|e| panic!("{label}: INVALID_FILTER 拒否は Result::Ok: {e:?}"));
-        let mut request_errors = 0;
-        while let Some(e) = server.poll_event() {
-            match e {
-                SessionEvent::SendOnStream {
-                    message: ControlMessage::RequestError(err),
-                    fin,
-                    ..
-                } => {
-                    assert_eq!(err.error_code, REQUEST_INVALID_FILTER, "{label}");
-                    assert!(fin, "{label}: 最終応答で FIN されること");
-                    request_errors += 1;
-                }
-                SessionEvent::CloseSession(err) => {
-                    panic!("{label}: INVALID_FILTER でセッションが閉じてはいけない: {err:?}")
-                }
-                _ => {}
+fn initial_fetch_with_range_filter_violation_sends_request_error_only() {
+    use shiguredo_moqt::message::Fetch as WireFetch;
+    let (_client, mut server) =
+        establish_pair_with_options(SetupOptions::new(), SetupOptions::new());
+    server
+        .recv_request(ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: one_range_subgroup_filter(),
+        }))
+        .expect("FETCH の INVALID_FILTER 拒否は Result::Ok");
+    let mut request_errors = 0;
+    while let Some(e) = server.poll_event() {
+        match e {
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(err),
+                fin,
+                ..
+            } => {
+                assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
+                assert!(fin, "最終応答で FIN されること");
+                request_errors += 1;
             }
+            SessionEvent::CloseSession(err) => {
+                panic!("FETCH の INVALID_FILTER でセッションが閉じてはいけない: {err:?}")
+            }
+            _ => {}
         }
-        assert_eq!(request_errors, 1, "{label}: REQUEST_ERROR がちょうど 1 件");
-        assert_eq!(server.state(), SessionState::Established, "{label}");
     }
+    assert_eq!(request_errors, 1, "REQUEST_ERROR がちょうど 1 件");
+    assert_eq!(server.state(), SessionState::Established);
 }
 
 // ─── MAX_FILTER_RANGES の subscription 単位累積 (§3.3.2 / §9.1.6) ─────────

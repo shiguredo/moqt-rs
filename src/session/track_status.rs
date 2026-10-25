@@ -169,24 +169,10 @@ impl Session {
             &track_status.track_namespace,
             &track_status.track_name,
             &track_status.parameters,
+            crate::message::TRACK_STATUS_ALLOWED_PARAMS,
+            "TRACK_STATUS parameter not allowed in this context",
         )? {
             return Ok(());
-        }
-        // draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): TRACK_STATUS で許可される
-        // パラメータは AUTHORIZATION_TOKEN と INCLUDE_PROPERTIES のみ。wire 経路では decode
-        // 層が検証済みだが、API 経路 (`recv_request`) で手組みされたメッセージは素通りする
-        // ため、受信側の状態整合性のためここでも検証する。
-        if track_status
-            .parameters
-            .validate_scope(crate::message::TRACK_STATUS_ALLOWED_PARAMS)
-            .is_err()
-        {
-            let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "TRACK_STATUS parameter not allowed in this context",
-            );
-            self.fail(err.clone());
-            return Err(err);
         }
         // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
         // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる
