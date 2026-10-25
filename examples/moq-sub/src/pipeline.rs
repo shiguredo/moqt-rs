@@ -26,7 +26,9 @@ use shiguredo_moqt::pending_subgroup_buffer::{
     DEFAULT_PENDING_SUBGROUP_BUFFER_OPTIONS, PendingNotifyReason, PendingSubgroupBuffer,
 };
 use shiguredo_moqt::playout::catch_up::{AudioReceiveCatchUp, AudioReceiveCatchUpObservation};
-use shiguredo_moqt::session::types::{DatagramAcceptance, SessionError, TrackDataAcceptance};
+use shiguredo_moqt::session::types::{
+    DatagramAcceptance, RequestStreamEnd, SessionError, TrackDataAcceptance,
+};
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::subgroup::SubgroupHeader;
 use shiguredo_moqt::video_decode_order::{
@@ -3478,11 +3480,25 @@ fn log_failure(message: std::fmt::Arguments<'_>, expected: bool) {
 /// 送出して読み取りを打ち切る (`SessionEvent::StopSendingDataStream` の doc と
 /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) を参照)。
 /// セッションは閉じないため、購読と他の stream の受信は継続する。
-async fn receive_registered_stream_data(
+/// 登録済み data stream の受信結果
+enum RegisteredStreamData {
+    /// データチャンク
+    Data(Bytes),
+    /// FIN / RESET_STREAM による終端
+    End(RequestStreamEnd),
+    /// Session が STOP_SENDING を指示した (DATA_STREAM_TIMEOUT など)
+    StoppedBySession,
+}
+
+/// 登録済み data stream から次のデータまたは終端種別を受け取る
+///
+/// 終端種別を呼び出し側へ返すのは、FIN の途中終了だけを mid-object FIN として報告し、
+/// RESET_STREAM (§11.3.2 の正常経路) と STOP_SENDING 指示を区別するためである。
+async fn receive_registered_stream_data_outcome(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     stream_id: DataStreamId,
-) -> Result<Option<Bytes>> {
+) -> Result<RegisteredStreamData> {
     tokio::select! {
         biased;
         error_code = data_plane.wait_data_stream_stop_sending(stream_id) => {
@@ -3495,20 +3511,64 @@ async fn receive_registered_stream_data(
             data_plane.clear_data_stream_stop_sending(stream_id);
             if let Err(e) = stream.stop_sending(error_code).await {
                 tracing::warn!(
-                    "Failed to send STOP_SENDING for timed out data stream: \
+                    "Failed to send STOP_SENDING for data stream: \
                      stream_id={}, error_code={error_code:#x} {e}",
                     stream_id.0
                 );
             }
-            Ok(None)
+            Ok(RegisteredStreamData::StoppedBySession)
         }
         chunk = stream.receive_chunk() => match chunk? {
-            transport::RecvChunk::Data(data) => Ok(Some(data)),
+            transport::RecvChunk::Data(data) => Ok(RegisteredStreamData::Data(data)),
             transport::RecvChunk::End(end) => {
                 data_plane.recv_data_stream_closed(stream_id, end)?;
-                Ok(None)
+                Ok(RegisteredStreamData::End(end))
             }
         },
+    }
+}
+
+/// 登録済み data stream から次のデータを受け取る
+///
+/// 終端種別を必要としない呼び出し元 (header 待ちループなど) 用の従来 API。
+async fn receive_registered_stream_data(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+) -> Result<Option<Bytes>> {
+    match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await? {
+        RegisteredStreamData::Data(data) => Ok(Some(data)),
+        RegisteredStreamData::End(_) | RegisteredStreamData::StoppedBySession => Ok(None),
+    }
+}
+
+/// 途中終了した FIN を `Session::report_mid_object_fin` へ報告すべきか
+///
+/// draft-ietf-moq-transport-22 §11.3 (Subgroup Streams): FIN の途中終了は PROTOCOL_VIOLATION。
+/// RESET_STREAM は §11.3.2 (Closing Subgroup Streams) の正常経路であり、header 未受信の
+/// `finish()` も §11.3 の「シリアライズ途中の Object」ではないため報告しない。
+fn mid_object_fin_should_report(
+    end: &RequestStreamEnd,
+    finish: &core::result::Result<(), MessageError>,
+) -> bool {
+    matches!(end, RequestStreamEnd::Fin) && matches!(finish, Err(MessageError::UnexpectedEof))
+}
+
+/// decoder の `finish()` 結果を見て、必要なときだけ mid-object FIN を報告する
+fn report_mid_object_fin_if_needed(
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    end: &RequestStreamEnd,
+    finish: &core::result::Result<(), MessageError>,
+) {
+    if !mid_object_fin_should_report(end, finish) {
+        return;
+    }
+    if let Err(e) = data_plane.report_mid_object_fin(stream_id) {
+        tracing::warn!(
+            "Failed to report mid-object FIN: stream_id={}, {e}",
+            stream_id.0
+        );
     }
 }
 
@@ -3852,12 +3912,18 @@ async fn read_catalog_fetch_objects(
     loop {
         let entry = match decoder.try_decode_entry()? {
             Some(e) => e,
-            None => match receive_registered_stream_data(stream, data_plane, stream_id).await? {
-                Some(data) => {
+            None => match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
+                .await?
+            {
+                RegisteredStreamData::Data(data) => {
                     decoder.push(&data);
                     continue;
                 }
-                None => break,
+                RegisteredStreamData::End(end) => {
+                    report_mid_object_fin_if_needed(data_plane, stream_id, &end, &decoder.finish());
+                    break;
+                }
+                RegisteredStreamData::StoppedBySession => break,
             },
         };
         data_plane.recv_fetch_entry(stream_id)?;
@@ -4015,11 +4081,17 @@ async fn read_catalog_payload(
         if let Some(payload) = decoder.try_read_payload() {
             return Ok(payload);
         }
-        match receive_registered_stream_data(stream, data_plane, stream_id).await? {
-            Some(data) => decoder.push(&data),
-            None => {
+        match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await? {
+            RegisteredStreamData::Data(data) => decoder.push(&data),
+            RegisteredStreamData::End(end) => {
+                report_mid_object_fin_if_needed(data_plane, stream_id, &end, &decoder.finish());
                 return Err(Error::Other(
                     "stream closed before catalog payload".to_string(),
+                ));
+            }
+            RegisteredStreamData::StoppedBySession => {
+                return Err(Error::Other(
+                    "stream stopped before catalog payload".to_string(),
                 ));
             }
         }
@@ -5098,9 +5170,20 @@ async fn decode_video_stream(
                     break (o, deliver);
                 }
                 Ok(None) => {
-                    match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                        Ok(Some(data)) => sg_decoder.push(&data),
-                        Ok(None) => return frames,
+                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
+                        .await
+                    {
+                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                        Ok(RegisteredStreamData::End(end)) => {
+                            report_mid_object_fin_if_needed(
+                                data_plane,
+                                stream_id,
+                                &end,
+                                &sg_decoder.finish(),
+                            );
+                            return frames;
+                        }
+                        Ok(RegisteredStreamData::StoppedBySession) => return frames,
                         Err(e) => {
                             log_failure(
                                 format_args!("Failed to read object: {e}"),
@@ -5127,9 +5210,18 @@ async fn decode_video_stream(
             if let Some(p) = sg_decoder.try_read_payload() {
                 break p;
             }
-            match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                Ok(Some(data)) => sg_decoder.push(&data),
-                Ok(None) => return frames,
+            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
+                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                Ok(RegisteredStreamData::End(end)) => {
+                    report_mid_object_fin_if_needed(
+                        data_plane,
+                        stream_id,
+                        &end,
+                        &sg_decoder.finish(),
+                    );
+                    return frames;
+                }
+                Ok(RegisteredStreamData::StoppedBySession) => return frames,
                 Err(e) => {
                     log_failure(
                         format_args!("Failed to read object payload: {e}"),
@@ -5692,9 +5784,20 @@ async fn decode_audio_stream(
                     break (o, deliver);
                 }
                 Ok(None) => {
-                    match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                        Ok(Some(data)) => sg_decoder.push(&data),
-                        Ok(None) => return chunks,
+                    match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
+                        .await
+                    {
+                        Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                        Ok(RegisteredStreamData::End(end)) => {
+                            report_mid_object_fin_if_needed(
+                                data_plane,
+                                stream_id,
+                                &end,
+                                &sg_decoder.finish(),
+                            );
+                            return chunks;
+                        }
+                        Ok(RegisteredStreamData::StoppedBySession) => return chunks,
                         Err(e) => {
                             log_failure(
                                 format_args!("Failed to read audio object: {e}"),
@@ -5724,9 +5827,18 @@ async fn decode_audio_stream(
             if let Some(p) = sg_decoder.try_read_payload() {
                 break p;
             }
-            match receive_registered_stream_data(stream, data_plane, stream_id).await {
-                Ok(Some(data)) => sg_decoder.push(&data),
-                Ok(None) => return chunks,
+            match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await {
+                Ok(RegisteredStreamData::Data(data)) => sg_decoder.push(&data),
+                Ok(RegisteredStreamData::End(end)) => {
+                    report_mid_object_fin_if_needed(
+                        data_plane,
+                        stream_id,
+                        &end,
+                        &sg_decoder.finish(),
+                    );
+                    return chunks;
+                }
+                Ok(RegisteredStreamData::StoppedBySession) => return chunks,
                 Err(e) => {
                     log_failure(
                         format_args!("Failed to read audio payload: {e}"),
@@ -5807,12 +5919,18 @@ async fn read_fetch_entry(
     loop {
         let entry = match decoder.try_decode_entry()? {
             Some(entry) => entry,
-            None => match receive_registered_stream_data(stream, data_plane, stream_id).await? {
-                Some(data) => {
+            None => match receive_registered_stream_data_outcome(stream, data_plane, stream_id)
+                .await?
+            {
+                RegisteredStreamData::Data(data) => {
                     decoder.push(&data);
                     continue;
                 }
-                None => return Ok(None),
+                RegisteredStreamData::End(end) => {
+                    report_mid_object_fin_if_needed(data_plane, stream_id, &end, &decoder.finish());
+                    return Ok(None);
+                }
+                RegisteredStreamData::StoppedBySession => return Ok(None),
             },
         };
         // entry を読むたびに Session の activity を更新する。Object と End of Range の
@@ -5826,11 +5944,22 @@ async fn read_fetch_entry(
                 if let Some(payload) = decoder.try_read_payload() {
                     break payload;
                 }
-                match receive_registered_stream_data(stream, data_plane, stream_id).await? {
-                    Some(data) => decoder.push(&data),
-                    None => {
+                match receive_registered_stream_data_outcome(stream, data_plane, stream_id).await? {
+                    RegisteredStreamData::Data(data) => decoder.push(&data),
+                    RegisteredStreamData::End(end) => {
+                        report_mid_object_fin_if_needed(
+                            data_plane,
+                            stream_id,
+                            &end,
+                            &decoder.finish(),
+                        );
                         return Err(Error::Other(
                             "stream closed before fetch payload".to_string(),
+                        ));
+                    }
+                    RegisteredStreamData::StoppedBySession => {
+                        return Err(Error::Other(
+                            "stream stopped before fetch payload".to_string(),
                         ));
                     }
                 }
@@ -8204,6 +8333,30 @@ mod tests {
             termination.code,
             shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
             "PROTOCOL_VIOLATION の終了コードであること"
+        );
+    }
+
+    /// 途中終了の FIN だけを mid-object FIN として報告すること
+    #[test]
+    fn mid_object_fin_reports_only_fin_with_unexpected_eof() {
+        use shiguredo_moqt::error::MessageError;
+        assert!(
+            mid_object_fin_should_report(&RequestStreamEnd::Fin, &Err(MessageError::UnexpectedEof)),
+            "FIN + UnexpectedEof は報告すること"
+        );
+        assert!(
+            !mid_object_fin_should_report(&RequestStreamEnd::Fin, &Ok(())),
+            "Object 境界の FIN は報告しないこと"
+        );
+        assert!(
+            !mid_object_fin_should_report(
+                &RequestStreamEnd::Reset {
+                    error_code: Some(1),
+                    reliable_size: None,
+                },
+                &Err(MessageError::UnexpectedEof)
+            ),
+            "RESET_STREAM は §11.3.2 の正常経路であり報告しないこと"
         );
     }
 

@@ -665,6 +665,19 @@ impl DataPlaneHandle {
             .map_err(|e| TransportError::Internal(format!("recv_data_stream_closed: {e}")))
     }
 
+    /// Object のシリアライズ途中で FIN が届いたことを Session に通知する (subscriber 側)
+    ///
+    /// draft-ietf-moq-transport-22 §11.3 (Subgroup Streams): "If a stream ends gracefully
+    /// (i.e., the stream terminates with a FIN) in the middle of a serialized Object, the
+    /// session SHOULD be closed with a PROTOCOL_VIOLATION." 破棄対象の stream では Session が
+    /// no-op で吸収する。
+    pub fn report_mid_object_fin(&self, stream_id: DataStreamId) -> Result<()> {
+        let mut session = lock_session(&self.session);
+        session
+            .report_mid_object_fin(stream_id)
+            .map_err(|e| TransportError::Internal(format!("report_mid_object_fin: {e}")))
+    }
+
     /// data stream へ STOP_SENDING を送信する (subscriber 側)
     pub fn send_data_stream_stop_sending(&self, stream_id: DataStreamId) -> Result<()> {
         let mut session = lock_session(&self.session);

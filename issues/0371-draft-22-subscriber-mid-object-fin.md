@@ -25,9 +25,10 @@ the middle of a serialized Object, the session SHOULD be closed with a PROTOCOL_
   `Ok(None)` を返す。呼び出し側は終端種別を受け取れない。
 - video / audio / catalog (subgroup / fetch) の各 Object ループは `Ok(None)` で処理を終えるが、decoder の `finish()` を呼ばない。
   header 待ちループも同じ `Ok(None)` で終わるが、header 未受信は §11.3 の「シリアライズ途中の Object」ではない。
-- payload 読み出しループ (`read_catalog_payload` / `read_fetch_entry` / video / audio の payload ループ) は、payload 途中の終端で
-  `Error::Other("stream closed before ... payload")` を返して drain するため、`Ok(None)` だけを見る設計では payload 途中の
-  FIN を検出できない。
+- payload 読み出しループは、payload 途中の終端で `read_catalog_payload` / `read_fetch_entry` が
+  `Error::Other("stream closed before ... payload")` を返し、video / audio の payload ループは `Ok(None)` で
+  `return frames` / `return chunks` する。いずれも decoder の `finish()` を呼ばないため、`Ok(None)` だけを見る設計では
+  payload 途中の FIN を検出できない。
 - `examples/tokio-moq/src/moqt_client.rs` の `DataPlaneHandle` は `Session::report_mid_object_fin` のラッパーを持たない。
 - ライブラリ側の `report_mid_object_fin` と decoder の `finish` は tests で固定されているが、examples からの呼び出しは 0 件である。
 
@@ -40,8 +41,8 @@ the middle of a serialized Object, the session SHOULD be closed with a PROTOCOL_
   を追加する。`end` が `Fin` かつ `finish` が `Err(UnexpectedEof)` のときだけ true を返す。header 待ちループでは呼ばず、
   header 受理後の Object ループと payload ループ (video / audio / catalog subgroup / catalog fetch / media fetch、
   `read_catalog_payload` / `read_fetch_entry` を含む) でのみ、終端時に decoder の `finish()` を呼んだ結果を本関数へ渡し、
-  true のとき `DataPlaneHandle::report_mid_object_fin` を呼ぶ。payload ループが途中終端で `Error::Other` を返す経路も、
-  返す前に `finish()` と本関数を通す。
+  true のとき `DataPlaneHandle::report_mid_object_fin` を呼ぶ。payload ループが途中終端で `Error::Other` を返す経路と、
+  video / audio の payload ループが `Ok(None)` で返る経路も、返す前に `finish()` と本関数を通す。
 - RESET_STREAM 終端と STOP_SENDING 指示 (timeout) は session が既に破棄対象として扱うため、報告しない。header 未受信の
   `finish()` も `AwaitingHeader` として `recv_data_stream_closed` が no-op で吸収する既存契約に合わせ、報告しない。
 - `finish()` は現状 `UnexpectedEof` 以外を返さないため、それ以外の `MessageError` は防御的に「報告しない」とし、
