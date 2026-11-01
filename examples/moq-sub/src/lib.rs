@@ -17,7 +17,7 @@ pub mod error;
 pub mod pipeline;
 
 // 呼び出し側がチャネルの型として必要とするため、クレート直下へ再公開する
-pub use decoder::{DecodedAudioFrame, DecodedVideoFrame};
+pub use decoder::{DecodedAudioFrame, DecodedVideoFrame, TimestampKind};
 
 /// 現在時刻を Unix epoch からのマイクロ秒で返す
 ///

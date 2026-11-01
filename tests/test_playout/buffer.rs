@@ -189,3 +189,42 @@ fn clear_returns_all_frames() {
     assert_eq!(buffer.clear(), vec![1, 2], "積んだ順に返すこと");
     assert!(buffer.is_empty(), "取り出したら空になること");
 }
+
+/// 表示時刻を過ぎたフレームが 3 枚以上あるときも、1 回の選択で描くのは 1 枚だけである
+///
+/// 表示時刻から上限を超えて遅れたフレームは捨て、最新の 1 枚は残す。残った 2 枚は次の
+/// 選択で 1 枚ずつ描く。
+#[test]
+fn select_draws_one_frame_and_keeps_the_latest_when_three_are_due() {
+    let mut timeline = timeline_with_delay(100);
+    let now_us = 10_000_000;
+    // 表示時刻が 10 ms 刻みで 3 枚とも過ぎている。1 枚目だけが上限 (20 ms) を超えて遅れ、
+    // 2 枚目と 3 枚目は上限の中にある
+    let timestamps_us = [9_900_000, 9_910_000, 9_920_000];
+    for timestamp_us in timestamps_us {
+        observe_video(&mut timeline, timestamp_us, now_us);
+    }
+    let mut buffer = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
+    for (index, timestamp_us) in timestamps_us.iter().enumerate() {
+        buffer.enqueue(index + 1, Some(*timestamp_us), &timeline);
+    }
+
+    // 今は 1 枚目の表示時刻から 30 ms 後である
+    let select_at_us = 10_110_000;
+    let first = buffer.select(select_at_us, &timeline);
+    assert_eq!(
+        first.draw,
+        Some(2),
+        "遅れすぎた 1 枚目を捨てて 2 枚目を描くこと"
+    );
+    assert_eq!(
+        first.late,
+        vec![1],
+        "上限を超えて遅れたフレームを捨てること"
+    );
+    assert_eq!(buffer.len(), 1, "最新の 1 枚は残すこと");
+
+    let second = buffer.select(select_at_us, &timeline);
+    assert_eq!(second.draw, Some(3), "残した最新を次の選択で描くこと");
+    assert!(buffer.is_empty(), "全部描いたら空になること");
+}

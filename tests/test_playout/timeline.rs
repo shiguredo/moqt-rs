@@ -1,1195 +1,1385 @@
 //! 音声と映像の共通の時間軸のテスト
 //!
-//! 公開 API (`PlayoutTimeline`) の契約を確認する。
+//! moqt-js の `timeline.test.ts` / `timelineLowLatency.test.ts` の意図を、マイクロ秒の
+//! 整数で動く [`PlayoutTimeline`] の公開 API に対して固定する。表示時刻の式
+//! (TIMESTAMP + 基準の遅れ + 表示の遅れ)、音声の自動予算 (直近 2 秒の揺らぎの百分位 +
+//! 直近 1 秒の実出力先行量の p95 を 50〜100 ms に切る)、A/V 同期の不感帯と補償の上限、
+//! 基準を共有しない判定 (差・ドリフト・保持)、追いつきの除外を確かめる。
+//!
+//! PBT (観測の任意の列に対する不変条件) は `pbt/tests/prop_playout/timeline.rs` が固定する。
 
-use shiguredo_moqt::playout::delay::AUDIO_DELAY_START_MS;
-use shiguredo_moqt::playout::feedback::{
-    AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US, AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-    AUDIO_DELAY_FEEDBACK_START_US, AudioDelayFeedbackReason,
-};
-use shiguredo_moqt::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use shiguredo_moqt::playout::timeline::{
     PlayoutTimeline, TIMELINE_ARRIVAL_DELAY_US, TIMELINE_AUDIO_DELAY_FLOOR_US,
-    TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US, TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US,
-    TIMELINE_BASE_DRIFT_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, TIMELINE_SYNC_MIN_DELTA_US,
-    TimelineConfig, Track, UnsharedReason, audio_arrival_delay_us, audio_only_arrival_delay_us,
+    TIMELINE_BASE_DIFFERENCE_RECENT_WINDOW_US, TIMELINE_BASE_DRIFT_CONFIRM_US,
+    TIMELINE_BASE_DRIFT_US, TIMELINE_BASE_UNSHARED_HOLD_US, TIMELINE_BASE_UNSHARED_RELEASE_US,
+    TIMELINE_DISCONTINUITY_US, TIMELINE_JITTER_WINDOW_US, TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+    TIMELINE_MAX_PRESENTATION_DELAY_MS, TIMELINE_MIN_BASE_DIFFERENCE_MS,
+    TIMELINE_MIN_COMPRESSION_DEADBAND_US, TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM,
+    TIMELINE_QUEUE_HEADROOM_FRAMES, TIMELINE_SYNC_MIN_DELTA_US, TIMELINE_WINDOW_US, TimelineConfig,
+    Track, UnsharedReason, audio_arrival_delay_us, playout_delay_percentile, playout_queue_cap_us,
     sync_compensation_limit_us,
 };
-use shiguredo_moqt::playout::timing::{
-    AudioDelayFeedbackObservation, AudioPlayoutTimingStats, TimingSummary,
-};
 
-/// 閉ループへ渡す観測を 1 つ作る
+/// 送信側の壁時計 (Unix epoch マイクロ秒)。メディア時刻 0 の TIMESTAMP にする
+const EPOCH_US: i64 = 1_790_263_445_000_000;
+
+/// 30 fps のフレーム間隔 (マイクロ秒)
+const FRAME_US: i64 = 1_000_000 / 30;
+
+/// 120 fps のフレーム間隔 (マイクロ秒)
+const FAST_FRAME_US: i64 = 1_000_000 / 120;
+
+/// 表示待ちのキューの上限 (枚)。[`TimelineConfig`] の既定値と同じ値にする
+const MAX_QUEUED_FRAMES: usize = 24;
+
+/// 丸めの差を許す幅 (マイクロ秒)
 ///
-/// `lateness_p50_us` が None のときは「まだ鳴らしていない」観測になる。鳴り始めまでの
-/// 時間と余裕は、JS のテスト (`timeline.test.ts`) が使う 50 ms に揃える。
-fn feedback_observation(at_us: i64, lateness_p50_us: Option<i64>) -> AudioDelayFeedbackObservation {
-    AudioDelayFeedbackObservation {
-        at_us,
-        lateness_us: lateness_p50_us.map(|p50| TimingSummary {
-            p50,
-            p95: p50,
-            max: p50,
-        }),
-        start_delay_us: Some(TimingSummary {
-            p50: 50_000,
-            p95: 50_000,
-            max: 50_000,
-        }),
-        slack_us: Some(TimingSummary {
-            p50: 50_000,
-            p95: 50_000,
-            max: 50_000,
-        }),
-        backlog_misses: 0,
-        backlog_us: 0,
-        underrun_ms: 0,
-        compression_us: 0,
-        jitter_target_us: 0,
-        // 穴と、音声だけの購読の到着基準の下限は、このヘルパを使うテストでは使わない
-        gap_count: 0,
-        gap_us: 0,
-        arrival_delay_floor_us: None,
+/// moqt-js はミリ秒の浮動小数、本実装はマイクロ秒の整数で計算する。判定に影響しない
+/// 1 マイクロ秒未満の差と、テストが与えたフレーム間隔と実装が測った間隔の差だけを許す。
+const TOLERANCE_US: i64 = 10;
+
+/// 音声の TIMESTAMP が壁時計から遅れる速さ (毎秒マイクロ秒)。実測 (336 秒で 16027 ms)
+const DRIFT_US_PER_SECOND: i64 = 48_000;
+
+/// メディア時刻のフレームの TIMESTAMP (Unix epoch マイクロ秒)
+fn timestamp_of(media_us: i64) -> i64 {
+    EPOCH_US + media_us
+}
+
+/// 表示時刻を求める時間軸を作る
+fn create_timeline() -> PlayoutTimeline {
+    PlayoutTimeline::new()
+}
+
+/// 表示時刻 (Unix epoch マイクロ秒) を求める
+fn wall_us_of(timeline: &PlayoutTimeline, track: Track, media_us: i64) -> i64 {
+    timeline
+        .present_us(track, timestamp_of(media_us))
+        .expect("表示時刻が決まること")
+}
+
+/// 2 つのトラックの表示の遅れの差 (マイクロ秒)
+fn presentation_delay_gap_us(timeline: &PlayoutTimeline) -> i64 {
+    let breakdown = timeline.delay_breakdown();
+    breakdown
+        .audio
+        .presentation_delay_us
+        .expect("音声の表示の遅れが決まること")
+        - breakdown
+            .video
+            .presentation_delay_us
+            .expect("映像の表示の遅れが決まること")
+}
+
+/// 音声も映像も同一の時刻に観測する (揺らぎ 0)
+fn observe_pair(timeline: &mut PlayoutTimeline, wall_us: i64, media_us: i64) {
+    timeline.observe(Track::Audio, wall_us, timestamp_of(media_us));
+    timeline.observe(Track::Video, wall_us, timestamp_of(media_us));
+}
+
+/// 音声と映像の到着列 (どちらも揺らぎ 0、音声は 5 個に 1 個が 40 ms 遅れ) を与える
+///
+/// 音声は 20 ms ごと (Opus)、映像は 30 fps。`duration_us` の間、実時間どおりに届く。
+fn observe_both_streams(timeline: &mut PlayoutTimeline, duration_us: i64) {
+    let mut arrivals: Vec<(i64, Track, i64)> = Vec::new();
+    let mut index = 0i64;
+    while index * 20_000 < duration_us {
+        let media_us = index * 20_000;
+        let jitter_us = if index % 5 == 4 { 40_000 } else { 0 };
+        arrivals.push((EPOCH_US + media_us + jitter_us, Track::Audio, media_us));
+        index += 1;
+    }
+    let mut index = 0i64;
+    while index * FRAME_US < duration_us {
+        let media_us = index * FRAME_US;
+        arrivals.push((EPOCH_US + media_us, Track::Video, media_us));
+        index += 1;
+    }
+    arrivals.sort_by_key(|(at_us, _, _)| *at_us);
+    for (at_us, track, media_us) in arrivals {
+        timeline.observe(track, at_us, timestamp_of(media_us));
     }
 }
 
-/// 映像の揺らぎを 40 ms、フレーム間隔を 33 ms にして観測を並べる
-fn observe_jittered_video(timeline: &mut PlayoutTimeline, count: i64) {
-    for index in 0..count {
-        // 10 枚に 1 枚だけ 40 ms 遅れて届く
-        let jitter_us = if index % 10 == 0 { 40_000 } else { 0 };
-        let wall_us = 10_000_000 + index * 33_333 + jitter_us;
-        let timestamp_us = 1_000_000 + index * 33_333;
-        timeline.observe(Track::Video, wall_us, timestamp_us);
+/// 音声の TIMESTAMP だけが壁時計から遅れていく到着列を与える (実測)
+///
+/// 音声と映像はどちらも揺らぎ 0 で同じ時刻に届く。音声の TIMESTAMP だけが毎秒
+/// [`DRIFT_US_PER_SECOND`] ずつ壁時計から遅れる。返り値は最後に観測したメディア時刻。
+fn observe_drifted_streams(timeline: &mut PlayoutTimeline, frame_us: i64, duration_us: i64) -> i64 {
+    let mut media_us = 0i64;
+    while media_us < duration_us {
+        let observed_at_us = EPOCH_US + media_us;
+        timeline.observe(Track::Video, observed_at_us, timestamp_of(media_us));
+        // 音声の TIMESTAMP は毎秒 [`DRIFT_US_PER_SECOND`] ずつ古くなる。整数の切り捨てで
+        // 1 µs 未満の差が出るが、判定に影響しない
+        let drift_us = media_us.saturating_mul(DRIFT_US_PER_SECOND) / 1_000_000;
+        timeline.observe(
+            Track::Audio,
+            observed_at_us,
+            timestamp_of(media_us.saturating_sub(drift_us)),
+        );
+        media_us += frame_us;
     }
+    media_us
 }
 
+/// 音声の開始時は 50 ms の下限を使い、映像はその不感帯の手前まで待つこと
 #[test]
-fn present_time_is_timestamp_plus_basis_and_delay() {
-    let mut timeline = PlayoutTimeline::new();
+fn starts_without_a_delay() {
+    let timeline = create_timeline();
+    assert_eq!(timeline.present_us(Track::Video, timestamp_of(0)), None);
+    assert_eq!(timeline.present_us(Track::Audio, timestamp_of(0)), None);
+    assert_eq!(timeline.presentation_delay_us(), None);
+    assert_eq!(timeline.playout_delay_us(), None);
+    assert_eq!(timeline.video_delay_us(), None);
+    assert_eq!(timeline.presentation_extra_delay_us(), None);
+    assert_eq!(timeline.audio_delay_stats().jitter_us, None);
+    assert_eq!(timeline.audio_delay_stats().output_lead_us, None);
+    assert_eq!(
+        timeline.audio_delay_stats().target_us,
+        TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "未観測でも自動予算の計器は下限を返すこと"
+    );
+    let breakdown = timeline.delay_breakdown();
+    assert!(!breakdown.sharing_bases);
+    assert_eq!(breakdown.unshared_reason, UnsharedReason::Unobserved);
+    assert_eq!(breakdown.base_difference_us, None);
+    assert_eq!(breakdown.base_difference_recent_us, None);
+    assert_eq!(breakdown.base_drift_us_per_second, None);
+}
+
+/// 最初の観測で TIMESTAMP + 基準の遅れ + 表示の遅れになること
+#[test]
+fn first_observation_uses_the_audio_floor_and_the_sync_deadband() {
+    let mut timeline = create_timeline();
+    observe_pair(&mut timeline, EPOCH_US, 0);
+
+    assert_eq!(
+        timeline.playout_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US),
+        "出力時計が未観測でも音声は下限を使うこと"
+    );
+    assert_eq!(
+        timeline.video_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US - TIMELINE_SYNC_MIN_DELTA_US),
+        "映像は音声の不感帯の手前まで遅れること"
+    );
+    assert_eq!(
+        wall_us_of(&timeline, Track::Audio, 0),
+        EPOCH_US + TIMELINE_AUDIO_DELAY_FLOOR_US
+    );
+    assert_eq!(
+        wall_us_of(&timeline, Track::Video, 0),
+        EPOCH_US + TIMELINE_AUDIO_DELAY_FLOOR_US - TIMELINE_SYNC_MIN_DELTA_US
+    );
+    assert_eq!(
+        timeline.presentation_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US - TIMELINE_SYNC_MIN_DELTA_US),
+        "内訳の遅れは映像を優先して返すこと"
+    );
+}
+
+/// TIMESTAMP の差どおりに表示時刻が進むこと
+#[test]
+fn present_time_follows_the_timestamp() {
+    let mut timeline = create_timeline();
     // 復号の出力が TIMESTAMP より 9 秒遅れている
     timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    // 表示時刻 = TIMESTAMP + 基準の遅れ (9 秒) + 表示の遅れ (80 ms)
+    // 表示時刻 = TIMESTAMP + 基準の遅れ (9 秒) + 表示の遅れ (50 ms)
     assert_eq!(
         timeline.present_us(Track::Audio, 1_000_000),
-        Some(10_080_000)
+        Some(10_050_000)
     );
-    // 表示の遅れはスケジューラへ渡せる形で読める
-    assert_eq!(timeline.presentation_delay_us(Track::Audio), Some(80_000));
+    assert_eq!(
+        timeline.presentation_extra_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US)
+    );
+    // TIMESTAMP が 20 ms 進めば表示時刻も 20 ms 進む
+    assert_eq!(
+        timeline.present_us(Track::Audio, 1_020_000),
+        Some(10_070_000)
+    );
     // 観測が無いトラックの表示時刻は返らない
     assert_eq!(timeline.present_us(Track::Video, 1_000_000), None);
 }
 
+/// 揺らぎの観測で映像の表示の遅れが決まること (配信 fps 依存の百分位)
 #[test]
-fn audio_delay_follows_the_learned_target() {
-    let mut timeline = PlayoutTimeline::new();
-    // 揺らぎの無い音声を 20 ms 間隔で届ける
-    for index in 0..40i64 {
-        let time_us = 1_000_000 + index * 20_000;
-        timeline.observe(Track::Audio, time_us, time_us);
+fn video_delay_comes_from_the_jitter_percentile() {
+    // 音声は観測しない (同期の制御を働かせない)
+    let mut timeline = create_timeline();
+    // 追いつき中の学習を終えるため、揺らぎ 0 のフレームで確認の間隔を超える
+    for index in 0..30i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
     }
-    // 目標遅延は分位点の最小 (20 ms) まで下がり、表示の遅れもそこへ追随する
-    assert_eq!(timeline.learned_delay_us(Track::Audio), 20_000);
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(20_000),
-        "学習した目標遅延がそのまま表示の遅れになる"
-    );
-}
-
-#[test]
-fn sync_raises_the_leading_track_toward_the_late_one() {
-    let mut timeline = PlayoutTimeline::new();
-    // 音声は 10 ms で届き、映像は同じ TIMESTAMP で 300 ms 遅れて届く
-    timeline.observe(Track::Audio, 10_010_000, 1_000_000);
-    timeline.observe(Track::Video, 10_310_000, 1_000_000);
-    // 2 つのトラックの表示時刻の差は、補償上限までで決まる。自然な差は
-    // 300 ms (基準の差) − 80 ms (音声の遅れ) = 220 ms であり、そこから
-    // TIMELINE_MAX_COMPENSATED_DIFFERENCE_US (補償上限) を引いた 120 ms になる
-    let audio_present_us = timeline
-        .present_us(Track::Audio, 1_000_000)
-        .expect("基準がある");
-    let video_present_us = timeline
-        .present_us(Track::Video, 1_000_000)
-        .expect("基準がある");
-    assert_eq!(
-        video_present_us - audio_present_us,
-        220_000 - TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
-        "相手側へ移す分は上限までにする"
-    );
-}
-
-#[test]
-fn sync_control_runs_on_every_observation() {
-    let mut timeline = PlayoutTimeline::new();
-    // 映像が 300 ms 遅れている状態を保ちながら、100 ms ごとに観測を足す
-    for step in 0..3i64 {
-        let wall_us = 10_000_000 + step * 100_000;
-        let timestamp_us = 1_000_000 + step * 100_000;
-        timeline.observe(Track::Audio, wall_us, timestamp_us);
-        timeline.observe(Track::Video, wall_us + 300_000, timestamp_us);
-        assert!(
-            timeline.presentation_delay_us(Track::Audio).unwrap_or(0) > 80_000,
-            "{step} 回目の観測で遅れを上げる"
+    assert_eq!(timeline.video_delay_us(), Some(0), "揺らぎ 0 なら遅れない");
+    // 100 ms 遅れて届いたフレームが 2 枚あり、2 秒の窓の百分位が 100 ms になる
+    for index in 30..32i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(
+            Track::Video,
+            EPOCH_US + media_us + 100_000,
+            timestamp_of(media_us),
         );
     }
+    assert_eq!(
+        timeline.video_delay_us(),
+        Some(100_000),
+        "窓の百分位 (100 ms) になる"
+    );
+    assert_eq!(wall_us_of(&timeline, Track::Video, 0), EPOCH_US + 100_000);
 }
 
+/// 音声は到着の揺らぎと実出力の先行量の合計から予算を決めること
 #[test]
-fn video_delay_stays_under_the_queue_cap() {
-    // 表示待ちのキューを 5 枚にすると、表示の遅れは 1 枚分 (33 ms) までに抑えられる
-    let config = TimelineConfig {
-        video_queue_limit: 5,
-        ..TimelineConfig::default()
-    };
-    let mut timeline = PlayoutTimeline::with_config(config);
-    observe_jittered_video(&mut timeline, 300);
+fn audio_budget_adds_the_jitter_and_the_output_lead() {
+    // 20 ms ごとに届き、5 個に 1 個が 40 ms 遅れて届く (揺らぎの百分位が 40 ms)
+    let mut timeline = create_timeline();
+    for index in 0..200i64 {
+        let media_us = index * 20_000;
+        let jitter_us = if index % 5 == 4 { 40_000 } else { 0 };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + media_us + jitter_us,
+            timestamp_of(media_us),
+        );
+    }
+    // 実出力の先行量が未観測なら、揺らぎ 40 ms は下限 50 ms に切られる
     assert_eq!(
-        timeline.learned_delay_us(Track::Video),
-        33_333,
-        "揺らぎ (40 ms) よりキューの上限 (33 ms) が先に効く"
+        timeline.playout_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US)
+    );
+    assert_eq!(
+        timeline.audio_delay_stats().jitter_us,
+        Some(40_000),
+        "媒体時刻からの到着の幅を測ること"
+    );
+    assert_eq!(timeline.audio_delay_stats().output_lead_us, None);
+    // 実出力の先行量を記録すると、揺らぎと足した 83 ms が予算になる
+    let now_us = EPOCH_US + 200 * 20_000;
+    timeline.observe_audio_output_lead(43_000, now_us);
+    let stats = timeline.audio_delay_stats();
+    assert_eq!(stats.output_lead_us, Some(43_000));
+    assert_eq!(stats.jitter_us, Some(40_000));
+    assert_eq!(stats.target_us, 83_000, "50〜100 ms に切った合計になること");
+    assert_eq!(timeline.playout_delay_us(), Some(83_000));
+}
+
+/// 一定の遅れは基準へ入るため、揺らぎの予算は上がらないこと
+#[test]
+fn audio_budget_keeps_the_floor_for_a_steady_delay() {
+    let mut timeline = create_timeline();
+    for index in 0..200i64 {
+        let media_us = index * 20_000;
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + media_us + 40_000,
+            timestamp_of(media_us),
+        );
+    }
+    assert_eq!(
+        timeline.audio_delay_stats().jitter_us,
+        Some(0),
+        "一定の遅れは基準に入り、揺らぎにならない"
+    );
+    assert_eq!(
+        timeline.playout_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US)
     );
 }
 
-/// 末尾 6 枚だけ揺らす (94 枚は揺らぎ無し、95・96 枚目は 20 ms、97 枚目以降は 40 ms)
-fn observe_jitter_tail(timeline: &mut PlayoutTimeline, interval_us: i64) {
-    for index in 0..100i64 {
-        let jitter_us = match index {
-            94 | 95 => 20_000,
-            96..=99 => 40_000,
-            _ => 0,
-        };
-        let wall_us = 10_000_000 + index * interval_us + jitter_us;
-        let timestamp_us = 1_000_000 + index * interval_us;
-        timeline.observe(Track::Video, wall_us, timestamp_us);
-    }
-}
-
+/// ずれが不感帯を超えたら、先行する側 (ここでは映像) の遅れを不感帯の手前まで上げること
 #[test]
-fn video_delay_uses_the_percentile_for_the_frame_rate() {
-    // 33 ms 間隔 (30 fps) では百分位 96.7% になり、96 番目の揺らぎ (40 ms) を拾う
-    let mut fast = PlayoutTimeline::new();
-    observe_jitter_tail(&mut fast, 33_333);
-    assert_eq!(fast.learned_delay_us(Track::Video), 40_000);
-
-    // 100 ms 間隔 (10 fps) では百分位 95% になり、94 番目の揺らぎ (20 ms) を拾う
-    let mut slow = PlayoutTimeline::new();
-    observe_jitter_tail(&mut slow, 100_000);
-    assert_eq!(slow.learned_delay_us(Track::Video), 20_000);
-}
-
-#[test]
-fn video_delay_decays_toward_the_target() {
-    let mut timeline = PlayoutTimeline::new();
-    observe_jittered_video(&mut timeline, 300);
-    assert_eq!(timeline.learned_delay_us(Track::Video), 40_000);
-
-    // 以降は 1 秒間隔で揺らぎの無いフレームだけが届く。古い観測が窓 (10 秒) から
-    // 抜けると目標が 0 になり、表示の遅れは毎秒 20 ms ずつ下がる
-    let mut wall_us = 10_000_000 + 300 * 33_333;
-    let mut timestamp_us = 1_000_000 + 300 * 33_333;
-    let mut previous_us = timeline.learned_delay_us(Track::Video);
-    for _ in 0..20 {
-        wall_us += 1_000_000;
-        timestamp_us += 1_000_000;
-        timeline.observe(Track::Video, wall_us, timestamp_us);
-        let learned_us = timeline.learned_delay_us(Track::Video);
-        assert!(
-            learned_us <= previous_us,
-            "下がり続ける: {previous_us} -> {learned_us}"
-        );
-        assert!(
-            previous_us - learned_us <= 20_000,
-            "下がる速さは毎秒 20 ms まで: {previous_us} -> {learned_us}"
-        );
-        previous_us = learned_us;
-    }
+fn sync_raises_the_late_video_to_the_deadband() {
+    let mut timeline = create_timeline();
+    observe_both_streams(&mut timeline, 12_000_000);
+    let audio_delay_us = timeline.playout_delay_us().expect("音声を観測している");
+    let video_delay_us = timeline.video_delay_us().expect("映像を観測している");
+    assert_eq!(audio_delay_us, TIMELINE_AUDIO_DELAY_FLOOR_US);
     assert_eq!(
-        timeline.learned_delay_us(Track::Video),
-        0,
-        "目標が 0 になったら 0 で止まる"
+        video_delay_us,
+        TIMELINE_AUDIO_DELAY_FLOOR_US - TIMELINE_SYNC_MIN_DELTA_US,
+        "映像の遅れが音声の不感帯の手前まで上がること"
+    );
+    // 同時刻の表示時刻の差は不感帯ちょうどになる
+    let difference_us = wall_us_of(&timeline, Track::Audio, 11_000_000)
+        - wall_us_of(&timeline, Track::Video, 11_000_000);
+    assert_eq!(difference_us, TIMELINE_SYNC_MIN_DELTA_US);
+}
+
+/// 音声が先行していても、許す幅は映像と同じ不感帯であること
+#[test]
+fn sync_raises_the_leading_audio_to_the_deadband() {
+    // 音声は揺らぎ 0 (予算は下限の 50 ms)、映像は 5 枚に 1 枚が 100 ms 遅れて届く
+    let mut arrivals: Vec<(i64, Track, i64)> = Vec::new();
+    let mut index = 0i64;
+    while index * 20_000 < 12_000_000 {
+        let media_us = index * 20_000;
+        arrivals.push((EPOCH_US + media_us, Track::Audio, media_us));
+        index += 1;
+    }
+    let mut index = 0i64;
+    while index * FRAME_US < 12_000_000 {
+        let media_us = index * FRAME_US;
+        let jitter_us = if index % 5 == 4 { 100_000 } else { 0 };
+        arrivals.push((EPOCH_US + media_us + jitter_us, Track::Video, media_us));
+        index += 1;
+    }
+    arrivals.sort_by_key(|(at_us, _, _)| *at_us);
+    let mut timeline = create_timeline();
+    for (at_us, track, media_us) in arrivals {
+        timeline.observe(track, at_us, timestamp_of(media_us));
+    }
+
+    let audio_delay_us = timeline.playout_delay_us().expect("音声を観測している");
+    let video_delay_us = timeline.video_delay_us().expect("映像を観測している");
+    assert_eq!(audio_delay_us, TIMELINE_AUDIO_DELAY_FLOOR_US);
+    assert!(video_delay_us > audio_delay_us, "映像の方が遅いこと");
+    // 音声へ足す分は「映像の表示の遅れ - 不感帯 - 音声の表示の遅れ」になる
+    let breakdown = timeline.delay_breakdown();
+    assert_eq!(
+        breakdown.audio.sync_extra_delay_us,
+        video_delay_us - TIMELINE_SYNC_MIN_DELTA_US - audio_delay_us,
+        "音声が先行していても不感帯まで詰めること"
     );
 }
 
+/// targetLatency と再生遅延の大きい方を使うこと
 #[test]
-fn target_latency_is_shared_by_both_tracks_and_the_cut_is_readable() {
-    let config = TimelineConfig {
-        target_latency_ms: 300,
-        max_presentation_delay_ms: 200,
-        ..TimelineConfig::default()
-    };
-    let mut timeline = PlayoutTimeline::with_config(config);
-    timeline.observe(Track::Audio, 10_000_000, 9_000_000);
-    timeline.observe(Track::Video, 10_000_000, 9_000_000);
-    // 下限 (300 ms) は上限 (200 ms) に収まらないため、切り下げた分が読める
-    assert_eq!(timeline.limited_us(), 100_000);
+fn target_latency_is_the_lower_bound_for_both_tracks() {
+    let mut timeline = create_timeline();
+    timeline.set_target_latency_ms(300);
+    observe_pair(&mut timeline, EPOCH_US, 0);
+    for index in 0..30i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
+    }
     assert_eq!(timeline.target_latency_ms(), 300);
-    // 表示の遅れは 2 つのトラックとも上限で切られる
-    assert_eq!(timeline.presentation_delay_us(Track::Audio), Some(200_000));
-    assert_eq!(timeline.presentation_delay_us(Track::Video), Some(200_000));
-}
-
-#[test]
-fn timestamp_jump_starts_a_new_generation() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    let generation = timeline.generation();
-    // TIMESTAMP が大きく戻った (配信元の切り替えなど)
-    timeline.observe(Track::Audio, 10_000_000, 8_000_000);
-    assert_eq!(timeline.generation(), generation + 1);
-    // 取り直した後も表示時刻が求まる
-    assert!(timeline.present_us(Track::Audio, 8_000_000).is_some());
-}
-
-#[test]
-fn a_drifting_track_has_no_presentation_time() {
-    let mut timeline = PlayoutTimeline::new();
-    // 音声は 1 秒の基準、映像は 2 秒の基準 (閾値より大きい)
-    timeline.observe(Track::Audio, 10_000_000, 9_000_000);
-    timeline.observe(Track::Video, 10_000_000, 8_000_000);
-    assert!(!timeline.sharing_bases());
-    assert!(timeline.present_us(Track::Audio, 9_000_000).is_some());
-    assert!(timeline.present_us(Track::Video, 8_000_000).is_none());
-    assert!(timeline.presentation_delay_us(Track::Video).is_none());
-}
-
-#[test]
-fn skew_is_readable_from_the_presented_records() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.record_presentation(Track::Audio, 1_000_000, 5_000_000);
-    timeline.record_presentation(Track::Video, 1_000_000, 5_040_000);
-    assert_eq!(timeline.skew_us(), Some(40_000), "映像が 40 ms 遅れている");
-    // 1 秒より古い実績は使わない
-    timeline.record_presentation(Track::Audio, 1_000_000, 4_000_000);
-    assert_eq!(timeline.skew_us(), None);
-}
-
-#[test]
-fn reset_track_keeps_the_other_track() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    timeline.observe(Track::Video, 10_000_000, 1_000_000);
-    let generation = timeline.generation();
-    timeline.reset_track(Track::Audio);
-    assert!(timeline.present_us(Track::Audio, 1_000_000).is_none());
-    assert!(timeline.present_us(Track::Video, 1_000_000).is_some());
-    assert_eq!(timeline.generation(), generation, "世代は進めない");
-}
-
-#[test]
-fn only_one_track_does_not_share_the_basis() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    // 観測が片方だけでは、差が 0 であるとも動きが無いとも言えない
-    assert!(!timeline.sharing_bases(), "片方だけでは共有しない");
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::Unobserved);
-    let breakdown = timeline.delay_breakdown();
-    assert_eq!(breakdown.video.base_delay_us, None);
-    assert_eq!(breakdown.video.jitter_delay_us, None);
-    assert_eq!(breakdown.video.presentation_delay_us, None);
-    assert_eq!(breakdown.base_difference_us, None);
-    assert_eq!(breakdown.audio.base_delay_us, Some(9_000_000));
-    assert_eq!(breakdown.audio.jitter_delay_us, Some(80_000));
-    assert_eq!(breakdown.base_drift_limit_us, TIMELINE_BASE_DRIFT_US);
-}
-
-#[test]
-fn delay_breakdown_splits_the_basis_the_jitter_and_the_sync() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 9_000_000);
-    timeline.observe(Track::Video, 10_300_000, 9_000_000);
-    let breakdown = timeline.delay_breakdown();
-    assert_eq!(breakdown.audio.base_delay_us, Some(1_000_000));
-    assert_eq!(breakdown.video.base_delay_us, Some(1_300_000));
-    assert_eq!(breakdown.audio.jitter_delay_us, Some(80_000));
-    assert_eq!(breakdown.base_difference_us, Some(-300_000));
-    assert!(breakdown.sharing_bases);
-    assert_eq!(breakdown.unshared_reason, UnsharedReason::None);
-    // 表示の遅れは「基準の遅れ + jitter buffer の遅れ + 同期で足した分」である
-    assert_eq!(breakdown.audio.sync_extra_delay_us, 100_000);
-    assert_eq!(breakdown.audio.presentation_delay_us, Some(1_180_000));
-    assert_eq!(breakdown.video.sync_extra_delay_us, 0);
-    assert_eq!(breakdown.video.presentation_delay_us, Some(1_300_000));
-    // 表示時刻は内訳と同じ値になる
     assert_eq!(
-        timeline.present_us(Track::Audio, 9_000_000),
-        Some(10_180_000)
+        timeline.presentation_extra_delay_us(),
+        Some(300_000),
+        "自動の音声予算 50 ms より targetLatency を優先すること"
     );
+    assert_eq!(timeline.video_delay_us(), Some(300_000));
+    assert_eq!(timeline.presentation_delay_us(), Some(300_000));
+    assert_eq!(wall_us_of(&timeline, Track::Audio, 0), EPOCH_US + 300_000);
+    assert_eq!(wall_us_of(&timeline, Track::Video, 0), EPOCH_US + 300_000);
+    assert_eq!(timeline.target_latency_limited_us(), 0, "上限に収まること");
+    // 再生遅延より小さい targetLatency を渡しても、遅い方 (再生遅延) を使う
+    timeline.set_target_latency_ms(10);
+    assert_eq!(timeline.target_latency_ms(), 10);
     assert_eq!(
-        timeline.present_us(Track::Video, 9_000_000),
-        Some(10_300_000)
+        timeline.presentation_extra_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US)
     );
+    // 0 を渡すと「下限にしない」の意味になる
+    timeline.set_target_latency_ms(0);
+    assert_eq!(timeline.target_latency_ms(), 0);
 }
 
+/// 下限が変わったらその場で表示時刻を合わせ直すこと
 #[test]
-fn a_moving_basis_is_treated_as_a_clock_drift() {
-    let mut timeline = PlayoutTimeline::new();
-    // まず 11 秒ぶん、差の無い観測を流して水準を決める。判定は落ち着いた水準を観測してから
-    // 始める (購読の直後は relay の cache から届いた分をまとめて復号しており、基準が
-    // 数百 ms から数秒動く)
-    let mut wall_us = 10_000_000;
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
+fn target_latency_change_realigns_immediately() {
+    let mut timeline = create_timeline();
+    // 音声の表示の遅れ (下限の 50 ms) との差で、映像に不感帯の手前までの 45 ms が足されて
+    // いる
+    observe_pair(&mut timeline, EPOCH_US, 0);
+    assert_eq!(
+        presentation_delay_gap_us(&timeline),
+        TIMELINE_SYNC_MIN_DELTA_US
+    );
+
+    // 音声の下限より大きい targetLatency を渡すと、両方の下限が 300 ms になる。映像に
+    // 足していた分はそのままでは差になるため、その場で合わせ直す
+    timeline.set_target_latency_ms(300);
+    let difference_us =
+        wall_us_of(&timeline, Track::Audio, 0) - wall_us_of(&timeline, Track::Video, 0);
+    assert!(
+        difference_us.saturating_abs() <= TIMELINE_SYNC_MIN_DELTA_US + TOLERANCE_US,
+        "下限の変更で表示時刻の差が開いたままにならないこと: {difference_us}"
+    );
+    assert!(
+        timeline.presentation_extra_delay_us().unwrap_or(0) >= 300_000,
+        "音声の表示の遅れが新しい下限を下回らないこと"
+    );
+    assert!(timeline.video_delay_us().unwrap_or(0) >= 300_000);
+}
+
+/// キュー由来の上限で targetLatency を切り下げ、切り下げた分を計器に出すこと
+#[test]
+fn queue_cap_limits_the_target_latency() {
+    let mut timeline = create_timeline();
+    // 120 fps のフレーム間隔を覚えさせる。キューが吸収できる長さは (上限 - 余裕) 枚分
+    for index in 0..60i64 {
+        let media_us = index * FAST_FRAME_US;
+        timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
     }
-
-    // 映像の基準が毎秒 40 ms ずつ遅れていく。差の大きさ (最大 450 ms) は閾値 (表示の遅れの
-    // 上限から求まる値) に届かないため、差の動き (6 秒で 240 ms) で検出できないと共有した
-    // ままになる。持続の確認 (6 秒) を超える長さを見る
-    for step in 0..100i64 {
-        wall_us += 100_000;
-        let video_offset_us = 1_050_000 + step * 4_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - video_offset_us);
-    }
+    let queue_cap_us = (MAX_QUEUED_FRAMES - TIMELINE_QUEUE_HEADROOM_FRAMES) as i64 * FAST_FRAME_US;
+    assert!(queue_cap_us < TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000);
+    timeline.set_target_latency_ms(4_000);
+    assert_eq!(timeline.presentation_delay_us(), Some(queue_cap_us));
     assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::Drift,
-        "差の動きで時計のずれを見つける"
+        timeline.target_latency_limited_us(),
+        4_000_000 - queue_cap_us,
+        "切り下げた分が読めること"
     );
+    // 基準の遅れには上限を掛けない。音声と映像は同じ値に切り下げられるため同じ表示時刻
+    // になる
+    timeline.observe(Track::Audio, EPOCH_US, timestamp_of(0));
+    assert_eq!(
+        wall_us_of(&timeline, Track::Audio, 1_000_000),
+        wall_us_of(&timeline, Track::Video, 1_000_000),
+        "切り下げても同じ表示時刻になること"
+    );
+}
+
+/// 上限が既定値のときはその値で切り下げること
+#[test]
+fn max_presentation_delay_caps_the_target_latency() {
+    let mut timeline = create_timeline();
+    // フレーム間隔を覚えていない間は、キュー由来の上限が既定値 (500 ms) になる
+    timeline.observe(Track::Video, EPOCH_US, timestamp_of(0));
+    timeline.set_target_latency_ms(5_000);
+    assert_eq!(
+        timeline.presentation_delay_us(),
+        Some(TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000)
+    );
+    assert_eq!(
+        timeline.target_latency_limited_us(),
+        5_000_000 - TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000
+    );
+}
+
+/// 表示の遅れは時計のずれの分だけ負になりうること
+#[test]
+fn presentation_delay_can_be_negative() {
+    // 音声は観測しない (同期の制御を働かせない)
+    let mut timeline = create_timeline();
+    // 受信側の壁時計では EPOCH のときに、TIMESTAMP が 5 秒先のフレームが届く
+    timeline.observe(Track::Video, EPOCH_US, timestamp_of(5_000_000));
+    assert_eq!(timeline.presentation_delay_us(), Some(-5_000_000));
+    // 表示時刻 = TIMESTAMP + 負の遅れ = 受信側の壁時計
+    assert_eq!(wall_us_of(&timeline, Track::Video, 5_000_000), EPOCH_US);
+}
+
+/// 基準が大きく離れたトラックの表示時刻を返さないこと
+#[test]
+fn drifted_track_has_no_presentation_time() {
+    let mut timeline = create_timeline();
+    // 音声の基準が 1 秒、映像の基準が 2 秒 (閾値 450 ms を超える)
+    timeline.observe(Track::Audio, EPOCH_US, timestamp_of(0) - 1_000_000);
+    timeline.observe(Track::Video, EPOCH_US, timestamp_of(0) - 2_000_000);
     assert!(!timeline.sharing_bases());
-    // 遅れて届いている側 (映像) の表示時刻は返らない
-    let timestamp_us = wall_us - 1_050_000;
-    assert!(timeline.present_us(Track::Video, timestamp_us).is_none());
-    assert!(timeline.present_us(Track::Audio, timestamp_us).is_some());
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
     assert!(
         timeline
-            .delay_breakdown()
-            .base_drift_us_per_second
+            .present_us(Track::Audio, timestamp_of(0) - 1_000_000)
             .is_some()
     );
-}
-
-#[test]
-fn the_unshared_hold_is_released_when_the_difference_returns() {
-    // 保持 (30 秒) は閾値が動くたびに共有と解除を往復しないために置く。解除のきっかけが
-    // 去って差が水準へ戻った後は、同じ水準へ留まる理由が無いため、保持を待たずに戻す
-    let mut timeline = PlayoutTimeline::new();
-    let mut wall_us = 10_000_000;
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
-    }
-    for step in 0..100i64 {
-        wall_us += 100_000;
-        let video_offset_us = 1_050_000 + step * 4_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - video_offset_us);
-    }
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::Drift);
-
-    // ドリフトが止まり、差が元の水準 (50 ms) へ戻る
-    for _ in 0..30 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
-    }
-    assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::None,
-        "きっかけが去って差が戻ったら保持を待たずに戻す"
+    assert!(
+        timeline
+            .present_us(Track::Video, timestamp_of(0) - 2_000_000)
+            .is_none(),
+        "遅れている側の表示時刻は返さないこと"
     );
-    assert!(timeline.sharing_bases(), "共有へ戻ること");
+    assert!(timeline.presentation_extra_delay_us().is_some());
 }
 
-/// 一過性の動きでは共有をやめない
-///
-/// 読み出しが一瞬遅れただけでも、直近の窓の最小値の差は動く。しかし離れ幅が段差とみなす
-/// 大きさに届かず、参照 (表示時刻が使う基準の差) も動いていなければ、経路と復号の乱れで
-/// ある。持続の確認の前に戻るため、解除しない。
+/// 音声の TIMESTAMP がドリフトしたら共有せず、映像を到着基準の時刻へ合わせること
 #[test]
-fn a_transient_move_does_not_unshare_the_bases() {
-    let mut timeline = PlayoutTimeline::new();
-    let mut wall_us = 10_000_000;
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
-    }
-
-    // 映像の基準が一瞬 150 ms 遅れる (段差とみなす 200 ms には届かない)。直近の窓 (2 秒) が
-    // 入れ替わる長さだけ続ける
-    for _ in 0..20 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_200_000);
-    }
-    for _ in 0..40 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
-        assert_ne!(
-            timeline.unshared_reason(),
-            UnsharedReason::Drift,
-            "一過性の動きを時計のずれとみなさない"
+fn audio_drift_unshares_and_video_follows_the_arrival_delay() {
+    for frame_us in [FRAME_US, FRAME_US / 2] {
+        let mut timeline = create_timeline();
+        // 120 秒
+        let media_us = observe_drifted_streams(&mut timeline, frame_us, 120_000_000);
+        assert!(
+            !timeline.sharing_bases(),
+            "frame_us={frame_us}: 基準を共有しないこと"
+        );
+        assert_eq!(timeline.unshared_reason(), UnsharedReason::Drift);
+        // ずれた側 (音声) は表示時刻を返さず、到着基準の再生へ落ちる
+        assert!(
+            timeline
+                .present_us(Track::Audio, timestamp_of(media_us))
+                .is_none(),
+            "frame_us={frame_us}: ずれた側の表示時刻を返さないこと"
+        );
+        // 映像は自分の基準を使い、表示時刻が「観測の時刻 + 上限」に収まる
+        let video_present_us = wall_us_of(&timeline, Track::Video, media_us);
+        assert!(
+            video_present_us
+                <= EPOCH_US + media_us + TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000 + TOLERANCE_US,
+            "frame_us={frame_us}: 映像の表示時刻が未来へ伸びないこと: {video_present_us}"
+        );
+        // 映像の遅れは、音声の到着基準の遅れから不感帯を引いた値になる
+        let video_delay_us = timeline.video_delay_us().expect("映像の遅れが決まること");
+        let arrival_delay_us = timeline
+            .audio_arrival_delay_us()
+            .expect("音声の到着基準の遅れが決まること");
+        assert_eq!(
+            video_delay_us,
+            arrival_delay_us - TIMELINE_SYNC_MIN_DELTA_US,
+            "frame_us={frame_us}: 映像を音声の到着基準の時刻へ合わせること"
+        );
+        assert!(
+            timeline.playout_delay_us().unwrap_or(0) >= arrival_delay_us,
+            "frame_us={frame_us}: 音声の遅れが上限を超えないこと"
+        );
+        // 実際に鳴るのは「到着 + 到着基準の遅れ」である。映像が音声より遅れないこと
+        let audio_plays_at_us = EPOCH_US + media_us + arrival_delay_us;
+        let video_shows_at_us = EPOCH_US + video_present_us - EPOCH_US;
+        assert!(
+            video_shows_at_us.saturating_sub(audio_plays_at_us) <= TIMELINE_SYNC_MIN_DELTA_US,
+            "frame_us={frame_us}: 映像が音声より遅れて表示されないこと"
         );
     }
-    assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::None,
-        "一過性の動きでは共有をやめない"
-    );
-    assert!(timeline.sharing_bases(), "共有したままであること");
 }
 
-/// 1 回で大きく離れた段差は、持続を待たずに共有をやめる
+/// ドリフトは差が閾値に達する前に、動き続けていることで検出すること
 #[test]
-fn a_step_away_from_the_level_unshares_immediately() {
-    let mut timeline = PlayoutTimeline::new();
-    let mut wall_us = 10_000_000;
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_050_000);
-    }
+fn audio_drift_is_detected_before_the_difference_threshold() {
+    let mut timeline = create_timeline();
+    // 閾値に達する前に検出できていれば、映像へ足した分は動きの幅の中に留まる
+    observe_drifted_streams(&mut timeline, FRAME_US, 20_000_000);
+    assert!(!timeline.sharing_bases(), "基準を共有しないこと");
+    // 検出した後は、映像へ足す先が音声の到着基準の遅れ (上限 100 ms) に変わる
+    assert!(
+        timeline.video_delay_us().unwrap_or(0)
+            <= TIMELINE_ARRIVAL_DELAY_US - TIMELINE_SYNC_MIN_DELTA_US + TOLERANCE_US,
+        "映像へ足した分が到着基準の上限の中に収まること"
+    );
+    // 動きの速さが入力と同じ値になる
+    let drift_us_per_second = timeline
+        .delay_breakdown()
+        .base_drift_us_per_second
+        .expect("履歴ができている");
+    assert!(
+        (drift_us_per_second - DRIFT_US_PER_SECOND).saturating_abs() < 1_000,
+        "動きの速さが入力と同じであること: {drift_us_per_second}"
+    );
+}
 
-    // 映像の基準が 1 回で 500 ms 遅れる (離れ幅が段差とみなす 200 ms を超える)。直近の窓
-    // (2 秒) が入れ替わって初めて差に現れる
-    let mut seen_drift = false;
-    for _ in 0..30 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_550_000);
-        if timeline.unshared_reason() == UnsharedReason::Drift {
-            seen_drift = true;
+/// 基準の差が大きくても相手側へ足す分は上限までにすること
+#[test]
+fn large_base_difference_is_compensated_only_up_to_the_limit() {
+    let mut timeline = create_timeline();
+    // 音声だけが TIMESTAMP より 300 ms 遅れて届き (定常)、5 秒目から TIMESTAMP が
+    // さらに 150 ms 古くなる。差が動き続ける場合 (ドリフト) と同じ条件にする
+    let audio_frame_us = 20_000;
+    let mut next_video_us = 0i64;
+    for wall_us in (0..20_000_000).step_by(audio_frame_us as usize) {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
         }
+        let step_us = if wall_us < 5_000_000 { 0 } else { 150_000 };
+        let audio_timestamp_us = EPOCH_US + wall_us - 300_000 - step_us;
+        timeline.observe(Track::Audio, EPOCH_US + wall_us, audio_timestamp_us);
     }
-    assert!(seen_drift, "段差は持続を待たずに見つける");
-    assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::Hold,
-        "解除した後は保持の間は戻さない"
+    let breakdown = timeline.delay_breakdown();
+    assert!(
+        breakdown
+            .base_difference_us
+            .unwrap_or(0)
+            .saturating_sub(450_000)
+            .saturating_abs()
+            <= 1_000,
+        "差が開いていること: {:?}",
+        breakdown.base_difference_us
+    );
+    // 映像へ足すのは上限まで。残りの差は A/V のずれとして残す
+    assert!(
+        breakdown.video.sync_extra_delay_us <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+        "映像へ足す分が上限を超えないこと: {}",
+        breakdown.video.sync_extra_delay_us
+    );
+    assert!(
+        timeline.video_delay_us().unwrap_or(i64::MAX)
+            <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US + 1_000,
+        "映像の表示の遅れが上限を超えないこと"
     );
 }
 
-/// 閾値だけが動いた解除も、差が戻れば 2 秒で共有へ戻ること
-///
-/// 差が同じ水準のまま、jitter buffer の目標遅延が動いて閾値が下がると解除される。解除の
-/// きっかけが動きだったかは見ない。差が水準へ戻り、直近に往復していなければ、同じ水準へ
-/// 留まる理由が無いため保持を待たずに戻す。
+/// 音声の TIMESTAMP に段差があっても、映像へ足す遅延は上限までにすること
 #[test]
-fn a_threshold_only_unshare_is_released_when_the_difference_returns() {
-    let mut timeline = PlayoutTimeline::new();
-    let mut wall_us = 10_000_000;
-    // 映像が 200 ms 遅い状態で水準を決める (差は 250 ms で一定)
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+fn audio_timestamp_step_does_not_grow_the_audio_budget() {
+    let mut timeline = create_timeline();
+    let audio_frame_us = 20_000;
+    let step_at_us = 5_000_000;
+    let step_us = 600_000;
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 10_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        // 段差の後は、音声の TIMESTAMP だけが 600 ms 古くなる (到着は変わらない)
+        let audio_timestamp_us = if wall_us < step_at_us {
+            EPOCH_US + wall_us
+        } else {
+            EPOCH_US + wall_us - step_us
+        };
+        timeline.observe(Track::Audio, EPOCH_US + wall_us, audio_timestamp_us);
+        wall_us += audio_frame_us;
+    }
+    // 未来へ進む時計の段差を、恒常的な待ちへ移さない
+    assert!(
+        timeline.playout_delay_us().unwrap_or(i64::MAX) <= 100_000,
+        "音声の予算が段差で無制限に育たないこと: {:?}",
+        timeline.playout_delay_us()
+    );
+    assert!(
+        timeline.delay_breakdown().video.sync_extra_delay_us
+            <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US,
+        "映像へ足す分が上限を超えないこと"
+    );
+    assert!(
+        timeline.video_delay_us().unwrap_or(i64::MAX)
+            <= TIMELINE_MAX_COMPENSATED_DIFFERENCE_US + 1_000,
+        "映像の表示待ちが上限に留まること"
+    );
+}
+
+/// 2 つのトラックの表示時刻の差が不感帯に収まること
+#[test]
+fn presentation_times_stay_within_the_deadband() {
+    let mut timeline = create_timeline();
+    observe_both_streams(&mut timeline, 30_000_000);
+    let difference_us = wall_us_of(&timeline, Track::Audio, 29_000_000)
+        - wall_us_of(&timeline, Track::Video, 29_000_000);
+    assert!(
+        difference_us.saturating_abs() <= TIMELINE_SYNC_MIN_DELTA_US + 5_000,
+        "差が不感帯に収まること: {difference_us}"
+    );
+    assert!(difference_us > 0, "映像の方が先に出ること");
+}
+
+/// 一過性の基準のずれでは共有をやめないこと
+#[test]
+fn transient_basis_move_does_not_unshare() {
+    let mut timeline = create_timeline();
+    // 5 秒目から 3 秒間、音声の TIMESTAMP だけが 95 ms 新しくなる (到着は変わらない)
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 20_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if (5_000_000..8_000_000).contains(&wall_us) {
+            95_000
+        } else {
+            0
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shift_us),
+        );
+        reasons.push(timeline.unshared_reason());
+        wall_us += 20_000;
+    }
+    assert!(
+        !reasons.contains(&UnsharedReason::Drift),
+        "一過性の動きを時計のずれと判定しないこと"
+    );
+    assert!(timeline.sharing_bases(), "観測の後も基準を共有していること");
+}
+
+/// 一過性の動きが去って差が戻ったら、保持を待たずに共有を戻すこと
+#[test]
+fn difference_return_releases_the_hold() {
+    let mut timeline = create_timeline();
+    // 5 秒目に音声の基準が 900 ms 開き、3 秒かけて実時間に追いつく。音声の TIMESTAMP を
+    // 古い側へずらすと、受信側の「到着 - TIMESTAMP」= 基準の遅れはその分だけ大きくなる
+    let excursion_start_us = 5_000_000;
+    let catch_up_us = 3_000_000;
+    let excursion_us = 900_000;
+    let audio_frame_us = 20_000;
+    let mut next_video_us = 0i64;
+    let mut samples: Vec<(i64, UnsharedReason)> = Vec::new();
+    let mut wall_us = 0i64;
+    while wall_us < 25_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shifted_us = if wall_us < excursion_start_us {
+            0
+        } else {
+            let progress =
+                (wall_us - excursion_start_us).min(catch_up_us) as f64 / catch_up_us as f64;
+            // 音声の TIMESTAMP を古い側へずらす (基準の遅れが開く)。切り捨てで 1 µs 未満の
+            // 差が出るが判定に影響しない
+            -((excursion_us as f64) * (1.0 - progress)) as i64
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shifted_us),
+        );
+        samples.push((wall_us, timeline.unshared_reason()));
+        wall_us += audio_frame_us;
+    }
+
+    // 動いている間は解除する (差が閾値を超えている、または離れた幅が続いている) ため、
+    // 一過性の動きでも解除のきっかけで保持に入る
+    assert!(
+        samples
+            .iter()
+            .any(|(_, reason)| *reason == UnsharedReason::Hold),
+        "一過性の動きで解除の保持に入ること"
+    );
+    assert!(
+        timeline.sharing_bases(),
+        "一過性の動きが去った後は共有を戻すこと"
+    );
+    let released_at_us = samples
+        .iter()
+        .find(|(at_us, reason)| *at_us > excursion_start_us && *reason == UnsharedReason::None)
+        .map(|(at_us, _)| *at_us)
+        .expect("観測の間に共有が戻ること");
+    assert!(
+        released_at_us
+            <= excursion_start_us
+                + catch_up_us
+                + TIMELINE_BASE_UNSHARED_RELEASE_US
+                + audio_frame_us,
+        "差が戻ってから解除の条件が続く時間のうちに戻すこと: {released_at_us}"
+    );
+    assert!(
+        released_at_us < excursion_start_us + TIMELINE_BASE_UNSHARED_HOLD_US,
+        "保持の満了 (30 秒) を待たずに戻すこと: {released_at_us}"
+    );
+}
+
+/// 映像の復号がのこぎり波で遅れても共有をやめないこと
+#[test]
+fn decoder_sawtooth_does_not_unshare() {
+    let mut timeline = create_timeline();
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut next_audio_us = 0i64;
+    let mut next_sample_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 40_000_000 {
+        while next_video_us <= wall_us {
+            // 5 秒ごとに 1000 ms まで遅れ、次の観測で戻る (のこぎり波)
+            let lag_us = (next_video_us % 5_000_000) * 1_000_000 / 5_000_000;
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us + lag_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        while next_audio_us <= wall_us {
+            timeline.observe(
+                Track::Audio,
+                EPOCH_US + next_audio_us,
+                timestamp_of(next_audio_us),
+            );
+            next_audio_us += 20_000;
+        }
+        while next_sample_us <= wall_us {
+            reasons.push(timeline.unshared_reason());
+            next_sample_us += 1_000_000;
+        }
+        wall_us += 5_000;
+    }
+    let unshared = reasons
+        .iter()
+        .filter(|reason| **reason != UnsharedReason::None)
+        .count();
+    assert_eq!(unshared, 0, "復号の乱れを時計のずれと判定しないこと");
+    assert!(timeline.sharing_bases(), "観測の後も基準を共有していること");
+}
+
+/// 復号の遅れが去った後に解除が残らないこと
+#[test]
+fn decoder_lag_gone_leaves_no_unshared_hold() {
+    let mut timeline = create_timeline();
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut next_audio_us = 0i64;
+    let mut next_sample_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 60_000_000 {
+        while next_video_us <= wall_us {
+            // 10 秒目まではのこぎり波で遅れ (判定を始める水準の決定がこの期間に入る)、
+            // 以後は遅れない
+            let lag_us = if next_video_us >= 10_000_000 {
+                0
+            } else {
+                (next_video_us % 5_000_000) * 1_000_000 / 5_000_000
+            };
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us + lag_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        while next_audio_us <= wall_us {
+            timeline.observe(
+                Track::Audio,
+                EPOCH_US + next_audio_us,
+                timestamp_of(next_audio_us),
+            );
+            next_audio_us += 20_000;
+        }
+        while next_sample_us <= wall_us {
+            reasons.push(timeline.unshared_reason());
+            next_sample_us += 1_000_000;
+        }
+        wall_us += 5_000;
+    }
+    let after_settled = reasons
+        .iter()
+        .skip(10)
+        .filter(|reason| **reason != UnsharedReason::None)
+        .count();
+    assert_eq!(after_settled, 0, "復号の遅れが去った後に解除が残らないこと");
+}
+
+/// 購読の直後の過渡では共有をやめないこと
+#[test]
+fn startup_transient_does_not_unshare() {
+    let mut timeline = create_timeline();
+    // 音声の復号が 150 ms 遅れて始まり、2 秒かけて実時間に追いつく (cache から届いた分を
+    // まとめて復号している間)
+    let catch_up_us = 150_000;
+    let catch_up_duration_us = 2_000_000;
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 25_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if wall_us < catch_up_duration_us {
+            -(catch_up_us * (catch_up_duration_us - wall_us) / catch_up_duration_us)
+        } else {
+            0
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shift_us),
+        );
+        reasons.push(timeline.unshared_reason());
+        wall_us += 20_000;
+    }
+    assert!(
+        !reasons.contains(&UnsharedReason::Drift),
+        "購読の直後の過渡を時計のずれと判定しないこと"
+    );
+    assert!(
+        timeline.sharing_bases(),
+        "追いついた後は基準を共有していること"
+    );
+}
+
+/// 戻らない基準のずれは共有をやめること (判定は持続の確認を待つ)
+#[test]
+fn persistent_difference_unshares_after_the_confirm_window() {
+    let mut timeline = create_timeline();
+    let excursion_start_us = 5_000_000;
+    let excursion_us = 95_000;
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 20_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if wall_us >= excursion_start_us {
+            excursion_us
+        } else {
+            0
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shift_us),
+        );
+        reasons.push(timeline.unshared_reason());
+        wall_us += 20_000;
+    }
+    let drift_index = reasons
+        .iter()
+        .position(|reason| *reason == UnsharedReason::Drift)
+        .expect("戻らないずれを時計のずれと判定すること");
+    // 判定は離れた幅が続いた時間を待ってからである。一瞬の動きで解除しないための待ち
+    assert!(
+        (drift_index as i64) * 20_000 >= excursion_start_us + TIMELINE_BASE_DRIFT_CONFIRM_US,
+        "離れた幅が続いた時間を待ってから判定すること: drift_index={drift_index}"
+    );
+    assert!(
+        !timeline.sharing_bases(),
+        "ずれた側があるときは基準を共有しないこと"
+    );
+}
+
+/// 差が動き続けている間は保持を解除しないこと
+#[test]
+fn moving_difference_keeps_the_hold() {
+    let mut timeline = create_timeline();
+    // 5 秒目から、音声の TIMESTAMP が毎秒 [`DRIFT_US_PER_SECOND`] ずつ壁計から遅れる
+    let excursion_start_us = 5_000_000;
+    let mut reasons = Vec::new();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 60_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if wall_us < excursion_start_us {
+            0
+        } else {
+            -(DRIFT_US_PER_SECOND * (wall_us - excursion_start_us) / 1_000_000)
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shift_us),
+        );
+        reasons.push(timeline.unshared_reason());
+        wall_us += 20_000;
+    }
+    assert!(
+        reasons.contains(&UnsharedReason::Drift),
+        "動き続けるずれを時計のずれと判定すること"
+    );
+    // 保持の満了 (30 秒) を過ぎても解除しない。解除の条件を数えていないことでも確かめる
+    assert!(
+        !timeline.sharing_bases(),
+        "差が動き続けている間は共有しないこと"
+    );
+    assert_eq!(
+        timeline.delay_breakdown().base_unshared_return_us,
+        None,
+        "動きが去っていないため解除の条件を数えないこと"
+    );
+}
+
+/// 段差の後の差が動かないまま保持されること
+#[test]
+fn unshared_hold_prevents_flapping() {
+    let mut timeline = create_timeline();
+    // 5 秒目に音声の TIMESTAMP が 150 ms 古くなる (段差)。以後は動かない
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 15_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if wall_us < 5_000_000 { 0 } else { 150_000 };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us + shift_us),
+        );
+        wall_us += 20_000;
+    }
+    assert!(!timeline.sharing_bases(), "保持の間は基準を共有しないこと");
+}
+
+/// 保持を早く解除する条件が続いている時間を読めること
+#[test]
+fn unshared_return_is_reported_while_counting() {
+    let mut timeline = create_timeline();
+    // 一過性の動きで解除した後、差が戻った状態が続くと解除の条件を数え始める
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    while wall_us < 20_000_000 {
+        while next_video_us <= wall_us {
+            timeline.observe(
+                Track::Video,
+                EPOCH_US + next_video_us,
+                timestamp_of(next_video_us),
+            );
+            next_video_us += FRAME_US;
+        }
+        let shift_us = if (5_000_000..8_000_000).contains(&wall_us) {
+            900_000
+        } else {
+            0
+        };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + wall_us,
+            timestamp_of(wall_us - shift_us),
+        );
+        wall_us += 20_000;
     }
     assert!(
         timeline.sharing_bases(),
-        "差が閾値の中なら共有したままであること"
+        "一過性の動きが去れば共有へ戻ること"
+    );
+    assert_eq!(
+        timeline.delay_breakdown().base_unshared_return_us,
+        None,
+        "解除した後は数えていないこと"
+    );
+}
+
+/// 閾値だけが動いた解除でも、閾値が戻れば解除を早めること
+#[test]
+fn threshold_only_unshare_is_released() {
+    let mut timeline = create_timeline();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    let observe_until = |timeline: &mut PlayoutTimeline,
+                         next_video_us: &mut i64,
+                         wall_us: &mut i64,
+                         until_us: i64|
+     -> Vec<(i64, UnsharedReason)> {
+        let mut reasons = Vec::new();
+        while *wall_us < until_us {
+            while *next_video_us <= *wall_us {
+                timeline.observe(
+                    Track::Video,
+                    EPOCH_US + *next_video_us,
+                    timestamp_of(*next_video_us),
+                );
+                *next_video_us += FRAME_US;
+            }
+            // 音声の基準だけ 400 ms 遅らせる
+            timeline.observe(
+                Track::Audio,
+                EPOCH_US + *wall_us,
+                timestamp_of(*wall_us - 300_000),
+            );
+            reasons.push((*wall_us, timeline.unshared_reason()));
+            *wall_us += 20_000;
+        }
+        reasons
+    };
+
+    // 差 400 ms は、閾値 (表示の遅れの上限 500 ms - 音声の表示の遅れ 50 ms = 450 ms) の
+    // 内側である
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 10_000_000);
+    assert!(timeline.sharing_bases(), "差が閾値の内側なら共有すること");
+    // targetLatency を上げると閾値が下がり、差が変わらないまま解除される
+    timeline.set_target_latency_ms(450);
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 11_000_000);
+    assert!(!timeline.sharing_bases(), "閾値を超えたら共有しないこと");
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+    // 閾値を戻すと差は再び閾値の内側になる。直ちには戻さないが、解除の条件が続けば解除する
+    timeline.set_target_latency_ms(0);
+    let reasons = observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 20_000_000);
+    let released_at_us = reasons
+        .iter()
+        .find(|(_, reason)| *reason == UnsharedReason::None)
+        .map(|(at_us, _)| *at_us)
+        .expect("閾値が戻った後に解除すること");
+    assert!(
+        released_at_us <= 11_000_000 + TIMELINE_BASE_UNSHARED_RELEASE_US + 1_000_000,
+        "解除の条件が続いた後に解除すること: {released_at_us}"
+    );
+    assert!(
+        timeline.sharing_bases(),
+        "閾値が戻って差が水準のままなら解除すること"
+    );
+}
+
+/// 閾値が行き来する間は解除を早めないこと
+#[test]
+fn repeated_unshare_within_the_hold_is_kept() {
+    let mut timeline = create_timeline();
+    let mut next_video_us = 0i64;
+    let mut wall_us = 0i64;
+    let observe_until = |timeline: &mut PlayoutTimeline,
+                         next_video_us: &mut i64,
+                         wall_us: &mut i64,
+                         until_us: i64| {
+        while *wall_us < until_us {
+            while *next_video_us <= *wall_us {
+                timeline.observe(
+                    Track::Video,
+                    EPOCH_US + *next_video_us,
+                    timestamp_of(*next_video_us),
+                );
+                *next_video_us += FRAME_US;
+            }
+            timeline.observe(
+                Track::Audio,
+                EPOCH_US + *wall_us,
+                timestamp_of(*wall_us - 300_000),
+            );
+            *wall_us += 20_000;
+        }
+    };
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 10_000_000);
+    // 1 回目の解除と、閾値が戻った後の早期解除
+    timeline.set_target_latency_ms(450);
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 11_000_000);
+    timeline.set_target_latency_ms(0);
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 20_000_000);
+    assert!(timeline.sharing_bases(), "1 回目は解除すること");
+    // 2 回目の解除 (往復)。差は同じ水準のまま閾値だけが動く
+    timeline.set_target_latency_ms(450);
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 21_000_000);
+    assert!(!timeline.sharing_bases(), "2 回目も解除されること");
+    // 閾値を戻しても、直近に解除しているため解除を早めない
+    timeline.set_target_latency_ms(0);
+    observe_until(&mut timeline, &mut next_video_us, &mut wall_us, 31_000_000);
+    assert!(!timeline.sharing_bases(), "往復している間は保持すること");
+    assert_eq!(
+        timeline.delay_breakdown().base_unshared_return_us,
+        None,
+        "解除の条件を数えないこと (往復している)"
+    );
+}
+
+/// 解除のきっかけが去っても、往復している間は 30 秒の保持が満了するまで共有しないこと
+///
+/// 早期解除 (差が戻った状態が 2 秒続いたら戻す) は、直近に共有と解除を往復している間は
+/// 働かない。その場合は 30 秒の保持の満了だけで共有が戻る。以前のテストは映像の観測を
+/// 止めていたため、記録が止まった後の状態を確かめておらず、満了そのものを検証していな
+/// かった。
+#[test]
+fn hold_expires_after_the_full_hold_window() {
+    let mut timeline = create_timeline();
+    let step_us = 20_000;
+    let mut wall_us = 0i64;
+    // 音声の TIMESTAMP だけ 300 ms 古い状態で観測する (基準の差が 300 ms ある)
+    let observe_until = |timeline: &mut PlayoutTimeline, wall_us: &mut i64, until_us: i64| {
+        while *wall_us < until_us {
+            timeline.observe(Track::Video, EPOCH_US + *wall_us, timestamp_of(*wall_us));
+            timeline.observe(
+                Track::Audio,
+                EPOCH_US + *wall_us,
+                timestamp_of(*wall_us - 300_000),
+            );
+            *wall_us += step_us;
+        }
+    };
+
+    // 10 秒: 差 300 ms は閾値 (20 ms ごとに観測しているためキューが吸収できる長さは
+    // 400 ms、そこから音声の遅れ 50 ms を引いた 350 ms) の内側であり、共有している
+    observe_until(&mut timeline, &mut wall_us, 10_000_000);
+    assert!(timeline.sharing_bases(), "差が閾値の内側なら共有すること");
+
+    // 1 回目の解除: targetLatency を上げると閾値が下がり、差 300 ms が閾値 100 ms を超える
+    timeline.set_target_latency_ms(450);
+    observe_until(&mut timeline, &mut wall_us, 11_000_000);
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+    // 閾値を戻すと差は内側へ戻り、2 秒の早期解除で共有が戻る
+    timeline.set_target_latency_ms(0);
+    observe_until(&mut timeline, &mut wall_us, 14_000_000);
+    assert!(
+        timeline.sharing_bases(),
+        "1 回目は原因が去って 2 秒で早期解除されること"
     );
 
-    // 明示の `targetLatency` を上げると、基準の差の閾値が下がって差が超える。差は動いて
-    // いないため、解除のきっかけに動きは無い
-    timeline.set_target_latency_ms(400);
-    wall_us += 100_000;
-    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    // 2 回目の解除: 直近の解除から 30 秒以内のため、以後は早期解除が働かない
+    timeline.set_target_latency_ms(450);
+    observe_until(&mut timeline, &mut wall_us, 15_000_000);
     assert_eq!(
         timeline.unshared_reason(),
         UnsharedReason::Difference,
-        "動かない差でも、閾値を超えたら解除する"
+        "2 回目の解除が始まること"
     );
-
-    // 閾値を戻すと、差が戻った状態が 2 秒続いた時点で保持を待たずに戻る
     timeline.set_target_latency_ms(0);
-    wall_us += 100_000;
-    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
+    // 原因 (閾値の低下) は去っているが、往復しているため早期解除は働かない
+    observe_until(&mut timeline, &mut wall_us, 20_000_000);
+    assert!(!timeline.sharing_bases(), "往復している間は保持すること");
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Hold);
+
+    // 2 回目の解除の 29 秒後はまだ保持している
+    observe_until(&mut timeline, &mut wall_us, 15_000_000 + 29_000_000);
     assert_eq!(
         timeline.unshared_reason(),
         UnsharedReason::Hold,
-        "戻った状態が続くまでは保持すること"
-    );
-    for _ in 0..30 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    }
-    assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::None,
-        "原因が去って差が戻ったら保持を待たずに戻す"
-    );
-    assert!(timeline.sharing_bases(), "共有へ戻ること");
-}
-
-/// 30 秒以内に再び解除したら、差が戻っても保持を待つこと
-///
-/// 往復のたびに、同期が足した分を戻して (間に合わないフレームを捨てる) すぐ足し直す
-/// (表示が待って止まる) ことになる。2 回の解除が保持の時間の内側で起きたら、閾値が動き
-/// 続けているとみなして落ち着くまで解かない。
-#[test]
-fn a_repeated_unshare_within_the_hold_is_kept() {
-    let mut timeline = PlayoutTimeline::new();
-    let mut wall_us = 10_000_000;
-    for _ in 0..110 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    }
-
-    // 1 回目の解除。きっかけは閾値だけで、差は動いていない
-    timeline.set_target_latency_ms(400);
-    wall_us += 100_000;
-    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
-
-    // 閾値を戻すと、原因が去って差が戻るため 2 秒で保持が解ける (1 回目の解除の時刻は残る)
-    timeline.set_target_latency_ms(0);
-    for _ in 0..30 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    }
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::None);
-
-    // 30 秒の内側で 2 回目の解除をする
-    timeline.set_target_latency_ms(400);
-    wall_us += 100_000;
-    timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-    timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
-
-    // 閾値を戻しても、直近に往復しているため保持を待たずには戻さない
-    timeline.set_target_latency_ms(0);
-    for _ in 0..30 {
-        wall_us += 100_000;
-        timeline.observe(Track::Audio, wall_us, wall_us - 1_000_000);
-        timeline.observe(Track::Video, wall_us, wall_us - 1_250_000);
-    }
-    assert_eq!(
-        timeline.unshared_reason(),
-        UnsharedReason::Hold,
-        "30 秒以内の再解除は保持すること"
+        "30 秒の保持が満了する 1 秒前はまだ保持すること"
     );
     assert!(!timeline.sharing_bases());
-}
 
-#[test]
-fn video_follows_the_audio_arrival_delay_when_the_audio_drifts() {
-    let mut timeline = PlayoutTimeline::new();
-    // 音声の基準が 2 秒、映像が 1 秒。音声の TIMESTAMP は信用できないとみなす
-    timeline.observe(Track::Audio, 10_000_000, 8_000_000);
-    timeline.observe(Track::Video, 10_000_000, 9_000_000);
-    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+    // 2 回目の解除の 31 秒後は、保持が満了して共有が戻る
+    observe_until(&mut timeline, &mut wall_us, 15_000_000 + 31_000_000);
     assert!(
-        timeline.presentation_delay_us(Track::Audio).is_none(),
-        "ずれている側の表示時刻は決めない"
+        timeline.sharing_bases(),
+        "30 秒の保持が満了して共有が戻ること"
     );
-    // 映像は音声の到着基準の遅れ (80 ms) から不感帯 (5 ms) を引いた 75 ms へ上げる
-    assert_eq!(timeline.presentation_delay_us(Track::Video), Some(75_000));
-    assert_eq!(timeline.audio_arrival_delay_us(), Some(80_000));
 }
 
-/// A/V 同期の不感帯の境界で、ちょうどは動かさず、超えた分だけ合わせること
-///
-/// 不感帯の中では遅延を変えないため、2 つのトラックは最大この値だけ離れたままになる。
-/// 超えた分は先行する側へ足して不感帯へ収める。
+/// 映像の学習分布が上限超過だけになっても、空を遅延 0 として適用しないこと
 #[test]
-fn sync_deadband_boundary_is_exact() {
-    assert_eq!(
-        TIMELINE_SYNC_MIN_DELTA_US, 5_000,
-        "A/V 同期の不感帯は 5 ms であること"
-    );
-    // 音声の素の表示の遅れは 80 ms (揺らぎの学習の初期値)、映像は 0 ms である。映像の基準を
-    // 音声より 85 ms 遅らせると、表示時刻の差はちょうど不感帯 (5 ms) になる
+fn only_over_cap_jitter_keeps_the_previous_video_delay() {
     let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    timeline.observe(Track::Video, 10_085_000, 1_000_000);
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(80_000),
-        "不感帯ちょうどの差では音声を遅らせないこと"
-    );
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Video),
-        Some(0),
-        "不感帯ちょうどの差では映像を動かさないこと"
-    );
-
-    // 差を 1 µs だけ超えさせると、先行する音声へ超えた分 (1 µs) を足して不感帯へ収める
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    timeline.observe(Track::Video, 10_085_001, 1_000_000);
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(80_001),
-        "不感帯を超えた分だけ音声を遅らせること"
-    );
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Video),
-        Some(0),
-        "映像は動かさないこと"
-    );
-    let audio_present_us = timeline
-        .present_us(Track::Audio, 1_000_000)
-        .expect("基準がある");
-    let video_present_us = timeline
-        .present_us(Track::Video, 1_000_000)
-        .expect("基準がある");
-    assert_eq!(
-        video_present_us - audio_present_us,
-        TIMELINE_SYNC_MIN_DELTA_US,
-        "合わせた後の差は不感帯ちょうどになること"
-    );
-}
-
-#[test]
-fn audio_arrival_delay_is_clamped_between_the_floor_and_the_cap() {
-    // 下限は 50 ms である。到着基準の遅れと、映像を合わせる先の両方がこの値を使うため、
-    // 値そのものを固定する
-    assert_eq!(
-        TIMELINE_AUDIO_DELAY_FLOOR_US, 50_000,
-        "音声の再生の遅れの下限は 50 ms であること"
-    );
-    // 下限ちょうどは切らない
-    assert_eq!(
-        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US),
-        TIMELINE_AUDIO_DELAY_FLOOR_US,
-        "下限ちょうどの遅れはそのまま使うこと"
-    );
-    // 下限の 1 µs 手前は下限まで上げる
-    assert_eq!(
-        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US - 1),
-        TIMELINE_AUDIO_DELAY_FLOOR_US,
-        "下限を下回る遅れは下限まで上げること"
-    );
-    assert_eq!(audio_arrival_delay_us(0), TIMELINE_AUDIO_DELAY_FLOOR_US);
-    assert_eq!(audio_arrival_delay_us(90_000), 90_000);
-    assert_eq!(audio_arrival_delay_us(1_000_000), TIMELINE_ARRIVAL_DELAY_US);
-    // 上限ちょうどは切らない
-    assert_eq!(
-        audio_arrival_delay_us(TIMELINE_ARRIVAL_DELAY_US),
-        TIMELINE_ARRIVAL_DELAY_US,
-        "上限ちょうどの遅れはそのまま使うこと"
-    );
-    // 観測が無ければ読めない
-    let timeline = PlayoutTimeline::new();
-    assert_eq!(timeline.audio_arrival_delay_us(), None);
-    assert_eq!(timeline.playout_delay_us(), None);
-}
-
-/// 音声だけの購読の到着基準の遅れが、下限と上限の間に切られること
-///
-/// 下限 (`floor_us`) を必ず確保し、その上で学習した値を上限
-/// ([`TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US`]) まで使う。式の順序は JS と同じで、
-/// `min` してから `max` するため、下限が上限より大きいときは下限が勝つ。
-#[test]
-fn audio_only_arrival_delay_is_clamped_between_the_floor_and_the_max() {
-    // 学習した遅れが下限を下回るときは下限を使う
-    assert_eq!(
-        audio_only_arrival_delay_us(0, TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US,
-        "学習した遅れが 0 でも下限を確保すること"
-    );
-    assert_eq!(
-        audio_only_arrival_delay_us(
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US - 1,
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US
-        ),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US,
-        "下限を 1 マイクロ秒下回る遅れは下限まで上げること"
-    );
-    // 上限ちょうどは切らない
-    assert_eq!(
-        audio_only_arrival_delay_us(
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US,
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US
-        ),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US,
-        "上限ちょうどの遅れはそのまま使うこと"
-    );
-    // 上限を超える分は使わない
-    assert_eq!(
-        audio_only_arrival_delay_us(
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US + 1,
-            TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US
-        ),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US,
-        "上限を超える学習値は上限まで下げること"
-    );
-    // 下限が上限より大きいときは下限を優先する (JS の Math.max(floor, Math.min(learned, max)))
-    assert_eq!(
-        audio_only_arrival_delay_us(0, TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US + 1),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US + 1,
-        "下限が上限より大きいときは下限を優先すること"
-    );
-    // 共有の時間軸用のクランプ (50〜100 ms) とは別の関数である。下限 0 なら学習値をそのまま使う
-    assert_eq!(
-        audio_only_arrival_delay_us(900_000, 0),
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US,
-        "下限が無ければ学習値は上限で切ること"
-    );
-}
-
-/// 音声だけの購読の定数が閉ループの上限と一致すること
-///
-/// 上限 (160 ms) は、閉ループが穴か圧縮で広げる適用上限と一致させる。値がずれると、
-/// 閉ループが広げた目標を到着基準の遅れへ使えなくなる。循環参照を避けて数値で持っている
-/// ため、一致はテストで固定する。
-#[test]
-fn audio_only_arrival_delay_constants_match_the_feedback_limits() {
-    assert_eq!(
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US, AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US,
-        "音声だけの到着基準の遅れの上限が、閉ループの広げた適用上限と一致すること"
-    );
-    assert_eq!(
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_MAX_US, 160_000,
-        "音声だけの到着基準の遅れの上限は 160 ms であること"
-    );
-    assert_eq!(
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US - TIMELINE_ARRIVAL_DELAY_US,
-        40_000,
-        "音声だけの購読の下限 (140 ms) が共有の時間軸の上限 (100 ms) より大きいこと"
-    );
-    assert_eq!(
-        TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US, 140_000,
-        "音声だけの購読の下限は実測で決めた 140 ms であること"
-    );
-}
-
-/// 補償の予算は基準の差だけを保護し、同じ向きのバッファ差は別に足すこと
-///
-/// 基準の差には [`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`] の保護を掛ける。同じ向きの
-/// 既知のバッファ差は全額補償し、バッファが基準の差を相殺しているときは予算を増やさない。
-/// 先行側は必ず両方を合成した実際の表示時刻から決めるため、この予算はそのまま足し算になる。
-#[test]
-fn sync_compensation_limit_protects_only_the_base_difference() {
-    assert_eq!(
-        TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, 100_000,
-        "基準の差の保護は 100 ms であること"
-    );
-    for (base_difference_us, buffer_difference_us, expected_us) in [
-        // バッファ差が基準の差と同方向なら、その全額を予算へ足す
-        (0, 80_000, 180_000),
-        (130_000, 80_000, 180_000),
-        // 全体が負でバッファ差も負なら、逆向きのバッファ差を足す (JS の
-        // Math.sign(base + buffer) * buffer)
-        (0, -80_000, 180_000),
-        (-130_000, -80_000, 180_000),
-        // バッファが基準の差を相殺している (全体が正だがバッファは負) なら、足さない
-        (200_000, -80_000, 100_000),
-        (0, 0, 100_000),
-    ] {
-        assert_eq!(
-            sync_compensation_limit_us(base_difference_us, buffer_difference_us),
-            expected_us,
-            "base={base_difference_us} buffer={buffer_difference_us} の補償の予算"
+    for index in 0..160i64 {
+        let media_us = index * 50_000;
+        // 基準の 0 ms は 10 秒窓へ残すが、2 秒の学習窓は 40 ms だけにしておく
+        let jitter_us = if index < 40 {
+            0
+        } else if index < 100 {
+            40_000
+        } else {
+            600_000
+        };
+        timeline.observe(
+            Track::Video,
+            media_us + 20_000 + jitter_us,
+            EPOCH_US + media_us,
         );
+        if index >= 100 {
+            assert_eq!(
+                timeline.video_delay_us(),
+                Some(40_000),
+                "有効な観測が無い間は直前値を保つこと: index={index}"
+            );
+        }
     }
 }
 
+/// 圧縮の不感帯は有効な学習の 1,999 ms まで保ち、2,000 ms で下限へ移ること
 #[test]
-fn observe_audio_playout_raises_the_audio_delay_to_the_closed_loop_target() {
-    // 鳴り遅れの観測を渡すと、揺らぎの学習値だけでは足りない分を閉ループが補い、
-    // 音声の表示の遅れがその場で上がる
+fn compression_deadband_follows_the_learning_window() {
     let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
     assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(AUDIO_DELAY_START_MS * 1_000),
-        "まずは揺らぎの学習値を使う"
-    );
-
-    // 予定を 60 ms 過ぎて鳴った。時間圧縮の不感帯 (20 ms) を引いた 40 ms が許容 (10 ms) を
-    // 超えるため、閉ループの目標は 1 回の増分の上限 (40 ms) まで増え、開始値 (50 ms) から
-    // 90 ms になる
-    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
-    let raised_us = 90_000;
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        raised_us,
-        "閉ループの目標へ上がる"
-    );
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(raised_us),
-        "表示の遅れもその場で上がる"
-    );
-    // 表示時刻 = TIMESTAMP + 基準の遅れ + 表示の遅れ
-    assert_eq!(
-        timeline.present_us(Track::Audio, 1_000_000),
-        Some(10_000_000 + raised_us),
-        "鳴らす時刻も新しい目標で求める"
-    );
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.reason,
-        AudioDelayFeedbackReason::Lateness,
-        "閉ループの理由が遅れである"
-    );
-}
-
-#[test]
-fn target_latency_caps_the_closed_loop_target() {
-    // 明示された `targetLatency` は、閉ループが自動で超えない上限になる。実際に使う値の
-    // 上限 (100 ms) より厳しい値を渡し、こちらが効くことを確かめる
-    let mut timeline = PlayoutTimeline::new();
-    timeline.set_target_latency_ms(90);
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-
-    // 遅れが大きくても、閉ループの目標は上限で止まる
-    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(400_000)));
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        90_000,
-        "上限で止まる"
-    );
-    assert_eq!(timeline.presentation_delay_us(Track::Audio), Some(90_000));
-
-    // 遅れが続いても上限を超えない
-    timeline.observe_audio_playout(feedback_observation(11_020_000, Some(400_000)));
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        90_000,
-        "何度観測しても上限を超えない"
-    );
-    let breakdown = timeline.delay_breakdown();
-    assert_eq!(
-        breakdown.audio_delay_feedback.target_us, 90_000,
-        "内訳に閉ループの目標が出る"
-    );
-    assert_eq!(
-        breakdown.audio_delay_feedback.ceiling_us,
-        Some(90_000),
-        "内訳に明示の上限が出る"
-    );
-
-    // 0 を渡すと「下限にしない」の意味であり、上限が外れる
-    timeline.set_target_latency_ms(0);
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.ceiling_us,
-        None,
-        "0 で上限を外す"
-    );
-    timeline.observe_audio_playout(feedback_observation(12_020_000, Some(400_000)));
-    // 明示の上限が外れると閉ループの内部値は増え続ける
-    assert!(
-        timeline.delay_breakdown().audio_delay_feedback.target_us > 90_000,
-        "上限が無ければ自動で増える: {}",
-        timeline.delay_breakdown().audio_delay_feedback.target_us
-    );
-    // 実際に使う値は、明示の上限とは別の上限 (100 ms) で止まる
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        AUDIO_DELAY_FEEDBACK_MAX_TARGET_US,
-        "実際に使う値は上限で止まる"
-    );
-}
-
-#[test]
-fn target_latency_does_not_cap_the_learned_jitter_target() {
-    // 明示の上限は閉ループの目標にだけ掛ける。揺らぎの学習値は既存の揺らぎの吸収そのもの
-    // であり、切り下げると挙動が変わるため掛けない
-    let mut timeline = PlayoutTimeline::new();
-    // 学習の初期値 (80 ms) より小さい上限にする
-    timeline.set_target_latency_ms(50);
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
-
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.target_us,
-        50_000,
-        "閉ループの目標は上限で止まる"
-    );
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        AUDIO_DELAY_START_MS * 1_000,
-        "学習値は上限で切り下げない"
-    );
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Audio),
-        Some(AUDIO_DELAY_START_MS * 1_000),
-        "表示の遅れは学習値のままになる"
-    );
-}
-
-#[test]
-fn reset_track_clears_the_audio_closed_loop_target() {
-    // 音声の再生を取り直したときは、過去の穴と遅れを持ち込まないように閉ループも
-    // 初期化する。初期化しないと、再開直後に前回の穴で広げた目標が残り、余分に遅れる。
-    // 閉ループの開始値は下限と同じ 50 ms であるため、下げる向きには動かせない。上げた
-    // 目標が開始値へ戻ることを確かめる
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    // 予定を 60 ms 過ぎて鳴った観測で、閉ループの目標を開始値 (50 ms) から 90 ms へ上げる
-    timeline.observe_audio_playout(feedback_observation(10_020_000, Some(60_000)));
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.target_us,
-        90_000,
-        "閉ループの目標が開始値から上がる"
-    );
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.adjustments,
-        1,
-        "1 回だけ動かした"
-    );
-
-    timeline.reset_track(Track::Audio);
-    assert!(
-        timeline.present_us(Track::Audio, 1_000_000).is_none(),
-        "基準は消える"
-    );
-    let breakdown = timeline.delay_breakdown();
-    assert_eq!(
-        breakdown.audio_delay_feedback.target_us, AUDIO_DELAY_FEEDBACK_START_US,
-        "閉ループの目標は開始値へ戻る"
-    );
-    assert_eq!(
-        breakdown.audio_delay_feedback.reason,
-        AudioDelayFeedbackReason::Initial,
-        "理由も初期状態へ戻る"
-    );
-    assert_eq!(
-        breakdown.audio_delay_feedback.adjustments, 0,
-        "動かした回数も 0 へ戻る"
-    );
-
-    // 観測し直しても、前回の目標ではなく揺らぎの学習の初期値 (80 ms) から始まる
-    timeline.observe(Track::Audio, 20_000_000, 11_000_000);
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        AUDIO_DELAY_START_MS * 1_000,
-        "購読のやり直しで過去の目標を持ち込まない"
-    );
-
-    // すべてリセットしても同じである。いったん目標を上げ直してから確かめる
-    timeline.observe_audio_playout(feedback_observation(21_020_000, Some(60_000)));
-    assert_eq!(
-        timeline.delay_breakdown().audio_delay_feedback.target_us,
-        90_000,
-        "全リセットの前にもう一度目標を上げる"
-    );
-    timeline.reset();
-    let breakdown = timeline.delay_breakdown();
-    assert_eq!(
-        breakdown.audio_delay_feedback.target_us, AUDIO_DELAY_FEEDBACK_START_US,
-        "全リセットでも閉ループの目標は開始値へ戻る"
-    );
-    assert_eq!(
-        breakdown.audio_delay_feedback.reason,
-        AudioDelayFeedbackReason::Initial,
-        "全リセットでも理由は初期状態へ戻る"
-    );
-    assert_eq!(
-        breakdown.audio_delay_feedback.adjustments, 0,
-        "全リセットでも動かした回数は 0 へ戻る"
-    );
-}
-
-#[test]
-fn delay_breakdown_reports_the_closed_loop_state() {
-    // 遅延の内訳に、閉ループがどう動いたかが出る
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    let before = timeline.delay_breakdown().audio_delay_feedback;
-    assert_eq!(before.target_us, AUDIO_DELAY_FEEDBACK_START_US);
-    assert_eq!(before.reason, AudioDelayFeedbackReason::Initial);
-    assert_eq!(before.adjustments, 0, "まだ動かしていない");
-    assert_eq!(before.ceiling_us, None, "明示の上限は無い");
-    assert_eq!(before.lateness_p50_us, None, "観測が無い");
-
-    timeline.observe_audio_playout(AudioDelayFeedbackObservation {
-        at_us: 10_020_000,
-        lateness_us: Some(TimingSummary {
-            p50: 60_000,
-            p95: 80_000,
-            max: 90_000,
-        }),
-        start_delay_us: Some(TimingSummary {
-            p50: 120_000,
-            p95: 130_000,
-            max: 140_000,
-        }),
-        slack_us: Some(TimingSummary {
-            p50: 20_000,
-            p95: 25_000,
-            max: 30_000,
-        }),
-        backlog_misses: 0,
-        backlog_us: 0,
-        underrun_ms: 0,
-        compression_us: 0,
-        jitter_target_us: 0,
-        gap_count: 0,
-        gap_us: 0,
-        arrival_delay_floor_us: None,
-    });
-    let after = timeline.delay_breakdown().audio_delay_feedback;
-    // 遅れの p50 は 60 ms であり、時間圧縮の不感帯 (20 ms) を引いた 40 ms が許容 (10 ms) を
-    // 超える。1 回の増分の上限 (40 ms) だけ上がり、開始値 (50 ms) から 90 ms になる
-    assert_eq!(
-        after.target_us, 90_000,
-        "閉ループの目標は 1 回の増分の上限まで上がる"
-    );
-    assert_eq!(after.reason, AudioDelayFeedbackReason::Lateness);
-    assert_eq!(
-        after.last_change_us, 40_000,
-        "開始値から 1 回の増分の上限だけ動く"
-    );
-    assert_eq!(after.adjustments, 1, "1 回動かした");
-    assert_eq!(
-        after.lateness_p50_us,
-        Some(40_000),
-        "遅れの p50 が出る (不感帯の 20 ms を引いた値)"
-    );
-    assert_eq!(
-        after.start_delay_p50_us,
-        Some(120_000),
-        "到着から鳴るまでの p50 が出る"
-    );
-    assert_eq!(after.slack_p50_us, Some(20_000), "余裕の p50 が出る");
-    // 閉ループが決めた目標と、揺らぎの学習値を合成した実際に使う値も読める
-    assert_eq!(
-        after.jitter_target_us,
-        AUDIO_DELAY_START_MS * 1_000,
-        "揺らぎだけから求めた目標が出る"
-    );
-    assert_eq!(
-        after.applied_us, 90_000,
-        "実際に使う値が出る (揺らぎの 80 ms より閉ループの目標が大きい)"
-    );
-}
-
-#[test]
-fn closed_loop_accepts_the_observation_from_the_timing_stats() {
-    // 計器 (`AudioPlayoutTimingStats`) が作る観測をそのまま渡しても閉ループが動くこと
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        AUDIO_DELAY_START_MS * 1_000,
-        "まずは揺らぎの学習値を使う"
-    );
-
-    let mut stats = AudioPlayoutTimingStats::new();
-    stats.record_play(AudioPlayoutPlay {
-        arrival_us: 10_020_000,
-        target_start_us: Some(10_000_000),
-        start_at_us: 10_080_000,
-        played_us: 20_000,
-        basis: AudioPlayoutBasis::Timestamp,
-    });
-    // 予定を 80 ms 過ぎて鳴った。時間圧縮の不感帯 (20 ms) を引いた 60 ms が許容 (10 ms) を
-    // 超えるため、1 回の増分の上限 (40 ms) だけ上がり、開始値 (50 ms) から 90 ms になる
-    timeline.observe_audio_playout(stats.audio_delay_feedback(10_100_000));
-    assert_eq!(
-        timeline.learned_delay_us(Track::Audio),
-        90_000,
-        "計器の観測でも閉ループが動く"
-    );
-}
-
-/// 音声の開始時は到着推定の 80 ms を使い、閉ループの初回観測で跳ね上げないこと
-///
-/// 音声の観測 (observe) がまだ 1 つしか無い間は、揺らぎの学習の開始値 (80 ms) をそのまま
-/// 使い、閉ループの初回観測だけで目標を増やさない。映像は音声の遅れから不感帯を引いた分だけ
-/// 待つ。
-#[test]
-fn audio_starts_with_the_arrival_estimate_and_does_not_jump() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Video, 1_000_000, 1_000_000);
-    timeline.observe(Track::Audio, 1_000_000, 1_000_000);
-    assert_eq!(
-        timeline.playout_delay_us(),
-        Some(AUDIO_DELAY_START_MS * 1_000),
-        "到着の分布が揃うまでは揺らぎの学習の開始値を保つこと"
-    );
-    timeline.observe_audio_playout(feedback_observation(1_000_000, Some(0)));
-    assert_eq!(
-        timeline.playout_delay_us(),
-        Some(AUDIO_DELAY_START_MS * 1_000),
-        "閉ループの初回観測で目標を跳ね上げないこと"
-    );
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Video),
-        Some(75_000),
-        "映像は音声の 80 ms の遅れから不感帯 (5 ms) を引いた分だけ待つこと"
-    );
-}
-
-/// 時計に由来しうる基準の差だけを 100 ms で保護すること
-///
-/// 基準の差 (130 ms) は上限 (100 ms) までしか補償せず、残りの 30 ms は A/V のずれとして
-/// 残す。音声に必要な 80 ms の jitter buffer は映像へも反映する。
-#[test]
-fn only_the_base_difference_is_protected_from_compensation() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Video, 1_000_000, 1_000_000);
-    timeline.observe(Track::Audio, 1_130_000, 1_000_000);
-    assert!(timeline.sharing_bases(), "基準の差は共有できること");
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Video),
-        Some(180_000),
-        "基準の 100 ms とバッファの 80 ms を補償すること"
-    );
-    let breakdown = timeline.delay_breakdown();
-    let audio_presentation_us = breakdown
-        .audio
-        .presentation_delay_us
-        .expect("音声の基準がある");
-    let video_presentation_us = breakdown
-        .video
-        .presentation_delay_us
-        .expect("映像の基準がある");
-    assert_eq!(
-        audio_presentation_us - video_presentation_us,
-        30_000,
-        "保護した基準の差を補償しないこと"
-    );
-}
-
-/// 基準の差とバッファの差が逆向きでも、実際に先行する映像を待たせること
-///
-/// 映像の jitter buffer (160 ms) が基準の差 (200 ms) を部分的に相殺する。補償の予算は
-/// 同じ向きの既知のバッファ差だけを足すため、実際の表示時刻の差は基準の差からバッファ差を
-/// 引いた 20 ms になる。
-#[test]
-fn the_video_waits_even_when_the_buffer_difference_reverses_the_base_difference() {
-    let mut timeline = PlayoutTimeline::new();
-    timeline.observe(Track::Video, 1_000_000, 1_000_000);
-    timeline.observe(Track::Audio, 1_200_000, 1_000_000);
-    for index in 0..20i64 {
-        let timestamp_us = 1_180_000 + index * 20_000;
-        timeline.observe(Track::Video, timestamp_us + 160_000, timestamp_us);
-    }
-    let breakdown = timeline.delay_breakdown();
-    assert!(breakdown.sharing_bases, "基準の差は共有できること");
-    assert_eq!(
-        breakdown.video.jitter_delay_us,
-        Some(160_000),
-        "映像のバッファが基準の差を部分的に相殺すること"
-    );
-    assert_eq!(
-        breakdown.audio.sync_extra_delay_us, 0,
-        "実際には遅い音声をさらに遅らせないこと"
-    );
-    let audio_presentation_us = breakdown
-        .audio
-        .presentation_delay_us
-        .expect("音声の基準がある");
-    let video_presentation_us = breakdown
-        .video
-        .presentation_delay_us
-        .expect("映像の基準がある");
-    assert_eq!(
-        audio_presentation_us - video_presentation_us,
+        timeline.compression_deadband_us(20_000),
         20_000,
-        "基準の差と逆向きのバッファ差を補償した後の差であること"
+        "未観測なら初期値を保つこと"
+    );
+    let mut learned_at_us = 0i64;
+    let mut at_us = 0i64;
+    while at_us < 1_000_000 {
+        timeline.observe(Track::Audio, at_us, at_us);
+        if timeline.audio_delay_stats().jitter_us.is_some() {
+            learned_at_us = at_us;
+            break;
+        }
+        at_us += 20_000;
+    }
+    assert!(learned_at_us > 0, "実際に初期学習を終えてから窓を測ること");
+    let mut at_us = learned_at_us + 20_000;
+    while at_us < learned_at_us + 1_999_000 {
+        timeline.observe(Track::Audio, at_us, at_us);
+        at_us += 20_000;
+    }
+    timeline.observe(
+        Track::Audio,
+        learned_at_us + 1_999_000,
+        learned_at_us + 1_999_000,
+    );
+    assert_eq!(
+        timeline.compression_deadband_us(20_000),
+        20_000,
+        "1,999 ms までは初期値を保つこと"
+    );
+    timeline.observe(
+        Track::Audio,
+        learned_at_us + 2_000_000,
+        learned_at_us + 2_000_000,
+    );
+    assert_eq!(
+        timeline.compression_deadband_us(20_000),
+        TIMELINE_MIN_COMPRESSION_DEADBAND_US,
+        "2,000 ms で下限へ移ること"
+    );
+}
+
+/// 到着基準の同期先は目標値で代用せず、実際の深さとその回復に追従すること
+#[test]
+fn audio_arrival_delay_observation_drives_the_sync() {
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 1_000_000, 1_000_000);
+    timeline.observe(Track::Video, 1_000_000, 1_000_000);
+    assert_eq!(timeline.audio_arrival_delay_us(), Some(50_000));
+    timeline.observe_audio_arrival_delay(Some(10_000), 1_000_000);
+    assert_eq!(
+        timeline.audio_arrival_delay_us(),
+        Some(10_000),
+        "再同期直後の浅い実出力を隠さないこと"
+    );
+    timeline.observe_audio_arrival_delay(Some(50_000), 1_100_000);
+    assert_eq!(
+        timeline.audio_arrival_delay_us(),
+        Some(50_000),
+        "深さが戻った後は実値を使うこと"
+    );
+    timeline.reset_track(Track::Audio);
+    assert_eq!(
+        timeline.audio_arrival_delay_us(),
+        None,
+        "出力を止めた後へ古い実値を持ち越さないこと"
+    );
+}
+
+/// 映像の一時的な遅延が消えたら、同期用の待ちを保持せず通常の予算へ戻すこと
+#[test]
+fn temporary_video_delay_is_released() {
+    let mut timeline = create_timeline();
+    let mut available_us = 0i64;
+    let mut maximum_delay_us = 0i64;
+    for index in 0..400i64 {
+        let media_us = index * FRAME_US;
+        let extra_us = if (100..150).contains(&index) {
+            120_000
+        } else {
+            0
+        };
+        available_us = (available_us + 100).max(media_us + extra_us);
+        timeline.observe(
+            Track::Video,
+            EPOCH_US + available_us,
+            timestamp_of(media_us),
+        );
+        maximum_delay_us = maximum_delay_us.max(timeline.video_delay_us().unwrap_or(0));
+    }
+    assert!(
+        maximum_delay_us >= 100_000,
+        "実際に遅れている間は到着を待つこと: {maximum_delay_us}"
+    );
+    assert!(
+        timeline.video_delay_us().unwrap_or(i64::MAX) <= TOLERANCE_US,
+        "過去の遅れを引きずらないこと: {:?}",
+        timeline.video_delay_us()
     );
 }
 
 /// 音声の残差が周期的に上下しても共通の遅延を積み上げないこと
-///
-/// 過去に映像へ足した補償を必要値の算定へ戻すと、残差が上下するたびに共通の待ち時間が
-/// 増え続ける。共有する表示時刻の下限を必要値から決め直すことで、映像の遅れは音声の
-/// 自然な遅れと残差の最大に留まる。
 #[test]
 fn the_shared_floor_does_not_accumulate_the_playout_residual() {
     let mut timeline = PlayoutTimeline::new();
@@ -1207,77 +1397,17 @@ fn the_shared_floor_does_not_accumulate_the_playout_residual() {
             target_us + residual_us,
             Some(target_us),
         );
-        timeline.observe_audio_playout(feedback_observation(at_us, Some(0)));
-        // 開始時を含む音声の自然な遅れ (80 ms) と残差の最大 (80 ms) の和までに留まること。
-        // 過去に足した補償を入力へ戻すと 370 ms まで増える
+        // 開始時を含む音声の自然な遅れ (50 ms) と残差の最大 (80 ms) の和までに留まること
         assert!(
-            timeline
-                .presentation_delay_us(Track::Video)
-                .unwrap_or(i64::MAX)
-                <= 160_010,
+            timeline.video_delay_us().unwrap_or(i64::MAX) <= 130_010,
             "補償した遅延を再び足さないこと: index={index}"
         );
     }
 }
 
-/// 音声の目標が広がった呼び出しの中で映像も同期すること
-///
-/// 穴で閉ループの目標が 160 ms まで広がるとき、次の復号出力を待たずに同期も更新する。
-/// 復号出力まで待つと、その間だけ音声と映像の時刻が離れる。
-#[test]
-fn sync_runs_inside_the_call_that_widens_the_audio_target() {
-    let mut timeline = PlayoutTimeline::new();
-    for index in 0..5i64 {
-        let at_us = 1_000_000 + index * 1_000_000;
-        timeline.observe(Track::Audio, at_us, at_us);
-        timeline.observe(Track::Video, at_us, at_us);
-        let mut observation = feedback_observation(at_us, Some(0));
-        observation.gap_count = index as u64;
-        observation.gap_us = index * 20_000;
-        timeline.observe_audio_playout(observation);
-        let breakdown = timeline.delay_breakdown();
-        let audio_presentation_us = breakdown
-            .audio
-            .presentation_delay_us
-            .expect("音声の基準がある");
-        let video_presentation_us = breakdown
-            .video
-            .presentation_delay_us
-            .expect("映像の基準がある");
-        assert!(
-            (audio_presentation_us - video_presentation_us).abs() <= 5_010,
-            "次の復号出力を待たずに表示時刻が揃うこと: index={index}"
-        );
-    }
-    assert_eq!(
-        timeline.playout_delay_us(),
-        Some(AUDIO_DELAY_FEEDBACK_ARTIFACT_CEILING_US),
-        "音切れを避ける適応を残すこと"
-    );
-    assert!(
-        timeline.presentation_delay_us(Track::Video).unwrap_or(0) > 100_000,
-        "既知のバッファ差を 100 ms で打ち切らないこと"
-    );
-    timeline.reset_track(Track::Audio);
-    assert_eq!(
-        timeline.presentation_delay_us(Track::Video),
-        Some(0),
-        "音声 OFF で補償を解くこと"
-    );
-    timeline.observe(Track::Audio, 6_000_000, 6_000_000);
-    assert_eq!(
-        timeline.playout_delay_us(),
-        Some(AUDIO_DELAY_START_MS * 1_000),
-        "再開時に過去の穴で深くなった目標を持ち込まないこと"
-    );
-}
-
 /// 映像は音声の実際の出力時刻へ追従し、同じ残差で遅延を積み上げないこと
-///
-/// 音声は出力の都合で予定より遅く鳴ることがある。予定どうしの差だけを揃えると、実際に
-/// 鳴る音から映像が先行したままになる。予約の結果 (実際の出力) を合わせ先として使う。
 #[test]
-fn the_video_follows_the_actual_audio_output_without_accumulating_the_residual() {
+fn the_video_follows_the_actual_audio_output() {
     let mut timeline = PlayoutTimeline::new();
     for index in 0..100i64 {
         let at_us = 1_000_000 + index * 20_000;
@@ -1288,26 +1418,15 @@ fn the_video_follows_the_actual_audio_output_without_accumulating_the_residual()
             .expect("音声の基準がある");
         let actual_us = target_us + 20_000;
         timeline.record_presentation_with_target(Track::Audio, at_us, actual_us, Some(target_us));
-        // JS のテスト (timeline.test.ts) と同じく、鳴り始めまでの時間だけ 70 ms にする
-        let mut observation = feedback_observation(at_us, Some(0));
-        observation.start_delay_us = Some(TimingSummary {
-            p50: 70_000,
-            p95: 70_000,
-            max: 70_000,
-        });
-        timeline.observe_audio_playout(observation);
         let video_present_us = timeline
             .present_us(Track::Video, at_us)
             .expect("映像の基準がある");
         assert!(
-            (actual_us - video_present_us).abs() <= 5_010,
+            (actual_us - video_present_us).saturating_abs() <= 5_010,
             "音声の実際の出力時刻へ映像が追従すること: index={index}"
         );
         assert!(
-            timeline
-                .presentation_delay_us(Track::Video)
-                .unwrap_or(i64::MAX)
-                <= 100_000,
+            timeline.video_delay_us().unwrap_or(i64::MAX) <= 100_000,
             "残差を繰り返し加算しないこと: index={index}"
         );
     }
@@ -1320,12 +1439,8 @@ fn the_video_follows_the_actual_audio_output_without_accumulating_the_residual()
 }
 
 /// 出力時計の対応が途切れたら古い残差を失効させること
-///
-/// 音声の予約は続くが、有効な出力時計で測った残差は更新できない状態を作る。再生の実績の
-/// 時刻を失効の基準にすると、古い残差が永久に残ってしまう。最後に有効な対応を測った時刻から
-/// 1 秒 (`TIMELINE_SKEW_WINDOW_US`) を超えたら失効させる。
 #[test]
-fn a_lost_output_clock_expires_the_playout_residual() {
+fn lost_output_clock_expires_the_residual() {
     let mut timeline = PlayoutTimeline::new();
     timeline.observe(Track::Audio, 1_000_000, 1_000_000);
     timeline.observe(Track::Video, 1_000_000, 1_000_000);
@@ -1342,10 +1457,6 @@ fn a_lost_output_clock_expires_the_playout_residual() {
 }
 
 /// 学習に使うかの判定は、中央値ではなく現フレームの TIMESTAMP 間隔で行うこと
-///
-/// 間隔の長いフレームが続いた後でも、現フレームの間隔が短ければ、その半分未満で届いた
-/// 観測は学習しない。間隔の中央値で判定すると、短い間隔で届いた観測を学習してしまい、
-/// 1 フレーム遅れて届いただけの揺らぎを経路の揺らぎとして取り込む。
 #[test]
 fn learns_uses_the_current_frame_interval() {
     let mut timeline = PlayoutTimeline::new();
@@ -1372,103 +1483,542 @@ fn learns_uses_the_current_frame_interval() {
         timeline.observe(Track::Video, wall_us, timestamp_us);
     }
     assert_eq!(
-        timeline.learned_delay_us(Track::Video),
-        9_000,
+        timeline.video_delay_us(),
+        Some(9_000),
         "現フレームの間隔で学習を判定し、9 ms の遅れを学習すること"
     );
 }
 
-/// 共有へ戻った直後に A/V のずれをそろえ直すこと
-///
-/// 共有を解除している間は相手がいないものとして足した分を戻すだけであり、共有へ戻った
-/// 最初の観測で足し直さないと、表示時刻の差が 1 観測分だけ大きいまま残る。
-/// プロパティテストで見つかった入力 (13.72 ms 間隔、音声 +94.418 ms/秒、映像
-/// -100 ms/秒、基準の差 300 ms、197 ステップ) を固定して、共有中は差が「補償しない分 +
-/// 出力の残差 + 不感帯」を超えないことを確かめる。
+/// まとまって届いたフレーム (cache の再生) を表示の遅れの目標に使わないこと
 #[test]
-fn sharing_resumption_realigns_the_sync_delays() {
-    /// 共有中なら、表示時刻の差が「補償しない分 + 出力の残差 + 不感帯」以内であることを確かめる
-    ///
-    /// 補償の予算は、基準の差の保護 ([`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`]) と、同じ
-    /// 向きの既知のバッファ差の和である。その予算で補償しきれない差と、音声の出力の残差と、
-    /// 先行側に残す不感帯だけが、合わせた後の表示時刻の差として残る。
-    fn check(timeline: &PlayoutTimeline, label: &str) {
-        let breakdown = timeline.delay_breakdown();
-        if !breakdown.sharing_bases {
-            return;
-        }
-        let (Some(audio_presentation_us), Some(video_presentation_us)) = (
-            breakdown.audio.presentation_delay_us,
-            breakdown.video.presentation_delay_us,
-        ) else {
-            return;
-        };
-        let (Some(audio_base_us), Some(video_base_us)) =
-            (breakdown.audio.base_delay_us, breakdown.video.base_delay_us)
-        else {
-            return;
-        };
-        let cap_us = breakdown.presentation_delay_cap_us;
-        // 同期が足す前の表示時刻を、出力の残差 (C) を含めて組み立て直す
-        let audio_own_us = breakdown
-            .audio
-            .jitter_delay_us
-            .unwrap_or(0)
-            .min(cap_us)
-            .saturating_add(breakdown.audio_playout_correction_us);
-        let video_own_us = breakdown.video.jitter_delay_us.unwrap_or(0).min(cap_us);
-        let audio_us = audio_base_us.saturating_add(audio_own_us);
-        let video_us = video_base_us.saturating_add(video_own_us);
-        let difference_us = audio_us.saturating_sub(video_us);
-        // 補償の予算は、基準の差の保護と、同じ向きの既知のバッファ差の和である
-        let limit_us = sync_compensation_limit_us(
-            audio_base_us.saturating_sub(video_base_us),
-            audio_own_us.saturating_sub(video_own_us),
+fn cache_replay_is_not_learned() {
+    // 30 fps のフレームが 2 ms 間隔で 90 枚 (メディア時刻で 3 秒分) 届く
+    let mut timeline = create_timeline();
+    for index in 0..90i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(
+            Track::Video,
+            EPOCH_US + index * 2_000,
+            timestamp_of(media_us),
         );
-        let uncorrected_us = difference_us
-            .saturating_abs()
-            .saturating_sub(limit_us)
-            .saturating_sub(TIMELINE_SYNC_MIN_DELTA_US)
-            .max(0);
-        let gap_us = audio_presentation_us
-            .saturating_sub(video_presentation_us)
-            .saturating_abs();
-        // 1 ms は内訳の整数化の丸めを許す
-        assert!(
-            gap_us
-                <= uncorrected_us
-                    + breakdown.audio_playout_correction_us
-                    + TIMELINE_SYNC_MIN_DELTA_US
-                    + 1_000,
-            "{label}: 共有へ戻った直後にずれが残っている: gap={gap_us} uncorrected={uncorrected_us} {breakdown:?}"
-        );
-        // 表示の遅れは上限を超えない
-        for track in [Track::Audio, Track::Video] {
-            let delay_us = timeline
-                .presentation_delay_us(track)
-                .expect("共有中は表示の遅れが読める");
-            assert!(
-                delay_us <= cap_us,
-                "{label}: 表示の遅れが上限を超えている: {track:?} delay={delay_us} cap={cap_us}"
-            );
-        }
     }
+    assert_eq!(timeline.video_delay_us(), Some(0));
+}
 
+/// live に追いつくまでに届いた揺らぎは学習しないこと
+#[test]
+fn catch_up_arrivals_are_not_learned() {
     let mut timeline = PlayoutTimeline::new();
-    let interval_us = 13_720_i64;
-    let mut audio_offset_us = 997_952_i64;
-    // 映像の基準は音声より 300 ms 遅い状態から、毎秒 100 ms ずつ音声へ近づく
-    let mut video_offset_us = audio_offset_us + 300_000;
-    let mut wall_us = 100_000_000_i64;
-    for _ in 0..197 {
-        wall_us = wall_us.saturating_add(interval_us);
-        audio_offset_us += 94_418 * interval_us / 1_000_000;
-        video_offset_us -= 100_000 * interval_us / 1_000_000;
-        let audio_timestamp_us = wall_us.saturating_sub(audio_offset_us);
-        let video_timestamp_us = wall_us.saturating_sub(video_offset_us);
-        timeline.observe(Track::Audio, wall_us, audio_timestamp_us);
-        check(&timeline, "音声の観測の後");
-        timeline.observe(Track::Video, wall_us, video_timestamp_us);
-        check(&timeline, "映像の観測の後");
+    // 基準の遅れが 250 ms ごとに 20 ms 以上下がる (live へ追いついている最中) 観測を続ける。
+    // 遅れは大きいが、これは経路の揺らぎではない
+    for index in 0..30i64 {
+        let wall_us = 10_000_000 + index * 33_333 + 100_000;
+        let timestamp_us = 1_000_000 + index * 53_333;
+        timeline.observe(Track::Video, wall_us, timestamp_us);
     }
+    assert_eq!(
+        timeline.video_delay_us(),
+        Some(0),
+        "追いつき中は学習しないこと"
+    );
+    // 追いついた後に届いた揺らぎは学習する
+    let mut wall_us = 11_000_000;
+    let mut timestamp_us = 2_599_990;
+    for index in 0..100i64 {
+        let jitter_us = if index % 10 == 0 { 40_000 } else { 0 };
+        wall_us += 33_333;
+        timestamp_us += 33_333;
+        timeline.observe(Track::Video, wall_us + jitter_us, timestamp_us);
+    }
+    assert_eq!(
+        timeline.video_delay_us(),
+        Some(40_000),
+        "追いついた後の揺らぎだけを学習すること"
+    );
+}
+
+/// 音声の開始時の揺らぎが 40 ms でも、出力の先行量が未観測なら下限を使うこと
+#[test]
+fn audio_budget_floor_holds_until_the_output_clock_arrives() {
+    let mut timeline = PlayoutTimeline::new();
+    for index in 0..200i64 {
+        let media_us = index * 20_000;
+        let jitter_us = if index % 5 == 4 { 40_000 } else { 0 };
+        timeline.observe(
+            Track::Audio,
+            EPOCH_US + media_us + jitter_us,
+            timestamp_of(media_us),
+        );
+    }
+    assert_eq!(timeline.audio_delay_stats().jitter_us, Some(40_000));
+    assert_eq!(timeline.playout_delay_us(), Some(50_000));
+    // 音声の再開では旧 Context の出力先行量を捨てる
+    timeline.reset_track(Track::Audio);
+    assert_eq!(timeline.audio_delay_stats().output_lead_us, None);
+    assert_eq!(timeline.audio_delay_stats().target_us, 50_000);
+}
+
+/// 実績から A/V のずれが読めること
+#[test]
+fn skew_uses_fresh_presentations() {
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, 1_000_000, 1_000_000);
+    timeline.observe(Track::Video, 1_000_000, 1_000_000);
+    let timestamp_us = timestamp_of(1_000_000);
+    let delay_us = timeline
+        .presentation_delay_us()
+        .expect("表示の遅れが決まる");
+    let presented_us = timestamp_us + delay_us;
+    // 片方だけでは推定しない
+    timeline.record_presentation(Track::Audio, timestamp_us, presented_us);
+    assert_eq!(timeline.skew_us(), None);
+    timeline.record_presentation(Track::Video, timestamp_us, presented_us);
+    assert_eq!(timeline.skew_us(), Some(0), "同じ差ならずれは 0");
+    // 映像だけ 30 ms 遅らせると正のずれになる
+    timeline.record_presentation(Track::Video, timestamp_us, presented_us + 30_000);
+    assert_eq!(timeline.skew_us(), Some(30_000));
+    // 1 秒より古い実績は使わない
+    timeline.record_presentation(Track::Audio, timestamp_us, presented_us - 2_000_000);
+    assert_eq!(timeline.skew_us(), None);
+}
+
+/// reset は基準と学習と実績を消し、targetLatency は残すこと
+#[test]
+fn reset_clears_everything_but_the_target_latency() {
+    let mut timeline = create_timeline();
+    observe_pair(&mut timeline, EPOCH_US, 0);
+    timeline.set_target_latency_ms(300);
+    let timestamp_us = timestamp_of(1_000_000);
+    let presented_us = timeline
+        .present_us(Track::Audio, timestamp_us)
+        .expect("表示時刻が決まる");
+    timeline.record_presentation(Track::Audio, timestamp_us, presented_us);
+    timeline.record_presentation(Track::Video, timestamp_us, presented_us);
+    assert_eq!(timeline.skew_us(), Some(0));
+    let generation = timeline.generation();
+
+    timeline.reset();
+    assert_eq!(timeline.generation(), generation + 1);
+    assert_eq!(timeline.presentation_delay_us(), None);
+    assert_eq!(timeline.playout_delay_us(), None);
+    assert_eq!(timeline.skew_us(), None);
+    assert_eq!(timeline.present_us(Track::Video, timestamp_of(0)), None);
+    // targetLatency は呼び出し側が決めた値であり、reset では消さない
+    assert_eq!(timeline.target_latency_ms(), 300);
+    // 次の観測で作り直す
+    timeline.observe(Track::Video, EPOCH_US, timestamp_of(0));
+    assert_eq!(timeline.presentation_delay_us(), Some(300_000));
+}
+
+/// 音声だけを消すと映像だけの値になり、世代は進まないこと
+#[test]
+fn reset_stream_keeps_the_other_track_and_the_generation() {
+    let mut timeline = create_timeline();
+    timeline.observe(Track::Audio, EPOCH_US, timestamp_of(0));
+    for index in 0..30i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
+    }
+    assert_eq!(
+        timeline.playout_delay_us(),
+        Some(TIMELINE_AUDIO_DELAY_FLOOR_US)
+    );
+    // 音声の実績 (同期ずれの推定に使う) も作っておく
+    let timestamp_us = timestamp_of(1_000_000);
+    let presented_us = timeline
+        .present_us(Track::Video, timestamp_us)
+        .expect("映像の表示時刻が決まる");
+    timeline.record_presentation(Track::Audio, timestamp_us, presented_us);
+    timeline.record_presentation(Track::Video, timestamp_us, presented_us);
+    assert_eq!(timeline.skew_us(), Some(0));
+    let generation = timeline.generation();
+
+    timeline.reset_track(Track::Audio);
+
+    // 音声の値は消える
+    assert_eq!(timeline.playout_delay_us(), None);
+    // 映像の表示の遅れは揺らぎ 0 のまま (音声の遅延を含まない)
+    assert_eq!(timeline.video_delay_us(), Some(0));
+    assert_eq!(wall_us_of(&timeline, Track::Video, 0), EPOCH_US);
+    assert_eq!(
+        wall_us_of(&timeline, Track::Video, 1_000_000),
+        EPOCH_US + 1_000_000
+    );
+    // 消したトラックの実績は残らない
+    assert_eq!(timeline.skew_us(), None, "音声の実績を消すこと");
+    // 世代は進めない
+    assert_eq!(timeline.generation(), generation, "世代を進めないこと");
+}
+
+/// TIMESTAMP が飛んだら基準を取り直すこと
+#[test]
+fn timestamp_jump_starts_a_new_generation() {
+    let mut timeline = PlayoutTimeline::new();
+    timeline.observe(Track::Audio, EPOCH_US, timestamp_of(0));
+    let generation = timeline.generation();
+    // TIMESTAMP が 3 秒進んだフレームが届く
+    let jump_us = 3_000_000;
+    assert!(jump_us >= TIMELINE_DISCONTINUITY_US);
+    timeline.observe(
+        Track::Audio,
+        EPOCH_US + 2 * FRAME_US,
+        timestamp_of(2 * FRAME_US + jump_us),
+    );
+    assert_eq!(timeline.generation(), generation + 1, "取り直すこと");
+    // 取り直した後も表示時刻が求まる
+    assert!(
+        timeline
+            .present_us(Track::Audio, timestamp_of(2 * FRAME_US + jump_us))
+            .is_some()
+    );
+}
+
+/// 負の設定値は 0 として扱うこと
+#[test]
+fn negative_config_values_are_clamped() {
+    let config = TimelineConfig {
+        max_presentation_delay_ms: -100,
+        target_latency_ms: -50,
+        ..TimelineConfig::default()
+    };
+    let mut timeline = PlayoutTimeline::with_config(config);
+    timeline.observe(Track::Audio, 10_000_000, 1_000_000);
+    assert_eq!(timeline.target_latency_ms(), 0);
+    assert_eq!(
+        timeline.presentation_extra_delay_us(),
+        Some(0),
+        "上限が 0 なら表示の遅れも 0"
+    );
+    assert_eq!(timeline.target_latency_limited_us(), 0);
+}
+
+/// 再生遅延の目標にする百分位が配信 fps から決まること
+#[test]
+fn playout_delay_percentile_follows_the_frame_rate() {
+    assert_eq!(
+        playout_delay_percentile(None),
+        TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM,
+        "フレーム間隔が不明なら下限を使うこと"
+    );
+    assert_eq!(
+        playout_delay_percentile(Some(0)),
+        TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM
+    );
+    assert_eq!(
+        playout_delay_percentile(Some(-1)),
+        TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM
+    );
+    // 30 fps (33.3 ms) で約 96.7%
+    assert_eq!(playout_delay_percentile(Some(FRAME_US)), 966_667);
+    // 120 fps (8.3 ms) で約 99.2%
+    assert_eq!(playout_delay_percentile(Some(FAST_FRAME_US)), 991_667);
+    // 10 fps (100 ms) は下限の 95% に切られる
+    assert_eq!(
+        playout_delay_percentile(Some(100_000)),
+        TIMELINE_MIN_PLAYOUT_DELAY_PERCENTILE_PPM
+    );
+}
+
+/// 表示待ちのキューが吸収できる表示の遅れが枚数から決まること
+#[test]
+fn playout_queue_cap_follows_the_queue_size() {
+    assert_eq!(
+        playout_queue_cap_us(MAX_QUEUED_FRAMES, None),
+        TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000,
+        "フレーム間隔が不明なら上限を返すこと"
+    );
+    assert_eq!(
+        playout_queue_cap_us(MAX_QUEUED_FRAMES, Some(FRAME_US)),
+        (MAX_QUEUED_FRAMES - TIMELINE_QUEUE_HEADROOM_FRAMES) as i64 * FRAME_US
+    );
+    assert_eq!(
+        playout_queue_cap_us(TIMELINE_QUEUE_HEADROOM_FRAMES, Some(FRAME_US)),
+        0,
+        "余裕分しか無ければ 0 になること"
+    );
+    assert_eq!(
+        playout_queue_cap_us(0, Some(FRAME_US)),
+        0,
+        "上限が 0 でも負にならないこと"
+    );
+}
+
+/// 音声を到着基準で並べるときの再生の遅れが下限と上限の間に切られること
+#[test]
+fn audio_arrival_delay_clamps_between_floor_and_cap() {
+    assert_eq!(
+        TIMELINE_AUDIO_DELAY_FLOOR_US, 50_000,
+        "音声の再生の遅れの下限は 50 ms であること"
+    );
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US),
+        TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "下限ちょうどの遅れはそのまま使うこと"
+    );
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_AUDIO_DELAY_FLOOR_US - 1),
+        TIMELINE_AUDIO_DELAY_FLOOR_US,
+        "下限を下回る遅れは下限まで上げること"
+    );
+    assert_eq!(audio_arrival_delay_us(0), TIMELINE_AUDIO_DELAY_FLOOR_US);
+    assert_eq!(audio_arrival_delay_us(90_000), 90_000);
+    assert_eq!(audio_arrival_delay_us(1_000_000), TIMELINE_ARRIVAL_DELAY_US);
+    assert_eq!(
+        audio_arrival_delay_us(TIMELINE_ARRIVAL_DELAY_US),
+        TIMELINE_ARRIVAL_DELAY_US,
+        "上限ちょうどの遅れはそのまま使うこと"
+    );
+}
+
+/// 補償の予算は基準の差だけを保護し、同じ向きのバッファ差は別に足すこと
+#[test]
+fn sync_compensation_limit_protects_only_the_base_difference() {
+    assert_eq!(
+        TIMELINE_MAX_COMPENSATED_DIFFERENCE_US, 100_000,
+        "基準の差の保護は 100 ms であること"
+    );
+    for (base_difference_us, buffer_difference_us, expected_us) in [
+        // バッファ差が基準の差と同方向なら、その全額を予算へ足す
+        (0, 80_000, 180_000),
+        (130_000, 80_000, 180_000),
+        // 全体が負でバッファ差も負なら、逆向きのバッファ差を足す (JS の
+        // Math.sign(base + buffer) * buffer)
+        (0, -80_000, 180_000),
+        (-130_000, -80_000, 180_000),
+        // バッファが基準の差を相殺している (全体が正だがバッファは負) なら、足さない
+        (200_000, -80_000, 100_000),
+        (0, 0, 100_000),
+    ] {
+        assert_eq!(
+            sync_compensation_limit_us(base_difference_us, buffer_difference_us),
+            expected_us,
+            "base={base_difference_us} buffer={buffer_difference_us} の補償の予算"
+        );
+    }
+}
+
+/// 基準の差が閾値を超えたら共有せず、大きい側は表示時刻を返さないこと
+#[test]
+fn sharing_bases_follows_the_difference_limit() {
+    // 30 fps のフレーム間隔を覚えさせる (キューが吸収できる長さが上限の 500 ms を超える)
+    let mut timeline = create_timeline();
+    for index in 0..30i64 {
+        let media_us = index * FRAME_US;
+        timeline.observe(Track::Video, EPOCH_US + media_us, timestamp_of(media_us));
+    }
+    // 閾値は表示の遅れの上限 (500 ms) から音声の表示の遅れ (下限の 50 ms) を引いた 450 ms
+    timeline.observe(
+        Track::Audio,
+        EPOCH_US
+            + (TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000 - TIMELINE_AUDIO_DELAY_FLOOR_US + 1_000),
+        timestamp_of(0),
+    );
+    assert!(!timeline.sharing_bases(), "閾値を超えたら共有しないこと");
+    assert_eq!(timeline.unshared_reason(), UnsharedReason::Difference);
+}
+
+/// 閾値の下限を下回る差でも共有しないこと
+#[test]
+fn sharing_bases_use_the_difference_floor() {
+    let mut timeline = create_timeline();
+    timeline.observe(Track::Video, EPOCH_US, timestamp_of(0));
+    timeline.observe(Track::Audio, EPOCH_US + 150_000, timestamp_of(0));
+    // キューが吸収できる 500 ms から targetLatency の 450 ms を引くと 50 ms になり、
+    // 下限の 100 ms を使う。差 150 ms は閾値を超える
+    timeline.set_target_latency_ms(TIMELINE_MAX_PRESENTATION_DELAY_MS - 50);
+    assert_eq!(TIMELINE_MIN_BASE_DIFFERENCE_MS, 100);
+    assert!(!timeline.sharing_bases());
+    // 差が下限の内側なら共有する
+    let mut shared = create_timeline();
+    shared.observe(Track::Video, EPOCH_US, timestamp_of(0));
+    shared.observe(
+        Track::Audio,
+        EPOCH_US + TIMELINE_MIN_BASE_DIFFERENCE_MS * 1_000,
+        timestamp_of(0),
+    );
+    shared.set_target_latency_ms(TIMELINE_MAX_PRESENTATION_DELAY_MS - 50);
+    assert!(shared.sharing_bases(), "差が下限の内側なら共有すること");
+}
+
+/// 遅延の内訳が表示の遅れの内訳と一致すること
+#[test]
+fn delay_breakdown_splits_basis_jitter_and_sync() {
+    let mut timeline = create_timeline();
+    observe_pair(&mut timeline, EPOCH_US, 0);
+    let breakdown = timeline.delay_breakdown();
+    assert!(breakdown.sharing_bases);
+    assert_eq!(breakdown.unshared_reason, UnsharedReason::None);
+    assert_eq!(breakdown.base_drift_limit_us, TIMELINE_BASE_DRIFT_US);
+    assert_eq!(
+        breakdown.presentation_delay_cap_us,
+        TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000
+    );
+    for track in [breakdown.audio, breakdown.video] {
+        let base_us = track.base_delay_us.expect("基準の遅れが決まる");
+        let jitter_us = track.jitter_delay_us.expect("jitter buffer の遅延が決まる");
+        // 表示の遅れ = 基準の遅れ + max(jitter buffer の遅延, targetLatency) + 同期の分
+        assert_eq!(
+            track.presentation_delay_us.expect("表示の遅れが決まる"),
+            base_us
+                + jitter_us.max(timeline.target_latency_ms() * 1_000)
+                + track.sync_extra_delay_us
+        );
+    }
+    assert_eq!(
+        breakdown.base_difference_us.expect("差が決まる"),
+        breakdown.audio.base_delay_us.expect("音声の基準がある")
+            - breakdown.video.base_delay_us.expect("映像の基準がある")
+    );
+    assert_eq!(
+        breakdown.audio_delay.target_us,
+        TIMELINE_AUDIO_DELAY_FLOOR_US
+    );
+}
+
+/// 動きの判定に使う直近の窓が公開されていること
+#[test]
+fn delay_breakdown_reports_the_recent_window() {
+    assert_eq!(TIMELINE_BASE_DIFFERENCE_RECENT_WINDOW_US, 2_000_000);
+    assert_eq!(TIMELINE_JITTER_WINDOW_US, 2_000_000);
+    assert_eq!(TIMELINE_WINDOW_US, 10_000_000);
+}
+
+/// メディア時刻ごとの揺らぎ (マイクロ秒) の列を作る決定論的な擬似乱数
+///
+/// moqt-js の `timeline.test.ts` の `jitterSequence` と同じく、同じ seed から同じ列を
+/// 作る (JS と同じ倍精度の計算で剰余を取る)。2% が 40 ms、0.1% が 200 ms 遅れ、それ以外は
+/// 0 ms である。
+fn jitter_sequence(count: usize, seed: f64) -> Vec<i64> {
+    let mut values = Vec::with_capacity(count);
+    let mut state = seed;
+    for _ in 0..count {
+        state = (state * 1_103_515_245.0 + 12_345.0) % 2_147_483_648.0;
+        let roll = state / 2_147_483_648.0;
+        if roll < 0.02 {
+            values.push(40_000);
+        } else if roll > 0.999 {
+            values.push(200_000);
+        } else {
+            values.push(0);
+        }
+    }
+    values
+}
+
+/// 120 秒の到着列を作る (音声 20 ms、映像 30 fps、どちらも揺らぎあり)
+///
+/// 返り値は観測の時刻の順に並べた (観測の時刻, トラック, メディア時刻) の列である。
+/// 音声と映像の揺らぎは別の seed から作る (moqt-js の `buildArrivals` と同じ)。
+fn build_jittered_arrivals() -> Vec<(i64, Track, i64)> {
+    let duration_us = 120_000_000i64;
+    let audio_frame_us = 20_000i64;
+    let audio_count = (duration_us / audio_frame_us) as usize;
+    let video_count = (duration_us / FRAME_US) as usize;
+    let audio_jitter = jitter_sequence(audio_count, 7.0);
+    let video_jitter = jitter_sequence(video_count, 11.0);
+    let mut arrivals: Vec<(i64, Track, i64)> = Vec::new();
+    for (index, jitter_us) in audio_jitter.iter().enumerate() {
+        let media_us = index as i64 * audio_frame_us;
+        arrivals.push((EPOCH_US + media_us + jitter_us, Track::Audio, media_us));
+    }
+    for (index, jitter_us) in video_jitter.iter().enumerate() {
+        let media_us = index as i64 * FRAME_US;
+        arrivals.push((EPOCH_US + media_us + jitter_us, Track::Video, media_us));
+    }
+    arrivals.sort_by_key(|(at_us, _, _)| *at_us);
+    arrivals
+}
+
+/// 時計の対応付けの不感帯と映像の write の遅れを同時に与えても、同期ずれの推定が
+/// その予算に収まること
+///
+/// moqt-js の `timeline.test.ts` の「recordPresentation: 不感帯と write の遅れを含めても
+/// skewMs が ±50 ms に収まる」に対応する。120 秒の到着列で、音声は時計の対応付けの
+/// 不感帯 (30 ms) まで、映像は write の遅れ (最大 20 ms) まで実績をずらして記録し、
+/// 定常状態の推定が write の遅れ + 不感帯 + 不感帯 (A/V 同期) に収まり、推移中も表示の
+/// 遅れの上限 (500 ms) を超えないことを確かめる。
+#[test]
+fn skew_stays_within_the_clock_deadband_and_write_delay_budget() {
+    // 音声の時計の対応付けの不感帯 (30 ms) と、映像の write の遅れの上限 (20 ms)
+    const AUDIO_CLOCK_DEADBAND_US: i64 = 30_000;
+    const MAX_PRESENTATION_LAG_US: i64 = 20_000;
+    let mut timeline = create_timeline();
+    let arrivals = build_jittered_arrivals();
+    let mut max_skew_us = 0i64;
+    let mut last_skew_us = None;
+    for (index, (at_us, track, media_us)) in arrivals.iter().enumerate() {
+        let timestamp_us = timestamp_of(*media_us);
+        timeline.observe(*track, *at_us, timestamp_us);
+        let presentation_us = timeline
+            .present_us(*track, timestamp_us)
+            .expect("表示時刻が決まること");
+        // 音声は時計の対応付けの不感帯 (30 ms) まで、映像は write の遅れ (20 ms) までずらす
+        let deviation_us = match track {
+            Track::Audio => AUDIO_CLOCK_DEADBAND_US * (index % 2) as i64,
+            Track::Video => MAX_PRESENTATION_LAG_US * ((index % 3) / 2) as i64,
+        };
+        timeline.record_presentation(
+            *track,
+            timestamp_us,
+            presentation_us.saturating_add(deviation_us),
+        );
+        if let Some(skew_us) = timeline.skew_us() {
+            max_skew_us = max_skew_us.max(skew_us.saturating_abs());
+            last_skew_us = Some(skew_us);
+        }
+    }
+    // 音声の目標遅延が段差で上がった直後は、次の観測で同期の制御が合わせるまで映像が
+    // 先行する。定常状態では不感帯と write の遅れの予算に収まる
+    let last_skew_us = last_skew_us.expect("最後の同期ずれが求められること");
+    assert!(
+        last_skew_us.saturating_abs()
+            <= MAX_PRESENTATION_LAG_US + AUDIO_CLOCK_DEADBAND_US + TIMELINE_SYNC_MIN_DELTA_US,
+        "定常状態のずれが write の遅れ + 不感帯の予算を超えた: {last_skew_us}"
+    );
+    assert!(
+        max_skew_us <= TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000,
+        "推移中のずれが表示の遅れの上限を超えた: {max_skew_us}"
+    );
+}
+
+/// 出力の残差の平滑化は四捨五入すること
+///
+/// 切り捨てを続けると、再帰フィルタの定常状態で下振れが積もる (レビュー M-2)。
+/// 1 µs の残差を入れた後に残差 0 の記録が来たとき、切り捨てなら 0 µs、四捨五入なら
+/// 1 µs になる値で固定する。
+#[test]
+fn the_output_residual_is_rounded_to_the_nearest_microsecond() {
+    let mut timeline = PlayoutTimeline::new();
+    let timestamp_us = timestamp_of(0);
+    timeline.observe(Track::Audio, EPOCH_US, timestamp_us);
+    timeline.observe(Track::Video, EPOCH_US, timestamp_us);
+    let audio_target_us = timeline
+        .present_us(Track::Audio, timestamp_us)
+        .expect("音声の表示時刻が決まる");
+    // 最初の記録は残差そのもの (平滑化前) になる。1 µs 遅れて鳴った
+    timeline.record_presentation_with_target(
+        Track::Audio,
+        timestamp_us,
+        audio_target_us + 1,
+        Some(audio_target_us),
+    );
+    assert_eq!(
+        timeline.delay_breakdown().audio_playout_correction_us,
+        1,
+        "最初の残差をそのまま使うこと"
+    );
+    // 19.999 ms 後に残差 0 で鳴った。(1 µs * 250 ms) / (250 ms + 19.999 ms) = 0.926 µs
+    // であり、切り捨てなら 0、四捨五入なら 1 になる
+    let later_target_us = audio_target_us + 20_000;
+    timeline.record_presentation_with_target(
+        Track::Audio,
+        timestamp_us,
+        later_target_us,
+        Some(later_target_us),
+    );
+    assert_eq!(
+        timeline.delay_breakdown().audio_playout_correction_us,
+        1,
+        "平滑化は四捨五入すること (切り捨てなら 0 になる)"
+    );
 }

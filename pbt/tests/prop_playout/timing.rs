@@ -10,8 +10,8 @@ use std::cell::Cell;
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::scheduler::{AudioPlayoutBasis, AudioPlayoutPlay};
 use shiguredo_moqt::playout::timing::{
-    AUDIO_DELAY_FEEDBACK_WINDOW_US, AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissEvent,
-    AudioMissReason, AudioMissTotal, AudioMissTotals, AudioPlayoutMiss, AudioPlayoutTimingSnapshot,
+    AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissEvent, AudioMissReason, AudioMissTotal,
+    AudioMissTotals, AudioPlayoutGap, AudioPlayoutMiss, AudioPlayoutTimingSnapshot,
     AudioPlayoutTimingStats, MAX_RECENT_AUDIO_MISSES, TimingSummary,
 };
 
@@ -250,13 +250,14 @@ impl TimingModel {
             .collect()
     }
 
-    /// 予定からどれだけ過ぎて鳴るかの列 (記録の時刻, 値)。予定の無い音は入れない
+    /// 予定からどれだけ過ぎて鳴るかの列 (記録の時刻, 値)。予定の無い音は入れない。
+    /// 前の音の終わりへ揃えるスナップで予定より早く鳴ることがあるため、0 で丸める
     fn lateness_series(&self) -> Vec<(i64, i64)> {
         self.plays
             .iter()
             .filter_map(|play| {
                 play.target_start_us
-                    .map(|target_us| (play.arrival_us, play.start_at_us - target_us))
+                    .map(|target_us| (play.arrival_us, (play.start_at_us - target_us).max(0)))
             })
             .collect()
     }
@@ -460,7 +461,7 @@ fn check_snapshot(
             assert_eq!(
                 snapshot.last_lateness_us,
                 play.target_start_us
-                    .map(|target_us| play.start_at_us - target_us),
+                    .map(|target_us| (play.start_at_us - target_us).max(0)),
                 "直近の遅れが一致しない: now_us={now_us}"
             );
         }
@@ -584,7 +585,7 @@ fn sample_play(ctx: &mut noprop::TestCaseContext, now_us: i64) -> AudioPlayoutPl
 fn sample_miss(ctx: &mut noprop::TestCaseContext, now_us: i64) -> AudioPlayoutMiss {
     AudioPlayoutMiss {
         at_us: now_us,
-        // 4 つの理由を満遍なく選ぶ (並べすぎは閉ループの観測にも使う)
+        // 4 つの理由を満遍なく選ぶ (理由ごとの累積の一致を確かめる)
         reason: REASONS[noprop::sample_weighted_index(ctx, &[1, 1, 1, 1])],
         duration_us: noprop::sample_usize_in(ctx, 0..=50_000) as i64,
         target_us: if noprop::sample_bool(ctx) {
@@ -779,129 +780,10 @@ fn records_match_the_model_and_stay_within_the_window() -> noprop::TestResult {
     Ok(())
 }
 
-#[test]
-fn audio_delay_feedback_uses_the_short_window() -> noprop::TestResult {
-    let with_values = Cell::new(false);
-    let empty_window = Cell::new(false);
-    let narrower_than_display = Cell::new(false);
-    let backlog_seen = Cell::new(false);
-    let mut runner = test_runner()?;
-    runner.run(128, |ctx| {
-        let mut stats = AudioPlayoutTimingStats::new();
-        let mut model = TimingModel::new(AUDIO_PLAYOUT_TIMING_WINDOW_US);
-        let mut now_us = noprop::sample_usize_in(ctx, 0..1_000_000) as i64;
-        for step in 0..noprop::sample_usize_in(ctx, 1..=16) {
-            now_us += noprop::sample_with_boundaries(
-                ctx,
-                &[0, 1_000, AUDIO_DELAY_FEEDBACK_WINDOW_US, 1_000_000],
-                noprop::Ratio::one_nth(4),
-                |ctx| noprop::sample_usize_in(ctx, 0..=500_000) as i64,
-            );
-            match noprop::sample_weighted_index(ctx, &[4, 2, 2]) {
-                0 => {
-                    let play = sample_play(ctx, now_us);
-                    stats.record_play(play);
-                    model.record_play(play);
-                }
-                1 => {
-                    let miss = sample_miss(ctx, now_us);
-                    stats.record_miss(miss);
-                    model.record_miss(miss);
-                }
-                _ => {
-                    // 短い窓より長く、表示用の窓より短い分だけ進める。短い窓が空になり、
-                    // 表示用の窓には値が残る場合を作る
-                    now_us += AUDIO_DELAY_FEEDBACK_WINDOW_US
-                        + noprop::sample_usize_in(ctx, 0..=500_000) as i64;
-                }
-            }
-
-            let feedback = stats.audio_delay_feedback(now_us);
-            assert_eq!(
-                feedback.at_us, now_us,
-                "観測した時刻を返すこと: step={step}"
-            );
-            // 捨てた量は購読の開始からの累積であること
-            let backlog = model.totals[reason_index(AudioMissReason::Backlog)];
-            assert_eq!(
-                feedback.backlog_misses, backlog.count,
-                "累積の捨てた数が一致しない: step={step} now_us={now_us}"
-            );
-            assert_eq!(
-                feedback.backlog_us, backlog.duration_us,
-                "累積の捨てた長さが一致しない: step={step} now_us={now_us}"
-            );
-            // 分布は短い窓 (1 秒) の中の値だけから求めること。境目は含めない
-            let control_min_us = now_us - AUDIO_DELAY_FEEDBACK_WINDOW_US;
-            let (delay_in, _) = check_distribution(
-                &feedback.start_delay_us,
-                &model.start_delay_series(),
-                control_min_us,
-                false,
-                "短い窓の鳴るまでの時間",
-            );
-            let (slack_in, _) = check_distribution(
-                &feedback.slack_us,
-                &model.slack_series(),
-                control_min_us,
-                false,
-                "短い窓の余裕",
-            );
-            let (lateness_in, _) = check_distribution(
-                &feedback.lateness_us,
-                &model.lateness_series(),
-                control_min_us,
-                false,
-                "短い窓の遅れ",
-            );
-
-            // 表示用の窓 (10 秒) には値があるのに、短い窓 (1 秒) には無い場合
-            let display = stats.snapshot(now_us);
-            if display.start_delay_us.is_some()
-                && feedback.start_delay_us.is_none()
-                && !model.start_delay_series().is_empty()
-            {
-                narrower_than_display.set(true);
-            }
-            if delay_in > 0 || slack_in > 0 || lateness_in > 0 {
-                with_values.set(true);
-            }
-            if feedback.start_delay_us.is_none()
-                && feedback.slack_us.is_none()
-                && feedback.lateness_us.is_none()
-                && !model.start_delay_series().is_empty()
-            {
-                empty_window.set(true);
-            }
-            if backlog.count > 0 {
-                backlog_seen.set(true);
-            }
-        }
-        Ok(())
-    })?;
-
-    assert!(
-        with_values.get(),
-        "短い窓に値のある観測を通っていない\n{runner}"
-    );
-    assert!(
-        empty_window.get(),
-        "記録はあるが短い窓に値が無い観測を通っていない\n{runner}"
-    );
-    assert!(
-        narrower_than_display.get(),
-        "短い窓の方が表示用の窓より狭い場合を通っていない\n{runner}"
-    );
-    assert!(
-        backlog_seen.get(),
-        "並べすぎて捨てた音のある観測を通っていない\n{runner}"
-    );
-    Ok(())
-}
-
 /// 隙間とアンダーランの計器が、記録した回数・合計・最大と一致すること
 ///
-/// 0 以下の長さは記録しない。累積はリセットでのみ 0 に戻り、途中の分布の窓には依存しない。
+/// 補間で埋まらなかった長さと、そのうち予約できなかった長さを別々に数える。0 以下の
+/// 長さは記録しない。累積はリセットでのみ 0 に戻り、途中の分布の窓には依存しない。
 #[test]
 fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -910,26 +792,44 @@ fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
         let mut gaps = 0u64;
         let mut gap_total_us = 0i64;
         let mut gap_max_us = 0i64;
+        let mut unrecoverable_gaps = 0u64;
+        let mut unrecoverable_gap_total_us = 0i64;
         let mut underruns = 0u64;
         let mut underrun_total_us = 0i64;
         let mut underrun_max_us = 0i64;
+        let mut boundary_step_count = 0u64;
+        let mut boundary_step_max = 0.0f32;
         let mut now_us = 0i64;
         for _ in 0..noprop::sample_usize_in(ctx, 1..=16) {
             now_us += noprop::sample_usize_in(ctx, 0..=5_000_000) as i64;
-            match noprop::sample_usize_in(ctx, 0..3) {
+            match noprop::sample_usize_in(ctx, 0..4) {
                 0 => {
-                    // 隙間の長さ。0 と負は記録しない
-                    let gap_us = noprop::sample_with_boundaries(
+                    // 補間で埋まらなかった長さと、予約できなかった長さ。0 と負は記録しない
+                    let uncovered_us = noprop::sample_with_boundaries(
                         ctx,
                         &[0, 1, 5_000, 100_001],
                         noprop::Ratio::one_nth(3),
                         |ctx| noprop::sample_usize_in(ctx, 0..=200_000) as i64 - 2,
                     );
-                    stats.record_gap(gap_us);
-                    if gap_us > 0 {
+                    let unrecoverable_us = noprop::sample_with_boundaries(
+                        ctx,
+                        &[0, 1, 5_000],
+                        noprop::Ratio::one_nth(3),
+                        |ctx| noprop::sample_usize_in(ctx, 0..=100_000) as i64,
+                    );
+                    stats.record_gap(AudioPlayoutGap {
+                        uncovered_us,
+                        unrecoverable_us,
+                    });
+                    if uncovered_us > 0 {
                         gaps += 1;
-                        gap_total_us += gap_us;
-                        gap_max_us = gap_max_us.max(gap_us);
+                        gap_total_us += uncovered_us;
+                        gap_max_us = gap_max_us.max(uncovered_us);
+                        let unrecoverable_us = uncovered_us.min(unrecoverable_us.max(0));
+                        if unrecoverable_us > 0 {
+                            unrecoverable_gaps += 1;
+                            unrecoverable_gap_total_us += unrecoverable_us;
+                        }
                     }
                 }
                 1 => {
@@ -947,15 +847,36 @@ fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
                         underrun_max_us = underrun_max_us.max(underrun_us);
                     }
                 }
+                2 => {
+                    // 出力側が描画した未補間区間と、バッファ境界の段差
+                    let uncovered_us = noprop::sample_usize_in(ctx, 0..=100_000) as i64;
+                    let count = noprop::sample_usize_in(ctx, 0..=3) as u64;
+                    let maximum_us = noprop::sample_usize_in(ctx, 0..=100_000) as i64;
+                    stats.record_rendered_gap(uncovered_us, count, maximum_us);
+                    gaps += count;
+                    gap_total_us += uncovered_us;
+                    gap_max_us = gap_max_us.max(maximum_us);
+                    unrecoverable_gaps += count;
+                    unrecoverable_gap_total_us += uncovered_us;
+                    let maximum = noprop::sample_usize_in(ctx, 0..=100) as f32 / 100.0;
+                    let boundary_count = noprop::sample_usize_in(ctx, 0..=3) as u64;
+                    stats.record_rendered_boundary(maximum, boundary_count);
+                    boundary_step_count += boundary_count;
+                    boundary_step_max = boundary_step_max.max(maximum);
+                }
                 _ => {
                     // 購読のやり直しでは累積を 0 に戻す
                     stats.reset();
                     gaps = 0;
                     gap_total_us = 0;
                     gap_max_us = 0;
+                    unrecoverable_gaps = 0;
+                    unrecoverable_gap_total_us = 0;
                     underruns = 0;
                     underrun_total_us = 0;
                     underrun_max_us = 0;
+                    boundary_step_count = 0;
+                    boundary_step_max = 0.0;
                 }
             }
             let snapshot = stats.snapshot(now_us);
@@ -965,6 +886,14 @@ fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
                 "隙間の合計が記録と違う"
             );
             assert_eq!(snapshot.gap_max_us, gap_max_us, "隙間の最大が記録と違う");
+            assert_eq!(
+                snapshot.unrecoverable_gaps, unrecoverable_gaps,
+                "予約できなかった区間の回数が記録と違う"
+            );
+            assert_eq!(
+                snapshot.unrecoverable_gap_total_us, unrecoverable_gap_total_us,
+                "予約できなかった区間の合計が記録と違う"
+            );
             assert_eq!(
                 snapshot.underruns, underruns,
                 "アンダーランの回数が記録と違う"
@@ -976,6 +905,14 @@ fn gap_and_underrun_counters_match_the_records() -> noprop::TestResult {
             assert_eq!(
                 snapshot.underrun_max_us, underrun_max_us,
                 "アンダーランの最大が記録と違う"
+            );
+            assert_eq!(
+                snapshot.boundary_step_count, boundary_step_count,
+                "境界の段差の回数が記録と違う"
+            );
+            assert!(
+                (snapshot.boundary_step_max - boundary_step_max).abs() < 1e-6,
+                "境界の段差の最大が記録と違う"
             );
         }
         Ok(())

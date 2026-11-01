@@ -48,7 +48,7 @@ use shiguredo_moqt::{
 
 use crate::catalog;
 use crate::cli::Config;
-use crate::decoder::{self, AudioDecoder, DecodedAudioFrame, DecodedVideoFrame};
+use crate::decoder::{self, AudioDecoder, DecodedAudioFrame, DecodedVideoFrame, TimestampKind};
 use crate::error::{Error, Result};
 use crate::mp4::{
     self, AudioSample, AudioSetup, Recorder, RecorderSender, Setup, VideoSample, VideoSetup,
@@ -412,6 +412,9 @@ impl AudioDelivery<'_> {
                 return false;
             }
         };
+        // TIMESTAMP の種類を求める。壁時計の TIMESTAMP を持つ音だけが、受信側の時間軸へ
+        // 観測して表示時刻を決められる (TIMESCALE を持つ音はメディア時刻である)
+        let timestamp_kind = timestamp_kind_of(timestamp, timescale);
         // 重複の判定と購読の境界の判定は録画より前に行う。境界以下の音声は購読より前に
         // publish された分であり、送出も録画も復号もしない (境界の位置の Object が live と
         // FETCH の両方で届いても、どちらもここで落ちるため二重にならない)。Audio Config の
@@ -547,8 +550,8 @@ impl AudioDelivery<'_> {
         // 行うため、経路が遅いだけの状態では作り直さない
         if let Some(pts_us) = pts_us {
             let now_us = crate::wall_clock_us();
-            let lag_ms = now_us.saturating_sub(pts_us) / 1_000;
-            let input_lag_ms = receive_input_lag_ms(timestamp, timescale, arrival_us, pts_us);
+            let lag_us = now_us.saturating_sub(pts_us);
+            let input_lag_us = receive_input_lag_us(timestamp, timescale, arrival_us, pts_us);
             // ロックは await をまたがない (観測と判定だけの同期処理)
             let (decision, stats) = {
                 let mut catch_up = self
@@ -556,10 +559,10 @@ impl AudioDelivery<'_> {
                     .lock()
                     .expect("audio catch up lock is not poisoned");
                 let decision = catch_up.observe(AudioReceiveCatchUpObservation {
-                    now_ms: now_us / 1_000,
-                    lag_ms,
-                    input_lag_ms,
-                    duration_ms: pcm_duration_ms(pcm.len(), usize::from(channels), sample_rate),
+                    now_us,
+                    lag_us,
+                    input_lag_us,
+                    duration_us: pcm_duration_us(pcm.len(), usize::from(channels), sample_rate),
                     timestamp_us: pts_us,
                 });
                 (decision, catch_up.snapshot())
@@ -567,7 +570,7 @@ impl AudioDelivery<'_> {
             if decision.rebuild_decoder {
                 tracing::info!(
                     "Rebuilding the audio decoder to catch up (lag {}ms, input_lag {}ms, decode_lag {}ms, starts {})",
-                    lag_ms,
+                    lag_us / 1_000,
                     optional_ms_log(stats.input_lag_ms),
                     optional_ms_log(stats.decode_lag_ms),
                     stats.catch_up_starts,
@@ -584,22 +587,25 @@ impl AudioDelivery<'_> {
             pts_us: pts_us.unwrap_or(0),
             arrival_us,
             decoded_us,
+            timestamp_kind,
         };
         self.audio_tx.send(frame).is_ok()
     }
 }
 
-/// PCM (S16 interleaved) の長さをミリ秒で返す
+/// PCM (S16 interleaved) の長さをマイクロ秒で返す
 ///
-/// チャンネル数とサンプルレートが 0 のときは 0 を返す。
-fn pcm_duration_ms(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
+/// チャンネル数とサンプルレートが 0 のときは 0 を返す。端数は四捨五入する
+/// (moqt-js の `numberOfFrames / sampleRate * 1_000_000` を `Math.round` するのと同じ向き)。
+fn pcm_duration_us(pcm_len: usize, channels: usize, sample_rate: u32) -> i64 {
     if channels == 0 || sample_rate == 0 {
         return 0;
     }
     let frames = pcm_len / channels;
     i64::try_from(frames)
         .unwrap_or(i64::MAX)
-        .saturating_mul(1_000)
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(sample_rate) / 2)
         / i64::from(sample_rate)
 }
 
@@ -5305,8 +5311,11 @@ async fn deliver_video_object(
 ) -> VideoDelivery {
     // 表示時刻を決めるために LOC の Timestamp も取り出す
     // (書式違反は配送の有無や処理済みフラグに関わらず毎 Object で検出する)
-    let timestamp_us = match extract_timestamp_timescale(properties_bytes) {
-        Ok((timestamp, timescale)) => loc_timestamp_us(timestamp, timescale),
+    let (timestamp_us, timestamp_kind) = match extract_timestamp_timescale(properties_bytes) {
+        Ok((timestamp, timescale)) => (
+            loc_timestamp_us(timestamp, timescale),
+            timestamp_kind_of(timestamp, timescale),
+        ),
         Err(e) => {
             request_session_termination(termination_tx, &e);
             return VideoDelivery::Terminated;
@@ -5373,6 +5382,7 @@ async fn deliver_video_object(
             payload,
             video_config.as_deref(),
             timestamp_us,
+            timestamp_kind,
             video_decoder,
             sink,
         )
@@ -5384,6 +5394,7 @@ fn decode_and_send(
     payload: &[u8],
     video_config: Option<&[u8]>,
     timestamp_us: Option<i64>,
+    timestamp_kind: TimestampKind,
     decoder: &mut decoder::VideoDecoder,
     sink: &FrameSink<'_>,
 ) -> u64 {
@@ -5396,8 +5407,9 @@ fn decode_and_send(
     };
     let mut frames: u64 = 0;
     for mut frame in decoded {
-        // 表示時刻を決めるのは時間軸であり、TIMESTAMP は Object からここで載せる
+        // 表示時刻を決めるのは時間軸であり、TIMESTAMP と種類は Object からここで載せる
         frame.timestamp_us = timestamp_us;
+        frame.timestamp_kind = timestamp_kind;
         frames += 1;
         if sink.frame_tx.send(frame).is_err() {
             return frames;
@@ -5571,7 +5583,26 @@ fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i6
     Some(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
-/// 受信の入口で測った入力の遅れ (ミリ秒) を求める
+/// LOC の Timestamp と Timescale から TIMESTAMP の種類を求める
+///
+/// moqt-js の `createMediaSubscriber` と同じ規則である。TIMESTAMP が無ければ
+/// [`TimestampKind::None`]、TIMESCALE が無ければ TIMESTAMP は Unix epoch からの
+/// マイクロ秒 ([`TimestampKind::WallClock`])、TIMESCALE があれば publisher のメディア時刻
+/// ([`TimestampKind::MediaTime`]) である (draft-ietf-moq-loc-04 §2.3.1.1)。
+/// 受信側の時間軸へ観測して表示時刻を決められるのは壁時計の TIMESTAMP だけである。
+///
+/// TIMESCALE が 0 のときも「TIMESCALE がある」ものとしてメディア時刻にする
+/// ([`loc_timestamp_us`] は 0 をマイクロ秒として扱うが、この判定だけは
+/// 「TIMESCALE が無い」という条件で分ける)。
+fn timestamp_kind_of(timestamp: Option<u64>, timescale: Option<u64>) -> TimestampKind {
+    match timestamp {
+        None => TimestampKind::None,
+        Some(_) if timescale.is_none() => TimestampKind::WallClock,
+        Some(_) => TimestampKind::MediaTime,
+    }
+}
+
+/// 受信の入口で測った入力の遅れ (マイクロ秒) を求める
 ///
 /// Object の到着の壁時計 − LOC TIMESTAMP である。受信側の追いつき
 /// ([`shiguredo_moqt::playout::catch_up`]) が、復号の出力の遅れからこの値を引いた
@@ -5588,7 +5619,7 @@ fn loc_timestamp_us(timestamp: Option<u64>, timescale: Option<u64>) -> Option<i6
 /// `timestamp` と `timescale` は LOC の Timestamp / Timescale (無い場合は `None`)、
 /// `arrival_us` は Object の到着の壁時計 (マイクロ秒)、`pts_us` は TIMESTAMP から求めた
 /// 時刻 (マイクロ秒) である。
-fn receive_input_lag_ms(
+fn receive_input_lag_us(
     timestamp: Option<u64>,
     timescale: Option<u64>,
     arrival_us: i64,
@@ -5600,7 +5631,7 @@ fn receive_input_lag_ms(
         // Timescale がある音はメディア時刻であり、壁時計の到着と対応しない
         return None;
     }
-    Some(arrival_us.saturating_sub(pts_us) / 1_000)
+    Some(arrival_us.saturating_sub(pts_us))
 }
 
 /// OpusHead (RFC 7845 §5.1) をパースする
@@ -7002,6 +7033,46 @@ mod tests {
         );
     }
 
+    // TIMESTAMP が無ければ種類も無い
+    #[test]
+    fn timestamp_kind_of_returns_none_without_a_timestamp() {
+        assert_eq!(
+            timestamp_kind_of(None, None),
+            TimestampKind::None,
+            "TIMESTAMP が無ければ種類は無い"
+        );
+        assert_eq!(
+            timestamp_kind_of(None, Some(48_000)),
+            TimestampKind::None,
+            "TIMESTAMP が無ければ TIMESCALE があっても種類は無い"
+        );
+    }
+
+    // TIMESCALE が無い TIMESTAMP は壁時計の時刻である
+    #[test]
+    fn timestamp_kind_of_returns_wall_clock_without_a_timescale() {
+        assert_eq!(
+            timestamp_kind_of(Some(1_700_000_000_000_000), None),
+            TimestampKind::WallClock,
+            "TIMESCALE が無ければ TIMESTAMP は Unix epoch からのマイクロ秒である"
+        );
+    }
+
+    // TIMESCALE がある TIMESTAMP は publisher のメディア時刻である
+    #[test]
+    fn timestamp_kind_of_returns_media_time_with_a_timescale() {
+        assert_eq!(
+            timestamp_kind_of(Some(48_000), Some(48_000)),
+            TimestampKind::MediaTime,
+            "TIMESCALE があれば TIMESTAMP はメディア時刻である"
+        );
+        assert_eq!(
+            timestamp_kind_of(Some(100), Some(0)),
+            TimestampKind::MediaTime,
+            "TIMESCALE が 0 でも TIMESCALE があるものとしてメディア時刻にする"
+        );
+    }
+
     // timescale が None のときは Timestamp を Unix epoch からのマイクロ秒として扱う
     // (draft-ietf-moq-loc-04 §2.3.1.1)
     #[test]
@@ -7077,41 +7148,41 @@ mod tests {
 
     // 壁時計の TIMESTAMP (Timescale が無い) では、到着と TIMESTAMP の差を入力の遅れとする
     #[test]
-    fn receive_input_lag_ms_measures_the_wall_clock_timestamp() {
+    fn receive_input_lag_us_measures_the_wall_clock_timestamp() {
         assert_eq!(
-            receive_input_lag_ms(Some(1_000_000), None, 1_250_000, 1_000_000),
-            Some(250),
-            "到着の壁時計から TIMESTAMP を引いた値をミリ秒で返す"
+            receive_input_lag_us(Some(1_000_000), None, 1_250_000, 1_000_000),
+            Some(250_000),
+            "到着の壁時計から TIMESTAMP を引いた値をマイクロ秒で返す"
         );
         // Timescale が 0 のときも Timescale が無いものとして扱う (loc_timestamp_us と同じ規則)
         assert_eq!(
-            receive_input_lag_ms(Some(1_000_000), Some(0), 1_250_000, 1_000_000),
-            Some(250),
+            receive_input_lag_us(Some(1_000_000), Some(0), 1_250_000, 1_000_000),
+            Some(250_000),
             "Timescale が 0 なら壁時計として測る"
         );
         // 到着が TIMESTAMP より前の音 (配信側の時計が先へ進んでいる) は負になる
         assert_eq!(
-            receive_input_lag_ms(Some(2_000_000), None, 1_000_000, 2_000_000),
-            Some(-1_000),
+            receive_input_lag_us(Some(2_000_000), None, 1_000_000, 2_000_000),
+            Some(-1_000_000),
             "到着のほうが早いときは負の遅れになる"
         );
     }
 
     // TIMESTAMP が無い音と、Timescale がある (メディア時刻である) 音では測れない
     #[test]
-    fn receive_input_lag_ms_returns_none_when_the_timestamp_is_not_a_wall_clock() {
+    fn receive_input_lag_us_returns_none_when_the_timestamp_is_not_a_wall_clock() {
         assert_eq!(
-            receive_input_lag_ms(None, None, 1_250_000, 0),
+            receive_input_lag_us(None, None, 1_250_000, 0),
             None,
             "TIMESTAMP が無い音では測れない"
         );
         assert_eq!(
-            receive_input_lag_ms(None, Some(48_000), 1_250_000, 0),
+            receive_input_lag_us(None, Some(48_000), 1_250_000, 0),
             None,
             "TIMESTAMP が無い音では Timescale があっても測れない"
         );
         assert_eq!(
-            receive_input_lag_ms(Some(48_000), Some(48_000), 1_250_000, 1_000_000),
+            receive_input_lag_us(Some(48_000), Some(48_000), 1_250_000, 1_000_000),
             None,
             "Timescale がある音はメディア時刻であり壁時計と対応しないため測れない"
         );
@@ -9271,7 +9342,7 @@ mod tests {
         );
 
         // 2. Timescale がある (メディア時刻である) 音。入力の遅れは測れないため、出力の遅れを
-        // そのまま使う
+        // そのまま使う (負の遅れは健全な状態として 0 に寄せる)
         let media_pts_us = base_us + 20_000;
         let media_timestamp = u64::try_from(media_pts_us).expect("時刻は 0 以上であること");
         let properties = audio_loc_properties(media_timestamp, 1_000_000, None);
@@ -9293,8 +9364,9 @@ mod tests {
             "Timescale がある音では入力の遅れを測らないこと"
         );
         assert_eq!(
-            stats.decode_lag_ms, stats.lag_ms,
-            "測れないときは出力の遅れをそのまま使うこと"
+            stats.decode_lag_ms,
+            stats.lag_ms.map(|lag_ms| lag_ms.max(0)),
+            "測れないときは出力の遅れをそのまま使い、負の遅れは 0 に寄せること"
         );
 
         assert!(

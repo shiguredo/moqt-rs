@@ -1,6 +1,6 @@
 //! AV1 デコーダ (dav1d)
 
-use crate::decoder::{DecodedVideoFrame, copy_plane};
+use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane};
 use crate::error::Result;
 
 /// dav1d を用いた AV1 デコーダ
@@ -38,6 +38,7 @@ impl Av1Decoder {
                 height: h as i32,
                 // Timestamp は Object の Properties から pipeline が載せる
                 timestamp_us: None,
+                timestamp_kind: TimestampKind::None,
             });
         }
         Ok(frames)

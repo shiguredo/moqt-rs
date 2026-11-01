@@ -1,11 +1,12 @@
 //! 棄却で飛んだ境目のフェードのテスト
 //!
-//! 公開 API (`fade_splice_edge` / `splice_fade_samples`) の契約を確認する。moqt-js の
-//! `src/audioSpliceFade.ts` が固定する規則 (落とす長さ・端の落とし方・外側を変えないこと)
-//! を移植する。
+//! 公開 API (`fade_splice_edge` / `splice_fade_samples` / 出力側の接続部品) の契約を確認する。
+//! moqt-js の `src/audioSpliceFade.ts` が固定する規則 (落とす長さ・端の落とし方・外側を
+//! 変えないこと・隙間の補間・継ぎ目のクロスフェード) を移植する。
 
 use shiguredo_moqt::playout::splice_fade::{
-    AudioSpliceEdge, fade_splice_edge, fade_splice_edge_i16, splice_fade_samples,
+    AudioSpliceEdge, AudioSpliceEdges, cross_fade_head, fade_splice_edge, fade_splice_edge_i16,
+    interpolate_splice_gap, merge_faded_planes, smooth_splice_head, splice_fade_samples,
 };
 
 /// 0.5 で埋めた音声を作る
@@ -210,4 +211,199 @@ fn fading_i16_never_grows_the_sample() {
             "端へ向けて単調に大きくなること: index={index}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// 出力側の接続部品 (moqt-js の audioSpliceFade.test.ts が固定する規則)
+// ---------------------------------------------------------------------------------------
+
+/// Opus の 1 フレーム (8 ms、16 kHz)
+const SAMPLE_RATE: u32 = 16_000;
+const FRAME_SAMPLES: usize = 128;
+
+/// 落とす長さ (2 ms = 32 サンプル)
+const FADE_SAMPLES: usize = 32;
+
+/// 一定値のフレームを作る (端の変化を読みやすくする)
+fn constant_frame(value: f32) -> Vec<f32> {
+    vec![value; FRAME_SAMPLES]
+}
+
+#[test]
+fn smooth_splice_head_does_not_create_a_step_over_the_previous_sound() {
+    // 補間の開始に元の音より大きい段差を作らない。既知の直前の末尾から接続し、
+    // 落とす長さの外は補間波形へ戻る
+    let previous: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| -0.2 - index as f32 * 0.001)
+        .collect();
+    let next = constant_frame(-0.1);
+    let output = smooth_splice_head(&[previous.as_slice()], &[next.as_slice()], SAMPLE_RATE);
+    assert_eq!(
+        output[0][0],
+        previous[FRAME_SAMPLES - 1],
+        "既知の直前の末尾から接続すること"
+    );
+    assert_eq!(
+        output[0][FADE_SAMPLES], next[FADE_SAMPLES],
+        "接続後は補間波形へ戻ること"
+    );
+    // 段差が自然な変化幅以内なら、通常の波形へフェードを掛けない
+    let constant = constant_frame(0.5);
+    assert_eq!(
+        smooth_splice_head(&[constant.as_slice()], &[constant.as_slice()], SAMPLE_RATE)[0],
+        constant,
+        "同じ音へ毎回フェードを掛けないこと"
+    );
+}
+
+#[test]
+fn interpolate_splice_gap_connects_the_two_ends_linearly() {
+    // 周期推定できない子音でも、既知の 2 端点の間にある短い隙間は無音へ落とさずに繋ぐ
+    let previous = constant_frame(0.2);
+    let next = constant_frame(-0.2);
+    let output = interpolate_splice_gap(&[previous.as_slice()], &[next.as_slice()], 16);
+    assert_eq!(output[0].len(), 16);
+    // 直前の最終サンプルから次の先頭まで、1 サンプルあたり 0.4 / 17 ずつ動く
+    let mut expected = 0.2f64;
+    for sample in output[0].iter().copied().chain(std::iter::once(-0.2f32)) {
+        assert!(
+            (f64::from(sample) - expected).abs() <= 0.4 / 17.0 + 1e-7,
+            "{sample} が {expected} から離れすぎている"
+        );
+        expected = f64::from(sample);
+    }
+}
+
+#[test]
+fn cross_fade_head_keeps_the_level_of_a_continuous_sound() {
+    // 補間と実音が同じ波形なら、継ぎ目のために一度 0 へ落とす必要はない
+    let frame = constant_frame(0.5);
+    let output = cross_fade_head(&[frame.as_slice()], &[frame.as_slice()], SAMPLE_RATE);
+    assert_eq!(output[0], frame, "連続する音の音量を変えないこと");
+    assert_eq!(frame[0], 0.5, "入力を変更しないこと");
+}
+
+#[test]
+fn cross_fade_head_connects_different_phases_without_a_step() {
+    // 位相が異なる音を段差を作らずに繋ぐ
+    let continuation = constant_frame(0.5);
+    let channel = constant_frame(-0.5);
+    let output = cross_fade_head(
+        &[continuation.as_slice()],
+        &[channel.as_slice()],
+        SAMPLE_RATE,
+    );
+    assert_eq!(output[0][0], 0.5, "補間の続きから始めること");
+    assert_eq!(output[0][FADE_SAMPLES], -0.5, "実音へ戻ること");
+    let mut maximum = 0.0f64;
+    for index in 1..=FADE_SAMPLES {
+        maximum = maximum.max((output[0][index] - output[0][index - 1]).abs() as f64);
+    }
+    assert!(
+        maximum <= 1.0 / FADE_SAMPLES as f64 + 1e-6,
+        "急な位相飛びを作らないこと: {maximum}"
+    );
+}
+
+#[test]
+fn cross_fade_head_treats_missing_or_short_continuation_samples_as_zero() {
+    // チャンネルごとに短い continuation を渡しても落ちない。moqt-js は範囲外を 0 として
+    // 混ぜる (`previous[index] ?? 0`)
+    let continuation_full = constant_frame(0.5);
+    let short: Vec<f32> = vec![0.25; 8];
+    let empty: Vec<f32> = Vec::new();
+    let channel_left = constant_frame(-0.5);
+    let channel_right = constant_frame(-0.25);
+    let output = cross_fade_head(
+        &[
+            continuation_full.as_slice(),
+            short.as_slice(),
+            empty.as_slice(),
+        ],
+        &[
+            channel_left.as_slice(),
+            channel_right.as_slice(),
+            channel_right.as_slice(),
+        ],
+        SAMPLE_RATE,
+    );
+    // 0 サンプル目の重みは 0 なので、続きの先頭がそのまま出る
+    assert_eq!(output[0][0], 0.5);
+    assert_eq!(output[1][0], 0.25);
+    // 空の continuation はすべて 0 として混ざる (実音へ向かう重みだけが残る)
+    assert_eq!(output[2][0], 0.0);
+    let weight = 1.0 / FADE_SAMPLES as f64;
+    assert!((f64::from(output[2][1]) - (-0.25 * weight)).abs() < 1e-6);
+    // 続きのチャンネルが無いときは実音をそのまま返す
+    let output = cross_fade_head(
+        &[continuation_full.as_slice()],
+        &[channel_left.as_slice(), channel_right.as_slice()],
+        SAMPLE_RATE,
+    );
+    assert_eq!(output[1], channel_right);
+}
+
+#[test]
+fn merge_faded_planes_returns_empty_for_a_zero_length_plane() {
+    // 長さ 0 の平面は空のバッファになる (moqt-js は長さ 0 の Float32Array を返す)
+    let empty: Vec<f32> = Vec::new();
+    for edges in [
+        AudioSpliceEdges {
+            head: true,
+            tail: false,
+        },
+        AudioSpliceEdges {
+            head: true,
+            tail: true,
+        },
+    ] {
+        assert!(
+            merge_faded_planes(&[empty.as_slice()], SAMPLE_RATE, edges).is_empty(),
+            "平面 1 本でも長さ 0 なら空を返すこと"
+        );
+        assert!(
+            merge_faded_planes(&[empty.as_slice(), empty.as_slice()], SAMPLE_RATE, edges)
+                .is_empty(),
+            "平面 2 本でも長さ 0 なら空を返すこと"
+        );
+    }
+}
+
+#[test]
+fn merge_faded_planes_fades_the_edges_and_merges_the_planes() {
+    // 端を落とし、平面の並びで 1 つのバッファへ戻す
+    let frame = constant_frame(0.5);
+    let merged = merge_faded_planes(
+        &[frame.as_slice(), frame.as_slice()],
+        SAMPLE_RATE,
+        AudioSpliceEdges {
+            head: true,
+            tail: true,
+        },
+    );
+    assert_eq!(merged.len(), FRAME_SAMPLES * 2, "平面の数だけ長くなること");
+    assert_eq!(merged[0], 0.0, "第 1 チャンネルの先頭が 0 になること");
+    assert_eq!(
+        merged[FRAME_SAMPLES - 1],
+        0.0,
+        "第 1 チャンネルの末尾が 0 になること"
+    );
+    assert_eq!(
+        merged[FRAME_SAMPLES], 0.0,
+        "第 2 チャンネルの先頭が 0 になること"
+    );
+    assert!(
+        (f64::from(merged[FADE_SAMPLES]) - 0.5).abs() < 1e-6,
+        "落とす長さの外は元の値であること"
+    );
+    // 端を指定しなければ値を変えない
+    let merged = merge_faded_planes(
+        &[frame.as_slice()],
+        SAMPLE_RATE,
+        AudioSpliceEdges::default(),
+    );
+    assert_eq!(merged[0], 0.5, "先頭がそのままであること");
+    assert_eq!(merged[FRAME_SAMPLES - 1], 0.5, "末尾がそのままであること");
+    // チャンネルが無ければ空
+    assert!(merge_faded_planes(&[], SAMPLE_RATE, AudioSpliceEdges::default()).is_empty());
 }

@@ -9,7 +9,7 @@
 
 use shiguredo_libvpx::{Decoder, DecoderCodec, DecoderConfig};
 
-use crate::decoder::{DecodedVideoFrame, copy_plane};
+use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane};
 use crate::error::{Error, Result};
 
 /// 扱う VP8 / VP9 の種別
@@ -75,6 +75,7 @@ impl VpxDecoder {
                 height: h as i32,
                 // Timestamp は Object の Properties から pipeline が載せる
                 timestamp_us: None,
+                timestamp_kind: TimestampKind::None,
             });
         }
         Ok(frames)

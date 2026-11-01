@@ -9,7 +9,7 @@
 
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_FADE_MS, TIME_STRETCH_MAX_CONCEAL_US, TIME_STRETCH_MIN_LAG, compress,
-    conceal, concealment_end_gain, is_time_stretch_available,
+    conceal, concealment_end_gain, is_time_stretch_available, preemptively_expand,
 };
 
 /// 周期 `period` の矩形波を `length` サンプル作る
@@ -259,11 +259,21 @@ fn compress_with_period_longer_than_the_search_range_is_ignored() {
 
 #[test]
 fn compress_with_unsupported_sample_rate_is_ignored() {
-    let original = square_wave(960, 240, 0.5);
-    let mut channel = original.clone();
-    let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
-    assert_eq!(compress(&mut channels, 44_100, usize::MAX), 0);
-    assert_eq!(channel, original);
+    // 96 kHz と 22.05 kHz は 4 kHz の格子へ丸めてもフィルタの表に無い
+    for sample_rate in [96_000u32, 22_050] {
+        let original = square_wave(960, 240, 0.5);
+        let mut channel = original.clone();
+        let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
+        assert_eq!(
+            compress(&mut channels, sample_rate, usize::MAX),
+            0,
+            "sample_rate={sample_rate} では圧縮しないこと"
+        );
+        assert_eq!(
+            channel, original,
+            "sample_rate={sample_rate} では音を変えないこと"
+        );
+    }
 }
 
 #[test]
@@ -302,7 +312,7 @@ fn pitch_period_must_fit_in_half_of_the_frame() {
 }
 
 #[test]
-fn analysis_boundary_of_the_downsampled_length_is_inclusive() {
+fn analysis_boundary_of_the_downsampled_length_is_exclusive() {
     // 8 kHz: 間引き後 59 サンプルでは周期を求められない
     let mut channel = vec![0.0f32; 123];
     let original = channel.clone();
@@ -310,8 +320,19 @@ fn analysis_boundary_of_the_downsampled_length_is_inclusive() {
     assert_eq!(compress(&mut channels, 8_000, usize::MAX), 0);
     assert_eq!(channel, original);
 
-    // 8 kHz: 間引き後 60 サンプル (ずらし幅の上限が下限と同じ 10) では操作する
+    // 8 kHz: 間引き後 60 サンプル (ずらし幅の上限が下限と同じ 10) でも、自己相関の窓
+    // (50 サンプル) と周期の下限 (10 サンプル) に 1 サンプル足りないため操作しない。
+    // moqt-js は `downsampled.length < TIME_STRETCH_CORRELATION_LEN + TIME_STRETCH_MIN_LAG
+    // + 1` で判定する
     let mut channel = vec![0.0f32; 124];
+    let original = channel.clone();
+    let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
+    assert_eq!(compress(&mut channels, 8_000, usize::MAX), 0);
+    assert_eq!(channel, original);
+
+    // 8 kHz: 間引き後 61 サンプルで操作する。無音なのでピッチは探索の下限
+    // (4 kHz の 10 サンプル = 8 kHz で 20 サンプル) になる
+    let mut channel = vec![0.0f32; 126];
     let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
     assert_eq!(
         compress(&mut channels, 8_000, usize::MAX),
@@ -782,8 +803,7 @@ fn conceal_fades_the_tail_when_the_period_is_uncertain() {
     );
     assert_eq!(output[1_919], 0.0, "末尾のサンプルが 0 になること");
     // フェードは末尾の 2 ms だけに掛ける (その前は振幅が残る)
-    let fade = ((f64::from(TIME_STRETCH_CONCEAL_FADE_MS) / 1_000.0) * f64::from(SAMPLE_RATE))
-        .round() as usize;
+    let fade = ((TIME_STRETCH_CONCEAL_FADE_MS / 1_000.0) * f64::from(SAMPLE_RATE)).round() as usize;
     let faded_peak = output[1_920 - fade / 4..]
         .iter()
         .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
@@ -931,12 +951,19 @@ fn conceal_with_a_short_input_is_ignored() {
 
 #[test]
 fn conceal_with_unsupported_sample_rate_is_ignored() {
-    let original = square_wave(960, 240, 0.5);
-    let mut output = vec![0.0f32; 1_764];
-    let channels: [&[f32]; 1] = [original.as_slice()];
-    let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
-    assert_eq!(conceal(&channels, &mut outputs, 44_100, 40_000), 0);
-    assert!(output.iter().all(|sample| *sample == 0.0));
+    // 96 kHz と 22.05 kHz は 4 kHz の格子へ丸めてもフィルタの表に無い
+    for sample_rate in [96_000u32, 22_050] {
+        let original = square_wave(960, 240, 0.5);
+        let mut output = vec![0.0f32; 1_764];
+        let channels: [&[f32]; 1] = [original.as_slice()];
+        let mut outputs: [&mut [f32]; 1] = [output.as_mut_slice()];
+        assert_eq!(
+            conceal(&channels, &mut outputs, sample_rate, 40_000),
+            0,
+            "sample_rate={sample_rate} では補間しないこと"
+        );
+        assert!(output.iter().all(|sample| *sample == 0.0));
+    }
 }
 
 #[test]
@@ -1035,57 +1062,597 @@ fn concealment_end_gain_ramps_to_the_end_gain() {
 }
 
 #[test]
-fn is_time_stretch_available_accepts_only_the_downsample_table_rates() {
-    // 4 kHz へ間引くフィルタの表にある 8 / 16 / 32 / 48 kHz だけが使える
+fn is_time_stretch_available_matches_the_downsample_table() {
+    // 4 kHz の格子へ丸めたレートがフィルタの表 (8 / 16 / 32 / 48 kHz) にあるレートは使える
     for sample_rate in [8_000u32, 16_000, 32_000, 48_000] {
         assert!(
             is_time_stretch_available(sample_rate),
             "sample_rate={sample_rate} は時間圧縮と補間を使えること"
         );
     }
-    // 表に無いレートは使えない。44.1 kHz (AAC など) とその半分の 22.05 kHz、レートとして
-    // 成り立たない 0 がこれにあたる
-    for sample_rate in [44_100u32, 22_050, 0] {
+    // 44.1 kHz は解析用の信号だけを 48 kHz の格子へ換算するため使える
+    assert!(
+        is_time_stretch_available(44_100),
+        "44.1 kHz は時間圧縮と補間を使えること"
+    );
+    // 判定は 4 kHz の倍数へ丸めてから表を引く。8.2 kHz は 8 kHz、47.999 kHz は 48 kHz として
+    // 扱われ、実際に時間圧縮と補間が働く
+    for sample_rate in [8_200u32, 47_999] {
+        assert!(
+            is_time_stretch_available(sample_rate),
+            "sample_rate={sample_rate} は表のレートへ丸められること"
+        );
+    }
+    // 22.05 kHz は丸めると 24 kHz になり表に無い。0 や 1 kHz は格子が 0 になる。
+    // 96 kHz も表に無い
+    for sample_rate in [22_050u32, 24_000, 95_000, 96_000, 1_000, 0] {
         assert!(
             !is_time_stretch_available(sample_rate),
             "sample_rate={sample_rate} は時間圧縮と補間を使えないこと"
         );
     }
-    // 判定は表の完全一致にする。4 kHz の倍数へ丸めると、8.2 kHz のような表に無いレートを
-    // 8 kHz とみなして「使える」と答えてしまうが、compress はサンプルレートそのもので
-    // フィルタを引くため実際には動かない
-    assert!(
-        !is_time_stretch_available(8_200),
-        "表に無いレートは表の近くでも使えないこと"
-    );
-    // 判定と実際の操作が一致することを固定する。丸めと完全一致で結論が分かれるレート
-    // (8.2 kHz は丸めると 8 kHz、47.999 kHz は丸めると 48 kHz) では、判定が false である
-    // だけでなく compress / conceal がどれも何もしないことを確かめる
-    for sample_rate in [8_200u32, 47_999] {
-        assert!(
-            !is_time_stretch_available(sample_rate),
-            "sample_rate={sample_rate} は時間圧縮と補間を使えないこと"
-        );
-        let original = square_wave(960, 240, 0.5);
-        let mut channel = original.clone();
+}
+
+#[test]
+fn rates_rounded_to_the_downsample_table_are_stretched() {
+    // 4 kHz の格子へ丸めたレートでも、周期は元のサンプルレートのサンプル数へ戻して操作する
+    for (sample_rate, length, period) in [(8_200u32, 160usize, 40usize), (47_999, 960, 240)] {
+        let mut channel = square_wave(length, period, 0.5);
         let mut channels: [&mut [f32]; 1] = [channel.as_mut_slice()];
         assert_eq!(
             compress(&mut channels, sample_rate, usize::MAX),
-            0,
-            "sample_rate={sample_rate} では時間圧縮をしないこと"
+            -(period as isize),
+            "sample_rate={sample_rate} で周期 {period} サンプルを削ること"
         );
-        assert_eq!(
-            channel, original,
-            "sample_rate={sample_rate} では音を変えないこと"
-        );
-        let mut concealed = vec![0.0f32; 1_764];
-        let channels: [&[f32]; 1] = [original.as_slice()];
-        let mut outputs: [&mut [f32]; 1] = [concealed.as_mut_slice()];
-        assert_eq!(
-            conceal(&channels, &mut outputs, sample_rate, 40_000),
-            0,
-            "sample_rate={sample_rate} では補間をしないこと"
-        );
-        assert!(concealed.iter().all(|sample| *sample == 0.0));
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// 周期の端数補間・圧縮位置の選択・予備的な時間伸長
+//
+// moqt-js の audioTimeStretch.test.ts が固定する規則を移植する。波形の周期は 4 kHz の
+// 粗い格子で探したあと、元のサンプルレートの相関で ±1 格子を評価し、端数まで求める。
+// 圧縮は削る長さを変えず、クロスフェードで波形を打ち消さない位置へ切断位置を移す。
+// 予備的な時間伸長は、直前の実音 10 ms と今回の実音を 15 ms の位置で重ねて 1 周期を足す。
+// ---------------------------------------------------------------------------------------
+
+/// 基本周波数 `frequency_hz` の有声 (倍音を 1 / 次数で重ねた周期波) を、指定したレートと
+/// 長さで作る
+///
+/// 実際の声に近づけるため、整数次の倍音を 4 kHz (音声の帯域) まで重ねる。振幅は 0.5 に揃える。
+/// 44.1 kHz では 20 ms のフレームが 882 サンプルになる。
+fn voiced_samples(frequency_hz: f64, sample_rate: u32, length: usize) -> Vec<f32> {
+    const MAX_HARMONIC_HZ: f64 = 4_000.0;
+    let mut norm = 0.0;
+    let mut harmonic = 1;
+    while harmonic as f64 * frequency_hz < MAX_HARMONIC_HZ {
+        norm += 1.0 / harmonic as f64;
+        harmonic += 1;
+    }
+    (0..length)
+        .map(|index| {
+            let mut value = 0.0;
+            let mut harmonic = 1;
+            while harmonic as f64 * frequency_hz < MAX_HARMONIC_HZ {
+                value += (1.0 / harmonic as f64)
+                    * (2.0 * std::f64::consts::PI * harmonic as f64 * frequency_hz * index as f64
+                        / f64::from(sample_rate))
+                    .sin();
+                harmonic += 1;
+            }
+            ((0.5 * value) / norm) as f32
+        })
+        .collect()
+}
+
+/// 決定論的な擬似乱数でノイズのフレームを作る (moqt-js の `noiseFrame` と同じ合同式)
+fn noise_frame(seed: u32) -> Vec<f32> {
+    let mut state = f64::from(seed);
+    (0..FRAME_SAMPLES)
+        .map(|_| {
+            state = (state * 1_103_515_245.0 + 12_345.0) % 2_147_483_648.0;
+            ((state / 2_147_483_648.0) * 2.0 - 1.0) as f32
+        })
+        .collect()
+}
+
+/// 時間圧縮を適用し、削った長さ (正の値) を返す
+fn compress_removed(
+    channel: &mut [f32],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+) -> isize {
+    let mut channels: [&mut [f32]; 1] = [channel];
+    -compress(&mut channels, sample_rate, max_length_change_samples)
+}
+
+/// 補間を適用し、埋めた長さと生成した音を返す
+fn conceal_case(channels: &[&[f32]], sample_rate: u32, conceal_us: i64) -> (isize, Vec<Vec<f32>>) {
+    let target = ((conceal_us * i64::from(sample_rate) + 500_000) / 1_000_000).max(0) as usize;
+    let mut output = vec![vec![0.0f32; target]; channels.len()];
+    let mut outputs: Vec<&mut [f32]> = output
+        .iter_mut()
+        .map(|channel| channel.as_mut_slice())
+        .collect();
+    let filled = conceal(channels, &mut outputs, sample_rate, conceal_us);
+    (filled, output)
+}
+
+#[test]
+fn compress_uses_the_integer_period_on_the_grid() {
+    // 4 kHz の格子に乗る F0 では、周期が元のサンプルレートで整数になる。このときは端数
+    // 補間を掛けず、真の周期ちょうどで削る (格子に乗る周期を放物線の頂点へずらすと、有限窓の
+    // 前後の相関の非対称で正しい整数周期の位相を壊す)
+    for (frequency_hz, period) in [(160.0f64, 300isize), (200.0, 240)] {
+        let mut channel = voiced_wave(frequency_hz);
+        assert_eq!(
+            compress_removed(&mut channel, SAMPLE_RATE, FRAME_SAMPLES / 2),
+            period,
+            "{frequency_hz} Hz の有声を真の周期 {period} サンプルで削ること"
+        );
+        // 完全相関のときは整数のずらし幅を維持するため、波形の位相が変わっても周期は動かない
+        for phase in [0.0f64, 1.0 / 3.0, 2.0 / 3.0] {
+            let mut channel: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|index| sine_sample_with_phase(index, frequency_hz, SAMPLE_RATE, 0.5, phase))
+                .collect();
+            assert_eq!(
+                compress_removed(&mut channel, SAMPLE_RATE, FRAME_SAMPLES / 2),
+                period,
+                "{frequency_hz} Hz の位相 {phase} でも真の周期 {period} で削ること"
+            );
+        }
+    }
+}
+
+#[test]
+fn compress_refines_the_fractional_period() {
+    // 4 kHz の格子に乗らない F0 は、ピークの前後 1 格子の相関を放物線補間して端数まで求める。
+    // 修正前は 180 / 220 / 260 Hz が 264 / 216 / 180 サンプル (格子の周期) であり、真の周期
+    // との誤差が 2 サンプル以上あった
+    for frequency_hz in [180.0f64, 220.0, 260.0] {
+        let true_period = f64::from(SAMPLE_RATE) / frequency_hz;
+        let mut channel = voiced_wave(frequency_hz);
+        let removed = compress_removed(&mut channel, SAMPLE_RATE, FRAME_SAMPLES / 2);
+        assert!(removed > 0, "{frequency_hz} Hz を圧縮すること");
+        assert!(
+            (removed as f64 - true_period).abs() <= 1.0,
+            "{frequency_hz} Hz の削る長さ {removed} が真の周期 {true_period} の ±1 サンプルに入ること"
+        );
+        // 格子の丸め (12 サンプル単位) のままなら、端数補間が効いていない
+        assert_ne!(
+            removed % 12,
+            0,
+            "{frequency_hz} Hz が 4 kHz の格子の周期のまま削られていないこと"
+        );
+        // 端数補間は真の周期に近づく向きに働く (格子へ丸めた周期より誤差が小さい)
+        let grid_rounded = (true_period / 12.0).round() * 12.0;
+        assert!(
+            (removed as f64 - true_period).abs() < (grid_rounded - true_period).abs(),
+            "{frequency_hz} Hz が格子へ丸めた周期 {grid_rounded} より真の周期に近いこと"
+        );
+    }
+}
+
+#[test]
+fn compress_refines_the_period_near_the_search_upper_bound() {
+    // 粗い探索の上端に最大値がある場合も、元のレートで評価できる近傍から周期を選ぶ。
+    // 348 サンプルのまま切ると、真の周期 342.857 サンプルから 5 サンプルずれる
+    let mut channel = voiced_wave(140.0);
+    let removed = compress_removed(&mut channel, SAMPLE_RATE, FRAME_SAMPLES / 2);
+    assert!(removed > 0, "140 Hz の有声を圧縮すること");
+    assert!(
+        (removed as f64 - f64::from(SAMPLE_RATE) / 140.0).abs() <= 1.0,
+        "140 Hz の削る長さ {removed} が真の周期の ±1 サンプルに入ること"
+    );
+}
+
+#[test]
+fn compress_supports_44_1khz_fractional_periods() {
+    // 44.1 kHz は解析用の信号だけを 48 kHz へ換算し、求めたずらし幅に 11.025 を掛けて元の
+    // サンプルレートへ戻す。300 Hz の真の周期は 147 サンプルであり、4 kHz の格子のままでは
+    // 143 サンプルになる。20 ms (882 サンプル) では 2 周期の相関ピークも探索範囲に入るため、
+    // 1 周期だけを確かめられる 800 サンプルで検証する
+    let mut channel = voiced_samples(300.0, 44_100, 800);
+    let removed = compress_removed(&mut channel, 44_100, 400);
+    assert!(removed > 0, "300 Hz を圧縮すること");
+    assert!(
+        (removed as f64 - 147.0).abs() <= 1.0,
+        "削る長さ {removed} が真の周期 147 の ±1 サンプルに入ること"
+    );
+    assert_ne!(
+        removed, 143,
+        "格子へ丸めた 143 サンプルのまま削られていないこと"
+    );
+    // 4 kHz の格子に乗る 200 Hz は、元のサンプルレートの端数 (220.5) を丸めた 221 になる
+    let mut channel = voiced_samples(200.0, 44_100, 882);
+    assert_eq!(
+        compress_removed(&mut channel, 44_100, 441),
+        221,
+        "200 Hz は真の周期 220.5 サンプルを丸めた 221 サンプルで削ること"
+    );
+}
+
+#[test]
+fn compress_rejects_even_after_fractional_refinement() {
+    // 端数補間を足しても、既存の拒否条件は変わらない
+    let frame = voiced_wave(180.0);
+    let mut channel = frame.clone();
+    let removed = compress_removed(&mut channel, SAMPLE_RATE, usize::MAX);
+    assert!(removed > 0, "上限なしでは削ること");
+    let mut limited = frame.clone();
+    assert_eq!(
+        compress_removed(&mut limited, SAMPLE_RATE, (removed - 1) as usize),
+        0,
+        "上限が周期より 1 サンプル短いときは削らないこと"
+    );
+    let mut limited = frame.clone();
+    assert_eq!(
+        compress_removed(&mut limited, SAMPLE_RATE, removed as usize),
+        removed,
+        "上限が周期ちょうどのときは削ること"
+    );
+    // 後半の位相を反転すると、切れ目の前後で波形が一致しない (相関が足りない)
+    let mut inverted = frame.clone();
+    for sample in &mut inverted[FRAME_SAMPLES / 2..] {
+        *sample = -*sample;
+    }
+    assert_eq!(
+        compress_removed(&mut inverted, SAMPLE_RATE, usize::MAX),
+        0,
+        "相関が足りない音は操作しないこと"
+    );
+}
+
+#[test]
+fn compress_moves_the_splice_away_from_a_growing_voice() {
+    // 中央のクロスフェードは、後半で強まる音を前半の弱い音と混ぜて潰す。前半には完全に
+    // 同じ周期が続くため、そこで削れば強まりをそのまま残せる
+    const ATTACK: usize = 600;
+    let original: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| {
+            let amplitude = if index < ATTACK { 0.3 } else { 0.36 };
+            (amplitude * (2.0 * std::f64::consts::PI * index as f64 / 240.0).sin()) as f32
+        })
+        .collect();
+    let mut channel = original.clone();
+    assert_eq!(
+        compress_removed(&mut channel, SAMPLE_RATE, 240),
+        240,
+        "削る時間を増減しないこと"
+    );
+    // 圧縮後の使用する範囲 (720 サンプル) の先頭と末尾は元の音のまま
+    assert_eq!(channel[0], original[0], "フレームの先頭を変更しないこと");
+    assert_eq!(
+        channel[FRAME_SAMPLES - 240 - 1],
+        original[FRAME_SAMPLES - 1],
+        "フレームの末尾を変更しないこと"
+    );
+    let maximum_error = channel[ATTACK - 240..FRAME_SAMPLES - 240]
+        .iter()
+        .enumerate()
+        .fold(0.0f64, |maximum, (index, sample)| {
+            maximum.max((f64::from(*sample) - f64::from(original[ATTACK + index])).abs())
+        });
+    assert!(
+        maximum_error < 1e-7,
+        "既に受信した音の強まりを潰さないこと: 最大誤差 {maximum_error}"
+    );
+}
+
+#[test]
+fn compress_does_not_sacrifice_the_quiet_channel() {
+    // 左の後半の強まりを避けると、右の前半の強まりへクロスフェードが移る。右を 40 dB
+    // 小さくしても、それを犠牲にした位置を選んではならない
+    let left: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| {
+            let amplitude = if index < 600 { 0.3 } else { 0.36 };
+            (amplitude * (2.0 * std::f64::consts::PI * index as f64 / 240.0).sin()) as f32
+        })
+        .collect();
+    let right: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| {
+            let amplitude = if index < 200 { 0.003 } else { 0.0036 };
+            (amplitude * (2.0 * std::f64::consts::PI * index as f64 / 240.0).sin()) as f32
+        })
+        .collect();
+    let mut storage = [left, right.clone()];
+    {
+        let mut channels: Vec<&mut [f32]> = storage
+            .iter_mut()
+            .map(|channel| channel.as_mut_slice())
+            .collect();
+        assert_eq!(
+            compress(&mut channels, SAMPLE_RATE, 240),
+            -240,
+            "圧縮量を変えないこと"
+        );
+    }
+    assert_eq!(
+        &storage[1][..240],
+        &right[..240],
+        "右の強まりを中央の切断より悪化させないこと"
+    );
+}
+
+#[test]
+fn compress_with_mismatched_pitch_between_channels_is_ignored() {
+    // 片側だけに周期がある音で他方まで切ると、クロスフェード中に逆相が混ざって音量が落ちる。
+    // 長さの一致だけでなく、すべてのチャンネルで同じ周期を使えることを要求する
+    for right_frequency_hz in [233.0f64, 333.0, 440.0] {
+        let left = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.5);
+        let right = sine_wave(FRAME_SAMPLES, right_frequency_hz, SAMPLE_RATE, 0.5);
+        let mut storage = [left, right];
+        let mut channels: Vec<&mut [f32]> = storage
+            .iter_mut()
+            .map(|channel| channel.as_mut_slice())
+            .collect();
+        assert_eq!(
+            compress(&mut channels, SAMPLE_RATE, FRAME_SAMPLES / 2),
+            0,
+            "{right_frequency_hz} Hz の右チャンネルを壊さないこと"
+        );
+    }
+}
+
+#[test]
+fn compress_does_not_mistake_a_harmonic_for_the_fundamental() {
+    // 共鳴が強い低い声では、短い相関窓だけを見ると 80 Hz の第 5 倍音を周期と誤認する。
+    // フレーム全体では一致しないため、2.5 ms を切る操作を受け入れてはならない
+    let mut channel: Vec<f32> = (0..FRAME_SAMPLES)
+        .map(|index| {
+            let mut sample = 0.0;
+            for harmonic in 1..=20 {
+                let formant = 0.2 + (-((harmonic as f64 * 80.0 - 1_000.0) / 650.0).powi(2)).exp();
+                sample += (formant / harmonic as f64)
+                    * (2.0 * std::f64::consts::PI * harmonic as f64 * 80.0 * index as f64
+                        / f64::from(SAMPLE_RATE))
+                    .sin();
+            }
+            (sample * 0.35) as f32
+        })
+        .collect();
+    assert_eq!(
+        compress_removed(&mut channel, SAMPLE_RATE, FRAME_SAMPLES / 2),
+        0,
+        "低い声の倍音を基本周期と誤認しないこと"
+    );
+}
+
+#[test]
+fn conceal_uses_the_same_tail_period_for_every_channel() {
+    // 左が 200 Hz でも、右の周期が異なれば繰り返しの内部が別の音になる。先頭の段差だけが
+    // 偶然小さくなる位相も含め、100 フレーム分を調べる
+    for right_frequency_hz in [233.0f64, 333.0, 400.0] {
+        let mut generated = 0;
+        for frame in 0..100 {
+            let left = sine_wave(FRAME_SAMPLES, 200.0, SAMPLE_RATE, 0.3);
+            let phase_cycles = right_frequency_hz * frame as f64 * 0.02;
+            let right: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|index| {
+                    sine_sample_with_phase(
+                        index,
+                        right_frequency_hz,
+                        SAMPLE_RATE,
+                        0.3,
+                        phase_cycles,
+                    )
+                })
+                .collect();
+            let channels: [&[f32]; 2] = [left.as_slice(), right.as_slice()];
+            let (filled, _) = conceal_case(&channels, SAMPLE_RATE, 20_000);
+            if filled > 0 {
+                generated += 1;
+            }
+        }
+        let expected = if right_frequency_hz == 400.0 { 100 } else { 0 };
+        assert_eq!(
+            generated, expected,
+            "右が {right_frequency_hz} Hz の補間で、200 Hz の周期を使える場合だけ生成すること"
+        );
+    }
+}
+
+#[test]
+fn conceal_does_not_change_the_decision_for_duplicated_channels() {
+    // 同じ音を左右に複製しても、補間の可否が変わらないこと (第 2 チャンネルの末尾の相関を
+    // 確かめる処理が、同じ音では常に同じ結論になる)
+    let mut accepted = 0;
+    for sample_rate in [44_100u32, 48_000] {
+        for duration_ms in [10u32, 20, 40] {
+            for frequency_hz in [100.0f64, 140.0, 170.0, 220.0, 390.0] {
+                let length =
+                    (f64::from(sample_rate) * f64::from(duration_ms) / 1_000.0).round() as usize;
+                let channel = voiced_samples(frequency_hz, sample_rate, length);
+                let (mono, _) = conceal_case(&[channel.as_slice()], sample_rate, 20_000);
+                let duplicated = channel.clone();
+                let (stereo, _) = conceal_case(
+                    &[channel.as_slice(), duplicated.as_slice()],
+                    sample_rate,
+                    20_000,
+                );
+                assert_eq!(
+                    stereo, mono,
+                    "{sample_rate} Hz / {duration_ms} ms / {frequency_hz} Hz で同じ判定になること"
+                );
+                if mono > 0 {
+                    accepted += 1;
+                }
+            }
+        }
+    }
+    assert!(accepted > 0, "すべてを拒否して判定を一致させないこと");
+}
+
+#[test]
+fn conceal_at_44_1khz_keeps_the_phase_of_a_fractional_period() {
+    // 44.1 kHz の探索下限付近では元のレートの周期が整数にならない。長い穴の末尾まで位相を
+    // 保ち、細探索の境界への丸めで周波数が変わらないことを、元の連続波形と比較する
+    for (frequency_hz, phase_cycles, gap_ms) in [(399.0f64, 0.71, 100u32), (395.0, 0.0, 20)] {
+        let reference: Vec<f32> = (0..882)
+            .map(|index| sine_sample_with_phase(index, frequency_hz, 44_100, 0.5, phase_cycles))
+            .collect();
+        let conceal_us = i64::from(gap_ms) * 1_000;
+        let (filled, outputs) = conceal_case(&[reference.as_slice()], 44_100, conceal_us);
+        let target = ((conceal_us * 44_100 + 500_000) / 1_000_000) as usize;
+        assert_eq!(filled, target as isize, "{frequency_hz} Hz を補間すること");
+        let end_gain = f64::from(concealment_end_gain(conceal_us));
+        for (index, sample) in outputs[0].iter().enumerate() {
+            let gain = 1.0 - (1.0 - end_gain) * ((index as f64 + 1.0) / target as f64);
+            let expected = f64::from(sine_sample_with_phase(
+                882 + index,
+                frequency_hz,
+                44_100,
+                0.5,
+                phase_cycles,
+            )) * gain;
+            assert!(
+                (f64::from(*sample) - expected).abs() < 0.04,
+                "{frequency_hz} Hz の {index} 番目が元の周期の位相を保つこと: {} 対 {expected}",
+                sample
+            );
+        }
+    }
+}
+
+#[test]
+fn preemptive_expand_returns_the_missing_depth() {
+    // 再同期で浅くなった到着基準の深さを、音を止めずに 1 周期ずつ戻す。低い声も含めて実際に
+    // 伸ばし、先頭と末尾の実音は保ち、周期の追加で新しい段差を作らない
+    for sample_rate in [44_100u32, 48_000] {
+        for frequency_hz in [80.0f64, 170.0, 440.0] {
+            let length = (f64::from(sample_rate) * 0.02).round() as usize;
+            let old_length = (f64::from(sample_rate) * 0.01).round() as usize;
+            let input: Vec<f32> = (0..length)
+                .map(|index| sine_sample(index, frequency_hz, sample_rate, 0.2))
+                .collect();
+            let history: Vec<f32> = (0..old_length)
+                .map(|index| {
+                    sine_sample_with_phase(
+                        index,
+                        frequency_hz,
+                        sample_rate,
+                        0.2,
+                        -frequency_hz * old_length as f64 / f64::from(sample_rate),
+                    )
+                })
+                .collect();
+            let limit = (f64::from(sample_rate) * 0.015).round() as usize;
+            let expansion = preemptively_expand(
+                core::slice::from_ref(&input),
+                core::slice::from_ref(&history),
+                sample_rate,
+                limit,
+            );
+            assert!(
+                expansion.added_samples > 0,
+                "{sample_rate} Hz / {frequency_hz} Hz で実際に伸ばすこと"
+            );
+            assert!(
+                expansion.added_samples <= limit,
+                "{sample_rate} Hz / {frequency_hz} Hz で上限を超えないこと"
+            );
+            let output = &expansion.channels[0];
+            assert_eq!(output.len(), input.len() + expansion.added_samples);
+            assert_eq!(&output[..32], &input[..32], "先頭の実音を保つこと");
+            assert_eq!(
+                &output[output.len() - 32..],
+                &input[input.len() - 32..],
+                "末尾の実音を保つこと"
+            );
+            assert!(
+                max_step(output) <= max_step(&input) * 1.05,
+                "{sample_rate} Hz / {frequency_hz} Hz の周期の追加で新しい段差を作らないこと"
+            );
+            let limited = preemptively_expand(
+                &[input],
+                &[history],
+                sample_rate,
+                expansion.added_samples - 1,
+            );
+            assert_eq!(
+                limited.added_samples, 0,
+                "目標の深さを越える周期を足さないこと"
+            );
+        }
+    }
+}
+
+#[test]
+fn preemptive_expand_leaves_noise_unchanged() {
+    // 周期を推定できない音 (白色雑音) では操作しない
+    let noise = noise_frame(12);
+    let expansion = preemptively_expand(
+        core::slice::from_ref(&noise),
+        core::slice::from_ref(&noise),
+        SAMPLE_RATE,
+        480,
+    );
+    assert_eq!(expansion.added_samples, 0, "非周期音は伸ばさないこと");
+    assert!(
+        expansion.channels.is_empty(),
+        "操作しなかったときは音を返さないこと"
+    );
+}
+
+#[test]
+fn preemptive_expand_fills_silence() {
+    // 無音は聞こえないため、要求の長さまで最後のサンプルで埋める
+    let silence = vec![0.0f32; FRAME_SAMPLES];
+    let expansion = preemptively_expand(&[silence], &[], SAMPLE_RATE, 240);
+    assert_eq!(expansion.added_samples, 240);
+    assert_eq!(expansion.channels[0].len(), FRAME_SAMPLES + 240);
+    assert!(expansion.channels[0].iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn preemptive_expand_ignores_unusable_input() {
+    let input = sine_wave(FRAME_SAMPLES, 170.0, SAMPLE_RATE, 0.2);
+    let history = sine_wave(FRAME_SAMPLES / 2, 170.0, SAMPLE_RATE, 0.2);
+    // 増やせる長さが 0
+    assert_eq!(
+        preemptively_expand(
+            core::slice::from_ref(&input),
+            core::slice::from_ref(&history),
+            SAMPLE_RATE,
+            0
+        )
+        .added_samples,
+        0
+    );
+    // 対応外のサンプルレート
+    assert_eq!(
+        preemptively_expand(
+            core::slice::from_ref(&input),
+            core::slice::from_ref(&history),
+            96_000,
+            480
+        )
+        .added_samples,
+        0
+    );
+    // 直前の実音が無い (チャンネル数が合わない)
+    assert_eq!(
+        preemptively_expand(core::slice::from_ref(&input), &[], SAMPLE_RATE, 480).added_samples,
+        0
+    );
+    let duplicated_history = vec![history.clone(), history.clone()];
+    assert_eq!(
+        preemptively_expand(
+            core::slice::from_ref(&input),
+            &duplicated_history,
+            SAMPLE_RATE,
+            480
+        )
+        .added_samples,
+        0
+    );
+    // 空のチャンネルと長さ 0
+    assert_eq!(
+        preemptively_expand(&[], &[], SAMPLE_RATE, 480).added_samples,
+        0
+    );
+    assert_eq!(
+        preemptively_expand(&[Vec::new()], &[], SAMPLE_RATE, 480).added_samples,
+        0
+    );
 }

@@ -3,18 +3,25 @@
 //! 音声の出力が FIFO (積んだ順に鳴らす) の場合 (`raw_player` のように PTS を再生時刻に
 //! 使わない出力)、隙間を無音としても積まなければ、後続の音がその分だけ早く鳴り、出力が
 //! 枯れて段差になる。そこで隙間の全長ぶん (要求した隙間のサンプル数ちょうど) の音を必ず
-//! 作り、補間できた分は直前の音の周期の繰り返しで、できなかった分は無音で埋める。
+//! 作り、続き音 ([`crate::playout::expansion::expand_audio`]) で埋める。それもできなかった分は無音で埋める。
 //!
-//! 境界はフェードで繋ぐ。隙間の末尾と今回の音の先頭は [`AUDIO_GAP_FADE_US`] で 0 へ落とし、
-//! 隙間の先頭は直前の音の最終サンプル (補間したときは補間の先頭の値) から 0 へ向かう重みで
-//! 埋める。これで隙間の最初と最後、および今回の音の先頭が段差にならない。
+//! 続き音は、moqt-js の出力側補間と同じく、直前の音の末尾 30 ms を履歴、その末尾 20 ms を
+//! 解析の対象にして最大 100 ms を生成する (周期が確かな音では周期補間、それ以外は線形予測
+//! による無声の続き音)。隙間の先頭は直前の音の最終サンプル (続き音があるときは続き音の
+//! 先頭の値) から 0 へ向かう重みで埋める。
+//!
+//! 今回の音への復帰は、続き音が隙間の後ろ 2 ms まで続いているときは、隙間の末尾を 0 へ
+//! 落とさず続き音のまま [`cross_fade_head`] で今回の音の先頭へクロスフェードする。続き音が
+//! 隙間を埋めきれない (100 ms を超える欠落) ときだけ、隙間の末尾と今回の音の先頭を
+//! [`AUDIO_GAP_FADE_US`] で 0 へ落とす。これで「両方を 0 へ落とす」2 ms の谷を作らない。
 //!
 //! 時刻や出力デバイスには触れない。サンプルは呼び出し側が渡す。
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::playout::stretch;
+use crate::playout::expansion;
+use crate::playout::splice_fade::cross_fade_head;
 
 /// 隙間の境界をフェードする長さ (マイクロ秒)
 ///
@@ -97,6 +104,37 @@ fn is_concealable(previous: &[Vec<f32>], channels: usize) -> bool {
     length > 0 && previous.iter().all(|channel| channel.len() == length)
 }
 
+/// 直前の音から作った続き音を隙間へ写す (作れないときは None)
+///
+/// [`expand_audio`] は周期が確かな音では周期補間を、それ以外は線形予測による無声の続き音を
+/// 返す。moqt-js の出力側補間と同じく、直前の音の末尾 30 ms を履歴、その末尾 20 ms を解析の
+/// 対象にする。隙間の後ろ (今回の音へ戻る境目) も続き音で覆えるか分かるよう、生成した音を
+/// そのまま返す。
+///
+/// # 戻り値
+///
+/// 生成した続き音 (チャンネルごと)。生成できなかったときは空。
+fn continuation(previous: &[Vec<f32>], sample_rate: u32) -> Vec<Vec<f32>> {
+    // 直前の音の末尾 30 ms を履歴、その末尾 20 ms を解析の対象にする
+    let history_length = rounded_samples(30_000, sample_rate)
+        .unwrap_or(1)
+        .max(1)
+        .min(previous[0].len());
+    let current_length = rounded_samples(20_000, sample_rate)
+        .unwrap_or(1)
+        .max(1)
+        .min(history_length);
+    let mut history: Vec<&[f32]> = Vec::new();
+    for channel in previous {
+        history.push(&channel[channel.len() - history_length..]);
+    }
+    let mut current: Vec<&[f32]> = Vec::new();
+    for channel in &history {
+        current.push(&channel[channel.len() - current_length..]);
+    }
+    expansion::expand_audio(&current, sample_rate, Some(&history)).unwrap_or_default()
+}
+
 /// 隙間の先頭へ繋ぐ、直前の音の最終サンプル
 ///
 /// 直前の音が無い、または形式が合わないときは 0 (無音から始める)。
@@ -113,13 +151,14 @@ fn previous_last_sample(previous: Option<&[Vec<f32>]>, channel: usize, channels:
 /// 隙間を埋める音を作る
 ///
 /// `previous` は直前の音のチャンネルごとの音声、`current` はこれから鳴らす音のチャンネル
-/// ごとの音声である。`current` の先頭 `min(2 ms, 長さ)` サンプルには、隙間の最後の無音から
-/// 段差なく立ち上がるようフェードインを掛ける (そのため `&mut` で受け取る)。
+/// ごとの音声である。`current` は、続き音が今回の音の先頭まで続くときはその続き音との
+/// クロスフェードで、そうでないときは 0 から立ち上がるフェードインで書き換える (そのため
+/// `&mut` で受け取る)。
 ///
 /// 長さは `gap_us` をサンプル数へ四捨五入した長さ (1 サンプル以上) であり、返る
 /// [`MaterializedGap::channels`] は `current` と同じ本数のチャンネルを持つ。隙間の音は
-/// 先頭から `min(conceal_us, gap_us)` の範囲で [`stretch::conceal`] の補間で埋め、残りは
-/// 無音にする。補間は `previous` があり、チャンネル数などの形式が合うときだけ行う。
+/// 先頭から続き音で埋め、残りは無音にする。続き音は `previous` があり、チャンネル数などの
+/// 形式が合うときだけ作る。
 ///
 /// # 戻り値
 ///
@@ -143,66 +182,81 @@ pub fn materialize(
         channels: (0..channels).map(|_| vec![0.0f32; length]).collect(),
         concealed_us: 0,
     };
-
-    // 補間する。隙間より長い補間は書けないため、要求を隙間の全長までに切る
+    // 続き音を作り、隙間へ写す。補間しない要求 (conceal_us <= 0) のときは作らない
     let conceal_us = conceal_us.min(gap_us);
+    let mut expansion: Vec<Vec<f32>> = Vec::new();
     if conceal_us > 0
         && let Some(previous) = previous
         && is_concealable(previous, channels)
     {
-        let sources: Vec<&[f32]> = previous.iter().map(|channel| channel.as_slice()).collect();
-        let mut destinations: Vec<&mut [f32]> = gap
-            .channels
-            .iter_mut()
-            .map(|channel| channel.as_mut_slice())
-            .collect();
-        let filled = stretch::conceal(&sources, &mut destinations, sample_rate, conceal_us);
-        if filled > 0 {
-            let filled = usize::try_from(filled).unwrap_or(0).min(length);
-            // 生成できた長さを要求以下に切って記録する
-            gap.concealed_us = samples_to_us(filled, sample_rate).min(conceal_us);
+        expansion = continuation(previous, sample_rate);
+    }
+    let filled = expansion
+        .first()
+        .map_or(0, |channel| channel.len().min(length));
+    if filled > 0 {
+        for (destination, source) in gap.channels.iter_mut().zip(expansion.iter()) {
+            let filled = filled.min(destination.len()).min(source.len());
+            destination[..filled].copy_from_slice(&source[..filled]);
         }
+        // 補間した長さは、要求した補間の長さを上限に記録する (スケジューラの契約を変えない)
+        gap.concealed_us = samples_to_us(filled, sample_rate).min(conceal_us);
     }
 
-    // 隙間の先頭: 直前の音の最終サンプル (補間したときは補間の先頭の値) から 0 へ向かう
-    // 重みで、隙間の内容へ繋ぐ。この形にすると、直前の音の最終サンプルと隙間の先頭が
-    // 段差にならず、補間した音の先頭も削らずに続けられる
+    // 隙間の先頭: 補間した続き音があるときは、続き音の先頭をそのまま使う。moqt-js の
+    // 出力側補間は隙間の先頭にフェードを掛けない (先頭を定数へ寄せると波形が潰れる)。
+    // 無音で埋めるときだけ、直前の音の最終サンプルから 0 へ向かう重みでフェードし、段差を
+    // 無音からの立ち上がりに変える
     let fade = fade_samples(sample_rate);
-    let head_fade = fade.min(length);
-    if head_fade > 0 {
-        for (channel, samples) in gap.channels.iter_mut().enumerate() {
-            let boundary = if gap.concealed_us > 0 {
-                // 補間した音の先頭は直前の音の末尾の続きである。その値から始める
-                samples[0]
-            } else {
-                previous_last_sample(previous, channel, channels)
-            };
-            for (index, sample) in samples.iter_mut().enumerate().take(head_fade) {
-                let weight = (index as f32 + 1.0) / head_fade as f32;
-                *sample = *sample * weight + boundary * (1.0 - weight);
+    if gap.concealed_us == 0 {
+        let head_fade = fade.min(length);
+        if head_fade > 0 {
+            for (channel, samples) in gap.channels.iter_mut().enumerate() {
+                let boundary = previous_last_sample(previous, channel, channels);
+                for (index, sample) in samples.iter_mut().enumerate().take(head_fade) {
+                    let weight = (index as f32 + 1.0) / head_fade as f32;
+                    *sample = *sample * weight + boundary * (1.0 - weight);
+                }
             }
         }
     }
 
-    // 隙間の末尾: 0 へ線形に落とす。今回の音の先頭は 0 から立ち上がるため、隙間の最後の
-    // サンプルを 0 にしておくと段差が無い。長さの半分より長くは落とさない (短い隙間で
-    // 先頭のフェードと重なりすぎないようにする)
-    let tail_fade = fade.min((length / 2).max(1));
-    if tail_fade > 0 {
-        for samples in gap.channels.iter_mut() {
-            for index in 0..tail_fade {
-                let gain = 1.0 - (index as f32 + 1.0) / tail_fade as f32;
-                samples[length - tail_fade + index] *= gain;
+    // 今回は続き音が隙間の後ろ 2 ms まで続いているか。続いていれば、隙間の末尾を 0 へ
+    // 落とさず、続き音のまま今回の音の先頭へクロスフェードする (両方を 0 へ落とす 2 ms の
+    // 谷を作らない)
+    let crossfades_into_current = filled > 0
+        && length + fade <= expansion.first().map_or(0, Vec::len)
+        && current.iter().all(|channel| channel.len() >= fade);
+    if crossfades_into_current {
+        for (channel, source) in current.iter_mut().zip(expansion.iter()) {
+            let continuation = &source[length..length + fade];
+            let channel_slices: [&[f32]; 1] = [&channel[..fade]];
+            let continuation_slices: [&[f32]; 1] = [continuation];
+            let blended = cross_fade_head(&continuation_slices, &channel_slices, sample_rate);
+            if let Some(blended) = blended.first() {
+                let copy_length = blended.len().min(fade);
+                channel[..copy_length].copy_from_slice(&blended[..copy_length]);
             }
         }
-    }
-
-    // 今回の音の先頭: 0 から立ち上げる。隙間の最後が 0 であるため、ここも段差にならない
-    for channel in current.iter_mut() {
-        let current_fade = fade.min(channel.len());
-        for (index, sample) in channel.iter_mut().enumerate().take(current_fade) {
-            let gain = index as f32 / current_fade as f32;
-            *sample *= gain;
+    } else {
+        // 続き音が隙間を埋めきれないときは、隙間の末尾を 0 へ線形に落とし、今回の音の先頭を
+        // 0 から立ち上げる。長さの半分より長くは落とさない (短い隙間で先頭のフェードと
+        // 重なりすぎないようにする)
+        let tail_fade = fade.min((length / 2).max(1));
+        if tail_fade > 0 {
+            for samples in gap.channels.iter_mut() {
+                for index in 0..tail_fade {
+                    let gain = 1.0 - (index as f32 + 1.0) / tail_fade as f32;
+                    samples[length - tail_fade + index] *= gain;
+                }
+            }
+            for channel in current.iter_mut() {
+                let current_fade = fade.min(channel.len());
+                for (index, sample) in channel.iter_mut().take(current_fade).enumerate() {
+                    let gain = index as f32 / current_fade as f32;
+                    *sample *= gain;
+                }
+            }
         }
     }
 
@@ -312,19 +366,21 @@ mod tests {
             "隙間の先頭が直前の音の末尾の続きであること: {} != {expected}",
             gap.channels[0][0]
         );
-        // 周期どおりに繰り返している。先頭と末尾はフェードで形を変えているため除く
-        let fade = fade_samples(sample_rate);
-        for index in fade..(960 - fade - 120) {
+        // 周期どおりに繰り返している。隙間の先頭にはフェードを掛けないため先頭から比べる
+        for index in 0..(960 - 120) {
             let difference = (gap.channels[0][index] - gap.channels[0][index + 120]).abs();
             assert!(
                 difference < 0.05,
                 "{index} 番目が周期ぶん後の音と一致すること: {difference}"
             );
         }
-        assert_eq!(
+        // 続き音が隙間の後ろまで続くため、隙間の末尾を 0 へ落とさず今回の音へ繋ぐ
+        assert_ne!(
             gap.channels[0][959], 0.0,
-            "隙間の最後のサンプルは 0 へ落ちること"
+            "続き音が今回の音の手前まで続くこと: {}",
+            gap.channels[0][959]
         );
+        assert_ne!(current[0][0], 0.0, "今回の音の先頭を続き音から繋ぐこと");
     }
 
     /// 補間しない隙間の先頭が直前の音の最終サンプルから 0 へ落ちること

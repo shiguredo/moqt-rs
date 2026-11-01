@@ -16,6 +16,21 @@ pub(crate) mod opus;
 #[cfg(not(target_os = "windows"))]
 pub(crate) mod vpx;
 
+/// LOC の TIMESTAMP の種類
+///
+/// 表示時刻を時間軸から決められるかは、TIMESTAMP が壁時計の時刻かどうかで決まる。
+/// moqt-js の `PlayoutTimestampKind` と同じ 3 値である。TIMESTAMP が無い音と、TIMESCALE を
+/// 持つ (メディア時刻の) 音は、受信側の壁時計と対応しないため時間軸へ観測しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampKind {
+    /// TIMESTAMP が無い
+    None,
+    /// TIMESTAMP があり TIMESCALE が無い (Unix epoch からのマイクロ秒)
+    WallClock,
+    /// TIMESTAMP と TIMESCALE がある (publisher のメディア時刻)
+    MediaTime,
+}
+
 /// デコード済みビデオフレーム (I420)
 ///
 /// 各プレーンは stride を詰めたバッファを保持する。
@@ -36,6 +51,11 @@ pub struct DecodedVideoFrame {
     /// 載せていなければ publisher の時間軸の値である。
     /// None のときは、表示時刻を時間軸から決められないため到着順に表示する。
     pub timestamp_us: Option<i64>,
+    /// TIMESTAMP の種類 ([`TimestampKind`])
+    ///
+    /// 表示時刻を時間軸から決められるのは [`TimestampKind::WallClock`] のときだけである。
+    /// 復号器はこの値を知らないため、受信側が Properties から求めて載せる。
+    pub timestamp_kind: TimestampKind,
 }
 
 /// デコード済み音声フレーム (S16 interleaved PCM)
@@ -60,6 +80,11 @@ pub struct DecodedAudioFrame {
     /// キューから取り出した時刻で観測すると、復号と無関係なスレッドの揺れが遅延学習へ
     /// 入るため、復号の出力が揃った時点の時刻を復号側で測って載せる。
     pub decoded_us: i64,
+    /// TIMESTAMP の種類 ([`TimestampKind`])
+    ///
+    /// 時間軸へ観測して表示時刻を決められるのは [`TimestampKind::WallClock`] のときだけである。
+    /// 復号器はこの値を知らないため、受信側が Properties から求めて載せる。
+    pub timestamp_kind: TimestampKind,
 }
 
 /// サンプル subscriber が扱うビデオデコーダ

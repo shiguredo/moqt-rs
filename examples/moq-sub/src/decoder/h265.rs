@@ -8,7 +8,7 @@ use shiguredo_video_toolbox::{
     DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler, PixelFormat,
 };
 
-use crate::decoder::{DecodedVideoFrame, copy_plane, read_ps_nal};
+use crate::decoder::{DecodedVideoFrame, TimestampKind, copy_plane, read_ps_nal};
 use crate::error::{Error, Result};
 
 /// ISO/IEC 14496-15 §8.3.3.1.2 `HEVCDecoderConfigurationRecord` 固定部サイズ
@@ -151,6 +151,7 @@ fn convert_decoded_frame(result: std::result::Result<DecodedFrame<()>, Error>) -
                 height: h as i32,
                 // Timestamp は Object の Properties から pipeline が載せる
                 timestamp_us: None,
+                timestamp_kind: TimestampKind::None,
             }))
         }
         Ok(DecodedFrame::Nv12 { .. }) => Err(Error::Other(

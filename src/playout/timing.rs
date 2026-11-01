@@ -13,6 +13,14 @@
 //! - 分布 (p50 / p95 / max) は直近の窓 ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) の値から求める
 //! - 鳴らなかった量は購読の開始 ([`AudioPlayoutTimingStats::reset`]) からの累積である。
 //!   理由ごとに数え、その和は合計に一致する
+//! - 出力の穴 (補間で埋まらなかった区間) とバッファ境界の段差も累積で数える。穴は
+//!   [`AudioPlayoutTimingStats::record_gap`] に「補間で埋まらなかった長さ」と「予約できな
+//!   かった長さ」を渡し、出力側が実際に描画した値を測れる場合は
+//!   [`AudioPlayoutTimingStats::record_rendered_gap`] と
+//!   [`AudioPlayoutTimingStats::record_rendered_boundary`] を使う
+//! - 停止時に予約済みの音を鳴らし切るまでの残りは
+//!   [`AudioPlayoutTimingStats::pending_us`] と [`AudioPlayoutTimingStats::pending_end_us`]
+//!   で読める
 //! - 表示のための整形 (UTC の ISO 8601 など) は持たない。記録の時刻は呼び出し側が渡した
 //!   軸のままであり、ログの整形は呼び出し側 (example) の責務である
 
@@ -26,13 +34,6 @@ pub const AUDIO_PLAYOUT_TIMING_WINDOW_US: i64 = 10_000_000;
 
 /// 残す直近の「鳴らさなかった音」の数
 pub const MAX_RECENT_AUDIO_MISSES: usize = 30;
-
-/// 目標遅延を閉ループで決めるときに読む短い窓 (マイクロ秒)
-///
-/// [`AudioPlayoutTimingStats::audio_delay_feedback`] が使う。表示用の分布
-/// ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) は、目標を増やした結果が現れるまでに数秒かかる
-/// ため、制御には短い窓を使う。
-pub const AUDIO_DELAY_FEEDBACK_WINDOW_US: i64 = 1_000_000;
 
 /// 鳴らさなかった理由
 ///
@@ -124,6 +125,18 @@ pub struct AudioPlayoutMiss {
     pub arrival_us: Option<i64>,
 }
 
+/// 補間で埋まらなかった隙間 1 件の記録
+///
+/// [`AudioPlayoutTimingStats::record_gap`] へ渡す。`unrecoverable_us` は
+/// `uncovered_us` に含まれる長さである。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AudioPlayoutGap {
+    /// 補間で埋まらなかった長さ (マイクロ秒)。0 以下は記録しない
+    pub uncovered_us: i64,
+    /// そのうち、予約できる最も早い時刻より前だった長さ (マイクロ秒)
+    pub unrecoverable_us: i64,
+}
+
 /// 直近に鳴らさなかった音 1 件の記録
 ///
 /// [`AudioPlayoutTimingSnapshot::recent_misses`] に古い順で残る。
@@ -177,7 +190,7 @@ pub fn summarize_timings(values: &[i64]) -> Option<TimingSummary> {
 /// [`AudioPlayoutTimingStats::snapshot`] が返す。時刻はすべて記録に渡した軸のマイクロ秒で
 /// あり、分布は直近の窓 ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) の値から求める。何も記録して
 /// いないときの観測値は `Default` で作れる (すべて None、0、空になる)。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AudioPlayoutTimingSnapshot {
     /// 直近に鳴らすと決めた音の再生予定時刻 (マイクロ秒)。予定を決められなければ None
     pub last_target_us: Option<i64>,
@@ -224,22 +237,38 @@ pub struct AudioPlayoutTimingSnapshot {
     pub missed_by_reason: AudioMissTotals,
     /// 直近に鳴らさなかった音 (古い順、最大 [`MAX_RECENT_AUDIO_MISSES`] 件)
     pub recent_misses: Vec<AudioMissEvent>,
-    /// 隙間を材料化した回数 (累積)
+    /// 補間で埋まらなかった区間の回数 (累積)
     ///
-    /// 呼び出し側が隙間の音を積むたびに
-    /// [`AudioPlayoutTimingStats::record_gap`] で数える。出力が FIFO の場合、隙間を積まないと
-    /// 後続の音がその分だけ早く鳴るため、隙間は必ず材料化する。この数だけでは「隙間が
-    /// 埋まったか」は分からないため、長さも数える。
+    /// 呼び出し側が、隙間の全長から実際に補間で埋めた長さを引いた残りを
+    /// [`AudioPlayoutTimingStats::record_gap`] で数える。出力が FIFO の場合、隙間を積まない
+    /// と後続の音がその分だけ早く鳴るため、隙間は必ず材料化する。この数だけでは
+    /// 「どれだけ音が欠けたか」は分からないため、長さも数える。moqt-js の `gapCount`
+    /// に対応する
     pub gaps: u64,
-    /// 材料化した隙間の長さの合計 (マイクロ秒、累積)
+    /// 補間で埋まらなかった区間の長さの合計 (マイクロ秒、累積)
     pub gap_total_us: i64,
-    /// 材料化した隙間の長さの最大 (マイクロ秒)
+    /// 補間で埋まらなかった区間の長さの最大 (マイクロ秒)
     pub gap_max_us: i64,
+    /// 未補間区間のうち、予約できなかった区間の回数 (累積)
+    ///
+    /// 現行の出力 (raw_player へ書き込む経路) では、材料化した隙間を補間で埋められなかった
+    /// 長さを [`AudioPlayoutTimingStats::record_gap`] が数える。moqt-js の
+    /// `unrecoverableGapCount` に対応し、過去の計測との互換のために残す
+    pub unrecoverable_gaps: u64,
+    /// 未補間区間のうち、予約できなかった長さの合計 (マイクロ秒、累積)
+    pub unrecoverable_gap_total_us: i64,
+    /// 出力の切り替え位置の段差が大きかった回数 (累積)
+    ///
+    /// 呼び出し側が実際に書き込んだ PCM の境界で測る。moqt-js の
+    /// `boundaryStepCount` に対応する
+    pub boundary_step_count: u64,
+    /// バッファ境界の段差の最大 (PCM の振幅。0〜1)
+    pub boundary_step_max: f32,
     /// 出力が枯れた回数 (累積)
     ///
     /// 呼び出し側が枯れが明けたときに 1 回だけ
     /// [`AudioPlayoutTimingStats::record_underrun`] で数える。アンダーランは事後には埋められ
-    /// ないため、閉ループの目標遅延を上げる根拠になる。
+    /// ないため、再生予算を増やす根拠として読む。
     pub underruns: u64,
     /// 出力が枯れた長さの合計 (マイクロ秒、累積)
     pub underrun_total_us: i64,
@@ -248,79 +277,13 @@ pub struct AudioPlayoutTimingSnapshot {
     /// 時間圧縮と補間を使えないサンプルレートで、鳴らす組み立てへ渡した音の数 (累積)
     ///
     /// 4 kHz へ間引くフィルタの表 (8 kHz / 16 kHz / 32 kHz / 48 kHz) に無いサンプルレート
-    /// (44.1 kHz の AAC など) では、ピッチの周期を求められないため時間圧縮も補間も働かない。
-    /// 落ちずに「操作しない」を返すので、この数が増えていることで気付く
+    /// では、ピッチの周期を求められないため時間圧縮も補間も働かない。44.1 kHz は解析用の
+    /// 信号だけを 48 kHz の格子へ換算して周期を求めるため使える。落ちずに「操作しない」を
+    /// 返すので、この数が増えていることで気付く
     /// ([`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available))。
     /// 0 なら使えている。受信側の待ち行列 (example の jitter buffer) の溢れで捨てられた音は、
     /// この数える位置へ届かないため含まない
     pub stretch_unavailable_frames: u64,
-}
-
-/// 目標遅延を閉ループで決めるための観測
-///
-/// [`AudioPlayoutTimingStats::audio_delay_feedback`] が返す。分布は短い窓
-/// ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値から求める。捨てた量と、材料化した隙間の累積は
-/// 購読の開始からの値であり、差を取るのは呼び出し側の仕事である。
-///
-/// 圧縮 (時間圧縮) の増分と、出力が枯れた長さと、揺らぎだけから求めた目標遅延は、この計器
-/// では分からない。圧縮と枯れは購読側 (再生の経路) が、揺らぎだけの目標は時間軸
-/// ([`PlayoutTimeline::observe_audio_playout`](crate::playout::timeline::PlayoutTimeline::observe_audio_playout))
-/// が埋める。どれも既定は 0 であり、埋めなければ「圧縮なし」「枯れなし」「経路は 100 ms
-/// 以内」とみなされる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioDelayFeedbackObservation {
-    /// 観測した時刻 (マイクロ秒)
-    pub at_us: i64,
-    /// 予定からどれだけ過ぎて鳴るかの分布 (短い窓、マイクロ秒)
-    pub lateness_us: Option<TimingSummary>,
-    /// 到着から鳴り始めるまでの時間の分布 (短い窓、マイクロ秒)
-    pub start_delay_us: Option<TimingSummary>,
-    /// 予定に対する余裕の分布 (短い窓、マイクロ秒)
-    pub slack_us: Option<TimingSummary>,
-    /// 累積で並べすぎて捨てた音の数
-    pub backlog_misses: u64,
-    /// 累積で並べすぎて捨てた音の長さ (マイクロ秒)
-    pub backlog_us: i64,
-    /// 前回の観測から、出力が枯れた合計 (ミリ秒)
-    ///
-    /// 購読側が、出力が枯れていた長さの増分を渡す。アンダーランは事後には埋められないため、
-    /// 閉ループはこれを根拠に目標遅延を上げる以外に減らせない。観測は音ごとに来るが、目標を
-    /// 動かすのは毎秒 1 回であるため、制御までの間ぶんを足し合わせて渡す。分からなければ 0
-    /// (枯れていない) とみなす。購読のやり直しで累積が 0 に戻っても負の差を作らないよう、
-    /// 累積ではなく増分を渡す。
-    pub underrun_ms: i64,
-    /// 前の観測から増えた圧縮 (時間圧縮 = 粗さ) の長さ (マイクロ秒、増分)
-    ///
-    /// 購読側が
-    /// [`AudioPlayoutScheduler::compressed_us`](crate::playout::scheduler::AudioPlayoutScheduler::compressed_us)
-    /// の増分を渡す。観測は音ごとに来るが、目標を動かすのは毎秒 1 回であるため、閉ループが
-    /// 制御までの間を足し合わせて速さ (マイクロ秒 / 秒) を求める。累積ではなく増分を渡すのは、
-    /// 購読のやり直しで累積が 0 に戻っても負の差を作らないためである。分からなければ 0
-    /// (圧縮なし) とみなす。
-    pub compression_us: i64,
-    /// 揺らぎだけから求めた目標遅延 (マイクロ秒)
-    ///
-    /// 上限を [`crate::playout::feedback::AUDIO_DELAY_FEEDBACK_MAX_TARGET_US`] へ戻してよいかの
-    /// 判断に使う。「圧縮が 0」だけでは、揺らぎが 100 ms を超えている経路で上限を戻した直後に
-    /// 圧縮が再発する (往復になる)。この値が 100 ms 以下であることを戻す条件に加える。
-    pub jitter_target_us: i64,
-    /// 購読の開始からの、材料化した隙間の数 (累積)
-    ///
-    /// 計器が [`AudioPlayoutTimingStats::record_gap`] で数えた累積である。閉ループは前回の
-    /// 観測との差を取る。moqt-js の `AudioDelayFeedbackObservation.gapCount` に対応する。
-    pub gap_count: u64,
-    /// 購読の開始からの、材料化した隙間の長さの合計 (マイクロ秒、累積)
-    ///
-    /// moqt-js の `AudioDelayFeedbackObservation.gapMs` に対応する。隙間は事後には埋められ
-    /// ないため、閉ループはこれを根拠に目標遅延を上げる以外に減らせない。
-    pub gap_us: i64,
-    /// 到着基準の再生に別の下限がある場合、その値から穴を吸収する分を増やす (マイクロ秒)
-    ///
-    /// moqt-js の `arrivalDelayFloorMs` に対応する。音声だけを購読するときに到着基準の再生へ
-    /// 足す下限 ([`crate::playout::timeline::TIMELINE_AUDIO_ONLY_ARRIVAL_DELAY_FLOOR_US`]) が
-    /// これにあたる。購読側が音声だけのときに埋める。None なら閉ループの目標だけを実際の
-    /// 深さとみなす。
-    pub arrival_delay_floor_us: Option<i64>,
 }
 
 /// 記録した時刻の順に並んだ値の列 (マイクロ秒)
@@ -359,18 +322,6 @@ impl TimedValues {
     /// 窓の中の値 (古い順)
     fn current(&self) -> &[i64] {
         &self.values_us[self.head..]
-    }
-
-    /// `at_us` が `since_us` より後の値 (古い順)
-    ///
-    /// 窓 (`prune`) より短い区間の分布を取り直すために使う。記録の時刻は単調に増えるため、
-    /// 条件を満たす値は末尾に連続して並ぶ。
-    fn since(&self, since_us: i64) -> &[i64] {
-        let mut start = self.head;
-        while start < self.times_us.len() && self.times_us[start] <= since_us {
-            start += 1;
-        }
-        &self.values_us[start..]
     }
 
     /// 記録をすべて捨てる
@@ -454,6 +405,14 @@ pub struct AudioPlayoutTimingStats {
     gap_total_us: i64,
     /// 材料化した隙間の長さの最大
     gap_max_us: i64,
+    /// 予約できなかった未補間区間の回数
+    unrecoverable_gaps: u64,
+    /// 予約できなかった未補間区間の長さの合計
+    unrecoverable_gap_total_us: i64,
+    /// 出力の切り替え位置の段差が大きかった回数
+    boundary_step_count: u64,
+    /// バッファ境界の段差の最大
+    boundary_step_max: f32,
     /// 出力が枯れた回数
     underruns: u64,
     /// 出力が枯れた長さの合計
@@ -492,6 +451,10 @@ impl AudioPlayoutTimingStats {
             gaps: 0,
             gap_total_us: 0,
             gap_max_us: 0,
+            unrecoverable_gaps: 0,
+            unrecoverable_gap_total_us: 0,
+            boundary_step_count: 0,
+            boundary_step_max: 0.0,
             underruns: 0,
             underrun_total_us: 0,
             underrun_max_us: 0,
@@ -505,15 +468,24 @@ impl AudioPlayoutTimingStats {
     /// 時間軸が予定を決めていればその予定との差を記録する (音が予定よりどれだけ遅れて
     /// 鳴っているかを読むため)。到着から鳴り始めるまでの時間は、予定の有無に関係なく
     /// 記録する。
+    /// 鳴らした音の実績を 1 つ記録する
+    ///
+    /// `play` は [`crate::playout::scheduler::AudioPlayoutScheduler::last_play`] の値である。
+    /// 実際に鳴る長さ ([`AudioPlayoutPlay::played_us`]) を確定した後に記録すること
+    /// (scheduler の `confirm_stretch` / `confirm_expansion` / `confirm_playout_end` を
+    /// すべて返した後に `last_play` を読む)。記録した長さは、`pending_us` /
+    /// `pending_end_us` と、停止時に切った長さ (`record_stopped`) の元になる。
     pub fn record_play(&mut self, play: AudioPlayoutPlay) {
         self.prune_pending(play.arrival_us);
         let start_delay_us = play.start_at_us.saturating_sub(play.arrival_us);
         let slack_us = play
             .target_start_us
             .map(|target_us| target_us.saturating_sub(play.arrival_us));
+        // 前の音の終わりへ揃えるスナップで、音が予定より最大 0.5 ms 早く鳴ることがある。
+        // scheduler の遅れ (AudioPlayoutScheduler::lateness_us) と同じく 0 で丸める
         let lateness_us = play
             .target_start_us
-            .map(|target_us| play.start_at_us.saturating_sub(target_us));
+            .map(|target_us| play.start_at_us.saturating_sub(target_us).max(0));
         self.start_delays_us.push(play.arrival_us, start_delay_us);
         match play.basis {
             AudioPlayoutBasis::Arrival => {
@@ -580,68 +552,6 @@ impl AudioPlayoutTimingStats {
         }
     }
 
-    /// 目標遅延を閉ループで決めるための観測を求める
-    ///
-    /// 表示用の分布 ([`AudioPlayoutTimingStats::snapshot`]) は直近の窓
-    /// ([`AUDIO_PLAYOUT_TIMING_WINDOW_US`]) である。目標を増やした結果がそこへ現れるまで
-    /// には数秒かかるため、制御には短い窓 ([`AUDIO_DELAY_FEEDBACK_WINDOW_US`]) の値を使う。
-    /// 捨てた量と隙間の累積は購読の開始からの値であり、差を取るのは呼び出し側の仕事である。
-    ///
-    /// 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からないため 0 にする。
-    /// 呼び出し側 (購読側と時間軸) が埋めること
-    /// ([`AudioDelayFeedbackObservation::compression_us`] と
-    /// [`AudioDelayFeedbackObservation::jitter_target_us`] を参照)。
-    pub fn audio_delay_feedback(&mut self, now_us: i64) -> AudioDelayFeedbackObservation {
-        self.audio_delay_feedback_since(
-            now_us,
-            now_us.saturating_sub(AUDIO_DELAY_FEEDBACK_WINDOW_US),
-        )
-    }
-
-    /// 目標遅延を閉ループで決めるための観測を求める (制御の開始時刻を指定する)
-    ///
-    /// 表示用の分布 ([`AudioPlayoutTimingStats::snapshot`]) と累積は残したまま、制御へ渡す
-    /// 分布だけを `since_us` より後の記録に限る。音声の再生を取り直したとき、再開前の遅れを
-    /// 新しい再生の制御へ混ぜないために使う (moqt-js の
-    /// `audioDelayFeedback(nowMs, sinceMs)` と同じ)。`since_us` は再開した時刻 (観測の
-    /// `at_us` と同じ軸のマイクロ秒) を渡す。
-    ///
-    /// 窓の先頭 (`now_us - AUDIO_DELAY_FEEDBACK_WINDOW_US`) より `since_us` が古いときは、
-    /// 窓の先頭から使う (分布が短い窓より広がることはない)。
-    ///
-    /// # 引数
-    ///
-    /// - `now_us`: 求める時刻 (マイクロ秒)
-    /// - `since_us`: 制御へ渡す分布の開始時刻。この時刻以前の記録は分布に使わない
-    pub fn audio_delay_feedback_since(
-        &mut self,
-        now_us: i64,
-        since_us: i64,
-    ) -> AudioDelayFeedbackObservation {
-        // 表示用の分布と同じ長さまでを残し、制御にはその中でも短い窓を使う
-        self.prune(now_us);
-        // 表示用の分布と累積は残す一方、再開前の遅れを新しい再生の制御へ混ぜない
-        let control_min_us = now_us
-            .saturating_sub(AUDIO_DELAY_FEEDBACK_WINDOW_US)
-            .max(since_us);
-        AudioDelayFeedbackObservation {
-            at_us: now_us,
-            lateness_us: summarize_timings(self.latenesses_us.since(control_min_us)),
-            start_delay_us: summarize_timings(self.start_delays_us.since(control_min_us)),
-            slack_us: summarize_timings(self.slacks_us.since(control_min_us)),
-            backlog_misses: self.missed_totals.backlog.count,
-            backlog_us: self.missed_totals.backlog.duration_us,
-            underrun_ms: 0,
-            compression_us: 0,
-            jitter_target_us: 0,
-            // 材料化した隙間を、閉ループが目標を増やす根拠として渡す
-            gap_count: self.gaps,
-            gap_us: self.gap_total_us,
-            // 到着基準の再生に別の下限がある場合、購読側が上書きする。計器では分からない
-            arrival_delay_floor_us: None,
-        }
-    }
-
     /// 観測値を求める
     ///
     /// 窓は `now_us` から遡る。窓の外に出た記録は分布から落とすが、累積の数と長さと直近の
@@ -671,6 +581,10 @@ impl AudioPlayoutTimingStats {
         snapshot.gaps = self.gaps;
         snapshot.gap_total_us = self.gap_total_us;
         snapshot.gap_max_us = self.gap_max_us;
+        snapshot.unrecoverable_gaps = self.unrecoverable_gaps;
+        snapshot.unrecoverable_gap_total_us = self.unrecoverable_gap_total_us;
+        snapshot.boundary_step_count = self.boundary_step_count;
+        snapshot.boundary_step_max = self.boundary_step_max;
         snapshot.underruns = self.underruns;
         snapshot.underrun_total_us = self.underrun_total_us;
         snapshot.underrun_max_us = self.underrun_max_us;
@@ -680,8 +594,9 @@ impl AudioPlayoutTimingStats {
 
     /// 時間圧縮と補間を使えないサンプルレートの音を 1 つ数える
     ///
-    /// 4 kHz へ間引くフィルタの表に無いサンプルレート (44.1 kHz の AAC など) では、ピッチの
-    /// 周期を求められないため時間圧縮も補間も働かない。落ちずに「操作しない」を返すので、
+    /// 4 kHz へ間引くフィルタの表に無いサンプルレート (96 kHz など) では、ピッチの
+    /// 周期を求められないため時間圧縮も補間も働かない。44.1 kHz は解析用の信号だけを
+    /// 48 kHz の格子へ換算して周期を求めるため使える。落ちずに「操作しない」を返すので、
     /// この数が増えていることで気付く。鳴らす側が、復号した音を鳴らす組み立てへ渡す時点で
     /// [`is_time_stretch_available`](crate::playout::stretch::is_time_stretch_available) を
     /// 確かめて呼ぶ。数えるだけで鳴らし方は変えない
@@ -689,27 +604,89 @@ impl AudioPlayoutTimingStats {
         self.stretch_unavailable_frames += 1;
     }
 
-    /// 材料化した隙間を 1 つ記録する
+    /// 出力の穴として残した区間を 1 つ記録する
     ///
-    /// 呼び出し側が隙間の音を積むたびに、その全長 (`gap_us`) で呼ぶ。0 以下の長さは
-    /// 材料化していないため数えない。隙間の長さは回数だけでは分からないため、合計と最大も
-    /// 残す。購読の開始 ([`AudioPlayoutTimingStats::reset`]) からの累積である。
-    pub fn record_gap(&mut self, gap_us: i64) {
-        let gap_us = gap_us.max(0);
-        if gap_us == 0 {
+    /// 呼び出し側が、隙間の全長から実際に補間で埋めた長さを引いた残りを渡す。予約できる
+    /// 最も早い時刻より前だった長さは `unrecoverable_us` として別に数える
+    /// (`unrecoverable_us` は `uncovered_us` に含まれる)。0 以下の長さは数えない。
+    /// moqt-js の `recordGap({ uncoveredMs, unrecoverableMs })` に対応する。購読の開始
+    /// ([`AudioPlayoutTimingStats::reset`]) からの累積である。
+    pub fn record_gap(&mut self, gap: AudioPlayoutGap) {
+        let uncovered_us = gap.uncovered_us.max(0);
+        if uncovered_us == 0 {
             return;
         }
         self.gaps += 1;
-        self.gap_total_us = self.gap_total_us.saturating_add(gap_us);
-        self.gap_max_us = self.gap_max_us.max(gap_us);
+        self.gap_total_us = self.gap_total_us.saturating_add(uncovered_us);
+        self.gap_max_us = self.gap_max_us.max(uncovered_us);
+        let unrecoverable_us = uncovered_us.min(gap.unrecoverable_us.max(0));
+        if unrecoverable_us > 0 {
+            self.unrecoverable_gaps += 1;
+            self.unrecoverable_gap_total_us = self
+                .unrecoverable_gap_total_us
+                .saturating_add(unrecoverable_us);
+        }
+    }
+
+    /// 出力側が実際に描画した未補間区間を反映する
+    ///
+    /// 補間を予約した長さではなく、出力が実際に描画した未補間の長さと回数を渡す。
+    /// moqt-rs の現行の出力は `raw_player` へ書き込む前の隙間の材料化であり、この計器は
+    /// 呼び出し側が実際に書き込んだ PCM を測ったときに使う。負の長さは無視する。
+    /// moqt-js の `recordRenderedGap` に対応する。
+    pub fn record_rendered_gap(&mut self, uncovered_us: i64, count: u64, maximum_us: i64) {
+        if uncovered_us < 0 || maximum_us < 0 {
+            return;
+        }
+        self.gaps = self.gaps.saturating_add(count);
+        self.gap_total_us = self.gap_total_us.saturating_add(uncovered_us);
+        self.gap_max_us = self.gap_max_us.max(maximum_us);
+        self.unrecoverable_gaps = self.unrecoverable_gaps.saturating_add(count);
+        self.unrecoverable_gap_total_us =
+            self.unrecoverable_gap_total_us.saturating_add(uncovered_us);
+    }
+
+    /// 出力側が描画したバッファ境界の段差を反映する
+    ///
+    /// 段差の最大 (PCM の振幅。0〜1) と、記録した回数を渡す。負の値は無視する。
+    /// moqt-js の `recordRenderedBoundary` に対応する。
+    pub fn record_rendered_boundary(&mut self, maximum: f32, count: u64) {
+        if !maximum.is_finite() || maximum < 0.0 {
+            return;
+        }
+        self.boundary_step_max = self.boundary_step_max.max(maximum);
+        self.boundary_step_count = self.boundary_step_count.saturating_add(count);
+    }
+
+    /// 最後に鳴り終わる予約の時刻 (マイクロ秒)。鳴り終わっていない予約が無ければ None
+    ///
+    /// 停止時に「あとどれだけ待てば予約済みが鳴り終わるか」を決めるのに使う。moqt-js の
+    /// `pendingEndMs` に対応する。
+    pub fn pending_end_us(&mut self, now_us: i64) -> Option<i64> {
+        self.prune_pending(now_us);
+        self.pending.iter().map(|sound| sound.end_us).max()
+    }
+
+    /// 予約済みでまだ鳴り終わっていない長さ (マイクロ秒)
+    ///
+    /// 停止した時点で切ることになる量である。moqt-js の `pendingMs` に対応する。
+    pub fn pending_us(&mut self, now_us: i64) -> i64 {
+        self.prune_pending(now_us);
+        self.pending.iter().fold(0i64, |total_us, sound| {
+            total_us.saturating_add(
+                sound
+                    .end_us
+                    .saturating_sub(sound.start_us.max(now_us))
+                    .max(0),
+            )
+        })
     }
 
     /// 出力が枯れた区間を 1 つ記録する
     ///
     /// 呼び出し側が枯れが明けたときに 1 回だけ、枯れていた長さ (`underrun_us`) で呼ぶ。
     /// 0 以下の長さは枯れていないため数えない。アンダーランは事後には埋められないため、
-    /// 長さは閉ループが目標遅延を上げる根拠になる
-    /// ([`AudioDelayFeedbackObservation::underrun_ms`])。購読の開始
+    /// 長さは再生予算を増やす根拠として読む。購読の開始
     /// ([`AudioPlayoutTimingStats::reset`]) からの累積である。
     pub fn record_underrun(&mut self, underrun_us: i64) {
         let underrun_us = underrun_us.max(0);
@@ -739,6 +716,10 @@ impl AudioPlayoutTimingStats {
         self.gaps = 0;
         self.gap_total_us = 0;
         self.gap_max_us = 0;
+        self.unrecoverable_gaps = 0;
+        self.unrecoverable_gap_total_us = 0;
+        self.boundary_step_count = 0;
+        self.boundary_step_max = 0.0;
         self.underruns = 0;
         self.underrun_total_us = 0;
         self.underrun_max_us = 0;

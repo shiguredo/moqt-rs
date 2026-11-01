@@ -193,9 +193,19 @@ impl<T> PlayoutBuffer<T> {
         timeline.present_us(self.track, timestamp_us)
     }
 
-    /// いま使っている表示の遅れ (マイクロ秒)。基準がまだ無ければ `None`
+    /// いま使っている jitter buffer の遅延 (マイクロ秒)。まだ観測していなければ `None`
+    ///
+    /// moqt-js の `PlayoutBuffer.playoutDelayMs` は映像専用のキューであり、時間軸の
+    /// `videoDelayMs` へ委譲する。このキューはトラックを指定できるため、映像なら映像の
+    /// jitter buffer の遅延 ([`PlayoutTimeline::video_delay_us`]) を返す。音声では
+    /// moqt-js に対応する呼び出しが無く (`videoDelayMs` を返すのは意味が違う)、音声の
+    /// 表示の遅れのうち基準を除いた分
+    /// ([`PlayoutTimeline::presentation_extra_delay_us`]) を返す。
     pub fn playout_delay_us(&self, timeline: &PlayoutTimeline) -> Option<i64> {
-        timeline.presentation_delay_us(self.track)
+        match self.track {
+            Track::Audio => timeline.presentation_extra_delay_us(),
+            Track::Video => timeline.video_delay_us(),
+        }
     }
 
     /// 表示待ちのフレームをすべて取り出す

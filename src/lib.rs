@@ -54,7 +54,7 @@ pub mod parameter;
 // 概要と根拠は src/pending_subgroup_buffer.rs の //! ドキュメントに書く。ここに /// を
 // 置くと rustdoc がモジュール内の intra-doc link をクレート直下の名前空間で解決してしまう
 pub mod pending_subgroup_buffer;
-/// 音声の再生に関する処理 (時間圧縮・伸長、目標遅延の学習と閉ループの調整、鳴らす時刻の決定、A/V 同期)
+/// 音声の再生に関する処理 (時間圧縮・伸長、到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期)
 pub mod playout;
 pub mod session;
 pub mod stream;

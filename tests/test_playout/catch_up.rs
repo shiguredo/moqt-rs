@@ -23,10 +23,29 @@ fn observation(now_ms: i64, lag_ms: i64) -> AudioReceiveCatchUpObservation {
 /// [`observation_with_input_lag`] で作る。
 fn observation_at(now_ms: i64, lag_ms: i64, timestamp_us: i64) -> AudioReceiveCatchUpObservation {
     AudioReceiveCatchUpObservation {
-        now_ms,
-        lag_ms,
-        input_lag_ms: None,
-        duration_ms: 20,
+        now_us: now_ms * 1_000,
+        lag_us: lag_ms * 1_000,
+        input_lag_us: None,
+        duration_us: 20_000,
+        timestamp_us,
+    }
+}
+
+/// 音の長さ (マイクロ秒) と TIMESTAMP を指定して 1 つ観測する
+///
+/// 23.22 ms (AAC の 1024 サンプル / 44.1 kHz) のような、ミリ秒では割り切れない音の長さを
+/// 扱うために使う。
+fn observation_with_duration(
+    now_ms: i64,
+    lag_ms: i64,
+    duration_us: i64,
+    timestamp_us: i64,
+) -> AudioReceiveCatchUpObservation {
+    AudioReceiveCatchUpObservation {
+        now_us: now_ms * 1_000,
+        lag_us: lag_ms * 1_000,
+        input_lag_us: None,
+        duration_us,
         timestamp_us,
     }
 }
@@ -38,10 +57,10 @@ fn observation_with_input_lag(
     input_lag_ms: Option<i64>,
 ) -> AudioReceiveCatchUpObservation {
     AudioReceiveCatchUpObservation {
-        now_ms,
-        lag_ms,
-        input_lag_ms,
-        duration_ms: 20,
+        now_us: now_ms * 1_000,
+        lag_us: lag_ms * 1_000,
+        input_lag_us: input_lag_ms.map(|input_lag_ms| input_lag_ms * 1_000),
+        duration_us: 20_000,
         timestamp_us: now_ms * 1_000,
     }
 }
@@ -621,12 +640,61 @@ fn the_stats_keep_the_output_lag_and_judge_by_the_decode_lag() {
         "入力の遅れは渡した値をそのまま残すこと"
     );
 
-    // 入力の遅れが測れないときは、負の出力の遅れ (配信側の時計が先へ進んでいる) もそのまま残す
+    // 入力の遅れが測れないときでも、負の出力の遅れ (配信側の時計が先へ進んでいる) は
+    // 健全な状態として 0 に寄せる
     let mut future = AudioReceiveCatchUp::new();
     future.observe(observation_with_input_lag(0, -19, None));
     assert_eq!(
         future.snapshot().decode_lag_ms,
-        Some(-19),
-        "測れないときは出力の遅れをそのまま使うこと"
+        Some(0),
+        "測れないときも負の出力の遅れは 0 にすること"
     );
+}
+
+/// ミリ秒で割り切れない音の長さでも、飛んだ音の数と長さをマイクロ秒で計算すること
+///
+/// AAC の 1024 サンプル / 44.1 kHz は 23.22 ms であり、ミリ秒の整数に丸めると 0.22 ms の
+/// 切り捨てが起きる。跳びが 1 音の 2.5 倍になる場合は、丸めた音の長さだと飛んだ音の数が
+/// 1 つ多く数えられる。
+#[test]
+fn skipped_audio_uses_microseconds_for_fractional_frame_lengths() {
+    let mut catch_up = AudioReceiveCatchUp::new();
+    observe_healthy_run(&mut catch_up);
+
+    // 床 + JUMP を超える遅れで追いつきを始める (この観測の跳びは追いつきの前なので数えない)
+    assert!(
+        catch_up
+            .observe(observation_at(6_250, 200, 6_250_000))
+            .rebuild_decoder,
+        "床から 100 ms を超えたら始めること"
+    );
+
+    // 23.22 ms の音が 57.5 ms 後に届く。跳びは 57.5 − 23.22 = 34.28 ms であり、
+    // 丸めた 23 ms で数えると 34.5 ms になる
+    catch_up.observe(observation_with_duration(6_300, 200, 23_220, 6_307_500));
+    let stats = catch_up.snapshot();
+    assert_eq!(
+        stats.skipped_frames, 1,
+        "57.5 ms は 1 音 (23.22 ms) の 2.5 倍ではなく 2.48 倍であり、飛んだ音は 1 つであること"
+    );
+    assert_eq!(
+        stats.last_skipped_ms,
+        Some(34),
+        "跳びから 1 音の長さを引いた 34.28 ms を丸めること"
+    );
+
+    // もう 1 つの跳びが 24.72 ms のとき、飛んだ長さは 1.50 ms であり、切り捨てると 1 ms に
+    // なる。丸めると 2 ms である
+    catch_up.observe(observation_with_duration(6_350, 200, 23_220, 6_332_220));
+    let stats = catch_up.snapshot();
+    assert_eq!(
+        stats.last_skipped_ms,
+        Some(2),
+        "1.50 ms は 2 ms へ丸めること"
+    );
+    assert_eq!(
+        stats.skipped_ms, 36,
+        "累積はマイクロ秒で足してから丸めること (1 件目の 34 ms + 2 件目の 2 ms)"
+    );
+    assert_eq!(stats.skipped_frames, 2, "飛んだ音の合計を数えること");
 }

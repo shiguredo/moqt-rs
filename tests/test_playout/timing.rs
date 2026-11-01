@@ -7,9 +7,9 @@ use shiguredo_moqt::playout::scheduler::{
     AudioPlayoutPlay, AudioPlayoutScheduler,
 };
 use shiguredo_moqt::playout::timing::{
-    AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissReason, AudioMissTotal, AudioPlayoutMiss,
-    AudioPlayoutTimingSnapshot, AudioPlayoutTimingStats, MAX_RECENT_AUDIO_MISSES, TimingSummary,
-    summarize_timings,
+    AUDIO_PLAYOUT_TIMING_WINDOW_US, AudioMissReason, AudioMissTotal, AudioPlayoutGap,
+    AudioPlayoutMiss, AudioPlayoutTimingSnapshot, AudioPlayoutTimingStats, MAX_RECENT_AUDIO_MISSES,
+    TimingSummary, summarize_timings,
 };
 
 /// 鳴らすと決めた音の値を作る
@@ -513,215 +513,6 @@ fn snapshot_keeps_an_empty_window_when_nothing_is_recorded() {
 }
 
 #[test]
-fn audio_delay_feedback_returns_the_short_window_and_cumulative_backlog() {
-    // 目標遅延を閉ループで決めるための観測は、表示用の 10 秒の窓ではなく短い窓 (既定
-    // 1 秒) の分布を返す。目標を増やした結果が 10 秒の窓へ現れるまでには数秒かかるため、
-    // 制御には短い窓を使う。捨てた量は累積のまま返し、差を取るのは使う側の仕事にする
-    let mut stats = AudioPlayoutTimingStats::new();
-    // 窓 (1 秒) より古い音。余裕 100 / 鳴るまで 110 / 遅れ 10。分布へ入れない
-    stats.record_play(play(
-        1_000_000,
-        Some(1_100_000),
-        1_110_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    // 直近 (時刻 5,000〜6,000) の音。余裕 30 / 鳴るまで 40 / 遅れ 10
-    stats.record_play(play(
-        5_100_000,
-        Some(5_130_000),
-        5_140_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    // 余裕 10 / 鳴るまで 20 / 遅れ 10
-    stats.record_play(play(
-        5_500_000,
-        Some(5_510_000),
-        5_520_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    stats.record_miss(miss(
-        5_600_000,
-        AudioMissReason::Backlog,
-        20_000,
-        Some(5_700_000),
-        Some(5_500_000),
-    ));
-    // 材料化した隙間。閉ループはこれを穴の累積として目標を増やす根拠にする
-    stats.record_gap(30_000);
-    stats.record_gap(10_000);
-
-    let feedback = stats.audio_delay_feedback(6_000_000);
-    assert_eq!(feedback.at_us, 6_000_000, "観測した時刻を返すこと");
-    assert_eq!(
-        feedback.lateness_us,
-        Some(TimingSummary {
-            p50: 10_000,
-            p95: 10_000,
-            max: 10_000,
-        }),
-        "短い窓の遅れを返すこと"
-    );
-    assert_eq!(
-        feedback.start_delay_us,
-        Some(TimingSummary {
-            p50: 20_000,
-            p95: 40_000,
-            max: 40_000,
-        }),
-        "短い窓の鳴るまでの時間を返すこと"
-    );
-    assert_eq!(
-        feedback.slack_us,
-        Some(TimingSummary {
-            p50: 10_000,
-            p95: 30_000,
-            max: 30_000,
-        }),
-        "短い窓の余裕を返すこと"
-    );
-    assert_eq!(feedback.backlog_misses, 1, "累積の捨てた数を返すこと");
-    assert_eq!(feedback.backlog_us, 20_000, "累積の捨てた長さを返すこと");
-    assert_eq!(feedback.gap_count, 2, "累積の材料化した隙間の数を返すこと");
-    assert_eq!(
-        feedback.gap_us, 40_000,
-        "累積の材料化した隙間の長さを返すこと"
-    );
-    assert_eq!(
-        feedback.arrival_delay_floor_us, None,
-        "到着基準の再生の下限は計器では分からないため None にすること"
-    );
-    // 圧縮の増分と、揺らぎだけから求めた目標遅延は、この計器では分からない。購読側と時間軸が
-    // 埋めるまで 0 である (閉ループは 0 を「圧縮なし」「経路は 100 ms 以内」とみなす)
-    assert_eq!(
-        feedback.compression_us, 0,
-        "圧縮の増分は計器では分からないため 0 にすること"
-    );
-    assert_eq!(
-        feedback.jitter_target_us, 0,
-        "揺らぎだけの目標遅延は計器では分からないため 0 にすること"
-    );
-
-    // 表示用の窓 (10 秒) より外に出れば None になり、累積の捨てた量は残る
-    let later = stats.audio_delay_feedback(20_000_000);
-    assert_eq!(
-        later.lateness_us, None,
-        "窓の外の値だけになれば None になること"
-    );
-    assert_eq!(later.backlog_misses, 1, "累積は窓に関係なく残ること");
-    assert_eq!(later.backlog_us, 20_000);
-    assert_eq!(later.gap_count, 2, "隙間の累積も窓に関係なく残ること");
-    assert_eq!(later.gap_us, 40_000);
-}
-
-#[test]
-fn audio_delay_feedback_since_excludes_before_restart_and_snapshot_keeps_it() {
-    // 音声の再生を取り直したとき、再開前の遅れを新しい再生の制御へ混ぜない。表示用の分布と
-    // 累積は残すため、snapshot は過去の実績を消さない
-    let mut stats = AudioPlayoutTimingStats::with_window_us(AUDIO_PLAYOUT_TIMING_WINDOW_US);
-    // 遅れ 100 ms (予定 100 / 鳴り始め 200)
-    stats.record_play(play(
-        100_000,
-        Some(100_000),
-        200_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    // 遅れ 100 ms (予定 120 / 鳴り始め 220)
-    stats.record_play(play(
-        120_000,
-        Some(120_000),
-        220_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    // 遅れ 0 ms (予定 250 / 鳴り始め 250)
-    stats.record_play(play(
-        200_000,
-        Some(250_000),
-        250_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    // 累積は再開の前後で残る
-    stats.record_miss(miss(210_000, AudioMissReason::Backlog, 20_000, None, None));
-    stats.record_gap(10_000);
-
-    // 窓の先頭から求めた分布は、3 件の遅れの p50 (0 / 100 / 100) で 100 ms になる
-    assert_eq!(
-        stats.audio_delay_feedback(220_000).lateness_us,
-        Some(TimingSummary {
-            p50: 100_000,
-            p95: 100_000,
-            max: 100_000,
-        }),
-        "再開前の実績を含む分布を返すこと"
-    );
-    // 再開時刻 (150 ms) より後の記録だけを使うと、遅れ 0 の 1 件だけになる
-    let after_restart = stats.audio_delay_feedback_since(220_000, 150_000);
-    assert_eq!(
-        after_restart.lateness_us,
-        Some(TimingSummary {
-            p50: 0,
-            p95: 0,
-            max: 0,
-        }),
-        "再開後の分布だけで制御すること"
-    );
-    assert_eq!(
-        after_restart.backlog_misses, 1,
-        "累積は since に関係なく返すこと"
-    );
-    assert_eq!(
-        after_restart.gap_count, 1,
-        "隙間の累積も since に関係なく返すこと"
-    );
-    // 表示用の分布は過去の実績を消さない
-    assert_eq!(
-        stats.snapshot(220_000).lateness_us,
-        Some(TimingSummary {
-            p50: 100_000,
-            p95: 100_000,
-            max: 100_000,
-        }),
-        "表示用の過去の実績を消さないこと"
-    );
-
-    // since が窓の先頭より古いときは、窓の先頭から使う (分布が窓より広がらない)
-    assert_eq!(
-        stats.audio_delay_feedback_since(220_000, 0).lateness_us,
-        stats.audio_delay_feedback(220_000).lateness_us,
-        "since が窓の先頭より古ければ窓の先頭から使うこと"
-    );
-}
-
-#[test]
-fn audio_delay_feedback_ignores_records_that_are_not_plays() {
-    // 鳴らさなかった音は分布へ入れず、並べすぎて捨てた分だけを累積で数える
-    let mut stats = AudioPlayoutTimingStats::new();
-    stats.record_miss(miss(1_000_000, AudioMissReason::Error, 20_000, None, None));
-    stats.record_miss(miss(
-        1_100_000,
-        AudioMissReason::Backlog,
-        30_000,
-        None,
-        None,
-    ));
-
-    let feedback = stats.audio_delay_feedback(1_200_000);
-    assert_eq!(feedback.start_delay_us, None);
-    assert_eq!(feedback.slack_us, None);
-    assert_eq!(feedback.lateness_us, None);
-    assert_eq!(
-        feedback.backlog_misses, 1,
-        "並べすぎて捨てた分だけを数えること"
-    );
-    assert_eq!(feedback.backlog_us, 30_000);
-}
-
-#[test]
 fn reset_returns_to_the_initial_state() {
     let mut stats = AudioPlayoutTimingStats::new();
     stats.record_play(play(
@@ -739,7 +530,10 @@ fn reset_returns_to_the_initial_state() {
         Some(0),
     ));
     stats.record_stopped(40_000);
-    stats.record_gap(20_000);
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: 20_000,
+        unrecoverable_us: 0,
+    });
     stats.record_underrun(10_000);
     stats.reset();
 
@@ -787,31 +581,57 @@ fn record_stretch_unavailable_counts_cumulatively_and_resets() {
 }
 
 #[test]
-fn record_gap_counts_the_count_total_and_maximum() {
+fn record_gap_counts_the_uncovered_total_and_maximum() {
     let mut stats = AudioPlayoutTimingStats::new();
     // 数える前はすべて 0 である
     let initial = stats.snapshot(0);
     assert_eq!(initial.gaps, 0);
     assert_eq!(initial.gap_total_us, 0);
     assert_eq!(initial.gap_max_us, 0);
+    assert_eq!(initial.unrecoverable_gaps, 0);
+    assert_eq!(initial.unrecoverable_gap_total_us, 0);
 
-    stats.record_gap(20_000);
-    stats.record_gap(40_000);
-    stats.record_gap(10_000);
+    // 補間で埋まらなかった長さを数える。うち 2 件は予約できる最も早い時刻より前だった
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: 20_000,
+        unrecoverable_us: 10_000,
+    });
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: 40_000,
+        unrecoverable_us: 40_000,
+    });
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: 10_000,
+        unrecoverable_us: 0,
+    });
     let snapshot = stats.snapshot(1_000_000);
-    assert_eq!(snapshot.gaps, 3, "材料化した回数を数えること");
+    assert_eq!(snapshot.gaps, 3, "補間で埋まらなかった回数を数えること");
     assert_eq!(
         snapshot.gap_total_us, 70_000,
-        "材料化した長さの合計を数えること"
+        "補間で埋まらなかった長さの合計を数えること"
     );
     assert_eq!(
         snapshot.gap_max_us, 40_000,
-        "材料化した長さの最大を返すこと"
+        "補間で埋まらなかった長さの最大を返すこと"
+    );
+    assert_eq!(
+        snapshot.unrecoverable_gaps, 2,
+        "予約できなかった回数を数えること"
+    );
+    assert_eq!(
+        snapshot.unrecoverable_gap_total_us, 50_000,
+        "予約できなかった長さの合計を数えること"
     );
 
-    // 0 以下の長さは材料化していないため数えない
-    stats.record_gap(0);
-    stats.record_gap(-1);
+    // 0 以下の長さは数えない
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: 0,
+        unrecoverable_us: 10_000,
+    });
+    stats.record_gap(AudioPlayoutGap {
+        uncovered_us: -1,
+        unrecoverable_us: 0,
+    });
     assert_eq!(stats.snapshot(2_000_000).gaps, 3);
 
     // 累積であり、分布の窓の外へ出ても残る
@@ -825,6 +645,74 @@ fn record_gap_counts_the_count_total_and_maximum() {
     assert_eq!(snapshot.gaps, 0);
     assert_eq!(snapshot.gap_total_us, 0);
     assert_eq!(snapshot.gap_max_us, 0);
+    assert_eq!(snapshot.unrecoverable_gaps, 0);
+    assert_eq!(snapshot.unrecoverable_gap_total_us, 0);
+}
+
+#[test]
+fn record_rendered_gap_and_boundary_follow_the_output() {
+    let mut stats = AudioPlayoutTimingStats::new();
+    // 出力側が描画した未補間区間は、補間の要求とは別に数える
+    stats.record_rendered_gap(30_000, 2, 20_000);
+    let snapshot = stats.snapshot(1_000_000);
+    assert_eq!(snapshot.gaps, 2);
+    assert_eq!(snapshot.gap_total_us, 30_000);
+    assert_eq!(snapshot.gap_max_us, 20_000);
+    assert_eq!(snapshot.unrecoverable_gaps, 2);
+    assert_eq!(snapshot.unrecoverable_gap_total_us, 30_000);
+
+    // 負の長さは数えない
+    stats.record_rendered_gap(-1, 1, 0);
+    stats.record_rendered_gap(1_000, 1, -1);
+    assert_eq!(stats.snapshot(2_000_000).gaps, 2);
+
+    // バッファ境界の段差は、最大を常に更新し、回数を足す
+    stats.record_rendered_boundary(0.02, 1);
+    stats.record_rendered_boundary(0.08, 2);
+    let snapshot = stats.snapshot(2_000_000);
+    assert_eq!(snapshot.boundary_step_count, 3);
+    assert!((snapshot.boundary_step_max - 0.08).abs() < 1e-6);
+
+    // 負の値は記録しない
+    stats.record_rendered_boundary(-0.1, 1);
+    assert_eq!(stats.snapshot(2_000_000).boundary_step_count, 3);
+
+    // 購読のやり直しでは 0 に戻る
+    stats.reset();
+    let snapshot = stats.snapshot(2_000_000);
+    assert_eq!(snapshot.gaps, 0);
+    assert_eq!(snapshot.unrecoverable_gaps, 0);
+    assert_eq!(snapshot.boundary_step_count, 0);
+    assert_eq!(snapshot.boundary_step_max, 0.0);
+}
+
+#[test]
+fn pending_tracks_the_reserved_sounds() {
+    let mut stats = AudioPlayoutTimingStats::new();
+    // 20 ms の音を 3 つ並べる (0 ms、20 ms、40 ms から鳴り始める)。到着はすべて 0 ms
+    // として、記録のたびに前の予約が落とされないようにする
+    for start_us in [0, 20_000, 40_000] {
+        stats.record_play(play(
+            0,
+            Some(start_us),
+            start_us,
+            20_000,
+            AudioPlayoutBasis::Timestamp,
+        ));
+    }
+    assert_eq!(
+        stats.pending_end_us(0),
+        Some(60_000),
+        "最後に鳴り終わる予約の時刻を返すこと"
+    );
+    assert_eq!(
+        stats.pending_us(0),
+        60_000,
+        "鳴り終わっていない長さの合計を返すこと"
+    );
+    // 30 ms の時点では、1 つ目は鳴り終わっており、残りは 10 ms と 20 ms
+    assert_eq!(stats.pending_us(30_000), 30_000);
+    assert_eq!(stats.pending_end_us(70_000), None);
 }
 
 #[test]
@@ -859,25 +747,6 @@ fn record_underrun_counts_the_count_total_and_maximum() {
     assert_eq!(snapshot.underruns, 0);
     assert_eq!(snapshot.underrun_total_us, 0);
     assert_eq!(snapshot.underrun_max_us, 0);
-}
-
-#[test]
-fn audio_delay_feedback_has_no_underrun_by_default() {
-    // 枯れた長さは購読側が増分として渡すため、計器が作る観測では 0 である
-    let mut stats = AudioPlayoutTimingStats::new();
-    stats.record_play(play(
-        0,
-        Some(10_000),
-        20_000,
-        20_000,
-        AudioPlayoutBasis::Timestamp,
-    ));
-    stats.record_underrun(10_000);
-    assert_eq!(
-        stats.audio_delay_feedback(30_000).underrun_ms,
-        0,
-        "計器の観測では枯れた長さを埋めないこと"
-    );
 }
 
 #[test]
@@ -927,6 +796,7 @@ fn scheduler_play_is_recorded_without_conversion() {
         delay_us: AUDIO_PLAYOUT_DELAY_US,
         arrival_delay_us: AUDIO_PLAYOUT_DELAY_US,
         presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        stretch_min_us: None,
     });
     assert_eq!(
         decision,
@@ -934,7 +804,10 @@ fn scheduler_play_is_recorded_without_conversion() {
             start_at_us: 180_000,
             basis: AudioPlayoutBasis::Timestamp,
             compress_us: 0,
-            gap_us: 0,
+            expand_us: 0,
+            gap_start_us: None,
+            total_gap_us: 0,
+            unrecoverable_gap_us: 0,
             conceal_us: 0,
         },
         "目標に間に合う音は目標の時刻で鳴らすこと"
@@ -971,4 +844,84 @@ fn scheduler_play_is_recorded_without_conversion() {
     );
     assert_eq!(snapshot.played_frames, 1);
     assert_eq!(snapshot.played_us, 20_000);
+}
+
+#[test]
+fn confirmed_play_length_reaches_the_stats() {
+    // 時間伸長と実際の出力終端を確定した後に record_play へ渡すと、伸びた分と実終端が
+    // 計器 (played_us / pending / 停止時に切った長さ) に入る
+    let mut scheduler = AudioPlayoutScheduler::new();
+    let mut stats = AudioPlayoutTimingStats::new();
+    // 到着基準の 1 つ目は 50 ms から 70 ms まで鳴る
+    scheduler.schedule(AudioPlayoutInput {
+        now_us: 0,
+        arrival_us: 0,
+        timestamp_us: 0,
+        duration_us: 20_000,
+        target_start_us: None,
+        enforce_target: false,
+        delay_us: AUDIO_PLAYOUT_DELAY_US,
+        arrival_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        stretch_min_us: None,
+    });
+    // 200 ms 過ぎて届いた音は 210 ms から鳴り、深さを戻すために 20 ms の伸長を要求する
+    let decision = scheduler.schedule(AudioPlayoutInput {
+        now_us: 200_000,
+        arrival_us: 200_000,
+        timestamp_us: 40_000,
+        duration_us: 20_000,
+        target_start_us: None,
+        enforce_target: false,
+        delay_us: AUDIO_PLAYOUT_DELAY_US,
+        arrival_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        presentation_delay_us: AUDIO_PLAYOUT_DELAY_US,
+        stretch_min_us: None,
+    });
+    let AudioPlayoutDecision::Play { expand_us, .. } = decision else {
+        panic!("鳴らす決定になること");
+    };
+    assert_eq!(expand_us, 20_000, "再同期後の伸長を要求すること");
+
+    // 実際に 20 ms 伸ばし、バッファへ書いた実際の終端を 250 ms で確定する
+    scheduler.confirm_expansion(20_000);
+    scheduler.confirm_playout_end(250_000);
+    let play = scheduler
+        .last_play()
+        .expect("鳴らすと決めた音の値が残っている");
+    assert_eq!(
+        play.played_us, 40_000,
+        "20 ms の音に 20 ms の伸長を確定すると 40 ms になること"
+    );
+
+    // 確定した値のまま計器へ渡す
+    stats.record_play(play);
+    let snapshot = stats.snapshot(210_000);
+    assert_eq!(snapshot.played_us, 40_000, "実際に鳴った長さを数えること");
+    assert_eq!(
+        stats.pending_end_us(210_000),
+        Some(250_000),
+        "予約の終端が確定した実終端になること"
+    );
+    assert_eq!(
+        stats.pending_us(210_000),
+        40_000,
+        "鳴り終わっていない長さが伸びた分を含むこと"
+    );
+
+    // 220 ms で停止すると、残りの 30 ms が鳴らなかった長さとして数えられる
+    stats.record_stopped(220_000);
+    let snapshot = stats.snapshot(220_000);
+    assert_eq!(
+        snapshot.missed_us, 30_000,
+        "停止時に切った長さは確定した実終端から求めること"
+    );
+    assert_eq!(
+        snapshot
+            .missed_by_reason
+            .get(AudioMissReason::Stopped)
+            .duration_us,
+        30_000,
+        "停止の理由別の累積にも実終端を使うこと"
+    );
 }

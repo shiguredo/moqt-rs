@@ -52,18 +52,19 @@ fn the_catch_up_always_ends_and_respects_the_cooldown() -> noprop::TestResult {
             } else {
                 Some(lag_ms)
             };
-            let decode_lag_ms = input_lag_ms.map_or(lag_ms, |input_lag_ms| {
-                lag_ms.saturating_sub(input_lag_ms).max(0)
-            });
+            // 負の遅れ (配信側の時計が先へ進んでいる) は 0 に寄せる
+            let decode_lag_ms = input_lag_ms
+                .map_or(lag_ms, |input_lag_ms| lag_ms.saturating_sub(input_lag_ms))
+                .max(0);
             let duration_ms = if noprop::sample_bool(ctx) { 20 } else { 10 };
             // 復号の出力の TIMESTAMP は投入の順に 1 音ずつ進む (跳びが無い)
             timestamp_us = timestamp_us.saturating_add(duration_ms * 1_000);
 
             let decision = catch_up.observe(AudioReceiveCatchUpObservation {
-                now_ms,
-                lag_ms,
-                input_lag_ms,
-                duration_ms,
+                now_us: now_ms * 1_000,
+                lag_us: lag_ms * 1_000,
+                input_lag_us: input_lag_ms.map(|input_lag_ms| input_lag_ms * 1_000),
+                duration_us: duration_ms * 1_000,
                 timestamp_us,
             });
             let stats = catch_up.snapshot();
@@ -77,6 +78,10 @@ fn the_catch_up_always_ends_and_respects_the_cooldown() -> noprop::TestResult {
             assert_eq!(
                 stats.input_lag_ms, input_lag_ms,
                 "入力の遅れを渡したとおりに残していない: {stats:?}"
+            );
+            assert!(
+                decode_lag_ms >= 0,
+                "「復号が足している遅れ」が負になった: {decode_lag_ms}"
             );
             assert_eq!(
                 stats.decode_lag_ms,
@@ -158,10 +163,10 @@ fn skipped_audio_matches_the_timestamp_jumps() -> noprop::TestResult {
             now_ms += 250;
             timestamp_us += 20_000;
             catch_up.observe(AudioReceiveCatchUpObservation {
-                now_ms,
-                lag_ms: 20,
-                input_lag_ms: Some(INPUT_LAG_MS),
-                duration_ms: 20,
+                now_us: now_ms * 1_000,
+                lag_us: 20_000,
+                input_lag_us: Some(INPUT_LAG_MS * 1_000),
+                duration_us: 20_000,
                 timestamp_us,
             });
         }
@@ -173,10 +178,10 @@ fn skipped_audio_matches_the_timestamp_jumps() -> noprop::TestResult {
         assert!(
             catch_up
                 .observe(AudioReceiveCatchUpObservation {
-                    now_ms,
-                    lag_ms: 200,
-                    input_lag_ms: Some(INPUT_LAG_MS),
-                    duration_ms: 20,
+                    now_us: now_ms * 1_000,
+                    lag_us: 200_000,
+                    input_lag_us: Some(INPUT_LAG_MS * 1_000),
+                    duration_us: 20_000,
                     timestamp_us,
                 })
                 .rebuild_decoder,
@@ -198,10 +203,10 @@ fn skipped_audio_matches_the_timestamp_jumps() -> noprop::TestResult {
                 expected_frames += extra_frames.max(1);
             }
             catch_up.observe(AudioReceiveCatchUpObservation {
-                now_ms,
-                lag_ms: 200,
-                input_lag_ms: Some(INPUT_LAG_MS),
-                duration_ms: 20,
+                now_us: now_ms * 1_000,
+                lag_us: 200_000,
+                input_lag_us: Some(INPUT_LAG_MS * 1_000),
+                duration_us: 20_000,
                 timestamp_us,
             });
             let stats = catch_up.snapshot();

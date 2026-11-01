@@ -1,34 +1,47 @@
-//! 波形の周期による時間圧縮と、欠落した区間の補間のプロパティテスト
+//! 波形の周期による時間圧縮・時間伸長と、欠落した区間の補間のプロパティテスト
 //!
-//! 任意の音声サンプル列に対して、長さの変化の契約とバッファ操作の構造が
-//! 保たれることを検証する。
+//! 任意の音声サンプル列に対して、時間圧縮・時間伸長・補間の長さの契約とバッファ操作の
+//! 構造が保たれることを検証する。時間圧縮は削る窓の外側のサンプルを変えず、窓の中も
+//! 「元の位置」と「周期ぶん後ろの位置」の間の値にしかならない (クロスフェードの重みが
+//! 0 から 1 の間にあるため)。時間伸長は実音の先頭と末尾を変えず、元の振幅を増やさない。
 
 use pbt::common::test_runner;
 use shiguredo_moqt::playout::stretch::{
     TIME_STRETCH_CONCEAL_END_GAIN, TIME_STRETCH_MAX_LAG, TIME_STRETCH_MIN_LAG, compress, conceal,
-    concealment_end_gain,
+    concealment_end_gain, is_time_stretch_available, preemptively_expand,
 };
 
-/// 対応しているサンプルレートと間引き率の組
+/// 対応しているサンプルレートと、4 kHz の 1 サンプルに対応する入力のサンプル数
 ///
-/// 間引き率は公開 API に無いため、テスト側で対応表を持つ。
-const SUPPORTED_RATES: [(u32, usize); 4] = [(8_000, 2), (16_000, 4), (32_000, 8), (48_000, 12)];
+/// 44.1 kHz は解析用の信号だけを 48 kHz へ換算するため、倍率が非整数 (11.025) になる。
+const SUPPORTED_RATES: [(u32, f64); 5] = [
+    (8_000, 2.0),
+    (16_000, 4.0),
+    (32_000, 8.0),
+    (44_100, 11.025),
+    (48_000, 12.0),
+];
 
-/// 対応しているサンプルレートと間引き率の組を 1 つ選ぶ
-fn sample_supported_rate(ctx: &mut noprop::TestCaseContext) -> (u32, usize) {
+/// 対応しているサンプルレートと格子の倍率の組を 1 つ選ぶ
+fn sample_supported_rate(ctx: &mut noprop::TestCaseContext) -> (u32, f64) {
     SUPPORTED_RATES[noprop::sample_usize_in(ctx, 0..SUPPORTED_RATES.len())]
 }
 
 /// 解析の受理境界を含む入力長を選ぶ
-fn sample_length(ctx: &mut noprop::TestCaseContext) -> usize {
-    match noprop::sample_usize_in(ctx, 0..8) {
-        0 => 0,
-        1 => 1,
-        2 => 123,   // 8 kHz: 間引き後 59 サンプル (操作しない)
-        3 => 124,   // 8 kHz: 間引き後 60 サンプル (操作する境界)
-        4 => 729,   // 48 kHz: 間引き後 59 サンプル (操作しない)
-        5 => 730,   // 48 kHz: 間引き後 60 サンプル (操作する境界)
-        6 => 1_440, // 48 kHz: ピッチ周期が音の半分にちょうど収まる長さ
+///
+/// 4 kHz へ間引いた長さが自己相関の窓 (50) + 周期の下限 (10) + 1 に届くかどうかの境界を
+/// レートごとに混ぜる。
+fn sample_length(ctx: &mut noprop::TestCaseContext, sample_rate: u32) -> usize {
+    let boundaries: &[usize] = match sample_rate {
+        // 8 kHz: 間引き後 59 / 60 / 61 サンプル
+        8_000 => &[0, 1, 123, 124, 126, 160],
+        // 44.1 kHz: 解析用の 48 kHz 変換を含む境界
+        44_100 => &[0, 1, 800, 882, 441, 1_323],
+        // 16 / 32 / 48 kHz
+        _ => &[0, 1, 729, 730, 742, 960],
+    };
+    match noprop::sample_usize_in(ctx, 0..4) {
+        0..=2 => boundaries[noprop::sample_usize_in(ctx, 0..boundaries.len())],
         _ => noprop::sample_usize_in(ctx, 0..=2_000),
     }
 }
@@ -40,9 +53,9 @@ fn sample_length(ctx: &mut noprop::TestCaseContext) -> usize {
 fn sample_max_length_change_samples(
     ctx: &mut noprop::TestCaseContext,
     length: usize,
-    factor: usize,
+    grid: f64,
 ) -> usize {
-    let period_floor = TIME_STRETCH_MIN_LAG * factor;
+    let period_floor = (TIME_STRETCH_MIN_LAG as f64 * grid) as usize;
     match noprop::sample_usize_in(ctx, 0..6) {
         0 => usize::MAX,
         1 => 0,
@@ -57,17 +70,19 @@ fn sample_max_length_change_samples(
 ///
 /// ノイズ (操作されない経路)、周期的な矩形波 (操作される経路)、無音 (相関に関係なく
 /// 操作される経路) を混ぜて、時間圧縮の分岐をひととおり踏む。
-fn sample_signal(ctx: &mut noprop::TestCaseContext, length: usize) -> Vec<f32> {
+fn sample_signal(ctx: &mut noprop::TestCaseContext, length: usize, grid: f64) -> Vec<f32> {
     match noprop::sample_usize_in(ctx, 0..3) {
         0 => (0..length)
             .map(|_| noprop::sample_f32_in(ctx, -1.0, 1.0))
             .collect(),
         1 => {
+            // 4 kHz の格子に乗る周期 (端数補間を掛けない経路) と乗らない周期を混ぜる
             let period = match noprop::sample_usize_in(ctx, 0..3) {
-                0 => 240,
-                1 => 720,
+                0 => (10.0 * grid) as usize,
+                1 => (20.0 * grid) as usize,
                 _ => noprop::sample_usize_in(ctx, 2..=2_000),
-            };
+            }
+            .max(2);
             let amplitude = noprop::sample_f32_in(ctx, 0.1, 1.0);
             (0..length)
                 .map(|index| {
@@ -88,9 +103,10 @@ fn sample_channels(
     ctx: &mut noprop::TestCaseContext,
     length: usize,
     channel_count: usize,
+    grid: f64,
 ) -> Vec<Vec<f32>> {
     (0..channel_count)
-        .map(|_| sample_signal(ctx, length))
+        .map(|_| sample_signal(ctx, length, grid))
         .collect()
 }
 
@@ -109,18 +125,27 @@ fn sample_conceal_us(ctx: &mut noprop::TestCaseContext) -> i64 {
     }
 }
 
-/// compress は 0 または負の長さの変化を返し、削った長さは上限を超えず、変更しなかった
-/// 範囲と詰めた範囲が元のサンプルと一致する
+/// 時間伸長で増やせる長さ (サンプル数) を選ぶ
+fn sample_expansion_limit(ctx: &mut noprop::TestCaseContext, length: usize) -> usize {
+    match noprop::sample_usize_in(ctx, 0..4) {
+        0 => 0,
+        1 => 1,
+        _ => noprop::sample_usize_in(ctx, 0..=length),
+    }
+}
+
+/// compress は 0 または負の長さの変化を返し、削った長さは上限を超えず、削る窓の外側の
+/// サンプルを変えず、窓の中も「元の位置」と「周期ぶん後ろの位置」の間の値にしかならない
 #[test]
 fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let (sample_rate, factor) = sample_supported_rate(ctx);
-        let length = sample_length(ctx);
+        let (sample_rate, grid) = sample_supported_rate(ctx);
+        let length = sample_length(ctx, sample_rate);
         let channel_count = noprop::sample_usize_in(ctx, 1..=2);
-        let mut channels = sample_channels(ctx, length, channel_count);
+        let mut channels = sample_channels(ctx, length, channel_count, grid);
         let original = channels.clone();
-        let max_length_change_samples = sample_max_length_change_samples(ctx, length, factor);
+        let max_length_change_samples = sample_max_length_change_samples(ctx, length, grid);
         let mut references: Vec<&mut [f32]> = channels
             .iter_mut()
             .map(|channel| channel.as_mut_slice())
@@ -136,26 +161,35 @@ fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::Test
                 removed <= max_length_change_samples,
                 "上限を超えて削った: removed={removed} max={max_length_change_samples}"
             );
-            assert_eq!(removed % factor, 0);
+            assert!(removed <= length, "音より長く削った");
+            // 4 kHz の格子の下限から上限までのずらし幅に端数補間を掛けた範囲に収まる
             assert!(
-                (TIME_STRETCH_MIN_LAG * factor..=TIME_STRETCH_MAX_LAG * factor).contains(&removed)
+                removed >= ((TIME_STRETCH_MIN_LAG as f64 - 1.0) * grid) as usize,
+                "削る長さが下限より短い: removed={removed} grid={grid}"
             );
-            let splice = length / 2;
-            // 削る長さは音の中央までである
-            assert!(removed <= splice);
+            assert!(
+                removed <= ((TIME_STRETCH_MAX_LAG as f64 + 1.0) * grid).ceil() as usize,
+                "削る長さが上限より長い: removed={removed} grid={grid}"
+            );
+            let used = length - removed;
             for (channel, original_channel) in channels.iter().zip(original.iter()) {
-                // 削る窓より手前は変わらない
+                // 先頭と末尾は隣接フレームへ繋がるため、削る位置をどこへ移しても変わらない
+                assert_eq!(channel[0], original_channel[0], "先頭のサンプルを変えない");
                 assert_eq!(
-                    &channel[..splice - removed],
-                    &original_channel[..splice - removed]
+                    channel[used - 1],
+                    original_channel[length - 1],
+                    "末尾のサンプルを変えない"
                 );
-                // 切れ目より後ろは削った分だけ前へ詰まる
-                assert_eq!(
-                    &channel[splice..length - removed],
-                    &original_channel[splice + removed..length]
-                );
-                for sample in channel {
-                    assert!(sample.is_finite());
+                // クロスフェードの重みが 0 から 1 の間にあるため、使用する範囲の各サンプルは
+                // 「元の位置」と「周期ぶん後ろの位置」の間の値にしかならない
+                for index in 0..used {
+                    let before = f64::from(original_channel[index]);
+                    let after = f64::from(original_channel[index + removed]);
+                    let value = f64::from(channel[index]);
+                    assert!(
+                        value >= before.min(after) - 1e-5 && value <= before.max(after) + 1e-5,
+                        "index={index} の値が元の 2 位置の外: value={value} before={before} after={after}"
+                    );
                 }
             }
         }
@@ -170,10 +204,10 @@ fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::Test
 fn conceal_reports_length_and_keeps_buffers_consistent() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
-        let (sample_rate, _factor) = sample_supported_rate(ctx);
-        let length = sample_length(ctx);
+        let (sample_rate, grid) = sample_supported_rate(ctx);
+        let length = sample_length(ctx, sample_rate);
         let channel_count = noprop::sample_usize_in(ctx, 1..=2);
-        let channels = sample_channels(ctx, length, channel_count);
+        let channels = sample_channels(ctx, length, channel_count, grid);
         let conceal_us = sample_conceal_us(ctx);
         // 要求する長さ (サンプル数、四捨五入)
         let requested =
@@ -311,6 +345,108 @@ fn conceal_of_a_periodic_wave_keeps_the_amplitude_and_the_step() -> noprop::Test
             generated_step <= source_step * 2.0 + 1e-6,
             "段差が大きい: generated={generated_step} source={source_step} period={period}"
         );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 時間伸長は実音の先頭と末尾を変えず、元の振幅を増やさず、増やした長さとバッファの契約を
+/// 守る
+#[test]
+fn preemptive_expand_keeps_the_edges_and_the_peak() -> noprop::TestResult {
+    const SAMPLE_RATE: u32 = 48_000;
+    const LENGTH: usize = 960;
+    const OLD_LENGTH: usize = 480;
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        // 周期のある音と無い音を混ぜる (どちらも非無音)
+        let periodic = noprop::sample_bool(ctx);
+        let amplitude = noprop::sample_f32_in(ctx, 0.1, 1.0);
+        let period = if periodic {
+            (TIME_STRETCH_MIN_LAG as f64 * 12.0) as usize
+        } else {
+            0
+        };
+        let channel: Vec<f32> = (0..LENGTH)
+            .map(|index| {
+                if periodic {
+                    if index % period < period / 2 {
+                        amplitude
+                    } else {
+                        -amplitude
+                    }
+                } else {
+                    noprop::sample_f32_in(ctx, -amplitude, amplitude)
+                }
+            })
+            .collect();
+        let history: Vec<f32> = channel[..OLD_LENGTH].to_vec();
+        let limit = sample_expansion_limit(ctx, LENGTH);
+        let expansion = preemptively_expand(
+            core::slice::from_ref(&channel),
+            core::slice::from_ref(&history),
+            SAMPLE_RATE,
+            limit,
+        );
+        if expansion.added_samples == 0 {
+            assert!(
+                expansion.channels.is_empty(),
+                "操作しなかったときは音を返さない"
+            );
+            Ok(())
+        } else {
+            let added = expansion.added_samples;
+            assert!(added <= limit, "上限を超えて伸ばした");
+            let output = &expansion.channels[0];
+            assert_eq!(output.len(), LENGTH + added);
+            assert_eq!(output[0], channel[0], "実音の先頭を変えない");
+            assert_eq!(
+                output[LENGTH + added - 1],
+                channel[LENGTH - 1],
+                "実音の末尾を変えない"
+            );
+            let peak = channel
+                .iter()
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+            for sample in output {
+                assert!(sample.is_finite());
+                assert!(
+                    sample.abs() <= peak + 1e-6,
+                    "元の振幅を超えた: sample={sample} peak={peak}"
+                );
+            }
+            Ok(())
+        }
+    })?;
+    Ok(())
+}
+
+/// 対応外のサンプルレートと、増やせる長さが 0 のときは時間伸長しない
+#[test]
+fn preemptive_expand_does_nothing_when_unavailable() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        let length = noprop::sample_usize_in(ctx, 1..=960);
+        let channel: Vec<f32> = (0..length)
+            .map(|_| noprop::sample_f32_in(ctx, -1.0, 1.0))
+            .collect();
+        let history = vec![channel.clone()];
+        // 対応外のレート (4 kHz の格子へ丸めてもフィルタの表に無い)
+        let unavailable = if noprop::sample_bool(ctx) {
+            96_000
+        } else {
+            22_050
+        };
+        assert!(!is_time_stretch_available(unavailable));
+        let expansion = preemptively_expand(
+            core::slice::from_ref(&channel),
+            &history,
+            unavailable,
+            length,
+        );
+        assert_eq!(expansion.added_samples, 0, "対応外のレートでは伸ばさない");
+        let expansion = preemptively_expand(&[channel], &history, 48_000, 0);
+        assert_eq!(expansion.added_samples, 0, "上限が 0 なら伸ばさない");
         Ok(())
     })?;
     Ok(())

@@ -7,10 +7,8 @@
 mod buffer;
 #[path = "test_playout/catch_up.rs"]
 mod catch_up;
-#[path = "test_playout/delay.rs"]
-mod delay;
-#[path = "test_playout/feedback.rs"]
-mod feedback;
+#[path = "test_playout/expansion.rs"]
+mod expansion;
 #[path = "test_playout/gap.rs"]
 mod gap;
 #[path = "test_playout/publish_catch_up.rs"]

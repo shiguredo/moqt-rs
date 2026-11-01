@@ -1,12 +1,14 @@
 //! 再生の隙間の材料化のプロパティテスト
 //!
 //! 任意の隙間の長さ・補間の要求・直前の音の形式に対して、隙間が要求したサンプル数ちょうどで
-//! 作られること、補間した長さが要求と隙間の長さの中に収まること、隙間の最後と今回の音の
-//! 先頭が 0 になること、補間しないときは無音で埋まること、同じ入力なら同じ結果になることを
-//! 検証する。補間が成功する場合としない場合の両方に到達したことも確かめる。
+//! 作られること、補間した長さが要求と隙間の長さの中に収まること、続き音が作れないときは
+//! 隙間の最後と今回の音の先頭が 0 になること、補間しないときは無音で埋まること、同じ入力
+//! なら同じ結果になることを検証する。補間が成功する場合としない場合の両方に到達したことも
+//! 確かめる。
 
 use pbt::common::test_runner;
-use shiguredo_moqt::playout::gap::materialize;
+use shiguredo_moqt::playout::expansion::expand_audio;
+use shiguredo_moqt::playout::gap::{AUDIO_GAP_FADE_US, materialize};
 
 /// 周期のある音を作る
 ///
@@ -124,10 +126,17 @@ fn materialized_gaps_follow_the_contract() -> noprop::TestResult {
                 expected_length,
                 "隙間の長さが要求と違う: gap_us={gap_us} sample_rate={sample_rate} expected={expected_length}"
             );
-            assert_eq!(
-                channel[expected_length - 1],
-                0.0,
-                "隙間の最後のサンプルは 0 であること: gap_us={gap_us}"
+            // 続き音が隙間を埋めきれないときだけ末尾を 0 へ落とす
+            if gap.concealed_us == 0 {
+                assert_eq!(
+                    channel[expected_length - 1],
+                    0.0,
+                    "続き音が無いときの隙間の最後のサンプルは 0 であること: gap_us={gap_us}"
+                );
+            }
+            assert!(
+                channel.iter().all(|sample| sample.is_finite()),
+                "隙間の音が有限でない: gap_us={gap_us}"
             );
         }
         // 補間した長さは、要求と隙間の全長の中に収まる
@@ -161,21 +170,71 @@ fn materialized_gaps_follow_the_contract() -> noprop::TestResult {
         } else {
             concealed_seen.set(concealed_seen.get() + 1);
         }
-        // 今回の音の先頭は 0 から立ち上がる
-        for channel in &current {
-            if !channel.is_empty() {
-                assert_eq!(
-                    channel[0], 0.0,
-                    "今回の音の先頭は 0 であること: gap_us={gap_us}"
-                );
+        // 続き音が無いときは今回の音の先頭を 0 から立ち上げる。続き音があるときは
+        // クロスフェードの始点 (続き音) になるため 0 とは限らない
+        if gap.concealed_us == 0 {
+            for channel in &current {
+                if !channel.is_empty() {
+                    assert_eq!(
+                        channel[0], 0.0,
+                        "続き音が無いときの今回の音の先頭は 0 であること: gap_us={gap_us}"
+                    );
+                }
             }
         }
-        // すべてのサンプルが有限である (入力も有限である)
-        for channel in &gap.channels {
-            assert!(
-                channel.iter().all(|sample| sample.is_finite()),
-                "隙間の音が有限でない: gap_us={gap_us} conceal_us={conceal_us} sample_rate={sample_rate}"
-            );
+
+        // 続き音があるときは、隙間の先頭をフェードで歪めない
+        //
+        // gap::materialize は直前の音の末尾 30 ms を履歴、その末尾 20 ms を解析の対象に
+        // して続き音を作る (moqt-js の AudioRenderConcealer と同じ切り方)。同じ切り方で
+        // expand_audio を呼んだ結果と隙間の音が一致することを確かめる。
+        if gap.concealed_us > 0
+            && let Some(previous) = previous.as_deref()
+            && previous.len() == channels
+            && !previous.is_empty()
+            && previous.iter().all(|channel| channel.len() == previous[0].len())
+        {
+            let history_length = ((f64::from(sample_rate) * 0.03).round() as usize)
+                .max(1)
+                .min(previous[0].len());
+            let current_length = ((f64::from(sample_rate) * 0.02).round() as usize)
+                .max(1)
+                .min(history_length);
+            let history: Vec<&[f32]> = previous
+                .iter()
+                .map(|channel| &channel[channel.len() - history_length..])
+                .collect();
+            let current_window: Vec<&[f32]> = history
+                .iter()
+                .map(|channel| &channel[channel.len() - current_length..])
+                .collect();
+            let expected = expand_audio(&current_window, sample_rate, Some(&history))
+                .expect("有限の音声は受け付ける");
+            if !expected.is_empty() {
+                let gap_length = gap.channels[0].len();
+                let filled = gap_length.min(expected[0].len());
+                let fade = ((AUDIO_GAP_FADE_US * i64::from(sample_rate) + 500_000) / 1_000_000)
+                    .max(1) as usize;
+                // 続き音が今回の音の手前まで続くときは、末尾のフェードも掛からないため全体を
+                // 比べられる。そうでないときは末尾のフェードが掛かる範囲を除いて比べる
+                let crossfades = filled > 0
+                    && gap_length + fade <= expected[0].len()
+                    && current_lengths.iter().all(|length| *length >= fade);
+                let compared = if crossfades {
+                    filled
+                } else {
+                    let tail_fade = fade.min((gap_length / 2).max(1));
+                    filled.min(gap_length.saturating_sub(tail_fade))
+                };
+                for (channel_index, channel) in gap.channels.iter().enumerate() {
+                    for index in 0..compared {
+                        assert_eq!(
+                            channel[index], expected[channel_index][index],
+                            "隙間の先頭をフェードで歪めないこと: channel={channel_index} index={index} gap_us={gap_us} sample_rate={sample_rate}"
+                        );
+                    }
+                }
+            }
         }
 
         // 同じ入力なら同じ結果になる

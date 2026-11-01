@@ -99,7 +99,7 @@
 - GREASE 値の生成と判定 (`grease::{generate / is_grease}`)
 - Namespace / Track Name のシリアライズ表現とパース (`name::{parse_name / parse_name_with_percent_encoding / serialize_name / parse_namespace / serialize_namespace / parse_track_name / serialize_track_name}`)
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
-- 音声の時間圧縮・伸長と欠落の補間、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択 (`playout::{stretch, delay, scheduler, timeline, buffer}`)
+- 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, timing, catch_up}`)
 - メディア時刻の Unix epoch の壁時計への換算 (`media_clock::WallClockMapper`)
 - セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)
 
@@ -193,7 +193,7 @@ MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TI
 | `name` | Namespace / Track Name のシリアライズ表現とパース (`parse_name` / `parse_name_with_percent_encoding` / `serialize_name` / `parse_namespace` / `serialize_namespace` / `parse_track_name` / `serialize_track_name`) |
 | `object_properties` | Object-scoped Properties と `IMMUTABLE_PROPERTIES` 補助デコーダー |
 | `parameter` | SETUP Options の encode / decode |
-| `playout` | 音声の時間圧縮・伸長と欠落の補間、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択 |
+| `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 |
 | `session` | 1 本の `MOQT Transport Session` に閉じた sans I/O な状態機械で、control plane に加えて request stream / data stream / datagram の state も扱う |
 | `stream` | data stream ヘッダ、`SubgroupStreamDecoder`、`FetchStreamDecoder`、`FetchStreamEncoder` |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証ユーティリティ |
@@ -206,7 +206,7 @@ MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TI
 
 | 層 | 主なモジュール | 概要 |
 | --- | --- | --- |
-| Codec / helper | `varint`, `message`, `name`, `message_parameter`, `parameter`, `decoder`, `stream`, `loc`, `msf`, `object_properties`, `track_properties`, `grease`, `playout`, `media_clock`, `error`, `c4m` | ワイヤーフォーマットの encode / decode と検証、音声再生の純粋な処理 |
+| Codec / helper | `varint`, `message`, `name`, `message_parameter`, `parameter`, `decoder`, `stream`, `loc`, `msf`, `object_properties`, `track_properties`, `grease`, `playout`, `media_clock`, `error`, `c4m` | ワイヤーフォーマットの encode / decode と検証、音声再生の予算・時刻決定と DSP の純粋な処理 |
 | Stateful helper | `subgroup_tracker`, `session::auth_token_cache::AuthTokenCache`, `session::request_id::RequestIdGenerator`, `session::request_id::RequestIdTracker` | セッション実装で使う状態付き補助コンポーネント |
 | Session | `session` | 1 本の `MOQT Transport Session` に閉じた endpoint-local な protocol state を管理する |
 

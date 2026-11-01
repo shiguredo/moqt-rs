@@ -1,6 +1,6 @@
 ---
 name: shiguredo-moqt
-description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-22 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 時間伸縮・目標遅延・鳴らす時刻・A/V 同期・共通の時間軸)、encode / decode やセッション駆動の実装に関する質問時に使用。"
+description: "時雨堂の Sans I/O MOQT ライブラリ shiguredo_moqt の機能・API リファレンス。draft-ietf-moq-transport-22 の制御メッセージ・セッション状態機械・data stream / datagram、LOC / MSF の codec、C4M (CAT / CWT) の認可トークン、音声の再生補助 (playout: 到着の揺らぎと実出力の先行量からの再生予算・鳴らす時刻・A/V 同期・共通の時間軸・時間圧縮/伸長・欠落の補間)、encode / decode やセッション駆動の実装に関する質問時に使用。"
 ---
 
 # shiguredo_moqt
@@ -14,7 +14,7 @@ draft-ietf-moq-transport-22 に基づく Sans I/O / no_std な Media over QUIC T
 - **依存は 4 つのみ**: `hashbrown` / `noflate` / `nojson` / `base64ct` (暗号処理は optional feature `aws-lc-rs`)
 - **Session 状態機械**: 1 本の Transport Session に閉じた endpoint-local な状態管理
 - **インクリメンタルデコード**: フレーム境界に依存せず受信バッファに蓄積しながらデコード
-- **音声の再生補助**: 時間伸縮、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御 (no_std / Sans I/O)
+- **音声の再生補助**: 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、時間圧縮・伸長と欠落の補間 (no_std / Sans I/O)
 - **対応仕様**: MOQT `draft-22` / LOC `draft-04` / MSF `draft-01` / C4M `draft-01`
 
 ## バージョン情報
@@ -60,7 +60,7 @@ use shiguredo_moqt::stream::SubgroupHeader;
 | `name` | Namespace / Track Name の文字列表現 |
 | `grease` | GREASE 値の生成・判定 |
 | `subgroup_tracker` | Subgroup 再オープン禁止の検証 |
-| `playout` | 時間伸縮、目標遅延の学習、鳴らす時刻の決定、A/V 同期の遅延制御、共通の時間軸 |
+| `playout` | 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期、共通の時間軸、時間圧縮・伸長と欠落の補間 |
 | `error` | エラー型とエラーコード定数 |
 
 ## クイックスタート
@@ -1157,13 +1157,20 @@ fn SubgroupStreamState::can_reopen(&self) -> bool
 ```rust
 // playout::stretch
 use shiguredo_moqt::playout::stretch::{
-    compress, conceal, concealment_end_gain, is_time_stretch_available,
+    PreemptiveExpansion, compress, conceal, concealment_end_gain, is_time_stretch_available,
+    preemptively_expand,
 };
 fn compress(
     channels: &mut [&mut [f32]],
     sample_rate: u32,
     max_length_change_samples: usize,
 ) -> isize
+fn preemptively_expand(
+    channels: &[Vec<f32>],
+    history: &[Vec<f32>],
+    sample_rate: u32,
+    max_length_change_samples: usize,
+) -> PreemptiveExpansion
 fn conceal(
     channels: &[&[f32]],
     output: &mut [&mut [f32]],
@@ -1172,6 +1179,30 @@ fn conceal(
 ) -> isize
 fn concealment_end_gain(conceal_us: i64) -> f32
 fn is_time_stretch_available(sample_rate: u32) -> bool
+```
+
+```rust
+// playout::expansion
+use shiguredo_moqt::playout::expansion::{ExpandAudioError, expand_audio};
+fn expand_audio(
+    channels: &[&[f32]],
+    sample_rate: u32,
+    history: Option<&[&[f32]]>,
+) -> Result<Vec<Vec<f32>>, ExpandAudioError>
+```
+
+```rust
+// playout::predictor
+use shiguredo_moqt::playout::predictor::generate_unvoiced;
+fn generate_unvoiced(
+    coefficients: &[f64; AUDIO_PREDICTOR_ORDER],
+    history: &[f64; AUDIO_PREDICTOR_HISTORY_SIZE],
+    frames: usize,
+    state: u32,
+    innovation: f64,
+    limit: f64,
+    polarity: f64,
+) -> Option<Vec<f32>>
 ```
 
 ```rust
@@ -1184,6 +1215,33 @@ fn materialize(
     gap_us: i64,
     conceal_us: i64,
 ) -> MaterializedGap
+```
+
+```rust
+// playout::splice_fade
+use shiguredo_moqt::playout::splice_fade::{
+    AudioSpliceEdge, AudioSpliceEdges, cross_fade_head, fade_splice_edge, fade_splice_edge_i16,
+    interpolate_splice_gap, merge_faded_planes, smooth_splice_head, splice_fade_samples,
+};
+fn splice_fade_samples(length: usize, sample_rate: u32) -> usize
+fn fade_splice_edge(channels: &mut [&mut [f32]], sample_rate: u32, edge: AudioSpliceEdge)
+fn fade_splice_edge_i16(channels: &mut [&mut [i16]], sample_rate: u32, edge: AudioSpliceEdge)
+fn interpolate_splice_gap(previous: &[&[f32]], next: &[&[f32]], frames: usize) -> Vec<Vec<f32>>
+fn cross_fade_head(
+    continuation: &[&[f32]],
+    channels: &[&[f32]],
+    sample_rate: u32,
+) -> Vec<Vec<f32>>
+fn smooth_splice_head(
+    previous: &[&[f32]],
+    channels: &[&[f32]],
+    sample_rate: u32,
+) -> Vec<Vec<f32>>
+fn merge_faded_planes(
+    planes: &[&[f32]],
+    sample_rate: u32,
+    edges: AudioSpliceEdges,
+) -> Vec<f32>
 ```
 
 ```rust
@@ -1214,23 +1272,20 @@ fn reset(&mut self)
 ```
 
 ```rust
-// playout::delay
-use shiguredo_moqt::playout::delay::AudioDelayManager;
-fn new() -> AudioDelayManager
-fn observe(&mut self, arrival_us: i64, capture_us: i64)
-fn target_delay_ms(&self) -> i64
-fn reset(&mut self)
-```
-
-```rust
 // playout::scheduler
 use shiguredo_moqt::playout::scheduler::{
-    AudioPlayoutDecision, AudioPlayoutInput, AudioPlayoutScheduler,
+    AudioPlayoutConfig, AudioPlayoutDecision, AudioPlayoutInput, AudioPlayoutPlay,
+    AudioPlayoutScheduler,
 };
 fn new() -> AudioPlayoutScheduler
+fn with_config(config: AudioPlayoutConfig) -> AudioPlayoutScheduler
+fn config(&self) -> AudioPlayoutConfig
 fn schedule(&mut self, input: AudioPlayoutInput) -> AudioPlayoutDecision
 fn confirm_stretch(&mut self, applied_us: i64)
+fn confirm_expansion(&mut self, applied_us: i64)
 fn confirm_concealment(&mut self, applied_us: i64)
+fn record_rendered_concealment(&mut self, concealed_us: i64, count: u64)
+fn confirm_playout_end(&mut self, end_us: i64)
 fn last_end_us(&self) -> Option<i64>
 fn note_underrun(&mut self, now_us: i64)
 fn rebases(&self) -> u64
@@ -1238,49 +1293,125 @@ fn drops(&self) -> u64
 fn compressed_us(&self) -> i64
 fn concealed_us(&self) -> i64
 fn concealments(&self) -> u64
+fn expanded_us(&self) -> i64
 fn lateness_us(&self) -> i64
+fn last_play(&self) -> Option<AudioPlayoutPlay>
 fn reset(&mut self)
 fn reset_stats(&mut self)
 ```
 
 ```rust
 // playout::timeline
-use shiguredo_moqt::playout::timeline::{PlayoutTimeline, TimelineConfig, Track};
+use shiguredo_moqt::playout::timeline::{
+    AudioPlayoutDelayStats, DelayBreakdown, PlayoutTimeline, TimelineConfig, Track,
+    UnsharedReason,
+};
 fn new() -> PlayoutTimeline
 fn with_config(config: TimelineConfig) -> PlayoutTimeline
 fn config(&self) -> TimelineConfig
 fn observe(&mut self, track: Track, wall_clock_us: i64, timestamp_us: i64)
-fn present_us(&self, track: Track, timestamp_us: i64) -> Option<i64>
-fn presentation_delay_us(&self, track: Track) -> Option<i64>
-fn learned_delay_us(&self, track: Track) -> i64
+fn observe_audio_output_lead(&mut self, lead_us: i64, wall_clock_us: i64)
+fn observe_audio_arrival_delay(&mut self, delay_us: Option<i64>, wall_clock_us: i64)
+fn compression_deadband_us(&self, default_us: i64) -> i64
+fn audio_delay_stats(&self) -> AudioPlayoutDelayStats
 fn set_target_latency_ms(&mut self, target_latency_ms: i64)
 fn target_latency_ms(&self) -> i64
-fn limited_us(&self) -> i64
-fn record_presentation(&mut self, track: Track, timestamp_us: i64, presented_wall_clock_us: i64)
+fn target_latency_limited_us(&self) -> i64
+fn presentation_delay_us(&self) -> Option<i64>
+fn playout_delay_us(&self) -> Option<i64>
+fn presentation_extra_delay_us(&self) -> Option<i64>
+fn video_delay_us(&self) -> Option<i64>
+fn present_us(&self, track: Track, timestamp_us: i64) -> Option<i64>
+fn record_presentation(
+    &mut self,
+    track: Track,
+    timestamp_us: i64,
+    presented_wall_clock_us: i64,
+)
+fn record_presentation_with_target(
+    &mut self,
+    track: Track,
+    timestamp_us: i64,
+    presented_wall_clock_us: i64,
+    target_wall_clock_us: Option<i64>,
+)
 fn skew_us(&self) -> Option<i64>
 fn sharing_bases(&self) -> bool
+fn unshared_reason(&self) -> UnsharedReason
+fn delay_breakdown(&self) -> DelayBreakdown
+fn audio_arrival_delay_us(&self) -> Option<i64>
 fn generation(&self) -> u64
 fn reset_track(&mut self, track: Track)
 fn reset(&mut self)
+
+// playout::timeline (free functions)
+use shiguredo_moqt::playout::timeline::{
+    audio_arrival_delay_us, playout_delay_percentile, playout_queue_cap_us,
+    sync_compensation_limit_us,
+};
+fn audio_arrival_delay_us(learned_delay_us: i64) -> i64
+fn sync_compensation_limit_us(base_difference_us: i64, buffer_difference_us: i64) -> i64
+fn playout_delay_percentile(frame_interval_us: Option<i64>) -> i64
+fn playout_queue_cap_us(max_queued_frames: usize, frame_interval_us: Option<i64>) -> i64
 ```
 
-`playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz に対応する (`is_time_stretch_available` で確かめられる)。戻り値は長さの変化 (圧縮は負、0 は操作なし)。時間伸長は持たない (この再生は音を伸ばす場面を持たず、足りない区間は `conceal` が埋める)。
-`conceal` は末尾の 2 周期分の相関から求めた周期で末尾を繰り返し、`conceal_us` 分を埋めた長さを返す (0 なら `output` に何も書かない)。利得は末尾へ向けて `concealment_end_gain` まで下げる。
+```rust
+// playout::timing
+use shiguredo_moqt::playout::scheduler::AudioPlayoutPlay;
+use shiguredo_moqt::playout::timing::{
+    AudioPlayoutGap, AudioPlayoutMiss, AudioPlayoutTimingSnapshot, AudioPlayoutTimingStats,
+};
+fn new() -> AudioPlayoutTimingStats
+fn with_window_us(window_us: i64) -> AudioPlayoutTimingStats
+fn record_play(&mut self, play: AudioPlayoutPlay)
+fn record_miss(&mut self, miss: AudioPlayoutMiss)
+fn record_stopped(&mut self, now_us: i64)
+fn record_stretch_unavailable(&mut self)
+fn record_gap(&mut self, gap: AudioPlayoutGap)
+fn record_rendered_gap(&mut self, uncovered_us: i64, count: u64, maximum_us: i64)
+fn record_rendered_boundary(&mut self, maximum: f32, count: u64)
+fn pending_end_us(&mut self, now_us: i64) -> Option<i64>
+fn pending_us(&mut self, now_us: i64) -> i64
+fn record_underrun(&mut self, underrun_us: i64)
+fn snapshot(&mut self, now_us: i64) -> AudioPlayoutTimingSnapshot
+fn reset(&mut self)
+```
 
-`playout::gap` は再生の隙間を材料化する。出力が FIFO (積んだ順に鳴らす) の場合は隙間を積まないと後続が早く鳴って出力が枯れるため、`materialize` は要求した隙間の全長ぶんの音を必ず返す。`conceal_us` の分は直前の音の末尾の周期で埋め、残りは無音にする。隙間の末尾と今回の音の先頭は `AUDIO_GAP_FADE_US` で 0 へ落とし、隙間の先頭は直前の音の最終サンプルから 0 へ向かう重みで繋ぐ。`current` の先頭にはフェードインが掛かるため `&mut` で渡す。
+`playout::stretch` は 8 kHz / 16 kHz / 32 kHz / 48 kHz と 44.1 kHz に対応する (`is_time_stretch_available` で確かめられる)。44.1 kHz は解析用の信号だけを 48 kHz の格子へ換算し、求めた周期を元のサンプルレートへ戻す。戻り値は長さの変化 (圧縮は負、伸長は正、0 は操作なし) である。`compress` はピッチ周期 1 つ分を削り、削る位置はクロスフェードで波形を打ち消さない位置から選ぶ。
+`preemptively_expand` は再同期で浅くなった到着基準の深さを戻す時間伸長であり、直前の実音 10 ms と今回の実音を重ねて周期 1 つ分を足す。`conceal` は末尾の周期で欠落を埋め、利得は末尾へ向けて `concealment_end_gain` まで下げる。
 
-`playout::delay` は到着の遅れの分布の 0.95 分位から目標遅延を決める (まだ観測が無いときは 80 ms)。
+`playout::expansion` は出力側で生成する最大 100 ms の続き音を作る。周期が確かな音では `stretch::conceal` の周期補間を使い、それ以外は `playout::predictor` の線形予測へ非周期の励振を入れて合成する。生成した音は最新の実音の RMS とピークを超えないように抑える。
+`playout::predictor` の `generate_unvoiced` は moqt-js の Wasm カーネル (`audioPredictor.c`) を Rust へ移した数値カーネルであり、JavaScript と同じ演算順序で 12 次の積和を行う。
 
-`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。`Play` の `gap_us` は前の音の終わりから今回の開始までの全長 (5 ms や 100 ms で切り捨てない)、`conceal_us` はそのうち補間してよい長さである。
-`compress_us` を実際に適用したら `confirm_stretch` へ、隙間を材料化したら `confirm_concealment` へ実測を返す。出力が枯れたときは、枯れた時間を隙間として二重に数えないよう `note_underrun` に今の時刻を渡す。並べた音の終わりは `last_end_us` で読める。
+`playout::gap` は再生の隙間を材料化する。出力が FIFO (積んだ順に鳴らす) の場合は隙間を積まないと後続が早く鳴って出力が枯れるため、`materialize` は要求した隙間の全長ぶんの音を必ず返す。隙間は先頭から `playout::expansion` の続き音で埋め、残りは無音にする。
+隙間の先頭は直前の音の最終サンプル (続き音があるときはその先頭の値) から 0 へ向かう重みで繋ぎ、続き音が隙間の後ろ 2 ms まで続くときは隙間の末尾を 0 へ落とさず `splice_fade::cross_fade_head` で今回の音の先頭へクロスフェードする。`current` の先頭は書き換わるため `&mut` で渡す。
+
+`playout::splice_fade` は音声の境目をフェードで繋ぐ。`fade_splice_edge` / `fade_splice_edge_i16` は配信側で捨てたフレームの端を `AUDIO_SPLICE_FADE_US` (2 ms) で 0 へ落とす。
+出力側では `interpolate_splice_gap` (直前の末尾から次の先頭への直線)、`cross_fade_head` (補間の続きから実音の先頭へ 2 ms で移る)、`smooth_splice_head` (周期補間の先頭に段差があるときだけ接続を滑らかにする)、`merge_faded_planes` (チャンネルごとの音声をフェードして `f32-planar` へ戻す) を使う。
+
+`playout::scheduler` は目標の時刻に従って音を並べ、間に合わない音は時間圧縮で目標へ戻す (`AudioPlayoutDecision` の `Play` / `Drop` を返す)。
+`Play` の `total_gap_us` は前の音の終わりから今回の開始までの全長 (`AUDIO_PLAYOUT_MIN_CONCEAL_US` の 500 µs や `AUDIO_PLAYOUT_MAX_CONCEAL_US` の 100 ms で切り捨てない)、`conceal_us` はそのうち補間してよい長さ、`expand_us` は再同期の直後だけ要求する時間伸長の長さである。
+`compress_us` を実際に適用したら `confirm_stretch` へ、伸長したら `confirm_expansion` へ、隙間を材料化したら `confirm_concealment` へ実測を返す。要求を経由せず出力側が補間した量は `record_rendered_concealment` で足せる。出力が枯れたときは、枯れた時間を隙間として二重に数えないよう `note_underrun` に今の時刻を渡す。
+並べた音の終わりは `last_end_us` で読めるが、サンプルへの丸めと開始の押し直しを含む実際の終端は `confirm_playout_end` で確定する。
+実際に鳴る長さ (`last_play` の `played_us`) は `confirm_stretch` → `confirm_expansion` → `confirm_playout_end` の順に確定した後に読み、その後に `AudioPlayoutTimingStats::record_play` へ渡す。
+圧縮の不感帯は `AudioPlayoutInput::stretch_min_us` (無ければ `AUDIO_PLAYOUT_STRETCH_MIN_US` の 20 ms) であり、呼び出し側が `PlayoutTimeline::compression_deadband_us` の値 (5〜20 ms) を渡す。
+並べすぎの判定は `delay_us` と `presentation_delay_us` の大きい方に `AUDIO_PLAYOUT_BACKLOG_US` (250 ms) を足した値を超えるかで行う (遅れが 50 ms のとき合計 300 ms = `AUDIO_PLAYOUT_MAX_DELAY_US`)。
 
 `playout::buffer` は復号したフレームを表示時刻に合わせて選ぶキューである。表示時刻を過ぎたフレームのうち最新の 1 枚を描き、`MAX_PRESENTATION_LAG_US` を超えて遅れたフレームは捨てる。表示時刻を決められないフレームと、積んだときの世代が今と違うフレームは届いた順に 1 枚ずつ描く。上限 (`JITTER_BUFFER_MAX_QUEUED_FRAMES`) を超えたフレームは `enqueue` が古い方から返す。
 
 `media_clock` はデバイスが返すメディア時刻を Unix epoch の壁時計へ換算する。`observe` で「壁時計 − メディア時刻」の最小値を目標にし、`to_wall_clock_us` でその目標へ向けて 1 回の換算につきメディア時刻の差の半分未満だけ動かす (換算した TIMESTAMP が戻らない)。
 
-`playout::timeline` は表示時刻 = TIMESTAMP + 基準の遅れ + 表示の遅れを返す。基準の遅れは直近 10 秒の (復号の出力の時刻 − TIMESTAMP) の最小値、音声の表示の遅れは `playout::delay` の目標遅延、映像は揺らぎの百分位 (`max(0.95, 1 - フレーム間隔 ms / 1000)`。上限は既定 500 ms と表示待ちのキューが吸収できる長さの小さい方) である。
-`observe` のたびに観測を足し、`present_us` で表示時刻を、`presentation_delay_us` でスケジューラへ渡す音声の遅れを読む。A/V 同期の制御も `observe` のたびに動く (音声と映像の両方に基準があり、基準の差が閾値の中にあるときだけ)。表示の遅れの差が `TIMELINE_SYNC_MIN_DELTA_US` を超えたら先行する側へ足して合わせ、足した分は毎秒 `TIMELINE_DELAY_DECAY_US_PER_SECOND` までで戻す。呼び出し側が別途 `sync` を呼ぶ必要はない。
-`targetLatency` は `TimelineConfig` か `set_target_latency_ms` で渡し、上限に収まらない分は `limited_us` で読める。`TimelineConfig` は `video_queue_limit` (映像の表示待ちのキューの上限、枚)・`max_presentation_delay_ms` (表示の遅れの上限、既定 500)・`target_latency_ms` を受ける。(復号の出力の時刻 − TIMESTAMP) が基準から 2 秒以上離れると基準を取り直して `generation` が進む。
+`playout::timeline` は表示時刻 = TIMESTAMP + 基準の遅れ + 表示の遅れを返す。基準の遅れは直近 10 秒の (復号の出力の時刻 − TIMESTAMP) の最小値である。
+音声の表示の遅れは、直近 2 秒の到着の揺らぎの百分位と直近 1 秒の実出力の先行量の p95 を足し、`audio_arrival_delay_us` で 50〜100 ms に切った自動予算である (`observe_audio_output_lead` と `observe_audio_arrival_delay` で観測を足す)。
+映像の表示の遅れは揺らぎの百分位 (`playout_delay_percentile`。表示時刻の後に届くフレームが 1 秒に 1 枚になる値で、下限 0.95) を、既定 500 ms と表示待ちのキューが吸収できる長さの小さい方で切った値である。追いつき中の出力と、停滞後にまとめた復号、長い停止の最初の出力は分布へ入れない。
+`observe` のたびに観測を足し、`present_us` で表示時刻を、`playout_delay_us` / `video_delay_us` / `presentation_extra_delay_us` で jitter buffer の遅延を読む。A/V 同期も `observe` のたびに動き、共有する表示時刻の下限を保持せず、現在の必要量を毎回引き直す。
+基準の差が `TIMELINE_MAX_COMPENSATED_DIFFERENCE_US` (100 ms) を超えるか動き続けているときは基準を共有せず、音声が到着基準のときは映像だけを `audio_arrival_delay_us()` の値へ合わせる。出力の残差 (`record_presentation_with_target`) は 250 ms の時定数の重み付き平均で平滑化し (端数は四捨五入する)、映像の合わせ先へ足し、1 秒途切れたら失効させる。
+`delay_breakdown` で内訳 (`AudioPlayoutDelayStats` を含む) を読める。
+`targetLatency` は `TimelineConfig` か `set_target_latency_ms` で渡し、上限に収まらない分は `target_latency_limited_us` で読める。`TimelineConfig` は `video_queue_limit` (映像の表示待ちのキューの上限、枚)・`max_presentation_delay_ms` (表示の遅れの上限、既定 500)・`target_latency_ms` を受ける。
+(復号の出力の時刻 − TIMESTAMP) が基準から 2 秒以上離れると基準を取り直して `generation` が進む。
+
+`playout::timing` は再生の観測値を記録して分布と累積を返す。`record_play` でスケジューラが決めた音を、`record_miss` で鳴らさなかった音を、`record_stopped` で停止時に切った予約を記録し、`snapshot` で余裕・鳴り始め・遅れの p50 / p95 / max と累積を読む。
+`record_gap` は補間で埋まらなかった区間、`record_rendered_gap` と `record_rendered_boundary` は出力側が実際に描画した未補間区間とバッファ境界の段差を記録する。`pending_us` / `pending_end_us` で停止時に鳴らし切るまでの残りを読める。`stretch_unavailable_frames` は時間圧縮も補間も使えないサンプルレート (8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz 以外) の音の数である。
 
 `MessageError` は `Clone` 不可。後段へ持ち回る場合は再構築を検討する。
 

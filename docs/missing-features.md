@@ -450,6 +450,24 @@ datagram で届いた Object を処理するのは音声だけで (`pipeline.rs:
 映像と catalog の datagram は 1 回警告して捨てる (`pipeline.rs:1091-1097`)。
 §11.2 は任意の track に datagram を許すため、publisher が datagram 配送を選ぶと追随できない。
 
+### 6.15 playout の適用層と復号前遅延を移植していない
+
+moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植していない。
+
+- 出力側の欠落補間の適用層。moqt-js は `AudioWorklet` の出力コールバックで実出力の
+  欠落を検出し、そのときだけ補間する (`AudioRenderConcealer`)。moqt-rs には出力
+  コールバックを公開する層が無く、`raw_player` の FIFO へ書き込む前に隙間を材料化する
+  (到着側) ため、適用層が違う。補間に使う純粋な DSP (周期補間、線形予測による非周期
+  合成、時間伸長、接続フェード) は `playout::{stretch, expansion, predictor,
+  splice_fade, gap}` に移植した
+- 復号前遅延 (`PreDecodeDelayQueue` / `PreDecodeDelayStage`) と、復号の入力 Timestamp の
+  対応表 (`decodeInputTimestamps`)。復号の手前で待つ制御と、復号入力の時刻の対応を
+  持たない
+
+計器 (`playout::timing`) は `AudioWorklet` が返す実描画量を前提にした
+`record_rendered_gap` / `record_rendered_boundary` を持つが、上の適用層が無いため、
+呼び出し側が実際に書き込んだ PCM を測ったときだけ記録できる。
+
 ## 7. transport 層 (examples/tokio-moq) の制約
 
 `examples/tokio-moq/README.md` に明記されている内容の再掲を含む。
