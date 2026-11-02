@@ -1,8 +1,8 @@
 # 映像も購読境界で表示を選別する
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
-- Branch: feature/change-video-subscription-boundary
+- Completed: 2026-11-03
+- Branch: develop
 - Polished: 2026-11-02
 
 ## 目的
@@ -42,3 +42,25 @@
 - `crates/moq-sub/README.md` の購読境界の説明が、映像も選別する実装と一致していること。
 - 実 relay の E2E (`publish_and_subscribe_roundtrip`) が通ること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+- `crates/moq-sub/src/pipeline.rs` に `VideoDeliveryOrder` を追加し、映像の購読境界 (起動時の購読は `SUBSCRIBE_OK` の Largest Object) を保持するようにした。境界以下の Location の映像 Object は復号はするが `frame_tx` へ送出しない。復号を残すのは、境界以降のフレームが境界以下のフレームを参照しうるためである (moqt-js の CatchUpGate と同じ扱い)。
+- 境界の判定は live の Subgroup stream と FETCH 応答が共有する `deliver_video_object` の 1 箇所に置き、復号の後・`frame_tx` への送出前に通す。録画は判定より前に行うため、replay が運ぶキーフレームは従来どおり録画の基準になり、境界以下の Object も録画の対象になる。
+- 境界は購読のたびに更新する。起動時は `SUBSCRIBE_OK` の Largest Object を境界にする。
+  session 移行は旧 session の stream task を止めて data plane を切り替える直前に
+  `last_received_locations` から読み直した位置、request stream 単位の再発行は再発行前の
+  スナップショットを候補にする (`select_video_subscription_boundary`)。
+  `VideoDeliveryOrder::advance_boundary` は現在の境界より後ろの位置にだけ進め、候補が
+  `None` の場合は既知の境界を消さない (replay の受信途中の再購読で購読前の Object が
+  表示経路へ戻らないようにするため)。
+- 購読境界以下として送出しなかった Object の累計を 100 ms の tick で info に出すようにした。
+- `crates/moq-sub/README.md` の購読境界の説明を映像にも適用される形に更新し、GOAWAY または transport drain による再購読時の境界と、映像の境界を後退させないことを追記した。
+- テスト:
+  - `video_delivery_does_not_send_objects_before_the_subscription_boundary` / `video_delivery_sends_live_objects_after_the_subscription_boundary` / `video_delivery_sends_objects_when_there_is_no_boundary` (実 VP8 エンコーダと実デコーダ)
+  - `video_delivery_decodes_objects_before_the_subscription_boundary` (境界以下のキーフレームを復号しないと境界より後の inter frame を復号できないことを実エンコーダと実デコーダで固定する)
+  - `video_delivery_records_objects_before_the_subscription_boundary` (実 Recorder で MP4 を読み戻し、先頭サンプルが replay のキーフレームであることと、replay と live の TIMESTAMP の差がサンプル時刻の差になることを確認)
+  - `video_delivery_order_detects_objects_at_or_before_the_boundary` / `video_delivery_order_advances_the_boundary_without_moving_backwards` / `video_boundary_counter_is_logged_only_when_it_increases`
+  - `session_migration_uses_the_reread_location_as_the_video_boundary` / `request_reissue_uses_the_snapshot_location_as_the_video_boundary` (スナップショットと再読み値が異なる入力で、経路ごとに選ぶ値を固定する)
+- 実 relay の E2E (`publish_and_subscribe_roundtrip`) は実リレーが必要なためローカルでは実行せず、CI の E2E Test ワークフローで確認する。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` は通ることを確認した。
