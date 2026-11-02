@@ -278,6 +278,116 @@ impl AudioDeliveryOrder {
     }
 }
 
+/// 映像 Object を表示経路へ送出してよいかを購読の境界で決める状態機械
+///
+/// 音声の [`AudioDeliveryOrder`] と同じく、購読より前に publish された映像 Object (relay の
+/// replay や FETCH の応答で届く) は表示しない。購読の境界は `SUBSCRIBE_OK` が運んだ Largest
+/// Object であり (draft-ietf-moq-transport-22 §3.1.4 (Largest Object) / §9.20.17 (LARGEST
+/// OBJECT Parameter))、境界以下は購読より前の配信である。境界の位置の Object は live と
+/// FETCH の両方で届きうるため、どちらも境界以下として落とし二重送出を防ぐ。
+///
+/// 映像は音声と違い、境界以下でも復号は行う。境界以降のフレームが境界以下のフレームを参照
+/// しうるためである (moqt-js の CatchUpGate と同じ扱い)。判定は復号の後、`frame_tx` への
+/// 送出前に行う。
+///
+/// 判定は Location の比較だけで決まり、時計も I/O も扱わない。live の Subgroup stream と
+/// FETCH 応答で同じ状態を共有する。`Location` の順序は (group_id, object_id) の辞書順で
+/// ある (§8.2 (Location Structure))。Group ID が時間とともに増える track を前提とする
+/// (§2.3.1 (Group IDs) は original publisher に SHOULD で求める。比較できない publisher の
+/// track では本 example の境界判定は意味を持たない)。
+///
+/// 境界は後退させない ([`Self::advance_boundary`])。再購読では「最後に受信した Location」を
+/// 候補にするが、replay の受信途中や映像を 1 つも受信していない間は候補が現在の境界より
+/// 前になったり `None` になったりするため、そのまま設定すると購読より前の Object が再送
+/// されたときに表示経路へ戻る。進めた境界は「その位置まで受信済み」を意味するため、境界
+/// より前で未受信の Object が後から届いても表示しない (out-of-order の取りこぼしは許容する。
+/// draft-ietf-moq-transport-22 §2.1.2 (Object States))。
+#[derive(Debug)]
+struct VideoDeliveryOrder {
+    /// 購読の境界 (`SUBSCRIBE_OK` の Largest Object、再購読では最後に受信した Location)。
+    /// `None` は境界が無く、すべて live として扱う (購読の時点で Object が publish されて
+    /// いない場合)
+    boundary: Option<Location>,
+    /// 購読の境界以下として送出しなかった Object の累計 (原因の切り分け用)
+    ///
+    /// 境界判定まで到達した Object だけを数える。復号器が無い経路 (再生しない指定、表示待ち
+    /// 超過) と、[`VideoDecodeOrder`] が復号しない Object は含まない。累計が 1 種類だけなのは、
+    /// 重複と並び替えの判定を [`VideoDecodeOrder`] が担うためである。境界以下を落とすのは
+    /// 正常な動作 (relay の replay や FETCH の応答) でも起きるため、1 件ごとの debug ログ
+    /// だけでは傾向を掴めない。累計を 100 ms の tick で比較し、増えたときだけ info で出す
+    /// ([`log_video_boundary_counter`] を参照)。
+    before_boundary_objects: u64,
+}
+
+impl VideoDeliveryOrder {
+    /// 購読の境界を指定して作る (`None` は Largest Object が告知されなかった場合)
+    ///
+    /// 初期化専用である。作成後の境界の更新は [`Self::advance_boundary`] だけを使う
+    /// (単調性を迂回して境界を後退させないため)。
+    fn new(boundary: Option<Location>) -> Self {
+        Self {
+            boundary,
+            before_boundary_objects: 0,
+        }
+    }
+
+    /// 購読の境界を、現在の境界より後ろの位置にだけ進める
+    ///
+    /// `candidate` が `None` の場合は何もしない (旧 session で映像 Object を 1 つも受信して
+    /// いない場合の `None` は候補が無いことを意味し、既に知っている境界を消す理由にはなら
+    /// ない)。後退させない理由は型の doc を参照。
+    fn advance_boundary(&mut self, candidate: Option<Location>) {
+        let Some(candidate) = candidate else {
+            return;
+        };
+        self.boundary = Some(match self.boundary {
+            Some(current) => current.max(candidate),
+            None => candidate,
+        });
+    }
+
+    /// `location` が購読の境界以下かを判定する
+    ///
+    /// 境界が無い場合は比較できないため `false` (live 扱い) を返す。境界以下だったときは、
+    /// 原因の切り分け用の累計 (`before_boundary_objects`) を進める。音声と違い位置を
+    /// `Option` で受けないのは、映像の配送経路 (live の Subgroup stream と FETCH 応答) が
+    /// 常に Location を持つためである。
+    fn is_before_boundary(&mut self, location: Location) -> bool {
+        let Some(boundary) = self.boundary else {
+            return false;
+        };
+        // `Location` の順序は (group_id, object_id) の辞書順である (§8.2)
+        if location <= boundary {
+            self.before_boundary_objects += 1;
+            return true;
+        }
+        false
+    }
+
+    /// 現在の購読の境界を返す (ログ用)
+    fn boundary(&self) -> Option<Location> {
+        self.boundary
+    }
+
+    /// 購読の境界以下として送出しなかった Object の累計を返す
+    fn before_boundary_objects(&self) -> u64 {
+        self.before_boundary_objects
+    }
+}
+
+/// 映像の購読境界以下として送出しなかった Object の累計が、前回のログから増えていれば info で出す
+///
+/// 累計が増えたときだけ info に出す。`previous` は前回ログを出した時点の累計で、増えていない
+/// ときは更新しない (同じ内容を出し続けてログを埋もれさせないため)。累計の意味は
+/// [`VideoDeliveryOrder::before_boundary_objects`] を参照。
+fn log_video_boundary_counter(previous: &mut u64, current: u64) {
+    if current == *previous {
+        return;
+    }
+    tracing::info!("Video delivery counters: before_boundary={current}");
+    *previous = current;
+}
+
 /// 音声配送の累計が前回のログから増えていれば info で出す
 ///
 /// 落とした Object の内訳は原因の切り分けに使う。1 件ごとの debug ログは既定の RUST_LOG では
@@ -860,6 +970,7 @@ fn spawn_stream_task(
     audio_params: Option<(u32, u8)>,
     display_backlog: &std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -880,6 +991,7 @@ fn spawn_stream_task(
     let audio_codec = audio_codec.map(str::to_owned);
     let backlog = std::sync::Arc::clone(display_backlog);
     let video_decode_order = std::sync::Arc::clone(video_decode_order);
+    let video_delivery_order = std::sync::Arc::clone(video_delivery_order);
     let audio_decoder = audio_decoder.cloned();
     let audio_config_handled = std::sync::Arc::clone(audio_config_handled);
     let audio_catch_up = std::sync::Arc::clone(audio_catch_up);
@@ -903,6 +1015,7 @@ fn spawn_stream_task(
             stream_num,
             backlog,
             &video_decode_order,
+            &video_delivery_order,
             audio_decoder.as_ref(),
             &audio_config_handled,
             &audio_catch_up,
@@ -969,7 +1082,64 @@ struct Resubscribed {
     media_fetch_targets: HashMap<u64, TrackKind>,
 }
 
-/// track ごとに最後に配送した Object の Location
+/// GOAWAY または transport drain による再購読の経路
+#[derive(Debug, Clone, Copy)]
+enum ResubscribeRoute {
+    /// session 移行。旧 session の stream task を止めて新しい data plane へ切り替える経路
+    SessionMigration,
+    /// request stream 単位の再発行。同じ session で購読を張り直す経路
+    RequestReissue,
+}
+
+/// 再購読で購読の境界の候補になる位置
+///
+/// どちらを使うかは経路で決まる ([`select_video_subscription_boundary`])。どちらも
+/// `Option<Location>` であり、呼び出し側で取り違えても型では検出できないため、名前付きの
+/// フィールドで渡す。
+#[derive(Debug, Clone, Copy)]
+struct VideoBoundaryCandidates {
+    /// 再購読の開始時に Location Filter へ渡した開始位置
+    snapshot: Option<Location>,
+    /// 再購読の完了後に読み直した最後の受信位置
+    ///
+    /// session 移行では旧 session の stream task を止めて切り替える直前、request stream 単位の
+    /// 再発行では再発行の完了後に読み直した値である。
+    reread: Option<Location>,
+}
+
+/// 再購読のあとに映像へ適用する購読の境界の候補を選ぶ
+///
+/// GOAWAY または transport drain による再購読では、新しい `SUBSCRIBE_OK` の Largest Object を
+/// 境界にしない。Largest Object は「publisher がそのメッセージを処理した時点で、その Track で
+/// 最大の Location」であるため (draft-ietf-moq-transport-22 §3.1.4 (Largest Object))、移行中・
+/// 再発行中に publish された Object を境界以下として捨ててしまう。境界は経路ごとに次の位置を
+/// 使う。
+///
+/// - session 移行は、旧 session の stream task を止めて新しい data plane へ切り替える直前に
+///   `last_received_locations` から読み直した値 (`reread`) を使う。再購読の開始時に
+///   Location Filter へ渡したスナップショット (`snapshot`) を使うと、移行中に旧 session で
+///   受信した Object を新しい購読の再送分として送出し直す
+/// - request stream 単位の再発行は、再発行の前に取得した最後に受信した Location
+///   (`snapshot`) を使う。`record_last_location` は Object の送出前に記録するため、再発行の
+///   完了後に読み直した値を境界にすると、記録済みだがまだ送出していない Object を境界以下
+///   として落とす競合がある
+///
+/// この選択は `VideoDeliveryOrder::advance_boundary` に渡され、境界は後退しない。記録が
+/// 送出前に行われるため、切り替え直前に記録された Object が送出されないまま境界以下になる
+/// 競合は残るが、対象は高々数 Object である。
+///
+/// draft 由来の仕様に依存する判断であり、将来変更される可能性がある。
+fn select_video_subscription_boundary(
+    route: ResubscribeRoute,
+    candidates: VideoBoundaryCandidates,
+) -> Option<Location> {
+    match route {
+        ResubscribeRoute::SessionMigration => candidates.reread,
+        ResubscribeRoute::RequestReissue => candidates.snapshot,
+    }
+}
+
+/// track ごとに最後に受信した Object の Location
 ///
 /// セッション移行では、再購読の Location Filter を「最後に届いた Object の位置」から
 /// 始めることで、移行中に publish された Object の取りこぼしを抑える
@@ -978,18 +1148,20 @@ struct Resubscribed {
 /// 流すため、`Arc<Mutex<...>>` で共有し、配送のたびに最大値を記録する。
 ///
 /// 記録するのは「配送経路へ流した Object」に限る。フィルタで落とした Object や payload を
-/// 持たない Object は、再開位置として意味を持たないため記録しない。Group ID / Object ID は
-/// 単調に増えるとは限らない (Group Order が降順の publisher もいる) ため、単純な代入ではなく
-/// 最大値を残す。`Location` の順序は (group_id, object_id) の辞書順である (§8.2)。
+/// 持たない Object は、再開位置として意味を持たないため記録しない。購読の境界以下として
+/// 送出しなかった Object も、購読より前に publish された分を含むため再購読の開始位置として
+/// 記録する。Group ID / Object ID は単調に増えるとは限らない (Group Order が降順の
+/// publisher もいる) ため、単純な代入ではなく最大値を残す。`Location` の順序は
+/// (group_id, object_id) の辞書順である (§8.2)。
 ///
 /// draft 由来の仕様に依存する値であり、将来変更される可能性がある。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LastReceivedLocations {
-    /// catalog track で最後に配送した Object の Location
+    /// catalog track で最後に受信した Object の Location
     catalog: Option<Location>,
-    /// 映像 track で最後に配送した Object の Location
+    /// 映像 track で最後に受信した Object の Location
     video: Option<Location>,
-    /// 音声 track で最後に配送した Object の Location
+    /// 音声 track で最後に受信した Object の Location
     audio: Option<Location>,
 }
 
@@ -1003,7 +1175,7 @@ impl LastReceivedLocations {
         }
     }
 
-    /// 配送した Object の Location を記録する
+    /// 受信した Object の Location を記録する
     ///
     /// 同じ track で既に記録した位置より新しい場合だけ更新する。
     fn record(&mut self, kind: TrackKind, location: Location) {
@@ -1041,7 +1213,7 @@ fn record_last_location(
 /// REQUEST_UPDATE を送る (起動時と同じ手順)。音声は SUBSCRIBE だけである。
 /// どちらの track も、購読のあとに直近 Group の FETCH を発行する (起動時と同じ手順)。
 ///
-/// `last_locations` は前の session で最後に配送した Object の位置である。映像と音声は
+/// `last_locations` は前の session で最後に受信した Object の位置である。映像と音声は
 /// これを Location Filter の Absolute Start (0x02) として SUBSCRIBE に載せ、移行中に
 /// publish された Object を取得し直す (draft-ietf-moq-transport-22 §3.3.1 / §9.20.9。
 /// draft 由来の仕様であり将来変更されうる)。位置が分からない場合 (まだ 1 つも配送して
@@ -1164,7 +1336,7 @@ async fn resubscribe_tracks(
 /// キーフレームを待たずに復号を始められる。同節は DYNAMIC_GROUPS の告知が無くても
 /// SUBSCRIBE に載せてよいと定める。
 ///
-/// `last` は前の session で最後に配送した Object の位置である。移行後の再購読では
+/// `last` は前の session で最後に受信した Object の位置である。移行後の再購読では
 /// Location Filter の Absolute Start (Table 6 の Type 0x02) として載せ、移行中に publish
 /// された Object を取得し直す (§3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
 /// Parameter))。フィルタは境界の位置の Object を含むため同じ Object が再送されうるが、
@@ -2001,6 +2173,9 @@ pub async fn run(
     // 音声の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
     // 音声であり、Audio Config の検証だけを行い、送出も録画も復号もしない
     let mut audio_largest_object: Option<Location> = None;
+    // 映像の購読境界 (SUBSCRIBE_OK の Largest Object)。境界以下は購読より前に publish された
+    // 映像であり、復号はするが表示しない
+    let mut video_largest_object: Option<Location> = None;
     // 映像 Object を復号してよいかの判定状態は購読で 1 つ持つ。Group ごとに別の Subgroup
     // ストリームで届くため (draft-ietf-moq-transport-22 §2.2 (Subgroups))、stream ごとに
     // 判定を持つと「前の Group の Object が次の Group のキーフレームより後に届く」場合を
@@ -2026,6 +2201,7 @@ pub async fn run(
         track_map.insert(video_sub.track_alias, TrackKind::Video);
         video_alias = Some(video_sub.track_alias);
         video_request_id = Some(video_sub.request_id);
+        video_largest_object = video_sub.largest_object;
 
         // REQUEST_UPDATE で video subscription の subscriber priority を変更するサンプル
         //
@@ -2252,6 +2428,10 @@ pub async fn run(
     let audio_delivery_order = Arc::new(std::sync::Mutex::new(AudioDeliveryOrder::new(
         audio_largest_object,
     )));
+    // 映像の購読境界の状態。live の Subgroup stream と FETCH 応答経路で共有する
+    let video_delivery_order = Arc::new(std::sync::Mutex::new(VideoDeliveryOrder::new(
+        video_largest_object,
+    )));
 
     // 移行 (GOAWAY) では peer が決める track alias が変わりうるため、書き換え可能にする。
     // 読み出しは短い区間に限り、await をまたいでロックを保持しない
@@ -2320,7 +2500,7 @@ pub async fn run(
             .expect("track_map lock must not be poisoned")
             .clone(),
     );
-    // track ごとに最後に配送した Object の位置。移行後の再購読の Location Filter に使う。
+    // track ごとに最後に受信した Object の位置。移行後の再購読の Location Filter に使う。
     // stream task と datagram task、main ループ (catalog) が共有する
     let last_received_locations: Arc<std::sync::Mutex<LastReceivedLocations>> =
         Arc::new(std::sync::Mutex::new(LastReceivedLocations::default()));
@@ -2452,7 +2632,7 @@ pub async fn run(
                             Some(decoder) => Some(decoder.lock().await),
                             None => None,
                         };
-                        // 移行後の再購読で使う「最後に配送した位置」を記録する
+                        // 移行後の再購読で使う「最後に受信した位置」を記録する
                         let location = datagram_object_location(&datagram);
                         record_last_location(
                             &last_received_locations_for_datagram,
@@ -2507,6 +2687,9 @@ pub async fn run(
     let mut fatal_error: Option<Error> = None;
     // 音声配送の累計を最後にログへ出した時点の値。100 ms の tick で増えたときだけ出す
     let mut logged_audio_delivery_counters = AudioDeliveryCounters::default();
+    // 映像の購読境界以下として落とした Object の累計を最後にログへ出した値。同じく tick で
+    // 増えたときだけ出す
+    let mut logged_video_boundary_objects: u64 = 0;
 
     // バックグラウンド移行の状態
     //
@@ -2517,6 +2700,11 @@ pub async fn run(
     let mut migration_in_progress = false;
     // 進行中の移行タスク。run の終了時に打ち切る
     let mut migration_task: Option<tokio::task::JoinHandle<()>> = None;
+    // 進行中の移行で再購読の Location Filter に渡したスナップショット。
+    // VideoBoundaryCandidates の snapshot として選択関数へ渡し、選ばれた候補と実効境界は
+    // 切替時にログへ出す (session 移行では再読み値が選ばれるため境界の決定には影響しない。
+    // select_video_subscription_boundary を参照)
+    let mut migration_boundary_snapshot: Option<LastReceivedLocations> = None;
     // 短期間に連続する移行を制限する (移行先がまた GOAWAY を返す構成への防御)
     let mut migration_limiter = MigrationLimiter::new(MIGRATION_LIMIT_WINDOW, MIGRATION_LIMIT_MAX);
     // 移行後に旧 session を終了するタスク。run の終了時に打ち切る
@@ -2558,6 +2746,7 @@ pub async fn run(
                 audio_params,
                 &display_backlog,
                 &video_decode_order,
+                &video_delivery_order,
                 audio_decoder.as_ref(),
                 &audio_config_handled,
                 &audio_catch_up,
@@ -2708,6 +2897,7 @@ pub async fn run(
                                                 last_locations,
                                                 deadline,
                                             };
+                                            migration_boundary_snapshot = Some(last_locations);
                                             let (task, receiver) =
                                                 spawn_migration(&task_monitor, request);
                                             migration_task = Some(task);
@@ -2798,6 +2988,42 @@ pub async fn run(
                                                                 reissued.subscription.request_id,
                                                             );
                                                             video_alias = Some(new_alias);
+                                                            // 同じ session で購読を張り直した
+                                                            // ため、復号順と購読境界の状態は
+                                                            // 引き継ぎ、境界だけを更新する。
+                                                            // 候補は再発行の前に取得した最後の
+                                                            // 受信位置である (選び方は
+                                                            // select_video_subscription_boundary)
+                                                            let video_boundary_candidates =
+                                                                VideoBoundaryCandidates {
+                                                                    snapshot: last_locations
+                                                                        .get(TrackKind::Video),
+                                                                    reread: last_received_locations
+                                                                        .lock()
+                                                                        .expect(
+                                                                            "last locations lock is not poisoned",
+                                                                        )
+                                                                        .get(TrackKind::Video),
+                                                                };
+                                                            let video_boundary_candidate =
+                                                                select_video_subscription_boundary(
+                                                                    ResubscribeRoute::RequestReissue,
+                                                                    video_boundary_candidates,
+                                                                );
+                                                            let video_boundary = {
+                                                                let mut order = video_delivery_order
+                                                                    .lock()
+                                                                    .expect(
+                                                                        "video delivery order lock is not poisoned",
+                                                                    );
+                                                                order.advance_boundary(
+                                                                    video_boundary_candidate,
+                                                                );
+                                                                order.boundary()
+                                                            };
+                                                            tracing::info!(
+                                                                "Updated the video subscription boundary for the re-issued request: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
+                                                            );
                                                         }
                                                         TrackKind::Audio => {
                                                             audio_request_id = Some(
@@ -3065,6 +3291,32 @@ pub async fn run(
                         tracing::info!(
                             "Updated the audio subscription boundary for the migrated session: audio_boundary={audio_boundary:?}"
                         );
+                        // 映像の購読境界も更新する。候補は旧 session の stream task を止めた
+                        // あとに読み直した最後の受信位置である (選び方は
+                        // select_video_subscription_boundary)
+                        let video_boundary_candidates = VideoBoundaryCandidates {
+                            snapshot: migration_boundary_snapshot
+                                .take()
+                                .and_then(|locations| locations.video),
+                            reread: last_received_locations
+                                .lock()
+                                .expect("last locations lock is not poisoned")
+                                .video,
+                        };
+                        let video_boundary_candidate = select_video_subscription_boundary(
+                            ResubscribeRoute::SessionMigration,
+                            video_boundary_candidates,
+                        );
+                        let video_boundary = {
+                            let mut order = video_delivery_order
+                                .lock()
+                                .expect("video delivery order lock is not poisoned");
+                            order.advance_boundary(video_boundary_candidate);
+                            order.boundary()
+                        };
+                        tracing::info!(
+                            "Updated the video subscription boundary for the migrated session: candidates={video_boundary_candidates:?}, candidate={video_boundary_candidate:?}, boundary={video_boundary:?}"
+                        );
                         // alias 表を移行先のものへ差し替える (alias は peer が決めるため変わる)
                         let datagram_map = {
                             let mut map = track_map
@@ -3224,6 +3476,7 @@ pub async fn run(
                                         last_locations,
                                         deadline,
                                     };
+                                    migration_boundary_snapshot = Some(last_locations);
                                     let (task, receiver) =
                                         spawn_migration(&task_monitor, request);
                                     migration_task = Some(task);
@@ -3281,6 +3534,15 @@ pub async fn run(
                     .expect("audio delivery order lock is not poisoned")
                     .counters();
                 log_audio_delivery_counters(&mut logged_audio_delivery_counters, counters);
+                // 映像の購読境界以下として落とした Object の累計も、増えていれば出す
+                let video_before_boundary = video_delivery_order
+                    .lock()
+                    .expect("video delivery order lock is not poisoned")
+                    .before_boundary_objects();
+                log_video_boundary_counter(
+                    &mut logged_video_boundary_objects,
+                    video_before_boundary,
+                );
             }
             _ = shutdown_monitor.recv() => {
                 tracing::info!("Shutdown signal received");
@@ -4312,6 +4574,7 @@ async fn handle_incoming_stream(
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -4341,6 +4604,7 @@ async fn handle_incoming_stream(
         stream_num,
         display_backlog,
         video_decode_order,
+        video_delivery_order,
         audio_decoder,
         audio_config_handled,
         audio_catch_up,
@@ -4412,6 +4676,7 @@ async fn handle_stream_body(
     stream_num: u64,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     audio_decoder: Option<&std::sync::Arc<tokio::sync::Mutex<AudioDecoder>>>,
     audio_config_handled: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     audio_catch_up: &std::sync::Arc<std::sync::Mutex<AudioReceiveCatchUp>>,
@@ -4556,6 +4821,7 @@ async fn handle_stream_body(
                                     display_backlog: &display_backlog,
                                 },
                                 video_decode_order,
+                                video_delivery_order,
                                 last_received_locations,
                                 recorder,
                                 termination_tx,
@@ -4758,6 +5024,7 @@ async fn handle_stream_body(
                         header.group_id,
                         &mut sg_decoder,
                         video_decode_order,
+                        video_delivery_order,
                         decoder.as_mut(),
                         &FrameSink {
                             frame_tx,
@@ -5139,6 +5406,8 @@ fn monotonic_now_us() -> i64 {
 /// 読む必要はない。
 /// `video_decode_order` は購読で共有する復号順の判定である。復号の直前に通し、復号してよい
 /// Object だけを decoder へ渡す。
+/// `video_delivery_order` は購読で共有する購読境界の判定である。復号の後、`frame_tx` への
+/// 送出前に通す。
 #[expect(clippy::too_many_arguments)]
 async fn decode_video_stream(
     stream: &mut transport::RecvStream,
@@ -5147,6 +5416,7 @@ async fn decode_video_stream(
     group_id: u64,
     sg_decoder: &mut SubgroupStreamDecoder,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
@@ -5243,7 +5513,7 @@ async fn decode_video_stream(
         if !deliver {
             continue;
         }
-        // 移行後の再購読で使う「最後に配送した位置」を記録する。配送しない Object や
+        // 移行後の再購読で使う「最後に受信した位置」を記録する。配送しない Object や
         // payload を持たない Object は再開位置として意味が無いため記録しない
         record_last_location(
             last_received_locations,
@@ -5260,6 +5530,7 @@ async fn decode_video_stream(
             obj.properties_bytes.as_deref(),
             &payload,
             video_decode_order,
+            video_delivery_order,
             video_decoder.as_deref_mut(),
             sink,
             recorder,
@@ -5282,7 +5553,8 @@ enum VideoDelivery {
     Terminated,
 }
 
-/// 映像 Object 1 つを live と同じ配送経路 (録画 → 復号順の判定 → 復号 → 送出) へ流す
+/// 映像 Object 1 つを live と同じ配送経路 (録画 → 復号順の判定 → 復号 → 購読境界の判定 →
+/// 送出) へ流す
 ///
 /// live の Subgroup stream と FETCH 応答 stream が共有する。`group_id` は Object が属する
 /// Group であり、Subgroup stream ではヘッダの Group ID、FETCH 応答 stream では entry の
@@ -5291,12 +5563,14 @@ enum VideoDelivery {
 /// `video_decode_order` は購読で共有する復号順の判定であり、`video_decoder` は stream ごとに
 /// 作る復号器である。判定が `Skip` の Object (`Stale` / `MissingReference`) は復号しない
 /// (キーフレームから復号を始める規則は [`VideoDecodeOrder`] が持つ)。録画は復号の可否に
-/// 関わらず行う。
-///
-/// `video_decode_order` は FETCH 応答でも live と共有するため、live で復号中の Group より
-/// 古い Group を FETCH で取得した場合、その Object は `Stale` として復号されない
+/// 関わらず行う。`video_decode_order` は FETCH 応答でも live と共有するため、live で復号中の
+/// Group より古い Group を FETCH で取得した場合、その Object は `Stale` として復号されない
 /// (取得した範囲は、live の録画が始まる前に届いた分だけが録画に残る。録画は最初の
 /// キーフレームを基準時刻にし、それより前の時刻の Object を破棄するためである)。
+///
+/// `video_delivery_order` は購読で共有する購読境界の判定である。境界以下の Object は復号は
+/// するが `frame_tx` へ送出しない ([`VideoDeliveryOrder`])。録画は境界の判定より前に行うため、
+/// 境界以下の Object も録画の対象になる。
 #[expect(clippy::too_many_arguments)]
 async fn deliver_video_object(
     group_id: u64,
@@ -5304,6 +5578,7 @@ async fn deliver_video_object(
     properties_bytes: Option<&[u8]>,
     payload: &[u8],
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     recorder: Option<&RecorderSender>,
@@ -5377,34 +5652,63 @@ async fn deliver_video_object(
         );
         return VideoDelivery::Delivered(0);
     }
-    let frames = tokio::task::block_in_place(|| {
-        decode_and_send(
-            payload,
-            video_config.as_deref(),
-            timestamp_us,
-            timestamp_kind,
-            video_decoder,
-            sink,
-        )
+    // 復号は購読の境界の判定より前に行う。境界以下の Object も、境界以降のフレームが参照する
+    // 可能性があるため復号する (moqt-js の CatchUpGate と同じ扱い)
+    let decoded = tokio::task::block_in_place(|| {
+        decode_video_frames(payload, video_config.as_deref(), video_decoder)
     });
+    // 購読の境界の判定は復号の後、`frame_tx` への送出前に行う。境界以下は購読より前に
+    // publish された Object であり、表示しない (録画は境界の判定より前に行うため残る)
+    let (before_boundary, boundary) = {
+        let mut order = video_delivery_order
+            .lock()
+            .expect("video delivery order lock is not poisoned");
+        let boundary = order.boundary();
+        (
+            order.is_before_boundary(Location {
+                group_id,
+                object_id,
+            }),
+            boundary,
+        )
+    };
+    if before_boundary {
+        tracing::debug!(
+            "Skipping video display before the subscription boundary (group={group_id}, object={object_id}, boundary={boundary:?})",
+        );
+        return VideoDelivery::Delivered(0);
+    }
+    let frames = send_decoded_frames(decoded, timestamp_us, timestamp_kind, sink);
     VideoDelivery::Delivered(frames)
 }
 
-fn decode_and_send(
+/// 映像 Object 1 つを復号する
+///
+/// 復号エラーは warn を残して空のフレーム列を返す (1 Object の復号失敗で stream 全体の
+/// 読み取りを打ち切らない)。
+fn decode_video_frames(
     payload: &[u8],
     video_config: Option<&[u8]>,
-    timestamp_us: Option<i64>,
-    timestamp_kind: TimestampKind,
     decoder: &mut decoder::VideoDecoder,
-    sink: &FrameSink<'_>,
-) -> u64 {
-    let decoded = match decoder.decode(payload, video_config) {
+) -> Vec<DecodedVideoFrame> {
+    match decoder.decode(payload, video_config) {
         Ok(frames) => frames,
         Err(e) => {
             tracing::warn!("Video decode error: {e}, payload_len={}", payload.len());
-            return 0;
+            Vec::new()
         }
-    };
+    }
+}
+
+/// 復号済みの映像フレームに表示時刻を載せて `frame_tx` へ送出する
+///
+/// 送出したフレーム数を返す。送り先が閉じた場合はその時点で打ち切る。
+fn send_decoded_frames(
+    decoded: Vec<DecodedVideoFrame>,
+    timestamp_us: Option<i64>,
+    timestamp_kind: TimestampKind,
+    sink: &FrameSink<'_>,
+) -> u64 {
     let mut frames: u64 = 0;
     for mut frame in decoded {
         // 表示時刻を決めるのは時間軸であり、TIMESTAMP と種類は Object からここで載せる
@@ -5884,7 +6188,7 @@ async fn decode_audio_stream(
         if !deliver {
             continue;
         }
-        // 移行後の再購読で使う「最後に配送した位置」を記録する
+        // 移行後の再購読で使う「最後に受信した位置」を記録する
         let location = subgroup_object_location(header, &obj);
         record_last_location(last_received_locations, TrackKind::Audio, location);
         if !delivery
@@ -6034,7 +6338,8 @@ fn log_end_of_range(stream_num: u64, entry: &DecodedFetchEntry) {
 /// `video_decoder` は stream ごとに作る復号器であり、キーフレームから復号を始める判定は
 /// live と共有する [`VideoDecodeOrder`] が持つ。FETCH で取得した Group が live で復号中の
 /// Group より古い場合、その Object は `Stale` として復号されない (録画は live の録画が
-/// 始まる前に届いた分だけが残る)。
+/// 始まる前に届いた分だけが残る)。購読の境界の判定も live と共有する
+/// ([`VideoDeliveryOrder`])。
 #[expect(clippy::too_many_arguments)]
 async fn read_video_fetch_stream(
     stream: &mut transport::RecvStream,
@@ -6045,6 +6350,7 @@ async fn read_video_fetch_stream(
     mut video_decoder: Option<&mut decoder::VideoDecoder>,
     sink: &FrameSink<'_>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+    video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
     last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
     recorder: Option<&RecorderSender>,
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
@@ -6078,7 +6384,7 @@ async fn read_video_fetch_stream(
         if obj.payload_length == 0 {
             continue;
         }
-        // 移行後の再購読で使う「最後に配送した位置」を記録する
+        // 移行後の再購読で使う「最後に受信した位置」を記録する
         record_last_location(
             last_received_locations,
             TrackKind::Video,
@@ -6093,6 +6399,7 @@ async fn read_video_fetch_stream(
             obj.properties_bytes.as_deref(),
             &payload,
             video_decode_order,
+            video_delivery_order,
             video_decoder.as_deref_mut(),
             sink,
             recorder,
@@ -6150,7 +6457,7 @@ async fn read_audio_fetch_stream(
         if obj.payload_length == 0 {
             continue;
         }
-        // 移行後の再購読で使う「最後に配送した位置」を記録する
+        // 移行後の再購読で使う「最後に受信した位置」を記録する
         let location = fetch_object_location(obj);
         record_last_location(last_received_locations, TrackKind::Audio, location);
         if !delivery
@@ -6261,7 +6568,7 @@ mod tests {
         );
     }
 
-    /// 移行後の再購読では最後に配送した位置を Absolute Start として載せること
+    /// 移行後の再購読では最後に受信した位置を Absolute Start として載せること
     ///
     /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER
     /// Parameter) Table 6 の Type 0x02。移行中に publish された Object を取りこぼさない
@@ -6283,11 +6590,11 @@ mod tests {
                 .location_filter_typed()
                 .expect("Location Filter を解釈できること"),
             Some(LocationFilter::AbsoluteStart { start: last }),
-            "最後に配送した位置を Absolute Start にすること"
+            "最後に受信した位置を Absolute Start にすること"
         );
     }
 
-    /// 音声の再購読も最後に配送した位置を Absolute Start として載せること
+    /// 音声の再購読も最後に受信した位置を Absolute Start として載せること
     #[test]
     fn audio_subscribe_parameters_use_the_last_location_as_absolute_start() {
         // 起動時は前の session が無いためパラメータを載せない
@@ -6307,7 +6614,7 @@ mod tests {
                 .location_filter_typed()
                 .expect("Location Filter を解釈できること"),
             Some(LocationFilter::AbsoluteStart { start: last }),
-            "最後に配送した位置を Absolute Start にすること"
+            "最後に受信した位置を Absolute Start にすること"
         );
     }
 
@@ -9837,5 +10144,762 @@ mod tests {
             !is_audio_only_subscription(true, false),
             "映像だけを購読しているときは音声だけの再生ではないこと"
         );
+    }
+
+    /// 映像の購読境界の判定を固定する
+    ///
+    /// 購読より前に publish された映像は relay の replay や FETCH の応答で届く。境界以下の
+    /// 映像は復号はするが表示しない、という規則を実デコーダと MP4 の読み戻しで確認する。
+    /// モックやスタブは使わない。
+    mod video_delivery_boundary_tests {
+        use super::*;
+
+        /// テスト用: 購読境界の状態を共有する `Arc` を作る
+        fn delivery_order_with_boundary(
+            boundary: Option<Location>,
+        ) -> std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>> {
+            std::sync::Arc::new(std::sync::Mutex::new(VideoDeliveryOrder::new(boundary)))
+        }
+
+        /// テスト用: 映像 Object の LOC Properties を組み立てる
+        ///
+        /// `video_config` を渡すと PROP_VIDEO_CONFIG を載せる。キーフレームは
+        /// PROP_VIDEO_FRAME_MARKING の I ビット (0x20) で示す (RFC 9626 §3.2)。
+        fn video_loc_properties(
+            timestamp: u64,
+            timescale: u64,
+            video_config: Option<&[u8]>,
+            is_keyframe: bool,
+        ) -> LocProperties {
+            let mut props = LocProperties::new();
+            props.push(LocProperty {
+                prop_id: PROP_TIMESTAMP,
+                value: LocPropertyValue::VarInt(timestamp),
+            });
+            props.push(LocProperty {
+                prop_id: PROP_TIMESCALE,
+                value: LocPropertyValue::VarInt(timescale),
+            });
+            props.push(LocProperty {
+                prop_id: PROP_VIDEO_FRAME_MARKING,
+                value: LocPropertyValue::Bytes(vec![if is_keyframe { 0x20 } else { 0x00 }]),
+            });
+            if let Some(config) = video_config {
+                props.push(LocProperty {
+                    prop_id: PROP_VIDEO_CONFIG,
+                    value: LocPropertyValue::Bytes(config.to_vec()),
+                });
+            }
+            props
+        }
+
+        /// テスト用: 実エンコーダで VP8 のキーフレームと後続の inter frame を 1 つずつ作る
+        ///
+        /// 実デコーダで復号できる本物のフレームを使う。libvpx の Windows ビルドは動作しない
+        /// ため、呼び出し側を Windows 以外に限定する。
+        #[cfg(not(target_os = "windows"))]
+        fn encode_vp8_frames() -> (Vec<u8>, Vec<u8>) {
+            use std::num::NonZeroUsize;
+
+            use shiguredo_libvpx::{
+                CodecConfig, EncodeOptions, Encoder, EncoderConfig, ImageData, ImageFormat,
+                Vp8Config,
+            };
+
+            const WIDTH: usize = 64;
+            const HEIGHT: usize = 48;
+            // 単色ではなく位置に応じて値を変え、実デコーダを通ったことを確かめられるようにする
+            let mut y = vec![0u8; WIDTH * HEIGHT];
+            for row in 0..HEIGHT {
+                for col in 0..WIDTH {
+                    y[row * WIDTH + col] = ((row + col) % 200) as u8;
+                }
+            }
+            let u = vec![96u8; WIDTH / 2 * (HEIGHT / 2)];
+            let v = vec![160u8; WIDTH / 2 * (HEIGHT / 2)];
+            let mut config = EncoderConfig::new(
+                WIDTH,
+                HEIGHT,
+                ImageFormat::I420,
+                CodecConfig::Vp8(Vp8Config::default()),
+            );
+            // 2 フレーム目を inter frame にするため、キーフレームの自動挿入を止める
+            config.keyframe_interval = NonZeroUsize::new(300);
+            config.lag_in_frames = NonZeroUsize::new(1);
+            let mut encoder = Encoder::new(config).expect("テスト用エンコーダを作成できること");
+            let image = ImageData::I420 {
+                y: &y,
+                u: &u,
+                v: &v,
+            };
+            encoder
+                .encode(
+                    &image,
+                    &EncodeOptions {
+                        force_keyframe: true,
+                    },
+                )
+                .expect("テスト用キーフレームをエンコードできること");
+            // 次の encode の前に、next_frame が None を返すまで取り出す
+            let mut keyframe = None;
+            while let Some(frame) = encoder.next_frame() {
+                if keyframe.is_none() {
+                    assert!(
+                        frame.is_keyframe(),
+                        "テスト用フレームがキーフレームであること"
+                    );
+                    keyframe = Some(frame.data().to_vec());
+                }
+            }
+            let keyframe = keyframe.expect("キーフレームのエンコード結果が得られること");
+            encoder
+                .encode(
+                    &image,
+                    &EncodeOptions {
+                        force_keyframe: false,
+                    },
+                )
+                .expect("テスト用 inter frame をエンコードできること");
+            let mut inter_frame = None;
+            while let Some(frame) = encoder.next_frame() {
+                if inter_frame.is_none() {
+                    assert!(
+                        !frame.is_keyframe(),
+                        "2 つ目のテスト用フレームが inter frame であること"
+                    );
+                    inter_frame = Some(frame.data().to_vec());
+                }
+            }
+            let inter_frame = inter_frame.expect("inter frame のエンコード結果が得られること");
+            (keyframe, inter_frame)
+        }
+
+        /// テスト用: MP4 を読み戻し、(timestamp, payload) の列を返す
+        fn read_mp4_samples(path: &std::path::Path) -> Vec<(u64, Vec<u8>)> {
+            let bytes = std::fs::read(path).expect("MP4 ファイルを読めること");
+            let mut demuxer = shiguredo_mp4::demux::Mp4FileDemuxer::new();
+            while let Some(required) = demuxer.required_input() {
+                let position = required.position as usize;
+                demuxer.handle_input(shiguredo_mp4::demux::Input {
+                    position: required.position,
+                    data: &bytes[position..],
+                });
+            }
+            let mut samples = Vec::new();
+            while let Some(sample) = demuxer.next_sample().expect("サンプルを読めること")
+            {
+                let start = sample.data_offset as usize;
+                samples.push((
+                    sample.timestamp,
+                    bytes[start..start + sample.data_size].to_vec(),
+                ));
+            }
+            samples
+        }
+
+        /// テスト用: 映像 Object を 1 つ配送経路へ流した結果を返す
+        ///
+        /// `deliver_video_object` の引数が多いため、テストで位置・時刻・ペイロードだけを
+        /// 変えて呼べるようにまとめる。再生するテストでは実デコーダを渡し、録画だけの
+        /// テストでは `None` を渡す。
+        #[expect(clippy::too_many_arguments)]
+        async fn deliver_video_at(
+            delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
+            decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
+            decoder: Option<&mut decoder::VideoDecoder>,
+            recorder: Option<&RecorderSender>,
+            sink: &FrameSink<'_>,
+            termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+            location: Location,
+            timestamp: u64,
+            timescale: u64,
+            video_config: Option<&[u8]>,
+            is_keyframe: bool,
+            payload: &[u8],
+        ) -> VideoDelivery {
+            let properties = video_loc_properties(timestamp, timescale, video_config, is_keyframe)
+                .encode()
+                .expect("LOC プロパティを encode できること");
+            deliver_video_object(
+                location.group_id,
+                location.object_id,
+                Some(&properties),
+                payload,
+                decode_order,
+                delivery_order,
+                decoder,
+                sink,
+                recorder,
+                termination_tx,
+            )
+            .await
+        }
+
+        /// 購読の境界以下の位置は表示しないこと
+        ///
+        /// 境界と同じ位置も含める。境界の位置の Object は live と FETCH の両方で届きうる
+        /// ため、どちらも落とさないと二重に表示される。`Location` の順序は (group_id,
+        /// object_id) の辞書順である (draft-ietf-moq-transport-22 §8.2)。
+        #[test]
+        fn video_delivery_order_detects_objects_at_or_before_the_boundary() {
+            let mut order = VideoDeliveryOrder::new(Some(loc(100, 5)));
+            assert!(
+                order.is_before_boundary(loc(100, 4)),
+                "同じ Group の境界より前の Object は境界以下であること"
+            );
+            assert!(
+                order.is_before_boundary(loc(100, 5)),
+                "境界と同じ位置の Object も境界以下であること"
+            );
+            assert!(
+                order.is_before_boundary(loc(99, 100)),
+                "前の Group の Object は境界以下であること"
+            );
+            assert!(
+                !order.is_before_boundary(loc(100, 6)),
+                "同じ Group の境界より後の Object は live であること"
+            );
+            assert!(
+                !order.is_before_boundary(loc(101, 0)),
+                "次の Group の Object は live であること"
+            );
+        }
+
+        /// 映像配送の累計が増えたときだけログ用に更新すること
+        ///
+        /// 100 ms の tick で累計を前回のログと比べ、増えたときだけ info を出す。増えていない
+        /// ときに同じ内容を出し続けるとログが埋もれ、原因の切り分けに使えなくなる。
+        #[test]
+        fn video_boundary_counter_is_logged_only_when_it_increases() {
+            let mut previous = 0;
+            log_video_boundary_counter(&mut previous, 0);
+            assert_eq!(previous, 0, "増えていないときは前回の値を変えないこと");
+
+            log_video_boundary_counter(&mut previous, 3);
+            assert_eq!(previous, 3, "増えたときは前回の値を更新すること");
+
+            // 同じ累計をもう一度渡しても、前回の値は変えない
+            log_video_boundary_counter(&mut previous, 3);
+            assert_eq!(previous, 3, "同じ累計では前回の値を変えないこと");
+        }
+
+        /// 再購読で境界が後退しないこと
+        ///
+        /// replay の受信途中では「最後に受信した Location」が起動時の Largest Object より
+        /// 前になりうる。境界を後退させると、購読より前に publish された Object が再送された
+        /// ときに表示経路へ戻る。候補が `None` の場合も既知の境界を消さない。
+        #[test]
+        fn video_delivery_order_advances_the_boundary_without_moving_backwards() {
+            // 境界が無ければ最初の Object も live である
+            let mut order = VideoDeliveryOrder::new(None);
+            assert!(
+                !order.is_before_boundary(loc(0, 0)),
+                "境界が無ければ最初の Object も live であること"
+            );
+
+            // 後ろの位置の候補では境界が進む
+            order.advance_boundary(Some(loc(10, 2)));
+            assert!(
+                order.is_before_boundary(loc(10, 2)),
+                "進めた境界と同じ位置は境界以下であること"
+            );
+            assert!(
+                !order.is_before_boundary(loc(10, 3)),
+                "進めた境界より後は live であること"
+            );
+
+            // 前の位置の候補では境界が後退しない
+            order.advance_boundary(Some(loc(10, 1)));
+            assert!(
+                order.is_before_boundary(loc(10, 2)),
+                "前の位置の候補では境界が後退しないこと"
+            );
+
+            // 候補が無くても既知の境界を消さない
+            order.advance_boundary(None);
+            assert!(
+                order.is_before_boundary(loc(10, 2)),
+                "候補が無くても境界を消さないこと"
+            );
+
+            // 同じ Group 内の後ろの位置でも境界が進む
+            order.advance_boundary(Some(loc(10, 5)));
+            assert!(
+                order.is_before_boundary(loc(10, 5)),
+                "同じ Group 内で進めた境界と同じ位置は境界以下であること"
+            );
+            assert!(
+                !order.is_before_boundary(loc(10, 6)),
+                "同じ Group 内で進めた境界より後は live であること"
+            );
+
+            // さらに後ろの候補では境界が進む
+            order.advance_boundary(Some(loc(20, 0)));
+            assert!(
+                order.is_before_boundary(loc(10, 2)),
+                "進んだ境界以下の位置は境界以下であること"
+            );
+            assert!(
+                !order.is_before_boundary(loc(20, 1)),
+                "進んだ境界より後は live であること"
+            );
+            assert_eq!(
+                order.before_boundary_objects(),
+                5,
+                "境界以下と判定した Object の累計を数えること"
+            );
+        }
+
+        /// session 移行の映像の境界は再読み値を選ぶこと
+        ///
+        /// 再購読の開始時に Location Filter へ渡したスナップショットを使うと、移行中に
+        /// 旧 session で受信した Object を新しい購読の再送分として送出し直す。
+        #[test]
+        fn session_migration_uses_the_reread_location_as_the_video_boundary() {
+            let snapshot = loc(10, 1);
+            let reread = loc(10, 7);
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::SessionMigration,
+                    VideoBoundaryCandidates {
+                        snapshot: Some(snapshot),
+                        reread: Some(reread),
+                    },
+                ),
+                Some(reread),
+                "session 移行では切り替え直前に読み直した値を候補にすること"
+            );
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::SessionMigration,
+                    VideoBoundaryCandidates {
+                        snapshot: None,
+                        reread: Some(reread),
+                    },
+                ),
+                Some(reread),
+                "スナップショットが無くても再読み値を候補にすること"
+            );
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::SessionMigration,
+                    VideoBoundaryCandidates {
+                        snapshot: Some(snapshot),
+                        reread: None,
+                    },
+                ),
+                None,
+                "再読み値が無ければ候補が無いこと"
+            );
+        }
+
+        /// request stream 単位の再発行の映像の境界はスナップショットを選ぶこと
+        ///
+        /// `record_last_location` は Object の送出前に記録するため、再発行の完了後に
+        /// 読み直した値を境界にすると、記録済みだがまだ送出していない Object を境界以下
+        /// として落とす競合がある。
+        #[test]
+        fn request_reissue_uses_the_snapshot_location_as_the_video_boundary() {
+            let snapshot = loc(10, 1);
+            let reread = loc(10, 7);
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::RequestReissue,
+                    VideoBoundaryCandidates {
+                        snapshot: Some(snapshot),
+                        reread: Some(reread),
+                    },
+                ),
+                Some(snapshot),
+                "request 単位の再発行では再発行前のスナップショットを候補にすること"
+            );
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::RequestReissue,
+                    VideoBoundaryCandidates {
+                        snapshot: Some(snapshot),
+                        reread: None,
+                    },
+                ),
+                Some(snapshot),
+                "再読み値が無くてもスナップショットを候補にすること"
+            );
+            assert_eq!(
+                select_video_subscription_boundary(
+                    ResubscribeRoute::RequestReissue,
+                    VideoBoundaryCandidates {
+                        snapshot: None,
+                        reread: Some(reread),
+                    },
+                ),
+                None,
+                "スナップショットが無ければ候補が無いこと"
+            );
+        }
+
+        /// 購読の境界以下の映像が `frame_tx` へ送出されないこと
+        ///
+        /// live の Subgroup stream と FETCH 応答 stream が共有する `deliver_video_object` を
+        /// 実 VP8 エンコーダと実デコーダで通す。境界以下でも復号は行う (境界以降のフレームが
+        /// 参照しうるため) が、表示経路へは送らない。
+        #[cfg(not(target_os = "windows"))]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn video_delivery_does_not_send_objects_before_the_subscription_boundary() {
+            let (payload, _) = encode_vp8_frames();
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order = delivery_order_with_boundary(Some(loc(10, 0)));
+            let mut decoder =
+                decoder::build_video_decoder("vp8").expect("VP8 デコーダを生成できること");
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            let result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(10, 0),
+                960,
+                48_000,
+                None,
+                true,
+                &payload,
+            )
+            .await;
+
+            assert!(
+                matches!(result, VideoDelivery::Delivered(0)),
+                "境界以下の映像は送出しないこと"
+            );
+            assert!(
+                frame_rx.try_recv().is_err(),
+                "境界以下の映像は frame_tx へ送出しないこと"
+            );
+            assert!(
+                termination_rx.try_recv().is_err(),
+                "書式違反が無いためセッション終了は依頼されないこと"
+            );
+            assert_eq!(
+                display_backlog.load(Ordering::Relaxed),
+                0,
+                "表示待ちへ積まないこと"
+            );
+            assert_eq!(
+                decode_order.lock().await.decoding_group_id(),
+                Some(10),
+                "境界以下でも復号するため復号順の状態は進むこと"
+            );
+            assert_eq!(
+                delivery_order
+                    .lock()
+                    .expect("映像の購読境界のロックが毒されていないこと")
+                    .before_boundary_objects(),
+                1,
+                "境界以下として落とした Object の累計に残すこと"
+            );
+        }
+
+        /// 購読の境界以下の映像を復号していること
+        ///
+        /// 境界以下のキーフレームを復号しないと、境界より後の inter frame を復号できない。
+        /// 境界判定を復号の前に移す誤りを検出するため、境界以下のキーフレームと、その直後の
+        /// 境界より後の inter frame を実エンコーダと実デコーダで通す。
+        #[cfg(not(target_os = "windows"))]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn video_delivery_decodes_objects_before_the_subscription_boundary() {
+            let (keyframe, inter_frame) = encode_vp8_frames();
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order = delivery_order_with_boundary(Some(loc(10, 0)));
+            let mut decoder =
+                decoder::build_video_decoder("vp8").expect("VP8 デコーダを生成できること");
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            // 境界以下のキーフレームは表示しないが復号する
+            let below = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(10, 0),
+                960,
+                48_000,
+                None,
+                true,
+                &keyframe,
+            )
+            .await;
+            assert!(
+                matches!(below, VideoDelivery::Delivered(0)),
+                "境界以下のキーフレームは送出しないこと"
+            );
+            assert!(
+                frame_rx.try_recv().is_err(),
+                "境界以下のキーフレームは frame_tx へ送出しないこと"
+            );
+
+            // 境界より後の inter frame は、境界以下のキーフレームを復号していなければ復号できない
+            let above = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(10, 1),
+                1_920,
+                48_000,
+                None,
+                false,
+                &inter_frame,
+            )
+            .await;
+            assert!(
+                matches!(above, VideoDelivery::Delivered(1)),
+                "境界以下のキーフレームを復号していれば inter frame を送出できること: {above:?}"
+            );
+            assert!(
+                frame_rx.try_recv().is_ok(),
+                "境界より後の inter frame が frame_tx へ送出されること"
+            );
+            assert!(
+                termination_rx.try_recv().is_err(),
+                "書式違反が無いためセッション終了は依頼されないこと"
+            );
+        }
+
+        /// 購読の境界より後の live の映像が従来どおり送出されること
+        #[cfg(not(target_os = "windows"))]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn video_delivery_sends_live_objects_after_the_subscription_boundary() {
+            let (payload, _) = encode_vp8_frames();
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order = delivery_order_with_boundary(Some(loc(10, 0)));
+            let mut decoder =
+                decoder::build_video_decoder("vp8").expect("VP8 デコーダを生成できること");
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            // TIMESCALE 48000 の 1920 は 40 ms である
+            let result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(10, 1),
+                1_920,
+                48_000,
+                None,
+                true,
+                &payload,
+            )
+            .await;
+
+            assert!(
+                matches!(result, VideoDelivery::Delivered(1)),
+                "境界より後の映像は 1 フレーム送出すること: {result:?}"
+            );
+            let frame = frame_rx
+                .try_recv()
+                .expect("境界より後の映像は frame_tx へ送出されること");
+            assert_eq!(
+                frame.timestamp_us,
+                Some(40_000),
+                "TIMESTAMP と TIMESCALE から求めた表示時刻を載せること"
+            );
+            assert_eq!(
+                frame.timestamp_kind,
+                TimestampKind::MediaTime,
+                "TIMESCALE がある映像はメディア時刻であること"
+            );
+            assert_eq!(
+                display_backlog.load(Ordering::Relaxed),
+                1,
+                "表示待ちを 1 つ増やすこと"
+            );
+        }
+
+        /// 購読の境界が無い場合は映像を送出すること
+        #[cfg(not(target_os = "windows"))]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn video_delivery_sends_objects_when_there_is_no_boundary() {
+            let (payload, _) = encode_vp8_frames();
+            let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, _termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order = delivery_order_with_boundary(None);
+            let mut decoder =
+                decoder::build_video_decoder("vp8").expect("VP8 デコーダを生成できること");
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            let result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                Some(&mut decoder),
+                None,
+                &sink,
+                &termination_tx,
+                loc(10, 0),
+                960,
+                48_000,
+                None,
+                true,
+                &payload,
+            )
+            .await;
+
+            assert!(
+                matches!(result, VideoDelivery::Delivered(1)),
+                "境界が無ければ映像を送出すること: {result:?}"
+            );
+            assert!(
+                frame_rx.try_recv().is_ok(),
+                "境界が無ければ frame_tx へ送出すること"
+            );
+        }
+
+        /// 購読の境界以下の映像も録画の対象になること
+        ///
+        /// 録画は境界の判定より前に行う。replay が運ぶキーフレームを録画の基準にする現在の
+        /// 挙動を、MP4 の先頭サンプルが replay の Object であることで固定する。再生しない
+        /// 指定 (`--no-play`) と同じく、復号器が無くても録画は行う。
+        #[tokio::test]
+        async fn video_delivery_records_objects_before_the_subscription_boundary() {
+            // shiguredo_mp4 のテストデータと同じ AV1 の Sequence Header OBU。MP4 の sample
+            // entry を作るために必要である (VP8 は MP4 録画に対応していない)
+            const AV1_CONFIG_OBUS: &[u8] = &[
+                0x0A, 0x0B, 0x00, 0x00, 0x00, 0x24, 0xC4, 0xFF, 0xDF, 0x3F, 0xFE, 0x60, 0x10,
+            ];
+            const REPLAY_PAYLOAD: &[u8] = b"replay";
+            const LIVE_PAYLOAD: &[u8] = b"live";
+
+            let path = std::env::temp_dir()
+                .join(format!("moq-sub-video-boundary-{}.mp4", std::process::id()));
+            std::fs::remove_file(&path).ok();
+            let recorder = Recorder::start(
+                path.clone(),
+                Setup {
+                    video: Some(VideoSetup {
+                        codec: "av01.0.08M.08".to_string(),
+                        fps: 30,
+                    }),
+                    audio: None,
+                },
+            )
+            .expect("録画を開始できること");
+            let recorder_sender = recorder.sender();
+
+            let (frame_tx, _frame_rx) = std::sync::mpsc::channel();
+            let display_backlog = std::sync::atomic::AtomicI64::new(0);
+            let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+            let decode_order =
+                std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+            let delivery_order = delivery_order_with_boundary(Some(loc(10, 0)));
+            let sink = FrameSink {
+                frame_tx: &frame_tx,
+                display_backlog: &display_backlog,
+            };
+
+            // 境界以下の replay のキーフレームを録画する
+            let replay_result = deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                None,
+                Some(&recorder_sender),
+                &sink,
+                &termination_tx,
+                loc(10, 0),
+                960,
+                48_000,
+                Some(AV1_CONFIG_OBUS),
+                true,
+                REPLAY_PAYLOAD,
+            )
+            .await;
+            assert!(
+                matches!(replay_result, VideoDelivery::Delivered(0)),
+                "再生しない指定では復号も送出もしないこと"
+            );
+            // 境界より後の live のキーフレームを録画する
+            deliver_video_at(
+                &delivery_order,
+                &decode_order,
+                None,
+                Some(&recorder_sender),
+                &sink,
+                &termination_tx,
+                loc(10, 1),
+                1_920,
+                48_000,
+                Some(AV1_CONFIG_OBUS),
+                true,
+                LIVE_PAYLOAD,
+            )
+            .await;
+            recorder.finish().expect("MP4 を finalize できること");
+
+            assert!(
+                termination_rx.try_recv().is_err(),
+                "書式違反が無いためセッション終了は依頼されないこと"
+            );
+            let samples = read_mp4_samples(&path);
+            assert_eq!(
+                samples.len(),
+                2,
+                "境界以下と境界より後の 2 サンプルを録画すること"
+            );
+            assert_eq!(
+                samples[0].1,
+                REPLAY_PAYLOAD.to_vec(),
+                "先頭サンプルは replay のキーフレームであり、録画の基準になること"
+            );
+            assert_eq!(
+                samples[1].1,
+                LIVE_PAYLOAD.to_vec(),
+                "境界より後の live の Object も録画すること"
+            );
+            // MP4 のトラックの timescale は 1,000,000 であり、TIMESTAMP の差 (20 ms) が
+            // サンプル時刻の差になる。先頭サンプルはトラック内の 0 から始まる
+            assert_eq!(
+                samples[0].0, 0,
+                "先頭サンプルはトラック内の 0 から始まること"
+            );
+            assert_eq!(
+                samples[1].0 - samples[0].0,
+                20_000,
+                "replay と live の TIMESTAMP の差がサンプル時刻の差になること"
+            );
+
+            std::fs::remove_file(&path).ok();
+        }
     }
 }
