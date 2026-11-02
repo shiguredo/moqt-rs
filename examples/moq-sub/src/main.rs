@@ -27,7 +27,7 @@ use moq_sub::{
     DecodedAudioFrame, DecodedVideoFrame, TimestampKind, cli, error, pipeline, wall_clock_us,
 };
 use shiguredo_moqt::name::serialize_namespace;
-use shiguredo_moqt::playout::buffer::PlayoutBuffer;
+use shiguredo_moqt::playout::buffer::{MAX_PRESENTATION_LAG_US, PlayoutBuffer};
 use shiguredo_moqt::playout::gap;
 use shiguredo_moqt::playout::scheduler::{
     AUDIO_PLAYOUT_DELAY_US, AUDIO_PLAYOUT_STRETCH_MIN_US, AudioPlayoutBasis, AudioPlayoutDecision,
@@ -299,22 +299,38 @@ const VIDEO_STALL_MIN_ENQUEUED: u64 = 2;
 /// 映像の描画会計をログに出す間隔 (ミリ秒)
 const VIDEO_PLAYER_LOG_INTERVAL_MS: u128 = 1_000;
 
+/// 映像の表示 tick (ループ 1 回) の周期の初期値 (マイクロ秒)
+///
+/// メインループは 1 ms 眠るため、最初はその周期とみなす。moqt-js 0885 の
+/// `DEFAULT_REFRESH_MS` (60 Hz) に対応する値であり、moqt-rs では表示の tick がループの
+/// 1 回になる。
+const VIDEO_DEFAULT_REFRESH_US: i64 = 1_000;
+
+/// 映像の表示周期の推定に使う、直近の tick 間隔の数
+///
+/// moqt-js 0885 の `REFRESH_SAMPLE_COUNT` と同じ値である。
+const VIDEO_REFRESH_SAMPLE_COUNT: usize = 16;
+
+/// 映像の表示先 (raw_player) が、積んだフレームを表示するまでの tick 数
+///
+/// raw_player は積んだフレームを次の `poll_events` で描画するため 1 tick である。
+/// moqt-js 0885 の `presentationLatencyTicks` の generator 経路 (1) に対応する。
+const VIDEO_PRESENTATION_LATENCY_TICKS: i64 = 1;
+
 /// 映像の描画会計と停止判定
 ///
 /// raw_player は映像のキュー先頭から 1 フレームずつ描画し、キュー上限を超えた分と再生時計
 /// から遅れすぎた分は先頭から捨てる。どのフレームが実際に描画されたかを知るために、投入した
-/// フレームの TIMESTAMP を投入順に保持し、`stats()` が示す描画数・破棄数の差分を先頭から
-/// 取り除く。
+/// フレームの TIMESTAMP と投入時刻を投入順に保持し、`stats()` が示す描画数・破棄数の差分を
+/// 先頭から取り除く。描画を観測したフレームは、推定表示時刻ではなく観測した時刻で時間軸へ
+/// 記録する。
 ///
 /// `Instant` を内部に持たず、単調増加する時刻 (マイクロ秒) を引数で受け取るため、SDL も
 /// プレイヤーも使わずに単体テストできる。
 #[derive(Default)]
 struct VideoPlayoutAccounting {
-    /// プレイヤーの映像キューに残っていると考えられるフレームの TIMESTAMP
-    ///
-    /// TIMESTAMP の無いフレームも、描画・破棄の差分とキューの位置をずらさないために
-    /// `None` として積む。時間軸へ記録するのは `Some` のフレームだけである。
-    pending_timestamps: VecDeque<Option<i64>>,
+    /// プレイヤーの映像キューに残っていると考えられるフレーム (投入順)
+    pending_frames: VecDeque<PendingVideoFrame>,
     /// 前回観測した `total_frames_rendered`
     last_rendered: i64,
     /// 前回観測した `dropped_frames`
@@ -338,10 +354,29 @@ struct VideoPlayoutAccounting {
     dropped_total: u64,
 }
 
+/// プレイヤーへ投入して、まだ描画・破棄を観測していないフレーム
+struct PendingVideoFrame {
+    /// 壁時計の TIMESTAMP
+    ///
+    /// TIMESTAMP の無いフレームも、描画・破棄の差分とキューの位置をずらさないために
+    /// `None` として積む。時間軸へ記録するのは `Some` のフレームだけである。
+    timestamp_us: Option<i64>,
+    /// 投入した時刻 (単調増加マイクロ秒)。投入から描画を観測するまでの遅れを測る
+    enqueued_us: u64,
+}
+
+/// [`VideoPlayoutAccounting::observe`] が返す、描画を観測したフレーム
+struct RenderedVideoFrame {
+    /// 壁時計の TIMESTAMP (時間軸へ記録するのは `Some` のフレームだけ)
+    timestamp_us: Option<i64>,
+    /// 投入から描画を観測するまでの遅れ (マイクロ秒)
+    enqueue_delay_us: u64,
+}
+
 /// [`VideoPlayoutAccounting::observe`] が返す、1 回の観測の結果
 struct VideoPlayoutObservation {
-    /// この観測で描画されたフレームの TIMESTAMP (描画順。TIMESTAMP の無いフレームは含まない)
-    rendered_timestamps: Vec<i64>,
+    /// この観測で描画されたフレーム (描画順)
+    rendered: Vec<RenderedVideoFrame>,
     /// 描画が止まっていると判定したか
     stalled: bool,
     /// 最後に描画を観測してからの経過時間 (マイクロ秒)。停止していなければ 0
@@ -360,7 +395,7 @@ impl VideoPlayoutAccounting {
     ///
     /// `now_us` は単調増加する時刻 (マイクロ秒) で、停止判定の起点になる。
     fn reset_for_player(&mut self, max_queue: usize, rendered: i64, dropped: i64, now_us: u64) {
-        self.pending_timestamps.clear();
+        self.pending_frames.clear();
         self.last_rendered = rendered;
         self.last_dropped = dropped;
         self.unobserved_enqueue_drops = 0;
@@ -373,23 +408,30 @@ impl VideoPlayoutAccounting {
     ///
     /// プレイヤーが投入を受け付けたフレームについてだけ呼ぶ。投入に失敗したフレームは
     /// プレイヤーのキューに残らないため、対応付けに含めてはいけない。
-    fn record_enqueue(&mut self, timestamp_us: Option<i64>) {
+    ///
+    /// `now_us` は単調増加する時刻 (マイクロ秒) で、投入から描画を観測するまでの遅れを
+    /// 測る起点になる。
+    fn record_enqueue(&mut self, timestamp_us: Option<i64>, now_us: u64) {
         self.enqueued_since_render += 1;
         // raw_player はキューが上限に達した状態で投入されると、先頭を 1 枚捨ててから
         // 積む。その破棄は次の `stats()` の差分に現れるため、ここでは FIFO の先頭も
         // 同じように取り除き、差分を処理するときに二重に取り除かないよう数を残す
-        if self.max_queue > 0 && self.pending_timestamps.len() >= self.max_queue {
-            self.pending_timestamps.pop_front();
+        if self.max_queue > 0 && self.pending_frames.len() >= self.max_queue {
+            self.pending_frames.pop_front();
             self.unobserved_enqueue_drops += 1;
         }
-        self.pending_timestamps.push_back(timestamp_us);
+        self.pending_frames.push_back(PendingVideoFrame {
+            timestamp_us,
+            enqueued_us: now_us,
+        });
     }
 
     /// `stats()` の差分から描画・破棄を会計へ反映する
     ///
     /// `current_rendered` / `current_dropped` は `stats()` が示す累計値である。
     /// `now_us` は単調増加する時刻 (マイクロ秒)。描画の差分があれば、その時刻を
-    /// 「最後に描画を観測した時刻」として停止判定をやり直す。
+    /// 「最後に描画を観測した時刻」として停止判定をやり直す。描画を観測したフレームは、
+    /// 投入から描画までの遅れと一緒に返す。
     fn observe(
         &mut self,
         current_rendered: i64,
@@ -406,15 +448,18 @@ impl VideoPlayoutAccounting {
         let already_removed = self.unobserved_enqueue_drops.min(dropped);
         self.unobserved_enqueue_drops -= already_removed;
         for _ in 0..(dropped - already_removed) {
-            self.pending_timestamps.pop_front();
+            self.pending_frames.pop_front();
         }
 
         // 破棄はすべて描画より前 (投入時、または描画ループの先頭) に起きるため、
         // 描画された分は破棄を取り除いた後の先頭から順に対応する
-        let mut rendered_timestamps = Vec::new();
+        let mut rendered_frames = Vec::new();
         for _ in 0..rendered {
-            if let Some(Some(timestamp_us)) = self.pending_timestamps.pop_front() {
-                rendered_timestamps.push(timestamp_us);
+            if let Some(frame) = self.pending_frames.pop_front() {
+                rendered_frames.push(RenderedVideoFrame {
+                    timestamp_us: frame.timestamp_us,
+                    enqueue_delay_us: now_us.saturating_sub(frame.enqueued_us),
+                });
             }
         }
 
@@ -429,7 +474,7 @@ impl VideoPlayoutAccounting {
         let stalled = self.enqueued_since_render >= VIDEO_STALL_MIN_ENQUEUED
             && stalled_for_us >= VIDEO_STALL_TIMEOUT_US;
         VideoPlayoutObservation {
-            rendered_timestamps,
+            rendered: rendered_frames,
             stalled,
             stalled_for_us: if stalled { stalled_for_us } else { 0 },
         }
@@ -442,7 +487,7 @@ impl VideoPlayoutAccounting {
     /// 残っていたフレームは描画されないまま消えるが、プレイヤーはそれを破棄として数えない
     /// ので、ここでも破棄には加えない。
     fn note_recovered(&mut self, rendered: i64, dropped: i64, now_us: u64) {
-        self.pending_timestamps.clear();
+        self.pending_frames.clear();
         self.unobserved_enqueue_drops = 0;
         self.last_rendered = rendered;
         self.last_dropped = dropped;
@@ -472,6 +517,109 @@ impl VideoPlayoutAccounting {
     }
 }
 
+/// 映像の表示周期 (tick 間隔) を実測し、目標表示時刻・許容幅・遅れの上限を決める
+///
+/// moqt-js 0885 の `VideoPlayoutSession.observeTick` と同じく、直近の tick 間隔の下位
+/// 25% を使う。メインスレッドが詰まってコールバックが 1 回飛ぶと間隔が 2 倍になるため、
+/// 中央値ではなく下位 25% を使う。moqt-rs では表示の tick がメインループの 1 回であり、
+/// raw_player はその次の `poll_events` で描画する。したがって表示周期がそのまま提示遅延
+/// (1 tick) の近似になる。
+///
+/// ここで測るのは **select の呼び出し間隔** であり、select から次の `poll_events` までの
+/// 実測ではない。前者は後者より「poll から select までの処理時間」の分だけわずかに大きい
+/// ため、目標表示時刻はその分だけ楽観的になる。1 tick の遅延を近似する目的では無視できる。
+///
+/// `Instant` を内部に持たず、壁時計のマイクロ秒を引数で受け取るため、SDL もプレイヤーも
+/// 使わずに単体テストできる。
+struct VideoDisplayPeriod {
+    /// 直前の tick の時刻 (受信側の壁時計、マイクロ秒)。まだ観測していなければ None
+    last_tick_us: Option<i64>,
+    /// 直近の tick 間隔 (マイクロ秒)
+    intervals_us: VecDeque<i64>,
+    /// いまの表示周期 (マイクロ秒)
+    refresh_us: i64,
+}
+
+impl VideoDisplayPeriod {
+    /// まだ tick を観測していない状態で作る
+    fn new() -> Self {
+        Self {
+            last_tick_us: None,
+            intervals_us: VecDeque::new(),
+            refresh_us: VIDEO_DEFAULT_REFRESH_US,
+        }
+    }
+
+    /// tick を観測し、その時点の表示周期 (マイクロ秒) を返す
+    ///
+    /// 4 tick 分 (4 ms) を超える間隔は、ループが復号や描画で止まった可能性があるため、
+    /// サンプルを捨てて初期値へ戻す (moqt-js 0885 と同じ)。止まった直後は表示周期を過信
+    /// せず初期値の 1 ms を目標にする。その結果として目標が実際より 1 ms 程度過去になる
+    /// が、遅れたフレームは `max_late_us` の逃げ道で拾うため害は小さい。サンプルが 2 つ
+    /// 未満の間は初期値のままにする。
+    fn observe_tick(&mut self, tick_us: i64) -> i64 {
+        let Some(previous_us) = self.last_tick_us.replace(tick_us) else {
+            return self.refresh_us;
+        };
+        let interval_us = tick_us.saturating_sub(previous_us);
+        if interval_us <= 0 {
+            return self.refresh_us;
+        }
+        if interval_us > VIDEO_DEFAULT_REFRESH_US.saturating_mul(4) {
+            self.intervals_us.clear();
+            self.refresh_us = VIDEO_DEFAULT_REFRESH_US;
+            return self.refresh_us;
+        }
+        self.intervals_us.push_back(interval_us);
+        if self.intervals_us.len() > VIDEO_REFRESH_SAMPLE_COUNT {
+            self.intervals_us.pop_front();
+        }
+        if self.intervals_us.len() < 2 {
+            return self.refresh_us;
+        }
+        self.refresh_us = estimate_refresh_us(&self.intervals_us);
+        self.refresh_us
+    }
+
+    /// 目標表示時刻 (tick + 提示遅延) を求める
+    fn target_us(&self, tick_us: i64) -> i64 {
+        tick_us.saturating_add(
+            self.refresh_us
+                .saturating_mul(VIDEO_PRESENTATION_LATENCY_TICKS),
+        )
+    }
+
+    /// 目標表示時刻からの許容幅 (表示周期 / 2) を求める
+    fn tolerance_us(&self) -> i64 {
+        self.refresh_us / 2
+    }
+
+    /// 遅れて提示してよい上限 (マイクロ秒) を求める
+    ///
+    /// moqt-js 0885 は `max(MAX_PRESENTATION_LAG_MS, 表示周期) + 提示遅延` を使う。表示
+    /// 周期が 20 ms より長い (30 Hz 以下) ときは、到着の位相によっては 1 tick 遅れが
+    /// 20 ms を超えるため、表示周期そのものも下限にする。
+    fn max_late_us(&self) -> i64 {
+        self.refresh_us.max(MAX_PRESENTATION_LAG_US).saturating_add(
+            self.refresh_us
+                .saturating_mul(VIDEO_PRESENTATION_LATENCY_TICKS),
+        )
+    }
+}
+
+/// tick 間隔から表示周期を推定する (下位 25%)
+///
+/// 空なら初期値を返す。moqt-js 0885 の `estimateRefreshMs` と同じ規則である。
+fn estimate_refresh_us(intervals_us: &VecDeque<i64>) -> i64 {
+    if intervals_us.is_empty() {
+        return VIDEO_DEFAULT_REFRESH_US;
+    }
+    let mut sorted: Vec<i64> = intervals_us.iter().copied().collect();
+    sorted.sort_unstable();
+    let index = (sorted.len() - 1) * 25 / 100;
+    sorted[index].max(1)
+}
+
 /// 単調増加するはずのカウンタの増分を求める
 ///
 /// プレイヤーを作り直した直後など、基準を取り直す前に値が減った場合は 0 として扱う。
@@ -488,6 +636,134 @@ fn wall_clock_timestamp(frame: &DecodedVideoFrame) -> Option<i64> {
     match frame.timestamp_kind {
         TimestampKind::WallClock => frame.timestamp_us,
         TimestampKind::None | TimestampKind::MediaTime => None,
+    }
+}
+
+/// 描画を観測したフレームを、時間軸の表示実績と計測用の標本へ反映する
+///
+/// 実績には推定表示時刻ではなく、描画を観測した時刻 (`observed_us`) をそのまま記録する。
+/// moqt-js 0885 が推定に変えたのは表示を観測する手段が無いためであり、moqt-rs には
+/// `poll_events` 後の `stats()` 差分で描画を観測する手段がある。推定にすると A/V 同期の
+/// ずれ (`skew_us`) がモデル出力になり、スタールや表示の遅れが映らなくなる。
+///
+/// 記録した時刻と `present_us` が決めた表示時刻との差 (残差) は、推定の妥当性を読むために
+/// 集計だけする (判定には使わない)。壁時計の TIMESTAMP を持たないフレームは、時間軸の
+/// 実績へは記録しない (音声と対応づけられない) が、投入から描画までの遅れは数える。
+fn record_observed_video_frames(
+    rendered: Vec<RenderedVideoFrame>,
+    observed_us: i64,
+    timeline: &mut PlayoutTimeline,
+    enqueue_delays_us: &mut SampleWindow,
+    presentation_residuals_us: &mut SampleWindow,
+) {
+    for frame in rendered {
+        enqueue_delays_us.push(i64::try_from(frame.enqueue_delay_us).unwrap_or(i64::MAX));
+        let Some(timestamp_us) = frame.timestamp_us else {
+            continue;
+        };
+        // 残差は、実績を記録する前の時間軸が決めた表示時刻で測る
+        if let Some(expected_us) = timeline.present_us(Track::Video, timestamp_us) {
+            presentation_residuals_us.push(observed_us.saturating_sub(expected_us));
+        }
+        timeline.record_presentation(Track::Video, timestamp_us, observed_us);
+    }
+}
+
+/// 標本の分布 (p50 / p95 / max、マイクロ秒)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SamplePercentiles {
+    /// p50 (中央値)
+    p50_us: i64,
+    /// p95
+    p95_us: i64,
+    /// 最大値
+    max_us: i64,
+}
+
+/// ログの区間ごとに標本を集め、p50 / p95 / max を求める窓
+///
+/// 判定には使わず、ログに出すためだけに使う。ログを出したら [`SampleWindow::clear`] で
+/// 空にして、次の区間の分布を出す。
+#[derive(Default)]
+struct SampleWindow {
+    /// 集めた標本 (マイクロ秒)
+    samples_us: Vec<i64>,
+}
+
+impl SampleWindow {
+    /// 標本を 1 つ足す
+    fn push(&mut self, value_us: i64) {
+        self.samples_us.push(value_us);
+    }
+
+    /// 標本を捨てる
+    fn clear(&mut self) {
+        self.samples_us.clear();
+    }
+
+    /// 標本数 (テストで境界を確かめるためだけに使う)
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.samples_us.len()
+    }
+
+    /// p50 / p95 / max を求める。標本が無ければ `None`
+    ///
+    /// 百分位は標本を昇順に並べ、`(標本数 - 1) * 百分位 / 100` 番目を取る。標本が 1 件
+    /// なら p50 / p95 / max はすべてその値になる。
+    fn percentiles(&self) -> Option<SamplePercentiles> {
+        if self.samples_us.is_empty() {
+            return None;
+        }
+        let mut sorted = self.samples_us.clone();
+        sorted.sort_unstable();
+        let percentile = |percent: usize| sorted[(sorted.len() - 1) * percent / 100];
+        Some(SamplePercentiles {
+            p50_us: percentile(50),
+            p95_us: percentile(95),
+            max_us: *sorted.last().expect("標本は空でない"),
+        })
+    }
+}
+
+/// 分布をログ用の文字列にする (マイクロ秒をミリ秒へ直す)
+///
+/// 標本が無ければ `none`。ログは英語で出す。
+fn percentile_log(percentiles: Option<SamplePercentiles>) -> String {
+    percentiles.map_or_else(
+        || "none".to_string(),
+        |percentiles| {
+            format!(
+                "p50={:.1}ms p95={:.1}ms max={:.1}ms",
+                percentiles.p50_us as f64 / 1_000.0,
+                percentiles.p95_us as f64 / 1_000.0,
+                percentiles.max_us as f64 / 1_000.0,
+            )
+        },
+    )
+}
+
+/// 映像の表示の選択の計器
+///
+/// `dropped` は提示しなかったフレームの数、`draw_late` は目標に合うフレームが無くて遅れて
+/// 提示した回数である (逃げ道がどれだけ働いたかを読む)。判定には使わない。
+#[derive(Default)]
+struct VideoSelectionCounters {
+    /// 提示しなかったフレームの累計
+    not_shown_frames: u64,
+    /// 遅れて提示した回数の累計
+    draw_late_count: u64,
+}
+
+impl VideoSelectionCounters {
+    /// 1 回の選択の結果を数える
+    fn record(&mut self, dropped_frames: usize, draw_late: bool) {
+        self.not_shown_frames = self
+            .not_shown_frames
+            .saturating_add(u64::try_from(dropped_frames).unwrap_or(u64::MAX));
+        if draw_late {
+            self.draw_late_count = self.draw_late_count.saturating_add(1);
+        }
     }
 }
 
@@ -727,12 +1003,13 @@ fn run_raw_player(
     // 「LOC の TIMESTAMP + 基準の遅れ + 表示の遅れ」で決まる。A/V 同期の制御も
     // 観測のたびに時間軸が行う
     let mut timeline = PlayoutTimeline::new();
-    // 映像は到着後すぐ表示せず、表示時刻まで保持して選ぶ。遅れて届いたフレームは
-    // 追い越させず、表示時刻を過ぎた最新の 1 枚だけを表示する
-    // 保持する上限も時間軸の設定から取る。上限を変えると表示の遅れの切り下げと保持数の
-    // 両方へ同じ値が効く
+    // 映像は到着後すぐ表示せず、表示時刻まで保持して選ぶ。表示の tick ごとに、目標表示
+    // 時刻に最も近い 1 枚を表示する (moqt-js 0885 の `selectNearest`)。保持する上限も
+    // 時間軸の設定から取る。上限を変えると表示の遅れの切り下げと保持数の両方へ同じ値が効く
     let video_queue_limit = timeline.config().video_queue_limit;
     let mut video_buffer = PlayoutBuffer::<DecodedVideoFrame>::new(video_queue_limit, Track::Video);
+    // 表示の tick (ループ 1 回) の周期を実測し、目標表示時刻・許容幅・遅れの上限を決める
+    let mut video_display = VideoDisplayPeriod::new();
 
     // 音声は受信したその場で鳴らす時刻を決めて積む。積んだ順に鳴る FIFO であるため、
     // 最初の音の開始時刻に達するまでのフレームは再生機器の内部キューに先行バッファとして
@@ -749,6 +1026,11 @@ fn run_raw_player(
     let mut video_enqueued_count: u64 = 0;
     // 映像の描画会計。プレイヤーを作った時点で実績の基準を取り直す
     let mut video_accounting = VideoPlayoutAccounting::default();
+    // 表示の選択の計器 (提示しなかったフレーム数と、遅れて提示した回数)
+    let mut video_selection_counters = VideoSelectionCounters::default();
+    // ログ用の分布。1 秒ごとのログの区間で集め、ログを出したら捨てる。判定には使わない
+    let mut video_enqueue_delays_us = SampleWindow::default();
+    let mut video_presentation_residuals_us = SampleWindow::default();
     // 直近の観測でプレイヤーの映像キューに残っていたフレーム数 (定期ログ用)
     let mut video_queue_size: usize = 0;
     // 直近の観測でプレイヤーが示した破棄の内訳と復帰回数 (定期ログ用)
@@ -821,11 +1103,18 @@ fn run_raw_player(
                 stats.dropped_frames,
                 now_mono_us,
             );
-            // 描画を観測した時点で、そのフレームの TIMESTAMP を表示の実績として記録する
+            // 実際に描画されたと観測したフレームを、観測した時点の壁時計で表示の実績と
+            // して残す。write 時刻 (推定表示時刻) ではなく観測を記録することで、スタールや
+            // 表示の遅れが skew に現れる。投入から描画までの遅れと、表示時刻の予定との
+            // 残差は、ログ用に集計する (判定には使わない)
             let now_us = wall_clock_us();
-            for timestamp_us in observation.rendered_timestamps {
-                timeline.record_presentation(Track::Video, timestamp_us, now_us);
-            }
+            record_observed_video_frames(
+                observation.rendered,
+                now_us,
+                &mut timeline,
+                &mut video_enqueue_delays_us,
+                &mut video_presentation_residuals_us,
+            );
             // ウィンドウを閉じた場合も、終了ログのためにここまでの実績を反映してから抜ける
             if !matches!(poll_result, Ok(true)) {
                 tracing::info!("Player window closed");
@@ -851,13 +1140,17 @@ fn run_raw_player(
         }
 
         // 描画の実績を 1 秒に 1 回だけ出す。投入数と描画数・破棄数を区別して、
-        // プレイヤーが詰まっていないかを読めるようにする
+        // プレイヤーが詰まっていないかを読めるようにする。提示しなかったフレーム数、
+        // 遅れて提示した回数、投入から描画までの遅れと表示時刻の残差の分布も出す
         if video_player.is_some()
             && last_video_log.elapsed().as_millis() >= VIDEO_PLAYER_LOG_INTERVAL_MS
         {
             last_video_log = std::time::Instant::now();
+            let enqueue_delay_log = percentile_log(video_enqueue_delays_us.percentiles());
+            let presentation_residual_log =
+                percentile_log(video_presentation_residuals_us.percentiles());
             tracing::info!(
-                "Video player: enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) queue={} drain_recoveries={} player_resyncs={}",
+                "Video player: enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) queue={} drain_recoveries={} player_resyncs={} not_shown={} draw_late={} enqueue_to_render=({}) presentation_residual=({})",
                 video_enqueued_count,
                 video_accounting.rendered_total(),
                 video_accounting.dropped_total(),
@@ -867,7 +1160,14 @@ fn run_raw_player(
                 video_queue_size,
                 video_accounting.recoveries(),
                 video_player_resyncs,
+                video_selection_counters.not_shown_frames,
+                video_selection_counters.draw_late_count,
+                enqueue_delay_log,
+                presentation_residual_log,
             );
+            // 分布は次のログの区間だけを出す
+            video_enqueue_delays_us.clear();
+            video_presentation_residuals_us.clear();
         }
 
         match video_rx.try_recv() {
@@ -906,19 +1206,36 @@ fn run_raw_player(
             }
         }
 
-        // 表示時刻を過ぎたフレームのうち最新の 1 枚を表示する。遅れすぎたフレームは
-        // 時間軸の上限を超えた分として捨てる
+        // 表示の tick の周期を実測し、目標表示時刻に最も近いフレームを 1 枚表示する。
+        // raw_player は積んだフレームを次の poll_events で描画するため、表示周期がそのまま
+        // 提示遅延 (1 tick) になり、目標表示時刻は tick + 提示遅延になる (moqt-js 0885)
         {
-            let now_us = wall_clock_us();
-            let selection = video_buffer.select(now_us, &timeline);
-            for late in selection.late {
+            let tick_us = wall_clock_us();
+            video_display.observe_tick(tick_us);
+            let target_us = video_display.target_us(tick_us);
+            let selection = video_buffer.select_nearest(
+                target_us,
+                video_display.tolerance_us(),
+                video_display.max_late_us(),
+                &timeline,
+            );
+            // 提示しなかったフレームと、遅れて提示した回数を計器に足す
+            video_selection_counters.record(selection.dropped.len(), selection.draw_late);
+            for dropped in selection.dropped {
                 tracing::debug!(
-                    "Discarded a late video frame: {}x{}",
-                    late.width,
-                    late.height
+                    "Discarded a video frame not chosen for display: {}x{}",
+                    dropped.width,
+                    dropped.height
                 );
             }
             if let Some(frame) = selection.draw {
+                if selection.draw_late {
+                    tracing::debug!(
+                        "Showing a video frame later than its presentation time: {}x{}",
+                        frame.width,
+                        frame.height
+                    );
+                }
                 let need_recreate = match video_player.as_ref() {
                     None => true,
                     Some(p) => p.width() != frame.width || p.height() != frame.height,
@@ -950,10 +1267,11 @@ fn run_raw_player(
                 }
 
                 if let Some(ref p) = video_player {
-                    // 表示時刻を過ぎたフレームを渡すため、PTS は再生側のいまの時刻にする
-                    let pts_us = start_time.elapsed().as_micros() as i64;
-                    // 会計へ積む TIMESTAMP は壁時計のときだけにする。メディア時刻の
-                    // フレームを実績として記録すると、時間軸の A/V 同期の推定が壊れる
+                    // 表示待ちのキューから選んだフレームを、再生側のいまの時刻で渡す
+                    let enqueue_us = start_time.elapsed().as_micros() as u64;
+                    let pts_us = i64::try_from(enqueue_us).unwrap_or(i64::MAX);
+                    // 対応付けの FIFO へ積む TIMESTAMP は壁時計のときだけにする。メディア
+                    // 時刻のフレームを実績として記録すると、A/V 同期の推定が壊れる
                     let timestamp_us = wall_clock_timestamp(&frame);
                     match p.enqueue_video_i420(
                         &frame.y,
@@ -964,10 +1282,8 @@ fn run_raw_player(
                         pts_us,
                     ) {
                         Ok(()) => {
-                            // 受け付けたフレームだけを会計へ積む。失敗したフレームは
-                            // プレイヤーのキューに残らないため、対応付けに含めない
                             video_enqueued_count += 1;
-                            video_accounting.record_enqueue(timestamp_us);
+                            video_accounting.record_enqueue(timestamp_us, enqueue_us);
                         }
                         Err(e) => tracing::warn!("Failed to enqueue video frame: {e}"),
                     }
@@ -1095,7 +1411,7 @@ fn run_raw_player(
     }
 
     // 最後の観測以降に描画・破棄された分を会計へ取り込み、終了ログを実測値にする。
-    // ここで記録する描画はループを抜ける直前に実際に表示されたフレームである
+    // ここで記録する描画は、ループを抜ける直前に実際に観測された表示である
     if let Some(ref p) = video_player {
         let stats = p.stats();
         video_queue_size = stats.video_queue_size;
@@ -1109,15 +1425,22 @@ fn run_raw_player(
             start_time.elapsed().as_micros() as u64,
         );
         let now_us = wall_clock_us();
-        for timestamp_us in observation.rendered_timestamps {
-            timeline.record_presentation(Track::Video, timestamp_us, now_us);
-        }
+        record_observed_video_frames(
+            observation.rendered,
+            now_us,
+            &mut timeline,
+            &mut video_enqueue_delays_us,
+            &mut video_presentation_residuals_us,
+        );
     }
 
     // 投入数と描画数・破棄数を区別する。描画が止まったまま終わった場合も、
-    // 投入だけが進んだことがこの行で分かる。破棄の内訳と復帰回数も出す
+    // 投入だけが進んだことがこの行で分かる。破棄の内訳と復帰回数、提示しなかった
+    // フレーム数、遅れて提示した回数、最後の区間の分布も出す
+    let enqueue_delay_log = percentile_log(video_enqueue_delays_us.percentiles());
+    let presentation_residual_log = percentile_log(video_presentation_residuals_us.percentiles());
     tracing::info!(
-        "Player stopped after enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) video frames / {} audio chunks (queue={} drain_recoveries={} player_resyncs={})",
+        "Player stopped after enqueued={} rendered={} dropped={} (queue_full={} late={} resync={}) video frames / {} audio chunks (queue={} drain_recoveries={} player_resyncs={} not_shown={} draw_late={} enqueue_to_render=({}) presentation_residual=({}))",
         video_enqueued_count,
         video_accounting.rendered_total(),
         video_accounting.dropped_total(),
@@ -1128,6 +1451,10 @@ fn run_raw_player(
         video_queue_size,
         video_accounting.recoveries(),
         video_player_resyncs,
+        video_selection_counters.not_shown_frames,
+        video_selection_counters.draw_late_count,
+        enqueue_delay_log,
+        presentation_residual_log,
     );
     // 音声の再生を止める。まず再生を開始していれば、予約した音を鳴らし切るまで待つ
     // (停止時の drain)。待っても鳴り終わらなかった分は、record_stopped が予約したまま
@@ -2483,20 +2810,25 @@ mod tests {
         );
     }
 
-    /// 描画差分 1 で FIFO の先頭の TIMESTAMP が記録対象として返ること
+    /// 描画差分 1 で、先頭のフレームの TIMESTAMP と投入からの遅れが返ること
     #[test]
-    fn video_accounting_returns_the_rendered_timestamp() {
+    fn video_accounting_returns_the_rendered_frame_and_its_delay() {
         let mut accounting = VideoPlayoutAccounting::default();
         // プレイヤーを作った直後 (実績 0) を基準にする
         accounting.reset_for_player(5, 0, 0, 0);
-        // 2 枚投入し、先頭の 1 枚が実際に描画された
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        // 2 枚投入し、先頭の 1 枚が 10 ms 後に描画された
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         let observation = accounting.observe(1, 0, 10_000);
+        let rendered: Vec<(Option<i64>, u64)> = observation
+            .rendered
+            .iter()
+            .map(|frame| (frame.timestamp_us, frame.enqueue_delay_us))
+            .collect();
         assert_eq!(
-            observation.rendered_timestamps,
-            vec![1_000],
-            "描画されたのは先頭のフレームであり、その TIMESTAMP が記録対象として返ること"
+            rendered,
+            vec![(Some(1_000), 10_000)],
+            "描画された先頭フレームの TIMESTAMP と、投入から描画までの遅れが返ること"
         );
         assert!(
             !observation.stalled,
@@ -2509,25 +2841,30 @@ mod tests {
         );
     }
 
-    /// 破棄差分で FIFO の先頭が取り除かれ、記録対象にならないこと
+    /// 破棄差分で FIFO の先頭が取り除かれ、描画として返らないこと
     #[test]
-    fn video_accounting_removes_the_dropped_timestamp() {
+    fn video_accounting_removes_the_dropped_frame() {
         let mut accounting = VideoPlayoutAccounting::default();
         accounting.reset_for_player(5, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         // 先頭の 1 枚が破棄された。破棄されたフレームは描画されない
         let observation = accounting.observe(0, 1, 10_000);
         assert!(
-            observation.rendered_timestamps.is_empty(),
-            "破棄だけでは記録対象が返らないこと"
+            observation.rendered.is_empty(),
+            "破棄だけでは描画されたフレームが返らないこと"
         );
         // 次の観測で描画されたのは、破棄された先頭ではなく 2 枚目
         let observation = accounting.observe(1, 1, 20_000);
+        let rendered: Vec<(Option<i64>, u64)> = observation
+            .rendered
+            .iter()
+            .map(|frame| (frame.timestamp_us, frame.enqueue_delay_us))
+            .collect();
         assert_eq!(
-            observation.rendered_timestamps,
-            vec![2_000],
-            "破棄されたフレームの次のフレームが記録対象になること"
+            rendered,
+            vec![(Some(2_000), 15_000)],
+            "破棄されたフレームの次のフレームが描画として返ること"
         );
     }
 
@@ -2537,21 +2874,45 @@ mod tests {
         let mut accounting = VideoPlayoutAccounting::default();
         // 上限 2 のキューに 3 枚投入すると、3 枚目の投入で先頭が捨てられる
         accounting.reset_for_player(2, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
-        accounting.record_enqueue(Some(3_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
+        accounting.record_enqueue(Some(3_000), 10_000);
         // プレイヤーは投入時に先頭を 1 枚捨てる。FIFO は既に取り除いているため、
         // ここでさらに取り除くと描画されたフレームの TIMESTAMP を取り違える
         let observation = accounting.observe(0, 1, 10_000);
         assert!(
-            observation.rendered_timestamps.is_empty(),
-            "破棄だけでは記録対象が返らないこと"
+            observation.rendered.is_empty(),
+            "破棄だけでは描画されたフレームが返らないこと"
         );
         let observation = accounting.observe(1, 1, 20_000);
+        let rendered: Vec<Option<i64>> = observation
+            .rendered
+            .iter()
+            .map(|frame| frame.timestamp_us)
+            .collect();
         assert_eq!(
-            observation.rendered_timestamps,
-            vec![2_000],
-            "キューに残った先頭のフレームが記録対象になること"
+            rendered,
+            vec![Some(2_000)],
+            "キューに残った先頭のフレームが描画として返ること"
+        );
+    }
+
+    /// 壁時計の TIMESTAMP を持たないフレームも、投入から描画までの遅れを数えること
+    #[test]
+    fn video_accounting_measures_the_delay_of_a_frame_without_a_timestamp() {
+        let mut accounting = VideoPlayoutAccounting::default();
+        accounting.reset_for_player(5, 0, 0, 0);
+        accounting.record_enqueue(None, 1_000);
+        let observation = accounting.observe(1, 0, 4_000);
+        let rendered: Vec<(Option<i64>, u64)> = observation
+            .rendered
+            .iter()
+            .map(|frame| (frame.timestamp_us, frame.enqueue_delay_us))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![(None, 3_000)],
+            "TIMESTAMP が無くても投入からの遅れは返ること"
         );
     }
 
@@ -2563,16 +2924,21 @@ mod tests {
     fn video_accounting_resets_for_a_new_player() {
         let mut accounting = VideoPlayoutAccounting::default();
         accounting.reset_for_player(5, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         // 解像度が変わってプレイヤーを作り直した。新しいプレイヤーの実績は 0 から始まる
         accounting.reset_for_player(5, 0, 0, 50_000);
         // 作り直す前のフレームは対応付けに残らない
-        accounting.record_enqueue(Some(3_000));
+        accounting.record_enqueue(Some(3_000), 50_000);
         let observation = accounting.observe(1, 0, 60_000);
+        let rendered: Vec<(Option<i64>, u64)> = observation
+            .rendered
+            .iter()
+            .map(|frame| (frame.timestamp_us, frame.enqueue_delay_us))
+            .collect();
         assert_eq!(
-            observation.rendered_timestamps,
-            vec![3_000],
+            rendered,
+            vec![(Some(3_000), 10_000)],
             "作り直した後に描画されたのは、作り直した後に投入したフレームであること"
         );
     }
@@ -2582,8 +2948,8 @@ mod tests {
     fn video_accounting_does_not_detect_a_stall_before_the_timeout() {
         let mut accounting = VideoPlayoutAccounting::default();
         accounting.reset_for_player(5, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         let observation = accounting.observe(0, 0, 999_999);
         assert!(
             !observation.stalled,
@@ -2600,8 +2966,8 @@ mod tests {
     fn video_accounting_detects_a_stall_after_the_timeout() {
         let mut accounting = VideoPlayoutAccounting::default();
         accounting.reset_for_player(5, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         let observation = accounting.observe(0, 0, 1_000_000);
         assert!(
             observation.stalled,
@@ -2630,8 +2996,8 @@ mod tests {
     fn video_accounting_resets_after_recovery() {
         let mut accounting = VideoPlayoutAccounting::default();
         accounting.reset_for_player(5, 0, 0, 0);
-        accounting.record_enqueue(Some(1_000));
-        accounting.record_enqueue(Some(2_000));
+        accounting.record_enqueue(Some(1_000), 0);
+        accounting.record_enqueue(Some(2_000), 5_000);
         // drain_video の呼び出し直前の実績。drain_video は描画数・破棄数を戻さない
         let observation = accounting.observe(0, 0, 1_000_000);
         assert!(
@@ -2648,12 +3014,297 @@ mod tests {
             "復帰後に投入が無ければ、時間が経っても停止と判定しないこと"
         );
         // FIFO も空になっているため、復帰前のフレームが描画として記録されないこと
-        accounting.record_enqueue(Some(3_000));
+        accounting.record_enqueue(Some(3_000), 3_000_000);
         let observation = accounting.observe(1, 0, 3_100_000);
+        let rendered: Vec<(Option<i64>, u64)> = observation
+            .rendered
+            .iter()
+            .map(|frame| (frame.timestamp_us, frame.enqueue_delay_us))
+            .collect();
         assert_eq!(
-            observation.rendered_timestamps,
-            vec![3_000],
+            rendered,
+            vec![(Some(3_000), 100_000)],
             "復帰後に描画されたのは復帰後に投入したフレームであること"
+        );
+    }
+
+    /// 描画を観測したフレームだけを時間軸へ記録し、残差を集計すること
+    ///
+    /// 推定表示時刻ではなく、描画を観測した時刻をそのまま記録する。TIMESTAMP の無い
+    /// フレームは時間軸へ記録しないが、投入から描画までの遅れは数える。
+    #[test]
+    fn record_observed_video_frames_records_only_the_observed_frames() {
+        let mut timeline = PlayoutTimeline::new();
+        let arrival_us = 10_000_000;
+        let timestamp_us = 1_000_000;
+        timeline.observe(Track::Video, arrival_us, timestamp_us);
+        // 時間軸が決めた表示時刻との差を、記録する前の値で求める
+        let expected_us = timeline
+            .present_us(Track::Video, timestamp_us)
+            .expect("映像の TIMESTAMP を観測したため表示時刻が決まること");
+        let observed_us = arrival_us + 2_000;
+        let mut enqueue_delays_us = SampleWindow::default();
+        let mut presentation_residuals_us = SampleWindow::default();
+        record_observed_video_frames(
+            vec![
+                RenderedVideoFrame {
+                    timestamp_us: Some(timestamp_us),
+                    enqueue_delay_us: 3_000,
+                },
+                RenderedVideoFrame {
+                    timestamp_us: None,
+                    enqueue_delay_us: 4_000,
+                },
+            ],
+            observed_us,
+            &mut timeline,
+            &mut enqueue_delays_us,
+            &mut presentation_residuals_us,
+        );
+        assert_eq!(
+            enqueue_delays_us.len(),
+            2,
+            "壁時計の TIMESTAMP の有無によらず、投入から描画までの遅れを数えること"
+        );
+        assert_eq!(
+            enqueue_delays_us
+                .percentiles()
+                .expect("標本があること")
+                .max_us,
+            4_000,
+            "投入から描画までの遅れの最大値を返すこと"
+        );
+        assert_eq!(
+            presentation_residuals_us.len(),
+            1,
+            "TIMESTAMP の無いフレームは表示時刻の残差を数えないこと"
+        );
+        assert_eq!(
+            presentation_residuals_us
+                .percentiles()
+                .expect("標本があること")
+                .p50_us,
+            observed_us - expected_us,
+            "記録した表示時刻と時間軸が決めた表示時刻との差を残差にすること"
+        );
+        // 描画を観測していない (推定しか無い) ときは何も記録しない
+        record_observed_video_frames(
+            Vec::new(),
+            observed_us,
+            &mut timeline,
+            &mut enqueue_delays_us,
+            &mut presentation_residuals_us,
+        );
+        assert_eq!(
+            enqueue_delays_us.len(),
+            2,
+            "描画の観測が無ければ投入から描画までの遅れを足さないこと"
+        );
+        assert_eq!(
+            presentation_residuals_us.len(),
+            1,
+            "描画の観測が無ければ表示の実績を記録しないこと"
+        );
+    }
+
+    /// 標本が無ければ分布を返さないこと
+    #[test]
+    fn sample_window_returns_none_when_empty() {
+        let window = SampleWindow::default();
+        assert!(
+            window.percentiles().is_none(),
+            "標本が無ければ None を返すこと"
+        );
+        assert_eq!(
+            percentile_log(None),
+            "none",
+            "標本が無ければ none と出すこと"
+        );
+    }
+
+    /// 標本が 1 件なら p50 / p95 / max はすべてその値になること
+    #[test]
+    fn sample_window_returns_the_same_value_for_one_sample() {
+        let mut window = SampleWindow::default();
+        window.push(1_500);
+        let percentiles = window.percentiles().expect("標本があること");
+        assert_eq!(
+            (percentiles.p50_us, percentiles.p95_us, percentiles.max_us),
+            (1_500, 1_500, 1_500),
+            "標本が 1 件ならすべて同じ値になること"
+        );
+    }
+
+    /// 標本が複数なら昇順に並べて p50 / p95 / max を求めること
+    #[test]
+    fn sample_window_returns_the_percentiles_for_multiple_samples() {
+        let mut window = SampleWindow::default();
+        for value in [5_000, 1_000, 3_000, 2_000, 4_000] {
+            window.push(value);
+        }
+        let percentiles = window.percentiles().expect("標本があること");
+        assert_eq!(
+            (percentiles.p50_us, percentiles.p95_us, percentiles.max_us),
+            (3_000, 4_000, 5_000),
+            "並べ替えた上で p50 / p95 / max を求めること"
+        );
+        assert_eq!(
+            percentile_log(Some(percentiles)),
+            "p50=3.0ms p95=4.0ms max=5.0ms",
+            "ログ用の文字列はミリ秒で出すこと"
+        );
+    }
+
+    /// 表示の選択の計器が、提示しなかった数と遅れて提示した回数を数えること
+    #[test]
+    fn video_selection_counters_count_dropped_and_late_frames() {
+        let mut counters = VideoSelectionCounters::default();
+        counters.record(0, false);
+        assert_eq!(
+            (counters.not_shown_frames, counters.draw_late_count),
+            (0, 0),
+            "何も捨てず遅れも無ければ数えないこと"
+        );
+        counters.record(2, true);
+        assert_eq!(
+            (counters.not_shown_frames, counters.draw_late_count),
+            (2, 1),
+            "提示しなかったフレーム数と、遅れて提示した回数を数えること"
+        );
+        counters.record(1, false);
+        assert_eq!(
+            (counters.not_shown_frames, counters.draw_late_count),
+            (3, 1),
+            "累計へ足し、遅れていない回は遅れに数えないこと"
+        );
+    }
+
+    /// tick 間隔が無ければ表示周期は初期値になること
+    #[test]
+    fn estimate_refresh_us_returns_the_default_for_no_samples() {
+        assert_eq!(
+            estimate_refresh_us(&VecDeque::new()),
+            VIDEO_DEFAULT_REFRESH_US,
+            "サンプルが無ければ初期値を使うこと"
+        );
+    }
+
+    /// 飛んだ tick が混ざっても、下位 25% は通常の間隔を拾うこと
+    #[test]
+    fn estimate_refresh_us_uses_the_lower_quartile() {
+        let mut intervals = VecDeque::new();
+        for _ in 0..15 {
+            intervals.push_back(1_000);
+        }
+        // メインスレッドが詰まって 1 回飛んだ tick (2 倍の間隔) を混ぜる
+        intervals.push_back(2_000);
+        assert_eq!(
+            estimate_refresh_us(&intervals),
+            1_000,
+            "2 倍に伸びた 1 回に引っ張られず、通常の間隔を拾うこと"
+        );
+    }
+
+    /// 表示周期が tick 間隔から求まり、目標表示時刻と許容幅がその値から決まること
+    #[test]
+    fn video_display_period_tracks_the_tick_intervals() {
+        let mut display = VideoDisplayPeriod::new();
+        assert_eq!(
+            display.observe_tick(10_000_000),
+            VIDEO_DEFAULT_REFRESH_US,
+            "最初の tick は初期値を使うこと"
+        );
+        assert_eq!(
+            display.observe_tick(10_000_800),
+            VIDEO_DEFAULT_REFRESH_US,
+            "サンプルが 2 つ未満の間は初期値のままにすること"
+        );
+        assert_eq!(
+            display.observe_tick(10_001_600),
+            800,
+            "2 つの tick 間隔から表示周期を求めること"
+        );
+        assert_eq!(
+            display.target_us(10_001_600),
+            10_001_600 + 800,
+            "目標表示時刻は tick + 提示遅延 (1 tick) になること"
+        );
+        assert_eq!(
+            display.tolerance_us(),
+            400,
+            "許容幅は表示周期の半分にすること"
+        );
+        assert_eq!(
+            display.max_late_us(),
+            MAX_PRESENTATION_LAG_US + 800,
+            "遅れの上限は max(20 ms, 表示周期) + 提示遅延にすること"
+        );
+    }
+
+    /// 4 tick 分を超える間隔では表示周期を初期値へ戻すこと
+    #[test]
+    fn video_display_period_resets_after_a_long_interval() {
+        let mut display = VideoDisplayPeriod::new();
+        display.observe_tick(0);
+        display.observe_tick(1_000);
+        display.observe_tick(2_000);
+        assert_eq!(
+            display.observe_tick(2_800),
+            800,
+            "通常の間隔では表示周期を更新すること"
+        );
+        // 4 ms を超える間隔 (ループの停止) ではサンプルを捨てて初期値へ戻す
+        assert_eq!(
+            display.observe_tick(10_000),
+            VIDEO_DEFAULT_REFRESH_US,
+            "4 tick を超える間隔で初期値へ戻すこと"
+        );
+        assert_eq!(
+            display.target_us(10_000),
+            11_000,
+            "初期値の 1 tick 後ろを目標表示時刻にすること"
+        );
+    }
+
+    /// 0 以下の tick 間隔は表示周期の推定に使わないこと
+    #[test]
+    fn video_display_period_ignores_non_positive_intervals() {
+        let mut display = VideoDisplayPeriod::new();
+        display.observe_tick(10_000);
+        assert_eq!(
+            display.observe_tick(10_000),
+            VIDEO_DEFAULT_REFRESH_US,
+            "同じ時刻の tick は間隔に数えないこと"
+        );
+        assert_eq!(
+            display.observe_tick(9_999),
+            VIDEO_DEFAULT_REFRESH_US,
+            "巻き戻った tick は間隔に数えないこと"
+        );
+        assert_eq!(
+            display.observe_tick(10_999),
+            VIDEO_DEFAULT_REFRESH_US,
+            "有効なサンプルが 2 つ未満の間は初期値のままにすること"
+        );
+    }
+
+    /// 表示周期が 20 ms より長いときは、遅れて提示してよい上限を広げること
+    #[test]
+    fn video_display_period_widens_the_max_late_for_a_slow_refresh() {
+        let display = VideoDisplayPeriod {
+            last_tick_us: None,
+            intervals_us: VecDeque::new(),
+            refresh_us: 33_000,
+        };
+        assert_eq!(
+            display.tolerance_us(),
+            16_500,
+            "許容幅は表示周期の半分にすること"
+        );
+        assert_eq!(
+            display.max_late_us(),
+            33_000 + 33_000,
+            "30 fps では表示周期を下限にして 2 tick まで遅れを許すこと"
         );
     }
 

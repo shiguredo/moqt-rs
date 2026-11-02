@@ -36,6 +36,9 @@
 - 共有する表示時刻の下限は保持しない。2 つのトラックの自然な表示の遅れから、現在の必要量を観測のたびに引き直す。先行する側には 5 ms の不感帯 (`TIMELINE_SYNC_MIN_DELTA_US`) を残す
 - 基準の差には 100 ms の保護 (`TIMELINE_MAX_COMPENSATED_DIFFERENCE_US`) を掛け、既知のバッファ差は別に補償する (`sync_compensation_limit_us`)
 - 予約した時点の予定と実際に鳴った位置の差 (残差) は、重み付き平均で 250 ms の時定数に平滑化し、端数は四捨五入して映像の合わせ先にだけ足す。切り捨てを続けると定常状態で下振れが積もるため、四捨五入する。有効な観測が 1 秒途切れたら失効させる
+- 映像の表示実績は、描画を観測した時刻で記録する。write 時刻ではなく、`present` が戻った後に描画を観測した時刻であり、画面に出た時刻でもない。`present` が戻ってから画面に出るまでの遅れ (コンポジタのフリップ) は測れない
+- 映像を選ぶときの目標表示時刻は、呼び出し側が実測した表示周期 (tick 間隔) から推定する。推定は選択の目標にだけ使い、表示の実績は観測のままにする。moqt-js 0885 が実績を推定に変えたのは、ブラウザに表示を観測する手段が無いためである
+- 映像の表示の遅れの上限 (`MAX_PRESENTATION_LAG_US`、既定 20 ms) は、映像が遅れて描かれる量の上限であり、A/V のずれ (`skew_us`) にそのまま現れる
 - 基準の差が、表示の遅れの上限から決まる閾値を超えるときと、50 ms (`TIMELINE_BASE_DRIFT_US`) を超えて動き続けている (TIMESTAMP が壁時計からずれている) ときは、基準を共有しない。解除は 30 秒保持するが、原因が去って差が戻った状態が 2 秒続いたら保持を待たずに戻す
 - 音声が基準を共有できないときは、同期を止めずに映像だけを音声の到着基準の遅れへ合わせる。止めると相対関係を見る相手がいなくなり、A/V がずれたまま残る
 - ドリフトした側の TIMESTAMP は使わず、`present_us` が None を返す。呼び出し側はそのトラックを到着基準で並べる
@@ -81,6 +84,7 @@
 - 遅延の内訳: `PlayoutTimeline::delay_breakdown` が音声と映像の基準の遅れ・jitter buffer の遅延・同期の補償・表示の遅れ・上限、基準を共有しているかとその理由、基準の差の動き、音声の予算、音声の残差を返す
 - 並べ方: `AudioPlayoutScheduler` が詰めた量 (`compressed_us`)、補間した量と回数 (`concealed_us` / `concealments`)、伸長した量 (`expanded_us`)、捨てた数 (`drops`)、基準を取り直した回数 (`rebases`)、現在の遅れ (`lateness_us`)、直前に鳴らすと決めた音 (`last_play`) を持つ
 - 確定の順序: 音を積んだ後は `confirm_stretch` → `confirm_expansion` → `confirm_playout_end` の順に返し、最後に `last_play` を読んで `AudioPlayoutTimingStats::record_play` へ渡す。`confirm_playout_end` はサンプルへの丸めと開始の押し直しを含む実際の終端で `played_us` を確定するため、詰め・伸長・実終端がすべて計器へ反映される
+- 映像の選択: `PlayoutNearestSelection` が `draw` / `dropped` / `draw_presentation_us` / `draw_late` を返す。呼び出し側は提示しなかったフレームの数と、逃げ道で遅れて提示した回数を計器とログへ記録する
 - 再生の観測: `AudioPlayoutTimingStats` が、予定に対する余裕・到着から鳴り始めるまで・予定からの遅れの分布 (直近 10 秒)、鳴らした音と鳴らさなかった音の累積、理由ごとの内訳、補間で埋まらなかった区間 (回数・合計・最大)、出力が枯れた回数と長さ、時間圧縮も補間も使えないサンプルレートの音の数を返す
 - `stretch_unavailable_frames` は時間圧縮・補間・伸長が使えないサンプルレートの音の数である。moqt-js の `sampleRateMismatchFrames` / `contextSampleRate` / `decodedSampleRate` は `AudioBufferSourceNode` のリサンプル用の計器であり、別の系統である。moqt-rs には該当する段が無いため移植していない
 - 実際に描画した未補間区間とバッファ境界の段差は、`record_rendered_gap` と `record_rendered_boundary` で記録できる。停止時に鳴らし切るまでの残りは `pending_us` と `pending_end_us` で読める
@@ -220,6 +224,46 @@ moqt-js が 2026-10-22 以降に変えた設計判断を moqt-rs へ移した。
 - moqt-js の `sampleRateMismatchFrames` / `contextSampleRate` / `decodedSampleRate` は `AudioBufferSourceNode` のリサンプル専用の計器であり、moqt-rs に該当する段が無いため移植していない (`stretch_unavailable_frames` とは別の系統である)
 - 閉ループの計器 (`feedback_*`、`arrival_delay_floor`) は削除した。代わりに `audio_delay_stats` の `jitter_us` / `output_lead_us` / `target_us` と、`compression_deadband_us`、`delay_breakdown` を読む
 
+### 2026-11-02 の追加移植 (moqt-js 0885)
+
+moqt-js が映像の表示をディスプレイのリフレッシュ (vsync) に整列し、表示先の提示遅延を補償する変更を入れた (issue `0885`)。moqt-rs へ移したのは選択規則と計器の意味であり、ブラウザ固有の層は移していない。
+
+#### 変更内容
+
+- 選択 API を `select(nowMs)` から `selectNearest(targetMs, toleranceMs, maxLateMs)` へ変えた。目標表示時刻に最も近い 1 枚を選び、目標から `maxLateMs` より古いフレームは提示しない
+- 戻り値を `draw` / `dropped` / `drawPresentationMs` / `drawLate` に変えた
+- `MAX_PRESENTATION_LAG_MS` (20 ms) の意味を「表示時刻を過ぎたフレームを 20 ms まで遅れて描く」から「表示できるフレームが無いときだけ遅れて提示する逃げ道の上限」へ変えた
+- 表示先の提示遅延 (`presentationLatencyTicks`、0〜4 tick) を必須の入力にした。canvas は 0、generator は 1 である
+- 表示周期を rAF の間隔の下位 25 % から推定する (`estimateRefreshMs`)
+- 表示実績を「`present` の呼び出し時刻」から「その tick の目標表示時刻」へ変えた
+- `VideoPlayoutPacing` (`drainImmediately` / `framesPerDrain`) を削除し、rAF の tick ごとに 1 枚へ統一した
+
+#### moqt-rs に移植したもの
+
+- `select_nearest` の選択規則。目標から `max_late_us` より古いフレームを捨て、`target - max_late` から `target + tolerance` の範囲で目標に最も近い 1 枚を選ぶ。同距離なら先に積んだ方である。選んだフレームより前のフレームは捨てる。`draw_late` は選んだフレームの表示時刻が `target - tolerance` より古い場合に true になる
+- `dropped` / `draw_late` の意味。`dropped` は提示しなかったフレーム (遅れ、同じ表示周期に重なった分) であり、`draw_late` は逃げ道を使った回数として読む。キュー上限超過の破棄は `enqueue` の戻り値と再生機器の統計で別に数える
+- `MAX_PRESENTATION_LAG_US` の意味の変更。従来の doc は「60 Hz の表示周期」「30 fps では…」を根拠にしていたが、moqt-rs に vsync は無く、量子化は呼び出し側のループ周期 (1 ms ループで、実測は 1〜3 ms と推定) である
+- 表示周期の推定手法 (下位 25 %)。example は tick 間隔を実測し、目標 = tick + 1 tick、許容幅 = 表示周期 / 2、遅れの上限 = max(20 ms, 表示周期) + 1 tick とする
+- A/V 同期の扱いは変えない。表示の実績は描画を観測した時刻のまま記録し、推定は選択の目標にだけ使う
+- skew 予算の考え方。moqt-js は記録値が推定になったため「write の遅れ」の項を予算から外したが、moqt-rs は記録値が観測のままなので、表示の遅れは実装が許す遅れとして予算に残す (`MAX_PRESENTATION_LAG_US` の逃げ道を含む)
+
+#### 移植しなかったもの
+
+- `presentationLatencyTicks`。moqt-rs には vsync が無く、提示遅延は 1 ループ周期でディスプレイの周期に量子化されない。tick 数を必須の公開 API にすると「表示周期の倍数で遅れる」という誤った模型を押し付ける。example は「1 tick」と近似する
+- `estimateRefreshMs` と rAF の予約、`IDLE_STOP_MS` に相当する処理。moqt-rs のループは常時回っており、予約の停止で周期の推定が壊れる問題が無い。推定の手法 (下位 25 %) だけを example に移した
+- `VideoPlayoutPacing` の削除。moqt-rs に pacing は無く、削除するものがない
+- 実ブラウザ試験 (`requestVideoFrameCallback` による vsync 観測)。raw_player は SDL で、相当する観測が無い
+- devtools の遅延・停止レポート。ブラウザの計器であり、対応する層が無い。ただし「投入から描画までの遅れ」「表示時刻の残差」「表示間隔の分布」を example のログに出す考え方は取り込んだ
+
+#### 注意: issue と実装の食い違い
+
+issue の記述と実装が食い違う箇所があり、移植は実装に合わせた。
+
+- 表示周期の推定は、issue の「設計方針」では「直近 16 tick の中央値」だが、実装は下位 25 % である
+- 遅れてよい上限は、issue の「提示遅延の分だけ広げる」ではなく、実装は `max(20 ms, 表示周期)` も取る (表示周期が 20 ms より長いときに 1 tick 遅れが 20 ms を超えるため)
+- `drawLate` は「`target - tolerance` より古い」の定義であり、`tolerance = 0` を渡すと描いたフレームは常に true になる。moqt-rs の example は `tolerance = 表示周期 / 2` を渡す
+- 記録する表示時刻は、moqt-js では「その tick の目標表示時刻」である。moqt-rs は描画を観測できるため、記録は観測のままにする
+
 ## 移植の範囲
 
 ### moqt-rs に移植したもの
@@ -232,14 +276,15 @@ moqt-js が 2026-10-22 以降に変えた設計判断を moqt-rs へ移した。
 - `src/playout/gap.rs`: FIFO 出力のための隙間の材料化
 - `src/playout/splice_fade.rs`: 端のフェード、隙間の直線補間、続き音から実音へのクロスフェード、`f32-planar` の統合
 - `src/playout/timing.rs`: 再生の観測値 (分布、累積、穴、境界の段差、枯れ、時間圧縮と補間を使えないサンプルレートの音) と、停止時の残りの計器
-- `src/playout/catch_up.rs` / `src/playout/buffer.rs` / `src/playout/publish_catch_up.rs`: 追いつき (`AudioReceiveCatchUpObservation` は `now_us` / `lag_us` / `input_lag_us` / `duration_us` / `timestamp_us` をマイクロ秒で受ける)、表示待ちのキュー、配信側の追いつき
-- `examples/moq-sub`: 直前の実音 30 ms の履歴、実出力の先行量と到着基準の深さの観測、時間伸長と接続フェード、終端の確定と計器へ渡す順序、停止時の drain、計器の出力
+- `src/playout/catch_up.rs` / `src/playout/buffer.rs` / `src/playout/publish_catch_up.rs`: 追いつき (`AudioReceiveCatchUpObservation` は `now_us` / `lag_us` / `input_lag_us` / `duration_us` / `timestamp_us` をマイクロ秒で受ける)、表示待ちのキューと目標表示時刻に最も近いフレームの選択 (`select_nearest`)、配信側の追いつき
+- `examples/moq-sub`: 直前の実音 30 ms の履歴、実出力の先行量と到着基準の深さの観測、時間伸長と接続フェード、終端の確定と計器へ渡す順序、停止時の drain、映像の表示周期の実測と選択の目標、描画を観測した実績の記録、計器の出力
 
 ### 移植対象外 (ブラウザ固有)
 
 - Web Audio (`AudioContext`、`AudioBufferSourceNode`、`AudioClockBridge`) と、`getOutputTimestamp()` と `performance.now()` の対応
 - `AudioWorklet` (`AudioWorkletProcessor`、`registerProcessor`、`currentFrame`、128 フレームの量子) と、出力コールバックの適用層 (`AudioRenderConcealer`)。DSP だけを移植した
 - WebCodecs (`AudioData` / `AudioDecoder`)、`HTMLAudioElement`、`MediaStream`、devtools
+- 映像の vsync と rAF の予約、`presentationLatencyTicks` (提示遅延の tick 数)、`estimateRefreshMs`、`requestVideoFrameCallback` による実ブラウザ試験、devtools の遅延・停止レポート
 - Wasm カーネル。Rust で同じ演算を書けば同じ結果になり、同梱と CSP の制約も無い
 - CSP、自動再生ポリシー、タブのバックグラウンド抑制、`AudioWorklet` の隣接する `process` に同じ `currentFrame` が渡る問題
 
@@ -262,6 +307,11 @@ moqt-js が 2026-10-22 以降に変えた設計判断を moqt-rs へ移した。
 - **TIMESCALE がある TIMESTAMP はメディア時刻として扱う。** LOC の TIMESTAMP は Timescale が無ければ Unix epoch からのマイクロ秒 (壁時計)、あれば (0 を含む) publisher のメディア時刻である。メディア時刻の音は壁時計と対応しないため、時間軸の基準の学習と到着基準の深さの観測には使わない
 - **基準の共有解除の保持の満了は、基準の差を記録した時刻から測る。** 片方のトラックが届かなくなると記録が止まり、満了の判断もその時点で止まる (moqt-js と同じ)。記録が再開すると、その間に経過した時間で判定する
 - **44.1 kHz は DSP が解析対応したが、実機の確認はしていない。** 操作できるのは 8 kHz / 16 kHz / 32 kHz / 48 kHz / 44.1 kHz であり、それ以外のレート (例: 96 kHz) の音は時間圧縮・補間・伸長が働かず、`stretch_unavailable_frames` に数える。44.1 kHz の AAC で時間圧縮・補間・伸長が動くことと、聴感・圧縮量は未確認である
+- **vsync が無いため、提示遅延が tick に量子化されない。** moqt-rs は `set_vsync(0)` で vsync を無効にしており、プログラムから見た表示周期は呼び出し側のループ周期 (example は 1 ms) である。moqt-js の `presentationLatencyTicks` に相当する値は持たない
+- **投入から描画を観測するまでの遅れは、まだ実測していない。** 1 ループ周期 (1〜3 ms と推定) の見込みである。example のログに分布を出す
+- **`present` が戻ってから画面に出るまでの遅れは測れない。** SDL とコンポジタの実装依存であり、コードからは決まらない
+- **映像が遅れて描かれる量は A/V のずれに現れる。** 表示の実績は「描画を観測した時刻」であり、`MAX_PRESENTATION_LAG_US` の逃げ道まで遅れて描くと `skew_us` にもその分が現れる
+- **実リレー・実機での映像の計測はまだ行っていない。** 表示間隔と `skew_us` の実分布は未確認である
 - **実リレーでの計測はまだ行っていない。** このドキュメントの数値は moqt-js 側の計測に基づく
 
 ## 検証方法
@@ -298,8 +348,15 @@ moqt-js が 2026-10-22 以降に変えた設計判断を moqt-rs へ移した。
   - `played` / `played_ms`: 詰め・伸長・実終端を確定した後の、実際に鳴る長さの合計
   - `arrival_depth_ms`: 到着基準で予約した音の実出力の深さ (chunk の切り替わりから測る近似)
   - `drain=pending_ms=... requested_ms=... waited_ms=... cut_ms=...`: 停止時に予約を鳴らし切れたかと、切った長さ
+- 1 秒ごとの `Video player:` 行 (example) で次を読む。値は判定には使わない。
+  - `not_shown`: 提示しなかったフレームの数。遅れ、同じ表示周期に重なった分を含む
+  - `draw_late`: 目標に合うフレームが無く、遅れて提示した回数 (逃げ道が働いた回数)
+  - `enqueue_to_render=(p50=... p95=... max=...)`: 再生機器へ投入してから描画を観測するまでの遅れ
+  - `presentation_residual=(p50=... p95=... max=...)`: 記録した表示時刻 − `present_us` が決めた表示時刻
+  - `rendered` / `dropped` / `queue_full` / `late` / `resync` / `drain_recoveries` / `player_resyncs`: 再生機器が観測した描画・破棄・復帰の回数
 - `timeline.delay_breakdown` の `sharing_bases` / `unshared_reason` を、映像ありの購読で読む。共有が解除されたまま戻らないなら、基準の差かドリフトの判定を見る
 - A/V 同期の制御 (30 秒保持の満了と解除、skew の合成)、出力残差の平滑化 (四捨五入) は `tests/test_playout/timeline.rs` と `pbt/tests/prop_playout/timeline.rs` で固定している。直前の実音の 30 ms 履歴、時間伸長の適用、停止時の drain は `cargo test -p moq-sub` で固定している
+- 映像の選択規則 (許容幅の境界、逃げ道で遅れて提示する上限、同じ目標に重なったとき、1 回 1 枚、未来のフレームだけなら描かない、世代の取り直し) は `tests/test_playout/buffer.rs` と `pbt/tests/prop_playout/buffer.rs` で固定している。選択の目標 (表示周期の実測への追随) と、描画を観測した分だけを実績に記録することは `cargo test -p moq-sub` で固定している
 - 同じ素材・同じリレーで qmux と QUIC 直接、映像あり / 映像なし、subgroup / datagram を比較する。qmux だけで `underruns` が増え、QMux の破棄警告が出ていなければ TCP の再送待ちによるバーストが原因である
 - moq-pub の `--target-latency` を 300〜500 ms にして症状が消えるかを見る。消えるなら遅延スパイクに対して目標遅延が不足している
 - `e2e-tests` は実リレーを必要とし、`#[ignore]` を付けて `MOQT_E2E_URL` を設定したときだけ実行する。確認できるのは、publish と subscribe の往復、音声 datagram の受信と MP4 保存、プロセスの異常終了が無いこと、新しい計器がログに出て削除した項目が出ないことである。聴感、実出力遅延、A/V のリップシンク、Bluetooth と OS のミキサー、qmux 経由の TCP 再送バースト、Wi-Fi の周期的な停滞、長時間の傾向は確認できない
@@ -312,4 +369,9 @@ moqt-js が 2026-10-22 以降に変えた設計判断を moqt-rs へ移した。
 - 映像の表示の遅れが 2 秒窓の百分位へ直接追従することの副作用。フレーム間隔の推定が不安定な開始直後に目標が跳ねないか
 - 時間伸長を入れたときの聴感と、圧縮との往復が増えないこと
 - 欠落の直後で直前の実音の履歴が 30 ms 未満になるときの補間の品質。moqt-js のリングバッファとの差は未確認である
+- 1 ループの実測周期 (sleep 1 ms と処理時間の合計)。1〜3 ms は推定である
+- 投入から描画を観測するまでの遅れの実測値
+- `present` が戻ってから画面に出るまでの残差。SDL とコンポジタの実装依存である
+- 120 fps 相当で同じ許容幅に 2 枚のフレームが入る頻度
+- 実リレーでの `skew_us` の実分布
 - 実リレーでの 90 秒以上の長時間の傾向

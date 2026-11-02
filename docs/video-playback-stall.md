@@ -88,3 +88,23 @@ moq-sub は、プレイヤーへ `enqueue_video_i420` した時点で描画数 (
 - 表示時刻を moq-sub が決め、raw_player がさらに別の時計で判定する二重管理は残っている。
   raw_player に「選択済みのフレームを PTS 待ちなしで描画する」API を足して責務を
   moq-sub へ寄せる案は、別途扱う。
+- vsync は無効にしてある (`set_vsync(0)`)。音声の積み込みと同じスレッドで動くため、
+  vsync を待つとその間だけ音声の供給が止まるからである。したがってプログラムから見た
+  表示周期は 1 ms ループだけであり、ディスプレイのリフレッシュ周期に同期する仕組みは無い。
+  表示は「選択した次の `poll_events`」で起きるので、量子化の幅は 1 ループ周期
+  (実測は未実施。sleep 1 ms と処理時間から 1〜3 ms と推定) である。
+- 表示時刻の二重管理の現状: moq-sub が時間軸 (`PlayoutTimeline::present_us`) で表示時刻を
+  決め、`PlayoutBuffer::select_nearest` が目標表示時刻に最も近いフレームを選び、
+  raw_player が PTS の時計で描画を判定する。moq-sub は PTS に「いま」を渡すため、
+  raw_player は次の `poll_events` で描くだけになり、ペーシングは `PlayoutBuffer` が持つ。
+  raw_player 内蔵の `AudioPlayer` は使っていないため、音声をマスターにした同期は働かない。
+  描画が 1 秒進まないときの復帰は、raw_player の自力復帰と moq-sub の `drain_video` の
+  二段構えである。
+- moqt-js 0885 相当 (表示を最も近い vsync に整列し、表示先の提示遅延を補償する) は移植
+  しない。vsync が無く、`requestVideoFrameCallback` に相当する観測も無いため、提示遅延を
+  tick 数で表せない。moqt-rs の系統誤差は 1 ループ周期 (1〜3 ms と推定) であり、moqt-js が
+  直した rAF の半周期遅れ (60 Hz で平均 8.3 ms) と比べて対策の価値が小さい。選択規則だけを
+  0885 に合わせ、`select_nearest` と example の `VideoDisplayPeriod` (tick 間隔の下位 25 %
+  から表示周期を推定し、目標 = tick + 1 tick、許容幅 = 表示周期 / 2、遅れの上限 =
+  max(20 ms, 表示周期) + 1 tick) として実装した。提示遅延の tick 数は公開 API にしない。
+  投入から描画までの遅れと表示時刻の残差は、example のログで分布を出す (実測は未実施)。

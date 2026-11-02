@@ -224,11 +224,13 @@ fn main() -> Result<(), CatError> {
 
 - 音声は、到着の揺らぎ (直近 2 秒の百分位) と実出力の先行量 (直近 1 秒の p95) から、再生開始までの遅延を 50〜100 ms の範囲で決めます。間に合わない音は波形の周期で少しずつ詰め、再同期で浅くなった深さは周期の重ね合わせで伸ばして戻します
 - 欠けた区間は、直前の音の周期補間と線形予測で埋めます
-- 映像は、決めた表示時刻に合わせて、表示待ちのキューからフレームを選びます
+- 映像は、表示したい時刻に合わせて、表示待ちのキューから最も近いフレームを選びます
 - 音声と映像は、表示時刻のずれを補正し、ライブ配信から遅れたら追いつきます
 
 ```rust,no_run
-use shiguredo_moqt::playout::buffer::{JITTER_BUFFER_MAX_QUEUED_FRAMES, PlayoutBuffer};
+use shiguredo_moqt::playout::buffer::{
+    JITTER_BUFFER_MAX_QUEUED_FRAMES, MAX_PRESENTATION_LAG_US, PlayoutBuffer,
+};
 use shiguredo_moqt::playout::timeline::{PlayoutTimeline, Track};
 
 fn main() {
@@ -241,10 +243,16 @@ fn main() {
     timeline.observe(Track::Audio, wall_clock_us, timestamp_us);
     let play_at_us = timeline.present_us(Track::Audio, timestamp_us);
 
-    // 映像: 復号したフレームを積み、表示時刻が来たものを取り出す
+    // 映像: 復号したフレームを積み、表示したい時刻に最も近いものを 1 枚取り出す。
+    // 第 2 引数は目標からの許容幅、第 3 引数は遅れて提示してよい上限 (マイクロ秒)
     let mut buffer: PlayoutBuffer<u32> = PlayoutBuffer::new(JITTER_BUFFER_MAX_QUEUED_FRAMES, Track::Video);
     let _ = buffer.enqueue(0, Some(timestamp_us), &timeline);
-    let selection = buffer.select(wall_clock_us, &timeline);
+    let selection = buffer.select_nearest(
+        wall_clock_us,
+        5_000,
+        MAX_PRESENTATION_LAG_US,
+        &timeline,
+    );
 
     let _ = (play_at_us, selection);
 }

@@ -1929,19 +1929,26 @@ fn build_jittered_arrivals() -> Vec<(i64, Track, i64)> {
     arrivals
 }
 
-/// 時計の対応付けの不感帯と映像の write の遅れを同時に与えても、同期ずれの推定が
-/// その予算に収まること
+/// 時計の対応付けの不感帯と表示の遅れを与えても、同期ずれの推定がその予算に収まること
 ///
-/// moqt-js の `timeline.test.ts` の「recordPresentation: 不感帯と write の遅れを含めても
-/// skewMs が ±50 ms に収まる」に対応する。120 秒の到着列で、音声は時計の対応付けの
-/// 不感帯 (30 ms) まで、映像は write の遅れ (最大 20 ms) まで実績をずらして記録し、
-/// 定常状態の推定が write の遅れ + 不感帯 + 不感帯 (A/V 同期) に収まり、推移中も表示の
-/// 遅れの上限 (500 ms) を超えないことを確かめる。
+/// moqt-js の `timeline.test.ts` の「recordPresentation: 不感帯を含めても skewMs が予算内に
+/// 収まる」を、moqt-rs の実装に合わせて導出し直したものである。moqt-rs の記録値は最初から
+/// 「描画を観測した時刻」であり write 時刻ではないため、moqt-js のような write の系統誤差は
+/// 無い。代わりに、映像の実績には 1 回の表示の機会の遅れ (呼び出し側のループ周期) が乗る。
+/// ここではその遅れを 1 ms として与え、定常状態の推定が
+/// 「音声の時計の対応付けの不感帯 (30 ms) + 表示の遅れ (1 ms) + A/V 同期の不感帯 (5 ms)」に
+/// 収まることを確かめる。
+///
+/// 逃げ道 (`draw_late`) の最悪値 (`MAX_PRESENTATION_LAG_US` + ループ周期) は、時間軸の
+/// テストではなく buffer の不変条件
+/// (`tests/test_playout/buffer.rs::select_nearest_never_draws_older_than_the_lag_limit`) が
+/// 固定する。
 #[test]
-fn skew_stays_within_the_clock_deadband_and_write_delay_budget() {
-    // 音声の時計の対応付けの不感帯 (30 ms) と、映像の write の遅れの上限 (20 ms)
+fn skew_stays_within_the_clock_deadband_and_the_display_delay_budget() {
+    // 音声の時計の対応付けの不感帯 (30 ms)
     const AUDIO_CLOCK_DEADBAND_US: i64 = 30_000;
-    const MAX_PRESENTATION_LAG_US: i64 = 20_000;
+    // 1 回の表示の機会の遅れ。1 ms ループの 1 周期 (実測は 1〜3 ms)
+    const DISPLAY_DELAY_US: i64 = 1_000;
     let mut timeline = create_timeline();
     let arrivals = build_jittered_arrivals();
     let mut max_skew_us = 0i64;
@@ -1952,10 +1959,12 @@ fn skew_stays_within_the_clock_deadband_and_write_delay_budget() {
         let presentation_us = timeline
             .present_us(*track, timestamp_us)
             .expect("表示時刻が決まること");
-        // 音声は時計の対応付けの不感帯 (30 ms) まで、映像は write の遅れ (20 ms) までずらす
+        // 音声は時計の対応付けの不感帯 (30 ms) まで、映像は 1 回の表示の機会の遅れ
+        // (1 ms) だけずらして実績を記録する (映像をずらさないと、実装が許す表示の遅れが
+        // 予算から消えてテストが実装より甘くなる)
         let deviation_us = match track {
             Track::Audio => AUDIO_CLOCK_DEADBAND_US * (index % 2) as i64,
-            Track::Video => MAX_PRESENTATION_LAG_US * ((index % 3) / 2) as i64,
+            Track::Video => DISPLAY_DELAY_US,
         };
         timeline.record_presentation(
             *track,
@@ -1968,12 +1977,12 @@ fn skew_stays_within_the_clock_deadband_and_write_delay_budget() {
         }
     }
     // 音声の目標遅延が段差で上がった直後は、次の観測で同期の制御が合わせるまで映像が
-    // 先行する。定常状態では不感帯と write の遅れの予算に収まる
+    // 先行する。定常状態では不感帯と表示の遅れの予算に収まる
     let last_skew_us = last_skew_us.expect("最後の同期ずれが求められること");
     assert!(
         last_skew_us.saturating_abs()
-            <= MAX_PRESENTATION_LAG_US + AUDIO_CLOCK_DEADBAND_US + TIMELINE_SYNC_MIN_DELTA_US,
-        "定常状態のずれが write の遅れ + 不感帯の予算を超えた: {last_skew_us}"
+            <= AUDIO_CLOCK_DEADBAND_US + DISPLAY_DELAY_US + TIMELINE_SYNC_MIN_DELTA_US,
+        "定常状態のずれが不感帯 + 表示の遅れの予算を超えた: {last_skew_us}"
     );
     assert!(
         max_skew_us <= TIMELINE_MAX_PRESENTATION_DELAY_MS * 1_000,
