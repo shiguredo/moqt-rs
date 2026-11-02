@@ -79,15 +79,6 @@ enum VideoCaptureGuard {
     Fake(fake_capture::FakeCapture),
 }
 
-/// 音声キャプチャの寿命管理
-///
-/// フィールドは読み出さないが、この値が drop されるまでキャプチャを保持する。
-#[expect(dead_code, reason = "キャプチャを drop まで保持するため")]
-enum AudioCaptureGuard {
-    Real(shiguredo_audio_device::AudioCapture),
-    Fake(fake_audio_capture::FakeAudioCapture),
-}
-
 /// パイプラインへ渡す映像入力
 ///
 /// カメラ / 疑似キャプチャは生フレームを渡し、MP4 パススルーはエンコード済みサンプルを、
@@ -1060,15 +1051,25 @@ pub async fn run(
     let mut reencode_source: Option<mp4::ReaderGuard> = None;
     let (video_input_tx, mut video_input_rx) = mpsc::channel::<VideoInput>(4);
     let (audio_input_tx, mut audio_input_rx) = mpsc::channel::<AudioInput>(8);
+    // 実マイクのキャプチャは、実行中のセッションを表すガードが AudioCapture を借用するため、
+    // AudioCapture とガードを別々のローカル変数として保持する。宣言と逆順に drop されるので、
+    // キャプチャを止めるガードの drop が AudioCapture の drop より先に起きる。
+    #[expect(
+        unused_assignments,
+        reason = "実キャプチャを使わない経路では初期値の None を読まないため"
+    )]
+    let mut audio_capture: Option<shiguredo_audio_device::AudioCapture> = None;
+    let mut _audio_capture_session: Option<shiguredo_audio_device::AudioCaptureSession<'_>> = None;
+    // 疑似音声キャプチャの寿命管理 (読み出さないが drop されるまで保持する)
+    let _fake_audio_capture: Option<fake_audio_capture::FakeAudioCapture>;
     let _video_capture: Option<VideoCaptureGuard>;
-    let _audio_capture: Option<AudioCaptureGuard>;
     if let Some(reader) = reencode_reader {
         // MP4 再エンコード: リーダーが映像と音声の両方を供給する
         let video_input_tx = config.video_enabled.then_some(video_input_tx);
         let audio_input_tx = config.audio_enabled.then_some(audio_input_tx);
         reencode_source = Some(reader.start(video_input_tx, audio_input_tx)?);
         _video_capture = None;
-        _audio_capture = None;
+        _fake_audio_capture = None;
     } else {
         _video_capture = if config.video_enabled {
             match mp4_reader {
@@ -1088,16 +1089,22 @@ pub async fn run(
             None
         };
 
-        _audio_capture = if config.audio_enabled {
-            Some(if config.fake_capture_device {
-                AudioCaptureGuard::Fake(fake_audio_capture::start_capture(audio_input_tx)?)
+        if config.audio_enabled {
+            if config.fake_capture_device {
+                _fake_audio_capture = Some(fake_audio_capture::start_capture(audio_input_tx)?);
             } else {
-                AudioCaptureGuard::Real(audio_capture::start_capture(&config, audio_input_tx)?)
-            })
+                _fake_audio_capture = None;
+                audio_capture = Some(audio_capture::new_capture(&config, audio_input_tx)?);
+                let capture = audio_capture
+                    .as_mut()
+                    .expect("audio capture is set just above");
+                _audio_capture_session = Some(capture.start()?);
+                tracing::info!("Audio capture started (48000 Hz, 1ch)");
+            }
         } else {
             drop(audio_input_tx);
-            None
-        };
+            _fake_audio_capture = None;
+        }
     };
 
     // 7. データループ

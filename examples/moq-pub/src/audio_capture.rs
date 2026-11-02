@@ -10,11 +10,12 @@ use crate::cli::Config;
 use crate::error::Result;
 use crate::pipeline::AudioInput;
 
-/// 音声キャプチャを開始する
+/// 音声キャプチャを構築する
 ///
-/// 指定されたデバイスからフレームをキャプチャし、チャネルに送信する。
-/// 返り値の AudioCapture を保持している間、キャプチャは継続する。
-pub fn start_capture(config: &Config, sender: mpsc::Sender<AudioInput>) -> Result<AudioCapture> {
+/// 指定されたデバイスからフレームをキャプチャする [AudioCapture] を構築する。この関数は
+/// キャプチャを開始しない。開始するには [`AudioCapture::start`] を呼び、返るセッション
+/// ガードをキャプチャを止めるまで保持すること。
+pub fn new_capture(config: &Config, sender: mpsc::Sender<AudioInput>) -> Result<AudioCapture> {
     if config.audio_device_id.is_none() {
         let devices = AudioDeviceList::enumerate_input()?;
         tracing::info!("Available audio input devices:");
@@ -31,14 +32,11 @@ pub fn start_capture(config: &Config, sender: mpsc::Sender<AudioInput>) -> Resul
         channels: 1,
     };
 
-    let mut capture = AudioCapture::new(capture_config, move |frame| {
+    let capture = AudioCapture::new(capture_config, move |frame| {
         let owned = frame.to_owned();
         // チャネルが満杯の場合はフレームを破棄する
         let _ = sender.try_send(AudioInput::Raw(owned));
     })?;
-
-    capture.start()?;
-    tracing::info!("Audio capture started (48000 Hz, 1ch)");
 
     Ok(capture)
 }
