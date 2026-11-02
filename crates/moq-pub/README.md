@@ -50,7 +50,7 @@ cargo run -p moq-pub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video' --f
 | `--height` | `720` | 映像高さ (px) |
 | `--fps` | `30` | フレームレート |
 | `--bitrate` | `2000` | 映像ターゲットビットレート (kbps) |
-| `--gop-duration` | `2000` | 映像の Group 長 (ms)。入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、新しい Group を開始する。Group 長は境界のフレームやカデンスのずれで 1 フレーム前後する。カタログの `maxGopDuration` / `maxGroupDuration` にはこの値 + 1 フレーム分を載せ、入力のゆらぎ・フレーム落ち・エンコーダ出力の遅延があると実測はこれを超え得る |
+| `--gop-duration` | `2000` | 映像のキーフレーム間隔 (= Group 長) (ms)。Group はキーフレームで始まるため、キーフレーム間隔がそのまま Group 長になる。入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、新しい Group を開始する。Group 長は境界のフレームやカデンスのずれで 1 フレーム前後する。カタログの `maxGopDuration` / `maxGroupDuration` にはこの値 + 1 フレーム分を載せ、入力のゆらぎ・フレーム落ち・エンコーダ出力の遅延があると実測はこれを超え得る |
 | `--namespace` | (省略時は `--url` の `msf` fragment) | Track Namespace (§8.8 表現。`-` が namespace フィールドの区切り) |
 | `--track-name` | `video` | Track Name |
 | `--fake-capture-device` | | 実デバイスの代わりに 440 Hz サイン波音声と raden 生成の疑似映像を使う |
@@ -108,7 +108,7 @@ DATAGRAM は経路での損失を下位の TCP が再送するため起きない
 
 ## 購読者からの新しい Group の要求
 
-映像の Group はキーフレームから始まる。そのため Group の途中で視聴を始めた購読者は、次のキーフレームが届くまで映像を表示できない。`--gop-duration` を長くするほど、この待ち時間も長くなる。
+映像の Group はキーフレームから始まる。そのため Group の途中で視聴を始めた購読者は、次のキーフレームが届くまで映像を表示できない。映像のキーフレーム間隔 (`--gop-duration`) を長くするほど、この待ち時間も長くなる。
 
 購読者は購読を始めるときに、次の Group をできるだけ早く始めるよう要求できる。この要求が `NEW_GROUP_REQUEST` である。moq-pub は要求に応じて `--gop-duration` の境界を待たずにキーフレームを作り、新しい Group を始める。Group の先頭はキーフレームなので、購読者は待たずに映像を見始められる。
 

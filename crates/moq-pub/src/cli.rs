@@ -81,10 +81,12 @@ pub struct Config {
     pub fps: u32,
     /// ターゲットビットレート kbps
     pub bitrate: u32,
-    /// 映像の Group 長 (ms)
+    /// 映像のキーフレーム間隔 (= Group 長) (ms)
     ///
     /// 入力フレームの Timestamp の差分がこの値に達したらキーフレームを強制し、
-    /// 新しい Group を開始する。Group は 1 キーフレーム間隔 = 1 GOP であるため、
+    /// 新しい Group を開始する。映像のキーフレーム間隔はそのまま Group 長になる
+    /// (Group はキーフレームで始まる、draft-ietf-moq-loc-04 §4.2)。フレーム数で
+    /// 指定すると実時間長が fps に依存するため、時間で指定する。
     /// MSF カタログの `maxGopDuration` / `maxGroupDuration` の基になる
     /// (draft-ietf-moq-msf-01 §5.2.24 / §5.2.25)。
     pub gop_duration_ms: u32,
@@ -160,7 +162,8 @@ pub(crate) const DEFAULT_TARGET_LATENCY_MS: u32 = 200;
 
 /// `--gop-duration` の既定値 (ms)
 ///
-/// フレーム数で指定していた頃の既定 (30 fps × 60 フレーム) と同じ実時間長にする。
+/// 映像のキーフレーム間隔 (= Group 長) の既定値。フレーム数で指定していた頃の
+/// 既定 (30 fps × 60 フレーム) と同じ実時間長にする。
 pub(crate) const DEFAULT_GOP_DURATION_MS: u32 = 2_000;
 
 /// `--cache-duration` の既定値 (ms)
@@ -301,9 +304,10 @@ fn parse_from(mut args: noargs::RawArgs) -> noargs::Result<Option<Config>> {
     let gop_duration_opt = noargs::opt("gop-duration")
         .ty("MS")
         .doc(
-            "Group duration in milliseconds. A keyframe is forced when this elapses on the input \
-             timestamps, so the group length does not depend on fps. Ignored when --input-mp4 is \
-             set (groups start at the keyframes in the MP4)",
+            "Video keyframe interval in milliseconds. A Group starts with a keyframe, so this is \
+             also the Group duration. A keyframe is forced when this interval elapses on the \
+             input timestamps, so the interval does not depend on fps. Ignored when --input-mp4 \
+             is set (groups start at the keyframes in the MP4)",
         )
         .default("2000")
         .take(&mut args);
@@ -1090,7 +1094,8 @@ mod tests {
         }
     }
 
-    /// `--gop-duration` は既定値を使い、指定で上書き、0 と数値でない値はエラーになる
+    /// `--gop-duration` (映像のキーフレーム間隔 = Group 長) は既定値を使い、指定で上書き、
+    /// 0 と数値でない値はエラーになる
     ///
     /// 既定の 2000 ms はフレーム数で指定していた頃の既定 (30 fps × 60 フレーム) と同じ
     /// 実時間長であり、fps を変えても Group が同じ長さで進む。
