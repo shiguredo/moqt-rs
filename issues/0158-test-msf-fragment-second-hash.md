@@ -28,7 +28,7 @@ track-identifier を MSF namespace-name string と規定し、§11.1.2 は非リ
 
 挙動は RFC に適合しているが、拒否は `#` を明示した検査ではなく pchar 検証の副作用であり、
 `tests/test_msf/uri.rs` にも 2 個目の `#` を持つ URI のテストが無いため、`split_once('#')` の扱いを変えると通ってしまう。
-example 経路 (`examples/tokio-moq/src/lib.rs`) には `#` の明示検査があるため (0133、closed)、
+example 経路 (`crates/tokio-moq/src/lib.rs`) には `#` の明示検査があるため (0133、closed)、
 明示検査が無いのは `parse_msf_uri` である。
 
 ## 設計方針

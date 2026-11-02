@@ -14,10 +14,10 @@ publisher example からの送信を対象外としているため、本 issue �
 
 ## 現状
 
-- `examples/moq-pub/src/pipeline.rs` の `build_video_loc_properties` は `if frame.is_keyframe` の中でだけ `PROP_TIMESCALE` を push する。同じブロックで `PROP_VIDEO_CONFIG` も push している。
+- `crates/moq-pub/src/pipeline.rs` の `build_video_loc_properties` は `if frame.is_keyframe` の中でだけ `PROP_TIMESCALE` を push する。同じブロックで `PROP_VIDEO_CONFIG` も push している。
 - MP4 入力では `video_timescale` が `Some(入力トラックの timescale)` になり、`EncodedFrame::timestamp` も入力 timescale 単位である。MP4 パススルーでは `Mp4VideoReader::info()` が返す `VideoTrackInfo::timescale`、再エンコードでは `Mp4ReencodeReader::video_info()` が返す `VideoInfo::timescale` を使う。非キーフレームは Timescale なしで送られる。
-- `examples/moq-sub/src/pipeline.rs` の `extract_timestamp_timescale` は Timestamp と Timescale を取り出すだけで、Timescale が無い Object をマイクロ秒として扱うのは `loc_timestamp_us` である。`deliver_video_object` は `loc_timestamp_us` の結果を表示時刻として `decode_and_send` へ渡す。
-- `examples/moq-sub/src/mp4.rs` の `to_microseconds` は観測済みの timescale を後続サンプルへ引き継ぐため、キーフレームに Timescale が付いている現状では録画経路は壊れない。再生経路の `loc_timestamp_us` は状態を持たないため、非キーフレームの PTS が誤解釈される。
+- `crates/moq-sub/src/pipeline.rs` の `extract_timestamp_timescale` は Timestamp と Timescale を取り出すだけで、Timescale が無い Object をマイクロ秒として扱うのは `loc_timestamp_us` である。`deliver_video_object` は `loc_timestamp_us` の結果を表示時刻として `decode_and_send` へ渡す。
+- `crates/moq-sub/src/mp4.rs` の `to_microseconds` は観測済みの timescale を後続サンプルへ引き継ぐため、キーフレームに Timescale が付いている現状では録画経路は壊れない。再生経路の `loc_timestamp_us` は状態を持たないため、非キーフレームの PTS が誤解釈される。
 - テスト `build_video_loc_properties_non_keyframe` が「非キーフレームは Timescale なし」を期待しており、誤った挙動を固定している (`props.timescale()` が `None` であることを assert している)。
 - 影響: MP4 入力の映像を再生する経路で、非キーフレームの PTS がマイクロ秒として解釈され、表示時刻と A/V 同期が崩れる。
 

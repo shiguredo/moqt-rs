@@ -38,7 +38,7 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
   コードと理由付きで伝える経路は無い)。
 - `SessionError::reason` は `&'static str` である。peer から渡される理由は transport 由来の動的な文字列で
   あり、そのままでは保持できない。
-- I/O 層の例: `examples/tokio-moq/src/moqt_client.rs` は control stream の終端を
+- I/O 層の例: `crates/tokio-moq/src/moqt_client.rs` は control stream の終端を
   `StreamRead::Closed(end)` で受け取り `recv_control_stream_closed(end)` を呼ぶだけで、
   transport が運んだ終了コードと理由を Session へ渡していない。
 - moqt-py 経由の実測では、WT-H3 で server が CONTROL_MESSAGE_TIMEOUT (0x11) と理由付きで終了しても、
@@ -60,8 +60,8 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
 - `recv_control_stream_closed` の既存の挙動 (コード・理由・セッション状態) は変えない。transport の終了に
   伴う閉鎖と session 中の不正な閉鎖の区別は I/O 層が行い、transport の終了コードを取得できた場合に
   新 API を呼ぶ (理由は取得できた場合だけ渡し、取得できない場合は空文字列にする)。
-- `examples/tokio-moq` の I/O 層は transport の終了コードと理由を取得して新 API を呼ぶ。WebTransport 経路は
-  取得できることが確定している (`examples/tokio-moq/src/webtransport_h3.rs` の `WebTransportEvent::SessionClosed` が
+- `crates/tokio-moq` の I/O 層は transport の終了コードと理由を取得して新 API を呼ぶ。WebTransport 経路は
+  取得できることが確定している (`crates/tokio-moq/src/webtransport_h3.rs` の `WebTransportEvent::SessionClosed` が
   `close_error_code` / `close_message` を、`webtransport_h2.rs` の `WtEvent::SessionClosed` が `error_code` / `reason` を
   運ぶ。h3 は現状ログに出すだけで破棄している)。h3 の `close_error_code` は WT_CLOSE_SESSION カプセルの
   Application Error Code (WebTransport のアプリケーションエラーコード) であり、§12.2 のコードとしてそのまま使う。
@@ -72,7 +72,7 @@ CONNECTION_CLOSE、WebTransport では CLOSE_WEBTRANSPORT_SESSION カプセル�
   reason phrase は `impl From<ConnectionClose<'_>> for Error` で捨てられるため、公開 API から理由は取得できない。
   このため native QUIC ではコードのみを新 API に渡し、理由は空文字列にする。理由も必要な場合は
   `Subscriber::on_frame_received` で `Frame::ConnectionClose` を観測する追加実装が要る。現在の QUIC 経路の
-  `examples/tokio-moq/src/transport.rs` の `StreamAcceptor::accept_recv_stream` は `Err(e)` を
+  `crates/tokio-moq/src/transport.rs` の `StreamAcceptor::accept_recv_stream` は `Err(e)` を
   `TransportError::Quic(format!("{e}"))` に畳むため、コードを渡すには
   `s2n_quic::connection::Error::Application` を判別して `TransportError` にコードを保持する変更も要る。
 

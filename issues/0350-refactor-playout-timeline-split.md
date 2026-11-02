@@ -57,7 +57,7 @@
 - `src/playout.rs` (変更なし。`pub mod timeline;` のまま)
 - `src/playout/timing.rs` (変更なし。`percentile_index` は `timeline.rs` に残す)
 - `tests/test_playout/timeline.rs` / `pbt/tests/prop_playout/timeline.rs` (変更なし。公開 API のパスを変えない)
-- `src/playout/scheduler.rs` / `src/playout/feedback.rs` / `src/playout/catch_up.rs` / `src/playout/buffer.rs` / `examples/moq-sub/src/main.rs` (変更なし。公開 API のパスを変えない)
+- `src/playout/scheduler.rs` / `src/playout/feedback.rs` / `src/playout/catch_up.rs` / `src/playout/buffer.rs` / `crates/moq-sub/src/main.rs` (変更なし。公開 API のパスを変えない)
 - `docs/moqt.md` / `docs/audio-playout.md` / `skills/shiguredo-moqt/SKILL.md` (変更なし。公開 API のパスを変えず、`timeline.rs` はモジュールルートとして残る)
 
 ## 完了条件

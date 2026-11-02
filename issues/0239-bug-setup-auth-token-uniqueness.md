@@ -50,7 +50,7 @@ MALFORMED_AUTH_TOKEN error." を課す。SETUP は Request ID を持たないた
 - 同じ (Token Type, Token Value) を持つ手組み SETUP を `Session::recv_control` に渡したとき、
   `SESSION_MALFORMED_AUTH_TOKEN` (0x16) で session が閉じること。wire 経由の同じ SETUP は
   `SetupOptions::decode` が `MessageError::MalformedAuthToken` を返し、I/O 層
-  (`examples/tokio-moq/src/error.rs` の `session_error_code`) が同じ 0x16 で閉じる。
+  (`crates/tokio-moq/src/error.rs` の `session_error_code`) が同じ 0x16 で閉じる。
 - `SetupOptions::encode` / `decode` の重複拒否 (`MessageError::MalformedAuthToken`) の
   挙動が変わらないこと。
 - 上記がテストで固定されていること。手組み SETUP の close code と `CloseSession` イベント、

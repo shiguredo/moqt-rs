@@ -7,7 +7,7 @@
 
 ## 目的
 
-`examples/tokio-moq/src/moqt_client.rs` の `MoqtClient::fetch` の doc は、応答が
+`crates/tokio-moq/src/moqt_client.rs` の `MoqtClient::fetch` の doc は、応答が
 `ClientEvent::Session` の `SessionEvent::FetchOkReceived` または
 `SessionEvent::RequestErrorReceived` として届くと書く。しかし `RequestErrorReceived` は
 `is_notable_event` に含まれず、`drain_events` も `request_errors` に記録するだけで
@@ -31,11 +31,11 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   発行済みである (`src/session/core.rs` の `handle_peer_request_error` と
   `src/session/fetch.rs` の `handle_err_for_fetch`)。欠けているのは example の配送だけであり、
   `src/session/` の変更は不要である。
-- `examples/moq-sub/src/pipeline.rs` の `fetch_recent_groups` は `MoqtClient::fetch` を
+- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_groups` は `MoqtClient::fetch` を
   呼ぶ唯一の example の実運用経路であり、「(`SessionEvent::RequestErrorReceived` は notable
   イベントではない) ためログに残せない」と doc に書いている。配送を実装するとこの記述は
   実態と合わなくなる。
-- `examples/tokio-moq/src/peer_harness.rs` の
+- `crates/tokio-moq/src/peer_harness.rs` の
   `rejected_fetch_is_not_delivered_to_the_application` は、peer 起点の FETCH を
   Session が INVALID_RANGE で拒否したときに `ClientEvent::Request` をアプリへ
   渡さないことを固定するテストである。これは本 issue の「自側が発行した FETCH への
@@ -78,26 +78,26 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   `FetchOkReceived` / `OpenFillFetchStream` / `RequestErrorReceived` を追加する。
 - `fetch` の doc は現行の `SessionEvent::RequestErrorReceived` のままで正しくなる。
   `retry_interval` / `redirect` も届くことを 1 文追記する。
-- `examples/moq-sub/src/pipeline.rs` の `fetch_recent_groups` の doc を更新し、
+- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_groups` の doc を更新し、
   `next_event` の `RequestErrorReceived` arm で `request_id` / `error_code` /
   `retry_interval` / `reason` / `redirect` をログに残す（ログメッセージは英語）。
   FETCH の拒否であれば `media_fetch_targets` から該当 `request_id` を削除する
   (`media_fetch_targets.remove(&request_id)` の戻り値で FETCH かどうかを判定できる)。
-- `examples/moq-pub/src/pipeline.rs` は FETCH を発行せず、PUBLISH の失敗は
+- `crates/moq-pub/src/pipeline.rs` は FETCH を発行せず、PUBLISH の失敗は
   `publish_track` の戻り値で終了するため、本 issue の変更対象外である。
 - `docs/missing-features.md` §6.7 を、イベントで `redirect` と `retry_interval` が届くが
   example はリダイレクトに追随しない、という実態に更新する。
 
 ## 変更対象
 
-- `examples/tokio-moq/src/moqt_client.rs`
+- `crates/tokio-moq/src/moqt_client.rs`
   - `is_notable_event` / `drain_events` / `next_event` の doc / `fetch` の doc /
     `#[cfg(test)]` の notable テスト
-- `examples/tokio-moq/src/peer_harness.rs`
+- `crates/tokio-moq/src/peer_harness.rs`
   - `TestPeer` に REQUEST_ERROR 応答用の helper を追加し、client 発 FETCH の
     REQUEST_ERROR 配送を固定するテストを追加する。
     `rejected_fetch_is_not_delivered_to_the_application` は変更しない。
-- `examples/moq-sub/src/pipeline.rs`
+- `crates/moq-sub/src/pipeline.rs`
   - `fetch_recent_groups` の doc と `next_event` の `RequestErrorReceived` arm
 - `docs/missing-features.md` §6.7
 
@@ -108,11 +108,11 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   `ClientEvent::Session(SessionEvent::RequestErrorReceived { request_id, error_code, retry_interval, reason, redirect })`
   を返すこと。`request_id` / `error_code` / `retry_interval` / `reason` が
   peer の送った値と一致し、`redirect` は非 REDIRECT なら `None` であること。
-- `examples/tokio-moq/src/moqt_client.rs` の単体テストで
+- `crates/tokio-moq/src/moqt_client.rs` の単体テストで
   `SessionEvent::RequestErrorReceived` が `is_notable_event` であることを固定すること。
 - `drain_events` の `RequestErrorReceived` arm に、`is_notable_event` との一致を検査する
   `debug_assert!` があること。
-- `examples/moq-sub/src/pipeline.rs` が FETCH の拒否をログに残し、
+- `crates/moq-sub/src/pipeline.rs` が FETCH の拒否をログに残し、
   `media_fetch_targets` から該当 request を除去すること。
 - `rejected_fetch_is_not_delivered_to_the_application` が変更されずに通ること
   (peer 起点 FETCH の拒否が `ClientEvent::Request` として渡らないこと)。

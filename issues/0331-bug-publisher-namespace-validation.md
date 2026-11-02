@@ -11,7 +11,7 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 
 ## 現状
 
-- `examples/moq-pub/src/pipeline.rs` の `serve_peer_request` は、SUBSCRIBE を `let track: &[u8] = &subscribe.track_name;` と `config.video_enabled && track == config.track_name.as_bytes()` で判定し、`subscribe.track_namespace` を比較しない。
+- `crates/moq-pub/src/pipeline.rs` の `serve_peer_request` は、SUBSCRIBE を `let track: &[u8] = &subscribe.track_name;` と `config.video_enabled && track == config.track_name.as_bytes()` で判定し、`subscribe.track_namespace` を比較しない。
 - FETCH も `if fetch.track_name == MSF_CATALOG_TRACK_NAME` と
   `config.video_enabled && track_name == config.track_name.as_bytes()` で catalog / メディアを判定し、
   `fetch.track_namespace` を見ない。`serve_media_fetch` は `media_cache.largest(&config.namespace, track_name)` と
@@ -29,14 +29,14 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
 
 ## 再現手順
 
-1. `examples/moq-pub` を relay に接続し、`--namespace moq-example` で video / audio / catalog を PUBLISH する。
+1. `crates/moq-pub` を relay に接続し、`--namespace moq-example` で video / audio / catalog を PUBLISH する。
 2. relay から、`Track Namespace = other`、`Track Name = catalog` の FETCH を送る。`serve_peer_request` は namespace を比較せず catalog の FETCH_OK と Object を返す。
 3. 同じく `Track Namespace = other`、`Track Name = video` (または audio) の SUBSCRIBE を送る。`serve_peer_request` は namespace を比較せず SUBSCRIBE_OK を返す。
 4. `Track Namespace = other`、`Track Name = video` (または audio) の FETCH を送る。`serve_media_fetch` は `config.namespace` の cache を引くため、video / audio の保持 Object を返す。
 
 ## 設計方針
 
-- `examples/moq-pub/src/pipeline.rs` に private な
+- `crates/moq-pub/src/pipeline.rs` に private な
   `fn published_track(config: &Config, namespace: &TrackNamespace, name: &[u8]) -> Option<PublishedTrack>`
   を追加する。`PublishedTrack` は `Video` / `Audio` / `Catalog` の enum とする。`namespace` が `config.namespace`
   と完全一致しない場合は `None` を返す。一致する場合は `config.video_enabled` / `config.audio_enabled` と track 名から種別を返す。namespace
@@ -52,7 +52,7 @@ Track は Track Namespace と Track Name からなる Full Track Name で識別�
   `config.namespace` で PUBLISH した subscription だけである。`subscription_track_name` による映像購読の判定はその前提で安全である。
   `REQUEST_DOES_NOT_EXIST` は draft-ietf-moq-transport-22 §12.3 (Request Error Codes) で publisher が SUBSCRIBE /
   FETCH / TRACK_STATUS / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS への応答に使うコードであり、REQUEST_UPDATE への応答には使わない。
-- `examples/moq-pub/src/pipeline.rs` の `#[cfg(test)] mod tests` に `published_track` の単体テストを追加する。`Config` は
+- `crates/moq-pub/src/pipeline.rs` の `#[cfg(test)] mod tests` に `published_track` の単体テストを追加する。`Config` は
   `cli::parse_args` で組み立てる。別 namespace の video / audio / catalog が `None` になること、同じ namespace の有効な video /
   audio / catalog がそれぞれ `Some(Video)` / `Some(Audio)` / `Some(Catalog)` になること、無効な video / audio が `None`
   になることを固定する。

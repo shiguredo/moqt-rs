@@ -40,7 +40,7 @@ SHOULD からの説明なき逸脱になっている。
   - `src/session/subscription.rs` の `Session::forget_subscription` doc: 除去する open な受信 data stream に STOP_SENDING を発行すること、移管する stream は対象外であることを明記する。
   - `src/session/data.rs` の `remove_incoming_data_streams_for_request` doc: 除去した fill fetch stream の ID を保持集合へ移すことを明記する。
   - `skills/shiguredo-moqt/SKILL.md` の `SessionEvent` 表と forget API の節: `StopSendingDataStream` の発行経路に `forget_subscription` を追加する。
-  - `examples/tokio-moq/src/moqt_client.rs` と `examples/moq-sub/src/pipeline.rs` の `StopSendingDataStream` を扱うコメント / ログ: DATA_STREAM_TIMEOUT 固定の記述を、timeout と `forget_subscription` の両経路を表す記述に直す。
+  - `crates/tokio-moq/src/moqt_client.rs` と `crates/moq-sub/src/pipeline.rs` の `StopSendingDataStream` を扱うコメント / ログ: DATA_STREAM_TIMEOUT 固定の記述を、timeout と `forget_subscription` の両経路を表す記述に直す。
 
 ## 完了条件
 
@@ -50,5 +50,5 @@ SHOULD からの説明なき逸脱になっている。
 - `IncomingDataStream::Discarded` の stream と、既に終端済みの stream には `StopSendingDataStream` が発行されないこと。
 - `Session::forget_subscription` で除去した fill fetch stream の ID が保持集合へ移り、STOP_SENDING 後に届く FIN / RESET_STREAM が `SESSION_PROTOCOL_VIOLATION` にならず no-op で吸収されること。
 - `Session::forget_fetch` / `terminate_subscriber_fetch` / `fetch_stop_sending_received` の経路で `StopSendingDataStream` が新たに発行されないこと。
-- 上記の doc (`src/session/types.rs` / `src/session/subscription.rs` / `src/session/data.rs` / `skills/shiguredo-moqt/SKILL.md` / examples のコメント / ログ) が新挙動を反映していること。
+- 上記の doc (`src/session/types.rs` / `src/session/subscription.rs` / `src/session/data.rs` / `skills/shiguredo-moqt/SKILL.md` / crates のコメント / ログ) が新挙動を反映していること。
 - 上記を `tests/test_session/subscription/` と `tests/test_session/fetch/` のテストで固定し、`cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。

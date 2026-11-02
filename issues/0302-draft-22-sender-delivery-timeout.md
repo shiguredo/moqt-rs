@@ -44,7 +44,7 @@ override は subgroup の先頭 Object に限られ、datagram には適用さ�
 - override は、RESET 終端の場合と、FIN 終端で FIN タイマーを開始しない場合に `close_outgoing_subgroup_stream` で削除する。FIN タイマーを開始する場合は、タイマー発火時に対応する override を削除する。`forget_subscription` では subscription ごと破棄される。
 - Properties の decode に失敗した場合は override を登録しない。不正な Properties の拒否は既存のエンコーダ (`SubgroupObject::encode`) の検証に委ね、この issue では properties の妥当性検証を追加しない。
 - `send_object_datagram` は §5.2 の override 対象外であり、既存の `effective_object_ms` / `effective_subgroup_ms` と `LocalDatagramTimeout` による drop 判定を変更しない。
-- `examples/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` は `SendRequestError::LocalSubgroupTimeout`
+- `crates/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` は `SendRequestError::LocalSubgroupTimeout`
   を `ObjectFilterOutcome::Skip` と同じ扱い (ワイヤ送信しない) にし、呼び出し側は当該 Object を書かずに処理を継続する。`ObjectFilterOutcome::Skip` の
   doc も delivery timeout を含むように更新する。stream の reset は `SessionEvent::ResetDataStream` を処理する I/O 層が行う。
 
@@ -55,6 +55,6 @@ override は subgroup の先頭 Object に限られ、datagram には適用さ�
 - Track Property のみのケースでも subgroup Object の送信前チェックが働くこと。
 - override が、RESET 終端の場合と FIN タイマー不要時の `close_outgoing_subgroup_stream` で削除され、FIN タイマー開始時はタイマー発火時に削除され、`forget_subscription` では subscription ごと破棄されること。
 - datagram は §5.2 の override 対象外であり、既存の `LocalDatagramTimeout` の drop 判定が維持されること。
-- `examples/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` が `LocalSubgroupTimeout` を `Skip` として扱い、example の publish ループがエラー終了しないこと。
+- `crates/tokio-moq/src/moqt_client.rs` の `send_subgroup_object` が `LocalSubgroupTimeout` を `Skip` として扱い、example の publish ループがエラー終了しないこと。
 - 送信側 override と送信直前チェックを `tests/test_session/subscription/delivery.rs` に追加して固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。

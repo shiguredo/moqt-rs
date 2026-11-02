@@ -30,7 +30,7 @@
 
   `FetchStreamDecoder::consume_payload` の doc も同じ契約を書く。モジュール doc・`try_decode_object` / `try_decode_entry` の doc・疑似コードは、この「外部で読み出す場合」の契約と矛盾する。
 - `try_read_payload` の後に `consume_payload` を呼ぶと `ProtocolViolation("consume_payload called in unexpected state")` になる。逆に、ペイロードを decoder に push したまま `consume_payload` だけを呼ぶと、状態は `AwaitingObject` / `AwaitingEntry` に戻るが `buf` にペイロードが残り、次の `try_decode_object` / `try_decode_entry` がペイロード先頭を次の Object ヘッダとして解釈する。
-- `consume_payload` は `src/`、`examples/`、`tests/`、`pbt/`、`fuzz/` のいずれからも呼ばれていない。`rg -n "consume_payload" src/ examples/ tests/ pbt/ fuzz/` のヒットは `src/stream/decoder.rs` の定義・実装と doc コメント、`tests/test_stream/decoder.rs` のコメントだけで、呼び出しは無い。
+- `consume_payload` は `src/`、`crates/`、`tests/`、`pbt/`、`fuzz/` のいずれからも呼ばれていない。`rg -n "consume_payload" src/ crates/ tests/ pbt/ fuzz/` のヒットは `src/stream/decoder.rs` の定義・実装と doc コメント、`tests/test_stream/decoder.rs` のコメントだけで、呼び出しは無い。
 - `README.md` の `SubgroupStreamDecoder` の説明は「ペイロードは `try_read_payload()` / `consume_payload()` で進める」と両方を並べ、`skills/shiguredo-moqt/SKILL.md` のデコーダ API 一覧と説明も両方を案内する。
 - `tests/test_stream/decoder.rs` の `encode_subgroup_stream` の doc コメントは「`consume_payload` 後にバッファから drain する必要があるためテスト側で処理する」と書くが、実際のテストは `try_read_payload` で drain しており、コメントが実装と一致しない。
 - 影響: 公開 API の誤用で誤デコードが起こり得る。`consume_payload` の正常系・長さ不一致・状態違い・バッファ非空の経路はテストで守られていない。

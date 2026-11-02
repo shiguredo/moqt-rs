@@ -18,11 +18,11 @@ example クレートの rustdoc の警告を CI で検出する。`no-std-doc` �
 同じ `ci.yml` の `test` ジョブ (macos-15) には `aws-lc-rs` feature 版の rustdoc 検査
 (`cargo doc --no-deps -p shiguredo_moqt --features aws-lc-rs`) があるが、feature 依存の検査のため
 workspace 全体の検査を代替しない。
-`examples/` の 3 クレート (`tokio-moq` / `moq-pub` / `moq-sub`) のうち `moq-pub` は macOS 専用クレート (`shiguredo_audio_device` / `shiguredo_video_device`) を無条件の依存に持つため ubuntu ではビルドできず、`cargo doc --no-deps --workspace` は macos-15 でしか実行できない
+`crates/` の 3 クレート (`tokio-moq` / `moq-pub` / `moq-sub`) のうち `moq-pub` は macOS 専用クレート (`shiguredo_audio_device` / `shiguredo_video_device`) を無条件の依存に持つため ubuntu ではビルドできず、`cargo doc --no-deps --workspace` は macos-15 でしか実行できない
 (`tokio-moq` 単体は Linux でもビルド可能だが、workspace 全体では `moq-pub` がビルドできないため実行できない。`moq-sub` の macOS 専用依存は `[target.'cfg(target_os = "macos")']` でゲートされている)。`prek.toml` にも
 `cargo doc` のフックは無い。
 
-このため、0132 (`issues/closed/0132-bug-url-default-port.md`) の実装中に公開 doc から private の `DEFAULT_MOQT_PORT` (`examples/tokio-moq/src/lib.rs` の private `const`) への intra-doc link が混入し、同 issue のレビューで発見されたが、既存の CI ジョブでも
+このため、0132 (`issues/closed/0132-bug-url-default-port.md`) の実装中に公開 doc から private の `DEFAULT_MOQT_PORT` (`crates/tokio-moq/src/lib.rs` の private `const`) への intra-doc link が混入し、同 issue のレビューで発見されたが、既存の CI ジョブでも
 `prek` でも検出できなかった (発見は `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` を手で実行したとき)。現行 develop では公開 doc からの当該リンクは解消されているが
 (private item の doc コメント内のリンクのみ残っている)、同種の問題が再混入しても CI も prek も検出しない。
 

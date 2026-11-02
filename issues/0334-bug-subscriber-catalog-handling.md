@@ -29,7 +29,7 @@ moq-sub のカタログ解釈に、MSF-01 の MUST と実装上の取りこぼ�
 
 ## 現状
 
-- `examples/moq-sub/src/pipeline.rs` の `receive_catalog` は、映像 track を codec が `av01` / `avc1` /
+- `crates/moq-sub/src/pipeline.rs` の `receive_catalog` は、映像 track を codec が `av01` / `avc1` /
   `hvc1` / `hev1` で始まるか、`vp8` / `vp09` と一致するか (または `vp09.` で始まるか) だけで選び、
   音声 track を `decoder::is_supported_audio_codec` だけで選ぶ。`MsfTrack::packaging` と
   `MsfTrack::role` は条件にしていない。
@@ -40,7 +40,7 @@ moq-sub のカタログ解釈に、MSF-01 の MUST と実装上の取りこぼ�
   `codec: "opus"` と `bitrate` を付けたカタログは decode を通り (`mediatimeline` / `eventtimeline` では
   さらに `depends` / `mimeType` などの必須フィールドを満たせばよい)、`receive_catalog` がその track を
   LOC の映像 / 音声として購読する。payload は LOC ではないため、デコードに失敗し得る。
-- `examples/moq-sub/src/catalog.rs` の `CatalogState::apply` は、独立カタログ (Full) を受けるたびに `self.catalog = Some(full.clone());` で置き換え、旧カタログの track との `isLive` / `isComplete` の比較をしない。
+- `crates/moq-sub/src/catalog.rs` の `CatalogState::apply` は、独立カタログ (Full) を受けるたびに `self.catalog = Some(full.clone());` で置き換え、旧カタログの track との `isLive` / `isComplete` の比較をしない。
 - `src/msf.rs` の `MsfCatalog::apply_delta` は delta 内の再追加で `isLive` の false→true を拒否するが、独立カタログ間の履歴は保持しない。`MsfCatalog` の `removed_tracks` は 1 つのカタログインスタンス内の delta 用であり、Full の置き換えで新しい `MsfCatalog` に差し替わると履歴は失われる (closed の [0127](closed/0127-bug-msf-delta-track-attribute-change.md) が限界として記録している)。
 - 影響: 非 LOC トラックを LOC として購読してデコードに失敗し得る。`isLive=false`→`true` の Full カタログ遷移と、`isComplete` を落とす / `isComplete=true` の後に track を追加する Full カタログ遷移を受理する。MSF の MUST に違反するカタログ遷移を受理する。
 
@@ -91,5 +91,5 @@ moq-sub のカタログ解釈に、MSF-01 の MUST と実装上の取りこぼ�
 - Full の置き換えで履歴が失われた後に、delta で同じ track を `isLive=true` で再追加した場合に拒否されること。
 - namespace を省略した track と catalog namespace を明示した track が同じキーとして扱われること。
 - Full / delta の拒否時にカタログ状態 (`catalog` / `latest_group` / `last_applied`) と履歴が更新されないこと。
-- 上記を `examples/moq-sub/src/pipeline.rs` と `examples/moq-sub/src/catalog.rs` の `#[cfg(test)] mod tests` に単体テストとして固定すること。
+- 上記を `crates/moq-sub/src/pipeline.rs` と `crates/moq-sub/src/catalog.rs` の `#[cfg(test)] mod tests` に単体テストとして固定すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` が通ること。

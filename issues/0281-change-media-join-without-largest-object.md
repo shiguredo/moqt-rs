@@ -17,7 +17,7 @@ FETCH を発行せず、映像の起動は `NEW_GROUP_REQUEST` か次のキー�
 
 ## 現状
 
-- `examples/moq-sub/src/pipeline.rs` の `fetch_recent_groups` は `SUBSCRIBE_OK` の Largest Object を終端にした直近 4 Group を要求し、`None` の場合は `Skipping FETCH for the ... track: SUBSCRIBE_OK carried no Largest Object` を残して何もしない。
+- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_groups` は `SUBSCRIBE_OK` の Largest Object を終端にした直近 4 Group を要求し、`None` の場合は `Skipping FETCH for the ... track: SUBSCRIBE_OK carried no Largest Object` を残して何もしない。
 - 起動時のメディア購読には Location Filter を載せていない (映像は `PARAM_NEW_GROUP_REQUEST` のみ、音声はパラメータ無し)。GOAWAY 移行の再購読では、映像と音声の両方に `LocationFilter::AbsoluteStart` を載せる (`video_subscribe_parameters` / `audio_subscribe_parameters`)。この移行経路のフィルタは本 issue の変更対象にしない。
 - 実測 (relay の cache 無効、publisher を 5 秒先行、映像の録画基準までの時間): FETCH は最初の購読者では発行されず (relay の下流 SUBSCRIBE_OK が LARGEST_OBJECT を運ばないためであり、0279 の解決方法で relay の責務と整理済み)、`NEW_GROUP_REQUEST` ありで 23〜48 ms、なしで 1095〜1144 ms であった。録画の先頭は前者が購読の 4 ms 後、後者が 1124 ms 後だった。
 - 実測 (relay の cache 有効): 起動を決めるのは relay の replay であり、FETCH の有無と `NEW_GROUP_REQUEST` の有無で差が無かった (録画基準までの遅延はローカル relay でいずれも 1 ms、実 relay でいずれも 20〜26 ms)。映像の FETCH が固有に届ける古い Group (2 Group 分 114 Object) は全て `VideoDecodeOrder` が stale として落とした (映像は 0280 で購読境界の選別を追加する予定であり、FETCH の古い Group はその境界でも落ちる)。
@@ -43,7 +43,7 @@ FETCH を発行せず、映像の起動は `NEW_GROUP_REQUEST` か次のキー�
     ただし、実測に使った relay は cache だけで覆える fill range しか配らず、覆えない
     範囲を上流へ要求する経路が未実装であるため、cache 無効の配備では使えない。
     ライブラリの Session は fill fetch stream の開設と FETCH stream の encode /
-    decode を実装済みだが、`send_fill_fetch_response` は `examples/tokio-moq` の
+    decode を実装済みだが、`send_fill_fetch_response` は `crates/tokio-moq` の
     `MoqtClient` にあり、複数 Object の fill range を返す writer は未整備である。
     moq-pub は catalog 以外の fill を reset し、moq-sub もメディアの fill fetch
     stream を配送経路へ流していない (`fetch_stream_action` が Ignore)。(b) を採用する
@@ -60,11 +60,11 @@ FETCH を発行せず、映像の起動は `NEW_GROUP_REQUEST` か次のキー�
 - (b) を採用する場合は、moq-pub のメディア fill 応答 (複数 Object の fill range を返す writer の実装を含む) と moq-sub のメディア fill stream 配送を実装する。採用しない場合は、現行どおりメディアの fill fetch を使わない。
 - メディア FETCH の扱いを決める。音声 FETCH は起動・再生・録画には寄与せず、OpusHead の取得だけが残る役割である。OpusHead は再生に必須でなく録画も catalog の値で代替できるため、削除を第一候補とする。残す場合は、その理由 (OpusHead の検証) を doc に明記する。映像 FETCH は、LARGEST_OBJECT がある場合の補助として残すか、実測で古い Group が表示に寄与しなかったことを踏まえて削除するかを決める。
 - 削除する場合も `AudioDeliveryOrder` の購読境界の規則は防御として残す (relay の replay と将来の fill 経路で効く)。LARGEST_OBJECT が無い場合は境界を設定せず、すべて live として扱う (0278 の設計)。
-- 変更対象は `examples/moq-sub/src/pipeline.rs` と `examples/moq-sub/README.md` を主とする。(b) を採用する場合は `examples/moq-pub/src/pipeline.rs` と `examples/tokio-moq/src/moqt_client.rs` も対象になる。`docs/missing-features.md` の同期は 0323 が扱うため、本 issue では変更しない。
+- 変更対象は `crates/moq-sub/src/pipeline.rs` と `crates/moq-sub/README.md` を主とする。(b) を採用する場合は `crates/moq-pub/src/pipeline.rs` と `crates/tokio-moq/src/moqt_client.rs` も対象になる。`docs/missing-features.md` の同期は 0323 が扱うため、本 issue では変更しない。
 
 ## 完了条件
 
-- 採用する参加手段と、メディア FETCH を残すか削除するかの判断が `examples/moq-sub/README.md` と実装に反映されていること。
+- 採用する参加手段と、メディア FETCH を残すか削除するかの判断が `crates/moq-sub/README.md` と実装に反映されていること。
 - 採用した手段で、LARGEST_OBJECT が無い購読でも映像が次のキーフレーム待ちだけに落ちないこと。
   - (a) を採用する場合: `SUBSCRIBE` に `NEW_GROUP_REQUEST` が載り、実測と同じ条件で `NEW_GROUP_REQUEST` ありの起動が次のキーフレーム待ち (約 1.1 秒) より早いことを確認する。publisher が `NEW_GROUP_REQUEST` を無視する場合は、次のキーフレームまで待つことを許容する。
   - (b) を採用する場合: relay の cache が現在 Group の先頭を覆うとき、fill range が現在 Group の先頭から届き、映像のキーフレームから復号を始められることを確認する。publisher にまだ Object が無い場合は、次のキーフレームまで待つことを許容する。

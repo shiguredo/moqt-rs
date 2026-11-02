@@ -12,18 +12,18 @@ publisher / subscriber のエラー表示がトランスポート種別と一致
 
 ## 現状
 
-`examples/moq-pub/src/error.rs` と `examples/moq-sub/src/error.rs` の `From<tokio_moq::error::TransportError> for Error` は `Quic` / `Internal` / `InvalidAuthority` / `ResolutionFailed` / `ConnectionClosed` / `StreamReset` / `Moqt` を明示し、残り 8 variant を `other => Self::WebTransport(other.to_string())` で受ける。
+`crates/moq-pub/src/error.rs` と `crates/moq-sub/src/error.rs` の `From<tokio_moq::error::TransportError> for Error` は `Quic` / `Internal` / `InvalidAuthority` / `ResolutionFailed` / `ConnectionClosed` / `StreamReset` / `Moqt` を明示し、残り 8 variant を `other => Self::WebTransport(other.to_string())` で受ける。
 
-`TransportError` (`examples/tokio-moq/src/error.rs`) の variant は `Quic` / `InvalidAuthority` / `ResolutionFailed` /
+`TransportError` (`crates/tokio-moq/src/error.rs`) の variant は `Quic` / `InvalidAuthority` / `ResolutionFailed` /
 `Internal` / `ConnectionClosed` / `Transport` / `Http3` / `Http2` / `WtH2` / `ConnectFailed` / `ProtocolNegotiationFailed` /
 `StreamClosed` / `InvalidState` / `StreamReset` / `Moqt` の 15 個である。catch-all に落ちる `Transport` / `Http3` / `Http2` / `WtH2` /
 `ConnectFailed` / `ProtocolNegotiationFailed` / `StreamClosed` / `InvalidState` は WebTransport 経路
-(`examples/tokio-moq/src/webtransport_h3.rs` / `webtransport_h2.rs` / `transport.rs` の `WtH3` / `WtH2` arm) が生成するため、
-現在は `WebTransport:` 表示になって偶然一致している。QUIC 経路 (`examples/tokio-moq/src/quic.rs`、`transport.rs` の `Quic` arm、
+(`crates/tokio-moq/src/webtransport_h3.rs` / `webtransport_h2.rs` / `transport.rs` の `WtH3` / `WtH2` arm) が生成するため、
+現在は `WebTransport:` 表示になって偶然一致している。QUIC 経路 (`crates/tokio-moq/src/quic.rs`、`transport.rs` の `Quic` arm、
 `moqt_client.rs` の `establish_quic`) は QUIC 固有の失敗を `TransportError::Quic` に畳む実装である。ただし peer の reset は
 0163 で `TransportError::StreamReset` を返すようになり、QUIC 経路もこの variant を生成する。
 
-なお `ConnectionClosed` は WebTransport 経路のみが生成し、app 側の `Error::ConnectionClosed` へ明示的に振り分けられている。publisher / subscriber の `is_transport_session_end` (`examples/moq-pub/src/pipeline.rs` / `examples/moq-sub/src/pipeline.rs`) がこの variant でセッション終了を判定しているため、表示文字列には依存しない。
+なお `ConnectionClosed` は WebTransport 経路のみが生成し、app 側の `Error::ConnectionClosed` へ明示的に振り分けられている。publisher / subscriber の `is_transport_session_end` (`crates/moq-pub/src/pipeline.rs` / `crates/moq-sub/src/pipeline.rs`) がこの variant でセッション終了を判定しているため、表示文字列には依存しない。
 
 両 error.rs には `transport_error_mapping_*` テストが 5 本ずつあり、`Quic` / `InvalidAuthority` /
 `ResolutionFailed` / `ConnectionClosed` / `StreamReset` / `Moqt` の写像は個別に固定しているが、

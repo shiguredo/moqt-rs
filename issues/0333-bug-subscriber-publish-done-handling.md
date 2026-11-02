@@ -11,12 +11,12 @@ draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes)
 
 ## 現状
 
-- `examples/moq-sub/src/pipeline.rs` のメインループは `SessionEvent::PublishDoneReceived` を受けると `Ok(true)` を返し、`peer_ended` としてパイプライン全体を終了させる。`request_id` は `..` で捨てており、どの購読の PUBLISH_DONE かを見ていない。
+- `crates/moq-sub/src/pipeline.rs` のメインループは `SessionEvent::PublishDoneReceived` を受けると `Ok(true)` を返し、`peer_ended` としてパイプライン全体を終了させる。`request_id` は `..` で捨てており、どの購読の PUBLISH_DONE かを見ていない。
 - `status_code` / `stream_count` はログに出すだけで、example 側の終端判定や購読ごとの終了に使っていない。
 - `Session` は §9.9 の drain timer と Stream Count の突き合わせを実装済みである。
   - `src/session/types.rs` の `SubscriptionPublishDone` が `drain` / `stream_count` / `stream_count_overrun` を保持し、`Subscription::cleanup_ready` が「drain timer 満了または stream_count 超過」かつ「open な受信 stream が 0」で true になる。
   - `src/session/subscription/delivery.rs` の `record_publish_done` が effective delivery timeout の大きい方を drain timer にする。
-  - `examples/tokio-moq/src/moqt_client.rs` の `forget_ready_requests` が `cleanup_ready` と `pending_publish_done` を見て subscription を回収する。
+  - `crates/tokio-moq/src/moqt_client.rs` の `forget_ready_requests` が `cleanup_ready` と `pending_publish_done` を見て subscription を回収する。
   - `tests/test_session/subscription/publish_done.rs` の `publish_done_drain_waits_for_timeout_and_open_stream_close` と `publish_done_overrun_allows_early_cleanup_after_open_streams_close` がこの挙動を固定している。
 - example は `Session` の cleanup 完了を待たずにパイプライン全体を終了する。PUBLISH_DONE 受信時点で `Session` の subscription は Terminated に遷移済みだが、drain 中の late-arriving stream は `Session` が受理する。
 - 影響: 1 track の終了が全体停止になる。たとえば publisher が audio subscription だけを `TRACK_ENDED` (0x2) で終了させても、video の受信・表示が止まる。catalog の PUBLISH_DONE でも同じことが起こる。
@@ -40,7 +40,7 @@ draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes)
   - example は PUBLISH_DONE を受けた購読を「終了待ち」として `HashMap<u64, (TrackKind, PublishDoneDisposition)>` に記録し、`MoqtClient` に追加する `subscription_cleanup_ready(request_id) -> Option<bool>` を 100 ms tick で確認する。
   - `Some(true)` または `None` (`Session` が回収済み) になった時点で該当 track を終了する。`Some(false)` の間は late-arriving object を既存の受信経路で処理する。
   - `Session::subscription_cleanup_ready` は `cleanup_ready` だけを見て `pending_publish_done` を見ないが、subscriber 側では `pending_publish_done` は `None` なので問題ない。
-  - この accessor は `examples/tokio-moq/src/moqt_client.rs` に doc コメント付きで追加し、未知 request id で `None` を返す単体テストを追加する。
+  - この accessor は `crates/tokio-moq/src/moqt_client.rs` に doc コメント付きで追加し、未知 request id で `None` を返す単体テストを追加する。
 - status code 別の扱い:
   - `TRACK_ENDED` (0x2): 正常終了。該当 track を恒久的に終了する。移行先では購読しない。
   - `GOING_AWAY` (0x4): 該当 track を終了待ちにし、cleanup 後に「移行待ち」として保持する。セッション移行の判断は既存の `SessionEvent::GoawayReceived` 経路が担う。PUBLISH_DONE(GOING_AWAY) を移行のトリガーにしない。移行が成立した場合は移行先で購読を張り直して track を再開する。全 media track が恒久的に終了し、移行待ちも無い場合は移行せず終了してよい。
@@ -64,7 +64,7 @@ draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE) と §12.4 (Publish Done Codes)
   - 移行成功後は、張り直した media track を `active_media_tracks` に入れ、`migration_pending_tracks` をクリアする。`permanently_ended_tracks` は維持する。`active_requests` は新しい購読の request_id で初期化する。
   - 移行先で購読を張り直せなかった場合は既存どおり移行失敗として終了する。
 - テスト:
-  - `publish_done_disposition(status_code) -> PublishDoneDisposition` のような純関数を `examples/moq-sub/src/pipeline.rs` に切り出し、`TRACK_ENDED` / `GOING_AWAY` / その他 / 未知 code の分類を単体テストで固定する。
+  - `publish_done_disposition(status_code) -> PublishDoneDisposition` のような純関数を `crates/moq-sub/src/pipeline.rs` に切り出し、`TRACK_ENDED` / `GOING_AWAY` / その他 / 未知 code の分類を単体テストで固定する。
   - `track_kind_for_request_id` の単体テストで catalog / video / audio / 未知 id の対応を固定する。
   - shutdown 時の STOP_SENDING 対象の判定 (`active_requests` に含まれる request id だけを送る) を純関数または単体テストで固定する。
   - pipeline の統合経路 (audio だけ終了しても video が止まらないこと、全 media 終了で終了すること) は 0338 の統合テストで扱う。本 issue では 0338 のテスト基盤を前提にしない。

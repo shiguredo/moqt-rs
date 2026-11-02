@@ -17,7 +17,7 @@ example の task はその stream を `abort_subgroup_stream` して、保持済
 
 - `src/pending_subgroup_buffer.rs` の `note_end_of_stream` は `notify_alias(track_alias, EndOfStream)` を呼び、同じ alias の全 entry のうち、理由が未設定のものに理由を設定する。理由を設定するだけで、チャンク自体は捨てない。
 - モジュール doc は「entry は Subgroup ストリーム 1 本に対応する」「同じ Track Alias に複数の entry が並び得る」と明記している。
-- `examples/moq-sub/src/pipeline.rs` の `register_subgroup_header` (`spawn_stream_task` が起動した
+- `crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` (`spawn_stream_task` が起動した
   タスク内の `handle_stream_body` から呼ばれる) は、自ストリームの終端で
   `note_end_of_stream(header.track_alias)` を呼び、`EndOfStream` を受けた task は
   `abort_subgroup_stream` して終了する。同じ alias の並行 stream が保留中だと、その stream も
@@ -33,7 +33,7 @@ example の task はその stream を `abort_subgroup_stream` して、保持済
 - `note_end_of_stream` の引数を `PendingSubgroupEntryId` に変更し、指定した entry のうち理由が未設定のものだけに `EndOfStream` を設定する (最初の理由を優先する現行契約を維持する)。
 - 現行の example 以外のアプリケーションコードに `note_end_of_stream` の呼び出しは無く、Track 全体の終端通知の用途も無い。そのため `note_track_end` のような別 API は追加しない。
 - `src/pending_subgroup_buffer.rs` の `note_end_of_stream` の doc とモジュール doc の「entry のライフサイクル」を entry 単位の通知に合わせて更新する。
-- `examples/moq-sub/src/pipeline.rs` の `register_subgroup_header` は、自ストリームの終端で `note_end_of_stream(id)` を呼ぶように変更する。`take_ready_for` で自分の entry だけを引き取る現在の構造は変えない。
+- `crates/moq-sub/src/pipeline.rs` の `register_subgroup_header` は、自ストリームの終端で `note_end_of_stream(id)` を呼ぶように変更する。`take_ready_for` で自分の entry だけを引き取る現在の構造は変えない。
 - `pbt/tests/prop_pending_subgroup_buffer.rs` の `NoteEndOfStream` コマンドを Track Alias から entry 指定に変更し、モデルも指定した entry だけを終端させる。同じ alias の他の entry が終端されないことをモデルで検証する。
 - `tests/test_pending_subgroup_buffer.rs` に、同じ alias に複数 entry がある状態で 1 件だけ `note_end_of_stream` し、他の entry が引き取り可能にならず、保持済みチャンクも残ることを固定するテストを追加する。
 - example は pipeline のテストを持たないため、example 側の修正は `note_end_of_stream(id)` への置き換えと、`abort_subgroup_stream` の呼び出し条件が変わらないことをコード上で確認する。

@@ -12,7 +12,7 @@ shiguredo-rust は公開 API (型・関数・フィールド・variant) に `///
 ## 現状
 
 - `src/object_properties.rs` の `find_varint` に `///` が無く、直前の `count_instances` の doc に「偶数型 Object Property から varint 値を取得する」という find_varint 向けの説明が混在している。
-- `examples/tokio-moq/src/moqt_client.rs` の `ControlStream::new` と `SubscribeResult` の `request_id` / `track_alias` に doc が無い。
+- `crates/tokio-moq/src/moqt_client.rs` の `ControlStream::new` と `SubscribeResult` の `request_id` / `track_alias` に doc が無い。
 - `RUSTDOCFLAGS="-W missing_docs" cargo doc --no-deps -p shiguredo_moqt -p tokio-moq` で、
   2026-10-20 時点で `shiguredo_moqt` 1 件 (`find_varint`)、`tokio-moq` 33 件の欠落が検出される。
   `tokio-moq` の内訳は `error.rs` 3 件、`moqt_client.rs` 5 件、`transport.rs` 17 件、
@@ -37,7 +37,7 @@ shiguredo-rust は公開 API (型・関数・フィールド・variant) に `///
   未対応であることを明記する。`src/lib.rs` / `src/playout.rs` / `src/playout/scheduler.rs` の
   時間伸長の記述を、`src/playout/stretch.rs` の「時間伸長を持たない」に合わせる。
 - 同名で意味が違う `PlayoutBuffer::playout_delay_us` と `PlayoutTimeline::playout_delay_us` は、本 issue では doc に相互参照と違いを明記して区別する。名前変更は破壊的変更であり本 issue の対象外とする。
-- 上記の既知の欠落に加え、`src/` と `examples/tokio-moq/src/` の公開項目を全数確認し、`///` の無い項目を補う。`RUSTDOCFLAGS="-D missing_docs" cargo doc --no-deps -p shiguredo_moqt -p tokio-moq` が通ることを確認する。
+- 上記の既知の欠落に加え、`src/` と `crates/tokio-moq/src/` の公開項目を全数確認し、`///` の無い項目を補う。`RUSTDOCFLAGS="-D missing_docs" cargo doc --no-deps -p shiguredo_moqt -p tokio-moq` が通ることを確認する。
 - `tokio-moq` の rustdoc には private item への intra-doc link 警告が 2026-10-20 時点で 5 件あるが、本 issue は欠落 doc の補完と記述の修正を対象とし、リンク警告の解消は対象外とする。
 
 ## 完了条件

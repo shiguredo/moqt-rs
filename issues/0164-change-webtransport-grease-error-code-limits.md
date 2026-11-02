@@ -24,29 +24,29 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
 
 ## 現状
 
-- `examples/tokio-moq/src/webtransport_h3.rs` の `moqt_to_wt_code` は `u32::try_from` で 32 ビットに
+- `crates/tokio-moq/src/webtransport_h3.rs` の `moqt_to_wt_code` は `u32::try_from` で 32 ビットに
   収まらない値を `TransportError::Internal` にし、エラーメッセージに制限 (0x00000000-0xffffffff) を明示する。
   `WtSendStream::reset` / `WtRecvStream::stop_sending` → `stream_application_error` の経路から呼ばれる。
   この変換は 0134 の実装で入ったもので、doc コメントに「この制限は §4.4 の u32 制限に由来し、
   `RequestStreamEnd` の型や greasing の扱いとは別に WebTransport 経路の既知の制限として扱う」と記録され、
   `moqt_to_wt_code_rejects_values_beyond_32_bits` (2^32 以上 u64::MAX) で固定されている
   (2^32 以上 2^62 未満は従来 remap せず wire に載っていたため、エラーへの変更は挙動変更である)。
-- `examples/tokio-moq/src/webtransport_h2.rs` の `WtH2SendStream::reset` / `WtH2RecvStream::stop_sending` は
+- `crates/tokio-moq/src/webtransport_h2.rs` の `WtH2SendStream::reset` / `WtH2RecvStream::stop_sending` は
   `u64` をそのまま shiguredo_http2 の `reset_stream` / `stop_sending` へ渡す。依存側は 0xffffffff 超を
   `flow_control_error` で拒否する (draft-ietf-webtrans-http2-15 §6.2 / §6.3 の MUST NOT) が、example の
   driver はこのエラーを `debug` ログに残すだけで WT_RESET_STREAM / WT_STOP_SENDING を送らず、
   呼び出し元には `Ok(())` を返す。example 側の doc は `WtH2SendStream::reset` の
   「capsule は 32 ビットのコードを運ぶ」の記述にとどまり、`WtH2RecvStream::stop_sending` の doc も
   送信の目的のみで、0xffffffff 超の拒否・MUST NOT の根拠・エラーが呼び出し元へ返らないことは記されていない。
-- `examples/tokio-moq/src/transport.rs` の `SendStream::reset` / `RecvStream::stop_sending` の QUIC 分岐は
+- `crates/tokio-moq/src/transport.rs` の `SendStream::reset` / `RecvStream::stop_sending` の QUIC 分岐は
   `s2n_quic::application::Error::new` にそのまま渡すため、`2^32` 以上 `2^62` 未満の値は QUIC 経路では
   送信できる (`Error::new` は varint の上限 `2^62 - 1` まで受け付ける)。
 - `src/session/data.rs` の公開 API (`Session::reset_outgoing_data_stream_with_code` /
   `reset_outgoing_data_stream_at_with_code`) は任意の `u64` を受け付け、ローカル専用コード
   (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を `STREAM_INTERNAL_ERROR` に
   置換する以外の範囲検証はしない。呼び出し元
-  (`examples/moq-pub/src/stream_writer.rs` の `SubgroupWriter::finish`、
-  `examples/tokio-moq/src/moqt_client.rs` の `SessionEvent::ResetRequestStream` 分岐など) も範囲を検証しない。
+  (`crates/moq-pub/src/stream_writer.rs` の `SubgroupWriter::finish`、
+  `crates/tokio-moq/src/moqt_client.rs` の `SessionEvent::ResetRequestStream` 分岐など) も範囲を検証しない。
   現行 example が渡すのは `SubgroupTermination::reset_error_code()` / `DataStreamResetReason::Cancelled.error_code()`
   の MOQT §12.5 の小さい値だけなので、32 ビット超は公開 API 経由で送信時に初めて問題になる。
 - close 経路 (MOQT §16.11.1 の Session Termination Error Codes) の 32 ビット超の扱いは本 issue の対象外であり、
@@ -58,7 +58,7 @@ WebTransport のストリーム操作 (RESET_STREAM / STOP_SENDING) のアプリ
   - (a) 制限を doc に書き、呼び出し元が 32 ビットを超えるコードを渡さない契約にする。
     書く場所は、トランスポート非依存の `Session` API に WebTransport 固有の制限を書くと
     齟齬が生じるため、
-    `examples/tokio-moq/src/transport.rs` の `SendStream::reset` / `RecvStream::stop_sending` と
+    `crates/tokio-moq/src/transport.rs` の `SendStream::reset` / `RecvStream::stop_sending` と
     呼び出し元 (moq-pub / moq-sub) の doc に分かれる。
   - (b) `Session` の API (`reset_outgoing_data_stream_with_code` / `reset_outgoing_data_stream_at_with_code`) で
     受け付ける値を 32 ビットに制限し、送信前にエラーにする (QUIC 経路の挙動も変わる)。

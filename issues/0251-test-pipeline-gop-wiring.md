@@ -7,18 +7,18 @@
 
 ## 目的
 
-映像 Group の長さを時間ベースで決める仕組みは、判定そのもの (`examples/moq-pub/src/gop.rs` の
+映像 Group の長さを時間ベースで決める仕組みは、判定そのもの (`crates/moq-pub/src/gop.rs` の
 `GopTracker`) をテストで固定してあるが、pipeline との結線 (キーフレーム要求・Group 開始の
-観測・カタログへの宣言) がテストで守られていない。`examples/moq-pub/src/pipeline.rs` の `run`
+観測・カタログへの宣言) がテストで守られていない。`crates/moq-pub/src/pipeline.rs` の `run`
 の映像入力分岐から呼び出しを 1 つ削るだけで、その経路では時間ベースのキーフレーム要求が
 丸ごと働かなくなる (Group はエンコーダのフレーム数上限だけで閉じられ、その長さは実際の
 フレーム間隔に依存する) のに、テストはすべて通ってしまう。
 
 ## 現状
 
-- `examples/moq-pub/src/gop.rs` の `GopTracker` (`request_keyframe_if_due` / `observe_keyframe`)
+- `crates/moq-pub/src/gop.rs` の `GopTracker` (`request_keyframe_if_due` / `observe_keyframe`)
   と換算・上限・宣言値の純関数は `#[cfg(test)]` のテストで守られている
-- 結線は `examples/moq-pub/src/pipeline.rs` の `run` の映像入力分岐にあり、次の 5 箇所が
+- 結線は `crates/moq-pub/src/pipeline.rs` の `run` の映像入力分岐にあり、次の 5 箇所が
   テストから到達できない
   - `request_keyframe_if_due` の呼び出し (live capture と MP4 再エンコードの 2 経路)
   - `observe_keyframe` の呼び出し (3 経路の共通ループ)
@@ -37,12 +37,12 @@
   - `observe_keyframe` の呼び出しを削除する (時間ベースの要求が一度も出なくなる)
   - カタログの宣言を常に `None` にする
 - キーフレーム間隔の逆算 (`keyframe_interval_frames`) の呼び出しもテストから到達できないが、
-  関数自体は `examples/moq-pub/src/gop.rs` の単体テストで固定済みであり、`encode_fps` と
+  関数自体は `crates/moq-pub/src/gop.rs` の単体テストで固定済みであり、`encode_fps` と
   `gop_duration_ms` をそのまま渡すだけなので、本 issue の変異対象には含めない
 
 ## 設計方針
 
-- `examples/moq-pub/src/pipeline.rs` に、出力フレーム列から Group の開始を観測する処理を
+- `crates/moq-pub/src/pipeline.rs` に、出力フレーム列から Group の開始を観測する処理を
   関数として切り出す (例: `observe_encoded_frames(tracker: &mut GopTracker, frames: &[EncodedFrame], timescale: Option<u64>) -> Vec<Option<u64>>`)。戻り値は観測したキーフレームごとの
   直前 Group 長とし、`run` はその戻り値をキーフレームごとの debug ログに使う。
   `build_video_loc_properties` と同じ流儀で `EncodedFrame` を直接組み立てて `#[cfg(test)]`

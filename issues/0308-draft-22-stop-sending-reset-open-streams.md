@@ -27,7 +27,7 @@ REQUEST_UPDATE 失敗応答で outgoing FETCH data stream を自動 reset して
 - `send_fetch_stop_sending` は subscriber 側のアプリ起点 cancel であり、subscriber は outgoing FETCH data stream を持たない。本 issue の対象は publisher 側で STOP_SENDING を受けた経路である。
 - I/O 層は bidi request stream の STOP_SENDING を
   `recv_request_stream_closed(request_id, RequestStreamEnd::Reset { .. })` として Session へ渡す
-  (`examples/tokio-moq/src/moqt_client.rs` の `terminate_request_stream_by_stop_sending`)。FETCH の uni data
+  (`crates/tokio-moq/src/moqt_client.rs` の `terminate_request_stream_by_stop_sending`)。FETCH の uni data
   stream の STOP_SENDING は `fetch_stop_sending_received` が受ける (fill fetch stream は
   `recv_data_stream_stop_sending` が受ける)。
 - `docs/missing-features.md` §4.7 が既知ギャップとして記録しており、本 issue で起票した。0246 は終端通知と STOP_SENDING 観測の順序契約の話であり、自動 reset の欠落そのものではない。

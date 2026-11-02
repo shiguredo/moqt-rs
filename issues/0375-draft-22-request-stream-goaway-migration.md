@@ -14,7 +14,7 @@
 
 draft-ietf-moq-transport-22 §9.2 (GOAWAY) は、request stream 上の GOAWAY を受けた endpoint に "the endpoint SHOULD re-issue that specific
 request on a session at the specified URI (or the current session if no URI is provided), and close the old request stream using
-the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を SHOULD で要求する。現在の examples は移行先 URL が現在の URL と
+the appropriate mechanism (e.g. FIN, stream reset, or PUBLISH_DONE)" を SHOULD で要求する。現在の crates は移行先 URL が現在の URL と
 同じときだけ現在の session で当該 request を再発行し、別 URL の非空 URI は warn して移行しない (subscriber)。
 publisher は空 URI のときだけ現在の session で PUBLISH を再発行し、非空 URI は同一 URL でも移行しない。`docs/moqt.md` と `docs/missing-features.md` に
 残課題として明記されている。
@@ -23,7 +23,7 @@ publisher は空 URI のときだけ現在の session で PUBLISH を再発行�
 
 - `src/session/types.rs` の `SessionEvent::GoawayReceived` は `new_session_uri` / `timeout` / `on_request_stream: Option<u64>`
   を持ち、request stream 上の GOAWAY を識別できる。
-- `examples/moq-sub/src/pipeline.rs` と `examples/moq-pub/src/pipeline.rs` は control GOAWAY を受けたときに新しい session を background
+- `crates/moq-sub/src/pipeline.rs` と `crates/moq-pub/src/pipeline.rs` は control GOAWAY を受けたときに新しい session を background
   で確立し、認可トークンの引き継ぎ・期限・指数バックオフ再試行を伴って購読 / 配信を張り直す移行経路を持つ。
 - moq-sub は `migration_target` と `same_session_url` により、移行先 URL が現在の URL と同じなら現在の session で当該 request を
   再発行する。別 URL のときは移行しない。moq-pub の `goaway_action` は `new_session_uri` が空かどうかだけで分岐し、
@@ -46,12 +46,12 @@ publisher は空 URI のときだけ現在の session で PUBLISH を再発行�
   control GOAWAY 移行と同じ警告と終了にする。
 - 対象とする request は subscriber の SUBSCRIBE (FILL_PARAMETERS を含む) と FETCH、publisher の PUBLISH とする。
   SUBSCRIBE_NAMESPACE など未対応 request は従来どおり対象外とする。
-- ライブラリの `Session` API は変更しない (CODEBASE.md の責務分界)。変更は `examples/tokio-moq` / moq-pub / moq-sub に閉じる。
+- ライブラリの `Session` API は変更しない (CODEBASE.md の責務分界)。変更は `crates/tokio-moq` / moq-pub / moq-sub に閉じる。
 - `docs/moqt.md` と `docs/missing-features.md` の残課題の記述を実装に合わせて更新する。
 
 ## 実装タスク
 
-1. `examples/tokio-moq` に `SessionHandle` / `SessionCommand` / session task / イベント集約の共通基盤を追加する。
+1. `crates/tokio-moq` に `SessionHandle` / `SessionCommand` / session task / イベント集約の共通基盤を追加する。
 2. 2 session を同時に駆動するテスト補助を用意する (0338 の test-support feature を先行するか、example 内の test 補助か)。
 3. moq-sub の main ループを `SessionHandle` ベースへ変更し、request 単位 GOAWAY の状態機械と data plane ルーティングを実装する。
 4. moq-pub の main ループを `SessionHandle` ベースへ変更し、PUBLISH の request 単位移行と旧 session の PUBLISH_DONE を実装する。
@@ -59,8 +59,8 @@ publisher は空 URI のときだけ現在の session で PUBLISH を再発行�
 6. `docs/moqt.md` / `docs/missing-features.md` を更新する。
 7. テスト (移行成功 / 同一 URL / 失敗 / 重複排除) を追加する。
 
-変更対象ファイルは `examples/tokio-moq/src/` (session 管理の新モジュール、`peer_harness.rs`)、
-`examples/moq-sub/src/pipeline.rs`、`examples/moq-pub/src/pipeline.rs`、`docs/moqt.md`、
+変更対象ファイルは `crates/tokio-moq/src/` (session 管理の新モジュール、`peer_harness.rs`)、
+`crates/moq-sub/src/pipeline.rs`、`crates/moq-pub/src/pipeline.rs`、`docs/moqt.md`、
 `docs/missing-features.md` とする。
 
 ## 完了条件

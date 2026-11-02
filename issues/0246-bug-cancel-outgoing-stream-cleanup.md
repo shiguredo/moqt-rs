@@ -16,7 +16,7 @@ peer が STOP_SENDING で cancel した outgoing data stream について、0243
 ## 現状
 
 - `src/session/data.rs` の `recv_data_stream_stop_sending` は「I/O 層は STOP_SENDING の受信を
-  終端通知より先に渡す契約」を前提にしている。実際の I/O 層 (`examples/tokio-moq/src/moqt_client.rs`
+  終端通知より先に渡す契約」を前提にしている。実際の I/O 層 (`crates/tokio-moq/src/moqt_client.rs`
   の `handle_stop_sending`) は「STOP_SENDING の観測と、RESET_STREAM / FIN による終端通知の順序は
   保証されない (別経路から届く)」と明記しており、終端通知 (`send_data_stream_closed`) が先に届いた
   ストリームへの STOP_SENDING は unknown outgoing stream として拒否され、再オープン禁止
@@ -24,14 +24,14 @@ peer が STOP_SENDING で cancel した outgoing data stream について、0243
 - 逆に、cancel の観測を待たずにアプリが `send_data_stream_closed(RequestStreamEnd::Reset)` を
   呼ぶと、`data_streams.outgoing` からエントリが消えるため、後着の観測が unknown になり
   再オープン禁止の記録が落ちる。cancel の観測は QUIC / wt-h3 / wt-h2 / QMux の全経路が
-  `MoqtClient::pump_once` 経由で届く (`examples/tokio-moq/src/quic.rs` / `webtransport_h3.rs` /
+  `MoqtClient::pump_once` 経由で届く (`crates/tokio-moq/src/quic.rs` / `webtransport_h3.rs` /
   `webtransport_h2.rs` / `qmux.rs` が `StopSendingReceiver` を `MoqtClient` に渡す) ため、
   アプリの構造 (単一タスクで `finish` を待つ等) によっては観測が後着になる。
-- `examples/moq-pub` は cancel を `SubgroupWriter::write_object` / `finish` / `reset_by_session` の
+- `crates/moq-pub` は cancel を `SubgroupWriter::write_object` / `finish` / `reset_by_session` の
   失敗 (`TransportError::StreamReset` / `StreamClosed`) で検知する。`write_object` の失敗経路
-  (`examples/moq-pub/src/pipeline.rs` の `is_peer_stream_reset` 分岐) は writer を捨てるだけで
+  (`crates/moq-pub/src/pipeline.rs` の `is_peer_stream_reset` 分岐) は writer を捨てるだけで
   `send_data_stream_closed` を呼ばない。`finish` / `reset_by_session` も失敗時に `?` で短絡して
-  通知に到達しない (`examples/moq-pub/src/stream_writer.rs`)。したがって通知を省くと、
+  通知に到達しない (`crates/moq-pub/src/stream_writer.rs`)。したがって通知を省くと、
   `has_open_outgoing_data_streams_for_request` が真のまま残り、保留中の PUBLISH_DONE がある場合に
   `maybe_flush_pending_publish_done` の PUBLISH_DONE flush 条件 (全 outgoing stream の終端) が
   満たされない。
@@ -60,11 +60,11 @@ peer が STOP_SENDING で cancel した outgoing data stream について、0243
 - cancel で `SubgroupWriter::write_object` / `finish` / `reset_by_session` が
   `TransportError::StreamReset` または `TransportError::StreamClosed` で失敗したストリームの
   追跡終端は、アプリが `send_data_stream_closed(RequestStreamEnd::Reset)` で通知する。
-  `examples/moq-pub/src/stream_writer.rs` の各メソッドで、失敗を返す前に
+  `crates/moq-pub/src/stream_writer.rs` の各メソッドで、失敗を返す前に
   `DataPlaneHandle::send_data_stream_closed` を呼ぶ。失敗経路で渡す `RequestStreamEnd::Reset` の
   `error_code` / `reliable_size` は `None` とし、後着の STOP_SENDING 観測が
   `stopped_outgoing_subgroups` に remap 後のコードを入れる。通知自体の失敗 (セッション終了など) は
-  無視し、元の transport エラーを返す。これにより `examples/moq-pub/src/pipeline.rs` の
+  無視し、元の transport エラーを返す。これにより `crates/moq-pub/src/pipeline.rs` の
   `is_peer_stream_reset` 分岐が writer を捨てる経路でも追跡が終端され、`?` 短絡で通知に到達しない
   現状を解消する。
 - Session が cancel の観測で追跡を終端する案は採らない。`recv_data_stream_stop_sending` の時点で
@@ -86,7 +86,7 @@ peer が STOP_SENDING で cancel した outgoing data stream について、0243
   `maybe_flush_pending_publish_done` の flush 条件が満たされること。`send_data_stream_closed(Reset)`
   後に PUBLISH_DONE が送信されることを `tests/test_session/data_stream.rs` /
   `tests/test_session/subscription/request_update.rs` の単体テストで固定する。
-- `examples/moq-pub/src/stream_writer.rs` の `write_object` / `finish` / `reset_by_session` の
+- `crates/moq-pub/src/stream_writer.rs` の `write_object` / `finish` / `reset_by_session` の
   `TransportError::StreamReset` / `StreamClosed` の失敗経路で `send_data_stream_closed(Reset)` が
   呼ばれること (通知の失敗は無視し、元の transport エラーを返す)。`transport::SendStream` を要求する
   分岐は example の単体テストから観測できないため、コードで担保しレビューで確認する

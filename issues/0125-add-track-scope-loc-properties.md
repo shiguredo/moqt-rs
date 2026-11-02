@@ -48,11 +48,11 @@ Scope が Track である値は Track Properties として購読確立時に一�
 - `src/track_properties.rs` の `TrackProperties` は `as_slice()` と `find_varint()` を持ち、奇数型の値を `TrackPropertyValue::Bytes(Vec<u8>)` として保持する。LOC の `0x0D` / `0x0F` は最上位リストに置かれた場合はこの形で生バイト列を取り出せる
 - `src/session/subscription.rs` の `Session::subscription` / `Session::subscriptions` は `&Subscription` を返すため、`Subscription` にフィールドを追加すれば application から参照できる
 - `src/object_properties.rs` の `ObjectProperties` は MOQT が定義する Object Properties (draft-ietf-moq-transport-22 §16.8 (Properties) Table 15) だけを対象にしており、LOC のプロパティを解釈する口は無い
-- `examples/tokio-moq/src/moqt_client.rs` の `publish_track` は呼び出し側が渡した `TrackProperties` を PUBLISH する。
-  `examples/moq-pub/src/pipeline.rs` の `publish_video_track` / `publish_audio_track` は `MAX_CACHE_DURATION` を載せ、
+- `crates/tokio-moq/src/moqt_client.rs` の `publish_track` は呼び出し側が渡した `TrackProperties` を PUBLISH する。
+  `crates/moq-pub/src/pipeline.rs` の `publish_video_track` / `publish_audio_track` は `MAX_CACHE_DURATION` を載せ、
   映像のエンコード経路では `DYNAMIC_GROUPS` も載せる。`serve_peer_request` は `subscribe_ok_properties` が返す
   同じ MOQT プロパティで応答するが、LOC の Track スコープ値 (`0x08` / `0x0D` / `0x0F`) は一度も告知しない
-- `examples/moq-sub/src/pipeline.rs` は Object ごとに `LocProperties::decode` して `extract_video_config` / `extract_audio_config` / `extract_timestamp_timescale` で取り出しており、Track スコープで送られた値を受け取る経路が無い
+- `crates/moq-sub/src/pipeline.rs` は Object ごとに `LocProperties::decode` して `extract_video_config` / `extract_audio_config` / `extract_timestamp_timescale` で取り出しており、Track スコープで送られた値を受け取る経路が無い
 
 ## 設計方針
 

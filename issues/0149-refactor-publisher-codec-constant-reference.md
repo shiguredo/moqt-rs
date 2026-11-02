@@ -8,11 +8,11 @@
 
 ## 目的
 
-`examples/moq-pub/src/catalog.rs` のテストが codec 文字列をリテラルで持ち、encoder モジュールの定数と同じ値を二重管理している。encoder 側で codec 文字列を変更したときにテストが追随せず、テストが実際の送信値ではなく過去の値を通してしまう状態を解消する。
+`crates/moq-pub/src/catalog.rs` のテストが codec 文字列をリテラルで持ち、encoder モジュールの定数と同じ値を二重管理している。encoder 側で codec 文字列を変更したときにテストが追随せず、テストが実際の送信値ではなく過去の値を通してしまう状態を解消する。
 
 ## 現状
 
-`build_catalog` (第 4 引数 `auth_info` を持つ) を検証する `examples/moq-pub/src/catalog.rs` のテスト 5 件
+`build_catalog` (第 4 引数 `auth_info` を持つ) を検証する `crates/moq-pub/src/catalog.rs` のテスト 5 件
 (`publisher_catalog_tracks_encode` / `publisher_catalog_sets_sync_metadata_on_both_tracks` /
 `publisher_catalog_sets_reserved_track_roles` / `publisher_alternate_video_codecs_encode` /
 `publisher_catalog_sets_auth_info_on_both_tracks_for_c4m`) は、
@@ -20,10 +20,10 @@
 encoder モジュールの次の定数である。av1 / opus は常に定数の値そのものが送信される。h264 / h265 は最初のキーフレームまでは
 定数の値 (`new` 時点の既定値) が送信され、最初のキーフレームで SPS から再構築した値へ置き換わる。
 
-- `examples/moq-pub/src/encoder/av1.rs` の `AV1_CATALOG_CODEC_STRING`
-- `examples/moq-pub/src/encoder/h264.rs` の `DEFAULT_AVC_CATALOG_CODEC_STRING`
-- `examples/moq-pub/src/encoder/h265.rs` の `DEFAULT_HEVC_CATALOG_CODEC_STRING`
-- `examples/moq-pub/src/encoder/opus.rs` の `OPUS_CATALOG_CODEC_STRING`
+- `crates/moq-pub/src/encoder/av1.rs` の `AV1_CATALOG_CODEC_STRING`
+- `crates/moq-pub/src/encoder/h264.rs` の `DEFAULT_AVC_CATALOG_CODEC_STRING`
+- `crates/moq-pub/src/encoder/h265.rs` の `DEFAULT_HEVC_CATALOG_CODEC_STRING`
+- `crates/moq-pub/src/encoder/opus.rs` の `OPUS_CATALOG_CODEC_STRING`
 
 いずれもモジュール外から参照できない可視性のため、テストから参照できない。encoder の各サブモジュール (`encoder.rs` の `mod` 宣言) は既に `pub(crate)` なので、調整が必要なのは定数の可視性だけである。
 

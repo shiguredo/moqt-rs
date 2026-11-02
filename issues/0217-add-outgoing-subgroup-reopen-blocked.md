@@ -28,7 +28,7 @@ REQUEST_UPDATE の受理まで禁止する状態として保持し (draft は SH
   `None` を返しても再オープンが禁止されている場合がある」と明記されている。
 - 禁止エントリは Forward State 0→1 の REQUEST_UPDATE 受理、または `Session::forget_subscription` で
   破棄される。
-- `examples/moq-pub/src/pipeline.rs` は映像の peer reset (`is_peer_stream_reset`) を観測すると
+- `crates/moq-pub/src/pipeline.rs` は映像の peer reset (`is_peer_stream_reset`) を観測すると
   `current_video_writer` を捨てて `video_group_id` を進め、音声は `audio_group_id` を進める。
   カタログは送信前に `catalog_group_id` を進める (`republish_catalog_at_next_group`)。
 

@@ -11,33 +11,33 @@ library の tests / PBT / fuzz は厚いが、example の pipeline 統合経路 
 
 ## 現状
 
-- `examples/moq-pub/src/pipeline.rs` の `serve_peer_request` / `serve_media_fetch` / `serve_fetch_entries` を直接呼ぶテストが無い。`pipeline.rs` には補助関数の単体テストはあるが、peer と接続して `run` を駆動するテストは無い。
-- `examples/moq-sub/src/pipeline.rs` の `receive_catalog` / `resubscribe_tracks` / `run` を直接呼ぶテストが無い。同様に補助関数の単体テストはある。
+- `crates/moq-pub/src/pipeline.rs` の `serve_peer_request` / `serve_media_fetch` / `serve_fetch_entries` を直接呼ぶテストが無い。`pipeline.rs` には補助関数の単体テストはあるが、peer と接続して `run` を駆動するテストは無い。
+- `crates/moq-sub/src/pipeline.rs` の `receive_catalog` / `resubscribe_tracks` / `run` を直接呼ぶテストが無い。同様に補助関数の単体テストはある。
 - `e2e-tests/tests/roundtrip.rs` は映像・音声 datagram・音声冗長の 3 本で、GOAWAY 移行、フィルタ付き / pause 購読、メディア FETCH 応答、MP4 パススルー / 再エンコード、PUBLISH_DONE の track 単位処理を検証しない。
 - e2e の `ATTEMPT_TIMEOUT` は 4 秒 (`e2e-tests/tests/roundtrip.rs`) で GOP の既定 2 秒
-  (`examples/moq-pub/src/cli.rs` の `DEFAULT_GOP_DURATION_MS`) より長い。さらに moq-sub は映像の
-  SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ (`examples/moq-sub/src/pipeline.rs` の
+  (`crates/moq-pub/src/cli.rs` の `DEFAULT_GOP_DURATION_MS`) より長い。さらに moq-sub は映像の
+  SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ (`crates/moq-sub/src/pipeline.rs` の
   `video_subscribe_parameters`)、moq-pub は直前の Group が 300 ms に達した後の最初の入力フレームで
-  キーフレームを強制する (`examples/moq-pub/src/gop.rs` の `MIN_GROUP_DURATION_US`)。そのため FETCH が
+  キーフレームを強制する (`crates/moq-pub/src/gop.rs` の `MIN_GROUP_DURATION_US`)。そのため FETCH が
   壊れていても、購読開始から約 300 ms 後には live のキーフレームで最初のフレームが届き得る。
   ATTEMPT_TIMEOUT を GOP より短くするだけでは FETCH 経路を分離できない。
 - `fuzz/fuzz_targets/fuzz_session.rs` は `RecvFetchHeader` と `SendFetch` を持つが、FETCH entry の受信と FETCH_OK + 応答 stream の成功経路を踏まない。
-- `peer_harness` は `examples/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` であり、`examples/moq-pub` / `examples/moq-sub` / `e2e-tests` から参照できない。`TestPeer` などの型とメソッドも `pub(crate)` である。
+- `peer_harness` は `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` であり、`crates/moq-pub` / `crates/moq-sub` / `e2e-tests` から参照できない。`TestPeer` などの型とメソッドも `pub(crate)` である。
 - 影響: 0339 / 0340 の example 改修 (pipeline 分割、decoder 共通化) を安全に進められない。
 - 依存: 0330 (受信 SUBSCRIBE の Object / PUBLISH_DONE)、0332 (MP4 の PROP_TIMESCALE)、0333 (PUBLISH_DONE の track 単位処理)、0335 (GOAWAY 移行後の Audio Config リセット) の実装後に着手する。これらの挙動を固定するテストは、各 issue の実装後に追加する。
 
 ## 設計方針
 
 - `peer_harness` をテスト専用 crate 間で共有できるようにする。
-  - `examples/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` を `#[cfg(any(test, feature = "test-support"))] pub mod peer_harness;` に変える。
-  - `examples/tokio-moq/Cargo.toml` に `[features] test-support = ["dep:rcgen"]` と optional な `rcgen` 依存を追加する。`peer_harness` は自己署名証明書の生成に `rcgen` を使う。既存の `[dev-dependencies] rcgen` は tokio-moq 自身のテスト用に残す。
+  - `crates/tokio-moq/src/lib.rs` の `#[cfg(test)] mod peer_harness;` を `#[cfg(any(test, feature = "test-support"))] pub mod peer_harness;` に変える。
+  - `crates/tokio-moq/Cargo.toml` に `[features] test-support = ["dep:rcgen"]` と optional な `rcgen` 依存を追加する。`peer_harness` は自己署名証明書の生成に `rcgen` を使う。既存の `[dev-dependencies] rcgen` は tokio-moq 自身のテスト用に残す。
   - `peer_harness` の `TestPeerServer` / `TestPeer` と、テストから使う `start` / `accept` / `establish` /
     `send_request_start` / `recv_request_start` / `recv_response` / `send_request_ok` / `send_subscribe_ok` /
     `send_fetch_ok` / `open_uni_send_stream` / `send_goaway` / `finish_request_stream` /
     `recv_uni_data_stream` などの可視性を `pub` にする。
   - `send_subscribe_ok` に `MessageParameters` と `TrackProperties` を渡せるようにする (LARGEST_OBJECT / DYNAMIC_GROUPS をテストから載せるため)。既存の呼び出しは新しい引数に合わせて更新する。PUBLISH_DONE を送る `send_publish_done` を追加する。
   - `peer_harness.rs` の doc コメントにある「`#[cfg(test)]` の module は他クレートへ公開されない」という記述を、`test-support` feature で参照できる旨に更新する。
-  - `examples/moq-pub/Cargo.toml` / `examples/moq-sub/Cargo.toml` の `[dev-dependencies]` に `tokio-moq = { path = "../tokio-moq", features = ["test-support"] }` を追加する。
+  - `crates/moq-pub/Cargo.toml` / `crates/moq-sub/Cargo.toml` の `[dev-dependencies]` に `tokio-moq = { path = "../tokio-moq", features = ["test-support"] }` を追加する。
   - 統合テストは各 example crate の `#[cfg(test)] mod tests` に置き、`run` または private な pipeline 関数をクレート内から呼ぶ。pipeline の private 関数をテストのために公開しない。
 - moq-pub の統合テスト:
   - `serve_peer_request` 経由で video / audio / catalog の SUBSCRIBE が SUBSCRIBE_OK になり、未知の track が REQUEST_ERROR(REQUEST_DOES_NOT_EXIST) になること。
