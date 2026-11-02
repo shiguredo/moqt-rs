@@ -5,14 +5,14 @@
 #   C4M の暗号実装は optional feature のため、aws-lc-rs feature の clippy / test / rustdoc も実行する
 # - no-std-doc ジョブ: no_std ビルドと rustdoc の警告を検査する
 # - runner:
-#   - prek / test は workspace 全体を対象にするため macos-15 を使う。examples が
+#   - prek / test は workspace 全体を対象にするため macos-15 を使う。crates 配下の crate が
 #     macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を持ち、
 #     Linux runner では workspace 全体をビルドできない (ubuntu-slim には Rust 自体がなく、
 #     ubuntu-latest では shiguredo_audio_device のビルドスクリプトが失敗する)。
-#     examples の単体テストは純粋なロジックのためヘッドレスでも実行できる
-#   - no-std-doc は shiguredo_moqt のみを対象にするため examples の macOS 専用依存を
+#     crates 配下の crate の単体テストは純粋なロジックのためヘッドレスでも実行できる
+#   - no-std-doc は shiguredo_moqt のみを対象にするため crates 配下の crate の macOS 専用依存を
 #     ビルドせず、ubuntu-latest を使う (ubuntu-slim には Rust が無い)
-# - MSRV 検証は含めない。examples が rust-version 1.95 を要求するため
+# - MSRV 検証は含めない。crates 配下の crate が rust-version 1.95 を要求するため
 #   workspace 単位の 1.93 検証が構造的にできない
 # - fuzz ターゲットの確認は CI では行わない (fuzz/ は独立 workspace のため
 #   cargo test --workspace の対象外だが、必要なときにローカルで実行する)

@@ -7,7 +7,7 @@
 //!
 //! ライブラリと example の公開 API だけを使う (`MoqtClient` の private な内部状態には依存
 //! しない)。`#[cfg(test)]` からのみ使う。`#[cfg(test)]` の module は他クレートへ公開されない
-//! ため、`examples/moq-pub` / `examples/moq-sub` からは参照できない (検証はこの crate の中で
+//! ため、`crates/moq-pub` / `crates/moq-sub` からは参照できない (検証はこの crate の中で
 //! 行う)。
 //!
 //! 対象は QUIC 直接接続 (`MoqtClient::establish_quic`) と QMux (`MoqtClient::establish_qmux`)

@@ -6,7 +6,7 @@
 # - secrets.TEST_MOQT_URI は moqt:// を指定する。接続経路は vars.TEST_MOQT_TRANSPORT
 #   (quic / wt-h3 / wt-h2) で選び、未設定なら quic を使う
 # - secrets.TEST_MOQT_URI が未設定の場合 (fork からの PR など) はテストを実行しない
-# - examples が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
+# - crates 配下の crate が macOS 専用依存 (Video Toolbox / CoreAudio 系の shiguredo_*_device 等) を
 #   持つため macos-15 を使う (ci.yml と同じ理由)
 # - 公開ログに relay のホストやトークンを残さないよう、接続先 (host / authority) と
 #   fragment は ::add-mask:: でマスクする

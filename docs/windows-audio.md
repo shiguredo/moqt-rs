@@ -36,9 +36,9 @@
 
 ## 3. 根拠: moq-pub は 48 kHz 1ch 固定
 
-- `examples/moq-pub/src/audio_capture.rs:28-32` は `AudioCaptureConfig { sample_rate: 48_000, channels: 1 }` を渡すだけで、`AudioCapture::sample_rate()` / `channels()` を呼ぶ箇所は moq-pub に無い。`audio_capture.rs:41` は実測値ではなく固定文字列 "48000 Hz, 1ch" をログする。
-- `examples/moq-pub/src/pipeline.rs:133-140` の `AUDIO_SAMPLE_RATE` / `AUDIO_CHANNELS` / `AUDIO_CHANNEL_CONFIG` が 48 kHz / 1ch 固定である。`pipeline.rs:607-613` の Opus エンコーダ、`pipeline.rs:703-710` のカタログ、`pipeline.rs:635-638` の OpusHead がすべてこの定数を使う。
-- `examples/moq-pub/src/pipeline.rs:2969-2984` の `extract_pcm_i16` は `frame.as_s16()` / `as_f32()` の生スライスをそのまま返す。`frame.channels` / `frame.sample_rate` / `frame.frames` を見ないため、ステレオのインターリーブをモノラルとして扱う。
+- `crates/moq-pub/src/audio_capture.rs:28-32` は `AudioCaptureConfig { sample_rate: 48_000, channels: 1 }` を渡すだけで、`AudioCapture::sample_rate()` / `channels()` を呼ぶ箇所は moq-pub に無い。`audio_capture.rs:41` は実測値ではなく固定文字列 "48000 Hz, 1ch" をログする。
+- `crates/moq-pub/src/pipeline.rs:133-140` の `AUDIO_SAMPLE_RATE` / `AUDIO_CHANNELS` / `AUDIO_CHANNEL_CONFIG` が 48 kHz / 1ch 固定である。`pipeline.rs:607-613` の Opus エンコーダ、`pipeline.rs:703-710` のカタログ、`pipeline.rs:635-638` の OpusHead がすべてこの定数を使う。
+- `crates/moq-pub/src/pipeline.rs:2969-2984` の `extract_pcm_i16` は `frame.as_s16()` / `as_f32()` の生スライスをそのまま返す。`frame.channels` / `frame.sample_rate` / `frame.frames` を見ないため、ステレオのインターリーブをモノラルとして扱う。
 - encoder/opus.rs:26-32 は 48 kHz / 1ch / 20 ms 固定であり、`samples_per_frame()` は 960 である (`encoder/opus.rs:53-56`)。`encoder/opus.rs:77-87` の OpusHead も 48 kHz / 1ch を書く。
 - 配信側の追いつき (`AudioPublishCatchUp`) は `read_wall_clock_us - timestamp_us` で判定する。timestamp が読み出し時刻由来で lag がほぼ 0 になるため、この問題では発動しない。
 

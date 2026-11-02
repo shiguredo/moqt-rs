@@ -7190,7 +7190,7 @@ mod tests {
 
     /// テスト用: OpusHead を構築する (RFC 7845 §5.1 のフォーマット)
     ///
-    /// publisher 側 (examples/moq-pub の `build_opus_head`) と同じ形式。
+    /// publisher 側 (crates/moq-pub の `build_opus_head`) と同じ形式。
     fn build_test_opus_head(sample_rate: u32, channels: u8) -> Vec<u8> {
         let mut head = Vec::with_capacity(19);
         head.extend_from_slice(b"OpusHead");

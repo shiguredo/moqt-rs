@@ -821,7 +821,7 @@ impl WtH2SendStream {
     /// 終端したストリームへの FIN は driver が送らず、[`TransportError::StreamReset`] (台帳に
     /// peer のコードがある場合) または [`TransportError::StreamClosed`] (ストリームが既に
     /// 閉じている場合) を返す。cancel の検知は観測チャネル
-    /// ([`WtH2Session::take_stop_sending_receiver`]) も担う (`examples/tokio-moq/src/quic.rs` の
+    /// ([`WtH2Session::take_stop_sending_receiver`]) も担う (`crates/tokio-moq/src/quic.rs` の
     /// doc を参照)。
     ///
     /// 送信データが flow control で滞留している間は返らないため、[`Self::send`] と同じく

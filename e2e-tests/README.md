@@ -48,4 +48,4 @@ QMux 経路 (`qmux`) は対象外です。これらのテストは実リレー�
 
 `.github/workflows/e2e-test.yml` がこのテストを実行します。接続先は `secrets.TEST_MOQT_URI`、トランスポートは `vars.TEST_MOQT_TRANSPORT` から渡し、`secrets.TEST_MOQT_URI` が未設定の場合はテストを実行しません (fork からの PR など)。
 
-examples は Video Toolbox / CoreAudio 系の macOS 専用依存を持つため、runner は `macos-15` を使います。
+crates 配下の moq-pub / moq-sub は Video Toolbox / CoreAudio 系の macOS 専用依存を持つため、runner は `macos-15` を使います。

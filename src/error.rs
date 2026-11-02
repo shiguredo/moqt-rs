@@ -391,7 +391,7 @@ const KNOWN_STREAM_RESET_CODES: &[u64] = &[
 
 /// Session Termination 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。`code` は examples の transport 層が
+/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。`code` はアプリケーションの transport 層が
 /// 観測した接続終了コード (peer の CONNECTION_CLOSE / WebTransport close code) を想定する。
 /// ライブラリは peer の Session Termination コードをイベントとして公開しないため、本関数は
 /// アプリが transport 層から得た値を分類するために使う。

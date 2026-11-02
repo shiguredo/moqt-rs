@@ -1,7 +1,7 @@
 # moq-sub の映像描画が停止する問題の原因と修正
 
 - 調査日: 2026-10-21
-- 対象: moqt-rs の `examples/moq-sub`、raw-player-rs の `VideoPlayer`
+- 対象: moqt-rs の `crates/moq-sub`、raw-player-rs の `VideoPlayer`
 
 ## 症状
 

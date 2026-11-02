@@ -11,10 +11,10 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 
 [workspace]
 members = [
+  "crates/moq-pub",
+  "crates/moq-sub",
+  "crates/tokio-moq",
   "e2e-tests",
-  "examples/moq-pub",
-  "examples/moq-sub",
-  "examples/tokio-moq",
   "pbt",
 ]
 exclude = ["fuzz"]

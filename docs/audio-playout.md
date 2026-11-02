@@ -277,7 +277,7 @@ issue の記述と実装が食い違う箇所があり、移植は実装に合�
 - `src/playout/splice_fade.rs`: 端のフェード、隙間の直線補間、続き音から実音へのクロスフェード、`f32-planar` の統合
 - `src/playout/timing.rs`: 再生の観測値 (分布、累積、穴、境界の段差、枯れ、時間圧縮と補間を使えないサンプルレートの音) と、停止時の残りの計器
 - `src/playout/catch_up.rs` / `src/playout/buffer.rs` / `src/playout/publish_catch_up.rs`: 追いつき (`AudioReceiveCatchUpObservation` は `now_us` / `lag_us` / `input_lag_us` / `duration_us` / `timestamp_us` をマイクロ秒で受ける)、表示待ちのキューと目標表示時刻に最も近いフレームの選択 (`select_nearest`)、配信側の追いつき
-- `examples/moq-sub`: 直前の実音 30 ms の履歴、実出力の先行量と到着基準の深さの観測、時間伸長と接続フェード、終端の確定と計器へ渡す順序、停止時の drain、映像の表示周期の実測と選択の目標、描画を観測した実績の記録、計器の出力
+- `crates/moq-sub`: 直前の実音 30 ms の履歴、実出力の先行量と到着基準の深さの観測、時間伸長と接続フェード、終端の確定と計器へ渡す順序、停止時の drain、映像の表示周期の実測と選択の目標、描画を観測した実績の記録、計器の出力
 
 ### 移植対象外 (ブラウザ固有)
 
@@ -329,7 +329,7 @@ issue の記述と実装が食い違う箇所があり、移植は実装に合�
 - 削除したシンボルが残っていないことを確かめる。
 
   ```bash
-  rg -n "AudioDelayFeedback|AudioDelayManager|audio_only_arrival_delay|feedback_target|feedback_ceiling|arrival_delay_floor" src tests pbt examples docs README.md skills
+  rg -n "AudioDelayFeedback|AudioDelayManager|audio_only_arrival_delay|feedback_target|feedback_ceiling|arrival_delay_floor" src tests pbt crates docs README.md skills
   ```
 
 - 5 秒ごとの `Audio jitter buffer:` 行 (example) で次を読む。

@@ -6,8 +6,8 @@
 
 対象仕様は `refs/moq/` の MOQT `draft-ietf-moq-transport-22`、LOC `draft-ietf-moq-loc-04`、
 MSF `draft-ietf-moq-msf-01`、C4M `draft-ietf-moq-c4m-01` である。
-対象コードは `src/` (ライブラリ)、`examples/moq-pub`、`examples/moq-sub`、
-`examples/tokio-moq` (transport 層)。
+対象コードは `src/` (ライブラリ)、`crates/moq-pub`、`crates/moq-sub`、
+`crates/tokio-moq` (transport 層)。
 
 `CODEBASE.md` の「クライアントとサーバーのみで MoQ リレーには対応しないこと」により、
 MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE_TRACKS` /
@@ -55,7 +55,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
 
 ## 3. ライブラリの API 露出と example での未使用
 
-`src/` の公開 API のうち `examples/` から呼ばれていないもの、および draft の MAY に
+`src/` の公開 API のうち `crates/` から呼ばれていないもの、および draft の MAY に
 対応していないものを機械的に抽出した。「実装済みだがクライアント機能として
 露出していない」ものである。
 
@@ -101,7 +101,7 @@ moq-sub は 4 箇所で `LocProperties::decode` を呼んで Video Config / Time
 
 MSF §5.2.8 は「If isLive is FALSE, this field MUST be ignored.」と定める。
 moq-sub は `targetLatency` を無条件に再生遅延へ反映する
-(`examples/moq-sub/src/pipeline.rs:727-743`、`2150-2175`)。
+(`crates/moq-sub/src/pipeline.rs:727-743`、`2150-2175`)。
 `is_live` は example から参照されていない (grep で 0 件)。VOD のトラックで不要な遅延を入れる。
 
 ### 4.3 catalog 更新をまたいだ `isLive` の False → True を拒否しない (MSF §5.2.7、moq-sub)
@@ -109,7 +109,7 @@ moq-sub は `targetLatency` を無条件に再生遅延へ反映する
 MSF §5.2.7 は「A True value MUST never follow a False value.」と定める。
 ライブラリは同一 catalog 内の delta 再追加では検証する (`src/msf.rs:1537` 付近の
 `validate_readded_track`) が、moq-sub は独立カタログ (Full) を受けるたびに
-直前のカタログを捨てて丸ごと差し替える (`examples/moq-sub/src/catalog.rs:118-130`)。
+直前のカタログを捨てて丸ごと差し替える (`crates/moq-sub/src/catalog.rs:118-130`)。
 更新をまたいだ履歴が失われるため、`isLive=false` の後に `isLive=true` の
 カタログを受けても受理する。`isComplete` の「一度 TRUE にしたら削除できない」
 (§5.1.3) も同じ経路で検証されない。
@@ -157,7 +157,7 @@ reset しないと明記している (`src/session/types.rs:750-756`)。
 `SetupOptions` にも `MOQT_IMPLEMENTATION` の getter が無い (`src/parameter.rs:591-635`)。
 アプリは peer が宣言した拡張 (Setup Option) を判定できず、§6.3.2 の
 拡張ネゴシエーションを行えない。example のラッパーも SETUP を消費して捨てる
-(`examples/tokio-moq/src/moqt_client.rs:1350`) ため上位アプリからも見えない。
+(`crates/tokio-moq/src/moqt_client.rs:1350`) ため上位アプリからも見えない。
 
 ## 5. publisher (moq-pub) に足りない機能
 
@@ -170,16 +170,16 @@ MSF §11.3 はライブ配信の終了を次の 3 手順で伝えるとする。
 3. 恒久終了の場合は `isComplete=true` と空の `tracks` を持つ独立カタログを公開する
 
 moq-pub は終了時に `PUBLISH_DONE(GOING_AWAY = 0x4)` を送るだけである
-(`examples/moq-pub/src/pipeline.rs:1570-1601`)。`PUBLISH_DONE_TRACK_ENDED` は
+(`crates/moq-pub/src/pipeline.rs:1570-1601`)。`PUBLISH_DONE_TRACK_ENDED` は
 example から使われず、catalog は `is_complete: false` / `isLive: true` 固定で
-`trackDuration` も設定しない (`examples/moq-pub/src/catalog.rs:154-205`)。
+`trackDuration` も設定しない (`crates/moq-pub/src/catalog.rs:154-205`)。
 購読側は配信が正常終了したことを判別できない。
 なお MSF §11.3 は `SUBSCRIBE_DONE` と書くが、draft-22 で `PUBLISH_DONE` に改名されている
 (コードは `src/error.rs:258` の `PUBLISH_DONE_TRACK_ENDED = 0x2`)。
 
 ### 5.2 PUBLISH に Message Parameters を載せられない
 
-`examples/tokio-moq/src/moqt_client.rs:1436-1462` の `publish_track` は
+`crates/tokio-moq/src/moqt_client.rs:1436-1462` の `publish_track` は
 `MessageParameters` を引数に取らず、内部で空のパラメータを渡す。
 ライブラリ側は `Session::send_publish(..., parameters, ...)` で任意のパラメータを受け付ける
 (`src/session/subscription/send.rs:254-261`) ため、transport 層のラッパーの制約である。
@@ -191,7 +191,7 @@ PUBLISH に載せられない。
 
 `OBJECT_DELIVERY_TIMEOUT` / `SUBGROUP_DELIVERY_TIMEOUT` (§5.2、§10.1、§10.2) を
 Track Property としても Object Property としても設定していない
-(`examples/moq-pub/src/pipeline.rs:236-256` で映像は `DYNAMIC_GROUPS` のみ、
+(`crates/moq-pub/src/pipeline.rs:236-256` で映像は `DYNAMIC_GROUPS` のみ、
 音声と catalog は `TrackProperties::new()`)。値が 0 (無設定) のときリレーは
 期限切れの Object を破棄しないため、ライブ配信で遅延が伸びる原因になる。
 ライブラリ側は購読者からのタイムアウトを反映する実装がある
@@ -200,7 +200,7 @@ Track Property としても Object Property としても設定していない
 ### 5.4 優先度が 128 固定で、CLI から変えられない
 
 publisher priority は `const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;`
-(`examples/moq-pub/src/pipeline.rs:121`) を subgroup header と datagram の双方へ
+(`crates/moq-pub/src/pipeline.rs:121`) を subgroup header と datagram の双方へ
 そのまま渡している (`:917`、`:1001`、`:1017`、`:1187`、`:1206`)。
 `DEFAULT_PUBLISHER_PRIORITY` Track Property (§10.4) も `SUBSCRIBER_PRIORITY` も設定せず、
 CLI に優先度のオプションも無い。音声と映像が同じ優先度になり、
@@ -209,7 +209,7 @@ CLI に優先度のオプションも無い。音声と映像が同じ優先度�
 ### 5.5 Track Properties の大半を告知していない
 
 PUBLISH に載せる Track Property は `DYNAMIC_GROUPS` など一部だけで、以下は
-`examples/` に出現しない (`MAX_CACHE_DURATION` §10.3、`DEFAULT_PUBLISHER_PRIORITY` §10.4、
+`crates/` に出現しない (`MAX_CACHE_DURATION` §10.3、`DEFAULT_PUBLISHER_PRIORITY` §10.4、
 `DEFAULT_PUBLISHER_GROUP_ORDER` §10.5、`IMMUTABLE_PROPERTIES` §10.7、
 `EXPIRES` §9.20.16)。保持期間や既定値を宣言しないため、subscriber は
 いつまで取得できるかを判断できない。
@@ -217,7 +217,7 @@ PUBLISH に載せる Track Property は `DYNAMIC_GROUPS` など一部だけで�
 ### 5.6 Range Filters を有効にできない
 
 `MAX_FILTER_RANGES` を SETUP で宣言していない
-(`examples/tokio-moq/src/lib.rs:42-82` が送るのは `PATH` / `AUTHORITY` /
+(`crates/tokio-moq/src/lib.rs:42-82` が送るのは `PATH` / `AUTHORITY` /
 `MOQT_IMPLEMENTATION` / `AUTHORIZATION_TOKEN` のみ)。
 §9.1.6 は既定 0 のとき「peer は Range filter パラメータを送ってはならない (MUST NOT)」と
 定めるため、購読者は `SUBGROUP_FILTER` / `OBJECTID_FILTER` / `PRIORITY_FILTER` /
@@ -226,18 +226,18 @@ PUBLISH に載せる Track Property は `DYNAMIC_GROUPS` など一部だけで�
 ### 5.7 TRACK_STATUS を拒否する
 
 moq-pub の peer request 処理は SUBSCRIBE と FETCH だけを扱い、それ以外は
-`REQUEST_NOT_SUPPORTED` で拒否する (`examples/moq-pub/src/pipeline.rs:1911-1916`)。
+`REQUEST_NOT_SUPPORTED` で拒否する (`crates/moq-pub/src/pipeline.rs:1911-1916`)。
 ライブラリは TRACK_STATUS の受信と応答に対応している
 (`src/session/track_status.rs`) ため example 側の実装漏れである。
 §9.13 は SUBSCRIBE_OK と同じ Track Properties を持つ応答を求めるが、
 transport 層の `send_request_ok` も Track Properties を渡せない
-(`examples/tokio-moq/src/moqt_client.rs:1697-1703`)。
+(`crates/tokio-moq/src/moqt_client.rs:1697-1703`)。
 
 ### 5.7.1 moq-sub の peer request 拒否方針
 
 moq-sub は peer request を処理しない。PUBLISH は「不要」として `UNINTERESTED` (0x20)、
 SUBSCRIBE / FETCH / TRACK_STATUS は `NOT_SUPPORTED` (0x3) で拒否する
-(`examples/moq-sub/src/pipeline.rs`)。PUBLISH の拒否時は、当該 subscription に属する
+(`crates/moq-sub/src/pipeline.rs`)。PUBLISH の拒否時は、当該 subscription に属する
 open な publisher 起点 data stream を破棄対象へ移し、
 `SessionEvent::StopSendingDataStream` (`STREAM_CANCELLED`) を発行する
 (`src/session/subscription/dispatch.rs`)。STOP_SENDING フレームの送出は I/O 層が行う。
@@ -245,7 +245,7 @@ open な publisher 起点 data stream を破棄対象へ移し、
 ### 5.8 メディアの FETCH に応答しない
 
 FETCH に応答するのは catalog track だけで、映像 / 音声の FETCH は `DOES_NOT_EXIST` で
-拒否する (`examples/moq-pub/src/pipeline.rs:1825-1910`)。fill fetch も catalog のみで、
+拒否する (`crates/moq-pub/src/pipeline.rs:1825-1910`)。fill fetch も catalog のみで、
 映像 / 音声は reset する (`pipeline.rs:1303-1367`)。
 draft-22 §3.2 は FETCH を「過去の Object を取得する」機構として定義しており、
 publisher が保持していれば応答できる。現状はメディアを保持もしないため、
@@ -253,26 +253,26 @@ subscriber は途中参加より前の Group を取得できない。
 
 ### 5.9 REQUEST_UPDATE の扱いが限定的
 
-受信する REQUEST_UPDATE (`examples/moq-pub/src/pipeline.rs:1368-1414`) は
+受信する REQUEST_UPDATE (`crates/moq-pub/src/pipeline.rs:1368-1414`) は
 常に `REQUEST_OK` を返し、実質的に扱うのは `NEW_GROUP_REQUEST` だけである。
 フィルタ変更と Forward (pause) はライブラリが反映する
 (`src/session/subscription/recv.rs`、`src/session/subscription/validation.rs`) が、
 priority の変更は購読状態に保存されるだけで送信に反映されず、
 `EXPIRES` の延長は `REQUEST_UPDATE_OK` に載せる経路が無い
-(`examples/tokio-moq/src/moqt_client.rs:1690-1703` が空パラメータ固定)。
+(`crates/tokio-moq/src/moqt_client.rs:1690-1703` が空パラメータ固定)。
 また pause 中もエンコーダは止めず、フィルタ不通過として捨てるだけである。
 
 ### 5.10 複数トラック / 階層符号化を出せない
 
 1 つの namespace に `--track-name` (既定 `video`) の 1 本と `audio` の 1 本、
-catalog の 1 本しか publish しない (`examples/moq-pub/src/pipeline.rs:474-506`)。
+catalog の 1 本しか publish しない (`crates/moq-pub/src/pipeline.rs:474-506`)。
 MSF §5.6.2 (simulcast) / §5.6.3 (SVC) や LOC §4.4〜§4.6 が想定する
 `altGroup` / `renderGroup` を使った複数品質の同時配信、`temporalId` / `spatialId` の
 告知ができない。品質の切り替えには再起動が要る。
 
 ### 5.11 メディア入力の制約
 
-- 音声は 48 kHz / モノラル固定 (`examples/moq-pub/src/pipeline.rs:126-132`、
+- 音声は 48 kHz / モノラル固定 (`crates/moq-pub/src/pipeline.rs:126-132`、
   `audio_capture.rs:29-32`)。CLI にチャンネル指定が無く、ステレオ入力は
   libopus のダウンミックスに任せる (`decoder/opus.rs:17-22`)
 - `--input-mp4` のパススルーは B フレームを含む MP4 を拒否する (`mp4.rs:9,143,179-186`)
@@ -281,7 +281,7 @@ MSF §5.6.2 (simulcast) / §5.6.3 (SVC) や LOC §4.4〜§4.6 が想定する
 
 ### 5.12 catalog の任意フィールドを出していない
 
-`examples/moq-pub/src/catalog.rs:154-189` が設定するのは name / namespace /
+`crates/moq-pub/src/catalog.rs:154-189` が設定するのは name / namespace /
 packaging / role / isLive / codec / width / height / framerate / bitrate /
 maxGopDuration / maxGroupDuration / targetLatency / renderGroup / samplerate /
 channelConfig / authInfo である。必須と条件付き必須は満たすが、
@@ -301,7 +301,7 @@ publish する経路が無い (§5.6.16、§10)。
 
 ### 6.1 FETCH を使わない (シーク・巻き戻し・欠落回収ができない)
 
-`examples/moq-sub/src/pipeline.rs:2411` に「本 example は FETCH を発行しない」とあり、
+`crates/moq-sub/src/pipeline.rs:2411` に「本 example は FETCH を発行しない」とあり、
 `MoqtClient` にも発行 API が無い。カタログは publisher が開く fill fetch stream と
 SUBSCRIBE の 2 経路で受けるが (`pipeline.rs:1657-1801`)、メディアの fill は要求せず、
 届いた fill fetch stream は読み捨てる (`pipeline.rs:2411-2417`)。
@@ -313,14 +313,14 @@ SUBSCRIBE の 2 経路で受けるが (`pipeline.rs:1657-1801`)、メディア�
 
 ### 6.2 トラック選択が「最初に見つかった 1 本」で固定
 
-`examples/moq-sub/src/pipeline.rs:1812-1831` は catalog の並び順で最初に一致した
+`crates/moq-sub/src/pipeline.rs:1812-1831` は catalog の並び順で最初に一致した
 映像コーデック / 音声コーデックのトラックを選ぶ。`--track-name` のような選択肢が無く、
 MSF §5.2.6 (role) / §5.2.10 (label) / §5.2.12 (altGroup) / §5.2.32 (lang) による
 選択も切替もできない。多言語・複数品質のカタログでは意図しない 1 本を選びうる。
 
 ### 6.3 catalog の delta update で追加された track を購読しない
 
-`examples/moq-sub/src/pipeline.rs:2086-2115` は適用結果をログに出すだけで、
+`crates/moq-sub/src/pipeline.rs:2086-2115` は適用結果をログに出すだけで、
 track の追加 (§5.3 の `add` / `clone`) に追随して SUBSCRIBE を送らない。
 削除 (`remove`) に追随した購読終了もしない。カタログが動的に増える配信では、
 後から増えた track を永久に受信できない。
@@ -330,8 +330,8 @@ track の追加 (§5.3 の `add` / `clone`) に追随して SUBSCRIBE を送ら�
 MSF §11.4.1 は「購読者は track ごとに `authInfo` を見て認可要件を判断する」と定める。
 moq-sub は `authInfo` を参照せず (grep で 0 件)、track ごとの認可要件を判定しない。
 さらに moq-pub は `authInfo` の値に `"%c4m%"` という変数参照を書く
-(`examples/moq-pub/src/catalog.rs:31`、§5.2.43) が、moq-sub は
-`MsfCatalogDocument::decode` を直接呼び (`examples/moq-sub/src/catalog.rs:32-38`)、
+(`crates/moq-pub/src/catalog.rs:31`、§5.2.43) が、moq-sub は
+`MsfCatalogDocument::decode` を直接呼び (`crates/moq-sub/src/catalog.rs:32-38`)、
 `msf::resolve_catalog_variables` (§5.4) を通さない。
 このため example 同士でも認可付き配信の受け渡しが成立しない。
 
@@ -375,7 +375,7 @@ session で再発行する。
 `Redirect` structure 付きの `REQUEST_ERROR` (`0x34`、§9.4.1) を example は解釈しない。
 session は `redirect` と `retry_interval` をイベントに載せる
 (`src/session/types.rs:283-289`) が、transport 層は `(error_code, reason)` だけを記録して
-`redirect` を捨てる (`examples/tokio-moq/src/moqt_client.rs:2676-2690`)。
+`redirect` を捨てる (`crates/tokio-moq/src/moqt_client.rs:2676-2690`)。
 リダイレクト先へ購読を張り直す経路が無い。
 
 ### 6.8 TRACK_STATUS を使わない
@@ -385,7 +385,7 @@ session は `redirect` と `retry_interval` をイベントに載せる
 
 ### 6.9 REQUEST_UPDATE が固定 priority の 1 回だけ
 
-REQUEST_UPDATE の送信は `examples/moq-sub/src/pipeline.rs:784-794` の 1 箇所だけで、
+REQUEST_UPDATE の送信は `crates/moq-sub/src/pipeline.rs:784-794` の 1 箇所だけで、
 固定値 192 の `SUBSCRIBER_PRIORITY` を送る (コメント上もサンプル)。§9.5 が購読で
 許す更新のうち、Forward (pause / 再開、§3.1.1)・Group Order・Location Filter・
 Range Filter・Delivery Timeout はいずれも送らない。REQUEST_UPDATE_OK も
@@ -393,7 +393,7 @@ catch-all で読み捨てる (`pipeline.rs:1280`)。`FORWARD=0` による一時�
 
 購読中の `NEW_GROUP_REQUEST` (§9.20.19、§3.5.1) も送れない。session は
 `DYNAMIC_GROUPS` を受けて保持する (`src/session/subscription/recv.rs:638`) が、
-`MoqtClient` に公開 accessor が無く (`examples/tokio-moq/src/moqt_client.rs:261-271`)、
+`MoqtClient` に公開 accessor が無く (`crates/tokio-moq/src/moqt_client.rs:261-271`)、
 購読確立後に新しい Group を要求する経路が API として存在しない。
 
 ### 6.10 SUBSCRIBE に載せるパラメータが 3 種類しかない
@@ -412,7 +412,7 @@ moq-sub が実際に載せるのは catalog の `LOCATION_FILTER` + `FILL_PARAME
 - `INCLUDE_PROPERTIES` (§9.20.21)
 - `FILL_TIMEOUT` (§9.20.5、§9.20.15)
 - `EXPIRES` (§9.20.16)。`SubscribeResult` は `largest_object` しか公開せず
-  (`examples/tokio-moq/src/moqt_client.rs:261-271`)、期限延長の要求ができない
+  (`crates/tokio-moq/src/moqt_client.rs:261-271`)、期限延長の要求ができない
 
 ### 6.11 Object Status / PUBLISH_DONE / Largest Object を判断に使わない
 
@@ -439,7 +439,7 @@ Media / Event Timeline (§7 / §8)、`msf::uri` の範囲パラメータ (§11.1
 ### 6.13 再生面の機能が無い
 
 シーク、一時停止、音量、トラック切替、字幕、複数映像の同時表示、帯域適応、
-統計表示のいずれも無い (`examples/moq-sub/src/main.rs` に該当する処理が無く、
+統計表示のいずれも無い (`crates/moq-sub/src/main.rs` に該当する処理が無く、
 `poll_events()` でウィンドウクローズだけを見る)。映像は codec 一致の 1 本のみである。
 音声出力は `default` / `none` のみ (`cli.rs:45-58`)、録画は MP4 のみで
 音声は Opus に限る (AAC は警告して音声を録画しない)。
@@ -468,9 +468,9 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 `record_rendered_gap` / `record_rendered_boundary` を持つが、上の適用層が無いため、
 呼び出し側が実際に書き込んだ PCM を測ったときだけ記録できる。
 
-## 7. transport 層 (examples/tokio-moq) の制約
+## 7. transport 層 (crates/tokio-moq) の制約
 
-`examples/tokio-moq/README.md` に明記されている内容の再掲を含む。
+`crates/tokio-moq/README.md` に明記されている内容の再掲を含む。
 
 - `wt-h3` は `RESET_STREAM_AT` を送出できない (0094)。request stream の cancel や
   送信中の data stream の中断が MoQ リレーによっては成立しない
@@ -490,14 +490,14 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
   同 draft の control stream (双方向 stream 0) は draft-ietf-moq-transport-22 §6.4.1
   (control stream は単方向) と矛盾する。本実装は QUIC version 1 との 1 対 1 の対応を採る
 - `--cert` を省略すると証明書検証をスキップする。mTLS (§15.3.1) には対応しない
-- 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' examples/` が 0 件)
+- 0-RTT (§6.3.1) と再接続 / セッション再開は未対応 (`rg 'early_data|0-rtt|resumption' crates/` が 0 件)
 - 無通信時の切断対策が無い。§15.6.1 が挙げる 3 つの選択肢 (transport の keep-alive、
   定期 control message、切断後の再接続) のいずれも実装していない
 - STOP_SENDING の error code を指定できない (`pipeline.rs:1389-1393`、§12.5 は SHOULD)
 - DPoP proof (`cnf` / `catdpop` 付きトークン) を送らない (C4M §3.2.2)
 - Extension Negotiation (§6.3.2) の枠組みが無い。拡張を使わないので現状の実害は無い
 - WebTransport 経由の datagram 受信は現行コードでは `take_buffered_datagrams` 経由で
-  実装されている (`examples/tokio-moq/src/transport.rs:431-438`)。
+  実装されている (`crates/tokio-moq/src/transport.rs:431-438`)。
   `issues/pending/0010` は削除済みの `examples/moq-transport` を指すため、
   現行で再現するかは要確認である
 
@@ -506,11 +506,11 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 実装漏れではないが、調査中に見つかった記述のずれを記す。
 
 - moq-pub のフラグ名: 実際は `--audio-subgroup` (既定が datagram) だが、
-  `examples/moq-pub/src/error.rs:72` と `:213` のメッセージは
+  `crates/moq-pub/src/error.rs:72` と `:213` のメッセージは
   `--audio-datagram` と案内している
-- `examples/moq-sub/README.md:76` は「moq-pub は `--audio-datagram` でこの配送を選べる」と
+- `crates/moq-sub/README.md:76` は「moq-pub は `--audio-datagram` でこの配送を選べる」と
   書くが、そのようなフラグは無い (既定が datagram で、subgroup にするのが `--audio-subgroup`)。
-  `examples/moq-sub/src/pipeline.rs:4775` のコメントも同じ
+  `crates/moq-sub/src/pipeline.rs:4775` のコメントも同じ
 - MSF §11.3 は `SUBSCRIBE_DONE` と書くが、draft-22 で `PUBLISH_DONE` に改名されている。
   実装は改名後に追従している
 
@@ -539,7 +539,7 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 - LOC §2.2 (Private Properties) の実害 (`src/loc.rs:12-13` は application 責務としている)
 - `issues/pending/0010` (WebTransport の datagram 受信) が現行コードで再現するか
 - Video Frame Marking の D / B / T / S ビットを使う予定があるか
-  (現状は I ビットのみ、`examples/moq-sub/src/pipeline.rs:3143-3165`)
+  (現状は I ビットのみ、`crates/moq-sub/src/pipeline.rs:3143-3165`)
 - カメラ経路のエンコーダ (Video Toolbox / libaom / libvpx) が B フレームを出力しうるか
   (パススルーは B フレーム入力を明示的に拒否する)
 - 0-RTT: rustls の `enable_early_data` 既定は false だが s2n-quic 側の既定は未確認

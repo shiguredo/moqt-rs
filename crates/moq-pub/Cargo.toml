@@ -1,26 +1,34 @@
 [package]
-name = "moq-sub"
+name = "moq-pub"
 version = "2026.0.0"
 edition = "2024"
-# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる
+# 依存の s2n-quic が MSRV 1.95 を要求するため、それに合わせる (raden の 1.94 要求も包含する)
 rust-version = "1.95"
 publish = false
 
 [dependencies]
 # 時雨堂クレート
 
-# AV1 デコーダ (dav1d)
+# AV1 エンコーダ (libaom)
+shiguredo_aom = "2026.3"
+# 音声キャプチャ
+# 2026.3.0 は WASAPI のキャプチャでタイムスタンプ計算が i64 オーバーフローし、
+# Windows の実マイクを使うと落ちるため、修正が入った canary.2 を使う
+shiguredo_audio_device = "2026.4.0-canary.2"
+# AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
 shiguredo_http3 = "2026.1.0-canary.13"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
-# MP4 mux (録画)
+# MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
 shiguredo_mp4 = "2026.6.0-canary.2"
-# Opus デコーダ
+# Opus エンコーダ
 shiguredo_opus = "2026.4"
+# カメラキャプチャ
+shiguredo_video_device = "2026.3"
 
-# examples 共有トランスポート crate (QUIC / WebTransport / QMux)
+# crates 配下で共有するトランスポート crate (QUIC / WebTransport / QMux)
 tokio-moq = { path = "../tokio-moq" }
 
 # 外部クレート
@@ -29,10 +37,8 @@ tokio-moq = { path = "../tokio-moq" }
 bytes = "1.12"
 # CLI 引数パース
 noargs = "0.4"
-# 映像プレイヤー (メインスレッド実行)
-# 2026.2 は映像のみ再生で再生時計が PTS からずれると描画が止まり続けるため、
-# 最新フレームへ復帰する処理と理由別ドロップ数が入った canary を使う
-raw_player = "2026.3.0-canary.1"
+# 疑似キャプチャ用 2D ベクターグラフィックス
+raden = "2026.2"
 # QUIC クライアント
 s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
@@ -48,16 +54,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # libvpx の Windows ビルド (MSVC) は動作しないため、Windows 以外に限って依存させる
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-# VP8 / VP9 デコーダ (libvpx)
+# VP8 / VP9 エンコーダ・デコーダ (libvpx)
 shiguredo_libvpx = "2026.2.0-canary.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# AAC-LC デコーダ (Apple Audio Toolbox)
+# AAC-LC エンコーダ (Apple Audio Toolbox)
 # 2026.1.0 は 1 回の AudioConverterFillComplexBuffer で同じパケットを再入力する不具合があり、
 # 音声が重複するため、修正が入った canary を使う
 shiguredo_audio_toolbox = "2026.2.0-canary.2"
-# H.264 / H.265 ハードウェアデコーダ (Apple Video Toolbox)
+# H.264 / H.265 ハードウェアエンコーダ (Apple Video Toolbox)
 # 2026.1.1 は NV12 入力の UV プレーンの大きさをバイト数とピクセル数で比較する不具合があり、
-# 同じ workspace の moq-pub のエンコードが失敗するため、修正が入った canary を使う
-# (workspace では shiguredo_video_toolbox が 1 つのバージョンに解決される)
+# 必ず "plane copy dimensions exceed CVPixelBuffer plane bounds" で失敗するため、
+# 修正が入った canary を使う
 shiguredo_video_toolbox = "2026.2.0-canary.4"

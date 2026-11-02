@@ -4,7 +4,7 @@
 
 request stream GOAWAY の非空 New Session URI
 移行を実装するための設計である。設計 issue の成果物として、
-examples (`moq-pub` / `moq-sub`) の単一 session 前提を複数 session 併走へ拡張する方法を決定する。
+crates 配下の `moq-pub` / `moq-sub` の単一 session 前提を複数 session 併走へ拡張する方法を決定する。
 
 ## 1. 前提と現状
 
@@ -16,9 +16,9 @@ no URI is provided), and close the old request stream using the appropriate mech
 PUBLISH_DONE)" を SHOULD で要求する。§6.6.1 (Graceful Session Migration) は新しい session の確立と移行の
 期限を、§7.6.1 (Graceful Publisher Relay Switchover) は publisher 側の移行を定める。
 
-### 1.2 現在の examples の構造
+### 1.2 現在の crates の構造
 
-- `examples/moq-pub/src/pipeline.rs` と `examples/moq-sub/src/pipeline.rs` の main ループは、1 つの
+- `crates/moq-pub/src/pipeline.rs` と `crates/moq-sub/src/pipeline.rs` の main ループは、1 つの
   `MoqtClient` と 1 つの `DataPlaneHandle` を所有する。
 - control GOAWAY の移行は session 全体の置換である。`migrate_publisher_session` は新 session を確立して
   `MigratedSession` を返し、main ループの `migration_outcome` 分岐が `client` / `data_plane` を差し替える。
@@ -32,7 +32,7 @@ PUBLISH_DONE)" を SHOULD で要求する。§6.6.1 (Graceful Session Migration)
   TrackKind) を持ち、stream task は 1 つの `DataPlaneHandle` とこれらの表を共有する。moq-pub は両表を持たず、
   固定 alias (`VIDEO_TRACK_ALIAS` / `AUDIO_TRACK_ALIAS`) と `PublisherSession` の request ID、`data_plane` を
   共有する。
-- `examples/tokio-moq/src/peer_harness.rs` の `goaway_migration_switches_to_the_new_session` は 2 つの
+- `crates/tokio-moq/src/peer_harness.rs` の `goaway_migration_switches_to_the_new_session` は 2 つの
   `TestPeerServer` / `TestPeer` / `MoqtClient` を同時に保持して control GOAWAY 移行を検証済みである。ただし
   `peer_harness` は `#[cfg(test)]` モジュールであり、moq-pub / moq-sub のテストからは参照できない
   (test-support feature 化は別途計画中)。2 session を同時に駆動する補助 API は無い。
@@ -41,7 +41,7 @@ PUBLISH_DONE)" を SHOULD で要求する。§6.6.1 (Graceful Session Migration)
 
 - CODEBASE.md のとおり、`Session` は 1 本の MOQT Transport Session に閉じた endpoint-local の protocol state
   machine であり、Sans I/O / no_std を守る。本設計ではライブラリの `Session` API を複数 session 対応に拡張しない。
-  session の所有とルーティングは examples と `examples/tokio-moq` の範囲に閉じる。
+  session の所有とルーティングは crates と `crates/tokio-moq` の範囲に閉じる。
 - relay 機能は追加しない。モック・スタブは使わず、失敗系も実 peer の REQUEST_ERROR / 無応答 / 切断で作る。
 - 設計の反映先の issue は、reopened の理由を追記してから実装対象へ戻す。
 
@@ -200,7 +200,7 @@ Idle
 - `peer_harness` は既に 2 つの `TestPeerServer` / `MoqtClient` を同時に保持する control GOAWAY 移行テストを
   持つため、2 session の同時駆動自体は可能である。ただし `#[cfg(test)]` のため moq-pub / moq-sub から参照
   できず、2 session を同時に駆動する補助 API は無い。テストは次のいずれかで実装する。
-  - test-support feature の計画を先行して実装し、`peer_harness` を examples のテストから使う。
+  - test-support feature の計画を先行して実装し、`peer_harness` を crates のテストから使う。
   - moq-pub / moq-sub の `#[cfg(test)]` 内に、`peer_harness` と同じ構成の 2 session 補助を置く。
   どちらを採るかは test-support feature の進捗で決める (実装タスクの依存として明記する)。
 - 検証項目:
@@ -217,14 +217,14 @@ Idle
 
 ## 4. 実装タスク分割
 
-1. `examples/tokio-moq` に session task / `SessionHandle` / `SessionCommand` / イベント集約の共通基盤を追加する。
-   対象: `examples/tokio-moq/src/` (新モジュール。`lib.rs` からの公開を検討する)。
+1. `crates/tokio-moq` に session task / `SessionHandle` / `SessionCommand` / イベント集約の共通基盤を追加する。
+   対象: `crates/tokio-moq/src/` (新モジュール。`lib.rs` からの公開を検討する)。
 2. 2 session を同時に駆動するテスト補助を用意する。test-support feature を先行するか、example 内の test 補助かを
-   決めて実装する。対象: `examples/tokio-moq/src/peer_harness.rs` または test-support 実装。
+   決めて実装する。対象: `crates/tokio-moq/src/peer_harness.rs` または test-support 実装。
 3. moq-sub の main ループを `SessionHandle` ベースへ変更し、request 単位 GOAWAY の状態機械と data plane
-   ルーティングを実装する。対象: `examples/moq-sub/src/pipeline.rs`。
+   ルーティングを実装する。対象: `crates/moq-sub/src/pipeline.rs`。
 4. moq-pub の main ループを `SessionHandle` ベースへ変更し、PUBLISH の request 単位移行と旧 session の
-   PUBLISH_DONE を実装する。対象: `examples/moq-pub/src/pipeline.rs`。
+   PUBLISH_DONE を実装する。対象: `crates/moq-pub/src/pipeline.rs`。
 5. 移行中の重複排除 (watermark) と catalog / decode order の共有状態を実装する。対象: 両 example。
 6. docs (`docs/moqt.md` / `docs/missing-features.md`) を実装に合わせて更新する。
 7. テスト (移行成功・同一 URL・失敗・重複排除) を追加する。

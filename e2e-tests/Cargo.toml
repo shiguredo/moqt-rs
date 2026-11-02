@@ -8,9 +8,9 @@ publish = false
 
 [dev-dependencies]
 # publisher (ローカル参照)
-moq-pub = { path = "../examples/moq-pub" }
+moq-pub = { path = "../crates/moq-pub" }
 # subscriber (ローカル参照)
-moq-sub = { path = "../examples/moq-sub" }
+moq-sub = { path = "../crates/moq-sub" }
 # 非同期ランタイム
 tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測

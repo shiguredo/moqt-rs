@@ -258,13 +258,13 @@ fn main() {
 }
 ```
 
-実際に組み込んだ例が [moq-sub](examples/moq-sub/README.md) です。詳しい仕組みと制約は [docs/audio-playout.md](docs/audio-playout.md) に書いています。
+実際に組み込んだ例が [moq-sub](crates/moq-sub/README.md) です。詳しい仕組みと制約は [docs/audio-playout.md](docs/audio-playout.md) に書いています。
 
 ## サンプル
 
-実際に動くサンプルとして、配信側の [moq-pub](examples/moq-pub/README.md)、受信側の [moq-sub](examples/moq-sub/README.md)、両者が共有するトランスポート層の [tokio-moq](examples/tokio-moq/README.md) があります。
+実際に動くサンプルとして、配信側の [moq-pub](crates/moq-pub/README.md)、受信側の [moq-sub](crates/moq-sub/README.md)、両者が共有するトランスポート層の [tokio-moq](crates/tokio-moq/README.md) があります。
 
-実行方法、前提、接続設定は [examples/README.md](examples/README.md) を参照してください。
+実行方法、前提、接続設定は [crates/README.md](crates/README.md) を参照してください。
 
 ## ライセンス
 

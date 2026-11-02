@@ -1,4 +1,4 @@
-//! examples 共有トランスポート crate
+//! crates 配下で共有するトランスポート crate
 //!
 //! `moq-pub` / `moq-sub` の両バイナリが共通で利用する QUIC / WebTransport over HTTP/3 /
 //! WebTransport over HTTP/2 / QMux のトランスポート層を提供する。
