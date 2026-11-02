@@ -26,8 +26,18 @@ SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) の拒否経路でこの MUST をどう�
 
 次のどちらを採るかを決め、選んだ理由を `apply_peer_message_auth_token_registers_only` と `Session::handle_unsupported_request` の doc と issue の「解決方法」に記録する。本 issue の変更対象は未対応 request の拒否経路 (`Session::handle_unsupported_request`) であり、control GOAWAY 送信後の supported request の拒否経路 (`Session::accept_peer_request`) は先例として挙動を確認するが変更しない。
 
-- (a) 現行方針を維持する。失敗するメッセージのパラメータは REGISTER を除いて適用しないため、未登録 alias の USE_ALIAS も解決せず `NOT_SUPPORTED` で拒否する。draft §1.6 (Modularity) の NOT_SUPPORTED (SHOULD) は未対応メッセージ全般への応答を定める。§8.9 の REGISTER 適用 MUST は "even if the message fails for other reasons" と失敗するメッセージにも及ぶことを明記する一方、USE_ALIAS の MUST にはこの限定が無い。したがって USE_ALIAS の MUST は受理するメッセージに対する規定として読む。
-- (b) §8.9 の USE_ALIAS に対する MUST を文字どおり適用する。USE_ALIAS を含む未対応 request は alias を解決し、未登録なら `UNKNOWN_AUTH_TOKEN_ALIAS` でセッションを閉じる。`UNKNOWN_AUTH_TOKEN_ALIAS` は §12.3 に無いため、メッセージ単位の `REQUEST_ERROR` ではなくセッション終了になる。受理経路と対称になる一方、未対応 request でセッションを落とすことになる。DELETE / USE_VALUE の扱いは現行どおり (REGISTER のみ適用) とし、本 issue では変更しない。
+- (a) 現行方針を維持する。失敗するメッセージのパラメータは REGISTER を除いて適用しないため、
+  未登録 alias の USE_ALIAS も解決せず `NOT_SUPPORTED` で拒否する。draft §1.6 (Modularity) の
+  NOT_SUPPORTED (SHOULD) は未対応メッセージ全般への応答を定める。§8.9 の REGISTER 適用 MUST は
+  "even if the message fails for other reasons" と失敗するメッセージにも及ぶことを明記する
+  一方、USE_ALIAS の MUST にはこの限定が無い。したがって USE_ALIAS の MUST は受理する
+  メッセージに対する規定として読む。
+- (b) §8.9 の USE_ALIAS に対する MUST を文字どおり適用する。USE_ALIAS を含む未対応 request は
+  alias を解決し、未登録なら `UNKNOWN_AUTH_TOKEN_ALIAS` でセッションを閉じる。
+  `UNKNOWN_AUTH_TOKEN_ALIAS` は §12.3 に無いため、メッセージ単位の `REQUEST_ERROR` ではなく
+  セッション終了になる。受理経路と対称になる一方、未対応 request でセッションを落とすことに
+  なる。DELETE / USE_VALUE の扱いは現行どおり (REGISTER のみ適用) とし、本 issue では
+  変更しない。
 
 どちらを採る場合も、alias 解決後も含めた (Token Type, Token Value) の一意性検証は 0237 で実装済みであり、本 issue では扱わない。0237 は `Session::validate_peer_message_auth_token_uniqueness` を追加し、`handle_unsupported_request` でも重複を `MALFORMED_AUTH_TOKEN` で拒否する経路を実装済みである。本 issue は未登録 alias の扱いだけを決める。
 
