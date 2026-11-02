@@ -12,7 +12,7 @@ moq-pub = { path = "../examples/moq-pub" }
 # subscriber (ローカル参照)
 moq-sub = { path = "../examples/moq-sub" }
 # 非同期ランタイム
-tokio = { version = "1.53", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
 tokio-metrics = "0.5"
 # 非同期ユーティリティ (graceful shutdown)

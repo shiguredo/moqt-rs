@@ -18,7 +18,7 @@ shiguredo_audio_device = "2026.4.0-canary.2"
 # AV1 デコーダ (dav1d、MP4 再エンコード配信の入力デコード)
 shiguredo_dav1d = "2026.3"
 # HTTP/3 / WebTransport クライアント
-shiguredo_http3 = "2026.1.0-canary.12"
+shiguredo_http3 = "2026.1.0-canary.13"
 # MOQT 本体 (ローカル参照)
 shiguredo_moqt = { path = "../../" }
 # MP4 ファイルの demux (映像トラックのパススルー配信 / 再エンコード配信)
@@ -42,7 +42,7 @@ raden = "2026.2"
 # QUIC クライアント
 s2n-quic = { version = "1.91", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls", "unstable-provider-datagram"] }
 # 非同期ランタイム
-tokio = { version = "1.53", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 # Tokio タスクメトリクス計測
 tokio-metrics = "0.5"
 # 非同期ユーティリティ (graceful shutdown, rate limit, pool)
