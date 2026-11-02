@@ -66,3 +66,12 @@ moqt-rs には待ち合わせが無く、同じ欠落が起きる。`src/video_d
 は保留を選んでいるが、moqt-rs の example は `targetLatency` (既定 200 ms) と時間軸で表示
 する構成であり、同じ判断がそのまま当てはまるかを確かめたうえで決める必要がある。判断が付く
 まで実装に着手しないため `issues/pending/` に置く。
+
+## reopened にした理由
+
+pending にした理由だった「前の Group の末尾の欠落を取るか、Group の切り替えごとの最大 50 ms の
+復号保留を取るか」の判断を確定できる材料が揃ったため、実装対象に戻す。moq-sub はカタログの
+`targetLatency` (moq-pub の `--target-latency` の既定 200 ms) を時間軸の表示の遅れの下限として
+使い、`crates/moq-sub/src/main.rs` の `timeline.set_target_latency_ms` で反映している。50 ms の
+保留はこの 200 ms の範囲に収まるため、moqt-js の `GROUP_SWITCH_HOLD_MS` と同じ保留を採用する。
+採用の判断と根拠は本文の設計方針に反映する。
