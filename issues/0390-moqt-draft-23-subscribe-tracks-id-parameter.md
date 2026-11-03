@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-moqt-draft-23-subscribe-tracks-id-parameter
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
@@ -19,13 +19,14 @@ draft 23 の正当な PUBLISH にこの値が含まれると、未知パラメ�
 
 Type `0x36` の varint パラメータと型付きアクセサを追加し、PUBLISH でのみ受理・送信する。
 元の SUBSCRIBE_TRACKS の Request ID を保持・利用側に通知できるようにする。
-ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、対応する要求を持たない場合の扱いを規定と現行の限定 endpoint 方針に沿って明記し、namespace 機能を追加しない。
+ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、その要求との照合 state は追加しない。受信時は ID を関連付け情報として保持・通知し、対応する要求がないことだけを理由に拒否やセッション終了を行わず、通常の PUBLISH の検証とアプリケーションによる受理・拒否判断へ進める。
+送信 API は型と PUBLISH のスコープを検証し、対応する namespace 要求の存在検証は追加しない。SUBSCRIBE_TRACKS 起因の PUBLISH にのみ指定する契約を API の説明へ明記する。
 
 ## 完了条件
 
 - Type `0x36` の golden バイト列と PUBLISH の往復を検証すること。
 - SUBSCRIBE / FETCH / REQUEST_UPDATE など許可されない文脈では INVALID_PARAMETER になること。
-- 対応する namespace 要求を送らない現行 endpoint の受信方針が明記されること。
+- 対応する namespace 要求がない場合も ID を保持・通知し、通常の PUBLISH の検証・受理判断へ進むこと。ID の照合 state や namespace 機能を追加しないこと。
 
 ## 依存・関連
 
