@@ -1,6 +1,21 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::object_properties::{ObjectProperties, ObjectProperty, ObjectPropertyValue};
-use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+use shiguredo_moqt::track_properties::{
+    PROP_DEFAULT_PUBLISHER_GROUP_ORDER, PROP_DEFAULT_PUBLISHER_PRIORITY, PROP_DYNAMIC_GROUPS,
+    PROP_IMMUTABLE_PROPERTIES, PROP_MAX_CACHE_DURATION,
+};
+
+/// Track 専用の既知 Property の型
+///
+/// Object scope で受信すると malformed になるため
+/// (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties))、正常系のサンプラーでは
+/// 生成しない。
+const TRACK_ONLY_TYPES: &[u64] = &[
+    PROP_MAX_CACHE_DURATION,
+    PROP_DEFAULT_PUBLISHER_PRIORITY,
+    PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
+    PROP_DYNAMIC_GROUPS,
+];
 
 /// ユニークな prop_type と対応する値のペアを生成する
 ///
@@ -15,7 +30,7 @@ fn sample_unique_non_immutable_properties(
     let mut out = Vec::new();
     for _ in 0..count {
         let id = noprop::sample_u64_in(ctx, 0..=255);
-        if id == PROP_IMMUTABLE_PROPERTIES {
+        if id == PROP_IMMUTABLE_PROPERTIES || TRACK_ONLY_TYPES.contains(&id) {
             continue;
         }
         if !seen.insert(id) {
@@ -87,7 +102,7 @@ fn roundtrip_immutable_and_find_varint() -> noprop::TestResult {
         let mut expected = Vec::new();
         for _ in 0..count {
             let key = noprop::sample_u64_in(ctx, 0..=255) & !1u64; // 偶数型
-            if !seen.insert(key) {
+            if TRACK_ONLY_TYPES.contains(&key) || !seen.insert(key) {
                 continue;
             }
             let value = noprop::sample_u64(ctx);
@@ -135,5 +150,64 @@ fn roundtrip_immutable_and_find_varint() -> noprop::TestResult {
         }
         Ok(())
     })?;
+    Ok(())
+}
+
+// ─── Property のスコープ検証 ─────────────────────────────
+
+/// `ObjectProperties::decode` が Track 専用の既知 Property だけを malformed にすること
+///
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): スコープ外で受信した
+/// 既知 Property は malformed track (§12.1 (Malformed Tracks) 条件 8)。未知の型はスコープを
+/// 推測せず受理する (§16.8 の "Endpoints MUST ignore unknown Property types")。
+/// スコープ違反の Object Properties は `encode` が拒否するため、wire 表現を手組みする。
+#[test]
+fn object_scope_rejects_track_only_property() -> noprop::TestResult {
+    use shiguredo_moqt::error::MessageError;
+    let malformed_seen = std::cell::Cell::new(false);
+    let accepted_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let prop_type = noprop::sample_u64_in(ctx, 0..=0x40);
+        let mut kvps = Vec::new();
+        shiguredo_moqt::varint::encode(prop_type, &mut kvps);
+        if prop_type.is_multiple_of(2) {
+            shiguredo_moqt::varint::encode(1, &mut kvps);
+        } else {
+            // 奇数型は長さ 0 の値にする (IMMUTABLE_PROPERTIES の内側も空になり構造検証を通る)
+            shiguredo_moqt::varint::encode(0, &mut kvps);
+        }
+        let mut block = Vec::new();
+        shiguredo_moqt::varint::encode(kvps.len() as u64, &mut block);
+        block.extend_from_slice(&kvps);
+
+        let result = ObjectProperties::decode(&block).map(|_| ());
+        if TRACK_ONLY_TYPES.contains(&prop_type) {
+            malformed_seen.set(true);
+            assert_eq!(
+                result,
+                Err(MessageError::MalformedTrack(
+                    "Track-only property in Object scope"
+                )),
+                "{prop_type:#x} は Track 専用 Property として検出すること"
+            );
+        } else {
+            accepted_seen.set(true);
+            assert_eq!(
+                result,
+                Ok(()),
+                "{prop_type:#x} は Object scope で受理すること"
+            );
+        }
+        Ok(())
+    })?;
+    assert!(
+        malformed_seen.get(),
+        "Track 専用型のケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        accepted_seen.get(),
+        "受理される型のケースが 1 つも観測されなかった\n{runner}"
+    );
     Ok(())
 }

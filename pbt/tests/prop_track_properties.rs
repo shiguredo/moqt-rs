@@ -113,8 +113,9 @@ fn sample_candidate_type(ctx: &mut noprop::TestCaseContext) -> u64 {
         1 => noprop::sample_choice(ctx, GREASE_IN_MANDATORY_RANGE),
         // 既知プロパティ (列挙の対象外)
         2 => noprop::sample_choice(ctx, KNOWN_TYPES),
-        // 必須範囲外の型 (列挙の対象外)
-        _ => noprop::sample_choice(ctx, &[0x08u64, 0x09u64, 0x1000u64]),
+        // 必須範囲外の型 (列挙の対象外)。Track scope で正当な型だけを使う
+        // (0x09 は Object 専用のため、encode がスコープ違反として拒否する)
+        _ => noprop::sample_choice(ctx, &[0x08u64, 0x0Au64, 0x1000u64]),
     }
 }
 
@@ -204,5 +205,67 @@ fn unknown_mandatory_types_matches_independent_filter() -> noprop::TestResult {
         );
         Ok(())
     })?;
+    Ok(())
+}
+
+// ─── Property のスコープ検証 ─────────────────────────────
+
+/// Object 専用の既知 Property 型
+///
+/// draft-ietf-moq-transport-23 §16.8 (Properties) Table 15 の PRIOR_GROUP_ID_GAP /
+/// PRIOR_OBJECT_ID_GAP と、Table 16 (draft-ietf-moq-loc-05 §6.1) の VIDEO_FRAME_MARKING /
+/// AUDIO_LEVEL / TIMESTAMP。仕様の表を独立に書き下し、実装の表と突き合わせる。
+const OBJECT_ONLY_TYPES: &[u64] = &[0x09, 0x0C, 0x10, 0x3C, 0x3E];
+
+/// `TrackProperties::validate_scope` の判定が、仕様の表から独立に書いた期待値と一致すること
+///
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): スコープ外で受信した
+/// 既知 Property は malformed track (§12.1 (Malformed Tracks) 条件 8)。未知の型はスコープを
+/// 推測せず受理する (§16.8 の "Endpoints MUST ignore unknown Property types")。
+#[test]
+fn validate_scope_matches_independent_scope_table() -> noprop::TestResult {
+    use shiguredo_moqt::error::MessageError;
+    let malformed_seen = std::cell::Cell::new(false);
+    let accepted_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let prop_type = noprop::sample_u64_in(ctx, 0..=0x50);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type,
+            value: if prop_type % 2 == 0 {
+                TrackPropertyValue::VarInt(1)
+            } else {
+                TrackPropertyValue::Bytes(vec![0xAB])
+            },
+        });
+        let result = props.validate_scope();
+        if OBJECT_ONLY_TYPES.contains(&prop_type) {
+            malformed_seen.set(true);
+            assert_eq!(
+                result,
+                Err(MessageError::MalformedTrack(
+                    "Object-only property in Track scope"
+                )),
+                "{prop_type:#x} は Object 専用 Property として検出すること"
+            );
+        } else {
+            accepted_seen.set(true);
+            assert_eq!(
+                result,
+                Ok(()),
+                "{prop_type:#x} は Track scope で受理すること"
+            );
+        }
+        Ok(())
+    })?;
+    assert!(
+        malformed_seen.get(),
+        "Object 専用型のケースが 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        accepted_seen.get(),
+        "受理される型のケースが 1 つも観測されなかった\n{runner}"
+    );
     Ok(())
 }

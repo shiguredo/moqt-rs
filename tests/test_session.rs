@@ -794,6 +794,8 @@ mod object_filter_pass;
 mod outgoing_range_filter;
 #[path = "test_session/parameter_rules.rs"]
 mod parameter_rules;
+#[path = "test_session/property_scope.rs"]
+mod property_scope;
 #[path = "test_session/request_stream.rs"]
 mod request_stream;
 #[path = "test_session/setup.rs"]

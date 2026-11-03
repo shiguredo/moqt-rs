@@ -303,16 +303,20 @@ pub fn sample_non_immutable_property(ctx: &mut noprop::TestCaseContext) -> Track
             prop_type: PROP_MAX_CACHE_DURATION,
             value: TrackPropertyValue::VarInt(sample_small_varint(ctx)),
         },
-        // その他の偶数型 (既知型 0x02 / 0x04 / 0x06 / 0x0E / 0x22 / 0x30 と重複しない)
+        // その他の偶数型 (既知型 0x02 / 0x04 / 0x06 / 0x0E / 0x22 / 0x30 と重複せず、
+        // Object 専用の既知型 0x0C / 0x10 にもならない未知型)。Track scope では Object 専用
+        // Property が malformed になるため (draft-ietf-moq-transport-23 §8.4 (Track and
+        // Object Properties))、正常系のサンプラーでは生成しない。
         4 => TrackProperty {
-            prop_type: noprop::sample_choice(ctx, &[0x08u64, 0x0Au64, 0x0Cu64]),
+            prop_type: noprop::sample_choice(ctx, &[0x08u64, 0x0Au64, 0x12u64]),
             value: TrackPropertyValue::VarInt(sample_small_varint(ctx)),
         },
-        // 奇数型 (IMMUTABLE_PROPERTIES 0x0B は除外する。0x0B は専用の生成関数で生成する)
+        // 奇数型 (Object 専用の 0x09 VIDEO_FRAME_MARKING と IMMUTABLE_PROPERTIES 0x0B は
+        // 除外する。0x0B は専用の生成関数で生成する)
         _ => {
-            let t = noprop::sample_usize_in(ctx, 0..100) as u64;
-            // t == 5 (0x0B) を除外する (0..=99 のうち 5 を飛ばして 6..=100 に射影)
-            let t = if t >= 5 { t + 1 } else { t };
+            let t = noprop::sample_usize_in(ctx, 0..98) as u64;
+            // t == 4 (0x09) と t == 5 (0x0B) を飛ばして以降を 2 つずらす
+            let t = if t >= 4 { t + 2 } else { t };
             let prop_type = t * 2 + 1;
             let len = noprop::sample_usize_in(ctx, 0..=50);
             TrackProperty {

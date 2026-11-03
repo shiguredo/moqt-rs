@@ -564,3 +564,21 @@ fn inner_prior_object_id_gap(value: u64) -> Vec<u8> {
     let (_, n) = varint::decode(&buf).expect("エンコードされたバッファは varint で始まる");
     buf[n..].to_vec()
 }
+
+/// Track 専用の既知 Property を Object Properties で受信した場合も `MalformedTrack` を保つ
+///
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed Tracks)
+/// 条件 8。`ObjectProperties::decode_exact` は `MalformedTrack` を `ProtocolViolation` へ
+/// 畳まず透過するため、data plane と同じ分類で呼び出し側へ届く。
+#[test]
+fn prior_object_id_gap_of_keeps_malformed_track_for_scope_violation() {
+    // MAX_CACHE_DURATION (0x04, Track 専用) を Object Properties に置く
+    // (Properties Length = 2, delta = 0x04, value = 1)
+    let bytes = vec![0x02, 0x04, 0x01];
+    assert_eq!(
+        prior_object_id_gap_of(Some(&bytes)),
+        Err(MessageError::MalformedTrack(
+            "Track-only property in Object scope"
+        ))
+    );
+}

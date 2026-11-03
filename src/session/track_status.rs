@@ -348,6 +348,12 @@ impl Session {
     /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
     /// (responder) であり、自側は subscriber (requester) である。
     ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed Tracks)
+    /// 条件 8: この実装が意味を理解する Property をスコープ外で受信したら Track を malformed
+    /// とする (MUST)。TRACK_STATUS_OK の Track Properties は検証対象であり、違反時は応答を
+    /// 成功として確定せず、同じ Track の subscription / FETCH を cancel してアプリへ
+    /// `MalformedTrack` を通知する (既存の malformed Track 経路)。
+    ///
     /// ローカル終端済み (`rejected_request_ids` に記録済み) の entry を吸収する経路は持たない。
     /// 終端を記録するのは request stream 上の GOAWAY の deadline 満了だが、GOAWAY を送れるのは
     /// request の受信側 (§9.2 (GOAWAY))、すなわち TRACK_STATUS では publisher であり、
@@ -357,6 +363,7 @@ impl Session {
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
+        track_properties: &TrackProperties,
     ) -> Result<(), SessionError> {
         let entry = self
             .track_status_requests
@@ -379,6 +386,14 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 8: Track Properties のスコープを検証する。違反時は
+        // TrackStatusResponse::Ok を記録せず、malformed Track の終端経路へ渡す
+        // (この request 自身は応答済みの失敗として確定し、アプリへ理由を届ける)。
+        if let Err(err) = track_properties.validate_scope() {
+            self.terminate_malformed_track(request_id, None, err.reason());
+            return Ok(());
         }
         // draft §9.20.17 (LARGEST OBJECT Parameter): TRACK_STATUS への REQUEST_OK は LARGEST_OBJECT を含み得る
         let largest_location = parameters

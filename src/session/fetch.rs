@@ -1034,6 +1034,22 @@ impl Session {
             });
             return Ok(());
         }
+        // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 8: この実装が意味を理解する Property をスコープ外で
+        // 受信したら Track を malformed とする (MUST)。fetch を cancel し、同じ Track の
+        // subscription も取消対象にして、アプリへ `MalformedTrack` を通知する (既存の
+        // malformed Track 経路)。未知 Mandatory Track Property の cancel (§3.7) を先に
+        // 判定するのは、draft が両条件の優先順位を定めていないためである。
+        // データストリームの FIN 後に FETCH_OK が届いて `Terminated` になっている fetch は
+        // 既存の malformed 経路が cancel を再発行しないが、応答自体は受領しているため
+        // `response_received` を立てる (アプリが応答待ちのままにならないようにする)。
+        if let Err(err) = ok.track_properties.validate_scope() {
+            self.terminate_malformed_track(request_id, None, err.reason());
+            if let Some(fetch) = self.fetches.get_mut(&request_id) {
+                fetch.response_received = true;
+            }
+            return Ok(());
+        }
         let fetch = self
             .fetches
             .get_mut(&request_id)

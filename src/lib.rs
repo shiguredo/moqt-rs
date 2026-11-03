@@ -57,6 +57,8 @@ pub mod parameter;
 pub mod pending_subgroup_buffer;
 /// 音声の再生に関する処理 (時間圧縮・伸長、到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期)
 pub mod playout;
+/// Property の許可スコープ (Track / Object) の表を集約する内部モジュール (外部公開しない)
+pub(crate) mod property_scope;
 pub mod session;
 pub mod stream;
 pub mod subgroup_tracker;

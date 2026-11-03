@@ -693,3 +693,220 @@ fn tracker_accepts_object_without_prior_gap() {
         .observe_decoded_object(10, 0, Some(&props))
         .expect("gap を持たない Object は受理されること");
 }
+
+// ─── Property のスコープ違反 (draft-ietf-moq-transport-23 §8.4 / §12.1 条件 8) ───
+
+/// Object scope のスコープ違反の検証
+///
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): "An endpoint that supports
+/// a Property and receives it outside its scope (e.g. a Track-only Property as an Object
+/// Property) MUST treat the Track as malformed" / §12.1 (Malformed Tracks) 条件 8。
+/// Object 側の decode は受信時の意味検証として `MalformedTrack` を返し、
+/// `ObjectProperties::encode` はローカル入力の検証として `ProtocolViolation` を返す。
+mod property_scope {
+    use super::*;
+    use shiguredo_moqt::track_properties::{
+        PROP_DEFAULT_PUBLISHER_GROUP_ORDER, PROP_DEFAULT_PUBLISHER_PRIORITY, PROP_DYNAMIC_GROUPS,
+        PROP_MAX_CACHE_DURATION,
+    };
+
+    /// Object 専用の既知 Property を Object scope で検出したときの理由
+    const TRACK_ONLY: &str = "Track-only property in Object scope";
+
+    /// 型で昇順に並べた Property 列を delta encoding の KVP 列にする
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): Type は直前の Type との
+    /// 差分で符号化する。スコープ違反のフィクスチャは `ObjectProperties::encode` が拒否する
+    /// ため、wire 表現を手組みする。
+    fn kvp_sequence(entries: &[(u64, ObjectPropertyValue)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut prev_type = 0u64;
+        for (prop_type, value) in entries {
+            varint::encode(prop_type - prev_type, &mut out);
+            match value {
+                ObjectPropertyValue::VarInt(v) => varint::encode(*v, &mut out),
+                ObjectPropertyValue::Bytes(bytes) => {
+                    varint::encode(bytes.len() as u64, &mut out);
+                    out.extend_from_slice(bytes);
+                }
+            }
+            prev_type = *prop_type;
+        }
+        out
+    }
+
+    /// KVP 列を Properties Length 付きのブロックにする
+    fn wrap(kvps: &[u8]) -> Vec<u8> {
+        let mut block = Vec::new();
+        varint::encode(kvps.len() as u64, &mut block);
+        block.extend_from_slice(kvps);
+        block
+    }
+
+    /// 偶数型 Property の KVP 生バイト列 (先頭の delta は型そのもの)
+    fn even_kvp(prop_type: u64, value: u64) -> Vec<u8> {
+        let mut kvps = Vec::new();
+        varint::encode(prop_type, &mut kvps);
+        varint::encode(value, &mut kvps);
+        kvps
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の両スコープ型と未知型は受理される
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) は未知 Property の
+    /// 転送を MUST とし、§16.8 (Properties) は "Endpoints MUST ignore unknown Property types"
+    /// と定める。内側のスコープ規則は mutable リストと同じである
+    /// (§10.7 (Immutable Properties))。
+    #[test]
+    fn immutable_inner_both_scope_and_unknown_accepted() {
+        let inner = kvp_sequence(&[
+            (0x02, ObjectPropertyValue::VarInt(100)), // OBJECT_DELIVERY_TIMEOUT (Track,Object)
+            (0x06, ObjectPropertyValue::VarInt(200)), // SUBGROUP_DELIVERY_TIMEOUT (Track,Object)
+            (0x08, ObjectPropertyValue::VarInt(90_000)), // TIMESCALE (Track,Object)
+            (0x1000, ObjectPropertyValue::VarInt(1)), // 未知 (偶数型)
+            (0x1001, ObjectPropertyValue::Bytes(vec![0xAB])), // 未知 (奇数型)
+        ]);
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: ObjectPropertyValue::Bytes(inner),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("内側が正当な IMMUTABLE_PROPERTIES は encode できる");
+        let (decoded, consumed) =
+            ObjectProperties::decode(&buf).expect("内側の未知型と両スコープ型は受理すること");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(decoded.len(), 1);
+    }
+
+    /// Track 専用の既知 Property を Object scope で受信したら `MalformedTrack` になる
+    ///
+    /// draft-ietf-moq-transport-23 §16.8 (Properties) Table 15 の Track 専用型
+    /// (MAX_CACHE_DURATION / DEFAULT_PUBLISHER_PRIORITY /
+    /// DEFAULT_PUBLISHER_GROUP_ORDER / DYNAMIC_GROUPS) を網羅する。
+    #[test]
+    fn track_only_property_is_malformed() {
+        for prop_type in [
+            PROP_MAX_CACHE_DURATION,
+            PROP_DEFAULT_PUBLISHER_PRIORITY,
+            PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
+            PROP_DYNAMIC_GROUPS,
+        ] {
+            let buf = wrap(&even_kvp(prop_type, 1));
+            assert_eq!(
+                ObjectProperties::decode(&buf),
+                Err(MessageError::MalformedTrack(TRACK_ONLY)),
+                "{prop_type:#x} を Object scope の違反として拒否すること"
+            );
+        }
+    }
+
+    /// Object 専用の型 (Track 専用ではない) は引き続き受理される (非回帰)
+    #[test]
+    fn object_only_and_both_scope_properties_are_accepted() {
+        let buf = wrap(&kvp_sequence(&[
+            (0x02, ObjectPropertyValue::VarInt(100)), // OBJECT_DELIVERY_TIMEOUT
+            (0x08, ObjectPropertyValue::VarInt(90_000)), // TIMESCALE
+            (0x09, ObjectPropertyValue::Bytes(vec![0xAB])), // VIDEO_FRAME_MARKING
+            (0x0C, ObjectPropertyValue::VarInt(1)),   // AUDIO_LEVEL
+            (0x10, ObjectPropertyValue::VarInt(1)),   // TIMESTAMP
+            (0x3C, ObjectPropertyValue::VarInt(1)),   // PRIOR_GROUP_ID_GAP
+        ]));
+        let (decoded, consumed) =
+            ObjectProperties::decode(&buf).expect("Object scope の正当な型は受理すること");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(decoded.len(), 6);
+    }
+
+    /// 未知 Property と GREASE はスコープを推測して拒否しない
+    ///
+    /// draft-ietf-moq-transport-23 §16.8 (Properties): "Endpoints MUST ignore unknown
+    /// Property types"。0x1000 と GREASE の 0x401D を Object scope で受理する。
+    #[test]
+    fn unknown_and_grease_properties_are_accepted() {
+        let buf = wrap(&kvp_sequence(&[
+            (0x1000, ObjectPropertyValue::VarInt(1)),
+            (0x401D, ObjectPropertyValue::Bytes(vec![0xAB])),
+        ]));
+        assert!(
+            ObjectProperties::decode(&buf).is_ok(),
+            "未知 Property と GREASE 値は受理すること"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の Track 専用 Property も `MalformedTrack` になる
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は内側も Track or Object
+    /// Property と対称に定義するため、同じスコープ規則を適用する。
+    #[test]
+    fn track_only_property_inside_immutable_is_malformed() {
+        let inner = even_kvp(PROP_MAX_CACHE_DURATION, 1_000);
+        let mut kvps = Vec::new();
+        varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut kvps);
+        varint::encode(inner.len() as u64, &mut kvps);
+        kvps.extend_from_slice(&inner);
+        let buf = wrap(&kvps);
+        assert_eq!(
+            ObjectProperties::decode(&buf),
+            Err(MessageError::MalformedTrack(TRACK_ONLY))
+        );
+    }
+
+    /// ローカル encode の Track 専用 Property は入力検証エラーになる
+    #[test]
+    fn encode_rejects_track_only_property() {
+        for prop_type in [
+            PROP_MAX_CACHE_DURATION,
+            PROP_DEFAULT_PUBLISHER_PRIORITY,
+            PROP_DEFAULT_PUBLISHER_GROUP_ORDER,
+            PROP_DYNAMIC_GROUPS,
+        ] {
+            let mut props = ObjectProperties::new();
+            props.push(ObjectProperty {
+                prop_type,
+                value: ObjectPropertyValue::VarInt(1),
+            });
+            let mut buf = Vec::new();
+            assert_eq!(
+                props.encode(&mut buf),
+                Err(MessageError::ProtocolViolation(TRACK_ONLY)),
+                "{prop_type:#x} の encode を入力検証エラーにすること"
+            );
+        }
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の Track 専用 Property も encode で拒否する
+    ///
+    /// decode 層は受信時の意味検証として `MalformedTrack` を返すが、encode はローカル入力の
+    /// 検証であるため `ProtocolViolation` に写す (受信 Track の取消と混同しない)。
+    #[test]
+    fn encode_rejects_track_only_property_inside_immutable() {
+        let mut props = ObjectProperties::new();
+        props.push(ObjectProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: ObjectPropertyValue::Bytes(even_kvp(PROP_MAX_CACHE_DURATION, 1_000)),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(TRACK_ONLY))
+        );
+    }
+
+    /// `ObjectProperties::decode_exact` 経由でも `MalformedTrack` が失われない
+    ///
+    /// data plane の取消経路は `ObjectPropertyTracker::observe_object` が使う
+    /// `decode_exact` の戻り値の variant でセッション終了と cancel を分岐する。
+    /// `ProtocolViolation` へ畳まないことを固定する。
+    #[test]
+    fn decode_exact_keeps_malformed_track() {
+        let buf = wrap(&even_kvp(PROP_MAX_CACHE_DURATION, 1_000));
+        let mut tracker = ObjectPropertyTracker::new();
+        assert_eq!(
+            tracker.observe_object(0, 0, Some(&buf)),
+            Err(MessageError::MalformedTrack(TRACK_ONLY))
+        );
+    }
+}

@@ -263,9 +263,13 @@ impl Default for VideoDecodeOrder {
 ///
 /// # Errors
 ///
-/// Object Properties の framing が不正 (Length varint が途中で切れている、宣言長が実データ
-/// 長と一致しない、Key-Value-Pair が malformed) の場合は
-/// [`MessageError::ProtocolViolation`]。
+/// `ObjectProperties::decode_exact` の分類をそのまま返す。Properties Length と実データ長の
+/// 不一致や KVP 層の復号失敗は `MalformedObject` / `MalformedKeyValue` / `ProtocolViolation`
+/// などであり、スコープ違反・Mandatory Track Property の Object scope 混入・入れ子
+/// IMMUTABLE_PROPERTIES は `MalformedTrack` である。`MalformedTrack` は draft-ietf-moq-transport-23
+/// §12.1 (Malformed Tracks) の購読・fetch の cancel 対象であり、セッション終了ではない
+/// (`crates/moq-sub` のようにデータプレーンのデコード失敗を一律にセッション終了へ写す呼び出し側は、
+/// `MalformedTrack` を cancel として扱うこと)。
 pub fn prior_object_id_gap_of(properties_bytes: Option<&[u8]>) -> Result<u64, MessageError> {
     let Some(properties_bytes) = properties_bytes else {
         return Ok(0);

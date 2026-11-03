@@ -861,3 +861,211 @@ mod immutable_properties {
         assert!(!props.has_unknown_mandatory());
     }
 }
+
+/// Property のスコープ違反 (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) /
+/// §12.1 (Malformed Tracks) 条件 8) の検証。
+///
+/// Track Properties のスコープ検証は構造 decode と分離する。`TrackProperties::decode` は
+/// スコープ違反だけを理由に失敗せず、`TrackProperties::validate_scope` が受信 Track の判定を
+/// 行う。ローカル入力の `encode` は受信 Track の取消と混同しないよう `ProtocolViolation` で
+/// 拒否する。
+mod property_scope {
+    use super::*;
+    use shiguredo_moqt::object_properties::{PROP_PRIOR_GROUP_ID_GAP, PROP_PRIOR_OBJECT_ID_GAP};
+    use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+    /// 偶数型 Property の KVP 生バイト列 (先頭の delta は型そのもの)
+    fn even_kvp(prop_type: u64, value: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        shiguredo_moqt::varint::encode(prop_type, &mut bytes);
+        shiguredo_moqt::varint::encode(value, &mut bytes);
+        bytes
+    }
+
+    /// IMMUTABLE_PROPERTIES の KVP 生バイト列 (内側の KVP 列を値に持つ)
+    fn immutable_kvp(inner: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut bytes);
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut bytes);
+        bytes.extend_from_slice(inner);
+        bytes
+    }
+
+    /// Object 専用の既知 Property を Track scope で検出したときの理由
+    const OBJECT_ONLY: &str = "Object-only property in Track scope";
+
+    /// 構造 decode はスコープ違反を理由に失敗せず、`validate_scope` が検出する
+    ///
+    /// decode 層は Track / request を特定できず §12.1 の cancel を発行できないため、
+    /// スコープ検証は意味の検証として分離する。
+    #[test]
+    fn decode_keeps_object_only_property_and_validate_scope_detects_it() {
+        let decoded = TrackProperties::decode(&even_kvp(PROP_PRIOR_GROUP_ID_GAP, 1))
+            .expect("スコープ違反は構造 decode を失敗させないこと");
+        assert_eq!(decoded.len(), 1, "Property は保持されること");
+        assert_eq!(
+            decoded.validate_scope(),
+            Err(MessageError::MalformedTrack(OBJECT_ONLY))
+        );
+    }
+
+    /// この実装が意味を理解する Object 専用型をすべて検出する
+    ///
+    /// draft-ietf-moq-transport-23 §16.8 (Properties) Table 15 の PRIOR_GROUP_ID_GAP /
+    /// PRIOR_OBJECT_ID_GAP と、Table 16 (draft-ietf-moq-loc-05 §6.1) の TIMESTAMP /
+    /// VIDEO_FRAME_MARKING / AUDIO_LEVEL が対象である。
+    #[test]
+    fn validate_scope_detects_object_only_types() {
+        let cases = [
+            (PROP_PRIOR_GROUP_ID_GAP, TrackPropertyValue::VarInt(1)),
+            (PROP_PRIOR_OBJECT_ID_GAP, TrackPropertyValue::VarInt(1)),
+            (0x10, TrackPropertyValue::VarInt(1)), // TIMESTAMP (偶数型)
+            (0x09, TrackPropertyValue::Bytes(vec![0xAB])), // VIDEO_FRAME_MARKING (奇数型)
+            (0x0C, TrackPropertyValue::VarInt(1)), // AUDIO_LEVEL (偶数型)
+        ];
+        for (prop_type, value) in cases {
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty { prop_type, value });
+            assert_eq!(
+                props.validate_scope(),
+                Err(MessageError::MalformedTrack(OBJECT_ONLY)),
+                "{prop_type:#x} を Object 専用 Property として検出すること"
+            );
+        }
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側も同じスコープ規則で検証する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties): "Properties MAY appear either
+    /// in the mutable property list or inside Immutable Properties."
+    #[test]
+    fn validate_scope_searches_inside_immutable() {
+        let inner = even_kvp(PROP_PRIOR_GROUP_ID_GAP, 1);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner.clone()),
+        });
+        assert_eq!(
+            props.validate_scope(),
+            Err(MessageError::MalformedTrack(OBJECT_ONLY))
+        );
+        // wire を経由しても内側の違反を検出する
+        let decoded = TrackProperties::decode(&immutable_kvp(&inner))
+            .expect("内側のスコープ違反は構造 decode を失敗させないこと");
+        assert_eq!(
+            decoded.validate_scope(),
+            Err(MessageError::MalformedTrack(OBJECT_ONLY))
+        );
+    }
+
+    /// 未知型・GREASE・両スコープの型 (IMMUTABLE 内側を含む) は受理される
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 は未知 Property の転送を MUST とし、§16.8 は
+    /// "Endpoints MUST ignore unknown Property types" と定める。スコープを推測して
+    /// 拒否しないことを固定する。
+    #[test]
+    fn validate_scope_accepts_track_and_both_scope_and_unknown() {
+        let mut inner = TrackProperties::new();
+        inner.push(TrackProperty {
+            prop_type: 0x02, // OBJECT_DELIVERY_TIMEOUT (Track,Object)
+            value: TrackPropertyValue::VarInt(100),
+        });
+        inner.push(TrackProperty {
+            prop_type: 0x1000, // 未知 (偶数型)
+            value: TrackPropertyValue::VarInt(1),
+        });
+        inner.push(TrackProperty {
+            prop_type: 0x401D, // GREASE (奇数型)
+            value: TrackPropertyValue::Bytes(vec![0xAB]),
+        });
+        let mut inner_bytes = Vec::new();
+        inner
+            .encode(&mut inner_bytes)
+            .expect("内側の KVP 列は encode できる");
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x02,
+            value: TrackPropertyValue::VarInt(200),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x04, // MAX_CACHE_DURATION (Track)
+            value: TrackPropertyValue::VarInt(1_000),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x08, // TIMESCALE (Track,Object)
+            value: TrackPropertyValue::VarInt(90_000),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x0E, // DEFAULT_PUBLISHER_PRIORITY (Track)
+            value: TrackPropertyValue::VarInt(128),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x22, // DEFAULT_PUBLISHER_GROUP_ORDER (Track)
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x30, // DYNAMIC_GROUPS (Track)
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x1001, // 未知 (奇数型)
+            value: TrackPropertyValue::Bytes(vec![0xCD]),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner_bytes),
+        });
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("スコープ違反の無い Track Properties は encode できる");
+        let decoded = TrackProperties::decode(&buf)
+            .expect("スコープ違反の無い Track Properties は decode できる");
+        assert_eq!(
+            decoded.validate_scope(),
+            Ok(()),
+            "未知型・GREASE・両スコープの型はスコープ違反にしないこと"
+        );
+    }
+
+    /// ローカル encode の Object 専用 Property は入力検証エラーになる
+    ///
+    /// 受信 Track の malformed 判定 (`MalformedTrack`) とは区別し、`ProtocolViolation` で
+    /// 拒否する (§12.1 の cancel を起こさない)。
+    #[test]
+    fn encode_rejects_object_only_property() {
+        let cases = [
+            (PROP_PRIOR_GROUP_ID_GAP, TrackPropertyValue::VarInt(1)),
+            (PROP_PRIOR_OBJECT_ID_GAP, TrackPropertyValue::VarInt(1)),
+            (0x10, TrackPropertyValue::VarInt(1)),
+            (0x09, TrackPropertyValue::Bytes(vec![0xAB])),
+            (0x0C, TrackPropertyValue::VarInt(1)),
+        ];
+        for (prop_type, value) in cases {
+            let mut props = TrackProperties::new();
+            props.push(TrackProperty { prop_type, value });
+            let mut buf = Vec::new();
+            assert_eq!(
+                props.encode(&mut buf),
+                Err(MessageError::ProtocolViolation(OBJECT_ONLY)),
+                "{prop_type:#x} の encode を入力検証エラーにすること"
+            );
+        }
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の Object 専用 Property も encode で拒否する
+    #[test]
+    fn encode_rejects_object_only_property_inside_immutable() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(even_kvp(PROP_PRIOR_GROUP_ID_GAP, 1)),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(OBJECT_ONLY))
+        );
+    }
+}

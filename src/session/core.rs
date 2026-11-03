@@ -2447,7 +2447,7 @@ impl Session {
             }
             Some(RequestTable::Fetch) => self.handle_ok_for_fetch(request_id, &ok.parameters),
             Some(RequestTable::TrackStatus) => {
-                self.handle_ok_for_track_status(request_id, &ok.parameters)
+                self.handle_ok_for_track_status(request_id, &ok.parameters, &ok.track_properties)
             }
             None => {
                 // 応答先の request を持たない REQUEST_OK は UNEXPECTED_MESSAGE (0x303)。

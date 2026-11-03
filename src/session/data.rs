@@ -11,7 +11,9 @@ use crate::error::{
     SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED, STREAM_INTERNAL_ERROR,
     STREAM_MALFORMED_TRACK, is_local_error_code,
 };
-use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
+use crate::message::{
+    ControlMessage, PublishDone, ReasonPhrase, common::Location, common::TrackNamespace,
+};
 use crate::object_properties::{DeliveryMode, ObjectFieldTracker, ObjectProperties};
 use crate::stream::{
     DataStreamType, OBJECT_STATUS_END_OF_GROUP, OBJECT_STATUS_END_OF_TRACK, OBJECT_STATUS_NORMAL,
@@ -36,7 +38,7 @@ use super::types::{
     DatagramAcceptance, FetchHeaderAcceptance, FetchState, PUBLISHER_PRIORITY_DEFAULT,
     RecvDataStreamError, RequestKind, RequestStreamEnd, SendRequestError, SessionError,
     SessionEvent, SessionState, Subscription, SubscriptionState, TerminationReason,
-    TrackDataAcceptance, TrackRole,
+    TrackDataAcceptance, TrackRole, TrackStatusResponse,
 };
 
 /// subscription がキャンセル由来 `Terminated` かどうかを判定する
@@ -3006,7 +3008,62 @@ impl Session {
         reason: &'static str,
     ) {
         // 検出した request の Track を先に取り出す (sibling 列挙中は可変借用しない)
-        let track = if let Some(subscription) = self.subscriptions.get(&request_id) {
+        if let Some((track_namespace, track_name, my_role)) = self.malformed_track_of(request_id) {
+            self.terminate_malformed_track_siblings(
+                request_id,
+                &track_namespace,
+                &track_name,
+                my_role,
+                reason,
+            );
+        }
+        self.terminate_request_for_malformed_track(request_id, stream_id, reason);
+    }
+
+    /// 受信メッセージの Request ID と Full Track Name から Malformed Track を終端する
+    ///
+    /// 初回 PUBLISH は購読を登録する前に Malformed Track を検出しうるため、
+    /// [`Self::terminate_malformed_track`] のように自側の状態から Track を取り出せない。
+    /// 受信メッセージが運ぶ Full Track Name を明示して同じ Track の既存の subscription /
+    /// FETCH を cancel し、検出した PUBLISH 自身は購読として登録しないまま bidi request
+    /// stream の cancel と `RequestTerminated` で終端する。
+    ///
+    /// §12.1 (Malformed Tracks) の "it MUST cancel any corresponding subscription or fetches
+    /// for that Track from that publisher (see Section 6.4.2.3), and SHOULD deliver an error
+    /// to the application." を、未登録の request でも満たすための経路である。
+    /// 検出した PUBLISH を購読として登録しないため、アプリは正常な受信として観測しない。
+    ///
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    pub(super) fn terminate_malformed_track_for_publish(
+        &mut self,
+        request_id: u64,
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+        reason: &'static str,
+    ) {
+        // 初回 PUBLISH の時点では自側の subscription は未登録であり、Track の文脈は
+        // 受信メッセージの Full Track Name から解決する。自側は常に subscriber 役である。
+        self.terminate_malformed_track_siblings(
+            request_id,
+            track_namespace,
+            track_name,
+            TrackRole::Subscriber,
+            reason,
+        );
+        self.terminate_unregistered_request_for_malformed_track(
+            request_id,
+            RequestKind::Publish,
+            reason,
+        );
+    }
+
+    /// 指定 request の Track 文脈 (名前空間 / 名前 / 自側の役割) を取り出す
+    ///
+    /// subscription / FETCH / TRACK_STATUS の順に探す。TRACK_STATUS は購読状態を持たないが、
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) が
+    /// TRACK_STATUS_OK の Property 検証を求めるため、Track 文脈の解決対象に含める。
+    fn malformed_track_of(&self, request_id: u64) -> Option<(TrackNamespace, Vec<u8>, TrackRole)> {
+        if let Some(subscription) = self.subscriptions.get(&request_id) {
             Some((
                 subscription.track_namespace.clone(),
                 subscription.track_name.clone(),
@@ -3019,43 +3076,101 @@ impl Session {
                 .zip(fetch.track_name.clone())
                 .map(|(track_namespace, track_name)| (track_namespace, track_name, fetch.my_role))
         } else {
-            None
-        };
+            self.track_status_requests.get(&request_id).map(|entry| {
+                (
+                    entry.track_namespace.clone(),
+                    entry.track_name.clone(),
+                    entry.my_role,
+                )
+            })
+        }
+    }
+
+    /// 同じ Track の sibling request を Malformed Track として終端する
+    ///
+    /// `(track_namespace, track_name, my_role)` の `my_role` が `Subscriber` のときだけ
+    /// sibling を列挙する。publisher 役の subscription / FETCH は自側が配信する側であり、
+    /// §12.1 の "cancel any corresponding subscription or fetches for that Track from that
+    /// publisher" の対象ではない。
+    ///
+    /// sibling の data stream はこの Session が reset しない。request stream の STOP_SENDING を
+    /// 受けた publisher が §3.1.2 / §3.2.4 の MUST で reset するため、`ResetDataStream` は
+    /// 検出した data stream だけに発行する (呼び出し元が `stream_id` を渡す)。
+    fn terminate_malformed_track_siblings(
+        &mut self,
+        request_id: u64,
+        track_namespace: &TrackNamespace,
+        track_name: &[u8],
+        my_role: TrackRole,
+        reason: &'static str,
+    ) {
+        if my_role != TrackRole::Subscriber {
+            return;
+        }
         let mut siblings = Vec::new();
-        if let Some((track_namespace, track_name, my_role)) = track
-            && my_role == TrackRole::Subscriber
-        {
-            // subscription は索引から、FETCH は fetches から列挙する。
-            // 検出した request 自身は最後に処理するため除外する。
-            let key = (
-                track_namespace.clone(),
-                track_name.clone(),
-                TrackRole::Subscriber,
-            );
-            if let Some(ids) = self.aliases.subscriptions_by_track.get(&key) {
-                siblings.extend(ids.iter().copied().filter(|&id| id != request_id));
-            }
-            for (id, fetch) in &self.fetches {
-                if *id != request_id
-                    && fetch.my_role == TrackRole::Subscriber
-                    && fetch.track_namespace.as_ref() == Some(&track_namespace)
-                    && fetch.track_name.as_deref() == Some(track_name.as_slice())
-                {
-                    siblings.push(*id);
-                }
+        // subscription は索引から、FETCH は fetches から列挙する。
+        // 検出した request 自身は呼び出し元が最後に処理するため除外する。
+        let key = (
+            track_namespace.clone(),
+            track_name.to_vec(),
+            TrackRole::Subscriber,
+        );
+        if let Some(ids) = self.aliases.subscriptions_by_track.get(&key) {
+            siblings.extend(ids.iter().copied().filter(|&id| id != request_id));
+        }
+        for (id, fetch) in &self.fetches {
+            if *id != request_id
+                && fetch.my_role == TrackRole::Subscriber
+                && fetch.track_namespace.as_ref() == Some(track_namespace)
+                && fetch.track_name.as_deref() == Some(track_name)
+            {
+                siblings.push(*id);
             }
         }
         // HashMap の反復順に依存せず、同じ入力で同じイベント順になるよう request id を
         // 昇順に揃える (AliasState が HashMap 反復順への依存を避ける方針と同じ)。
         siblings.sort_unstable();
         siblings.dedup();
-        // sibling の data stream はこの Session が reset しない。request stream の
-        // STOP_SENDING を受けた publisher が §3.1.2 / §3.2.4 の MUST で reset するため、
-        // ResetDataStream は検出した data stream だけに発行する。
         for sibling in siblings {
             self.terminate_request_for_malformed_track(sibling, None, reason);
         }
-        self.terminate_request_for_malformed_track(request_id, stream_id, reason);
+    }
+
+    /// 状態を持たない request を Malformed Track として終端する
+    ///
+    /// 購読登録前の初回 PUBLISH のように、Session がまだ request の状態を持たない場合に使う。
+    /// bidi request stream の受信方向を STOP_SENDING、送信方向を RESET_STREAM で
+    /// [`STREAM_MALFORMED_TRACK`] により打ち切り (§6.4.2.3 / §12.5)、
+    /// `RequestTerminated { reason: MalformedTrack }` を発行してアプリへエラーを届ける
+    /// (§12.1 の SHOULD)。
+    ///
+    /// `request_streams` に entry を作らないため、peer が reset を観測する前に送った
+    /// stream close は [`Session::rejected_request_ids`] 経由で no-op に吸収される。
+    fn terminate_unregistered_request_for_malformed_track(
+        &mut self,
+        request_id: u64,
+        kind: RequestKind,
+        reason: &'static str,
+    ) {
+        self.rejected_request_ids.insert(request_id);
+        // 状態を持たない request では deadline は開始されていないが、同じ request id に
+        // 対する遅延メッセージを no-op にする状態を既存の終端経路と揃えておく。
+        self.clear_control_message_deadline(request_id);
+        self.clear_request_stream_goaway_deadline(request_id);
+        self.events
+            .push_back(SessionEvent::StopSendingRequestStream {
+                request_id,
+                error_code: STREAM_MALFORMED_TRACK,
+            });
+        self.events.push_back(SessionEvent::ResetRequestStream {
+            request_id,
+            error_code: STREAM_MALFORMED_TRACK,
+        });
+        self.events.push_back(SessionEvent::RequestTerminated {
+            request_id,
+            kind,
+            reason: TerminationReason::MalformedTrack { reason },
+        });
     }
 
     /// Malformed Track を検出した 1 件の request を終端する (draft §12.1 (Malformed Tracks))
@@ -3068,6 +3183,8 @@ impl Session {
     ///
     /// 行うこと:
     /// - 該当 subscription / fetch を `Terminated` へ遷移させる
+    /// - TRACK_STATUS の entry は応答済みの失敗 (`TrackStatusResponse::Error`) として確定する
+    ///   (TRACK_STATUS_OK の Track Properties から Malformed Track を検出した経路)
     /// - 対象 request の bidi request stream を cancel する
     ///   ([`SessionEvent::StopSendingRequestStream`] → [`SessionEvent::ResetRequestStream`] の順、
     ///   どちらも [`STREAM_MALFORMED_TRACK`] (§6.4.2.3 / §12.5))
@@ -3140,6 +3257,17 @@ impl Session {
             }
             fetch.state = FetchState::Terminated;
             RequestKind::Fetch
+        } else if let Some(entry) = self.track_status_requests.get_mut(&request_id) {
+            // TRACK_STATUS は購読も FETCH も持たない単発の問い合わせである。draft
+            // §12.1 (Malformed Tracks) の MUST cancel の対象は subscription / FETCH だが、
+            // TRACK_STATUS_OK の Track Properties から Malformed Track を検出した場合は、
+            // この request 自身も終端してアプリへ理由を届ける (SHOULD)。
+            // 応答済み・終端済みの entry は終端を重ねない。
+            if entry.response.is_some() || entry.terminated {
+                return;
+            }
+            entry.response = Some(TrackStatusResponse::Error);
+            RequestKind::TrackStatus
         } else {
             // 対象が既に回収されている場合は通知だけ行わない (二重終端を避ける)
             return;
