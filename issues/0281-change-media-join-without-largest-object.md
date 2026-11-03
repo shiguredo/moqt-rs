@@ -1,8 +1,8 @@
 # LARGEST_OBJECT に依存せずにメディアへ途中参加できるようにする
 
 - Created: 2026-10-15
-- Completed: {YYYY-MM-DD}
-- Branch: feature/change-media-join-without-largest-object
+- Completed: 2026-11-03
+- Branch: develop
 - Polished: 2026-11-02
 
 ## 目的
@@ -134,3 +134,120 @@ LARGEST_OBJECT に依存せずにメディアへ途中参加できる経路を�
   `publish_and_subscribe_audio_datagram_roundtrip`) が通ること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
+
+## 解決方法
+
+### 確定した内容
+
+- 既定の参加手段を (a) `NEW_GROUP_REQUEST` に確定した。起動時の映像 `SUBSCRIBE` は
+  `NEW_GROUP_REQUEST=0` だけを載せ、Location Filter と FILL_PARAMETERS は載せない。音声の
+  `SUBSCRIBE` はパイプラインのパラメータを載せない (現行どおり)。
+- 次 Group の Location Filter は追加しない (cache 有効時の起動は relay の replay が決めており、
+  フィルタを追加すると replay を捨てるため)。
+- FILL_PARAMETERS 付き SUBSCRIBE (`§3.5` の「現在 Group から参加」) は採用しない (複数 Object の
+  fill range を返す writer が未整備であり、実測に使った relay は cache 無効の配備で fill range を
+  配れないため)。
+- 音声の明示 FETCH を削除した。削除したのは起動時 (`run`)、session 移行
+  (`resubscribe_tracks`)、request stream 単位の再発行 (`reissue_request`) の 3 箇所の呼び出しと、
+  音声の FETCH 応答経路 (`read_audio_fetch_stream`、`FetchStreamAction::DeliverAudio`、
+  音声 Object の位置を取る `fetch_object_location`)、および関連テストである。
+- FETCH の配送先を `FetchTarget` (Video / Catalog) に型付けし、音声が配送先に現れないことを
+  型で保証した。`fetch_recent_groups` は `fetch_recent_video_groups` に改名し、映像だけを
+  対象にした。`FETCH_RECENT_GROUPS` と `plan_fetch_range` の doc も映像に限定した。
+- 音声の購読境界の規則 (`AudioDeliveryOrder`) は防御として残した。LARGEST_OBJECT が無い場合は
+  境界を設定せず、すべて live として扱う (変更なし)。
+- `crates/moq-sub/README.md` に、既定の参加手段・Next Group の Location Filter を追加しない理由・
+  (b) を採用しない理由・映像 FETCH の位置づけ・音声 FETCH を削除した理由を残した。
+- `issues/0338` の統合テスト計画を映像 FETCH に限定し、session 移行と request 再発行の前後で
+  音声が欠落しないことを確認する項目を追加した。
+
+### 音声 FETCH 削除の検証 (実 relay での計測)
+
+音声 FETCH の寄与を、削除前 (削除前の develop) と削除後の 2 版で比較した。計測は次のとおり。
+
+- publisher: `moq-pub --fake-capture-device --no-video` (440 Hz 正弦波、Opus 20 ms、datagram 配送)
+- subscriber: `moq-sub --mp4 --no-play` で音声を MP4 に録画
+- 欠落の判定: 録画した MP4 の音声パケットのタイムスタンプを `ffprobe` で取り出し、40 ms
+  (2 フレーム) を超える飛びを欠落とした。20 ms 周期なので 1 フレームの欠落は 40 ms の飛びになる
+- session 移行の起こし方: 移行中の publisher は別ノードに接続したまま、subscriber が接続する
+  ノードに relay の管理 API で GOAWAY を送らせた (移行先は明示)
+- request 再発行の起こし方: relay の管理 API では request 単位の GOAWAY を起こせないため、
+  実装の再発行手順 (`STOP_SENDING` で旧 request を閉じ、同じ session で Absolute Start 付きで
+  再購読する) を一定時刻に実行する計測用の分岐を一時的に入れて測った (計測後に削除済み)。
+  さらに旧購読を閉じてから再購読するまでの隙間を 200 ms / 500 ms に広げても測った
+
+#### 1. 起動時
+
+| 版 | 音声 FETCH | `before_boundary` の累計 | 起動への寄与 |
+| --- | --- | --- | --- |
+| 削除前 | 直近 4 Group を要求 | 1 → 4 (4 Object を取得) | なし (すべて購読境界以下で破棄) |
+| 削除後 | なし | 1 (relay が replay する最新 1 Object のみ) | 変化なし |
+
+`SUBSCRIBE_OK` の Largest Object が購読境界になるため、起動時の FETCH で遡る範囲の Object は
+すべて境界以下になる。削除前後で起動時間・再生・録画に差は無かった。
+
+#### 2. session 移行 (GOAWAY)
+
+削除前 3 試行 / 削除後 9 試行。GOAWAY の Timeout 0 / 5000 / 20000 ms、GOAWAY を購読開始の
+1 秒後 / 6 秒後に送る条件、音声を datagram と subgroup stream の両方で配送する条件を含む。
+
+| 版 | 試行 | 移行成功 | 音声 FETCH の発行 | 音声パケット | 記録時間 | 移行 ±1.5 秒の欠落 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 削除前 | 3 | 3/3 | 2 回 (起動時 + 移行時) | 1267〜1347 | 25.3〜26.9 秒 | 0 件 |
+| 削除後 | 9 | 9/9 | 0 回 | 1096〜1348 | 21.9〜27.0 秒 | 0 件 |
+
+音声パケット数 × 20 ms が記録時間と一致し、フレームの欠落は無かった。削除前の移行時の FETCH は
+4 Object を取得したが、`before_boundary` が 1 → 4 に増えただけで、すべて購読境界以下として
+破棄された。観測された 40 ms 超の飛び (削除後の 3 試行で計 3 件) は移行の 7〜20 秒後であり、
+datagram のランダムな損失であった。
+
+欠落しない理由は次のとおりである。relay は GOAWAY の Timeout まで購読を維持して配送を続け
+(§6.6.1)、切替時の購読境界は「切り替え直前に読み直した最後の受信位置」になる。FETCH の range の
+終端は再購読時の `SUBSCRIBE_OK` の Largest Object であり、移行に時間がかかるほど「最後の受信
+位置」より前になる。したがって FETCH の Object はすべて境界以下になる。実測でも Largest Object が
+…8753、切替時の最後の受信位置が …9022 であった。
+
+#### 3. request stream 単位の再発行
+
+移行検証モードが無効な relay では request 単位の GOAWAY を外部から起こせないため、実装と同じ
+手順 (`STOP_SENDING` → 同じ session で Absolute Start 付き再購読) を強制する計測用の分岐で
+測った。
+
+| 試行 | STOP から再購読までの遅延 | 音声パケット | 記録時間 | 再発行地点の欠落 | 重複・境界落ち |
+| --- | --- | --- | --- | --- | --- |
+| 6 | 0 / 200 / 500 ms | 966〜1094 | 19.3〜21.9 秒 | 0 件 | 増加なし |
+
+再発行地点の前後で `before_boundary` / `duplicated` / `stale` の累計が増えず (バックフィルも
+重複配送も無い)、音声も途切れなかった。旧購読を閉じてから再購読するまでの 500 ms の隙間を
+人工的に空けても欠落しなかったのは、計測に使った relay が `STOP_SENDING` の後も購読を維持して
+配送を続けるためである。
+
+#### 結論と限界
+
+- 起動時・session 移行・request stream 単位の再発行の 3 経路すべてで、音声の明示 FETCH は
+  起動時間・再生・録画に寄与しなかった。削除は妥当である。
+- この結論は、relay が GOAWAY の Timeout まで購読を維持し、`STOP_SENDING` の後も配送を続ける
+  という挙動に依存する。仕様は §6.6.1 で購読の維持を定めるが、Timeout より前に購読を止める
+  実装では、移行中に publish された音声が欠落しうる。この前提は `crates/moq-sub/README.md` と
+  `issues/0338` に注記した。
+- 計測は 1 つの relay 実装 (クラスタ構成) による。別の relay 実装での再確認は 0338 の統合テストと
+  実 relay の E2E に委ねる。
+- 計測に使った環境のホスト名・アドレスはリポジトリに残していない。計測用の分岐は削除済みで、
+  最終的な差分には含まれない。
+
+### テストと確認
+
+- 追加・更新:
+  - `FetchTarget` (Video / Catalog) を導入し、FETCH の配送先に音声が現れないことを型で保証した。
+    `fetch_stream_action_routes_media_fetches` は映像と catalog の振り分けを固定する。
+  - `video_subscribe_parameters_request_a_new_group` に、起動時の映像 `SUBSCRIBE` が
+    `NEW_GROUP_REQUEST=0` だけを載せ、Location Filter と FILL_PARAMETERS を載せない断言を追加した。
+  - `video_subscribe_parameters_use_the_last_location_as_absolute_start` と
+    `audio_subscribe_parameters_use_the_last_location_as_absolute_start` に、再購読でも
+    FILL_PARAMETERS を載せない断言を追加した。
+- 削除: `read_audio_fetch_stream`、`FetchStreamAction::DeliverAudio`、`fetch_object_location` と
+  そのテスト (音声 Object の位置が datagram と subgroup stream の 2 経路から取れることは残した)。
+- `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
+  `cargo fmt --all -- --check` が通ることを確認した。
+- 実 relay の E2E (`publish_and_subscribe_roundtrip` /
+  `publish_and_subscribe_audio_datagram_roundtrip`) は CI の E2E Test ワークフローで確認する。
