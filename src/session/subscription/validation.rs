@@ -43,9 +43,9 @@ pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
 ///
 /// SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_STATE_NOTIFY の受信経路
 /// (`handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_request_update` /
-/// `handle_peer_publish_state_notify`) では、値域外の受信は同節の MUST に従い
-/// 呼び出し側が `self.fail()` を呼んでセッションを PROTOCOL_VIOLATION により閉じる
-/// (`?` 伝播のみではセッションが開いたまま残る)。
+/// `handle_peer_publish_state_notify`) では、値域外の受信は同節の MUST (INVALID_PARAMETER)
+/// を、本実装では既存の写像に合わせて PROTOCOL_VIOLATION として扱う。呼び出し側が
+/// `self.fail()` を呼んでセッションを閉じる (`?` 伝播のみではセッションが開いたまま残る)。
 pub fn validate_paused(value: u8) -> Result<bool, SessionError> {
     if value > 1 {
         return Err(SessionError::new(

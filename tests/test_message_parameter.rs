@@ -148,7 +148,7 @@ mod error_cases {
 
     #[test]
     fn paused_out_of_range_rejected_on_decode() {
-        // count=1, delta=0x10 ではなく 0x11 (PAUSED), 値=0x02 (値域外)
+        // count=1, delta=0x11 (PAUSED), 値=0x02 (値域外)
         for value in [2u8, u8::MAX] {
             let buf = vec![0x01, PARAM_PAUSED as u8, value];
             assert!(

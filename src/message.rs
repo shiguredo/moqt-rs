@@ -179,7 +179,7 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 
 /// PUBLISH で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-22 §9.20 各 Parameter 節の出現規定 (PUBLISH を含む) から
+/// draft-ietf-moq-transport-23 §9.19 各 Parameter 節の出現規定 (PUBLISH を含む) から
 /// 再導出した 9 種 (AUTHORIZATION_TOKEN / OBJECT_DELIVERY_TIMEOUT /
 /// SUBGROUP_DELIVERY_TIMEOUT / SUBSCRIBER_PRIORITY / GROUP_ORDER /
 /// LOCATION_FILTER / EXPIRES / LARGEST_OBJECT / PAUSED)。
@@ -209,9 +209,9 @@ pub(crate) const PUBLISH_ALLOWED_PARAMS: &[u64] = &[
 ];
 
 /// PUBLISH_STATE_NOTIFY で許可されるパラメータ型
-/// (draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) /
-/// §9.20.9 (LOCATION FILTER Parameter) / §9.20.17 (LARGEST OBJECT Parameter) /
-/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の MAY appear 列挙)
+/// (draft-ietf-moq-transport-23 §9.10 (PUBLISH_STATE_NOTIFY) /
+/// §9.19.9 (LOCATION FILTER Parameter) / §9.19.17 (LARGEST OBJECT Parameter) /
+/// §9.19.18 (PAUSED Parameter) の MAY appear 列挙)
 ///
 /// 送信側の `send_publish_state_notify` (src/session/subscription/send.rs) が
 /// 状態遷移前にスコープ検証するために `pub(crate)` で公開している。
@@ -283,17 +283,16 @@ const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
 /// SUBSCRIBE_TRACKS で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-22 §9.18 (SUBSCRIBE_TRACKS) の列挙 (AUTHORIZATION_TOKEN / PAUSED /
-/// GROUP_ORDER / SUBGROUP_FILTER / OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER /
-/// TRACK_PROPERTY_FILTER / INCLUDE_PROPERTIES) と、§3.6.2 (Parameters on SUBSCRIBE_TRACKS) の
+/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の列挙
+/// (OBJECT_DELIVERY_TIMEOUT / AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT / PAUSED /
+/// SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS / SUBGROUP_FILTER /
+/// OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER / TRACK_PROPERTY_FILTER /
+/// INCLUDE_PROPERTIES) と、§3.6.2 (Parameters on SUBSCRIBE_TRACKS) の
 /// "Any Parameter that can be specified on a Subscription (ie: in SUBSCRIBE) is valid in
 /// SUBSCRIBE_TRACKS, unless otherwise specified." の和集合である。
 ///
-/// §3.6.2 が SUBSCRIBE_TRACKS に載せられると明記する LOCATION_FILTER / FILL_PARAMETERS は
-/// §9.18 の列挙にも §9.20.9 (LOCATION FILTER Parameter) / §9.20.15 (FILL PARAMETERS Parameter)
-/// をはじめ各パラメータ節の "MAY appear in" にも現れず、draft の記述が食い違う。仕様が許容する
-/// メッセージでセッションを閉じない側 (包括許可) を採る。TRACK_PROPERTY_FILTER は SUBSCRIBE に
-/// 出現しない SUBSCRIBE_TRACKS 固有の型である (§3.6.1 (Filtering SUBSCRIBE_TRACKS))。
+/// TRACK_PROPERTY_FILTER は SUBSCRIBE に出現しない SUBSCRIBE_TRACKS 固有の型である
+/// (§3.6.1 (Filtering SUBSCRIBE_TRACKS))。
 ///
 /// [`SUBSCRIBE_ALLOWED_PARAMS`] を変更するときは本定数も追随させること
 /// (`subscribe_tracks_allowed_params_covers_subscribe_params` が固定する)。

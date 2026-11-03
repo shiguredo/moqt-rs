@@ -908,7 +908,7 @@ fn paused_parameter_roundtrip_preserves_absence_and_values() -> noprop::TestResu
     let unpaused_seen = std::cell::Cell::new(false);
     let paused_seen = std::cell::Cell::new(false);
     let mut runner = test_runner()?;
-    runner.run(64, |ctx| {
+    runner.run(256, |ctx| {
         // 0: 省略、1: 0 (unpaused) の明示、2: 1 (paused) の明示
         let (sampled, expected) = match noprop::sample_usize_in(ctx, 0..=2) {
             0 => {

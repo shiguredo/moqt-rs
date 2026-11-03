@@ -327,6 +327,115 @@ fn request_update_with_fill_opens_fill_stream() {
     );
 }
 
+/// PAUSED 1 件を持つ MessageParameters を作る
+fn paused_params(value: u8) -> MessageParameters {
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(value),
+    });
+    params
+}
+
+/// FILL_PARAMETERS と PAUSED を併せ持つ MessageParameters を作る
+fn fill_params_with_paused(inner: MessageParameters, paused: u8) -> MessageParameters {
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(paused),
+    });
+    params.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    });
+    params
+}
+
+/// 2 本目の SUBSCRIBE を PAUSED 値つきで established にする
+///
+/// 1 本目で Largest Object を確定させた状態を前提とし、track alias は 2 を使う。
+fn subscribe_paused_and_ok(client: &mut Session, server: &mut Session, paused: u8) -> u64 {
+    let sub_rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), paused_params(paused))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 2, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    sub_rid
+}
+
+/// paused な購読への REQUEST_UPDATE は FILL を持っても、PAUSED 省略なら fill を開かない
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): REQUEST_UPDATE で PAUSED を
+/// 省略した場合は現在の状態を維持する。paused のままなので §3.4.1 (Fill Semantics) の
+/// "FILL_PARAMETERS carried while the subscription is paused opens no fill fetch stream."
+/// に従い開設しない。
+#[test]
+fn request_update_with_fill_and_omitted_paused_stays_paused() {
+    let (mut client, mut server, _sub_rid) = establish_sub_with_object();
+    let paused_rid = subscribe_paused_and_ok(&mut client, &mut server, 1);
+    send_update_to_server(
+        &mut client,
+        &mut server,
+        paused_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "PAUSED 省略で paused を維持する場合、FILL 付き UPDATE でも開設しないこと"
+    );
+}
+
+/// paused な購読への FILL + PAUSED=0 の REQUEST_UPDATE は再開して fill を開く
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED=0 は unpaused を明示する。
+/// 再開後の購読は配送対象になり、§3.4.1 (Fill Semantics) に従って fill fetch stream を開く。
+#[test]
+fn request_update_with_fill_and_unpaused_resumes_and_opens_fill_stream() {
+    let (mut client, mut server, _sub_rid) = establish_sub_with_object();
+    let paused_rid = subscribe_paused_and_ok(&mut client, &mut server, 1);
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        paused_rid,
+        fill_params_with_paused(MessageParameters::new(), 0),
+    );
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        vec![update_rid],
+        "PAUSED=0 で再開した場合は fill stream を開くこと"
+    );
+}
+
+/// unpaused な購読への FILL + PAUSED=1 の REQUEST_UPDATE は fill を開かない
+///
+/// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 同じ REQUEST_UPDATE で
+/// paused にする場合、fill を開設してはならない (§3.4.1 (Fill Semantics))。
+#[test]
+fn request_update_with_fill_and_pause_opens_nothing() {
+    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params_with_paused(MessageParameters::new(), 1),
+    );
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "同じ UPDATE で paused にする場合は fill stream を開設しないこと"
+    );
+}
+
 /// FILL 内側の Location Filter Type 0x00 (None) は subscription filter を継承せず
 /// track 全体を指す (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
 ///
