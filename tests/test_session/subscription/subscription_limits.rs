@@ -1038,6 +1038,15 @@ fn incoming_update_with_only_inner_ranges_uses_cumulative_max() {
     server
         .recv_stream_message(rid, second)
         .expect("INVALID_FILTER 拒否は Result::Ok (セッションは維持)");
+    // 拒否は 1 通目の OK より後に返す必要があるため、1 通目への応答を送ってから確認する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    assert!(
+        matches!(ok, ControlMessage::RequestOk(_)),
+        "先行する 1 通目の OK が先に送出されること: {ok:?}"
+    );
     assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 
@@ -2070,13 +2079,32 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
         )
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok (セッションは維持)");
 
+    // 拒否は先行する 1 通目の OK より後に返す必要があるため、応答を送って順序を確認する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let mut saw_ok = false;
     let mut saw_invalid_filter = false;
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::SendOnStream {
+                message: ControlMessage::RequestOk(_),
+                ..
+            } => {
+                assert!(
+                    !saw_invalid_filter,
+                    "受理済みの更新の OK は拒否の ERROR より先に送出されること"
+                );
+                saw_ok = true;
+            }
+            SessionEvent::SendOnStream {
                 message: ControlMessage::RequestError(err),
                 ..
             } => {
+                assert!(
+                    saw_ok,
+                    "拒否の ERROR は先行する更新の OK より後に送出されること"
+                );
                 assert_eq!(err.error_code, REQUEST_INVALID_FILTER);
                 saw_invalid_filter = true;
             }
@@ -2089,6 +2117,7 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
             _ => {}
         }
     }
+    assert!(saw_ok, "受理した 1 通目の OK が送出されること");
     assert!(
         saw_invalid_filter,
         "累積超過は INVALID_FILTER の REQUEST_ERROR で拒否されること"
@@ -2177,6 +2206,15 @@ fn cumulative_overflow_terminates_publisher_subscription() {
             inject_request_update(rid + 4, one_range_objectid_filter()),
         )
         .expect("累積超過は INVALID_FILTER 拒否なので Result::Ok");
+    // 拒否は 1 通目の OK より後に返す必要があるため、1 通目への応答を送ってから確認する
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let (_, ok) = take_send_on_stream(&mut server);
+    assert!(
+        matches!(ok, ControlMessage::RequestOk(_)),
+        "先行する 1 通目の OK が先に送出されること: {ok:?}"
+    );
     assert_publisher_invalid_filter_rejection(&mut server, rid);
 }
 

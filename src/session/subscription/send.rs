@@ -659,24 +659,6 @@ impl Session {
             message: msg,
             fin: false,
         });
-        // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540:
-        // 後続処理の前に pending な REQUEST_UPDATE を適用する (coalescing)。
-        // 通常フローでは Pending の subscription に REQUEST_UPDATE は届かない (Established の
-        // self loop のみ) ため本経路は防御であり、受信順に合体した累積表示を先頭から適用する。
-        // paused 変更が pending にあれば先に反映する。
-        let pending_view = subscription.pending_update_params.front().map(|head| {
-            let mut view = head.parameters.clone();
-            for group in subscription.pending_update_params.iter().skip(1) {
-                view.merge_from(&group.parameters);
-            }
-            view
-        });
-        subscription.pending_update_params.clear();
-        if let Some(pending_params) = pending_view
-            && let Some(value) = pending_params.paused()
-        {
-            subscription.paused = validate_paused(value)?;
-        }
         Ok(())
     }
 

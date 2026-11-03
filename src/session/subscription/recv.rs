@@ -7,8 +7,8 @@
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN,
     REQUEST_UNSUPPORTED_EXTENSION, SESSION_DUPLICATE_TRACK_ALIAS, SESSION_INVALID_PARAMETER,
-    SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
-    STREAM_CANCELLED,
+    SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION, SESSION_TOO_MANY_REQUEST_UPDATES,
+    SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
 };
 use crate::message::{
     ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone,
@@ -27,9 +27,10 @@ use super::super::core::{
     RequestTable, Session, alias_used_by_different_track, range_filter_usage,
 };
 use super::super::types::{
-    DeadlineTimer, DeliveryTimeoutState, PendingUpdateGroup, RequestKind, SessionError,
-    SessionEvent, StreamCountState, Subscription, SubscriptionInitiator, SubscriptionRangeFilters,
-    SubscriptionState, TerminationReason, TrackRole,
+    DeadlineTimer, DeliveryTimeoutState, MAX_PENDING_UPDATE_GROUPS, PendingUpdateGroup,
+    PendingUpdateRejection, RequestKind, SessionError, SessionEvent, StreamCountState,
+    Subscription, SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState,
+    TerminationReason, TrackRole,
 };
 use super::delivery::{
     compute_effective_delivery_timeout_ms, record_publish_done, set_subscription_expires,
@@ -743,15 +744,10 @@ impl Session {
         // 「同じ bidi stream 上で送る」ことで識別されるため、wire の
         // `update.request_id` は stream context の `request_id` と一致しない。
         // 対象 request の解決には stream context の `request_id` を使う。
-        // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): peer からの outstanding REQUEST_UPDATE 数が
-        // 自側 SETUP で宣言した MAX_REQUEST_UPDATES を超えたら TOO_MANY_REQUEST_UPDATES でセッションを閉じる。
-        // デフォルト値 0 は無制限を意味する。
-        let local_max = self
-            .setup
-            .local
-            .as_ref()
-            .and_then(|s| s.options.max_request_updates())
-            .unwrap_or(0);
+        // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): peer からの outstanding
+        // REQUEST_UPDATE 数が自側 SETUP で宣言した MAX_REQUEST_UPDATES を超えたら
+        // TOO_MANY_REQUEST_UPDATES でセッションを閉じる。デフォルト値 0 は無制限を意味する。
+        let local_max = self.local_max_request_updates();
         if local_max > 0 {
             let count = self.incoming_request_updates.entry(request_id).or_insert(0);
             *count += 1;
@@ -932,7 +928,7 @@ impl Session {
     /// REQUEST_UPDATE を REQUEST_ERROR で拒否するときの終端処理
     ///
     /// `error_code` は拒否理由 (Range Filter の INVALID_FILTER、不正トークンの
-    /// MALFORMED_AUTH_TOKEN など) を表す。あわせて draft-ietf-moq-transport-22 §9.5.1
+    /// MALFORMED_AUTH_TOKEN など) を表す。あわせて draft-ietf-moq-transport-23 §9.5.1
     /// (Updating Subscriptions): "When a REQUEST_UPDATE is unsuccessful, the publisher MUST
     /// also terminate the subscription by sending a PUBLISH_DONE with error code
     /// UPDATE_FAILED." を満たす。
@@ -944,6 +940,22 @@ impl Session {
     /// REQUEST_ERROR ではなくセッション終了になっているため、本関数は
     /// 拒否できる request (Established) だけを扱う。state は見ない前提であり、
     /// TRACK_STATUS / 未知 id だけを防御として閉じる。
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE_OKs MUST be
+    /// returned in the order the REQUEST_UPDATEs were received." のため、先行する未応答
+    /// グループがある状態で REQUEST_ERROR を即座に送ってはならない。先行グループの OK より
+    /// 先に ERROR が wire に出ると順序違反になるうえ、現実装では ERROR の終端処理が
+    /// キューを解放するため先行グループの OK を永久に送れなくなる。
+    ///
+    /// そこで subscription では次のように振る舞う。
+    ///
+    /// - 未応答グループが無い: 従来どおり即時に REQUEST_ERROR を送る。
+    /// - 未応答グループがある: 拒否内容を [`PendingUpdateGroup`] としてキューへ積み、
+    ///   先行グループの OK が送出された時点 (`Session::send_request_ok`) で
+    ///   REQUEST_ERROR を自動送出する。拒否した更新はアプリへ通知しない
+    ///   (アプリは拒否された更新への応答を返さない)。
+    ///
+    /// FETCH は受信側キューを持たず更新を即時処理するため、即時応答のままで順序が保たれる。
     ///
     /// - Established かつ自側 publisher: `send_request_error` と同じ経路で
     ///   REQUEST_ERROR (`error_code`) → Terminated → PUBLISH_DONE(UPDATE_FAILED)。
@@ -970,41 +982,33 @@ impl Session {
         error_code: u64,
         reason: &'static str,
     ) -> Result<(), SessionError> {
-        let reason_phrase = || {
-            ReasonPhrase::new(reason)
-                .expect("request update rejection reason must be <= 1024 bytes")
-        };
         match self.locate_request(request_id) {
             // draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions): "When a
             // REQUEST_UPDATE fails for a FETCH, the publisher MUST reset the FETCH data
             // stream." の MUST と fetch state の遷移は `send_request_error`
             // (`send_err_for_fetch`) が担う。`emit_request_error` では reset が発行されない。
+            // FETCH は未応答キューを持たないため、即時応答でも受信順を崩さない。
             Some(RequestTable::Fetch) => self.send_request_error(
                 request_id,
                 error_code,
                 0,
-                reason_phrase(),
+                ReasonPhrase::new(reason)
+                    .expect("request update rejection reason must be <= 1024 bytes"),
                 ErrorDetails::new(),
             ),
             Some(RequestTable::Subscription) => {
-                let my_role = self
+                // 先行する未応答グループがあれば、拒否をキューへ積んで OK の後ろに回す
+                let has_pending = self
                     .subscriptions
                     .get(&request_id)
-                    .expect("locate_request guarantees key presence")
-                    .my_role;
-                match my_role {
-                    TrackRole::Publisher => self.send_request_error(
+                    .is_some_and(|subscription| !subscription.pending_update_params.is_empty());
+                if has_pending {
+                    return self.push_pending_update_group(
                         request_id,
-                        error_code,
-                        0,
-                        reason_phrase(),
-                        ErrorDetails::new(),
-                    ),
-                    TrackRole::Subscriber => {
-                        self.emit_request_error(request_id, error_code, reason);
-                        Ok(())
-                    }
+                        PendingUpdateGroup::rejected(PendingUpdateRejection { error_code, reason }),
+                    );
                 }
+                self.send_subscription_update_rejection(request_id, error_code, reason)
             }
             // draft §9.5 (REQUEST_UPDATE): 更新できない request への受信は
             // UNEXPECTED_MESSAGE で閉じる。呼び出し元の request 種別判定
@@ -1018,6 +1022,47 @@ impl Session {
                 Err(err)
             }
         }
+    }
+
+    /// subscription の未応答グループをキューへ追加する
+    ///
+    /// 自側 MAX_REQUEST_UPDATES が 0 (無制限) のときだけ [`MAX_PENDING_UPDATE_GROUPS`] を
+    /// 実装上限として適用する。宣言済みなら peer はその数を超えられず
+    /// (`handle_peer_request_update` が先に TOO_MANY_REQUEST_UPDATES で閉じる)、本上限は
+    /// 発動しない。実装上限を超えた場合は、同じく未応答更新の過多を表す
+    /// draft-ietf-moq-transport-23 §9.1.7 / §12.2 (Session Termination Codes) の
+    /// `TOO_MANY_REQUEST_UPDATES` (0x1B) でセッションを閉じる。
+    /// §12.2 は "the application MAY use any error message and SHOULD use a relevant code"
+    /// と定めるため、実装固有の上限超過にも最も関連する本コードを使う
+    /// (INTERNAL_ERROR では原因が伝わらない)。
+    fn push_pending_update_group(
+        &mut self,
+        request_id: u64,
+        group: PendingUpdateGroup,
+    ) -> Result<(), SessionError> {
+        let count = self
+            .subscriptions
+            .get(&request_id)
+            .expect("locate_request guarantees key presence")
+            .pending_update_params
+            .len();
+        // draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 値 0 は
+        // "the endpoint does not limit REQUEST_UPDATE concurrency" であるため、
+        // 実装上限は宣言していない (local_max == 0) 場合だけ適用する。
+        if self.local_max_request_updates() == 0 && count >= MAX_PENDING_UPDATE_GROUPS {
+            let err = SessionError::new(
+                SESSION_TOO_MANY_REQUEST_UPDATES,
+                "pending REQUEST_UPDATE groups exceed implementation limit",
+            );
+            self.fail(err.clone());
+            return Err(err);
+        }
+        let subscription = self
+            .subscriptions
+            .get_mut(&request_id)
+            .expect("locate_request guarantees key presence");
+        subscription.pending_update_params.push_back(group);
+        Ok(())
     }
 
     /// REQUEST_UPDATE を受信できる Subscription かを検証する
@@ -1117,22 +1162,10 @@ impl Session {
         // 更新は「受信順のグループ」として保持し、FILL_PARAMETERS を含む更新の前後を境界に
         // する。先頭グループは `send_request_ok` が応答時に適用して取り除く。
         //
-        // `view` は未応答の全グループと今回のメッセージを先頭から順に合体した
+        // `view` は未応答の全グループと今回のメッセージを先頭から合体した
         // 「受信順に処理した場合の累積表示」である。累積上限の検証と fill fetch stream の
-        // 開設判定、アプリへの通知に使う。`merge_from` は破壊的なので複製の上でマージする。
-        let view = match subscription.pending_update_params.front() {
-            // 先頭グループの累積から始め、以降のグループと今回のメッセージを順に重ねる
-            Some(head) => {
-                let mut folded = head.parameters.clone();
-                for group in subscription.pending_update_params.iter().skip(1) {
-                    folded.merge_from(&group.parameters);
-                }
-                folded.merge_from(&parameters);
-                folded
-            }
-            // 未応答の更新が無ければ、今回のメッセージ自体が累積表示になる
-            None => parameters.clone(),
-        };
+        // 開設判定、アプリへの通知に使う (合体は複製の上で行う)。
+        let view = subscription.pending_update_view(&parameters);
         // draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、同節の
         // "the peer's total number of Ranges (Start/End pairs) allowed concurrently in all
         // Range filter Section 3.3.2 parameters for a given subscription or fetch" であり、
@@ -1156,38 +1189,52 @@ impl Session {
             )?;
             return Ok(());
         }
-        let subscription = self
-            .subscriptions
-            .get_mut(&request_id)
-            .expect("locate_request guarantees key presence");
         // グループの境界を決めて今回の更新を蓄積する。FILL_PARAMETERS を含む更新は
         // 単独のグループとし (前の通常更新にも後続の通常更新にも合体しない)、
         // FILL_PARAMETERS を含むグループの直後の通常更新も新しいグループを開始する。
-        // それ以外の通常更新は末尾グループへ累積する (後の値が前を上書きする)。
+        // 拒否待ちグループもパラメータを適用しない境界であるため、その後続は合体せず
+        // 新しいグループを開始する。それ以外の通常更新は末尾グループへ累積する
+        // (後の値が前を上書きする)。
         let has_fill_parameters = parameters.fill_parameters().is_some();
-        let tail_is_fill_group = subscription
-            .pending_update_params
-            .back()
-            .is_some_and(|group| group.has_fill_parameters);
-        if has_fill_parameters
-            || tail_is_fill_group
-            || subscription.pending_update_params.is_empty()
-        {
-            // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+        let start_new_group = {
+            let subscription = self
+                .subscriptions
+                .get(&request_id)
+                .expect("locate_request guarantees key presence");
+            let tail = subscription.pending_update_params.back();
+            has_fill_parameters
+                || tail.is_some_and(|group| group.has_fill_parameters)
+                || tail.is_some_and(PendingUpdateGroup::is_rejection)
+                || subscription.pending_update_params.is_empty()
+        };
+        if start_new_group {
+            // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
             // FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
             // 保持されない (sticky 対象外) ため、グループのパラメータから除外する。
             // アプリへ通知する累積表示 (`view`) には残る。
             let mut group_parameters = parameters.clone();
             group_parameters.remove_type(PARAM_FILL_PARAMETERS);
-            subscription
-                .pending_update_params
-                .push_back(PendingUpdateGroup {
+            self.push_pending_update_group(
+                request_id,
+                PendingUpdateGroup {
                     parameters: group_parameters,
                     has_fill_parameters,
-                });
-        } else if let Some(tail) = subscription.pending_update_params.back_mut() {
-            tail.parameters.merge_from(&parameters);
+                    rejection: None,
+                },
+            )?;
+        } else {
+            let subscription = self
+                .subscriptions
+                .get_mut(&request_id)
+                .expect("locate_request guarantees key presence");
+            if let Some(tail) = subscription.pending_update_params.back_mut() {
+                tail.parameters.merge_from(&parameters);
+            }
         }
+        let subscription = self
+            .subscriptions
+            .get(&request_id)
+            .expect("locate_request guarantees key presence");
         // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // FILL_PARAMETERS 付き REQUEST_UPDATE を処理したら fill fetch stream の
         // 開設を判定する。処理後観点の paused と filter で評価する

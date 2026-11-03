@@ -225,10 +225,15 @@ pub enum SessionEvent {
     /// セッションをクローズすべき (I/O 層は接続を閉じる)
     CloseSession(SessionError),
     /// peer からの REQUEST_UPDATE を受信した (アプリは send_request_ok / send_request_error で応答する)
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 複数の更新の処理を合体できるため、
+    /// `parameters` は受信した 1 通のパラメータではなく、未応答の先行更新と今回の更新を
+    /// 受信順に合体した累積表示である ([`Subscription::pending_update_view`])。
+    /// 受信時に拒否を決めた更新についてはイベントを発行しない (応答は Session が自動送出する)。
     RequestUpdateReceived {
         /// 対象 request の Request ID
         request_id: u64,
-        /// 受信したパラメータ
+        /// 受信順に合体した累積パラメータ (FILL_PARAMETERS を含む)
         parameters: MessageParameters,
     },
     /// peer からの PUBLISH_STATE_NOTIFY を受信した
@@ -1479,8 +1484,49 @@ pub struct Subscription {
     /// 適用して取り除く。これにより応答の返却順と適用順が受信順に一致する。
     /// FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として保持されない
     /// (sticky 対象外) ため、グループのパラメータからは除去する。
+    ///
+    /// 受信時に REQUEST_ERROR で拒否することが決まった更新も、先行グループの応答との順序を
+    /// 守るため、拒否を表すグループとして同じキューへ積む
+    /// (draft §9.5: "REQUEST_UPDATE_OKs MUST be returned in the order the REQUEST_UPDATEs
+    /// were received.")。先頭が拒否グループになった時点で `Session::send_request_ok` が
+    /// REQUEST_ERROR を送出する。
+    /// 拒否グループより後に受信した更新は受理グループとして積まれることがあるが、拒否の
+    /// REQUEST_ERROR 送出で購読が終端するため、それらのグループは適用されずに解放される。
+    ///
+    /// 既定構成では自側 MAX_REQUEST_UPDATES が 0 (無制限) のため、peer は未応答の更新を
+    /// いくつでも送れる。FILL_PARAMETERS を含む更新は合体できず更新ごとに 1 グループ増える
+    /// ため、[`MAX_PENDING_UPDATE_GROUPS`] を実装上限として設け、超過時はセッションを閉じる。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub pending_update_params: VecDeque<PendingUpdateGroup>,
+}
+
+/// 未応答の REQUEST_UPDATE グループ数の実装上限
+///
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 既定値 0 は
+/// "the endpoint does not limit REQUEST_UPDATE concurrency" を意味する。しかし
+/// FILL_PARAMETERS を含む更新は合体できない (§9.19.15 (FILL PARAMETERS Parameter)) ため、
+/// 更新ごとに [`PendingUpdateGroup`] が 1 つ増える。アプリの応答が滞留した状態で peer が
+/// 更新を送り続けると、未応答グループ数に上限が無くなる。
+///
+/// そこで自側 MAX_REQUEST_UPDATES が 0 のときだけ本値を実装上限として適用する
+/// (宣言済みなら peer はその数を超えられず、§9.1.7 のとおり超過時にセッションを閉じる)。
+/// 1 グループのサイズは制御メッセージ長で抑えられるが、その数百倍は無視できないため、
+/// 正常なアプリの応答遅延では到達しない 256 とする。
+pub const MAX_PENDING_UPDATE_GROUPS: usize = 256;
+
+/// 受信時に REQUEST_ERROR で拒否することを決めた REQUEST_UPDATE の応答内容
+///
+/// 拒否は受信順の応答を守るため [`PendingUpdateGroup`] としてキューに積み、
+/// 先行グループの応答 (REQUEST_UPDATE_OK) が送出された後に REQUEST_ERROR を送出する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingUpdateRejection {
+    /// REQUEST_ERROR の Error Code (draft-ietf-moq-transport-23 §12.3 (Request Error Codes))
+    pub error_code: u64,
+    /// REQUEST_ERROR の Reason Phrase
+    ///
+    /// 拒否理由は静的な実装メッセージであり 1024 バイト上限
+    /// (draft §8.5 (Reason Phrase Structure)) を超えない。
+    pub reason: &'static str,
 }
 
 /// 未応答の REQUEST_UPDATE 1 グループ分の適用待ちパラメータ
@@ -1489,6 +1535,10 @@ pub struct Subscription {
 /// 合体して累積結果のみを適用することを許す。合体の単位が本構造体であり、通常の更新は
 /// 1 グループへ累積する。FILL_PARAMETERS を含む更新は合体できない (§9.19.15) ため、
 /// その更新だけを含むグループとして前後の更新から分離する。
+///
+/// 拒否する更新は [`Self::rejection`] が `Some` のグループとして表し、`parameters` は空、
+/// `has_fill_parameters` は `false` になる。拒否グループはパラメータを適用しないため、
+/// 合体の境界としても扱う (後続の更新を拒否グループへ累積しない)。
 ///
 /// TRACK_NAMESPACE_PREFIX (0x34) も合体を禁止されるパラメータだが
 /// (§9.19.20 (TRACK_NAMESPACE_PREFIX Parameter))、SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS は
@@ -1499,13 +1549,37 @@ pub struct PendingUpdateGroup {
     /// このグループに属する REQUEST_UPDATE の累積パラメータ
     ///
     /// FILL_PARAMETERS は含まない。`send_request_ok` が応答時に subscription 状態へ
-    /// 適用する値そのものである。
+    /// 適用する値そのものである。拒否グループでは空になる。
     pub parameters: MessageParameters,
-    /// このグループが FILL_PARAMETERS を含む更新かどうか (合体の境界)
+    /// このグループが FILL_PARAMETERS を含む更新かどうか
     ///
-    /// このグループの前後では通常の更新を累積しない。fill fetch stream の開設は
-    /// 更新の受信時点で行うため (この値は保持・観測用)。
+    /// グループ境界の判定だけに使う。受信した更新が合体できない境界かどうかを表し、
+    /// fill fetch stream の開設は受信時点のメッセージに対して行うため、この値を
+    /// 開設判定には使わない。拒否グループでは `false` になる。
     pub has_fill_parameters: bool,
+    /// REQUEST_ERROR で拒否する更新のとき `Some`
+    ///
+    /// `Some` のグループは `parameters` を適用せず、`send_request_ok` が拒否応答を送出する。
+    pub rejection: Option<PendingUpdateRejection>,
+}
+
+impl PendingUpdateGroup {
+    /// REQUEST_ERROR で拒否する更新のグループか
+    pub fn is_rejection(&self) -> bool {
+        self.rejection.is_some()
+    }
+
+    /// 受信時に拒否を決めた更新のグループを作る
+    ///
+    /// 拒否グループはパラメータを適用しないため `parameters` は空、
+    /// `has_fill_parameters` は `false` にする。
+    pub fn rejected(rejection: PendingUpdateRejection) -> Self {
+        Self {
+            parameters: MessageParameters::new(),
+            has_fill_parameters: false,
+            rejection: Some(rejection),
+        }
+    }
 }
 
 /// subscription に適用されている Range Filter 群 (draft-ietf-moq-transport-22 §3.3.2 (Range Filters))
@@ -1658,10 +1732,34 @@ impl Subscription {
     /// `Some` の場合、次に `Session::send_request_ok` を呼ぶとこの値が subscription 状態へ
     /// 適用される (FILL_PARAMETERS は含まない)。更新の受信順のグループ一覧は
     /// `pending_update_params` で参照できる。
+    ///
+    /// 先頭が拒否待ちグループ (`PendingUpdateGroup::is_rejection`) の場合、その
+    /// `parameters` は空であり、次に `send_request_ok` を呼ぶと REQUEST_ERROR が送出される
+    /// (拒否した更新のパラメータは保持しない)。
     pub fn pending_update_parameters(&self) -> Option<&MessageParameters> {
         self.pending_update_params
             .front()
             .map(|group| &group.parameters)
+    }
+
+    /// 未応答の更新と `current` を先頭から合体した累積表示を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は複数の更新を合体して
+    /// 累積結果のみを適用できるため、「受信順に処理した場合の累積パラメータ」が必要になる。
+    /// `current` はこれから処理する REQUEST_UPDATE のパラメータであり、受信時に
+    /// 「今回のメッセージまで含めた表示」を必要とする検証とアプリへの通知で使う。
+    /// 既に受信済みのグループだけを見たい場合は空の [`MessageParameters`] を渡す。
+    ///
+    /// 各グループの `parameters` は FILL_PARAMETERS を除去済みである。`current` に
+    /// FILL_PARAMETERS が含まれる場合はそのまま表示に残る (アプリへの通知用)。
+    /// 拒否待ちグループはパラメータを持たないため合体に寄与しない。
+    pub fn pending_update_view(&self, current: &MessageParameters) -> MessageParameters {
+        let mut view = MessageParameters::new();
+        for group in &self.pending_update_params {
+            view.merge_from(&group.parameters);
+        }
+        view.merge_from(current);
+        view
     }
 }
 

@@ -6,8 +6,8 @@ use crate::error::{
     SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE, STREAM_DELIVERY_TIMEOUT,
 };
 use crate::message::{
-    ControlMessage, PUBLISH_OK_ALLOWED_PARAMS, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS,
-    ReasonPhrase, common::Location,
+    ControlMessage, ErrorDetails, PUBLISH_OK_ALLOWED_PARAMS, PublishDone,
+    REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, common::Location,
 };
 use crate::message_parameter::{
     LocationFilterContext, LocationFilterUpdate, MessageParameters, PARAM_LARGEST_OBJECT,
@@ -16,27 +16,51 @@ use alloc::vec::Vec;
 
 use super::super::core::Session;
 use super::super::types::{
-    DataStreamId, RequestKind, SessionError, SessionEvent, SubscriptionInitiator,
-    SubscriptionState, TrackRole,
+    DataStreamId, PendingUpdateGroup, RequestKind, SessionError, SessionEvent,
+    SubscriptionInitiator, SubscriptionState, TrackRole,
 };
 use super::delivery::{
     effective_largest_object, set_subscription_expires, update_largest_object_in_parameters,
     update_subscription_expires_if_present,
     update_subscription_subscriber_delivery_timeouts_if_present,
 };
-use super::validation::{extract_range_filters, resolve_location_filter, validate_paused};
+use super::validation::{apply_range_filter_update, resolve_location_filter, validate_paused};
+
+/// `send_ok_for_subscription` が実際に送った応答
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubscriptionOkResponse {
+    /// REQUEST_OK (PUBLISH_OK / REQUEST_UPDATE_OK) を送る
+    Ok,
+    /// 先頭が拒否待ちグループだったため REQUEST_ERROR を送った
+    Rejected,
+}
 
 impl Session {
+    /// subscription 向け REQUEST_OK の送信時処理
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 未応答の更新は受信順に保持され、
+    /// 応答も受信順に返す必要がある ("REQUEST_UPDATE_OKs MUST be returned in the order the
+    /// REQUEST_UPDATEs were received.")。そのため `Established` では呼び出し意図にかかわらず
+    /// キューの先頭グループを 1 つだけ適用する。
+    ///
+    /// 先頭が拒否待ちグループ (`PendingUpdateGroup::is_rejection`) の場合は OK を送らず、
+    /// 記録済みの拒否内容で REQUEST_ERROR を送出して [`SubscriptionOkResponse::Rejected`] を
+    /// 返す。呼び出し元は REQUEST_OK メッセージを積まないこと。
     pub(crate) fn send_ok_for_subscription(
         &mut self,
         request_id: u64,
         parameters: &mut MessageParameters,
-    ) -> Result<(), SessionError> {
+    ) -> Result<SubscriptionOkResponse, SessionError> {
         let now_ms = self.timing.last_tick_ms;
         let subscription = self
             .subscriptions
             .get(&request_id)
             .expect("locate_request guarantees key presence");
+        // 判定に使う状態と役割を Copy で退避し、拒否応答の送出 (可変借用) より前に
+        // この共有借用を終わらせる。
+        let state = subscription.state;
+        let pending_publisher = subscription.is_pending_publisher();
+        let my_role = subscription.my_role;
         // draft §9.5 (REQUEST_UPDATE): REQUEST_OK (REQUEST_UPDATE_OK) を返せるのは、
         // peer が送った request の responder と、PUBLISH 起点 subscription の publisher
         // (initiator) が peer subscriber の REQUEST_UPDATE に応答する場合である
@@ -49,7 +73,7 @@ impl Session {
         // PUBLISH 起点かどうかは購読を開始したメッセージ種別 (`Subscription::initiator`) で
         // 判定する (`my_role` は自側が担う役割であり、単独では起点を表さない)。
         // 外側の `is_initiator_self()` により、この条件が真のとき自側は publisher である。
-        let established_publish_origin = subscription.state == SubscriptionState::Established
+        let established_publish_origin = state == SubscriptionState::Established
             && subscription.initiator == SubscriptionInitiator::Publisher;
         if subscription.is_initiator_self() && !established_publish_origin {
             return Err(SessionError::new(
@@ -57,16 +81,13 @@ impl Session {
                 "request_ok (subscription) can only be sent by responder-role or by the publisher-role of an established PUBLISH subscription",
             ));
         }
-        // 末尾の LARGEST_OBJECT 保存判定に使う `my_role` を、match による更新前に
-        // Copy 退避し、冒頭の immutable な get 借用をここで終わらせる。
-        let my_role = subscription.my_role;
         // draft §9.20.1 (Parameter Scope): Subscription context は state で
         // PUBLISH_OK / REQUEST_UPDATE_OK に分岐する。状態遷移の前にスコープ検証を
         // 行うため、状態遷移前の context を保存する。末尾の LARGEST_OBJECT 注入判定
         // (context が許可する場合のみ注入) にも使い回す。
         // 将来 draft 改版で変更される可能性がある。
-        let allowed_params_for_context: Option<(&[u64], &str)> = match subscription.state {
-            SubscriptionState::Pending if subscription.is_pending_publisher() => Some((
+        let allowed_params_for_context: Option<(&[u64], &str)> = match state {
+            SubscriptionState::Pending if pending_publisher => Some((
                 PUBLISH_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (publish) parameter not allowed in this context",
             )),
@@ -88,10 +109,38 @@ impl Session {
         {
             return Err(SessionError::new(SESSION_PROTOCOL_VIOLATION, message));
         }
-        match subscription.state {
+        // 先頭が拒否待ちグループなら、REQUEST_OK ではなく REQUEST_ERROR を送る。
+        // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 応答は受信順に返す必要がある
+        // ため、先行グループが残っている間に拒否を即時送出してはならない
+        // (`reject_request_update` の doc を参照)。拒否グループはアプリへ通知していないので、
+        // アプリからの応答対象にはならない。ここに到達するのは、応答順序を守るために
+        // キューへ積まれた拒否が先頭に来た場合だけである。
+        // 拒否の送出は REQUEST_ERROR が最終応答になるため、REQUEST_OK 側の状態遷移より前に
+        // 済ませてよい (拒否グループの `parameters` は空であり適用する値を持たない)。
+        let front_rejection = self
+            .subscriptions
+            .get(&request_id)
+            .filter(|subscription| subscription.state == SubscriptionState::Established)
+            .and_then(|subscription| subscription.pending_update_params.front())
+            .filter(|group| group.is_rejection())
+            .and_then(|group| group.rejection.clone());
+        if let Some(rejection) = front_rejection {
+            self.subscriptions
+                .get_mut(&request_id)
+                .expect("locate_request guarantees key presence")
+                .pending_update_params
+                .pop_front();
+            self.send_subscription_update_rejection(
+                request_id,
+                rejection.error_code,
+                rejection.reason,
+            )?;
+            return Ok(SubscriptionOkResponse::Rejected);
+        }
+        match state {
             // draft §9.3 (REQUEST_OK): PUBLISH_OK context → REQUEST_OK に統一。
             // Pending(Publisher) → Established 遷移
-            SubscriptionState::Pending if subscription.is_pending_publisher() => {
+            SubscriptionState::Pending if pending_publisher => {
                 // draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters
                 // appear in REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを
                 // 運び、subscription 更新用パラメータは REQUEST_UPDATE (要求) に出現する。
@@ -169,14 +218,17 @@ impl Session {
                     if let Some(priority) = pending_params.subscriber_priority() {
                         subscription.subscriber_priority = Some(priority);
                     }
-                    // draft §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0 removes the
-                    // filter; non-zero replaces it entirely. If a filter parameter is omitted
-                    // from REQUEST_UPDATE, it is unchanged."
-                    // `merge_from` が型単位の全置換と Length=0 削除を済ませているので、
-                    // 累積パラメータからそのまま作り直せばこの規則を満たす。
-                    if pending_params.has_range_filters() {
-                        subscription.range_filters = extract_range_filters(&pending_params);
-                    }
+                    // draft-ietf-moq-transport-23 §3.3.2 (Range Filters):
+                    // "In REQUEST_UPDATE, Length of 0 removes the filter; non-zero replaces
+                    // it entirely. If a filter parameter is omitted from REQUEST_UPDATE, it
+                    // is unchanged."
+                    //
+                    // 未応答の更新は FILL_PARAMETERS の境界でグループに分かれるため、
+                    // 先行グループで設定した型がこのグループのパラメータに現れないことが
+                    // ある。4 型を丸ごと置き換えると省略された型が消えてしまうため、
+                    // パラメータに現れた型だけを差し替える。subscription に累積パラメータを
+                    // 別途持つ案は、適用済みの `range_filters` と二重管理になるため採らない。
+                    apply_range_filter_update(&mut subscription.range_filters, &pending_params);
                     // draft §3.3.1 (Location Filters): 相対フィルタは更新時点の largest で解決する。
                     // フィルタ不変 (Unchanged) の場合も応答時点の largest で再解決する (旧来挙動)。
                     let largest = subscription.largest_received_location;
@@ -243,7 +295,7 @@ impl Session {
             }
         }
 
-        Ok(())
+        Ok(SubscriptionOkResponse::Ok)
     }
 
     /// subscription 用 REQUEST_ERROR の送信時状態遷移
@@ -333,6 +385,73 @@ impl Session {
             self.release_request_update_state(request_id);
         }
         result
+    }
+
+    /// subscription の REQUEST_UPDATE を REQUEST_ERROR で拒否する応答を送る
+    ///
+    /// 自側が publisher の場合は `send_request_error` と同じ経路で
+    /// REQUEST_ERROR → Terminated → PUBLISH_DONE(UPDATE_FAILED) まで進める
+    /// (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))。
+    /// 自側が subscriber の場合は REQUEST_ERROR のみを送り、PUBLISH_DONE の送出は
+    /// publisher である peer の責務に委ねる。どちらの場合も REQUEST_ERROR が最終応答
+    /// (FIN) になるため、以後の REQUEST_UPDATE_OK は送れない。残っている未応答グループと
+    /// MAX_REQUEST_UPDATES (§9.1.7) のクレジットを解放する。
+    pub(crate) fn send_subscription_update_rejection(
+        &mut self,
+        request_id: u64,
+        error_code: u64,
+        reason: &'static str,
+    ) -> Result<(), SessionError> {
+        let my_role = self
+            .subscriptions
+            .get(&request_id)
+            .expect("locate_request guarantees key presence")
+            .my_role;
+        match my_role {
+            TrackRole::Publisher => self.send_request_error(
+                request_id,
+                error_code,
+                0,
+                ReasonPhrase::new(reason)
+                    .expect("request update rejection reason must be <= 1024 bytes"),
+                ErrorDetails::new(),
+            ),
+            TrackRole::Subscriber => {
+                self.emit_request_error(request_id, error_code, reason);
+                self.release_request_update_state(request_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// 先頭に詰まった拒否待ちグループの REQUEST_ERROR を送出する
+    ///
+    /// 受理済みグループの REQUEST_UPDATE_OK を送った直後に呼ぶ。拒否は受信時に
+    /// キューの末尾へ積まれているため、先頭に来た時点で受信順の応答が可能になる
+    /// (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))。REQUEST_ERROR の送出で
+    /// 購読が終端するか送信方向が FIN するため、続けて応答を返すことはない。
+    pub(crate) fn flush_deferred_update_rejections(
+        &mut self,
+        request_id: u64,
+    ) -> Result<(), SessionError> {
+        let rejection = {
+            let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
+                return Ok(());
+            };
+            if !subscription
+                .pending_update_params
+                .front()
+                .is_some_and(PendingUpdateGroup::is_rejection)
+            {
+                return Ok(());
+            }
+            subscription
+                .pending_update_params
+                .pop_front()
+                .and_then(|group| group.rejection)
+                .expect("front group was checked as rejection")
+        };
+        self.send_subscription_update_rejection(request_id, rejection.error_code, rejection.reason)
     }
 
     pub(crate) fn handle_ok_for_subscription(

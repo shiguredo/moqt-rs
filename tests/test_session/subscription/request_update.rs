@@ -4379,6 +4379,501 @@ fn send_subscription_update(
         .expect("REQUEST_UPDATE の受信に成功すること");
 }
 
+/// 指定の SETUP Option で SUBSCRIBE / SUBSCRIBE_OK を確立する
+///
+/// Range Filter を送るには peer (server) の MAX_FILTER_RANGES 宣言が必要であり
+/// (draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES))、累積上限の判定には
+/// server 自身の宣言が必要になる。
+fn establish_subscribe_with_setup(
+    client_opts: SetupOptions,
+    server_opts: SetupOptions,
+) -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair_with_options(client_opts, server_opts);
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam1".to_vec(), MessageParameters::new())
+        .expect("SUBSCRIBE の送信に成功すること");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("SUBSCRIBE の受信に成功すること");
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("SUBSCRIBE_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("SUBSCRIBE_OK の受信に成功すること");
+    (client, server, rid)
+}
+
+/// FILL_PARAMETERS の境界を挟んでも、先行グループで設定した Range Filter の型は消えない
+///
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0
+/// removes the filter; non-zero replaces it entirely. If a filter parameter is omitted
+/// from REQUEST_UPDATE, it is unchanged."
+///
+/// FILL_PARAMETERS を含む更新は合体できない (§9.19.15 (FILL PARAMETERS Parameter)) ため、
+/// 未応答の更新は fill の前後でグループに分かれる。後続グループに現れない型は先行グループの
+/// 設定を維持しなければならないが、4 型を丸ごと置き換える実装では消えてしまう。
+#[test]
+fn range_filter_types_survive_fill_boundary() {
+    use shiguredo_moqt::message_parameter::{
+        PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER, RangeFilterSet,
+    };
+
+    let (mut client, mut server, rid) =
+        establish_subscribe_with_setup(SetupOptions::new(), max_filter_options());
+
+    // 1 通目: SUBGROUP_FILTER (SetID=0, 0..=1)
+    let mut first = MessageParameters::new();
+    first.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 1));
+    send_subscription_update(&mut client, &mut server, rid, first);
+    // 2 通目: FILL_PARAMETERS (内側は空)。合体の境界になる
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    // 3 通目: OBJECTID_FILTER (SetID=0, 10..=20)
+    let mut third = MessageParameters::new();
+    third.push(range_filter(PARAM_OBJECTID_FILTER, 0, 10, 20));
+    send_subscription_update(&mut client, &mut server, rid, third);
+
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.pending_update_params.len(),
+        3,
+        "fill の前後が境界となり 3 グループになること"
+    );
+    assert!(
+        subscription.pending_update_params[1].has_fill_parameters,
+        "2 通目が fill を含むグループであること"
+    );
+
+    // 1 通目の応答: SUBGROUP_FILTER だけが適用される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    let subgroup_filter = vec![RangeFilterSet {
+        set_id: 0,
+        property_type: None,
+        ranges: vec![(0, Some(1))],
+    }];
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.range_filters.subgroup, subgroup_filter,
+        "1 通目の SUBGROUP_FILTER が適用されること"
+    );
+    assert!(
+        subscription.range_filters.object_id.is_empty(),
+        "1 通目では OBJECTID_FILTER は設定されていないこと"
+    );
+
+    // 2 通目 (fill) の応答: パラメータを持たないため状態は不変
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("2 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.range_filters.subgroup, subgroup_filter,
+        "fill グループの適用で先行グループの SUBGROUP_FILTER が消えないこと"
+    );
+    assert!(
+        subscription.range_filters.object_id.is_empty(),
+        "fill グループ自体は OBJECTID_FILTER を設定しないこと"
+    );
+
+    // 3 通目の応答: OBJECTID_FILTER が加わり、SUBGROUP_FILTER も維持される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("3 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.range_filters.subgroup, subgroup_filter,
+        "3 通目に現れない SUBGROUP_FILTER が維持されること"
+    );
+    assert_eq!(
+        subscription.range_filters.object_id,
+        vec![RangeFilterSet {
+            set_id: 0,
+            property_type: None,
+            ranges: vec![(10, Some(20))],
+        }],
+        "3 通目の OBJECTID_FILTER が適用されること"
+    );
+    assert!(
+        subscription.pending_update_params.is_empty(),
+        "すべてのグループへ応答するとキューが空になること"
+    );
+}
+
+/// FILL_PARAMETERS の境界を挟んだ Length=0 の更新で、先行グループの型が削除される
+///
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0
+/// removes the filter"。省略 (不変) と Length=0 (削除) を区別する必要がある。
+#[test]
+fn range_filter_removal_survives_fill_boundary() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_SUBGROUP_FILTER,
+    };
+
+    let (mut client, mut server, rid) =
+        establish_subscribe_with_setup(SetupOptions::new(), max_filter_options());
+
+    // 1 通目: SUBGROUP_FILTER (0..=1)
+    let mut first = MessageParameters::new();
+    first.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 1));
+    send_subscription_update(&mut client, &mut server, rid, first);
+    // 2 通目: FILL_PARAMETERS (境界)
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    // 3 通目: SUBGROUP_FILTER を Length=0 で削除
+    let mut third = MessageParameters::new();
+    third.push(MessageParameter {
+        param_type: PARAM_SUBGROUP_FILTER,
+        value: MessageParameterValue::LengthPrefixed(vec![]),
+    });
+    send_subscription_update(&mut client, &mut server, rid, third);
+
+    // 1 通目の応答でフィルタが設定される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    assert!(
+        !server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .range_filters
+            .subgroup
+            .is_empty(),
+        "1 通目の SUBGROUP_FILTER が適用されること"
+    );
+
+    // 2 通目 (fill) の応答では削除されない (省略は不変)
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("2 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    assert!(
+        !server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .range_filters
+            .subgroup
+            .is_empty(),
+        "fill グループの適用でフィルタが削除されないこと"
+    );
+
+    // 3 通目の応答 (Length=0) で削除される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("3 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        subscription.range_filters.subgroup.is_empty(),
+        "Length=0 の更新で SUBGROUP_FILTER が削除されること"
+    );
+    assert!(
+        subscription.range_filters.is_empty(),
+        "他の型も設定されていないこと"
+    );
+}
+
+/// fill 境界を挟んだ異なる型の Range Filter が応答ごとに適用され、Pass 判定が追随する
+///
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) の「省略は不変・非ゼロは全置換・
+/// Length=0 は削除」と、§3.3.3 (Combining Filters) の
+/// "Pass = (NOT Paused) AND Location Filters AND Range Filters" を、publisher 側の
+/// 送信 API (`send_subgroup_object`) で検証する。先行グループの型が後続グループの適用で
+/// 消えると、通過するはずの Object が `LocalFilterMismatch` で拒否される。
+#[test]
+fn range_filter_types_apply_in_receive_order_with_pass_evaluation() {
+    use shiguredo_moqt::message_parameter::{PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER};
+    use shiguredo_moqt::session::types::SendRequestError;
+
+    let (mut client, mut server, rid) =
+        establish_subscribe_with_setup(SetupOptions::new(), max_filter_options());
+
+    // 1 通目: SUBGROUP_FILTER (0..=1)
+    let mut first = MessageParameters::new();
+    first.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 1));
+    send_subscription_update(&mut client, &mut server, rid, first);
+    // 2 通目: FILL_PARAMETERS (境界、フィルタは変更しない)
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    // 3 通目: OBJECTID_FILTER (10..=20)
+    let mut third = MessageParameters::new();
+    third.push(range_filter(PARAM_OBJECTID_FILTER, 0, 10, 20));
+    send_subscription_update(&mut client, &mut server, rid, third);
+
+    // 受信順に応答する。1 通目で subgroup 0..=1 が適用される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+
+    // subgroup 0 は通過し、subgroup 2 は拒否される
+    server
+        .send_subgroup_header(
+            DataStreamId(80),
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: None,
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("subgroup header の送信に成功すること");
+    server
+        .send_subgroup_object(DataStreamId(80), 1, None)
+        .expect("subgroup 0 は SUBGROUP_FILTER を満たすこと");
+    server
+        .send_subgroup_header(
+            DataStreamId(81),
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(2),
+                publisher_priority: None,
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("subgroup header の送信に成功すること");
+    let err = server
+        .send_subgroup_object(DataStreamId(81), 1, None)
+        .expect_err("subgroup 2 は SUBGROUP_FILTER を満たさないこと");
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "SUBGROUP_FILTER 不一致は LocalFilterMismatch であること: {err:?}"
+    );
+
+    // 2 通目 (fill) の応答ではフィルタは不変。subgroup 3 は引き続き拒否される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("2 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    server
+        .send_subgroup_header(
+            DataStreamId(82),
+            rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(3),
+                publisher_priority: None,
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("subgroup header の送信に成功すること");
+    let err = server
+        .send_subgroup_object(DataStreamId(82), 1, None)
+        .expect_err("fill の応答後も SUBGROUP_FILTER が維持されること");
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "fill の応答でフィルタが消えていないこと: {err:?}"
+    );
+
+    // 3 通目の応答で OBJECTID_FILTER が AND される。subgroup 0 でも Object 5 は範囲外
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("3 通目の REQUEST_UPDATE_OK を送れること");
+    let _ = take_send_on_stream(&mut server);
+    let err = server
+        .send_subgroup_object(DataStreamId(80), 5, None)
+        .expect_err("Object 5 は OBJECTID_FILTER (10..=20) を満たさないこと");
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "OBJECTID_FILTER 不一致は LocalFilterMismatch であること: {err:?}"
+    );
+    // Object 15 は両方の型を満たす (subgroup 0 AND object 10..=20)
+    server
+        .send_subgroup_object(DataStreamId(80), 15, None)
+        .expect("subgroup 0 と Object 15 は両方のフィルタを満たすこと");
+    // subgroup 2 は Object 15 でも SUBGROUP_FILTER を満たさない
+    let err = server
+        .send_subgroup_object(DataStreamId(81), 15, None)
+        .expect_err("subgroup 2 は OBJECTID_FILTER を満たしても拒否されること");
+    assert!(
+        matches!(err, SendRequestError::LocalFilterMismatch),
+        "先行グループの SUBGROUP_FILTER が維持されていること: {err:?}"
+    );
+}
+
+/// 受理された更新と拒否された更新が混在しても、OK と ERROR が受信順に送出される
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE_OKs MUST be returned
+/// in the order the REQUEST_UPDATEs were received."
+///
+/// 1 通目は受理され未応答のまま残り、2 通目は受信時の累積 Range Filter 検証で拒否される。
+/// 拒否を即時送出すると 1 通目の OK より先に ERROR が出てしまうため、拒否も受信順の
+/// キューに積み、1 通目の OK の直後に ERROR を送出する。
+#[test]
+fn accepted_and_rejected_updates_respond_in_receive_order() {
+    use shiguredo_moqt::error::{PUBLISH_DONE_UPDATE_FAILED, REQUEST_INVALID_FILTER};
+    use shiguredo_moqt::message_parameter::{PARAM_OBJECTID_FILTER, PARAM_SUBGROUP_FILTER};
+
+    // 自側 (server) の MAX_FILTER_RANGES=1。2 通目の累積 2 個が上限を超える
+    let (mut client, mut server, rid) =
+        establish_subscribe_with_setup(SetupOptions::new(), opts_with(0x06, 1));
+
+    // 1 通目: SUBGROUP_FILTER 1 Range → 受理
+    let mut first = MessageParameters::new();
+    first.push(range_filter(PARAM_SUBGROUP_FILTER, 0, 0, 1));
+    send_subscription_update(&mut client, &mut server, rid, first);
+    // 2 通目: OBJECTID_FILTER 1 Range → 単体では上限内だが累積 2 で超過 → 拒否
+    let mut second = MessageParameters::new();
+    second.push(range_filter(PARAM_OBJECTID_FILTER, 0, 0, 1));
+    send_subscription_update(&mut client, &mut server, rid, second);
+
+    // アプリへ通知されるのは受理した 1 通目だけであり、拒否はまだ送出されない
+    let mut received = 0;
+    while let Some(event) = server.poll_event() {
+        match event {
+            SessionEvent::RequestUpdateReceived { request_id, .. } => {
+                assert_eq!(request_id, rid);
+                received += 1;
+            }
+            SessionEvent::SendOnStream { message, .. } => {
+                panic!("先行グループの応答前に送信してはいけない: {message:?}")
+            }
+            SessionEvent::CloseSession(err) => panic!("セッションを閉じてはいけない: {err:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(received, 1, "拒否した更新はアプリへ通知しないこと");
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.pending_update_params.len(),
+        2,
+        "受理グループと拒否グループが受信順に残ること"
+    );
+    assert!(
+        !subscription.pending_update_params[0].is_rejection(),
+        "先頭は受理した 1 通目であること"
+    );
+    assert!(
+        subscription.pending_update_params[1].is_rejection(),
+        "拒否した 2 通目は拒否グループとして積まれること"
+    );
+
+    // 1 通目の OK を送ると、その直後に 2 通目の ERROR が送出される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("1 通目の REQUEST_UPDATE_OK を送れること");
+    let (stream_rid, ok, ok_fin) = take_send_on_stream_with_fin(&mut server);
+    assert_eq!(stream_rid, rid);
+    assert!(
+        matches!(ok, ControlMessage::RequestOk(_)),
+        "1 通目の OK が最初に送出されること: {ok:?}"
+    );
+    assert!(!ok_fin, "REQUEST_UPDATE_OK は stream を閉じないこと");
+
+    let (stream_rid, error, error_fin) = take_send_on_stream_with_fin(&mut server);
+    assert_eq!(stream_rid, rid);
+    match error {
+        ControlMessage::RequestError(err) => assert_eq!(
+            err.error_code, REQUEST_INVALID_FILTER,
+            "拒否理由は INVALID_FILTER であること"
+        ),
+        other => panic!("2 番目は REQUEST_ERROR であること: {other:?}"),
+    }
+    assert!(
+        !error_fin,
+        "PUBLISH_DONE が続くため REQUEST_ERROR では FIN しないこと"
+    );
+
+    let (stream_rid, done, done_fin) = take_send_on_stream_with_fin(&mut server);
+    assert_eq!(stream_rid, rid);
+    match done {
+        ControlMessage::PublishDone(done) => assert_eq!(
+            done.status_code, PUBLISH_DONE_UPDATE_FAILED,
+            "失敗した更新の購読は UPDATE_FAILED で終端すること"
+        ),
+        other => panic!("REQUEST_ERROR の後は PUBLISH_DONE であること: {other:?}"),
+    }
+    assert!(done_fin, "PUBLISH_DONE が最終メッセージで FIN されること");
+
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.state,
+        SubscriptionState::Terminated,
+        "拒否した更新で購読が終端すること"
+    );
+    assert!(
+        subscription.pending_update_params.is_empty(),
+        "終端時に未応答グループが解放されること"
+    );
+}
+
+/// 自側 MAX_REQUEST_UPDATES が 0 でも未応答グループ数に実装上限がある
+///
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): 既定値 0 は
+/// "the endpoint does not limit REQUEST_UPDATE concurrency" である。しかし
+/// FILL_PARAMETERS を含む更新は合体できない (§9.19.15) ため、peer 入力だけで未応答グループが
+/// 増え続ける。実装上限を超えたらセッションを閉じ、メモリを有限に保つ。
+#[test]
+fn pending_update_groups_have_implementation_limit_without_peer_limit() {
+    use shiguredo_moqt::error::SESSION_TOO_MANY_REQUEST_UPDATES;
+    use shiguredo_moqt::session::types::MAX_PENDING_UPDATE_GROUPS;
+
+    // 既定構成では自側 MAX_REQUEST_UPDATES を宣言しない (0 = 無制限)
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    for expected in 1..=MAX_PENDING_UPDATE_GROUPS {
+        send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+        assert_eq!(
+            server
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .pending_update_params
+                .len(),
+            expected,
+            "FILL_PARAMETERS を含む更新ごとに未応答グループが増えること"
+        );
+    }
+
+    // 上限を超える更新はセッションを閉じる
+    client
+        .send_request_update(rid, fill_update_params())
+        .expect("REQUEST_UPDATE の送信に成功すること");
+    let (_, update) = take_send_on_stream(&mut client);
+    let err = server
+        .recv_stream_message(rid, update)
+        .expect_err("実装上限を超えた REQUEST_UPDATE は拒否されること");
+    assert_eq!(
+        err.code, SESSION_TOO_MANY_REQUEST_UPDATES,
+        "未応答更新の過多は TOO_MANY_REQUEST_UPDATES で閉じること"
+    );
+    match drain_until_close(&mut server) {
+        SessionEvent::CloseSession(err) => assert_eq!(
+            err.code, SESSION_TOO_MANY_REQUEST_UPDATES,
+            "CloseSession も同じコードであること"
+        ),
+        other => panic!("CloseSession が期待されたが {other:?} だった"),
+    }
+}
+
 /// pause → fill → resume の REQUEST_UPDATE は受信順に処理され、応答も受信順に返る
 ///
 /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) は合体後の累積結果のみを適用する

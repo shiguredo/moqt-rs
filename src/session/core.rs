@@ -50,6 +50,7 @@ use crate::stream::SETUP_STREAM_TYPE;
 use super::auth_token_cache::AuthTokenCache;
 use super::data::{IncomingDataStream, OutgoingDataStream};
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
+use super::subscription::dispatch::SubscriptionOkResponse;
 use super::types::{
     DataStreamId, DeadlineTimer, Fetch, PeerControlMessageSizeLimit, PeerGoawayInfo,
     RecvRequestError, RequestKind, RequestStreamEnd, Role, SendRequestError, SessionError,
@@ -1958,6 +1959,15 @@ impl Session {
     /// `RequestTable::Fetch` 分岐は FETCH 確立後 (FetchState::Established) の REQUEST_UPDATE_OK 経路
     /// (draft §9.5 (REQUEST_UPDATE): FETCH を REQUEST_UPDATE 対象に含め、応答を
     /// REQUEST_OK / REQUEST_ERROR と規定) として REQUEST_UPDATE に含まれる。
+    ///
+    /// subscription では「未応答の REQUEST_UPDATE グループの先頭を 1 つ適用して
+    /// REQUEST_UPDATE_OK を返す」ことを意味する。REQUEST_UPDATE 1 通につき 1 回、
+    /// 受信順に呼ぶこと。どのイベントへの応答を意図していても適用対象は常に先頭グループに
+    /// なる (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE_OKs MUST be
+    /// returned in the order the REQUEST_UPDATEs were received.")。受信時に拒否を決めた
+    /// 更新はアプリへ通知しないため、先行グループの OK を送った直後に、キューに残っている
+    /// 拒否の REQUEST_ERROR が自動送出される。
+    ///
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fn send_request_ok(
         &mut self,
@@ -2016,7 +2026,13 @@ impl Session {
         let mut fin = false;
         match table {
             Some(RequestTable::Subscription) => {
-                self.send_ok_for_subscription(request_id, &mut parameters)?
+                // 先頭が拒否待ちグループだった場合、REQUEST_ERROR の送出まで済んでいる。
+                // ここで REQUEST_OK を積むと応答が 2 通になり、受信順の MUST にも反する。
+                if self.send_ok_for_subscription(request_id, &mut parameters)?
+                    == SubscriptionOkResponse::Rejected
+                {
+                    return Ok(());
+                }
             }
             Some(RequestTable::Fetch) => self.send_ok_for_fetch(request_id, &mut parameters)?,
             Some(RequestTable::TrackStatus) => {
@@ -2041,6 +2057,12 @@ impl Session {
             message: msg,
             fin,
         });
+        // 受信時に拒否を決めてキューへ積んだ更新は、先行グループの OK を積んだ後で
+        // REQUEST_ERROR を送る (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) の
+        // 応答順序)。FETCH / TRACK_STATUS は未応答キューを持たないため対象外である。
+        if matches!(table, Some(RequestTable::Subscription)) {
+            self.flush_deferred_update_rejections(request_id)?;
+        }
         Ok(())
     }
 
@@ -2520,6 +2542,20 @@ impl Session {
             .local
             .as_ref()
             .and_then(|s| s.options.max_filter_ranges())
+            .unwrap_or(0)
+    }
+
+    /// 自側 SETUP で宣言した MAX_REQUEST_UPDATES を返す (未宣言は 0 = 無制限)
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): "A value of 0 means the
+    /// endpoint does not limit REQUEST_UPDATE concurrency. If not present, the default value
+    /// is 0."。受信時のクレジット検証と未応答グループ数の実装上限
+    /// (`MAX_PENDING_UPDATE_GROUPS`) の判定が同じ値を見るよう、参照を 1 箇所にまとめている。
+    pub(super) fn local_max_request_updates(&self) -> u64 {
+        self.setup
+            .local
+            .as_ref()
+            .and_then(|s| s.options.max_request_updates())
             .unwrap_or(0)
     }
 

@@ -100,6 +100,46 @@ pub fn extract_range_filters(parameters: &MessageParameters) -> SubscriptionRang
     }
 }
 
+/// 適用済みの Range Filter に、パラメータに現れた型だけを反映する
+///
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters): "In REQUEST_UPDATE, Length of 0
+/// removes the filter; non-zero replaces it entirely. If a filter parameter is omitted
+/// from REQUEST_UPDATE, it is unchanged."
+///
+/// FILL_PARAMETERS を含む更新は合体できない (§9.19.15 (FILL PARAMETERS Parameter)) ため、
+/// 未応答の更新はその前後でグループに分かれる。先行グループで設定した型は後続グループの
+/// パラメータに現れないことがあり、[`extract_range_filters`] で 4 型を丸ごと置き換えると
+/// 「省略された型は不変」という規則に反して先行グループの設定が消える。
+///
+/// そこで型ごとに、その型のパラメータが現れたときだけ置き換える (現れた型の
+/// [`SubscriptionRangeFilters`] は空 = Length=0 の削除になる)。Subscription に累積
+/// パラメータを別途保持すると subscription 状態と二重管理になるため、適用済みの状態である
+/// `applied` を直接更新する。
+///
+/// 型の有無は [`MessageParameters::range_filters`] の生インスタンスで判定する。
+/// [`MessageParameters::range_filter_sets`] は Length=0 を除外するため、削除指示を
+/// 「型が現れていない」と誤認する。
+pub fn apply_range_filter_update(
+    applied: &mut SubscriptionRangeFilters,
+    parameters: &MessageParameters,
+) {
+    if !parameters.range_filters(PARAM_SUBGROUP_FILTER).is_empty() {
+        applied.subgroup = parameters.range_filter_sets(PARAM_SUBGROUP_FILTER);
+    }
+    if !parameters.range_filters(PARAM_OBJECTID_FILTER).is_empty() {
+        applied.object_id = parameters.range_filter_sets(PARAM_OBJECTID_FILTER);
+    }
+    if !parameters.range_filters(PARAM_PRIORITY_FILTER).is_empty() {
+        applied.priority = parameters.range_filter_sets(PARAM_PRIORITY_FILTER);
+    }
+    if !parameters
+        .range_filters(PARAM_OBJECT_PROPERTY_FILTER)
+        .is_empty()
+    {
+        applied.object_property = parameters.range_filter_sets(PARAM_OBJECT_PROPERTY_FILTER);
+    }
+}
+
 /// Location Filter を解決して (Start Location, End Location) を返す
 ///
 /// draft-ietf-moq-transport-22 §3.3.1 (Location Filters): RelativeGroup / NextObject は
