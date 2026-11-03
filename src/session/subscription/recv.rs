@@ -284,6 +284,9 @@ impl Session {
             filter,
             subscriber_priority,
             group_order,
+            // SUBSCRIBE に SUBSCRIBE_TRACKS_ID は出現しない
+            // (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
+            subscribe_tracks_id: None,
             // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
             // peer が SUBSCRIBE で指定した値を保持し、SUBSCRIBE_OK 送信時に参照する
             include_properties,
@@ -474,6 +477,12 @@ impl Session {
             }
         };
         let subscriber_priority = publish.parameters.subscriber_priority();
+        // draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter):
+        // SUBSCRIBE_TRACKS 起因の PUBLISH を識別する Request ID を相関情報として保持する。
+        // 本ライブラリは SUBSCRIBE_TRACKS を実装せず要求との照合状態も持たないため、
+        // 対応する要求が無い PUBLISH でも値を保持するだけで拒否せず、通常の PUBLISH の
+        // 検証とアプリケーションによる受理・拒否判断へ進む。
+        let subscribe_tracks_id = publish.parameters.subscribe_tracks_id();
         // delivery timeout の Parameters は状態に保持しない。§8 の規則
         // (publisher は Track Property、subscriber は SUBSCRIBE / REQUEST_UPDATE の
         // Message Parameters で伝える) に従い、publisher 側値は Track Properties、
@@ -547,6 +556,7 @@ impl Session {
             filter,
             subscriber_priority,
             group_order,
+            subscribe_tracks_id,
             // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
             include_properties: None,
             filter_start,

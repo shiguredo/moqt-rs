@@ -75,6 +75,10 @@
     SUBSCRIBE_TRACKS の応答として返る PUBLISH の選別に使うが、本ライブラリは MoQ リレー専用機能
     (SUBSCRIBE_TRACKS) を対象外としているため、選別の対象が存在しない (draft から削除された
     仕様ではない)
+- Subscribe Tracks ID (PUBLISH のみ。SUBSCRIBE_TRACKS の Request ID を相関情報として `Subscription`
+  に保持する。本ライブラリは SUBSCRIBE_TRACKS を実装しないため、対応する namespace 要求の有無は
+  検証せず、要求が無い PUBLISH でも通常の検証と受理判断へ進む。SUBSCRIBE_TRACKS 起因の PUBLISH に
+  だけ載せる契約であり、`resulting_publish_parameters` でも引き継がない)
 - Subscriber Priority
 - Track Namespace Prefix
 

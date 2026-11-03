@@ -1484,6 +1484,247 @@ fn publish_without_group_order_no_auto_inject() {
     }
 }
 
+// ─── SUBSCRIBE_TRACKS_ID (draft-ietf-moq-transport-23 §9.19.21) ────
+
+/// 対応する SUBSCRIBE_TRACKS が無くても SUBSCRIBE_TRACKS_ID 付き PUBLISH を受理すること
+///
+/// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): 値は元の
+/// SUBSCRIBE_TRACKS の Request ID である。本ライブラリは SUBSCRIBE_TRACKS 自体を実装せず、
+/// 要求との照合状態も持たない。対応する namespace 要求が無いことだけを理由に拒否や
+/// セッション終了を行わず、値を相関情報として保持して通常の PUBLISH の検証とアプリケーション
+/// による受理・拒否判断へ進むことを固定する。
+#[test]
+fn publish_with_subscribe_tracks_id_accepted_without_request() {
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+    let (mut client, mut server) = establish_pair();
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+        value: MessageParameterValue::VarInt(42),
+    });
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            201,
+            params,
+            TrackProperties::new(),
+        )
+        .expect("SUBSCRIBE_TRACKS_ID 付き PUBLISH の送信は成功すること");
+    // 送信側も受信側と対称に相関情報として保持する
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .subscribe_tracks_id,
+        Some(42),
+        "送信側が指定した SUBSCRIBE_TRACKS_ID を保持すること"
+    );
+    let (_, pub_msg) = take_send_request(&mut client);
+    match &pub_msg {
+        ControlMessage::Publish(p) => assert_eq!(
+            p.parameters.subscribe_tracks_id(),
+            Some(42),
+            "ワイヤに SUBSCRIBE_TRACKS_ID が載ること"
+        ),
+        other => panic!("Publish が期待されたが {other:?} を受け取った"),
+    }
+    // 対応する SUBSCRIBE_TRACKS を一度も受信していなくても通常の PUBLISH として受理される
+    server
+        .recv_request(pub_msg)
+        .expect("対応する SUBSCRIBE_TRACKS が無くても PUBLISH は受理されること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "対応する要求が無いことを理由にセッションを閉じないこと"
+    );
+    let sub = server
+        .subscription(rid)
+        .expect("受信側に PUBLISH の subscription が作られること");
+    assert_eq!(
+        sub.subscribe_tracks_id,
+        Some(42),
+        "受信側も SUBSCRIBE_TRACKS_ID を相関情報として保持すること"
+    );
+    // namespace 要求との照合 state を追加していないこと (購読は PUBLISH 由来の 1 件だけ)
+    assert_eq!(
+        server.subscriptions().count(),
+        1,
+        "SUBSCRIBE_TRACKS の照合 state を作らないこと"
+    );
+    // アプリは通常どおり PUBLISH_OK で受理判断を進められる
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("通常の PUBLISH_OK で受理できること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "受理判断のあともセッションを維持すること"
+    );
+}
+
+/// SUBSCRIBE_TRACKS_ID は SUBSCRIBE / FETCH / TRACK_STATUS で拒否される
+///
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in some
+/// other type of message, the receiving endpoint MUST close the session with
+/// INVALID_PARAMETER." §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は出現先を PUBLISH に限る。
+#[test]
+fn subscribe_tracks_id_rejected_outside_publish() {
+    use shiguredo_moqt::message::{Fetch as WireFetch, Subscribe, TrackStatus};
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+    let parameters = || {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::VarInt(9),
+        });
+        parameters
+    };
+    // SUBSCRIBE
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: parameters(),
+        }),
+        "SUBSCRIBE + SUBSCRIBE_TRACKS_ID",
+    );
+    // FETCH
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::Fetch(WireFetch {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: parameters(),
+        }),
+        "FETCH + SUBSCRIBE_TRACKS_ID",
+    );
+    // TRACK_STATUS
+    let (_client, mut server) = establish_pair();
+    assert_scope_violation(
+        &mut server,
+        ControlMessage::TrackStatus(TrackStatus {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            parameters: parameters(),
+        }),
+        "TRACK_STATUS + SUBSCRIBE_TRACKS_ID",
+    );
+}
+
+/// REQUEST_UPDATE に載った SUBSCRIBE_TRACKS_ID は INVALID_PARAMETER でセッションを閉じる
+///
+/// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) の MUST。REQUEST_UPDATE は
+/// request stream 上のフォローアップであり、context 別の許可集合は subscription と fetch で
+/// 異なるため、購読の確立後に受信側で検証する。
+#[test]
+fn request_update_with_subscribe_tracks_id_closes_session() {
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // REQUEST_UPDATE は Established の subscription にだけ届く (§9.5) ため、
+    // 先に SUBSCRIBE_OK で確立してから注入する
+    server
+        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    // REQUEST_UPDATE は独立した Request ID を消費する。peer (client) が使う Request ID は
+    // 偶数であり、購読の 0 と重複しない 2 を使う (draft §6.4.2.1 (Request ID))。
+    let mut update_parameters = MessageParameters::new();
+    update_parameters.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+        value: MessageParameterValue::VarInt(9),
+    });
+    let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
+        request_id: rid + 2,
+        parameters: update_parameters,
+    });
+    let err = server
+        .recv_stream_message(rid, update)
+        .expect_err("REQUEST_UPDATE の SUBSCRIBE_TRACKS_ID は拒否されること");
+    assert_eq!(
+        err.code, SESSION_INVALID_PARAMETER,
+        "REQUEST_UPDATE のスコープ違反は INVALID_PARAMETER であること"
+    );
+    assert_eq!(
+        server.state(),
+        SessionState::Closing,
+        "スコープ違反はセッションを閉じること"
+    );
+    let mut close_sessions = 0;
+    let mut request_errors = 0;
+    while let Some(event) = server.poll_event() {
+        match event {
+            SessionEvent::CloseSession(err) => {
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+                close_sessions += 1;
+            }
+            SessionEvent::SendOnStream {
+                message: ControlMessage::RequestError(_),
+                ..
+            } => request_errors += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(close_sessions, 1, "CloseSession が 1 回");
+    assert_eq!(request_errors, 0, "REQUEST_ERROR を送らないこと");
+}
+
+/// PUBLISH_OK に載った SUBSCRIBE_TRACKS_ID は送信側で拒否される
+///
+/// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は出現先を PUBLISH に
+/// 限るため、PUBLISH_OK (REQUEST_OK) では送信 API のスコープ検証で拒否され、
+/// subscription の状態も変わらない。
+#[test]
+fn publish_ok_with_subscribe_tracks_id_rejected() {
+    use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            202,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let mut ok_params = MessageParameters::new();
+    ok_params.push(MessageParameter {
+        param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+        value: MessageParameterValue::VarInt(9),
+    });
+    let err = server
+        .send_request_ok(rid, ok_params, TrackProperties::default())
+        .expect_err("PUBLISH_OK の SUBSCRIBE_TRACKS_ID はスコープ外で拒否される");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .is_pending_publisher(),
+        "拒否後も subscription は Pending のままであること"
+    );
+}
+
 /// スコープ外パラメータを含む PUBLISH_OK は subscription の状態を変更しない
 ///
 /// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): スコープ外パラメータを含む

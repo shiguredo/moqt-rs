@@ -623,6 +623,7 @@ mod accessors {
         assert_eq!(params.group_order(), None);
         assert_eq!(params.new_group_request(), None);
         assert_eq!(params.fill_timeout(), None);
+        assert_eq!(params.subscribe_tracks_id(), None);
     }
 
     /// FILL_TIMEOUT (type 0x0A) のアクセサ
@@ -772,6 +773,74 @@ mod accessors {
                 Err(MessageError::InvalidParameter)
             ),
             "範囲外値の decode は INVALID_PARAMETER になる"
+        );
+    }
+
+    /// SUBSCRIBE_TRACKS_ID (type 0x36) のアクセサ、golden バイト列、round-trip
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter):
+    /// 値は varint であり、SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現する。
+    /// 300 は 2 バイト varint (`0x81 0x2C`) になるため、uint8 との取り違えも検出できる。
+    #[test]
+    fn subscribe_tracks_id_accessor_and_golden_bytes() {
+        use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::VarInt(300),
+        });
+        // count=1, delta=0x36, 値=300 (2 バイト varint)
+        let golden = vec![0x01, 0x36, 0x81, 0x2C];
+        let mut buf = Vec::new();
+        params
+            .encode(&mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        assert_eq!(buf, golden, "SUBSCRIBE_TRACKS_ID の golden バイト列");
+        let (decoded, consumed) =
+            MessageParameters::decode(&golden).expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            consumed,
+            golden.len(),
+            "golden バイト列をすべて消費すること"
+        );
+        assert_eq!(
+            decoded, params,
+            "decode 結果が encode 前のパラメータと一致すること"
+        );
+        assert_eq!(
+            decoded.subscribe_tracks_id(),
+            Some(300),
+            "varint の値がそのまま読めること"
+        );
+        // 値 0 でもパラメータの存在を保持し、不在 (None) と区別できること
+        let mut zero = MessageParameters::new();
+        zero.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::VarInt(0),
+        });
+        assert_eq!(zero.subscribe_tracks_id(), Some(0));
+        assert_eq!(MessageParameters::new().subscribe_tracks_id(), None);
+    }
+
+    /// SUBSCRIBE_TRACKS_ID は varint 専用であり、uint8 の値は encode で拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は
+    /// 値のエンコーディングを varint と定める。型と値の不一致を許すと、encode は通るのに
+    /// decode が別の値として解釈するラウンドトリップ不整合が生じる。
+    #[test]
+    fn subscribe_tracks_id_rejects_uint8_value() {
+        use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::Uint8(1),
+        });
+        let mut buf = Vec::new();
+        assert!(
+            matches!(params.encode(&mut buf), Err(MessageError::InvalidParameter)),
+            "uint8 の値は PUBLISH の型定義と一致しないため拒否されること"
         );
     }
 
@@ -2731,6 +2800,30 @@ mod resulting_publish_parameters {
                 .resulting_publish_parameters()
                 .is_empty()
         );
+    }
+
+    /// SUBSCRIBE_TRACKS_ID は要求のパラメータから resulting PUBLISH へ引き継がない
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): この
+    /// パラメータは SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現し、値は元の
+    /// SUBSCRIBE_TRACKS の Request ID である。SUBSCRIBE_TRACKS 自身のパラメータではないため
+    /// initial subscription parameters としてコピーしてはならず、PUBLISH を送る側が改めて
+    /// 設定する。
+    #[test]
+    fn does_not_inherit_subscribe_tracks_id() {
+        use shiguredo_moqt::message_parameter::PARAM_SUBSCRIBE_TRACKS_ID;
+
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::VarInt(7),
+        });
+        let derived = params.resulting_publish_parameters();
+        assert!(
+            derived.is_empty(),
+            "SUBSCRIBE_TRACKS_ID は derived PUBLISH に引き継がないこと"
+        );
+        assert_eq!(derived.subscribe_tracks_id(), None);
     }
 }
 

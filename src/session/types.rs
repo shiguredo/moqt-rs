@@ -1098,6 +1098,7 @@ mod tests {
             filter: None,
             subscriber_priority: None,
             group_order: None,
+            subscribe_tracks_id: None,
             include_properties: None,
             filter_start: None,
             filter_end: None,
@@ -1417,6 +1418,18 @@ pub struct Subscription {
     /// SUBSCRIBE / SUBSCRIBE_TRACKS / FETCH に含まれる。draft-ietf-moq-transport-22 §5.1.1 (Definitions) により
     /// 確定後は変更不可。
     pub group_order: Option<u8>,
+    /// PUBLISH を生じさせた SUBSCRIBE_TRACKS の Request ID
+    /// (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
+    ///
+    /// PUBLISH の SUBSCRIBE_TRACKS_ID パラメータの値をそのまま保持する。
+    /// draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by Prefix) は
+    /// SUBSCRIBE_TRACKS の結果として送る PUBLISH にこの値を載せると定める。
+    /// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装せず、対応する namespace 要求との照合状態も
+    /// 持たないため、値はアプリケーションが相関を取るための情報に限られる。対応する要求が
+    /// 無い PUBLISH でも値は保持し、受理・拒否は通常の PUBLISH の判断として行う。
+    /// 自側が publisher の場合は `send_publish` に渡した値が入る。省略時は `None`。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub subscribe_tracks_id: Option<u64>,
     /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
     ///
     /// peer が SUBSCRIBE で指定した値。`Some(0)` のとき OK 応答の Track Properties を

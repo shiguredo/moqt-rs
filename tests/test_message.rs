@@ -1631,6 +1631,160 @@ mod error_cases {
     }
 }
 
+mod publish {
+    use super::*;
+    use shiguredo_moqt::message::{Fetch, Publish, RequestUpdate, Subscribe, TrackStatus};
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_SUBSCRIBE_TRACKS_ID,
+    };
+
+    /// SUBSCRIBE_TRACKS_ID を持つ PUBLISH の golden バイト列と往復
+    ///
+    /// draft-ietf-moq-transport-23 §9.8 (PUBLISH) は PUBLISH が運べるパラメータに
+    /// SUBSCRIBE_TRACKS_ID を含め、§9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は値を varint と
+    /// 定める。値 300 は 2 バイト varint (`0x81 0x2C`) であり、uint8 との取り違えも検出できる。
+    #[test]
+    fn subscribe_tracks_id_golden_bytes_and_round_trip() {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+            value: MessageParameterValue::VarInt(300),
+        });
+        let msg = ControlMessage::Publish(Publish {
+            request_id: 0,
+            track_namespace: TrackNamespace::new(vec![b"live".to_vec()])
+                .expect("正当な namespace である"),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters,
+            track_properties: TrackProperties::new(),
+        });
+        // PUBLISH (0x1D), Length = 16, Request ID = 0,
+        // Track Namespace: count=1 / "live", Track Name: "cam", Track Alias = 1,
+        // Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
+        // Track Properties は空 (カウントプレフィックスを持たない)
+        let golden = vec![
+            0x1D, 0x10, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+            0x01, 0x36, 0x81, 0x2C,
+        ];
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("SUBSCRIBE_TRACKS_ID を持つ PUBLISH は encode できること");
+        assert_eq!(
+            encoded, golden,
+            "SUBSCRIBE_TRACKS_ID を持つ PUBLISH の golden バイト列"
+        );
+
+        let (decoded, consumed) = ControlMessage::decode(&golden)
+            .expect("SUBSCRIBE_TRACKS_ID を持つ PUBLISH は decode できること");
+        assert_eq!(
+            consumed,
+            golden.len(),
+            "golden バイト列をすべて消費すること"
+        );
+        assert_eq!(
+            decoded, msg,
+            "decode 結果が encode 前のメッセージと一致すること"
+        );
+        let ControlMessage::Publish(publish) = decoded else {
+            panic!("Publish が期待された");
+        };
+        assert_eq!(
+            publish.parameters.subscribe_tracks_id(),
+            Some(300),
+            "decode 後も varint の値が読めること"
+        );
+    }
+
+    /// SUBSCRIBE_TRACKS_ID は PUBLISH 以外のメッセージでは拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は出現先を
+    /// PUBLISH に限り、§9.19.1 (Parameter Scope) は許可されないメッセージ型での受信を
+    /// INVALID_PARAMETER で閉じることを MUST とする。encode / decode の両経路を固定する。
+    #[test]
+    fn subscribe_tracks_id_rejected_outside_publish() {
+        let parameters = || {
+            let mut parameters = MessageParameters::new();
+            parameters.push(MessageParameter {
+                param_type: PARAM_SUBSCRIBE_TRACKS_ID,
+                value: MessageParameterValue::VarInt(300),
+            });
+            parameters
+        };
+        let namespace =
+            || TrackNamespace::new(vec![b"live".to_vec()]).expect("正当な namespace である");
+        let messages = vec![
+            ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                track_namespace: namespace(),
+                track_name: b"cam".to_vec(),
+                parameters: parameters(),
+            }),
+            ControlMessage::Fetch(Fetch {
+                request_id: 0,
+                track_namespace: namespace(),
+                track_name: b"cam".to_vec(),
+                parameters: parameters(),
+            }),
+            ControlMessage::RequestUpdate(RequestUpdate {
+                request_id: 1,
+                parameters: parameters(),
+            }),
+            ControlMessage::TrackStatus(TrackStatus {
+                request_id: 0,
+                track_namespace: namespace(),
+                track_name: b"cam".to_vec(),
+                parameters: parameters(),
+            }),
+        ];
+        for message in &messages {
+            assert!(
+                matches!(
+                    message.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
+                    Err(MessageError::InvalidParameter)
+                ),
+                "SUBSCRIBE_TRACKS_ID は {message:?} で encode できないこと"
+            );
+        }
+
+        // SUBSCRIBE (0x03), Length = 15, Request ID = 0, Track Namespace: count=1 / "live",
+        // Track Name: "cam", Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
+        let subscribe = vec![
+            0x03, 0x0F, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+            0x01, 0x36, 0x81, 0x2C,
+        ];
+        assert!(
+            matches!(
+                ControlMessage::decode(&subscribe),
+                Err(MessageError::InvalidParameter)
+            ),
+            "SUBSCRIBE に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+        // FETCH (0x16) は SUBSCRIBE と同じ本体構造である
+        let fetch = vec![
+            0x16, 0x0F, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+            0x01, 0x36, 0x81, 0x2C,
+        ];
+        assert!(
+            matches!(
+                ControlMessage::decode(&fetch),
+                Err(MessageError::InvalidParameter)
+            ),
+            "FETCH に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+        // REQUEST_UPDATE (0x02), Length = 5, Request ID = 1,
+        // Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
+        let request_update = vec![0x02, 0x05, 0x01, 0x01, 0x36, 0x81, 0x2C];
+        assert!(
+            matches!(
+                ControlMessage::decode(&request_update),
+                Err(MessageError::InvalidParameter)
+            ),
+            "REQUEST_UPDATE に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+    }
+}
+
 mod publish_state_notify {
     use super::*;
     use shiguredo_moqt::message::PublishStateNotify;

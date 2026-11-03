@@ -823,6 +823,7 @@ fn group_order(&self) -> Option<u8>                         // 0x22
 fn new_group_request(&self) -> Option<u64>                  // 0x32
 fn track_namespace_prefix(&self) -> Option<&TrackNamespace> // 0x34
 fn include_properties(&self) -> Option<u8>                  // 0x35
+fn subscribe_tracks_id(&self) -> Option<u64>                // 0x36
 ```
 
 主なパラメータ型定数:
@@ -849,6 +850,13 @@ fn include_properties(&self) -> Option<u8>                  // 0x35
 | `PARAM_NEW_GROUP_REQUEST` | `0x32` |
 | `PARAM_TRACK_NAMESPACE_PREFIX` | `0x34` |
 | `PARAM_INCLUDE_PROPERTIES` | `0x35` |
+| `PARAM_SUBSCRIBE_TRACKS_ID` | `0x36` |
+
+`SUBSCRIBE_TRACKS_ID` (0x36) は PUBLISH でのみ出現できる varint で、SUBSCRIBE_TRACKS の
+Request ID を運ぶ。本ライブラリは SUBSCRIBE_TRACKS を実装しないため、受信側は値を
+`Subscription::subscribe_tracks_id` に相関情報として保持するだけで、対応する要求の有無を
+検証せずに通常の PUBLISH の検証と受理判断へ進む。送信側は SUBSCRIBE_TRACKS 起因の PUBLISH に
+だけ指定し、`MessageParameters::resulting_publish_parameters` はこの型を引き継がない。
 
 `AuthorizationToken` は `Delete` / `Register` / `UseAlias` / `UseValue` の variant を持つ。各メソッドは `pub(crate)` のため、利用側は variant を直接構築して `MessageParameterValue` に格納する。
 

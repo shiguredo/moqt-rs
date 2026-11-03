@@ -227,6 +227,9 @@ impl Session {
             filter,
             subscriber_priority,
             group_order,
+            // SUBSCRIBE に SUBSCRIBE_TRACKS_ID は出現しない
+            // (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
+            subscribe_tracks_id: None,
             // 自側は subscriber のため SUBSCRIBE_OK を送らず、INCLUDE_PROPERTIES の保持は不要
             include_properties: None,
             filter_start,
@@ -267,6 +270,14 @@ impl Session {
     /// 開設するのは publisher である自側だけであり、PUBLISH を受けて PUBLISH_OK を返す
     /// subscriber は開設しない。fill range が空、Largest Object より後に始まる、
     /// Largest Object が未知のいずれかなら開設しない (§3.4 (Fill Semantics))。
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): `parameters` に
+    /// SUBSCRIBE_TRACKS_ID (0x36) を載せられるのは、SUBSCRIBE_TRACKS の結果として送る
+    /// PUBLISH だけであり、値は元の SUBSCRIBE_TRACKS の Request ID でなければならない。
+    /// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、対応する namespace 要求の
+    /// 存在は検証しない。パラメータ型が PUBLISH のスコープ内にあることだけを検証し、
+    /// 値の符号化はメッセージのエンコード時に検証する。SUBSCRIBE_TRACKS 起因ではない
+    /// PUBLISH に指定してはならない。
     pub fn send_publish(
         &mut self,
         track_namespace: TrackNamespace,
@@ -446,6 +457,10 @@ impl Session {
             filter,
             subscriber_priority: parameters.subscriber_priority(),
             group_order: parameters.group_order(),
+            // draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter):
+            // SUBSCRIBE_TRACKS 起因の PUBLISH を識別する Request ID を、受信側と対称に
+            // 相関情報として保持する (要求の存在検証は行わない)
+            subscribe_tracks_id: parameters.subscribe_tracks_id(),
             // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
             include_properties: None,
             filter_start,

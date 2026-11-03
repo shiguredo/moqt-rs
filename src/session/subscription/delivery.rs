@@ -391,6 +391,7 @@ mod tests {
             filter: None,
             subscriber_priority: None,
             group_order: None,
+            subscribe_tracks_id: None,
             // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
             include_properties: None,
             filter_start: None,

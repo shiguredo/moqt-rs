@@ -20,7 +20,8 @@ use crate::{
         PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT,
         PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_PAUSED, PARAM_PRIORITY_FILTER,
         PARAM_RENDEZVOUS_TIMEOUT, PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER,
-        PARAM_SUBSCRIBER_PRIORITY, PARAM_TRACK_NAMESPACE_PREFIX, PARAM_TRACK_PROPERTY_FILTER,
+        PARAM_SUBSCRIBE_TRACKS_ID, PARAM_SUBSCRIBER_PRIORITY, PARAM_TRACK_NAMESPACE_PREFIX,
+        PARAM_TRACK_PROPERTY_FILTER,
     },
     parameter::SetupOptions,
     track_properties::TrackProperties,
@@ -181,14 +182,23 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 ///
 /// draft-ietf-moq-transport-23 §9.8 (PUBLISH) の Parameters の列挙 (OBJECT_DELIVERY_TIMEOUT /
 /// AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT / EXPIRES / LARGEST_OBJECT / PAUSED /
-/// SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS) と
-/// §9.19 各 Parameter 節の出現規定 (PUBLISH を含む) から再導出した 10 種。
-/// Range Filter 等の PUBLISH 出現規定を持たない型は含めない。
+/// SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS /
+/// SUBSCRIBE_TRACKS_ID) と §9.19 各 Parameter 節の出現規定 (PUBLISH を含む) から再導出した
+/// 11 種。Range Filter 等の PUBLISH 出現規定を持たない型は含めない。
 ///
 /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
 /// SUBSCRIBE / SUBSCRIBE_TRACKS / PUBLISH / REQUEST_UPDATE に出現可能とし、§3.4.1
 /// (Opening and Closing Fill Fetch Streams) は PUBLISH 送信時の FILL_PARAMETERS でも
 /// 初回 fill の fill fetch stream を開くと定める。
+///
+/// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は
+/// SUBSCRIBE_TRACKS_ID を「SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現する」と
+/// 定める。値は元の SUBSCRIBE_TRACKS の Request ID である (§3.6 (Subscribing to Tracks by
+/// Prefix))。本ライブラリは SUBSCRIBE_TRACKS 自体を実装せず、要求との照合状態も持たない。
+/// 受信側は値を関連付け情報として保持するだけで、対応する要求が見つからないことを理由に
+/// PUBLISH を拒否したりセッションを閉じたりせず、通常の PUBLISH の検証とアプリケーションに
+/// よる受理・拒否判断へ進む。送信側は SUBSCRIBE_TRACKS 起因の PUBLISH にだけ指定する
+/// (`Session::send_publish` の doc 参照)。
 ///
 /// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):
 /// SUBSCRIBE_TRACKS 由来の PUBLISH には SUBSCRIBE_TRACKS の Parameters が
@@ -212,6 +222,7 @@ pub(crate) const PUBLISH_ALLOWED_PARAMS: &[u64] = &[
     PARAM_LOCATION_FILTER,
     PARAM_GROUP_ORDER,
     PARAM_FILL_PARAMETERS,
+    PARAM_SUBSCRIBE_TRACKS_ID,
 ];
 
 /// PUBLISH_STATE_NOTIFY で許可されるパラメータ型

@@ -70,6 +70,13 @@ pub const PARAM_NEW_GROUP_REQUEST: u64 = 0x32;
 pub const PARAM_TRACK_NAMESPACE_PREFIX: u64 = 0x34;
 /// INCLUDE_PROPERTIES (uint8, draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
 pub const PARAM_INCLUDE_PROPERTIES: u64 = 0x35;
+/// SUBSCRIBE_TRACKS_ID (varint, draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
+///
+/// SUBSCRIBE_TRACKS の結果として送る PUBLISH にだけ出現し、値は元の SUBSCRIBE_TRACKS の
+/// Request ID である (draft-ietf-moq-transport-23 §3.6 (Subscribing to Tracks by Prefix))。
+/// 本ライブラリは SUBSCRIBE_TRACKS 自体を実装しないため、受信側で対応する要求を照合しない。
+/// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+pub const PARAM_SUBSCRIBE_TRACKS_ID: u64 = 0x36;
 
 // ─── Range Filter パラメータ (draft-ietf-moq-transport-22 §3.3.2 (Range Filters)) ───
 
@@ -153,6 +160,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
         PARAM_NEW_GROUP_REQUEST => Ok(ValueEncoding::VarInt),
         PARAM_TRACK_NAMESPACE_PREFIX => Ok(ValueEncoding::TrackNamespacePrefix),
         PARAM_INCLUDE_PROPERTIES => Ok(ValueEncoding::Uint8),
+        PARAM_SUBSCRIBE_TRACKS_ID => Ok(ValueEncoding::VarInt),
         PARAM_SUBGROUP_FILTER => Ok(ValueEncoding::LengthPrefixed),
         PARAM_OBJECTID_FILTER => Ok(ValueEncoding::LengthPrefixed),
         PARAM_PRIORITY_FILTER => Ok(ValueEncoding::LengthPrefixed),
@@ -1250,6 +1258,19 @@ impl MessageParameters {
         None
     }
 
+    /// SUBSCRIBE_TRACKS_ID (type 0x36) の値を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): この
+    /// パラメータは SUBSCRIBE_TRACKS の結果として送られた PUBLISH にだけ出現し、値は
+    /// 元の SUBSCRIBE_TRACKS の Request ID である。本ライブラリは SUBSCRIBE_TRACKS を
+    /// 実装しないため、対応する要求が存在するかは検証しない。受信側は値を関連付け情報
+    /// として保持するだけで、要求が見つからないことを理由に PUBLISH を拒否しない。
+    /// 省略時は `None` を返す。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn subscribe_tracks_id(&self) -> Option<u64> {
+        self.find_varint(PARAM_SUBSCRIBE_TRACKS_ID)
+    }
+
     /// 指定した Range Filter 型 (0x25-0x29) の全インスタンスのバイト列を出現順に返す
     ///
     /// draft-ietf-moq-transport-22 §3.3.2 (Range Filters): Range Filter は同一 Parameter Type が
@@ -1307,6 +1328,10 @@ impl MessageParameters {
     /// PUBLISH に出現可能な subset (`PUBLISH_ALLOWED_PARAMS`) のみ残し、
     /// AUTHORIZATION TOKEN は除外する (送信者義務。draft-ietf-moq-transport-22
     /// §9.20.2 (AUTHORIZATION TOKEN Parameter) の MUST NOT copy)。
+    /// SUBSCRIBE_TRACKS_ID も除外する。これは SUBSCRIBE_TRACKS のパラメータではなく、
+    /// 元の要求の Request ID を指す PUBLISH 専用の識別子であり
+    /// (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))、
+    /// publisher が PUBLISH ごとに自分で設定する値だからである。
     /// 本メソッドは濾過のみ行い、subscription 側の PAUSED 状態は見ない。
     /// 蓄積値と明示値が競合した場合は、呼び出し側で明示値を優先して解決すること。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -1314,6 +1339,11 @@ impl MessageParameters {
         let mut result = MessageParameters::new();
         for p in &self.0 {
             if p.param_type == PARAM_AUTHORIZATION_TOKEN {
+                continue;
+            }
+            // 元の SUBSCRIBE_TRACKS の Request ID は要求のパラメータから引き継がず、
+            // PUBLISH を送る側が改めて指定する
+            if p.param_type == PARAM_SUBSCRIBE_TRACKS_ID {
                 continue;
             }
             if crate::message::PUBLISH_ALLOWED_PARAMS.contains(&p.param_type) {

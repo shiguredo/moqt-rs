@@ -11,7 +11,8 @@ use shiguredo_moqt::{
     message_parameter::PARAM_OBJECT_PROPERTY_FILTER, message_parameter::PARAM_OBJECTID_FILTER,
     message_parameter::PARAM_PAUSED, message_parameter::PARAM_PRIORITY_FILTER,
     message_parameter::PARAM_SUBGROUP_DELIVERY_TIMEOUT, message_parameter::PARAM_SUBGROUP_FILTER,
-    message_parameter::PARAM_SUBSCRIBER_PRIORITY, varint,
+    message_parameter::PARAM_SUBSCRIBE_TRACKS_ID, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
+    varint,
 };
 
 use pbt::common::{RANGE_FILTER_TYPES, has_property_type_field, sample_small_varint, test_runner};
@@ -683,6 +684,7 @@ const OUTER_HIGHER_TYPES: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
     PARAM_NEW_GROUP_REQUEST,
     PARAM_INCLUDE_PROPERTIES,
+    PARAM_SUBSCRIBE_TRACKS_ID,
 ];
 
 /// 型の候補から重複なしで `count` 個を選び、昇順に並べて返す
@@ -786,7 +788,8 @@ fn sample_outer_parameters(ctx: &mut noprop::TestCaseContext, types: &[u64]) -> 
             | PARAM_SUBGROUP_DELIVERY_TIMEOUT
             | PARAM_EXPIRES
             | PARAM_FILL_TIMEOUT
-            | PARAM_NEW_GROUP_REQUEST => MessageParameterValue::VarInt(sample_small_varint(ctx)),
+            | PARAM_NEW_GROUP_REQUEST
+            | PARAM_SUBSCRIBE_TRACKS_ID => MessageParameterValue::VarInt(sample_small_varint(ctx)),
             PARAM_LARGEST_OBJECT => MessageParameterValue::Location {
                 group: sample_small_varint(ctx),
                 object: sample_small_varint(ctx),
