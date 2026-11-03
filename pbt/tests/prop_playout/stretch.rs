@@ -162,13 +162,15 @@ fn compress_reports_length_change_and_keeps_buffers_consistent() -> noprop::Test
                 "上限を超えて削った: removed={removed} max={max_length_change_samples}"
             );
             assert!(removed <= length, "音より長く削った");
-            // 4 kHz の格子の下限から上限までのずらし幅に端数補間を掛けた範囲に収まる
+            // 4 kHz の格子の下限から上限までのずらし幅に端数補間を掛けた範囲に収まる。
+            // 上限側は探索の上端で放物線補間が ±0.5 格子ずれることと、元レートで ±1 格子を
+            // 評価して候補を広げることの両方を見込む (あわせて 1.5 格子)。
             assert!(
                 removed >= ((TIME_STRETCH_MIN_LAG as f64 - 1.0) * grid) as usize,
                 "削る長さが下限より短い: removed={removed} grid={grid}"
             );
             assert!(
-                removed <= ((TIME_STRETCH_MAX_LAG as f64 + 1.0) * grid).ceil() as usize,
+                removed <= ((TIME_STRETCH_MAX_LAG as f64 + 1.5) * grid).ceil() as usize,
                 "削る長さが上限より長い: removed={removed} grid={grid}"
             );
             let used = length - removed;
