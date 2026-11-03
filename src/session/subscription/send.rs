@@ -16,6 +16,7 @@ use crate::message::{
 };
 use crate::message_parameter::{LocationFilterContext, LocationFilterUpdate, MessageParameters};
 use crate::track_properties::TrackProperties;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -82,6 +83,11 @@ impl Session {
         // Cancellation and Rejection)) は RESET_STREAM / STOP_SENDING であり、FIN による
         // 終端は cancel ではない。
         self.reset_open_fill_streams(request_id);
+        // cancel (§6.4.2.3 (Request Cancellation and Rejection)) または requester 側の
+        // 完了通知 (§6.4.2.2 (Graceful Request Stream Closure)) で request が終端したため、
+        // 未応答の REQUEST_UPDATE と MAX_REQUEST_UPDATES のクレジットを解放する。
+        // 応答を返す経路が残らないため、保持し続ける理由がない。
+        self.release_request_update_state(request_id);
         // クローズ通知を受信済みの request は request_streams と peer FIN の記録から除去する。
         // これにより同じ subscription への遅延した終端通知で `RequestTerminated` を
         // 二重に発行したり `rejected_request_ids` に close 済み id を登録したりしない。
@@ -228,7 +234,7 @@ impl Session {
             range_filters,
             ended_groups: HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
         };
         self.register_subscription(request_id, subscription);
         self.request_streams
@@ -434,7 +440,7 @@ impl Session {
             range_filters,
             ended_groups: HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
         };
         self.register_subscription(request_id, subscription);
         self.request_streams
@@ -621,9 +627,19 @@ impl Session {
             fin: false,
         });
         // draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540:
-        // 後続処理の前に pending REQUEST_UPDATE を適用する (coalescing)。
+        // 後続処理の前に pending な REQUEST_UPDATE を適用する (coalescing)。
+        // 通常フローでは Pending の subscription に REQUEST_UPDATE は届かない (Established の
+        // self loop のみ) ため本経路は防御であり、受信順に合体した累積表示を先頭から適用する。
         // paused 変更が pending にあれば先に反映する。
-        if let Some(pending_params) = subscription.pending_update_params.take()
+        let pending_view = subscription.pending_update_params.front().map(|head| {
+            let mut view = head.parameters.clone();
+            for group in subscription.pending_update_params.iter().skip(1) {
+                view.merge_from(&group.parameters);
+            }
+            view
+        });
+        subscription.pending_update_params.clear();
+        if let Some(pending_params) = pending_view
             && let Some(value) = pending_params.paused()
         {
             subscription.paused = validate_paused(value)?;
@@ -1083,6 +1099,10 @@ impl Session {
             .get_mut(&request_id)
             .expect("subscription must exist while transitioning to Terminated by PUBLISH_DONE");
         subscription.state = SubscriptionState::Terminated;
+        // publisher の最終メッセージ (PUBLISH_DONE) で subscription が終端するため、
+        // 未応答の REQUEST_UPDATE と MAX_REQUEST_UPDATES のクレジットを解放する。
+        // 応答を返す経路が残らないため、保持し続ける理由がない。
+        self.release_request_update_state(request_id);
         // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
         // PUBLISH_DONE の MUST NOT (全 stream 終端まで送信禁止) と両立するため、

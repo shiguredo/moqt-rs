@@ -692,7 +692,7 @@ fn locally_terminated_publish_subscription_absorbs_request_update_with_duplicate
         "GOAWAY の deadline 満了によるローカル終端の状態が維持されること"
     );
     assert!(
-        subscription.pending_update_params.is_none(),
+        subscription.pending_update_params.is_empty(),
         "吸収した REQUEST_UPDATE のパラメータを蓄積しないこと"
     );
     assert!(

@@ -342,6 +342,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::VecDeque;
     use alloc::vec::Vec;
 
     use super::{
@@ -397,7 +398,7 @@ mod tests {
             range_filters: SubscriptionRangeFilters::default(),
             ended_groups: hashbrown::HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
         }
     }
 

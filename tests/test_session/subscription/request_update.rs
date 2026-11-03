@@ -1,6 +1,7 @@
 //! REQUEST_UPDATE / REQUEST_OK / REQUEST_ERROR のテスト
 
 use super::*;
+use shiguredo_moqt::message_parameter::LocationFilter;
 
 /// Client (subscriber) → Server (publisher) の SUBSCRIBE/OK 確立後に
 /// REQUEST_UPDATE → REQUEST_OK のフルサイクルが両端で動作する
@@ -39,7 +40,7 @@ fn request_update_full_cycle() {
         server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .pending_update_params
+            .pending_update_parameters()
             .is_some()
     );
 
@@ -2329,8 +2330,7 @@ fn send_request_update_by_subscriber_on_publish_established_subscription() {
     let pending = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
-        .pending_update_params
-        .as_ref();
+        .pending_update_parameters();
     assert!(pending.is_some());
     assert_eq!(
         pending
@@ -2423,8 +2423,7 @@ fn multiple_request_updates_are_coalesced() {
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
-        .pending_update_params
-        .as_ref();
+        .pending_update_parameters();
     assert!(pending.is_some());
     assert_eq!(
         pending
@@ -2458,8 +2457,7 @@ fn multiple_request_updates_are_coalesced() {
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
-        .pending_update_params
-        .as_ref();
+        .pending_update_parameters();
     assert!(pending.is_some());
     assert_eq!(
         pending
@@ -2492,8 +2490,7 @@ fn multiple_request_updates_are_coalesced() {
     let pending = server
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす")
-        .pending_update_params
-        .as_ref();
+        .pending_update_parameters();
     assert!(pending.is_some());
     assert_eq!(
         pending
@@ -2523,7 +2520,7 @@ fn multiple_request_updates_are_coalesced() {
     assert!(!sub.paused, "合体後の PAUSED=0 で購読が再開されること");
     assert_eq!(sub.subscriber_priority, Some(100));
     // pending_update_params はクリアされている
-    assert!(sub.pending_update_params.is_none());
+    assert!(sub.pending_update_params.is_empty());
 }
 
 /// draft-ietf-moq-transport-22 Appendix A.5 (Since draft-ietf-moq-transport-17) #1540: REQUEST_UPDATE 合体後に REQUEST_ERROR で応答すると
@@ -2564,7 +2561,7 @@ fn request_error_discards_coalesced_pending_params() {
         server
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
-            .pending_update_params
+            .pending_update_parameters()
             .is_some()
     );
 
@@ -2584,7 +2581,7 @@ fn request_error_discards_coalesced_pending_params() {
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
             .pending_update_params
-            .is_none()
+            .is_empty()
     );
     // paused は元のまま
     assert!(
@@ -3067,7 +3064,7 @@ fn recv_request_update_no_filter_clears_on_request_ok() {
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
-        sub.pending_update_params.is_some(),
+        sub.pending_update_parameters().is_some(),
         "REQUEST_OK 応答前はパラメータが pending 蓄積されること"
     );
     assert_eq!(
@@ -3632,7 +3629,7 @@ fn peer_request_update_with_invalid_paused_closes_session() {
             .subscription(rid)
             .expect("テストフィクスチャの前提条件を満たす")
             .pending_update_params
-            .is_none(),
+            .is_empty(),
         "値域違反時に pending_update_params に保存されないこと"
     );
     match drain_until_close(&mut client) {
@@ -4316,4 +4313,442 @@ fn subscribe_originated_responder_request_ok_in_established_closes_session() {
         SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_ROLE_VIOLATION),
         _ => unreachable!("CloseSession イベントが発行されること"),
     }
+}
+
+// ─── 受信順の処理・応答順・fill の非 coalescing ──────────────────
+//
+// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE messages MUST be
+// processed in order" / "REQUEST_UPDATE_OKs MUST be returned in the order the
+// REQUEST_UPDATEs were received". FILL_PARAMETERS を含む更新は合体できず
+// (§9.19.15 (FILL PARAMETERS Parameter))、その前後が coalescing の境界になる。
+// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+
+/// PAUSED 1 個を持つ REQUEST_UPDATE のパラメータを作る
+fn paused_update_params(paused: u8) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_PAUSED,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(paused),
+    });
+    parameters
+}
+
+/// FILL_PARAMETERS (内側は空) 1 個を持つ REQUEST_UPDATE のパラメータを作る
+fn fill_update_params() -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(MessageParameters::new()),
+    });
+    parameters
+}
+
+/// LOCATION_FILTER 1 個を持つ REQUEST_UPDATE のパラメータを作る
+fn location_filter_update_params(filter: LocationFilter) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(filter),
+    });
+    parameters
+}
+
+/// client (subscriber) から REQUEST_UPDATE を送り、server (publisher) に受信させる
+fn send_subscription_update(
+    client: &mut Session,
+    server: &mut Session,
+    rid: u64,
+    parameters: MessageParameters,
+) {
+    client
+        .send_request_update(rid, parameters)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (stream_rid, message) = take_send_on_stream(client);
+    assert_eq!(stream_rid, rid, "購読の bidi stream に送ること");
+    server
+        .recv_stream_message(rid, message)
+        .expect("REQUEST_UPDATE の受信に成功すること");
+}
+
+/// pause → fill → resume の REQUEST_UPDATE は受信順に処理され、応答も受信順に返る
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) は合体後の累積結果のみを適用する
+/// ことを許すが、FILL_PARAMETERS を含む更新は合体できない (§9.19.15)。本テストは
+/// fill の前後が境界になり、3 つの更新が 3 グループとして受信順に保持されること、
+/// REQUEST_UPDATE_OK の個数が受信数と一致し、各 OK で適用される状態が受信順の
+/// 中間状態 (pause → fill → resume) になることを固定する。
+///
+/// fill は PAUSED=1 の時点で処理されるため fill fetch stream を開かない
+/// (draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions))。中間の fill が
+/// 後続の resume (PAUSED=0) に置き換えられて開設されてはならない。
+#[test]
+fn request_updates_are_processed_in_receive_order() {
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    send_subscription_update(&mut client, &mut server, rid, paused_update_params(1));
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    send_subscription_update(&mut client, &mut server, rid, paused_update_params(0));
+
+    // 受信イベントは 3 件。fill fetch stream は開かない (fill 時点は paused)。
+    let mut received = 0;
+    let mut opened_fill = 0;
+    while let Some(event) = server.poll_event() {
+        match event {
+            SessionEvent::RequestUpdateReceived { parameters, .. } => {
+                received += 1;
+                if received == 2 {
+                    assert!(
+                        parameters.fill_parameters().is_some(),
+                        "FILL を運んだメッセージ自体はアプリへ通知されること"
+                    );
+                }
+            }
+            SessionEvent::OpenFillFetchStream { .. } => opened_fill += 1,
+            SessionEvent::CloseSession(err) => {
+                panic!("REQUEST_UPDATE の受信でセッションが閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(received, 3, "REQUEST_UPDATE ごとに通知されること");
+    assert_eq!(
+        opened_fill, 0,
+        "paused の時点で届いた fill は resume の値で開設されないこと"
+    );
+
+    // 3 つの更新が受信順の 3 グループとして保持され、まだ状態は変わっていない
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.pending_update_params.len(),
+        3,
+        "fill の前後が境界となり 3 グループになること"
+    );
+    assert_eq!(
+        subscription
+            .pending_update_params
+            .iter()
+            .map(|group| group.has_fill_parameters)
+            .collect::<Vec<_>>(),
+        vec![false, true, false],
+        "fill を含むグループだけが境界として印されること"
+    );
+    assert!(
+        subscription
+            .pending_update_params
+            .iter()
+            .all(|group| group.parameters.fill_parameters().is_none()),
+        "FILL_PARAMETERS は subscription 状態として保持されないこと"
+    );
+    assert!(!subscription.paused, "応答前は PAUSED を適用しないこと");
+
+    // 応答ごとに先頭グループが適用され、状態が受信順の中間状態になる
+    for (expected_paused, expected_remaining) in [(true, 2_usize), (true, 1), (false, 0)] {
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("REQUEST_UPDATE_OK の送信に成功すること");
+        let (stream_rid, message, fin) = take_send_on_stream_with_fin(&mut server);
+        assert_eq!(stream_rid, rid, "購読の bidi stream に応答すること");
+        assert!(
+            matches!(message, ControlMessage::RequestOk(_)),
+            "REQUEST_UPDATE_OK で応答すること: {message:?}"
+        );
+        assert!(!fin, "REQUEST_UPDATE_OK は request stream を閉じないこと");
+        let subscription = server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            subscription.paused, expected_paused,
+            "応答したグループまでの PAUSED が適用されること"
+        );
+        assert_eq!(
+            subscription.pending_update_params.len(),
+            expected_remaining,
+            "応答したグループだけがキューから取り除かれること"
+        );
+    }
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        SubscriptionState::Established,
+        "REQUEST_UPDATE_OK の応答で購読は維持されること"
+    );
+}
+
+/// fill を含む更新は後続の Location Filter と合体せず、応答時点で個別に適用される
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 通常の更新は合体して累積結果のみを
+/// 適用できるが、FILL_PARAMETERS を含む更新は合体できない (§9.19.15)。そのため
+/// fill + LOCATION_FILTER=X の更新に続く LOCATION_FILTER=Y は別グループになり、
+/// fill の応答 (REQUEST_UPDATE_OK) では X が、次の応答で Y が適用される。
+/// 合体してしまうと最初の応答で Y が適用され、中間の fill が後続値に置き換わる。
+#[test]
+fn fill_update_is_not_coalesced_with_later_location_filter() {
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    let filter_x = LocationFilter::AbsoluteRangeWithEnd {
+        start: Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        end_group_delta: 1,
+        end_object: 0,
+    };
+    let filter_y = LocationFilter::AbsoluteRangeWithEnd {
+        start: Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        end_group_delta: 2,
+        end_object: 0,
+    };
+
+    // 1 通目: FILL + LOCATION_FILTER=X、2 通目: LOCATION_FILTER=Y
+    let mut first = fill_update_params();
+    first.merge_from(&location_filter_update_params(filter_x));
+    send_subscription_update(&mut client, &mut server, rid, first);
+    send_subscription_update(
+        &mut client,
+        &mut server,
+        rid,
+        location_filter_update_params(filter_y),
+    );
+
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.pending_update_params.len(),
+        2,
+        "fill の前後が境界となり 2 グループになること"
+    );
+    assert!(
+        subscription.pending_update_params[0].has_fill_parameters,
+        "1 通目が fill を含むグループであること"
+    );
+    assert!(
+        !subscription.pending_update_params[1].has_fill_parameters,
+        "2 通目は後続の通常グループであること"
+    );
+
+    // 1 通目の応答では X が適用され、後続の Y に置き換わらない
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_UPDATE_OK の送信に成功すること");
+    let _ = take_send_on_stream(&mut server);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.filter,
+        Some(filter_x),
+        "fill を含む更新の応答では受信した時点のフィルタが適用されること"
+    );
+    assert_eq!(
+        subscription.filter_end,
+        Some(Location {
+            group_id: 1,
+            object_id: 0,
+        }),
+        "解決済みの終端も適用したグループのフィルタに追随すること"
+    );
+
+    // 2 通目の応答で Y が適用される
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+        .expect("REQUEST_UPDATE_OK の送信に成功すること");
+    let _ = take_send_on_stream(&mut server);
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.filter,
+        Some(filter_y),
+        "2 通目の応答で後続のフィルタが適用されること"
+    );
+    assert_eq!(
+        subscription.filter_end,
+        Some(Location {
+            group_id: 2,
+            object_id: 0,
+        }),
+        "解決済みの終端も 2 通目のフィルタに追随すること"
+    );
+    assert!(
+        subscription.pending_update_params.is_empty(),
+        "応答したグループがキューから取り除かれること"
+    );
+}
+
+/// 片方向の FIN は cancel ではなく、未応答の更新と応答経路を維持する
+///
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure): FIN は
+/// 「その方向にもうメッセージを送らない」表明であり request cancellation ではない。
+/// したがって responder は FIN の後も REQUEST_UPDATE_OK を返す MUST
+/// (§9.5 (REQUEST_UPDATE)) を果たす必要がある。未応答の更新は破棄せず受信順のまま保持し、
+/// 応答がすべて返ってから PUBLISH_DONE + FIN で完了させる。
+#[test]
+fn peer_fin_keeps_pending_updates_until_responses_are_sent() {
+    use shiguredo_moqt::message::ReasonPhrase;
+    use shiguredo_moqt::session::types::{RequestStreamEnd, TerminationReason};
+
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    send_subscription_update(&mut client, &mut server, rid, paused_update_params(1));
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    send_subscription_update(&mut client, &mut server, rid, paused_update_params(0));
+    while server.poll_event().is_some() {}
+
+    // requester (subscriber) の片方向 FIN。server は responder なので request を維持する
+    server
+        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("片方向 FIN の受信に成功すること");
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.state,
+        SubscriptionState::Established,
+        "requester の FIN だけでは subscription を終端しないこと"
+    );
+    assert_eq!(
+        subscription.pending_update_params.len(),
+        3,
+        "未応答の更新は FIN の後も保持されること"
+    );
+
+    // FIN の後も未応答の更新へ受信順に応答できる
+    for expected_paused in [true, true, false] {
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("片方向 FIN の後も REQUEST_UPDATE_OK を送れること");
+        let (stream_rid, message, fin) = take_send_on_stream_with_fin(&mut server);
+        assert_eq!(stream_rid, rid);
+        assert!(
+            matches!(message, ControlMessage::RequestOk(_)),
+            "REQUEST_UPDATE_OK で応答すること: {message:?}"
+        );
+        assert!(!fin, "REQUEST_UPDATE_OK はまだ stream を閉じないこと");
+        assert_eq!(
+            server
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .paused,
+            expected_paused,
+            "FIN の後も応答したグループまでの PAUSED が適用されること"
+        );
+    }
+    assert!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_update_params
+            .is_empty(),
+        "すべての更新へ応答するとキューが空になること"
+    );
+
+    // 自側の最終メッセージ (PUBLISH_DONE) + FIN で両方向が閉じ、request が完了する
+    server
+        .send_publish_done(
+            rid,
+            0x2,
+            0,
+            ReasonPhrase::new("done").expect("空でない reason phrase である"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    let mut terminated = None;
+    while let Some(event) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id, reason, ..
+        } = event
+            && request_id == rid
+        {
+            terminated = Some(reason);
+        }
+    }
+    assert_eq!(
+        terminated,
+        Some(TerminationReason::PeerStreamFin),
+        "両方向の FIN が揃うと request が完了すること"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("終端した subscription は cleanup まで残ること")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// peer の RESET_STREAM (cancel) は未応答の更新を破棄する
+///
+/// draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection): cancel は
+/// 開いている方向を打ち切る。応答を返す経路が無くなるため、適用待ちの更新を保持し続けない
+/// (draft §9.5 (REQUEST_UPDATE) の未応答キューと MAX_REQUEST_UPDATES のクレジットを解放する)。
+#[test]
+fn peer_cancel_discards_pending_updates() {
+    use shiguredo_moqt::session::types::{RequestStreamEnd, TerminationReason};
+
+    let (mut client, mut server, rid) = establish_subscribe_track(1);
+    send_subscription_update(&mut client, &mut server, rid, paused_update_params(1));
+    send_subscription_update(&mut client, &mut server, rid, fill_update_params());
+    while server.poll_event().is_some() {}
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .pending_update_params
+            .len(),
+        2,
+        "cancel の前は未応答の更新が保持されていること"
+    );
+
+    server
+        .recv_request_stream_closed(
+            rid,
+            RequestStreamEnd::Reset {
+                error_code: Some(0x1),
+                reliable_size: None,
+            },
+        )
+        .expect("cancel の受信に成功すること");
+
+    let subscription = server
+        .subscription(rid)
+        .expect("終端した subscription は cleanup まで残ること");
+    assert_eq!(
+        subscription.state,
+        SubscriptionState::Terminated,
+        "cancel で subscription が終端すること"
+    );
+    assert!(
+        subscription.pending_update_params.is_empty(),
+        "cancel で未応答の更新が破棄されること"
+    );
+    let mut terminated = None;
+    while let Some(event) = server.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id, reason, ..
+        } = event
+            && request_id == rid
+        {
+            terminated = Some(reason);
+        }
+    }
+    assert_eq!(
+        terminated,
+        Some(TerminationReason::PeerStreamReset {
+            error_code: Some(0x1)
+        }),
+        "cancel の理由が RequestTerminated で通知されること"
+    );
 }

@@ -158,7 +158,7 @@ fn assert_publisher_invalid_filter_rejection(server: &mut Session, rid: u64) {
         "publisher 側の subscription は Terminated になること"
     );
     assert!(
-        sub.pending_update_params.is_none(),
+        sub.pending_update_params.is_empty(),
         "終端時に pending_update_params はクリアされること"
     );
 }
@@ -216,7 +216,7 @@ fn assert_subscriber_invalid_filter_rejection(server: &mut Session, rid: u64) {
             .subscription(rid)
             .expect("subscription が存在する")
             .pending_update_params
-            .is_none(),
+            .is_empty(),
         "拒否された REQUEST_UPDATE のパラメータが pending に残ってはいけない"
     );
 }
@@ -301,7 +301,7 @@ fn incoming_request_update_exceeds_local_max() {
         server
             .subscription(rid)
             .expect("subscription が存在する")
-            .pending_update_params
+            .pending_update_parameters()
             .is_some(),
         "1 通目は pending_update_params に蓄積される"
     );
@@ -644,8 +644,7 @@ fn incoming_range_filters_within_max_accepted() {
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("受理された REQUEST_UPDATE は pending_update_params に残る");
     assert_eq!(pending.count_range_filters(), 1);
 }
@@ -924,8 +923,7 @@ fn incoming_fill_parameters_outer_and_inner_within_local_max() {
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("受理された REQUEST_UPDATE は pending に残る");
     assert!(
         pending.fill_parameters().is_none(),
@@ -1000,8 +998,7 @@ fn incoming_fill_parameters_inner_range_within_local_max() {
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("受理された REQUEST_UPDATE は pending に残る");
     assert!(
         pending.fill_parameters().is_none(),
@@ -2060,8 +2057,7 @@ fn cumulative_cross_type_range_filters_exceed_local_max() {
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("1 通目が累積されること");
     assert_eq!(pending.count_range_filters(), 1);
     while server.poll_event().is_some() {}
@@ -2132,8 +2128,7 @@ fn cumulative_overflow_does_not_mutate_pending_params() {
         "subscriber 側は拒否後も Established のまま"
     );
     let pending = sub
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("1 通目の累積は残ること");
     assert_eq!(
         pending.count_range_filters(),
@@ -2203,8 +2198,7 @@ fn cumulative_same_type_replacement_does_not_accumulate() {
         let pending = server
             .subscription(rid)
             .expect("subscription が存在する")
-            .pending_update_params
-            .as_ref()
+            .pending_update_parameters()
             .expect("累積が存在すること");
         assert_eq!(
             pending.count_range_filters(),
@@ -2257,8 +2251,7 @@ fn cumulative_range_filters_at_local_max_accepted() {
     let pending = server
         .subscription(rid)
         .expect("subscription が存在する")
-        .pending_update_params
-        .as_ref()
+        .pending_update_parameters()
         .expect("累積が存在すること");
     assert_eq!(pending.count_range_filters(), 2);
 }
@@ -2342,4 +2335,66 @@ fn send_subscribe_with_invalid_group_order_returns_error_without_closing() {
         .expect("検証エラー後も正常な送信ができること");
     let (sent_rid, _) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
+}
+
+/// 応答ごとに受信側の MAX_REQUEST_UPDATES のクレジットが回復する
+///
+/// draft-ietf-moq-transport-23 §9.1.7 (MAX_REQUEST_UPDATES): "A REQUEST_UPDATE is
+/// considered outstanding from when it is sent until the sender receives the
+/// corresponding REQUEST_OK or REQUEST_ERROR response." 受信側も応答を 1 つ送るごとに
+/// クレジットを 1 つ回復しなければ、次の更新を上限超過として誤って拒否してしまう。
+/// 自側 (server) が宣言した MAX_REQUEST_UPDATES=1 の下で更新 → REQUEST_UPDATE_OK を
+/// 3 回繰り返し、セッションが閉じずに最後まで受理されることを固定する。
+#[test]
+fn incoming_request_update_credit_recovers_after_each_ok() {
+    // peer も server の宣言した上限を学習するため、client は 1 通ずつしか送れない。
+    // 応答 (= クレジット回復) の後でなければ次の送信が TOO_MANY_REQUEST_UPDATES になる。
+    let (mut client, mut server, rid) =
+        establish_subscribe_with(SetupOptions::new(), opts_with(0x08, 1));
+
+    let mut ok_count = 0;
+    for paused in [1_u8, 0, 1] {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(paused),
+        });
+        client
+            .send_request_update(rid, parameters)
+            .expect("応答でクレジットが回復した後の送信に成功すること");
+        let (stream_rid, update) = take_send_on_stream(&mut client);
+        assert_eq!(stream_rid, rid);
+        server
+            .recv_stream_message(rid, update)
+            .expect("1 通ずつの受信は local MAX_REQUEST_UPDATES=1 以内であること");
+
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("REQUEST_UPDATE_OK の送信に成功すること");
+        let (_, ok) = take_send_on_stream(&mut server);
+        assert!(
+            matches!(ok, ControlMessage::RequestOk(_)),
+            "REQUEST_UPDATE_OK で応答すること: {ok:?}"
+        );
+        ok_count += 1;
+        // 応答を受けた client 側のクレジットも回復し、次の REQUEST_UPDATE を送れる
+        client
+            .recv_stream_message(rid, ok)
+            .expect("REQUEST_UPDATE_OK の受信に成功すること");
+    }
+
+    assert_eq!(ok_count, 3, "受信した更新と同数の応答を返すこと");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "クレジットの回復漏れによる TOO_MANY_REQUEST_UPDATES で閉じないこと"
+    );
+    assert!(
+        server
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .pending_update_params
+            .is_empty(),
+        "すべての更新へ応答するとキューが空になること"
+    );
 }

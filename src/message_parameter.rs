@@ -1101,8 +1101,8 @@ impl MessageParameters {
     ///
     /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
     /// FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
-    /// 保持されない (sticky 対象外) ため、累積パラメータ (`pending_update_params`)
-    /// への保持から除外する用途に使う。
+    /// 保持されない (sticky 対象外) ため、適用待ちグループの累積パラメータ
+    /// (`Subscription::pending_update_params`) への保持から除外する用途に使う。
     pub(crate) fn remove_type(&mut self, param_type: u64) {
         self.0.retain(|p| p.param_type != param_type);
     }

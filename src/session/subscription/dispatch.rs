@@ -113,12 +113,17 @@ impl Session {
                     .subscriptions
                     .get_mut(&request_id)
                     .expect("locate_request guarantees key presence");
-                // draft §9.5.1 (Updating Subscriptions): 合体された REQUEST_UPDATE の
-                // 累積パラメータを subscription state に適用する。
-                // 現状の draft-ietf-moq-transport-22 では REQUEST_UPDATE に EXPIRES は
-                // 許可されていないため、pending_update_params から EXPIRES が到達することは
-                // ないが、将来の draft 変更に備えて適用しておく。
-                if let Some(pending_params) = subscription.pending_update_params.take() {
+                // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 未応答の更新のうち
+                // 最も古いグループ (合体された累積パラメータ) を subscription state に適用し、
+                // キューから取り除く。応答は受信順に返す必要があるため、呼び出し側がどの
+                // 更新への応答を意図していても、常に先頭グループが適用対象になる。
+                // FILL_PARAMETERS を含む更新は前後の更新と合体しない独立したグループであり、
+                // この時点の subscription 状態 (先行グループ適用後) で個別に適用される。
+                // 現状の draft では REQUEST_UPDATE に EXPIRES は許可されていないため、
+                // グループから EXPIRES が到達することはないが、将来の draft 変更に備えて
+                // 適用しておく。
+                if let Some(group) = subscription.pending_update_params.pop_front() {
+                    let pending_params = group.parameters;
                     update_subscription_subscriber_delivery_timeouts_if_present(
                         subscription,
                         &pending_params,
@@ -267,7 +272,11 @@ impl Session {
         //     terminate the subscription by sending a PUBLISH_DONE with error
         //     code UPDATE_FAILED")
         // の 2 ケース。Terminated からの送信は不正。
-        match subscription.state {
+        //
+        // どちらの遷移でも request は終端するため、残っている適用待ちの
+        // REQUEST_UPDATE と MAX_REQUEST_UPDATES のクレジット会計を解放する
+        // (`release_request_update_state` の doc を参照)。
+        let result = match subscription.state {
             SubscriptionState::Pending => {
                 subscription.state = SubscriptionState::Terminated;
                 // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
@@ -297,7 +306,9 @@ impl Session {
                     return Err(err);
                 }
                 let stream_count = subscription.stream_counts.published_count;
-                subscription.pending_update_params = None;
+                // 失敗応答では合体した複数の更新に単一の REQUEST_ERROR を返すため、
+                // 未応答のグループをすべて破棄する (以後の REQUEST_UPDATE_OK は適用されない)
+                subscription.pending_update_params.clear();
                 subscription.state = SubscriptionState::Terminated;
                 // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
                 // subscription の終了時は open 中の fill fetch stream を reset する (MUST)。
@@ -315,7 +326,13 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "send_request_error requires non-terminated state (subscription)",
             )),
+        };
+        // Terminated への遷移 (Ok) のときだけ、キューとクレジットを解放する。
+        // 既に Terminated の request は状態を変えないため何もしない。
+        if result.is_ok() {
+            self.release_request_update_state(request_id);
         }
+        result
     }
 
     pub(crate) fn handle_ok_for_subscription(
@@ -563,6 +580,10 @@ impl Session {
                 }
             }
         }
+        // 失敗応答の受信で subscription が終端したため、未応答の REQUEST_UPDATE と
+        // MAX_REQUEST_UPDATES のクレジットを解放する。以後の応答は返らない
+        // (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions))。
+        self.release_request_update_state(request_id);
         // draft-ietf-moq-transport-22 §9.9 (PUBLISH_DONE): "A sender MUST NOT send
         // PUBLISH_DONE until it has closed all streams it will ever open, and has no
         // further datagrams to send, for a subscription." の MUST NOT と §9.5.1 の MUST を

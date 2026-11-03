@@ -744,3 +744,132 @@ fn publish_sender_defers_peer_fin_by_state_role_and_local_fin() -> TestResult {
     );
     Ok(())
 }
+
+/// 片方向の FIN の後も未応答の REQUEST_UPDATE へ受信順に応答できる
+///
+/// draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure) の FIN は
+/// 方向ごとの終端であり cancel (§6.4.2.3 (Request Cancellation and Rejection)) ではない。
+/// 同節は "An endpoint MUST NOT send a FIN on a direction of a request stream until it has
+/// sent all required messages on that direction" と定め、§9.5 (REQUEST_UPDATE) は受信した
+/// 更新ごとに 1 つの REQUEST_UPDATE_OK / REQUEST_UPDATE_ERROR を返すことを MUST とする。
+/// したがって responder は requester の FIN を受けた後も未応答の更新を保持し、応答を
+/// 返さなければならない。本性質は任意個 (FILL を含みうる) の未応答更新について次を検証する。
+///
+/// - 片方向 FIN の後も subscription は Established のままで、未応答のグループが残る
+/// - FIN の後も応答でき、応答ごとに先頭グループだけが取り除かれる
+/// - すべて応答するとキューが空になり、セッションは閉じない
+#[test]
+fn peer_fin_keeps_pending_request_updates_respondable() -> TestResult {
+    use shiguredo_moqt::message_parameter::{PARAM_FILL_PARAMETERS, PARAM_PAUSED};
+
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let count = noprop::sample_usize_in(ctx, 1..=4);
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(
+                TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                b"cam".to_vec(),
+                MessageParameters::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        // 未応答の更新を count 通送る。1 通おきに FILL を挟んで coalescing の境界を作る
+        let mut expected_groups = 0_usize;
+        let mut tail_is_fill = false;
+        for index in 0..count {
+            let has_fill = index % 2 == 0;
+            let mut parameters = MessageParameters::new();
+            if has_fill {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_FILL_PARAMETERS,
+                    value: MessageParameterValue::FillParameters(MessageParameters::new()),
+                });
+            } else {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_PAUSED,
+                    value: MessageParameterValue::Uint8(1),
+                });
+            }
+            client
+                .send_request_update(rid, parameters)
+                .expect("テストフィクスチャの前提条件を満たす");
+            let (stream_rid, message) = take_send_on_stream(&mut client);
+            assert_eq!(stream_rid, rid, "購読の bidi stream に送ること");
+            server
+                .recv_stream_message(rid, message)
+                .expect("テストフィクスチャの前提条件を満たす");
+            if has_fill || tail_is_fill || expected_groups == 0 {
+                expected_groups += 1;
+                tail_is_fill = has_fill;
+            }
+        }
+
+        // requester (subscriber) の片方向 FIN。responder は request を維持する
+        server
+            .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let subscription = server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            subscription.state,
+            SubscriptionState::Established,
+            "requester の FIN だけでは subscription を終端しないこと"
+        );
+        assert_eq!(
+            subscription.pending_update_params.len(),
+            expected_groups,
+            "FIN の後も未応答のグループを保持すること"
+        );
+
+        // FIN の後も応答でき、応答ごとに先頭グループだけが取り除かれる
+        for answered in 1..=expected_groups {
+            server
+                .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+                .expect("片方向 FIN の後も REQUEST_UPDATE_OK を送れること");
+            let (stream_rid, message) = take_send_on_stream(&mut server);
+            assert_eq!(stream_rid, rid);
+            assert!(
+                matches!(
+                    message,
+                    shiguredo_moqt::message::ControlMessage::RequestOk(_)
+                ),
+                "REQUEST_UPDATE_OK で応答すること: {message:?}"
+            );
+            assert_eq!(
+                server
+                    .subscription(rid)
+                    .expect("テストフィクスチャの前提条件を満たす")
+                    .pending_update_params
+                    .len(),
+                expected_groups - answered,
+                "応答したグループだけがキューから取り除かれること"
+            );
+        }
+        let mut close_seen = false;
+        while let Some(event) = server.poll_event() {
+            if matches!(event, SessionEvent::CloseSession(_)) {
+                close_seen = true;
+            }
+        }
+        assert!(
+            !close_seen,
+            "片方向 FIN の後の応答でセッションを閉じてはいけない"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}

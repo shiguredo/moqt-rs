@@ -8,6 +8,7 @@ use crate::message::{
     ControlMessage, ErrorDetails, ReasonPhrase, common::Location, common::TrackNamespace,
 };
 use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet};
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -1021,6 +1022,7 @@ mod tests {
         SubscriptionState, TrackNamespace, TrackRole,
     };
     use crate::message::ReasonPhrase;
+    use alloc::collections::VecDeque;
     use alloc::vec;
 
     /// 最小限のフィールドだけ埋めた Subscription を作る (cleanup_ready 専用)
@@ -1075,7 +1077,7 @@ mod tests {
             range_filters: SubscriptionRangeFilters::default(),
             ended_groups: HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
             pending_publish_done: None,
         };
         sub.publish_done
@@ -1442,11 +1444,46 @@ pub struct Subscription {
     /// (§11.1.1 の "Location that is equal to or greater than the one specified" との差は、
     /// 宣言した Object 自身を存在するものとして扱うことで解消する)。
     pub end_of_track: Option<Location>,
-    /// 合体された REQUEST_UPDATE の累積パラメータ (draft §9.5.1 (Updating Subscriptions))
+    /// 未応答の REQUEST_UPDATE の適用待ちグループ (受信順)
     ///
-    /// REQUEST_UPDATE 受信時に即座に適用せず、マージして蓄積する。
-    /// `send_request_ok` 応答時に適用されクリアされる。
-    pub pending_update_params: Option<MessageParameters>,
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_UPDATE を
+    /// 受信順に処理し、更新ごとに 1 つの REQUEST_UPDATE_OK / REQUEST_UPDATE_ERROR を返す。
+    /// 処理を合体 (coalesce) して累積結果のみを適用することは許されるが、FILL_PARAMETERS を
+    /// 含む更新は合体できない (§9.19.15 (FILL PARAMETERS Parameter))。そのため通常の更新は
+    /// 末尾のグループへ累積し、FILL_PARAMETERS を含む更新の前後を境界としてグループを
+    /// 分割する。
+    ///
+    /// 先頭が最も古い未応答グループであり、`Session::send_request_ok` が先頭から 1 グループを
+    /// 適用して取り除く。これにより応答の返却順と適用順が受信順に一致する。
+    /// FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として保持されない
+    /// (sticky 対象外) ため、グループのパラメータからは除去する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub pending_update_params: VecDeque<PendingUpdateGroup>,
+}
+
+/// 未応答の REQUEST_UPDATE 1 グループ分の適用待ちパラメータ
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) は、受信側が複数の REQUEST_UPDATE を
+/// 合体して累積結果のみを適用することを許す。合体の単位が本構造体であり、通常の更新は
+/// 1 グループへ累積する。FILL_PARAMETERS を含む更新は合体できない (§9.19.15) ため、
+/// その更新だけを含むグループとして前後の更新から分離する。
+///
+/// TRACK_NAMESPACE_PREFIX (0x34) も合体を禁止されるパラメータだが
+/// (§9.19.20 (TRACK_NAMESPACE_PREFIX Parameter))、SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS は
+/// 本 Session が request として受理しないため本キューには現れない。将来これらの request を
+/// 扱う場合も、同じ境界規則で他の更新と分離する必要がある。
+#[derive(Debug, Clone)]
+pub struct PendingUpdateGroup {
+    /// このグループに属する REQUEST_UPDATE の累積パラメータ
+    ///
+    /// FILL_PARAMETERS は含まない。`send_request_ok` が応答時に subscription 状態へ
+    /// 適用する値そのものである。
+    pub parameters: MessageParameters,
+    /// このグループが FILL_PARAMETERS を含む更新かどうか (合体の境界)
+    ///
+    /// このグループの前後では通常の更新を累積しない。fill fetch stream の開設は
+    /// 更新の受信時点で行うため (この値は保持・観測用)。
+    pub has_fill_parameters: bool,
 }
 
 /// subscription に適用されている Range Filter 群 (draft-ietf-moq-transport-22 §3.3.2 (Range Filters))
@@ -1591,6 +1628,18 @@ impl Subscription {
     /// EXPIRES deadline を超過済みか
     pub fn expires_elapsed(&self) -> bool {
         self.expires.as_ref().is_some_and(|expires| expires.expired)
+    }
+
+    /// 未応答の REQUEST_UPDATE のうち最も古いグループの累積パラメータを返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 未応答の更新が無ければ `None`。
+    /// `Some` の場合、次に `Session::send_request_ok` を呼ぶとこの値が subscription 状態へ
+    /// 適用される (FILL_PARAMETERS は含まない)。更新の受信順のグループ一覧は
+    /// `pending_update_params` で参照できる。
+    pub fn pending_update_parameters(&self) -> Option<&MessageParameters> {
+        self.pending_update_params
+            .front()
+            .map(|group| &group.parameters)
     }
 }
 

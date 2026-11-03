@@ -863,3 +863,130 @@ fn fetch_request_update_ok_without_publish_observation_has_no_largest_object() {
         "publish 観測がない Track では自動補完されないこと"
     );
 }
+
+/// FETCH の REQUEST_UPDATE は受信順に処理され、応答が同数・同順で返る
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): FETCH の REQUEST_UPDATE が運べる
+/// パラメータは AUTHORIZATION_TOKEN / SUBSCRIBER_PRIORITY だけであり (同節の列挙)、
+/// 受信側は受信順に処理して更新ごとに 1 つの REQUEST_UPDATE_OK / REQUEST_UPDATE_ERROR を
+/// 返す。応答は同じ bidi stream 上を順に流れ、Request ID を持たないため、
+/// 呼び出し順がそのまま受信順の応答になる。QUEUE を持たない FETCH でも順序と個数が
+/// 保たれることを固定する。
+#[test]
+fn fetch_request_updates_return_ok_in_receive_order() {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_SUBSCRIBER_PRIORITY,
+    };
+    use shiguredo_moqt::session::types::FetchState;
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(
+            rid,
+            0,
+            Location {
+                group_id: 5,
+                object_id: 0,
+            },
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // SUBSCRIBER_PRIORITY だけが異なる 3 通を、応答を待たずに受信させる
+    let priorities = [7_u8, 9, 11];
+    for priority in priorities {
+        let mut params = MessageParameters::new();
+        params.push(MessageParameter {
+            param_type: PARAM_SUBSCRIBER_PRIORITY,
+            value: MessageParameterValue::Uint8(priority),
+        });
+        client
+            .send_request_update(rid, params)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (stream_rid, upd_msg) = take_send_on_stream(&mut client);
+        assert_eq!(stream_rid, rid);
+        server
+            .recv_stream_message(rid, upd_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+    }
+
+    // 受信イベントは受信順に 3 件、各イベントの優先度も送信順になる
+    let mut seen = Vec::new();
+    while let Some(event) = server.poll_event() {
+        match event {
+            SessionEvent::RequestUpdateReceived { parameters, .. } => {
+                seen.push(parameters.subscriber_priority());
+            }
+            SessionEvent::CloseSession(err) => {
+                panic!("REQUEST_UPDATE の受信でセッションが閉じてはいけない: {err:?}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        seen,
+        priorities
+            .iter()
+            .map(|value| Some(*value))
+            .collect::<Vec<_>>(),
+        "REQUEST_UPDATE は受信順に通知されること"
+    );
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .subscriber_priority,
+        Some(11),
+        "最後に受信した SUBSCRIBER_PRIORITY が適用されること"
+    );
+
+    // 応答は受信した更新と同数・同順で 3 通返る
+    for _ in 0..priorities.len() {
+        server
+            .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+            .expect("REQUEST_UPDATE_OK の送信に成功すること");
+        let (stream_rid, ok) = take_send_on_stream(&mut server);
+        assert_eq!(stream_rid, rid);
+        assert!(
+            matches!(ok, ControlMessage::RequestOk(_)),
+            "REQUEST_UPDATE_OK で応答すること: {ok:?}"
+        );
+        client
+            .recv_stream_message(rid, ok)
+            .expect("REQUEST_UPDATE_OK の受信に成功すること");
+    }
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        FetchState::Established,
+        "応答後も FETCH は Established のままであること"
+    );
+}

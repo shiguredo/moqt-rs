@@ -2211,3 +2211,252 @@ fn peer_object_fields_tracker_uses_subscription_group_order_on_datagram_path() {
         "datagram 経路でも GROUP_ORDER = 0x2 (Descending) が tracker に反映されること"
     );
 }
+
+/// request 終端時に REQUEST_UPDATE の未応答キューとクレジット会計を解放する
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE) は、受信側が未応答の更新を
+/// 受信順に保持し、更新ごとに 1 つの応答を返すことを求める。§6.4.2.2 (Graceful Request
+/// Stream Closure) の片方向 FIN は cancel ではないため、request を維持する経路では
+/// 未応答の更新と MAX_REQUEST_UPDATES (§9.1.7) のクレジットを保持しなければならない。
+/// §6.4.2.3 (Request Cancellation and Rejection) の cancel と、両方向の FIN による
+/// request の完了では応答経路が無くなるため、キューとクレジットを解放する。
+///
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+#[test]
+fn request_termination_releases_pending_updates_and_credit() {
+    use crate::message::{ControlMessage, ReasonPhrase, RequestOk, RequestUpdate, Setup};
+    use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_PAUSED};
+    use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+    use crate::session::types::{RequestStreamEnd, TerminationReason};
+    use crate::track_properties::TrackProperties;
+
+    /// local の MAX_REQUEST_UPDATES を `max` にして Established な client を作る
+    ///
+    /// PUBLISH を送って REQUEST_OK を受けるため、受信した REQUEST_UPDATE は peer
+    /// subscriber からの更新になる (draft §9.5 の第 2 のケース)。
+    fn established_publish_client(max: u64) -> (Session, u64, u64, u64) {
+        let mut local_opts = SetupOptions::new();
+        local_opts.push(SetupOption {
+            option_type: crate::parameter::SETUP_OPTION_MAX_REQUEST_UPDATES,
+            value: SetupOptionValue::VarInt(max),
+        });
+        let mut client = Session::new_client(Transport::Quic, local_opts)
+            .expect("テストフィクスチャの前提条件を満たす");
+        client
+            .recv_control(ControlMessage::Setup(Setup {
+                options: SetupOptions::new(),
+            }))
+            .expect("テストフィクスチャの前提条件を満たす");
+        // 異なる Track の PUBLISH 2 本 (cancel 用と完了用) を確立する
+        let mut rids = Vec::new();
+        for (alias, name) in [(1_u64, b"cam-a".to_vec()), (2_u64, b"cam-b".to_vec())] {
+            let rid = client
+                .send_publish(
+                    TrackNamespace::new(vec![b"live".to_vec()])
+                        .expect("テストフィクスチャの前提条件を満たす"),
+                    name,
+                    alias,
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .expect("テストフィクスチャの前提条件を満たす");
+            client
+                .recv_stream_message(
+                    rid,
+                    ControlMessage::RequestOk(RequestOk {
+                        parameters: MessageParameters::new(),
+                        track_properties: TrackProperties::new(),
+                    }),
+                )
+                .expect("PUBLISH_OK の受信に成功すること");
+            rids.push(rid);
+        }
+        (client, rids[0], rids[1], 0)
+    }
+
+    /// PAUSED 1 個を持つ REQUEST_UPDATE を作る
+    fn update(update_request_id: u64, paused: u8) -> ControlMessage {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: PARAM_PAUSED,
+            value: MessageParameterValue::Uint8(paused),
+        });
+        ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: update_request_id,
+            parameters,
+        })
+    }
+
+    /// FILL_PARAMETERS 1 個 (内側は空) を持つ REQUEST_UPDATE を作る
+    ///
+    /// FILL_PARAMETERS を含む更新は coalescing の境界になるため、未応答の更新が
+    /// 2 グループとして保持されることを観測できる。
+    fn fill_update(update_request_id: u64) -> ControlMessage {
+        let mut parameters = MessageParameters::new();
+        parameters.push(MessageParameter {
+            param_type: crate::message_parameter::PARAM_FILL_PARAMETERS,
+            value: MessageParameterValue::FillParameters(MessageParameters::new()),
+        });
+        ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: update_request_id,
+            parameters,
+        })
+    }
+
+    let (mut client, cancel_rid, complete_rid, _) = established_publish_client(2);
+
+    // 2 本の subscription それぞれに REQUEST_UPDATE を 2 通ずつ受信させる
+    for (rid, ids) in [(cancel_rid, [1_u64, 3_u64]), (complete_rid, [5, 7])] {
+        client
+            .recv_stream_message(rid, update(ids[0], 0))
+            .expect("REQUEST_UPDATE の受信に成功すること");
+        client
+            .recv_stream_message(rid, fill_update(ids[1]))
+            .expect("REQUEST_UPDATE (FILL) の受信に成功すること");
+        let subscription = client
+            .subscription(rid)
+            .expect("subscription が存在すること");
+        assert_eq!(
+            subscription.pending_update_params.len(),
+            2,
+            "未応答の更新は受信順に 2 グループ保持されること"
+        );
+        assert_eq!(
+            client.incoming_request_updates.get(&rid),
+            Some(&2),
+            "未応答の更新のクレジットが 2 消費されていること"
+        );
+    }
+
+    // cancel 側: 片方向 FIN では request を維持し、キューとクレジットを保持する
+    client
+        .recv_request_stream_closed(cancel_rid, RequestStreamEnd::Fin)
+        .expect("片方向 FIN の受信に成功すること");
+    assert_eq!(
+        client
+            .subscription(cancel_rid)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Established,
+        "片方向 FIN は cancel ではないため subscription を終端しないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(cancel_rid)
+            .expect("subscription が存在すること")
+            .pending_update_params
+            .len(),
+        2,
+        "片方向 FIN の後も未応答の更新を保持すること"
+    );
+    assert_eq!(
+        client.incoming_request_updates.get(&cancel_rid),
+        Some(&2),
+        "片方向 FIN の後もクレジットを保持すること"
+    );
+
+    // cancel 側: RESET_STREAM でキューとクレジットを解放する
+    client
+        .recv_request_stream_closed(
+            cancel_rid,
+            RequestStreamEnd::Reset {
+                error_code: Some(0x1),
+                reliable_size: None,
+            },
+        )
+        .expect("cancel の受信に成功すること");
+    assert_eq!(
+        client
+            .subscription(cancel_rid)
+            .expect("subscription が存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "cancel で subscription が終端すること"
+    );
+    assert!(
+        client
+            .subscription(cancel_rid)
+            .expect("subscription が存在すること")
+            .pending_update_params
+            .is_empty(),
+        "cancel で未応答の更新が解放されること"
+    );
+    assert!(
+        !client.incoming_request_updates.contains_key(&cancel_rid),
+        "cancel でクレジット会計が解放されること"
+    );
+
+    // 完了側: 片方向 FIN の後に応答してから PUBLISH_DONE + FIN で完了させる
+    client
+        .recv_request_stream_closed(complete_rid, RequestStreamEnd::Fin)
+        .expect("片方向 FIN の受信に成功すること");
+    for _ in 0..2 {
+        client
+            .send_request_ok(
+                complete_rid,
+                MessageParameters::new(),
+                TrackProperties::new(),
+            )
+            .expect("片方向 FIN の後も未応答の更新へ応答できること");
+    }
+    assert!(
+        client
+            .subscription(complete_rid)
+            .expect("subscription が存在すること")
+            .pending_update_params
+            .is_empty(),
+        "すべての更新へ応答するとキューが空になること"
+    );
+    assert!(
+        !client.incoming_request_updates.contains_key(&complete_rid)
+            || client.incoming_request_updates.get(&complete_rid) == Some(&0),
+        "応答ごとにクレジットが回復していること"
+    );
+
+    // クレジットを残したまま完了させ、キューとクレジットが残らないことを確認するため
+    // もう 1 通受信してから PUBLISH_DONE + FIN で終端する
+    client
+        .recv_stream_message(complete_rid, update(9, 1))
+        .expect("REQUEST_UPDATE の受信に成功すること");
+    assert_eq!(
+        client.incoming_request_updates.get(&complete_rid),
+        Some(&1),
+        "未応答の更新のクレジットが残っていること"
+    );
+    client
+        .send_publish_done(
+            complete_rid,
+            0x2,
+            0,
+            ReasonPhrase::new("done").expect("空でない reason phrase である"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    assert!(
+        client
+            .subscription(complete_rid)
+            .expect("subscription が存在すること")
+            .pending_update_params
+            .is_empty(),
+        "request 完了で未応答の更新が解放されること"
+    );
+    assert!(
+        !client.incoming_request_updates.contains_key(&complete_rid),
+        "request 完了でクレジット会計が解放されること"
+    );
+    // 両方向の FIN が揃ったため RequestTerminated (PeerStreamFin) が発行される
+    let mut terminated = None;
+    while let Some(event) = client.poll_event() {
+        if let SessionEvent::RequestTerminated {
+            request_id, reason, ..
+        } = event
+            && request_id == complete_rid
+        {
+            terminated = Some(reason);
+        }
+    }
+    assert_eq!(
+        terminated,
+        Some(TerminationReason::PeerStreamFin),
+        "完了で RequestTerminated (PeerStreamFin) が発行されること"
+    );
+}

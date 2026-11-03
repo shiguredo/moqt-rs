@@ -9,7 +9,10 @@
 use pbt::common::test_runner;
 use shiguredo_moqt::message::{ControlMessage, common::TrackNamespace};
 use shiguredo_moqt::message_parameter::MessageParameters;
-use shiguredo_moqt::session::{core::PUBLISH_DONE_STREAM_COUNT_UNKNOWN, types::SubscriptionState};
+use shiguredo_moqt::session::{
+    core::PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
+    types::{SessionEvent, SubscriptionState},
+};
 use shiguredo_moqt::track_properties::TrackProperties;
 use shiguredo_moqt::{
     session::types::DataStreamId, session::types::RequestStreamEnd,
@@ -504,6 +507,246 @@ fn forget_subscription_removes_all_indices() -> noprop::TestResult {
                 .expect("テストフィクスチャの前提条件を満たす")
                 .track_alias,
             Some(alias)
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// REQUEST_UPDATE は受信順のグループ単位で処理され、応答も受信順に返る
+///
+/// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): "REQUEST_UPDATE messages MUST be
+/// processed in order" / "The receiver MUST still send a REQUEST_UPDATE_OK for each
+/// successful update" / "REQUEST_UPDATE_OKs MUST be returned in the order the
+/// REQUEST_UPDATEs were received". 通常の更新は合体 (coalesce) して累積結果のみを適用
+/// できるが、FILL_PARAMETERS を含む更新は合体できない (§9.19.15)。そのため受信順の
+/// グループ単位で状態が適用され、応答の個数は受信数と一致する。
+///
+/// 本性質は任意の更新列 (PAUSED / LOCATION_FILTER / FILL の組合せ) について次を検証する。
+///
+/// - FILL の前後がグループ境界になり、グループ数が境界規則と一致する
+/// - 応答 k 回目の直後の paused / filter が、先頭から k グループ目までを適用した値になり、
+///   未応答の後続グループの値が先に適用されない
+/// - 応答の個数が受信数と一致し、最後にキューが空になる
+#[test]
+fn request_update_groups_apply_in_receive_order() -> noprop::TestResult {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+        PARAM_LOCATION_FILTER, PARAM_PAUSED,
+    };
+
+    /// サンプルした更新 1 通分
+    struct SampledUpdate {
+        has_fill: bool,
+        paused: Option<u8>,
+        filter: Option<LocationFilter>,
+    }
+
+    /// 更新列から受信順の coalescing グループを求める
+    ///
+    /// FILL_PARAMETERS を含む更新は単独グループになり、その直後の通常更新も
+    /// 新しいグループを開始する。それ以外は直前のグループへ合体する。
+    fn group_indices(updates: &[SampledUpdate]) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut tail_is_fill = false;
+        for (index, update) in updates.iter().enumerate() {
+            if update.has_fill || groups.is_empty() || tail_is_fill {
+                groups.push(vec![index]);
+                tail_is_fill = update.has_fill;
+            } else {
+                groups
+                    .last_mut()
+                    .expect("グループは 1 件以上ある")
+                    .push(index);
+            }
+        }
+        groups
+    }
+
+    /// 先頭から `answered` グループまでを適用した (paused, filter) を返す
+    ///
+    /// PAUSED は省略時に現在値を維持し、LOCATION_FILTER は後の値が前を上書きする
+    /// (draft-ietf-moq-transport-23 §9.19.18 / §9.19.9)。
+    fn expected_state_after(
+        updates: &[SampledUpdate],
+        groups: &[Vec<usize>],
+        answered: usize,
+    ) -> (bool, Option<LocationFilter>) {
+        let mut paused = false;
+        let mut filter = None;
+        for group in &groups[..answered] {
+            for &index in group {
+                if let Some(value) = updates[index].paused {
+                    paused = value == 1;
+                }
+                if let Some(value) = updates[index].filter {
+                    filter = Some(value);
+                }
+            }
+        }
+        (paused, filter)
+    }
+
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let count = noprop::sample_usize_in(ctx, 1..=5);
+        let mut updates = Vec::new();
+        for _ in 0..count {
+            let has_fill = noprop::sample_bool(ctx);
+            let paused = if noprop::sample_bool(ctx) {
+                Some(noprop::sample_u8(ctx) % 2)
+            } else {
+                None
+            };
+            let filter = if noprop::sample_bool(ctx) {
+                Some(LocationFilter::AbsoluteRangeWithEnd {
+                    start: Location {
+                        group_id: 0,
+                        object_id: 0,
+                    },
+                    end_group_delta: noprop::sample_u64_in(ctx, 0..=4),
+                    end_object: noprop::sample_u64_in(ctx, 0..=4),
+                })
+            } else {
+                None
+            };
+            updates.push(SampledUpdate {
+                has_fill,
+                paused,
+                filter,
+            });
+        }
+        let groups = group_indices(&updates);
+
+        // SUBSCRIBE を確立する。Largest Object を公開しないため fill fetch stream は開かない
+        // (fill の開設条件だけを本性質の対象外にする)。
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(
+                TrackNamespace::new(vec![b"prop".to_vec()]).expect("正当な namespace である"),
+                b"update".to_vec(),
+                MessageParameters::new(),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, subscribe) = take_send_request(&mut client);
+        server
+            .recv_request(subscribe)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok)
+            .expect("テストフィクスチャの前提条件を満たす");
+
+        // 更新を応答を待たずに送受信する
+        for update in &updates {
+            let mut parameters = MessageParameters::new();
+            if update.has_fill {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_FILL_PARAMETERS,
+                    value: MessageParameterValue::FillParameters(MessageParameters::new()),
+                });
+            }
+            if let Some(paused) = update.paused {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_PAUSED,
+                    value: MessageParameterValue::Uint8(paused),
+                });
+            }
+            if let Some(filter) = update.filter {
+                parameters.push(MessageParameter {
+                    param_type: PARAM_LOCATION_FILTER,
+                    value: MessageParameterValue::LocationFilter(filter),
+                });
+            }
+            client
+                .send_request_update(rid, parameters)
+                .expect("テストフィクスチャの前提条件を満たす");
+            let (stream_rid, message) = take_send_on_stream(&mut client);
+            assert_eq!(stream_rid, rid, "購読の bidi stream に送ること");
+            server
+                .recv_stream_message(rid, message)
+                .expect("テストフィクスチャの前提条件を満たす");
+        }
+
+        // 受信イベントは受信数と一致し、fill fetch stream は開かない
+        let mut received = 0_usize;
+        while let Some(event) = server.poll_event() {
+            match event {
+                SessionEvent::RequestUpdateReceived { .. } => received += 1,
+                SessionEvent::OpenFillFetchStream { .. } => {
+                    panic!("Largest Object 未知では fill fetch stream を開かない")
+                }
+                SessionEvent::CloseSession(err) => {
+                    panic!("REQUEST_UPDATE の受信でセッションが閉じてはいけない: {err:?}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(received, count, "REQUEST_UPDATE ごとに通知されること");
+
+        // グループ構造が境界規則と一致する
+        let subscription = server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            subscription.pending_update_params.len(),
+            groups.len(),
+            "FILL の前後を境界としたグループ数になること"
+        );
+        assert_eq!(
+            subscription
+                .pending_update_params
+                .iter()
+                .map(|group| group.has_fill_parameters)
+                .collect::<Vec<_>>(),
+            groups
+                .iter()
+                .map(|group| group.len() == 1 && updates[group[0]].has_fill)
+                .collect::<Vec<_>>(),
+            "fill を含むグループだけが境界として印されること"
+        );
+
+        // 応答ごとに先頭グループだけが適用される
+        for answered in 1..=groups.len() {
+            server
+                .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
+                .expect("REQUEST_UPDATE_OK の送信に成功すること");
+            let (stream_rid, message) = take_send_on_stream(&mut server);
+            assert_eq!(stream_rid, rid);
+            assert!(
+                matches!(message, ControlMessage::RequestOk(_)),
+                "REQUEST_UPDATE_OK で応答すること: {message:?}"
+            );
+            let subscription = server
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす");
+            let (expected_paused, expected_filter) =
+                expected_state_after(&updates, &groups, answered);
+            assert_eq!(
+                subscription.paused, expected_paused,
+                "応答したグループまでの PAUSED が適用されること"
+            );
+            assert_eq!(
+                subscription.filter, expected_filter,
+                "応答したグループまでの LOCATION_FILTER が適用されること"
+            );
+            assert_eq!(
+                subscription.pending_update_params.len(),
+                groups.len() - answered,
+                "応答したグループだけがキューから取り除かれること"
+            );
+        }
+        assert_eq!(
+            server
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .state,
+            SubscriptionState::Established,
+            "応答で購読が終端しないこと"
         );
         Ok(())
     })?;

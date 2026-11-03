@@ -195,6 +195,12 @@ impl Session {
             ));
         };
         fetch.state = FetchState::Terminated;
+        // cancel (§6.4.2.3 (Request Cancellation and Rejection)) または requester 側の
+        // 完了通知 (§6.4.2.2 (Graceful Request Stream Closure)) で request が終端したため、
+        // REQUEST_UPDATE のクレジット会計を解放する。FETCH の REQUEST_UPDATE は
+        // subscriber 役だけが送信でき (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))、
+        // 受信側の適用待ちキューは subscription にしか無い。
+        self.remove_request_update_credit_entries(request_id);
         Ok(terminationreason_from_end(end))
     }
 
@@ -503,6 +509,8 @@ impl Session {
             request_id,
             error_code: super::types::DataStreamResetReason::Cancelled.error_code(),
         });
+        // cancel で応答を返す経路が無くなるため、REQUEST_UPDATE のクレジット会計を解放する
+        self.remove_request_update_credit_entries(request_id);
         Ok(())
     }
 
@@ -566,6 +574,9 @@ impl Session {
             request_id,
             error_code: super::types::DataStreamResetReason::Cancelled.error_code(),
         });
+        // peer の cancel で応答を返す経路が無くなるため、REQUEST_UPDATE のクレジット会計を
+        // 解放する (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))
+        self.remove_request_update_credit_entries(request_id);
         Ok(())
     }
 
@@ -1188,7 +1199,7 @@ impl Session {
                 "request_error (fetch) can only be sent by publisher-role",
             ));
         }
-        match fetch.state {
+        let result = match fetch.state {
             FetchState::Pending => {
                 fetch.state = FetchState::Terminated;
                 Ok(None)
@@ -1222,7 +1233,13 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "send_request_error requires non-terminated state (fetch)",
             )),
+        };
+        // Terminated への遷移 (Ok) では応答を返す経路が残らないため、REQUEST_UPDATE の
+        // クレジット会計を解放する (既に Terminated の request は状態を変えない)
+        if result.is_ok() {
+            self.remove_request_update_credit_entries(request_id);
         }
+        result
     }
 
     pub(super) fn handle_err_for_fetch(&mut self, request_id: u64) -> Result<(), SessionError> {
@@ -1284,6 +1301,10 @@ impl Session {
             // 受理するための許容集合へ登録する (draft-ietf-moq-transport-22 §3.2.4)
             self.record_fetch_error_late_stream(request_id);
         }
+        // 失敗応答の受信で fetch が終端したため、REQUEST_UPDATE のクレジット会計を解放する
+        // (draft-ietf-moq-transport-23 §9.5.1 (Updating Subscriptions): 失敗応答を受けた
+        // fetch は Terminated になり、以後の応答は返らない)。
+        self.remove_request_update_credit_entries(request_id);
         Ok(())
     }
 }

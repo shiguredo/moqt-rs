@@ -1640,6 +1640,11 @@ impl Session {
             .request_streams
             .remove(&request_id)
             .expect("peer_fin_received implies a request_streams entry");
+        // 両方向の FIN で request が完了したため、未応答の REQUEST_UPDATE と
+        // MAX_REQUEST_UPDATES のクレジットを解放する。正常な応答順序なら未応答の更新は
+        // 残っていないが、最終メッセージ送信後に届いた更新をアプリが応答していない場合の
+        // 取りこぼしを残さない (draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE))。
+        self.release_request_update_state(request_id);
         self.events.push_back(SessionEvent::RequestTerminated {
             request_id,
             kind,
@@ -2406,6 +2411,27 @@ impl Session {
     pub(super) fn remove_request_update_credit_entries(&mut self, request_id: u64) {
         self.outgoing_request_updates.remove(&request_id);
         self.incoming_request_updates.remove(&request_id);
+    }
+
+    /// request の終端時に REQUEST_UPDATE の未応答キューとクレジット会計を解放する
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信した REQUEST_UPDATE は受信順に
+    /// 保持され、更新ごとに 1 つの応答が必要である。request stream が cancel されたとき
+    /// (§6.4.2.3 (Request Cancellation and Rejection)) と、両方向の FIN で request が完了した
+    /// とき (§6.4.2.2 (Graceful Request Stream Closure)) は、以後の応答が意味を持たないため、
+    /// 適用待ちの更新と MAX_REQUEST_UPDATES (§9.1.7) のクレジットを解放する。
+    ///
+    /// 片方向の FIN を受けただけで request を維持する経路 (responder が応答を送る前など) では
+    /// 呼ばないこと。未応答の更新とクレジットを保持し、必要な応答を順に返す必要がある。
+    ///
+    /// request_id は再利用されない (自側採番は `RequestIdGenerator` の単調増加、peer 採番は
+    /// `RequestIdTracker` の重複拒否で担保) ため、解放後の会計が新しい request に誤用される
+    /// ことはない。
+    pub(super) fn release_request_update_state(&mut self, request_id: u64) {
+        if let Some(subscription) = self.subscriptions.get_mut(&request_id) {
+            subscription.pending_update_params.clear();
+        }
+        self.remove_request_update_credit_entries(request_id);
     }
 
     /// キャンセル済み peer publisher alias の tombstone 保持期間 (ms) を返す

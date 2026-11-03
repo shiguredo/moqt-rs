@@ -898,7 +898,7 @@ fn request_update_ok_with_out_of_scope_parameter_keeps_subscription_state() {
         "状態は Established のまま"
     );
     assert!(
-        sub.pending_update_params.is_some(),
+        sub.pending_update_parameters().is_some(),
         "pending_update_params が消費されないこと"
     );
     assert_eq!(

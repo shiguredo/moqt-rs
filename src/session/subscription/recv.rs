@@ -20,15 +20,16 @@ use crate::message_parameter::{
     LocationFilter, LocationFilterContext, LocationFilterUpdate, MessageParameters,
     PARAM_FILL_PARAMETERS,
 };
+use alloc::collections::VecDeque;
 use hashbrown::HashMap;
 
 use super::super::core::{
     RequestTable, Session, alias_used_by_different_track, range_filter_usage,
 };
 use super::super::types::{
-    DeadlineTimer, DeliveryTimeoutState, RequestKind, SessionError, SessionEvent, StreamCountState,
-    Subscription, SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState,
-    TerminationReason, TrackRole,
+    DeadlineTimer, DeliveryTimeoutState, PendingUpdateGroup, RequestKind, SessionError,
+    SessionEvent, StreamCountState, Subscription, SubscriptionInitiator, SubscriptionRangeFilters,
+    SubscriptionState, TerminationReason, TrackRole,
 };
 use super::delivery::{
     compute_effective_delivery_timeout_ms, record_publish_done, set_subscription_expires,
@@ -71,6 +72,10 @@ impl Session {
             ));
         }
         subscription.state = SubscriptionState::Terminated;
+        // subscriber 主導の cancel で購読が終端したため、未応答の REQUEST_UPDATE と
+        // MAX_REQUEST_UPDATES のクレジットを解放する
+        // (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and Rejection))。
+        self.release_request_update_state(request_id);
         Ok(())
     }
 
@@ -286,7 +291,7 @@ impl Session {
             range_filters,
             ended_groups: HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
         };
         self.register_subscription(request_id, subscription);
         self.request_streams
@@ -539,7 +544,7 @@ impl Session {
             range_filters,
             ended_groups: HashMap::new(),
             end_of_track: None,
-            pending_update_params: None,
+            pending_update_params: VecDeque::new(),
         };
         self.register_subscription(request_id, subscription);
         self.request_streams
@@ -1087,19 +1092,27 @@ impl Session {
         if locally_terminated {
             return Ok(());
         }
-        // draft §9.5.1 (Updating Subscriptions): REQUEST_UPDATE のパラメータを合体 (coalesce)
-        // する。後続の REQUEST_UPDATE が届くたびに pending_update_params へマージし
-        // (後の値が前を上書き)、send_request_ok 応答時に累積パラメータを適用する。
+        // draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): 受信側は REQUEST_UPDATE を
+        // 受信順に処理し、更新ごとに 1 つの REQUEST_UPDATE_OK / REQUEST_UPDATE_ERROR を返す。
+        // 処理の合体 (coalescing) は累積結果のみを適用する形で許されるが、FILL_PARAMETERS を
+        // 含む更新は合体できない (§9.19.15 (FILL PARAMETERS Parameter))。そのため未応答の
+        // 更新は「受信順のグループ」として保持し、FILL_PARAMETERS を含む更新の前後を境界に
+        // する。先頭グループは `send_request_ok` が応答時に適用して取り除く。
         //
-        // `merge_from` は破壊的なのでコピー上でマージし、累積の上限検証を通ってから確定させる。
-        // 上限違反で拒否したのに累積側が更新されていると、以降の正当な REQUEST_UPDATE も
-        // 超過状態のまま評価されてしまう。
-        let merged = match subscription.pending_update_params.as_ref() {
-            Some(pending) => {
-                let mut copy = pending.clone();
-                copy.merge_from(&parameters);
-                copy
+        // `view` は未応答の全グループと今回のメッセージを先頭から順に合体した
+        // 「受信順に処理した場合の累積表示」である。累積上限の検証と fill fetch stream の
+        // 開設判定、アプリへの通知に使う。`merge_from` は破壊的なので複製の上でマージする。
+        let view = match subscription.pending_update_params.front() {
+            // 先頭グループの累積から始め、以降のグループと今回のメッセージを順に重ねる
+            Some(head) => {
+                let mut folded = head.parameters.clone();
+                for group in subscription.pending_update_params.iter().skip(1) {
+                    folded.merge_from(&group.parameters);
+                }
+                folded.merge_from(&parameters);
+                folded
             }
+            // 未応答の更新が無ければ、今回のメッセージ自体が累積表示になる
             None => parameters.clone(),
         };
         // draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES) が宣言する上限は、同節の
@@ -1110,13 +1123,13 @@ impl Session {
         // 累積するため、マージ後の総数を再検証する。
         //
         // 総数は FILL_PARAMETERS の内側も合算する (`range_filter_usage` の doc を参照)。
-        // `pending_update_params` からは FILL_PARAMETERS を除去しているため `merged` の内側は
+        // グループのパラメータからは FILL_PARAMETERS を除去しているため `view` の内側は
         // 常に今回のメッセージのものであり、合算値は「マージ後の外側の Range 総数 (同一型は
         // 今回のメッセージの値で置換済み) + 今回メッセージの内側の Range 総数」になる
         // (前回メッセージの内側を二重計上しない)。
         // 有無の判定は総数の比較に含まれる (総数が 1 以上なら Range Filter パラメータも必ず
         // 存在する) ため、ここでは総数だけを見る。
-        let (_, accumulated_ranges) = range_filter_usage(&merged);
+        let (_, accumulated_ranges) = range_filter_usage(&view);
         if accumulated_ranges > self.local_max_filter_ranges() {
             self.reject_request_update(
                 request_id,
@@ -1129,22 +1142,44 @@ impl Session {
             .subscriptions
             .get_mut(&request_id)
             .expect("locate_request guarantees key presence");
-        // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
-        // FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
-        // 保持されない (sticky 対象外) ため、累積パラメータへの保持から除外する。
-        // アプリへ通知する累積表示 (`merged`) には残す。
-        let mut pending = merged.clone();
-        pending.remove_type(PARAM_FILL_PARAMETERS);
-        subscription.pending_update_params = Some(pending);
+        // グループの境界を決めて今回の更新を蓄積する。FILL_PARAMETERS を含む更新は
+        // 単独のグループとし (前の通常更新にも後続の通常更新にも合体しない)、
+        // FILL_PARAMETERS を含むグループの直後の通常更新も新しいグループを開始する。
+        // それ以外の通常更新は末尾グループへ累積する (後の値が前を上書きする)。
+        let has_fill_parameters = parameters.fill_parameters().is_some();
+        let tail_is_fill_group = subscription
+            .pending_update_params
+            .back()
+            .is_some_and(|group| group.has_fill_parameters);
+        if has_fill_parameters
+            || tail_is_fill_group
+            || subscription.pending_update_params.is_empty()
+        {
+            // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter):
+            // FILL_PARAMETERS は運んできたメッセージにのみ適用され subscription 状態として
+            // 保持されない (sticky 対象外) ため、グループのパラメータから除外する。
+            // アプリへ通知する累積表示 (`view`) には残る。
+            let mut group_parameters = parameters.clone();
+            group_parameters.remove_type(PARAM_FILL_PARAMETERS);
+            subscription
+                .pending_update_params
+                .push_back(PendingUpdateGroup {
+                    parameters: group_parameters,
+                    has_fill_parameters,
+                });
+        } else if let Some(tail) = subscription.pending_update_params.back_mut() {
+            tail.parameters.merge_from(&parameters);
+        }
         // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
         // FILL_PARAMETERS 付き REQUEST_UPDATE を処理したら fill fetch stream の
         // 開設を判定する。処理後観点の paused と filter で評価する
         // (PAUSED を省略した REQUEST_UPDATE は現在値の維持なので、現状値へフォールバックする)。
-        let post_paused = match merged.paused() {
+        // この判定は今回の更新の受信時点で行うため、後続の更新の値は反映されない。
+        let post_paused = match view.paused() {
             Some(value) => validate_paused(value)?,
             None => subscription.paused,
         };
-        let post_filter: Option<LocationFilter> = match merged.location_filter_update() {
+        let post_filter: Option<LocationFilter> = match view.location_filter_update() {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // Type 0x00 (None) はフィルタ削除、省略時は現 filter を使う
             Ok(LocationFilterUpdate::Removed) => None,
@@ -1155,7 +1190,7 @@ impl Session {
         // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は確定後変更不可 (draft-ietf-moq-transport-22 §5.1.1 (Definitions)) のため更新しない
         self.events.push_back(SessionEvent::RequestUpdateReceived {
             request_id,
-            parameters: merged,
+            parameters: view,
         });
         self.maybe_open_fill_stream(
             fill_request_id,
@@ -1362,6 +1397,9 @@ impl Session {
         // Pending(Publisher) / Established / Terminated (未記録) のいずれも Terminated に確定させる
         subscription.state = SubscriptionState::Terminated;
         record_publish_done(subscription, &done, now_ms);
+        // PUBLISH_DONE の受信で subscription が終端したため、未応答の REQUEST_UPDATE と
+        // MAX_REQUEST_UPDATES のクレジットを解放する。
+        self.release_request_update_state(request_id);
         if was_established {
             self.events
                 .push_back(SessionEvent::FinishRequestStream { request_id });
