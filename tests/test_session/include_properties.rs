@@ -197,18 +197,16 @@ fn fetch_include_properties_zero_empties_fetch_ok() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             non_empty_track_properties(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     match ok_msg {
-        ControlMessage::FetchOk(ref ok) => {
+        ControlMessage::RequestOk(ref ok) => {
             assert!(
                 ok.track_properties.is_empty(),
                 "INCLUDE_PROPERTIES=0 では FETCH_OK の Track Properties が空になること"

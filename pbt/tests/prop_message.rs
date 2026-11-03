@@ -5,7 +5,6 @@ use shiguredo_moqt::{
     message::ErrorDetail,
     message::ErrorDetails,
     message::Fetch,
-    message::FetchOk,
     message::Goaway,
     message::Publish,
     message::PublishDone,
@@ -367,7 +366,9 @@ const FETCH_PARAMS: &[u64] = &[
     PARAM_PRIORITY_FILTER,
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
-const FETCH_OK_PARAMS: &[u64] = &[];
+// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH_OK は EXPIRES と
+// LARGEST_OBJECT を運べる。`src/message.rs::FETCH_OK_ALLOWED_PARAMS` と一致させること。
+const FETCH_OK_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY) / §9.20.9 / §9.20.17 /
 // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter):
 // `src/message.rs::PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS` と一致させること。
@@ -460,11 +461,12 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             track_name: sample_nonempty_bytes(ctx, 50),
             parameters: sample_scoped_parameters(ctx, FETCH_PARAMS),
         }),
-        // FetchOk
-        11 => ControlMessage::FetchOk(FetchOk {
-            // End Of Track は 0 または 1 のみ (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-            end_of_track: noprop::sample_choice(ctx, &[0u8, 1u8]),
-            end_location: sample_location(ctx),
+        // FETCH_OK (REQUEST_OK の別名。draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
+        //
+        // FETCH_OK は REQUEST_OK (Type 0x07) であり、FETCH の REQUEST_UPDATE_OK とは
+        // メッセージ型では区別できない。ここでは FETCH_OK context の許可パラメータと
+        // Track Properties を持つ形を生成する。
+        11 => ControlMessage::RequestOk(RequestOk {
             parameters: sample_scoped_parameters(ctx, FETCH_OK_PARAMS),
             track_properties: sample_track_properties(ctx),
         }),

@@ -1877,15 +1877,18 @@ impl Session {
     /// 自端点が送る FETCH Object を Session に通知する (draft §11.4.1 (Fetch Header))
     ///
     /// Object の Location を要求範囲と照合し、範囲外なら `SendRequestError::LocalFilterMismatch`
-    /// で拒否する (draft-ietf-moq-transport-22 §3.3.1 (Location Filters): "A publisher MUST NOT
+    /// で拒否する (draft-ietf-moq-transport-23 §3.3.1 (Location Filters): "A publisher MUST NOT
     /// send objects from outside the requested range.")。判定に使う範囲は次のとおり。
-    /// - 通常の FETCH 応答: `Fetch::fetch_start` / `Fetch::request_end` と、`send_fetch_ok` が
-    ///   保存した `Fetch::end_location` (FETCH_OK の End Location を超えないこと)
+    /// - 通常の FETCH 応答: `Fetch::fetch_start` / `Fetch::request_end` (要求が明示した終端)
+    ///   と、`send_fetch_ok` が確定した `Fetch::end_location` (応答範囲の終端を超えないこと)。
+    ///   `request_end` は End を省略した要求では `None` になるが、応答を送れるのは
+    ///   `send_fetch_ok` の後 (`send_fetch_header` が `Established` を要求する) ため、
+    ///   終端は `end_location` で必ず抑止される。
     /// - fill fetch stream: `maybe_open_fill_stream` が計算した effective fill range
     ///   (`OutgoingFetchStream::range`)。range が不明なら判定をスキップする。
     ///
     /// Range Filters (§3.3.2) の評価は本 API の対象外である (Location Filter のみ)。
-    /// End of Range (§11.4.1.2) は Object ではないため
+    /// End of Range (§11.4.2) は Object ではないため
     /// [`send_fetch_end_of_range`](Self::send_fetch_end_of_range) を使う。
     pub fn send_fetch_object(
         &mut self,
@@ -1923,7 +1926,8 @@ impl Session {
         ) {
             return Err(SendRequestError::LocalFilterMismatch);
         }
-        // FETCH_OK の End Location を超える Object は送らない
+        // 応答範囲の終端 (要求の End と LARGEST_OBJECT から `send_fetch_ok` が確定した値) を
+        // 超える Object は送らない
         if let Some(end) = fetch.end_location.as_ref()
             && location > end
         {
@@ -2894,7 +2898,8 @@ impl Session {
         // FETCH whose response indicated End of Track" であるため、終端を宣言した Object 自身
         // (同一 Location) は Malformed にしない。同一位置の重複は §12.1 条件 6 の内容比較
         // (`ObjectFieldTracker`) に委ねる。FETCH 応答内の Object は本判定の対象外である
-        // (`recv_fetch_entry` は位置検証を行わず、`Fetch::end_of_track` は位置を保持しない)。
+        // (`recv_fetch_entry` は位置検証を行わない。Track の終端は FETCH 応答ストリームの
+        // End of Track で受け取り、FETCH_OK は終端位置を運ばない)。
         // `Location` は group_id → object_id の辞書順なので、厳密な `>` が条件 5 の
         // "larger than" と一致する (桁溢れも起きない)。
         if let Some(end) = subscription.end_of_track.as_ref()

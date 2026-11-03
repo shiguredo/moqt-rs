@@ -3057,12 +3057,13 @@ async fn serve_peer_request(
                 };
                 match catalog::catalog_fetch_response(filter.as_ref(), catalog.location) {
                     catalog::CatalogFetchResponse::Object { end_location } => {
+                        // 要求範囲にカタログ自身の Location (この track の Largest Object) が
+                        // 含まれるため、LARGEST_OBJECT として渡して応答範囲をそこへ切り詰める
+                        // (draft-ietf-moq-transport-23 §3.2 (Fetch))
                         client
                             .send_fetch_ok(
                                 request_id,
-                                0,
-                                end_location,
-                                MessageParameters::new(),
+                                fetch_ok_parameters(Some(end_location)),
                                 TrackProperties::new(),
                             )
                             .await?;
@@ -3082,13 +3083,13 @@ async fn serve_peer_request(
                     }
                     catalog::CatalogFetchResponse::Empty { end_location } => {
                         // 要求 range に Object が無い場合は FETCH_OK と FETCH_HEADER だけの
-                        // 空ストリームを返す (draft-ietf-moq-transport-22 §3.2.1)
+                        // 空ストリームを返す (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object
+                        // Delivery))。Largest Object は要求範囲外なので LARGEST_OBJECT は載せず、
+                        // 応答範囲の終端は要求の End Location になる (§3.2 (Fetch))
                         client
                             .send_fetch_ok(
                                 request_id,
-                                0,
-                                end_location,
-                                MessageParameters::new(),
+                                fetch_ok_parameters(None),
                                 TrackProperties::new(),
                             )
                             .await?;
@@ -3121,9 +3122,24 @@ async fn serve_peer_request(
     Ok(())
 }
 
+/// FETCH の初回成功応答に載せるパラメータを組み立てる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH_OK が運べるのは EXPIRES と
+/// LARGEST_OBJECT である。Largest Object が要求範囲内なら応答はそこへ切り詰められ、
+/// LARGEST_OBJECT を載せなければならない (§3.2 (Fetch))。この example は Session を経由せず
+/// に Object を書くため Session は Track の Largest Object を観測できない。自前のキャッシュが
+/// 把握している値をここで渡す。
+fn fetch_ok_parameters(largest_in_range: Option<Location>) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    if let Some(largest) = largest_in_range {
+        parameters.set_largest_object(largest.group_id, largest.object_id);
+    }
+    parameters
+}
+
 /// FETCH の LOCATION_FILTER から要求 range を決める
 ///
-/// draft-ietf-moq-transport-22 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.20.9 (LOCATION
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.3.1 (Location Filters) / §9.19.9 (LOCATION
 /// FILTER Parameter): Start の省略時は track の先頭 `{0, 0}`、End の省略時は Largest Object
 /// である。要求が Largest Object より先を指しても publisher が持つのは Largest Object まで
 /// であるため、`end` は Largest Object でクランプする。
@@ -3131,6 +3147,11 @@ async fn serve_peer_request(
 /// Largest Object が無い (まだ 1 件も publish していない) track でも、境界の解決を Session と
 /// 揃えて先頭側に解決する。この場合に配れる Object は無く、応答の判断は対象外の track と
 /// 同じになる。
+///
+/// 戻り値の `end` は Largest Object でクランプ済みなので、`largest == end` が
+/// 「Largest Object が要求範囲内」の判定になる。範囲内なら FETCH_OK に LARGEST_OBJECT を
+/// 載せて応答をそこへ切り詰める MUST があり、範囲外なら要求の End Location が応答範囲の
+/// 終端になる (§3.2 (Fetch))。
 fn fetch_request_range(
     filter: Option<&LocationFilter>,
     largest: Option<Location>,
@@ -3208,10 +3229,12 @@ async fn serve_media_fetch(
             return Ok(());
         }
     };
-    let (start, end) = fetch_request_range(
-        filter.as_ref(),
-        media_cache.largest(&config.namespace, track_name),
-    );
+    let largest = media_cache.largest(&config.namespace, track_name);
+    let (start, end) = fetch_request_range(filter.as_ref(), largest);
+    // draft-ietf-moq-transport-23 §3.2 (Fetch): Largest Object が要求範囲内なら応答は
+    // そこへ切り詰められ、LARGEST_OBJECT を FETCH_OK に載せなければならない。
+    // `end` は Largest Object でクランプ済みのため、一致すれば範囲内である。
+    let largest_in_range = largest.filter(|largest| *largest == end);
     let plan = media_cache.plan(
         published,
         &config.namespace,
@@ -3239,13 +3262,12 @@ async fn serve_media_fetch(
         }
         cache::FetchPlan::EmptyRange => {
             // 要求 range に存在する Object が無い。FETCH_OK を返し、FETCH_HEADER だけの
-            // stream を FIN で閉じる (draft-ietf-moq-transport-22 §3.2.1)
+            // stream を FIN で閉じる (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object
+            // Delivery))
             client
                 .send_fetch_ok(
                     request_id,
-                    0,
-                    end,
-                    MessageParameters::new(),
+                    fetch_ok_parameters(largest_in_range),
                     TrackProperties::new(),
                 )
                 .await?;
@@ -3280,14 +3302,31 @@ async fn serve_media_fetch(
                 )
                 .await?;
         }
-        cache::FetchPlan::AllUnknown { end_location } => {
-            // 要求 range 全体が不明である。FETCH_OK の End Location に置く End of Unknown
-            // Range を 1 件だけ書く (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))
-            serve_fetch_entries(client, request_id, track_name, *end_location, &entries).await?;
+        cache::FetchPlan::AllUnknown { .. } => {
+            // 要求 range 全体が不明である。End of Unknown Range を 1 件だけ書く
+            // (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。応答範囲の終端は要求と
+            // LARGEST_OBJECT から Session が決めるため、ここでは要求 range の終端を渡す
+            serve_fetch_entries(
+                client,
+                request_id,
+                track_name,
+                end,
+                largest_in_range,
+                &entries,
+            )
+            .await?;
         }
         cache::FetchPlan::Serve { .. } => {
-            // FETCH_OK の End Location は要求 range の終端 (Largest Object でクランプ済み)
-            serve_fetch_entries(client, request_id, track_name, end, &entries).await?;
+            // 応答範囲の終端は要求 range の終端 (Largest Object でクランプ済み)
+            serve_fetch_entries(
+                client,
+                request_id,
+                track_name,
+                end,
+                largest_in_range,
+                &entries,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -3297,19 +3336,23 @@ async fn serve_media_fetch(
 ///
 /// entry の並びは [`cache::FetchPlan::entries`] が決める。End of Range は位置に意味を持つ
 /// ため、並びの決定と書き出しを分けてある (並びは単体テストで固定する)。
+///
+/// `end_location` は応答範囲の終端 (ログ用)、`largest_in_range` は要求範囲内にある
+/// Largest Object である。FETCH_OK の応答範囲は Session が要求と LARGEST_OBJECT から導出する
+/// ため、範囲内の Largest Object だけを LARGEST_OBJECT として渡す
+/// (draft-ietf-moq-transport-23 §3.2 (Fetch))。
 async fn serve_fetch_entries(
     client: &mut MoqtClient,
     request_id: u64,
     track_name: &[u8],
     end_location: Location,
+    largest_in_range: Option<Location>,
     entries: &[cache::FetchResponseEntry<'_>],
 ) -> Result<()> {
     client
         .send_fetch_ok(
             request_id,
-            0,
-            end_location,
-            MessageParameters::new(),
+            fetch_ok_parameters(largest_in_range),
             TrackProperties::new(),
         )
         .await?;

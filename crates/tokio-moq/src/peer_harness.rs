@@ -52,6 +52,20 @@ use crate::transport::{BidiStreamAcceptor, SendStream, StreamAcceptor, StreamHan
 /// 既定値を受信上限に使うため、両方向で一致する。
 const MAX_CONTROL_MESSAGE_SIZE: u64 = DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 
+/// FETCH の初回成功応答に載せるパラメータを組み立てる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH_OK が運べるのは EXPIRES と
+/// LARGEST_OBJECT である。要求が End を省略している場合の応答範囲の終端は Largest Object
+/// なので (§3.2 (Fetch) / §9.19.9 (LOCATION FILTER Parameter))、把握している値を
+/// LARGEST_OBJECT として渡す。
+fn fetch_ok_parameters(largest_object: Option<Location>) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    if let Some(largest) = largest_object {
+        parameters.set_largest_object(largest.group_id, largest.object_id);
+    }
+    parameters
+}
+
 // 以下の 3 つは `moqt_client` の対応する private 関数と同じ処理を含む。テスト専用の都合で
 // 通常ビルド対象の可視性を広げないため (`shiguredo-rust` の「テストのために private な API を
 // 無理矢理公開しないこと」)、あえて重複させている。`request_stream_id` は
@@ -670,22 +684,21 @@ impl TestPeer {
         self.flush_queued_response(request_id).await
     }
 
-    /// 受理した FETCH に FETCH_OK で応答する
+    /// 受理した FETCH に初回成功応答 (REQUEST_OK、別名 FETCH_OK) で応答する
     ///
-    /// draft-ietf-moq-transport-22 §9.12 (FETCH_OK)。End Location は publisher が返す範囲の
-    /// 終端で、End of Track は track の終端まで返し切ったことを示す (0 は未達)。
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream):
+    /// 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した
+    /// End Location になる。テストの要求は End を省略することが多いため、把握している
+    /// Largest Object を LARGEST_OBJECT として渡せるようにする。
     pub(crate) async fn send_fetch_ok(
         &mut self,
         request_id: u64,
-        end_location: Location,
-        end_of_track: u8,
+        largest_object: Option<Location>,
     ) -> Result<()> {
         self.session
             .send_fetch_ok(
                 request_id,
-                end_of_track,
-                end_location,
-                MessageParameters::new(),
+                fetch_ok_parameters(largest_object),
                 TrackProperties::new(),
             )
             .map_err(|e| TransportError::Internal(format!("send_fetch_ok: {e}")))?;
@@ -2299,12 +2312,10 @@ mod tests {
             client
                 .send_fetch_ok(
                     request_id,
-                    0,
-                    Location {
+                    fetch_ok_parameters(Some(Location {
                         group_id: 3,
                         object_id: 1,
-                    },
-                    MessageParameters::new(),
+                    })),
                     TrackProperties::new(),
                 )
                 .await
@@ -2454,16 +2465,14 @@ mod tests {
                 other => panic!("FETCH がアプリへ届くこと: {other:?}"),
             }
 
-            // FETCH_OK の End Location は marker が示す最終 Object に合わせる
+            // LARGEST_OBJECT は marker が示す最終 Object に合わせる
             client
                 .send_fetch_ok(
                     request_id,
-                    0,
-                    Location {
+                    fetch_ok_parameters(Some(Location {
                         group_id: 2,
                         object_id: 0,
-                    },
-                    MessageParameters::new(),
+                    })),
                     TrackProperties::new(),
                 )
                 .await
@@ -2627,12 +2636,10 @@ mod tests {
             client
                 .send_fetch_ok(
                     request_id,
-                    0,
-                    Location {
+                    fetch_ok_parameters(Some(Location {
                         group_id: 3,
                         object_id: 6,
-                    },
-                    MessageParameters::new(),
+                    })),
                     TrackProperties::new(),
                 )
                 .await
@@ -2788,7 +2795,7 @@ mod tests {
                 group_id: 3,
                 object_id: 1,
             };
-            peer.send_fetch_ok(request_id, end_location, 0)
+            peer.send_fetch_ok(request_id, Some(end_location))
                 .await
                 .expect("FETCH_OK を返せること");
 
@@ -2847,11 +2854,12 @@ mod tests {
                 Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
                     request_id: rid,
                     end_location: location,
-                    end_of_track,
                 })) => {
                     assert_eq!(rid, request_id, "FETCH_OK の Request ID");
-                    assert_eq!(location, end_location, "FETCH_OK の End Location");
-                    assert!(!end_of_track, "FETCH_OK の End of Track は未達であること");
+                    assert_eq!(
+                        location, end_location,
+                        "FETCH_OK の応答範囲の終端が LARGEST_OBJECT と一致すること"
+                    );
                 }
                 other => panic!("FETCH_OK がアプリへ届くこと: {other:?}"),
             }

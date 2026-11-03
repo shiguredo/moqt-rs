@@ -2269,12 +2269,10 @@ fn establish_fetch_as_subscriber(
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 1,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2308,12 +2306,10 @@ fn establish_fetch_as_publisher(
     client
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 1,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2516,13 +2512,11 @@ fn malformed_track_absorbs_late_fetch_ok_on_terminated_fetch() {
     client
         .recv_stream_message(
             fetch_rid,
-            ControlMessage::FetchOk(shiguredo_moqt::message::FetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 1,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: TrackProperties::new(),
             }),
         )

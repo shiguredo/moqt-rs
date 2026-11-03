@@ -2,10 +2,10 @@ use shiguredo_moqt::{
     error::MessageError,
     message::ControlMessage,
     message::Fetch,
-    message::FetchOk,
     message::ReasonPhrase,
     message::Redirect,
     message::RequestError,
+    message::RequestOk,
     message::RequestUpdate,
     message::Setup,
     message::SubscribeOk,
@@ -1050,23 +1050,50 @@ mod fetch {
         }
     }
 
+    /// FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) は EXPIRES と LARGEST_OBJECT を
+    /// 運べること
+    ///
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "FETCH_OK: EXPIRES, LARGEST_OBJECT"。
+    /// 両パラメータを持つ REQUEST_OK の往復と、FETCH_OK context で許可されない型
+    /// (AUTHORIZATION_TOKEN) の拒否を固定する。
     #[test]
-    fn fetch_ok_with_expires_is_rejected_on_encode() {
+    fn fetch_ok_accepts_expires_and_largest_object() {
         use shiguredo_moqt::message_parameter::{
-            MessageParameter, MessageParameterValue, PARAM_EXPIRES,
+            MessageParameter, MessageParameterValue, PARAM_AUTHORIZATION_TOKEN, PARAM_EXPIRES,
+            PARAM_LARGEST_OBJECT,
         };
         let mut parameters = MessageParameters::new();
         parameters.push(MessageParameter {
             param_type: PARAM_EXPIRES,
             value: MessageParameterValue::VarInt(100),
         });
-        let msg = ControlMessage::FetchOk(FetchOk {
-            end_of_track: 0,
-            end_location: Location {
-                group_id: 1,
-                object_id: 0,
+        parameters.push(MessageParameter {
+            param_type: PARAM_LARGEST_OBJECT,
+            value: MessageParameterValue::Location {
+                group: 3,
+                object: 7,
             },
+        });
+        let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
+            track_properties: TrackProperties::new(),
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("FETCH_OK の EXPIRES と LARGEST_OBJECT は encode できること");
+        let (decoded, consumed) = ControlMessage::decode(&encoded)
+            .expect("FETCH_OK の EXPIRES と LARGEST_OBJECT は decode できること");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+
+        // FETCH_OK context で許可されないパラメータは encode 時に拒否される
+        let mut rejected = MessageParameters::new();
+        rejected.push(MessageParameter {
+            param_type: PARAM_AUTHORIZATION_TOKEN,
+            value: MessageParameterValue::VarInt(1),
+        });
+        let msg = ControlMessage::RequestOk(RequestOk {
+            parameters: rejected,
             track_properties: TrackProperties::new(),
         });
         assert!(matches!(
@@ -1075,33 +1102,26 @@ mod fetch {
         ));
     }
 
+    /// 旧 FETCH_OK のメッセージ型 0x18 は未知の型として拒否されること
+    ///
+    /// draft-ietf-moq-transport-23 §9 Table 5: 0x18 は "RESERVED (FETCH_OK in <= 22)" で
+    /// あり、FETCH_OK は REQUEST_OK (0x07) に統合された。§9 の "An endpoint that receives an
+    /// unknown message type MUST close the session with UNEXPECTED_MESSAGE." に従い、
+    /// 旧形式として解釈せず未知型として拒否する。
     #[test]
-    fn fetch_ok_with_largest_object_is_rejected_on_decode() {
-        use shiguredo_moqt::message_parameter::{
-            MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
-        };
-        let mut payload = vec![0u8, 0u8, 0u8];
-        let mut parameters = MessageParameters::new();
-        parameters.push(MessageParameter {
-            param_type: PARAM_LARGEST_OBJECT,
-            value: MessageParameterValue::Location {
-                group: 3,
-                object: 7,
-            },
-        });
-        parameters
-            .encode(&mut payload)
-            .expect("正当なテスト入力の encode は成功する");
-        TrackProperties::new()
-            .encode(&mut payload)
-            .expect("正当なテスト入力の encode は成功する");
-
+    fn legacy_fetch_ok_message_type_is_rejected() {
+        // 旧 FETCH_OK (0x18) の本文: End of Track (0x00) + End Location (0, 0) +
+        // Number of Parameters (0x00) + Track Properties (空)
+        let payload = vec![0x00u8, 0x00, 0x00, 0x00];
         let encoded = frame(0x18, &payload);
 
-        assert!(matches!(
-            ControlMessage::decode(&encoded),
-            Err(MessageError::InvalidParameter)
-        ));
+        assert!(
+            matches!(
+                ControlMessage::decode(&encoded),
+                Err(MessageError::InvalidMessageType(0x18))
+            ),
+            "旧 FETCH_OK の Type 0x18 は未知のメッセージ型として拒否されること"
+        );
     }
 }
 

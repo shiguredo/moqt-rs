@@ -37,12 +37,10 @@ fn fetch_request_update_full_cycle() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -142,12 +140,10 @@ fn fetch_request_error_in_established_transitions_to_terminated() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -216,8 +212,8 @@ fn fetch_request_error_in_established_transitions_to_terminated() {
 fn fetch_request_update_ok_emits_request_ok_received_event_with_kind_fetch() {
     use shiguredo_moqt::message::common::Location;
     // FETCH → FETCH_OK で確立し、その後に REQUEST_UPDATE → REQUEST_OK を受信する。
-    // FETCH_OK は handle_ok_for_fetch を通らないため、最初のイベントは発火しない。
-    // REQUEST_UPDATE_OK 受信時に RequestOkReceived(request_kind=Fetch) が発火することを検証する。
+    // 初回応答 (FETCH_OK) は FetchOkReceived を発火し、REQUEST_UPDATE_OK は
+    // RequestOkReceived(request_kind=Fetch) を発火する。ここでは後者を検証する。
     let (mut client, mut server) = establish_pair();
     let start = Location {
         group_id: 0,
@@ -241,12 +237,10 @@ fn fetch_request_update_ok_emits_request_ok_received_event_with_kind_fetch() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 10,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -334,12 +328,10 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -483,12 +475,10 @@ fn terminated_fetch_rejects_late_request_update() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -573,12 +563,10 @@ fn terminated_fetch_absorbs_reset_via_recv_data_stream_closed() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -675,12 +663,10 @@ fn fetch_request_update_ok_includes_auto_largest_object() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -744,12 +730,10 @@ fn fetch_request_update_ok_does_not_lower_largest_object() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 9,
                 object_id: 9,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -828,12 +812,10 @@ fn fetch_request_update_ok_without_publish_observation_has_no_largest_object() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 0,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -904,12 +886,10 @@ fn fetch_request_updates_return_ok_in_receive_order() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");

@@ -32,6 +32,18 @@ fn fetch_range_params(start: Location, end: Location) -> MessageParameters {
     params
 }
 
+/// FETCH の初回成功応答に載せるパラメータを組み立てる
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) / §9.19.17 (LARGEST OBJECT Parameter):
+/// FETCH_OK が運べるのは EXPIRES と LARGEST_OBJECT である。応答範囲の終端は
+/// LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した End Location に
+/// なる (§3.2 (Fetch))。
+fn fetch_ok_params(largest_object: Location) -> MessageParameters {
+    let mut parameters = MessageParameters::new();
+    parameters.set_largest_object(largest_object.group_id, largest_object.object_id);
+    parameters
+}
+
 #[test]
 fn auth_token_cache_register_and_resolve() {
     let mut cache = AuthTokenCache::new(1024);
@@ -372,7 +384,7 @@ fn forget_subscription_cleans_request_update_credit_entries() {
 /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 #[test]
 fn forget_fetch_cleans_request_update_credit_entries() {
-    use crate::message::{ControlMessage, FetchOk, Setup, common::Location};
+    use crate::message::{ControlMessage, RequestOk, Setup, common::Location};
     use crate::message_parameter::MessageParameters;
     use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
     use crate::session::types::SessionState;
@@ -417,13 +429,11 @@ fn forget_fetch_cleans_request_update_credit_entries() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(FetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(RequestOk {
+                parameters: fetch_ok_params(Location {
                     group_id: 10,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                }),
                 track_properties: TrackProperties::new(),
             }),
         )
@@ -569,7 +579,7 @@ fn forget_subscription_does_not_clean_credit_entries_when_not_cleanup_ready() {
 /// incoming エントリは subscriber 役の fetch では生成できないため対象外。
 #[test]
 fn forget_fetch_does_not_clean_credit_entries_when_not_finished() {
-    use crate::message::{ControlMessage, FetchOk, Setup, common::Location};
+    use crate::message::{ControlMessage, RequestOk, Setup, common::Location};
     use crate::message_parameter::MessageParameters;
     use crate::parameter::{SetupOption, SetupOptionValue, SetupOptions};
     use crate::session::types::SessionState;
@@ -614,13 +624,11 @@ fn forget_fetch_does_not_clean_credit_entries_when_not_finished() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(FetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(RequestOk {
+                parameters: fetch_ok_params(Location {
                     group_id: 10,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                }),
                 track_properties: TrackProperties::new(),
             }),
         )

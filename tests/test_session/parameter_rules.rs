@@ -2575,12 +2575,10 @@ fn request_update_ok_fetch_with_expires_and_largest_object_accepted() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2655,12 +2653,10 @@ fn send_request_ok_for_fetch_with_object_delivery_timeout_rejected() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 1,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2726,12 +2722,13 @@ fn fetch_ok_with_out_of_scope_parameter_keeps_fetch_pending() {
     let err = server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
-                group_id: 5,
-                object_id: 0,
-            },
-            ok_params,
+            fetch_ok_params_with(
+                Some(Location {
+                    group_id: 5,
+                    object_id: 0,
+                }),
+                ok_params,
+            ),
             TrackProperties::new(),
         )
         .unwrap_err();
@@ -2753,12 +2750,10 @@ fn fetch_ok_with_out_of_scope_parameter_keeps_fetch_pending() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("スコープ検証エラー後の再送信は成功すること");
@@ -2771,7 +2766,7 @@ fn fetch_ok_with_out_of_scope_parameter_keeps_fetch_pending() {
     let (stream_rid, ok_msg) = take_send_on_stream(&mut server);
     assert_eq!(stream_rid, rid);
     assert!(
-        matches!(ok_msg, ControlMessage::FetchOk(_)),
+        matches!(ok_msg, ControlMessage::RequestOk(_)),
         "再送信の FETCH_OK が SendOnStream として積まれること"
     );
 }
@@ -2809,12 +2804,10 @@ fn send_request_ok_for_fetch_with_non_empty_track_properties_rejected() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 1,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");

@@ -416,12 +416,10 @@ fn run_multi_fetch(fetcher: &mut Session, responder: &mut Session) {
         responder
             .send_fetch_ok(
                 rid,
-                0,
-                Location {
+                fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                MessageParameters::new(),
+                })),
                 TrackProperties::new(),
             )
             .expect("テストフィクスチャの前提条件を満たす");
@@ -551,12 +549,10 @@ fn run_mixed(local: &mut Session, peer: &mut Session, _local_is_client: bool) {
             .expect("テストフィクスチャの前提条件を満たす");
         peer.send_fetch_ok(
             fetch_rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");

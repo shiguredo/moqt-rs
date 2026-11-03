@@ -2364,18 +2364,16 @@ fn responder_sends_fetch_ok_after_requester_fin() {
     server
         .send_fetch_ok(
             rid,
-            1,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("requester の FIN 後でも FETCH_OK を送れること");
     let (_, ok_msg, fin) = take_send_on_stream_with_fin(&mut server);
     assert!(
-        matches!(ok_msg, ControlMessage::FetchOk(_)),
+        matches!(ok_msg, ControlMessage::RequestOk(_)),
         "FETCH_OK が SendOnStream として発行されること"
     );
     assert!(

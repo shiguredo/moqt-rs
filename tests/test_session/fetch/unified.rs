@@ -292,12 +292,10 @@ fn fetch_stream_finished_requires_subscriber_role() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 1,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -388,7 +386,7 @@ fn fetch_stream_reset_in_pending_transitions_to_terminated() {
 /// (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
 #[test]
 fn fetch_ok_end_before_start_closes_session() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_fetch(
@@ -414,13 +412,11 @@ fn fetch_ok_end_before_start_closes_session() {
     let err = client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 2,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: TrackProperties::new(),
             }),
         )
@@ -710,13 +706,7 @@ fn establish_fetch_with_range(
 ) -> (Session, Session, u64) {
     let (mut client, mut server, rid) = establish_pending_fetch_with_range(start, end);
     server
-        .send_fetch_ok(
-            rid,
-            0,
-            end,
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
+        .send_fetch_ok(rid, fetch_ok_params(Some(end)), TrackProperties::new())
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client
@@ -1000,12 +990,10 @@ fn forget_fetch_does_not_clean_other_fetch_entries() {
         server
             .send_fetch_ok(
                 rid,
-                0,
-                Location {
+                fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                MessageParameters::new(),
+                })),
                 TrackProperties::new(),
             )
             .expect("テストフィクスチャの前提条件を満たす");
@@ -2127,9 +2115,9 @@ fn fetch_object_outside_requested_range_is_rejected() {
     );
 }
 
-/// FETCH_OK の End Location を超える Location の Object は拒否されること
+/// 応答範囲の終端を超える Location の Object は拒否されること
 #[test]
-fn fetch_object_beyond_ok_end_location_is_rejected() {
+fn fetch_object_beyond_response_end_is_rejected() {
     use shiguredo_moqt::message::common::Location;
     let (mut client, mut server, rid) = establish_pending_fetch_with_range(
         Location {
@@ -2141,16 +2129,14 @@ fn fetch_object_beyond_ok_end_location_is_rejected() {
             object_id: 0,
         },
     );
-    // FETCH_OK の End Location を要求範囲より手前にする
+    // LARGEST_OBJECT を要求範囲より手前にして応答範囲の終端を切り詰める
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 2,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -2170,7 +2156,7 @@ fn fetch_object_beyond_ok_end_location_is_rejected() {
                 object_id: 0,
             },
         )
-        .expect_err("FETCH_OK の End Location を超える Object は拒否されること");
+        .expect_err("応答範囲の終端を超える Object は拒否されること");
     assert_eq!(
         err,
         shiguredo_moqt::session::types::SendRequestError::LocalFilterMismatch
@@ -2191,4 +2177,534 @@ fn fetch_end_of_range_is_accepted_without_location_validation() {
     server
         .send_fetch_data_stream_closed(stream_id)
         .expect("テストフィクスチャの前提条件を満たす");
+}
+
+// ─── 初回応答 (REQUEST_OK、別名 FETCH_OK) の応答範囲と dispatch ─────────
+//
+// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream) /
+// §9.3 (REQUEST_OK): FETCH の初回成功応答は REQUEST_OK (Type 0x07) であり、FETCH の
+// REQUEST_UPDATE_OK とはメッセージ型では区別できない。応答範囲の終端は LARGEST_OBJECT が
+// 要求範囲内ならその値、そうでなければ要求で明示した End Location になる。
+
+/// 要求が End を省略した FETCH (Absolute Start) のパラメータを作る
+///
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): End を省略した FETCH の
+/// End は Largest Object である。
+fn fetch_start_params(start: Location) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        LocationFilter, MessageParameter, MessageParameterValue, PARAM_LOCATION_FILTER,
+    };
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_LOCATION_FILTER,
+        value: MessageParameterValue::LocationFilter(LocationFilter::AbsoluteStart { start }),
+    });
+    params
+}
+
+/// 要求 range を明示した FETCH を送り、publisher 側の Pending 状態で返す
+fn send_pending_fetch_with_params(parameters: MessageParameters) -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_fetch(ns(&[b"live"]), b"cam".to_vec(), parameters)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (client, server, rid)
+}
+
+/// 送信された REQUEST_OK の LARGEST_OBJECT を取り出す
+fn largest_object_of(msg: &ControlMessage) -> Option<(u64, u64)> {
+    match msg {
+        ControlMessage::RequestOk(ok) => ok.parameters.largest_object(),
+        other => panic!("REQUEST_OK が期待されたが {other:?} だった"),
+    }
+}
+
+/// LARGEST_OBJECT が要求範囲内なら応答範囲の終端がそこへ切り詰められること
+///
+/// 要求 range は {0, 0} から {10, 0} までで、Largest Object は {5, 0} である。
+/// §3.2 (Fetch) の "If Largest Object is within the requested range, the FETCH response ends
+/// at Largest Object" に従い、応答範囲の終端は {5, 0} になる。
+#[test]
+fn fetch_ok_largest_object_within_range_truncates_end() {
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 10,
+            object_id: 0,
+        },
+    );
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 5,
+                object_id: 0,
+            })),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    assert_eq!(
+        largest_object_of(&ok_msg),
+        Some((5, 0)),
+        "要求範囲内の LARGEST_OBJECT は応答に載ること"
+    );
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .end_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 0,
+        }),
+        "応答範囲の終端が LARGEST_OBJECT へ切り詰められること"
+    );
+    let mut saw_ok = false;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::FetchOkReceived {
+            request_id,
+            end_location,
+        } = ev
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(
+                end_location,
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                "切り詰めた終端がイベントで通知されること"
+            );
+            saw_ok = true;
+        }
+    }
+    assert!(saw_ok, "FetchOkReceived が発行されること");
+}
+
+/// LARGEST_OBJECT が要求範囲外なら応答範囲の終端は要求の End Location になること
+///
+/// 要求 range は {0, 0} から {5, 0} までで、Largest Object は {10, 0} である。
+/// §3.2 (Fetch) の "Otherwise, the response ends at the requested End Location" に従い、
+/// 応答範囲の終端は {5, 0} になり、LARGEST_OBJECT は応答に載らない。
+#[test]
+fn fetch_ok_largest_object_outside_range_uses_requested_end() {
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+    );
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 10,
+                object_id: 0,
+            })),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    assert_eq!(
+        largest_object_of(&ok_msg),
+        None,
+        "要求範囲外の LARGEST_OBJECT は応答に載らないこと"
+    );
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .end_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 0,
+        }),
+        "応答範囲の終端が要求の End Location になること"
+    );
+}
+
+/// LARGEST_OBJECT を省略した応答は要求の End Location を終端にすること
+///
+/// §9.19.17 (LARGEST OBJECT Parameter) は Largest Object が要求範囲内のときだけ
+/// FETCH_OK への同梱を必須とする。要求 range が {0, 0} から {5, 0} までで Largest Object が
+/// 範囲外なら省略できるため、終端は要求の End Location になる。
+#[test]
+fn fetch_ok_without_largest_object_uses_requested_end() {
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+    );
+    server
+        .send_fetch_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    assert_eq!(
+        largest_object_of(&ok_msg),
+        None,
+        "LARGEST_OBJECT を省略した応答には載らないこと"
+    );
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .end_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 0,
+        }),
+        "省略時は要求の End Location が終端になること"
+    );
+}
+
+/// End を省略した要求への LARGEST_OBJECT 付き応答は終端を Largest Object にすること
+///
+/// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): End を省略した FETCH の
+/// End は Largest Object である。応答範囲の終端は LARGEST_OBJECT になり、要求の End は
+/// 存在しないため、LARGEST_OBJECT は必須である (§9.19.17)。
+#[test]
+fn fetch_ok_largest_object_resolves_open_ended_request() {
+    let (mut client, mut server, rid) =
+        send_pending_fetch_with_params(fetch_start_params(Location {
+            group_id: 0,
+            object_id: 0,
+        }));
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 3,
+                object_id: 4,
+            })),
+            TrackProperties::new(),
+        )
+        .expect("End を省略した要求には LARGEST_OBJECT が必要であること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .end_location,
+        Some(Location {
+            group_id: 3,
+            object_id: 4,
+        }),
+        "Largest Object が応答範囲の終端になること"
+    );
+}
+
+/// End を省略した要求への LARGEST_OBJECT 無し応答は拒否されること
+///
+/// §3.2 (Fetch) は "the FETCH_OK MUST NOT be sent until the publisher knows whether Largest
+/// Object is within the requested range." とし、End を省略した要求の End は Largest Object
+/// である (§9.19.9)。LARGEST_OBJECT の省略は §9.19.17 により「Track に Object が無い」を
+/// 意味するため、その状態の FETCH_OK は応答範囲を確定できない。
+#[test]
+fn fetch_ok_without_largest_object_for_open_ended_request_closes_session() {
+    let (mut client, mut server, rid) =
+        send_pending_fetch_with_params(fetch_start_params(Location {
+            group_id: 0,
+            object_id: 0,
+        }));
+    // publisher 側も応答範囲を確定できないため送信 API が拒否する
+    let err = server
+        .send_fetch_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect_err("End を省略した要求への LARGEST_OBJECT 無し応答は拒否されること");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    // ワイヤで届いた場合も受信側が INVALID_PARAMETER で閉じる
+    let err = client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect_err("LARGEST_OBJECT 無しの FETCH_OK は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+}
+
+/// 初回応答の Track Properties は受理され、2 回目以降 (REQUEST_UPDATE_OK) は拒否されること
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): Track Properties は TRACK_STATUS_OK と
+/// FETCH_OK でのみ populate され、REQUEST_UPDATE_OK では空でなければならない
+/// ("If an endpoint receives Track Properties in one of these messages it MUST close the
+/// session with INVALID_FIELD.")。
+#[test]
+fn track_properties_are_accepted_only_in_the_initial_fetch_ok() {
+    use shiguredo_moqt::track_properties::{
+        PROP_DEFAULT_PUBLISHER_PRIORITY, TrackProperty, TrackPropertyValue,
+    };
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+    );
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_DEFAULT_PUBLISHER_PRIORITY,
+        value: TrackPropertyValue::VarInt(200),
+    });
+    // 初回応答では Track Properties を運べる
+    server
+        .send_fetch_ok(rid, fetch_ok_params(None), track_properties.clone())
+        .expect("初回応答の Track Properties は受理されること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("初回応答の Track Properties は受理されること");
+    // 2 回目の REQUEST_OK は REQUEST_UPDATE_OK として扱われ、Track Properties を持つと
+    // INVALID_FIELD でセッションを閉じる
+    let err = client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties,
+            }),
+        )
+        .expect_err("REQUEST_UPDATE_OK の Track Properties は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
+}
+
+/// 初回応答の後に届いた REQUEST_OK は REQUEST_UPDATE_OK として dispatch されること
+///
+/// FETCH の初回応答 (FETCH_OK) と FETCH の REQUEST_UPDATE_OK は同じ REQUEST_OK (Type 0x07)
+/// で届く (§9.3 (REQUEST_OK))。受信側は初回応答の受領有無 (`response_received`) で
+/// 応答 context を決め、2 回目以降は REQUEST_UPDATE_OK としてアプリへ通知する。
+#[test]
+fn second_request_ok_is_dispatched_as_request_update_ok() {
+    let (mut client, _server, rid) = establish_fetch();
+    // 1 回目 (初回応答) は FetchOkReceived
+    let mut saw_fetch_ok = false;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::FetchOkReceived { request_id, .. } = ev {
+            assert_eq!(request_id, rid);
+            saw_fetch_ok = true;
+        }
+    }
+    assert!(saw_fetch_ok, "初回応答で FetchOkReceived が発行されること");
+    // 2 回目は REQUEST_UPDATE_OK として RequestOkReceived (request_kind = Fetch)
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("2 回目の REQUEST_OK は REQUEST_UPDATE_OK として受理されること");
+    let mut saw_update_ok = false;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::RequestOkReceived {
+            request_id,
+            request_kind,
+            ..
+        } = ev
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(request_kind, RequestKind::Fetch);
+            saw_update_ok = true;
+        }
+    }
+    assert!(
+        saw_update_ok,
+        "REQUEST_UPDATE_OK で RequestOkReceived が発行されること"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// 応答前に publish 済みの Object があれば FETCH_OK の送信時点で Largest Object が決まること
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): "the FETCH_OK MUST NOT be sent until the publisher
+/// knows whether Largest Object is within the requested range." 要求が End を省略している場合の
+/// End は Largest Object であるため、応答前に publish した Object の最大 Location が応答範囲の
+/// 終端になり、LARGEST_OBJECT が応答に載る (§9.19.17)。
+#[test]
+fn fetch_ok_uses_objects_published_before_the_response() {
+    let alias = 700;
+    let (mut client, mut server, sub_rid) = establish_subscribe_track(alias);
+    // 応答前に publisher が Object を publish する (datagram は送信記録だけを残す)
+    server
+        .send_object_datagram(sub_rid, 7, 3, None, None, false)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // 同じ track を End 省略で FETCH する
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam1".to_vec(),
+            fetch_start_params(Location {
+                group_id: 0,
+                object_id: 0,
+            }),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("観測済みの Largest Object から応答範囲を確定できること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    assert_eq!(
+        largest_object_of(&ok_msg),
+        Some((7, 3)),
+        "publish 済みの最大 Location が LARGEST_OBJECT として載ること"
+    );
+    assert_eq!(
+        server
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .end_location,
+        Some(Location {
+            group_id: 7,
+            object_id: 3,
+        }),
+        "応答範囲の終端が観測済みの最大 Location になること"
+    );
+}
+
+/// 空ストリーム応答でも応答範囲の終端が確定し、subscriber が終端を解決できること
+///
+/// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): 要求範囲に Object が無い場合、
+/// publisher は FETCH_HEADER だけの stream を FIN で閉じる。FETCH_OK は要求範囲の終端を
+/// 示し、Track / Group の終端はデータストリームの marker で通知する (§11.4.2.2)。
+#[test]
+fn empty_fetch_response_still_resolves_the_end() {
+    let (mut client, mut server, rid) = establish_pending_fetch_with_range(
+        Location {
+            group_id: 0,
+            object_id: 0,
+        },
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+    );
+    server
+        .send_fetch_ok(rid, fetch_ok_params(None), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // FETCH_HEADER だけの stream を開いて FIN する
+    let stream_id = DataStreamId(160);
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_fetch_data_stream_closed(stream_id)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_data_stream_closed(rid, RequestStreamEnd::Fin)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch = client
+        .fetch(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fetch.end_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 0,
+        }),
+        "空ストリームでも応答範囲の終端が確定すること"
+    );
+    assert_eq!(
+        fetch.state,
+        FetchState::Terminated,
+        "空ストリームの FIN で state が Terminated になること"
+    );
+}
+
+/// 降順の要求でも LARGEST_OBJECT による切り詰めが応答範囲の終端に効くこと
+///
+/// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream) は降順 (Descending Group
+/// Order) でも End Location を応答範囲の上端と定める。Largest Object が要求範囲内なら
+/// 応答範囲の終端はそこへ切り詰められ、降順の最初の Group がその Group になる。
+#[test]
+fn descending_fetch_truncates_the_end_to_largest_object() {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_GROUP_ORDER,
+    };
+    let mut parameters = fetch_range_params(
+        Location {
+            group_id: 5,
+            object_id: 0,
+        },
+        Location {
+            group_id: 10,
+            object_id: 0,
+        },
+    );
+    parameters.push(MessageParameter {
+        param_type: PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(2),
+    });
+    let (mut client, mut server, rid) = send_pending_fetch_with_params(parameters);
+    server
+        .send_fetch_ok(
+            rid,
+            fetch_ok_params(Some(Location {
+                group_id: 8,
+                object_id: 2,
+            })),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch = client
+        .fetch(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fetch.end_location,
+        Some(Location {
+            group_id: 8,
+            object_id: 2,
+        }),
+        "降順でも LARGEST_OBJECT が応答範囲の終端になること"
+    );
+    assert_eq!(
+        fetch.group_order,
+        Some(2),
+        "要求した Group Order が保持されること"
+    );
 }

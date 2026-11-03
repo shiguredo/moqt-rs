@@ -69,10 +69,10 @@ pub enum FetchPlan<'a> {
     UnsupportedGroupOrder,
     /// 要求 range の Object を 1 つも保持しておらず、その範囲が evict 済みである
     ///
-    /// FETCH_OK の End Location に置く End of Unknown Range を 1 件だけ書く。evict 済みは
+    /// End of Unknown Range を 1 件だけ書く。evict 済みは
     /// 「存在しない」ではなく「不明」である (draft-ietf-moq-transport-22 §2.1.2 (Object States) / §10.3)。
     AllUnknown {
-        /// End of Unknown Range の Location (= FETCH_OK の End Location)
+        /// End of Unknown Range の Location
         end_location: Location,
     },
     /// 要求 range に、一度も publish していない範囲しか無い
@@ -698,7 +698,7 @@ mod tests {
     /// 要求 range 全体が evict 済みである場合は不明として示すこと
     ///
     /// evict 済みは「存在しない」ではなく「不明」である (draft-ietf-moq-transport-22 §2.1.2 /
-    /// §10.3)。End of Unknown Range の Location は FETCH_OK の End Location にする。
+    /// §10.3)。End of Unknown Range の Location は応答範囲の終端にする。
     #[test]
     fn plan_reports_an_evicted_range_as_unknown() {
         let mut cache = MediaCache::new(0);

@@ -1254,9 +1254,9 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // Object を書くのは I/O 層 (example) の責務であり、ここで捨てると fill に
             // 応答できないため、アプリへ届ける
             | SessionEvent::OpenFillFetchStream { .. }
-            // FetchOkReceived は自側が FETCH を発行したときの応答である
-            // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。End Location と End of Track は
-            // アプリが応答 stream を読む範囲の決定に使うため、アプリへ届ける
+            // FetchOkReceived は自側が FETCH を発行したときの初回応答である
+            // (draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK))。応答範囲の
+            // 終端はアプリが応答 stream を読む範囲の決定に使うため、アプリへ届ける
             | SessionEvent::FetchOkReceived { .. }
     )
 }
@@ -2293,9 +2293,12 @@ impl MoqtClient {
 
     /// FETCH を発行する (subscriber 側)
     ///
-    /// draft-ietf-moq-transport-22 §9.11 (FETCH)。取り出す範囲は LOCATION_FILTER パラメータで
+    /// draft-ietf-moq-transport-23 §9.11 (FETCH)。取り出す範囲は LOCATION_FILTER パラメータで
     /// 指定する。応答は [`ClientEvent::Session`] の [`SessionEvent::FetchOkReceived`]
-    /// (End Location / End of Track) または [`SessionEvent::RequestErrorReceived`] として届く。
+    /// (応答範囲の終端 Location) または [`SessionEvent::RequestErrorReceived`] として届く。
+    /// 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した
+    /// End Location になる (§3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream))。Track の終端は
+    /// 応答ストリームの End of Group / End of Track で届く (§11.4.2.2 (Prior Object Fields))。
     /// FETCH_OK のあと、応答の Object と End of Range は peer が開いた uni stream に載るため、
     /// [`DataPlaneHandle::recv_data_stream_type`] などで読む。
     ///
@@ -2437,29 +2440,26 @@ impl MoqtClient {
         self.drain_events().await
     }
 
-    /// peer から届いた FETCH に FETCH_OK で応答する (publisher 側)
+    /// peer から届いた FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を送る (publisher 側)
     ///
-    /// draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): publisher は FETCH 応答用の
+    /// draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery): publisher は FETCH 応答用の
     /// uni stream を開き、FETCH_HEADER (要求の Request ID) に続けて Object を書く。
     /// Object の送信は §3.2 (Fetch) により FETCH_OK の前後どちらでもよい。
+    ///
+    /// 応答範囲の終端は Session が要求範囲と LARGEST_OBJECT から導出する (§3.2 (Fetch))。
+    /// 自前のキャッシュ等で Track の Largest Object を把握している場合は `parameters` に
+    /// LARGEST_OBJECT を載せること。Largest Object が要求範囲内なら応答はそこへ切り詰められ、
+    /// LARGEST_OBJECT が応答に載る。範囲外なら要求で明示した End Location が終端になる。
     pub async fn send_fetch_ok(
         &mut self,
         request_id: u64,
-        end_of_track: u8,
-        end_location: Location,
         parameters: MessageParameters,
         track_properties: TrackProperties,
     ) -> Result<()> {
         {
             let mut session = lock_session(&self.session);
             session
-                .send_fetch_ok(
-                    request_id,
-                    end_of_track,
-                    end_location,
-                    parameters,
-                    track_properties,
-                )
+                .send_fetch_ok(request_id, parameters, track_properties)
                 .map_err(|e| TransportError::Internal(format!("send_fetch_ok: {e}")))?;
         }
         self.drain_events().await
@@ -3530,9 +3530,9 @@ impl MoqtClient {
                 // range の Object を書くのは I/O 層 (example) の責務であり、ここで捨てると
                 // fill に応答できない
                 | SessionEvent::OpenFillFetchStream { .. }
-                // FetchOkReceived は自側が FETCH を発行したときの応答である
-                // (draft-ietf-moq-transport-22 §9.12)。I/O 層で行うことは無く、
-                // アプリが End Location / End of Track を使って応答 stream を読む
+                // FetchOkReceived は自側が FETCH を発行したときの初回応答である
+                // (draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK))。
+                // I/O 層で行うことは無く、アプリが応答範囲の終端を使って応答 stream を読む
                 | SessionEvent::FetchOkReceived { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
                     // `take_notable_event` が取り出せない

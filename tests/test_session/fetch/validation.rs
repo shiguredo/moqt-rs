@@ -384,7 +384,7 @@ fn drain_fetch_cancel_events(s: &mut Session, request_id: u64) -> Vec<&'static s
 /// `Terminated` へ遷移させる経路で 1 回だけ発行する。
 #[test]
 fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
-    use shiguredo_moqt::message::FetchOk as WireFetchOk;
+    use shiguredo_moqt::message::RequestOk as WireRequestOk;
     use shiguredo_moqt::track_properties::{
         MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
     };
@@ -433,13 +433,11 @@ fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: tp,
             }),
         )
@@ -461,7 +459,7 @@ fn late_fetch_ok_with_unknown_mandatory_does_not_re_cancel() {
 /// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties))
 #[test]
 fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     use shiguredo_moqt::track_properties::{
         MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
     };
@@ -495,13 +493,11 @@ fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: tp,
             }),
         )
@@ -539,7 +535,7 @@ fn fetch_ok_with_unknown_mandatory_property_cancels_fetch() {
 /// solely because they received an unknown value.")。
 #[test]
 fn fetch_ok_with_grease_property_in_mandatory_range_does_not_cancel() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -575,13 +571,11 @@ fn fetch_ok_with_grease_property_in_mandatory_range_does_not_cancel() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: tp,
             }),
         )
@@ -610,7 +604,7 @@ fn fetch_ok_with_grease_property_in_mandatory_range_does_not_cancel() {
 /// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の非回帰)
 #[test]
 fn fetch_ok_with_non_mandatory_property_establishes_fetch() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -642,13 +636,11 @@ fn fetch_ok_with_non_mandatory_property_establishes_fetch() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: tp,
             }),
         )
@@ -691,12 +683,10 @@ fn fetch_ok_without_track_properties_establishes_fetch() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -718,7 +708,7 @@ fn fetch_ok_without_track_properties_establishes_fetch() {
 /// (draft-ietf-moq-transport-22 §9.12 (FETCH_OK) / §3.7 (Mandatory to Understand Track Properties) の評価順序)
 #[test]
 fn fetch_ok_end_before_start_with_unknown_mandatory_closes_session() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     use shiguredo_moqt::track_properties::{
         MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
     };
@@ -752,13 +742,11 @@ fn fetch_ok_end_before_start_with_unknown_mandatory_closes_session() {
     let err = client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 2,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: tp,
             }),
         )

@@ -320,10 +320,10 @@ pub async fn publish_catalog_object(
 /// §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter) に基づく。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogFetchResponse {
-    /// 要求 range にカタログの Object が含まれる。FETCH_OK の End Location は
-    /// カタログ自身の Location になり、Object を 1 つ返す
+    /// 要求 range にカタログの Object が含まれる。FETCH_OK の応答範囲の終端は
+    /// カタログ自身の Location (この track の Largest Object) になり、Object を 1 つ返す
     Object { end_location: Location },
-    /// 要求 range にカタログの Object が含まれない。FETCH_OK の End Location は
+    /// 要求 range にカタログの Object が含まれない。FETCH_OK の応答範囲の終端は
     /// 要求 range の終端になり、Object を返さずに FIN する
     Empty { end_location: Location },
     /// 開始 Location が Largest Object を超える、または range が空である。

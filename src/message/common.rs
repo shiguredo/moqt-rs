@@ -213,23 +213,3 @@ pub struct Location {
     /// オブジェクト ID (draft-ietf-moq-transport-23 §8.2 (Location Structure))
     pub object_id: u64,
 }
-
-impl Location {
-    /// バッファにエンコードする (Group (vi64) + Object (vi64))
-    pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) {
-        varint::encode(self.group_id, buf);
-        varint::encode(self.object_id, buf);
-    }
-
-    /// バッファの `pos` 位置からデコードする (Group (vi64) + Object (vi64))
-    pub(crate) fn decode_from(buf: &[u8], pos: &mut usize) -> Result<Self, MessageError> {
-        let (group_id, n) = varint::decode(&buf[*pos..])?;
-        *pos += n;
-        let (object_id, n) = varint::decode(&buf[*pos..])?;
-        *pos += n;
-        Ok(Self {
-            group_id,
-            object_id,
-        })
-    }
-}

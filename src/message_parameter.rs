@@ -677,6 +677,42 @@ impl LocationFilter {
         }
     }
 
+    /// フィルタ自身が明示する End Location を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter) の Table 6 のうち、
+    /// End を運ぶのは Type 0x03 (Absolute Start, Group End) と Type 0x04 (Absolute Range)
+    /// だけである。End を省略した FETCH の End は Largest Object であり
+    /// (同節 "When they are omitted from a Fetch, the EndGroup and EndObject are Largest
+    /// Object." / §3.2 (Fetch))、要求そのものが固定した終端ではない。
+    ///
+    /// [`effective_end_location`](Self::effective_end_location) が Fetch context で
+    /// Largest Object を終端として返すのに対し、本メソッドは要求が明示した終端だけを返す。
+    /// FETCH の応答範囲を Largest Object と区別して扱うために使う。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+    pub fn explicit_end_location(&self) -> Option<Location> {
+        match self {
+            Self::AbsoluteRange {
+                start,
+                end_group_delta,
+            } => Some(Location {
+                group_id: start.group_id.saturating_add(*end_group_delta),
+                object_id: u64::MAX,
+            }),
+            Self::AbsoluteRangeWithEnd {
+                start,
+                end_group_delta,
+                end_object,
+            } => Some(Location {
+                group_id: start.group_id.saturating_add(*end_group_delta),
+                object_id: *end_object,
+            }),
+            Self::RelativeGroup { .. }
+            | Self::NextObject
+            | Self::AbsoluteStart { .. }
+            | Self::NoFilter => None,
+        }
+    }
+
     /// フィルタの実効 End Location を導出する
     /// (draft-ietf-moq-transport-22 §3.3.1 (Location Filters) / §9.20.9 (LOCATION FILTER Parameter))
     ///
@@ -859,6 +895,15 @@ impl MessageParameters {
     /// 内部のパラメータスライスを返す
     pub fn as_slice(&self) -> &[MessageParameter] {
         &self.0
+    }
+
+    /// LARGEST_OBJECT パラメータを取り除く
+    ///
+    /// 存在しない場合は何もしない。FETCH_OK の応答範囲は LARGEST_OBJECT が要求範囲内に
+    /// あるときだけそこへ切り詰められる (draft-ietf-moq-transport-23 §3.2 (Fetch) /
+    /// §3.2.2 (Gaps in a Fetch Stream)) ため、範囲外の値を載せないために使う。
+    pub fn remove_largest_object(&mut self) {
+        self.0.retain(|p| p.param_type != PARAM_LARGEST_OBJECT);
     }
 
     /// LARGEST_OBJECT パラメータを設定する

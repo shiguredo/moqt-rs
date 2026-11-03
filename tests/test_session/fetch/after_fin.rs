@@ -49,12 +49,10 @@ fn establish_fetch_and_send_request_update() -> (Session, Session, u64) {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -97,12 +95,10 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
     server
         .send_fetch_ok(
             rid,
-            1,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -124,11 +120,7 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
             group_id: 5,
             object_id: 0,
         }),
-        "FIN 後の FETCH_OK で終端情報が保存されること"
-    );
-    assert!(
-        fetch.end_of_track,
-        "FIN 後の FETCH_OK で end_of_track フラグが保存されること"
+        "FIN 後の FETCH_OK で応答範囲の終端が保存されること"
     );
     assert!(
         fetch.response_received,
@@ -140,7 +132,6 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
-            end_of_track,
         } = ev
         {
             assert_eq!(request_id, rid);
@@ -150,11 +141,7 @@ fn fetch_ok_after_fin_keeps_terminated_and_saves_end_info() {
                     group_id: 5,
                     object_id: 0,
                 },
-                "FIN 後の FETCH_OK でも終端情報が通知されること"
-            );
-            assert!(
-                end_of_track,
-                "FIN 後の FETCH_OK でも end_of_track が通知されること"
+                "FIN 後の FETCH_OK でも応答範囲の終端が通知されること"
             );
             saw_ok = true;
         }
@@ -177,12 +164,10 @@ fn fetch_ok_before_fin_emits_fetch_ok_received() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -202,7 +187,6 @@ fn fetch_ok_before_fin_emits_fetch_ok_received() {
         if let SessionEvent::FetchOkReceived {
             request_id,
             end_location,
-            end_of_track,
         } = ev
         {
             assert_eq!(request_id, rid);
@@ -212,9 +196,8 @@ fn fetch_ok_before_fin_emits_fetch_ok_received() {
                     group_id: 5,
                     object_id: 0,
                 },
-                "FIN 前の FETCH_OK でも終端情報が通知されること"
+                "FIN 前の FETCH_OK でも応答範囲の終端が通知されること"
             );
-            assert!(!end_of_track, "end_of_track = 0 がそのまま通知されること");
             saw_ok = true;
         }
     }
@@ -283,146 +266,76 @@ fn request_error_after_fin_accepted() {
     );
 }
 
-/// 二重応答: FIN → REQUEST_ERROR → FETCH_OK で ProtocolViolation になりセッションが fail すること
+/// FIN 後に届いた初回応答 (REQUEST_OK、別名 FETCH_OK) は `Terminated` のまま受理されること
 ///
-/// draft §3.2 (Fetch): "The publisher MUST send exactly one FETCH_OK or FETCH_ERROR in
-/// response to a FETCH."
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): FETCH_OK はデータストリームの FIN 前後どちらでも
+/// 届きうる。§9.3 (REQUEST_OK) により FETCH_OK は REQUEST_OK (Type 0x07) であるため、
+/// REQUEST_ERROR の受理で `response_received` が立った fetch への REQUEST_OK は
+/// REQUEST_UPDATE_OK として解釈される (初回応答とメッセージ型では区別できない)。
+/// 本テストは初回応答をまだ受けていない fetch への REQUEST_OK が FETCH_OK として受理され、
+/// 応答範囲の終端が要求の End Location から解決されることを固定する。
 #[test]
-fn fetch_ok_after_request_error_after_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, ReasonPhrase, common::Location};
-    let (mut client, mut server, rid) = send_fetch_pending();
-    client
-        .recv_fetch_data_stream_closed(rid, RequestStreamEnd::Fin)
-        .expect("テストフィクスチャの前提条件を満たす");
-    server
-        .send_request_error(
-            rid,
-            0x42,
-            0,
-            ReasonPhrase::new("fetch failed".to_string())
-                .expect("テストフィクスチャの前提条件を満たす"),
-            ErrorDetails::new(),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, err_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, err_msg)
-        .expect("テストフィクスチャの前提条件を満たす");
-    // REQUEST_ERROR 受理後の FETCH_OK は二重応答として ProtocolViolation
-    // (server 側の `send_fetch_ok` は Pending 状態を要求するため、ワイヤメッセージを直接注入する)
-    let err = client
-        .recv_stream_message(
-            rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
-                    group_id: 5,
-                    object_id: 0,
-                },
-                parameters: MessageParameters::new(),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect_err("二重応答の FETCH_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
-}
-
-/// 二重応答: FIN → FETCH_OK → FETCH_OK で ProtocolViolation になりセッションが fail すること
-///
-/// draft §3.2 (Fetch): "The publisher MUST send exactly one FETCH_OK or FETCH_ERROR in
-/// response to a FETCH."
-#[test]
-fn fetch_ok_twice_after_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+fn initial_request_ok_after_fin_is_accepted_as_fetch_ok() {
+    use shiguredo_moqt::message::RequestOk as WireRequestOk;
+    use shiguredo_moqt::message::common::Location;
     let (mut client, _server, rid) = send_fetch_pending();
     client
         .recv_fetch_data_stream_closed(rid, RequestStreamEnd::Fin)
         .expect("テストフィクスチャの前提条件を満たす");
-    // server 側の `send_fetch_ok` は Pending 状態を要求するため、ワイヤメッセージを直接注入する
-    let fetch_ok = |end: Location| {
-        ControlMessage::FetchOk(WireFetchOk {
-            end_of_track: 0,
-            end_location: end,
-            parameters: MessageParameters::new(),
-            track_properties: TrackProperties::new(),
-        })
-    };
+    // 要求は {0, 0} から {5, 0} までなので、LARGEST_OBJECT が無ければ要求の End Location が
+    // 応答範囲の終端になる
     client
         .recv_stream_message(
             rid,
-            fetch_ok(Location {
-                group_id: 5,
-                object_id: 0,
-            }),
-        )
-        .expect("FIN 後の 1 回目の FETCH_OK は受理されること");
-    let err = client
-        .recv_stream_message(
-            rid,
-            fetch_ok(Location {
-                group_id: 5,
-                object_id: 0,
-            }),
-        )
-        .expect_err("2 回目の FETCH_OK は二重応答として ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
-}
-
-/// 二重応答: FIN 前 (Established) の FETCH_OK → FETCH_OK でも ProtocolViolation になり
-/// セッションが fail すること
-///
-/// データストリームの FIN 前後で応答受領フラグによる二重応答検出は同一経路である。
-/// FIN 前に FETCH_OK を受信して `Established` に遷移した後は `response_received` が
-/// true のため、2 回目の FETCH_OK はフラグ判定で fail する
-/// (draft §3.2 (Fetch): "The publisher MUST send exactly one FETCH_OK or FETCH_ERROR in
-/// response to a FETCH.")。
-#[test]
-fn fetch_ok_twice_before_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
-    use shiguredo_moqt::session::types::FetchState;
-    let (mut client, mut server, rid) = send_fetch_pending();
-    server
-        .send_fetch_ok(
-            rid,
-            0,
-            Location {
-                group_id: 5,
-                object_id: 0,
-            },
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
-        .expect("テストフィクスチャの前提条件を満たす");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("FIN 前の 1 回目の FETCH_OK は受理されること");
-    assert_eq!(
-        client
-            .fetch(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .state,
-        FetchState::Established
-    );
-    // server 側の `send_fetch_ok` は Pending 状態を要求するため、ワイヤメッセージを直接注入する
-    let err = client
-        .recv_stream_message(
-            rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
-                    group_id: 5,
-                    object_id: 0,
-                },
+            ControlMessage::RequestOk(WireRequestOk {
                 parameters: MessageParameters::new(),
                 track_properties: TrackProperties::new(),
             }),
         )
-        .expect_err("Established での 2 回目の FETCH_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
+        .expect("FIN 後の初回 REQUEST_OK は FETCH_OK として受理されること");
+    let fetch = client
+        .fetch(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        fetch.state,
+        FetchState::Terminated,
+        "FIN 後の FETCH_OK でも state は Terminated のまま維持されること"
+    );
+    assert_eq!(
+        fetch.end_location,
+        Some(Location {
+            group_id: 5,
+            object_id: 0,
+        }),
+        "要求の End Location が応答範囲の終端になること"
+    );
+    assert!(
+        fetch.response_received,
+        "FIN 後の FETCH_OK で応答受領フラグが立つこと"
+    );
+    let mut saw_ok = false;
+    while let Some(ev) = client.poll_event() {
+        if let SessionEvent::FetchOkReceived {
+            request_id,
+            end_location,
+        } = ev
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(
+                end_location,
+                Location {
+                    group_id: 5,
+                    object_id: 0,
+                },
+                "要求の End Location が通知されること"
+            );
+            saw_ok = true;
+        }
+    }
+    assert!(
+        saw_ok,
+        "FIN 後の FETCH_OK で FetchOkReceived が発行されること"
+    );
 }
 
 /// FIN → FETCH_OK → REQUEST_ERROR の順で届いても fail しないこと
@@ -444,12 +357,10 @@ fn request_error_after_fetch_ok_after_fin_accepted() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -582,12 +493,10 @@ fn fetch_ok_after_reset_stream_accepted() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -621,7 +530,7 @@ fn fetch_ok_after_reset_stream_accepted() {
 /// fail すること (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
 #[test]
 fn fetch_ok_end_before_start_after_fin_fails_session() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_fetch(
@@ -649,13 +558,11 @@ fn fetch_ok_end_before_start_after_fin_fails_session() {
     let err = client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 2,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: TrackProperties::new(),
             }),
         )
@@ -673,7 +580,7 @@ fn fetch_ok_end_before_start_after_fin_fails_session() {
 /// によるキャンセルを検知できるようにする。
 #[test]
 fn unknown_mandatory_fetch_ok_after_fin_terminates_fetch() {
-    use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
+    use shiguredo_moqt::message::{RequestOk as WireRequestOk, common::Location};
     use shiguredo_moqt::session::types::FetchState;
     use shiguredo_moqt::track_properties::{
         MANDATORY_TRACK_PROPERTY_MIN, TrackProperty, TrackPropertyValue,
@@ -690,13 +597,11 @@ fn unknown_mandatory_fetch_ok_after_fin_terminates_fetch() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(WireFetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(WireRequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties,
             }),
         )
@@ -892,12 +797,10 @@ fn empty_fetch_response_then_fetch_ok_accepted() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
@@ -927,26 +830,43 @@ fn empty_fetch_response_then_fetch_ok_accepted() {
     );
 }
 
-/// `Pending` 状態での REQUEST_OK は従来どおり ProtocolViolation で fail すること
+/// `Pending` 状態の fetch に届いた REQUEST_OK は初回応答 (FETCH_OK) として受理されること
 ///
-/// REQUEST_UPDATE は実装が `Established` でのみ送るため、`Pending` での REQUEST_OK は
-/// peer の違反である。
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK): FETCH の初回成功応答は
+/// REQUEST_OK (別名 FETCH_OK) であり、REQUEST_UPDATE を送っていない fetch に届く
+/// REQUEST_OK は初回応答である。`response_received` が未設定の fetch は初回応答の
+/// context で dispatch され、Track Properties も受理される (§9.3)。
 #[test]
-fn request_ok_in_pending_fails_session() {
-    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
+fn initial_request_ok_in_pending_is_accepted_as_fetch_ok() {
     use shiguredo_moqt::message::RequestOk as WireRequestOk;
+    use shiguredo_moqt::session::types::FetchState;
+    use shiguredo_moqt::track_properties::{
+        PROP_DEFAULT_PUBLISHER_PRIORITY, TrackProperty, TrackPropertyValue,
+    };
     let (mut client, _server, rid) = send_fetch_pending();
-    // server 側の `send_request_ok` は Established 状態を要求するため、ワイヤメッセージを直接注入する
-    let err = client
+    // 初回応答では Track Properties を運べる (REQUEST_UPDATE_OK では空でなければならない)
+    let mut track_properties = TrackProperties::new();
+    track_properties.push(TrackProperty {
+        prop_type: PROP_DEFAULT_PUBLISHER_PRIORITY,
+        value: TrackPropertyValue::VarInt(200),
+    });
+    client
         .recv_stream_message(
             rid,
             ControlMessage::RequestOk(WireRequestOk {
                 parameters: MessageParameters::new(),
-                track_properties: TrackProperties::default(),
+                track_properties,
             }),
         )
-        .expect_err("Pending 状態の REQUEST_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
+        .expect("Pending 状態の初回 REQUEST_OK は FETCH_OK として受理されること");
+    let fetch = client
+        .fetch(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(fetch.state, FetchState::Established);
+    assert!(
+        fetch.response_received,
+        "初回応答の受理で応答受領フラグが立つこと"
+    );
 }
 
 // ─── FETCH_ERROR 後の遅延 in-flight FETCH data stream ─────────────────

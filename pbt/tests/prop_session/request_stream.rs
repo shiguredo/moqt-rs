@@ -27,7 +27,7 @@ use shiguredo_moqt::session::types::{
 };
 use shiguredo_moqt::track_properties::TrackProperties;
 
-use super::common::{establish_pair, take_send_on_stream, take_send_request};
+use super::common::{establish_pair, fetch_ok_params, take_send_on_stream, take_send_request};
 
 /// peer の終端種別のサンプル (FIN と RESET_STREAM)
 fn sample_end(ctx: &mut noprop::TestCaseContext) -> RequestStreamEnd {
@@ -344,12 +344,10 @@ fn fetch_responder_terminates_only_on_reset() -> TestResult {
             server
                 .send_fetch_ok(
                     rid,
-                    0,
-                    Location {
+                    fetch_ok_params(Some(Location {
                         group_id: 5,
                         object_id: 0,
-                    },
-                    MessageParameters::new(),
+                    })),
                     TrackProperties::new(),
                 )
                 .expect("requester の FIN 後でも FETCH_OK を送れること");

@@ -1028,12 +1028,10 @@ fn peer_goaway_does_not_suppress_send_fetch_ok() {
     server
         .send_fetch_ok(
             fetch_rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 0,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("peer GOAWAY 受信後も FETCH_OK は送信可能であること");

@@ -276,20 +276,24 @@ pub enum SessionEvent {
         /// 受信したパラメータ
         parameters: MessageParameters,
     },
-    /// peer からの FETCH_OK を受信した (終端情報を含む)
+    /// peer から FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を受信した
     ///
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) / §9.12 (FETCH_OK): FETCH への応答は
-    /// FETCH_OK / REQUEST_ERROR のみ。FIN 前後どちらの到着でも受理時に発火する。
-    /// アプリは `Session::fetch` のポーリングなしに再生終了の確定などを
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK): FETCH への応答は
+    /// REQUEST_OK / REQUEST_ERROR のみ。データストリームの FIN 前後どちらの到着でも
+    /// 受理時に発火する。アプリは `Session::fetch` のポーリングなしに再生終了の確定などを
     /// イベント駆動で書ける。
+    ///
+    /// `end_location` は応答範囲の終端であり、FETCH_OK の LARGEST_OBJECT が要求範囲内なら
+    /// その値、そうでなければ要求で明示した End Location になる (§3.2 / §3.2.2
+    /// (Gaps in a Fetch Stream))。Track の終端は FETCH_OK では運ばず、FETCH 応答
+    /// ストリームの End of Group (0x80) / End of Track (0x81) で受け取る (§11.4.2.2
+    /// (Prior Object Fields))。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     FetchOkReceived {
         /// 対象 request の Request ID
         request_id: u64,
-        /// fetch の終端 Location
+        /// 応答範囲の終端 Location
         end_location: Location,
-        /// Track 終端に達したか
-        end_of_track: bool,
     },
     /// peer からの PUBLISH_DONE を受信した (subscription は Terminated に遷移済み)
     PublishDoneReceived {
@@ -1905,34 +1909,46 @@ pub struct Fetch {
     pub track_namespace: Option<TrackNamespace>,
     /// 要求 track の name (常に Some)
     pub track_name: Option<Vec<u8>>,
-    /// subscriber が要求した range の Start Location
+    /// 要求範囲の Start Location
     ///
-    /// draft-ietf-moq-transport-22 §9.11 (FETCH): range は LOCATION_FILTER
-    /// パラメータで指定する。送信時に解決した値を保持し、FETCH_OK の
-    /// End Location 検証に使う。送信経路の解決は常に `Some` になる
-    /// (Largest 未知でも先頭寄りに解決される) ため、`None` は publisher 側
-    /// (保持しない) のみであり、その場合は FETCH_OK 検証をスキップする。
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.19.9 (LOCATION FILTER Parameter):
+    /// range は LOCATION_FILTER パラメータで指定する。送信時 (subscriber) / 受信時
+    /// (publisher) に解決した値を保持し、応答範囲の終端解決と送信 Object の範囲検証に使う。
+    /// 解決結果は常に `Some` になる (Largest Object 未知の相対フィルタは先頭寄りに解決される)。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub fetch_start: Option<Location>,
-    /// publisher が FETCH で要求された範囲の終端 (draft §3.3.1 Location Filters)
+    /// 要求で明示された範囲の終端 (draft §9.19.9 (LOCATION FILTER Parameter))
     ///
-    /// `handle_peer_fetch` が LOCATION_FILTER から解決した値を保存する。publisher 側の
-    /// 送信 Object が要求範囲を超えていないかの検証 (`send_fetch_object`) に使う。
-    /// subscriber 側は `None` (FETCH_OK の `end_location` を別途保持する)。
+    /// Location Filter が End を運ぶ形式 (Type 0x03 / 0x04) のときだけ `Some`。
+    /// End を省略した FETCH の End は Largest Object であるため (同節 / §3.2 (Fetch))、
+    /// `None` は「終端が要求で固定されていない」ことを意味し、応答範囲の終端は
+    /// FETCH_OK の送受信時点の Largest Object になる。
+    /// publisher 側では送信 Object が要求範囲を超えていないかの検証
+    /// (`send_fetch_object`) にも使う。応答範囲の終端 (`end_location`) は
+    /// `send_fetch_ok` / 初回応答の受信で確定する。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub request_end: Option<Location>,
     /// 現在の状態
     pub state: FetchState,
-    /// FETCH_OK 受信 / 送信で確定した end_location
+    /// 応答範囲の終端 (FETCH_OK の送受信時に確定する)
+    ///
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream):
+    /// LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で明示した End Location
+    /// になる。publisher 側は `send_fetch_ok` が、subscriber 側は初回応答の受信が設定する。
+    /// Track の終端はこの値では表さない (FETCH 応答ストリームの End of Group /
+    /// End of Track で受け取る。§11.4.2.2 (Prior Object Fields))。
     pub end_location: Option<Location>,
-    /// FETCH_OK 受信 / 送信で確定した end_of_track フラグ
-    pub end_of_track: bool,
-    /// FETCH への初回応答 (FETCH_OK / FETCH への応答の REQUEST_ERROR) を受信済みか
+    /// FETCH への初回応答 (REQUEST_OK / FETCH への応答の REQUEST_ERROR) を受信済みか
     ///
     /// subscriber 側の受信経路のみで更新され、publisher 側は常に false のまま
     /// (送信側の応答は `send_fetch_ok` / `send_request_error` 呼び出しが担う)。
-    /// draft-ietf-moq-transport-22 §3.2 (Fetch) は FETCH_OK / REQUEST_ERROR の
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) は REQUEST_OK / REQUEST_ERROR の
     /// 到着タイミングをオブジェクト配信に対して制約しないため、データストリームの
-    /// FIN 後に届くこともある。二重応答の検出と、アプリが応答受領を確認するために使う。
+    /// FIN 後に届くこともある。アプリが応答受領を確認するために使う。
+    ///
+    /// 同じ REQUEST_OK で届く FETCH の REQUEST_UPDATE_OK との dispatch にも使う
+    /// (§9.3 (REQUEST_OK): Track Properties を運べるのは初回の FETCH_OK だけであり、
+    /// REQUEST_UPDATE_OK は空でなければならない)。
     pub response_received: bool,
     /// 自端点が FETCH データストリームを終端済みか (publisher 側のみで更新)
     ///

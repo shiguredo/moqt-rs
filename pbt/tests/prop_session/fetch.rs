@@ -23,7 +23,7 @@ use shiguredo_moqt::session::types::FetchState;
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupIdMode};
 use shiguredo_moqt::track_properties::TrackProperties;
 
-use super::common::{establish_pair, take_send_on_stream, take_send_request};
+use super::common::{establish_pair, fetch_ok_params, take_send_on_stream, take_send_request};
 
 /// FETCH の range 指定 (AbsoluteRangeWithEnd) を持つ MessageParameters を作る
 ///
@@ -78,12 +78,10 @@ fn multiple_fetches_all_establish() -> noprop::TestResult {
             server
                 .send_fetch_ok(
                     rid,
-                    0,
-                    Location {
+                    fetch_ok_params(Some(Location {
                         group_id: u64::from(i) + 1,
                         object_id: 0,
-                    },
-                    MessageParameters::new(),
+                    })),
                     TrackProperties::new(),
                 )
                 .expect("テストフィクスチャの前提条件を満たす");
@@ -712,6 +710,79 @@ fn send_fetch_relative_filter_rejected_without_side_effects() -> noprop::TestRes
         );
         let (sent_rid, _) = take_send_request(&mut client);
         assert_eq!(sent_rid, rid);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// FETCH_OK の応答範囲の終端は Largest Object が要求範囲内ならそこへ切り詰められること
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): "If Largest Object is within the requested range,
+/// the FETCH response ends at Largest Object and the publisher MUST include the LARGEST_OBJECT
+/// parameter in FETCH_OK. Otherwise, the response ends at the requested End Location."
+/// 任意の要求範囲と Largest Object について、切り詰めの判定がこの規則と一致し、
+/// 範囲内のときだけ LARGEST_OBJECT が応答に載ることを検証する。
+#[test]
+fn fetch_ok_end_follows_largest_object_within_range() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let start_group = noprop::sample_u64_in(ctx, 0..1000);
+        let start_object = noprop::sample_u64_in(ctx, 0..100);
+        let start = Location {
+            group_id: start_group,
+            object_id: start_object,
+        };
+        // 空 range は send_fetch が拒否するため、End は Start 以上になるように作る
+        let end_group_delta = noprop::sample_u64_in(ctx, 0..10);
+        let end = Location {
+            group_id: start_group + end_group_delta,
+            object_id: if end_group_delta == 0 {
+                start_object + noprop::sample_u64_in(ctx, 0..100)
+            } else {
+                noprop::sample_u64_in(ctx, 0..100)
+            },
+        };
+        let largest = Location {
+            group_id: start_group + noprop::sample_u64_in(ctx, 0..12),
+            object_id: noprop::sample_u64_in(ctx, 0..100),
+        };
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_fetch(
+                TrackNamespace::new(vec![b"live".to_vec()])
+                    .expect("テストフィクスチャの前提条件を満たす"),
+                b"cam".to_vec(),
+                fetch_range_params(start, end),
+            )
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, m) = take_send_request(&mut client);
+        server
+            .recv_request(m)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let largest_in_range = largest >= start && largest <= end;
+        server
+            .send_fetch_ok(rid, fetch_ok_params(Some(largest)), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok) = take_send_on_stream(&mut server);
+        let ControlMessage::RequestOk(request_ok) = &ok else {
+            panic!("REQUEST_OK が期待されたが {ok:?} だった");
+        };
+        assert_eq!(
+            request_ok.parameters.largest_object(),
+            largest_in_range.then_some((largest.group_id, largest.object_id)),
+            "要求範囲内のときだけ LARGEST_OBJECT が応答に載ること"
+        );
+        client
+            .recv_stream_message(rid, ok)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            client
+                .fetch(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .end_location,
+            Some(if largest_in_range { largest } else { end }),
+            "応答範囲の終端が Largest Object の範囲判定に一致すること"
+        );
         Ok(())
     })?;
     Ok(())

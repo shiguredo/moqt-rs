@@ -154,12 +154,10 @@ fn request_stream_goaway_timeout_terminates_fetch_receiver() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 10,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("FETCH_OK の送信に成功すること");

@@ -314,13 +314,7 @@ fn fetch_request_update_with_duplicate_tokens_resets_fetch_data_stream() {
         .recv_request(fetch_msg)
         .expect("FETCH の受信に成功すること");
     server
-        .send_fetch_ok(
-            rid,
-            0,
-            end,
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
+        .send_fetch_ok(rid, fetch_ok_params(Some(end)), TrackProperties::new())
         .expect("FETCH_OK の送信に成功すること");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client
@@ -498,13 +492,7 @@ fn request_update_for_terminated_fetch_with_duplicate_tokens_closes_session() {
         .recv_request(fetch_msg)
         .expect("FETCH の受信に成功すること");
     server
-        .send_fetch_ok(
-            rid,
-            0,
-            end,
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
+        .send_fetch_ok(rid, fetch_ok_params(Some(end)), TrackProperties::new())
         .expect("FETCH_OK の送信に成功すること");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client

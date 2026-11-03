@@ -31,9 +31,10 @@ use crate::error::{
     is_local_error_code,
 };
 use crate::message::{
-    ControlMessage, ErrorDetails, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase,
-    RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location,
-    common::TrackNamespace, unsupported_request_allowed_params,
+    ControlMessage, ErrorDetails, FETCH_OK_ALLOWED_PARAMS, PublishDone,
+    REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, RequestError, RequestOk, Setup,
+    TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location, common::TrackNamespace,
+    unsupported_request_allowed_params,
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
@@ -1993,7 +1994,6 @@ impl Session {
             ControlMessage::PublishStateNotify(notify) => {
                 self.handle_peer_publish_state_notify(request_id, notify)
             }
-            ControlMessage::FetchOk(ok) => self.handle_peer_fetch_ok(request_id, ok),
             ControlMessage::Publish(_) => {
                 // draft-ietf-moq-transport-22 §9 Table 5: PUBLISH (0x1D) は Request, First。
                 // Messages marked "First" MUST be the first message on a new request stream.
@@ -2039,12 +2039,13 @@ impl Session {
     /// なお outstanding な REQUEST_UPDATE との対応付けは検証しないため、REQUEST_UPDATE を
     /// 受信していない購読に対して呼ぶことは想定しない。
     ///
-    /// draft §9.3 (REQUEST_OK): REQUEST_OK は PUBLISH / REQUEST_UPDATE / TRACK_STATUS /
+    /// draft §9.3 (REQUEST_OK): REQUEST_OK は PUBLISH / FETCH / REQUEST_UPDATE / TRACK_STATUS /
     /// SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS / PUBLISH_NAMESPACE への成功応答として送信される。
-    /// FETCH の初回応答は FETCH_OK / REQUEST_ERROR (draft §3.2 (Fetch)) であり REQUEST_OK ではなく、
-    /// `RequestTable::Fetch` 分岐は FETCH 確立後 (FetchState::Established) の REQUEST_UPDATE_OK 経路
-    /// (draft §9.5 (REQUEST_UPDATE): FETCH を REQUEST_UPDATE 対象に含め、応答を
-    /// REQUEST_OK / REQUEST_ERROR と規定) として REQUEST_UPDATE に含まれる。
+    /// FETCH の初回成功応答も REQUEST_OK (別名 FETCH_OK) だが、応答範囲の終端を要求と
+    /// LARGEST_OBJECT から導出する必要があるため [`send_fetch_ok`](Self::send_fetch_ok) を使う。
+    /// `RequestTable::Fetch` 分岐は FETCH 確立後 (FetchState::Established) の
+    /// REQUEST_UPDATE_OK 経路 (draft §9.5 (REQUEST_UPDATE): FETCH を REQUEST_UPDATE 対象に
+    /// 含め、応答を REQUEST_OK / REQUEST_ERROR と規定) だけを扱う。
     ///
     /// subscription では「未応答の REQUEST_UPDATE グループの先頭を 1 つ適用して
     /// REQUEST_UPDATE_OK を返す」ことを意味する。REQUEST_UPDATE 1 通につき 1 回、
@@ -2403,9 +2404,27 @@ impl Session {
         // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): 応答受信でクレジット回復
         self.restore_outgoing_request_update_credit(request_id);
         let table = self.locate_request(request_id);
-        // draft §9.3 (REQUEST_OK): TRACK_STATUS_OK 以外の context では
-        // TrackProperties は空でなければならない。違反時は PROTOCOL_VIOLATION でセッションクローズ。
-        if !matches!(table, Some(RequestTable::TrackStatus)) && !ok.track_properties.is_empty() {
+        // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH の初回成功応答 (FETCH_OK) と
+        // FETCH の REQUEST_UPDATE_OK は同じ REQUEST_OK で届く。両者は応答の種類が違うため、
+        // 初回応答を受領済みか (`response_received`) で応答 context を確定する。
+        // §3.2 (Fetch) は FETCH への応答を 1 回に限り、REQUEST_UPDATE は確立後にだけ送れる。
+        let fetch_initial = match table {
+            Some(RequestTable::Fetch) => {
+                Some(self.fetches.get(&request_id).is_some_and(|fetch| {
+                    // publisher 側の fetch は応答を送る側であり、初回応答は受領しない。
+                    // 役割違反は各ハンドラが検出するため、ここでは subscriber 側だけを
+                    // 初回応答の候補にする。
+                    fetch.my_role == TrackRole::Subscriber && !fetch.response_received
+                }))
+            }
+            _ => None,
+        };
+        // draft §9.3 (REQUEST_OK): Track Properties を運べるのは TRACK_STATUS_OK と
+        // FETCH の初回応答 (FETCH_OK) だけであり、PUBLISH_OK / REQUEST_UPDATE_OK /
+        // SUBSCRIBE_NAMESPACE_OK / PUBLISH_NAMESPACE_OK では空でなければならない。
+        let track_properties_allowed =
+            matches!(table, Some(RequestTable::TrackStatus)) || fetch_initial == Some(true);
+        if !track_properties_allowed && !ok.track_properties.is_empty() {
             // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "If an endpoint receives Track
             // Properties in one of these messages it MUST close the session with INVALID_FIELD."
             let err = SessionError::new(
@@ -2427,6 +2446,10 @@ impl Session {
                 TRACK_STATUS_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (track_status) parameter not allowed in this context",
             )),
+            Some(RequestTable::Fetch) if fetch_initial == Some(true) => Some((
+                FETCH_OK_ALLOWED_PARAMS,
+                "REQUEST_OK (fetch) parameter not allowed in this context",
+            )),
             Some(RequestTable::Fetch) => Some((
                 REQUEST_UPDATE_OK_ALLOWED_PARAMS,
                 "REQUEST_OK (request_update for fetch) parameter not allowed in this context",
@@ -2445,7 +2468,13 @@ impl Session {
             Some(RequestTable::Subscription) => {
                 self.handle_ok_for_subscription(request_id, &ok.parameters)
             }
-            Some(RequestTable::Fetch) => self.handle_ok_for_fetch(request_id, &ok.parameters),
+            Some(RequestTable::Fetch) => {
+                if fetch_initial == Some(true) {
+                    self.handle_ok_for_fetch_initial(request_id, ok)
+                } else {
+                    self.handle_ok_for_fetch_update(request_id, &ok.parameters)
+                }
+            }
             Some(RequestTable::TrackStatus) => {
                 self.handle_ok_for_track_status(request_id, &ok.parameters, &ok.track_properties)
             }

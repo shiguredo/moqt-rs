@@ -144,15 +144,15 @@ fn subscribe_ok_wire(track_alias: u64, track_properties: &[u8]) -> Vec<u8> {
     frame(0x04, &payload)
 }
 
-/// Track Properties の生バイト列を持つ FETCH_OK の wire 表現 (Type 0x18)
+/// Track Properties の生バイト列を持つ FETCH_OK の wire 表現 (Type 0x07)
+///
+/// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH_OK は REQUEST_OK (Type 0x07) の
+/// 別名であり、本文は Number of Parameters + Parameters + Track Properties である。
 fn fetch_ok_wire(track_properties: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.push(0); // End of Track
-    shiguredo_moqt::varint::encode(0, &mut payload); // End Location: Group ID
-    shiguredo_moqt::varint::encode(0, &mut payload); // End Location: Object ID
     shiguredo_moqt::varint::encode(0, &mut payload); // Number of Parameters
     payload.extend_from_slice(track_properties);
-    frame(0x18, &payload)
+    frame(0x07, &payload)
 }
 
 /// Track Properties の生バイト列を持つ REQUEST_OK (TRACK_STATUS_OK) の wire 表現 (Type 0x07)
@@ -444,13 +444,11 @@ fn fetch_ok_with_duplicate_track_property_cancels_fetch() {
     client
         .recv_stream_message(
             rid,
-            ControlMessage::FetchOk(shiguredo_moqt::message::FetchOk {
-                end_of_track: 0,
-                end_location: Location {
+            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
+                parameters: fetch_ok_params(Some(Location {
                     group_id: 5,
                     object_id: 0,
-                },
-                parameters: MessageParameters::new(),
+                })),
                 track_properties: track_properties_with_duplicate_delivery_timeout(),
             }),
         )

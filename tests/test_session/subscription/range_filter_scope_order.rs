@@ -74,12 +74,10 @@ fn fetch_context_range_filter_closes_session() {
     server
         .send_fetch_ok(
             rid,
-            0,
-            Location {
+            fetch_ok_params(Some(Location {
                 group_id: 5,
                 object_id: 0,
-            },
-            MessageParameters::new(),
+            })),
             TrackProperties::new(),
         )
         .expect("FETCH_OK の送信に成功すること");

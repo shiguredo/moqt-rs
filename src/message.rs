@@ -9,7 +9,7 @@
 pub mod common;
 
 use common::{
-    Location, TrackNamespace, decode_track_name, encode_track_name, validate_full_track_name,
+    TrackNamespace, decode_track_name, encode_track_name, validate_full_track_name,
     validate_track_name,
 };
 
@@ -44,7 +44,9 @@ const MSG_PUBLISH_DONE: u64 = 0x0B;
 const MSG_TRACK_STATUS: u64 = 0x0D;
 const MSG_GOAWAY: u64 = 0x10;
 const MSG_FETCH: u64 = 0x16;
-const MSG_FETCH_OK: u64 = 0x18;
+// 0x18 は draft-ietf-moq-transport-23 §9 Table 5 で "RESERVED (FETCH_OK in <= 22)" と
+// 定義される。FETCH_OK は REQUEST_OK (0x07) に統合されたため、0x18 を受信した場合は
+// 未知のメッセージ型として UNEXPECTED_MESSAGE でセッションを閉じる (§9 の MUST)。
 const MSG_PUBLISH: u64 = 0x1D;
 const MSG_PUBLISH_STATE_NOTIFY: u64 = 0x22;
 const MSG_SETUP: u64 = 0x2F00; // src/stream.rs の SETUP_STREAM_TYPE と同じ値 (異なる名前空間)
@@ -261,15 +263,19 @@ pub(crate) const FETCH_ALLOWED_PARAMS: &[u64] = &[
     PARAM_OBJECT_PROPERTY_FILTER,
 ];
 
-/// FETCH_OK で許可されるパラメータ型
+/// FETCH_OK で許可されるパラメータ型 (draft-ietf-moq-transport-23 §9.3 (REQUEST_OK))
 ///
-/// FETCH_OK はパラメータを運べない (draft-ietf-moq-transport-22 §9.12 (FETCH_OK) の
-/// Parameters フィールドは存在するが、許可されるパラメータは 0 個。
-/// §9.19.1 (Parameter Scope) は許可されないパラメータを含むメッセージの受信を
-/// INVALID_PARAMETER で拒否する MUST を規定する)。
+/// FETCH_OK は REQUEST_OK (Type 0x07) の別名であり、§9.3 の Parameters の列挙は
+/// "FETCH_OK: EXPIRES, LARGEST_OBJECT" とする。§9.19.1 (Parameter Scope) は許可されない
+/// パラメータを含むメッセージの受信を INVALID_PARAMETER で拒否する MUST を規定する。
+///
+/// 同じ REQUEST_OK でも FETCH の REQUEST_UPDATE_OK は Track Properties を運べない (§9.3)。
+/// メッセージ型だけでは両者を区別できないため、Track Properties の可否は初回応答かどうかを
+/// 知っているセッション層が判定する。
+///
 /// 送信側の `send_fetch_ok` (src/session/fetch.rs) が状態遷移前にスコープ検証するために
 /// `pub(crate)` で公開している。
-pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[];
+pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT];
 
 /// TRACK_STATUS で許可されるパラメータ型
 ///
@@ -1371,70 +1377,6 @@ impl Fetch {
     }
 }
 
-/// FETCH_OK メッセージ (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-#[derive(Debug, Clone, PartialEq)]
-pub struct FetchOk {
-    /// トラック終端に達した場合に 1 となるフラグ (0 または 1 のみ、draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-    pub end_of_track: u8,
-    /// 取得範囲の終端位置 (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-    pub end_location: Location,
-    /// 応答に付随するメッセージ パラメータ (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-    pub parameters: MessageParameters,
-    /// 応答に付随するトラック プロパティ (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-    pub track_properties: TrackProperties,
-}
-
-/// FETCH_OK の End of Track 値域文言 (encode / decode で共有)
-const FETCH_OK_END_OF_TRACK_RANGE: &str = "FETCH_OK end_of_track must be 0 or 1";
-
-impl FetchOk {
-    /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
-    pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): End of Track は 0 または 1 のみ
-        if self.end_of_track > 1 {
-            return Err(MessageError::ProtocolViolation(FETCH_OK_END_OF_TRACK_RANGE));
-        }
-        self.parameters.validate_scope(FETCH_OK_ALLOWED_PARAMS)?;
-        buf.push(self.end_of_track);
-        self.end_location.encode_to(buf);
-        self.parameters.encode(buf)?;
-        self.track_properties.encode(buf)?;
-        Ok(())
-    }
-
-    /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
-    ///
-    /// 末尾の `TrackProperties::decode` は残スライス全体を消費するため、消費バイト数は
-    /// 常に `payload.len()` となる (ControlMessage 側の末尾長一致検証は no-op になる)。
-    pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
-        let mut pos = 0;
-        if payload[pos..].is_empty() {
-            return Err(MessageError::UnexpectedEof);
-        }
-        let end_of_track = payload[pos];
-        // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): End of Track は 0 または 1 のみ
-        if end_of_track > 1 {
-            return Err(MessageError::ProtocolViolation(FETCH_OK_END_OF_TRACK_RANGE));
-        }
-        pos += 1;
-        let end_location = Location::decode_from(payload, &mut pos)?;
-        let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
-        pos += n;
-        parameters.validate_scope(FETCH_OK_ALLOWED_PARAMS)?;
-        let track_properties = TrackProperties::decode(&payload[pos..])?;
-        pos = payload.len();
-        Ok((
-            Self {
-                end_of_track,
-                end_location,
-                parameters,
-                track_properties,
-            },
-            pos,
-        ))
-    }
-}
-
 /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackStatus {
@@ -1538,8 +1480,6 @@ pub enum ControlMessage {
     PublishStateNotify(PublishStateNotify),
     /// FETCH メッセージ (draft-ietf-moq-transport-22 §9.11 (FETCH))
     Fetch(Fetch),
-    /// FETCH_OK メッセージ (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
-    FetchOk(FetchOk),
     /// TRACK_STATUS メッセージ (draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS))
     TrackStatus(TrackStatus),
     /// 定義済みだが本ライブラリが実装しない制御メッセージ
@@ -1716,10 +1656,6 @@ impl ControlMessage {
                 m.encode_message_body(&mut payload)?;
                 MSG_FETCH
             }
-            Self::FetchOk(m) => {
-                m.encode_message_body(&mut payload)?;
-                MSG_FETCH_OK
-            }
             Self::TrackStatus(m) => {
                 m.encode_message_body(&mut payload)?;
                 MSG_TRACK_STATUS
@@ -1782,10 +1718,6 @@ impl ControlMessage {
             MSG_FETCH => {
                 let (m, n) = Fetch::decode_message_body(payload)?;
                 (Self::Fetch(m), n)
-            }
-            MSG_FETCH_OK => {
-                let (m, n) = FetchOk::decode_message_body(payload)?;
-                (Self::FetchOk(m), n)
             }
             MSG_TRACK_STATUS => {
                 let (m, n) = TrackStatus::decode_message_body(payload)?;

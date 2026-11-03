@@ -1,9 +1,10 @@
 //! FETCH 関連
 //!
-//! draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) / §9.11 (FETCH) / §9.12 (FETCH_OK) に対応する
-//! `impl Session` の送受信メソッドをまとめる。単独 FETCH の相対 Location Filter は
-//! draft-ietf-moq-transport-23 §3.2 (Fetch) に基づき REQUEST_ERROR (INVALID_RANGE) で拒否する。
-//! 将来 draft 側で変更される可能性がある。
+//! draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.4 (Fetch State Management) / §9.11 (FETCH) /
+//! §9.3 (REQUEST_OK) に対応する `impl Session` の送受信メソッドをまとめる。FETCH の初回成功応答は
+//! REQUEST_OK (Type 0x07) であり、FETCH の REQUEST_UPDATE_OK とはセッションの状態で区別する。
+//! 単独 FETCH の相対 Location Filter は §3.2 (Fetch) に基づき REQUEST_ERROR (INVALID_RANGE) で
+//! 拒否する。将来 draft 側で変更される可能性がある。
 
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE, SESSION_INVALID_FIELD,
@@ -11,8 +12,7 @@ use crate::error::{
     SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
 };
 use crate::message::{
-    ControlMessage, FETCH_ALLOWED_PARAMS, FETCH_OK_ALLOWED_PARAMS, Fetch as WireFetch,
-    FetchOk as WireFetchOk,
+    ControlMessage, FETCH_ALLOWED_PARAMS, FETCH_OK_ALLOWED_PARAMS, Fetch as WireFetch, RequestOk,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{LocationFilter, LocationFilterContext, MessageParameters};
@@ -38,6 +38,34 @@ fn fetch_finished(fetch: &Fetch) -> bool {
         TrackRole::Publisher => fetch.state == FetchState::Terminated || fetch.data_stream_finished,
         TrackRole::Subscriber => fetch.state == FetchState::Terminated,
     }
+}
+
+/// Location が FETCH の要求範囲内かを返す
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch): "If Largest Object is within the requested
+/// range, the FETCH response ends at Largest Object and the publisher MUST include the
+/// LARGEST_OBJECT parameter in FETCH_OK. Otherwise, the response ends at the requested
+/// End Location." 範囲は Start と End の両端を含む。
+///
+/// `request_end` が `None` のときは要求が End を省略しており、その End は Largest Object
+/// である (§9.19.9 (LOCATION FILTER Parameter)) ため、Start だけを下限として判定する。
+/// この場合 Largest Object は常に範囲内になる。
+fn fetch_location_within_range(
+    request_start: Option<Location>,
+    request_end: Option<Location>,
+    location: Location,
+) -> bool {
+    if let Some(start) = request_start
+        && location < start
+    {
+        return false;
+    }
+    if let Some(end) = request_end
+        && location > end
+    {
+        return false;
+    }
+    true
 }
 
 /// subscriber 側 fetch 終端通知の呼び出し元種別 (エラーメッセージの出し分け用)
@@ -276,6 +304,8 @@ impl Session {
         // `None` で解決する (絶対値で範囲が定まる形式のみがここに到達する)。
         // 空 range (Start > End) の FETCH は送らない (受信側は INVALID_RANGE で
         // 拒否するのが本実装の選択であり、peer も同様と期待する)。
+        // 保持する `request_end` は要求が明示した終端だけであり、End を省略した要求では
+        // `None` のままにする (応答範囲の終端は FETCH_OK の LARGEST_OBJECT から解決する)。
         let (fetch_start, fetch_end) = match filter.as_ref() {
             Some(filter) => (
                 filter.effective_start_location(None),
@@ -289,6 +319,9 @@ impl Session {
                 None,
             ),
         };
+        let request_end = filter
+            .as_ref()
+            .and_then(LocationFilter::explicit_end_location);
         if let (Some(start), Some(end)) = (fetch_start.as_ref(), fetch_end.as_ref())
             && start > end
         {
@@ -305,10 +338,9 @@ impl Session {
             track_namespace: Some(track_namespace.clone()),
             track_name: Some(track_name.clone()),
             fetch_start,
-            request_end: None,
+            request_end,
             state: FetchState::Pending,
             end_location: None,
-            end_of_track: false,
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -342,18 +374,44 @@ impl Session {
         Ok(request_id)
     }
 
-    /// FETCH_OK を送信する (draft-ietf-moq-transport-22 §9.12 (FETCH_OK)、publisher 側)
+    /// FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を送信する (publisher 側)
+    ///
+    /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): FETCH の初回成功応答は Type 0x07 の
+    /// REQUEST_OK であり、FETCH_OK はその別名である。FETCH の REQUEST_UPDATE_OK と
+    /// 同じメッセージ型になるため、両者はセッションの状態 (初回応答済みか) で区別する。
+    ///
+    /// 応答範囲の終端は本呼び出しの時点で確定させる (draft §3.2 (Fetch))。
+    /// Largest Object が要求範囲内ならその位置へ応答を切り詰め、LARGEST_OBJECT を必ず載せる。
+    /// 範囲外なら要求で明示した End Location を使う (§3.2.2 (Gaps in a Fetch Stream))。
+    /// 要求が End を省略している場合の End は Largest Object であるため
+    /// (§9.19.9 (LOCATION FILTER Parameter))、`parameters` に LARGEST_OBJECT を渡すか、
+    /// 自側が publish 済みの Object から Largest Object を観測できている必要がある。
+    ///
+    /// `parameters` の LARGEST_OBJECT は Session が観測した Track の最大 Location との
+    /// 大きい方に正規化し、要求範囲内なら必ず載せ、範囲外なら取り除く。応答範囲と矛盾する
+    /// LARGEST_OBJECT を載せると、§3.2.2 が End Location を LARGEST_OBJECT と定めるために
+    /// 受信側の範囲解釈がぶれるためである。
+    ///
+    /// 戻り値が `Err` のときは fetch の状態を変更しない (エンコードは sans-I/O のため
+    /// I/O 層で行われ、状態遷移後の失敗は peer に応答が届かない孤児状態を残す)。
+    ///
+    /// # Errors
+    ///
+    /// - セッションが確立していない: `SESSION_PROTOCOL_VIOLATION`
+    /// - `request_id` の fetch が無い、publisher 役でない、`Pending` でない:
+    ///   `SESSION_PROTOCOL_VIOLATION`
+    /// - `parameters` に FETCH_OK で許可されないパラメータがある: `SESSION_PROTOCOL_VIOLATION`
+    /// - 応答範囲の終端を確定できない (要求が End を省略し、Largest Object も不明):
+    ///   `SESSION_PROTOCOL_VIOLATION`
     pub fn send_fetch_ok(
         &mut self,
         request_id: u64,
-        end_of_track: u8,
-        end_location: Location,
         parameters: MessageParameters,
         track_properties: TrackProperties,
     ) -> Result<(), SessionError> {
         self.require_established()?;
-        // 存在・ role ・ state を先に検証する
-        {
+        // 存在・ role ・ state を先に検証する。Track の名前は Largest Object の観測に使う
+        let (request_start, request_end, track_namespace, track_name) = {
             let fetch = self.fetches.get(&request_id).ok_or_else(|| {
                 SessionError::new(
                     SESSION_PROTOCOL_VIOLATION,
@@ -372,33 +430,75 @@ impl Session {
                     "send_fetch_ok requires Pending state",
                 ));
             }
-        }
-        // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): End Location はアプリが
-        // 渡した値をそのまま使う (Joining FETCH 廃止に伴い導出は行わない)。
-        // draft §9.20.1 (Parameter Scope): FETCH_OK はパラメータを運べない
-        // (FETCH_OK_ALLOWED_PARAMS は空集合。draft-ietf-moq-transport-22 §9.12 (FETCH_OK)
-        // の Parameters フィールドに許可されるパラメータは 0 個)。
-        // スコープ外パラメータを含む FETCH_OK では状態を一切変更せずエラーを返す。
-        // 受信側はワイヤ層 (`FetchOk::decode_message_body` の validate_scope) で検証済みのため、
-        // ここは送信側の状態整合性のための検証。検証が状態遷移後に走ると、fetch が
-        // `Established` に遷移済みのまま後段のエンコード失敗で peer に FETCH_OK が送られない
-        // 孤児状態が残る (エンコードは sans-I/O のため I/O 層で行われる)。
-        // なお本検証はパラメータのみを対象とし、`end_of_track > 1` や不正な `track_properties`
-        // はエンコード時検証のまま残る (同型の孤児化経路。値域・内容検証は本検証の対象外)。
+            // fetch の namespace / name は送受信経路で常に設定される契約である
+            // (types.rs の Fetch の doc 参照)
+            (
+                fetch.fetch_start,
+                fetch.request_end,
+                fetch
+                    .track_namespace
+                    .clone()
+                    .expect("fetch track_namespace is always set"),
+                fetch
+                    .track_name
+                    .clone()
+                    .expect("fetch track_name is always set"),
+            )
+        };
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): FETCH_OK は EXPIRES と
+        // LARGEST_OBJECT だけを運べる (§9.3)。スコープ外のパラメータを含む応答では状態を
+        // 一切変更せずエラーを返す。
         if parameters.validate_scope(FETCH_OK_ALLOWED_PARAMS).is_err() {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
                 "FETCH_OK parameter not allowed in this context",
             ));
         }
+        let mut parameters = parameters;
+        // draft-ietf-moq-transport-23 §3.1.4 (Largest Object) / §9.19.17 (LARGEST OBJECT
+        // Parameter): Largest Object は送信端点が把握している Track の最大 Location である。
+        // アプリが渡した値 (自前のキャッシュ等) と Session が観測した値の大きい方を採る
+        // (観測値でアプリ指定値を下げない)。
+        if let Some(largest) = self.publisher_track_largest(&track_namespace, &track_name) {
+            update_largest_object_in_parameters(&mut parameters, &largest);
+        }
+        let largest = parameters
+            .largest_object()
+            .map(|(group_id, object_id)| Location {
+                group_id,
+                object_id,
+            });
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): Largest Object が要求範囲内なら応答は
+        // そこへ切り詰め、LARGEST_OBJECT を必ず載せる。範囲外なら要求の End Location を
+        // 使い、LARGEST_OBJECT は載せない (§3.2.2 (Gaps in a Fetch Stream) は End Location を
+        // LARGEST_OBJECT があればその値と定めるため、範囲外の値を残すと解釈がぶれる)。
+        let end_location = match largest {
+            Some(largest) if fetch_location_within_range(request_start, request_end, largest) => {
+                largest
+            }
+            _ => {
+                parameters.remove_largest_object();
+                match request_end {
+                    Some(end) => end,
+                    // 要求が End を省略している場合の End は Largest Object であり、
+                    // Largest Object が不明なら応答範囲を確定できない。
+                    None => {
+                        return Err(SessionError::new(
+                            SESSION_PROTOCOL_VIOLATION,
+                            "cannot determine the FETCH_OK end location: \
+                             LARGEST_OBJECT is required for an open-ended request",
+                        ));
+                    }
+                }
+            }
+        };
         let fetch = self
             .fetches
             .get_mut(&request_id)
             .expect("fetch existence checked above");
         fetch.state = FetchState::Established;
-        fetch.end_of_track = end_of_track != 0;
         fetch.end_location = Some(end_location);
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // peer が FETCH で INCLUDE_PROPERTIES=0 を指定したとき、FETCH_OK の
         // Track Properties は存在するが空にする (SHOULD)。
         let track_properties = if fetch.include_properties == Some(0) {
@@ -406,9 +506,7 @@ impl Session {
         } else {
             track_properties
         };
-        let msg = ControlMessage::FetchOk(WireFetchOk {
-            end_of_track,
-            end_location,
+        let msg = ControlMessage::RequestOk(RequestOk {
             parameters,
             track_properties,
         });
@@ -786,6 +884,14 @@ impl Session {
             );
             return Ok(());
         }
+        // 要求が明示した終端だけを保持する。End を省略した要求の End は Largest Object で
+        // あり (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))、要求時点で
+        // 固定された値ではないため、応答範囲の終端は `send_fetch_ok` が FETCH_OK の送信時点で
+        // 決める (§3.2 (Fetch) の "the FETCH_OK MUST NOT be sent until the publisher knows
+        // whether Largest Object is within the requested range.")。
+        let request_end = filter
+            .as_ref()
+            .and_then(LocationFilter::explicit_end_location);
         let group_order = fetch.parameters.group_order();
         if let Some(order) = group_order {
             // draft §9.20.8 (GROUP ORDER Parameter): 値域外の受信はセッションを閉じる
@@ -809,12 +915,11 @@ impl Session {
             my_role: TrackRole::Publisher,
             track_namespace: Some(track_ns),
             track_name: Some(track_name),
-            // 送信 Object が要求範囲の内側かを検証するため、解決済みの start / end を保持する
+            // 送信 Object が要求範囲の内側かを検証するため、解決済みの start を保持する
             fetch_start: start,
-            request_end: end,
+            request_end,
             state: FetchState::Pending,
             end_location: None,
-            end_of_track: false,
             response_received: false,
             data_stream_finished: false,
             local_cancel_sent: false,
@@ -913,12 +1018,23 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn handle_peer_fetch_ok(
+    /// FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を受信する (subscriber 側)
+    ///
+    /// draft-ietf-moq-transport-23 §3.2 (Fetch) / §3.2.2 (Gaps in a Fetch Stream) /
+    /// §9.3 (REQUEST_OK) / §9.19.17 (LARGEST OBJECT Parameter):
+    ///
+    /// - 応答範囲の終端は LARGEST_OBJECT が要求範囲内ならその値、そうでなければ要求で
+    ///   明示した End Location になる。要求が End を省略している場合の End は
+    ///   Largest Object であるため、LARGEST_OBJECT が無ければ終端を確定できない
+    /// - Track Properties を運べるのは初回応答だけであり、REQUEST_UPDATE_OK では
+    ///   空でなければならない (§9.3)。そのため本関数は初回応答だけを扱う
+    /// - Track の終端は FETCH_OK では運ばない。FETCH 応答ストリームの
+    ///   End of Group / End of Track で受け取る (§11.4.2.2 (Prior Object Fields))
+    pub(super) fn handle_ok_for_fetch_initial(
         &mut self,
         request_id: u64,
-        ok: WireFetchOk,
+        ok: RequestOk,
     ) -> Result<(), SessionError> {
-        self.clear_control_message_deadline(request_id);
         let Some(fetch) = self.fetches.get(&request_id) else {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
@@ -935,27 +1051,21 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §3.2 (Fetch): publisher は FETCH に
-        // 対してちょうど 1 個の FETCH_OK / REQUEST_ERROR を送る。受信済みフラグによる
-        // 二重応答の検出を検証順序の先頭で行う (draft-ietf-moq-transport-22 §3.2
-        // (Fetch) は応答がデータストリームの FIN 前後どちらでもよいとするため、
-        // state ベースの二重応答判定は FIN 後到着を誤って fail させる)。
+        // 初回応答かどうかは呼び出し元 (`handle_peer_request_ok`) が `response_received` で
+        // 判定して振り分ける。ここに来る時点で未受領であることが契約であり、破れていれば
+        // 応答の解釈が変わるため UNEXPECTED_MESSAGE で閉じる。
         if fetch.response_received {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
-                "FETCH_OK received twice for the same fetch",
+                "FETCH_OK received after the initial response",
             );
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §3.2 (Fetch): FETCH_OK / REQUEST_ERROR は
-        // データストリームの FIN 後に届いても受理する。`Pending` は従来どおり
-        // `Established` へ遷移させ、`Terminated` は維持する (`Established` に戻すと
-        // `fetch_cleanup_ready` の判定により fetch が回収不能になるため)。
-        // subscriber 側で `Established` になるのは本関数の受理経路のみであり、その時点で
-        // `response_received` が必ず true になる (invariant: subscriber 側 `Established` ⇒
-        // `response_received == true`)。よってこのチェックに到達するのは `Pending` /
-        // `Terminated` のみで、`Established` 分岐は invariant が崩れた場合の防御となる。
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): FETCH_OK / REQUEST_ERROR は
+        // データストリームの FIN 後に届いても受理する。`Pending` は `Established` へ遷移させ、
+        // `Terminated` は維持する (`Established` に戻すと `fetch_cleanup_ready` の判定により
+        // fetch が回収不能になるため)。
         if fetch.state == FetchState::Established {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
@@ -964,29 +1074,53 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): End Location < Start Location は
-        // フィールド値が許されないため INVALID_FIELD (0x301)。
-        // Start Location は送信時に LOCATION_FILTER から解決した
-        // `fetch_start` を使う。相対指定は Largest 未知のため先頭寄りに解決され、
-        // 真の Start を下回る End の検出漏れがありうる (送信者が peer の Largest を
-        // 知り得ないための限定事項)。
-        // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
-        let request_start = self
-            .fetches
-            .get(&request_id)
-            .and_then(|fetch| fetch.fetch_start.as_ref());
-        if let Some(start) = request_start
-            && ok.end_location < *start
+        let request_start = fetch.fetch_start;
+        let request_end = fetch.request_end;
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): Largest Object が要求範囲内なら応答は
+        // そこへ切り詰められ、LARGEST_OBJECT が必ず載る。範囲外なら要求の End Location が
+        // 応答範囲の終端になる (§3.2.2 (Gaps in a Fetch Stream))。
+        let largest = ok
+            .parameters
+            .largest_object()
+            .map(|(group_id, object_id)| Location {
+                group_id,
+                object_id,
+            });
+        // draft-ietf-moq-transport-23 §3.2 (Fetch): "If no Objects have been published for the
+        // track or Start Location is greater than the Largest Object ... the publisher MUST
+        // return FETCH_ERROR with error code INVALID_RANGE." Start より小さい LARGEST_OBJECT を
+        // 持つ FETCH_OK はこの MUST に反するため、範囲を表す値が許されないものとして
+        // INVALID_FIELD (0x301) で閉じる。
+        if let (Some(start), Some(largest)) = (request_start, largest)
+            && largest < start
         {
             let err = SessionError::new(
                 SESSION_INVALID_FIELD,
-                "FETCH_OK End Location smaller than Start Location",
+                "FETCH_OK LARGEST_OBJECT smaller than start location",
             );
             self.fail(err.clone());
             return Err(err);
         }
-        // ローカル終端済みの request はここまでの検証 (送信者・二重応答・End Location) だけを
-        // 行い、状態遷移とイベント発行はしない。draft §3.7 (Mandatory to Understand Track
+        let end_location = match (request_end, largest) {
+            // Largest Object が要求範囲内 (要求の End 以下) ならそこへ切り詰める
+            (Some(end), Some(largest)) if largest <= end => largest,
+            (Some(end), _) => end,
+            (None, Some(largest)) => largest,
+            (None, None) => {
+                // 要求が End を省略している場合の End は Largest Object であり、
+                // LARGEST_OBJECT が無ければ応答範囲を確定できない。§9.19.17 は
+                // LARGEST_OBJECT の省略を「Track に Object が無い」と定義するため、
+                // その状態で FETCH_OK を送ること自体が §3.2 の INVALID_RANGE に反する。
+                let err = SessionError::new(
+                    SESSION_INVALID_PARAMETER,
+                    "FETCH_OK has no LARGEST_OBJECT for an open-ended request",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+        };
+        // ローカル終端済みの request はここまでの検証 (送信者・応答範囲) だけを行い、
+        // 状態遷移とイベント発行はしない。draft §3.7 (Mandatory to Understand Track
         // Properties) の cancel は送信方向を reset 済みのため不要である。
         if self.is_locally_terminated_request(request_id) {
             return Ok(());
@@ -1059,18 +1193,12 @@ impl Session {
             fetch.state = FetchState::Established;
         }
         fetch.response_received = true;
-        fetch.end_of_track = ok.end_of_track != 0;
-        fetch.end_location = Some(ok.end_location);
+        fetch.end_location = Some(end_location);
         // FETCH_OK 受信をアプリへ能動通知する (FIN 前後どちらの到着もここに至る)。
-        // 終端情報は `fetch()` ポーリングでも参照できるが、イベント駆動のために載せる。
-        let end_location = fetch
-            .end_location
-            .expect("end_location assigned just above");
-        let end_of_track = fetch.end_of_track;
+        // 応答範囲の終端は `fetch()` ポーリングでも参照できるが、イベント駆動のために載せる。
         self.events.push_back(SessionEvent::FetchOkReceived {
             request_id,
             end_location,
-            end_of_track,
         });
         Ok(())
     }
@@ -1120,7 +1248,18 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn handle_ok_for_fetch(
+    /// FETCH の REQUEST_UPDATE に対する REQUEST_UPDATE_OK を受信する (subscriber 側)
+    ///
+    /// draft-ietf-moq-transport-23 §9.5 (REQUEST_UPDATE): REQUEST_UPDATE は複数回送れるため、
+    /// 応答も複数回届きうる。初回応答 (FETCH_OK) は
+    /// [`handle_ok_for_fetch_initial`](Self::handle_ok_for_fetch_initial) が扱い、
+    /// 本関数は初回応答を受理済みの fetch だけを扱う (呼び出し元が `response_received` で
+    /// 振り分ける)。Track Properties は REQUEST_UPDATE_OK では空でなければならない (§9.3)。
+    ///
+    /// データストリームの FIN 後に REQUEST_UPDATE_OK が届くこともあるため、`Terminated` でも
+    /// 受理する (REQUEST_OK は bidi request stream で送られ、データストリームの終端とは独立)。
+    /// この節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
+    pub(super) fn handle_ok_for_fetch_update(
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
@@ -1132,28 +1271,19 @@ impl Session {
         if fetch.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
                 SESSION_ROLE_VIOLATION,
-                "REQUEST_OK (fetch) received on publisher side",
+                "REQUEST_UPDATE_OK (fetch) received on publisher side",
             );
             self.fail(err.clone());
             return Err(err);
         }
-        // REQUEST_OK は REQUEST_UPDATE への応答 (REQUEST_UPDATE_OK) のみであり
-        // (draft §9.3 (REQUEST_OK) の応答対象に FETCH は含まれない)、REQUEST_UPDATE は
-        // 複数回送れるため二重応答フラグの対象外とする。FETCH への応答は FETCH_OK /
-        // REQUEST_ERROR のみ (draft §3.2 (Fetch))。
-        // データストリームの FIN 後に REQUEST_UPDATE_OK が届くこともあるため、
-        // `Terminated` でも受理する (REQUEST_OK は bidi request stream で送られ、
-        // データストリームの終端とは独立であることからの推論。draft-ietf-moq-transport-22
-        // §3.2 (Fetch) の "can come at any time" は FETCH_OK / REQUEST_ERROR の
-        // タイミングを述べたもの。将来の draft 改版で変わる可能性がある)。
         if fetch.state == FetchState::Pending {
-            // REQUEST_UPDATE は実装が `Established` でのみ送るため、
-            // `Pending` での REQUEST_OK は peer の違反。仕様上も
-            // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): "A publisher sends a FETCH_OK as the first message
-            // on the bidi stream" により、REQUEST_OK が FETCH_OK より先に届くことはない。
+            // REQUEST_UPDATE は実装が `Established` でのみ送るため、初回応答を受ける前の
+            // REQUEST_UPDATE_OK は peer の違反。§3.2 (Fetch) は FETCH への応答を 1 回の
+            // REQUEST_OK / REQUEST_ERROR に限り、§9.3 (REQUEST_OK) の REQUEST_UPDATE_OK は
+            // 確立済みの要求への応答だからである。
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
-                "REQUEST_OK for fetch requires Established or Terminated state",
+                "REQUEST_UPDATE_OK for fetch requires Established or Terminated state",
             );
             self.fail(err.clone());
             return Err(err);
@@ -1163,7 +1293,8 @@ impl Session {
         if self.is_locally_terminated_request(request_id) {
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 §9.20.17 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK で新しい LARGEST_OBJECT が通知される
+        // draft-ietf-moq-transport-23 §9.19.17 (LARGEST OBJECT Parameter): REQUEST_UPDATE_OK で
+        // 新しい LARGEST_OBJECT が通知される
         self.events.push_back(SessionEvent::RequestOkReceived {
             request_id,
             request_kind: RequestKind::Fetch,
