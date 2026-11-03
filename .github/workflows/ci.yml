@@ -16,15 +16,24 @@
 #   workspace 単位の 1.93 検証が構造的にできない
 # - fuzz ターゲットの確認は CI では行わない (fuzz/ は独立 workspace のため
 #   cargo test --workspace の対象外だが、必要なときにローカルで実行する)
+# - issues/ 配下だけを変更した push / pull_request では workflow を起動しない。
+#   issue ファイルはコードに影響せず、markdownlint はコミット時の prek フックで検査済みのため、
+#   コードを変更しない issue 更新で macOS runner を消費しない
 
 name: CI
 
 on:
+  # issues/ 配下だけの更新では CI を起動しない (paths-ignore)。
+  # pull_request でも同じ条件を適用し、issue ファイルだけの PR では CI を走らせない
   push:
     branches:
       - develop
       - "feature/**"
+    paths-ignore:
+      - "issues/**"
   pull_request:
+    paths-ignore:
+      - "issues/**"
 
 permissions:
   contents: read

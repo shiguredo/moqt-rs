@@ -10,15 +10,22 @@
 #   持つため macos-15 を使う (ci.yml と同じ理由)
 # - 公開ログに relay のホストやトークンを残さないよう、接続先 (host / authority) と
 #   fragment は ::add-mask:: でマスクする
+# - issues/ 配下だけを変更した push / pull_request では workflow を起動しない。
+#   issue ファイルはコードに影響しないため、実 relay を必要とする E2E テストを実行する意味がない
 
 name: E2E Test
 
 on:
+  # issues/ 配下だけの更新では E2E テストを起動しない (ci.yml と同じ paths-ignore を使う)
   push:
     branches:
       - develop
       - "feature/**"
+    paths-ignore:
+      - "issues/**"
   pull_request:
+    paths-ignore:
+      - "issues/**"
 
 permissions:
   contents: read
