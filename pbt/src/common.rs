@@ -199,12 +199,14 @@ pub const SETUP_SAMPLING_SMALL: SetupSampling = SetupSampling {
 /// 偶数型は varint 値、奇数型はバイト列。
 /// PATH (0x01) / AUTHORITY (0x05) は encode 時に URI バリデーションがあるため、
 /// 生成側でも RFC 3986 の必要 subset を満たす値だけを作る。AUTHORIZATION_TOKEN (0x03) は
-/// Token 構造なので除外する。
+/// Token 構造なので除外する。MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型だが値が varint であり
+/// 最小値 65535 を持つため、専用の分岐で生成する
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
 pub fn sample_setup_option_with(
     ctx: &mut noprop::TestCaseContext,
     sampling: &SetupSampling,
 ) -> SetupOption {
-    match noprop::sample_weighted_index(ctx, &[2, 1, 1, 6]) {
+    match noprop::sample_weighted_index(ctx, &[2, 1, 1, 1, 6]) {
         // 偶数型: varint 値
         0 => {
             let option_type = noprop::sample_usize_in(ctx, 0..sampling.even_type_bound) as u64 * 2;
@@ -228,11 +230,26 @@ pub fn sample_setup_option_with(
             option_type: shiguredo_moqt::parameter::SETUP_OPTION_AUTHORITY,
             value: SetupOptionValue::Bytes(sample_setup_authority(ctx)),
         },
-        // その他の奇数型 (AUTHORIZATION_TOKEN (0x03) は除外)
+        // 奇数型 0x09 (MAX_CONTROL_MESSAGE_SIZE): 値は varint で最小値 65535
+        3 => {
+            let value = shiguredo_moqt::parameter::MIN_MAX_CONTROL_MESSAGE_SIZE
+                + noprop::sample_u64_in(ctx, 0..=1_000_000);
+            SetupOption {
+                option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+                value: SetupOptionValue::VarInt(value),
+            }
+        }
+        // その他の奇数型 (AUTHORIZATION_TOKEN (0x03) と MAX_CONTROL_MESSAGE_SIZE (0x09) は除外)
         _ => {
-            let t = noprop::sample_usize_in(ctx, 0..sampling.even_type_bound) as u64;
-            // t == 1 (0x03) を除外する (1 を飛ばして 2.. に射影)
-            let t = if t >= 1 { t + 1 } else { 0 };
+            let mut t = noprop::sample_usize_in(ctx, 0..sampling.even_type_bound) as u64;
+            // t == 1 (0x03) を飛ばす
+            if t >= 1 {
+                t += 1;
+            }
+            // t == 4 (0x09) を飛ばす
+            if t >= 4 {
+                t += 1;
+            }
             let option_type = t * 2 + 1;
             let len = noprop::sample_usize_in(ctx, 0..=sampling.odd_bytes_max);
             SetupOption {

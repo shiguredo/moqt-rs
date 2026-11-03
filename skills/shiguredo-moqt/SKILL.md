@@ -71,13 +71,14 @@ use shiguredo_moqt::stream::SubgroupHeader;
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::message::{ControlMessage, Setup};
-use shiguredo_moqt::parameter::SetupOptions;
+use shiguredo_moqt::parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOptions};
 
 fn main() -> Result<(), MessageError> {
     let msg = ControlMessage::Setup(Setup {
         options: SetupOptions::new(),
     });
-    let bytes = msg.encode()?;
+    // peer の SETUP 受信前は既定値 (65535) が送信上限になる
+    let bytes = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)?;
 
     let (decoded, consumed) = ControlMessage::decode(&bytes)?;
     let _ = (decoded, consumed);
@@ -97,7 +98,7 @@ fn main() -> Result<(), SessionError> {
     while let Some(event) = session.poll_event() {
         match event {
             SessionEvent::SendControl(msg) => {
-                // 制御ストリームへ msg.encode()? を書き出す
+                // 制御ストリームへ msg.encode(peer の MAX_CONTROL_MESSAGE_SIZE)? を書き出す
                 let _ = msg;
             }
             SessionEvent::Established => {
@@ -117,11 +118,13 @@ fn main() -> Result<(), SessionError> {
 ## 制御メッセージ (`message`)
 
 ```rust
-fn encode(&self) -> Result<Vec<u8>, MessageError>
+fn encode(&self, max_control_message_size: u64) -> Result<Vec<u8>, MessageError>
 fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 ```
 
-`Type (varint) | Length (u16 big-endian) | Message Body` 形式。`decode` は `(メッセージ, 消費バイト数)` を返す。
+`Type (vi64) | Length (vi64) | Message Body` 形式。`decode` は `(メッセージ, 消費バイト数)` を返す。
+`encode` は peer の `MAX_CONTROL_MESSAGE_SIZE` を超える本文を書き出す前に拒否する
+(draft-ietf-moq-transport-23 §9)。
 
 主な variant:
 
@@ -165,8 +168,10 @@ fn as_str(&self) -> &str
 
 ```rust
 use shiguredo_moqt::decoder::MessageDecoder;
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 
-let mut decoder = MessageDecoder::new();
+// 自側が受信を許容する制御メッセージ長の上限を渡す
+let mut decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
 decoder.push(&data);
 if let Some(msg) = decoder.try_decode_message()? {
     // msg を Session::recv_control 等に渡す
@@ -174,7 +179,7 @@ if let Some(msg) = decoder.try_decode_message()? {
 ```
 
 ```rust
-fn new() -> MessageDecoder
+fn new(max_control_message_size: u64) -> MessageDecoder
 fn push(&mut self, data: &[u8])
 fn try_decode_message(&mut self) -> Result<Option<ControlMessage>, MessageError>
 fn try_decode_varint(&mut self) -> Result<Option<u64>, MessageError>
@@ -754,6 +759,11 @@ Setup Option 型定数:
 | `SETUP_OPTION_MAX_FILTER_RANGES` | `0x06` |
 | `SETUP_OPTION_MOQT_IMPLEMENTATION` | `0x07` |
 | `SETUP_OPTION_MAX_REQUEST_UPDATES` | `0x08` |
+| `SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE` | `0x09` |
+
+`MAX_CONTROL_MESSAGE_SIZE` (0x09) は奇数型だが値は varint である
+(draft-ietf-moq-transport-23 §9.1.8)。省略時の既定値と最小値は 65535 で、
+`DEFAULT_MAX_CONTROL_MESSAGE_SIZE` / `MIN_MAX_CONTROL_MESSAGE_SIZE` にある。
 
 ## Message Parameters (`message_parameter`)
 

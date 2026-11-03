@@ -100,9 +100,17 @@ fn encode_control_stream_prefix() -> Vec<u8> {
 /// [`crate::stream::subgroup::SubgroupHeader::encode`] や [`crate::stream::fetch::FetchHeader::encode`] が stream type を
 /// 内包するのと同様に、制御ストリーム開設時の初回メッセージ (SETUP) も
 /// stream type prefix を自動で前置する。
-pub fn encode_control_stream_setup(msg: &ControlMessage) -> Result<Vec<u8>, MessageError> {
+///
+/// `max_control_message_size` は peer が広告した `MAX_CONTROL_MESSAGE_SIZE`
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。peer の SETUP を
+/// 受信する前に送る自側の SETUP には、既定値
+/// [`crate::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] を渡す。
+pub fn encode_control_stream_setup(
+    msg: &ControlMessage,
+    max_control_message_size: u64,
+) -> Result<Vec<u8>, MessageError> {
     let mut buf = encode_control_stream_prefix();
-    buf.extend_from_slice(&msg.encode()?);
+    buf.extend_from_slice(&msg.encode(max_control_message_size)?);
     Ok(buf)
 }
 

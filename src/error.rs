@@ -20,6 +20,28 @@ pub enum MessageError {
     InvalidMessageType(u64),
     /// ペイロード長が 65535 バイトを超えた
     PayloadTooLong,
+    /// 制御メッセージの長さが上限を超えた
+    ///
+    /// 受信では、peer が宣言した Length が自側の `MAX_CONTROL_MESSAGE_SIZE` を超えたことを表す。
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): "If an endpoint receives a control
+    /// message with a length larger than its MAX_CONTROL_MESSAGE_SIZE, it MUST close the session
+    /// with FIELD_LENGTH_EXCEEDED." (MUST)
+    ///
+    /// 送信では、本文長が peer の `MAX_CONTROL_MESSAGE_SIZE` を超えたことを表す。同節の
+    /// "An endpoint MUST NOT send a control message with a length larger than the peer's
+    /// MAX_CONTROL_MESSAGE_SIZE" (MUST NOT) に従い、ワイヤへ書き出す前に拒否する。
+    FieldLengthExceeded(&'static str),
+    /// 制御メッセージの本文が Length と一致しない
+    ///
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): "If the length does not match the
+    /// length of the Message Body, the receiver MUST close the session with MALFORMED_MESSAGE."
+    /// (MUST)
+    MalformedMessage(&'static str),
+    /// 制御メッセージのフィールド値が仕様の許容範囲外
+    ///
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の INVALID_FIELD (0x301)
+    /// に対応する。制御メッセージとしては解析できたが、フィールドの値が定義に反する場合に返る。
+    InvalidField(&'static str),
     /// Reason Phrase が 1024 バイトを超えた (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure))
     ReasonPhraseTooLong,
     /// Parameter エンコードが不正 (型と値の不一致、長さ超過など)
@@ -66,6 +88,9 @@ impl core::fmt::Display for MessageError {
             Self::UnexpectedEof => write!(f, "unexpected end of buffer"),
             Self::InvalidMessageType(t) => write!(f, "invalid message type: {t:#x}"),
             Self::PayloadTooLong => write!(f, "payload too long (max 65535 bytes)"),
+            Self::FieldLengthExceeded(msg) => write!(f, "field length exceeded: {msg}"),
+            Self::MalformedMessage(msg) => write!(f, "malformed message: {msg}"),
+            Self::InvalidField(msg) => write!(f, "invalid field: {msg}"),
             Self::ReasonPhraseTooLong => write!(f, "reason phrase too long (max 1024 bytes)"),
             Self::InvalidParameter => write!(f, "invalid parameter encoding"),
             Self::ProtocolViolation(msg) => write!(f, "protocol violation: {msg}"),
@@ -95,7 +120,10 @@ impl MessageError {
             Self::ProtocolViolation(msg)
             | Self::MalformedTrack(msg)
             | Self::KeyValueFormattingError(msg)
-            | Self::MalformedAuthToken(msg) => msg,
+            | Self::MalformedAuthToken(msg)
+            | Self::FieldLengthExceeded(msg)
+            | Self::MalformedMessage(msg)
+            | Self::InvalidField(msg) => msg,
             Self::UnexpectedEof => "unexpected end of buffer",
             Self::InvalidMessageType(_) => "invalid message type",
             Self::PayloadTooLong => "payload too long",
@@ -204,6 +232,17 @@ pub const SESSION_INVALID_AUTHORITY: u64 = 0x19;
 pub const SESSION_MALFORMED_AUTHORITY: u64 = 0x1A;
 /// REQUEST_UPDATE 上限超過 (draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))
 pub const SESSION_TOO_MANY_REQUEST_UPDATES: u64 = 0x1B;
+// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加・整理されたコード。
+// 制御メッセージの長さ検証は draft-23 の分類に従う。
+/// 制御メッセージを解析できない、または必須要素が欠けている
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_MALFORMED_MESSAGE: u64 = 0x300;
+/// 制御メッセージは解析できたが、フィールドの値が許容範囲外
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_INVALID_FIELD: u64 = 0x301;
+/// フィールドまたは構造が最大許容長を超えている
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_FIELD_LENGTH_EXCEEDED: u64 = 0x401;
 
 // ─── REQUEST_ERROR Codes ──────────────────────────────────────
 //
@@ -316,7 +355,10 @@ pub const STREAM_MALFORMED_TRACK: u64 = 0x12;
 // 受信側のアプリは正規化後のコードで分岐・ログ出力できる。wire 上の値を観測したい場合は
 // 生のコードも併せて保持すること。
 
-/// Session Termination 文脈で既知のコード (draft §16.11 の registry)
+/// Session Termination 文脈で既知のコード
+///
+/// draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes) のレジストリと、
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加されたコードを含む。
 const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_NO_ERROR,
     SESSION_INTERNAL_ERROR,
@@ -338,6 +380,9 @@ const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_INVALID_AUTHORITY,
     SESSION_MALFORMED_AUTHORITY,
     SESSION_TOO_MANY_REQUEST_UPDATES,
+    SESSION_MALFORMED_MESSAGE,
+    SESSION_INVALID_FIELD,
+    SESSION_FIELD_LENGTH_EXCEEDED,
 ];
 
 /// REQUEST_ERROR 文脈で既知のコード (draft §12.3 の registry)

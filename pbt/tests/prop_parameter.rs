@@ -40,3 +40,26 @@ fn roundtrip() -> noprop::TestResult {
 
 // 「非空入力なら encode 後バッファも非空」は roundtrip が成立していれば論理的に含意され、
 // encode 形式 (要素を並べるだけ) からも自明なため、独立した property としては持たない。
+
+/// sampler が MAX_CONTROL_MESSAGE_SIZE (0x09) を生成すること (roundtrip のカバレッジゲート)
+///
+/// `roundtrip` は sampler が生成した値だけを往復させる。0x09 は奇数型だが値が varint という
+/// 例外であり、sampler が生成しないとこの経路の往復が検証されない
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
+#[test]
+fn sample_covers_max_control_message_size() -> noprop::TestResult {
+    let seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let options = sample_setup_options_with(ctx, &SETUP_SAMPLING_FULL);
+        if options.max_control_message_size().is_some() {
+            seen.set(true);
+        }
+        Ok(())
+    })?;
+    assert!(
+        seen.get(),
+        "MAX_CONTROL_MESSAGE_SIZE が生成されなかった\n{runner}"
+    );
+    Ok(())
+}

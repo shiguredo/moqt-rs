@@ -12,28 +12,43 @@ use shiguredo_moqt::{
     message::common::Location,
     message::common::TrackNamespace,
     message_parameter::MessageParameters,
-    parameter::{SetupOption, SetupOptionValue, SetupOptions},
+    parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOption, SetupOptionValue, SetupOptions},
     track_properties::TrackProperties,
+    varint,
 };
+
+/// 制御メッセージのフレーム (Type + Length + 本文) を組み立てる
+///
+/// Length は vi64 であり、最小バイト数で書き出す
+/// (draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers))。
+fn frame(type_id: u64, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    varint::encode(type_id, &mut buf);
+    varint::encode(payload.len() as u64, &mut buf);
+    buf.extend_from_slice(payload);
+    buf
+}
 
 mod setup_messages {
     use super::*;
 
     #[test]
     fn setup_wire_format() {
-        // SETUP: type=0x2F00, length(u16), payload=空 (カウントプレフィックスなし)
+        // SETUP: type=0x2F00, length(vi64), payload=空 (カウントプレフィックスなし)
         let msg = ControlMessage::Setup(Setup {
             options: SetupOptions::new(),
         });
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         // type = 0x2F00 (2 byte vi64: 0x80|0x2F=0xAF, 0x00)
         assert_eq!(encoded[0], 0xAF);
         assert_eq!(encoded[1], 0x00);
         // length = 0 (空の SetupOptions はカウントプレフィックスなしなので 0 バイト)
+        // vi64 の 0 は 1 バイト
         assert_eq!(encoded[2], 0x00);
-        assert_eq!(encoded[3], 0x00);
         // ペイロードなし
-        assert_eq!(encoded.len(), 4);
+        assert_eq!(encoded.len(), 3);
     }
 
     /// malformed PATH を含む SETUP の wire decode が parameter 層では成功することを確認する
@@ -46,7 +61,9 @@ mod setup_messages {
             value: SetupOptionValue::Bytes(b"relative/path".to_vec()),
         });
         let msg = ControlMessage::Setup(Setup { options: opts });
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, encoded.len());
@@ -58,15 +75,132 @@ mod setup_messages {
     }
 }
 
+/// Length が vi64 であることと送信上限の検証
+///
+/// draft-ietf-moq-transport-23 §9 (Control Messages): Length は vi64 であり、
+/// peer の MAX_CONTROL_MESSAGE_SIZE を超える制御メッセージは送出してはならない (MUST NOT)。
+mod framing {
+    use super::*;
+
+    /// 128 バイト以上の本文では Length が 2 バイトの vi64 になる
+    #[test]
+    fn length_is_varint_for_large_body() {
+        use shiguredo_moqt::message::Goaway;
+
+        // 本文長 = URI 長 (vi64) + URI + timeout (vi64) で 128 バイトを超える
+        let msg = ControlMessage::Goaway(Goaway {
+            new_session_uri: vec![b'x'; 200],
+            timeout: 0,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
+        // Type は 1 バイト (0x10)
+        assert_eq!(encoded[0], 0x10);
+        // Length は 2 バイト vi64 (leading bits 10)
+        assert_eq!(
+            encoded[1] & 0xC0,
+            0x80,
+            "Length が 2 バイト vi64 であること"
+        );
+        let (body_len, length_len) =
+            varint::decode(&encoded[1..]).expect("Length を vi64 として読める");
+        assert_eq!(length_len, 2, "128 バイト超の Length は 2 バイトになること");
+        assert_eq!(
+            encoded.len(),
+            1 + length_len + body_len as usize,
+            "Type + Length + 本文の長さが一致すること"
+        );
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode したメッセージを decode できること");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+    }
+
+    /// 非最小符号化された Length も decode できる
+    ///
+    /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): decode 側は非最小
+    /// エンコーディングをエラーにしない。
+    #[test]
+    fn non_minimal_length_is_accepted_on_decode() {
+        // SETUP (0x2F00) の本文長 0 を 4 バイトの vi64 で表す
+        let wire = [0xAFu8, 0x00, 0xE0, 0x00, 0x00, 0x00];
+        let (decoded, consumed) =
+            ControlMessage::decode(&wire).expect("非最小符号化の Length は受理されること");
+        assert_eq!(consumed, wire.len());
+        assert!(matches!(decoded, ControlMessage::Setup(_)));
+    }
+
+    /// 本文長が送信上限を超えると encode が FieldLengthExceeded を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9 (Control Messages) の MUST NOT に従い、ワイヤへ
+    /// 書き出す前に拒否する。境界 (上限ちょうど) は成功する。
+    #[test]
+    fn encode_rejects_body_over_send_limit() {
+        use shiguredo_moqt::message::Goaway;
+
+        let msg = ControlMessage::Goaway(Goaway {
+            new_session_uri: vec![b'x'; 100],
+            timeout: 0,
+        });
+        // 上限なしでエンコードして本文長を得る
+        let full = msg.encode(u64::MAX).expect("上限なしの encode は成功する");
+        let (_, type_len) = varint::decode(&full).expect("Type を読める");
+        let (body_len, _) = varint::decode(&full[type_len..]).expect("Length を読める");
+
+        // 上限ちょうどは成功する
+        msg.encode(body_len)
+            .expect("上限ちょうどの本文は encode できること");
+        // 上限 - 1 は拒否される
+        let err = msg
+            .encode(body_len - 1)
+            .expect_err("上限を超える本文は encode できないこと");
+        assert!(
+            matches!(err, MessageError::FieldLengthExceeded(_)),
+            "FieldLengthExceeded を期待したが {err:?} になった"
+        );
+    }
+
+    /// 本文長が Length と一致しないフレームは MALFORMED_MESSAGE になる
+    ///
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): Length と本文が一致しなければ
+    /// MALFORMED_MESSAGE で閉じる (MUST)。宣言長を実際の本文より 1 バイト長くした
+    /// SETUP を decode すると、本文の解析が Length の末尾で終われず MalformedMessage になる。
+    #[test]
+    fn body_shorter_than_declared_length_is_malformed_message() {
+        // SETUP の本文を 1 バイトと宣言するが、その 1 バイトは Setup Options として
+        // 解釈できない (0xFF は 9 バイト vi64 の先頭バイト)
+        let wire = [0xAFu8, 0x00, 0x01, 0xFF];
+        let err = ControlMessage::decode(&wire).expect_err("本文長の不一致は拒否されること");
+        assert!(
+            matches!(err, MessageError::MalformedMessage(_)),
+            "MalformedMessage を期待したが {err:?} になった"
+        );
+    }
+
+    /// 宣言長が残りバッファを超える場合は UnexpectedEof のまま (追加データ待ち)
+    ///
+    /// Length は読めたが本文がまだ揃っていない状態は、デコーダーが追加データを待てるよう
+    /// UnexpectedEof で表す。MALFORMED_MESSAGE と混同しないことを固定する。
+    #[test]
+    fn missing_body_is_unexpected_eof() {
+        let wire = [0xAFu8, 0x00, 0x05, 0x00];
+        assert_eq!(
+            ControlMessage::decode(&wire),
+            Err(MessageError::UnexpectedEof)
+        );
+    }
+}
+
 mod goaway {
     use super::*;
 
-    /// Timeout 後に余剰バイト (draft-19 §10.4 で削除された Request ID) があると PROTOCOL_VIOLATION
+    /// Timeout 後に余剰バイト (draft-19 §10.4 で削除された Request ID) があると MALFORMED_MESSAGE
     ///
-    /// draft-ietf-moq-transport-22 §9 (Control Messages): Length が Message Body と
-    /// 一致しなければ PROTOCOL_VIOLATION。
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): Length が Message Body と
+    /// 一致しなければ MALFORMED_MESSAGE で閉じる (MUST)。
     #[test]
-    fn trailing_bytes_after_timeout_are_protocol_violation() {
+    fn trailing_bytes_after_timeout_are_malformed_message() {
         use shiguredo_moqt::error::MessageError;
         use shiguredo_moqt::varint;
 
@@ -76,16 +210,11 @@ mod goaway {
         varint::encode(0, &mut payload); // timeout
         varint::encode(1, &mut payload); // 余剰 (旧 Request ID)
 
-        let mut buf = Vec::new();
-        varint::encode(0x10, &mut buf); // MSG_GOAWAY
-        let len = payload.len() as u16;
-        buf.push((len >> 8) as u8);
-        buf.push((len & 0xff) as u8);
-        buf.extend_from_slice(&payload);
+        let buf = frame(0x10, &payload); // MSG_GOAWAY
 
-        let err = ControlMessage::decode(&buf).expect_err("余剰バイトは PROTOCOL_VIOLATION");
+        let err = ControlMessage::decode(&buf).expect_err("余剰バイトは MALFORMED_MESSAGE");
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::MalformedMessage(_)),
             "got {err:?}"
         );
     }
@@ -101,12 +230,7 @@ mod goaway {
         let mut payload = Vec::new();
         varint::encode(8193, &mut payload);
 
-        let mut buf = Vec::new();
-        varint::encode(0x10, &mut buf); // MSG_GOAWAY
-        let len = u16::try_from(payload.len()).expect("payload は u16 に収まる");
-        buf.push((len >> 8) as u8);
-        buf.push((len & 0xff) as u8);
-        buf.extend_from_slice(&payload);
+        let buf = frame(0x10, &payload); // MSG_GOAWAY
 
         let err = ControlMessage::decode(&buf).expect_err("URI > 8192 は PROTOCOL_VIOLATION");
         assert!(
@@ -128,7 +252,7 @@ mod goaway {
             timeout: 0,
         });
         let encoded = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("8192 バイト URI の GOAWAY はエンコードできる");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("8192 バイト URI の GOAWAY はデコードできる");
@@ -154,7 +278,7 @@ mod goaway {
             timeout: 0,
         });
         let err = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect_err("URI > 8192 のエンコードは PROTOCOL_VIOLATION");
         assert!(
             matches!(err, MessageError::ProtocolViolation(_)),
@@ -176,9 +300,9 @@ mod request_flow {
     /// (UnexpectedEof ではなく ProtocolViolation であること)
     #[test]
     fn request_error_redirect_missing_redirect_is_protocol_violation() {
-        // type=0x05, length=0x0003, payload=[error_code=0x34 (REDIRECT), retry=0x00, reason_len=0x00]
+        // type=0x05, length=3 (vi64), payload=[error_code=0x34 (REDIRECT), retry=0x00, reason_len=0x00]
         // reason まで読むと pos == payload.len() となり Redirect が欠落している
-        let bytes = [0x05u8, 0x00, 0x03, 0x34, 0x00, 0x00];
+        let bytes = [0x05u8, 0x03, 0x34, 0x00, 0x00];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
             matches!(err, MessageError::ProtocolViolation(_)),
@@ -187,31 +311,33 @@ mod request_flow {
     }
 
     /// 非 REDIRECT なのに末尾に余剰バイトがあるバイト列をデコードすると、末尾チェックで
-    /// PROTOCOL_VIOLATION になる
+    /// MALFORMED_MESSAGE になる
     #[test]
-    fn request_error_non_redirect_trailing_bytes_is_protocol_violation() {
-        // type=0x05, length=0x0004, payload=[error_code=0x03, retry=0x00, reason_len=0x00, 余剰=0xAB]
+    fn request_error_non_redirect_trailing_bytes_is_malformed_message() {
+        // type=0x05, length=4 (vi64), payload=[error_code=0x03, retry=0x00, reason_len=0x00, 余剰=0xAB]
         // error_code != REDIRECT なので redirect=None となり、余剰バイトで pos != payload.len()
-        let bytes = [0x05u8, 0x00, 0x04, 0x03, 0x00, 0x00, 0xAB];
+        let bytes = [0x05u8, 0x04, 0x03, 0x00, 0x00, 0xAB];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
-            "非 REDIRECT で末尾余剰は ProtocolViolation であるべきだが {err:?}"
+            matches!(err, MessageError::MalformedMessage(_)),
+            "非 REDIRECT で末尾余剰は MALFORMED_MESSAGE であるべきだが {err:?}"
         );
     }
 
-    /// REDIRECT で Redirect が途中で切れたバイト列をデコードすると、デコードエラー
-    /// (UnexpectedEof 系) になる。空欠落の ProtocolViolation との境界を固定する。
+    /// REDIRECT で Redirect が途中で切れたバイト列をデコードすると MALFORMED_MESSAGE になる
+    ///
+    /// 外側フレームの Length は揃っているため、本文の途中で終わるのは本文長の不一致である
+    /// (draft-ietf-moq-transport-23 §9 (Control Messages))。
     #[test]
-    fn request_error_redirect_truncated_redirect_is_unexpected_eof() {
-        // type=0x05, length=0x0004, payload=[error_code=0x34, retry=0x00, reason_len=0x00,
+    fn request_error_redirect_truncated_redirect_is_malformed_message() {
+        // type=0x05, length=4 (vi64), payload=[error_code=0x34, retry=0x00, reason_len=0x00,
         // connect_uri_len=0x05 (但し後続バイトなし)]。Redirect::decode_from が checked_len で
-        // UnexpectedEof を返す (pos < payload.len() なので ProtocolViolation 分岐には入らない)
-        let bytes = [0x05u8, 0x00, 0x04, 0x34, 0x00, 0x00, 0x05];
+        // UnexpectedEof を返し、ControlMessage::decode が MalformedMessage へ写す
+        let bytes = [0x05u8, 0x04, 0x34, 0x00, 0x00, 0x05];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            matches!(err, MessageError::UnexpectedEof),
-            "Redirect 途中切れは UnexpectedEof であるべきだが {err:?}"
+            matches!(err, MessageError::MalformedMessage(_)),
+            "Redirect 途中切れは MALFORMED_MESSAGE であるべきだが {err:?}"
         );
     }
 
@@ -224,7 +350,7 @@ mod request_flow {
             reason: ReasonPhrase::new("redirect").expect("テストフィクスチャの前提条件を満たす"),
             redirect: None,
         });
-        let err = msg.encode().unwrap_err();
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
         assert!(
             matches!(err, MessageError::ProtocolViolation(_)),
             "REDIRECT + None のエンコードは ProtocolViolation であるべきだが {err:?}"
@@ -246,7 +372,7 @@ mod request_flow {
                 track_name: vec![],
             }),
         });
-        let err = msg.encode().unwrap_err();
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
         assert!(
             matches!(err, MessageError::ProtocolViolation(_)),
             "非 REDIRECT + Some のエンコードは ProtocolViolation であるべきだが {err:?}"
@@ -272,7 +398,9 @@ mod request_flow {
                 track_name: Vec::new(),
             }),
         });
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
         assert_eq!(consumed, encoded.len());
@@ -321,7 +449,9 @@ mod fetch {
             track_name: b"cam".to_vec(),
             parameters,
         });
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, encoded.len());
@@ -350,12 +480,7 @@ mod fetch {
                 0x00, 0x01, 0x00, 0x00,
             ],
         ] {
-            let mut buf = vec![
-                0x16u8, // MSG_FETCH type
-                0x00,
-            ];
-            buf.push(payload.len() as u8);
-            buf.extend_from_slice(&payload);
+            let buf = frame(0x16, &payload); // MSG_FETCH
 
             assert!(
                 ControlMessage::decode(&buf).is_err(),
@@ -384,7 +509,7 @@ mod fetch {
             track_properties: TrackProperties::new(),
         });
         assert!(matches!(
-            msg.encode(),
+            msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
             Err(MessageError::ProtocolViolation(_))
         ));
     }
@@ -410,9 +535,7 @@ mod fetch {
             .encode(&mut payload)
             .expect("正当なテスト入力の encode は成功する");
 
-        let len = payload.len() as u16;
-        let mut encoded = vec![0x18, (len >> 8) as u8, len as u8];
-        encoded.extend_from_slice(&payload);
+        let encoded = frame(0x18, &payload);
 
         assert!(matches!(
             ControlMessage::decode(&encoded),
@@ -454,7 +577,7 @@ mod redirect_full_track_name {
     fn redirect_at_limit_round_trips() {
         let msg = ControlMessage::RequestError(request_error_with_redirect_total(0));
         let bytes = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("4,096 バイトちょうどは encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         assert_eq!(decoded, msg);
@@ -469,7 +592,7 @@ mod redirect_full_track_name {
     fn redirect_over_limit_is_rejected_on_encode() {
         let msg = ControlMessage::RequestError(request_error_with_redirect_total(1));
         assert!(matches!(
-            msg.encode(),
+            msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
             Err(MessageError::ProtocolViolation(_))
         ));
     }
@@ -491,11 +614,7 @@ mod redirect_full_track_name {
         varint::encode(2, &mut payload); // Track Name length (合計 4,097)
         payload.extend_from_slice(b"bb");
 
-        let mut bytes = Vec::new();
-        varint::encode(MSG_REQUEST_ERROR, &mut bytes);
-        bytes.push((payload.len() >> 8) as u8);
-        bytes.push(payload.len() as u8);
-        bytes.extend_from_slice(&payload);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
 
         assert!(matches!(
             ControlMessage::decode(&bytes),
@@ -510,7 +629,7 @@ mod error_cases {
     #[test]
     fn unknown_message_type() {
         // 0x3F は 1 バイト varint (< 64) だが有効なメッセージ型 ID ではない
-        let buf = vec![0x3F, 0x00, 0x00];
+        let buf = vec![0x3F, 0x00];
         assert!(matches!(
             ControlMessage::decode(&buf),
             Err(MessageError::InvalidMessageType(0x3F))
@@ -527,8 +646,8 @@ mod error_cases {
 
     #[test]
     fn truncated_length_field() {
-        // type=0x03 だが length フィールドが 1 バイトしかない
-        let buf = vec![0x03, 0x00];
+        // type=0x03 のあとに 2 バイト vi64 の先頭バイト (0x80) だけがある
+        let buf = vec![0x03, 0x80];
         assert_eq!(
             ControlMessage::decode(&buf),
             Err(MessageError::UnexpectedEof)
@@ -538,7 +657,7 @@ mod error_cases {
     #[test]
     fn payload_shorter_than_length() {
         // type=0xAF, 0x00 (=0x2F00 SETUP), length=10, payload=5 bytes
-        let buf = vec![0xAF, 0x00, 0x00, 0x0A, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let buf = vec![0xAF, 0x00, 0x0A, 0x01, 0x02, 0x03, 0x04, 0x05];
         assert_eq!(
             ControlMessage::decode(&buf),
             Err(MessageError::UnexpectedEof)
@@ -560,10 +679,7 @@ mod error_cases {
             0x0A, // Length = 10
             0x01, 0x02, 0x03, // 3 バイトしかない
         ];
-        let mut wire = vec![0x03]; // MSG_SUBSCRIBE
-        wire.push((payload.len() >> 8) as u8);
-        wire.push(payload.len() as u8);
-        wire.extend_from_slice(&payload);
+        let wire = frame(0x03, &payload); // MSG_SUBSCRIBE
 
         assert!(
             matches!(
@@ -586,7 +702,7 @@ mod error_cases {
         // Parameters: count=0,
         // Track Properties: delta=0x0B (既知の奇数型 IMMUTABLE_PROPERTIES) /
         // Length=10 / 実体 3 バイト
-        let wire = [0x04, 0x00, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
+        let wire = [0x04, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
         let err = ControlMessage::decode(&wire)
             .expect_err("Track Properties の宣言長超過は decode に失敗すること");
         assert!(
@@ -606,12 +722,7 @@ mod error_cases {
             0x04,   // namespace field count = 4 (満たせない)
         ];
 
-        let mut buf = vec![
-            0x16u8, // MSG_FETCH type
-            0x00,
-        ];
-        buf.push(inner.len() as u8);
-        buf.extend_from_slice(&inner);
+        let buf = frame(0x16, &inner); // MSG_FETCH
 
         assert!(
             ControlMessage::decode(&buf).is_err(),
@@ -645,12 +756,11 @@ mod error_cases {
         let mut payload = vec![
             0x00, // status_code = 0
             0x00, // stream_count = 0
-            0x44, 0x01, // reason phrase length = 1025 の vi64
         ];
+        varint::encode(1025, &mut payload); // reason phrase length (vi64)
         payload.extend_from_slice(&[b'x'; 1025]);
 
-        let mut buf = vec![0x0Bu8, (payload.len() >> 8) as u8, payload.len() as u8];
-        buf.extend_from_slice(&payload);
+        let buf = frame(0x0B, &payload);
 
         assert!(
             matches!(
@@ -704,7 +814,7 @@ mod error_cases {
             parameters,
         });
         let encoded = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("定義済みパラメータを含む SUBSCRIBE は encode できること");
         let (decoded, _) = ControlMessage::decode(&encoded)
             .expect("定義済みパラメータを含む SUBSCRIBE は decode できること");
@@ -741,7 +851,9 @@ mod error_cases {
                 // request_id として読むため、body の先頭を request_id と一致させる
                 body: vec![request_id.expect("request_id は Some") as u8],
             };
-            let bytes = original.encode().expect("encode できること");
+            let bytes = original
+                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .expect("encode できること");
             let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
             assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
         }
@@ -752,7 +864,9 @@ mod error_cases {
                 request_id: None,
                 body: vec![0x01, 0x02],
             };
-            let bytes = original.encode().expect("encode できること");
+            let bytes = original
+                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .expect("encode できること");
             let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
             assert_eq!(decoded, original, "roundtrip で一致すること: {type_id:#x}");
         }
@@ -774,8 +888,8 @@ mod error_cases {
         // Track Namespace: count=1 / "live", Track Name: "cam",
         // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
         let wire = [
-            0x03, 0x00, 0x0E, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
-            0x01, 0x23, 0x00,
+            0x03, 0x0E, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+            0x23, 0x00,
         ];
         assert!(
             matches!(
@@ -809,7 +923,7 @@ mod error_cases {
             parameters,
         });
         let encoded = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("内側 0 個の FILL_PARAMETERS は encode できること");
         // 内側 0 個の値は count 0 の `0x00` 1 バイトであり、外側の Length は 1 になる。
         // 拒否テストが使う wire (Length = 0) との違いを固定するため全体を比較する
@@ -818,8 +932,8 @@ mod error_cases {
         assert_eq!(
             encoded,
             [
-                0x03, 0x00, 0x0F, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D,
-                0x01, 0x23, 0x01, 0x00,
+                0x03, 0x0F, 0x07, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+                0x23, 0x01, 0x00,
             ],
             "encode の出力が count 付きの FILL_PARAMETERS を持つ SUBSCRIBE であること"
         );
@@ -849,21 +963,21 @@ mod error_cases {
     /// (CHANGES.md に記載した受信挙動の変更)。
     #[test]
     fn subscribe_ok_with_fill_parameters_reports_value_error_first() {
-        // SUBSCRIBE_OK (0x04), Length = 4, Track Alias = 0,
+        // SUBSCRIBE_OK (0x04), Length = 4 (vi64), Track Alias = 0,
         // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 0
         assert!(
             matches!(
-                ControlMessage::decode(&[0x04, 0x00, 0x04, 0x00, 0x01, 0x23, 0x00]),
+                ControlMessage::decode(&[0x04, 0x04, 0x00, 0x01, 0x23, 0x00]),
                 Err(MessageError::KeyValueFormattingError(_))
             ),
             "空の FILL_PARAMETERS は scope 検証より先に KEY_VALUE_FORMATTING_ERROR になること"
         );
 
-        // 対照: SUBSCRIBE_OK (0x04), Length = 5, Track Alias = 0,
+        // 対照: SUBSCRIBE_OK (0x04), Length = 5 (vi64), Track Alias = 0,
         // Parameters: count=1 / delta=0x23 (FILL_PARAMETERS) / Length = 1 / 内側 count=0
         assert!(
             matches!(
-                ControlMessage::decode(&[0x04, 0x00, 0x05, 0x00, 0x01, 0x23, 0x01, 0x00]),
+                ControlMessage::decode(&[0x04, 0x05, 0x00, 0x01, 0x23, 0x01, 0x00]),
                 Err(MessageError::ProtocolViolation(_))
             ),
             "値が空でなければ Table 7 外として PROTOCOL_VIOLATION になること"
@@ -892,7 +1006,10 @@ mod error_cases {
             parameters,
         });
         assert!(
-            matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+            matches!(
+                msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
+                Err(MessageError::ProtocolViolation(_))
+            ),
             "未定義のパラメータ型は encode で拒否されること"
         );
     }
@@ -913,7 +1030,7 @@ mod error_cases {
             track_properties: TrackProperties::new(),
         });
         assert!(matches!(
-            msg.encode(),
+            msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
             Err(MessageError::ProtocolViolation(_))
         ));
     }
@@ -933,7 +1050,7 @@ mod error_cases {
             parameters,
         });
         assert!(matches!(
-            msg.encode(),
+            msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
             Err(MessageError::ProtocolViolation(_))
         ));
     }
@@ -976,7 +1093,9 @@ mod publish_state_notify {
         let msg = ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_params(),
         });
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, encoded.len());
@@ -993,7 +1112,7 @@ mod publish_state_notify {
         });
         let msg = ControlMessage::PublishStateNotify(PublishStateNotify { parameters: params });
         assert!(matches!(
-            msg.encode(),
+            msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
             Err(MessageError::ProtocolViolation(_))
         ));
     }
@@ -1003,12 +1122,7 @@ mod publish_state_notify {
         // EXPIRES (0x08) を含むワイヤ形式は PROTOCOL_VIOLATION
         // payload: count=1, delta=0x08, value=100
         let payload = vec![0x01u8, 0x08, 0x64];
-        let mut buf = vec![
-            0x22u8, // MSG_PUBLISH_STATE_NOTIFY
-            0x00,
-        ];
-        buf.push(payload.len() as u8);
-        buf.extend_from_slice(&payload);
+        let buf = frame(0x22, &payload); // MSG_PUBLISH_STATE_NOTIFY
         assert!(matches!(
             ControlMessage::decode(&buf),
             Err(MessageError::ProtocolViolation(_))
@@ -1095,7 +1209,10 @@ mod request_ok {
                 track_properties: TrackProperties::default(),
             });
             assert!(
-                matches!(msg.encode(), Err(MessageError::ProtocolViolation(_))),
+                matches!(
+                    msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
+                    Err(MessageError::ProtocolViolation(_))
+                ),
                 "型 {param_type:#x} の encode は PROTOCOL_VIOLATION になること"
             );
 
@@ -1106,14 +1223,10 @@ mod request_ok {
             shiguredo_moqt::varint::encode(1, &mut payload);
             shiguredo_moqt::varint::encode(param_type, &mut payload);
             payload.extend_from_slice(value_bytes);
-            let mut frame = Vec::new();
-            shiguredo_moqt::varint::encode(0x07, &mut frame);
-            frame.push((payload.len() >> 8) as u8);
-            frame.push(payload.len() as u8);
-            frame.extend_from_slice(&payload);
+            let wire = frame(0x07, &payload);
             assert!(
                 matches!(
-                    ControlMessage::decode(&frame),
+                    ControlMessage::decode(&wire),
                     Err(MessageError::ProtocolViolation(_))
                 ),
                 "型 {param_type:#x} の decode は PROTOCOL_VIOLATION になること"
@@ -1144,7 +1257,7 @@ mod request_ok {
                 track_properties: TrackProperties::default(),
             });
             assert!(
-                msg.encode().is_ok(),
+                msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).is_ok(),
                 "型 {param_type:#x} の encode は成功すること"
             );
         }

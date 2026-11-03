@@ -623,3 +623,149 @@ fn peer_max_auth_token_cache_size_is_peer_value_not_self_limit() {
         "peer の宣言した MAX は新アクセサで取得できること"
     );
 }
+
+// ─── MAX_CONTROL_MESSAGE_SIZE (draft-ietf-moq-transport-23 §9.1.8) ─────
+
+/// MAX_CONTROL_MESSAGE_SIZE を持つ SetupOptions を作る
+fn options_with_max_control_message_size(value: u64) -> SetupOptions {
+    let mut options = SetupOptions::new();
+    options.push(SetupOption {
+        option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+        value: SetupOptionValue::VarInt(value),
+    });
+    options
+}
+
+/// 自側が MAX_CONTROL_MESSAGE_SIZE を省略した場合の受信上限は既定値 65535
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 省略時の既定値は 65535。
+#[test]
+fn local_max_control_message_size_defaults_to_65535() {
+    use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
+
+    let client = Session::new_client(Transport::Quic, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client.local_max_control_message_size(),
+        DEFAULT_MAX_CONTROL_MESSAGE_SIZE
+    );
+    assert_eq!(client.local_max_control_message_size(), 65_535);
+}
+
+/// 自側が広告した MAX_CONTROL_MESSAGE_SIZE が受信上限になる
+///
+/// peer SETUP の受信前でも、自側の受信上限は自側の設定で確定する
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
+#[test]
+fn local_max_control_message_size_returns_advertised_value() {
+    let client = Session::new_client(
+        Transport::WebTransport,
+        options_with_max_control_message_size(1_000_000),
+    )
+    .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(client.local_max_control_message_size(), 1_000_000);
+}
+
+/// 自側の MAX_CONTROL_MESSAGE_SIZE が 65535 未満なら Session を作れない
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "MUST be at least 65535."
+/// 値が許容範囲外のフィールドに該当するため INVALID_FIELD (§12.2) を返す。
+#[test]
+fn local_max_control_message_size_below_minimum_is_rejected() {
+    let err = Session::new_client(
+        Transport::WebTransport,
+        options_with_max_control_message_size(65_534),
+    )
+    .expect_err("65535 未満の自側設定は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
+}
+
+/// 自側の MAX_CONTROL_MESSAGE_SIZE が最小値ちょうどなら受理される
+#[test]
+fn local_max_control_message_size_at_minimum_is_accepted() {
+    let client = Session::new_client(
+        Transport::WebTransport,
+        options_with_max_control_message_size(65_535),
+    )
+    .expect("65535 ちょうどは受理されること");
+    assert_eq!(client.local_max_control_message_size(), 65_535);
+}
+
+/// peer SETUP 受信前の送信上限は BeforeSetup で既定値 65535
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "Until an endpoint receives
+/// the peer's SETUP, it uses the default value, including for SETUP itself."
+/// 交渉前と省略は同じ 65535 だが、区別できることを固定する。
+#[test]
+fn peer_control_message_size_limit_before_setup_is_default() {
+    let client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let limit = client.peer_control_message_size_limit();
+    assert_eq!(limit, PeerControlMessageSizeLimit::BeforeSetup);
+    assert_eq!(limit.bytes(), 65_535);
+}
+
+/// peer SETUP が MAX_CONTROL_MESSAGE_SIZE を省略した場合は Omitted、広告した場合は Advertised
+#[test]
+fn peer_control_message_size_limit_tracks_peer_setup() {
+    // 省略: 既定値 65535 (交渉前の BeforeSetup とは区別する)
+    let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: SetupOptions::new(),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let limit = client.peer_control_message_size_limit();
+    assert_eq!(limit, PeerControlMessageSizeLimit::Omitted);
+    assert_eq!(limit.bytes(), 65_535);
+
+    // 広告: peer の値がそのまま送信上限になる
+    let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: options_with_max_control_message_size(2_000_000),
+        }))
+        .expect("テストフィクスチャの前提条件を満たす");
+    let limit = client.peer_control_message_size_limit();
+    assert_eq!(limit, PeerControlMessageSizeLimit::Advertised(2_000_000));
+    assert_eq!(limit.bytes(), 2_000_000);
+}
+
+/// peer SETUP の MAX_CONTROL_MESSAGE_SIZE が 65535 未満なら INVALID_FIELD で閉じる
+///
+/// SetupOptions を直接組み立てた場合 (decode を通らない API 入力) も Session が検証する。
+#[test]
+fn peer_max_control_message_size_below_minimum_is_rejected() {
+    let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: options_with_max_control_message_size(65_534),
+        }))
+        .expect_err("65535 未満の peer 設定は拒否されること");
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
+    // セッションは閉じる (PROTOCOL_VIOLATION ではなく原因を伝えるコード)
+    match drain_until_close(&mut client) {
+        SessionEvent::CloseSession(err) => assert_eq!(err.code, SESSION_INVALID_FIELD),
+        other => panic!("CloseSession が期待されたが {other:?}"),
+    }
+}
+
+/// peer SETUP の MAX_CONTROL_MESSAGE_SIZE が最小値ちょうどなら受理される
+#[test]
+fn peer_max_control_message_size_at_minimum_is_accepted() {
+    let mut client = Session::new_client(Transport::WebTransport, SetupOptions::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_control(ControlMessage::Setup(Setup {
+            options: options_with_max_control_message_size(65_535),
+        }))
+        .expect("65535 ちょうどの peer 設定は受理されること");
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client.peer_control_message_size_limit(),
+        PeerControlMessageSizeLimit::Advertised(65_535)
+    );
+}

@@ -33,7 +33,9 @@ use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message::Setup;
 use shiguredo_moqt::message::common::Location;
 use shiguredo_moqt::message_parameter::MessageParameters;
-use shiguredo_moqt::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+use shiguredo_moqt::parameter::{
+    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOption, SetupOptionValue, SetupOptions,
+};
 use shiguredo_moqt::session::core::Session;
 use shiguredo_moqt::session::types::{SessionEvent, SessionState, Transport as MoqtTransport};
 use shiguredo_moqt::stream::encode_control_stream_setup;
@@ -42,6 +44,13 @@ use shiguredo_moqt::track_properties::TrackProperties;
 use crate::error::{Result, TransportError};
 use crate::moqt_client::{ControlStream, StreamRead};
 use crate::transport::{BidiStreamAcceptor, SendStream, StreamAcceptor, StreamHandle};
+
+/// テスト用 peer が使う制御メッセージ長の上限 (バイト)
+///
+/// 本ハーネスは自側で `MAX_CONTROL_MESSAGE_SIZE` を広告しないため、wire 上の既定値
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)) を使う。client も同じ
+/// 既定値を受信上限に使うため、両方向で一致する。
+const MAX_CONTROL_MESSAGE_SIZE: u64 = DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 
 // 以下の 3 つは `moqt_client` の対応する private 関数と同じ処理を含む。テスト専用の都合で
 // 通常ビルド対象の可視性を広げないため (`shiguredo-rust` の「テストのために private な API を
@@ -72,7 +81,10 @@ async fn send_control_stream_setup(
     setup: &ControlMessage,
 ) -> Result<()> {
     control_send
-        .send(Bytes::from(encode_control_stream_setup(setup)?))
+        .send(Bytes::from(encode_control_stream_setup(
+            setup,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )?))
         .await?;
     Ok(())
 }
@@ -440,7 +452,7 @@ impl TestPeer {
             .ok_or_else(|| {
                 TransportError::Quic("connection closed before client control stream".into())
             })?;
-        let mut control_recv = ControlStream::new(recv);
+        let mut control_recv = ControlStream::new(recv, MAX_CONTROL_MESSAGE_SIZE);
         let stream_type = match control_recv.read_stream_type().await? {
             StreamRead::Value(stream_type) => stream_type,
             StreamRead::Closed(end) => {
@@ -485,11 +497,12 @@ impl TestPeer {
     /// 渡すこと。
     pub(crate) async fn send_request_start(&mut self, message: ControlMessage) -> Result<()> {
         let (mut send, recv) = self.handle.open_bidi_stream().await?;
-        send.send(Bytes::from(message.encode()?)).await?;
+        send.send(Bytes::from(message.encode(MAX_CONTROL_MESSAGE_SIZE)?))
+            .await?;
         self.opened_requests.push(OpenedRequest {
             request_id: request_stream_id(&message),
             send,
-            reader: ControlStream::new(recv),
+            reader: ControlStream::new(recv, MAX_CONTROL_MESSAGE_SIZE),
         });
         Ok(())
     }
@@ -553,7 +566,7 @@ impl TestPeer {
             .ok_or_else(|| {
                 TransportError::Quic("connection closed before peer request stream".into())
             })?;
-        let mut reader = ControlStream::new(recv);
+        let mut reader = ControlStream::new(recv, MAX_CONTROL_MESSAGE_SIZE);
         let message = match reader.recv_message().await? {
             StreamRead::Value(message) => message,
             StreamRead::Closed(_) => {
@@ -629,7 +642,10 @@ impl TestPeer {
             .ok_or_else(|| {
                 TransportError::Internal(format!("request stream not found: {request_id}"))
             })?;
-        request.send.send(Bytes::from(message.encode()?)).await?;
+        request
+            .send
+            .send(Bytes::from(message.encode(MAX_CONTROL_MESSAGE_SIZE)?))
+            .await?;
         if fin {
             request.send.finish().await?;
         }
@@ -719,7 +735,9 @@ impl TestPeer {
             .control_send
             .as_mut()
             .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
-        control_send.send(Bytes::from(message.encode()?)).await?;
+        control_send
+            .send(Bytes::from(message.encode(MAX_CONTROL_MESSAGE_SIZE)?))
+            .await?;
         Ok(())
     }
 
@@ -734,7 +752,9 @@ impl TestPeer {
             .control_send
             .as_mut()
             .ok_or_else(|| TransportError::Internal("control stream is not opened".into()))?;
-        control_send.send(Bytes::from(message.encode()?)).await?;
+        control_send
+            .send(Bytes::from(message.encode(MAX_CONTROL_MESSAGE_SIZE)?))
+            .await?;
         Ok(())
     }
 
@@ -754,7 +774,10 @@ impl TestPeer {
             .ok_or_else(|| {
                 TransportError::Internal(format!("opened request not found: {request_id}"))
             })?;
-        request.send.send(Bytes::from(message.encode()?)).await?;
+        request
+            .send
+            .send(Bytes::from(message.encode(MAX_CONTROL_MESSAGE_SIZE)?))
+            .await?;
         Ok(())
     }
 
@@ -836,7 +859,8 @@ impl TestPeer {
         let setup = ControlMessage::Setup(Setup {
             options: options.clone(),
         });
-        let head = shiguredo_moqt::stream::encode_control_stream_setup(&setup)?;
+        let head =
+            shiguredo_moqt::stream::encode_control_stream_setup(&setup, MAX_CONTROL_MESSAGE_SIZE)?;
         self.send_control_stream_head(head).await
     }
 
@@ -883,9 +907,9 @@ mod tests {
     use std::time::Duration;
 
     use shiguredo_moqt::error::{
-        REQUEST_NOT_SUPPORTED, SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID,
-        SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN,
-        SESSION_PROTOCOL_VIOLATION,
+        REQUEST_NOT_SUPPORTED, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
+        SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID, SESSION_KEY_VALUE_FORMATTING_ERROR,
+        SESSION_MALFORMED_AUTH_TOKEN, SESSION_PROTOCOL_VIOLATION,
     };
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
@@ -1414,7 +1438,7 @@ mod tests {
     ///
     /// `ControlMessage::Setup` は `SetupOptions` の型付き API しか受け付けないため、型では
     /// 表現できない不正な Setup Options は `ControlMessage::Unsupported` で書き出す (encode は
-    /// type varint + u16 長 + body であり SETUP と同じ書式になる)。body は
+    /// type varint + vi64 長 + body であり SETUP と同じ書式になる)。body は
     /// draft-ietf-moq-transport-22 §9.1 (SETUP) の「カウントプレフィックスなしのデルタ
     /// エンコードされた KVP」である。
     fn setup_head(body: Vec<u8>) -> Vec<u8> {
@@ -1423,7 +1447,7 @@ mod tests {
             request_id: None,
             body,
         };
-        shiguredo_moqt::stream::encode_control_stream_setup(&message)
+        shiguredo_moqt::stream::encode_control_stream_setup(&message, MAX_CONTROL_MESSAGE_SIZE)
             .expect("SETUP のバイト列を組み立てられること")
     }
 
@@ -1621,6 +1645,111 @@ mod tests {
                     .expect("終了コードを観測できること"),
                 SESSION_INVALID_PATH,
                 "server の PATH は INVALID_PATH (0x8) であること"
+            );
+        })
+        .await;
+    }
+
+    /// peer の MAX_CONTROL_MESSAGE_SIZE が 65535 以上なら SETUP 交換が成立すること
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 値は varint で、
+    /// 65535 以上でなければならない。wire 上の Setup Option を client が decode して受理し、
+    /// ハンドシェイクを完了することを通しで固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_max_control_message_size_establishes() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            let mut options = SetupOptions::new();
+            options.push(SetupOption {
+                option_type: shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+                value: SetupOptionValue::VarInt(1_000_000),
+            });
+            peer.send_setup(&options).await.expect("SETUP を送れること");
+
+            let _client = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .expect("MAX_CONTROL_MESSAGE_SIZE を持つ SETUP で確立できること");
+        })
+        .await;
+    }
+
+    /// peer の MAX_CONTROL_MESSAGE_SIZE が 65535 未満なら INVALID_FIELD を送ること
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE) は 65535 以上を MUST と
+    /// する。値が許容範囲外の制御メッセージフィールドに該当するため、§12.2 (Session
+    /// Termination Codes) の INVALID_FIELD (0x301) で閉じる。`SetupOptions::encode` は
+    /// 最小値を検証するため、生の Setup Options を書いて再現する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_setup_with_small_max_control_message_size_closes_with_invalid_field() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // delta type = 0x09、値 = 65534 (最小値の 1 バイト下)
+            let mut body =
+                vec![shiguredo_moqt::parameter::SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE as u8];
+            shiguredo_moqt::varint::encode(65_534, &mut body);
+            peer.send_control_stream_head(setup_head(body))
+                .await
+                .expect("control stream を書けること");
+
+            establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("最小値未満の MAX_CONTROL_MESSAGE_SIZE で確立が失敗すること");
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_INVALID_FIELD,
+                "最小値未満は INVALID_FIELD (0x301) であること"
+            );
+        })
+        .await;
+    }
+
+    /// 受信上限を超える制御メッセージの宣言は、本文を待たず FIELD_LENGTH_EXCEEDED になること
+    ///
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): 自側の MAX_CONTROL_MESSAGE_SIZE を
+    /// 超える Length の宣言は FIELD_LENGTH_EXCEEDED で閉じる (MUST)。client は既定値 65535 を
+    /// 受信上限に使うため、65536 を宣言した SETUP のヘッダだけを送り、本文を送らなくても
+    /// セッションが閉じることを固定する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_control_message_declaration_closes_with_field_length_exceeded() {
+        run_with_timeout(async {
+            let (mut peer, establish) = connect_handshake().await;
+
+            // stream type prefix (control stream) と SETUP の Type / Length のみを書く
+            let mut head = Vec::new();
+            shiguredo_moqt::varint::encode(shiguredo_moqt::stream::SETUP_STREAM_TYPE, &mut head);
+            shiguredo_moqt::varint::encode(0x2F00, &mut head);
+            shiguredo_moqt::varint::encode(65_536, &mut head);
+            peer.send_control_stream_head(head)
+                .await
+                .expect("control stream を書けること");
+
+            let error = establish
+                .await
+                .expect("establish タスクが終了すること")
+                .err()
+                .expect("上限超過の宣言で確立が失敗すること");
+            assert!(
+                matches!(
+                    error,
+                    TransportError::Moqt(shiguredo_moqt::error::MessageError::FieldLengthExceeded(
+                        _
+                    ))
+                ),
+                "FieldLengthExceeded として返ること: {error}"
+            );
+            assert_eq!(
+                peer.recv_close_code()
+                    .await
+                    .expect("終了コードを観測できること"),
+                SESSION_FIELD_LENGTH_EXCEEDED,
+                "上限超過は FIELD_LENGTH_EXCEEDED (0x401) であること"
             );
         })
         .await;

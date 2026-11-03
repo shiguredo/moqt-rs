@@ -860,7 +860,7 @@ fn publish_with_group_order_encodes_and_keeps_value() {
     }
     // ワイヤエンコードが成功すること
     pub_msg
-        .encode()
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
         .expect("GROUP_ORDER を含む PUBLISH はエンコードできること");
 }
 
@@ -893,7 +893,7 @@ fn publish_with_group_order_roundtrips() {
     let (sent_rid, pub_msg) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
     let encoded = pub_msg
-        .encode()
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
         .expect("GROUP_ORDER を含む PUBLISH はエンコードできること");
     let (decoded, _) =
         ControlMessage::decode(&encoded).expect("GROUP_ORDER を含む PUBLISH はデコードできること");
@@ -1053,7 +1053,7 @@ fn publish_with_forward_encodes_and_keeps_value() {
     }
     // ワイヤエンコードが成功すること
     pub_msg
-        .encode()
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
         .expect("FORWARD=0 を含む PUBLISH はエンコードできること");
 }
 
@@ -1085,7 +1085,7 @@ fn publish_with_forward_roundtrips() {
     let (sent_rid, pub_msg) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
     let encoded = pub_msg
-        .encode()
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
         .expect("FORWARD を含む PUBLISH はエンコードできること");
     let (decoded, _) =
         ControlMessage::decode(&encoded).expect("FORWARD を含む PUBLISH はデコードできること");

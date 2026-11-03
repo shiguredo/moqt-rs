@@ -438,8 +438,7 @@ fn wire_subscribe_with_duplicate_tokens_is_rejected_by_session() {
         0x02, 0x03, 0x03, 0x03, 0x00, 0x78, 0x00, 0x03, 0x03, 0x00, 0x78,
     ];
     let mut wire = vec![0x03]; // MSG_SUBSCRIBE
-    wire.push((body.len() >> 8) as u8);
-    wire.push(body.len() as u8);
+    shiguredo_moqt::varint::encode(body.len() as u64, &mut wire);
     wire.extend_from_slice(&body);
 
     let (decoded, consumed) =
@@ -1140,8 +1139,7 @@ fn wire_subscribe_with_duplicate_resolved_alias_is_rejected_by_session() {
         0x02, 0x03, 0x02, 0x02, 0x01, 0x00, 0x02, 0x02, 0x01,
     ];
     let mut wire = vec![0x03]; // MSG_SUBSCRIBE
-    wire.push((body.len() >> 8) as u8);
-    wire.push(body.len() as u8);
+    shiguredo_moqt::varint::encode(body.len() as u64, &mut wire);
     wire.extend_from_slice(&body);
 
     let (decoded, consumed) =

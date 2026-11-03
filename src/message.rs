@@ -1,6 +1,10 @@
-//! MOQT コントロールメッセージ (draft-ietf-moq-transport-22 §9 (Control Messages))
+//! MOQT コントロールメッセージ (draft-ietf-moq-transport-23 §9 (Control Messages))
 //!
-//! ワイヤーフォーマット: Type (varint) | Length (u16 big-endian) | Message Body
+//! ワイヤーフォーマット: Type (vi64) | Length (vi64) | Message Body
+//!
+//! Length は Message Body のバイト数であり、MOQT の可変長整数 (vi64, 1〜9 バイト) で表す。
+//! 非最小符号化も受信側は受理する (draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers))。
+//! 本文長が Length と一致しない場合は MALFORMED_MESSAGE でセッションを閉じる (§9)。
 
 pub mod common;
 
@@ -463,8 +467,8 @@ impl Goaway {
     /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
     ///
     /// Timeout 以降に余剰バイトがある場合は呼び出し側 (`ControlMessage::decode`) の
-    /// 末尾長一致検証が draft-ietf-moq-transport-22 §9 (Control Messages) に従い
-    /// PROTOCOL_VIOLATION にする。
+    /// 末尾長一致検証が draft-ietf-moq-transport-23 §9 (Control Messages) に従い
+    /// MALFORMED_MESSAGE にする。
     pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
         let (uri_len, n) = varint::decode(&payload[pos..])?;
@@ -643,7 +647,7 @@ impl RequestError {
         // チェックを省くと空スライスに対する Redirect::decode_from が UnexpectedEof を
         // 返してしまい、完了条件が要求する ProtocolViolation にならない。
         // error_code != REDIRECT で末尾に余剰がある場合は redirect = None のまま、
-        // 末尾チェック (pos != payload.len()) が PROTOCOL_VIOLATION にする。
+        // 末尾チェック (pos != payload.len()) が MALFORMED_MESSAGE にする。
         let redirect = if error_code == REQUEST_REDIRECT {
             if pos == payload.len() {
                 return Err(MessageError::ProtocolViolation(
@@ -1177,22 +1181,50 @@ pub enum ControlMessage {
 
 impl ControlMessage {
     /// メッセージ全体 (Type + Length + Message Body) をエンコードして返す
-    pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
+    ///
+    /// `max_control_message_size` は peer が SETUP で広告した `MAX_CONTROL_MESSAGE_SIZE`
+    /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。peer の SETUP を
+    /// 受信するまでは、SETUP 自体を含めて既定値
+    /// [`crate::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] を渡す。
+    ///
+    /// draft-ietf-moq-transport-23 §9 (Control Messages): "An endpoint MUST NOT send a control
+    /// message with a length larger than the peer's MAX_CONTROL_MESSAGE_SIZE." (MUST NOT)
+    /// 本文長が上限を超える場合はワイヤへ書き出す前に `FieldLengthExceeded` を返す。
+    ///
+    /// Length は vi64 で最小バイト数にエンコードする
+    /// (draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers))。
+    ///
+    /// # Errors
+    ///
+    /// - 本文長が `max_control_message_size` を超える: `FieldLengthExceeded`
+    /// - 各メッセージ固有のエンコード検証に失敗した: そのエラー
+    pub fn encode(&self, max_control_message_size: u64) -> Result<Vec<u8>, MessageError> {
         let (type_id, payload) = self.encode_message_body()?;
-        let payload_len = payload.len();
-        if payload_len > 65535 {
-            return Err(MessageError::PayloadTooLong);
+        let payload_len = payload.len() as u64;
+        if payload_len > max_control_message_size {
+            return Err(MessageError::FieldLengthExceeded(
+                "control message exceeds peer MAX_CONTROL_MESSAGE_SIZE",
+            ));
         }
 
         let mut buf = Vec::new();
         varint::encode(type_id, &mut buf);
-        buf.push((payload_len >> 8) as u8);
-        buf.push(payload_len as u8);
+        varint::encode(payload_len, &mut buf);
         buf.extend_from_slice(&payload);
         Ok(buf)
     }
 
     /// バッファの先頭からメッセージをデコードし `(ControlMessage, 消費バイト数)` を返す
+    ///
+    /// Length は vi64 として読み、非最小符号化も受理する
+    /// (draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers))。
+    /// 宣言された Length 分の本文が `buf` に揃っていない場合は `UnexpectedEof` を返す
+    /// (呼び出し側が追加データを待てるようにするため)。
+    ///
+    /// 本文が Length に満たない、または Length を超えて余剰がある場合は
+    /// draft-ietf-moq-transport-23 §9 (Control Messages) の MUST に従い
+    /// `MalformedMessage` を返す。受信上限 (`MAX_CONTROL_MESSAGE_SIZE`) の検証は
+    /// 長さ宣言の段階で行う必要があるため [`crate::decoder::MessageDecoder`] が担う。
     ///
     /// AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複を本 decode が検出するのは
     /// SETUP だけである (draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN)。
@@ -1219,19 +1251,22 @@ impl ControlMessage {
         let (type_id, n) = varint::decode(&buf[pos..])?;
         pos += n;
 
-        if buf[pos..].len() < 2 {
-            return Err(MessageError::UnexpectedEof);
-        }
-        let payload_len = ((buf[pos] as usize) << 8) | buf[pos + 1] as usize;
-        pos += 2;
+        let (declared_len, n) = varint::decode(&buf[pos..])?;
+        pos += n;
+        // 32bit 環境でも宣言長を usize へ切り捨てずに残りバッファと比較する
+        let payload_len = varint::checked_len(declared_len, buf[pos..].len())?;
 
-        if buf[pos..].len() < payload_len {
-            return Err(MessageError::UnexpectedEof);
-        }
         let payload = &buf[pos..pos + payload_len];
         pos += payload_len;
 
-        let msg = Self::decode_message_body(type_id, payload)?;
+        // 宣言された Length 分の本文は揃っているため、本文の解析中に生じた UnexpectedEof は
+        // 「本文が Length より短い」ことを意味する (§9 の MALFORMED_MESSAGE)。
+        let msg = Self::decode_message_body(type_id, payload).map_err(|err| match err {
+            MessageError::UnexpectedEof => MessageError::MalformedMessage(
+                "control message body is shorter than the declared length",
+            ),
+            other => other,
+        })?;
         Ok((msg, pos))
     }
 
@@ -1389,9 +1424,15 @@ impl ControlMessage {
             _ => return Err(MessageError::InvalidMessageType(type_id)),
         };
 
-        // 全メッセージ共通の末尾長一致検証: ペイロード長と実際の消費バイト数が一致しない場合は RFC 違反
+        // 全メッセージ共通の末尾長一致検証
+        //
+        // draft-ietf-moq-transport-23 §9 (Control Messages): "If the length does not match the
+        // length of the Message Body, the receiver MUST close the session with
+        // MALFORMED_MESSAGE." (MUST) 本文が Length より長い (余剰がある) 場合を検出する。
+        // 本文が Length より短い場合は `ControlMessage::decode` が UnexpectedEof を
+        // `MalformedMessage` へ写す。
         if consumed != payload.len() {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedMessage(
                 "payload length does not match message content",
             ));
         }

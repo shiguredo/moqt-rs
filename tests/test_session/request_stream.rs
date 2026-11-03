@@ -645,7 +645,9 @@ fn unsupported_request_is_rejected_with_not_supported() {
     for (i, type_id) in [0x06u64, 0x50, 0x51].into_iter().enumerate() {
         let rid = (i as u64) * 2; // Client 役の採番 (偶数)
         let msg = unsupported_request(type_id, rid, &MessageParameters::new());
-        let bytes = msg.encode().expect("encode できること");
+        let bytes = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         server
             .recv_request(decoded)
@@ -705,7 +707,9 @@ fn unsupported_request_single_period_namespace_is_rejected_with_does_not_exist()
             &single_period,
             &MessageParameters::new(),
         );
-        let bytes = msg.encode().expect("encode できること");
+        let bytes = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         server
             .recv_request(decoded)
@@ -754,7 +758,9 @@ fn unsupported_request_session_namespace_is_rejected_with_does_not_exist() {
             &session_namespace,
             &MessageParameters::new(),
         );
-        let bytes = msg.encode().expect("encode できること");
+        let bytes = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         server
             .recv_request(decoded)
@@ -795,7 +801,9 @@ fn unsupported_request_other_reserved_namespace_is_rejected_with_not_supported()
                 &prefix,
                 &MessageParameters::new(),
             );
-            let bytes = msg.encode().expect("encode できること");
+            let bytes = msg
+                .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+                .expect("encode できること");
             let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
             server
                 .recv_request(decoded)
@@ -1352,8 +1360,9 @@ fn unsupported_request_register_without_cache_closes_session() {
 
 /// 未対応 request の本体が共通構造に従わない場合は原因に応じた終了コードでセッションを閉じる
 ///
-/// draft-ietf-moq-transport-22 §9 Table 5 (Length と本体の不一致) は PROTOCOL_VIOLATION、
-/// §8.3 (Key-Value-Pair Structure) の Token 直列化の不整合は KEY_VALUE_FORMATTING_ERROR で閉じる。
+/// draft-ietf-moq-transport-23 §9 (Control Messages) の Length と本体の不一致は
+/// MALFORMED_MESSAGE、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の Token
+/// 直列化の不整合は KEY_VALUE_FORMATTING_ERROR で閉じる。
 #[test]
 fn unsupported_request_body_decode_errors_close_session() {
     // 本体が Request ID で終わっている (Track Namespace Prefix とパラメータが無い)
@@ -1389,6 +1398,9 @@ fn unsupported_request_body_decode_errors_close_session() {
     );
 
     // パラメータブロックの後ろに余剰バイトがある (count=0 のあとに 1 バイト)
+    //
+    // 制御メッセージの本文が Length と一致しないため MALFORMED_MESSAGE で閉じる
+    // (draft-ietf-moq-transport-23 §9 (Control Messages))。
     let (_client, mut server) = establish_pair();
     let mut body = Vec::new();
     shiguredo_moqt::varint::encode(0, &mut body);
@@ -1406,7 +1418,7 @@ fn unsupported_request_body_decode_errors_close_session() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_MALFORMED_MESSAGE
     );
 
     // AUTHORIZATION_TOKEN の内部直列化が壊れている (DELETE なのに alias が無い)

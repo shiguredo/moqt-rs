@@ -59,13 +59,15 @@ MOQT では、接続の確立や購読の開始などを「制御メッセージ
 ```rust,no_run
 use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::{message::{ControlMessage, Setup}, parameter::SetupOptions};
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 
 fn main() -> Result<(), MessageError> {
     // SETUP メッセージを作成してエンコード
     let msg = ControlMessage::Setup(Setup {
         options: SetupOptions::new(),
     });
-    let bytes = msg.encode()?;
+    // peer の SETUP 受信前は既定値 (65535) が送信上限になる
+    let bytes = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)?;
     // bytes を制御ストリームに書き出す...
 
     // 受信バイト列からデコード
@@ -83,9 +85,11 @@ fn main() -> Result<(), MessageError> {
 ```rust,no_run
 use shiguredo_moqt::decoder::MessageDecoder;
 use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 
 fn main() -> Result<(), MessageError> {
-    let mut decoder = MessageDecoder::new();
+    // 自側が受信を許容する制御メッセージ長の上限を渡す
+    let mut decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
 
     // 受信したバイト列を追加する
     let data: &[u8] = &[];
@@ -117,7 +121,7 @@ fn main() -> Result<(), SessionError> {
     while let Some(event) = session.poll_event() {
         match event {
             SessionEvent::SendControl(msg) => {
-                // 制御ストリームに msg.encode() を書き出す
+                // 制御ストリームに msg.encode(peer の MAX_CONTROL_MESSAGE_SIZE) を書き出す
                 let _ = msg;
             }
             SessionEvent::Established => {

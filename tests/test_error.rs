@@ -1,5 +1,5 @@
-//! エラーコード定数が draft-ietf-moq-transport-22 §16.11 の IANA レジストリ表と一致することと、
-//! `MessageError` が `core::error::Error` を実装していることのテスト
+//! エラーコード定数が draft-ietf-moq-transport-22 §16.11 / draft-ietf-moq-transport-23 §12.2
+//! のレジストリ表と一致することと、`MessageError` が `core::error::Error` を実装していることのテスト
 
 use shiguredo_moqt::error::{
     PUBLISH_DONE_EXCESSIVE_LOAD, PUBLISH_DONE_EXPIRED, PUBLISH_DONE_GOING_AWAY,
@@ -12,14 +12,15 @@ use shiguredo_moqt::error::{
     REQUEST_TIMEOUT, REQUEST_UNAUTHORIZED, REQUEST_UNINTERESTED, REQUEST_UNSUPPORTED_EXTENSION,
     SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CONTROL_MESSAGE_TIMEOUT,
     SESSION_DATA_STREAM_TIMEOUT, SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_DUPLICATE_TRACK_ALIAS,
-    SESSION_EXPIRED_AUTH_TOKEN, SESSION_GOAWAY_TIMEOUT, SESSION_INTERNAL_ERROR,
-    SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID,
-    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_AUTHORITY,
-    SESSION_MALFORMED_PATH, SESSION_NO_ERROR, SESSION_PROTOCOL_VIOLATION,
-    SESSION_TOO_MANY_REQUEST_UPDATES, SESSION_UNAUTHORIZED, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
-    STREAM_CANCELLED, STREAM_DELIVERY_TIMEOUT, STREAM_EXCESSIVE_LOAD, STREAM_EXPIRED_AUTH_TOKEN,
-    STREAM_GOING_AWAY, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK, STREAM_SESSION_CLOSED,
-    STREAM_TOO_FAR_BEHIND, STREAM_UNKNOWN_OBJECT_STATUS,
+    SESSION_EXPIRED_AUTH_TOKEN, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_GOAWAY_TIMEOUT,
+    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD, SESSION_INVALID_PATH,
+    SESSION_INVALID_REQUEST_ID, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN,
+    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH,
+    SESSION_NO_ERROR, SESSION_PROTOCOL_VIOLATION, SESSION_TOO_MANY_REQUEST_UPDATES,
+    SESSION_UNAUTHORIZED, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, STREAM_CANCELLED,
+    STREAM_DELIVERY_TIMEOUT, STREAM_EXCESSIVE_LOAD, STREAM_EXPIRED_AUTH_TOKEN, STREAM_GOING_AWAY,
+    STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK, STREAM_SESSION_CLOSED, STREAM_TOO_FAR_BEHIND,
+    STREAM_UNKNOWN_OBJECT_STATUS,
 };
 use shiguredo_moqt::message::ControlMessage;
 
@@ -46,6 +47,10 @@ fn session_termination_codes_match_iana_registry() {
     assert_eq!(SESSION_INVALID_AUTHORITY, 0x19);
     assert_eq!(SESSION_MALFORMED_AUTHORITY, 0x1A);
     assert_eq!(SESSION_TOO_MANY_REQUEST_UPDATES, 0x1B);
+    // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加されたコード
+    assert_eq!(SESSION_MALFORMED_MESSAGE, 0x300);
+    assert_eq!(SESSION_INVALID_FIELD, 0x301);
+    assert_eq!(SESSION_FIELD_LENGTH_EXCEEDED, 0x401);
 }
 
 /// §16.11.2 (REQUEST_ERROR Codes) と一致する
@@ -123,7 +128,8 @@ fn message_error_converts_into_boxed_error() {
 mod unknown_error_code_normalization {
     use shiguredo_moqt::error::{
         PUBLISH_DONE_INTERNAL_ERROR, PUBLISH_DONE_TRACK_ENDED, REQUEST_INTERNAL_ERROR,
-        REQUEST_MALFORMED_TRACK, SESSION_INTERNAL_ERROR, SESSION_NO_ERROR, STREAM_CANCELLED,
+        REQUEST_MALFORMED_TRACK, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INTERNAL_ERROR,
+        SESSION_INVALID_FIELD, SESSION_MALFORMED_MESSAGE, SESSION_NO_ERROR, STREAM_CANCELLED,
         STREAM_INTERNAL_ERROR, normalize_publish_done_code, normalize_request_error_code,
         normalize_session_termination_code, normalize_stream_reset_code,
     };
@@ -147,6 +153,24 @@ mod unknown_error_code_normalization {
             normalize_stream_reset_code(STREAM_CANCELLED),
             STREAM_CANCELLED
         );
+    }
+
+    /// draft-ietf-moq-transport-23 §12.2 で追加されたコードが既知として扱われること
+    ///
+    /// 正規化でこれらが INTERNAL_ERROR に落ちると、受信側のアプリが原因を失う。
+    #[test]
+    fn draft_23_session_codes_are_known() {
+        for code in [
+            SESSION_MALFORMED_MESSAGE,
+            SESSION_INVALID_FIELD,
+            SESSION_FIELD_LENGTH_EXCEEDED,
+        ] {
+            assert_eq!(
+                normalize_session_termination_code(code),
+                code,
+                "コード {code:#x} が既知として保たれること"
+            );
+        }
     }
 
     /// 未知コードは文脈ごとの INTERNAL_ERROR 相当になること (4 文脈)

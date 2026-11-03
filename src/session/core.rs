@@ -23,9 +23,10 @@ use hashbrown::{HashMap, HashSet};
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
     REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
-    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH,
-    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
-    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
+    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD, SESSION_INVALID_PATH,
+    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE,
+    SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
+    is_local_error_code,
 };
 use crate::message::{
     ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
@@ -34,7 +35,10 @@ use crate::message::{
 };
 use crate::message_parameter::{AuthorizationToken, MessageParameters};
 use crate::object_properties::{ObjectFieldTracker, ObjectPropertyTracker};
-use crate::parameter::{SetupOptions, SetupUriValidationError};
+use crate::parameter::{
+    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE, SetupOptions,
+    SetupUriValidationError,
+};
 use crate::subgroup_tracker::SubgroupTracker;
 use crate::track_properties::TrackProperties;
 use crate::varint;
@@ -45,10 +49,10 @@ use super::auth_token_cache::AuthTokenCache;
 use super::data::{IncomingDataStream, OutgoingDataStream};
 use super::request_id::{RequestIdGenerator, RequestIdTracker};
 use super::types::{
-    DataStreamId, DeadlineTimer, Fetch, PeerGoawayInfo, RecvRequestError, RequestKind,
-    RequestStreamEnd, Role, SendRequestError, SessionError, SessionEvent, SessionState,
-    Subscription, SubscriptionInitiator, SubscriptionState, TerminationReason, TrackRole,
-    TrackStatusEntry, Transport,
+    DataStreamId, DeadlineTimer, Fetch, PeerControlMessageSizeLimit, PeerGoawayInfo,
+    RecvRequestError, RequestKind, RequestStreamEnd, Role, SendRequestError, SessionError,
+    SessionEvent, SessionState, Subscription, SubscriptionInitiator, SubscriptionState,
+    TerminationReason, TrackRole, TrackStatusEntry, Transport,
 };
 
 /// STOP_SENDING を受けた outgoing Subgroup の識別子 (`(track_alias, group_id, subgroup_id)`)
@@ -660,6 +664,9 @@ impl Session {
         // draft §9.1.1 (AUTHORITY), §9.1.2 (PATH): 自側 SETUP に違反がないか確認
         validate_setup_role_transport(&options, role, transport)?;
         validate_setup_uri_format(&options)?;
+        // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+        // 自側が広告する受信上限も 65535 以上でなければならない
+        validate_max_control_message_size(&options)?;
 
         // draft §8.9 (Authorization Token Compression): 自側 SETUP 内の AUTHORIZATION_TOKEN の alias 重複のみ事前検出する。
         // サイズ判定 (MAX_AUTH_TOKEN_CACHE_SIZE) は受信側の上限に従うため、自側が送った
@@ -814,6 +821,43 @@ impl Session {
             .as_ref()
             .and_then(|s| s.options.max_auth_token_cache_size())
             .unwrap_or(0)
+    }
+
+    /// 自側が受信を許容する制御メッセージ本文の最大長 (バイト) を返す
+    ///
+    /// 自側が SETUP で広告した `MAX_CONTROL_MESSAGE_SIZE`
+    /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)) であり、省略時は
+    /// 既定値 [`DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] (65535) を返す。
+    /// 自側の受信上限は交渉を待たずに確定するため、peer の SETUP 受信前でも同じ値を適用する
+    /// (peer の SETUP 自体も受信上限で検証する)。
+    ///
+    /// I/O 層はこの値を [`crate::decoder::MessageDecoder::new`] に渡す。65535 より大きい値を
+    /// 設定した場合は、transport のストリームごとのフロー制御窓をヘッダ込みの 1 メッセージ
+    /// 以上に設定すること (draft-ietf-moq-transport-23 §15.5 (Resource Exhaustion))。
+    pub fn local_max_control_message_size(&self) -> u64 {
+        self.setup
+            .local
+            .as_ref()
+            .and_then(|s| s.options.max_control_message_size())
+            .unwrap_or(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+    }
+
+    /// peer が広告した `MAX_CONTROL_MESSAGE_SIZE` (自側の送信上限) の状態を返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): peer の SETUP を受信する
+    /// までは、SETUP 自体を含めて既定値 65535 を適用する。省略と交渉前を区別できるよう
+    /// [`PeerControlMessageSizeLimit`] を返す。送信上限の値は
+    /// [`PeerControlMessageSizeLimit::bytes`] で取得する。
+    ///
+    /// I/O 層は [`crate::message::ControlMessage::encode`] に `.bytes()` の値を渡す。
+    pub fn peer_control_message_size_limit(&self) -> PeerControlMessageSizeLimit {
+        match self.setup.peer.as_ref() {
+            None => PeerControlMessageSizeLimit::BeforeSetup,
+            Some(setup) => match setup.options.max_control_message_size() {
+                Some(value) => PeerControlMessageSizeLimit::Advertised(value),
+                None => PeerControlMessageSizeLimit::Omitted,
+            },
+        }
     }
 
     /// 制御メッセージ応答待ちタイムアウト (ms) を取得する (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))
@@ -2590,6 +2634,12 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+        // peer が広告した受信上限 (自側の送信上限) が 65535 未満なら INVALID_FIELD で閉じる
+        if let Err(err) = validate_max_control_message_size(&setup.options) {
+            self.fail(err.clone());
+            return Err(err);
+        }
 
         // draft §9.1.3 (MAX_AUTH_TOKEN_CACHE_SIZE) / §8.9 (Authorization Token Compression): peer が REGISTER したトークンの保持上限は
         // 「自側」の MAX_AUTH_TOKEN_CACHE_SIZE で決まる (受信側が自身のリソースを
@@ -2875,8 +2925,8 @@ impl Session {
 /// - Request ID / Track Namespace / パラメータのデコード失敗: 各デコーダのエラー
 ///   (Track Namespace の書式不正は `ProtocolViolation`、KVP の宣言長が残りバッファを超える
 ///   場合は `KeyValueFormattingError`)
-/// - パラメータブロックを読み切ったあとに余剰バイトがある (draft §9 Table 5 の Length の
-///   不一致): `ProtocolViolation`
+/// - パラメータブロックを読み切ったあとに余剰バイトがある (draft-ietf-moq-transport-23 §9
+///   (Control Messages) の Length の不一致): `MalformedMessage`
 fn decode_unsupported_request_body(
     body: &[u8],
 ) -> Result<(u64, TrackNamespace, MessageParameters), MessageError> {
@@ -2886,7 +2936,7 @@ fn decode_unsupported_request_body(
     let track_namespace = TrackNamespace::decode_from(body, &mut pos)?;
     let (parameters, consumed) = MessageParameters::decode(&body[pos..])?;
     if pos + consumed != body.len() {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::MalformedMessage(
             "unsupported request has trailing bytes after parameters",
         ));
     }
@@ -2897,6 +2947,8 @@ fn decode_unsupported_request_body(
 ///
 /// - draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の値の直列化不整合:
 ///   `KEY_VALUE_FORMATTING_ERROR`
+/// - draft-ietf-moq-transport-23 §9 (Control Messages) の本文長不一致:
+///   `MALFORMED_MESSAGE`
 /// - draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) /
 ///   §9.20 (Control Message Parameters) のフレーミング違反: `PROTOCOL_VIOLATION`
 ///
@@ -2910,6 +2962,7 @@ fn session_error_from_request_body(err: MessageError) -> SessionError {
         MessageError::KeyValueFormattingError(msg) => {
             SessionError::new(SESSION_KEY_VALUE_FORMATTING_ERROR, msg)
         }
+        MessageError::MalformedMessage(msg) => SessionError::new(SESSION_MALFORMED_MESSAGE, msg),
         MessageError::ProtocolViolation(msg) => SessionError::new(SESSION_PROTOCOL_VIOLATION, msg),
         _ => SessionError::new(
             SESSION_PROTOCOL_VIOLATION,
@@ -2928,6 +2981,24 @@ fn validate_setup_uri_format(options: &SetupOptions) -> Result<(), SessionError>
             "AUTHORITY does not conform to RFC 3986",
         ),
     })
+}
+
+/// MAX_CONTROL_MESSAGE_SIZE が仕様の最小値以上か検証する
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "The value ... MUST be at
+/// least 65535." 値が許容範囲外の制御メッセージフィールドに該当するため INVALID_FIELD で閉じる
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
+/// 自側の SETUP に設定した値と peer の SETUP が広告した値の双方に適用する。
+fn validate_max_control_message_size(options: &SetupOptions) -> Result<(), SessionError> {
+    if let Some(value) = options.max_control_message_size()
+        && value < MIN_MAX_CONTROL_MESSAGE_SIZE
+    {
+        return Err(SessionError::new(
+            SESSION_INVALID_FIELD,
+            "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
+        ));
+    }
+    Ok(())
 }
 
 /// SETUP Options が送信者 role + transport と整合するか検証する

@@ -7,7 +7,7 @@ use shiguredo_moqt::message::ControlMessage;
 use shiguredo_moqt::message_parameter::MessageParameters;
 use shiguredo_moqt::msf::{MsfCatalogDocument, MsfEventTimeline, MsfMediaTimeline};
 use shiguredo_moqt::object_properties::ObjectProperties;
-use shiguredo_moqt::parameter::SetupOptions;
+use shiguredo_moqt::parameter::{DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOptions};
 use shiguredo_moqt::stream::datagram::ObjectDatagram;
 use shiguredo_moqt::stream::fetch::{FetchHeader, FetchPriorContext, FetchStreamEntry};
 use shiguredo_moqt::stream::subgroup::{SubgroupHeader, SubgroupObject};
@@ -16,7 +16,7 @@ use shiguredo_moqt::track_properties::TrackProperties;
 // decode に成功した値は encode しても panic しない (encode / decode の往復不変式)
 fuzz_target!(|data: &[u8]| {
     if let Ok((msg, _)) = ControlMessage::decode(data) {
-        let _ = msg.encode();
+        let _ = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
     }
     if let Ok((header, _)) = SubgroupHeader::decode(data) {
         let _ = header.encode();

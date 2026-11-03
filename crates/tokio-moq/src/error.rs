@@ -8,7 +8,8 @@
 //! [`session_error_code`] に集約する (`moq-pub` / `moq-sub` / 確立前の `MoqtClient` が共有する)。
 
 use shiguredo_moqt::error::{
-    MessageError, SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN,
+    MessageError, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
+    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_MESSAGE,
     SESSION_PROTOCOL_VIOLATION,
 };
 
@@ -36,9 +37,10 @@ pub fn data_stream_termination_code(error: &MessageError) -> Option<u64> {
 /// encode / decode 失敗を閉じる終了コード
 ///
 /// library の data plane (`src/session/data.rs` の `session_error_from_data_message`) と
-/// 異なるのは `MalformedAuthToken` の写像 (0x16) だけである。draft-ietf-moq-transport-22
-/// §8.3 (Key-Value-Pair Structure) が MUST を定める書式違反は KEY_VALUE_FORMATTING_ERROR
-/// (0x6)、それ以外は両者とも PROTOCOL_VIOLATION (0x3) で閉じる。
+/// 異なるのは `MalformedAuthToken` の写像 (0x16) と、制御メッセージ長の写像
+/// (`FieldLengthExceeded` → 0x401 / `MalformedMessage` → 0x300 / `InvalidField` → 0x301)
+/// である。draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) が MUST を定める
+/// 書式違反は KEY_VALUE_FORMATTING_ERROR (0x6)、それ以外は PROTOCOL_VIOLATION (0x3) で閉じる。
 ///
 /// Request ID を持つ request メッセージの不正トークンは、library のセッションが
 /// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否するためここには届かない。
@@ -54,6 +56,12 @@ pub fn session_error_code(error: &MessageError) -> u64 {
     match error {
         MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
         MessageError::MalformedAuthToken(_) => SESSION_MALFORMED_AUTH_TOKEN,
+        // draft-ietf-moq-transport-23 §9 (Control Messages): 受信上限を超える Length の宣言は
+        // FIELD_LENGTH_EXCEEDED、本文長の不一致は MALFORMED_MESSAGE で閉じる (MUST)。
+        // §9.1.8 (MAX_CONTROL_MESSAGE_SIZE) の最小値違反は INVALID_FIELD (§12.2)。
+        MessageError::FieldLengthExceeded(_) => SESSION_FIELD_LENGTH_EXCEEDED,
+        MessageError::MalformedMessage(_) => SESSION_MALFORMED_MESSAGE,
+        MessageError::InvalidField(_) => SESSION_INVALID_FIELD,
         _ => SESSION_PROTOCOL_VIOLATION,
     }
 }
@@ -283,10 +291,10 @@ mod tests {
     #[test]
     fn track_property_length_error_maps_to_key_value_formatting_error() {
         use shiguredo_moqt::message::ControlMessage;
-        // SUBSCRIBE_OK (0x04), Length = 7, Track Alias = 0, Parameters: count=0,
+        // SUBSCRIBE_OK (0x04), Length = 7 (vi64), Track Alias = 0, Parameters: count=0,
         // Track Properties: delta=0x0B (既知の奇数型 IMMUTABLE_PROPERTIES) /
         // Length=10 / 実体 3 バイト
-        let wire = [0x04, 0x00, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
+        let wire = [0x04, 0x07, 0x00, 0x00, 0x0B, 0x0A, 0x01, 0x02, 0x03];
         let err = ControlMessage::decode(&wire)
             .expect_err("Track Properties の宣言長超過は decode に失敗すること");
         assert_eq!(
@@ -316,6 +324,23 @@ mod tests {
             session_error_code(&MessageError::MalformedAuthToken("test malformed token")),
             SESSION_MALFORMED_AUTH_TOKEN,
             "不正トークンは MALFORMED_AUTH_TOKEN (0x16) であること"
+        );
+        assert_eq!(
+            session_error_code(&MessageError::FieldLengthExceeded(
+                "test field length exceeded"
+            )),
+            SESSION_FIELD_LENGTH_EXCEEDED,
+            "上限超過は FIELD_LENGTH_EXCEEDED (0x401) であること"
+        );
+        assert_eq!(
+            session_error_code(&MessageError::MalformedMessage("test malformed message")),
+            SESSION_MALFORMED_MESSAGE,
+            "本文長の不一致は MALFORMED_MESSAGE (0x300) であること"
+        );
+        assert_eq!(
+            session_error_code(&MessageError::InvalidField("test invalid field")),
+            SESSION_INVALID_FIELD,
+            "フィールド値の範囲外は INVALID_FIELD (0x301) であること"
         );
         assert_eq!(
             session_error_code(&MessageError::ProtocolViolation("test violation")),

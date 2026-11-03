@@ -1,3 +1,5 @@
+use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 use shiguredo_moqt::{
     message::ControlMessage,
     message::Fetch,
@@ -479,7 +481,9 @@ fn roundtrip() -> noprop::TestResult {
     let mut runner = test_runner()?;
     runner.run(256, |ctx| {
         let msg = sample_control_message(ctx);
-        let encoded = msg.encode().expect("正当なテスト入力の encode は成功する");
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当なテスト入力の encode は成功する");
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("テストフィクスチャの前提条件を満たす");
         assert_eq!(consumed, encoded.len());
@@ -578,7 +582,7 @@ fn decode_treats_trailing_bytes_as_next_frame() -> noprop::TestResult {
         let extra_len = noprop::sample_usize_in(ctx, 1..=16);
         let extra = noprop::sample_bytes_vec(ctx, extra_len);
         let frame = msg
-            .encode()
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
             .expect("sample_control_message は常に encode 可能");
         let frame_len = frame.len();
         let mut buf = frame;
@@ -591,6 +595,48 @@ fn decode_treats_trailing_bytes_as_next_frame() -> noprop::TestResult {
         // 消費バイト数はフレーム長と一致し、末尾余剰は消費されない
         assert_eq!(consumed, frame_len);
         assert!(consumed < buf.len());
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 本文長が peer の MAX_CONTROL_MESSAGE_SIZE 以下なら encode でき、超えるなら拒否される
+///
+/// draft-ietf-moq-transport-23 §9 (Control Messages): "An endpoint MUST NOT send a control
+/// message with a length larger than the peer's MAX_CONTROL_MESSAGE_SIZE." (MUST NOT)
+/// encode は本文を組み立てた後に上限を判定するため、境界 (上限ちょうど / 上限 - 1) で
+/// 結果が変わることを固定する。
+#[test]
+fn encode_respects_max_control_message_size() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let msg = sample_control_message(ctx);
+        // 上限を課さずにエンコードして、フレーム長と本文長を得る
+        let full = msg.encode(u64::MAX).expect("上限なしの encode は成功する");
+        let (_, type_len) = varint::decode(&full).expect("Type を読める");
+        let (body_len, length_len) = varint::decode(&full[type_len..]).expect("Length を読める");
+        assert_eq!(
+            type_len + length_len + body_len as usize,
+            full.len(),
+            "Length は本文長と一致すること"
+        );
+
+        // 上限ちょうどの本文は encode できる
+        let at_limit = msg
+            .encode(body_len)
+            .expect("上限ちょうどの本文は encode できる");
+        assert_eq!(at_limit, full, "上限ちょうどでもバイト列は変わらないこと");
+
+        // 本文があるメッセージは上限 - 1 で拒否される
+        if body_len > 0 {
+            let err = msg
+                .encode(body_len - 1)
+                .expect_err("上限を 1 バイト超える本文は拒否されること");
+            assert!(
+                matches!(err, MessageError::FieldLengthExceeded(_)),
+                "FieldLengthExceeded を期待したが {err:?} になった"
+            );
+        }
         Ok(())
     })?;
     Ok(())

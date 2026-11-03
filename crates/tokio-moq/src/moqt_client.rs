@@ -392,10 +392,18 @@ pub struct ControlStream {
 }
 
 impl ControlStream {
-    pub fn new(stream: RecvStream) -> Self {
+    /// 受信ストリームと自側の受信上限からリーダーを作る
+    ///
+    /// `max_control_message_size` は `Session::local_max_control_message_size` の値
+    /// (自側が SETUP で広告した `MAX_CONTROL_MESSAGE_SIZE`) を渡す。宣言された Length が
+    /// この値を超えるメッセージは本文を待たずに FIELD_LENGTH_EXCEEDED として失敗する
+    /// (draft-ietf-moq-transport-23 §9 (Control Messages))。transport のフロー制御窓は
+    /// ヘッダ込みでこの値以上の 1 メッセージを受け取れる必要がある (§15.5
+    /// (Resource Exhaustion))。
+    pub fn new(stream: RecvStream, max_control_message_size: u64) -> Self {
         Self {
             stream,
-            decoder: MessageDecoder::new(),
+            decoder: MessageDecoder::new(max_control_message_size),
         }
     }
 
@@ -749,6 +757,12 @@ pub struct MoqtClient {
     /// アプリはこの変化を観測し、MOQT の GOAWAY より先に移行を始められる。
     wt_session_state: Option<watch::Receiver<crate::webtransport::WtSessionState>>,
     session: Arc<StdMutex<Session>>,
+    /// 自側が受信を許容する制御メッセージ本文の最大長 (バイト)
+    ///
+    /// SETUP 交換時に `Session::local_max_control_message_size` から確定する
+    /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。request stream 用の
+    /// [`ControlStream`] を作るたびに Session のロックを取らずに済むよう保持する。
+    max_control_message_size: u64,
     control_send: SendStream,
     handle: StreamHandle,
     bidi_sends: HashMap<u64, SendStream>,
@@ -997,6 +1011,7 @@ fn spawn_bidi_recv_task(
 fn spawn_peer_bidi_accept_task(
     mut acceptor: BidiStreamAcceptor,
     tx: mpsc::Sender<BidiMessage>,
+    max_control_message_size: u64,
     task_monitor: &tokio_metrics::TaskMonitor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(task_monitor.clone().instrument(async move {
@@ -1012,7 +1027,7 @@ fn spawn_peer_bidi_accept_task(
             let (send, recv) = pair;
             let tx = tx.clone();
             tokio::spawn(async move {
-                let mut stream = ControlStream::new(recv);
+                let mut stream = ControlStream::new(recv, max_control_message_size);
                 // 先頭メッセージが request の開始メッセージである
                 let first = match stream.recv_message().await {
                     Ok(StreamRead::Value(message)) => message,
@@ -1265,7 +1280,12 @@ impl MoqtClient {
 
         // SETUP を取り出して送信する
         let setup_msg = pop_send_control(&mut session)?;
-        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        send_control_stream_setup(
+            &mut control_send,
+            &setup_msg,
+            session.peer_control_message_size_limit().bytes(),
+        )
+        .await?;
         tracing::info!("Sent SETUP message");
 
         // peer uni stream を受信して stream type を検証
@@ -1276,7 +1296,10 @@ impl MoqtClient {
             .ok_or_else(|| {
                 TransportError::Quic("connection closed before control stream".into())
             })?;
-        let mut control_recv = ControlStream::new(RecvStream::Quic(recv_stream));
+        let mut control_recv = ControlStream::new(
+            RecvStream::Quic(recv_stream),
+            session.local_max_control_message_size(),
+        );
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
@@ -1340,7 +1363,12 @@ impl MoqtClient {
 
         // SETUP を取り出して送信する
         let setup_msg = pop_send_control(&mut session)?;
-        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        send_control_stream_setup(
+            &mut control_send,
+            &setup_msg,
+            session.peer_control_message_size_limit().bytes(),
+        )
+        .await?;
         tracing::info!("Sent SETUP message");
 
         // peer uni stream の先頭が制御ストリームである。受理は接続を共有した別タスクが
@@ -1349,7 +1377,8 @@ impl MoqtClient {
             .recv()
             .await
             .ok_or(TransportError::ConnectionClosed)?;
-        let mut control_recv = ControlStream::new(recv_stream);
+        let mut control_recv =
+            ControlStream::new(recv_stream, session.local_max_control_message_size());
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
@@ -1422,12 +1451,20 @@ impl MoqtClient {
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
-        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        send_control_stream_setup(
+            &mut control_send,
+            &setup_msg,
+            session.peer_control_message_size_limit().bytes(),
+        )
+        .await?;
         tracing::info!("Sent SETUP message");
 
         // 制御ストリームを受け取る順序は `take_uni_receiver` より前である (上記)。
         // 受け取ったストリームは acceptor へ流さず、ここで制御ストリームとして読む
-        let mut control_recv = ControlStream::new(RecvStream::WtH3(wt_recv));
+        let mut control_recv = ControlStream::new(
+            RecvStream::WtH3(wt_recv),
+            session.local_max_control_message_size(),
+        );
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
@@ -1505,14 +1542,22 @@ impl MoqtClient {
         let mut session = Session::new_client(MoqtTransport::WebTransport, options)?;
 
         let setup_msg = pop_send_control(&mut session)?;
-        send_control_stream_setup(&mut control_send, &setup_msg).await?;
+        send_control_stream_setup(
+            &mut control_send,
+            &setup_msg,
+            session.peer_control_message_size_limit().bytes(),
+        )
+        .await?;
         tracing::info!("Sent SETUP message");
 
         let wt_recv = {
             let mut s = shared.lock().await;
             s.accept_uni_stream().await?
         };
-        let mut control_recv = ControlStream::new(RecvStream::WtH2(wt_recv));
+        let mut control_recv = ControlStream::new(
+            RecvStream::WtH2(wt_recv),
+            session.local_max_control_message_size(),
+        );
         recv_control_stream_type(&mut session, &handle, &mut control_recv).await?;
 
         let client = Self::finish_handshake(
@@ -1610,13 +1655,20 @@ impl MoqtClient {
 
         let session = Arc::new(StdMutex::new(session));
 
+        // 自側の受信上限は SETUP 交換で確定する。request stream 用の decoder も同じ上限を使う
+        let max_control_message_size = lock_session(&session).local_max_control_message_size();
+
         // 制御 stream の受信を task 化
         let (control_rx, _) = spawn_control_recv_task(control_recv, task_monitor);
         let (bidi_tx, bidi_rx) = mpsc::channel::<BidiMessage>(64);
 
         // peer (relay) 起動の request stream の受理を task 化
-        let _peer_bidi_task =
-            spawn_peer_bidi_accept_task(bidi_acceptor, bidi_tx.clone(), task_monitor);
+        let _peer_bidi_task = spawn_peer_bidi_accept_task(
+            bidi_acceptor,
+            bidi_tx.clone(),
+            max_control_message_size,
+            task_monitor,
+        );
 
         let task_monitor = task_monitor.clone();
 
@@ -1628,6 +1680,7 @@ impl MoqtClient {
             tick_epoch: Instant::now(),
             wt_session_state,
             session,
+            max_control_message_size,
             control_send,
             handle,
             bidi_sends: HashMap::new(),
@@ -2820,7 +2873,7 @@ impl MoqtClient {
     /// (draft-ietf-moq-transport-22 §9.5.1 (Updating Subscriptions) など) を果たせない。
     async fn drain_events(&mut self) -> Result<()> {
         loop {
-            let (event, forgotten) = {
+            let (event, forgotten, peer_max_control_message_size) = {
                 let mut session = lock_session(&self.session);
                 let event = session.poll_event();
                 // キューが空である観測と、終端済み request の回収の判定を同一のロック保持で行う。
@@ -2834,7 +2887,10 @@ impl MoqtClient {
                 } else {
                     Vec::new()
                 };
-                (event, forgotten)
+                // 送信上限 (peer の MAX_CONTROL_MESSAGE_SIZE) は同一ロック保持で読む。
+                // SETUP 交換が終わっていれば以降の値は変わらない。
+                let limit = session.peer_control_message_size_limit().bytes();
+                (event, forgotten, limit)
             };
             // 送信半の後始末はロックを解放してから行う
             self.finish_forgotten(forgotten).await;
@@ -2843,20 +2899,26 @@ impl MoqtClient {
             };
             match event {
                 SessionEvent::SendControl(msg) => {
-                    self.control_send.send(Bytes::from(msg.encode()?)).await?;
+                    // encode の段階で peer の MAX_CONTROL_MESSAGE_SIZE を検証し、
+                    // 超過時はワイヤへ書き出す前に失敗する
+                    self.control_send
+                        .send(Bytes::from(msg.encode(peer_max_control_message_size)?))
+                        .await?;
                 }
                 SessionEvent::SendRequest {
                     request_id,
                     message,
                 } => {
                     // encode はストリームを開く前に行う (encode 失敗でストリームを開かない)
-                    let bytes = Bytes::from(message.encode()?);
+                    let bytes =
+                        Bytes::from(message.encode(peer_max_control_message_size)?);
                     let (mut send, recv) = self.handle.open_bidi_stream().await?;
                     // 送信の前に受信タスクと STOP_SENDING のチャネルを整える。送信中に
                     // future が破棄されても受信タスクは起動済みになる
                     let (stop_tx, stop_rx) = mpsc::channel(1);
                     self.bidi_stop_txs.insert(request_id, stop_tx);
-                    let reader = ControlStream::new(recv);
+                    let reader =
+                        ControlStream::new(recv, self.max_control_message_size);
                     spawn_bidi_recv_task(
                         request_id,
                         reader,
@@ -2894,7 +2956,10 @@ impl MoqtClient {
                                 .bidi_sends
                                 .get_mut(&request_id)
                                 .expect("the ledger entry is present");
-                            send.send(Bytes::from(message.encode()?)).await?;
+                            send.send(Bytes::from(
+                                message.encode(peer_max_control_message_size)?,
+                            ))
+                            .await?;
                             if fin {
                                 // FIN は必須メッセージを送り終えてから送る
                                 // (draft-ietf-moq-transport-22 §6.4.2.2)
@@ -3171,12 +3236,22 @@ fn pop_send_control(session: &mut Session) -> Result<ControlMessage> {
     }
 }
 
+/// 自側の SETUP を制御ストリームへ送る
+///
+/// `max_control_message_size` は peer の `MAX_CONTROL_MESSAGE_SIZE`
+/// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。peer の SETUP を
+/// 受信する前は既定値 65535 が適用されるため、呼び出し側は
+/// `Session::peer_control_message_size_limit().bytes()` を渡す。
 async fn send_control_stream_setup(
     control_send: &mut SendStream,
     setup: &ControlMessage,
+    max_control_message_size: u64,
 ) -> Result<()> {
     control_send
-        .send(Bytes::from(encode_control_stream_setup(setup)?))
+        .send(Bytes::from(encode_control_stream_setup(
+            setup,
+            max_control_message_size,
+        )?))
         .await?;
     Ok(())
 }

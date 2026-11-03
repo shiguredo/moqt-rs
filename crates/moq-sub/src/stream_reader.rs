@@ -3,6 +3,7 @@
 //! `ControlStream` / `StreamRead` は `tokio_moq::moqt_client` が提供する。
 
 use shiguredo_moqt::decoder::MessageDecoder;
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 use shiguredo_moqt::stream::{DataStreamType, classify_data_stream_type};
 
 use crate::error::Result;
@@ -28,7 +29,9 @@ pub async fn peek_stream_type(
     stream: &mut transport::RecvStream,
     buf: &mut Vec<u8>,
 ) -> Result<StreamRead<(u64, StreamType)>> {
-    let mut decoder = MessageDecoder::new();
+    // ここでは stream type の varint しか読まないが、decoder は制御メッセージの
+    // 受信上限を要求するため既定値 (65535) を渡す
+    let mut decoder = MessageDecoder::new(DEFAULT_MAX_CONTROL_MESSAGE_SIZE);
     loop {
         if let Some(stream_type) = decoder.try_decode_varint()? {
             let stream_kind = match classify_data_stream_type(stream_type) {

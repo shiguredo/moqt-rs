@@ -4,9 +4,10 @@
 //! 実際の公開 API 検証は `test_session/` 配下の責務別サブモジュールへ分割する。
 
 use shiguredo_moqt::error::{
-    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_INVALID_AUTHORITY, SESSION_INVALID_PATH,
-    SESSION_INVALID_REQUEST_ID, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_PATH,
-    SESSION_NO_ERROR, SESSION_PROTOCOL_VIOLATION, STREAM_DELIVERY_TIMEOUT, STREAM_INTERNAL_ERROR,
+    SESSION_DUPLICATE_TRACK_ALIAS, SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD,
+    SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID, SESSION_MALFORMED_AUTHORITY,
+    SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH, SESSION_NO_ERROR,
+    SESSION_PROTOCOL_VIOLATION, STREAM_DELIVERY_TIMEOUT, STREAM_INTERNAL_ERROR,
 };
 use shiguredo_moqt::loc::{LocProperties, LocProperty, LocPropertyValue, PROP_TIMESTAMP};
 use shiguredo_moqt::message::{ControlMessage, Goaway, Setup, common::TrackNamespace};
@@ -18,7 +19,9 @@ use shiguredo_moqt::message_parameter::{
 use shiguredo_moqt::object_properties::{
     ObjectProperties, ObjectProperty, ObjectPropertyValue, PROP_PRIOR_OBJECT_ID_GAP,
 };
-use shiguredo_moqt::parameter::{SetupOption, SetupOptionValue, SetupOptions};
+use shiguredo_moqt::parameter::{
+    DEFAULT_MAX_CONTROL_MESSAGE_SIZE, SetupOption, SetupOptionValue, SetupOptions,
+};
 use shiguredo_moqt::session::{
     core::PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
     types::{
@@ -30,10 +33,10 @@ use shiguredo_moqt::stream::{FETCH_HEADER_TYPE, subgroup::SubgroupIdMode};
 use shiguredo_moqt::track_properties::{PROP_OBJECT_DELIVERY_TIMEOUT, TrackProperties};
 use shiguredo_moqt::{
     message::common::Location, session::core::Session, session::types::DataStreamId,
-    session::types::RequestStreamEnd, session::types::SessionEvent, session::types::SessionState,
-    session::types::Transport, stream::datagram::ObjectDatagram,
-    stream::decoder::DecodedSubgroupObject, stream::fetch::FetchHeader,
-    stream::subgroup::SubgroupHeader,
+    session::types::PeerControlMessageSizeLimit, session::types::RequestStreamEnd,
+    session::types::SessionEvent, session::types::SessionState, session::types::Transport,
+    stream::datagram::ObjectDatagram, stream::decoder::DecodedSubgroupObject,
+    stream::fetch::FetchHeader, stream::subgroup::SubgroupHeader,
 };
 
 /// 発行されたイベント列から最初の SendControl を取り出す

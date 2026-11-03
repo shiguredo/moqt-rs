@@ -1,3 +1,4 @@
+use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 use shiguredo_moqt::{
     error::MessageError,
     message::common::Location,
@@ -597,7 +598,10 @@ mod accessors {
             parameters: params,
         });
         assert!(
-            matches!(subscribe.encode(), Err(MessageError::ProtocolViolation(_))),
+            matches!(
+                subscribe.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
+                Err(MessageError::ProtocolViolation(_))
+            ),
             "FILL_TIMEOUT は SUBSCRIBE で拒否される"
         );
     }

@@ -1,8 +1,10 @@
-//! Setup Options エンコーディング (draft-ietf-moq-transport-22 §9.1 (SETUP))
+//! Setup Options エンコーディング (draft-ietf-moq-transport-23 §9.1 (SETUP))
 //!
 //! Setup Options は Key-Value-Pair 形式で、カウントプレフィックスなし。
 //! ペイロード末尾まで KVP を読む。
 //! 型番号 (type) が偶数の場合は値が varint、奇数の場合は長さ付きバイト列。
+//! 例外として MAX_CONTROL_MESSAGE_SIZE (0x09) は奇数型だが値が varint である
+//! (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
 use crate::{
     error::MessageError,
     message_parameter::{AuthorizationToken, validate_auth_token_uniqueness},
@@ -10,7 +12,20 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-/// Setup Option Type 群 (draft-ietf-moq-transport-22 §16.4 (Setup Options))
+/// MAX_CONTROL_MESSAGE_SIZE の既定値 (65535 バイト)
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "If not present, the default
+/// value is 65535." peer の SETUP を受信するまでは、SETUP 自体を含めてこの値を使う。
+/// 将来 draft 改定で値が変わる可能性がある。
+pub const DEFAULT_MAX_CONTROL_MESSAGE_SIZE: u64 = 65_535;
+
+/// MAX_CONTROL_MESSAGE_SIZE に設定できる最小値 (65535 バイト)
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): "The value ... MUST be at
+/// least 65535." 将来 draft 改定で値が変わる可能性がある。
+pub const MIN_MAX_CONTROL_MESSAGE_SIZE: u64 = 65_535;
+
+/// Setup Option Type 群 (draft-ietf-moq-transport-23 §16.4 (Setup Options))
 ///
 /// `PARAM_*` (Message Parameter Type) と同水準の公開定数。利用者が draft の
 /// 生数値をベタ書きしなくて済むようにする。値は §16.4 のレジストリ表と 1 対 1 に対応する。
@@ -29,6 +44,11 @@ pub const SETUP_OPTION_MAX_FILTER_RANGES: u64 = 0x06;
 pub const SETUP_OPTION_MOQT_IMPLEMENTATION: u64 = 0x07;
 /// MAX_REQUEST_UPDATES (0x08)
 pub const SETUP_OPTION_MAX_REQUEST_UPDATES: u64 = 0x08;
+/// MAX_CONTROL_MESSAGE_SIZE (0x09)
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)。値は varint であり、
+/// 型番号が奇数でも長さ付きバイト列ではない。
+pub const SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE: u64 = 0x09;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupUriValidationError {
@@ -352,11 +372,15 @@ fn validate_authority(value: &[u8]) -> Result<(), SetupUriValidationError> {
 
 /// Setup Option 値
 ///
-/// - `VarInt`: 型番号が偶数の Setup Option
+/// - `VarInt`: 型番号が偶数の Setup Option、および MAX_CONTROL_MESSAGE_SIZE (0x09)
 /// - `Bytes`: 型番号が奇数の Setup Option (最大 65535 バイト)
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetupOptionValue {
-    /// 偶数型番号の Setup Option 値 (varint)
+    /// varint の Setup Option 値
+    ///
+    /// 偶数型番号の Setup Option と、奇数型番号でも値が varint と定義された
+    /// MAX_CONTROL_MESSAGE_SIZE (0x09) が使う
+    /// (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))。
     VarInt(u64),
     /// 奇数型番号の Setup Option 値 (バイト列、最大 65535 バイト)
     Bytes(Vec<u8>),
@@ -417,6 +441,8 @@ impl SetupOptions {
     /// # Errors
     ///
     /// - 同一 Option Type の重複、型と値形式の不整合: `InvalidParameter`
+    /// - MAX_CONTROL_MESSAGE_SIZE が 65535 未満
+    ///   (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)): `InvalidField`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS): `ProtocolViolation`
     /// - 値長が 2^16-1 バイトを超える Setup Option 値 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
@@ -454,14 +480,28 @@ impl SetupOptions {
             // variant は受理しない (decode が常に AuthorizationToken を返すこととの対称のため)。
             match (&option.value, option.option_type) {
                 (SetupOptionValue::VarInt(_), t) if t % 2 == 0 => {}
+                // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+                // 型番号 0x09 は奇数だが値は varint である
+                (SetupOptionValue::VarInt(_), SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE) => {}
                 (SetupOptionValue::AuthorizationToken(_), SETUP_OPTION_AUTHORIZATION_TOKEN) => {}
                 (SetupOptionValue::Bytes(_), t)
-                    if t % 2 == 1 && t != SETUP_OPTION_AUTHORIZATION_TOKEN => {}
+                    if t % 2 == 1
+                        && t != SETUP_OPTION_AUTHORIZATION_TOKEN
+                        && t != SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE => {}
                 _ => return Err(MessageError::InvalidParameter),
             }
             crate::kvp::encode_delta_key(prev_type, option.option_type, buf);
             match &option.value {
                 SetupOptionValue::VarInt(v) => {
+                    // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+                    // "The value ... MUST be at least 65535." 送信側でも最小値を守る
+                    if option.option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE
+                        && *v < MIN_MAX_CONTROL_MESSAGE_SIZE
+                    {
+                        return Err(MessageError::InvalidField(
+                            "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
+                        ));
+                    }
                     varint::encode(*v, buf);
                 }
                 SetupOptionValue::Bytes(bytes) => {
@@ -511,6 +551,8 @@ impl SetupOptions {
     ///   値長 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))、既知の Setup Option
     ///   型の重複、KVP Type の delta オーバーフロー: `ProtocolViolation`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
+    /// - MAX_CONTROL_MESSAGE_SIZE が 65535 未満
+    ///   (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)): `InvalidField`
     /// - AUTHORIZATION_TOKEN の Token 構造が不正な場合 (未知の Alias Type など):
     ///   `KeyValueFormattingError`
     /// - 奇数型の値で Length varint は読めるが宣言長が残りバッファを超える場合 (Type を理解した
@@ -526,7 +568,18 @@ impl SetupOptions {
             // 重複検出は post-loop で行うため delta は使わない)
             let (option_type, _) = crate::kvp::decode_delta_key(prev_type, buf, &mut pos)?;
 
-            let value = if option_type % 2 == 0 {
+            let value = if option_type == SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE {
+                // draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE):
+                // 型番号 0x09 は奇数だが、値は長さ付きバイト列ではなく varint である
+                let (v, n) = varint::decode(&buf[pos..])?;
+                pos += n;
+                if v < MIN_MAX_CONTROL_MESSAGE_SIZE {
+                    return Err(MessageError::InvalidField(
+                        "MAX_CONTROL_MESSAGE_SIZE is less than 65535",
+                    ));
+                }
+                SetupOptionValue::VarInt(v)
+            } else if option_type % 2 == 0 {
                 // 偶数型: varint 値
                 let (v, n) = varint::decode(&buf[pos..])?;
                 pos += n;
@@ -574,7 +627,8 @@ impl SetupOptions {
         // AUTHORIZATION_TOKEN (0x03) は複数回出現が許可されている
         // 未知オプションの重複は許容する
         // デルタエンコーディングにより options は type 昇順で並んでいる
-        // PATH, MAX_AUTH_TOKEN_CACHE_SIZE, AUTHORITY, MAX_FILTER_RANGES, MOQT_IMPLEMENTATION, MAX_REQUEST_UPDATES
+        // PATH, MAX_AUTH_TOKEN_CACHE_SIZE, AUTHORITY, MAX_FILTER_RANGES, MOQT_IMPLEMENTATION,
+        // MAX_REQUEST_UPDATES, MAX_CONTROL_MESSAGE_SIZE
         let known_types: &[u64] = &[
             SETUP_OPTION_PATH,
             SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE,
@@ -582,6 +636,7 @@ impl SetupOptions {
             SETUP_OPTION_MAX_FILTER_RANGES,
             SETUP_OPTION_MOQT_IMPLEMENTATION,
             SETUP_OPTION_MAX_REQUEST_UPDATES,
+            SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
         ];
         for window in options.windows(2) {
             if window[0].option_type == window[1].option_type
@@ -653,6 +708,19 @@ impl SetupOptions {
     /// デフォルト値 0 は Range Filter の送信を禁止する。
     pub fn max_filter_ranges(&self) -> Option<u64> {
         self.find_varint(SETUP_OPTION_MAX_FILTER_RANGES)
+    }
+
+    /// SETUP Option: MAX_CONTROL_MESSAGE_SIZE
+    /// (type 0x09, draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE))
+    ///
+    /// 自側が受信を許容する制御メッセージの最大長 (バイト)。省略時は
+    /// [`DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] (65535) を適用する。値は 65535 以上でなければ
+    /// ならない (encode / decode が `InvalidField` で拒否する)。
+    /// 大きな値を受信上限に設定する場合、transport のストリームごとのフロー制御窓を
+    /// ヘッダ込みの 1 メッセージ以上に設定すること
+    /// (draft-ietf-moq-transport-23 §15.5 (Resource Exhaustion))。
+    pub fn max_control_message_size(&self) -> Option<u64> {
+        self.find_varint(SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE)
     }
 
     /// 偶数型 Setup Option から varint 値を取得する

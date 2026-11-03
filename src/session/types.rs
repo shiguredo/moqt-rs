@@ -55,6 +55,36 @@ pub enum SessionState {
     Closed,
 }
 
+/// peer が広告した `MAX_CONTROL_MESSAGE_SIZE` の状態
+///
+/// 自側が制御メッセージを送るときの上限 (送信上限) を表す。
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 既定値は 65535 で、
+/// "Until an endpoint receives the peer's SETUP, it uses the default value, including for
+/// SETUP itself."
+///
+/// 省略 (peer が option を送らなかった) と交渉前 (peer SETUP 未受信) は同じ 65535 だが、
+/// 意味が異なるため別の variant として区別する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerControlMessageSizeLimit {
+    /// peer の SETUP を受信していない。既定値 [`crate::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] を適用する
+    BeforeSetup,
+    /// peer の SETUP を受信し、MAX_CONTROL_MESSAGE_SIZE を省略していた。既定値
+    /// [`crate::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE`] を適用する
+    Omitted,
+    /// peer の SETUP が MAX_CONTROL_MESSAGE_SIZE で広告した値
+    Advertised(u64),
+}
+
+impl PeerControlMessageSizeLimit {
+    /// 送信に適用する上限値 (バイト) を返す
+    pub fn bytes(self) -> u64 {
+        match self {
+            Self::BeforeSetup | Self::Omitted => crate::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE,
+            Self::Advertised(value) => value,
+        }
+    }
+}
+
 /// セッション終了エラー (draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes))
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionError {

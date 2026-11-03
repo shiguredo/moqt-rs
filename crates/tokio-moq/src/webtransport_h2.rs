@@ -1897,6 +1897,28 @@ mod tests {
         );
     }
 
+    /// 既定のフロー制御窓が制御メッセージ 1 通分を運べること
+    ///
+    /// draft-ietf-moq-transport-23 §15.5 (Resource Exhaustion): 制御メッセージ全体を
+    /// バッファする端点は、ストリームごとに 1 メッセージ分のフロー制御を peer へ与えないと
+    /// deadlock する。既定の `WtConfig` の単方向ストリーム窓が、既定の
+    /// `MAX_CONTROL_MESSAGE_SIZE` (65535 バイト) とヘッダ (Type + Length の最大 18 バイト) を
+    /// 満たすことを固定する。QUIC 直接接続と QMux は 16 MiB の窓を使うため、最も狭い
+    /// WebTransport over HTTP/2 で検証する。
+    #[test]
+    fn wt_config_stream_window_covers_control_message_limit() {
+        // Type と Length はそれぞれ最大 9 バイトの vi64 である
+        const CONTROL_MESSAGE_HEADER_MAX: u64 = 18;
+        let config = WtConfig::default();
+        assert!(
+            config.initial_max_stream_data_uni
+                >= shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE
+                    + CONTROL_MESSAGE_HEADER_MAX,
+            "単方向ストリーム窓が制御メッセージ 1 通分に足りない: {}",
+            config.initial_max_stream_data_uni
+        );
+    }
+
     /// ClientConfig のビルダーが値を設定する
     #[test]
     fn client_config_builders_set_fields() {

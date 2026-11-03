@@ -9,8 +9,9 @@ use shiguredo_moqt::{
 fn setup_option_type_constants_match_registry() {
     use shiguredo_moqt::parameter::{
         SETUP_OPTION_AUTHORITY, SETUP_OPTION_AUTHORIZATION_TOKEN,
-        SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, SETUP_OPTION_MAX_FILTER_RANGES,
-        SETUP_OPTION_MAX_REQUEST_UPDATES, SETUP_OPTION_MOQT_IMPLEMENTATION, SETUP_OPTION_PATH,
+        SETUP_OPTION_MAX_AUTH_TOKEN_CACHE_SIZE, SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+        SETUP_OPTION_MAX_FILTER_RANGES, SETUP_OPTION_MAX_REQUEST_UPDATES,
+        SETUP_OPTION_MOQT_IMPLEMENTATION, SETUP_OPTION_PATH,
     };
     assert_eq!(SETUP_OPTION_PATH, 0x01);
     assert_eq!(SETUP_OPTION_AUTHORIZATION_TOKEN, 0x03);
@@ -19,6 +20,237 @@ fn setup_option_type_constants_match_registry() {
     assert_eq!(SETUP_OPTION_MAX_FILTER_RANGES, 0x06);
     assert_eq!(SETUP_OPTION_MOQT_IMPLEMENTATION, 0x07);
     assert_eq!(SETUP_OPTION_MAX_REQUEST_UPDATES, 0x08);
+    assert_eq!(SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, 0x09);
+}
+
+/// MAX_CONTROL_MESSAGE_SIZE (Option Type 0x09) のエンコード / デコード
+///
+/// draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE): 型番号は奇数だが値は
+/// varint であり、最小値は 65535、省略時の既定値も 65535 である。
+mod max_control_message_size {
+    use super::*;
+    use shiguredo_moqt::parameter::{
+        DEFAULT_MAX_CONTROL_MESSAGE_SIZE, MIN_MAX_CONTROL_MESSAGE_SIZE,
+        SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, SETUP_OPTION_PATH,
+    };
+
+    /// MAX_CONTROL_MESSAGE_SIZE を持つ SetupOptions を作る
+    fn options_with(value: u64) -> SetupOptions {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+            value: SetupOptionValue::VarInt(value),
+        });
+        options
+    }
+
+    /// 既定値と最小値が仕様 (65535) と一致する
+    #[test]
+    fn default_and_minimum_match_specification() {
+        assert_eq!(DEFAULT_MAX_CONTROL_MESSAGE_SIZE, 65_535);
+        assert_eq!(MIN_MAX_CONTROL_MESSAGE_SIZE, 65_535);
+    }
+
+    /// option を省略した場合に `max_control_message_size` が None を返す
+    ///
+    /// 省略時の既定値の適用は Session 層の責務であり、codec は省略をそのまま表す。
+    #[test]
+    fn omitted_option_returns_none() {
+        assert_eq!(SetupOptions::new().max_control_message_size(), None);
+    }
+
+    /// 型番号 0x09 は長さ付きバイト列ではなく varint で書かれる
+    ///
+    /// ワイヤは delta type (0x09) + varint 値の 4 バイトだけであり、長さプレフィックスを
+    /// 持たない。65535 は 3 バイトの vi64 (0xC0 0xFF 0xFF) で表される。
+    #[test]
+    fn wire_format_is_varint_without_length() {
+        let mut buf = Vec::new();
+        options_with(65_535)
+            .encode(&mut buf)
+            .expect("正当なテスト入力の encode は成功する");
+        assert_eq!(
+            buf,
+            vec![0x09, 0xC0, 0xFF, 0xFF],
+            "delta type + 3 バイト vi64 の値であること"
+        );
+
+        let (decoded, consumed) =
+            SetupOptions::decode(&buf).expect("encode した option を decode できること");
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded.max_control_message_size(),
+            Some(65_535),
+            "decode した値を取得できること"
+        );
+    }
+
+    /// 最小値ちょうど (65535) とそれ以上の値はエンコードできる
+    #[test]
+    fn encode_accepts_minimum_and_larger_values() {
+        for value in [65_535u64, 65_536, 1_000_000, u64::MAX] {
+            let mut buf = Vec::new();
+            options_with(value)
+                .encode(&mut buf)
+                .unwrap_or_else(|e| panic!("値 {value} の encode は成功すること: {e}"));
+            let (decoded, _) = SetupOptions::decode(&buf)
+                .unwrap_or_else(|e| panic!("値 {value} の decode は成功すること: {e}"));
+            assert_eq!(
+                decoded.max_control_message_size(),
+                Some(value),
+                "値 {value} が往復すること"
+            );
+        }
+    }
+
+    /// 最小値未満 (65534) はエンコードで拒否される
+    #[test]
+    fn encode_rejects_value_below_minimum() {
+        let mut buf = Vec::new();
+        let err = options_with(65_534)
+            .encode(&mut buf)
+            .expect_err("65535 未満の設定値は encode で拒否されること");
+        assert!(
+            matches!(err, MessageError::InvalidField(_)),
+            "InvalidField を期待したが {err:?} になった"
+        );
+        assert!(
+            buf.is_empty() || buf == [0x09],
+            "拒否した option 以降のバイトを書かないこと: {buf:?}"
+        );
+    }
+
+    /// 最小値未満の値を含むワイヤはデコードで拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の INVALID_FIELD (0x301)。
+    #[test]
+    fn decode_rejects_value_below_minimum() {
+        use shiguredo_moqt::varint;
+        let mut buf = Vec::new();
+        varint::encode(SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE, &mut buf);
+        varint::encode(65_534, &mut buf);
+        let err = SetupOptions::decode(&buf).expect_err("65535 未満の設定値は decode で拒否される");
+        assert!(
+            matches!(err, MessageError::InvalidField(_)),
+            "InvalidField を期待したが {err:?} になった"
+        );
+    }
+
+    /// 型番号 0x09 に Bytes 値を与えると InvalidParameter になる
+    ///
+    /// 0x09 は奇数型だが値は varint であり、長さ付きバイト列は定義されていない。
+    #[test]
+    fn encode_rejects_bytes_value() {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+            value: SetupOptionValue::Bytes(vec![0x00, 0x01]),
+        });
+        let mut buf = Vec::new();
+        let err = options
+            .encode(&mut buf)
+            .expect_err("0x09 の Bytes 値は encode で拒否されること");
+        assert!(
+            matches!(err, MessageError::InvalidParameter),
+            "InvalidParameter を期待したが {err:?} になった"
+        );
+    }
+
+    /// 非最小符号化された値もデコードできる
+    ///
+    /// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers): decode 側は非最小
+    /// エンコーディングをエラーにしない。
+    #[test]
+    fn decode_accepts_non_minimal_value() {
+        // delta type 0x09 + 65535 を 4 バイト vi64 で表す (0xE0 0x00 0xFF 0xFF)
+        let wire = [0x09u8, 0xE0, 0x00, 0xFF, 0xFF];
+        let (decoded, consumed) =
+            SetupOptions::decode(&wire).expect("非最小符号化の値は受理されること");
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.max_control_message_size(), Some(65_535));
+    }
+
+    /// 0x09 の重複は encode / decode の双方で拒否される
+    ///
+    /// draft-ietf-moq-transport-23 §9.1 (SETUP): "Senders MUST NOT repeat the same Option Type
+    /// in a message unless the option definition explicitly allows multiple instances."
+    #[test]
+    fn duplicate_option_is_rejected() {
+        // encode: 同じ型を 2 つ積む
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+            value: SetupOptionValue::VarInt(65_535),
+        });
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+            value: SetupOptionValue::VarInt(65_536),
+        });
+        let mut buf = Vec::new();
+        let err = options
+            .encode(&mut buf)
+            .expect_err("0x09 の重複は encode で拒否されること");
+        assert!(
+            matches!(err, MessageError::InvalidParameter),
+            "InvalidParameter を期待したが {err:?} になった"
+        );
+
+        // decode: 同じ型を delta 0 で 2 つ並べる
+        let mut wire = Vec::new();
+        wire.push(0x09); // delta type = 0x09
+        wire.extend_from_slice(&[0xC0, 0xFF, 0xFF]); // 65535
+        wire.push(0x00); // delta = 0 (同じ型)
+        wire.extend_from_slice(&[0xC0, 0xFF, 0xFF]); // 65535
+        let err = SetupOptions::decode(&wire).expect_err("0x09 の重複は decode で拒否される");
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "既知型の重複は ProtocolViolation であること: {err:?}"
+        );
+    }
+
+    /// 未知の奇数型は従来どおり長さ付きバイト列として扱われる
+    ///
+    /// 0x09 の例外を一般化しすぎていないことを固定する (他の奇数型は Length を持つ)。
+    #[test]
+    fn other_odd_type_keeps_length_prefixed_form() {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: 0x0B,
+            value: SetupOptionValue::Bytes(vec![0xAA, 0xBB]),
+        });
+        let mut buf = Vec::new();
+        options
+            .encode(&mut buf)
+            .expect("未知の奇数型の encode は成功する");
+        // delta type 0x0B + 長さ 2 + 値 2 バイト
+        assert_eq!(buf, vec![0x0B, 0x02, 0xAA, 0xBB]);
+        let (decoded, _) = SetupOptions::decode(&buf).expect("decode できること");
+        // 未知型は保持され、`max_control_message_size` には影響しない
+        assert_eq!(decoded.max_control_message_size(), None);
+    }
+
+    /// PATH と 0x09 を併用しても互いの解釈に影響しない
+    ///
+    /// 0x09 が varint 例外でも、既存の奇数型 (PATH) の長さ付きバイト列の解釈は変わらない。
+    #[test]
+    fn mixed_with_path_option() {
+        let mut options = SetupOptions::new();
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_MAX_CONTROL_MESSAGE_SIZE,
+            value: SetupOptionValue::VarInt(65_535),
+        });
+        options.push(SetupOption {
+            option_type: SETUP_OPTION_PATH,
+            value: SetupOptionValue::Bytes(b"/live".to_vec()),
+        });
+        let mut buf = Vec::new();
+        options
+            .encode(&mut buf)
+            .expect("PATH と 0x09 の併用は encode できること");
+        let (decoded, _) = SetupOptions::decode(&buf).expect("decode できること");
+        assert_eq!(decoded.path(), Some(b"/live".as_slice()));
+        assert_eq!(decoded.max_control_message_size(), Some(65_535));
+    }
 }
 
 mod delta_encoding {
