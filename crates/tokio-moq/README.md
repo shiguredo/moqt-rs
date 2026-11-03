@@ -62,12 +62,12 @@ experimental のため、`--transport` も `connection` も無いときの既定
 
 | `--transport` | `Transport` | 接続経路 | 備考 |
 | --- | --- | --- | --- |
-| `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-22` |
+| `quic` | `Transport::Quic` | QUIC 直接接続 | ALPN は `moqt-23` |
 | `wt-h3` | `Transport::WtH3` | WebTransport over HTTP/3 | QUIC 上の ALPN は `h3`。experimental |
 | `wt-h2` | `Transport::WtH2` | WebTransport over HTTP/2 | TCP+TLS 上の ALPN は `h2`。experimental |
-| `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-22`。UDP が使えない環境向け。experimental |
+| `qmux` | `Transport::Qmux` | QMux | TCP+TLS 上の ALPN は `moqt-23`。UDP が使えない環境向け。experimental |
 
-WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-22`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-22 §6.2)。
+WebTransport 経路では draft-ietf-webtrans-http3-16 / draft-ietf-webtrans-http2-15 に従い、Extended CONNECT でセッションを確立する。MOQT のプロトコル識別子 (`MOQT_PROTOCOL` = `moqt-23`) は `WT-Available-Protocols` で通知し、サーバーが `WT-Protocol` で選択しなければ接続を失敗させる (draft-ietf-moq-transport-23 §6.2)。
 
 WebTransport 経路 (`wt-h3` / `wt-h2`) は experimental として扱う。draft-ietf-webtrans-http3-16 §4.4 は WebTransport のデータストリームを reset するとき、WebTransport ヘッダ以上の Reliable Size を持つ `RESET_STREAM_AT` を使うことを MUST とする。
 ただし example が使う s2n-quic は `RESET_STREAM_AT` を送出できず、`reset_stream_at` transport parameter も広告しない。
@@ -76,7 +76,7 @@ reset を伴う経路 (request stream の cancel や、送信中の subgroup / d
 この経路を選ぶと、接続の前に experimental である旨の警告ログ (英語) が出る。
 
 QMux 経路 (`qmux`) は experimental として扱う。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で QUIC version 1 のストリームと DATAGRAM を多重化する経路で (draft-ietf-quic-qmux-02)、UDP が使えない環境でも MOQT を試せるようにするためのものである。
-QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-22` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
+QMux 自体は暗号化も ALPN のネゴシエーションも行わないため、ALPN は native QUIC と同じ `moqt-23` をこのクレートが張る (`wt-h2` の ALPN は `h2` のままである)。
 DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP の再送で遅延が伸びる。また QMux は速やかに配送できない DATAGRAM の破棄を許すため (draft-ietf-quic-qmux-02 Section 6)、受信側のバッファが溢れると欠落しうる (破棄は `dropped_datagrams` として警告ログに出る)。QMux は `RESET_STREAM_AT` を実装しないため `reliable_size` は常に `None` になる。
 送る DATAGRAM がピアの広告する `max_datagram_frame_size` か `max_record_size` (QMux はフレーム全体を両方と比較する) に収まらない場合、tokio-qmux の `send_datagram` はエラーを返す。音声は 20 ms ごとに送るためエラーログが大量にならないよう、接続確立時に 1 度だけ判定して警告ログ (英語) を出す (`--datagram-max-size` の既定 1160 の音声 Object は、QMux の DATAGRAM フレーム全体では 1163 バイトになる)。
 `--cert` の扱いは WebTransport over HTTP/2 経路と同じで、省略すると証明書検証をスキップする (TCP + TLS の組み立てを共有し、ALPN だけが異なる)。
@@ -109,4 +109,4 @@ cargo run -p moq-sub -- --url 'moqt://127.0.0.1:4443#msf:moq-example--video&c4m=
 
 `peer_harness` (テスト専用、`#[cfg(test)]`) が s2n-quic のサーバーを 127.0.0.1 に立て、in-process で MOQT peer を駆動する。モックやスタブは使わず、ライブラリと example の公開 API だけを使う。対象は QUIC 直接接続と QMux である。
 
-QMux は `QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-22`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。
+QMux は `QmuxTestPeerServer` が TCP + TLS (ALPN `moqt-23`) を 127.0.0.1 に立て、`qmux` モジュールのテストが SETUP の交換、PUBLISH / SUBSCRIBE、subgroup stream と datagram の往復、ピアの STOP_SENDING の観測を実行で検証する。

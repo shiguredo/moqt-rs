@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Result, TransportError};
 
-/// ALPN プロトコル識別子 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
+/// ALPN プロトコル識別子 (draft-ietf-moq-transport-23 §6.2 (Session establishment))
 ///
 /// WebTransport の `WT-Available-Protocols` と共通の定数を使う。
 const ALPN: &[u8] = crate::MOQT_PROTOCOL.as_bytes();
@@ -214,8 +214,35 @@ pub async fn connect(
         .await
         .map_err(|e| TransportError::Quic(format!("connection failed: {e}")))?;
 
+    // サーバーが選択したサブプロトコルを検証する (draft-ietf-moq-transport-23 §6.2)。
+    //
+    // QUIC は ALPN の選択を必須とするため (RFC 9001 §8.1)、rustls の時点で候補外の選択と
+    // 選択なしの接続は失敗する。候補は MOQT の識別子 1 つだけなので、ここへ来た接続は
+    // 必ず `moqt-23` を選択している。それでも確かめるのは、下位の TLS 実装が変わったときに
+    // draft 番号の異なる相手を受け入れないようにするためである。
+    let selected = connection
+        .application_protocol()
+        .map_err(|e| TransportError::Quic(format!("failed to read the negotiated ALPN: {e}")))?;
+    verify_alpn(&selected)?;
+
     tracing::info!("Connected to {socket_addr}");
     Ok((connection, stop_sending_rx))
+}
+
+/// 交渉されたサブプロトコルが MOQT の識別子かを検証する
+///
+/// draft-ietf-moq-transport-23 §6.2: draft の ALPN は `moqt-` に draft 番号を付けた値で
+/// あり、draft-23 では `moqt-23` である。識別子が一致しない接続は MOQT のセッションを
+/// 運べないため、確立しない。
+fn verify_alpn(selected: &[u8]) -> Result<()> {
+    if selected == ALPN {
+        return Ok(());
+    }
+    Err(TransportError::Quic(format!(
+        "the server did not select the MOQT ALPN ({}): {}",
+        crate::MOQT_PROTOCOL,
+        String::from_utf8_lossy(selected)
+    )))
 }
 
 /// クライアントの接続 limits を構築する。
@@ -276,7 +303,7 @@ fn build_tls_client(cert_path: Option<&str>) -> Result<s2n_rustls::Client> {
 /// 証明書検証をスキップする開発用 TLS クライアントを構築する
 ///
 /// `alpn_protocols` には接続方式に応じた ALPN を渡す。QUIC 直接接続は MOQT の
-/// プロトコル識別子、WebTransport over HTTP/3 は `h3` を使う。
+/// プロトコル識別子 (`moqt-23`)、WebTransport over HTTP/3 は `h3` を使う。
 /// s2n-quic の default TLS は feature `provider-tls-rustls` で rustls に解決されるため、
 /// rustls の `ClientConfig` を直接構築して渡す。
 pub(crate) fn build_insecure_tls_client(alpn_protocols: &[&[u8]]) -> Result<s2n_rustls::Client> {
@@ -333,5 +360,84 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         rustls::crypto::aws_lc_rs::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer_harness::TestPeerServer;
+
+    /// 接続結果を待つ上限時間 (ハングを失敗として観測する)
+    const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// 選択されたサブプロトコルが moqt-23 なら受理する
+    #[test]
+    fn verify_alpn_accepts_moqt_23() {
+        verify_alpn(crate::MOQT_PROTOCOL.as_bytes()).expect("moqt-23 は受理されること");
+    }
+
+    /// draft 22 の識別子と選択なしは交渉失敗にする
+    ///
+    /// draft の ALPN は `moqt-` に draft 番号を付けた値なので、draft 番号が異なる値は
+    /// 別のプロトコルである。空の選択 (サーバーが ALPN を返さない場合) も MOQT の
+    /// セッションを運べない。
+    #[test]
+    fn verify_alpn_rejects_other_identifiers() {
+        for selected in [&b"moqt-22"[..], b"moqt", b"h3", b""] {
+            let error = verify_alpn(selected).expect_err("拒否されること");
+            let message = match &error {
+                TransportError::Quic(message) => message,
+                other => panic!("TransportError::Quic を期待したが {other:?} だった"),
+            };
+            assert!(
+                message.contains("did not select the MOQT ALPN"),
+                "交渉失敗の error であること: {message}"
+            );
+        }
+    }
+
+    /// ALPN を選択しないサーバーとは接続できない
+    ///
+    /// RFC 9001 §8.1 は、サーバーが互換なアプリケーションプロトコルを選択できない場合を
+    /// `no_application_protocol` の接続エラーとすることを MUST とする。QUIC では ALPN の
+    /// 選択が必須であり、ALPN を広告しないサーバーとはハンドシェイクが成立しない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_rejects_a_peer_without_alpn_selection() {
+        let server = TestPeerServer::start_with_alpn(&[])
+            .await
+            .expect("サーバーを起動できること");
+        let addr = server.local_addr();
+
+        let error = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
+            .await
+            .expect("上限時間以内に完了すること")
+            .expect_err("ALPN を選択しない相手とは接続できないこと");
+        assert!(
+            matches!(error, TransportError::Quic(_)),
+            "ハンドシェイクの失敗として返ること: {error:?}"
+        );
+    }
+
+    /// draft 22 の識別子だけを広告するサーバーとは接続できない
+    ///
+    /// draft の ALPN は `moqt-` に draft 番号を付けた値であり (draft-ietf-moq-transport-23
+    /// §6.2)、draft-22 の相手は `moqt-22` しか選択できない。こちらの候補は `moqt-23` だけ
+    /// なので、ALPN の交渉で失敗し、draft-22 の相手を draft-23 として受け入れない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_rejects_a_draft_22_peer() {
+        let server = TestPeerServer::start_with_alpn(&[b"moqt-22"])
+            .await
+            .expect("サーバーを起動できること");
+        let addr = server.local_addr();
+
+        let error = tokio::time::timeout(TEST_TIMEOUT, connect(addr, "localhost", None))
+            .await
+            .expect("上限時間以内に完了すること")
+            .expect_err("draft 22 の識別子しか広告しない相手とは接続できないこと");
+        assert!(
+            matches!(error, TransportError::Quic(_)),
+            "ハンドシェイクの失敗として返ること: {error:?}"
+        );
     }
 }

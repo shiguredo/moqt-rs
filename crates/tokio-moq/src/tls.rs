@@ -15,7 +15,7 @@ use crate::error::{Result, TransportError};
 ///
 /// `disable_cert_validation` が true の場合と CA 証明書が指定されていない場合は
 /// 証明書検証を行わない (開発用)。両方指定された場合は無効化を優先する。
-/// `alpn` は TLS の ALPN に載せる 1 要素で、経路ごとに異なる (`h2` と `moqt-22`)。
+/// `alpn` は TLS の ALPN に載せる 1 要素で、経路ごとに異なる (`h2` と `moqt-23`)。
 ///
 /// 検証を無効化したことの警告は呼び出し側が出す (経路ごとに理由が異なるため)。
 pub(crate) fn build_client_config(

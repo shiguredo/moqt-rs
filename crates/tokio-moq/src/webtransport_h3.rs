@@ -1028,7 +1028,7 @@ impl WtClient {
                 .lock()
                 .expect("connection state mutex must not be poisoned");
             let headers = ConnectRequest::new("https", &config.authority, path)
-                // draft-ietf-moq-transport-22 §6.2 / draft-ietf-webtrans-http3-16 §3.3:
+                // draft-ietf-moq-transport-23 §6.2 / draft-ietf-webtrans-http3-16 §3.3:
                 // MOQT のプロトコル識別子を WT-Available-Protocols で通知する
                 .available_protocols(vec![crate::MOQT_PROTOCOL.to_string()])
                 .to_headers()

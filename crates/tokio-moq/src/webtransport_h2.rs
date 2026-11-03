@@ -440,7 +440,7 @@ fn build_limits(wt_config: &WtConfig) -> Result<Limits> {
 /// draft-ietf-webtrans-http2-15 §3.1 / §3.2: `:method=CONNECT`、`:protocol=webtransport`、
 /// `:scheme=https`、`:authority`、`:path` を設定する。MOQT は
 /// `WT-Available-Protocols` でプロトコル識別子を通知する
-/// (draft-ietf-moq-transport-22 §6.2 (Session establishment))。
+/// (draft-ietf-moq-transport-23 §6.2 (Session establishment))。
 fn build_connect_headers(authority: &str, path: &str) -> Result<Vec<HeaderField>> {
     let internal = |e: shiguredo_http2::HeaderFieldError| {
         TransportError::Internal(format!("failed to build CONNECT headers: {e}"))
@@ -571,13 +571,15 @@ async fn wait_for_connect_response(
 /// `WT-Available-Protocols` に含めた値でなければならない。String 以外の型は無視され、
 /// パラメータは読み飛ばされる (同節)。パラメータの読み飛ばしは
 /// `WtAvailableProtocols::parse` の List パーサーに任せ、要素数を 1 に限定して
-/// Item of String として扱う。
+/// Item of String として扱う。候補は MOQT のプロトコル識別子 1 つだけなので、別の
+/// 識別子 (draft-22 の `moqt-22` など) を選んだ相手は交渉失敗として扱う
+/// (draft-ietf-moq-transport-23 §6.2 (Session establishment))。
 fn verify_wt_protocol(headers: &[HeaderField]) -> Result<()> {
     let negotiation_failed = || {
-        TransportError::InvalidState(
-            "WebTransport protocol negotiation failed: the response does not select moqt-22"
-                .to_string(),
-        )
+        TransportError::InvalidState(format!(
+            "WebTransport protocol negotiation failed: the response does not select {}",
+            crate::MOQT_PROTOCOL
+        ))
     };
     let Some(value) = headers
         .iter()
@@ -1836,21 +1838,21 @@ mod tests {
             .find(|h| h.name() == b"wt-available-protocols")
             .map(HeaderField::value)
             .expect("WT-Available-Protocols が設定されること");
-        // RFC 8941 の sf-string を 1 要素の List として送る
-        assert_eq!(available, br#""moqt-22""#);
+        // RFC 8941 の sf-string を 1 要素の List として送る。draft-23 の識別子は moqt-23 である
+        assert_eq!(available, br#""moqt-23""#);
     }
 
-    /// 2xx 応答の WT-Protocol が moqt-22 なら受理する
+    /// 2xx 応答の WT-Protocol が moqt-23 なら受理する
     #[test]
-    fn verify_wt_protocol_accepts_moqt_22() {
-        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\"")];
-        verify_wt_protocol(&headers).expect("moqt-22 は受理されること");
+    fn verify_wt_protocol_accepts_moqt_23() {
+        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-23\"")];
+        verify_wt_protocol(&headers).expect("moqt-23 は受理されること");
     }
 
     /// WT-Protocol のパラメータは無視する (RFC 8941 / draft §3.3)
     #[test]
     fn verify_wt_protocol_ignores_parameters() {
-        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-22\";x=1")];
+        let headers = vec![HeaderField::from_static(b"wt-protocol", b"\"moqt-23\";x=1")];
         verify_wt_protocol(&headers).expect("パラメータ付きでも受理されること");
     }
 
@@ -1858,10 +1860,10 @@ mod tests {
     #[test]
     fn verify_wt_protocol_rejects_invalid_selection() {
         for value in [
-            // 別のプロトコル
-            &b"\"moqt-21\""[..],
+            // draft 22 の識別子 (draft-22 の相手を draft-23 として受け入れない)
+            &b"\"moqt-22\""[..],
             // List (Item of String ではない)
-            &b"\"moqt-22\", \"moqt-21\""[..],
+            &b"\"moqt-23\", \"moqt-22\""[..],
             // 非 String
             &b"token"[..],
         ] {
@@ -2677,13 +2679,14 @@ mod tests {
     ///
     /// `enable_webtransport` が false のときは SETTINGS で WebTransport の対応を宣言しない。
     /// `status` が 200 以外のときはその status を END_STREAM 付きで返す。
-    /// `include_wt_protocol` が false のときは 200 でも WT-Protocol を付けない。
+    /// `wt_protocol` が None のときは 200 でも WT-Protocol を付けない。Some の場合はその値を
+    /// `WT-Protocol` として返す (候補に無い値も返せるようにして、交渉失敗の経路を検証する)。
     async fn run_connect_only_server(
         listener: tokio::net::TcpListener,
         tls: tokio_rustls::TlsAcceptor,
         enable_webtransport: bool,
         status: u16,
-        include_wt_protocol: bool,
+        wt_protocol: Option<&'static str>,
     ) -> std::result::Result<(), String> {
         let (tcp, _) = listener
             .accept()
@@ -2713,9 +2716,11 @@ mod tests {
                         HeaderField::new(b":status", status.to_string())
                             .map_err(|e| format!("failed to build :status: {e}"))?,
                     ];
-                    if status == 200 && include_wt_protocol {
+                    if status == 200
+                        && let Some(protocol) = wt_protocol
+                    {
                         let wt_protocol = shiguredo_http2::webtransport::serialize_wt_protocol(
-                            crate::MOQT_PROTOCOL.as_bytes(),
+                            protocol.as_bytes(),
                         )
                         .map_err(|e| format!("failed to serialize wt-protocol: {e}"))?;
                         response.push(
@@ -2742,7 +2747,7 @@ mod tests {
     async fn spawn_connect_only_server(
         enable_webtransport: bool,
         status: u16,
-        include_wt_protocol: bool,
+        wt_protocol: Option<&'static str>,
     ) -> (
         SocketAddr,
         tokio::task::JoinHandle<std::result::Result<(), String>>,
@@ -2758,7 +2763,7 @@ mod tests {
             test_server_tls(),
             enable_webtransport,
             status,
-            include_wt_protocol,
+            wt_protocol,
         ));
         (addr, server)
     }
@@ -2776,7 +2781,7 @@ mod tests {
     /// 2xx 以外の応答は ConnectFailed に status を保持して返す
     #[tokio::test(flavor = "multi_thread")]
     async fn wt_h2_connect_reports_rejection_status() {
-        let (addr, server) = spawn_connect_only_server(true, 403, false).await;
+        let (addr, server) = spawn_connect_only_server(true, 403, None).await;
         let config = ClientConfig::new(addr, "localhost").insecure();
         let error = expect_connect_error(
             tokio::time::timeout(
@@ -2799,7 +2804,8 @@ mod tests {
     /// SETTINGS で WebTransport の対応を宣言しないサーバーとは接続できない
     #[tokio::test(flavor = "multi_thread")]
     async fn wt_h2_requires_webtransport_settings() {
-        let (addr, server) = spawn_connect_only_server(false, 200, true).await;
+        let (addr, server) =
+            spawn_connect_only_server(false, 200, Some(crate::MOQT_PROTOCOL)).await;
         let config = ClientConfig::new(addr, "localhost").insecure();
         let error = expect_connect_error(
             tokio::time::timeout(
@@ -2822,7 +2828,7 @@ mod tests {
     /// 2xx でも WT-Protocol が無い応答はプロトコル交渉の失敗にする (draft §3.3)
     #[tokio::test(flavor = "multi_thread")]
     async fn wt_h2_requires_wt_protocol_selection() {
-        let (addr, server) = spawn_connect_only_server(true, 200, false).await;
+        let (addr, server) = spawn_connect_only_server(true, 200, None).await;
         let config = ClientConfig::new(addr, "localhost").insecure();
         let error = expect_connect_error(
             tokio::time::timeout(
@@ -2836,6 +2842,36 @@ mod tests {
             matches!(error, TransportError::InvalidState(_)),
             "{error:?}"
         );
+        server
+            .await
+            .expect("サーバータスクの join に成功すること")
+            .expect("サーバーがエラーなく終了すること");
+    }
+    /// draft 22 の識別子を選ぶ応答はプロトコル交渉の失敗にする
+    ///
+    /// draft の識別子は `moqt-` に draft 番号を付けた値であり (draft-ietf-moq-transport-23
+    /// §6.2)、`WT-Available-Protocols` には `moqt-23` だけを載せている。draft-22 の相手が
+    /// `moqt-22` を選んでも、その値を draft-23 のセッションとして受け入れない
+    /// (draft-ietf-webtrans-http2-15 §3.3)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wt_h2_rejects_a_draft_22_selection() {
+        let (addr, server) = spawn_connect_only_server(true, 200, Some("moqt-22")).await;
+        let config = ClientConfig::new(addr, "localhost").insecure();
+        let error = expect_connect_error(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                WtH2Client::connect(config, "/test"),
+            )
+            .await
+            .expect("タイムアウトしないこと"),
+        );
+        match &error {
+            TransportError::InvalidState(message) => assert!(
+                message.contains("does not select moqt-23"),
+                "交渉失敗の error であること: {message}"
+            ),
+            other => panic!("TransportError::InvalidState を期待したが {other:?} だった"),
+        }
         server
             .await
             .expect("サーバータスクの join に成功すること")

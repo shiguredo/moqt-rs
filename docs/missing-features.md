@@ -478,7 +478,7 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
   また §6.2 により datagram が reliable / ordered になるため、音声を datagram で
   送る既定の遅延特性が変わる
 - `qmux` は QMux (draft-ietf-quic-qmux-02) 経由であり、MOQT 側に QMux 用の ALPN 登録が
-  無いため native QUIC と同じ `moqt-22` を広告する。QMux 自身の §8.1 は「QUIC マッピングと
+  無いため native QUIC と同じ `moqt-23` を広告する。QMux 自身の §8.1 は「QUIC マッピングと
   異なる識別子」を MUST で求めるため、この選択は同節から外れる (interop を優先した)。
   両 draft が決着したら見直す
 - `qmux` の DATAGRAM は経路での損失を下位の TCP が再送するため起きないが、TCP が再送した

@@ -129,10 +129,13 @@ pub(crate) fn c4m_authorization_token(token_value: &[u8]) -> AuthorizationToken 
     }
 }
 
-/// MOQT のプロトコル識別子 (draft-ietf-moq-transport-22 §6.2 (Session establishment))
+/// MOQT のプロトコル識別子 (draft-ietf-moq-transport-23 §6.2 (Session establishment))
 ///
-/// QUIC の ALPN と WebTransport の `WT-Available-Protocols` の双方で使う。draft-22 では `moqt-22`。
-pub const MOQT_PROTOCOL: &str = "moqt-22";
+/// QUIC の ALPN と WebTransport の `WT-Available-Protocols` の双方で使う。draft の ALPN は
+/// `moqt-` に draft 番号を付けた値であり、draft-23 では `moqt-23` である。識別子が一致しない
+/// 相手とは交渉が成立しないため、draft-22 の識別子 (`moqt-22`) だけを提示する相手を
+/// draft-23 として受け入れない。
+pub const MOQT_PROTOCOL: &str = "moqt-23";
 
 pub mod error;
 pub mod metrics;
@@ -159,7 +162,7 @@ mod peer_harness;
 /// URL の scheme は `moqt://` に統一されており、接続経路はこの値で選ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
-    /// QUIC 直接接続 (ALPN `moqt-22`)
+    /// QUIC 直接接続 (ALPN `moqt-23`)
     Quic,
     /// WebTransport over HTTP/3 (QUIC 上の ALPN `h3`)
     ///
@@ -173,7 +176,7 @@ pub enum Transport {
     /// experimental。reset は `WT_RESET_STREAM` capsule で行うため `RESET_STREAM_AT` は
     /// 不要だが、relay の capsule 対応に依存する。
     WtH2,
-    /// QMux (TCP+TLS 上の ALPN `moqt-22`)
+    /// QMux (TCP+TLS 上の ALPN `moqt-23`)
     ///
     /// experimental。QMux は順序保証された 1 本の双方向バイトストリーム (TLS over TCP) の上で
     /// QUIC version 1 のストリーム操作と DATAGRAM 操作を多重化する

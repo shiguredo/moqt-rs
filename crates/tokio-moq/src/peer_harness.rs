@@ -190,6 +190,14 @@ impl TestPeerServer {
     /// client は ALPN で [`crate::MOQT_PROTOCOL`] を要求するため、既定の `h3` のままだと
     /// ハンドシェイクが HANDSHAKE_FAILURE で失敗する。
     pub(crate) async fn start() -> Result<Self> {
+        Self::start_with_alpn(&[crate::MOQT_PROTOCOL.as_bytes()]).await
+    }
+
+    /// ALPN に載せる識別子を指定して s2n-quic サーバーを 127.0.0.1 で起動する
+    ///
+    /// `alpn` が空の場合は ALPN を広告しないサーバーになる。MOQT のプロトコル識別子を
+    /// 選択しない相手を client が拒否することを、実接続で確かめるために使う。
+    pub(crate) async fn start_with_alpn(alpn: &[&[u8]]) -> Result<Self> {
         let certified =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
                 TransportError::Internal(format!("failed to generate certificate: {e}"))
@@ -200,7 +208,7 @@ impl TestPeerServer {
                 certified.signing_key.serialize_der(),
             )
             .map_err(|e| TransportError::Internal(format!("failed to set certificate: {e}")))?
-            .with_application_protocols([crate::MOQT_PROTOCOL].into_iter())
+            .with_application_protocols(alpn.iter().copied())
             .map_err(|e| TransportError::Internal(format!("failed to set ALPN: {e}")))?
             .build()
             .map_err(|e| TransportError::Internal(format!("failed to build server TLS: {e}")))?;

@@ -1032,6 +1032,87 @@ mod tests {
         peer.abort();
     }
 
+    /// 指定した ALPN だけを広告する TCP + TLS のピアを立て、待ち受けアドレスを返す
+    ///
+    /// ハンドシェイクだけ応答し、QMux を話さない。ALPN の検証 (ハンドシェイクの失敗と
+    /// 選択結果の確認) だけを目的とするテストが使う。`alpn_protocols` が空の場合は ALPN を
+    /// 広告しないピアになる。
+    async fn spawn_tls_peer(alpn_protocols: Vec<Vec<u8>>) -> SocketAddr {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("証明書を生成できること");
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certified.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    certified.signing_key.serialize_der().into(),
+                ),
+            )
+            .expect("証明書を設定できること");
+        tls_config.alpn_protocols = alpn_protocols;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP を待ち受けられること");
+        let addr = listener
+            .local_addr()
+            .expect("待ち受けアドレスを取得できること");
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("接続を受理できること");
+            // ALPN が一致しない場合はハンドシェイクが失敗する。ピア側の失敗はテストの対象では
+            // ないため、成立した場合だけ接続を保持する
+            if let Ok(tls) = acceptor.accept(tcp).await {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                drop(tls);
+            }
+        });
+        addr
+    }
+
+    /// ALPN を選択しないピアとは接続できない
+    ///
+    /// RFC 7301 §3.1 はサーバーが ALPN を返さないことを許すため、rustls は ALPN 無しの
+    /// ハンドシェイクを成功させる。draft-ietf-quic-qmux-02 Section 8.1 は ALPN の交渉に
+    /// 失敗した場合はハンドシェイクを中断することを MUST とするため、選択結果を確かめる。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qmux_connect_rejects_a_peer_without_alpn_selection() {
+        let addr = spawn_tls_peer(Vec::new()).await;
+        // QmuxSession は Debug ではないため expect_err を使わずに取り出す
+        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        {
+            Ok(_) => panic!("ALPN を選択しないピアとは接続できないこと"),
+            Err(e) => e,
+        };
+        let message = match &error {
+            TransportError::Internal(message) => message,
+            other => panic!("TransportError::Internal を期待したが {other:?} だった"),
+        };
+        assert!(
+            message.contains("did not negotiate the MOQT ALPN"),
+            "ALPN 未選択の error であること: {message}"
+        );
+    }
+
+    /// draft 22 の識別子だけを広告するピアとは接続できない
+    ///
+    /// draft の ALPN は `moqt-` に draft 番号を付けた値であり (draft-ietf-moq-transport-23
+    /// §6.2)、draft-22 のピアは `moqt-22` しか選択できない。こちらの候補は `moqt-23` だけ
+    /// なので、ALPN の交渉で失敗し、draft-22 のピアを draft-23 として受け入れない。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qmux_connect_rejects_a_draft_22_peer() {
+        let addr = spawn_tls_peer(vec![b"moqt-22".to_vec()]).await;
+        // QmuxSession は Debug ではないため expect_err を使わずに取り出す
+        let error = match connect(addr, "localhost", None, &tokio_metrics::TaskMonitor::new()).await
+        {
+            Ok(_) => panic!("draft 22 の識別子しか広告しないピアとは接続できないこと"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(error, TransportError::Transport(_)),
+            "TLS ハンドシェイクの失敗として返ること: {error:?}"
+        );
+    }
+
     /// 設定が QUIC 直接接続の上限に相当する量を持つ
     #[test]
     fn config_has_flow_control_credits() {
