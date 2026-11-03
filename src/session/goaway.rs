@@ -345,9 +345,9 @@ impl Session {
     /// この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     fn terminate_request_on_goaway_timeout(&mut self, request_id: u64) -> Option<RequestKind> {
         let Some(table) = self.locate_request(request_id) else {
-            // deadline は request の登録前後を問わず設定できる
-            // (`send_goaway_on_request_stream` は request の存在を要求しない) ため、
-            // 対象が見つからなければ何も終端しない。
+            // deadline は request の登録中にだけ設定でき、request を破棄する経路
+            // (`forget_*`) は deadline も解除するため、通常はここに到達しない。
+            // 防御として、対象が見つからなければ何も終端しない。
             return None;
         };
         // request stream を reset するとローカル送信方向も閉じるため、reset 後に flush されると
@@ -451,9 +451,19 @@ impl Session {
     /// reset は発行されない。
     ///
     /// 制約:
+    /// - 自側が request の受信側 (responder) であること
+    ///   (draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Only the receiver of a request can send
+    ///   GOAWAY on its request stream.")
     /// - `Role::Client` は `new_session_uri` を空にする必要がある
     /// - `new_session_uri` の長さは 8192 バイト以下
     /// - 各リクエストストリームから 1 回のみ
+    ///
+    /// request の受信側であるかは request 種別ごとの initiator で判定する。
+    /// SUBSCRIBE / FETCH / TRACK_STATUS は subscriber (§9.6 / §9.11 / §9.12)、
+    /// PUBLISH は publisher (§9.8) が要求を開始した側であり、この判定は client / server の
+    /// `Role` とも publisher / subscriber の `TrackRole` 単独とも一致しない。
+    /// 判定はイベントや deadline を積む前に行い、拒否時は session の状態を変更しない。
+    /// 自側 state に該当 request が無い場合も receiver であることを確認できないため拒否する。
     pub fn send_goaway_on_request_stream(
         &mut self,
         request_id: u64,
@@ -466,6 +476,24 @@ impl Session {
                 SESSION_PROTOCOL_VIOLATION,
                 "GOAWAY already sent on this request stream",
             ));
+        }
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Only the receiver of a request can send
+        // GOAWAY on its request stream." request の sender (requester) は自身が開始した
+        // request stream 上で GOAWAY を送れない。event と deadline を積む前に拒否する。
+        match self.is_request_receiver(request_id) {
+            Some(true) => {}
+            Some(false) => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "GOAWAY on a request stream cannot be sent by the sender of the request",
+                ));
+            }
+            None => {
+                return Err(SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "GOAWAY on a request stream requires a tracked request",
+                ));
+            }
         }
         validate_outgoing_goaway_uri(self.role, &new_session_uri)?;
         let msg = ControlMessage::Goaway(Goaway {
@@ -526,10 +554,17 @@ impl Session {
         Ok(())
     }
 
-    /// リクエストストリーム上で GOAWAY を受信する (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// リクエストストリーム上で GOAWAY を受信する (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     ///
     /// 個別リクエストストリーム上の GOAWAY はそのリクエストのマイグレーションを開始する。
     /// control stream の GOAWAY と異なり session 全体には影響しない。
+    ///
+    /// 同節: "Only the receiver of a request can send GOAWAY on its request stream. If the
+    /// receiver of a request receives a GOAWAY on that request stream, it MUST close the
+    /// session with a PROTOCOL_VIOLATION."
+    /// したがって peer が receiver である場合 (自側が request の sender の場合) だけ受理し、
+    /// 自側が receiver の場合、および該当 request を特定できない場合は PROTOCOL_VIOLATION で
+    /// セッションを閉じる。
     pub(super) fn handle_peer_goaway_on_request_stream(
         &mut self,
         request_id: u64,
@@ -556,6 +591,30 @@ impl Session {
         if let Err(err) = validate_incoming_goaway_uri(self.role, &msg.new_session_uri) {
             self.fail(err.clone());
             return Err(err);
+        }
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY を送れるのは request の受信側だけ
+        // である。自側が request の送信側 (requester) なら peer が受信側であり、peer からの
+        // GOAWAY は正当である。自側が受信側の場合は peer が送信側であり、§9.2 の MUST に
+        // 従って PROTOCOL_VIOLATION (0x3) で閉じる。該当 request を特定できない場合も、
+        // receiver でないことを確認できないため同じく閉じる。
+        match self.is_request_receiver(request_id) {
+            Some(false) => {}
+            Some(true) => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "GOAWAY received on a request stream from the sender of the request",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
+            None => {
+                let err = SessionError::new(
+                    SESSION_PROTOCOL_VIOLATION,
+                    "GOAWAY received on a request stream without a tracked request",
+                );
+                self.fail(err.clone());
+                return Err(err);
+            }
         }
         self.goaway.request_stream_received.insert(request_id);
         self.events.push_back(SessionEvent::GoawayReceived {

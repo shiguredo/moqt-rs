@@ -547,3 +547,86 @@ fn condition6_duplicate_object_with_same_content_is_not_malformed() {
         "subscription は Established のまま"
     );
 }
+
+/// malformed track でローカル終端した subscription への遅延 SUBSCRIBE_OK は吸収する
+///
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出で自側が購読を終端しても、
+/// publisher が cancel を観測する前に送った SUBSCRIBE_OK は正当に届く。終端済み request への
+/// 応答は MUST 検証だけを行い、状態遷移とイベント発行をしない
+/// (`Session::is_locally_terminated_request` の吸収経路)。
+#[test]
+fn malformed_termination_absorbs_late_subscribe_ok() {
+    let alias = 837u64;
+    let (mut client, _server, rid) = establish_subscribe_track(alias);
+    let stream_id = DataStreamId(71);
+    let header = SubgroupHeader {
+        track_alias: alias,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
+    client
+        .recv_data_stream_type(stream_id, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let err = client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 5,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("条件 6: payload 長の不一致は Malformed Track");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "malformed 検出で subscription がローカル終端されること"
+    );
+
+    client
+        .recv_stream_message(
+            rid,
+            ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                track_alias: 900,
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("ローカル終端済み subscription への遅延 SUBSCRIBE_OK が吸収されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延応答でセッションを閉じないこと"
+    );
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated,
+        "吸収した応答で状態を Established に戻さないこと"
+    );
+}

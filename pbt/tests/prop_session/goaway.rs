@@ -169,7 +169,10 @@ fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
         let base = noprop::sample_u64_in(ctx, 0..1_000_000);
         let timeout = noprop::sample_u64_in(ctx, 1..10_000);
         let extra = noprop::sample_u64_in(ctx, 0..20_000);
-        let (mut client, _server) = establish_pair();
+        // request stream 上の GOAWAY は request の receiver だけが送れる
+        // (draft-ietf-moq-transport-23 §9.2 (GOAWAY))。SUBSCRIBE の receiver である
+        // server (publisher) 側から GOAWAY を送る
+        let (mut client, mut server) = establish_pair();
         let rid = client
             .send_subscribe(
                 TrackNamespace::new(vec![b"live".to_vec()])
@@ -178,13 +181,16 @@ fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
                 MessageParameters::new(),
             )
             .expect("テストフィクスチャの前提条件を満たす");
-        let (sent_rid, _) = take_send_request(&mut client);
+        let (sent_rid, sub_msg) = take_send_request(&mut client);
         assert_eq!(sent_rid, rid);
-        client.tick(base);
-        client
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server.tick(base);
+        server
             .send_goaway_on_request_stream(rid, Vec::new(), timeout)
             .expect("テストフィクスチャの前提条件を満たす");
-        let (_, _) = take_send_on_stream(&mut client);
+        let (_, _) = take_send_on_stream(&mut server);
 
         // 期限前後の任意の時刻で tick し、その後で期限超過を確定させる。
         // `tick(now_ms)` の契約は単調増加ミリ秒時刻なので、2 回目は必ず 1 回目以降にする。
@@ -194,8 +200,8 @@ fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
         let mut resets = 0;
         let mut terminated = 0;
         for check_at in [first_check, second_check] {
-            client.tick(check_at);
-            while let Some(e) = client.poll_event() {
+            server.tick(check_at);
+            while let Some(e) = server.poll_event() {
                 match e {
                     SessionEvent::ResetRequestStream { request_id, .. } => {
                         assert_eq!(
@@ -231,8 +237,8 @@ fn request_stream_goaway_timeout_fires_exactly_once() -> noprop::TestResult {
 
         // 期限到達後に再度 tick しても再発行しない
         // (`tick(now_ms)` の契約は単調増加ミリ秒時刻なので、直前の tick 以降にする)
-        client.tick(second_check.max(deadline.saturating_add(1)));
-        while let Some(e) = client.poll_event() {
+        server.tick(second_check.max(deadline.saturating_add(1)));
+        while let Some(e) = server.poll_event() {
             assert!(
                 !matches!(
                     e,

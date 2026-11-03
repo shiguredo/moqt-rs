@@ -2484,6 +2484,61 @@ fn malformed_track_cancels_same_track_fetch() {
     assert_eq!(client.state(), SessionState::Established);
 }
 
+/// malformed track でローカル終端した pending FETCH への遅延 FETCH_OK は吸収する
+///
+/// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出で同じ Track の FETCH も
+/// 終端されるが、publisher が cancel を観測する前に送った FETCH_OK は正当に届く。
+/// 終端済み request への応答は MUST 検証だけを行い、状態遷移とイベント発行をしない
+/// (`Session::is_locally_terminated_request` の吸収経路)。
+#[test]
+fn malformed_track_absorbs_late_fetch_ok_on_terminated_fetch() {
+    let (mut client, mut server) = establish_pair();
+    let alias = 625;
+    let subscription_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    publish_one_object_on_track(&mut server, subscription_rid, alias, DataStreamId(41));
+    // FETCH_OK / REQUEST_ERROR をまだ受けていない pending FETCH を作る
+    let fetch_rid = client
+        .send_fetch(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(37), DataStreamId(38));
+    assert_eq!(
+        client.fetch(fetch_rid).expect("fetch が存在する").state,
+        FetchState::Terminated,
+        "malformed 検出で同じ Track の FETCH もローカル終端されること"
+    );
+
+    client
+        .recv_stream_message(
+            fetch_rid,
+            ControlMessage::FetchOk(shiguredo_moqt::message::FetchOk {
+                end_of_track: 0,
+                end_location: Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }),
+        )
+        .expect("終端済み fetch への遅延 FETCH_OK が吸収されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延応答でセッションを閉じないこと"
+    );
+    assert_eq!(
+        client.fetch(fetch_rid).expect("fetch が存在する").state,
+        FetchState::Terminated,
+        "吸収した応答で状態を Established に戻さないこと"
+    );
+}
+
 /// Malformed Track 検出時に別 Track と publisher 役の subscription は影響を受けない
 #[test]
 fn malformed_track_keeps_other_track_and_publisher_role_requests() {

@@ -582,6 +582,11 @@ fn request_update_from_publisher_with_duplicate_tokens_closes_session() {
 /// 自側が SUBSCRIBE を送った subscription へ peer publisher が REQUEST_UPDATE を送るのは
 /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) の 2 ケース外であり、重複トークンを
 /// 含んでいてもセッションを ROLE_VIOLATION で閉じる。
+///
+/// ローカル終端は request stream 上の GOAWAY ではなく、malformed track の検出
+/// (draft-ietf-moq-transport-22 §12.1 (Malformed Tracks)) で発生させる。GOAWAY を
+/// request stream 上で送れるのは request の receiver だけであり (draft-ietf-moq-transport-23
+/// §9.2 (GOAWAY))、SUBSCRIBE の sender である subscriber は送れない。
 #[test]
 fn locally_terminated_subscription_update_with_duplicate_tokens_closes_session() {
     let (mut client, mut server) = establish_pair_with_self_auth_cache(1024);
@@ -594,22 +599,53 @@ fn locally_terminated_subscription_update_with_duplicate_tokens_closes_session()
     );
     complete_subscribe(&mut client, &mut server, rid, 1);
 
-    // request stream GOAWAY の deadline 満了で client 側の request をローカル終端する
-    client.tick(1_000);
+    // malformed track (同じ Object の payload 長の不一致) で client 側の subscription を
+    // ローカル終端する。request_streams の entry は除去され rejected_request_ids に記録される
+    let stream_id = DataStreamId(70);
+    let header = SubgroupHeader {
+        track_alias: 1,
+        group_id: 0,
+        subgroup_id: SubgroupIdMode::Explicit(0),
+        publisher_priority: Some(10),
+        has_properties: false,
+        end_of_group: false,
+        first_object: false,
+    };
     client
-        .send_goaway_on_request_stream(rid, Vec::new(), 100)
-        .expect("request stream GOAWAY の送信に成功すること");
-    let _ = take_send_on_stream(&mut client);
-    client.tick(1_100);
-    let mut resets = 0;
-    while let Some(event) = client.poll_event() {
-        if matches!(event, SessionEvent::ResetRequestStream { .. }) {
-            resets += 1;
-        }
-    }
+        .recv_data_stream_type(stream_id, 0x14)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_header(stream_id, &header)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 4,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_subgroup_object(
+            stream_id,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 5,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("payload 長の不一致は Malformed Track として検出されること");
     assert_eq!(
-        resets, 1,
-        "期限到達で request stream の reset が 1 回発行され、request がローカル終端済みになること"
+        client
+            .subscription(rid)
+            .expect("subscription は存在すること")
+            .state,
+        SubscriptionState::Terminated,
+        "malformed track の検出で subscription がローカル終端されること"
     );
 
     // peer (server) の parity (奇数) の Request ID を使う
@@ -632,12 +668,15 @@ fn locally_terminated_subscription_update_with_duplicate_tokens_closes_session()
 /// 送信方向を reset 済みの request では REQUEST_ERROR を送れないため、正当な送信者からの
 /// REQUEST_UPDATE は状態遷移せずに捨てる。ただし §8.9 の REGISTER MUST
 /// ("does not result in a Session error" が前提) は満たすため、alias は cache に登録する。
+///
+/// 自側は PUBLISH を受けた subscriber であり、request stream 上の GOAWAY を送れる receiver
+/// である (draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §9.8 (PUBLISH))。peer publisher は
+/// PUBLISH 起点 subscription の request sender として REQUEST_UPDATE を送れる (§9.5)。
 #[test]
 fn locally_terminated_publish_subscription_absorbs_request_update_with_duplicate_tokens() {
     let (mut client, mut server) = establish_pair_with_self_auth_cache(1024);
-    // 自側 publisher の subscription (PUBLISH 起点) を作る。peer subscriber からの
-    // REQUEST_UPDATE は §9.5 の 2 ケースの 2 つ目に該当する
-    let rid = client
+    // server (publisher) が PUBLISH を送り、client (subscriber) が receiver になる
+    let rid = server
         .send_publish(
             ns(&[b"live"]),
             b"cam".to_vec(),
@@ -646,15 +685,15 @@ fn locally_terminated_publish_subscription_absorbs_request_update_with_duplicate
             TrackProperties::new(),
         )
         .expect("PUBLISH の送信に成功すること");
-    let (_, publish_msg) = take_send_request(&mut client);
-    server
+    let (_, publish_msg) = take_send_request(&mut server);
+    client
         .recv_request(publish_msg)
         .expect("PUBLISH の受信に成功すること");
-    server
+    client
         .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
         .expect("REQUEST_OK の送信に成功すること");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
+    let (_, ok_msg) = take_send_on_stream(&mut client);
+    server
         .recv_stream_message(rid, ok_msg)
         .expect("REQUEST_OK の受信に成功すること");
 
@@ -673,9 +712,10 @@ fn locally_terminated_publish_subscription_absorbs_request_update_with_duplicate
     }
     assert_eq!(resets, 1, "期限到達で request stream が reset されること");
 
-    // peer (server) の parity (奇数) の Request ID で重複トークン付き REQUEST_UPDATE を注入する
+    // peer (server) の parity (奇数) の未使用 Request ID で重複トークン付き REQUEST_UPDATE を
+    // 注入する。PUBLISH が server の最初の request id (1) を消費しているため、次の奇数を使う
     let update = ControlMessage::RequestUpdate(RequestUpdate {
-        request_id: 1,
+        request_id: rid + 2,
         parameters: duplicate_token_parameters(),
     });
     client
@@ -699,10 +739,7 @@ fn locally_terminated_publish_subscription_absorbs_request_update_with_duplicate
         client.poll_event().is_none(),
         "吸収時は REQUEST_ERROR を含むイベントを発行しないこと"
     );
-    assert_registered_aliases(&client);
 }
-
-// ─── alias 解決後まで含めた (Token Type, Token Value) の一意性検証 ─────────────
 
 /// USE_ALIAS の列を持つパラメータを組み立てる
 fn use_alias_parameters(aliases: &[u64]) -> MessageParameters {

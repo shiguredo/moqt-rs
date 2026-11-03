@@ -1626,17 +1626,70 @@ fn request_error_resets_fills_and_sends_publish_done() {
     assert!(saw_publish_done, "失敗応答で PUBLISH_DONE が送られること");
 }
 
+/// PUBLISH 起点 subscription を Established にし、server 側で {0, 0} を公開して
+/// Largest {0, 0} を確定させる
+///
+/// request stream 上の GOAWAY は request の receiver だけが送れる
+/// (draft-ietf-moq-transport-23 §9.2 (GOAWAY)) ため、PUBLISH の receiver である subscriber
+/// (client) 側から GOAWAY を送るテストの前提を作る。戻り値は PUBLISH の Request ID。
+fn establish_publish_with_object() -> (Session, Session, u64) {
+    let (mut client, mut server) = establish_pair();
+    let sub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            1,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, publish_msg) = take_send_request(&mut server);
+    client
+        .recv_request(publish_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .send_request_ok(sub_rid, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    // server (publisher) が指定位置を公開し、観測 Largest を確定させる
+    let stream_id = DataStreamId(1);
+    server
+        .send_subgroup_header(
+            stream_id,
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(stream_id, 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    (client, server, sub_rid)
+}
+
 /// GOAWAY の deadline 満了で終端した subscription への遅延 fill fetch stream は受理する
 ///
 /// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
 /// (Graceful Request Stream Closure))、自側が送信方向を reset しても peer の送信方向は
 /// 開いたままである。peer が GOAWAY / reset を観測する前に開いた fill fetch stream は
 /// 正当に届くため、session を `PROTOCOL_VIOLATION` で閉じてはならない。
+/// GOAWAY を送るのは request の receiver である subscriber (client) であり、
+/// PUBLISH 起点 subscription (§9.8) で fill stream の受信側でもある。
 #[test]
 fn subscriber_accepts_late_fill_fetch_header_after_goaway_timeout() {
     use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
 
-    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let (mut client, mut server, sub_rid) = establish_publish_with_object();
     let update_rid = send_update_to_server(
         &mut client,
         &mut server,
@@ -1714,11 +1767,13 @@ fn subscriber_accepts_late_fill_fetch_header_after_goaway_timeout() {
 /// fill fetch stream は uni stream であり、bidi request stream の close 通知との到着順に
 /// 保証がない。close 通知で `rejected_request_ids` から id が消えても、自側が request stream
 /// の GOAWAY を送った request への遅延 fill stream は受理する。
+/// GOAWAY を送るのは request の receiver である subscriber (client) であり、
+/// PUBLISH 起点 subscription (§9.8) で fill stream の受信側でもある。
 #[test]
 fn subscriber_accepts_late_fill_fetch_header_after_peer_close() {
     use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
 
-    let (mut client, mut server, sub_rid) = establish_sub_with_object();
+    let (mut client, mut server, sub_rid) = establish_publish_with_object();
     let update_rid = send_update_to_server(
         &mut client,
         &mut server,
@@ -1755,7 +1810,8 @@ fn subscriber_accepts_late_fill_fetch_header_after_peer_close() {
         SessionState::Established,
         "遅延 fill stream でセッションを閉じないこと"
     );
-    // 受理した stream はアプリが subscription を破棄した後の終端通知も吸収する
+
+    // 破棄後の遅延 fill stream の終端通知も吸収する
     assert!(
         client.forget_subscription(sub_rid).is_some(),
         "終端済み subscription を破棄できること"

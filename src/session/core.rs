@@ -1706,6 +1706,38 @@ impl Session {
         }
     }
 
+    /// 自側がその request の受信側 (responder) かどうかを返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "Only the receiver of a request can send
+    /// GOAWAY on its request stream." の判定に使う。request の送信側 (initiator) は
+    /// SUBSCRIBE / FETCH / TRACK_STATUS が subscriber (§9.6 / §9.11 / §9.12)、PUBLISH が
+    /// publisher (§9.8) である。したがって client / server の `Role` や `TrackRole` 単独では
+    /// 決まらず、request 種別と initiator の組で決まる。
+    ///
+    /// 継続中の request のみ判定できる。`forget` 済みなど自側 state に該当 request が
+    /// 無い場合は `None` を返す。
+    pub(super) fn is_request_receiver(&self, request_id: u64) -> Option<bool> {
+        if let Some(subscription) = self.subscriptions.get(&request_id) {
+            // SUBSCRIBE は subscriber、PUBLISH は publisher が request を開始した側である。
+            // `initiator` と `my_role` が同じなら自側が request の送信側になる。
+            // 例: 自側が受けた SUBSCRIBE は initiator=Subscriber / my_role=Publisher で受信側、
+            // 自側が受けた PUBLISH は initiator=Publisher / my_role=Subscriber で受信側になる。
+            let local_is_sender = match subscription.initiator {
+                SubscriptionInitiator::Subscriber => subscription.my_role == TrackRole::Subscriber,
+                SubscriptionInitiator::Publisher => subscription.my_role == TrackRole::Publisher,
+            };
+            return Some(!local_is_sender);
+        }
+        // FETCH / TRACK_STATUS は subscriber が要求を開始する (§9.11 / §9.12)。
+        // 自側が publisher なら request の受信側である。
+        if let Some(fetch) = self.fetches.get(&request_id) {
+            return Some(fetch.my_role == TrackRole::Publisher);
+        }
+        self.track_status_requests
+            .get(&request_id)
+            .map(|entry| entry.my_role == TrackRole::Publisher)
+    }
+
     /// 遅延して届く data stream を破棄対象として扱う request かを返す
     ///
     /// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2

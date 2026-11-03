@@ -6,163 +6,41 @@
 
 use super::*;
 
-/// deadline 満了で終端した request へ peer の正当な応答が遅延して届いても、セッションを閉じない
+/// deadline 満了で終端した PUBLISH 起点 subscription へ peer publisher の PUBLISH_DONE が
+/// 遅延して届いてもセッションを閉じない
 ///
 /// request stream は方向ごとに独立に閉じるため (draft-ietf-moq-transport-22 §6.4.2.2
 /// (Graceful Request Stream Closure))、送信方向の reset 後も peer の送信方向は開いたままである。
-/// peer が GOAWAY / reset を観測する前に送った応答は正当な traffic であり、
+/// peer が GOAWAY / reset を観測する前に送った PUBLISH_DONE は正当な traffic であり、
 /// `SESSION_PROTOCOL_VIOLATION` でセッションを閉じてはならない。吸収した応答は状態を作らない。
+///
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) により GOAWAY を送れるのは request の receiver
+/// だけである。PUBLISH の receiver は subscriber (§9.8) なので、自側 subscriber が GOAWAY を
+/// 送り、publisher の PUBLISH_DONE を遅延受信する。
 #[test]
-fn request_stream_goaway_timeout_absorbs_late_response() {
-    // subscription (Pending(Subscriber)) の遅延 SUBSCRIBE_OK
+fn request_stream_goaway_timeout_absorbs_late_publish_done() {
     let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("SUBSCRIBE の送信に成功すること");
-    let (_, sub_msg) = take_send_request(&mut client);
-    server
-        .recv_request(sub_msg)
-        .expect("SUBSCRIBE の受信に成功すること");
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 820);
     terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
 
     server
-        .send_subscribe_ok(rid, 1, MessageParameters::new(), TrackProperties::default())
-        .expect("SUBSCRIBE_OK の送信に成功すること");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
+        .send_publish_done(
+            rid,
+            shiguredo_moqt::error::PUBLISH_DONE_TRACK_ENDED,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("done")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("PUBLISH_DONE の送信に成功すること");
+    let (_, done_msg) = take_send_on_stream(&mut server);
     client
-        .recv_stream_message(rid, ok_msg)
-        .expect("終端済み request への遅延 SUBSCRIBE_OK が no-op で吸収されること");
+        .recv_stream_message(rid, done_msg)
+        .expect("終端済み request への遅延 PUBLISH_DONE が no-op で吸収されること");
     assert_eq!(
         client.state(),
         SessionState::Established,
         "遅延応答でセッションを閉じないこと"
     );
-
-    // track_status (Pending) の遅延 REQUEST_OK (TRACK_STATUS_OK)
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("TRACK_STATUS の送信に成功すること");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("TRACK_STATUS の受信に成功すること");
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-
-    client
-        .recv_stream_message(
-            rid,
-            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
-                parameters: MessageParameters::new(),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect("終端済み request への遅延 TRACK_STATUS_OK が no-op で吸収されること");
-    assert_eq!(client.state(), SessionState::Established);
-    assert!(
-        client
-            .track_status_request(rid)
-            .expect("track status entry が残ること")
-            .response
-            .is_none(),
-        "吸収した応答で応答状態を確定しないこと"
-    );
-
-    // track_status (Pending) の遅延 REQUEST_ERROR
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("TRACK_STATUS の送信に成功すること");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("TRACK_STATUS の受信に成功すること");
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-
-    client
-        .recv_stream_message(
-            rid,
-            ControlMessage::RequestError(shiguredo_moqt::message::RequestError {
-                error_code: shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST,
-                retry_interval: 0,
-                reason: shiguredo_moqt::message::ReasonPhrase::new("failed")
-                    .expect("テストフィクスチャの前提条件を満たす"),
-                error_details: ErrorDetails::new(),
-            }),
-        )
-        .expect("終端済み request への遅延 REQUEST_ERROR が no-op で吸収されること");
-    assert_eq!(client.state(), SessionState::Established);
-    assert!(
-        client
-            .track_status_request(rid)
-            .expect("track status entry が残ること")
-            .response
-            .is_none(),
-        "吸収した応答で応答状態を確定しないこと"
-    );
-
-    // fetch (Pending) の遅延 FETCH_OK
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_fetch(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            fetch_range_params(
-                Location {
-                    group_id: 0,
-                    object_id: 0,
-                },
-                Location {
-                    group_id: 10,
-                    object_id: 0,
-                },
-            ),
-        )
-        .expect("FETCH の送信に成功すること");
-    let (_, fetch_msg) = take_send_request(&mut client);
-    server
-        .recv_request(fetch_msg)
-        .expect("FETCH の受信に成功すること");
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-
-    client
-        .recv_stream_message(
-            rid,
-            ControlMessage::FetchOk(shiguredo_moqt::message::FetchOk {
-                end_of_track: 0,
-                end_location: Location {
-                    group_id: 10,
-                    object_id: 0,
-                },
-                parameters: MessageParameters::new(),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect("終端済み request への遅延 FETCH_OK が no-op で吸収されること");
-    assert_eq!(client.state(), SessionState::Established);
-    while let Some(e) = client.poll_event() {
-        assert!(
-            !matches!(e, SessionEvent::FetchOkReceived { .. }),
-            "吸収した FETCH_OK でイベントを発行しないこと"
-        );
-    }
-
-    // subscription (Established) の遅延 PUBLISH_DONE
-    let (mut client, _server, rid) = establish_subscribe_track(820);
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-
-    client
-        .recv_stream_message(
-            rid,
-            ControlMessage::PublishDone(shiguredo_moqt::message::PublishDone {
-                status_code: 0,
-                stream_count: 0,
-                reason: shiguredo_moqt::message::ReasonPhrase::new("done")
-                    .expect("テストフィクスチャの前提条件を満たす"),
-            }),
-        )
-        .expect("終端済み request への遅延 PUBLISH_DONE が no-op で吸収されること");
-    assert_eq!(client.state(), SessionState::Established);
     assert!(
         client
             .subscription(rid)
@@ -195,16 +73,17 @@ fn request_stream_goaway_timeout_absorbs_late_message_from_expected_sender() {
         .expect("request の送信者からの REQUEST_UPDATE が no-op で吸収されること");
     assert_eq!(server.state(), SessionState::Established);
 
-    // 自側が subscriber の subscription へ publisher (peer) からの PUBLISH_STATE_NOTIFY
-    let (mut client, _server, rid) = establish_subscribe_track(822);
+    // 自側が PUBLISH を受けた subscriber の subscription へ publisher (peer) からの
+    // PUBLISH_STATE_NOTIFY (§9.10 で publisher だけが送れる)
+    let (mut client, mut server) = establish_pair();
+    let rid = establish_publish_sender_as_established(&mut client, &mut server, 822);
     terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
+    server
+        .send_publish_state_notify(rid, MessageParameters::new())
+        .expect("publisher からの PUBLISH_STATE_NOTIFY の送信に成功すること");
+    let (_, notify_msg) = take_send_on_stream(&mut server);
     client
-        .recv_stream_message(
-            rid,
-            ControlMessage::PublishStateNotify(shiguredo_moqt::message::PublishStateNotify {
-                parameters: MessageParameters::new(),
-            }),
-        )
+        .recv_stream_message(rid, notify_msg)
         .expect("publisher からの PUBLISH_STATE_NOTIFY が no-op で吸収されること");
     assert_eq!(client.state(), SessionState::Established);
 }
@@ -215,29 +94,26 @@ fn request_stream_goaway_timeout_absorbs_late_message_from_expected_sender() {
 /// 仕様が MUST close を定める組み合わせは従来どおりセッションを閉じる。
 #[test]
 fn request_stream_goaway_timeout_rejects_late_message_from_unexpected_sender() {
-    // 自側が SUBSCRIBE の requester のとき、publisher (peer) からの REQUEST_UPDATE は
-    // draft §9.5 の 2 ケース外
-    let (mut client, _server, rid) = establish_subscribe_track(823);
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-    let err = client
+    // 自側が SUBSCRIBE の responder (publisher) を終端した後、requester (subscriber) からの
+    // SUBSCRIBE_OK は publisher だけが送れる応答であり、送信者が正当でない
+    let (_client, mut server, rid) = establish_subscribe_track(823);
+    terminate_request_by_goaway_timeout(&mut server, rid, b"moqt://relay.example/".to_vec());
+    let err = server
         .recv_stream_message(
             rid,
-            ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
-                // peer (Server) が採番する Request ID は奇数 (draft-ietf-moq-transport-22
-                // §6.4.2.1 (Request ID))。REQUEST_UPDATE 自身も Request ID を消費するため、
-                // 検証を通る id を渡す
-                request_id: 1,
+            ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
+                track_alias: 1,
                 parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
             }),
         )
-        .unwrap_err();
+        .expect_err("subscriber からの SUBSCRIBE_OK は session error になること");
     assert_eq!(err.code, SESSION_ROLE_VIOLATION);
-    assert_eq!(client.state(), SessionState::Closing);
+    assert_eq!(server.state(), SessionState::Closing);
 
-    // 自側が PUBLISH を送った側のとき、subscriber (peer) からの PUBLISH_STATE_NOTIFY は
-    // draft §9.10 の MUST に反する
-    let (mut client, mut server) = establish_pair();
-    let rid = establish_publish_sender_as_established(&mut client, &mut server, 824);
+    // 自側 publisher を終端した後、subscriber (requester) からの PUBLISH_STATE_NOTIFY は
+    // draft §9.10 の MUST に反する (publisher だけが送れる)
+    let (_client, mut server, rid) = establish_subscribe_track(824);
     terminate_request_by_goaway_timeout(&mut server, rid, b"moqt://relay.example/".to_vec());
     let err = server
         .recv_stream_message(
@@ -246,7 +122,7 @@ fn request_stream_goaway_timeout_rejects_late_message_from_unexpected_sender() {
                 parameters: MessageParameters::new(),
             }),
         )
-        .unwrap_err();
+        .expect_err("subscriber からの PUBLISH_STATE_NOTIFY は session error になること");
     assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
@@ -275,44 +151,6 @@ fn request_stream_goaway_timeout_second_close_fails_as_unknown_id() {
         .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
-}
-
-/// deadline が解除済みの request には満了時刻を過ぎても reset も終端通知も発行しない
-///
-/// requester が peer (responder) の FIN を受けた時点で request は終端し、reset deadline も
-/// 解除される (`Session::recv_request_stream_closed`)。したがって期限到達後も
-/// `terminate_request_on_goaway_timeout` は呼ばれず、二重の終端通知は発行されない。
-#[test]
-fn request_stream_goaway_timeout_is_not_reprocessed_after_deadline_cleared() {
-    let (mut client, _server, rid) = establish_subscribe_track(806);
-    client.tick(1_000);
-    client
-        .send_goaway_on_request_stream(rid, Vec::new(), 100)
-        .expect("request stream GOAWAY の送信に成功すること");
-    let (_, _) = take_send_on_stream(&mut client);
-    // requester が peer (responder) の FIN を受けると request は即時に終端する
-    client
-        .recv_request_stream_closed(rid, RequestStreamEnd::Fin)
-        .expect("responder の FIN の通知に成功すること");
-    let mut terminated = 0;
-    while let Some(e) = client.poll_event() {
-        if matches!(e, SessionEvent::RequestTerminated { .. }) {
-            terminated += 1;
-        }
-    }
-    assert_eq!(terminated, 1, "requester の終端が 1 回だけ出ること");
-
-    // FIN の終端経路で deadline は解除済みのため、期限到達後も reset も終端も出ない
-    client.tick(1_100);
-    while let Some(e) = client.poll_event() {
-        assert!(
-            !matches!(
-                e,
-                SessionEvent::ResetRequestStream { .. } | SessionEvent::RequestTerminated { .. }
-            ),
-            "既に終端した request へ reset も終端通知も発行しないこと"
-        );
-    }
 }
 
 /// REQUEST_UPDATE の吸収条件が draft §9.5 の 2 ケースと一致すること
@@ -478,87 +316,6 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// 終端済み subscription への遅延 SUBSCRIBE_OK でも Track Alias 衝突は検出する
-///
-/// draft-ietf-moq-transport-22 §3.1.3 (Track Alias): 異なる Track の Established
-/// subscription と同じ Track Alias を使う SUBSCRIBE_OK は DUPLICATE_TRACK_ALIAS で
-/// セッションを閉じる MUST。終端済み request への遅延応答でも検証を省かない。
-#[test]
-fn request_stream_goaway_timeout_rejects_late_subscribe_ok_with_duplicate_track_alias() {
-    let (mut client, mut server) = establish_pair();
-    // 1 本目: "cam" を alias 77 で確立する
-    let rid1 = client
-        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("1 本目の SUBSCRIBE の送信に成功すること");
-    let (_, sub1) = take_send_request(&mut client);
-    server
-        .recv_request(sub1)
-        .expect("1 本目の SUBSCRIBE の受信に成功すること");
-    server
-        .send_subscribe_ok(
-            rid1,
-            77,
-            MessageParameters::new(),
-            TrackProperties::default(),
-        )
-        .expect("1 本目の SUBSCRIBE_OK の送信に成功すること");
-    let (_, ok1) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid1, ok1)
-        .expect("1 本目の SUBSCRIBE_OK の受信に成功すること");
-
-    // 2 本目: "mic" を GOAWAY の deadline 満了で終端してから同じ alias の SUBSCRIBE_OK を届ける
-    let rid2 = client
-        .send_subscribe(ns(&[b"live"]), b"mic".to_vec(), MessageParameters::new())
-        .expect("2 本目の SUBSCRIBE の送信に成功すること");
-    let (_, sub2) = take_send_request(&mut client);
-    server
-        .recv_request(sub2)
-        .expect("2 本目の SUBSCRIBE の受信に成功すること");
-    terminate_request_by_goaway_timeout(&mut client, rid2, Vec::new());
-    // 自側の送信 API は alias 衝突を送信前に拒否するため、受信経路の検証として
-    // peer が送ってきた SUBSCRIBE_OK を直接渡す
-    let err = client
-        .recv_stream_message(
-            rid2,
-            ControlMessage::SubscribeOk(shiguredo_moqt::message::SubscribeOk {
-                track_alias: 77,
-                parameters: MessageParameters::new(),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect_err("終端済み request でも Track Alias 衝突は拒否されること");
-    assert_eq!(err.code, SESSION_DUPLICATE_TRACK_ALIAS);
-}
-
-/// 終端済み TRACK_STATUS への遅延 REQUEST_OK でも context 別スコープを検証する
-///
-/// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): TRACK_STATUS_OK で許可されるのは
-/// LARGEST_OBJECT のみであり、EXPIRES を含む REQUEST_OK は MUST でセッションを閉じる。
-#[test]
-fn request_stream_goaway_timeout_rejects_late_track_status_ok_with_invalid_scope() {
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_track_status(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
-        .expect("TRACK_STATUS の送信に成功すること");
-    let (_, ts_msg) = take_send_request(&mut client);
-    server
-        .recv_request(ts_msg)
-        .expect("TRACK_STATUS の受信に成功すること");
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-
-    let err = client
-        .recv_stream_message(
-            rid,
-            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
-                parameters: expires_params(1_000),
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect_err("TRACK_STATUS_OK で許可されない EXPIRES は拒否されること");
-    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
-}
-
 /// PUBLISH 起点 subscription の subscriber 側でも遅延 REQUEST_UPDATE_OK でセッションを閉じない
 ///
 /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE): PUBLISH 起点の subscription では
@@ -640,68 +397,4 @@ fn request_stream_goaway_timeout_rejects_late_request_ok_for_responder_publisher
         .expect_err("自側 publisher への遅延 REQUEST_OK は拒否されること");
     assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
-}
-
-/// 終端済みでも自側 publisher の遅延 REQUEST_OK を受理する (context 復元不能による残差)
-///
-/// 自側が PUBLISH を送った (publisher 役の initiator) subscription を GOAWAY の deadline 満了で
-/// 終端すると、draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) の context
-/// (PUBLISH_OK / REQUEST_UPDATE_OK) が state から失われる。どちらの context でも許可されない
-/// パラメータだけを違反とするため、PUBLISH_OK context では許可されない LARGEST_OBJECT でも
-/// 受理する (残差。詳細は `Session::handle_ok_for_subscription` のコメントを参照)。
-#[test]
-fn request_stream_goaway_timeout_absorbs_late_publish_ok_with_largest_object() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_LARGEST_OBJECT,
-    };
-
-    let (mut client, mut server) = establish_pair();
-    let rid = client
-        .send_publish(
-            ns(&[b"live"]),
-            b"cam".to_vec(),
-            900,
-            MessageParameters::new(),
-            TrackProperties::new(),
-        )
-        .expect("PUBLISH の送信に成功すること");
-    let (_, pub_msg) = take_send_request(&mut client);
-    server
-        .recv_request(pub_msg)
-        .expect("PUBLISH の受信に成功すること");
-    server
-        .send_request_ok(rid, MessageParameters::new(), TrackProperties::default())
-        .expect("PUBLISH_OK の送信に成功すること");
-    let (_, ok_msg) = take_send_on_stream(&mut server);
-    client
-        .recv_stream_message(rid, ok_msg)
-        .expect("PUBLISH_OK の受信に成功すること");
-    assert_eq!(
-        client
-            .subscription(rid)
-            .expect("テストフィクスチャの前提条件を満たす")
-            .state,
-        SubscriptionState::Established,
-        "PUBLISH_OK で subscription が確立すること"
-    );
-
-    terminate_request_by_goaway_timeout(&mut client, rid, Vec::new());
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_LARGEST_OBJECT,
-        value: MessageParameterValue::Location {
-            group: 1,
-            object: 2,
-        },
-    });
-    client
-        .recv_stream_message(
-            rid,
-            ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
-                parameters: params,
-                track_properties: TrackProperties::new(),
-            }),
-        )
-        .expect("終端済み request への遅延 REQUEST_OK が no-op で吸収されること");
-    assert_eq!(client.state(), SessionState::Established);
 }
