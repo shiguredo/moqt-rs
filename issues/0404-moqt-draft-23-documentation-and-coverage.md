@@ -1,8 +1,8 @@
 # MOQT draft 23 の仕様参照と実装状況を更新する
 
 - Created: 2026-11-03
-- Completed: {YYYY-MM-DD}
-- Branch: feature/update-moqt-draft-23-documentation-and-coverage
+- Completed: 2026-11-04
+- Branch: develop
 - Polished: 2026-11-03
 
 ## 目的
@@ -96,3 +96,64 @@ FETCH_OK の削除に伴い §9.13 以降が移動し、Parameters は §9.19、
 - 先行: [0401](0401-moqt-draft-23-property-duplicates.md)
 - 先行: [0402](0402-moqt-draft-23-track-status-mandatory-properties.md)
 - 先行: [0403](0403-moqt-draft-23-request-and-reset-error-registry.md)
+
+## 解決方法
+
+draft-23 の全文差分と Appendix A.1 を根拠に、両 draft の目次と本文の対応表を作ってから置換した。
+末尾番号の機械置換は行っていない。
+
+- 節番号の移動は次のとおり。コードコメント・テスト・`pbt/`・`fuzz/`・`e2e-tests/`・`crates/`・
+  `docs/`・`README.md`・`skills/shiguredo-moqt/SKILL.md` の 159 ファイルに反映した
+  - `§9.13` → `§9.12` (TRACK_STATUS)、`§9.14` → `§9.13` (PUBLISH_NAMESPACE)、
+    `§9.15` → `§9.14` (SUBSCRIBE_NAMESPACE)
+  - `§9.20` → `§9.19`、`§9.20.1`〜`§9.20.20` → `§9.19.1`〜`§9.19.20`、
+    `§9.20.21` (INCLUDE_PROPERTIES) → `§9.19.22` (SUBSCRIBE_TRACKS_ID の挿入で 1 つ後ろ)
+  - `§11.4.1.2` (End of Range) → `§11.4.2`、`§16.11` (Error Codes) → `§16.12`、
+    `§16.11.1`〜`§16.11.4` → `§16.12.1`〜`§16.12.4`
+  - `§9.4.1` (Redirect Structure) → `§9.4.2` (Error Details)、
+    `§9.4.2` (REQUEST_ERROR Message Format) → `§9.4.1`
+  - `§7.4.1` / `§7.6.1` (Relay Switchover) → `§7.5.1` / `§7.7.1`
+  - Table 20〜22 (エラーコード表) → Table 21〜23、Figure 3 / 6 → Figure 4 / 7、
+    Appendix A.3 / A.5 → A.4 / A.6
+- FETCH_OK の廃止に伴い、`§9.12 (FETCH_OK)` を引用していた 6 箇所を書き換えた。成功応答は
+  `§9.3 (REQUEST_OK)`、FETCH_OK という名称は `§1.5 (Response Message Naming)` の別名、
+  応答範囲の終端は `§3.2 (Fetch)` / `§9.19.17 (LARGEST OBJECT Parameter)` を引く
+- 旧 wire 形式・旧規則を新仕様の引用として残していた箇所を直した。`FORWARD` と
+  `Pass = Forward AND ...` は PAUSED と `Pass = (NOT Paused) AND ...` へ、draft-23 で削除された
+  "Since Objects can be delivered out of order" は `§2.2 (Subgroups)` の stream 単位の順序保証へ
+  置き換えた
+- 引用文とエラー名を draft-23 の文面に合わせた。LARGEST_OBJECT の MUST、Request ID の重複検出、
+  REQUEST_UPDATE の 2 ケース (`UNEXPECTED_MESSAGE`)、Parameter Scope (`INVALID_PARAMETER`)、
+  Location Filter Type (`INVALID_PARAMETER`) と End Group 溢出 (`DELTA_ENCODING_OVERFLOW`)、
+  Object Status (`INVALID_OBJECT_STATUS`)、切り詰められた Object (`TRUNCATED_OBJECT`)
+- 利用者向けドキュメントを更新した
+  - `README.md` / `skills/shiguredo-moqt/SKILL.md` / `crates/README.md` の対応仕様を
+    `draft-23` にした
+  - `docs/moqt.md` は Setup Options を 8 種にし、FETCH_OK が REQUEST_OK の別名であること、
+    PAUSED、FILL_PARAMETERS の個数符号化、相対 Location Filter の拒否、REQUEST_UPDATE の
+    受信順処理と FILL_PARAMETERS の非 coalescing、空 Track Name の拒否、`DYNAMIC_GROUPS`
+    未受信の `NEW_GROUP_REQUEST` 受理、Malformed Track 条件 6〜10 を追記した
+  - `docs/missing-features.md` は対象仕様を draft-23 にし、§15.6 (Timeouts) の待機箇所と
+    既存タイマー (`CONTROL_MESSAGE_TIMEOUT` / `DATA_STREAM_TIMEOUT` / 購読の Delivery Timeout /
+    `GOAWAY_TIMEOUT`) の対応とトレードオフを追記した。一律の timeout 値や新しい MUST は
+    追加していない。`SUBSCRIBE_DONE` → `PUBLISH_DONE` の改名が draft-13 由来であることも確認した
+- draft-22 への言及は、draft-22 の相手を誤受理しないことを確かめる ALPN のテストだけに残した。
+  これは相手のプロトコル版を指す記述であり、現在の仕様の引用ではない
+- MoQ リレー機能・namespace 機能の追加は行っていない。`SUBSCRIBE_TRACKS` /
+  `PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は引き続き未対応として記述した
+- モジュール移動・図表・日付・参照文献の更新だけの項目は、新しい実装機能として扱っていない
+
+## 完了条件の検証
+
+| 完了条件 | 結果 | 検証方法 |
+| --- | --- | --- |
+| 各追従 issue の結果と利用者向け仕様対応表が一致すること | 満たす | 0378〜0403 の結果と docs を突き合わせ、PAUSED・FETCH_OK・EXPIRES・Gone・UNAVAILABLE などの記述を実装に合わせた。未対応は未対応と明記した |
+| 旧 wire 形式の説明を新仕様の引用として残さないこと | 満たす | draft-22 の節参照と `§9.20` / `§7.6.1` / `§11.4.1.2` / `§16.11.x` の参照が 0 件であることを確認した。引用文は draft-23 の文面と機械照合した |
+| 節番号・図表・パラメータ名・エラー名の参照を本文で確認すること | 満たす | 節番号が draft-23 に実在し、括弧内の節名が題名と一致することを機械的に確認した。エラー名は §16.12 と `src/error.rs` を突き合わせた |
+| リレー機能や namespace 機能の追加を対象にしないこと | 満たす | 変更はコメント・ドキュメント・issue のみで、公開 API と状態機械は変えていない。`SUBSCRIBE_TRACKS` / `PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` は未対応のまま |
+
+- `cargo fmt --all -- --check` 成功
+- `cargo clippy --workspace --all-targets -- -D warnings` 成功
+- `cargo test --workspace` 成功
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p shiguredo_moqt --no-deps` 成功
+- 変更した Markdown への `prek run markdownlint-cli2 --files ...` 成功
