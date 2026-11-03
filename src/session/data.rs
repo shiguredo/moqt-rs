@@ -1777,11 +1777,12 @@ impl Session {
     /// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §11.4.1 (Fetch Header))
     ///
     /// `SessionEvent::OpenFillFetchStream` を受けたアプリが uni stream を開き、
-    /// FETCH_HEADER (起因 SUBSCRIBE / REQUEST_UPDATE の Request ID を載せる) を
+    /// FETCH_HEADER (起因 SUBSCRIBE / PUBLISH / REQUEST_UPDATE の Request ID を載せる) を
     /// 書いたときに呼ぶ。`fill_request_id` には FETCH_HEADER に載せた値
     /// (= `SessionEvent::OpenFillFetchStream::request_id`) をそのまま渡す。
-    /// 初回 fill は subscription の Request ID そのもの、REQUEST_UPDATE 起因の fill は
-    /// REQUEST_UPDATE 自身の Request ID であり、後者は購読へ解決してから会計する。
+    /// 初回 fill (SUBSCRIBE / PUBLISH 起因) は subscription の Request ID そのもの、
+    /// REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の Request ID であり、
+    /// 後者は購読へ解決してから会計する。
     /// 通常の FETCH 応答 (`send_fetch_header`) とは異なり
     /// `Fetch` 状態に紐づかず subscription に direct に紐づくため、1 つの
     /// subscription に複数本が同時に開くことがある。

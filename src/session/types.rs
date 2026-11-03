@@ -454,7 +454,13 @@ pub enum SessionEvent {
     /// fill fetch stream を開く (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
     ///
     /// publisher が FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を unpaused で
-    /// 処理し、fill range が空でなく Largest Object より後に始まらない場合に発火する。
+    /// 処理したとき、または FILL_PARAMETERS 付き PUBLISH を unpaused で送るとき
+    /// (draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams)) に、
+    /// fill range が空でなく Largest Object より後に始まらない場合に発火する。
+    /// 開設するのは publisher だけであり、PUBLISH を受けて PUBLISH_OK を返す subscriber は
+    /// 発火しない (自側は publisher が開いた fill fetch stream を
+    /// [`Session::recv_fetch_header`](crate::session::core::Session::recv_fetch_header) で
+    /// 受理する側である)。
     /// I/O 層は uni stream を開き、先頭に `request_id` を載せた FETCH_HEADER を書いて
     /// fill range の Object 送出を開始し、送り終わったら FIN で閉じる
     /// (失敗時は FETCH_HEADER の直後で即 reset する)。
@@ -482,7 +488,9 @@ pub enum SessionEvent {
         start: Location,
         /// fill range の終端 Location
         ///
-        /// 開いた範囲 (終端の指定が無い filter) は開設時点の Largest Object で解決した値。
+        /// 開いた範囲 (終端の指定が無い filter) は開設時点で self 側が知る Largest Object で
+        /// 解決した値。PUBLISH 起源では PUBLISH の LARGEST_OBJECT (アプリ指定値と観測値の
+        /// 大きい方) である (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))。
         end: Location,
     },
     /// bidi request stream の送信方向を RESET_STREAM で打ち切る

@@ -5,6 +5,11 @@
 //! - PUBLISH_DONE の対象限定性
 //! - stream_count 受理判定の不変条件
 //! - forget_subscription による全索引削除
+//! - REQUEST_UPDATE の受信順と FILL 境界によるグループ分割
+//! - FILL_PARAMETERS 付き PUBLISH の初回 fill 開設条件 (paused / FILL の有無 /
+//!   Largest Object の既知性) と、開く場合の 1 本・Request ID・fill range の終端
+//! - PUBLISH と初回 fill の到着順序によらず、未知の Request ID を再試行可能な結果で返し、
+//!   PUBLISH の受理後に同じヘッダを再通知すれば受理されること
 
 use pbt::common::test_runner;
 use shiguredo_moqt::message::{ControlMessage, common::TrackNamespace};

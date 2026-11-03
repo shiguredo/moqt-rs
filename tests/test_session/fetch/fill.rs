@@ -1895,8 +1895,8 @@ fn publish_with_fill_opens_initial_fill_stream() {
         events.push(e);
     }
     let mut publish_index = None;
-    let mut fill_index = None;
-    let mut fill = None;
+    let mut fill_indices = Vec::new();
+    let mut fills = Vec::new();
     for (index, event) in events.iter().enumerate() {
         match event {
             SessionEvent::SendRequest {
@@ -1916,21 +1916,25 @@ fn publish_with_fill_opens_initial_fill_stream() {
                 start,
                 end,
             } => {
-                fill_index = Some(index);
-                fill = Some((*request_id, *subscription_request_id, *start, *end));
+                fill_indices.push(index);
+                fills.push((*request_id, *subscription_request_id, *start, *end));
             }
             SessionEvent::CloseSession(err) => panic!("CloseSession が発行された: {err:?}"),
             _ => {}
         }
     }
     let publish_index = publish_index.expect("PUBLISH が送信されること");
-    let fill_index = fill_index.expect("初回 fill が 1 本開くこと");
+    assert_eq!(
+        fills.len(),
+        1,
+        "初回 fill は 1 本だけ開くこと (重複して開くと fill が二重に配信される)"
+    );
+    let fill_index = fill_indices[0];
     assert!(
         publish_index < fill_index,
         "PUBLISH を送ってから初回 fill を開くこと"
     );
-    let (request_id, subscription_request_id, start, end) =
-        fill.expect("fill の値を取得できること");
+    let (request_id, subscription_request_id, start, end) = fills[0];
     assert_eq!(
         request_id, pub_rid,
         "初回 fill の FETCH_HEADER には PUBLISH の Request ID を載せること"
@@ -2059,6 +2063,68 @@ fn publish_with_fill_and_no_largest_object_opens_nothing() {
         drain_open_fill_events(&mut server),
         Vec::<u64>::new(),
         "Largest Object が未知なら fill stream を開いてはならない"
+    );
+}
+
+/// 観測最大が無くても PUBLISH の LARGEST_OBJECT を Largest Object として fill を開く
+///
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics): "The subscriber learns the Largest
+/// Object from the LARGEST_OBJECT parameter in SUBSCRIBE_OK, PUBLISH or REQUEST_UPDATE_OK."
+/// そのため publisher がまだ Object を観測していなくても (自側の観測最大が無くても)、
+/// PUBLISH に LARGEST_OBJECT を載せれば subscriber は Largest Object を知り、fill range が
+/// 定まる。終端は PUBLISH で通知した値であり、自側の観測値で置き換えてはならない。
+#[test]
+fn publish_with_fill_uses_publish_largest_object_as_fill_end() {
+    let (_client, mut server) = establish_pair();
+    // 観測済みの Object は無い。アプリが LARGEST_OBJECT だけを指定する
+    let mut params = fill_params(MessageParameters::new());
+    params.set_largest_object(2, 3);
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            params,
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut fills = Vec::new();
+    while let Some(event) = server.poll_event() {
+        match event {
+            SessionEvent::OpenFillFetchStream {
+                request_id,
+                subscription_request_id,
+                start,
+                end,
+            } => fills.push((request_id, subscription_request_id, start, end)),
+            SessionEvent::CloseSession(err) => panic!("CloseSession が発行された: {err:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        fills.len(),
+        1,
+        "アプリ指定の LARGEST_OBJECT だけで初回 fill を 1 本開くこと"
+    );
+    let (request_id, subscription_request_id, start, end) = fills[0];
+    assert_eq!(
+        request_id, pub_rid,
+        "初回 fill の FETCH_HEADER には PUBLISH の Request ID を載せること"
+    );
+    assert_eq!(
+        subscription_request_id, pub_rid,
+        "fill 対象 subscription は PUBLISH が作る subscription であること"
+    );
+    assert_eq!(
+        (start.group_id, start.object_id),
+        (0, 0),
+        "開始は Track の先頭であること"
+    );
+    assert_eq!(
+        (end.group_id, end.object_id),
+        (2, 3),
+        "終端は PUBLISH で通知した LARGEST_OBJECT であること"
     );
 }
 

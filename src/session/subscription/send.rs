@@ -12,7 +12,8 @@ use crate::message::{
     ControlMessage, FETCH_UPDATE_ALLOWED_PARAMS, PUBLISH_ALLOWED_PARAMS,
     PUBLISH_STATE_NOTIFY_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
     RequestUpdate, SUBSCRIBE_ALLOWED_PARAMS, SUBSCRIBE_OK_ALLOWED_PARAMS,
-    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk, common::TrackNamespace,
+    SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{LocationFilterContext, LocationFilterUpdate, MessageParameters};
 use crate::track_properties::TrackProperties;
@@ -273,6 +274,13 @@ impl Session {
     /// subscriber は開設しない。fill range が空、Largest Object より後に始まる、
     /// Largest Object が未知のいずれかなら開設しない (§3.4 (Fill Semantics))。
     ///
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics): "The subscriber learns the Largest
+    /// Object from the LARGEST_OBJECT parameter in SUBSCRIBE_OK, PUBLISH or
+    /// REQUEST_UPDATE_OK." そのため初回 fill の fill range の終端は、自側の観測最大では
+    /// なく、送信する PUBLISH の LARGEST_OBJECT (アプリ指定値と観測値の大きい方) で解決する。
+    /// 観測最大が無くアプリが LARGEST_OBJECT だけを指定した場合も、subscriber は Largest
+    /// Object を知るため fill を開ける。
+    ///
     /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter): `parameters` に
     /// SUBSCRIBE_TRACKS_ID (0x36) を載せられるのは、SUBSCRIBE_TRACKS の結果として送る
     /// PUBLISH だけであり、値は元の SUBSCRIBE_TRACKS の Request ID でなければならない。
@@ -349,6 +357,15 @@ impl Session {
         // 不正内側パラメータの送出と状態登録を防ぐ (SUBSCRIBE / REQUEST_UPDATE の
         // 送信と同じ検証を PUBLISH にも適用する)。
         super::fill::validate_outgoing_fill_parameters(&parameters)?;
+        // draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES) / §3.3.2 (Range Filters):
+        // PUBLISH の FILL_PARAMETERS 内側に置ける Range Filter も、同じ subscription の
+        // 予算 ("all Range filter ... parameters for a given subscription or fetch") に
+        // 含まれる。§9.1.6 は "The default value is 0, so if not specified, the peer MUST
+        // NOT send any such filter parameters." と定めるため、SUBSCRIBE / REQUEST_UPDATE と
+        // 同じく request_id 発行前に検証する。検証がないと peer が宣言していない
+        // (既定 0) Range Filter を載せた PUBLISH を送出してしまい、相手に INVALID_FILTER の
+        // 拒否 MUST を強いる。検証は request_id 発行より前に置き、エラー時に欠番を作らない。
+        self.validate_outgoing_range_filters(&parameters)?;
         // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、値域は Ascending
         // (0x1) / Descending (0x2) のみ。値域外は API 呼び出し時に拒否する (検証がないと
@@ -465,7 +482,9 @@ impl Session {
             // SUBSCRIBE_TRACKS 起因の PUBLISH を識別する Request ID を、受信側と対称に
             // 相関情報として保持する (要求の存在検証は行わない)
             subscribe_tracks_id: parameters.subscribe_tracks_id(),
-            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
+            // PUBLISH に INCLUDE_PROPERTIES は出現しない
+            // (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter) の MAY appear
+            // 列挙は SUBSCRIBE / TRACK_STATUS / FETCH / SUBSCRIBE_TRACKS であり、PUBLISH は含まない)
             include_properties: None,
             filter_start,
             filter_end,
@@ -487,9 +506,17 @@ impl Session {
         // (旧称 Joining Location の保持 MUST は draft-20 で廃止。
         // publisher の観測 Largest は `largest_received_location` で追跡する)。
         // `parameters` は Publish メッセージへ move するため、初回 fill の開設判定に使う
-        // FILL_PARAMETERS の内側パラメータを先に取り出しておく
+        // FILL_PARAMETERS の内側パラメータと LARGEST_OBJECT を先に取り出しておく
         // (`maybe_open_fill_stream` が見るのは内側パラメータだけである)。
+        // LARGEST_OBJECT は上の補完後の値であり、subscriber が PUBLISH から知る Largest
+        // Object そのものである (§3.4)。fill range はこの値でクランプする。
         let fill_parameters = parameters.fill_parameters().cloned();
+        let fill_largest = parameters
+            .largest_object()
+            .map(|(group_id, object_id)| Location {
+                group_id,
+                object_id,
+            });
         let msg = ControlMessage::Publish(Publish {
             request_id,
             track_namespace,
@@ -516,6 +543,7 @@ impl Session {
             request_id,
             fill_parameters.as_ref(),
             filter,
+            fill_largest,
             paused,
         );
         Ok(request_id)

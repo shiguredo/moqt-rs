@@ -861,6 +861,10 @@ impl DataPlaneHandle {
     /// [`Self::wait_fetch_header_registration`] で受理を待ち、受理された場合だけ entry の
     /// 処理へ進む。期限・上限を超えた場合は stream を破棄して Session の会計を解放する
     /// (呼び出し側は stream の読み取りを打ち切る)。
+    ///
+    /// 保留の判定と挿入は pending ロックで原子化し、挿入後にも Session へ再通知する。判定と
+    /// 挿入の間に制御メッセージの処理側が PUBLISH を受理して
+    /// [`Self::notify_publish_accepted`] を呼んでも、先着した fill を取りこぼさないためである。
     pub fn recv_fetch_header(
         &self,
         stream_id: DataStreamId,
@@ -884,44 +888,67 @@ impl DataPlaneHandle {
         if acceptance == FetchHeaderAcceptance::Accepted {
             return Ok(FetchHeaderRegistration::Accepted);
         }
+        // 保留の判定と挿入を原子化する。上の Session 判定が「要求が未登録」を返してから
+        // 保留表へ挿入するまでの間に、制御メッセージの処理側が PUBLISH を受理して
+        // [`resolve_pending_fill_header`] を呼ぶと、保留表に entry が無いため通知が
+        // 取りこぼされ、先着した fill が期限切れまで誰にも解決されない。pending ロックを
+        // 保持したまま挿入し、その後に Session へ再通知することで、この競合を塞ぐ。
+        // pending ロック → Session ロックの順序は既存の discard 経路と同じであり、
+        // 逆順 (Session → pending) に取る経路は無いため deadlock しない。
+        let mut pending = lock_pending_fill_headers(&self.pending_fill_headers);
         // 同じ Request ID の保留が既にある場合 (peer が同じ要求に対して 2 本目を開いた) は、
         // 古い方を破棄する。Request ID をキーに 1 件だけ保持するため、後着を残す
-        let old = {
-            let mut pending = lock_pending_fill_headers(&self.pending_fill_headers);
-            pending.remove_entry(header.request_id)
-        };
-        if let Some(old) = old {
+        if let Some(old) = pending.remove_entry(header.request_id) {
             discard_pending_fill_header(&self.session, old);
         }
-        let (resolution, receiver) = oneshot::channel();
-        let deadline = tokio::time::Instant::now() + PENDING_FILL_HEADER_TIMEOUT;
-        let entry = PendingFillHeader {
-            stream_id,
-            header: header.clone(),
-            deadline,
-            resolution,
-        };
-        let inserted = {
-            let mut pending = lock_pending_fill_headers(&self.pending_fill_headers);
-            if pending.entries.len() >= MAX_PENDING_FILL_HEADERS {
-                false
-            } else {
-                pending.entries.insert(header.request_id, entry);
-                true
-            }
-        };
-        if !inserted {
+        if pending.entries.len() >= MAX_PENDING_FILL_HEADERS {
+            drop(pending);
             // 上限超過。保留せずに会計だけ解放し、呼び出し側に破棄させる
             let mut session = lock_session(&self.session);
             let _ = session.send_data_stream_stop_sending(stream_id);
             return Ok(FetchHeaderRegistration::Rejected);
         }
-        Ok(FetchHeaderRegistration::Pending(PendingFetchHeader {
-            request_id: header.request_id,
-            stream_id,
-            deadline,
-            receiver,
-        }))
+        let (resolution, receiver) = oneshot::channel();
+        let deadline = tokio::time::Instant::now() + PENDING_FILL_HEADER_TIMEOUT;
+        pending.entries.insert(
+            header.request_id,
+            PendingFillHeader {
+                stream_id,
+                header: header.clone(),
+                deadline,
+                resolution,
+            },
+        );
+        // 挿入後に Session へ再通知する。挿入までに PUBLISH が受理されていれば、ここで
+        // FETCH_HEADER が受理されて保留は不要になる (受理されずに通知だけが先に走った
+        // 場合も、この再通知が拾う)。再通知の結果を受け取るまで pending ロックを保持する
+        // ため、通知側は「保留を解決する」か「保留がまだ無いので何もしない」のどちらか
+        // になり、両者の間で entry が取り残されることはない。
+        let retry = {
+            let mut session = lock_session(&self.session);
+            session.recv_fetch_header(stream_id, header)
+        };
+        match retry {
+            Ok(FetchHeaderAcceptance::Accepted) => {
+                // Session が受理したため保留は不要である。待機側は作らない
+                pending.remove_entry(header.request_id);
+                Ok(FetchHeaderRegistration::Accepted)
+            }
+            Ok(FetchHeaderAcceptance::RequestNotRegistered) => {
+                drop(pending);
+                Ok(FetchHeaderRegistration::Pending(PendingFetchHeader {
+                    request_id: header.request_id,
+                    stream_id,
+                    deadline,
+                    receiver,
+                }))
+            }
+            Err(e) => {
+                // Session が closing へ遷移した。保留は解決されないため取り下げる
+                pending.remove_entry(header.request_id);
+                Err(TransportError::Internal(format!("recv_fetch_header: {e}")))
+            }
+        }
     }
 
     /// 保留した FETCH_HEADER が受理されるまで待つ
@@ -1154,10 +1181,12 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // ワイヤを閉じるのも Session へ終端を通知するのも I/O 層 (example) の責務である。
             // ここで捨てると保留 PUBLISH_DONE の flush 条件が満たされないため、アプリへ届ける
             | SessionEvent::ResetDataStream { .. }
-            // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE を受けた publisher が uni
-            // stream を開く」指示である (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))。
-            // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層 (example) の
-            // 責務であり、ここで捨てると fill に応答できないため、アプリへ届ける
+            // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を
+            // 処理した publisher、または FILL_PARAMETERS 付き PUBLISH を送る publisher が
+            // uni stream を開く」指示である (draft-ietf-moq-transport-23 §3.4.1 (Opening and
+            // Closing Fill Fetch Streams))。stream を開いて FETCH_HEADER と fill range の
+            // Object を書くのは I/O 層 (example) の責務であり、ここで捨てると fill に
+            // 応答できないため、アプリへ届ける
             | SessionEvent::OpenFillFetchStream { .. }
             // FetchOkReceived は自側が FETCH を発行したときの応答である
             // (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))。End Location と End of Track は
@@ -3428,10 +3457,12 @@ impl MoqtClient {
                 | SessionEvent::GoawayDrainReady
                 | SessionEvent::PublishDoneReceived { .. }
                 | SessionEvent::ResetDataStream { .. }
-                // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE を受けた publisher が
-                // uni stream を開く」指示である (draft-ietf-moq-transport-22 §3.4)。
-                // stream を開いて FETCH_HEADER と fill range の Object を書くのは I/O 層
-                // (example) の責務であり、ここで捨てると fill に応答できない
+                // OpenFillFetchStream は「FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を
+                // 処理した publisher、または FILL_PARAMETERS 付き PUBLISH を送る publisher が
+                // uni stream を開く」指示である (draft-ietf-moq-transport-23 §3.4.1 (Opening
+                // and Closing Fill Fetch Streams))。stream を開いて FETCH_HEADER と fill
+                // range の Object を書くのは I/O 層 (example) の責務であり、ここで捨てると
+                // fill に応答できない
                 | SessionEvent::OpenFillFetchStream { .. }
                 // FetchOkReceived は自側が FETCH を発行したときの応答である
                 // (draft-ietf-moq-transport-22 §9.12)。I/O 層で行うことは無く、
@@ -4053,9 +4084,10 @@ mod tests {
 
     /// fill 配信の指示がアプリへ配送されること
     ///
-    /// `SessionEvent::OpenFillFetchStream` は「FILL_PARAMETERS 付き SUBSCRIBE を受けた
-    /// publisher が uni stream を開く」指示であり (draft-ietf-moq-transport-22 §3.4)、
-    /// ここで捨てると fill に応答できない。
+    /// `SessionEvent::OpenFillFetchStream` は「FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE
+    /// を処理した publisher、または FILL_PARAMETERS 付き PUBLISH を送る publisher が uni
+    /// stream を開く」指示であり (draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill
+    /// Fetch Streams))、ここで捨てると fill に応答できない。
     #[test]
     fn open_fill_fetch_stream_is_notable_event() {
         assert!(
@@ -4352,6 +4384,133 @@ mod tests {
                 .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
                 .is_err(),
             "会計を解放済みの stream の終端通知は拒否されること"
+        );
+    }
+
+    /// 指定の Request ID の PUBLISH を Session に受理させる
+    ///
+    /// Track は Request ID ごとに変え、同一 publisher が同じ Track を重複して
+    /// 公開しないようにする (fill の帰属先だけが Request ID で決まればよい)。
+    fn accept_publish(session: &Arc<StdMutex<Session>>, request_id: u64) {
+        use shiguredo_moqt::message::{Publish, common::TrackNamespace};
+
+        let namespace =
+            TrackNamespace::new(vec![b"prop".to_vec()]).expect("正当な namespace である");
+        let mut session = lock_session(session);
+        session
+            .recv_request(ControlMessage::Publish(Publish {
+                request_id,
+                track_namespace: namespace,
+                track_name: format!("fill-{request_id}").into_bytes(),
+                track_alias: request_id,
+                parameters: MessageParameters::new(),
+                track_properties: TrackProperties::new(),
+            }))
+            .expect("FILL_PARAMETERS の有無によらず PUBLISH を受理できること");
+    }
+
+    /// 登録結果が最終的に受理されることを検証する
+    ///
+    /// PUBLISH の受理が先なら最初から `Accepted`、保留が先なら `Pending` を経て
+    /// `Accepted` になる。どちらの順序でも fill を失わないことが本テストの主張である。
+    async fn assert_fetch_header_eventually_accepted(
+        handle: &DataPlaneHandle,
+        registration: FetchHeaderRegistration,
+        label: &str,
+    ) {
+        match registration {
+            FetchHeaderRegistration::Accepted => {}
+            FetchHeaderRegistration::Pending(pending_header) => {
+                assert_eq!(
+                    handle.wait_fetch_header_registration(pending_header).await,
+                    FetchHeaderResolution::Accepted,
+                    "{label}: 保留した fill が PUBLISH の受理で解決されること"
+                );
+            }
+            FetchHeaderRegistration::Rejected => {
+                panic!("{label}: 保留の上限に達してはならない")
+            }
+        }
+    }
+
+    /// PUBLISH の受理通知と保留の挿入が競合しても先着 fill を取りこぼさないこと
+    ///
+    /// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
+    /// PUBLISH の bidi stream と初回 fill の uni stream の到着順序は保証されない。
+    /// `recv_fetch_header` の Session 判定 (要求が未登録) と保留の挿入の間に制御側が
+    /// PUBLISH を受理して `notify_publish_accepted` を呼ぶと、通知側は保留を見つけられず
+    /// 先着 fill が期限まで解決されない。挿入後に Session へ再通知することで、
+    /// 「通知が先」「挿入が先」「同時」のどの順序でも最終的に受理されることを固定する。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pending_fetch_header_insert_and_notify_race_keeps_fill() {
+        use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+        let (handle, pending) = test_data_plane();
+
+        // 1) PUBLISH の受理と通知が保留の挿入より先に起きる順序。
+        //    受理済みのため最初の Session 判定で受理し、保留は作らない
+        let accepted_stream = DataStreamId(20);
+        handle
+            .recv_data_stream_type(accepted_stream, FETCH_HEADER_TYPE)
+            .expect("テストフィクスチャの前提条件を満たす");
+        accept_publish(&handle.session, 11);
+        handle.notify_publish_accepted(11);
+        let registration = handle
+            .recv_fetch_header(accepted_stream, &FetchHeader { request_id: 11 })
+            .expect("受理済みの PUBLISH の fill でセッションを閉じないこと");
+        assert_fetch_header_eventually_accepted(&handle, registration, "PUBLISH が先").await;
+
+        // 2) 保留の挿入後に PUBLISH の受理と通知が起きる順序。
+        //    先着した fill は保留され、PUBLISH の受理で解決される
+        let pending_stream = DataStreamId(21);
+        handle
+            .recv_data_stream_type(pending_stream, FETCH_HEADER_TYPE)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let registration = handle
+            .recv_fetch_header(pending_stream, &FetchHeader { request_id: 13 })
+            .expect("未知の Request ID でもセッションを閉じないこと");
+        assert!(
+            matches!(registration, FetchHeaderRegistration::Pending(_)),
+            "PUBLISH の受理前は保留すること"
+        );
+        accept_publish(&handle.session, 13);
+        handle.notify_publish_accepted(13);
+        assert_fetch_header_eventually_accepted(&handle, registration, "fill が先").await;
+
+        // 3) 挿入と受理通知を別スレッドで同時に走らせる順序。
+        //    どの interleaving でも fill を失わないことを複数回固定する
+        for iteration in 0..32u64 {
+            // peer (server) が開始する request の Request ID は奇数である
+            let request_id = 101 + 2 * iteration;
+            let stream_id = DataStreamId(1000 + iteration);
+            handle
+                .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+                .expect("テストフィクスチャの前提条件を満たす");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let control = {
+                let handle = handle.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    accept_publish(&handle.session, request_id);
+                    handle.notify_publish_accepted(request_id);
+                })
+            };
+            barrier.wait();
+            let registration = handle
+                .recv_fetch_header(stream_id, &FetchHeader { request_id })
+                .expect("同時到着の fill でセッションを閉じないこと");
+            assert_fetch_header_eventually_accepted(&handle, registration, "同時到着").await;
+            control.await.expect("制御側のタスクが正常に終了すること");
+        }
+        assert!(
+            lock_pending_fill_headers(&pending).entries.is_empty(),
+            "解決済みの保留が残らないこと"
+        );
+        assert_eq!(
+            lock_session(&handle.session).state(),
+            SessionState::Established,
+            "fill の受理でセッションが終了しないこと"
         );
     }
 }

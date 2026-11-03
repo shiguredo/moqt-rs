@@ -2733,9 +2733,12 @@ impl Session {
     /// 重複した Range Filter は peer が INVALID_FILTER で拒否することが §3.3.2 で MUST とされるため、
     /// 送信前に自側で弾く。セッションは閉じず `Err` を呼び出し側へ返すだけに留める。
     ///
-    /// Range Filter を載せられる送信経路すべてから呼ばれる (SUBSCRIBE / REQUEST_UPDATE /
-    /// FETCH)。応答経路 (REQUEST_OK 系) からも呼ばれるが、スコープ検証で弾かれるか Range
-    /// Filter を含まないため実質 no-op である。受信側の
+    /// Range Filter を載せられる送信経路すべてから呼ばれる (SUBSCRIBE / PUBLISH /
+    /// REQUEST_UPDATE / FETCH)。PUBLISH の外側スコープに Range Filter は無く (§9.8 (PUBLISH)
+    /// の Parameters 列挙)、FILL_PARAMETERS の内側だけが対象になるが、内側の Range も
+    /// "all Range filter ... parameters for a given subscription or fetch" として同じ予算に
+    /// 含まれるため検証対象である。応答経路 (REQUEST_OK 系) からも呼ばれるが、スコープ検証で
+    /// 弾かれるか Range Filter を含まないため実質 no-op である。受信側の
     /// [`check_incoming_range_filters`](Self::check_incoming_range_filters) と対称である。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     pub(super) fn validate_outgoing_range_filters(

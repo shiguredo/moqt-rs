@@ -62,8 +62,8 @@ pub(super) fn validate_outgoing_fill_parameters(
 ///
 /// `fill` は当該メッセージの FILL_PARAMETERS 内側パラメータ群
 /// (`MessageParameters::fill_parameters`)、`subscription_filter` は呼び出し側
-/// subscription の typed filter (`Subscription::filter`)、`largest` は publisher が
-/// 観測した当該 track の Largest Object を渡す。評価は Fetch の規則
+/// subscription の typed filter (`Subscription::filter`)、`largest` は subscriber が
+/// 当該メッセージから知る当該 track の Largest Object を渡す。評価は Fetch の規則
 /// (`LocationFilterContext::Fetch`) で行う。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn should_open_fill_stream(
@@ -146,12 +146,20 @@ impl Session {
     /// (`MessageParameters::fill_parameters`) で、FILL_PARAMETERS を持たない場合は `None`。
     /// `filter_view` は処理後観点の subscription filter
     /// (SUBSCRIBE / PUBLISH なら新規 filter、REQUEST_UPDATE なら累積後の filter) を渡す。
+    /// `largest_view` は subscriber が当該メッセージから知る Largest Object である。
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) は "The subscriber learns the
+    /// Largest Object from the LARGEST_OBJECT parameter in SUBSCRIBE_OK, PUBLISH or
+    /// REQUEST_UPDATE_OK." と定めるため、PUBLISH 送信経路は補完後の LARGEST_OBJECT を
+    /// `Some` で渡し、LARGEST_OBJECT を運ばない SUBSCRIBE / REQUEST_UPDATE の処理経路は
+    /// `None` を渡して自側の観測最大 (`publisher_track_largest`) から解決させる。
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub(super) fn maybe_open_fill_stream(
         &mut self,
         fill_request_id: u64,
         subscription_request_id: u64,
         fill: Option<&MessageParameters>,
         filter_view: Option<LocationFilter>,
+        largest_view: Option<Location>,
         paused: bool,
     ) {
         // draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions): paused な
@@ -175,7 +183,13 @@ impl Session {
         }
         let track_namespace = subscription.track_namespace.clone();
         let track_name = subscription.track_name.clone();
-        let largest = self.publisher_track_largest(&track_namespace, &track_name);
+        // fill range の終端となる Largest Object。メッセージが LARGEST_OBJECT を運ぶ
+        // (PUBLISH 送信経路) 場合は subscriber が知るその値を優先し、運ばない場合は
+        // 自側が観測した Track 単位の最大で解決する。
+        let largest = match largest_view {
+            Some(largest) => Some(largest),
+            None => self.publisher_track_largest(&track_namespace, &track_name),
+        };
         if let Some((start, end)) =
             should_open_fill_stream(fill, filter_view.as_ref(), largest.as_ref())
         {

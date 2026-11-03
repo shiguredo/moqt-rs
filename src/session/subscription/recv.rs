@@ -308,11 +308,14 @@ impl Session {
         // FILL_PARAMETERS 付き SUBSCRIBE を unpaused (PAUSED=0) で処理したら
         // fill fetch stream を開く。fill range が empty または Largest Object より
         // 後に始まる場合・ Largest Object 未知の場合は開設しない。
+        // SUBSCRIBE は LARGEST_OBJECT を運ばないため、Largest Object は自側の観測値から
+        // 解決する (`largest_view` に `None` を渡す)。
         self.maybe_open_fill_stream(
             request_id,
             request_id,
             subscribe.parameters.fill_parameters(),
             filter,
+            None,
             paused,
         );
         Ok(())
@@ -1279,6 +1282,9 @@ impl Session {
             request_id,
             parameters.fill_parameters(),
             post_filter,
+            // REQUEST_UPDATE は LARGEST_OBJECT を運ばないため、Largest Object は
+            // 自側の観測値から解決する
+            None,
             post_paused,
         );
         Ok(())

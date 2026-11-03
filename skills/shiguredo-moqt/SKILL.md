@@ -270,6 +270,7 @@ pub enum RequestStreamEnd {
     Reset { error_code: u64, reliable_size: Option<u64> },
 }
 pub enum FetchState { Pending, Established, Terminated }
+pub enum FetchHeaderAcceptance { Accepted, RequestNotRegistered }
 pub enum TrackDataAcceptance { Accepted, UnknownTrackAlias, Discarded, FilteredOut }
 pub enum DatagramAcceptance { Object(TrackDataAcceptance), Padding }
 pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
@@ -301,7 +302,7 @@ pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 | `SendPaddingDatagram { length }` | 指定長のパディングデータグラムを送る |
 | `ResetDataStream { stream_id, error_code, reliable_size }` | data stream を reset する |
 | `StopSendingDataStream { stream_id, error_code }` | 受信 data stream に STOP_SENDING を送る (subgroup stream の DATA_STREAM_TIMEOUT、または subscriber 役 subscription への REQUEST_ERROR 送信 (§9.8)。`error_code` は `STREAM_CANCELLED`。timeout 後の遅延到着は保持期間の間 no-op) |
-| `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く (`request_id` は FETCH_HEADER に載せる起因メッセージの Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済みの fill range) |
+| `OpenFillFetchStream { request_id, subscription_request_id, start, end }` | fill fetch stream を開く。`request_id` は FETCH_HEADER の起因 Request ID、`subscription_request_id` は fill 対象購読、`start` / `end` は解決済み range。FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE の処理と PUBLISH の送信で発火する |
 | `ResetRequestStream { request_id, error_code }` | request stream の送信方向を reset する |
 | `StopSendingRequestStream { request_id, error_code }` | request stream の受信方向に STOP_SENDING を送る |
 | `FinishRequestStream { request_id }` | request stream の送信方向を FIN で閉じる |
@@ -365,7 +366,11 @@ fn recv_subgroup_object(
     stream_id: DataStreamId,
     object: &DecodedSubgroupObject,
 ) -> Result<TrackDataAcceptance, SessionError>
-fn recv_fetch_header(&mut self, stream_id: DataStreamId, header: &FetchHeader) -> Result<(), SessionError>
+fn recv_fetch_header(
+    &mut self,
+    stream_id: DataStreamId,
+    header: &FetchHeader,
+) -> Result<FetchHeaderAcceptance, SessionError>
 fn recv_fetch_entry(&mut self, stream_id: DataStreamId) -> Result<(), SessionError>
 fn recv_fetch_data_stream_closed(&mut self, request_id: u64, end: RequestStreamEnd) -> Result<(), SessionError>
 fn fetch_stop_sending_received(&mut self, request_id: u64, error_code: Option<u64>) -> Result<(), SessionError>
@@ -381,6 +386,23 @@ fn report_mid_object_fin(&mut self, stream_id: DataStreamId) -> Result<(), Sessi
 `recv_subgroup_object()` は Object 単位のフィルタ再適用結果を `TrackDataAcceptance` で返す。
 `FilteredOut` / `Discarded` の Object は Application へ渡さないが、wire 上の payload は
 デコーダから読み出して消費する必要がある。
+
+`recv_fetch_header()` は受理結果を `FetchHeaderAcceptance` で返す。`Accepted` は Session が
+stream を受理したこと、`RequestNotRegistered` は対応する要求がまだ登録されていないことを表す
+(`RequestNotRegistered` でもセッションは閉じない)。FILL_PARAMETERS 付き PUBLISH を送った
+publisher は初回 fill の fill fetch stream を開くが (draft-ietf-moq-transport-23 §3.4.1
+(Opening and Closing Fill Fetch Streams))、PUBLISH の bidi stream と初回 fill の uni stream の
+到着順序は保証されないため、PUBLISH の処理前に fill が届きうる。§11.4.1 (Fetch Header) は
+未知の Request ID の扱いを定めないため、caller は stream と decode 済みヘッダを有限の上限・
+期限で保留し、PUBLISH の受理後に同じヘッダを再通知すること。tokio-moq の
+`DataPlaneHandle::recv_fetch_header()` はこの契約を実装しており、戻り値は
+`FetchHeaderRegistration` (`Accepted` / `Pending` / `Rejected`) である。`Pending` は保留を
+作ったことを表し、`wait_fetch_header_registration()` で受理を待ってから entry の処理へ進む。
+PUBLISH の受理を観測した側は `notify_publish_accepted(request_id)` を呼んで保留を解決する
+(`MoqtClient` の受信ループが呼ぶ。制御メッセージを独自に処理する場合はアプリが呼ぶ)。
+保留は接続あたり上限 64 件・期限 5 秒であり、期限切れ・上限超過
+(`FetchHeaderResolution::Discarded` / `FetchHeaderRegistration::Rejected`) では stream の
+読み取りを打ち切る (Session の会計は解放済み)。
 
 `recv_request_stream_closed(rid, RequestStreamEnd::Fin)` は、自側が SUBSCRIBE / FETCH /
 TRACK_STATUS の responder、または PUBLISH を送った側 (publisher 役) で `Established` のとき

@@ -948,6 +948,51 @@ fn request_rejection(message: &ControlMessage) -> (u64, &'static str) {
 /// 自分の通知だけを引き取る。
 type SharedPendingSubgroupBuffer = std::sync::Arc<tokio::sync::Mutex<PendingSubgroupBuffer>>;
 
+/// data stream の同時処理枠
+///
+/// `MAX_CONCURRENT_STREAMS` 本を上限に stream task が 1 枠ずつ保持する。CPU を使わない
+/// 待機 (PUBLISH の到着を待つ fill の保留) の間は [`StreamSlot::release`] で枠を手放し、
+/// 待機が明けたら [`StreamSlot::reacquire`] で取り直す。枠を保持したまま待つと、保留が
+/// 上限本そろったときに他の stream の処理が保留の期限まで止まるためである。手放している
+/// 間もセマフォの総数は変わらないので、同時に処理する stream 数は上限を超えない。
+struct StreamSlot {
+    /// 枠の総数を管理するセマフォ (session スコープで共有)
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    /// 現在保持している枠 (手放している間は `None`)
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl StreamSlot {
+    fn new(
+        semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            semaphore,
+            permit: Some(permit),
+        }
+    }
+
+    /// 枠を手放す
+    fn release(&mut self) {
+        self.permit = None;
+    }
+
+    /// 手放した枠を取り直す
+    async fn reacquire(&mut self) {
+        if self.permit.is_some() {
+            return;
+        }
+        // セマフォは session の生存中に close されないため、取得の失敗は起こらない
+        self.permit = Some(
+            std::sync::Arc::clone(&self.semaphore)
+                .acquire_owned()
+                .await
+                .expect("stream slot semaphore must not be closed"),
+        );
+    }
+}
+
 /// 受け入れた data stream の処理タスクを起動する。
 ///
 /// `permit` はこの stream の処理枠である。タスクの終了時に手放すので、
@@ -958,6 +1003,7 @@ fn spawn_stream_task(
     task_monitor: &tokio_metrics::TaskMonitor,
     stream: transport::RecvStream,
     permit: tokio::sync::OwnedSemaphorePermit,
+    stream_slots: &std::sync::Arc<tokio::sync::Semaphore>,
     stream_num: u64,
     track_map: &HashMap<u64, TrackKind>,
     fetch_targets: &HashMap<u64, FetchTarget>,
@@ -1004,7 +1050,9 @@ fn spawn_stream_task(
     let catalog_tx = catalog_tx.clone();
     let pending_subgroups = std::sync::Arc::clone(pending_subgroups);
     let recorder = recorder.cloned();
+    let slots = std::sync::Arc::clone(stream_slots);
     join_set.spawn(task_monitor.clone().instrument(async move {
+        let mut slot = StreamSlot::new(slots, permit);
         handle_incoming_stream(
             stream,
             data_plane,
@@ -1016,6 +1064,7 @@ fn spawn_stream_task(
             &frame_tx,
             &audio_tx,
             stream_num,
+            &mut slot,
             backlog,
             &video_decode_order,
             &video_delivery_order,
@@ -1033,7 +1082,7 @@ fn spawn_stream_task(
         )
         .await;
         // stream の処理が終わるまで枠を保持する
-        drop(permit);
+        drop(slot);
     }));
 }
 
@@ -2718,6 +2767,7 @@ pub async fn run(
                 &task_monitor,
                 stream,
                 permit,
+                &stream_slots,
                 total_streams,
                 &track_map_snapshot,
                 &fetch_targets,
@@ -4640,6 +4690,7 @@ async fn handle_incoming_stream(
     frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     stream_num: u64,
+    slot: &mut StreamSlot,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
@@ -4671,6 +4722,7 @@ async fn handle_incoming_stream(
         frame_tx,
         audio_tx,
         stream_num,
+        slot,
         display_backlog,
         video_decode_order,
         video_delivery_order,
@@ -4744,6 +4796,7 @@ async fn handle_stream_body(
     frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
     stream_num: u64,
+    slot: &mut StreamSlot,
     display_backlog: std::sync::Arc<std::sync::atomic::AtomicI64>,
     video_decode_order: &std::sync::Arc<tokio::sync::Mutex<VideoDecodeOrder>>,
     video_delivery_order: &std::sync::Arc<std::sync::Mutex<VideoDeliveryOrder>>,
@@ -4822,7 +4875,11 @@ async fn handle_stream_body(
             // Session への登録を配送先の判定より先に行う。fill fetch stream の Request ID は
             // 起因メッセージのものであり、PUBLISH 起点の初回 fill は fetch_targets に現れない
             // (fetch_targets は自側が発行した要求の Request ID だけを持つ)。登録を先に行うことで、
-            // PUBLISH の受理待ちの保留・会計の解放を DataPlaneHandle に一任できる
+            // PUBLISH の受理待ちの保留・会計の解放を DataPlaneHandle に一任できる。
+            // 保留待ちは PUBLISH の到着を最長 5 秒待つため、その間は stream の同時処理枠を
+            // 手放す。枠を保持したまま待つと、保留が MAX_CONCURRENT_STREAMS 本そろったときに
+            // 他の stream の処理が保留の期限まで止まる。
+            slot.release();
             let registered =
                 match register_fetch_header(stream, data_plane, stream_id, &fetch_header).await {
                     Ok(registered) => registered,
@@ -4838,6 +4895,7 @@ async fn handle_stream_body(
                         return;
                     }
                 };
+            slot.reacquire().await;
             if !registered {
                 // 保留の期限・上限の超過で破棄済みである。Session の会計も解放済み
                 return;
@@ -8435,6 +8493,30 @@ mod tests {
             fetch_stream_action(0, &fetch_targets),
             FetchStreamAction::Ignore,
             "対応表に無い Request ID の stream は読み捨てること"
+        );
+    }
+
+    /// 保留待ちの間は同時処理枠を手放し、待機後に取り直すこと
+    ///
+    /// fill の保留は PUBLISH の到着を最長 5 秒待つ。その間も枠を保持すると、保留が
+    /// `MAX_CONCURRENT_STREAMS` 本そろったときに他の stream の処理が止まる。
+    /// 手放している間はセマフォの空きが増え、取り直すと元に戻ることを固定する。
+    #[tokio::test]
+    async fn stream_slot_releases_and_reacquires_permit() {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = std::sync::Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("テストフィクスチャの前提条件を満たす");
+        let mut slot = StreamSlot::new(std::sync::Arc::clone(&semaphore), permit);
+        assert_eq!(semaphore.available_permits(), 0, "枠を保持していること");
+        slot.release();
+        assert_eq!(semaphore.available_permits(), 1, "待機の前に枠を手放すこと");
+        slot.reacquire().await;
+        assert_eq!(
+            semaphore.available_permits(),
+            0,
+            "待機の後に枠を取り直すこと"
         );
     }
 
