@@ -5,13 +5,13 @@
 Media Over QUIC                                            S. Nandakumar
 Internet-Draft                                               C. Jennings
 Intended status: Standards Track                                   Cisco
-Expires: 7 January 2027                                       T. Meunier
+Expires: 6 May 2027                                           T. Meunier
                                                          Cloudflare Inc.
-                                                             6 July 2026
+                                                         2 November 2026
 
 
          Privacy Pass Authentication for Media over QUIC (MoQ)
-                  draft-ietf-moq-privacy-pass-auth-03
+                  draft-ietf-moq-privacy-pass-auth-04
 
 Abstract
 
@@ -53,9 +53,9 @@ Status of This Memo
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                 [Page 1]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 1]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
    Internet-Drafts are draft documents valid for a maximum of six months
@@ -63,7 +63,7 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 7 January 2027.
+   This Internet-Draft will expire on 6 May 2027.
 
 Copyright Notice
 
@@ -83,6 +83,7 @@ Table of Contents
 
    1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
      1.1.  Requirements Language . . . . . . . . . . . . . . . . . .   4
+     1.2.  MoQ Transport Conventions . . . . . . . . . . . . . . . .   4
    2.  Privacy Pass Architecture for MoQ . . . . . . . . . . . . . .   4
      2.1.  Joint Attester and Issuer . . . . . . . . . . . . . . . .   5
      2.2.  Shared Origin, Attester, Issuer with a Reverse Flow . . .   5
@@ -96,47 +97,49 @@ Table of Contents
        3.2.1.  Token Challenge Structure for MoQ . . . . . . . . . .  10
        3.2.2.  MoQ Actions . . . . . . . . . . . . . . . . . . . . .  11
        3.2.3.  Match Types . . . . . . . . . . . . . . . . . . . . .  12
-       3.2.4.  Authorization Scope Structure (origin_info) . . . . .  12
-       3.2.5.  Examples  . . . . . . . . . . . . . . . . . . . . . .  13
+       3.2.4.  Authorization Scope Structure (origin_info) . . . . .  13
+       3.2.5.  Examples  . . . . . . . . . . . . . . . . . . . . . .  14
      3.3.  Track Namespace and Track Name Matching Rules . . . . . .  15
        3.3.1.  Match Rule Evaluation . . . . . . . . . . . . . . . .  15
        3.3.2.  Matching Algorithm  . . . . . . . . . . . . . . . . .  16
-     3.4.  Required MoQ Transport Extensions . . . . . . . . . . . .  18
-       3.4.1.  AUTH CHALLENGE Parameter  . . . . . . . . . . . . . .  18
-       3.4.2.  AUTH REQUEST and AUTH RESPONSE Parameters . . . . . .  19
-     3.5.  Token in MOQ Messages . . . . . . . . . . . . . . . . . .  20
-       3.5.1.  SETUP Message Authorization . . . . . . . . . . . . .  20
+       3.3.3.  Requests on a Track Namespace Prefix  . . . . . . . .  18
+     3.4.  Required MoQ Transport Extensions . . . . . . . . . . . .  19
+       3.4.1.  AUTH CHALLENGE  . . . . . . . . . . . . . . . . . . .  19
+       3.4.2.  AUTH REQUEST and AUTH RESPONSE Parameters . . . . . .  20
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                 [Page 2]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 2]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
-       3.5.2.  MoQ Operation-Level Authorization . . . . . . . . . .  21
-       3.5.3.  Continuous Authorization with Batched Tokens  . . . .  21
-       3.5.4.  Continuous Authorization with Reverse Flow  . . . . .  22
-       3.5.5.  Errors  . . . . . . . . . . . . . . . . . . . . . . .  23
-   4.  Example Authorization Flow  . . . . . . . . . . . . . . . . .  28
-   5.  Security Considerations . . . . . . . . . . . . . . . . . . .  29
-   6.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  29
-     6.1.  MOQT Auth Token Type Registration . . . . . . . . . . . .  29
-     6.2.  MoQ Action Registry . . . . . . . . . . . . . . . . . . .  29
-     6.3.  MoQ Match Type Registry . . . . . . . . . . . . . . . . .  30
-     6.4.  MoQ Privacy Pass Error Code Registry  . . . . . . . . . .  31
-   7.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  32
-     7.1.  Normative References  . . . . . . . . . . . . . . . . . .  32
-     7.2.  Informative References  . . . . . . . . . . . . . . . . .  33
-   Appendix A.  Deployment considerations  . . . . . . . . . . . . .  34
-     A.1.  Fetching key material for the bootstrap issuer  . . . . .  34
-     A.2.  Fetching key material for the relay reverse issuer  . . .  34
-   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  34
-   Changelog . . . . . . . . . . . . . . . . . . . . . . . . . . . .  34
-     Since draft-ietf-moq-privacy-pass-auth-02 . . . . . . . . . . .  35
-     Since draft-ietf-moq-privacy-pass-auth-01 . . . . . . . . . . .  35
-     Since draft-ietf-moq-privacy-pass-auth-00 . . . . . . . . . . .  36
-   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  36
+     3.5.  Token in MOQ Messages . . . . . . . . . . . . . . . . . .  21
+       3.5.1.  SETUP Message Authorization . . . . . . . . . . . . .  21
+       3.5.2.  MoQ Operation-Level Authorization . . . . . . . . . .  23
+       3.5.3.  Token Aliases . . . . . . . . . . . . . . . . . . . .  23
+       3.5.4.  Continuous Authorization with Batched Tokens  . . . .  23
+       3.5.5.  Continuous Authorization with Reverse Flow  . . . . .  25
+       3.5.6.  Errors  . . . . . . . . . . . . . . . . . . . . . . .  25
+   4.  Example Authorization Flow  . . . . . . . . . . . . . . . . .  30
+   5.  Security Considerations . . . . . . . . . . . . . . . . . . .  31
+   6.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  32
+     6.1.  MOQT Auth Token Type Registration . . . . . . . . . . . .  32
+     6.2.  MoQ Action Registry . . . . . . . . . . . . . . . . . . .  32
+     6.3.  MoQ Match Type Registry . . . . . . . . . . . . . . . . .  33
+     6.4.  REQUEST_ERROR Code Registrations  . . . . . . . . . . . .  34
+   7.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  34
+     7.1.  Normative References  . . . . . . . . . . . . . . . . . .  34
+     7.2.  Informative References  . . . . . . . . . . . . . . . . .  36
+   Appendix A.  Deployment considerations  . . . . . . . . . . . . .  36
+     A.1.  Fetching key material for the bootstrap issuer  . . . . .  37
+     A.2.  Fetching key material for the relay reverse issuer  . . .  37
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  37
+   Changelog . . . . . . . . . . . . . . . . . . . . . . . . . . . .  37
+     Since draft-ietf-moq-privacy-pass-auth-02 . . . . . . . . . . .  37
+     Since draft-ietf-moq-privacy-pass-auth-01 . . . . . . . . . . .  39
+     Since draft-ietf-moq-privacy-pass-auth-00 . . . . . . . . . . .  39
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  39
 
 1.  Introduction
 
@@ -159,16 +162,17 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    architecture that enables anonymous authentication through unlinkable
    tokens.  The Privacy Pass architecture consists of four entities:
    Client, Origin, Issuer, and Attester, which work together to provide
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                   [Page 3]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    token-based authorization without compromising user privacy.  The
    issuance protocols [RFC9578] define how these tokens are created and
    verified.
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                 [Page 3]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    This document defines how Privacy Pass tokens can be integrated with
    MoQ's authorization framework to provide comprehensive access control
@@ -183,6 +187,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    "OPTIONAL" in this document are to be interpreted as described in
    BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
    capitals, as shown here.
+
+1.2.  MoQ Transport Conventions
+
+   [MoQ-TRANSPORT] defines a single SETUP message (Section 9.1 of
+   [MoQ-TRANSPORT]) that each endpoint sends on its control stream.  In
+   this document, CLIENT_SETUP denotes the SETUP message sent by the
+   client and SERVER_SETUP denotes the SETUP message sent by the server.
 
 2.  Privacy Pass Architecture for MoQ
 
@@ -205,6 +216,16 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
       and metadata.
 
    *Privacy Pass Issuer*  The entity that issues Privacy Pass tokens to
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                   [Page 4]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
       clients after successful attestation.  The issuer operates the
       token issuance protocol, manages cryptographic keys.  The issuer
       creates tokens with appropriate MoQ-specific metadata.
@@ -214,17 +235,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
       client credentials, subscription status, or other eligibility
       criteria.  Common attestation methods include username/password,
       OAuth, device certificates, or other authentication mechanisms.
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                 [Page 4]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
 2.1.  Joint Attester and Issuer
 
@@ -265,6 +275,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    1.  Type 0x0002 token signed by the bootstrap issuer from Section 2.1
 
+
+
+Nandakumar, et al.         Expires 6 May 2027                   [Page 5]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    2.  Type 0x0001, 0x0005, or 0xE5AC tokens signed by its own issuer.
 
    This two-phase approach provides several advantages:
@@ -272,15 +289,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    *  *Bootstrapping*: The initial publicly verifiable token (0x0002)
       establishes trust without requiring the relay to share private
       keys with external verifiers.
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                 [Page 5]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    *  *Efficiency*: Subsequent privately verifiable tokens allow batched
       issuance, amortizing cryptographic costs across multiple
@@ -325,55 +333,48 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                 [Page 6]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 6]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
-+---------------+  +------------+        +--------+        +----------+  +--------+
-| Origin Issuer |  |  MoQ Relay |        | Client |        | Attester |  | Issuer |
-+-------+-------+  +------+-----+        +----+---+        +-----+----+  +----+---+
-        |                 |                   |                  |           |
-        |                 |                   |                  |           |
-        :     Phase 1: Bootstrap Token Acquisition               :           :
-        |                 |                   |                  |           |
-        |                 |<- CLIENT_SETUP[] -+                  |           |
-        |                 +- SERVER_SETUP  -->|                  |           |
-        |                 |  [AUTH CHALLENGE] |                  |           |
-        |                 +- UNAUTHORIZED --->|                  |           |
-        |                 |                   |                  |           |
-        |                 |                   |<== Attestation ==>           |
-        |                 |                   |                  |           |
-        |                 |                   +---- TokenRequest ----------->|
-        |                 |                   |<--- TokenResponse -----------+
-        |                 |                   |                  |           |
-        :     Phase 2: Token Exchange via Reverse Flow           :           :
-        |                 |                   |                  |           |
-        |                 |<- CLIENT_SETUP ---+                  |           |
-        |                 |   [AUTH TOKEN +   |                  |           |
-        |                 |    AUTH REQUEST]  |                  |           |
-        |                 |                   |                  |           |
-        |<-CredentialReq--+                   |                  |           |
-        +--CredentialRes->|                   |                  |           |
-        |                 |                   |                  |           |
-        |                 +-- SERVER_SETUP -->|                  |           |
-        |                 |  [AUTH RESPONSE]  |                  |           |
-        |                 |                   |                  |           |
-        :     Phase 3: Normal Operations with Derived Tokens     :           :
-        |                 |                   |                  |           |
-        |                 |<-- SUBSCRIBE -----+                  |           |
-        |                 |   [Token from     |                  |           |
-        |                 |    credential]    |                  |           |
-        |                 +-- SUBSCRIBE_OK -->|                  |           |
-        |                 |                   |                  |           |
++--------+      +-----------+      +--------+    +----------+ +--------+
+| Origin |      | MoQ Relay |      | Client |    | Attester | | Issuer |
+| Issuer |      +-----+-----+      +----+---+    +-----+----+ +----+---+
++----+---+            |                 |              |           |
+     |                |                 |              |           |
+     |                |                 |              |           |
+     :  Phase 1: Bootstrap Token Acquisition           :           :
+     |                |                 |              |           |
+     |                |<-CLIENT_SETUP[]-+              |           |
+     |                +-SERVER_SETUP--->|              |           |
+     |                | [AUTH CHALLENGE]|              |           |
+     |                +-UNAUTHORIZED--->|              |           |
+     |                |                 |              |           |
+     |                |                 |<=Attestation=>           |
+     |                |                 |              |           |
+     |                |                 +---- TokenRequest ------->|
+     |                |                 |<--- TokenResponse -------+
+     |                |                 |              |           |
+     :  Phase 2: Token Exchange via Reverse Flow       :           :
+     |                |                 |              |           |
+     |                |<-CLIENT_SETUP---+              |           |
+     |                | [AUTH TOKEN +   |              |           |
+     |                |  AUTH REQUEST]  |              |           |
+     |                |                 |              |           |
+     |<-CredentialReq-+                 |              |           |
+     +-CredentialRes->|                 |              |           |
+     |                |                 |              |           |
+     |                +-SERVER_SETUP--->|              |           |
+     |                | [AUTH RESPONSE] |              |           |
+     |                |                 |              |           |
+     :  Phase 3: Normal Operations with Derived Tokens :           :
+     |                |                 |              |           |
+     |                |<-SUBSCRIBE------+              |           |
+     |                | [Token from     |              |           |
+     |                |  credential]    |              |           |
+     |                +-SUBSCRIBE_OK--->|              |           |
+     |                |                 |              |           |
 
             Figure 2: Complete Reverse Flow Authorization
 
@@ -388,10 +389,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-
-Nandakumar, et al.       Expires 7 January 2027                 [Page 7]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 7]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
    2.  The MoQ relay responds with a SERVER_SETUP carrying an AUTH
@@ -445,9 +445,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                 [Page 8]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 8]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
    Similarly, the AUTH RESPONSE payload contains:
@@ -501,9 +501,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                 [Page 9]
+Nandakumar, et al.         Expires 6 May 2027                   [Page 9]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
    *  0xE5AC (ARC(P-256)): Anonymous Rate Limit Credentials Token using
@@ -557,9 +557,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                [Page 10]
+Nandakumar, et al.         Expires 6 May 2027                  [Page 10]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
 3.2.2.  MoQ Actions
@@ -570,23 +570,25 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
      +=====================+=======+=================================+
      | Action              | Value | Reference                       |
      +=====================+=======+=================================+
-     | CLIENT_SETUP        | 0     | Section 9.3 of [MoQ-TRANSPORT]  |
+     | CLIENT_SETUP        | 0     | Section 9.1 of [MoQ-TRANSPORT]  |
      +---------------------+-------+---------------------------------+
-     | SERVER_SETUP        | 1     | Section 9.3 of [MoQ-TRANSPORT]  |
+     | SERVER_SETUP        | 1     | Section 9.1 of [MoQ-TRANSPORT]  |
      +---------------------+-------+---------------------------------+
-     | PUBLISH_NAMESPACE   | 2     | Section 9.20 of [MoQ-TRANSPORT] |
+     | PUBLISH_NAMESPACE   | 2     | Section 9.13 of [MoQ-TRANSPORT] |
      +---------------------+-------+---------------------------------+
-     | SUBSCRIBE_NAMESPACE | 3     | Section 9.25 of [MoQ-TRANSPORT] |
+     | SUBSCRIBE_NAMESPACE | 3     | Section 9.14 of [MoQ-TRANSPORT] |
      +---------------------+-------+---------------------------------+
-     | SUBSCRIBE           | 4     | Section 9.9 of [MoQ-TRANSPORT]  |
+     | SUBSCRIBE           | 4     | Section 9.6 of [MoQ-TRANSPORT]  |
      +---------------------+-------+---------------------------------+
-     | REQUEST_UPDATE      | 5     | Section 9.11 of [MoQ-TRANSPORT] |
+     | REQUEST_UPDATE      | 5     | Section 9.5 of [MoQ-TRANSPORT]  |
      +---------------------+-------+---------------------------------+
-     | PUBLISH             | 6     | Section 9.13 of [MoQ-TRANSPORT] |
+     | PUBLISH             | 6     | Section 9.8 of [MoQ-TRANSPORT]  |
      +---------------------+-------+---------------------------------+
-     | FETCH               | 7     | Section 9.16 of [MoQ-TRANSPORT] |
+     | FETCH               | 7     | Section 9.11 of [MoQ-TRANSPORT] |
      +---------------------+-------+---------------------------------+
-     | TRACK_STATUS        | 8     | Section 9.19 of [MoQ-TRANSPORT] |
+     | TRACK_STATUS        | 8     | Section 9.12 of [MoQ-TRANSPORT] |
+     +---------------------+-------+---------------------------------+
+     | SUBSCRIBE_TRACKS    | 9     | Section 9.17 of [MoQ-TRANSPORT] |
      +---------------------+-------+---------------------------------+
 
                          Table 1: MoQ Action Values
@@ -595,6 +597,26 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    denied unless explicitly permitted by a token scope.
 
    MoQAction wire representation is as follows
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 11]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
    enum {
        CLIENT_SETUP(0),
@@ -606,17 +628,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
        PUBLISH(6),
        FETCH(7),
        TRACK_STATUS(8),
+       SUBSCRIBE_TRACKS(9),
        (255)
    } MoQAction;
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 11]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
 3.2.3.  Match Types
 
@@ -653,6 +667,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    MatchType wire representation is as follows
 
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 12]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    enum {
        MATCH_EXACT(0),
        MATCH_PREFIX(1),
@@ -665,14 +686,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    When authorization scope is bound at issuance time, the origin_info
    field contains a binary-encoded MoQAuthorizationInfo structure:
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 12]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    struct {
        opaque element<0..2^16-1>;
@@ -707,28 +720,21 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    Authorization succeeds if ANY scope in the token permits the
    requested operation.
 
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 13]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
 3.2.5.  Examples
 
    The following examples illustrate authorization scope configurations:
 
    Subscribe to live sports namespace (prefix match):
-
-
-
-
-
-
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 13]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    MoQAuthScope {
        actions = [SUBSCRIBE(4)],
@@ -764,6 +770,22 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    Fetch video-on-demand with suffix matching:
 
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 14]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    MoQAuthScope {
        actions = [FETCH(7)],
        namespace_match = {
@@ -775,16 +797,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
            value = ".mp4"
        }
    }
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 14]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    This matches namespace tuples containing the contiguous subsequence
    ["vod", "movies"], such as ["example.com", "vod", "movies",
@@ -801,8 +813,8 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    Given a MatchRule and a target value (namespace tuple or track name),
    the match succeeds according to the following rules.  For namespace
-   matching, both the pattern and target are tuples of byte strings;
-   matching operates at tuple element boundaries.
+   matching, both the pattern and target are tuples of byte strings.
+   Matching operates at tuple element boundaries.
 
    MATCH_EXACT (0):
 
@@ -822,6 +834,14 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    MATCH_SUFFIX (2):
 
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 15]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    The target MUST end with the pattern at tuple element boundaries.
    The pattern tuple ["audio"] matches ["meeting123", "audio"] and
    ["conference", "room1", "audio"] but not ["audio", "opus"].
@@ -833,14 +853,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    ["example.com", "live", "sports", "soccer"] but the single-element
    pattern ["sports"] does NOT match ["live-sports", "channel"] since
    "sports" is a substring within an element, not a complete element.
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 15]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    Note: To match all values, use MATCH_PREFIX with an empty pattern ([]
    for namespaces or "" for track names).  An empty pattern is a prefix
@@ -878,6 +890,14 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
             v
    +------------------+                 +----------------+
    |                  +---------------->| Authorization  |
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 16]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    | For each Scope   | No more scopes  | Failed         |
    |                  |<---------+      +----------------+
    +--------+---------+          |
@@ -890,14 +910,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
             | Yes                |
             v                    |
    +------------------+          |
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 16]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
    | Namespace Match  |----------+
    | Rule passes?     |    No    |
    +--------+---------+          |
@@ -935,6 +947,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    3.  *Replay Protection*: Validate that the token has not been
        replayed:
 
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 17]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
        *  Check token nonce uniqueness within the configured replay
           window
 
@@ -945,15 +964,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
        *  If using origin_info: Decode the MoQAuthorizationInfo
           structure
 
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 17]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
    5.  *Scope Evaluation*: For each MoQAuthScope in the token, check if
        the requested operation is authorized:
 
@@ -961,7 +971,8 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
        Section 3.2.2) is present in the scope's actions list
 
        b. *Namespace Match*: Apply the namespace_match rule to the
-       requested track namespace using the algorithm in Section 3.2.3
+       requested track namespace using the algorithm in Section 3.2.3.
+       Requests that carry a Track Namespace Prefix follow Section 3.3.3
 
        c. *Track Name Match*: Apply the track_name_match rule to the
        requested track name using the algorithm in Section 3.2.3
@@ -979,36 +990,86 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
           5)
 
    If authorization fails, an error is returned as specified in
-   Section 3.5.5.
+   Section 3.5.6.
+
+3.3.3.  Requests on a Track Namespace Prefix
+
+   PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE, and SUBSCRIBE_TRACKS carry a
+   Track Namespace Prefix instead of a track namespace and track name.
+   Such a request covers every track namespace that begins with the
+   prefix, so a scope authorizes it only if it covers all of them:
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 18]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+   *  Namespace check: The namespace_match rule MUST be MATCH_PREFIX,
+      and its pattern MUST be a prefix of the requested Track Namespace
+      Prefix.  Other match types cannot cover an open-ended set of
+      namespaces.
+
+   *  Track name check: PUBLISH_NAMESPACE and SUBSCRIBE_NAMESPACE do not
+      name tracks, so track_name_match is not evaluated for them.
+      SUBSCRIBE_TRACKS results in subscriptions to any track under the
+      prefix, so its track_name_match MUST be MATCH_PREFIX with an empty
+      pattern.
+
+   As an alternative, a relay MAY accept SUBSCRIBE_NAMESPACE or
+   SUBSCRIBE_TRACKS under a narrower scope, provided it only sends
+   NAMESPACE, NAMESPACE_DONE, PUBLISH, or PUBLISH_SKIPPED messages for
+   namespaces and tracks that the scope covers.
+
+   PUBLISH messages that a relay sends as a result of SUBSCRIBE_TRACKS
+   are covered by the token presented in the SUBSCRIBE_TRACKS.  That
+   token is not copied into them (Section 9.19.2 of [MoQ-TRANSPORT]).
 
 3.4.  Required MoQ Transport Extensions
 
-   This document relies on authentication hooks that are proposed for
-   MoQ Transport but not yet part of [MoQ-TRANSPORT] (see moq-transport
-   issue 1658).  They are defined here provisionally and are expected to
-   move to the transport draft.  They are deliberately scheme-agnostic:
-   any authorization scheme with a codepoint in the "MOQT Auth Token
-   Type" registry can use them.
+   This document uses the Error Details mechanism of [MoQ-TRANSPORT] to
+   carry AUTH CHALLENGE in REQUEST_ERROR.  It also defines AUTH
+   CHALLENGE Setup Options and Message Parameters, and AUTH REQUEST and
+   AUTH RESPONSE for reverse flow issuance.  These hooks are scheme-
+   agnostic: any authorization scheme with a codepoint in the "MOQT Auth
+   Token Type" registry can use them.
 
-   This document also assumes that REQUEST_ERROR carries Message
-   Parameters, as REQUEST_OK and REQUEST_UPDATE already do.
+   [[editor's note: These hooks depend on ongoing MoQ Transport
+   authentication work (see https://github.com/moq-wg/moq-transport/
+   issues/1658 (https://github.com/moq-wg/moq-transport/issues/1658)).
+   [MoQ-TRANSPORT] provides Error Details in REQUEST_ERROR, but the AUTH
+   CHALLENGE binding remains undefined.  SETUP challenge delivery and
+   in-band issuance, including successful-response parameters, also
+   remain open.  AUTH REQUEST and AUTH RESPONSE describe the exchange
+   needed for reverse flow.  They are not an adopted AUTH design-team
+   solution.]]
 
-3.4.1.  AUTH CHALLENGE Parameter
+3.4.1.  AUTH CHALLENGE
 
-   The AUTH CHALLENGE parameter is a length-prefixed Message Parameter,
-   with a Setup Option counterpart of identical encoding:
+   AUTH CHALLENGE is a repeatable, odd-numbered Error Detail in
+   REQUEST_ERROR, using the Key-Value-Pair encoding of [MoQ-TRANSPORT].
+   Its value has the following encoding, also used by the Message
+   Parameter and Setup Option counterparts:
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 19]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
    Auth Challenge {
      Token Type (vi64),
      Challenge (..)
    }
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 18]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    *  Token Type: a codepoint from the "MOQT Auth Token Type" registry
       of [MoQ-TRANSPORT], identifying the authorization scheme.
@@ -1017,13 +1078,20 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    The parameter conveys that the sender will accept a credential of
    this Token Type satisfying this Challenge.  It MAY be repeated within
-   a message; challenges are ordered by sender preference, most
+   a message.  Challenges are ordered by sender preference, most
    preferred first.  A receiver ignores challenges whose Token Type it
    does not support.
 
-   The Message Parameter can appear in REQUEST_ERROR and in successful
-   responses (REQUEST_OK, SUBSCRIBE_OK, FETCH_OK).  The Setup Option can
-   appear in SERVER_SETUP.
+   The Error Detail applies to the error codes in Table 3 and MAY appear
+   more than once in a REQUEST_ERROR.  Its encoding and size limits
+   follow [MoQ-TRANSPORT].  The Message Parameter can appear in
+   successful responses (REQUEST_OK, SUBSCRIBE_OK, FETCH_OK), including
+   REQUEST_OK responding to REQUEST_UPDATE (REQUEST_UPDATE_OK).  The
+   Setup Option can appear in SERVER_SETUP.
+
+   [[editor's note: The codepoint in the "MOQT Error Detail Types"
+   registry of [MoQ-TRANSPORT] remains TBD, pending definition of the
+   generic transport challenge mechanism.]]
 
    For this document, the Token Type is PRIVACY_PASS_TOKEN (Section 6.1)
    and the Challenge is a TokenChallenge as defined in Section 2.1 of
@@ -1045,13 +1113,22 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
      Response Payload (..)
    }
 
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 20]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    AUTH REQUEST asks the receiver to produce credential material defined
    by the authorization scheme, such as a token issuance or renewal
    request.  It can appear wherever the AUTHORIZATION TOKEN parameter
    can, including REQUEST_UPDATE, and in CLIENT_SETUP as an option.  A
    receiver that does not support the Token Type, or is unwilling to
    issue, ignores the parameter and processes the message as if it were
-   absent; the sender detects this by the absence of a matching AUTH
+   absent.  The sender detects this by the absence of a matching AUTH
    RESPONSE.
 
    AUTH RESPONSE carries the material produced in answer to an AUTH
@@ -1059,16 +1136,18 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    the AUTH REQUEST (REQUEST_OK, SUBSCRIBE_OK, FETCH_OK) and in
    SERVER_SETUP as an option.  It MUST NOT be sent unsolicited.
 
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 19]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
    Request and response payloads are transient: they are not registered
    in the token cache and do not count against
    MAX_AUTH_TOKEN_CACHE_SIZE.
+
+   Issuance is between the client and its peer relay acting as issuer.
+   These parameters do not request issuance by an upstream relay or
+   original publisher.
+
+   [[editor's note: The transport binding needs to specify how issuance
+   requests and responses are correlated when REQUEST_UPDATE processing
+   is coalesced.  The existing parameter update rules do not define this
+   exchange.]]
 
    For this document, the Token Type is PRIVACY_PASS_TOKEN and the
    payloads are the issuance structures listed in Section 2.2.3.
@@ -1081,12 +1160,23 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 3.5.1.  SETUP Message Authorization
 
    For connection-level authorization, the client includes an
-   AUTHORIZATION TOKEN Setup Option (Section 9.3.1.5 of [MoQ-TRANSPORT])
+   AUTHORIZATION TOKEN Setup Option (Section 9.1.4 of [MoQ-TRANSPORT])
    whose Token Type is PRIVACY_PASS_TOKEN and whose Token Value is a
    Token structure.  When the client also wants tokens or credentials
    issued over this connection (Section 2.2), it adds an AUTH REQUEST
-   option (Section 3.4.2); the relay answers with an AUTH RESPONSE
+   option (Section 3.4.2).  The relay answers with an AUTH RESPONSE
    option in SERVER_SETUP.
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 21]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
    CLIENT_SETUP {
        Setup Options = [
@@ -1113,31 +1203,41 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    The Token structure is prepended by a two-byte token type identifier
    as registered with IANA:
 
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 20]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
-struct {
-   uint16_t token_type; /* From the IANA Privacy Pass Token Types Registry */
-   select (token_type) { /* Rest of the token */
-     case (0x0001, 0x0002, 0x0005):
-         uint8_t nonce[32];
-         uint8_t challenge_digest[32];
-         uint8_t token_key_id[Nid];
-         uint8_t authenticator[Nk];
-     case (other): /* Other token types from the IANA Privacy Pass Token Types Registry */
-         opaque remainder<0..2^16-1>;
-   }
-} Token;
+   struct {
+      /* From the IANA Privacy Pass Token Types Registry */
+      uint16_t token_type;
+      select (token_type) { /* Rest of the token */
+        case (0x0001, 0x0002, 0x0005):
+            uint8_t nonce[32];
+            uint8_t challenge_digest[32];
+            uint8_t token_key_id[Nid];
+            uint8_t authenticator[Nk];
+        case (other):
+            /* Other token types from the IANA Privacy Pass
+               Token Types Registry */
+            opaque remainder<0..2^16-1>;
+      }
+   } Token;
 
    Where Nk is determined by token_type per the [PRIVACYPASS-IANA].
 
    Unknown token types MUST be rejected.
+
+   Each endpoint sends SETUP independently and MAY send it before
+   receiving the peer's SETUP (Section 9.1 of [MoQ-TRANSPORT]).  A relay
+   that authenticates SETUP or supports issuance through AUTH REQUEST
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 22]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+   MUST receive and process the client's SETUP before sending its own,
+   so it can include any required AUTH CHALLENGE or AUTH RESPONSE.
+   Requests that a client pipelines after its SETUP are lost if the
+   relay terminates the session with UNAUTHORIZED.
 
 3.5.2.  MoQ Operation-Level Authorization
 
@@ -1155,7 +1255,23 @@ struct {
        ]
    }
 
-3.5.3.  Continuous Authorization with Batched Tokens
+3.5.3.  Token Aliases
+
+   Section 8.9 of [MoQ-TRANSPORT] lets a sender register a token under
+   an Alias and refer to it later with USE_ALIAS.  Privacy Pass tokens
+   are single-use, so a sender MUST use Alias Type USE_VALUE for tokens
+   with Token Type PRIVACY_PASS_TOKEN and MUST NOT register them.
+
+   A receiver still processes a REGISTER as [MoQ-TRANSPORT] requires.
+   Every message whose token resolves to a PRIVACY_PASS_TOKEN, by value
+   or by alias, redeems that token and is subject to the replay check in
+   Section 3.3.2.  A USE_ALIAS that refers to an already redeemed token
+   therefore fails with TOKEN_REPLAYED.  A relay that only accepts
+   Privacy Pass tokens can leave MAX_AUTH_TOKEN_CACHE_SIZE at its
+   default of 0, which prohibits aliases (Section 9.1.3 of
+   [MoQ-TRANSPORT]).
+
+3.5.4.  Continuous Authorization with Batched Tokens
 
    Long-lived MoQ sessions (such as live streaming or real-time
    communication) require periodic re-authorization to ensure continued
@@ -1163,20 +1279,22 @@ struct {
    revalidation intervals, Privacy Pass can achieve continuous
    authorization through batched token issuance.
 
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 23]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    During the initial SETUP exchange, clients can request multiple
    tokens by sending a GenericBatchTokenRequest (defined in Section 6.1
    of [PRIVACYPASS-BATCHED]) in an AUTH REQUEST option.  Each token in
    the batch is independently valid and can be presented for subsequent
    operations or periodic re-authorization.
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 21]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    Batched Token Usage Timeline:
 
@@ -1192,11 +1310,11 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
                Client presents Token_4
 
    Relays MAY request periodic re-authorization by attaching an AUTH
-   CHALLENGE parameter to a REQUEST_ERROR, or ahead of time to a
-   successful response alongside the EXPIRES parameter of
-   [MoQ-TRANSPORT], which tells the client what its extending
-   REQUEST_UPDATE needs to present.  Clients SHOULD present a fresh
-   token from their batch in response if any satisfy the new
+   CHALLENGE Error Detail to a REQUEST_ERROR, or an AUTH CHALLENGE
+   parameter ahead of time to a successful response alongside the
+   EXPIRES parameter of [MoQ-TRANSPORT], which tells the client what its
+   extending REQUEST_UPDATE needs to present.  Clients SHOULD present a
+   fresh token from their batch in response if any satisfy the new
    TokenChallenge.  If not, they SHOULD perform a new issuance process.
 
    When using [ARC] tokens (0xE5AC), the credential's presentation_limit
@@ -1217,22 +1335,21 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    *  For high-security deployments, shorter re-authorization intervals
       with smaller batches provide stronger revocation guarantees
 
-3.5.4.  Continuous Authorization with Reverse Flow
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 24]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+3.5.5.  Continuous Authorization with Reverse Flow
 
    If the client and the relay support it, a Relay MAY perform
    continuous authentication using a reverse flow.
-
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 22]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    To do so, a client attaches an AUTH REQUEST parameter, carrying at
    least one token request, to a message that also carries its
@@ -1249,7 +1366,12 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    requests the next one in the same message.
 
    Tokens obtained this way can be presented by the Client to maintain
-   the continuity of the session without linkability.
+   the continuity of the session.  The presentations are
+   cryptographically unlinkable, subject to the privacy properties of
+   the token type and deployment.  Presentations on the same MoQ
+   connection can still be correlated through the connection, timing, or
+   request metadata.  A connection may carry requests for multiple
+   actors, so this correlation does not by itself identify an actor.
 
    Reverse Flow Token Usage Timeline:
 
@@ -1262,33 +1384,39 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    Time 2T:    REQUEST_UPDATE with Token_3 + AUTH REQUEST for 1 token
                REQUEST_OK with AUTH RESPONSE (1 token)
 
-3.5.5.  Errors
+3.5.6.  Errors
 
    If the authentication fails for any reason, the server MUST send an
    error.  The error response includes a TokenChallenge to enable the
    client to obtain a valid token and retry the operation.
 
-3.5.5.1.  SETUP Errors
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 25]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+3.5.6.1.  SETUP Errors
+
+   [[editor's note: The following SETUP procedure depends on transport
+   work described in Section 3.4.  Sending SERVER_SETUP before closing
+   does not guarantee that the client receives the challenge.  MoQ
+   Transport still needs to define challenge delivery before session
+   termination.]]
 
    If authentication fails during SETUP, the Relay MUST send a
    SERVER_SETUP carrying one or more AUTH CHALLENGE Setup Options
    (Section 3.4) and then terminate the session with the UNAUTHORIZED
-   (0x02) Termination Error Code defined in Section 3.4 of
+   (0x02) Termination Error Code defined in Section 12.2 of
    [MoQ-TRANSPORT].  The termination reason phrase carries no challenge
-   material; it stays a human-readable string, as the QUIC
+   material.  It stays a human-readable string, as the QUIC
    CONNECTION_CLOSE frame requires.
-
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 23]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    Each AUTH CHALLENGE option carries one TokenChallenge.  Options are
    ordered by relay preference, most preferred first, which lets the
@@ -1303,54 +1431,70 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    does not support this mechanism observes a regular UNAUTHORIZED
    termination.
 
-3.5.5.2.  Operation Errors
+3.5.6.2.  Operation Errors
 
    If the error occurs over an established connection, the Relay MUST
-   send a REQUEST_ERROR defined in Section 9.8 of [MoQ-TRANSPORT].
+   send a REQUEST_ERROR defined in Section 9.4 of [MoQ-TRANSPORT].
 
    The error code MUST be one of:
 
-    +============+=================+=================================+
-    | Error Code | Name            | Description                     |
-    +============+=================+=================================+
-    | 0x0100     | TOKEN_MISSING   | No token provided when required |
-    +------------+-----------------+---------------------------------+
-    | 0x0101     | TOKEN_INVALID   | Token signature verification    |
-    |            |                 | failed                          |
-    +------------+-----------------+---------------------------------+
-    | 0x0102     | TOKEN_EXPIRED   | Token has expired or been       |
-    |            |                 | revoked                         |
-    +------------+-----------------+---------------------------------+
-    | 0x0103     | TOKEN_REPLAYED  | Token nonce has been seen       |
-    |            |                 | before                          |
-    +------------+-----------------+---------------------------------+
-    | 0x0104     | SCOPE_MISMATCH  | Token scope does not authorize  |
-    |            |                 | this operation                  |
-    +------------+-----------------+---------------------------------+
-    | 0x0105     | ISSUER_UNKNOWN  | Token issuer is not trusted by  |
-    |            |                 | this relay                      |
-    +------------+-----------------+---------------------------------+
-    | 0x0106     | TOKEN_MALFORMED | Token cannot be parsed          |
-    |            |                 | correctly                       |
-    +------------+-----------------+---------------------------------+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 26]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+     +============+======================+==========================+
+     | Error Code | Name                 | Description              |
+     +============+======================+==========================+
+     | 0x4        | MALFORMED_AUTH_TOKEN | Token cannot be parsed   |
+     |            |                      | correctly                |
+     +------------+----------------------+--------------------------+
+     | 0x5        | EXPIRED_AUTH_TOKEN   | Token has expired or     |
+     |            |                      | been revoked             |
+     +------------+----------------------+--------------------------+
+     | 0x0100     | TOKEN_MISSING        | No token provided when   |
+     |            |                      | required                 |
+     +------------+----------------------+--------------------------+
+     | 0x0101     | TOKEN_INVALID        | Token signature          |
+     |            |                      | verification failed      |
+     +------------+----------------------+--------------------------+
+     | 0x0103     | TOKEN_REPLAYED       | Token nonce has been     |
+     |            |                      | seen before              |
+     +------------+----------------------+--------------------------+
+     | 0x0104     | SCOPE_MISMATCH       | Token scope does not     |
+     |            |                      | authorize this operation |
+     +------------+----------------------+--------------------------+
+     | 0x0105     | ISSUER_UNKNOWN       | Token issuer is not      |
+     |            |                      | trusted by this relay    |
+     +------------+----------------------+--------------------------+
 
              Table 3: Privacy Pass Authorization Error Codes
 
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 24]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
+   MALFORMED_AUTH_TOKEN and EXPIRED_AUTH_TOKEN are defined in
+   Section 12.3 of [MoQ-TRANSPORT].  This document registers the
+   remaining codes in the REQUEST_ERROR Codes registry (Section 6.4).
 
    When the client should retry with a new token, the REQUEST_ERROR MUST
-   carry one or more AUTH CHALLENGE parameters (Section 3.4), ordered by
-   relay preference.  The reason phrase stays a human-readable string.
+   carry one or more AUTH CHALLENGE Error Details (Section 3.4), ordered
+   by relay preference.  The reason phrase stays a human-readable
+   string.
 
-3.5.5.3.  TokenChallenge Construction
+3.5.6.3.  TokenChallenge Construction
 
    The TokenChallenge carried in each AUTH CHALLENGE MUST be constructed
    as follows:
@@ -1363,6 +1507,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    *  redemption_context: A fresh 32-byte random value, or empty if the
       relay accepts tokens with any redemption context
 
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 27]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    *  origin_info: The relay's origin identifier, optionally including
       the required authorization scope
 
@@ -1371,43 +1522,16 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    tokens with any scope and performs authorization based solely on the
    token's embedded scope information.
 
-3.5.5.4.  Error Response Example
+3.5.6.4.  Error Response Example
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 25]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
+   This example uses Error Details from [MoQ-TRANSPORT] and the AUTH
+   CHALLENGE binding in Section 3.4.
 
    REQUEST_ERROR {
-       Request_ID = 42,
        Error_Code = 0x0104,  /* SCOPE_MISMATCH */
        Retry_Interval = 1,
        Reason = "token scope does not cover this namespace",
-       Parameters = [
+       Error Details = [
            AUTH_CHALLENGE {
                token_type = PRIVACY_PASS_TOKEN,
                challenge = TokenChallenge {
@@ -1438,29 +1562,29 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
        ]
    }
 
-   Note the two levels of token type: the parameter's token_type names
-   the authorization scheme in the "MOQT Auth Token Type" registry,
-   while the TokenChallenge.token_type names the Privacy Pass issuance
-   protocol inside that scheme.
 
-3.5.5.5.  Control Message Authorization Failures
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 28]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+   Note the two levels of token type: the Error Detail's token_type
+   names the authorization scheme in the "MOQT Auth Token Type"
+   registry, while the TokenChallenge.token_type names the Privacy Pass
+   issuance protocol inside that scheme.
+
+3.5.6.5.  Control Message Authorization Failures
 
    When authorization fails for MoQ control messages other than SETUP,
    the relay returns a REQUEST_ERROR with the appropriate error code
    from Table 3.  The client MAY retry the operation with a valid token
    obtained using the TokenChallenge from the error response.
 
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 26]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
-   As per Section 3.4.4 of [MoQ-TRANSPORT], implementations MAY elevate
-   request-specific errors to session-level errors.  This elevation is
-   appropriate when:
+   Implementations MAY elevate request-specific errors to session-level
+   errors by closing the session with UNAUTHORIZED (Section 12.2 of
+   [MoQ-TRANSPORT]).  This elevation is appropriate when:
 
    *  The authorization failure indicates a systemic issue (e.g., all
       client tokens are from an untrusted issuer)
@@ -1473,20 +1597,56 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    Implementations need to consider the impact on other outstanding
    subscriptions before elevating to session-level errors.
 
-3.5.5.6.  Retry Behavior
+3.5.6.6.  Loss of Authorization on Established Requests
 
-   AUTH CHALLENGE parameters are ordered by relay preference.  A client
+   A relay can determine that an established request is no longer
+   authorized, for example because the client did not present a fresh
+   token before the EXPIRES deadline, or because a REQUEST_UPDATE
+   carried a token that failed verification.  The relay answers a failed
+   REQUEST_UPDATE with a REQUEST_ERROR as described in Section 3.5.6.5.
+   To end the underlying request:
+
+   *  For a subscription, a failed REQUEST_UPDATE requires PUBLISH_DONE
+      with status UPDATE_FAILED (Section 9.5.1 of [MoQ-TRANSPORT]).
+      Token expiry uses EXPIRED_AUTH_TOKEN.  Other loss of authorization
+      uses UNAUTHORIZED (Section 12.4 of [MoQ-TRANSPORT]).
+
+   *  For a FETCH in progress, the relay resets the fetch stream with
+      EXPIRED_AUTH_TOKEN (Section 12.5 of [MoQ-TRANSPORT]).
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 29]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+3.5.6.7.  Request Migration
+
+   A request that is re-issued after a GOAWAY (Section 9.2 of
+   [MoQ-TRANSPORT]), on a new session or on the current one, MUST carry
+   a fresh token.  The token presented with the original request has
+   already been redeemed.
+
+3.5.6.8.  Retry Behavior
+
+   AUTH CHALLENGE values are ordered by relay preference.  A client
    selects the first challenge whose token type it supports and whose
    issuer it trusts.  If no challenge qualifies, the client MUST NOT
    retry the operation and SHOULD surface the failure to the
    application.
 
    If the client holds an unused token satisfying the selected
-   challenge, for example from a batch obtained earlier (Section 3.5.3),
+   challenge, for example from a batch obtained earlier (Section 3.5.4),
    it SHOULD present that token rather than start a new issuance.
 
    For operation errors, retry timing is governed by the Retry Interval
-   field of REQUEST_ERROR (Section 9.8 of [MoQ-TRANSPORT]): the client
+   field of REQUEST_ERROR (Section 9.4 of [MoQ-TRANSPORT]): the client
    MUST NOT retry before the interval has elapsed, and MUST NOT retry at
    all when the interval is 0.
 
@@ -1495,24 +1655,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    failure of the same operation with the same error code as terminal
    rather than retry further.  In particular, SCOPE_MISMATCH is only
    worth retrying if the client can obtain a token whose scope actually
-   covers the operation; retrying with an identically scoped token
+   covers the operation.  Retrying with an identically scoped token
    cannot succeed.
 
    The same limit applies across connections: after a session
    termination with UNAUTHORIZED, a client SHOULD NOT reconnect with a
    token for the same challenge more than once unless its attestation
    context has changed.
-
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 27]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
 4.  Example Authorization Flow
 
@@ -1522,35 +1671,44 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    directly without contacting the Issuer.  This example uses publicly
    verifiable tokens.
 
-         +-----------+                        +--------+         +----------+ +--------+
-         | MoQ Relay |                        | Client |         | Attester | | Issuer |
-         +-----+-----+                        +---+----+         +----+-----+ +---+----+
-               |                                  |                   |           |
-               |<--------------- CLIENT_SETUP[] --+                   |           |
-               |                                  |                   |           |
-               +-- SERVER_SETUP[  --------------->|                   |           |
-               |     AUTH CHALLENGE,              |                   |           |
-               |   ]                              |                   |           |
-               +-- UNAUTHORIZED (0x2) ----------->|                   |           |
-               |                                  |                   |           |
-               |                                  |<== Attestation ==>|           |
-               |                                  |                   |           |
-               |                                  +--------- TokenRequest ------->|
-               |                                  |<-------- TokenResponse -------+
-               |                                  |                   |           |
-               |                           FinalizeToken              |           |
-               |                                  |                   |           |
-               |            CLIENT_SETUP[{        |                   |           |
-               |<----------    AUTHORIZATION      |                   |           |
-               |               TOKEN,           --+                   |           |
-               |            }]                    |                   |           |
-               |                                  |                   |           |
- .-------------+--.                               |                   |           |
-| Local validation |                              |                   |           |
- `-------------+--'                               |                   |           |
-               |                                  |                   |           |
-               +-- SERVER_SETUP ----------------->|                   |           |
-               |                                  |                   |           |
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 30]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+         +-----------+             +--------+    +----------+ +--------+
+         | MoQ Relay |             | Client |    | Attester | | Issuer |
+         +-----+-----+             +----+---+    +-----+----+ +----+---+
+               |                        |              |           |
+               |                        |              |           |
+               |<------ CLIENT_SETUP[] -+              |           |
+               |                        |              |           |
+               +-- SERVER_SETUP ------->|              |           |
+               |  [AUTH CHALLENGE]      |              |           |
+               +-- UNAUTHORIZED (0x2) ->|              |           |
+               |                        |              |           |
+               |                        |<=Attestation=>           |
+               |                        |              |           |
+               |                        +------- TokenRequest ---->|
+               |                        |<------ TokenResponse ----+
+               |                        |              |           |
+               |                  FinalizeToken        |           |
+               |                        |              |           |
+               |<--- CLIENT_SETUP ------+              |           |
+               |  [AUTHORIZATION TOKEN] |              |           |
+               |                        |              |           |
+ .-------------+--.                     |              |           |
+| Local validation |                    |              |           |
+ '-------------+--'                     |              |           |
+               |                        |              |           |
+               +-- SERVER_SETUP ------->|              |           |
+               |                        |              |           |
 
               Figure 4: Direct Relay Authorization Flow
 
@@ -1559,16 +1717,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    0xE5AC), each with the relay's issuer configuration.  This allows the
    client to select the appropriate issuance protocol based on its
    capabilities and the available attesters/issuers.
-
-
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 28]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
 5.  Security Considerations
 
@@ -1582,6 +1730,13 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    *  Key rotation
 
    *  Use of TLS
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 31]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
 6.  IANA Considerations
 
@@ -1621,38 +1776,53 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                [Page 29]
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 32]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
-              +=======+=====================+===============+
-              | Value | Action              | Reference     |
-              +=======+=====================+===============+
-              | 0     | CLIENT_SETUP        | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 1     | SERVER_SETUP        | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 2     | PUBLISH_NAMESPACE   | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 3     | SUBSCRIBE_NAMESPACE | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 4     | SUBSCRIBE           | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 5     | REQUEST_UPDATE      | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 6     | PUBLISH             | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 7     | FETCH               | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 8     | TRACK_STATUS        | Section 3.2.2 |
-              +-------+---------------------+---------------+
-              | 9-254 | Unassigned          |               |
-              +-------+---------------------+---------------+
-              | 255   | Reserved            | This document |
-              +-------+---------------------+---------------+
+             +========+=====================+===============+
+             | Value  | Action              | Reference     |
+             +========+=====================+===============+
+             | 0      | CLIENT_SETUP        | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 1      | SERVER_SETUP        | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 2      | PUBLISH_NAMESPACE   | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 3      | SUBSCRIBE_NAMESPACE | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 4      | SUBSCRIBE           | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 5      | REQUEST_UPDATE      | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 6      | PUBLISH             | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 7      | FETCH               | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 8      | TRACK_STATUS        | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 9      | SUBSCRIBE_TRACKS    | Section 3.2.2 |
+             +--------+---------------------+---------------+
+             | 10-254 | Unassigned          |               |
+             +--------+---------------------+---------------+
+             | 255    | Reserved            | This document |
+             +--------+---------------------+---------------+
 
-                       Table 5: MoQ Actions Registry
+                      Table 5: MoQ Actions Registry
 
    New entries in this registry require Specification Required
    registration policy.  Values SHOULD align with MoQTransport control
@@ -1675,11 +1845,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
 
 
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 30]
+Nandakumar, et al.         Expires 6 May 2027                  [Page 33]
 
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
 
 
                 +=======+================+===============+
@@ -1703,48 +1871,40 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    New entries in this registry require Specification Required
    registration policy.
 
-6.4.  MoQ Privacy Pass Error Code Registry
+6.4.  REQUEST_ERROR Code Registrations
 
-   IANA is requested to create a new registry titled "MoQ Privacy Pass
-   Authorization Error Codes" with the following initial contents:
+   IANA is requested to register the following entries in the
+   "REQUEST_ERROR Codes" registry defined in Section 16.12.2 of
+   [MoQ-TRANSPORT]:
 
-            +===============+=================+===============+
-            | Value         | Name            | Reference     |
-            +===============+=================+===============+
-            | 0x0100        | TOKEN_MISSING   | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0101        | TOKEN_INVALID   | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0102        | TOKEN_EXPIRED   | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0103        | TOKEN_REPLAYED  | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0104        | SCOPE_MISMATCH  | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0105        | ISSUER_UNKNOWN  | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0106        | TOKEN_MALFORMED | Section 3.5.5 |
-            +---------------+-----------------+---------------+
-            | 0x0107-0x01FF | Unassigned      |               |
-            +---------------+-----------------+---------------+
+                +========+================+===============+
+                | Code   | Name           | Specification |
+                +========+================+===============+
+                | 0x0100 | TOKEN_MISSING  | Section 3.5.6 |
+                +--------+----------------+---------------+
+                | 0x0101 | TOKEN_INVALID  | Section 3.5.6 |
+                +--------+----------------+---------------+
+                | 0x0103 | TOKEN_REPLAYED | Section 3.5.6 |
+                +--------+----------------+---------------+
+                | 0x0104 | SCOPE_MISMATCH | Section 3.5.6 |
+                +--------+----------------+---------------+
+                | 0x0105 | ISSUER_UNKNOWN | Section 3.5.6 |
+                +--------+----------------+---------------+
 
-               Table 7: MoQ Privacy Pass Error Codes Registry
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 31]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
-   New entries in this registry require Specification Required
-   registration policy.  Values are allocated from the 0x0100-0x01FF
-   range reserved for Privacy Pass authorization errors.
+                 Table 7: REQUEST_ERROR Code Registrations
 
 7.  References
 
 7.1.  Normative References
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 34]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
    [ARC]      Yun, C., Wood, C. A., and A. F. Faz-Hernandez, "Anonymous
               Rate-Limited Credentials Cryptography", Work in Progress,
@@ -1755,9 +1915,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    [MoQ-TRANSPORT]
               Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
               "Media over QUIC Transport", Work in Progress, Internet-
-              Draft, draft-ietf-moq-transport-18, 12 May 2026,
+              Draft, draft-ietf-moq-transport-22, 1 October 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
-              transport-18>.
+              transport-22>.
 
    [PRIVACYPASS-ARC]
               Yun, C., Wood, C. A., and A. F. Faz-Hernandez, "Privacy
@@ -1785,15 +1945,6 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
               Prime-Order Groups", RFC 9497, DOI 10.17487/RFC9497,
               December 2023, <https://www.rfc-editor.org/rfc/rfc9497>.
 
-
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 32]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
    [RFC9576]  Davidson, A., Iyengar, J., and C. A. Wood, "The Privacy
               Pass Architecture", RFC 9576, DOI 10.17487/RFC9576, June
               2024, <https://www.rfc-editor.org/rfc/rfc9576>.
@@ -1802,6 +1953,14 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
               HTTP Authentication Scheme", RFC 9577,
               DOI 10.17487/RFC9577, June 2024,
               <https://www.rfc-editor.org/rfc/rfc9577>.
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 35]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
    [RFC9578]  Celi, S., Davidson, A., Valdez, S., and C. A. Wood,
               "Privacy Pass Issuance Protocols", RFC 9578,
@@ -1812,16 +1971,16 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
 
    [KEYTRANS] McMillion, B., "Key Transparency Architecture", Work in
               Progress, Internet-Draft, draft-ietf-keytrans-
-              architecture-09, 29 June 2026,
+              architecture-11, 1 November 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-
-              keytrans-architecture-09>.
+              keytrans-architecture-11>.
 
    [PRIVACYPASS-BATCHED]
               Robert, R., Wood, C. A., and T. Meunier, "Batched Token
               Issuance Protocol", Work in Progress, Internet-Draft,
-              draft-ietf-privacypass-batched-tokens-08, 4 May 2026,
+              draft-ietf-privacypass-batched-tokens-09, 15 October 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-
-              privacypass-batched-tokens-08>.
+              privacypass-batched-tokens-09>.
 
    [PRIVACYPASS-IANA]
               "Privacy Pass IANA", n.d.,
@@ -1839,20 +1998,9 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
    [PRIVACYPASS-REVERSE-FLOW]
               Meunier, T., "Privacy Pass Reverse Flow", Work in
               Progress, Internet-Draft, draft-meunier-privacypass-
-              reverse-flow-06, 6 July 2026,
+              reverse-flow-07, 4 August 2026,
               <https://datatracker.ietf.org/doc/html/draft-meunier-
-              privacypass-reverse-flow-06>.
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 33]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
-   [RFC9458]  Thomson, M. and C. A. Wood, "Oblivious HTTP", RFC 9458,
-              DOI 10.17487/RFC9458, January 2024,
-              <https://www.rfc-editor.org/rfc/rfc9458>.
+              privacypass-reverse-flow-07>.
 
    [SCITT]    Birkholz, H., Delignat-Lavaud, A., Fournet, C., Deshpande,
               Y., and S. Lasker, "An Architecture for Trustworthy and
@@ -1861,6 +2009,14 @@ Internet-Draft            Privacy Pass MoQ Auth                July 2026
               <https://www.rfc-editor.org/rfc/rfc9943>.
 
 Appendix A.  Deployment considerations
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 36]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
 
 A.1.  Fetching key material for the bootstrap issuer
 
@@ -1898,14 +2054,6 @@ Changelog
    RFC Editor's Note: Please remove this section prior to publication of
    a final version of this document.
 
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 34]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
-
 Since draft-ietf-moq-privacy-pass-auth-02
 
    *  Move reverse flow issuance to AUTH REQUEST and AUTH RESPONSE
@@ -1919,8 +2067,39 @@ Since draft-ietf-moq-privacy-pass-auth-02
    *  Carry TokenChallenge in AUTH CHALLENGE transport parameters
       instead of reason phrases
 
-   *  Define required MoQ Transport extensions (AUTH CHALLENGE,
-      REQUEST_ERROR parameters)
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 37]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
+   *  Define required MoQ Transport extensions (AUTH CHALLENGE, AUTH
+      REQUEST/RESPONSE)
+
+   *  Bind request-error challenges to Error Details and identify
+      remaining SETUP and issuance dependencies
+
+   *  Clarify that token unlinkability does not hide connection-level
+      correlation
+
+   *  Align with draft-ietf-moq-transport-23: single SETUP message,
+      updated section references
+
+   *  Add SUBSCRIBE_TRACKS action and define matching for Track
+      Namespace Prefix requests
+
+   *  Require USE_VALUE for Privacy Pass tokens and treat alias reuse as
+      replay
+
+   *  Require relays to wait for the client's SETUP before sending
+      challenge or issuance options
+
+   *  Reuse MoQT MALFORMED_AUTH_TOKEN and EXPIRED_AUTH_TOKEN, register
+      remaining codes in the REQUEST_ERROR Codes registry
+
+   *  Specify PUBLISH_DONE and stream reset codes when authorization
+      ends, and fresh tokens after GOAWAY
 
    *  Register a Privacy Pass codepoint in the MOQT Auth Token Type
       registry
@@ -1940,6 +2119,17 @@ Since draft-ietf-moq-privacy-pass-auth-02
    *  Documented credential request/response encoding for different
       token types
 
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 38]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
 Since draft-ietf-moq-privacy-pass-auth-01
 
    *  Replace text-based moq-scope with binary TLS presentation language
@@ -1954,13 +2144,6 @@ Since draft-ietf-moq-privacy-pass-auth-01
    *  Define MoQAuthorizationInfo structure for origin_info encoding
 
    *  Add continuous authorization section using reverse flow
-
-
-
-Nandakumar, et al.       Expires 7 January 2027                [Page 35]
-
-Internet-Draft            Privacy Pass MoQ Auth                July 2026
-
 
    *  Add continuous authorization section using batched tokens
 
@@ -1995,6 +2178,14 @@ Authors' Addresses
    Email: fluffy@iii.ca
 
 
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 39]
+
+Internet-Draft            Privacy Pass MoQ Auth            November 2026
+
+
    Thibault Meunier
    Cloudflare Inc.
    Email: ot-ietf@thibault.uk
@@ -2013,4 +2204,37 @@ Authors' Addresses
 
 
 
-Nandakumar, et al.       Expires 7 January 2027                [Page 36]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Nandakumar, et al.         Expires 6 May 2027                  [Page 40]

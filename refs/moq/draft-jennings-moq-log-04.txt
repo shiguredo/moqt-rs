@@ -1,0 +1,728 @@
+
+
+
+
+Network Working Group                                        C. Jennings
+Internet-Draft                                             S. Nandakumar
+Intended status: Informational                                     Cisco
+Expires: 6 May 2027                                      2 November 2026
+
+
+                 Logging over Media over QUIC Transport
+                       draft-jennings-moq-log-04
+
+Abstract
+
+   Real time systems often run into the problems where the network
+   bandwidth for logging is shared with the real time media and impacts
+   the media quality.  There is a desire to transport the logging data
+   at an appropriate priority level over the same transport as the
+   media.  This allows the logging data to take advantage of times when
+   the media bitrate is below the peak rate while not impacting the peak
+   rate available for media.
+
+   This document specifies how to send syslog [RFC5424] type information
+   over Media over QUIC Transport (MOQT) [MOQT].
+
+Discussion Venues
+
+   This note is to be removed before publishing as an RFC.
+
+   Discussion of this document takes place on the Media Over QUIC
+   Working Group mailing list (moq@ietf.org), which is archived at
+   https://mailarchive.ietf.org/arch/browse/moq/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/fluffy/moq-log.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 1]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+   This Internet-Draft will expire on 6 May 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  Conventions and Definitions . . . . . . . . . . . . . . . . .   3
+   3.  Architecture Overview . . . . . . . . . . . . . . . . . . . .   3
+     3.1.  Logs Sharing a Session with Media . . . . . . . . . . . .   3
+     3.2.  Logs as the Primary Data  . . . . . . . . . . . . . . . .   4
+   4.  Resource ID . . . . . . . . . . . . . . . . . . . . . . . . .   5
+   5.  Logs and MOQT . . . . . . . . . . . . . . . . . . . . . . . .   5
+     5.1.  Track Naming  . . . . . . . . . . . . . . . . . . . . . .   5
+     5.2.  Groups and Objects  . . . . . . . . . . . . . . . . . . .   6
+     5.3.  Log Record  . . . . . . . . . . . . . . . . . . . . . . .   7
+     5.4.  Track Properties  . . . . . . . . . . . . . . . . . . . .   8
+     5.5.  Priorities  . . . . . . . . . . . . . . . . . . . . . . .   9
+     5.6.  Discovery and Subscription  . . . . . . . . . . . . . . .   9
+     5.7.  Retrieval of Past Logs  . . . . . . . . . . . . . . . . .   9
+     5.8.  Examples  . . . . . . . . . . . . . . . . . . . . . . . .  10
+   6.  Use with MSF  . . . . . . . . . . . . . . . . . . . . . . . .  11
+   7.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  11
+   8.  Security Considerations . . . . . . . . . . . . . . . . . . .  11
+   9.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  11
+     9.1.  Normative References  . . . . . . . . . . . . . . . . . .  11
+     9.2.  Informative References  . . . . . . . . . . . . . . . . .  12
+   Changes from the -03 Version  . . . . . . . . . . . . . . . . . .  12
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  12
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  12
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 2]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+1.  Introduction
+
+   Each device that logs publishes its log messages as MOQT objects.
+   The devices or systems publishing the logs are referred to as
+   resources and have a unique ResourceID.  Track names are set up such
+   that a subscriber can subscribe to the logs of each resource
+   separately, and can pick the log severity levels it wants.  A log
+   collector subscribes to the logs of the resources it wishes to
+   monitor, and MOQT relays cache logs so that they can be retrieved
+   later, when needed.
+
+   The data model used is consistent with the OpenTelemetry logs data
+   model [OTEL] and a superset of the [RFC5424] data model for logging.
+
+   [RFC5424] specifies a layered architecture that provides for support
+   of any number of transport layer mappings for transmitting syslog
+   messages.  This document describes the MOQT transport mapping for the
+   syslog protocol.
+
+2.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+3.  Architecture Overview
+
+   This section describes two deployment models for logging over MOQT.
+   In both, resources publish logs as MOQT tracks (see Section 5.1) to a
+   relay, and log collectors subscribe to them via relays.  Relays cache
+   logs so that collectors can retrieve them later.
+
+3.1.  Logs Sharing a Session with Media
+
+   In this model, an endpoint such as a realtime conferencing client
+   publishes its media and its logs over the same MOQT session, and thus
+   the same QUIC connection, to its ingress relay.  Media and logs share
+   the congestion control context of that connection, and MOQT
+   priorities (see Section 5.5) determine what is sent when the
+   available bandwidth is limited.  At the relay, media and logs are
+   forwarded to different destinations: media to the other participants,
+   and logs to a log collector, possibly through other relays.
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 3]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+                     one QUIC connection
+                 (shared congestion control)
+   +------------+                   +---------+  media  +--------------+
+   |  Endpoint  |      media        |         |-------->| Participants |
+   | +--------+ |==================>|         |         +--------------+
+   | | Media  | |                   |  Relay  |
+   | +--------+ |      logs         |         |  logs   +--------------+
+   | |  Logs  | |==================>| (cache) |-------->|     Log      |
+   | +--------+ |   (pri 128..240)  |         |         |  Collector   |
+   +------------+                   +---------+         +--------------+
+
+   When congestion occurs on the endpoint's connection, log messages of
+   the higher severity levels are the first to be delayed and, with
+   OBJECT_DELIVERY_TIMEOUT, dropped, while media is unaffected.  The
+   relay continues to cache what it has received, and a collector can
+   retrieve logs for a time window of interest later (see Section 5.7).
+
+3.2.  Logs as the Primary Data
+
+   In this model, the endpoints, such as servers, network devices or
+   sensors, send logs as their main data over MOQT.  Each endpoint
+   publishes its log tracks to a relay, which may aggregate many
+   endpoints, and one or more log collectors subscribe to them.
+
+   +------------+
+   | Endpoint 1 |---logs----+
+   +------------+           |
+                            v
+   +------------+      +---------+       +---------+     +-----------+
+   | Endpoint 2 |----->|  Relay  |------>|  Relay  |---->|    Log    |
+   +------------+      | (cache) |       | (cache) |     | Collector |
+                       +---------+       +---------+     +-----------+
+   +------------+           ^                 |
+   | Endpoint N |---logs----+                 |          +-----------+
+   +------------+                             +--------->| Dashboard |
+                                                         +-----------+
+
+   Collectors discover endpoints and subscribe to the severity levels of
+   interest (see Section 5.6), while the remaining levels stay in relay
+   caches until needed (see Section 5.7).
+
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 4]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+4.  Resource ID
+
+   Each Resource that creates logs has a unique ResourceID.  This is
+   created by taking the MAC address of the primary network interface in
+   binary, computing the SHA-1 hash of it, then truncating to lower 64
+   bits.  Note that SHA-1 does not provide any security properties here;
+   it is just a hash that is widely implemented in hardware.  If this is
+   not possible, any other random stable 64-bit identifier MAY be used.
+   The advantage of using a MAC address is that many other management
+   systems use this address and using it makes it easier to correlate
+   with other systems.  The disadvantage is that it reveals the MAC
+   address.
+
+   When carried in MOQT names, the ResourceID is encoded as exactly 16
+   lowercase hexadecimal ASCII characters.
+
+5.  Logs and MOQT
+
+5.1.  Track Naming
+
+   Each resource publishes its logs under the Track Namespace consisting
+   of the following three Track Namespace Fields, each encoded as ASCII:
+
+   ("logs.moq.arpa", "v1", <resourceID>)
+
+   The Track Namespace Prefix ("logs.moq.arpa", "v1") is common to all
+   resources, which allows a collector to discover all resources (see
+   Section 5.6).  Within a resource's namespace there is one track per
+   severity level.  The Track Name is a single ASCII digit identifying
+   the [RFC5424] severity of the log messages it carries:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 5]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+        +===============+============+============================+
+        | Severity      | Track Name | Default Publisher Priority |
+        +===============+============+============================+
+        | Emergency     |     0      |            128             |
+        +---------------+------------+----------------------------+
+        | Alert         |     1      |            144             |
+        +---------------+------------+----------------------------+
+        | Critical      |     2      |            160             |
+        +---------------+------------+----------------------------+
+        | Error         |     3      |            176             |
+        +---------------+------------+----------------------------+
+        | Warning       |     4      |            192             |
+        +---------------+------------+----------------------------+
+        | Notice        |     5      |            208             |
+        +---------------+------------+----------------------------+
+        | Informational |     6      |            224             |
+        +---------------+------------+----------------------------+
+        | Debug         |     7      |            240             |
+        +---------------+------------+----------------------------+
+
+                          Table 1: Severity levels
+
+   In this document, "lower levels" refers to Emergency (0) towards
+   Error (3), and "higher levels" to Warning (4) towards Debug (7).
+
+   Using the serialization format in Section 8.8 of [MOQT], the
+   Informational track of the resource with ResourceID 8f2c4a1b0e9d7c63
+   is rendered as:
+
+   logs.2emoq.2earpa-v1-8f2c4a1b0e9d7c63--6
+
+5.2.  Groups and Objects
+
+   Each group in a log track holds the log messages produced by the
+   resource during one second.  The Group ID is the start of that
+   second, in seconds since the UNIX Epoch (00:00:00 UTC on 1 January
+   1970).  This satisfies the requirement that Group IDs increase with
+   time (Section 2.3.1 of [MOQT]) and allows subscribers to express time
+   ranges directly as Location filters (see Section 5.7).
+
+   Each log message is one object, carrying a Log Record (Section 5.3).
+   Object IDs start at 0 in each group and increase by one for each log
+   message in the order they are produced.  Each object is self-
+   contained, so a subscriber can use any object without other objects
+   of the group.
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 6]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+   All objects of a group MUST be sent in a single subgroup with
+   Subgroup ID 0.  The publisher sends each object as soon as the log
+   message is produced, keeping the subgroup open until the end of the
+   second.  The publisher MUST then end the group with an object with
+   the End of Group Object Status (Section 11.1.1 of [MOQT]) and an
+   Object ID one greater than the last log message, and close the
+   subgroup.  The Datagram delivery mode MUST NOT be used.
+
+   Seconds without log messages have no group.  The publisher MUST
+   include the Prior Group ID Gap Object Property (Section 10.8 of
+   [MOQT]) on the first object of each group, set to the number of
+   seconds since the previous group minus one, except on the first group
+   it publishes after starting, when the previous group is not known.
+   This allows relays and fetches to know that the intervening groups
+   will never exist, rather than leaving them in the unknown state.
+   Object IDs within a group are contiguous, so the Prior Object ID Gap
+   Object Property is not used.
+
+5.3.  Log Record
+
+   The payload of each log message object is a Log Record, encoded as
+   follows using the notation of Section 1.3 of [RFC9000] and the
+   variable-length integer (vi64) of Section 8.1 of [MOQT].
+
+   Log Record {
+     Timestamp Offset (vi64),
+     Facility (vi64),
+     Hostname Length (vi64),
+     Hostname (..),
+     App Name Length (vi64),
+     App Name (..),
+     Proc ID Length (vi64),
+     Proc ID (..),
+     Msg ID Length (vi64),
+     Msg ID (..),
+     Message Length (vi64),
+     Message (..),
+     Number of Attributes (vi64),
+     Attribute (..) ...,
+   }
+
+   Attribute {
+     Key Length (vi64),
+     Key (..),
+     Value Length (vi64),
+     Value (..),
+   }
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 7]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+                            Figure 1: Log Record
+
+   *  Timestamp Offset: The nanoseconds to add to the Group ID, in
+      seconds, to obtain the time the log message was produced.  The
+      value is less than 1000000000.
+
+   *  Facility: The facility as defined in [RFC5424], from 0 to 23.
+
+   *  Hostname, App Name, Proc ID, Msg ID: The HOSTNAME, APP-NAME,
+      PROCID and MSGID fields as defined in [RFC5424], as ASCII strings.
+      An empty field corresponds to the [RFC5424] NILVALUE.
+
+   *  Message: The MSG as defined in [RFC5424], as a UTF-8 string.  This
+      is the Body in [OTEL].
+
+   *  Attribute: A key-value pair, where Key and Value are UTF-8
+      strings.  Attributes carry [RFC5424] structured data.  The keys
+      "TraceID" and "SpanID", defined in [CRD-trace-context-2-20240328],
+      and "InstrumentationScope" have the meaning defined in [OTEL].
+      Other attributes map to Attributes in [OTEL].
+
+   The severity of a log message is given by the track that carries it
+   and is not repeated in the Log Record.  Receivers MUST ignore any
+   bytes following the fields defined in this document, to allow future
+   extension.
+
+5.4.  Track Properties
+
+   Publishers SHOULD include the following Track Properties (Section 8.4
+   of [MOQT]) on each log track:
+
+   *  DEFAULT_PUBLISHER_PRIORITY: see Section 5.5.
+
+   *  DEFAULT_PUBLISHER_GROUP_ORDER: Ascending (0x1), so that collectors
+      receive log messages in order.
+
+   *  MAX_CACHE_DURATION: the retention time for which relays may serve
+      cached log messages.  Lower levels are typically retained longer
+      than higher levels.
+
+   *  OBJECT_DELIVERY_TIMEOUT: for higher levels, a timeout after which
+      a stale log message is dropped rather than delivered late.
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 8]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+5.5.  Priorities
+
+   Logs are expected to yield to the primary application under
+   congestion.  The publisher SHOULD set the DEFAULT_PUBLISHER_PRIORITY
+   Track Property of each log track to the value in Section 5.1, or
+   another value that keeps lower levels ahead of higher levels.  These
+   values are in the lower priority half of the range, behind the MOQT
+   default of 128 typically used for media, with Emergency at par with
+   the default.
+
+   Subscribers can adjust the relative importance of logs against other
+   subscriptions in the session using the SUBSCRIBER_PRIORITY parameter,
+   which is considered before publisher priority.
+
+5.6.  Discovery and Subscription
+
+   A collector discovers resources by sending SUBSCRIBE_NAMESPACE with
+   the Track Namespace Prefix ("logs.moq.arpa", "v1").  The relay
+   responds with a NAMESPACE message for each resource namespace, and
+   NAMESPACE_DONE when a resource stops publishing.
+
+   For each discovered resource, the collector subscribes by name to the
+   tracks of the levels it wants to receive continuously, for example
+   levels 0 to 3.  Resources that start publishing later are learned
+   from subsequent NAMESPACE messages.  Tracks of other levels are not
+   subscribed to and remain available from the relay cache via FETCH
+   (see Section 5.7).
+
+   Collectors can further select log messages using MOQT Object Property
+   range filters (Section 3.3.2 of [MOQT]) on application-defined Object
+   Properties, which are outside the scope of this document.  Range
+   Filters are only available when the relay advertises a non-zero
+   MAX_FILTER_RANGES, so collectors MUST be able to process unfiltered
+   tracks.
+
+5.7.  Retrieval of Past Logs
+
+   Since Group IDs are times in seconds, a time range of logs
+   corresponds directly to a range of Locations:
+
+   *  A collector retrieves past log messages for a time window [T1, T2]
+      by sending FETCH with a Location filter from {T1, 0} to {T2, max}.
+      The request is served from the relay cache, subject to
+      MAX_CACHE_DURATION.
+
+   *  A collector that wants recent history followed by live log
+      messages sends a SUBSCRIBE with a Location filter starting at the
+      Next Object, together with FILL_PARAMETERS whose Location filter
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 9]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+      selects the starting point of the history.  The relay delivers the
+      history on a fill fetch stream and live log messages on the
+      subscription, without gaps or duplicates (Section 3.4 of [MOQT]).
+
+   *  A collector that only needs live log messages subscribes with a
+      Location filter starting at the Next Object.
+
+   This enables "just in time" collection of logs: resources publish all
+   levels to a nearby relay, while collectors subscribe to the lower
+   levels and fetch the higher levels for the time windows of interest,
+   for example around an error.
+
+5.8.  Examples
+
+   On 31 December 1999, a server publishes two Informational log
+   messages in the second starting at 23:59:59 UTC (Group 946684799),
+   and one more five seconds later (Group 946684805).
+
+   Track "6", Group 946684799
+
+    Obj  Content                         Meaning
+    ---  ------------------------------  ----------------------------
+     0   Log Record                      23:59:59.250000000
+           offset 250000000 ns           user facility
+           facility 1, app "y2kd"        "preparing for Y2K"
+           msg "preparing for Y2K"
+     1   Log Record                      23:59:59.900000000
+           offset 900000000 ns           user facility
+           facility 1, app "y2kd"        "shutting down for Y2K"
+           msg "shutting down for Y2K"
+     2   End of Group                    no further log messages
+
+   Track "6", Group 946684805
+
+    Obj  Content                         Meaning
+    ---  ------------------------------  ----------------------------
+     0   Log Record                      2000-01-01 00:00:05.000120000
+           offset 120000 ns              "back online"
+           facility 1, app "y2kd"
+           msg "back online"
+           [Prior Group ID Gap 5]        no groups since previous one
+     1   End of Group                    no further log messages
+
+   [ ] denotes an Object Property.
+
+                        Figure 2: Log track example
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 10]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+6.  Use with MSF
+
+   An MOQT Streaming Format (MSF) [MSF] catalog can direct a client to
+   publish logs using a publishTracks entry with a packaging of "moqlog"
+   and a role of "log".  In such an entry:
+
+   *  namespace is the Track Namespace of Section 5.1 rendered using
+      Section 8.8 of [MOQT], with %resourceId% as a placeholder for the
+      client's ResourceID: logs.2emoq.2earpa-v1-%resourceId%.
+
+   *  name is the track for a severity level (Section 5.1).  A catalog
+      can include one entry per level it wants the client to publish.
+
+7.  IANA Considerations
+
+   This document has no IANA actions.
+
+8.  Security Considerations
+
+   TODO
+
+9.  References
+
+9.1.  Normative References
+
+   [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-22, 1 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-22>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC5424]  Gerhards, R., "The Syslog Protocol", RFC 5424,
+              DOI 10.17487/RFC5424, March 2009,
+              <https://www.rfc-editor.org/rfc/rfc5424>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+   [RFC9000]  Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 11]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+9.2.  Informative References
+
+   [CRD-trace-context-2-20240328]
+              Kanzhelev, S., Dyla, D., Shkuro, Y., Sundaram, J. K., and
+              B. Krol, "Trace Context Level 2", W3C CRD-trace-context-
+              2-20240328, 28 March 2024, <https://www.w3.org/TR/2024/
+              CRD-trace-context-2-20240328/>.
+
+   [MSF]      Law, W. and S. Nandakumar, "MOQT Streaming Format", Work
+              in Progress, Internet-Draft, draft-ietf-moq-msf-01, 2 June
+              2026, <https://datatracker.ietf.org/doc/html/draft-ietf-
+              moq-msf-01>.
+
+   [OTEL]     Ruech, A., "OpenTelemetry Specification 1.34.0", 11 June
+              2024, <https://opentelemetry.io/docs/specs/otel/logs/>.
+
+Changes from the -03 Version
+
+   *  Aligned with draft-ietf-moq-transport-22.
+
+   *  Added an Architecture Overview describing logs sharing a session
+      with media, and logs as the primary data.
+
+   *  Track Namespace is now the tuple ("logs.moq.arpa", "v1",
+      resourceID), replacing the moq:// URL form, and the Track Name is
+      the severity level as an ASCII digit.
+
+   *  Each group holds the log messages of one second, sent on a single
+      subgroup and ended with an End of Group object, instead of one
+      group per log message.
+
+   *  Log Records use a binary encoding following the MOQT notation
+      instead of JSON, with timestamps relative to the Group ID.
+
+   *  Added the use of Prior Group ID Gap, Track Properties for
+      priority, group order, caching and delivery timeouts,
+      SUBSCRIBE_NAMESPACE for discovery, and FETCH and fill for time
+      range retrieval.
+
+   *  Added use with MSF.
+
+Acknowledgments
+
+   Thanks to Tim Evens for contributions and suggestions to this
+   specification.
+
+Authors' Addresses
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 12]
+
+Internet-Draft                  moqt-log                   November 2026
+
+
+   Cullen Jennings
+   Cisco
+   Canada
+   Email: fluffy@iii.ca
+
+
+   Suhas Nandakumar
+   Cisco
+   United States of America
+   Email: snandaku@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 13]

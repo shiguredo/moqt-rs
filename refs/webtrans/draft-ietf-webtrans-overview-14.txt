@@ -5,12 +5,12 @@
 WEBTRANS                                                      E. Kinnear
 Internet-Draft                                                Apple Inc.
 Intended status: Standards Track                             V. Vasiliev
-Expires: 7 January 2027                                           Google
-                                                             6 July 2026
+Expires: 6 May 2027                                               Google
+                                                         2 November 2026
 
 
                   The WebTransport Protocol Framework
-                    draft-ietf-webtrans-overview-13
+                    draft-ietf-webtrans-overview-14
 
 Abstract
 
@@ -53,9 +53,9 @@ Status of This Memo
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 1]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 1]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    Internet-Drafts are draft documents valid for a maximum of six months
@@ -63,7 +63,7 @@ Internet-Draft                WebTransport                     July 2026
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 7 January 2027.
+   This Internet-Draft will expire on 6 May 2027.
 
 Copyright Notice
 
@@ -109,9 +109,9 @@ Table of Contents
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 2]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 2]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    This document defines the overall requirements on the protocols used
@@ -165,9 +165,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 3]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 3]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
       request different retransmission priorities for different streams,
@@ -221,9 +221,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 4]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 4]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
       can be fully buffered before being passed to the application.
@@ -277,9 +277,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 5]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 5]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    All WebTransport protocols MUST use TLS [RFC8446] or a semantically
@@ -333,9 +333,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 6]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 6]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
 3.  Session Establishment
@@ -379,8 +379,8 @@ Internet-Draft                WebTransport                     July 2026
    the session:
 
    establish a session  Create a new WebTransport session given a URI
-      [RFC3986] of the requester.  An origin [RFC6454] MUST be given if
-      the WebTransport session is coming from a browser client;
+      [RFC3986] of the server endpoint.  An origin [RFC6454] MUST be
+      given if the WebTransport session is coming from a browser client;
       otherwise, it is OPTIONAL.
 
    terminate a session  Terminate the session while communicating to the
@@ -389,9 +389,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 7]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 7]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
       peer an unsigned 32-bit error code and a UTF-8 encoded error
@@ -445,9 +445,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 8]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 8]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    WebTransport datagrams have bounded send and receive buffers.  Either
@@ -501,9 +501,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                 [Page 9]
+Kinnear & Vasiliev         Expires 6 May 2027                   [Page 9]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    A WebTransport stream receiver can abort its receive side, indicating
@@ -557,9 +557,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 10]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 10]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    send bytes  Add bytes into the stream send buffer.  The sender can
@@ -613,9 +613,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 11]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 11]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
       component (like a kernel) for transmission.  Once data is passed
@@ -669,9 +669,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 12]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 12]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    WebTransport mandates the use of TLS for all protocols implementing
@@ -725,9 +725,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 13]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 13]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
@@ -740,7 +740,7 @@ Internet-Draft                WebTransport                     July 2026
 
 8.2.  Informative References
 
-   [CSP]      W3C, "Content Security Policy Level 3", July 2026,
+   [CSP]      W3C, "Content Security Policy Level 3", November 2026,
               <https://www.w3.org/TR/CSP/>.
 
    [RFC5681]  Allman, M., Paxson, V., and E. Blanton, "TCP Congestion
@@ -781,9 +781,9 @@ Internet-Draft                WebTransport                     July 2026
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 14]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 14]
 
-Internet-Draft                WebTransport                     July 2026
+Internet-Draft                WebTransport                 November 2026
 
 
    [RFC9220]  Hamilton, R., "Bootstrapping WebSockets with HTTP/3",
@@ -837,4 +837,4 @@ Authors' Addresses
 
 
 
-Kinnear & Vasiliev       Expires 7 January 2027                [Page 15]
+Kinnear & Vasiliev         Expires 6 May 2027                  [Page 15]

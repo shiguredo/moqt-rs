@@ -5,14 +5,14 @@
 WEBTRANS                                                     A. Frindell
 Internet-Draft                                                      Meta
 Intended status: Standards Track                              E. Kinnear
-Expires: 7 January 2027                                       Apple Inc.
+Expires: 6 May 2027                                           Apple Inc.
                                                              V. Vasiliev
                                                                   Google
-                                                             6 July 2026
+                                                         2 November 2026
 
 
                         WebTransport over HTTP/3
-                      draft-ietf-webtrans-http3-16
+                      draft-ietf-webtrans-http3-17
 
 Abstract
 
@@ -53,9 +53,9 @@ Status of This Memo
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 1]
+Frindell, et al.           Expires 6 May 2027                   [Page 1]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    Internet-Drafts are draft documents valid for a maximum of six months
@@ -63,7 +63,7 @@ Internet-Draft               WebTransport-H3                   July 2026
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 7 January 2027.
+   This Internet-Draft will expire on 6 May 2027.
 
 Copyright Notice
 
@@ -91,57 +91,57 @@ Table of Contents
    3.  Session Establishment . . . . . . . . . . . . . . . . . . . .   7
      3.1.  Establishing a WebTransport-Capable HTTP/3 Connection . .   7
      3.2.  Creating a New Session  . . . . . . . . . . . . . . . . .   9
-     3.3.  Application Protocol Negotiation  . . . . . . . . . . . .  10
+     3.3.  Application Protocol Negotiation  . . . . . . . . . . . .  11
      3.4.  Prioritization  . . . . . . . . . . . . . . . . . . . . .  12
-   4.  WebTransport Features . . . . . . . . . . . . . . . . . . . .  12
+   4.  WebTransport Features . . . . . . . . . . . . . . . . . . . .  13
      4.1.  Transport Properties  . . . . . . . . . . . . . . . . . .  13
-     4.2.  Unidirectional streams  . . . . . . . . . . . . . . . . .  13
+     4.2.  Unidirectional streams  . . . . . . . . . . . . . . . . .  14
      4.3.  Bidirectional Streams . . . . . . . . . . . . . . . . . .  14
      4.4.  Resetting Data Streams  . . . . . . . . . . . . . . . . .  15
-     4.5.  Datagrams . . . . . . . . . . . . . . . . . . . . . . . .  16
-     4.6.  Buffering Incoming Streams and Datagrams  . . . . . . . .  16
-     4.7.  Interaction with the HTTP/3 GOAWAY frame  . . . . . . . .  17
-     4.8.  Use of Keying Material Exporters  . . . . . . . . . . . .  17
-   5.  Flow Control  . . . . . . . . . . . . . . . . . . . . . . . .  18
-     5.1.  Negotiating the Use of Flow Control . . . . . . . . . . .  18
-     5.2.  Limiting the Number of Simultaneous Sessions  . . . . . .  19
-     5.3.  Limiting the Number of Streams Within a Session . . . . .  20
+     4.5.  Datagrams . . . . . . . . . . . . . . . . . . . . . . . .  17
+     4.6.  Buffering Incoming Streams and Datagrams  . . . . . . . .  17
+     4.7.  Interaction with the HTTP/3 GOAWAY frame  . . . . . . . .  18
+     4.8.  Use of Keying Material Exporters  . . . . . . . . . . . .  18
+   5.  Flow Control  . . . . . . . . . . . . . . . . . . . . . . . .  19
+     5.1.  Negotiating the Use of Flow Control . . . . . . . . . . .  19
+     5.2.  Limiting the Number of Simultaneous Sessions  . . . . . .  20
+     5.3.  Limiting the Number of Streams Within a Session . . . . .  21
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 2]
+Frindell, et al.           Expires 6 May 2027                   [Page 2]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
-     5.4.  Data Limits . . . . . . . . . . . . . . . . . . . . . . .  21
-     5.5.  Flow Control SETTINGS . . . . . . . . . . . . . . . . . .  21
-       5.5.1.  Initial Unidirectional Stream Limit . . . . . . . . .  21
-       5.5.2.  Initial Bidirectional Stream Limit  . . . . . . . . .  22
-       5.5.3.  Initial Session Data Limit  . . . . . . . . . . . . .  22
-     5.6.  Flow Control Capsules . . . . . . . . . . . . . . . . . .  22
-       5.6.1.  Flow Control and Intermediaries . . . . . . . . . . .  23
-       5.6.2.  WT_MAX_STREAMS Capsule  . . . . . . . . . . . . . . .  23
-       5.6.3.  WT_STREAMS_BLOCKED Capsule  . . . . . . . . . . . . .  24
-       5.6.4.  WT_MAX_DATA Capsule . . . . . . . . . . . . . . . . .  25
-       5.6.5.  WT_DATA_BLOCKED Capsule . . . . . . . . . . . . . . .  26
-   6.  Session Termination . . . . . . . . . . . . . . . . . . . . .  27
-   7.  Considerations for Future Versions  . . . . . . . . . . . . .  29
-     7.1.  Negotiating the Draft Version . . . . . . . . . . . . . .  29
-   8.  Security Considerations . . . . . . . . . . . . . . . . . . .  29
-   9.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  31
-     9.1.  Upgrade Token Registration  . . . . . . . . . . . . . . .  31
-     9.2.  HTTP/3 SETTINGS Parameter Registration  . . . . . . . . .  31
-     9.3.  Frame Type Registration . . . . . . . . . . . . . . . . .  32
-     9.4.  Stream Type Registration  . . . . . . . . . . . . . . . .  33
-     9.5.  HTTP/3 Error Code Registration  . . . . . . . . . . . . .  33
-     9.6.  Capsule Types . . . . . . . . . . . . . . . . . . . . . .  35
-     9.7.  Protocol Negotiation HTTP Header Fields . . . . . . . . .  36
-   10. References  . . . . . . . . . . . . . . . . . . . . . . . . .  37
-     10.1.  Normative References . . . . . . . . . . . . . . . . . .  37
-     10.2.  Informative References . . . . . . . . . . . . . . . . .  39
-   Index . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  39
-   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  40
+     5.4.  Data Limits . . . . . . . . . . . . . . . . . . . . . . .  22
+     5.5.  Flow Control SETTINGS . . . . . . . . . . . . . . . . . .  22
+       5.5.1.  Initial Unidirectional Stream Limit . . . . . . . . .  22
+       5.5.2.  Initial Bidirectional Stream Limit  . . . . . . . . .  23
+       5.5.3.  Initial Session Data Limit  . . . . . . . . . . . . .  23
+     5.6.  Flow Control Capsules . . . . . . . . . . . . . . . . . .  23
+       5.6.1.  Flow Control and Intermediaries . . . . . . . . . . .  24
+       5.6.2.  WT_MAX_STREAMS Capsule  . . . . . . . . . . . . . . .  24
+       5.6.3.  WT_STREAMS_BLOCKED Capsule  . . . . . . . . . . . . .  25
+       5.6.4.  WT_MAX_DATA Capsule . . . . . . . . . . . . . . . . .  26
+       5.6.5.  WT_DATA_BLOCKED Capsule . . . . . . . . . . . . . . .  27
+   6.  Session Termination . . . . . . . . . . . . . . . . . . . . .  28
+   7.  Considerations for Future Versions  . . . . . . . . . . . . .  30
+     7.1.  Negotiating the Draft Version . . . . . . . . . . . . . .  30
+   8.  Security Considerations . . . . . . . . . . . . . . . . . . .  31
+   9.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  33
+     9.1.  Upgrade Token Registration  . . . . . . . . . . . . . . .  33
+     9.2.  HTTP/3 SETTINGS Parameter Registration  . . . . . . . . .  33
+     9.3.  Frame Type Registration . . . . . . . . . . . . . . . . .  34
+     9.4.  Stream Type Registration  . . . . . . . . . . . . . . . .  35
+     9.5.  HTTP/3 Error Code Registration  . . . . . . . . . . . . .  35
+     9.6.  Capsule Types . . . . . . . . . . . . . . . . . . . . . .  37
+     9.7.  Protocol Negotiation HTTP Header Fields . . . . . . . . .  39
+   10. References  . . . . . . . . . . . . . . . . . . . . . . . . .  39
+     10.1.  Normative References . . . . . . . . . . . . . . . . . .  39
+     10.2.  Informative References . . . . . . . . . . . . . . . . .  41
+   Index . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .  41
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  42
 
 1.  Introduction
 
@@ -165,9 +165,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 3]
+Frindell, et al.           Expires 6 May 2027                   [Page 3]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    This document follows terminology defined in Section 1.2 of
@@ -221,9 +221,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 4]
+Frindell, et al.           Expires 6 May 2027                   [Page 4]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    Although WebTransport requires HTTP for its handshake, when HTTP/3 is
@@ -277,9 +277,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 5]
+Frindell, et al.           Expires 6 May 2027                   [Page 5]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 2.1.2.  Capsule-Based WebTransport over HTTP/3
@@ -311,8 +311,8 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 2.2.  Protocol Overview
 
-   WebTransport servers are identified by a pair of authority value and
-   path value (defined in [RFC3986] Sections 3.2 and 3.3 respectively).
+   WebTransport servers are identified by an HTTPS URI as defined in
+   Section 4.2.2 of [HTTP].
 
    When an HTTP/3 connection is established, the server sends a
    SETTINGS_WT_ENABLED setting to indicate support for WebTransport over
@@ -333,9 +333,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                 [Page 6]
+Frindell, et al.           Expires 6 May 2027                   [Page 6]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    *  A client can create a bidirectional stream and transfer its
@@ -374,25 +374,31 @@ Internet-Draft               WebTransport-H3                   July 2026
    greater than "1" as a connection error of type H3_SETTINGS_ERROR.
    Clients MUST NOT attempt to establish WebTransport sessions with the
    "webtransport-h3" token until they have received the setting
-   indicating WebTransport support from the server.
+   indicating WebTransport support from the server.  SETTINGS_WT_ENABLED
+   has no meaning when sent by a client; a server MUST ignore it.
+
+   [[RFC editor: please remove the following paragraph before
+   publication.]]
+
+   Servers that advertise draft versions of WebTransport do not ignore
+   SETTINGS_WT_ENABLED sent by clients; see Section 7.1.
 
    WebTransport over HTTP/3 uses extended CONNECT in HTTP/3 as described
    in [RFC9220], which defines the SETTINGS_ENABLE_CONNECT_PROTOCOL
    setting.
+
+
+
+Frindell, et al.           Expires 6 May 2027                   [Page 7]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
    WebTransport over HTTP/3 requires support for HTTP/3 datagrams and
    the Capsule Protocol, and both the client and the server indicate
    support for HTTP/3 datagrams by sending a SETTINGS_H3_DATAGRAM
    setting value set to 1 in their SETTINGS frame (see Section 2.1.1 of
    [HTTP-DATAGRAM]).
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                 [Page 7]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    WebTransport over HTTP/3 also requires support for QUIC datagrams.
    To indicate support, both the client and the server send a
@@ -430,8 +436,19 @@ Internet-Draft               WebTransport-H3                   July 2026
    publication.]]
 
    For draft versions of WebTransport only, clients MUST also send
-   SETTINGS_WT_ENABLED with the draft-specific codepoint to allow the
-   server to identify the client's supported version; see Section 7.1.
+   SETTINGS_WT_ENABLED for each draft version they support, and for the
+   version described in this document if they support it, so that the
+   server can identify which version the client will use; see
+   Section 7.1.
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                   [Page 8]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
    Servers should note that CONNECT requests to establish new
    WebTransport sessions, in addition to other messages, can arrive
@@ -441,14 +458,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    values for every required transport parameter, the server MUST treat
    all established and newly incoming WebTransport sessions as
    malformed, as described in Section 4.1.2 of [HTTP3].
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                 [Page 8]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    A client MUST NOT establish WebTransport sessions if the server's
    SETTINGS do not have correct values for every required setting or if
@@ -486,6 +495,17 @@ Internet-Draft               WebTransport-H3                   July 2026
       Origin header [RFC6454] MUST be provided within the request.
       Otherwise, the header is OPTIONAL.
 
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                   [Page 9]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    Upon receiving an extended CONNECT request with a :protocol field set
    to webtransport-h3, the HTTP/3 server can check if the target
    resource (Section 7.1 of [HTTP]) supports WebTransport.  If the
@@ -497,14 +517,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    allowed to access the server in question.  If the verification fails,
    the WebTransport server SHOULD reply with status code 403
    (Section 15.5.4 of [HTTP]).
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                 [Page 9]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    A server then performs any checks specific to the server and target
    resource.  If all checks pass, the session can be accepted by
@@ -523,20 +535,32 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    Clients cannot initiate WebTransport sessions in 0-RTT packets, as
    the CONNECT method is not considered safe (see Section 10.9 of
-   [HTTP3]).  However, WebTransport-related SETTINGS parameters can be
-   retained from the previous session as described in Section 7.2.4.2 of
-   [HTTP3].  If the server accepts 0-RTT, the server MUST NOT reduce
-   these initial flow control values from those negotiated during the
-   previous session.  A client MUST close the connection with
-   H3_SETTINGS_ERROR if the SETTINGS frame received in the resumed
-   connection reduces any flow control values from the cached previous
-   values.
+   [HTTP3]).  Consequently, a client MUST discard any values for the
+   settings defined in this document (Section 9.2) that it retained from
+   a previous connection and use the values received on the current
+   connection.  A server can therefore accept 0-RTT regardless of the
+   values it previously sent for these settings, and the requirements in
+   Section 7.2.4.2 of [HTTP3] to treat incompatible or omitted settings
+   as a connection error do not apply to these settings.
 
    The "webtransport-h3" HTTP Upgrade Token uses the Capsule Protocol as
    defined in [HTTP-DATAGRAM].  The Capsule Protocol is negotiated when
    the server sends a 2xx response.  The capsule-protocol header field
    Section 3.4 of [HTTP-DATAGRAM] is not required by WebTransport and
    can safely be ignored by WebTransport endpoints.
+
+
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 10]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
    To reduce latency at the start of a WebTransport session, a client
    MAY optimistically send capsules on the CONNECT stream before
@@ -553,26 +577,15 @@ Internet-Draft               WebTransport-H3                   July 2026
    extension [RFC7301]; the intent is to simplify porting existing
    protocols that use QUIC and rely on this functionality.
 
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 10]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
    The client MAY include a WT-Available-Protocols header field in the
-   CONNECT The client MAY include a WT-Available-Protocols header field
-   in the CONNECT request.  The WT-Available-Protocols field enumerates
-   the possible next protocols in preference order, with the most
-   preferred protocol listed first.  If the server receives such a
-   header, it MAY include a WT-Protocol field in a successful (2xx)
-   response.  If it does, the server MUST include a single choice from
-   the client's list in that field; client behavior when the server
-   response does not satisfy this requirement is described below.
-   Servers MAY reject the request if the client did not include a
-   suitable protocol.
+   CONNECT request.  The WT-Available-Protocols field enumerates the
+   possible next protocols in preference order, with the most preferred
+   protocol listed first.  If the server receives such a header, it MAY
+   include a WT-Protocol field in a successful (2xx) response.  If it
+   does, the server MUST include a single choice from the client's list
+   in that field; client behavior when the server response does not
+   satisfy this requirement is described below.  Servers MAY reject the
+   request if the client did not include a suitable protocol.
 
    Both WT-Available-Protocols and WT-Protocol are Structured Fields
    [FIELDS].  WT-Available-Protocols is a List.  WT-Protocol is defined
@@ -592,6 +605,19 @@ Internet-Draft               WebTransport-H3                   July 2026
    server does not include a WT-Protocol header field, or if it is
    malformed and therefore ignored, in a successful response.
 
+
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 11]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    If the client sends a WT-Available-Protocols header field and the
    server responds with a WT-Protocol header field, the value in the WT-
    Protocol response header field MUST be one of the values listed in
@@ -604,19 +630,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    WT-Protocol are determined by the WebTransport resource in question
    and are not required to be registered in IANA's "ALPN Protocol IDs"
    registry.
-
-
-
-
-
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 11]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
 3.4.  Prioritization
 
@@ -650,6 +663,17 @@ Internet-Draft               WebTransport-H3                   July 2026
    they interact with other sessions or requests on the same HTTP/3
    connection.
 
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 12]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
 4.  WebTransport Features
 
    WebTransport over HTTP/3 provides the following features described in
@@ -664,15 +688,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    to different WebTransport sessions.  On the wire, session IDs are
    encoded using the QUIC variable length integer scheme described in
    [RFC9000].
-
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 12]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    The client MAY optimistically open unidirectional and bidirectional
    streams, as well as send datagrams, on a session for which it has
@@ -707,6 +722,14 @@ Internet-Draft               WebTransport-H3                   July 2026
       longer being retransmitted.  WebTransport over HTTP/3 also
       supports datagrams, which are not retransmitted.
 
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 13]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    Pooling:  WebTransport over HTTP/3 provides optional support for
       pooling.  Endpoints that do not support pooling can reply to
       CONNECT requests with a header indicating a rate limit policy with
@@ -719,16 +742,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    stream SHALL be the stream type, followed by the session ID, encoded
    as a variable-length integer, followed by the user-specified stream
    data (Figure 2).
-
-
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 13]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    Unidirectional Stream {
        Stream Type (i) = 0x54,
@@ -764,6 +777,15 @@ Internet-Draft               WebTransport-H3                   July 2026
    encoded as a variable-length integer; the rest of the stream is the
    application payload of the WebTransport stream (Figure 3).
 
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 14]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    Bidirectional Stream {
        Signal Value (i) = 0x41,
        Session ID (i),
@@ -778,18 +800,11 @@ Internet-Draft               WebTransport-H3                   July 2026
    it is an extension of HTTP/3 frame syntax that MUST be supported by
    any peer negotiating WebTransport.  Endpoints that implement this
    extension are also subject to additional frame handling requirements.
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 14]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
    Endpoints MUST NOT send WT_STREAM as a frame type on HTTP/3 streams
-   other than the very first bytes of a request stream.  Receiving this
-   frame type in any other circumstances MUST be treated as a connection
-   error of type H3_FRAME_ERROR.
+   other than as the very first bytes sent by the initiator of a
+   bidirectional stream.  Receiving this frame type in any other
+   circumstances MUST be treated as a connection error of type
+   H3_FRAME_UNEXPECTED.
 
 4.4.  Resetting Data Streams
 
@@ -811,6 +826,22 @@ Internet-Draft               WebTransport-H3                   July 2026
    would map to two adjacent WebTransport application error codepoints).
    An example pseudocode can be seen in Figure 4.
 
+
+
+
+
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 15]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
        first = 0x52e4a40fa8db
        last = 0x52e5ac983162
 
@@ -830,29 +861,42 @@ Internet-Draft               WebTransport-H3                   July 2026
    header at the beginning of the stream; resetting a stream might
    result in that data being discarded when using a RESET_STREAM frame.
    To prevent this, WebTransport implementations MUST use the
-   RESET_STREAM_AT frame [RESET-STREAM-AT] with a Reliable Size set to
-   at least the size of the WebTransport header when resetting a
-   WebTransport data stream.  This ensures reliable delivery of the ID
-   field associating the data stream with a WebTransport session.
+   RESET_STREAM_AT frame [RESET-STREAM-AT] when resetting a WebTransport
+   data stream, with a Reliable Size set to the size of the WebTransport
+   header on that stream plus any offset provided by the application
+   (see "abort send side" in Section 4.3 of [OVERVIEW]).  This ensures
+   reliable delivery of the ID field associating the data stream with a
+   WebTransport session, along with any data the application asked to
+   deliver.
 
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 15]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
-   The error code from a WebTransport stream reset MUST be delivered
+   An error code in the WT_APPLICATION_ERROR range MUST be delivered
    unchanged, both by intermediaries forwarding on the wire and by
    endpoints delivering to the application.  Upon receiving a
-   RESET_STREAM or STOP_SENDING frame on a WebTransport stream, an
-   intermediary MUST send the same frame type, with the corresponding
-   error code, to the next hop on that stream.  If a RESET_STREAM or
-   STOP_SENDING frame is received with an error code outside the range
-   reserved for WT_APPLICATION_ERROR, the stream is still considered
-   reset, but the error code is not mapped to a WebTransport application
-   error code.  The WebTransport implementation SHOULD deliver this to
-   the application as a stream reset with no application error code.
+   RESET_STREAM, RESET_STREAM_AT, or STOP_SENDING frame on a
+   WebTransport stream, an intermediary MUST send the same frame type,
+   with the corresponding error code, to the next hop on that stream.
+   When forwarding a RESET_STREAM_AT frame, the intermediary MUST set
+   the Reliable Size so that at least the same amount of stream data
+   after any WebTransport header is delivered reliably; the size of that
+   header can differ between hops.  If a RESET_STREAM, RESET_STREAM_AT,
+   or STOP_SENDING frame is received with an error code outside the
+   range reserved for WT_APPLICATION_ERROR, the stream is still
+   considered reset, but the error code is not mapped to a WebTransport
+   application error code.  The WebTransport implementation SHOULD
+   deliver this to the application as a stream reset with no application
+   error code.
+
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 16]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
 4.5.  Datagrams
 
@@ -889,13 +933,25 @@ Internet-Draft               WebTransport-H3                   July 2026
    dropped.  It is up to an implementation to choose what stream or
    datagram to discard.
 
+   Rejecting a buffered stream does not affect the session it was
+   intended for.  Because buffering is not required and buffering limits
+   can be reached, a client that opens streams or sends datagrams
+   without waiting for the 2xx response to its CONNECT request needs to
+   be prepared for them to be rejected or dropped.  The same applies to
+   a server, since its streams and datagrams can reach the client before
+   the 2xx response does.  An endpoint can open new streams for the
+   session to resend any data that was rejected.
 
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 16]
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 17]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 4.7.  Interaction with the HTTP/3 GOAWAY frame
@@ -949,9 +1005,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 17]
+Frindell, et al.           Expires 6 May 2027                  [Page 18]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    the "WebTransport Exporter Context" struct as defined below.
@@ -1005,9 +1061,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 18]
+Frindell, et al.           Expires 6 May 2027                  [Page 19]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    Flow control is enabled when both endpoints declare their intent to
@@ -1061,9 +1117,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 19]
+Frindell, et al.           Expires 6 May 2027                  [Page 20]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    WebTransport servers can use rate limit header fields in responses to
@@ -1117,9 +1173,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 20]
+Frindell, et al.           Expires 6 May 2027                  [Page 21]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 5.4.  Data Limits
@@ -1173,9 +1229,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 21]
+Frindell, et al.           Expires 6 May 2027                  [Page 22]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    Note that this limit applies to all WebTransport sessions that use
@@ -1229,9 +1285,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 22]
+Frindell, et al.           Expires 6 May 2027                  [Page 23]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 5.6.1.  Flow Control and Intermediaries
@@ -1248,7 +1304,9 @@ Internet-Draft               WebTransport-H3                   July 2026
    In practice, an intermediary that translates flow control signals
    between similar WebTransport protocols, such as between two HTTP/3
    connections, can often simply reexpress the same limits received on
-   one connection directly on the other connection.
+   one connection directly on the other connection, as long as each
+   capsule it sends increases the corresponding limit on that
+   connection.
 
    An intermediary that does not want to be responsible for storing data
    that cannot be immediately sent on its translated connection can
@@ -1283,11 +1341,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 23]
+Frindell, et al.           Expires 6 May 2027                  [Page 24]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
       corresponding type that can be opened over the lifetime of the
@@ -1312,7 +1368,10 @@ Internet-Draft               WebTransport-H3                   July 2026
    order, WT_MAX_STREAMS capsules are sent on the WebTransport session's
    connect stream and are delivered in order.  If an endpoint receives a
    WT_MAX_STREAMS capsule that does not increase the Maximum Streams
-   value previously received, it MUST close the WebTransport session
+   value previously received, or the corresponding initial value
+   (SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI or
+   SETTINGS_WT_INITIAL_MAX_STREAMS_UNI) if no WT_MAX_STREAMS capsule of
+   that type has been received, it MUST close the WebTransport session
    with a WT_FLOW_CONTROL_ERROR error code.
 
    The WT_MAX_STREAMS capsule defines special intermediary handling, as
@@ -1338,12 +1397,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 24]
+Frindell, et al.           Expires 6 May 2027                  [Page 25]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    A WT_STREAMS_BLOCKED capsule does not open the stream, but informs
@@ -1397,9 +1453,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 25]
+Frindell, et al.           Expires 6 May 2027                  [Page 26]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
                     Figure 9: WT_MAX_DATA Capsule Format
@@ -1422,8 +1478,10 @@ Internet-Draft               WebTransport-H3                   July 2026
    WT_MAX_DATA capsules are sent on the WebTransport session's connect
    stream and are delivered in order.  If an endpoint receives a
    WT_MAX_DATA capsule with a Maximum Data value that does not increase
-   the Maximum Data value previously received, it MUST close the
-   WebTransport session with a WT_FLOW_CONTROL_ERROR error code.
+   the Maximum Data value previously received, or the value of
+   SETTINGS_WT_INITIAL_MAX_DATA if no WT_MAX_DATA capsule has been
+   received, it MUST close the WebTransport session with a
+   WT_FLOW_CONTROL_ERROR error code.
 
    The WT_MAX_DATA capsule defines special intermediary handling, as
    described in Section 3.2 of [HTTP-DATAGRAM].  Intermediaries MUST
@@ -1449,14 +1507,14 @@ Internet-Draft               WebTransport-H3                   July 2026
      Maximum Data (i),
    }
 
-                 Figure 10: WT_DATA_BLOCKED Capsule Format
 
 
-
-Frindell, et al.         Expires 7 January 2027                [Page 26]
+Frindell, et al.           Expires 6 May 2027                  [Page 27]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
+
+                 Figure 10: WT_DATA_BLOCKED Capsule Format
 
    WT_DATA_BLOCKED capsules contain the following field:
 
@@ -1504,15 +1562,16 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    WT_CLOSE_SESSION has the following fields:
 
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 28]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    Application Error Code:  A 32-bit error code provided by the
       application closing the session.
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 27]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    Application Error Message:  A UTF-8 encoded error message string
       provided by the application closing the session.  The message
@@ -1562,12 +1621,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 28]
+Frindell, et al.           Expires 6 May 2027                  [Page 29]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 7.  Considerations for Future Versions
@@ -1594,15 +1650,51 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    [[RFC editor: please remove this section before publication.]]
 
-   The wire format aspects of the protocol are negotiated by changing
-   the codepoint used for the SETTINGS_WT_ENABLED setting.  Each draft
-   version defines a distinct codepoint for SETTINGS_WT_ENABLED.  Both
-   the client and the server MUST send SETTINGS_WT_ENABLED with the
+   The draft version in use is negotiated using the codepoint for the
+   SETTINGS_WT_ENABLED setting.  Draft versions that introduce
+   incompatible changes define distinct SETTINGS_WT_ENABLED codepoints.
+   Both the client and the server MUST send SETTINGS_WT_ENABLED with the
    codepoint corresponding to their supported draft version.  An
-   endpoint that supports multiple draft versions sends a
-   SETTINGS_WT_ENABLED value for each supported version, as each version
-   uses a different setting identifier.  The highest version supported
-   by both endpoints is selected.
+   endpoint that supports multiple draft versions sends
+   SETTINGS_WT_ENABLED once for each distinct codepoint.  The highest
+   version supported by both endpoints is selected.
+
+   A server that supports draft versions uses the SETTINGS_WT_ENABLED
+   codepoints that a client sends to select a version.  This is an
+   exception to Section 3.1, which otherwise requires servers to ignore
+   SETTINGS_WT_ENABLED sent by a client.
+
+   An endpoint that supports both a draft version and the version
+   described in this document also sends SETTINGS_WT_ENABLED with a
+   value of "1" using the codepoint in Section 9.2.  A server that
+   supports both selects a version as follows:
+
+   *  If the client sends the codepoint in Section 9.2, the server
+      selects the version described in this document.
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 30]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
+   *  Otherwise, if the client sends codepoints for draft versions that
+      the server supports, the server selects the highest of those
+      versions.
+
+   *  Otherwise, the server selects the version described in this
+      document.
+
+   For example, a client that supports only the version described in
+   this document does not send SETTINGS_WT_ENABLED, so the server
+   selects that version.  A client that supports only draft versions
+   that the server does not support finds none of its codepoints in the
+   server's SETTINGS, so it treats the server as not supporting
+   WebTransport and never attempts to establish a session.
 
    Because data streams can arrive at the server before the CONNECT
    request that establishes the associated session, and the wire format
@@ -1619,19 +1711,32 @@ Internet-Draft               WebTransport-H3                   July 2026
    secure framework for client-server communication in cases when the
    application is potentially untrusted.
 
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 29]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
    WebTransport over HTTP/3 requires explicit opt-in through the use of
    an HTTP/3 setting; this avoids potential protocol confusion attacks
    by ensuring the HTTP/3 server explicitly supports it.  It also
    requires the use of the Origin header for browser traffic, providing
    the server with the ability to deny access to Web-based applications
    that do not originate from a trusted origin.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 31]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
    Just like HTTP traffic going over HTTP/3, WebTransport pools traffic
    to different origins within a single connection.  Different origins
@@ -1647,6 +1752,17 @@ Internet-Draft               WebTransport-H3                   July 2026
    a fairness scheme that ensures that each session that shares a
    transport connection gets a reasonable share of controlled resources;
    this applies both to sending data and to opening new streams.
+
+   When flow control is not enabled, a WebTransport session is limited
+   only by the stream and data limits of the underlying QUIC connection.
+   The session can use all of that capacity, which prevents other HTTP
+   requests on the same connection from making progress.  Because HTTP
+   responses and the QPACK streams use the same connection-level flow
+   control, an application that waits for an HTTP response before
+   reading data from the session can deadlock.  An endpoint that sends
+   other HTTP requests on the same connection can avoid this by enabling
+   flow control, or by using a separate connection for the WebTransport
+   session.
 
    An application could attempt to exhaust resources by opening too many
    WebTransport sessions at once.  In cases when the application is
@@ -1673,13 +1789,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 30]
+Frindell, et al.           Expires 6 May 2027                  [Page 32]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
 9.  IANA Considerations
@@ -1711,7 +1823,7 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    Setting Name:  SETTINGS_WT_ENABLED
 
-   Value:  0x2c7cf000
+   Value:  0x20b8933b
 
    Default:  0
 
@@ -1733,9 +1845,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 31]
+Frindell, et al.           Expires 6 May 2027                  [Page 33]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
    Change Controller:  IETF
@@ -1789,9 +1901,9 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 32]
+Frindell, et al.           Expires 6 May 2027                  [Page 34]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
       (mailto:webtransport@ietf.org)
@@ -1845,15 +1957,20 @@ Internet-Draft               WebTransport-H3                   July 2026
 
 
 
-Frindell, et al.         Expires 7 January 2027                [Page 33]
+Frindell, et al.           Expires 6 May 2027                  [Page 35]
 
-Internet-Draft               WebTransport-H3                   July 2026
+Internet-Draft               WebTransport-H3               November 2026
 
 
       WebTransport session has been closed.  Also used to indicate that
       the endpoint is no longer reading from the CONNECT stream.
 
-   Specification:  This document.
+   Reference:  This document.
+
+   Change Controller:  IETF
+
+   Contact:  WebTransport Working Group webtransport@ietf.org
+      (mailto:webtransport@ietf.org)
 
    Name:  WT_FLOW_CONTROL_ERROR
 
@@ -1894,17 +2011,17 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    Reference:  This document.
 
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 36]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    Change Controller:  IETF
 
    Contact:  WebTransport Working Group webtransport@ietf.org
       (mailto:webtransport@ietf.org)
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 34]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    In addition, the following range of entries is registered:
 
@@ -1950,18 +2067,17 @@ Internet-Draft               WebTransport-H3                   July 2026
       (mailto:webtransport@ietf.org)
    Notes:  None
 
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 37]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    The WT_MAX_STREAMS capsule:
 
    Value:  0x190B4D3F..0x190B4D40
    Capsule Type:  WT_MAX_STREAMS
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 35]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
    Status:  permanent
    Reference:  This document
    Change Controller:  IETF
@@ -2002,6 +2118,18 @@ Internet-Draft               WebTransport-H3                   July 2026
       (mailto:webtransport@ietf.org)
    Notes:  None
 
+
+
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 38]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
 9.7.  Protocol Negotiation HTTP Header Fields
 
    The following HTTP header fields are used for negotiating a protocol
@@ -2009,14 +2137,6 @@ Internet-Draft               WebTransport-H3                   July 2026
    established in Section 18.4 of [HTTP]:
 
    The WT-Available-Protocols field:
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 36]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    Field Name:  WT-Available-Protocols
    Status:  permanent
@@ -2055,9 +2175,16 @@ Internet-Draft               WebTransport-H3                   July 2026
 
    [OVERVIEW] Kinnear, E. and V. Vasiliev, "The WebTransport Protocol
               Framework", Work in Progress, Internet-Draft, draft-ietf-
-              webtrans-overview-12, 2 March 2026,
+              webtrans-overview-13, 6 July 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-
-              webtrans-overview-12>.
+              webtrans-overview-13>.
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 39]
+
+Internet-Draft               WebTransport-H3               November 2026
+
 
    [QUIC-DATAGRAM]
               Pauly, T., Kinnear, E., and D. Schinazi, "An Unreliable
@@ -2065,31 +2192,17 @@ Internet-Draft               WebTransport-H3                   July 2026
               DOI 10.17487/RFC9221, March 2022,
               <https://www.rfc-editor.org/rfc/rfc9221>.
 
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 37]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
    [RESET-STREAM-AT]
               Seemann, M. and K. Oku, "QUIC Stream Resets with Partial
               Delivery", Work in Progress, Internet-Draft, draft-ietf-
-              quic-reliable-stream-reset-09, 4 July 2026,
+              quic-reliable-stream-reset-11, 6 September 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-quic-
-              reliable-stream-reset-09>.
+              reliable-stream-reset-11>.
 
    [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
               Requirement Levels", BCP 14, RFC 2119,
               DOI 10.17487/RFC2119, March 1997,
               <https://www.rfc-editor.org/rfc/rfc2119>.
-
-   [RFC3986]  Berners-Lee, T., Fielding, R., and L. Masinter, "Uniform
-              Resource Identifier (URI): Generic Syntax", STD 66,
-              RFC 3986, DOI 10.17487/RFC3986, January 2005,
-              <https://www.rfc-editor.org/rfc/rfc3986>.
 
    [RFC6454]  Barth, A., "The Web Origin Concept", RFC 6454,
               DOI 10.17487/RFC6454, December 2011,
@@ -2119,16 +2232,19 @@ Internet-Draft               WebTransport-H3                   July 2026
    [RFC9114]  Bishop, M., Ed., "HTTP/3", RFC 9114, DOI 10.17487/RFC9114,
               June 2022, <https://www.rfc-editor.org/rfc/rfc9114>.
 
+
+
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 40]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
    [RFC9218]  Oku, K. and L. Pardue, "Extensible Prioritization Scheme
               for HTTP", RFC 9218, DOI 10.17487/RFC9218, June 2022,
               <https://www.rfc-editor.org/rfc/rfc9218>.
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 38]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
 
    [RFC9220]  Hamilton, R., "Bootstrapping WebSockets with HTTP/3",
               RFC 9220, DOI 10.17487/RFC9220, June 2022,
@@ -2146,9 +2262,9 @@ Internet-Draft               WebTransport-H3                   July 2026
    [I-D.ietf-webtrans-http2]
               Frindell, A., Kinnear, E., Pauly, T., Thomson, M.,
               Vasiliev, V., and W. Xie, "WebTransport over HTTP/2", Work
-              in Progress, Internet-Draft, draft-ietf-webtrans-http2-14,
-              2 March 2026, <https://datatracker.ietf.org/doc/html/
-              draft-ietf-webtrans-http2-14>.
+              in Progress, Internet-Draft, draft-ietf-webtrans-http2-15,
+              6 July 2026, <https://datatracker.ietf.org/doc/html/draft-
+              ietf-webtrans-http2-15>.
 
    [ORIGIN]   Fette, I. and A. Melnikov, "The WebSocket Protocol",
               RFC 6455, DOI 10.17487/RFC6455, December 2011,
@@ -2166,26 +2282,25 @@ Internet-Draft               WebTransport-H3                   July 2026
    [WEBTRANS-H2]
               Frindell, A., Kinnear, E., Pauly, T., Thomson, M.,
               Vasiliev, V., and W. Xie, "WebTransport over HTTP/2", Work
-              in Progress, Internet-Draft, draft-ietf-webtrans-http2-14,
-              2 March 2026, <https://datatracker.ietf.org/doc/html/
-              draft-ietf-webtrans-http2-14>.
+              in Progress, Internet-Draft, draft-ietf-webtrans-http2-15,
+              6 July 2026, <https://datatracker.ietf.org/doc/html/draft-
+              ietf-webtrans-http2-15>.
 
 Index
 
    W
 
+
+
+
+Frindell, et al.           Expires 6 May 2027                  [Page 41]
+
+Internet-Draft               WebTransport-H3               November 2026
+
+
       W
 
          WT_DATA_BLOCKED  Section 5.4, Paragraph 3; Section 5.6,
-
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 39]
-
-Internet-Draft               WebTransport-H3                   July 2026
-
-
             Paragraph 1; Section 5.6, Paragraph 2; Section 5.6.5,
             Paragraph 1; Section 5.6.5, Paragraph 3; Section 5.6.5,
             Paragraph 5; Section 9.6, Paragraph 13.4.1
@@ -2234,7 +2349,4 @@ Authors' Addresses
 
 
 
-
-
-
-Frindell, et al.         Expires 7 January 2027                [Page 40]
+Frindell, et al.           Expires 6 May 2027                  [Page 42]

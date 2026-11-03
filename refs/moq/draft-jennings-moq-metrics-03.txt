@@ -1,0 +1,952 @@
+
+
+
+
+Network Working Group                                        C. Jennings
+Internet-Draft                                             S. Nandakumar
+Intended status: Informational                                     Cisco
+Expires: 6 May 2027                                      2 November 2026
+
+
+                           Metrics over MOQT
+                     draft-jennings-moq-metrics-03
+
+Abstract
+
+   Many systems produce significant volumes of metrics which either are
+   not all needed at the same time for consumption by collection/
+   aggregation endpoints or may also compete for bandwidth with the
+   primary application, thus exacerbating congestion conditions
+   especially in low-bandwidth networks.  Delivering these over
+   architectures enabled by publish/subscribe transport like Media over
+   QUIC Transport (MOQT) [MOQT], allows metrics data to be prioritized
+   within the congestion context of the primary application as well as
+   enabling local nodes to cache the metric value to be later retrieved
+   via new subscriptions.
+
+   This document specifies how to send metrics type information over
+   MOQT.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 6 May 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 1]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  Conventions and Definitions . . . . . . . . . . . . . . . . .   3
+   3.  Architecture Overview . . . . . . . . . . . . . . . . . . . .   3
+     3.1.  Metrics Sharing a Session with Media  . . . . . . . . . .   3
+     3.2.  Metrics as the Primary Data . . . . . . . . . . . . . . .   4
+   4.  Metrics Data Model  . . . . . . . . . . . . . . . . . . . . .   4
+     4.1.  ResourceID  . . . . . . . . . . . . . . . . . . . . . . .   6
+   5.  Metrics and MOQT  . . . . . . . . . . . . . . . . . . . . . .   6
+     5.1.  Track Naming  . . . . . . . . . . . . . . . . . . . . . .   6
+     5.2.  Granularity Levels  . . . . . . . . . . . . . . . . . . .   7
+     5.3.  Catalog Track . . . . . . . . . . . . . . . . . . . . . .   7
+     5.4.  Groups and Objects  . . . . . . . . . . . . . . . . . . .  10
+     5.5.  Track Properties  . . . . . . . . . . . . . . . . . . . .  11
+     5.6.  Priorities  . . . . . . . . . . . . . . . . . . . . . . .  12
+     5.7.  Discovery and Subscription  . . . . . . . . . . . . . . .  12
+     5.8.  Filtering . . . . . . . . . . . . . . . . . . . . . . . .  12
+     5.9.  Retrieval of Past Metrics . . . . . . . . . . . . . . . .  13
+     5.10. Examples  . . . . . . . . . . . . . . . . . . . . . . . .  13
+       5.10.1.  Catalog  . . . . . . . . . . . . . . . . . . . . . .  13
+       5.10.2.  Data . . . . . . . . . . . . . . . . . . . . . . . .  14
+       5.10.3.  Result . . . . . . . . . . . . . . . . . . . . . . .  15
+   6.  Use with MSF  . . . . . . . . . . . . . . . . . . . . . . . .  15
+   7.  IANA Considerations . . . . . . . . . . . . . . . . . . . . .  15
+   8.  Security Considerations . . . . . . . . . . . . . . . . . . .  15
+   9.  References  . . . . . . . . . . . . . . . . . . . . . . . . .  15
+     9.1.  Normative References  . . . . . . . . . . . . . . . . . .  15
+     9.2.  Informative References  . . . . . . . . . . . . . . . . .  16
+   Appendix A.  Changes from the ietf122 Version . . . . . . . . . .  16
+   Acknowledgments . . . . . . . . . . . . . . . . . . . . . . . . .  17
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  17
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 2]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+1.  Introduction
+
+   Systems often share the network bandwidth used for metrics with
+   realtime media, which impacts the media quality.  Metrics compete
+   with media for bandwidth, reducing the peak bandwidth available to
+   the primary application and often causing congestion in low-bandwidth
+   networks.  There is a desire to transport metrics at an appropriate
+   priority level over the same transport as the application media.
+   This allows metrics to take advantage of times when the media bitrate
+   is below the peak rate, without impacting the peak rate available for
+   media.
+
+   Publishing metrics over MOQT also allows MOQT relays to act as caches
+   that store metrics close to where they are produced.  Instead of
+   sending every metric to collectors, metrics can be cached in relays
+   and retrieved only when needed, enabling "just in time" delivery of
+   metrics (see Section 5.9).
+
+2.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+3.  Architecture Overview
+
+   This section describes two deployment models for metrics over MOQT.
+   In both, resources publish metrics as MOQT tracks (see Section 5) to
+   a relay, and metrics collectors subscribe to them via relays.  Relays
+   cache metrics so that collectors can retrieve them later.
+
+3.1.  Metrics Sharing a Session with Media
+
+   In this model, an endpoint such as a realtime conferencing client
+   publishes its media and its metrics over the same MOQT session, and
+   thus the same QUIC connection, to its ingress relay.  Media and
+   metrics share the congestion control context of that connection, and
+   MOQT priorities (see Section 5.6) determine what is sent when the
+   available bandwidth is limited.
+
+   At the relay, media and metrics are forwarded to different
+   destinations: media to the other participants, and metrics to a
+   metrics collector, possibly through other relays.  The relay does not
+   need to treat the two differently beyond the track names and
+   properties.
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 3]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+                     one QUIC connection
+                 (shared congestion control)
+   +------------+                   +---------+  media  +--------------+
+   |  Endpoint  |      media        |         |-------->| Participants |
+   | +--------+ |==================>|         |         +--------------+
+   | | Media  | |                   |  Relay  |
+   | +--------+ |      metrics      |         | metrics +--------------+
+   | |Metrics | |==================>| (cache) |-------->|   Metrics    |
+   | +--------+ |   (pri 128..240)  |         |         |  Collector   |
+   +------------+                   +---------+         +--------------+
+
+   When congestion occurs on the endpoint's connection, objects of the
+   higher granularity metrics levels are the first to be delayed and,
+   with OBJECT_DELIVERY_TIMEOUT, dropped, while media is unaffected.
+   The relay continues to cache what it has received, and a collector
+   can retrieve the metrics for a time window of interest later using
+   FETCH (see Section 5.9).
+
+3.2.  Metrics as the Primary Data
+
+   In this model, the endpoints, such as servers, network devices or
+   sensors, send metrics as their main data over MOQT.  Each endpoint
+   publishes its metrics tracks to a relay, which may aggregate many
+   endpoints, and one or more metrics collectors subscribe to them.
+
+   +------------+
+   | Endpoint 1 |--metrics--+
+   +------------+           |
+                            v
+   +------------+      +---------+       +---------+     +-----------+
+   | Endpoint 2 |----->|  Relay  |------>|  Relay  |---->|  Metrics  |
+   +------------+      | (cache) |       | (cache) |     | Collector |
+                       +---------+       +---------+     +-----------+
+   +------------+           ^                 |
+   | Endpoint N |--metrics--+                 |          +-----------+
+   +------------+                             +--------->| Dashboard |
+                                                         +-----------+
+
+   Collectors discover endpoints and subscribe to the levels of interest
+   (see Section 5.7), while the remaining levels stay in relay caches
+   until needed (see Section 5.9).  Multiple consumers, such as a
+   collector and a dashboard, can subscribe to the same tracks through
+   relays without the endpoint sending the data more than once.
+
+4.  Metrics Data Model
+
+   Below picture captures relationship between the entities in the data
+   model.
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 4]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   +---------------------+
+   |      Resource       |                  Attribute
+   |       - ResourceID  |
+   +---------------------+                 +--------------------+
+      |                                    |    Key: String     |
+      |                              +---->|   Value: String    |
+      |                              |     +--------------------+
+      |    +------------------+      |
+      +--->|Attributes [0..n] | -----+
+      |    +------------------+             +--------------------+
+      |                              +----->|Metric Name: String |
+      |                              |      +--------------------+
+      |    +------------------+      |
+      +--> |      Metric      |------+    +--------------------------+
+           +------------------+      |    |      TimeSeries 1..n     |
+                                     +--->|    [{time, value}, ...]  |
+                                          +--------------------------+
+
+   The devices or systems publishing the metrics are referred to as
+   "Resources" and have an unique "ResourceID".
+
+   Each metric reported by a Resource has an associated timeseries.  A
+   metric's timeseries is time ordered set of values (observations at
+   points in time) for the corresponding metric.  Metric names are
+   represented as strings and may contain ASCII letters, digits,
+   underscores, and colon.  A metric's value can be one of "Gauge" or
+   "Counter".  The "Gauge" value type represents a scalar value that
+   always represents the current value being measured.  The "Counter"
+   value type is a cumulative value that represents a single
+   monotonically increasing value that can increase or be reset to zero
+   on restart.  The Gauge and Counter can represent either a 64-bit
+   floating point value or a 64-bit integer value.
+
+   Resources also define zero or more Attributes.  Attributes capture
+   the dimensional data to identify any given combination of them for
+   the metrics reported by the resource.  Attributes are represented as
+   key-value pairs and represented as strings.
+
+   The data model specified in this section is consistent with the
+   OpenTelemetry metrics data model [OTEL] when at rest (also known as
+   Timeseries model).  See Section 5 for streaming model where MOQT is
+   used for transporting the metric data.
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 5]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+4.1.  ResourceID
+
+   Each resource that creates metrics has a unique "ResourceID".  This
+   is created by taking the MAC address of the primary network interface
+   in binary, computing the SHA-1 hash of it, and truncating to lower 64
+   bits.  Note that SHA-1 does not provide any security properties here;
+   it is just a hash that is widely implemented in hardware.  If this is
+   not possible, any other random stable 64-bit identifier MAY be used.
+   The advantage of using the MAC address is that many other management
+   systems use this address and it makes it easier to correlate.  The
+   disadvantage is that it reveals the MAC address.
+
+   When carried in MOQT names, the ResourceID is encoded as exactly 16
+   lowercase hexadecimal ASCII characters.
+
+5.  Metrics and MOQT
+
+   This section maps the metrics data model defined in this
+   specification to the MOQT Object Data Model (Section 2 of [MOQT]).
+   The core idea is that the names of the MOQT tracks are set up such
+   that a subscriber can discover and subscribe to each resource
+   reporting metrics separately, pick the right granularity level, and
+   select individual metrics using MOQT filters, while relays cache and
+   serve past metric values.
+
+5.1.  Track Naming
+
+   Each resource publishes its metrics under the Track Namespace
+   consisting of the following three Track Namespace Fields, each
+   encoded as ASCII:
+
+   ("metrics.moq.arpa", "v1", <resourceID>)
+
+   The Track Namespace Prefix ("metrics.moq.arpa", "v1") is common to
+   all resources, which allows a collector to discover all resources
+   (see Section 5.7).  Within a resource's namespace the following
+   tracks are defined:
+
+   *  One data track per granularity level.  The Track Name is a single
+      ASCII digit identifying the level (see Section 5.2).
+
+   *  One catalog track with the Track Name catalog (see Section 5.3).
+
+   Using the serialization format in Section 8.8 of [MOQT], the Warning
+   level track of the resource with ResourceID 8f2c4a1b0e9d7c63 is
+   rendered as:
+
+   metrics.2emoq.2earpa-v1-8f2c4a1b0e9d7c63--4
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 6]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+5.2.  Granularity Levels
+
+   Following granularity levels are defined in this specification, along
+   with their associated track names and default publisher priorities
+   (see Section 5.6).  Higher levels carry more detailed metrics: in
+   this document, "lower levels" refers to Emergency (0) towards Error
+   (3), and "higher levels" to Warning (4) towards Debug (7).
+
+        +===============+============+============================+
+        | Level         | Track Name | Default Publisher Priority |
+        +===============+============+============================+
+        | Emergency     |     0      |            128             |
+        +---------------+------------+----------------------------+
+        | Alert         |     1      |            144             |
+        +---------------+------------+----------------------------+
+        | Critical      |     2      |            160             |
+        +---------------+------------+----------------------------+
+        | Error         |     3      |            176             |
+        +---------------+------------+----------------------------+
+        | Warning       |     4      |            192             |
+        +---------------+------------+----------------------------+
+        | Notice        |     5      |            208             |
+        +---------------+------------+----------------------------+
+        | Informational |     6      |            224             |
+        +---------------+------------+----------------------------+
+        | Debug         |     7      |            240             |
+        +---------------+------------+----------------------------+
+
+                                  Table 1
+
+   Mapping of metrics and its reporting frequency at the aforementioned
+   levels by a resource is application defined.  However, it can be
+   typical of an implementation to report metrics that represent
+   aggregation of values over larger time intervals or that represent
+   erroneous conditions, to use granularity that is one of Emergency,
+   Alert, Critical and Error.  Such metrics have characteristics of
+   being less frequent and hence consume lesser bandwidth.  Metrics that
+   are captured more frequently and capture detailed view of system
+   being measured typically are reported at the Warning through Debug
+   levels.  Such metrics, however, consume high bandwidth when
+   published.
+
+5.3.  Catalog Track
+
+   The catalog track describes the resource and the metrics it
+   publishes.  Each catalog group is one version of the catalog, and its
+   objects mirror the objects of data groups:
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 7]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  Object ID 0 carries the catalog header.
+
+   *  Object ID N, for N > 0, carries the Metric Description of the
+      metric with Metric Index N.
+
+   The Metric Index of a metric is the Object ID of its Metric
+   Description in the catalog group, and is also the Object ID that
+   carries the metric's value in data groups (Section 5.4).  It is not
+   encoded in the Metric Description itself.  Metric Indices are unique
+   across all data tracks of the resource within a catalog version.  A
+   subscriber uses the Metric Description with index N to interpret
+   Object ID N of any data group that refers to that catalog version.
+
+   The catalog header and metric description are encoded as follows,
+   using the notation of Section 1.3 of [RFC9000] and the variable-
+   length integer (vi64) of Section 8.1 of [MOQT].
+
+   Catalog Header {
+     Version (vi64),
+     Number of Attributes (vi64),
+     Attribute (..) ...,
+   }
+
+   Attribute {
+     Key Length (vi64),
+     Key (..),
+     Value Length (vi64),
+     Value (..),
+   }
+
+                   Figure 1: Catalog Header (Object ID 0)
+
+   *  Version: The catalog format version.  This document defines
+      version 1.
+
+   *  Attribute: A resource attribute, where Key and Value are UTF-8
+      strings.
+
+   Metric Description {
+     Metric Type (vi64),
+     Value Representation (vi64),
+     Name Length (vi64),
+     Name (..),
+     Unit Length (vi64),
+     Unit (..),
+   }
+
+               Figure 2: Metric Description (Object ID N > 0)
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 8]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  Metric Type: 0x0 for Gauge, 0x1 for Counter (see Section 4).
+
+   *  Value Representation: The encoding of the metric value in data
+      objects (see Section 5.4): 0x0 for an unsigned integer, 0x1 for a
+      signed integer, 0x2 for a floating point number.
+
+   *  Name: The metric name, in ASCII (see Section 4).
+
+   *  Unit: The unit of the value following [OTEL] conventions, or empty
+      if not specified.
+
+   Receivers MUST ignore any bytes following the fields defined in this
+   document, to allow future extension.
+
+   The Group ID of a catalog group is the catalog version number.  The
+   first version has Group ID 1, and each new version increments it by
+   one, so the reference carried in every data group (see Section 5.4)
+   stays small.  The publisher MUST publish a catalog group before any
+   data group that refers to it.
+
+   Metric Indices are scoped to a catalog version: a new catalog version
+   MAY assign indices differently.  Publishers SHOULD keep indices
+   stable across versions, which keeps Object ID filters valid (see
+   Section 5.8) and allows unchanged metric descriptions to be reused.
+
+   Because each metric is described by its own object, a subscriber does
+   not need the complete catalog before decoding data.  It can decode
+   the value in data Object ID N as soon as it has catalog Object ID N
+   of the referenced version, and it can retrieve only the descriptions
+   it needs by applying the same Object ID filter to the catalog track
+   as to the data track.
+
+   A subscriber SHOULD subscribe to the catalog track in parallel with
+   the data tracks, using FILL_PARAMETERS selecting the current group
+   (Section 3.5 of [MOQT]), and hold data objects until the referenced
+   catalog objects are received.  Catalog versions rarely change, so
+   subscribers MAY cache them per Track Namespace and catalog version
+   and use a cached version without waiting.  A subscriber that receives
+   a data group referring to a catalog version it does not have
+   retrieves it with FETCH.
+
+   The catalog track MUST use subgroup delivery and SHOULD carry the
+   following Track Properties:
+
+   *  MAX_CACHE_DURATION no shorter than that of any data track of the
+      resource, so that cached data remains interpretable.
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                   [Page 9]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  DEFAULT_PUBLISHER_PRIORITY numerically lower than that of any data
+      track of the resource, so that catalog objects arrive ahead of the
+      data that depends on them.  This can place the catalog ahead of
+      media using the default priority, which is acceptable given its
+      small size and infrequent changes.
+
+   *  No OBJECT_DELIVERY_TIMEOUT.
+
+5.4.  Groups and Objects
+
+   Each group in a data track holds the set of metrics captured by the
+   resource at one point in time.  The Group ID is the capture time in
+   milliseconds since the UNIX Epoch (00:00:00 UTC on 1 January 1970).
+   This satisfies the requirement that Group IDs increase with time
+   (Section 2.3.1 of [MOQT]) and allows subscribers to express time
+   ranges directly as Location filters (see Section 5.9).
+
+   Each group is independently useful: decoding a group requires only
+   the objects in that group and the catalog version it refers to.
+   Objects within a group are:
+
+   *  Object ID 0 is REQUIRED and carries the Capture Info.
+
+   *  Object ID N, for N > 0, carries the Metric Value of the metric
+      with Metric Index N in the referenced catalog version, observed at
+      the capture time.
+
+   Capture Info {
+     Capture Timestamp Offset (vi64),
+     Catalog Version (vi64),
+   }
+
+                    Figure 3: Capture Info (Object ID 0)
+
+   *  Capture Timestamp Offset: The nanoseconds to add to the Group ID,
+      in milliseconds, to obtain the precise capture time.  The value is
+      less than 1000000.
+
+   *  Catalog Version: The Group ID of the catalog version used by this
+      group (see Section 5.3).
+
+   The Metric Value is the entire object payload, encoded according to
+   the Value Representation of the metric:
+
+   *  Unsigned integer: a vi64.
+
+   *  Signed integer: a 64-bit two's complement integer in network byte
+      order.
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 10]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  Floating point: an IEEE 754 binary64 value in network byte order.
+
+   A resource that does not report a given metric at a capture time
+   simply omits that object.  A subscriber or relay cannot infer
+   anything from a missing Object ID (Section 2.1.2 of [MOQT]).  The
+   publisher MUST therefore include the Prior Object ID Gap Object
+   Property (Section 10.9 of [MOQT]) on the object that follows any
+   skipped Object IDs, signaling that they do not exist in the group.
+   The publisher MUST also end each group with an object with the End of
+   Group Object Status (Section 11.1.1 of [MOQT]) and an Object ID one
+   greater than the largest Object ID carrying a metric value, so that
+   the receiver knows that no further metrics exist in the group,
+   including skipped metrics after the last value.  Object Status is not
+   carried in FETCH responses, which convey non-existent objects as
+   described in Section 3.2.2 of [MOQT].
+
+   Resources typically do not capture metrics every millisecond, so
+   Group IDs in a data track are sparse.  The publisher SHOULD include
+   the Prior Group ID Gap Object Property (Section 10.8 of [MOQT]) on
+   Object 0, set to the number of milliseconds since the previous
+   capture minus one.  This allows relays and fetches to know that the
+   intervening groups will never exist, rather than leaving them in the
+   unknown state.
+
+   All objects of a group MUST be sent in a single subgroup with
+   Subgroup ID 0, so that Object 0 is delivered ahead of the values that
+   depend on it.  The Datagram delivery mode MUST NOT be used.  An
+   example of a group is shown in Section 5.10.
+
+5.5.  Track Properties
+
+   Publishers SHOULD include the following Track Properties (Section 8.4
+   of [MOQT]) on each data track:
+
+   *  DEFAULT_PUBLISHER_PRIORITY: see Section 5.6.
+
+   *  DEFAULT_PUBLISHER_GROUP_ORDER: Ascending (0x1), so that collectors
+      receive samples in capture order.  Subscribers interested only in
+      the freshest value, such as live dashboards, MAY request
+      Descending group order.
+
+   *  MAX_CACHE_DURATION: the retention time for which relays may serve
+      cached samples.  Lower granularity levels are typically retained
+      longer than higher granularity levels.
+
+   *  OBJECT_DELIVERY_TIMEOUT: for high granularity levels, a timeout
+      after which a stale sample is dropped rather than delivered late.
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 11]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+5.6.  Priorities
+
+   Metrics are expected to yield to the primary application under
+   congestion.  The publisher SHOULD set the DEFAULT_PUBLISHER_PRIORITY
+   Track Property of each data track to the value in Section 5.2, or
+   another value that keeps lower granularity levels ahead of higher
+   granularity levels.  These values are in the lower priority half of
+   the range, behind the MOQT default of 128 typically used for media,
+   with Emergency at par with the default.
+
+   Subscribers can adjust the relative importance of metrics against
+   other subscriptions in the session using the SUBSCRIBER_PRIORITY
+   parameter, which is considered before publisher priority.
+
+5.7.  Discovery and Subscription
+
+   A collector discovers resources by sending SUBSCRIBE_NAMESPACE with
+   the Track Namespace Prefix ("metrics.moq.arpa", "v1").  The relay
+   responds with a NAMESPACE message for each resource namespace, and
+   NAMESPACE_DONE when a resource stops publishing.
+
+   For each discovered resource, the collector subscribes by name to the
+   catalog track and to the data tracks of the levels it wants to
+   receive continuously, for example levels 0 to 3.  Resources that
+   start publishing later are learned from subsequent NAMESPACE
+   messages.  Tracks of other levels are not subscribed to and remain
+   available from the relay cache via FETCH (see Section 5.9).
+
+5.8.  Filtering
+
+   MOQT Range Filters (Section 3.3.2 of [MOQT]) carried in SUBSCRIBE,
+   FETCH or FILL_PARAMETERS allow a collector to further reduce the data
+   delivered within a track:
+
+   *  An Object ID range filter selects specific metrics by Metric
+      Index.  The filter MUST include Object ID 0, which identifies the
+      catalog version.  For example, ranges [0, 0] and [3, 5] deliver
+      Object 0 and the metrics with indices 3 to 5.  The same filter
+      applied to the catalog track delivers only the catalog header and
+      the descriptions of those metrics.  A subscriber updates its
+      filters when a new catalog version assigns indices differently.
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 12]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  An Object Property range filter selects individual samples based
+      on application-defined Object Properties.  For example, an
+      application can mark samples that cross a configured threshold
+      with an Object Property from the application-specific range, so
+      that a collector subscribed to a high granularity level receives
+      only those samples.  Such properties are outside the scope of this
+      document.
+
+   Range Filters are only available when the relay advertises a non-zero
+   MAX_FILTER_RANGES.  Collectors therefore treat filtering as an
+   optimization and MUST be able to process unfiltered tracks.
+
+5.9.  Retrieval of Past Metrics
+
+   Since Group IDs are capture times in milliseconds, a time range of
+   metrics corresponds directly to a range of Locations:
+
+   *  A collector retrieves past samples for a time window [T1, T2] by
+      sending FETCH with a Location filter from {T1, 0} to {T2, max}.
+      The request is served from the relay cache, subject to
+      MAX_CACHE_DURATION.
+
+   *  A collector that wants recent history followed by live samples
+      sends a SUBSCRIBE with a Location filter starting at the Next
+      Object, together with FILL_PARAMETERS whose Location filter
+      selects the starting point of the history.  The relay delivers the
+      history on a fill fetch stream and live samples on the
+      subscription, without gaps or duplicates (Section 3.4 of [MOQT]).
+
+   *  A collector that only needs live samples subscribes with a
+      Location filter starting at the Next Group.
+
+   This enables the "just in time" collection model: resources publish
+   all levels to a nearby relay, while collectors subscribe to the low
+   granularity levels and fetch the high granularity levels for the time
+   windows of interest, for example around an alert.
+
+5.10.  Examples
+
+   This example follows a resource that reports two metrics on its
+   Warning level track: cpu_usage_percentage and cpu_temperature.
+
+5.10.1.  Catalog
+
+   The resource publishes catalog version 1 as Group 1 of its catalog
+   track.
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 13]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   Track "catalog", Group 1 (catalog version 1)
+
+    Obj  Content
+    ---  ------------------------------------------------------------
+     0   Catalog Header      version 1
+                             location = us-east-2, os = ubuntu20.4
+     1   Metric Description  cpu_usage_percentage  Gauge  unsigned  %
+     2   Metric Description  cpu_temperature       Gauge  float     Cel
+
+                      Figure 4: Catalog track example
+
+5.10.2.  Data
+
+   The resource captures both metrics at 15:59:51.000123456 UTC on 7
+   July 2024 (Group 1720367991000).  One second later it captures only
+   cpu_temperature (Group 1720367992000).
+
+   Track "4", Group 1720367991000
+
+    Obj  Content                       Meaning
+    ---  ----------------------------  ------------------------------
+     0   Capture Info                  captured 15:59:51.000123456,
+           offset 123456 ns            decode with catalog version 1
+           catalog 1
+     1   Metric Value  99              cpu_usage_percentage = 99 %
+     2   Metric Value  45.1            cpu_temperature = 45.1 Cel
+     3   End of Group                  no further metrics
+
+   Track "4", Group 1720367992000
+
+    Obj  Content                       Meaning
+    ---  ----------------------------  ------------------------------
+     0   Capture Info                  captured 15:59:52.000004211,
+           offset 4211 ns              decode with catalog version 1
+           catalog 1
+           [Prior Group ID Gap 999]    no groups since previous one
+     2   Metric Value  44.8            cpu_temperature = 44.8 Cel
+           [Prior Object ID Gap 1]     Object 1 not reported
+     3   End of Group                  no further metrics
+
+   [ ] denotes an Object Property.
+
+                        Figure 5: Data track example
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 14]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+5.10.3.  Result
+
+   A collector holding catalog version 1 turns the two groups into the
+   following time series (Section 4), with capture times in UTC on 7
+   July 2024:
+
+       +====================+======================+=======+======+
+       | Capture time       | Metric               | Value | Unit |
+       +====================+======================+=======+======+
+       | 15:59:51.000123456 | cpu_usage_percentage |    99 | %    |
+       +--------------------+----------------------+-------+------+
+       | 15:59:51.000123456 | cpu_temperature      |  45.1 | Cel  |
+       +--------------------+----------------------+-------+------+
+       | 15:59:52.000004211 | cpu_temperature      |  44.8 | Cel  |
+       +--------------------+----------------------+-------+------+
+
+                       Table 2: Decoded time series
+
+6.  Use with MSF
+
+   An MOQT Streaming Format (MSF) [MSF] catalog can direct a client to
+   publish metrics using a publishTracks entry with a packaging of
+   "moqmetrics" and a role of "metrics".  In such an entry:
+
+   *  namespace is the Track Namespace of Section 5.1 rendered using
+      Section 8.8 of [MOQT], with %resourceId% as a placeholder for the
+      client's ResourceID: metrics.2emoq.2earpa-v1-%resourceId%.
+
+   *  name is the data track for a granularity level (Section 5.2).  A
+      catalog can include one entry per level it wants the client to
+      publish.
+
+   A client publishing any data track in this way also publishes the
+   catalog track (Section 5.3) in the same namespace.  The connectionUri
+   and token of the entry apply to the catalog track as well.
+
+7.  IANA Considerations
+
+   This document has no IANA actions.
+
+8.  Security Considerations
+
+   TODO
+
+9.  References
+
+9.1.  Normative References
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 15]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
+              "Media over QUIC Transport", Work in Progress, Internet-
+              Draft, draft-ietf-moq-transport-22, 1 October 2026,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
+              transport-22>.
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+   [RFC9000]  Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
+              Multiplexed and Secure Transport", RFC 9000,
+              DOI 10.17487/RFC9000, May 2021,
+              <https://www.rfc-editor.org/rfc/rfc9000>.
+
+9.2.  Informative References
+
+   [MSF]      Law, W. and S. Nandakumar, "MOQT Streaming Format", Work
+              in Progress, Internet-Draft, draft-ietf-moq-msf-01, 2 June
+              2026, <https://datatracker.ietf.org/doc/html/draft-ietf-
+              moq-msf-01>.
+
+   [OTEL]     OpenTelemetry, "OpenTelemetry Metrics Data Model", n.d.,
+              <https://opentelemetry.io/docs/specs/otel/metrics/data-
+              model/>.
+
+Appendix A.  Changes from the ietf122 Version
+
+   *  Aligned with draft-ietf-moq-transport-22.
+
+   *  Added an Architecture Overview describing metrics sharing a
+      session with media, and metrics as the primary data.
+
+   *  Track Namespace is now the tuple ("metrics.moq.arpa", "v1",
+      resourceID); the string form uses the MOQT serialization format
+      instead of a moq:// URL.
+
+   *  Group ID is the capture time in milliseconds since the UNIX Epoch
+      as a full 64-bit value.
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 16]
+
+Internet-Draft                moqt-metrics                 November 2026
+
+
+   *  Attributes and metric names moved to a versioned catalog track
+      with one object per metric.  Each data group refers to the catalog
+      version that maps its Object IDs to metrics, which removes the
+      dependency on previous groups.
+
+   *  Object payloads use a binary encoding following the MOQT notation.
+
+   *  Each group is sent as a single subgroup, ending with an End of
+      Group object, and skipped metrics are signaled with Prior Object
+      ID Gap.
+
+   *  Added the use of Prior Group ID Gap, Track Properties for
+      priority, group order, caching and delivery timeouts,
+      SUBSCRIBE_NAMESPACE for discovery, range filters for metric
+      selection, and FETCH and fill for time range retrieval.
+
+   *  Added use with MSF.
+
+Acknowledgments
+
+   Thanks to TODO for contributions and suggestions to this
+   specification.
+
+Authors' Addresses
+
+   Cullen Jennings
+   Cisco
+   Canada
+   Email: fluffy@iii.ca
+
+
+   Suhas Nandakumar
+   Cisco
+   United States of America
+   Email: snandaku@cisco.com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Jennings & Nandakumar      Expires 6 May 2027                  [Page 17]

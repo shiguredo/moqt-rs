@@ -5,15 +5,15 @@
 Media Over QUIC                                               M. English
 Internet-Draft                                                 L. Pardue
 Intended status: Informational                                Cloudflare
-Expires: 7 January 2027                                        A. Sharma
+Expires: 6 May 2027                                            A. Sharma
                                                                     Meta
                                                                 I. Swett
                                                                   Google
-                                                             6 July 2026
+                                                         2 November 2026
 
 
  Denial-of-Service Considerations for Media over QUIC Relay Deployments
-                    draft-englishm-moq-relay-dos-01
+                    draft-englishm-moq-relay-dos-02
 
 Abstract
 
@@ -53,9 +53,9 @@ Status of This Memo
 
 
 
-English, et al.          Expires 7 January 2027                 [Page 1]
+English, et al.            Expires 6 May 2027                   [Page 1]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
    Internet-Drafts are draft documents valid for a maximum of six months
@@ -63,7 +63,7 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 7 January 2027.
+   This Internet-Draft will expire on 6 May 2027.
 
 Copyright Notice
 
@@ -98,33 +98,35 @@ Table of Contents
        4.2.1.  Update Coalescing . . . . . . . . . . . . . . . . . .   9
      4.3.  Namespace Advertisement Flooding  . . . . . . . . . . . .   9
    5.  Data Plane Considerations . . . . . . . . . . . . . . . . . .   9
-     5.1.  Slow Subscribers  . . . . . . . . . . . . . . . . . . . .   9
+     5.1.  Slow Subscribers  . . . . . . . . . . . . . . . . . . . .  10
      5.2.  Join-Time Buffering . . . . . . . . . . . . . . . . . . .  10
-     5.3.  Flow Control Limitations  . . . . . . . . . . . . . . . .  10
-   6.  Relay Dual-Role Considerations  . . . . . . . . . . . . . . .  11
-     6.1.  Resource Isolation  . . . . . . . . . . . . . . . . . . .  11
-     6.2.  Upstream Load Protection  . . . . . . . . . . . . . . . .  12
-     6.3.  Multi-Publisher Fan-Out . . . . . . . . . . . . . . . . .  12
-   7.  Operational Recommendations . . . . . . . . . . . . . . . . .  12
+     5.3.  Unknown Track Aliases . . . . . . . . . . . . . . . . . .  11
+     5.4.  Flow Control Limitations  . . . . . . . . . . . . . . . .  12
+   6.  Relay Dual-Role Considerations  . . . . . . . . . . . . . . .  12
+     6.1.  Resource Isolation  . . . . . . . . . . . . . . . . . . .  12
+     6.2.  Upstream Load Protection  . . . . . . . . . . . . . . . .  13
+     6.3.  Paused Subscriptions  . . . . . . . . . . . . . . . . . .  13
 
 
 
-English, et al.          Expires 7 January 2027                 [Page 2]
+English, et al.            Expires 6 May 2027                   [Page 2]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
-     7.1.  Cost Tracking . . . . . . . . . . . . . . . . . . . . . .  12
-     7.2.  Rate Limiting . . . . . . . . . . . . . . . . . . . . . .  13
-   8.  Tracking Protocol Load-Bearing Mitigations  . . . . . . . . .  13
-   9.  Security Considerations . . . . . . . . . . . . . . . . . . .  15
-   10. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  15
-   11. References  . . . . . . . . . . . . . . . . . . . . . . . . .  15
-     11.1.  Normative References . . . . . . . . . . . . . . . . . .  15
-     11.2.  Informative References . . . . . . . . . . . . . . . . .  15
-   Contributors  . . . . . . . . . . . . . . . . . . . . . . . . . .  16
-   Use of Generative AI  . . . . . . . . . . . . . . . . . . . . . .  16
-   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  16
+     6.4.  Multi-Publisher Fan-Out . . . . . . . . . . . . . . . . .  14
+   7.  Operational Recommendations . . . . . . . . . . . . . . . . .  14
+     7.1.  Cost Tracking . . . . . . . . . . . . . . . . . . . . . .  14
+     7.2.  Rate Limiting . . . . . . . . . . . . . . . . . . . . . .  14
+   8.  Tracking Protocol Load-Bearing Mitigations  . . . . . . . . .  15
+   9.  Security Considerations . . . . . . . . . . . . . . . . . . .  18
+   10. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  19
+   11. References  . . . . . . . . . . . . . . . . . . . . . . . . .  19
+     11.1.  Normative References . . . . . . . . . . . . . . . . . .  19
+     11.2.  Informative References . . . . . . . . . . . . . . . . .  19
+   Contributors  . . . . . . . . . . . . . . . . . . . . . . . . . .  19
+   Use of Generative AI  . . . . . . . . . . . . . . . . . . . . . .  20
+   Authors' Addresses  . . . . . . . . . . . . . . . . . . . . . . .  20
 
 1.  Introduction
 
@@ -163,11 +165,9 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
 
 
-
-
-English, et al.          Expires 7 January 2027                 [Page 3]
+English, et al.            Expires 6 May 2027                   [Page 3]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
 1.2.  Scope
@@ -221,9 +221,9 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
 
 
-English, et al.          Expires 7 January 2027                 [Page 4]
+English, et al.            Expires 6 May 2027                   [Page 4]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
       subscribers: QUIC stream management, object framing, and flow
@@ -277,9 +277,9 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
 
 
-English, et al.          Expires 7 January 2027                 [Page 5]
+English, et al.            Expires 6 May 2027                   [Page 5]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
 3.1.2.  Misbehaving Publisher
@@ -307,6 +307,18 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    peers) and a misbehaving publisher (to its downstream peers) at the
    same time.
 
+   A misbehaving relay can also direct load at a third party.  When a
+   server sends GOAWAY with a New Session URI, the client MUST use that
+   URI for its new session (see Section 9.2 of [MOQT]).  A relay with
+   many connected clients can send them all a GOAWAY naming a victim
+   host, which then receives a burst of connection attempts from clients
+   that would not otherwise contact it.  The victim need not implement
+   MoQT at all.  Because the clients are following the protocol, the
+   victim cannot prevent the connection attempts.  Mitigating this would
+   require clients to have some assurance that a new URI is
+   authoritative before following it, which is a matter for the
+   transport specification.
+
 3.2.  Amplification Properties
 
    MoQT has significant amplification properties.  A single SUBSCRIBE
@@ -318,6 +330,14 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    protocols like HTTP, where the server's cost is roughly proportional
    to the request.
 
+
+
+
+English, et al.            Expires 6 May 2027                   [Page 6]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
    This has a direct implication for how limits need to be designed.
    Per-session limits are necessary but may not be sufficient: if an
    attacker can open many sessions cheaply, per-session limits just move
@@ -327,16 +347,6 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    specifics of authentication and billing are out of scope here, but
    session-level controls alone may not be sufficient — they could be
    one layer of a defense-in-depth strategy.
-
-
-
-
-
-
-English, et al.          Expires 7 January 2027                 [Page 6]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
 
 4.  Control Plane Considerations
 
@@ -353,9 +363,9 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    multiple nodes, that state must be shared — through replication,
    coordination, or some partitioning scheme — and the per-operation
    cost tends to increase accordingly.  MoQT is designed to support
-   distribution at scale through third-party relay networks (see [MOQT],
-   Section 1.1.4), so this document focuses on the cost profile where
-   these pressures are most acute.
+   distribution at scale through third-party relay networks (see
+   Section 1.2.4 of [MOQT]), so this document focuses on the cost
+   profile where these pressures are most acute.
 
    In general, operations that read authoritative state tend to be
    cheaper than operations that write or update it, and this asymmetry
@@ -377,6 +387,13 @@ Internet-Draft                MoQ Relay DoS                    July 2026
       this registration must be visible to other nodes that may receive
       subscriptions for the same namespace.
 
+
+
+English, et al.            Expires 6 May 2027                   [Page 7]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
    SUBSCRIBE:  Requests content for a Full Track Name (Track Namespace +
       Track Name).  The relay must look up the registered namespace,
       determine where the content can be sourced, and may need to
@@ -385,15 +402,6 @@ Internet-Draft                MoQ Relay DoS                    July 2026
       subscription.
 
    SUBSCRIBE_NAMESPACE:  Registers interest in content matching a
-
-
-
-
-English, et al.          Expires 7 January 2027                 [Page 7]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
-
       namespace prefix.  This inverts the namespace-advertisement flow:
       instead of matching a subscription against registered namespaces,
       the relay must match incoming PUBLISH_NAMESPACE messages against
@@ -433,22 +441,20 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    repetition.  REQUEST_UPDATE can change the priority, which may force
    reordering of internal scheduling structures.
 
+
+
+
+
+English, et al.            Expires 6 May 2027                   [Page 8]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
    Implementations that track request rates per session can reduce the
    rate at which they provide more bidirectional streams, thereby
    limiting the number of new requests.  As a more disruptive measure,
    implementations can detect and terminate sessions exhibiting
    excessive churn without making progress on useful data transfer.
-
-
-
-
-
-
-
-English, et al.          Expires 7 January 2027                 [Page 8]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
 
 4.2.1.  Update Coalescing
 
@@ -456,14 +462,19 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    — most commonly the priority, which may force reordering of internal
    scheduling structures.  The recipient of a REQUEST_UPDATE can
    coalesce multiple pending updates for the same subscription before
-   applying them (see Section 10.9 of [MOQT]).  For example, if a
+   applying them (see Section 9.5.1 of [MOQT]).  For example, if a
    subscriber sends 100 REQUEST_UPDATEs changing the priority of a
    subscription before the relay has processed them, only the final
    value needs to be applied.
 
    Rapid REQUEST_UPDATE messages still consume network and parsing
    resources, but coalescing prevents them from causing proportional
-   scheduling work at the relay.
+   scheduling work at the relay.  Coalescing does not apply to every
+   update: a REQUEST_UPDATE carrying FILL_PARAMETERS or
+   TRACK_NAMESPACE_PREFIX cannot be coalesced with other REQUEST_UPDATEs
+   (see Section 9.19.15 of [MOQT] and Section 9.19.20 of [MOQT]), so
+   floods of those updates need other limits, such as
+   MAX_REQUEST_UPDATES.
 
 4.3.  Namespace Advertisement Flooding
 
@@ -488,45 +499,52 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    memory consumed by buffered objects, bandwidth spent on delivery, and
    processing capacity for framing and scheduling.
 
+
+
+English, et al.            Expires 6 May 2027                   [Page 9]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
 5.1.  Slow Subscribers
 
    A relay MUST NOT reorder or drop objects on a multi-object stream
-   when forwarding to subscribers, absent application-specific
-   information (see Section 9.4 of [MOQT]).  Without such information, a
-   subscriber that consumes data more slowly than it is produced will
-   cause data to accumulate at the relay.  That memory pressure could
-   affect other subscribers on the same relay (see Section 5.3 and
-   Section 6.1).  This can happen because the subscriber's network is
-   slow, because the subscriber's application isn't consuming data fast
+   when forwarding to subscribers (see Section 7.5 of [MOQT]).  As a
+   result, a subscriber that consumes data more slowly than it is
+   produced will cause data to accumulate at the relay.  That memory
+   pressure could affect other subscribers on the same relay (see
+   Section 5.4 and Section 6.1).  This can happen because the
+   subscriber's network is slow, because the subscriber's application
+   isn't consuming data fast enough, or because the subscriber is
+   deliberately not consuming data at all.
 
-
-
-English, et al.          Expires 7 January 2027                 [Page 9]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
-
-   enough, or because the subscriber is deliberately not consuming data
-   at all.
-
-   Objects sent on QUIC streams are reliably delivered, so the relay's
-   only mechanism to bound buffering is to terminate the subscription
-   entirely by resetting the stream.  The relay cannot selectively drop
-   individual objects while keeping the subscription active, which means
-   any resource bound requires full termination — creating a denial-of-
-   service risk where the only defense disrupts service.  Objects sent
-   as datagrams can simply be dropped when a buffer forms, which
-   naturally limits accumulation but does not eliminate the processing
-   cost of receiving and discarding them.
+   Objects sent on QUIC streams are reliably delivered, so a relay
+   cannot skip individual objects within a Subgroup stream.  The
+   smallest unit it can shed is a whole stream: resetting a Subgroup
+   stream ends delivery of that Subgroup but leaves the subscription in
+   place, and later Groups are delivered on new streams (see
+   Section 11.3.2 of [MOQT]).  When an endpoint reaches a resource
+   limit, Section 15.5 of [MOQT] requires it to cancel a stream,
+   preferably the one with the lowest priority.  Shedding a stream still
+   disrupts the subscriber, which loses the rest of that Subgroup and
+   may need to FETCH it, but the disruption is limited to that stream
+   rather than the whole subscription.  Ending the subscription (for
+   example, with PUBLISH_DONE and the TOO_FAR_BEHIND status code)
+   remains available when a subscriber is persistently unable to keep
+   up.  Objects sent as datagrams can simply be dropped when a buffer
+   forms, which naturally limits accumulation but does not eliminate the
+   processing cost of receiving and discarding them.
 
    A relay also cannot apply QUIC flow control backpressure to the
    upstream publisher on behalf of one slow subscriber without affecting
    other downstream subscribers of that track.
 
    Relays that detect and handle slow subscribers can limit this
-   accumulation.  Options include canceling subscriptions that fall too
-   far behind the live edge, and imposing per-subscriber buffer limits
-   (see Section 8 of [MOQT]).
+   accumulation.  Options include imposing per-subscriber buffer limits,
+   resetting the lowest-priority streams of a subscriber that exceeds
+   them, relying on delivery timeouts to reset streams whose Objects are
+   no longer useful (see Section 5.2 of [MOQT]), and ending
+   subscriptions that remain too far behind the live edge.
 
 5.2.  Join-Time Buffering
 
@@ -536,6 +554,14 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    to arrive.  If the subscriber's bandwidth is limited, the historical
    delivery takes time during which live objects queue at the relay.
    For high-bitrate streams, this transient buffering spike can be
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 10]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
    significant.
 
    This is not inherently an attack — it happens in normal operation.
@@ -546,22 +572,59 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    cancel the subscription, skip ahead to the live edge, or reduce
    delivery quality.
 
-5.3.  Flow Control Limitations
+5.3.  Unknown Track Aliases
+
+   Objects can arrive on a data stream or in a datagram before the
+   control message that associates their Track Alias with a
+   subscription.  Section 3.1.3.1 of [MOQT] allows the receiver to drop
+   such data or to buffer it briefly, and to withhold stream flow
+   control beyond the stream header until the Track Alias is
+   established.  It does not say how much to buffer or for how long, and
+   the sender chooses the Track Alias values, so a receiver cannot tell
+   in advance which aliases will turn out to be valid.  A peer, whether
+   misbehaving or merely slow to send its control messages, can
+   therefore make a relay hold data it cannot yet attribute to any
+   subscription or account against any limit tied to a subscription.
+
+   A relay that buffers data for unknown Track Aliases can bound it in
+   two dimensions: how long it waits for the alias to be established,
+   and how much data it holds while waiting, both per session and across
+   the relay.  Withholding stream flow control bounds the amount of data
+   the peer can send on those streams, though it does not bound the
+   number of streams opened, which remains limited by QUIC stream
+   limits.
+
+   Context can inform these limits.  Data that could plausibly belong to
+   a request the relay itself has sent and not yet seen answered, such
+   as a pending SUBSCRIBE, is more likely to be legitimate than
+   unsolicited data on a session where the relay does not expect to
+   receive PUBLISH.  A relay can reasonably wait longer or hold more in
+   the first case than in the second.
+
+   When a relay discards buffered data under resource pressure,
+   discarding everything for the affected Track Alias, rather than
+   individual Subgroups, avoids leaving gaps that are hard to account
+   for if the alias later turns out to be valid.  The sender is not told
+   why its streams were reset, so it cannot distinguish this from other
+   stream resets.  Datagrams with an unknown Track Alias can simply be
+   dropped.
+
+
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 11]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
+5.4.  Flow Control Limitations
 
    QUIC flow control (Section 4 of [QUIC]) protects receivers from
    memory exhaustion, but its protections have limits that are worth
    understanding:
 
    Within a single MoQT session:  QUIC flow control operates at the
-
-
-
-
-English, et al.          Expires 7 January 2027                [Page 10]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
-
       connection and stream level.  MoQT's prioritization mechanism
       intentionally allows higher-priority subscriptions to consume
       resources at the expense of lower-priority ones — that is by
@@ -600,23 +663,22 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    other subscribers' data); and fairness policies for shared resources
    like memory, bandwidth, and backend query capacity.
 
+
+
+
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 12]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
    These two goals sit in tension: the more independently a relay
    handles each downstream subscription, the less sharing and coalescing
    it can do upstream, limiting its ability to scale efficiently.
    Operators need to navigate this tradeoff for their particular
    deployment.
-
-
-
-
-
-
-
-
-English, et al.          Expires 7 January 2027                [Page 11]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
 
    That said, propagating per-subscriber resource pressure upstream
    degrades service for every other subscriber on that stream.  If one
@@ -642,7 +704,39 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    possible, and shedding downstream load rather than passing it through
    to upstream peers.
 
-6.3.  Multi-Publisher Fan-Out
+6.3.  Paused Subscriptions
+
+   A subscription can be paused, in which case the publisher sends no
+   Objects on it until it is resumed (see Section 3.1.1 of [MOQT]).  A
+   paused subscription costs the subscriber little but still occupies
+   state at the relay, and when it is the only downstream subscription
+   for a Track it can still cause upstream work.  When all downstream
+   subscriptions to a Track are paused, the relay decides whether to
+   pause its upstream subscription (see Section 7.2 of [MOQT]).  Leaving
+   it unpaused keeps the relay's cache warm so that a resumed subscriber
+   is served quickly, but it pulls content from the publisher that no
+   subscriber is currently receiving.  A subscriber that opens many
+   paused subscriptions could use this to drive upstream traffic and
+   cache use at almost no cost to itself.
+
+   Counting paused subscriptions against the same per-session and per-
+   identity limits as active ones prevents them from being a cheap way
+   to accumulate relay state.  Keeping upstream subscriptions unpaused
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 13]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
+   is most appropriate when there is reason to expect that a downstream
+   subscriber will resume soon, for example for popular content, and
+   less so for Tracks requested only by paused subscriptions from a
+   single session.  Rapid toggling between paused and unpaused is
+   another form of the rapid request cycles described in Section 4.2.
+
+6.4.  Multi-Publisher Fan-Out
 
    When a relay serves content from multiple publishers, subscriber
    operations can fan out upstream in ways that may not be obvious from
@@ -666,14 +760,6 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    advertisements, buffered data per subscriber, and the ratio of
    control plane activity to useful data transfer.
 
-
-
-
-English, et al.          Expires 7 January 2027                [Page 12]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
-
    Sessions or identities that consume disproportionate resources
    relative to the data transfer they facilitate are candidates for
    throttling or termination.
@@ -689,6 +775,16 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    everyone else.  Scoping limits per deployment unit — per customer
    account or per content namespace — further isolates abuse so that
    problems in one context do not affect another.
+
+
+
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 14]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
 
    Per-client limits and systemic circuit breakers serve different
    purposes and both contribute to a complete defense.  Per-client
@@ -721,72 +817,176 @@ Internet-Draft                MoQ Relay DoS                    July 2026
    mitigations are being preserved, replaced with equivalent mechanisms,
    or inadvertently weakened.
 
+   Some mechanisms present in earlier revisions of [MOQT] have since
+   been removed or relaxed.  The PREFIX_OVERLAP error, which prevented a
+   session from holding overlapping SUBSCRIBE_NAMESPACE or
+   SUBSCRIBE_TRACKS requests, no longer exists, so a Track matching
+   several overlapping SUBSCRIBE_TRACKS results in a PUBLISH for each
+   (see Section 3.6 of [MOQT]).  Detecting duplicate Request IDs is no
+   longer required (see Section 6.4.2.1 of [MOQT]), which avoids
+   unbounded per-session state; reusing a Request ID is still
+   prohibited, but a receiver that does not track them may not notice a
+   peer that does.  The fixed 2^16-1 control message length has been
+   replaced by MAX_CONTROL_MESSAGE_SIZE.
 
 
 
 
-English, et al.          Expires 7 January 2027                [Page 13]
+
+
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 15]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
-   +===========================+=================+=====================+
-   | Mechanism                 | Threat          | Notes               |
-   |                           | Mitigated       |                     |
-   +===========================+=================+=====================+
-   | QUIC bidi Stream Limits   | Rapid request   | Limits outstanding  |
-   |                           | flooding;       | requests a peer     |
-   |                           | unbounded state | can issue.  Any     |
-   |                           | commitment      | proposal to remove  |
-   |                           |                 | or change this      |
-   |                           |                 | needs to provide    |
-   |                           |                 | equivalent          |
-   |                           |                 | protection.         |
-   +---------------------------+-----------------+---------------------+
-   | QUIC uni Stream Limits    | Stream          | Baseline            |
-   |                           | exhaustion      | protection.  When   |
-   |                           |                 | used as the         |
-   |                           |                 | primary request-    |
-   |                           |                 | limiting            |
-   |                           |                 | mechanism,          |
-   |                           |                 | configuration       |
-   |                           |                 | needs to account    |
-   |                           |                 | for security        |
-   |                           |                 | implications.       |
-   +---------------------------+-----------------+---------------------+
-   | QUIC Flow Control         | Receiver memory | Protects            |
-   |                           | exhaustion      | individual          |
-   |                           |                 | receivers but does  |
-   |                           |                 | not provide cross-  |
-   |                           |                 | session fairness    |
-   |                           |                 | or state            |
-   |                           |                 | exhaustion          |
-   |                           |                 | protection.         |
-   +---------------------------+-----------------+---------------------+
-   | Subscription Timeouts     | Idle resource   | Lets relays         |
-   |                           | consumption     | reclaim resources   |
-   |                           |                 | from inactive       |
-   |                           |                 | subscriptions.      |
-   +---------------------------+-----------------+---------------------+
-   | MAX_AUTH_TOKEN_CACHE_SIZE | Memory          | Bounds total per-   |
-   |                           | consumption     | session bytes of    |
-   |                           |                 | registered          |
-   |                           |                 | authorization       |
-   |                           |                 | token aliases/      |
-   |                           |                 | values              |
-   +---------------------------+-----------------+---------------------+
-   | Control message length    | Oversized       | Bounds the size of  |
-   | limit (2^16-1)            | control-message | each control        |
-   |                           | parsing DoS     | message             |
+   +===========================+===============+=======================+
+   | Mechanism                 |Threat         |Notes                  |
+   |                           |Mitigated      |                       |
+   +===========================+===============+=======================+
+   | QUIC bidi Stream Limits   |Rapid request  |Limits outstanding     |
+   |                           |flooding;      |requests a peer can    |
+   |                           |unbounded state|issue.  Any proposal   |
+   |                           |commitment     |to remove or change    |
+   |                           |               |this needs to provide  |
+   |                           |               |equivalent protection. |
+   +---------------------------+---------------+-----------------------+
+   | QUIC uni Stream Limits    |Stream         |Baseline protection.   |
+   |                           |exhaustion     |When used as the       |
+   |                           |               |primary request-       |
+   |                           |               |limiting mechanism,    |
+   |                           |               |configuration needs to |
+   |                           |               |account for security   |
+   |                           |               |implications.          |
+   +---------------------------+---------------+-----------------------+
+   | QUIC Flow Control         |Receiver memory|Protects individual    |
+   |                           |exhaustion     |receivers but does not |
+   |                           |               |provide cross-session  |
+   |                           |               |fairness or state      |
+   |                           |               |exhaustion protection. |
+   +---------------------------+---------------+-----------------------+
+   | Timeouts (Section 15.6 of |Idle resource  |Let relays reclaim     |
+   | [MOQT]), including        |consumption    |resources from peers   |
+   | delivery timeouts         |               |that do not send       |
+   | (Section 5.2 of [MOQT])   |               |expected data and from |
+   | and EXPIRES               |               |inactive               |
+   | (Section 9.19.16 of       |               |subscriptions.  Values |
+   | [MOQT])                   |               |are implementation-    |
+   |                           |               |chosen.                |
+   +---------------------------+---------------+-----------------------+
+   | MAX_AUTH_TOKEN_CACHE_SIZE |Memory         |Bounds total per-      |
+   |                           |consumption    |session bytes of       |
+   |                           |               |registered             |
+   |                           |               |authorization token    |
+   |                           |               |aliases/values         |
+   +---------------------------+---------------+-----------------------+
+   | MAX_CONTROL_MESSAGE_SIZE  |Oversized      |Bounds the size of     |
+   | (Section 9.1.8 of [MOQT]) |control-message|each control message   |
+   |                           |parsing DoS    |the receiver accepts.  |
+   |                           |               |The receiver           |
+   |                           |               |advertises the value,  |
+   |                           |               |which is at least      |
+   |                           |               |65535 and has no upper |
+   |                           |               |bound, so a receiver   |
 
 
 
-English, et al.          Expires 7 January 2027                [Page 14]
+English, et al.            Expires 6 May 2027                  [Page 16]
 
-Internet-Draft                MoQ Relay DoS                    July 2026
+Internet-Draft                MoQ Relay DoS                November 2026
 
 
-   +---------------------------+-----------------+---------------------+
+   |                           |               |that raises it accepts |
+   |                           |               |proportionally more    |
+   |                           |               |buffered control data  |
+   |                           |               |per request stream.    |
+   +---------------------------+---------------+-----------------------+
+   | UNAVAILABLE when out of   |One downstream |A relay that lacks     |
+   | upstream stream credit    |request        |stream credit to       |
+   | (Section 7.4 of [MOQT])   |exhausting a   |forward a request can  |
+   |                           |relay's        |fail it immediately    |
+   |                           |upstream       |with UNAVAILABLE, or   |
+   |                           |request streams|wait and fail it with  |
+   |                           |               |TIMEOUT, rather than   |
+   |                           |               |holding it             |
+   |                           |               |indefinitely.          |
+   +---------------------------+---------------+-----------------------+
+   | MAX_REQUEST_UPDATES       |Rapid          |Bounds outstanding     |
+   | (Section 9.1.7 of [MOQT]) |REQUEST_UPDATE |REQUEST_UPDATEs per    |
+   |                           |churn          |request stream.  The   |
+   |                           |               |default of 0 means no  |
+   |                           |               |limit, so it only      |
+   |                           |               |protects an endpoint   |
+   |                           |               |that advertises a      |
+   |                           |               |value.  It does not    |
+   |                           |               |bound the total number |
+   |                           |               |of updates over time,  |
+   |                           |               |or the number of fill  |
+   |                           |               |fetch streams          |
+   |                           |               |(Section 3.4 of        |
+   |                           |               |[MOQT]) that updates   |
+   |                           |               |open, because each     |
+   |                           |               |response restores a    |
+   |                           |               |credit.                |
+   +---------------------------+---------------+-----------------------+
+   | MAX_FILTER_RANGES         |Per-object     |The default of 0 means |
+   | (Section 9.1.6 of [MOQT]) |filter         |a peer cannot send     |
+   |                           |evaluation     |Range Filters unless   |
+   |                           |cost; growth of|the endpoint           |
+   |                           |aggregated     |advertises support.    |
+   |                           |filter state   |                       |
+   +---------------------------+---------------+-----------------------+
+   | Full Track Name limits    |Oversized      |At most 32 Track       |
+   | (Section 8.7 of [MOQT])   |names;         |Namespace Fields, and  |
+   |                           |namespace      |at most 4,096 bytes    |
+   |                           |lookup and     |for a Full Track Name. |
+   |                           |storage cost   |                       |
+   +---------------------------+---------------+-----------------------+
+   | Relay-chosen              |Subscriptions  |The relay MAY use a    |
+   | RENDEZVOUS_TIMEOUT        |held while     |shorter timeout than   |
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 17]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
+
+   | (Section 9.19.6 of        |waiting for a  |the subscriber         |
+   | [MOQT])                   |publisher      |requests.              |
+   +---------------------------+---------------+-----------------------+
+   | FILL_TIMEOUT budget       |Unbounded      |A total budget for all |
+   | (Section 3.2.3 of [MOQT], |upstream FETCH |upstream FETCHes       |
+   | Section 9.19.5 of [MOQT]) |work for one   |generated by a single  |
+   |                           |request        |request.  The          |
+   |                           |               |requester supplies the |
+   |                           |               |value, and the relay   |
+   |                           |               |MAY use a shorter one. |
+   +---------------------------+---------------+-----------------------+
+   | One outstanding           |Upstream       |A relay does not       |
+   | NEW_GROUP_REQUEST per     |amplification  |forward a              |
+   | relay (Section 9.19.19 of |of new-group   |NEW_GROUP_REQUEST      |
+   | [MOQT])                   |requests       |while one of its own   |
+   |                           |               |is outstanding, so     |
+   |                           |               |many downstream        |
+   |                           |               |requests collapse into |
+   |                           |               |one.                   |
+   +---------------------------+---------------+-----------------------+
+   | No propagation of invalid |One misbehaving|A relay MUST NOT       |
+   | messages or Objects       |session causing|forward a control      |
+   | (Section 7.7 of [MOQT])   |unrelated      |message or Object that |
+   |                           |sessions to    |caused a session to    |
+   |                           |close          |close.                 |
+   +---------------------------+---------------+-----------------------+
+   | Malformed Objects are not |Cache          |Objects that trigger   |
+   | cached (Section 12.1 of   |poisoning; one |Malformed Track status |
+   | [MOQT])                   |publisher's bad|MUST NOT be cached.    |
+   |                           |data persisting|                       |
+   |                           |for other      |                       |
+   |                           |subscribers    |                       |
+   +---------------------------+---------------+-----------------------+
 
                                   Table 1
 
@@ -794,12 +994,21 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
    This entire document addresses security considerations for MoQT relay
    deployments.  It complements the MoQT Security Considerations. (see
-   [MOQT], Section 13) The focus is on denial-of-service threats and
+   Section 15 of [MOQT]) The focus is on denial-of-service threats and
    resource exhaustion; authentication, authorization, and billing are
    out of scope but can be essential parts of a complete defense.  In
    particular, the amplification properties described in Section 3.2
    mean that effective DoS protection may require per-identity or per-
    account limits beyond what the transport protocol alone can provide.
+
+
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 18]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
 
 10.  IANA Considerations
 
@@ -811,9 +1020,9 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
    [MOQT]     Nandakumar, S., Vasiliev, V., Swett, I., and A. Frindell,
               "Media over QUIC Transport", Work in Progress, Internet-
-              Draft, draft-ietf-moq-transport-19, 6 July 2026,
+              Draft, draft-ietf-moq-transport-23, 2 November 2026,
               <https://datatracker.ietf.org/doc/html/draft-ietf-moq-
-              transport-19>.
+              transport-23>.
 
    [QUIC]     Iyengar, J., Ed. and M. Thomson, Ed., "QUIC: A UDP-Based
               Multiplexed and Secure Transport", RFC 9000,
@@ -830,17 +1039,6 @@ Internet-Draft                MoQ Relay DoS                    July 2026
               Text on Security Considerations", BCP 72, RFC 3552,
               DOI 10.17487/RFC3552, July 2003,
               <https://www.rfc-editor.org/info/rfc3552>.
-
-
-
-
-
-
-
-English, et al.          Expires 7 January 2027                [Page 15]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
 
               Gont, F. and I. Arce, "Security Considerations for
               Transient Numeric Identifiers Employed in Network
@@ -860,6 +1058,13 @@ Contributors
    *  Ian Swett
 
    *  Aman Sharma
+
+
+
+English, et al.            Expires 6 May 2027                  [Page 19]
+
+Internet-Draft                MoQ Relay DoS                November 2026
+
 
    *  Cullen Jennings
 
@@ -892,12 +1097,6 @@ Authors' Addresses
    Email: lucas@lucaspardue.com
 
 
-
-English, et al.          Expires 7 January 2027                [Page 16]
-
-Internet-Draft                MoQ Relay DoS                    July 2026
-
-
    Aman Sharma
    Meta
    Email: amsharma@meta.com
@@ -918,35 +1117,4 @@ Internet-Draft                MoQ Relay DoS                    July 2026
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-English, et al.          Expires 7 January 2027                [Page 17]
+English, et al.            Expires 6 May 2027                  [Page 20]
