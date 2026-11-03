@@ -114,7 +114,7 @@ FILL_PARAMETERS 付き SUBSCRIBE (§3.5 の「現在 Group から参加」) も�
   - 音声の FETCH 応答経路 (専用の stream 読み取りと配送先の振り分け) も持たない。残る OpusHead の取得は再生に必須でなく、録画は catalog の値で代替できる
   - 音声の購読境界の規則は relay の replay への防御として残す (将来 fill を入れる場合は、fill range が Largest Object を超えず (§3.4)、起動時の購読では fill で届く Object がすべて境界以下になるため、境界の規則を同時に見直す必要がある)
 - GOAWAY または transport drain による再購読では、境界を新しい `SUBSCRIBE_OK` の Largest Object にしない。移行中・再発行中に publish された Object を境界以下として捨ててしまうためである。session 移行では切り替え直前に読み直した最後の受信位置、request stream 単位の再発行では再発行前の最後の受信位置を境界にする。映像の境界は後退させない (replay の受信途中でも購読前の Object が表示経路へ戻らないようにするため)
-- 応答の End of Range (Non-Existent / Unknown / Timed-Out) は「取得できなかった範囲」として info ログに残す (§11.4.1.2)
+- 応答の End of Range (Non-Existent / Unknown / Timed-Out / Gone) は「取得できなかった範囲」として info ログに残す (draft-ietf-moq-transport-23 §11.4.2 (End of Range))
 - SUBSCRIBE_OK が Largest Object を運ばない場合と、FETCH を発行できなかった場合はログを残し、購読はそのまま続ける (example は停止しない)
 - Largest Object が告知されない publisher と、映像の FETCH に応答しない publisher では購読より前の Group を取得できない
 

@@ -2,8 +2,9 @@
 //!
 //! Gone は「元の publisher が再配送できないが、存在するか否かは知らない」状態であり
 //! (draft-ietf-moq-transport-23 §2.1.2 (Object States))、存在しないと確定した Non-Existent
-//! (0x8C) とは区別する。Gone が Non-Existent と混同されると、別経路から後で届く Object を
-//! §12.1 (Malformed Tracks) 条件 10 の「存在しないと記録した後の Object」として誤って
+//! (0x8C) とは区別する。Non-Existent だけが不存在を断定し、Gone / Unknown / Timed-Out は
+//! いずれも存在を否定しない。Gone を Non-Existent と混同すると、別経路から後で届く Object を
+//! §12.1 (Malformed Tracks) 条件 10 の「不存在と記録した後の Object の受信」として誤って
 //! 拒否してしまう。
 //!
 //! バイト列は仕様の規則から手計算した golden として固定する。End of Range の 4 種は
@@ -388,21 +389,18 @@ fn gone_range_mixed_with_objects_roundtrips() {
     );
 }
 
-/// End of Gone Range の後に続く Object を不存在の矛盾として拒否しないこと
-///
-/// draft-ietf-moq-transport-23 §2.1.2 (Object States): Gone は「元の publisher が
-/// 再配送できないが、存在するか否かは知らない」状態であり、存在しないと確定した
-/// Non-Existent とは異なる。"Because another source can still hold a Gone Object, receiving
-/// an Object that was recorded as Gone or Unknown is not an error." のため、Gone の範囲を
-/// 記録しても、その範囲やその周辺の Location の Object を後から受け取ることを
-/// §12.1 (Malformed Tracks) 条件 10 の「存在しないと記録した後の Object」として拒否しては
-/// ならない。
+/// End of Gone Range の後に続く Object の Location が通常どおり解決されること
 ///
 /// このデコーダは FETCH ストリームごとの Location 解決だけを行い、不存在の範囲を記録しない。
-/// そのため Gone の直後でも Object を通常どおり受理する。ここでは同一 Group の続き
+/// そのため Gone の後に Object が来ても拒否する判定は存在せず、デコードは成功する。
+/// ここでは Gone の終端を基準にした Location 解決として、同一 Group の続き
 /// (Gone の終端 + 1) と、Gone の範囲より後ろの新しい Group の 2 通りを固定する。
+///
+/// 不存在の記録と Object の矛盾 (§12.1 (Malformed Tracks) 条件 10) の判定は Session が
+/// 担う。Gone は存在を否定しないため (draft-ietf-moq-transport-23 §2.1.2 (Object States))、
+/// Session 側でもこの Object を malformed にしない (その判定は Session のテストが担う)。
 #[test]
-fn object_after_gone_range_is_not_rejected() {
+fn gone_range_then_object_resolves_locations() {
     // End of Gone Range (Group 2 / Object 5) の後、同一 Group の続きを置く
     let mut bytes = FETCH_HEADER_BYTES.to_vec();
     bytes.extend_from_slice(&END_OF_GONE_RANGE_FLAGS);

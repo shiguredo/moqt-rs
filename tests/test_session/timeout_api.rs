@@ -1181,6 +1181,117 @@ fn stopped_subgroup_stream_is_excluded_from_data_stream_timeout() {
     );
 }
 
+/// 単一に限られる既知 Property を同じ ID で 2 インスタンス持つ Object Properties を作る
+///
+/// 偶数 ID の値は varint であり、2 個目以降のキーは delta 0 で同じ型を繰り返す
+/// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。先頭の Properties Length
+/// varint も含めて返す。
+fn duplicate_even_object_properties(prop_type: u64, values: &[u64]) -> Vec<u8> {
+    let mut inner = Vec::new();
+    shiguredo_moqt::varint::encode(prop_type, &mut inner);
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            shiguredo_moqt::varint::encode(0, &mut inner);
+        }
+        shiguredo_moqt::varint::encode(*value, &mut inner);
+    }
+    let mut block = Vec::new();
+    shiguredo_moqt::varint::encode(inner.len() as u64, &mut block);
+    block.extend_from_slice(&inner);
+    block
+}
+
+/// malformed Track を検出した FETCH stream も STOP_SENDING で timeout の対象から外れる
+///
+/// FETCH 応答の Object が malformed Track を含むと、Session は FETCH を cancel する
+/// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 9)。ただし受信 data stream の
+/// 会計はアプリが `send_data_stream_stop_sending` を呼ぶまで残る。残したままだと同 §12.2
+/// (Session Termination Codes) の DATA_STREAM_TIMEOUT でセッションが閉じるため、読み取りを
+/// 打ち切る経路は stream を会計から外す。
+#[test]
+fn stopped_malformed_fetch_stream_is_excluded_from_data_stream_timeout() {
+    let (mut client, _server) = establish_pair();
+    client.tick(0);
+    client.set_control_message_timeout_ms(None);
+    client.set_data_stream_timeout_ms(Some(30));
+
+    // data stream timeout を開始するため FETCH 応答 stream を開く
+    let rid = client
+        .send_fetch(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fetch_range_params(
+                Location {
+                    group_id: 0,
+                    object_id: 0,
+                },
+                Location {
+                    group_id: 1,
+                    object_id: 0,
+                },
+            ),
+        )
+        .expect("client が FETCH を送信する");
+    let _ = take_send_request(&mut client);
+    let stream_id = DataStreamId(402);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("client が fetch stream type を受理する");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("client が fetch header を受理する");
+
+    // OBJECT_DELIVERY_TIMEOUT (0x02) は Object scope で単一に限られる既知 Property である。
+    // 2 インスタンス持つ Object は Malformed Track になる。
+    let mut entry = fetch_object_entry(0, 0);
+    let DecodedFetchEntry::Object(object) = &mut entry else {
+        unreachable!("fetch_object_entry は Object を返す");
+    };
+    object.properties_bytes = Some(duplicate_even_object_properties(
+        PROP_OBJECT_DELIVERY_TIMEOUT,
+        &[100, 200],
+    ));
+    client
+        .recv_fetch_entry(stream_id, &entry)
+        .expect_err("重複した既知 Property は malformed Track になること");
+    assert_eq!(
+        client.fetch(rid).expect("FETCH を参照できること").state,
+        FetchState::Terminated,
+        "malformed Track を検出した FETCH は cancel されていること"
+    );
+
+    // 読み切れなかった stream を会計から外す (malformed Track で打ち切る経路と同じ)
+    client
+        .send_data_stream_stop_sending(stream_id)
+        .expect("STOP_SENDING の送信は Err にならないこと");
+
+    // Object を追加で受信しないまま timeout を経過させる。
+    // 会計から外れているため DATA_STREAM_TIMEOUT の対象にならない。
+    client.tick(31);
+    let mut stop_sending = false;
+    while let Some(ev) = client.poll_event() {
+        match ev {
+            SessionEvent::StopSendingDataStream { .. } => stop_sending = true,
+            SessionEvent::CloseSession(err) => {
+                assert_ne!(
+                    err.code, SESSION_DATA_STREAM_TIMEOUT,
+                    "STOP_SENDING を送った FETCH stream では DATA_STREAM_TIMEOUT が発火しないこと"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !stop_sending,
+        "会計から外した stream へ STOP_SENDING を再指示しないこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "STOP_SENDING を送った FETCH stream のせいでセッションが閉じないこと"
+    );
+}
+
 /// 期限到達の判定は `経過 >= timeout` である (境界値)
 ///
 /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の DATA_STREAM_TIMEOUT は

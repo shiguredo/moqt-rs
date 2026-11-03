@@ -407,6 +407,10 @@ impl FetchStreamEncoder {
     /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
     /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
     ///
+    /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した
+    /// Location を含む) であり、その範囲の Object が存在しないことを示す
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
+    ///
     /// # Errors
     ///
     /// - Group Order と逆方向の Group ID を指定した (デルタが負になる): `ProtocolViolation`
@@ -432,6 +436,10 @@ impl FetchStreamEncoder {
     ///
     /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
     /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
+    ///
+    /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した
+    /// Location を含む) であり、その範囲の Object が不明であることを示す
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
     ///
     /// # Errors
     ///
@@ -459,6 +467,10 @@ impl FetchStreamEncoder {
     /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
     /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
     ///
+    /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した
+    /// Location を含む) であり、その範囲の Object が期限切れであることを示す
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
+    ///
     /// # Errors
     ///
     /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] と同じ条件で
@@ -485,13 +497,15 @@ impl FetchStreamEncoder {
     /// `group_id` / `object_id` は絶対 Location であり、直前の Location とのデルタへの
     /// 変換は内部で行う (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。
     ///
-    /// 直前の Location から `group_id` / `object_id` までの区間の Object が Gone であることを
-    /// 示す。Gone は「元の publisher が再配送できないが、存在するか否かは知らない」状態であり
-    /// (draft-ietf-moq-transport-23 §2.1.2 (Object States))、存在しないと確定した
-    /// [`FetchStreamEncoder::encode_end_of_non_existent_range`] とは使い分ける。
+    /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した
+    /// Location を含む) であり、その範囲の Object が Gone であることを示す。Gone は
+    /// Non-Existent と違って存在を否定
+    /// しない状態であり (draft-ietf-moq-transport-23 §2.1.2 (Object States))、存在しないと
+    /// 確定した [`FetchStreamEncoder::encode_end_of_non_existent_range`] とは使い分ける。
     /// 元の publisher が再起動で state を失った場合や、保持期間を過ぎて Object を
     /// 再配送できない場合は、その過去を Non-Existent と断定せずこの指示で Gone として通知する
-    /// (同 §2.1.2 / §3.2.2 (Gaps in a Fetch Stream))。
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range) / §2.1.2 / §3.2.2 (Gaps in a
+    /// Fetch Stream))。
     ///
     /// # Errors
     ///
@@ -586,6 +600,12 @@ impl FetchStreamEncoder {
     /// `build_entry` は生の Group ID Delta / Object ID Delta を受け取って variant を組み立てる。
     /// 4 種の End of Range はフィールドの構造が同じで variant だけが異なるため、
     /// デルタ計算・状態更新・prior 文脈の遷移を共通化する。
+    ///
+    /// 範囲は直前に直列化した Object より後、`group_id` / `object_id` まで (指定した Location を
+    /// 含む) であり、draft-ietf-moq-transport-23 §11.4.2 (End of Range) の "All Objects with
+    /// Locations between the last serialized Object, if any, and the Location decoded from
+    /// this indicator, inclusive" にあたる。直前の entry が End of Range の場合も、デルタの
+    /// 基準はその End of Range の解決済み Location になる (§11.4.2.1 (ID Decoding))。
     ///
     /// # Errors
     ///

@@ -5739,9 +5739,12 @@ enum VideoDelivery {
     /// LOC Properties が malformed Track を示した (セッション終了は依頼せず、読み取りを打ち切る)
     ///
     /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
-    /// Tracks) 条件 9 はセッションを閉じず購読・fetch の cancel を求める。Session の data
-    /// plane が同じ Object Properties を decode して既に cancel しているため、この stream の
-    /// 読み取りだけを打ち切る。
+    /// Tracks) 条件 9 はセッションを閉じず購読・fetch の cancel を求める。このためセッション
+    /// 終了は依頼しない。Session の data plane も同じ Object Properties を decode するが、
+    /// FETCH 応答 stream でこの結果になるのは Session が受理した後に LOC の再 decode だけが
+    /// malformed Track と判定した場合である。したがって「Session が既に cancel している」
+    /// ことは当てにできず、読み取りを打ち切った stream を Session の会計から外す後始末は
+    /// 呼び出し側が行う。
     MalformedTrack,
     /// LOC Properties の書式違反によりセッション終了を依頼した (読み取りを打ち切る)
     Terminated,
@@ -6638,7 +6641,7 @@ async fn read_video_fetch_stream(
                 object_id: obj.object_id,
             },
         );
-        match deliver_video_object(
+        let delivery = deliver_video_object(
             obj.group_id,
             obj.object_id,
             obj.properties_bytes.as_deref(),
@@ -6650,12 +6653,37 @@ async fn read_video_fetch_stream(
             recorder,
             termination_tx,
         )
-        .await
-        {
-            VideoDelivery::Delivered(_) => {}
-            VideoDelivery::MalformedTrack | VideoDelivery::Terminated => return,
+        .await;
+        if video_fetch_stream_needs_cleanup(delivery) {
+            // malformed Track はセッション終了ではなく購読・fetch の cancel で済ませるが
+            // (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))、FETCH 応答 stream を
+            // Session の会計に残したままだと DATA_STREAM_TIMEOUT でセッションが閉じる
+            // (同 §12.2 (Session Termination Codes))。読み切れなかった stream を会計から
+            // 外す (他の Err 経路と同じ後始末)
+            let _ = data_plane.send_data_stream_stop_sending(stream_id);
+            let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+            return;
+        }
+        // セッション終了を依頼した場合は main ループが接続を閉じる。依頼が通らなかった
+        // 場合も main ループは既に停止しているため、stream の後始末は要らない
+        if matches!(delivery, VideoDelivery::Terminated) {
+            return;
         }
     }
+}
+
+/// FETCH 応答の映像配送を打ち切った後、stream を Session の会計から外すかを返す
+///
+/// malformed Track はセッションを閉じず、同じ Track の購読・fetch の cancel で扱う
+/// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks))。ただし FETCH 応答 stream を
+/// Session の `data_streams.incoming` に残したままだと、同 §12.2 (Session Termination
+/// Codes) の DATA_STREAM_TIMEOUT でセッションが閉じる。STOP_SENDING で stream を会計から
+/// 外し、残りのバイトを読み切る必要がある。
+///
+/// セッション終了を依頼した [`VideoDelivery::Terminated`] と、配送を続ける
+/// [`VideoDelivery::Delivered`] では後始末しない。
+fn video_fetch_stream_needs_cleanup(delivery: VideoDelivery) -> bool {
+    matches!(delivery, VideoDelivery::MalformedTrack)
 }
 
 #[cfg(test)]
@@ -9180,6 +9208,28 @@ mod tests {
         assert!(
             frame_rx.try_recv().is_err(),
             "malformed Track の Object は送出しないこと"
+        );
+    }
+
+    /// FETCH 応答の映像配送が malformed Track で打ち切られたら stream を後始末すること
+    ///
+    /// FETCH 応答 stream を Session の会計に残したままだと、DATA_STREAM_TIMEOUT
+    /// (30 秒) でセッションが閉じる。malformed Track はセッション終了ではなく
+    /// 購読・fetch の cancel で扱うため、STOP_SENDING と drain で会計から外す必要がある。
+    /// 配送の継続とセッション終了の依頼では後始末しないことも固定する。
+    #[test]
+    fn video_fetch_stream_cleanup_follows_the_delivery_outcome() {
+        assert!(
+            video_fetch_stream_needs_cleanup(VideoDelivery::MalformedTrack),
+            "malformed Track では STOP_SENDING と drain で stream を会計から外すこと"
+        );
+        assert!(
+            !video_fetch_stream_needs_cleanup(VideoDelivery::Delivered(1)),
+            "配送を続ける Object では stream を打ち切らないこと"
+        );
+        assert!(
+            !video_fetch_stream_needs_cleanup(VideoDelivery::Terminated),
+            "セッション終了を依頼したら stream の後始末はしないこと"
         );
     }
 

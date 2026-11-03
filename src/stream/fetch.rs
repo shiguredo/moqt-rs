@@ -123,14 +123,11 @@ pub enum FetchSubgroupIdMode {
 /// marker は同 §11.4.2.2 (Prior Object Fields) に従って他のフィールドを持たず、
 /// 後続 ID フィールドが存在しない。
 ///
-/// [`FetchStreamEntry::EndOfGoneRange`] は 4 種の End of Range の中で唯一
-/// 「Object が存在しないと断定しない」指示である。指す範囲の Object は、元の publisher が
-/// 再配送できないだけで存在自体は否定されていない (draft-ietf-moq-transport-23 §2.1.2
-/// (Object States) の "The original publisher cannot deliver the Object and will not be able
-/// to, but does not know whether it exists.")。Non-Existent は「存在しないと確定」であり、
-/// 恒久的で権威的である (同節 "This state is permanent. All signals that an Object does not
-/// exist are authoritative.")。元の publisher が state を失った過去 (再起動や保持期間の
-/// 経過) を Non-Existent と断定してはならず、Gone として通知する (同節)。
+/// End of Range の 4 種はフィールド構造が同じで Serialization Flags だけが異なり、指す範囲の
+/// Object を Non-Existent / Unknown / Timed-Out / Gone のどれとして扱うかだけを変える。
+/// Non-Existent (0x8C) だけが不存在を断定し、他の 3 種は存在を否定しない
+/// (draft-ietf-moq-transport-23 §11.4.2 (End of Range) / §2.1.2 (Object States))。
+/// 各状態の意味はそれぞれの variant の doc を参照。
 ///
 /// End of Range の 2 フィールドは wire に現れた生値であり、絶対 Location ではない。
 /// [`FetchPriorContext::First`] (FETCH_HEADER 直後の最初の entry) では両フィールドが
@@ -188,16 +185,18 @@ pub enum FetchStreamEntry {
     /// draft-ietf-moq-transport-23 §11.4.2 (End of Range): Group ID Delta と
     /// Object ID Delta が必須で、Subgroup ID / Priority / Properties は存在しない。
     ///
-    /// 直前に直列化した Object から、この指示が指す Location までの区間の Object が
-    /// Gone であることを示す。Gone は「元の publisher が再配送できないが、存在するか否かは
-    /// 知らない」状態であり (draft-ietf-moq-transport-23 §2.1.2 (Object States))、
-    /// 存在しないと確定した Non-Existent (`EndOfNonExistentRange`) とは区別する。
+    /// 範囲は直前に直列化した Object より後、この指示が指す Location まで (指す Location を
+    /// 含む) であり、その範囲の Object が Gone であることを示す。Non-Existent (0x8C) だけが
+    /// 不存在を断定し、Gone / Unknown / Timed-Out はいずれも存在を否定しない。Gone は元の
+    /// publisher が Object を再配送できない (今後もできない) が、存在するか否かは知らない
+    /// 状態であり (draft-ietf-moq-transport-23 §2.1.2 (Object States) の "The original
+    /// publisher cannot deliver the Object and will not be able to, but does not know
+    /// whether it exists.")。Gone は元の publisher が再配送できない点で Unknown /
+    /// Timed-Out と異なる。
     /// 別の情報源が Gone の Object を保持していることがあるため、Gone として記録した
     /// Location の Object を後から受け取っても矛盾ではない (同節 "Because another source can
     /// still hold a Gone Object, receiving an Object that was recorded as Gone or Unknown is
-    /// not an error.")。Gone を Non-Existent と同一視すると、この後から届く Object を
-    /// §12.1 (Malformed Tracks) 条件 10 の「存在しないと記録した後の Object」として
-    /// 誤って拒否してしまう。
+    /// not an error.")。Non-Existent だけを恒久的な不存在として扱うこと。
     ///
     /// 元の publisher が再起動で state を失った場合や保持期間を過ぎた Object は、
     /// この指示で Gone として通知する (同 §2.1.2 / §3.2.2 (Gaps in a Fetch Stream))。

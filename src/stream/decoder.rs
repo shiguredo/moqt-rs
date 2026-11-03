@@ -379,8 +379,9 @@ pub enum DecodedFetchEntry {
     /// 不存在の記録と矛盾するわけではない (同節 "Because another source can still hold a
     /// Gone Object, receiving an Object that was recorded as Gone or Unknown is not an
     /// error.")。アプリはこの 2 つを混同せず、Non-Existent だけを恒久的な不存在として
-    /// 扱うこと (§12.1 (Malformed Tracks) 条件 10 は「存在しないと記録した後の Object」を
-    /// malformed とするが、Gone はその記録に当たらない)。
+    /// 扱うこと (§12.1 (Malformed Tracks) 条件 10 は「不存在と記録した後の Object の受信」と
+    /// 「受信済みの Object の不存在通知」の双方向を malformed とするが、Gone は不存在の記録でも
+    /// 通知でもない)。
     EndOfGoneRange {
         /// 終端 Group ID (絶対値)
         group_id: u64,

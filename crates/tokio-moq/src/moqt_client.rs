@@ -284,7 +284,7 @@ pub struct SubscribeResult {
 /// End of Group / End of Track の marker を順に書き、[`FetchResponseWriter::finish`] で FIN する。
 ///
 /// End of Range は「直前に書いた entry の Location から自分の Location までの区間」を表すため
-/// (draft-ietf-moq-transport-22 §11.4.1.2)、書く順序と Location は呼び出し側が決める。
+/// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))、書く順序と Location は呼び出し側が決める。
 /// End of Group / End of Track は ID を持たず、直前に書いた Object が Group / Track の
 /// 最終 Object であることだけを示す (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object
 /// Fields))。どちらを書くかは、応答末尾の Object が Group / Track の終端と分かっている
@@ -336,7 +336,7 @@ impl FetchResponseWriter {
     /// End of Non-Existent Range を書く
     ///
     /// 直前までに書いた entry の Location から `location` までの区間の Object が
-    /// 「存在しない」ことを示す (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+    /// 「存在しない」ことを示す (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
     /// §3.2.2 は「存在しない範囲と不明な範囲に分割する」用途に限って使ってよいとしている。
     ///
     /// # Errors
@@ -355,7 +355,7 @@ impl FetchResponseWriter {
     /// End of Unknown Range を書く
     ///
     /// 直前までに書いた entry の Location から `location` までの区間が「不明」であることを示す
-    /// (draft-ietf-moq-transport-22 §11.4.1.2 (End of Range))。
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
     ///
     /// # Errors
     ///
@@ -856,7 +856,7 @@ impl DataPlaneHandle {
     /// FETCH 応答 stream 上の End of Range 送信を Session に通知する (publisher 側)
     ///
     /// End of Range は Object ではないため Location 検証は行わない
-    /// (draft-ietf-moq-transport-22 §11.4.1.2)。
+    /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
     pub fn send_fetch_end_of_range(&self, stream_id: DataStreamId) -> Result<()> {
         let mut session = lock_session(&self.session);
         session
