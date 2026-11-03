@@ -42,8 +42,8 @@ use shiguredo_moqt::{
     message_parameter::PARAM_NEW_GROUP_REQUEST, msf::MSF_CATALOG_TRACK_NAME, msf::MsfTrack,
     name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
     session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
-    stream::decoder::DecodedFetchObject, stream::decoder::DecodedSubgroupObject,
-    stream::decoder::FetchStreamDecoder, stream::decoder::SubgroupStreamDecoder,
+    stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
+    stream::decoder::SubgroupStreamDecoder,
 };
 
 use crate::catalog;
@@ -65,13 +65,14 @@ use crate::stream_reader::{self, StreamType};
 /// 録画中 (`--mp4`) は group を捨てずにデコードだけをスキップし、録画を継続する。
 const MAX_DISPLAY_BACKLOG: i64 = 20;
 
-/// 購読の Largest Object から遡って FETCH で要求する Group 数
+/// 購読の Largest Object から遡って映像の FETCH で要求する Group 数
 ///
 /// 途中参加した購読者は購読より前に publish された Object を受け取れない。SUBSCRIBE_OK が
 /// 運んだ Largest Object を基準に直近の Group を FETCH で埋める
 /// (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups) が示す
 /// 「SUBSCRIBE で Largest Object を観測し、Group の先頭まで FETCH で遡る」パターン)。
-/// 映像はこの範囲のキーフレームから復号を始められる。
+/// 映像はこの範囲のキーフレームから復号を始められる。音声の明示 FETCH は発行しないため、
+/// この値を使うのは映像だけである。
 const FETCH_RECENT_GROUPS: u64 = 4;
 
 /// デコード済み映像フレームの送り先
@@ -115,26 +116,28 @@ struct AudioDeliveryCounters {
 /// 音声 Object を送出してよいかを、購読の境界と送出済みの TIMESTAMP で決める状態機械
 ///
 /// 音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04 §4.1 (Application with one audio
-/// track))、購読より前に publish された Group は購読のあとに FETCH で届く。FETCH の要求 range
-/// の終端は `SUBSCRIBE_OK` の Largest Object であり、draft-ietf-moq-transport-22 §3.1.4
-/// (Largest Object) は Largest Object が「まだ到着しうる Object」を指すこと、§3.2 (Fetch) は
-/// FETCH の range が Largest Object を含む場合にその Object を完全に含めることを定める。
-/// したがって境界の位置の Object は live と FETCH の両方で届きうる。
+/// track))、購読より前に publish された Group は relay の replay で届きうる。購読の境界は
+/// `SUBSCRIBE_OK` が運んだ Largest Object であり (draft-ietf-moq-transport-22 §3.1.4
+/// (Largest Object) / §9.20.17 (LARGEST OBJECT Parameter))、境界以下は購読より前の配信で
+/// ある。音声の明示 FETCH は発行しないが、境界の判定は relay の replay への防御として残す
+/// (将来 fill を入れる場合は、fill range が Largest Object を超えず (draft-ietf-moq-transport-22
+/// §3.4 (Fill Semantics))、起動時の購読では fill で届く Object がすべて境界以下になるため、
+/// 境界の規則を同時に見直す必要がある)。
 ///
 /// 判定は 3 段階である。
 ///
 /// - 直近に届いた Object と同じ識別子の 2 回目は捨てる ([`Self::is_duplicate`])。datagram は
 ///   再送されない (RFC 9221 §3) ため、publisher が同じ Object を n 回送ることがある。
 /// - 購読の境界 (`SUBSCRIBE_OK` の Largest Object) 以下は購読より前に publish された分で
-///   あり、送出しない ([`Self::is_before_boundary`])。境界の位置の Object が live と FETCH の
-///   両方で届いても、どちらも境界以下であるため二重に送出されない。moqt-js の CatchUpGate が
-///   `SUBSCRIBE_OK` の `LARGEST_OBJECT` を境界に cache の分を再生しない扱いと同じである。
+///   あり、送出しない ([`Self::is_before_boundary`])。境界の位置の Object は live と replay の
+///   両方で届きうるが、どちらも境界以下であるため二重に送出されない。moqt-js の CatchUpGate
+///   が `SUBSCRIBE_OK` の `LARGEST_OBJECT` を境界に cache の分を再生しない扱いと同じである。
 /// - 境界より後は、送出済みの TIMESTAMP より古い Object を送出しない ([`Self::admit`])。
 ///   live の datagram は並び替わって届きうる (draft-ietf-moq-transport-22 §2.1.2
 ///   (Object States) / §2.3.1 (Group IDs)) ため、境界とは別の防御として持つ。
 ///
 /// どちらの判定も位置と TIMESTAMP だけで決まり、時計も I/O も扱わない。購読ごとに 1 つ持ち、
-/// 音声の配送経路 (datagram / subgroup stream / FETCH 応答) で共有する。落とした Object の
+/// 音声の配送経路 (datagram / subgroup stream) で共有する。落とした Object の
 /// 内訳は累計 ([`Self::counters`]) に残し、原因の切り分けに使う。
 #[derive(Debug)]
 struct AudioDeliveryOrder {
@@ -431,17 +434,6 @@ fn subgroup_object_location(header: &SubgroupHeader, object: &DecodedSubgroupObj
     }
 }
 
-/// FETCH の応答で届いた音声 Object の位置
-///
-/// FETCH の応答は Group をまたぐため、位置は Object ごとに届く
-/// (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))。
-fn fetch_object_location(object: &DecodedFetchObject) -> Location {
-    Location {
-        group_id: object.group_id,
-        object_id: object.object_id,
-    }
-}
-
 /// 音声 Object を再生経路へ流すための共有状態
 ///
 /// 音声 Object は subgroup stream と datagram の両方で届く (draft-ietf-moq-loc-04 §4.1)。
@@ -471,12 +463,12 @@ struct AudioDelivery<'a> {
     catch_up: &'a std::sync::Mutex<AudioReceiveCatchUp>,
     /// 音声の購読境界と送出順の判定 (購読で 1 つ共有する)
     ///
-    /// 購読より前に publish された Group は購読のあとに FETCH で届く。`SUBSCRIBE_OK` の
+    /// 購読より前に publish された Group は relay の replay で届きうる。`SUBSCRIBE_OK` の
     /// Largest Object 以下の音声は送出も録画も復号もしない (境界の位置の Object が live と
-    /// FETCH の両方で届いても二重にならない)。同じ識別子の Object の 2 回目 (datagram の
+    /// replay の両方で届いても二重にならない)。同じ識別子の Object の 2 回目 (datagram の
     /// 冗長化による copy) も落とす。境界より後は、送出済みの TIMESTAMP より古い音声を落とし、
     /// 再生経路の TIMESTAMP が巻き戻らないようにする。状態は datagram 経路と
-    /// subgroup stream 経路、FETCH 応答経路で共有する。
+    /// subgroup stream 経路で共有する。
     delivery_order: &'a std::sync::Mutex<AudioDeliveryOrder>,
 }
 
@@ -527,8 +519,8 @@ impl AudioDelivery<'_> {
         let timestamp_kind = timestamp_kind_of(timestamp, timescale);
         // 重複の判定と購読の境界の判定は録画より前に行う。境界以下の音声は購読より前に
         // publish された分であり、送出も録画も復号もしない (境界の位置の Object が live と
-        // FETCH の両方で届いても、どちらもここで落ちるため二重にならない)。Audio Config の
-        // 検証だけは Properties から行うため、この時点では return しない。
+        // relay の replay の両方で届いても、どちらもここで落ちるため二重にならない)。
+        // Audio Config の検証だけは Properties から行うため、この時点では return しない。
         //
         // 同じ識別子の Object を publisher が複数回送ることがある (datagram は再送されない
         // ため、RFC 9221 §3)。2 回目はここで捨て、録画・Audio Config の検証・復号・送出へ
@@ -601,8 +593,8 @@ impl AudioDelivery<'_> {
             }
         }
         if before_boundary {
-            // 境界以下の音声は復号しない。復号器は datagram / subgroup stream / FETCH 応答で
-            // 1 つを共有しており、live の音声を復号したあとに古い音声で状態を進めると、次に
+            // 境界以下の音声は復号しない。復号器は datagram と subgroup stream で 1 つを
+            // 共有しており、live の音声を復号したあとに古い音声で状態を進めると、次に
             // 届く live の音声が不連続になるためである (Audio Config は Properties から検証
             // できるため、復号しなくても適用は落ちない)。送出も録画もしない。catch-up の観測へも
             // 渡さない (古い TIMESTAMP で遅れが跳ね、復号器が作り直される)
@@ -961,7 +953,7 @@ fn spawn_stream_task(
     permit: tokio::sync::OwnedSemaphorePermit,
     stream_num: u64,
     track_map: &HashMap<u64, TrackKind>,
-    media_fetch_targets: &HashMap<u64, TrackKind>,
+    fetch_targets: &HashMap<u64, FetchTarget>,
     data_plane: &DataPlaneHandle,
     frame_tx: &std::sync::mpsc::Sender<DecodedVideoFrame>,
     audio_tx: &std::sync::mpsc::Sender<DecodedAudioFrame>,
@@ -983,7 +975,7 @@ fn spawn_stream_task(
     recorder: Option<&RecorderSender>,
 ) {
     let track_map = track_map.clone();
-    let media_fetch_targets = media_fetch_targets.clone();
+    let fetch_targets = fetch_targets.clone();
     let data_plane = data_plane.clone();
     let frame_tx = frame_tx.clone();
     let audio_tx = audio_tx.clone();
@@ -1006,7 +998,7 @@ fn spawn_stream_task(
             stream,
             data_plane,
             &track_map,
-            &media_fetch_targets,
+            &fetch_targets,
             codec.as_deref(),
             audio_codec.as_deref(),
             audio_params,
@@ -1075,11 +1067,11 @@ struct Resubscribed {
     video: Option<SubscribeResult>,
     /// 音声の購読 (購読する場合)
     audio: Option<SubscribeResult>,
-    /// 移行先で発行したメディア FETCH の対応表 (Request ID → トラック種別)
+    /// 移行先で発行した FETCH の対応表 (Request ID → 配送先)
     ///
     /// Request ID は session ごとに払い出されるため、旧 session の対応表は移行先では
     /// 使えない。移行に成功した時点でこの表へ差し替える
-    media_fetch_targets: HashMap<u64, TrackKind>,
+    fetch_targets: HashMap<u64, FetchTarget>,
 }
 
 /// GOAWAY または transport drain による再購読の経路
@@ -1211,7 +1203,8 @@ fn record_last_location(
 /// catalog は FILL_PARAMETERS 付き SUBSCRIBE で張り直す (draft-ietf-moq-msf-01 §5 (Catalog)
 /// が catalog の取得に求める経路)。映像は SUBSCRIBE のあとに SUBSCRIBER_PRIORITY の
 /// REQUEST_UPDATE を送る (起動時と同じ手順)。音声は SUBSCRIBE だけである。
-/// どちらの track も、購読のあとに直近 Group の FETCH を発行する (起動時と同じ手順)。
+/// 映像だけ、購読のあとに直近 Group の FETCH を発行する (起動時と同じ手順)。音声の明示
+/// FETCH は発行しない。
 ///
 /// `last_locations` は前の session で最後に受信した Object の位置である。映像と音声は
 /// これを Location Filter の Absolute Start (0x02) として SUBSCRIBE に載せ、移行中に
@@ -1247,10 +1240,10 @@ async fn resubscribe_tracks(
         catalog.request_id,
     );
 
-    let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
+    let mut fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
     // catalog 購読の fill fetch stream をカタログとして適用するため、Request ID を登録する
     // (移行中に更新された catalog が fill の完全な catalog で届く)
-    media_fetch_targets.insert(catalog.request_id, TrackKind::Catalog);
+    fetch_targets.insert(catalog.request_id, FetchTarget::Catalog);
     let video = match &plan.video {
         Some(target) => {
             let sub = client
@@ -1279,14 +1272,7 @@ async fn resubscribe_tracks(
             // FETCH は購読の優先度を変えたあとに発行する。先に発行すると、FETCH 応答の
             // Object が既定の SUBSCRIBER_PRIORITY で届く
             // (draft-ietf-moq-transport-22 §9.20.7 (SUBSCRIBER PRIORITY Parameter) / §9.11)
-            fetch_recent_groups(
-                client,
-                &mut media_fetch_targets,
-                target,
-                TrackKind::Video,
-                sub.largest_object,
-            )
-            .await;
+            fetch_recent_video_groups(client, &mut fetch_targets, target, sub.largest_object).await;
             Some(sub)
         }
         None => None,
@@ -1307,14 +1293,6 @@ async fn resubscribe_tracks(
                 sub.request_id,
                 last_locations.get(TrackKind::Audio),
             );
-            fetch_recent_groups(
-                client,
-                &mut media_fetch_targets,
-                target,
-                TrackKind::Audio,
-                sub.largest_object,
-            )
-            .await;
             Some(sub)
         }
         None => None,
@@ -1324,7 +1302,7 @@ async fn resubscribe_tracks(
         catalog,
         video,
         audio,
-        media_fetch_targets,
+        fetch_targets,
     })
 }
 
@@ -1380,15 +1358,15 @@ fn audio_subscribe_parameters(last: Option<Location>) -> MessageParameters {
     parameters
 }
 
-/// 購読した track の直近 Group を FETCH で要求する range を決める
+/// 購読した映像 track の直近 Group を FETCH で要求する range を決める
 ///
 /// `largest` は SUBSCRIBE_OK が運んだ Largest Object (draft-ietf-moq-transport-22
 /// §3.1.4 (Largest Object) / §9.20.17 (LARGEST_OBJECT Parameter)) である。購読より前に
 /// publish された Object の存在はこれでしか分からないため、無い場合は FETCH しない。
-/// 開始 Location は Largest Object の Group から `groups` 個前 (Largest Object の Group を
-/// 含む) の Group の先頭、終端は Largest Object とする。両端を含む range であり
-/// (§3.3.1 (Location Filters): "an inclusive range of Locations")、Group 数が足りない
-/// 場合は Group 0 で飽和させる。
+/// 開始 Location は Largest Object の Group を含む `groups` 個の Group の先頭
+/// (Largest Object の Group が G なら G - (groups - 1))、終端は Largest Object とする。
+/// 両端を含む range であり (§3.3.1 (Location Filters): "an inclusive range of Locations")、
+/// Group 数が足りない場合は Group 0 で飽和させる。
 ///
 /// 根拠の仕様は draft であり、将来変更される可能性がある。
 fn plan_fetch_range(largest: Option<Location>, groups: u64) -> Option<(Location, Location)> {
@@ -1425,10 +1403,27 @@ fn fetch_range_parameters(start: Location, end: Location) -> MessageParameters {
     parameters
 }
 
-/// 購読した track の直近 Group を FETCH で要求し、対応表へ記録する
+/// メディアの購読の track 種別を FETCH の配送先へ写す
+///
+/// `FetchTarget` を持つのは映像と catalog だけであり、音声は `None` になる (音声の明示
+/// FETCH は発行しない)。再発行で同じ track の旧 Request ID を対応表から外すときに使う。
+fn fetch_target_of(kind: TrackKind) -> Option<FetchTarget> {
+    match kind {
+        TrackKind::Video => Some(FetchTarget::Video),
+        TrackKind::Catalog => Some(FetchTarget::Catalog),
+        TrackKind::Audio => None,
+    }
+}
+
+/// 購読した映像 track の直近 Group を FETCH で要求し、対応表へ記録する
+///
+/// 音声の明示 FETCH は発行しない。音声は 1 Object = 1 Group で届き (draft-ietf-moq-loc-04
+/// §4.1)、起動時の実測で明示 FETCH の起動・再生・録画への寄与が無かった。残る OpusHead の
+/// 取得も再生に必須ではなく、録画は catalog の値で代替できる。映像だけを対象にすることは
+/// 関数名 (`fetch_recent_video_groups`) で示す。
 ///
 /// `largest` に Largest Object が無い場合は FETCH しない ([`plan_fetch_range`])。
-/// 発行できたら「Request ID → トラック種別」の対応表へ記録する。FETCH_OK の受信時に
+/// 発行できたら「Request ID → 配送先」の対応表へ記録する。FETCH_OK の受信時に
 /// 記録するのではなく発行直後に記録するのは、応答 stream が FETCH_OK より先に届きうる
 /// ためである。発行に失敗した場合 (Session が送信を拒否した場合を含む) は warn ログを
 /// 残して live の購読を続ける (FETCH は欠落した Group を埋めるための補助であり、
@@ -1438,16 +1433,15 @@ fn fetch_range_parameters(start: Location, end: Location) -> MessageParameters {
 /// `MoqtClient` がアプリへ配送しない (`SessionEvent::RequestErrorReceived` は notable
 /// イベントではない) ためログに残せないが、live の購読は影響を受けない
 /// (対応表に残った Request ID は、同じ session では再利用されないため誤配送しない)。
-async fn fetch_recent_groups(
+async fn fetch_recent_video_groups(
     client: &mut MoqtClient,
-    media_fetch_targets: &mut HashMap<u64, TrackKind>,
+    fetch_targets: &mut HashMap<u64, FetchTarget>,
     target: &SubscribeTarget,
-    kind: TrackKind,
     largest: Option<Location>,
 ) {
     let Some((start, end)) = plan_fetch_range(largest, FETCH_RECENT_GROUPS) else {
         tracing::info!(
-            "Skipping FETCH for the {kind:?} track: SUBSCRIBE_OK carried no Largest Object"
+            "Skipping FETCH for the video track: SUBSCRIBE_OK carried no Largest Object"
         );
         return;
     };
@@ -1462,17 +1456,17 @@ async fn fetch_recent_groups(
     {
         Ok(request_id) => {
             tracing::info!(
-                "Sent FETCH for the recent groups: kind={kind:?}, request_id={request_id}, \
+                "Sent FETCH for the recent groups: request_id={request_id}, \
                  start=({}, {}), end=({}, {})",
                 start.group_id,
                 start.object_id,
                 end.group_id,
                 end.object_id,
             );
-            media_fetch_targets.insert(request_id, kind);
+            fetch_targets.insert(request_id, FetchTarget::Video);
         }
         Err(e) => {
-            tracing::warn!("Failed to send FETCH for the {kind:?} track: {e}");
+            tracing::warn!("Failed to send FETCH for the video track: {e}");
         }
     }
 }
@@ -1836,8 +1830,8 @@ fn spawn_old_session_close(
 struct ReissuedRequest {
     /// 再発行した購読の結果
     subscription: SubscribeResult,
-    /// 再発行に伴って発行したメディア FETCH の対応表 (Request ID → トラック種別)
-    media_fetch_targets: HashMap<u64, TrackKind>,
+    /// 再発行に伴って発行した FETCH の対応表 (Request ID → 配送先)
+    fetch_targets: HashMap<u64, FetchTarget>,
 }
 
 /// request stream の GOAWAY で、現在の session に同じ購読を再発行する
@@ -1849,7 +1843,7 @@ struct ReissuedRequest {
 ///
 /// 旧 request stream は STOP_SENDING で閉じる (§6.4.2.3 (Request Cancellation and
 /// Rejection))。購読の張り直しは移行時と同じ手順 (映像は SUBSCRIBER_PRIORITY の
-/// REQUEST_UPDATE と直近 Group の FETCH、音声は直近 Group の FETCH) で行う。
+/// REQUEST_UPDATE と直近 Group の FETCH、音声は SUBSCRIBE だけ) で行う。
 /// draft 由来の仕様であり、将来変更される可能性がある。
 async fn reissue_request(
     client: &mut MoqtClient,
@@ -1866,7 +1860,7 @@ async fn reissue_request(
             "Failed to send STOP_SENDING for request {request_id} before re-issuing it: {e}"
         );
     }
-    let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
+    let mut fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
     let subscription = match kind {
         TrackKind::Catalog => {
             let sub = client
@@ -1878,7 +1872,7 @@ async fn reissue_request(
                 .await?;
             // 再発行した catalog 購読の fill fetch stream をカタログとして適用するため、
             // Request ID を対応表に登録する
-            media_fetch_targets.insert(sub.request_id, TrackKind::Catalog);
+            fetch_targets.insert(sub.request_id, FetchTarget::Catalog);
             sub
         }
         TrackKind::Video => {
@@ -1903,14 +1897,7 @@ async fn reissue_request(
             if let Err(e) = client.send_request_update(sub.request_id, params).await {
                 tracing::warn!("Failed to send REQUEST_UPDATE for video subscription: {e}");
             }
-            fetch_recent_groups(
-                client,
-                &mut media_fetch_targets,
-                target,
-                TrackKind::Video,
-                sub.largest_object,
-            )
-            .await;
+            fetch_recent_video_groups(client, &mut fetch_targets, target, sub.largest_object).await;
             sub
         }
         TrackKind::Audio => {
@@ -1919,27 +1906,18 @@ async fn reissue_request(
                     "the audio subscription is not configured".to_string(),
                 ));
             };
-            let sub = client
+            client
                 .subscribe_track_with_parameters(
                     target.namespace.clone(),
                     target.track_name.clone(),
                     audio_subscribe_parameters(last_locations.get(TrackKind::Audio)),
                 )
-                .await?;
-            fetch_recent_groups(
-                client,
-                &mut media_fetch_targets,
-                target,
-                TrackKind::Audio,
-                sub.largest_object,
-            )
-            .await;
-            sub
+                .await?
         }
     };
     Ok(ReissuedRequest {
         subscription,
-        media_fetch_targets,
+        fetch_targets,
     })
 }
 
@@ -2153,17 +2131,17 @@ pub async fn run(
     let mut track_map: HashMap<u64, TrackKind> = HashMap::new();
     // カタログの購読は TrackKind::Catalog として登録し、届いた Object は main ループが適用する
     track_map.insert(catalog_sub.track_alias, TrackKind::Catalog);
-    // 自側が発行したメディア FETCH の対応表 (Request ID → トラック種別)。応答 Object は
-    // 通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の FETCH_HEADER が
-    // 運ぶ Request ID でしか分からないため、ここで記録する。
+    // 自側が発行した FETCH (映像と catalog の fill) の対応表 (Request ID → 配送先)。
+    // 応答 Object は通常の再生経路へ流すが、どの track の応答かは FETCH 応答 stream の
+    // FETCH_HEADER が運ぶ Request ID でしか分からないため、ここで記録する。
     // catalog 購読の Request ID も登録する。FILL_PARAMETERS 付き SUBSCRIBE には publisher が
     // fill fetch stream を返し (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その
     // FETCH_HEADER は起因 SUBSCRIBE の Request ID を運ぶ。移行後に catalog を張り直したとき
     // の fill をカタログとして適用するため、種別をここで対応づける。
     // 移行 (GOAWAY) では、張り直した購読に対して発行した FETCH の対応表へ差し替える
     // (Request ID は session ごとに払い出される)
-    let mut media_fetch_targets: HashMap<u64, TrackKind> = HashMap::new();
-    media_fetch_targets.insert(catalog_sub.request_id, TrackKind::Catalog);
+    let mut fetch_targets: HashMap<u64, FetchTarget> = HashMap::new();
+    fetch_targets.insert(catalog_sub.request_id, FetchTarget::Catalog);
     let mut video_codec: Option<String> = None;
     let mut video_request_id: Option<u64> = None;
     let mut audio_request_id: Option<u64> = None;
@@ -2225,14 +2203,13 @@ pub async fn run(
         // キーフレームから復号を始められるようにする (draft-ietf-moq-transport-22 §3.5.1)。
         // 購読の優先度を変えたあとに発行する (§9.20.7 の SUBSCRIBER PRIORITY を
         // FETCH 応答にも効かせるため)
-        fetch_recent_groups(
+        fetch_recent_video_groups(
             &mut client,
-            &mut media_fetch_targets,
+            &mut fetch_targets,
             &SubscribeTarget {
                 namespace: v.namespace.clone(),
                 track_name: v.track_name.as_bytes().to_vec(),
             },
-            TrackKind::Video,
             video_sub.largest_object,
         )
         .await;
@@ -2259,7 +2236,12 @@ pub async fn run(
     let audio_params: Option<(u32, u8)> = if subscribe_audio {
         let a = audio_info.as_ref().expect("audio_info is Some");
         let audio_sub = client
-            .subscribe_track(a.namespace.clone(), a.track_name.as_bytes().to_vec())
+            .subscribe_track_with_parameters(
+                a.namespace.clone(),
+                a.track_name.as_bytes().to_vec(),
+                // 起動時は前の session が無く、パイプラインが載せるパラメータは無い
+                audio_subscribe_parameters(None),
+            )
             .await?;
         tracing::info!(
             "Subscribed to audio track: alias={}, request_id={}",
@@ -2270,19 +2252,6 @@ pub async fn run(
         audio_alias = Some(audio_sub.track_alias);
         audio_request_id = Some(audio_sub.request_id);
         audio_largest_object = audio_sub.largest_object;
-
-        // 映像と同じく、購読より前に publish された Group を FETCH で埋める
-        fetch_recent_groups(
-            &mut client,
-            &mut media_fetch_targets,
-            &SubscribeTarget {
-                namespace: a.namespace.clone(),
-                track_name: a.track_name.as_bytes().to_vec(),
-            },
-            TrackKind::Audio,
-            audio_sub.largest_object,
-        )
-        .await;
 
         let channels = match a.channel_config.as_str() {
             "1" => 1u8,
@@ -2423,8 +2392,7 @@ pub async fn run(
     let audio_config_handled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // 受信側の追いつきの状態。ストリーム経路と datagram 経路で共有する
     let audio_catch_up = Arc::new(std::sync::Mutex::new(AudioReceiveCatchUp::new()));
-    // 音声の購読境界と送出順の状態。datagram 経路と subgroup stream 経路、FETCH 応答経路で
-    // 共有する
+    // 音声の購読境界と送出順の状態。datagram 経路と subgroup stream 経路で共有する
     let audio_delivery_order = Arc::new(std::sync::Mutex::new(AudioDeliveryOrder::new(
         audio_largest_object,
     )));
@@ -2737,7 +2705,7 @@ pub async fn run(
                 permit,
                 total_streams,
                 &track_map_snapshot,
-                &media_fetch_targets,
+                &fetch_targets,
                 &data_plane,
                 &frame_tx,
                 &audio_tx,
@@ -3047,13 +3015,14 @@ pub async fn run(
                                                                 );
                                                         }
                                                     }
-                                                    // 再発行に伴うメディア FETCH の対応表を足す。
-                                                    // 同じ track の旧 Request ID は、遅延して届く
+                                                    // 再発行に伴う FETCH の対応表を足す。同じ
+                                                    // track の旧 Request ID は、遅延して届く
                                                     // FETCH / fill stream を誤配送しないよう先に外す
-                                                    media_fetch_targets
-                                                        .retain(|_, track| *track != kind);
-                                                    media_fetch_targets
-                                                        .extend(reissued.media_fetch_targets);
+                                                    fetch_targets.retain(|_, target| {
+                                                        Some(*target) != fetch_target_of(kind)
+                                                    });
+                                                    fetch_targets
+                                                        .extend(reissued.fetch_targets);
                                                     // datagram 受信タスクへ新しい alias 表を渡す
                                                     let datagram_map = Arc::new(
                                                         track_map
@@ -3115,7 +3084,7 @@ pub async fn run(
                             // End of Track を残す。対応表への記録は応答 stream が FETCH_OK
                             // より先に届きうるため FETCH の発行時に行っており、ここでは
                             // 記録済みの種別を添えて確定した終端情報を残す
-                            let kind = media_fetch_targets.get(&request_id);
+                            let kind = fetch_targets.get(&request_id);
                             tracing::info!(
                                 "Received FETCH_OK: request_id={request_id}, kind={kind:?}, \
                                  end_location=({}, {}), end_of_track={end_of_track}",
@@ -3392,7 +3361,7 @@ pub async fn run(
                         // メディア FETCH の対応表を移行先のものへ差し替える。Request ID は
                         // session ごとに払い出されるため、旧 session の表で移行先の FETCH 応答
                         // stream を振り分けることはできない
-                        media_fetch_targets = outcome.resubscribed.media_fetch_targets;
+                        fetch_targets = outcome.resubscribed.fetch_targets;
                         wt_session_state_rx = new_wt_session_state;
                         tracing::info!(
                             "Migrated the session to {}",
@@ -4565,7 +4534,7 @@ async fn handle_incoming_stream(
     mut stream: transport::RecvStream,
     data_plane: DataPlaneHandle,
     track_map: &HashMap<u64, TrackKind>,
-    media_fetch_targets: &HashMap<u64, TrackKind>,
+    fetch_targets: &HashMap<u64, FetchTarget>,
     video_codec: Option<&str>,
     audio_codec: Option<&str>,
     audio_params: Option<(u32, u8)>,
@@ -4595,7 +4564,7 @@ async fn handle_incoming_stream(
         &mut stream,
         &data_plane,
         track_map,
-        media_fetch_targets,
+        fetch_targets,
         video_codec,
         audio_codec,
         audio_params,
@@ -4667,7 +4636,7 @@ async fn handle_stream_body(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
     track_map: &HashMap<u64, TrackKind>,
-    media_fetch_targets: &HashMap<u64, TrackKind>,
+    fetch_targets: &HashMap<u64, FetchTarget>,
     video_codec: Option<&str>,
     audio_codec: Option<&str>,
     audio_params: Option<(u32, u8)>,
@@ -4745,7 +4714,7 @@ async fn handle_stream_body(
                     }
                 }
             };
-            match fetch_stream_action(fetch_header.request_id, media_fetch_targets) {
+            match fetch_stream_action(fetch_header.request_id, fetch_targets) {
                 // 自側の要求に対応しない FETCH 応答である。読み捨てる
                 FetchStreamAction::Ignore => {
                     tracing::debug!(
@@ -4755,9 +4724,7 @@ async fn handle_stream_body(
                     );
                     let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                 }
-                action @ (FetchStreamAction::DeliverVideo
-                | FetchStreamAction::DeliverAudio
-                | FetchStreamAction::DeliverCatalog) => {
+                action @ (FetchStreamAction::DeliverVideo | FetchStreamAction::DeliverCatalog) => {
                     // 自側が発行した FETCH の応答であるため、Session には受理される
                     // (FETCH の状態と stream の会計を対応づける)
                     if let Err(e) = data_plane.recv_fetch_header(stream_id, &fetch_header) {
@@ -4825,47 +4792,6 @@ async fn handle_stream_body(
                                 last_received_locations,
                                 recorder,
                                 termination_tx,
-                            )
-                            .await;
-                        }
-                        FetchStreamAction::DeliverAudio => {
-                            let Some((sample_rate, channels)) = audio_params else {
-                                tracing::warn!(
-                                    "Stream #{stream_num}: audio FETCH response arrived \
-                                     but audio is not configured"
-                                );
-                                let _ = data_plane.send_data_stream_stop_sending(stream_id);
-                                let _ =
-                                    drain_registered_stream_to_end(stream, data_plane, stream_id)
-                                        .await;
-                                return;
-                            };
-                            // 音声デコーダと Audio Config の処理済みフラグは購読で共有する
-                            // (live の Subgroup stream と同じ)
-                            let mut decoder = match audio_decoder {
-                                Some(decoder) => Some(decoder.lock().await),
-                                None => None,
-                            };
-                            let delivery = AudioDelivery {
-                                audio_tx,
-                                audio_config_handled,
-                                is_opus_codec: audio_codec.is_some_and(decoder::is_opus_codec),
-                                catalog_sample_rate: sample_rate,
-                                catalog_channels: channels,
-                                recorder,
-                                termination_tx,
-                                catch_up: audio_catch_up.as_ref(),
-                                delivery_order: audio_delivery_order.as_ref(),
-                            };
-                            read_audio_fetch_stream(
-                                stream,
-                                data_plane,
-                                stream_id,
-                                &mut fetch_decoder,
-                                stream_num,
-                                decoder.as_deref_mut(),
-                                &delivery,
-                                last_received_locations,
                             )
                             .await;
                         }
@@ -6206,35 +6132,48 @@ async fn decode_audio_stream(
     }
 }
 
+/// FETCH 応答 stream の配送先
+///
+/// 自側が FETCH を発行するのは映像と catalog (catalog 購読の fill fetch) だけである。音声の
+/// 明示 FETCH は発行しないため、音声を配送先に持たないことを型で保証する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchTarget {
+    /// 映像のメディア FETCH
+    Video,
+    /// catalog 購読の fill fetch
+    Catalog,
+}
+
 /// FETCH 応答 stream をどう扱うか
+///
+/// メディアの FETCH は映像だけを対象にする。音声の明示 FETCH は起動・再購読・再発行の
+/// いずれでも発行しない (購読境界の規則により起動・再生・録画への寄与が無いため。音声の
+/// 購読境界の規則は将来の fill 経路の防御として残す)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchStreamAction {
     /// 映像の FETCH 応答。映像の配送経路へ流す
     DeliverVideo,
-    /// 音声の FETCH 応答。音声の配送経路へ流す
-    DeliverAudio,
     /// catalog 購読の fill fetch 応答。カタログの状態へ適用する
     DeliverCatalog,
-    /// 自側が発行した要求への応答ではない。読み捨てる
+    /// 配送先が無い、または自側が発行していない要求の応答。読み捨てる
     Ignore,
 }
 
 /// FETCH 応答 stream の Request ID から配送先を決める
 ///
-/// `media_fetch_targets` は自側が発行したメディア FETCH の Request ID と、catalog 購読の
-/// Request ID を「Request ID → トラック種別」で記録した対応表である。FILL_PARAMETERS 付き
+/// `fetch_targets` は自側が発行した映像のメディア FETCH の Request ID と、catalog 購読の
+/// Request ID を「Request ID → 配送先」で記録した対応表である。FILL_PARAMETERS 付き
 /// SUBSCRIBE へは publisher が fill fetch stream を返すため
 /// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その Request ID も登録して
 /// カタログとして適用する。表に無い Request ID の stream は自側の要求と対応しないため
-/// 読み捨てる。
+/// 読み捨てる (音声の明示 FETCH は発行しないため、音声の Request ID は登録されない)。
 fn fetch_stream_action(
     request_id: u64,
-    media_fetch_targets: &HashMap<u64, TrackKind>,
+    fetch_targets: &HashMap<u64, FetchTarget>,
 ) -> FetchStreamAction {
-    match media_fetch_targets.get(&request_id) {
-        Some(TrackKind::Video) => FetchStreamAction::DeliverVideo,
-        Some(TrackKind::Audio) => FetchStreamAction::DeliverAudio,
-        Some(TrackKind::Catalog) => FetchStreamAction::DeliverCatalog,
+    match fetch_targets.get(&request_id) {
+        Some(FetchTarget::Video) => FetchStreamAction::DeliverVideo,
+        Some(FetchTarget::Catalog) => FetchStreamAction::DeliverCatalog,
         None => FetchStreamAction::Ignore,
     }
 }
@@ -6413,73 +6352,9 @@ async fn read_video_fetch_stream(
     }
 }
 
-/// メディア FETCH 応答 stream から音声 Object を読み、live と同じ配送経路へ流す
-///
-/// 配送 (録画・Audio Config の検証・デコード・フレーム送出) は live の Subgroup stream と
-/// 同じ [`AudioDelivery::deliver`] が行う。
-#[expect(clippy::too_many_arguments)]
-async fn read_audio_fetch_stream(
-    stream: &mut transport::RecvStream,
-    data_plane: &DataPlaneHandle,
-    stream_id: DataStreamId,
-    decoder: &mut FetchStreamDecoder,
-    stream_num: u64,
-    mut audio_decoder: Option<&mut AudioDecoder>,
-    delivery: &AudioDelivery<'_>,
-    last_received_locations: &std::sync::Arc<std::sync::Mutex<LastReceivedLocations>>,
-) {
-    loop {
-        let (entry, payload) = match read_fetch_entry(stream, data_plane, stream_id, decoder).await
-        {
-            Ok(Some(entry)) => entry,
-            // FIN / RESET_STREAM / Session からの STOP_SENDING 指示で stream が終わった
-            // (live の Subgroup stream と同じ扱い。セッションは閉じない)
-            Ok(None) => {
-                tracing::debug!("Stream #{stream_num}: audio fetch stream ended");
-                return;
-            }
-            Err(e) => {
-                log_failure(
-                    format_args!("Stream #{stream_num}: failed to read an audio fetch entry: {e}"),
-                    is_transport_session_end(&e),
-                );
-                // 読み切れなかった stream を Session の会計から外す (live の Subgroup stream と
-                // 同じ扱い)。残すと timeout まで open のままになり、購読の cleanup が進まない
-                let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                return;
-            }
-        };
-        let DecodedFetchEntry::Object(obj) = &entry else {
-            log_end_of_range(stream_num, &entry);
-            continue;
-        };
-        // payload を持たない Object (Object Status のみ) は live と同じく配送しない
-        if obj.payload_length == 0 {
-            continue;
-        }
-        // 移行後の再購読で使う「最後に受信した位置」を記録する
-        let location = fetch_object_location(obj);
-        record_last_location(last_received_locations, TrackKind::Audio, location);
-        if !delivery
-            .deliver(
-                Some(location),
-                obj.properties_bytes.as_deref(),
-                &payload,
-                audio_decoder.as_deref_mut(),
-            )
-            .await
-        {
-            // LOC Properties の書式違反でセッション終了を依頼したか、再生側が終了した
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shiguredo_moqt::stream::encoder::FetchObjectInput;
-    use shiguredo_moqt::stream::encoder::FetchStreamEncoder;
     use shiguredo_moqt::stream::subgroup::SubgroupIdMode;
     use shiguredo_moqt::stream::subgroup::SubgroupObject;
 
@@ -6562,9 +6437,16 @@ mod tests {
             1,
             "映像トラックの SUBSCRIBE には NEW_GROUP_REQUEST だけを載せること"
         );
+        assert_eq!(
+            parameters
+                .location_filter_typed()
+                .expect("Location Filter の解釈が失敗しないこと"),
+            None,
+            "起動時の映像トラックの SUBSCRIBE には Location Filter を載せないこと"
+        );
         assert!(
-            parameters.location_filter_typed().is_ok(),
-            "Location Filter の解釈が失敗しないこと"
+            parameters.fill_parameters().is_none(),
+            "映像トラックの SUBSCRIBE には FILL_PARAMETERS を載せないこと"
         );
     }
 
@@ -6592,6 +6474,10 @@ mod tests {
             Some(LocationFilter::AbsoluteStart { start: last }),
             "最後に受信した位置を Absolute Start にすること"
         );
+        assert!(
+            parameters.fill_parameters().is_none(),
+            "映像の再購読にも FILL_PARAMETERS を載せないこと"
+        );
     }
 
     /// 音声の再購読も最後に受信した位置を Absolute Start として載せること
@@ -6615,6 +6501,10 @@ mod tests {
                 .expect("Location Filter を解釈できること"),
             Some(LocationFilter::AbsoluteStart { start: last }),
             "最後に受信した位置を Absolute Start にすること"
+        );
+        assert!(
+            parameters.fill_parameters().is_none(),
+            "音声の再購読にも FILL_PARAMETERS を載せないこと"
         );
     }
 
@@ -8325,36 +8215,26 @@ mod tests {
         );
     }
 
-    /// FETCH 応答 stream を映像 / 音声 / カタログへ振り分けること
+    /// FETCH 応答 stream を映像 / カタログへ振り分けること
+    ///
+    /// 音声のメディア FETCH は発行しないため、対応表の値 (`FetchTarget`) に音声は無い。
+    /// catalog 購読の fill fetch stream はカタログとして適用する (移行後に catalog を張り
+    /// 直すと、FILL_PARAMETERS 付き SUBSCRIBE への fill fetch stream で完全な catalog が
+    /// 届く。読み捨てると移行中に更新された catalog が反映されない。
+    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics)。draft 由来の仕様であり将来変更
+    /// されうる)。
     #[test]
     fn fetch_stream_action_routes_media_fetches() {
-        let mut media_fetch_targets = HashMap::new();
-        media_fetch_targets.insert(10, TrackKind::Video);
-        media_fetch_targets.insert(12, TrackKind::Audio);
+        let mut fetch_targets = HashMap::new();
+        fetch_targets.insert(10, FetchTarget::Video);
+        fetch_targets.insert(11, FetchTarget::Catalog);
         assert_eq!(
-            fetch_stream_action(10, &media_fetch_targets),
+            fetch_stream_action(10, &fetch_targets),
             FetchStreamAction::DeliverVideo,
             "映像の FETCH 応答は映像の配送経路へ流すこと"
         );
         assert_eq!(
-            fetch_stream_action(12, &media_fetch_targets),
-            FetchStreamAction::DeliverAudio,
-            "音声の FETCH 応答は音声の配送経路へ流すこと"
-        );
-    }
-
-    /// catalog 購読の fill fetch stream はカタログの配送経路へ流すこと
-    ///
-    /// 移行後に catalog を張り直すと、FILL_PARAMETERS 付き SUBSCRIBE への fill fetch stream
-    /// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)。draft 由来の仕様であり将来変更
-    /// されうる) で完全な catalog が届く。これを読み捨てると移行中に更新された catalog が
-    /// 反映されないため、カタログとして適用する。
-    #[test]
-    fn fetch_stream_action_delivers_the_catalog_fill() {
-        let mut media_fetch_targets = HashMap::new();
-        media_fetch_targets.insert(11, TrackKind::Catalog);
-        assert_eq!(
-            fetch_stream_action(11, &media_fetch_targets),
+            fetch_stream_action(11, &fetch_targets),
             FetchStreamAction::DeliverCatalog,
             "catalog 購読の fill fetch 応答はカタログへ流すこと"
         );
@@ -8365,11 +8245,11 @@ mod tests {
     /// 対応表に無い Request ID の stream は自側の要求と対応しない。
     #[test]
     fn fetch_stream_action_ignores_unknown_request_ids() {
-        let mut media_fetch_targets = HashMap::new();
-        media_fetch_targets.insert(10, TrackKind::Video);
-        media_fetch_targets.insert(11, TrackKind::Catalog);
+        let mut fetch_targets = HashMap::new();
+        fetch_targets.insert(10, FetchTarget::Video);
+        fetch_targets.insert(11, FetchTarget::Catalog);
         assert_eq!(
-            fetch_stream_action(0, &media_fetch_targets),
+            fetch_stream_action(0, &fetch_targets),
             FetchStreamAction::Ignore,
             "対応表に無い Request ID の stream は読み捨てること"
         );
@@ -9165,7 +9045,7 @@ mod tests {
             "基準を新しい TIMESTAMP へ進めること"
         );
 
-        // FETCH の応答で購読より前の音声が届く場合がこれにあたる
+        // 並び替わって、送出済みの TIMESTAMP より古い音声が遅れて届く場合がこれにあたる
         assert_eq!(
             order.admit(Some(1_920)),
             AudioDeliveryAdmission::Stale,
@@ -9216,16 +9096,13 @@ mod tests {
         );
     }
 
-    /// 購読のあとに FETCH で届いた古い音声が、送出済みの TIMESTAMP を巻き戻さないこと
+    /// live の音声が並び替わって届いても、送出済みの TIMESTAMP を巻き戻さないこと
     ///
-    /// 購読より前に publish された Group は SUBSCRIBE では届かない。moq-sub は SUBSCRIBE_OK が
-    /// 告知した Largest Object を基準に直近 4 Group を FETCH で要求し、応答の Object を live と
-    /// 同じ配送経路へ流す (draft-ietf-moq-transport-22 §3.5.1 (Dynamically Starting New Groups))。
-    /// FETCH の応答は live の Object と並行して届くため、live の音声を送出したあとに、それより
-    /// 前に publish された音声が届く。音声の再生は TIMESTAMP の順を前提とする
+    /// live の datagram は並び替わって届きうる (draft-ietf-moq-transport-22 §2.1.2
+    /// (Object States) / §2.3.1 (Group IDs))。音声の再生は TIMESTAMP の順を前提とする
     /// (映像と違い、復号の出力がそのまま提示の順になる) ため、古い音声は送出しない。
     ///
-    /// 判定が無いと、FETCH で遡った 4 つの TIMESTAMP が再生経路へ流れ、送出済みの TIMESTAMP
+    /// 判定が無いと、遅れて届いた古い TIMESTAMP が再生経路へ流れ、送出済みの TIMESTAMP
     /// から巻き戻る。
     #[tokio::test]
     async fn audio_delivery_does_not_send_objects_older_than_the_delivered_one() {
@@ -9257,7 +9134,7 @@ mod tests {
             deliver_audio_at(&delivery, &mut decoder, None, pts_us(4), &packet).await,
             "live の音声は配送を継続すること"
         );
-        // 2. FETCH の応答が、購読より前に publish された 4 つを届ける
+        // 2. 並び替わって、購読後に届いた音声より古い TIMESTAMP の音声が遅れて届く
         for index in 0..4 {
             assert!(
                 deliver_audio_at(&delivery, &mut decoder, None, pts_us(index), &packet).await,
@@ -9298,7 +9175,7 @@ mod tests {
                 .expect("audio delivery order lock is not poisoned")
                 .last_pts_us(),
             Some(pts_us(5)),
-            "送出順の判定は live と FETCH の応答で共有すること"
+            "送出順の判定は datagram と subgroup stream の経路で共有すること"
         );
         // 送出済みの TIMESTAMP より古い 4 件を累計に残す
         let counters = delivery_order
@@ -9406,9 +9283,9 @@ mod tests {
 
     /// 購読の境界以下の音声が再生経路へ流れないこと
     ///
-    /// FETCH の要求 range の終端は `SUBSCRIBE_OK` の Largest Object であり、その位置の Object は
-    /// live と FETCH の両方で届きうる (draft-ietf-moq-transport-22 §3.1.4 / §3.2)。境界以下を
-    /// 送出しないため、どちらで届いても再生経路へは流れない。
+    /// 購読の境界は `SUBSCRIBE_OK` の Largest Object であり、その位置の Object は live と relay の
+    /// replay の両方で届きうる (draft-ietf-moq-transport-22 §3.1.4)。境界以下を送出しないため、
+    /// どちらで届いても再生経路へは流れない。
     ///
     /// 境界より後の live の音声は従来どおり送出し、TIMESTAMP による送出順の判定は境界より後の
     /// 分だけで働く。境界以下の音声は catch-up の観測へも渡さない。
@@ -9448,7 +9325,7 @@ mod tests {
         let base_us = crate::wall_clock_us();
         let pts_us = |index: i64| base_us + index * 20_000;
 
-        // 1. 境界の位置の Object が FETCH の応答で届く
+        // 1. 境界の位置の Object が relay の replay で届く
         assert!(
             deliver_audio_at(
                 &delivery,
@@ -9520,7 +9397,7 @@ mod tests {
             .await,
             "live の音声は配送を継続すること"
         );
-        // 6. 境界以下の音声が、live よりずっと古い TIMESTAMP で届く (FETCH の応答が遅れた場合)。
+        // 6. 境界以下の音声が、live よりずっと古い TIMESTAMP で届く (replay が遅れた場合)。
         // 復号も観測もしないため、追いつきの遅れは live の値から動かない
         let lag_after_live = catch_up
             .lock()
@@ -9746,7 +9623,8 @@ mod tests {
     /// 購読の境界以下の音声でも Audio Config の検証が行われること
     ///
     /// 境界以下は送出も録画も復号もしないが、Audio Config は Properties から検証する。
-    /// 途中参加の購読では OpusHead が FETCH の応答だけで届くことがあるためである。
+    /// OpusHead は publisher が最初の音声 Object にだけ載せ、その Object は購読の境界以下と
+    /// して落ちるためである。
     #[tokio::test]
     async fn audio_delivery_validates_audio_config_before_the_subscription_boundary() {
         let packet = encode_opus_silence(48_000, 1);
@@ -9805,8 +9683,8 @@ mod tests {
     /// 購読の境界以下の音声が MP4 へ保存されないこと
     ///
     /// 録画は復号の可否に関わらず行うが、購読より前に publish された音声は購読の時点で
-    /// 不要である。境界以下を録画しないため、同じ Object が live と FETCH の両方で届いても
-    /// MP4 に重複が残らない。
+    /// 不要である。境界以下を録画しないため、同じ Object が live と relay の replay の両方で
+    /// 届いても MP4 に重複が残らない。
     #[tokio::test]
     async fn audio_delivery_does_not_record_objects_before_the_subscription_boundary() {
         let path =
@@ -9826,7 +9704,7 @@ mod tests {
         .expect("録画を開始できること");
         let recorder_sender = recorder.sender();
 
-        // 境界以下の音声 (FETCH の応答) と live の音声で TIMESTAMP と payload を変える。
+        // 境界以下の音声 (relay の replay) と live の音声で TIMESTAMP と payload を変える。
         // MP4 の先頭サンプルの decode timestamp は 0 になるため、保存された Object は
         // payload で見分ける
         let boundary_below = audio_loc_properties(960, 48_000, None)
@@ -9910,11 +9788,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// 音声 Object の位置が 3 経路それぞれの Group ID と Object ID から取れること
+    /// 音声 Object の位置が datagram / subgroup stream それぞれの Group ID と Object ID から
+    /// 取れること
     ///
-    /// datagram / subgroup stream / FETCH 応答は位置の持ち方が異なるため、取り違えを
-    /// ここで固定する。位置を取り違えると、購読の境界と比べられず境界以下の音声が
-    /// 再生経路へ流れる。
+    /// 2 つの経路は位置の持ち方が異なるため、取り違えをここで固定する。位置を取り違えると、
+    /// 購読の境界と比べられず境界以下の音声が再生経路へ流れる。
     #[test]
     fn audio_object_location_comes_from_each_paths_group_and_object_id() {
         const AUDIO_ALIAS: u64 = 7;
@@ -9977,45 +9855,6 @@ mod tests {
             subgroup_object_location(&decoded_header, &decoded_object),
             loc(GROUP_ID, OBJECT_ID),
             "subgroup stream の位置は Header の Group ID と解決済みの Object ID であること"
-        );
-
-        // FETCH の応答は Group をまたぐため、位置は Object ごとに届く。
-        // 同じく実エンコーダと実デコーダを通す
-        let mut encoder = FetchStreamEncoder::new(1);
-        let mut bytes = encoder.encode_header();
-        encoder
-            .encode_object(
-                &FetchObjectInput {
-                    group_id: GROUP_ID,
-                    subgroup_id: 3,
-                    object_id: OBJECT_ID,
-                    publisher_priority: 128,
-                    has_properties: false,
-                    is_datagram_origin: true,
-                    payload_length: 1,
-                },
-                None,
-                &mut bytes,
-            )
-            .expect("FETCH の Object を encode できること");
-        bytes.extend_from_slice(b"x");
-        let mut decoder = FetchStreamDecoder::new();
-        decoder.push(&bytes);
-        decoder
-            .try_decode_header()
-            .expect("FETCH_HEADER を decode できること")
-            .expect("FETCH_HEADER が揃っていること");
-        let DecodedFetchEntry::Object(decoded_object) = decoder
-            .try_decode_entry()
-            .expect("FETCH の Object を decode できること")
-            .expect("FETCH の Object が揃っていること")
-        else {
-            panic!("FETCH の応答の先頭は Object であること");
-        };
-        assert_eq!(
-            fetch_object_location(&decoded_object),
-            loc(GROUP_ID, OBJECT_ID),
-            "FETCH の応答の位置は Object ごとの Group ID と Object ID であること"
         );
     }
 
