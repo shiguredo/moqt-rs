@@ -598,6 +598,187 @@ fn publish_with_grease_property_in_mandatory_range_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
+/// 未知の必須トラックプロパティを複数含む PUBLISH は型ごとの UNSUPPORTED_PROPERTY Detail で拒否される
+///
+/// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) は未知の
+/// Mandatory Track Property を含む PUBLISH を UNSUPPORTED_EXTENSION で拒否することを求める。
+/// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は理解できない型ごとに
+/// 1 つの Error Detail を載せることを求める (SHOULD)。IMMUTABLE_PROPERTIES の内側も探索し
+/// (§10.7 の "MUST search both")、GREASE 値 (0x401D) と既知プロパティ (0x0E) は報告しない。
+#[test]
+fn publish_with_multiple_unknown_mandatory_properties_reports_each_type() {
+    use shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION;
+    use shiguredo_moqt::track_properties::{
+        PROP_IMMUTABLE_PROPERTIES, TrackProperty, TrackPropertyValue,
+    };
+
+    /// IMMUTABLE_PROPERTIES の内側に置く未知の必須プロパティ
+    const INNER_MANDATORY: u64 = 0x6000;
+
+    let (mut client, mut server) = establish_pair();
+    // IMMUTABLE_PROPERTIES の内側には未知の必須プロパティと GREASE 値を置く
+    let mut inner = TrackProperties::new();
+    inner.push(TrackProperty {
+        prop_type: INNER_MANDATORY,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    inner.push(TrackProperty {
+        prop_type: 0x401D,
+        value: TrackPropertyValue::Bytes(vec![0xAB]),
+    });
+    let mut inner_bytes = Vec::new();
+    inner
+        .encode(&mut inner_bytes)
+        .expect("IMMUTABLE の内側 KVP 列は encode できる");
+
+    let mut tp = TrackProperties::new();
+    // mutable リストには未知の必須プロパティ 2 つと既知プロパティ 1 つを置く
+    tp.push(TrackProperty {
+        prop_type: 0x4000,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    tp.push(TrackProperty {
+        prop_type: 0x5001,
+        value: TrackPropertyValue::Bytes(vec![0xCD]),
+    });
+    tp.push(TrackProperty {
+        prop_type: 0x0E,
+        value: TrackPropertyValue::VarInt(128),
+    });
+    tp.push(TrackProperty {
+        prop_type: PROP_IMMUTABLE_PROPERTIES,
+        value: TrackPropertyValue::Bytes(inner_bytes),
+    });
+
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            102,
+            MessageParameters::new(),
+            tp,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (stream_rid, err_msg) = take_send_on_stream(&mut server);
+    assert_eq!(stream_rid, rid);
+
+    let ControlMessage::RequestError(ref err) = err_msg else {
+        panic!("RequestError が期待された");
+    };
+    assert_eq!(err.error_code, REQUEST_UNSUPPORTED_EXTENSION);
+    assert_eq!(
+        err.error_details.unsupported_properties(),
+        vec![0x4000, 0x5001, INNER_MANDATORY],
+        "未知の必須型ごとに Detail を作り、既知プロパティと GREASE 値を含めないこと"
+    );
+
+    // ワイヤに載せても Detail が失われないこと (生成側の encode と受信側の decode の往復)
+    let encoded = err_msg
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+        .expect("UNSUPPORTED_PROPERTY Detail を含む REQUEST_ERROR は encode できる");
+    let (decoded, consumed) =
+        ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+    assert_eq!(consumed, encoded.len(), "メッセージ全体を消費すること");
+    let ControlMessage::RequestError(decoded) = decoded else {
+        panic!("RequestError が期待された");
+    };
+    assert_eq!(
+        decoded.error_details.unsupported_properties(),
+        vec![0x4000, 0x5001, INNER_MANDATORY],
+        "wire を経由しても Property Type が保持されること"
+    );
+
+    // 拒否した PUBLISH は購読として登録せず、セッションは維持する
+    assert!(server.subscription(rid).is_none());
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// 未知の必須トラックプロパティで拒否された PUBLISH の Error Detail を publisher が受信できる
+///
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details) の適用規則により、
+/// Error Code = UNSUPPORTED_EXTENSION でのみ UNSUPPORTED_PROPERTY が保持される。
+/// 受信した publisher は `SessionEvent::RequestErrorReceived` の `error_details` から
+/// 未対応 Property Type を参照できる。
+#[test]
+fn client_receives_unsupported_property_details_for_rejected_publish() {
+    use shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION;
+    use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+
+    let (mut client, mut server) = establish_pair();
+    let mut tp = TrackProperties::new();
+    tp.push(TrackProperty {
+        prop_type: 0x4000,
+        value: TrackPropertyValue::VarInt(1),
+    });
+    tp.push(TrackProperty {
+        prop_type: 0x4005,
+        value: TrackPropertyValue::VarInt(2),
+    });
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            103,
+            MessageParameters::new(),
+            tp,
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, pub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(pub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, err_msg) = take_send_on_stream(&mut server);
+
+    // 実際の transport と同じく wire を経由させてから受信させる
+    let encoded = err_msg
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+        .expect("UNSUPPORTED_PROPERTY Detail を含む REQUEST_ERROR は encode できる");
+    let (decoded, consumed) =
+        ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+    assert_eq!(consumed, encoded.len());
+
+    client
+        .recv_stream_message(rid, decoded)
+        .expect("UNSUPPORTED_EXTENSION の REQUEST_ERROR は拒否せず受理すること");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // イベントには未対応の Property Type が載る
+    let mut saw = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestErrorReceived {
+            request_id,
+            error_code,
+            error_details,
+            ..
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(error_code, REQUEST_UNSUPPORTED_EXTENSION);
+            assert_eq!(
+                error_details.unsupported_properties(),
+                vec![0x4000, 0x4005],
+                "未対応の Property Type がイベントに載ること"
+            );
+            saw = true;
+        }
+    }
+    assert!(saw, "RequestErrorReceived イベントが発行されること");
+
+    // publisher 側の購読は REQUEST_ERROR の受信で Terminated になる (draft §3.1.2)
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("PUBLISH の subscription が登録されていること")
+            .state,
+        SubscriptionState::Terminated,
+        "REQUEST_ERROR の受信で subscription が Terminated になること"
+    );
+}
+
 // ─── REQUEST_OK の応答 context 別パラメータスコープ検証 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK)) ────
 //
 // REQUEST_OK (Type 0x07) は PUBLISH_OK / REQUEST_UPDATE_OK / TRACK_STATUS_OK が

@@ -281,41 +281,63 @@ impl TrackProperties {
         false
     }
 
-    /// 未知の必須プロパティを含むかどうかを返す
+    /// 未知の Mandatory Track Property の型を昇順・重複なしで列挙する
     ///
-    /// draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties): 未知の必須プロパティを受信したエンドポイントは
-    /// PUBLISH なら REQUEST_ERROR (UNSUPPORTED_EXTENSION)、SUBSCRIBE_OK なら購読キャンセルを行う。
-    /// draft-ietf-moq-transport-22 §10.7 (Immutable Properties)「MUST search both」に従い、mutable リストに加えて
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の
+    /// 0x4000-0x7FFF のうち、この実装が認識していない型を返す。draft-ietf-moq-transport-23
+    /// §10.7 (Immutable Properties) の "MUST search both" に従い、mutable リストに加えて
     /// IMMUTABLE_PROPERTIES (0x0B) の内側も探索する。
     ///
-    /// ただし §16.8 (Properties) の Table 15 が GREASE の Property Type (`0x7f * N + 0x9D`) を
-    /// Scope Any として予約しており、その一部 (N = 128 の 0x401D から N = 256 の 0x7F9D まで) は
-    /// この範囲に入る。GREASE 値は IANA に登録された Property ではないため、§3.7 の
-    /// 「Mandatory Track Property」は登録された必須トラックプロパティを指し、予約値である
-    /// GREASE を含まないと解釈する (§3.7 の字面は範囲全体を Mandatory とするため衝突するが、
-    /// Table 15 が GREASE の Scope を Any と定めていることを優先する)。
-    /// この解釈は §13 (Grease) の
+    /// ただし §16.8 (Properties) の Table 15 が GREASE の Property Type
+    /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、その一部 (N = 128 の 0x401D
+    /// から N = 256 の 0x7F9D まで) はこの範囲に入る。GREASE 値は IANA に登録された
+    /// Property ではないため、§3.7 の「Mandatory Track Property」は登録された必須トラック
+    /// プロパティを指し、予約値である GREASE を含まないと解釈する (§3.7 の字面は範囲全体を
+    /// Mandatory とするため衝突するが、Table 15 が GREASE の Scope を Any と定めていることを
+    /// 優先する)。この解釈は §13 (Grease) の
     /// "Endpoints MUST NOT close the session solely because they received an unknown value."
     /// と §16.8 (Properties) の "Endpoints MUST ignore unknown Property types, skipping them
     /// according to the Key-Value-Pair encoding" に整合する。
-    /// GREASE 値は未知 Property として §16.8 に従い無視する (decode 直後の `TrackProperties` は値を
-    /// 保持するが、Session は未知の Track Property を保持する場所を持たない。本実装は endpoint で
-    /// あり relay と違って転送しない)。
     /// Object scope の同じ衝突 (`crate::object_properties`) も同じ解釈で扱う。
     /// draft 内部の登録ポリシーと予約値の関係は将来の draft 改版で変わりうる。
-    pub fn has_unknown_mandatory(&self) -> bool {
-        let is_unknown_mandatory = |prop_type: u64| {
-            (MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX).contains(&prop_type)
-                && !Self::is_known_mandatory(prop_type)
-                && !crate::grease::is_grease(prop_type)
-        };
-        if self.0.iter().any(|p| is_unknown_mandatory(p.prop_type)) {
-            return true;
-        }
-        // IMMUTABLE_PROPERTIES の内側も探索する
-        self.immutable_inner_properties()
+    ///
+    /// 返した型は REQUEST_ERROR (UNSUPPORTED_EXTENSION) の UNSUPPORTED_PROPERTY Error Detail
+    /// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY)) に 1 型 1 Detail で載せる。
+    /// mutable リストと IMMUTABLE_PROPERTIES の内側に同じ型が現れても Detail は 1 つで足りる
+    /// ため重複は除去し、ワイヤ上の Detail の並び (型の昇順) に揃えて昇順にする。
+    pub fn unknown_mandatory_types(&self) -> Vec<u64> {
+        let inner = self.immutable_inner_properties();
+        let mut types: Vec<u64> = self
+            .0
             .iter()
-            .any(|p| is_unknown_mandatory(p.prop_type))
+            .chain(inner.iter())
+            .map(|p| p.prop_type)
+            .filter(|prop_type| Self::is_unknown_mandatory(*prop_type))
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types
+    }
+
+    /// 未知の必須プロパティを含むかどうかを返す
+    ///
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 未知の
+    /// 必須プロパティを受信したエンドポイントは PUBLISH なら REQUEST_ERROR
+    /// (UNSUPPORTED_EXTENSION)、SUBSCRIBE_OK / FETCH_OK なら購読・ fetch のキャンセルを行う。
+    /// 対象の判定は [`TrackProperties::unknown_mandatory_types`] と同じである。
+    pub fn has_unknown_mandatory(&self) -> bool {
+        !self.unknown_mandatory_types().is_empty()
+    }
+
+    /// prop_type が未知の Mandatory Track Property かを返す
+    ///
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties) の範囲に
+    /// 入り、この実装が認識せず (§16.8 (Properties) の既知型でなく)、GREASE 予約値でもない
+    /// (§13 (Grease)) 型を未知の Mandatory Track Property とする。
+    fn is_unknown_mandatory(prop_type: u64) -> bool {
+        (MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX).contains(&prop_type)
+            && !Self::is_known_mandatory(prop_type)
+            && !crate::grease::is_grease(prop_type)
     }
 
     /// IMMUTABLE_PROPERTIES (0x0B) の内側 Track Property 列をデコードして返す

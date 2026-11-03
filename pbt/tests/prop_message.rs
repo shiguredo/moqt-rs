@@ -19,6 +19,7 @@ use shiguredo_moqt::{
     message::Subscribe,
     message::SubscribeOk,
     message::TrackStatus,
+    message::UnsupportedProperty,
     message::common::Location,
     message_parameter::AuthorizationToken,
     message_parameter::LocationFilter,
@@ -473,9 +474,27 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             parameters: sample_scoped_parameters(ctx, TRACK_STATUS_PARAMS),
         }),
         // PublishStateNotify (draft-ietf-moq-transport-22 §9.10)
-        _ => ControlMessage::PublishStateNotify(PublishStateNotify {
+        13 => ControlMessage::PublishStateNotify(PublishStateNotify {
             parameters: sample_scoped_parameters(ctx, PUBLISH_STATE_NOTIFY_PARAMS),
         }),
+        // RequestError (UNSUPPORTED_EXTENSION: UNSUPPORTED_PROPERTY Detail を 0〜4 個持つ)
+        // draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数インスタンスを
+        // 明示的に許可するため、同じ Property Type の重複も生成しうる。
+        _ => {
+            let count = noprop::sample_usize_in(ctx, 0..=4);
+            let mut details = ErrorDetails::new();
+            for _ in 0..count {
+                details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                    property_type: noprop::sample_u64_in(ctx, 0x4000..=0x7FFF),
+                }));
+            }
+            ControlMessage::RequestError(RequestError {
+                error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+                retry_interval: sample_small_varint(ctx),
+                reason: sample_reason_phrase(ctx),
+                error_details: details,
+            })
+        }
     }
 }
 
@@ -712,6 +731,115 @@ fn unknown_error_details_are_skipped() -> noprop::TestResult {
         assert!(
             err.error_details.is_empty(),
             "未知の Error Detail は保持しないこと"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// UNSUPPORTED_EXTENSION の REQUEST_ERROR が複数の UNSUPPORTED_PROPERTY Detail を往復すること
+///
+/// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数インスタンスを許す型で、
+/// 値は Property Type (vi64) 1 つである (§8.3 (Key-Value-Pair Structure) の偶数 Type)。
+/// 0〜8 個の Detail を生成し、encode → decode で同じ Property Type 列が出現順に取り出せる
+/// ことを固定する。同じ Property Type の重複も型の定義が許すため、そのまま往復させる。
+#[test]
+fn unsupported_property_details_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let count = noprop::sample_usize_in(ctx, 0..=8);
+        let mut details = ErrorDetails::new();
+        let mut expected = Vec::new();
+        for _ in 0..count {
+            let property_type = noprop::sample_u64_in(ctx, 0x4000..=0x7FFF);
+            expected.push(property_type);
+            details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                property_type,
+            }));
+        }
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+            retry_interval: sample_small_varint(ctx),
+            reason: sample_reason_phrase(ctx),
+            error_details: details,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("UNSUPPORTED_PROPERTY Detail は常に encode 可能");
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+        assert_eq!(consumed, encoded.len(), "メッセージ全体を消費すること");
+        assert_eq!(decoded, msg, "往復で同じ構造に戻ること");
+        let ControlMessage::RequestError(err) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert_eq!(
+            err.error_details.unsupported_properties(),
+            expected,
+            "Property Type が出現順に保持されること"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// UNSUPPORTED_EXTENSION 以外の Error Code に届いた UNSUPPORTED_PROPERTY Detail を無視すること
+///
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details): "Receivers MUST ... ignore a known
+/// Error Detail type that accompanies an Error Code it is not defined for."
+/// UNSUPPORTED_PROPERTY は UNSUPPORTED_EXTENSION (§9.4.2.2) でのみ意味を持つため、
+/// 他の Error Code では保持しない。detail の KVP 形式 (偶数 Type の vi64) は読み飛ばす。
+#[test]
+fn inapplicable_unsupported_property_details_are_ignored() -> noprop::TestResult {
+    // REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
+    const MSG_REQUEST_ERROR: u64 = 0x05;
+    // UNSUPPORTED_PROPERTY Error Detail の Type 値
+    // (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))
+    const UNSUPPORTED_PROPERTY_DETAIL_TYPE: u64 = 0x02;
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let mut error_code = noprop::sample_u64_in(ctx, 0..=0x200);
+        // UNSUPPORTED_EXTENSION は適用対象、REDIRECT は REDIRECT Detail が必須になるため避ける
+        if error_code == shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION
+            || error_code == shiguredo_moqt::error::REQUEST_REDIRECT
+        {
+            error_code += 2;
+        }
+        let count = noprop::sample_usize_in(ctx, 0..=4);
+        let mut detail_bytes = Vec::new();
+        let mut prev_type = 0;
+        for _ in 0..count {
+            // 2 個目以降は同じ Error Detail Type の繰り返しなので Delta Type は 0 になる
+            varint::encode(
+                UNSUPPORTED_PROPERTY_DETAIL_TYPE - prev_type,
+                &mut detail_bytes,
+            );
+            prev_type = UNSUPPORTED_PROPERTY_DETAIL_TYPE;
+            varint::encode(noprop::sample_u64_in(ctx, 0..=0x7FFF), &mut detail_bytes);
+        }
+        let mut payload = Vec::new();
+        varint::encode(error_code, &mut payload);
+        varint::encode(0, &mut payload); // Retry Interval
+        varint::encode(0, &mut payload); // Error Reason 長
+        payload.extend_from_slice(&detail_bytes);
+        let mut frame = Vec::new();
+        varint::encode(MSG_REQUEST_ERROR, &mut frame);
+        varint::encode(payload.len() as u64, &mut frame);
+        frame.extend_from_slice(&payload);
+
+        let (decoded, consumed) =
+            ControlMessage::decode(&frame).expect("適用外の Detail は無視され decode できる");
+        assert_eq!(consumed, frame.len(), "フレーム全体を消費すること");
+        let ControlMessage::RequestError(err) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            err.error_details.is_empty(),
+            "適用外の UNSUPPORTED_PROPERTY Detail は保持しないこと"
+        );
+        assert!(
+            err.error_details.unsupported_properties().is_empty(),
+            "適用外の UNSUPPORTED_PROPERTY Detail は型としても取り出せないこと"
         );
         Ok(())
     })?;

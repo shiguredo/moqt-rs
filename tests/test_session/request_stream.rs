@@ -4,7 +4,7 @@ use shiguredo_moqt::error::{
     REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
     SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_KEY_VALUE_FORMATTING_ERROR,
 };
-use shiguredo_moqt::message::{ErrorDetail, Redirect, RequestError};
+use shiguredo_moqt::message::{ErrorDetail, Redirect, RequestError, UnsupportedProperty};
 use shiguredo_moqt::message_parameter::{
     PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT, PARAM_SUBGROUP_FILTER,
 };
@@ -3269,6 +3269,53 @@ fn redirect_nonempty_track_name_for_fetch_accepted() {
     );
     assert!(result.is_ok());
     assert_eq!(client.state(), SessionState::Established);
+}
+
+/// UNSUPPORTED_EXTENSION 以外の Error Code に UNSUPPORTED_PROPERTY Detail が付いていても無視される
+///
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details): 既知の Detail でも当該 Error Code に
+/// 適用されないものは無視する (MUST)。UNSUPPORTED_PROPERTY は UNSUPPORTED_EXTENSION でのみ
+/// 意味を持つ (§9.4.2.2 (UNSUPPORTED_PROPERTY))。イベントの Error Details からも適用外の
+/// Detail は落ちる。
+#[test]
+fn server_receives_inapplicable_unsupported_property_detail_accepted() {
+    let (_client, mut server, rid) = establish_subscribe_track(5);
+    let mut details = ErrorDetails::new();
+    details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+        property_type: 0x4000,
+    }));
+    let result = server.recv_stream_message(
+        rid,
+        ControlMessage::RequestError(RequestError {
+            error_code: REQUEST_NOT_SUPPORTED,
+            retry_interval: 0,
+            reason: shiguredo_moqt::message::ReasonPhrase::new("not supported")
+                .expect("正当な reason phrase である"),
+            error_details: details,
+        }),
+    );
+    assert!(
+        result.is_ok(),
+        "適用外の UNSUPPORTED_PROPERTY Detail で閉じてはならない"
+    );
+    assert_eq!(server.state(), SessionState::Established);
+
+    // イベントの Error Details からも適用外の Detail は落ちる
+    let mut saw = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestErrorReceived { error_details, .. } = e {
+            assert!(
+                error_details.is_empty(),
+                "適用外の UNSUPPORTED_PROPERTY Detail はイベントに載らないこと"
+            );
+            assert!(
+                error_details.unsupported_properties().is_empty(),
+                "適用外の UNSUPPORTED_PROPERTY Detail は型としても取り出せないこと"
+            );
+            saw = true;
+        }
+    }
+    assert!(saw, "RequestErrorReceived イベントが発行されること");
 }
 
 /// 未知の Error Detail とその重複は無視され、セッションを閉じない

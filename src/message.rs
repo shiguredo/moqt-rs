@@ -13,7 +13,7 @@ use common::{
 };
 
 use crate::{
-    error::{MessageError, REQUEST_REDIRECT},
+    error::{MessageError, REQUEST_REDIRECT, REQUEST_UNSUPPORTED_EXTENSION},
     message_parameter::{
         MessageParameters, PARAM_AUTHORIZATION_TOKEN, PARAM_EXPIRES, PARAM_FILL_PARAMETERS,
         PARAM_FILL_TIMEOUT, PARAM_GROUP_ORDER, PARAM_INCLUDE_PROPERTIES, PARAM_LARGEST_OBJECT,
@@ -534,6 +534,10 @@ impl RequestOk {
 /// REDIRECT Error Detail の Type 値 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
 const ERROR_DETAIL_REDIRECT: u64 = 0x01;
 
+/// UNSUPPORTED_PROPERTY Error Detail の Type 値
+/// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))
+const ERROR_DETAIL_UNSUPPORTED_PROPERTY: u64 = 0x02;
+
 /// Error Detail の値長の上限 (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))
 ///
 /// "The maximum length of a value is 2^16-1 bytes." Length が上限を超える KVP を
@@ -597,6 +601,22 @@ impl Redirect {
     }
 }
 
+/// 未対応の Mandatory Track Property (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))
+///
+/// Error Code = UNSUPPORTED_EXTENSION の REQUEST_ERROR に付加され、送信側が理解できなかった
+/// Mandatory Track Property (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track
+/// Properties)) の Property Type を伝える。この型は複数インスタンスを許すため、理解できない
+/// 型ごとに 1 つの Detail を載せられる (§9.4.2.2 の SHOULD)。
+///
+/// Type は偶数 0x02 のため、KVP の値は Property Type の vi64 そのものであり Length
+/// フィールドを持たない (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedProperty {
+    /// 理解できなかった Mandatory Track Property の Property Type
+    pub property_type: u64,
+}
+
 /// REQUEST_ERROR の Error Detail (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
 ///
 /// Error Detail の型と値の対応は "MOQT Error Detail Types" レジストリ
@@ -612,6 +632,13 @@ pub enum ErrorDetail {
     /// リダイレクト先を指示する Detail であり、Error Code = REDIRECT でのみ意味を持つ。
     /// Error Code = REDIRECT の REQUEST_ERROR はこの Detail を必ず 1 つ含む。
     Redirect(Redirect),
+    /// Type 0x02: UNSUPPORTED_PROPERTY
+    /// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))
+    ///
+    /// 理解できなかった Mandatory Track Property の型を伝える Detail であり、
+    /// Error Code = UNSUPPORTED_EXTENSION でのみ意味を持つ。定義が複数インスタンスを
+    /// 明示的に許可するため、複数の Property Type をそれぞれ別の Detail で運べる。
+    UnsupportedProperty(UnsupportedProperty),
 }
 
 impl ErrorDetail {
@@ -619,6 +646,7 @@ impl ErrorDetail {
     fn detail_type(&self) -> u64 {
         match self {
             Self::Redirect(_) => ERROR_DETAIL_REDIRECT,
+            Self::UnsupportedProperty(_) => ERROR_DETAIL_UNSUPPORTED_PROPERTY,
         }
     }
 
@@ -629,6 +657,7 @@ impl ErrorDetail {
     fn applies_to(&self, error_code: u64) -> bool {
         match self {
             Self::Redirect(_) => error_code == REQUEST_REDIRECT,
+            Self::UnsupportedProperty(_) => error_code == REQUEST_UNSUPPORTED_EXTENSION,
         }
     }
 }
@@ -676,14 +705,26 @@ impl ErrorDetails {
     /// Error Code = REDIRECT の REQUEST_ERROR では必ず 1 つ存在する。それ以外の
     /// Error Code では `None` を返す。
     pub fn redirect(&self) -> Option<&Redirect> {
-        // Error Detail が 1 種類しかない現状では全要素が Redirect になるが、型が増えても
-        // 最初の REDIRECT を返す形を保つためイテレータで走査する。
+        self.0.iter().find_map(|detail| match detail {
+            ErrorDetail::Redirect(redirect) => Some(redirect),
+            ErrorDetail::UnsupportedProperty(_) => None,
+        })
+    }
+
+    /// UNSUPPORTED_PROPERTY Detail の Property Type を出現順に返す
+    ///
+    /// UNSUPPORTED_PROPERTY は複数インスタンスを許す型
+    /// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY)) のため、
+    /// Detail と同じ個数の要素を返す。Error Code = UNSUPPORTED_EXTENSION 以外では
+    /// 適用外の Detail を保持しないため空になる。
+    pub fn unsupported_properties(&self) -> Vec<u64> {
         self.0
             .iter()
-            .map(|detail| match detail {
-                ErrorDetail::Redirect(redirect) => redirect,
+            .filter_map(|detail| match detail {
+                ErrorDetail::UnsupportedProperty(unsupported) => Some(unsupported.property_type),
+                ErrorDetail::Redirect(_) => None,
             })
-            .next()
+            .collect()
     }
 
     /// `error_code` に適用される Detail だけを残した複製を返す
@@ -736,6 +777,9 @@ impl ErrorDetails {
                     }
                     seen_redirect = true;
                 }
+                // draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数
+                // インスタンスを明示的に許可するため、重複を拒否しない。
+                ErrorDetail::UnsupportedProperty(_) => {}
             }
         }
         if error_code == REQUEST_REDIRECT && !seen_redirect {
@@ -754,6 +798,11 @@ impl ErrorDetails {
             crate::kvp::encode_delta_key(prev_type, detail.detail_type(), buf);
             match detail {
                 ErrorDetail::Redirect(redirect) => encode_redirect_detail(redirect, buf)?,
+                // Type 0x02 は偶数型のため、Property Type の vi64 だけを書く
+                // (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+                ErrorDetail::UnsupportedProperty(unsupported) => {
+                    varint::encode(unsupported.property_type, buf);
+                }
             }
             prev_type = detail.detail_type();
         }
@@ -796,6 +845,19 @@ impl ErrorDetails {
                     // 適用されない Error Code では意味を持たないため保持しない (§9.4.2)。
                     if error_code == REQUEST_REDIRECT {
                         details.push(ErrorDetail::Redirect(redirect));
+                    }
+                }
+                ERROR_DETAIL_UNSUPPORTED_PROPERTY => {
+                    // 偶数 Type の Value は vi64 そのもの (§8.3 (Key-Value-Pair Structure))。
+                    // 値は Property Type 1 つであり、複数インスタンスが許可されているため
+                    // 重複検査はしない (§9.4.2.2 (UNSUPPORTED_PROPERTY))。
+                    let (property_type, n) = varint::decode(&buf[*pos..])?;
+                    *pos += n;
+                    // 適用されない Error Code では意味を持たないため保持しない (§9.4.2)。
+                    if error_code == REQUEST_UNSUPPORTED_EXTENSION {
+                        details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                            property_type,
+                        }));
                     }
                 }
                 // 未知の型は KVP の形式だけ読み飛ばして無視する (§9.4.2)。

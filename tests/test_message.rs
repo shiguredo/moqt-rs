@@ -289,13 +289,17 @@ mod goaway {
 
 mod request_error_details {
     use super::*;
-    use shiguredo_moqt::message::{ErrorDetail, ErrorDetails};
+    use shiguredo_moqt::message::{ErrorDetail, ErrorDetails, UnsupportedProperty};
 
     /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
     const MSG_REQUEST_ERROR: u64 = 0x05;
 
     /// REDIRECT Error Detail の Type 値 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
     const ERROR_DETAIL_REDIRECT: u64 = 0x01;
+
+    /// UNSUPPORTED_PROPERTY Error Detail の Type 値
+    /// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))
+    const ERROR_DETAIL_UNSUPPORTED_PROPERTY: u64 = 0x02;
 
     /// REDIRECT Detail を 1 つだけ持つ Error Details を組み立てる
     fn redirect_details(redirect: Redirect) -> ErrorDetails {
@@ -594,6 +598,231 @@ mod request_error_details {
         assert!(
             matches!(err, MessageError::KeyValueFormattingError(_)),
             "Detail 値内の余剰バイトは MALFORMED_KEY_VALUE であるべきだが {err:?}"
+        );
+    }
+
+    /// UNSUPPORTED_PROPERTY Detail を含む REQUEST_ERROR のゴールデンバイト列
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) の値は理解できなかった
+    /// Mandatory Track Property の Property Type (vi64) 1 つである。Type 0x02 は偶数型の
+    /// ため Length フィールドを持たず、KVP の値は vi64 そのものになる
+    /// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+    /// 0x4000 は 2 バイト varint の上限 (0x3FFF) を超えるため 3 バイトで符号化される。
+    #[test]
+    fn unsupported_property_golden_bytes() {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+            property_type: 0x4000,
+        }));
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("").expect("空の Reason Phrase は正当である"),
+            error_details: details,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当な UNSUPPORTED_PROPERTY は encode できる");
+        assert_eq!(
+            encoded,
+            vec![
+                MSG_REQUEST_ERROR as u8,                 // Type = 0x05
+                0x07,                                    // Length = 7 バイト
+                0x33,                                    // Error Code = UNSUPPORTED_EXTENSION
+                0x00,                                    // Retry Interval
+                0x00,                                    // Error Reason 長 = 0
+                ERROR_DETAIL_UNSUPPORTED_PROPERTY as u8, // Delta Type = 0x02
+                0xC0,                                    // Property Type 0x4000 の vi64 (3 バイト)
+                0x40,
+                0x00,
+            ],
+            "UNSUPPORTED_PROPERTY Error Detail は Length を持たない vi64 であること"
+        );
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "エンコードした全バイトを消費すること"
+        );
+        assert_eq!(decoded, msg, "ゴールデンバイト列が同じ構造へ戻ること");
+    }
+
+    /// 複数の UNSUPPORTED_PROPERTY Detail を 1 つの REQUEST_ERROR に載せられる
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数インスタンスを
+    /// 許す。各 Detail の KVP Type は同じ 0x02 であるため、2 個目以降の Delta Type は 0 に
+    /// なる。値はそれぞれの Property Type (vi64) である。
+    #[test]
+    fn multiple_unsupported_property_details_golden_bytes() {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+            property_type: 0x4000,
+        }));
+        details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+            property_type: 0x7FFF,
+        }));
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("").expect("空の Reason Phrase は正当である"),
+            error_details: details,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("複数の UNSUPPORTED_PROPERTY は encode できる");
+        assert_eq!(
+            encoded,
+            vec![
+                MSG_REQUEST_ERROR as u8,                 // Type = 0x05
+                0x0B,                                    // Length = 11 バイト
+                0x33,                                    // Error Code = UNSUPPORTED_EXTENSION
+                0x00,                                    // Retry Interval
+                0x00,                                    // Error Reason 長 = 0
+                ERROR_DETAIL_UNSUPPORTED_PROPERTY as u8, // 1 個目: Delta Type = 0x02
+                0xC0,                                    // Property Type 0x4000 の vi64
+                0x40,
+                0x00,
+                0x00, // 2 個目: Delta Type = 0 (同じ Error Detail Type の繰り返し)
+                0xC0, // Property Type 0x7FFF の vi64
+                0x7F,
+                0xFF,
+            ],
+            "複数 Detail の Delta Type は 0 で、値はそれぞれの Property Type であること"
+        );
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+        assert_eq!(consumed, encoded.len());
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert_eq!(
+            decoded.error_details.len(),
+            2,
+            "Detail が 2 個保持されること"
+        );
+        assert_eq!(
+            decoded.error_details.unsupported_properties(),
+            vec![0x4000, 0x7FFF],
+            "Property Type が出現順に取り出せること"
+        );
+    }
+
+    /// 同じ Property Type を持つ UNSUPPORTED_PROPERTY Detail の重複も許可される
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2: 送信側は型の定義が複数インスタンスを明示的に
+    /// 許可しない限り同じ Error Detail 型を繰り返してはならない (MUST NOT)。
+    /// §9.4.2.2 は複数インスタンスを許可し、同じ Property Type の重複も型としては許される。
+    #[test]
+    fn duplicate_unsupported_property_detail_allowed() {
+        let mut details = ErrorDetails::new();
+        for _ in 0..2 {
+            details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                property_type: 0x4000,
+            }));
+        }
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("").expect("空の Reason Phrase は正当である"),
+            error_details: details,
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("重複した UNSUPPORTED_PROPERTY は encode できる");
+        let (decoded, consumed) = ControlMessage::decode(&encoded)
+            .expect("重複した UNSUPPORTED_PROPERTY は decode できる");
+        assert_eq!(consumed, encoded.len());
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert_eq!(
+            decoded.error_details.unsupported_properties(),
+            vec![0x4000, 0x4000],
+            "重複した Detail は拒否せず、そのまま保持すること"
+        );
+    }
+
+    /// UNSUPPORTED_EXTENSION 以外の Error Code に付いた UNSUPPORTED_PROPERTY は無視される
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2 (Error Details): "Receivers MUST ... ignore a known
+    /// Error Detail type that accompanies an Error Code it is not defined for."
+    /// UNSUPPORTED_PROPERTY は UNSUPPORTED_EXTENSION でのみ意味を持つ (§9.4.2.2)。
+    #[test]
+    fn unsupported_property_detail_for_other_error_code_is_ignored() {
+        let mut payload = vec![
+            0x03, // Error Code = NOT_SUPPORTED
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        // Delta Type = 0x02, Property Type = 0x4000 (vi64 4 バイト、Length なし)
+        payload.extend_from_slice(&[
+            ERROR_DETAIL_UNSUPPORTED_PROPERTY as u8,
+            0xE0,
+            0x00,
+            0x40,
+            0x00,
+        ]);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let (decoded, consumed) =
+            ControlMessage::decode(&bytes).expect("適用外の既知 Detail は無視され、decode できる");
+        assert_eq!(consumed, bytes.len(), "メッセージ全体を消費すること");
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            decoded.error_details.is_empty(),
+            "適用外の UNSUPPORTED_PROPERTY Detail は保持しないこと"
+        );
+    }
+
+    /// 適用外の Error Code に UNSUPPORTED_PROPERTY Detail を付けた RequestError は encode できない
+    ///
+    /// 受信側は適用外の既知 Detail を無視する (draft-ietf-moq-transport-23 §9.4.2) ため、
+    /// 送信側で生成を許すと decode で Detail が落ちて往復が崩れる。
+    #[test]
+    fn encode_unsupported_property_for_other_error_code_is_protocol_violation() {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+            property_type: 0x4000,
+        }));
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("not supported").expect("正当な Reason Phrase である"),
+            error_details: details,
+        });
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "適用外 Detail の encode は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// UNSUPPORTED_PROPERTY の値 (vi64) が途中終端すると MALFORMED_MESSAGE
+    ///
+    /// KVP の値はメッセージ Length の内側にあるため、値の varint が途中で切れた場合は
+    /// 本文が Length より短いことになり、MALFORMED_MESSAGE になる
+    /// (draft-ietf-moq-transport-23 §9 (Control Messages) / §8.3 (Key-Value-Pair Structure))。
+    #[test]
+    fn truncated_unsupported_property_detail_is_malformed_message() {
+        let bytes = [
+            MSG_REQUEST_ERROR as u8,
+            0x05, // Length = 5 バイト
+            0x33, // Error Code = UNSUPPORTED_EXTENSION
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+            ERROR_DETAIL_UNSUPPORTED_PROPERTY as u8,
+            // 3 バイト vi64 の先頭バイトだけで残りが無い
+            0xC0,
+        ];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert_eq!(
+            err,
+            MessageError::MalformedMessage(
+                "control message body is shorter than the declared length"
+            ),
+            "Detail 値の varint 途中終端は MALFORMED_MESSAGE であること"
         );
     }
 

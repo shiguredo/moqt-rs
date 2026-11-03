@@ -359,7 +359,73 @@ mod mandatory_properties {
         assert!(props.has_unknown_mandatory());
     }
 
-    /// GREASE の Property Type は 0x4000-0x7FFF に入っていても unknown mandatory にしない
+    /// 未知の Mandatory Track Property の型を昇順・重複なしで列挙する
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は、理解できない
+    /// Mandatory Track Property ごとに 1 つの Error Detail を送ることを求める (SHOULD)。
+    /// 列挙には既知プロパティ (0x0E) と GREASE 予約値 (0x401D) を含めず、型の昇順に並べる。
+    #[test]
+    fn unknown_mandatory_types_lists_sorted_unique_types() {
+        let mut props = TrackProperties::new();
+        // 既知プロパティは未対応として報告しない
+        props.push(TrackProperty {
+            prop_type: 0x0E,
+            value: TrackPropertyValue::VarInt(128),
+        });
+        // GREASE 予約値も未対応として報告しない
+        props.push(TrackProperty {
+            prop_type: 0x401D,
+            value: TrackPropertyValue::Bytes(vec![0xAB]),
+        });
+        // 未知の必須プロパティを昇順でない順に積む
+        props.push(TrackProperty {
+            prop_type: 0x7FFF,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x4000,
+            value: TrackPropertyValue::VarInt(2),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x5001,
+            value: TrackPropertyValue::Bytes(vec![0xCD]),
+        });
+        assert_eq!(
+            props.unknown_mandatory_types(),
+            vec![0x4000, 0x5001, 0x7FFF],
+            "未知の必須プロパティの型だけを昇順で列挙すること"
+        );
+        assert!(props.has_unknown_mandatory());
+    }
+
+    /// 未知の必須プロパティが無ければ列挙は空になる
+    #[test]
+    fn unknown_mandatory_types_empty_when_no_unknown() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x02,
+            value: TrackPropertyValue::VarInt(100),
+        });
+        // GREASE 値 (0x401D) は 0x4000-0x7FFF に入るが未知の必須プロパティではない
+        props.push(TrackProperty {
+            prop_type: 0x401D,
+            value: TrackPropertyValue::Bytes(vec![0xAB]),
+        });
+        assert!(
+            props.unknown_mandatory_types().is_empty(),
+            "既知プロパティと GREASE 値だけなら列挙は空であること"
+        );
+        assert!(!props.has_unknown_mandatory());
+    }
+
+    /// 未知の必須プロパティを 1 つも持たない空の TrackProperties では列挙が空になる
+    #[test]
+    fn unknown_mandatory_types_empty_for_empty_properties() {
+        let props = TrackProperties::new();
+        assert!(props.unknown_mandatory_types().is_empty());
+    }
+
+    /// GREASE の Track Property は 0x4000-0x7FFF に入っていても unknown mandatory にしない
     ///
     /// draft-ietf-moq-transport-22 §16.8 (Properties) の Table 15 は GREASE の Property Type
     /// (`0x7f * N + 0x9D`) を Scope Any として予約しており、N = 128 の 0x401D から N = 256 の
@@ -399,6 +465,8 @@ mod mandatory_properties {
     /// Mandatory Track Property の検出漏れ (非退行) を同時に固定する。
     /// この等式は 0x4000-0x7FFF に既知の必須トラックプロパティが無い前提に依存するため、
     /// 将来 `TrackProperties::is_known_mandatory` に既知値を追加した場合は期待値を更新すること。
+    /// bool 判定 (`has_unknown_mandatory`) と型の列挙 (`unknown_mandatory_types`) の
+    /// 両方が同じ規則に従うことを確認する。
     #[test]
     fn mandatory_range_scan_matches_grease_exclusion() {
         for prop_type in MANDATORY_TRACK_PROPERTY_MIN..=MANDATORY_TRACK_PROPERTY_MAX {
@@ -411,10 +479,21 @@ mod mandatory_properties {
                     TrackPropertyValue::Bytes(vec![0xAB])
                 },
             });
+            let is_grease = shiguredo_moqt::grease::is_grease(prop_type);
             assert_eq!(
                 props.has_unknown_mandatory(),
-                !shiguredo_moqt::grease::is_grease(prop_type),
+                !is_grease,
                 "{prop_type:#x} の判定が GREASE 除外と一致すること"
+            );
+            let expected: Vec<u64> = if is_grease {
+                Vec::new()
+            } else {
+                vec![prop_type]
+            };
+            assert_eq!(
+                props.unknown_mandatory_types(),
+                expected,
+                "{prop_type:#x} の列挙が GREASE 除外と一致すること"
             );
         }
     }
@@ -618,6 +697,66 @@ mod immutable_properties {
         assert!(
             !props.has_unknown_mandatory(),
             "IMMUTABLE 内側の GREASE 値を unknown mandatory として扱わないこと"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側にある未知の必須プロパティも型として列挙する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both" に
+    /// 従い、mutable リストと内側の両方を探索する。内側の GREASE 値 (0x401D) と既知
+    /// プロパティ (0x0E) は列挙に含めない。
+    #[test]
+    fn unknown_mandatory_types_searches_inside_immutable() {
+        let inner = encode_inner(&[
+            (0x6000, TrackPropertyValue::VarInt(1)),
+            (0x401D, TrackPropertyValue::Bytes(vec![0xAB])),
+            (0x0E, TrackPropertyValue::VarInt(128)),
+        ]);
+        let mut props = with_immutable(inner);
+        props.push(TrackProperty {
+            prop_type: 0x5000,
+            value: TrackPropertyValue::VarInt(2),
+        });
+        assert_eq!(
+            props.unknown_mandatory_types(),
+            vec![0x5000, 0x6000],
+            "mutable と IMMUTABLE 内側の未知必須型を合わせて昇順で列挙すること"
+        );
+    }
+
+    /// mutable と IMMUTABLE 内側に同じ未知必須型があっても列挙は 1 回だけになる
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は 1 型につき 1 Detail を
+    /// 送ることを求める (SHOULD) ため、同じ型を重複して列挙しない。
+    #[test]
+    fn unknown_mandatory_types_deduplicates_across_mutable_and_immutable() {
+        let inner = encode_inner(&[(0x4000, TrackPropertyValue::VarInt(1))]);
+        let mut props = with_immutable(inner);
+        props.push(TrackProperty {
+            prop_type: 0x4000,
+            value: TrackPropertyValue::VarInt(2),
+        });
+        assert_eq!(
+            props.unknown_mandatory_types(),
+            vec![0x4000],
+            "同じ型は 1 回だけ列挙すること"
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES を含む TrackProperties を往復しても列挙が変わらない
+    #[test]
+    fn unknown_mandatory_types_survives_roundtrip() {
+        let inner = encode_inner(&[(0x4000, TrackPropertyValue::VarInt(1))]);
+        let props = with_immutable(inner);
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("IMMUTABLE を含む TrackProperties は encode 可能");
+        let decoded = TrackProperties::decode(&buf).expect("encode した IMMUTABLE は decode 可能");
+        assert_eq!(
+            decoded.unknown_mandatory_types(),
+            vec![0x4000],
+            "wire 経由でも内側の未知必須型を列挙できること"
         );
     }
 

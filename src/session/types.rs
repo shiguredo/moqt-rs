@@ -328,10 +328,15 @@ pub enum SessionEvent {
         /// 構造化されたエラー詳細 (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
         ///
         /// Error Code = REDIRECT の場合は REDIRECT Detail を必ず 1 つ含む
-        /// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
+        /// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。Error Code =
+        /// UNSUPPORTED_EXTENSION の場合は未対応の Mandatory Track Property の型ごとに
+        /// UNSUPPORTED_PROPERTY Detail を含みうる
+        /// (draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY))。
         /// 未知の Detail と、適用されない Error Code の Detail は受信時に無視されるため
         /// 含まれない (§9.4.2)。REDIRECT の内容は
-        /// [`ErrorDetails::redirect`](crate::message::ErrorDetails::redirect) で取得する。
+        /// [`ErrorDetails::redirect`](crate::message::ErrorDetails::redirect)、未対応の型は
+        /// [`ErrorDetails::unsupported_properties`](crate::message::ErrorDetails::unsupported_properties)
+        /// で取得する。
         error_details: ErrorDetails,
     },
     /// bidi request stream の終端 (または REQUEST_ERROR 等による) で request が

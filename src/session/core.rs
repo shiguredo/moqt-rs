@@ -2599,6 +2599,24 @@ impl Session {
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     #[track_caller]
     pub(super) fn emit_request_error(&mut self, request_id: u64, error_code: u64, reason: &str) {
+        self.emit_request_error_with_details(request_id, error_code, reason, ErrorDetails::new());
+    }
+
+    /// Error Details 付きの REQUEST_ERROR を peer 宛に送出する
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2 (Error Details) の適用規則に従い、`error_details`
+    /// は `error_code` に対して適用される Detail だけを含めること。適用外の Detail を含むと
+    /// `ControlMessage::RequestError` の encode が `ProtocolViolation` で失敗し、peer へ
+    /// メッセージが届かない (適用規則の検証は encode 層に集約する)。
+    /// その他の契約・副作用は [`Session::emit_request_error`] と同じ。
+    #[track_caller]
+    pub(super) fn emit_request_error_with_details(
+        &mut self,
+        request_id: u64,
+        error_code: u64,
+        reason: &str,
+        error_details: ErrorDetails,
+    ) {
         // ローカル専用コードが wire に流出しないよう、REQUEST_ERROR レジストリの
         // INTERNAL_ERROR に置換する (`send_request_error` と同じ置換を最終防御として行う)
         let error_code = if is_local_error_code(error_code) {
@@ -2621,7 +2639,7 @@ impl Session {
             retry_interval: 0,
             reason: ReasonPhrase::new(reason)
                 .expect("emit_request_error reason must be <= 1024 bytes"),
-            error_details: ErrorDetails::new(),
+            error_details,
         });
         // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES):
         // "Each REQUEST_OK or REQUEST_ERROR response restores one credit on that stream"。

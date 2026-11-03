@@ -9,7 +9,7 @@
 - REQUEST_OK / REQUEST_ERROR
   - PUBLISH への肯定応答 PUBLISH_OK は REQUEST_OK の別名 (共有ワイヤメッセージ)
   - REQUEST_OK が運べるパラメータは応答の種類ごとの許可集合に限る (codec 層は EXPIRES / LARGEST_OBJECT の和集合で検証し、種類ごとの厳密な検証はセッション層が行う)
-  - REQUEST_ERROR は Error Details (Delta Type 付き KVP) の REDIRECT Error Detail (`0x01`) に対応し、REDIRECT (`0x34`) では必須
+  - REQUEST_ERROR は Error Details (Delta Type 付き KVP) の REDIRECT Error Detail (`0x01`) と UNSUPPORTED_PROPERTY Error Detail (`0x02`) に対応する。REDIRECT (`0x34`) では REDIRECT Detail が必須で、UNSUPPORTED_EXTENSION (`0x33`) では未対応の Mandatory Track Property の型ごとに 1 つ載せる
 - PUBLISH / PUBLISH_DONE
   - PUBLISH は Subscription Parameters を運び、auth token のコピーを禁じる
 - PUBLISH_STATE_NOTIFY

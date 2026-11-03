@@ -10,8 +10,9 @@ use crate::error::{
     STREAM_CANCELLED,
 };
 use crate::message::{
-    ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify,
-    ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    ErrorDetail, ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone,
+    PublishStateNotify, ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe,
+    SubscribeOk, UnsupportedProperty,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{
@@ -345,13 +346,26 @@ impl Session {
             );
             return Ok(());
         }
-        // draft §3.7 (Mandatory to Understand Track Properties): 未知の必須トラックプロパティを含む PUBLISH は
-        // REQUEST_ERROR (UNSUPPORTED_EXTENSION) で拒否する
-        if publish.track_properties.has_unknown_mandatory() {
-            self.emit_request_error(
+        // draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties):
+        // 未知の Mandatory Track Property を含む PUBLISH は REQUEST_ERROR
+        // (UNSUPPORTED_EXTENSION) で拒否する。理解できなかった型は
+        // draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) の Error Detail で
+        // 1 型 1 Detail として伝える (同節の SHOULD)。複数型をまとめて伝えられるよう
+        // 複数インスタンスを許す型として生成する。型の列挙は IMMUTABLE_PROPERTIES の内側も
+        // 対象にし、GREASE は対象外になる (TrackProperties::unknown_mandatory_types)。
+        let unsupported_types = publish.track_properties.unknown_mandatory_types();
+        if !unsupported_types.is_empty() {
+            let mut error_details = ErrorDetails::new();
+            for property_type in unsupported_types {
+                error_details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                    property_type,
+                }));
+            }
+            self.emit_request_error_with_details(
                 request_id,
                 REQUEST_UNSUPPORTED_EXTENSION,
                 "unsupported mandatory extension",
+                error_details,
             );
             return Ok(());
         }

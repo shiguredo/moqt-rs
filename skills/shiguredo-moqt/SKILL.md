@@ -132,7 +132,7 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | --- | --- |
 | `Setup(Setup)` | セッション確立 |
 | `Goaway(Goaway)` | セッション終了通知 |
-| `RequestOk` / `RequestError` | 共通応答 (PUBLISH への PUBLISH_OK は `RequestOk` の別名)。`RequestError` は Error Details (REDIRECT Error Detail) を運ぶ |
+| `RequestOk` / `RequestError` | 共通応答 (PUBLISH への PUBLISH_OK は `RequestOk` の別名)。`RequestError` は Error Details (REDIRECT / UNSUPPORTED_PROPERTY Error Detail) を運ぶ |
 | `Subscribe` / `SubscribeOk` | SUBSCRIBE |
 | `Publish` / `PublishDone` | PUBLISH |
 | `PublishStateNotify` | 状態通知 |
@@ -293,7 +293,7 @@ pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 | `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 |
 | `FetchOkReceived { request_id, end_location, end_of_track }` | FETCH_OK 受信 |
 | `PublishDoneReceived { request_id, status_code, stream_count, reason }` | PUBLISH_DONE 受信 |
-| `RequestErrorReceived { request_id, error_code, retry_interval, reason, error_details }` | REQUEST_ERROR 受信 (`error_details.redirect()` で REDIRECT を取得) |
+| `RequestErrorReceived { request_id, error_code, retry_interval, reason, error_details }` | REQUEST_ERROR 受信 (`error_details.redirect()` で REDIRECT、`error_details.unsupported_properties()` で未対応 Property Type の一覧を取得) |
 | `RequestTerminated { request_id, kind, reason }` | request が Terminated に遷移 |
 | `GoawayReceived { new_session_uri, timeout, on_request_stream }` | GOAWAY 受信 |
 | `GoawayDrainReady` | 自側 GOAWAY の drain 完了 (open request が無くなった。NO_ERROR で閉じてよい) |
