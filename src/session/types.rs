@@ -686,6 +686,28 @@ pub enum DatagramAcceptance {
     Padding,
 }
 
+/// `Session::recv_fetch_header` の受理結果 (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header))
+///
+/// §11.4.1 は FETCH_HEADER の Request ID が未知の場合の扱いを MUST で定めていない。一方
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1 (Opening and Closing Fill Fetch
+/// Streams) は、publisher が PUBLISH を送るときに FILL_PARAMETERS が載っていれば初回 fill の
+/// fill fetch stream を開くと定める。PUBLISH は bidi stream、fill fetch stream は uni stream
+/// であり両者の到着順序は保証されないため、PUBLISH の処理前に初回 fill が届きうる。
+/// したがって未知の Request ID はセッション終了ではなく再試行可能な結果として返し、
+/// 保留の上限・期限を設けたうえで caller に再通知させる。
+/// この節番号・規則は draft 由来であり将来 draft 改版で変わる可能性がある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchHeaderAcceptance {
+    /// 受理し、stream を帰属先の fetch または subscription に登録した
+    Accepted,
+    /// 対応する要求が未登録のため受理しなかった。状態は一切変更していない
+    ///
+    /// caller は stream と decode 済みヘッダを有限の上限・期限で保留し、対応する PUBLISH を
+    /// 受理した後に [`Session::recv_fetch_header`](crate::session::core::Session::recv_fetch_header)
+    /// を再通知する。期限超過時は stream を破棄して Session の会計を解放する。
+    RequestNotRegistered,
+}
+
 // ─── bidi request stream のライフサイクル型 ─────────────────
 //
 // draft-ietf-moq-transport-22 §6.3 (Session initialization) / §6.4.2.3 (Request Cancellation and Rejection)

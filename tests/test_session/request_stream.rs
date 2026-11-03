@@ -1031,6 +1031,99 @@ fn unsupported_request_fill_parameters_inner_duplicate_range_filters_is_rejected
     );
 }
 
+/// PUBLISH の FILL_PARAMETERS 内側の Range も MAX_FILTER_RANGES の総数に合算する
+///
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL の内側の
+/// パラメータは "a sequence of Parameters that apply to the fill fetch stream" であり、
+/// §9.1.6 (MAX FILTER RANGES) の総数は "all Range filter ... parameters for a given
+/// subscription or fetch" であるため内側も合算する。§9.8 (PUBLISH) は PUBLISH も
+/// FILL_PARAMETERS を運べるため、PUBLISH でも同じ合算が適用される。
+#[test]
+fn publish_fill_inner_range_filters_count_toward_max_filter_ranges() {
+    use shiguredo_moqt::message::Publish;
+
+    let (_client, mut server) = establish_pair_with_options(
+        SetupOptions::new(),
+        opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 1),
+    );
+    // Range Filter (0x25-0x28) は PUBLISH の外側では許可されないため (§9.19.1 (Parameter Scope))、
+    // 上限に数えられるのは FILL の内側だけである。内側に 2 Range を置き、上限 1 を超えることを見る
+    let mut inner = MessageParameters::new();
+    inner.push(two_range_subgroup_filter_param());
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    });
+
+    server
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters,
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert!(
+        server.subscription(0).is_none(),
+        "拒否した PUBLISH の subscription を作らないこと"
+    );
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filters exceed MAX_FILTER_RANGES",
+    );
+}
+
+/// PUBLISH の FILL_PARAMETERS 内側の重複 Range Filter も INVALID_FILTER で拒否する
+///
+/// draft-ietf-moq-transport-23 §3.3.2 (Range Filters) の重複の MUST は FILL の内側にも
+/// 適用される (§9.19.15 が内側も §9.19 の Parameters として符号化すると定める)。
+/// 上限判定に落ちないよう MAX_FILTER_RANGES=2 に宣言し、重複検出そのものを固定する。
+#[test]
+fn publish_fill_inner_duplicate_range_filters_is_rejected() {
+    use shiguredo_moqt::message::Publish;
+
+    let (_client, mut server) = establish_pair_with_options(
+        SetupOptions::new(),
+        opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 2),
+    );
+    let mut inner = MessageParameters::new();
+    inner.push(one_range_subgroup_filter_with_set_id(0));
+    inner.push(one_range_subgroup_filter_with_set_id(0));
+    let mut parameters = MessageParameters::new();
+    parameters.push(MessageParameter {
+        param_type: PARAM_FILL_PARAMETERS,
+        value: MessageParameterValue::FillParameters(inner),
+    });
+
+    server
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: 0,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 1,
+            parameters,
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("INVALID_FILTER 拒否は Result::Ok であること");
+    assert_eq!(server.state(), SessionState::Established);
+    assert!(
+        server.subscription(0).is_none(),
+        "拒否した PUBLISH の subscription を作らないこと"
+    );
+    assert_request_error_with_reason(
+        &mut server,
+        0,
+        REQUEST_INVALID_FILTER,
+        "Range Filter validation failed inside FILL_PARAMETERS",
+    );
+}
+
 /// Length=0 の Range Filter (Range 0 個) は上限判定を通過し NOT_SUPPORTED のまま拒否する
 ///
 /// draft-ietf-moq-transport-22 §3.3.2 は受信側に Range 数 0 の拒否 MUST を課していないため、

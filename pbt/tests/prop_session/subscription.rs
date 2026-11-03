@@ -752,3 +752,252 @@ fn request_update_groups_apply_in_receive_order() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// FILL_PARAMETERS 付き PUBLISH の初回 fill は「unpaused かつ Largest Object 既知」のときだけ開く
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) は、publisher が
+/// FILL_PARAMETERS 付き PUBLISH を送るときに unpaused なら初回 fill の fill fetch stream を
+/// 開くと定める。paused (PAUSED=1) では開かず、FILL_PARAMETERS を持たない PUBLISH でも開かない
+/// (§9.19.15 (FILL PARAMETERS Parameter))。Largest Object が未知なら fill range が定まらない
+/// ため開かない (§3.4 (Fill Semantics))。
+///
+/// 開く場合は 1 本だけで、FETCH_HEADER に載せる Request ID は PUBLISH の Request ID
+/// (subscription の Request ID) であり、fill range の終端は Largest Object でクランプされる。
+#[test]
+fn publish_fill_opens_only_when_unpaused_and_largest_known() -> noprop::TestResult {
+    use shiguredo_moqt::message::common::Location;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS, PARAM_PAUSED,
+    };
+    use shiguredo_moqt::session::types::SessionState;
+
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let has_fill = noprop::sample_bool(ctx);
+        let paused = match noprop::sample_u8(ctx) % 3 {
+            0 => None,
+            1 => Some(0),
+            _ => Some(1),
+        };
+        let largest_known = noprop::sample_bool(ctx);
+        let largest = Location {
+            group_id: noprop::sample_u64_in(ctx, 0..=3),
+            object_id: noprop::sample_u64_in(ctx, 0..=3),
+        };
+
+        // 1 本の SUBSCRIBE を確立し、publisher (server) が Largest Object を観測できる状態にする
+        let (mut client, mut server) = establish_pair();
+        let ns = TrackNamespace::new(vec![b"prop".to_vec()]).expect("正当な namespace である");
+        let sub_rid = client
+            .send_subscribe(ns.clone(), b"fill".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, subscribe) = take_send_request(&mut client);
+        server
+            .recv_request(subscribe)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(sub_rid, ok)
+            .expect("テストフィクスチャの前提条件を満たす");
+        if largest_known {
+            let stream_id = DataStreamId(900);
+            server
+                .send_subgroup_header(
+                    stream_id,
+                    sub_rid,
+                    &SubgroupHeader {
+                        track_alias: 1,
+                        group_id: largest.group_id,
+                        subgroup_id: SubgroupIdMode::Explicit(0),
+                        publisher_priority: Some(128),
+                        has_properties: false,
+                        end_of_group: false,
+                        first_object: false,
+                    },
+                )
+                .expect("テストフィクスチャの前提条件を満たす");
+            server
+                .send_subgroup_object(stream_id, largest.object_id, None)
+                .expect("テストフィクスチャの前提条件を満たす");
+            server
+                .send_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+                .expect("テストフィクスチャの前提条件を満たす");
+        }
+
+        // FILL / PAUSED の組合せを変えた PUBLISH を送る
+        let mut parameters = MessageParameters::new();
+        if has_fill {
+            parameters.push(MessageParameter {
+                param_type: PARAM_FILL_PARAMETERS,
+                value: MessageParameterValue::FillParameters(MessageParameters::new()),
+            });
+        }
+        if let Some(value) = paused {
+            parameters.push(MessageParameter {
+                param_type: PARAM_PAUSED,
+                value: MessageParameterValue::Uint8(value),
+            });
+        }
+        let publish_rid = server
+            .send_publish(
+                ns,
+                b"fill".to_vec(),
+                2,
+                parameters,
+                TrackProperties::new(),
+            )
+            .expect("FILL_PARAMETERS 付き PUBLISH を送信できること");
+
+        // 開設条件: FILL を持ち、paused でなく、Largest Object が既知であること
+        let expected = has_fill && paused != Some(1) && largest_known;
+        let mut fills = Vec::new();
+        while let Some(event) = server.poll_event() {
+            match event {
+                SessionEvent::OpenFillFetchStream {
+                    request_id,
+                    subscription_request_id,
+                    start,
+                    end,
+                } => fills.push((request_id, subscription_request_id, start, end)),
+                SessionEvent::CloseSession(err) => {
+                    panic!("PUBLISH の送信でセッションが閉じてはいけない: {err:?}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            fills.len(),
+            usize::from(expected),
+            "初回 fill の開設数が条件と一致すること: has_fill={has_fill}, paused={paused:?}, largest_known={largest_known}"
+        );
+        if expected {
+            let (request_id, subscription_request_id, start, end) = fills[0];
+            assert_eq!(
+                request_id, publish_rid,
+                "初回 fill の FETCH_HEADER には PUBLISH の Request ID を載せること"
+            );
+            assert_eq!(
+                subscription_request_id, publish_rid,
+                "fill 対象 subscription は PUBLISH が作る subscription であること"
+            );
+            assert_eq!(
+                (start.group_id, start.object_id),
+                (0, 0),
+                "開始は Track の先頭であること"
+            );
+            assert_eq!(
+                (end.group_id, end.object_id),
+                (largest.group_id, largest.object_id),
+                "終端は Largest Object でクランプされること"
+            );
+        }
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "PUBLISH の送信でセッションが終了しないこと"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// PUBLISH と初回 fill の到着順がどちらでも、subscriber は初回 fill を受理する
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): 初回 fill は
+/// PUBLISH の bidi stream とは別の uni stream で届くため、PUBLISH の処理前に到着しうる。
+/// `Session` は未知の Request ID でセッションを閉じず、`FetchHeaderAcceptance::RequestNotRegistered`
+/// を返す (§11.4.1 (Fetch Header) は未知 ID の扱いを定めない)。caller は保留して PUBLISH の
+/// 受理後に再通知するため、どちらの順序でも最終的に受理される。
+#[test]
+fn publish_initial_fill_is_accepted_in_either_arrival_order() -> noprop::TestResult {
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_FILL_PARAMETERS,
+    };
+    use shiguredo_moqt::session::types::{FetchHeaderAcceptance, SessionState};
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+    use shiguredo_moqt::stream::fetch::FetchHeader;
+
+    let mut runner = test_runner()?;
+    runner.run(128, |ctx| {
+        let publish_first = noprop::sample_bool(ctx);
+        let track_alias = noprop::sample_u64_in(ctx, 1..=16);
+
+        let (mut client, mut server) = establish_pair();
+        let ns = TrackNamespace::new(vec![b"prop".to_vec()]).expect("正当な namespace である");
+        // PUBLISH は server (publisher) が発行するため、Request ID は server 側の採番である
+        let publish_rid = server
+            .next_local_request_id()
+            .expect("テストフィクスチャの前提条件を満たす");
+        let publish = ControlMessage::Publish(Publish {
+            request_id: publish_rid,
+            track_namespace: ns,
+            track_name: b"fill".to_vec(),
+            track_alias,
+            parameters: {
+                let mut parameters = MessageParameters::new();
+                parameters.push(MessageParameter {
+                    param_type: PARAM_FILL_PARAMETERS,
+                    value: MessageParameterValue::FillParameters(MessageParameters::new()),
+                });
+                parameters
+            },
+            track_properties: TrackProperties::new(),
+        });
+        let stream_id = DataStreamId(901);
+        let header = FetchHeader {
+            request_id: publish_rid,
+        };
+
+        if publish_first {
+            client
+                .recv_request(publish)
+                .expect("FILL_PARAMETERS 付き PUBLISH を受理できること");
+            client
+                .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+                .expect("テストフィクスチャの前提条件を満たす");
+            assert_eq!(
+                client
+                    .recv_fetch_header(stream_id, &header)
+                    .expect("初回 fill の FETCH_HEADER が受理されること"),
+                FetchHeaderAcceptance::Accepted
+            );
+        } else {
+            client
+                .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+                .expect("テストフィクスチャの前提条件を満たす");
+            assert_eq!(
+                client
+                    .recv_fetch_header(stream_id, &header)
+                    .expect("先着した初回 fill でセッションを閉じないこと"),
+                FetchHeaderAcceptance::RequestNotRegistered,
+                "PUBLISH が未登録であることを再試行可能な結果で返すこと"
+            );
+            client
+                .recv_request(publish)
+                .expect("FILL_PARAMETERS 付き PUBLISH を受理できること");
+            assert_eq!(
+                client
+                    .recv_fetch_header(stream_id, &header)
+                    .expect("PUBLISH の受理後の再通知が受理されること"),
+                FetchHeaderAcceptance::Accepted
+            );
+        }
+        client
+            .recv_fetch_entry(stream_id)
+            .expect("受理した fill stream の Object 通知が通ること");
+        client
+            .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+            .expect("fill stream の終端通知が通ること");
+        assert_eq!(
+            client.state(),
+            SessionState::Established,
+            "初回 fill の受理でセッションが終了しないこと"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}

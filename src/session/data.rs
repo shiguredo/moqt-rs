@@ -33,9 +33,10 @@ use super::subscription::validation::{
 };
 use super::types::{
     DEFAULT_PUBLISHER_GROUP_ORDER_ASCENDING, DataStreamId, DataStreamResetReason,
-    DatagramAcceptance, FetchState, PUBLISHER_PRIORITY_DEFAULT, RecvDataStreamError, RequestKind,
-    RequestStreamEnd, SendRequestError, SessionError, SessionEvent, SessionState, Subscription,
-    SubscriptionState, TerminationReason, TrackDataAcceptance, TrackRole,
+    DatagramAcceptance, FetchHeaderAcceptance, FetchState, PUBLISHER_PRIORITY_DEFAULT,
+    RecvDataStreamError, RequestKind, RequestStreamEnd, SendRequestError, SessionError,
+    SessionEvent, SessionState, Subscription, SubscriptionState, TerminationReason,
+    TrackDataAcceptance, TrackRole,
 };
 
 /// subscription がキャンセル由来 `Terminated` かどうかを判定する
@@ -2100,8 +2101,9 @@ impl Session {
     /// FETCH request 自体は既に `send_fetch` で
     /// 登録済みであることを前提にし、pending / established のどちらでも受理する。
     /// `Fetch` 状態を先に引き、なければ fill fetch stream として subscription を引く。
-    /// fill fetch stream の FETCH_HEADER は起因 SUBSCRIBE / REQUEST_UPDATE の
-    /// Request ID (= subscription の Request ID) を載せ、自側 `Subscriber` 役の
+    /// fill fetch stream の FETCH_HEADER は起因 SUBSCRIBE / PUBLISH / REQUEST_UPDATE の
+    /// Request ID を載せる (§6.4.2.1 (Request ID))。初回 fill の Request ID は
+    /// subscription の Request ID そのものなので、自側 `Subscriber` 役の
     /// `Pending` / `Established` subscription に対して受理する。
     /// PUBLISH_DONE 受信後の drain 中 (`publish_done` 付きの `Terminated`) は
     /// late-opening stream として受理し、Stream Count 集計にも加算する
@@ -2113,9 +2115,18 @@ impl Session {
     /// アプリが先に `forget_subscription` を呼んだ場合は解決できず拒否される。
     /// 同じく `Terminated` の fetch へ遅延して届いた FETCH 応答 stream も
     /// 破棄対象 stream として吸収する。
-    /// それ以外 (未知 ID / 非 subscriber 役 / 上記以外の `Terminated`) は
+    /// 非 subscriber 役や上記以外の `Terminated` は
     /// `UNEXPECTED_MESSAGE` または `ROLE_VIOLATION` でセッションを閉じる
     /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
+    ///
+    /// 未知の Request ID は §11.4.1 (Fetch Header) が扱いを定めていないため、セッションを
+    /// 閉じずに [`FetchHeaderAcceptance::RequestNotRegistered`] を返す。publisher は
+    /// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) に従い
+    /// PUBLISH を送るときに初回 fill の fill fetch stream を開くが、PUBLISH の bidi stream と
+    /// fill fetch stream の到着順序は保証されないため、PUBLISH の処理前に初回 fill が届きうる。
+    /// caller は stream と decode 済みヘッダを有限の上限・期限で保留し、PUBLISH の受理後に
+    /// 本 API を再通知すること (期限超過時は stream を破棄して会計を解放する)。
+    ///
     /// fill は複数本の同時存在を許すため `has_other_fetch_stream` 検証は行わない。
     /// なお FETCH と fill の判別は Session が行うため、アプリは request id 種別を
     /// 自前で管理する必要はない。
@@ -2123,12 +2134,12 @@ impl Session {
         &mut self,
         stream_id: DataStreamId,
         header: &FetchHeader,
-    ) -> Result<(), SessionError> {
+    ) -> Result<FetchHeaderAcceptance, SessionError> {
         self.require_established()?;
         // 破棄対象の保持集合に含まれる stream id (forget_fetch 後に保持した遅延 fetch stream) は
         // no-op で吸収する
         if self.data_streams.discarded.contains_key(&stream_id) {
-            return Ok(());
+            return Ok(FetchHeaderAcceptance::Accepted);
         }
         match self.data_streams.incoming.get(&stream_id) {
             Some(IncomingDataStream::AwaitingHeader {
@@ -2215,7 +2226,7 @@ impl Session {
                 // stream として吸収する。
                 if self.tolerates_late_data_stream(header.request_id) {
                     self.register_fetch_error_late_stream(stream_id, header.request_id);
-                    return Ok(());
+                    return Ok(FetchHeaderAcceptance::Accepted);
                 }
                 let err = SessionError::new(
                     SESSION_UNEXPECTED_MESSAGE,
@@ -2250,7 +2261,7 @@ impl Session {
                     return Err(err);
                 }
                 self.register_fetch_error_late_stream(stream_id, header.request_id);
-                return Ok(());
+                return Ok(FetchHeaderAcceptance::Accepted);
             }
             // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill fetch stream の
             // FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
@@ -2264,12 +2275,13 @@ impl Session {
             let Some(fill_subscription_request_id) =
                 self.resolve_fill_subscription(header.request_id)
             else {
-                let err = SessionError::new(
-                    SESSION_UNEXPECTED_MESSAGE,
-                    "FETCH_HEADER received for unknown request id",
-                );
-                self.fail(err.clone());
-                return Err(err);
+                // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                // publisher は PUBLISH を送るときに初回 fill の fill fetch stream を開く。
+                // PUBLISH の bidi stream と fill fetch stream の到着順序は保証されないため、
+                // PUBLISH の処理前に届いた初回 fill を未知の Request ID として扱ってセッションを
+                // 閉じてはならない。ここでは incoming の状態も変えず、caller が保留して
+                // 再通知できる結果を返す (§11.4.1 (Fetch Header) は未知 ID の扱いを定めない)。
+                return Ok(FetchHeaderAcceptance::RequestNotRegistered);
             };
             let fill_state = self
                 .subscriptions
@@ -2344,7 +2356,7 @@ impl Session {
                 .data_stream_last_activity_ms
                 .insert(stream_id, now_ms);
         }
-        Ok(())
+        Ok(FetchHeaderAcceptance::Accepted)
     }
 
     /// 自端点が Object Datagram を送信することを Session に通知する

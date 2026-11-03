@@ -179,11 +179,16 @@ const REQUEST_UPDATE_ALLOWED_PARAMS: &[u64] = &[
 
 /// PUBLISH で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-23 §9.19 各 Parameter 節の出現規定 (PUBLISH を含む) から
-/// 再導出した 9 種 (AUTHORIZATION_TOKEN / OBJECT_DELIVERY_TIMEOUT /
-/// SUBGROUP_DELIVERY_TIMEOUT / SUBSCRIBER_PRIORITY / GROUP_ORDER /
-/// LOCATION_FILTER / EXPIRES / LARGEST_OBJECT / PAUSED)。
+/// draft-ietf-moq-transport-23 §9.8 (PUBLISH) の Parameters の列挙 (OBJECT_DELIVERY_TIMEOUT /
+/// AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT / EXPIRES / LARGEST_OBJECT / PAUSED /
+/// SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS) と
+/// §9.19 各 Parameter 節の出現規定 (PUBLISH を含む) から再導出した 10 種。
 /// Range Filter 等の PUBLISH 出現規定を持たない型は含めない。
+///
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
+/// SUBSCRIBE / SUBSCRIBE_TRACKS / PUBLISH / REQUEST_UPDATE に出現可能とし、§3.4.1
+/// (Opening and Closing Fill Fetch Streams) は PUBLISH 送信時の FILL_PARAMETERS でも
+/// 初回 fill の fill fetch stream を開くと定める。
 ///
 /// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS):
 /// SUBSCRIBE_TRACKS 由来の PUBLISH には SUBSCRIBE_TRACKS の Parameters が
@@ -206,6 +211,7 @@ pub(crate) const PUBLISH_ALLOWED_PARAMS: &[u64] = &[
     PARAM_SUBSCRIBER_PRIORITY,
     PARAM_LOCATION_FILTER,
     PARAM_GROUP_ORDER,
+    PARAM_FILL_PARAMETERS,
 ];
 
 /// PUBLISH_STATE_NOTIFY で許可されるパラメータ型

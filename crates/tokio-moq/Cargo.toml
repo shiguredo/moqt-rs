@@ -46,3 +46,6 @@ tracing = "0.1"
 [dev-dependencies]
 # 結合テスト用の自己署名証明書生成 (暗号バックエンドは aws-lc-rs)
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
+# テストで tokio の時計を止める (start_paused / advance) ため test-util を有効にする。
+# full は通常依存で有効なため、ここでは足りない feature だけを足す
+tokio = { version = "1.54", features = ["test-util"] }

@@ -1,10 +1,10 @@
-//! FILL_PARAMETERS と fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))
+//! FILL_PARAMETERS と fill fetch stream (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))
 //!
-//! Joining FETCH の廃止に伴い、SUBSCRIBE / REQUEST_UPDATE の FILL_PARAMETERS
-//! パラメータ (Type 0x23) が fill fetch stream を要求する。publisher は
-//! unpaused (PAUSED=0) で FILL_PARAMETERS 付きメッセージを処理したときに
-//! fill fetch stream を開く (§3.4.1 (Opening and Closing Fill Fetch Streams))。
-//! 将来 draft 側で変更される可能性がある。
+//! FILL_PARAMETERS パラメータ (Type 0x23) が載った SUBSCRIBE / REQUEST_UPDATE を処理した
+//! publisher、および FILL_PARAMETERS 付きの PUBLISH を送る publisher は、unpaused
+//! (PAUSED=0) のときに fill fetch stream を開く (§3.4.1 (Opening and Closing Fill Fetch
+//! Streams))。開設するのは常に publisher 側であり、PUBLISH を受けて PUBLISH_OK を返す
+//! subscriber は開設しない。将来 draft 側で変更される可能性がある。
 
 use super::super::core::Session;
 use super::super::types::{SessionError, SessionEvent, SubscriptionState, TrackRole};
@@ -16,7 +16,7 @@ use crate::message_parameter::{
 };
 
 /// 送信前の FILL_PARAMETERS 事前検証 (Table 7 スコープ + 内側 LOCATION_FILTER)
-/// (draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter))
+/// (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))
 ///
 /// 外側 scope と同様、request_id 発行・状態更新より前に検証し、不正 inner の
 /// 送出と孤児状態 (登録済みだが I/O 層 encode で失敗する) を防ぐ。
@@ -49,7 +49,7 @@ pub(super) fn validate_outgoing_fill_parameters(
 /// (fill range が空、Largest Object より後に始まる、Largest Object が未知) は `None` を返す。
 /// 終端は Largest Object でクランプする (§3.4)。
 ///
-/// draft-ietf-moq-transport-22 §3.4 (Fill Semantics) / §3.4.1 (Opening and
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) / §3.4.1 (Opening and
 /// Closing Fill Fetch Streams):
 /// - fill range は FILL 内側の LOCATION_FILTER、省略時は `subscription_filter`
 ///   (subscription の Location filter)、どちらもなければ track 全体
@@ -73,7 +73,7 @@ fn should_open_fill_stream(
 ) -> Option<(Location, Location)> {
     let largest = largest?;
     // 内側 LOCATION_FILTER → subscription filter → track 全体の順で fill range を決める。
-    // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): 内側の Location Filter Type 0x00
+    // draft-ietf-moq-transport-23 §3.4 (Fill Semantics): 内側の Location Filter Type 0x00
     // (None) は track 全体 (Largest Object まで) を指し、内側を省略した場合は
     // subscription の Location filter を継承する。両者を区別するため 3 状態で判定する。
     let filter: Option<LocationFilter> = match fill.location_filter_update() {
@@ -110,7 +110,7 @@ fn should_open_fill_stream(
         return None;
     }
     // 終端の指定が無い filter は Largest Object までを range とする。
-    // draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill range は Largest Object を
+    // draft-ietf-moq-transport-23 §3.4 (Fill Semantics): fill range は Largest Object を
     // 超えない。EndObject / EndGroup を明示する filter (Type 0x03 / 0x04) でも
     // Largest Object を超える分は要求できないため、Largest Object でクランプする
     let end = end.unwrap_or(*largest);
@@ -125,24 +125,32 @@ fn should_open_fill_stream(
 impl Session {
     /// FILL_PARAMETERS 付きメッセージ処理時の fill fetch stream 開設判定と通知
     ///
-    /// draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams) /
+    /// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) /
     /// draft-ietf-moq-transport-23 §3.1.1 (Pausing Subscriptions):
-    /// unpaused (PAUSED=0) で FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を処理し、
+    /// unpaused (PAUSED=0) で FILL_PARAMETERS 付き SUBSCRIBE / REQUEST_UPDATE を処理した
+    /// publisher、および FILL_PARAMETERS 付き PUBLISH を送る publisher は、
     /// fill range が空でなく Largest Object より後に始まらない場合に
     /// `SessionEvent::OpenFillFetchStream` を発火する。paused (PAUSED=1) での運搬や
     /// FILL なし REQUEST_UPDATE では発火しない。
+    ///
+    /// 開設するのは自側が publisher 役の subscription に限る。PUBLISH を受けて
+    /// PUBLISH_OK を返す subscriber は fill を配送される側であり、fill fetch stream を
+    /// 開いてはならない (§3.4 が開設主体を publisher と定める)。
+    ///
     /// `fill_request_id` は fill fetch stream の FETCH_HEADER に載せる起因メッセージの
     /// Request ID である (SUBSCRIBE / PUBLISH 起因なら subscription の Request ID、
     /// REQUEST_UPDATE 起因なら REQUEST_UPDATE 自身の Request ID で、§6.4.2.1 により
     /// 両者は一致しない)。`subscription_request_id` は fill 対象 subscription の
     /// Request ID で、開設判定にだけ使う。
+    /// `fill` は当該メッセージの FILL_PARAMETERS 内側パラメータ群
+    /// (`MessageParameters::fill_parameters`) で、FILL_PARAMETERS を持たない場合は `None`。
     /// `filter_view` は処理後観点の subscription filter
-    /// (SUBSCRIBE なら新規 filter、REQUEST_UPDATE なら累積後の filter) を渡す。
+    /// (SUBSCRIBE / PUBLISH なら新規 filter、REQUEST_UPDATE なら累積後の filter) を渡す。
     pub(super) fn maybe_open_fill_stream(
         &mut self,
         fill_request_id: u64,
         subscription_request_id: u64,
-        parameters: &MessageParameters,
+        fill: Option<&MessageParameters>,
         filter_view: Option<LocationFilter>,
         paused: bool,
     ) {
@@ -152,7 +160,7 @@ impl Session {
         if paused {
             return;
         }
-        let Some(fill) = parameters.fill_parameters() else {
+        let Some(fill) = fill else {
             return;
         };
         let Some(subscription) = self.subscriptions.get(&subscription_request_id) else {
@@ -188,7 +196,7 @@ impl Session {
 
     /// fill fetch stream の Request ID から subscription の Request ID を解決する
     ///
-    /// draft-ietf-moq-transport-22 §3.4 (Fill Semantics): fill fetch stream の
+    /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics): fill fetch stream の
     /// FETCH_HEADER は起因メッセージの Request ID を載せる。初回 fill は
     /// SUBSCRIBE / PUBLISH の Request ID (= subscription の Request ID そのもの) で、
     /// REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の Request ID である。
@@ -198,6 +206,10 @@ impl Session {
     /// 別 subscription の Request ID と偶然一致しても、起因メッセージの
     /// subscription へ帰属させる。
     /// 対応先の subscription が既に破棄されている場合は `None` を返す。
+    ///
+    /// `None` は「対応する要求がまだ登録されていない」ことを意味しうる。
+    /// PUBLISH の処理前に初回 fill が届く場合があるため、呼び出し側
+    /// (`Session::recv_fetch_header`) はこの結果だけでセッションを閉じない。
     pub(crate) fn resolve_fill_subscription(&self, request_id: u64) -> Option<u64> {
         if let Some(&subscription_request_id) = self.fill_request_subscriptions.get(&request_id)
             && self.subscriptions.contains_key(&subscription_request_id)

@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use crate::group_switch::{GroupSwitchHandle, SharedGroupSwitchGate};
 use bytes::Bytes;
-use shiguredo_moqt::error::MessageError;
+use shiguredo_moqt::error::{MessageError, STREAM_CANCELLED};
 use shiguredo_moqt::loc::{
     LocProperties, LocPropertyValue, PROP_AUDIO_CONFIG, PROP_TIMESCALE, PROP_TIMESTAMP,
     PROP_VIDEO_CONFIG, PROP_VIDEO_FRAME_MARKING,
@@ -44,7 +44,7 @@ use shiguredo_moqt::{
     name::parse_namespace, name::serialize_namespace, session::types::DataStreamId,
     session::types::SessionEvent, stream::decoder::DecodedFetchEntry,
     stream::decoder::DecodedSubgroupObject, stream::decoder::FetchStreamDecoder,
-    stream::decoder::SubgroupStreamDecoder,
+    stream::decoder::SubgroupStreamDecoder, stream::fetch::FetchHeader,
 };
 
 use crate::catalog;
@@ -781,7 +781,8 @@ use tokio_moq::error::{
     data_stream_termination_code, normalize_publish_done_code, session_error_code,
 };
 use tokio_moq::moqt_client::{
-    ClientEvent, DataPlaneHandle, MoqtClient, StreamRead, SubscribeResult,
+    ClientEvent, DataPlaneHandle, FetchHeaderRegistration, FetchHeaderResolution, MoqtClient,
+    StreamRead, SubscribeResult,
 };
 use tokio_moq::transport;
 use tokio_moq::webtransport::WtSessionState;
@@ -4113,6 +4114,75 @@ async fn receive_catalog(
     })
 }
 
+/// 破棄する fetch stream の会計を解放し、peer に STOP_SENDING を送出する
+///
+/// 保留の期限・上限の超過では [`DataPlaneHandle`] が Session の会計を解放済みであるため、
+/// `recv_data_stream_closed` を送ると「unknown stream id」になる。ただし期限到達と PUBLISH の
+/// 受理が競合した場合は受理済みの stream を取り逃す可能性があるため、`send_data_stream_stop_sending`
+/// で会計を解放し直す (未登録ならエラーになるだけで副作用はない)。
+/// peer へは「この stream は不要」を STOP_SENDING で伝える (draft-ietf-moq-transport-23 §12.5
+/// (Stream Reset Error Codes) の CANCELLED)。
+async fn stop_sending_discarded_fetch_stream(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+) {
+    let _ = data_plane.send_data_stream_stop_sending(stream_id);
+    if let Err(e) = stream.stop_sending(STREAM_CANCELLED).await {
+        tracing::warn!(
+            "Failed to send STOP_SENDING for a discarded fetch stream: stream_id={}, {e}",
+            stream_id.0
+        );
+    }
+}
+
+/// FETCH_HEADER を Session に登録し、受理されるまで待つ
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): FILL_PARAMETERS
+/// 付き PUBLISH を送った publisher は初回 fill の fill fetch stream を開く。PUBLISH と fill の
+/// 到着順序は保証されないため、Session が未登録の Request ID を返した場合は
+/// [`DataPlaneHandle::wait_fetch_header_registration`] で PUBLISH の受理 (または保留の期限・
+/// 上限の超過) を待つ。保留の期限・上限を超えた場合は stream と Session の会計が
+/// `DataPlaneHandle` 側で破棄されるため、本関数は `false` を返して読み取りを打ち切らせる。
+///
+/// 読み切り (`drain_registered_stream_to_end`) は呼び出し側の責務である。登録できなかった
+/// stream は Session の会計が既に無いため、drain せずに STOP_SENDING で打ち切る。
+async fn register_fetch_header(
+    stream: &mut transport::RecvStream,
+    data_plane: &DataPlaneHandle,
+    stream_id: DataStreamId,
+    fetch_header: &FetchHeader,
+) -> Result<bool> {
+    match data_plane.recv_fetch_header(stream_id, fetch_header)? {
+        FetchHeaderRegistration::Accepted => Ok(true),
+        FetchHeaderRegistration::Pending(pending) => {
+            match data_plane.wait_fetch_header_registration(pending).await {
+                FetchHeaderResolution::Accepted => Ok(true),
+                FetchHeaderResolution::Discarded => {
+                    tracing::warn!(
+                        "Discarded a fetch stream whose request was not registered before the \
+                         hold expired: stream_id={}, request_id={}",
+                        stream_id.0,
+                        fetch_header.request_id,
+                    );
+                    stop_sending_discarded_fetch_stream(stream, data_plane, stream_id).await;
+                    Ok(false)
+                }
+            }
+        }
+        FetchHeaderRegistration::Rejected => {
+            tracing::warn!(
+                "Discarded a fetch stream because too many fetch headers are awaiting their \
+                 PUBLISH: stream_id={}, request_id={}",
+                stream_id.0,
+                fetch_header.request_id,
+            );
+            stop_sending_discarded_fetch_stream(stream, data_plane, stream_id).await;
+            Ok(false)
+        }
+    }
+}
+
 /// fill fetch stream (FETCH 系の uni stream) を読み切り、catalog Object を取り出す
 ///
 /// 読み出しの終端検知は `receive_registered_stream_data` に任せる。同関数が
@@ -4142,7 +4212,14 @@ async fn read_catalog_fetch_stream(
             }
         }
     };
-    data_plane.recv_fetch_header(stream_id, &fetch_header)?;
+    // 自側が発行した購読の fill であるため Request ID は既知だが、PUBLISH 起点の fill と
+    // 同じ経路を通す (登録の成否を 1 か所に集約する)
+    if !register_fetch_header(stream, data_plane, stream_id, &fetch_header).await? {
+        return Err(Error::Other(format!(
+            "fetch header was discarded before registration: request_id={}",
+            fetch_header.request_id,
+        )));
+    }
     if fetch_header.request_id != expected_request_id {
         let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
         return Err(Error::Other(format!(
@@ -4708,9 +4785,12 @@ async fn handle_stream_body(
     match stream_type {
         StreamType::Fetch => {
             // FETCH 応答 stream は、自側が発行したメディア FETCH の応答と、catalog 購読への
-            // fill fetch stream (draft-ietf-moq-transport-22 §3.4 (Fill Semantics)) を配送経路へ
+            // fill fetch stream (draft-ietf-moq-transport-23 §3.4 (Fill Semantics)) を配送経路へ
             // 流す。移行後に catalog を張り直すと fill で完全なカタログが届くため、これを
-            // CatalogState へ適用する。どちらでもない stream は読み捨てる
+            // CatalogState へ適用する。どちらでもない stream は Session へ登録だけ行って
+            // 読み捨てる (読み捨ての判定を登録より先に行うと、自側が発行していない
+            // Request ID を載せた PUBLISH 起点の初回 fill を失う。§3.4.1 (Opening and Closing
+            // Fill Fetch Streams))
             let mut fetch_decoder = FetchStreamDecoder::new();
             fetch_decoder.push(&buf);
             let fetch_header = loop {
@@ -4739,20 +4819,14 @@ async fn handle_stream_body(
                     }
                 }
             };
-            match fetch_stream_action(fetch_header.request_id, fetch_targets) {
-                // 自側の要求に対応しない FETCH 応答である。読み捨てる
-                FetchStreamAction::Ignore => {
-                    tracing::debug!(
-                        "Stream #{stream_num}: dropping a fetch stream \
-                         (request_id={} does not belong to this subscriber)",
-                        fetch_header.request_id,
-                    );
-                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
-                }
-                action @ (FetchStreamAction::DeliverVideo | FetchStreamAction::DeliverCatalog) => {
-                    // 自側が発行した FETCH の応答であるため、Session には受理される
-                    // (FETCH の状態と stream の会計を対応づける)
-                    if let Err(e) = data_plane.recv_fetch_header(stream_id, &fetch_header) {
+            // Session への登録を配送先の判定より先に行う。fill fetch stream の Request ID は
+            // 起因メッセージのものであり、PUBLISH 起点の初回 fill は fetch_targets に現れない
+            // (fetch_targets は自側が発行した要求の Request ID だけを持つ)。登録を先に行うことで、
+            // PUBLISH の受理待ちの保留・会計の解放を DataPlaneHandle に一任できる
+            let registered =
+                match register_fetch_header(stream, data_plane, stream_id, &fetch_header).await {
+                    Ok(registered) => registered,
+                    Err(e) => {
                         // MoqtClient の登録 API は全エラーを `TransportError::Internal` に
                         // 写すため、ここはセッション終了でも warn のままにする
                         tracing::warn!(
@@ -4763,6 +4837,22 @@ async fn handle_stream_body(
                         let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
                         return;
                     }
+                };
+            if !registered {
+                // 保留の期限・上限の超過で破棄済みである。Session の会計も解放済み
+                return;
+            }
+            match fetch_stream_action(fetch_header.request_id, fetch_targets) {
+                // Session は受理したが、このアプリに配送先が無い FETCH 応答である。読み捨てる
+                FetchStreamAction::Ignore => {
+                    tracing::debug!(
+                        "Stream #{stream_num}: dropping a fetch stream \
+                         (request_id={} does not belong to this subscriber)",
+                        fetch_header.request_id,
+                    );
+                    let _ = drain_registered_stream_to_end(stream, data_plane, stream_id).await;
+                }
+                action @ (FetchStreamAction::DeliverVideo | FetchStreamAction::DeliverCatalog) => {
                     match action {
                         FetchStreamAction::DeliverVideo => {
                             let Some(codec) = video_codec else {
@@ -6245,9 +6335,15 @@ enum FetchStreamAction {
 /// `fetch_targets` は自側が発行した映像のメディア FETCH の Request ID と、catalog 購読の
 /// Request ID を「Request ID → 配送先」で記録した対応表である。FILL_PARAMETERS 付き
 /// SUBSCRIBE へは publisher が fill fetch stream を返すため
-/// (draft-ietf-moq-transport-22 §3.4 (Fill Semantics))、その Request ID も登録して
-/// カタログとして適用する。表に無い Request ID の stream は自側の要求と対応しないため
-/// 読み捨てる (音声の明示 FETCH は発行しないため、音声の Request ID は登録されない)。
+/// (draft-ietf-moq-transport-23 §3.4 (Fill Semantics))、その Request ID も登録して
+/// カタログとして適用する。
+///
+/// 表に無い Request ID でも「自側の要求と対応しない」とは限らない。PUBLISH 起点の初回 fill は
+/// peer の PUBLISH の Request ID を載せるため (§3.4.1 (Opening and Closing Fill Fetch
+/// Streams)。このアプリは PUBLISH に UNINTERESTED を返すため配送先は無い)、表に現れない。
+/// したがって本関数の `Ignore` は「このアプリに配送先が無い」ことだけを意味し、Session への
+/// 登録 (FETCH_HEADER の受理と stream の会計) は呼び出し側が本関数より先に行う。
+/// 音声の明示 FETCH は発行しないため、音声の Request ID も登録されない。
 fn fetch_stream_action(
     request_id: u64,
     fetch_targets: &HashMap<u64, FetchTarget>,
@@ -8321,9 +8417,15 @@ mod tests {
         );
     }
 
-    /// 自側が発行していない FETCH の応答 stream は読み捨てること
+    /// 対応表に無い Request ID は配送先なしとして扱うこと
     ///
-    /// 対応表に無い Request ID の stream は自側の要求と対応しない。
+    /// `fetch_targets` は自側が発行した要求 (映像 FETCH と catalog 購読) の Request ID だけを
+    /// 持つ。PUBLISH 起点の初回 fill は peer の PUBLISH の Request ID を載せるため
+    /// (draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams))、表に
+    /// 現れない。`Ignore` は「このアプリに配送先が無い」ことだけを意味し、Session への登録
+    /// (FETCH_HEADER の受理と stream の会計) は [`handle_stream_body`] が本判定より先に
+    /// [`DataPlaneHandle::recv_fetch_header`] で行う。この順序により、表に無いことだけを理由に
+    /// PUBLISH 起点の fill を Session へ届けずに失うことはない。
     #[test]
     fn fetch_stream_action_ignores_unknown_request_ids() {
         let mut fetch_targets = HashMap::new();

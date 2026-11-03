@@ -2666,11 +2666,14 @@ mod resulting_publish_parameters {
                 object: 2,
             },
         });
-        // PUBLISH に出現できない型 (FILL_PARAMETERS / Range Filter / TRACK_PROPERTY_FILTER)
+        // PUBLISH に出現できる型 (draft-ietf-moq-transport-23 §9.8 (PUBLISH) の列挙)。
+        // SUBSCRIBE_TRACKS の FILL_PARAMETERS は initial subscription parameters として
+        // 導出 PUBLISH に載る (§3.6.2 (Parameters on SUBSCRIBE_TRACKS))
         params.push(MessageParameter {
             param_type: PARAM_FILL_PARAMETERS,
             value: MessageParameterValue::FillParameters(MessageParameters::new()),
         });
+        // PUBLISH に出現できない型 (Range Filter / TRACK_PROPERTY_FILTER)
         params.push(MessageParameter {
             param_type: PARAM_SUBGROUP_FILTER,
             value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
@@ -2701,8 +2704,9 @@ mod resulting_publish_parameters {
                 PARAM_SUBSCRIBER_PRIORITY,
                 PARAM_LOCATION_FILTER,
                 PARAM_GROUP_ORDER,
+                PARAM_FILL_PARAMETERS,
             ],
-            "PUBLISH 出現可能な 8 種だけが残ること"
+            "PUBLISH 出現可能な 9 種だけが残ること"
         );
         // 値は複写される
         assert_eq!(derived.paused(), Some(1));

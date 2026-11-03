@@ -303,13 +303,22 @@ impl Session {
         self.maybe_open_fill_stream(
             request_id,
             request_id,
-            &subscribe.parameters,
+            subscribe.parameters.fill_parameters(),
             filter,
             paused,
         );
         Ok(())
     }
 
+    /// peer publisher からの PUBLISH を受信する (自側が subscriber)
+    ///
+    /// draft-ietf-moq-transport-23 §9.8 (PUBLISH) / §9.19.15 (FILL PARAMETERS Parameter):
+    /// PUBLISH は FILL_PARAMETERS を運べる。受信側である自側はこのパラメータを受理して
+    /// subscription の状態を作るが、fill fetch stream は開設しない。開設するのは
+    /// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) が定める
+    /// publisher の責務であり、自側は publisher が開いた fill fetch stream を
+    /// `Session::recv_fetch_header` で受理する側である。この役割分担により、PUBLISH_OK を
+    /// 返す subscriber が誤って fill を送出することはない。
     pub(crate) fn handle_peer_publish(&mut self, publish: Publish) -> Result<(), SessionError> {
         let request_id = publish.request_id;
         // PUBLISH は自側が subscriber として受ける request であり、§9.2 の publisher 限定の
@@ -1204,7 +1213,7 @@ impl Session {
         self.maybe_open_fill_stream(
             fill_request_id,
             request_id,
-            &parameters,
+            parameters.fill_parameters(),
             post_filter,
             post_paused,
         );

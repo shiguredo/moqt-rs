@@ -224,22 +224,24 @@ pub(super) fn remove_alias_holder(
 ///
 /// 戻り値は `(Range Filter パラメータが 1 つでもあるか, Range の総数)` である。
 ///
-/// draft-ietf-moq-transport-22 §9.1.6 (MAX FILTER RANGES) は "all Range filter Section 3.3.2
+/// draft-ietf-moq-transport-23 §9.1.6 (MAX FILTER RANGES) は "all Range filter Section 3.3.2
 /// parameters for a given subscription or fetch" の Range 総数を上限の対象とする。
-/// §9.20.15 (FILL PARAMETERS Parameter) は内側に Range Filter (0x25-0x28) を置けるとし、
+/// §9.19.15 (FILL PARAMETERS Parameter) は内側に Range Filter (0x25-0x28) を置けるとし、
 /// その値を "a sequence of Parameters that apply to the fill fetch stream (see Section 3.4)"
 /// と定めるため、内側の Range も同じ subscription / fetch の予算に含まれる。
 ///
-/// §9.20.15 の "separate parameter scope" は内側のパラメータを外側メッセージに出現したものと
-/// みなさないという §9.20 の重複判定のための規定であり、効力範囲は引用文自身が
-/// "for the purposes of Section 9.20" に限定している。したがって §3.3.2 の予算には及ばない。
+/// §9.19.15 の "separate parameter scope" は内側のパラメータを外側メッセージに出現したものと
+/// みなさないという §9.19 の重複判定のための規定であり、効力範囲は引用文自身が
+/// "for the purposes of Section 9.19" に限定している。したがって §3.3.2 の予算には及ばない。
 ///
 /// [`MessageParameters::has_range_filters`] と [`MessageParameters::count_range_filters`] は
 /// 公開 API であり、`src/session/subscription/dispatch.rs` が subscription の `range_filters`
 /// 再構築という別用途で外側だけを見るために使う。意味を変えないよう合算は本 helper に閉じる。
 ///
-/// FILL_PARAMETERS を運べるのは SUBSCRIBE と subscription の REQUEST_UPDATE だけであり
-/// (§9.20.15)、FETCH は内側を持ち得ないためこの合算は FETCH では外側の総数と一致する。
+/// FILL_PARAMETERS を運べるのは SUBSCRIBE / SUBSCRIBE_TRACKS / PUBLISH / REQUEST_UPDATE で
+/// あり (§9.19.15)、このうち本実装が受信側として予算を数えるのは SUBSCRIBE / PUBLISH /
+/// subscription の REQUEST_UPDATE を処理する経路である。FETCH は内側を持ち得ないため
+/// この合算は FETCH では外側の総数と一致する。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 pub(super) fn range_filter_usage(parameters: &MessageParameters) -> (bool, u64) {
     let fill = parameters.fill_parameters();

@@ -259,6 +259,14 @@ impl Session {
     /// [`SessionEvent::SendRequest`] を発行する。`track_alias` は draft §3.1.3 (Track Alias) に従い自側が一意に採番する。
     /// peer の TRACK_PROPERTY_FILTER を通らない Track は
     /// [`SendRequestError::LocalFilterMismatch`] を返して送信を抑止する。
+    ///
+    /// draft-ietf-moq-transport-23 §9.8 (PUBLISH) / §9.19.15 (FILL PARAMETERS Parameter) /
+    /// §3.4.1 (Opening and Closing Fill Fetch Streams): `parameters` に FILL_PARAMETERS が
+    /// 載っていて unpaused (PAUSED=0) の場合、PUBLISH の送信後に初回 fill の
+    /// fill fetch stream の開設を `SessionEvent::OpenFillFetchStream` で指示する。
+    /// 開設するのは publisher である自側だけであり、PUBLISH を受けて PUBLISH_OK を返す
+    /// subscriber は開設しない。fill range が空、Largest Object より後に始まる、
+    /// Largest Object が未知のいずれかなら開設しない (§3.4 (Fill Semantics))。
     pub fn send_publish(
         &mut self,
         track_namespace: TrackNamespace,
@@ -321,6 +329,11 @@ impl Session {
             )
             .into());
         }
+        // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
+        // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
+        // 不正内側パラメータの送出と状態登録を防ぐ (SUBSCRIBE / REQUEST_UPDATE の
+        // 送信と同じ検証を PUBLISH にも適用する)。
+        super::fill::validate_outgoing_fill_parameters(&parameters)?;
         // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): GROUP_ORDER は
         // SUBSCRIBE / PUBLISH / SUBSCRIBE_TRACKS / FETCH に出現可能であり、値域は Ascending
         // (0x1) / Descending (0x2) のみ。値域外は API 呼び出し時に拒否する (検証がないと
@@ -454,6 +467,10 @@ impl Session {
         // publisher 側は LARGEST_OBJECT を保存しない
         // (旧称 Joining Location の保持 MUST は draft-20 で廃止。
         // publisher の観測 Largest は `largest_received_location` で追跡する)。
+        // `parameters` は Publish メッセージへ move するため、初回 fill の開設判定に使う
+        // FILL_PARAMETERS の内側パラメータを先に取り出しておく
+        // (`maybe_open_fill_stream` が見るのは内側パラメータだけである)。
+        let fill_parameters = parameters.fill_parameters().cloned();
         let msg = ControlMessage::Publish(Publish {
             request_id,
             track_namespace,
@@ -466,6 +483,22 @@ impl Session {
             request_id,
             message: msg,
         });
+        // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
+        // FILL_PARAMETERS 付き PUBLISH を送る publisher は、unpaused (PAUSED=0) で fill range が
+        // 空でない場合に初回 fill の fill fetch stream を開く。初回 fill の FETCH_HEADER には
+        // subscription の Request ID を載せる (§3.4 (Fill Semantics)。PUBLISH 起因の初回 fill
+        // では PUBLISH の Request ID と一致する)。PUBLISH の SendRequest を先に積み、初回 fill の
+        // 開設指示を後ろに置くことで、I/O 層が PUBLISH を書いてから fill stream を開く順序を
+        // 保つ (逆順にすると peer が PUBLISH を処理する前に fill の FETCH_HEADER を受け取る
+        // 確率が上がる。先着した場合の扱いは `recv_fetch_header` の
+        // `FetchHeaderAcceptance::RequestNotRegistered` が担う)。
+        self.maybe_open_fill_stream(
+            request_id,
+            request_id,
+            fill_parameters.as_ref(),
+            filter,
+            paused,
+        );
         Ok(request_id)
     }
 

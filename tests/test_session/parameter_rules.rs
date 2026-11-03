@@ -3086,23 +3086,14 @@ fn recv_request_fill_parameters_with_invalid_value_encoding_closes_session() {
 }
 
 /// FILL_PARAMETERS を許可しないメッセージに載せると外側スコープ違反で閉じる
+///
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) は FILL_PARAMETERS を
+/// SUBSCRIBE / SUBSCRIBE_TRACKS / PUBLISH / REQUEST_UPDATE に出現可能とする。PUBLISH は
+/// 許可されるため (§9.8 (PUBLISH) の Parameters の列挙にも含まれる)、FETCH と TRACK_STATUS
+/// だけがここでの対象である。
 #[test]
-fn recv_request_fill_parameters_outside_subscribe_closes_session() {
-    use shiguredo_moqt::message::{Fetch as WireFetch, Publish as WirePublish, TrackStatus};
-    // PUBLISH
-    let (_client, mut server) = establish_pair();
-    assert_scope_violation(
-        &mut server,
-        ControlMessage::Publish(WirePublish {
-            request_id: 0,
-            track_namespace: ns(&[b"live"]),
-            track_name: b"cam".to_vec(),
-            track_alias: 1,
-            parameters: fill_parameters(MessageParameters::new()),
-            track_properties: TrackProperties::new(),
-        }),
-        "PUBLISH + FILL_PARAMETERS",
-    );
+fn recv_request_fill_parameters_outside_allowed_messages_closes_session() {
+    use shiguredo_moqt::message::{Fetch as WireFetch, TrackStatus};
     // FETCH
     let (_client, mut server) = establish_pair();
     assert_scope_violation(

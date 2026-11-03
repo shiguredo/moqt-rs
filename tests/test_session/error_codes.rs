@@ -495,23 +495,33 @@ fn api_truncated_datagram_maps_to_malformed_object() {
     );
 }
 
-/// 未知の Request ID を持つ FETCH_HEADER を直接渡すと UNEXPECTED_MESSAGE (0x303) になること
+/// 未知の Request ID を持つ FETCH_HEADER は再試行可能な結果になり、セッションを閉じないこと
 ///
-/// 応答先の request を持たない FETCH_HEADER は §12.2 (Session Termination Codes) の
-/// UNEXPECTED_MESSAGE で閉じる。
+/// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) は未知の Request ID の扱いを MUST で
+/// 定めていない。§3.4.1 (Opening and Closing Fill Fetch Streams) により PUBLISH の初回 fill は
+/// PUBLISH の処理前に届きうるため、未知の Request ID を理由にセッションを閉じない。
+/// caller は stream と decode 済みヘッダを保留し、PUBLISH の受理後に再通知する。
 #[test]
-fn api_fetch_header_for_unknown_request_maps_to_unexpected_message() {
+fn api_fetch_header_for_unknown_request_returns_retryable_result() {
+    use shiguredo_moqt::session::types::FetchHeaderAcceptance;
+
     let (mut client, _server) = establish_pair();
     let stream_id = DataStreamId(91);
     client
         .recv_data_stream_type(stream_id, shiguredo_moqt::stream::FETCH_HEADER_TYPE)
         .expect("テストフィクスチャの前提条件を満たす");
-    let err = client
+    let acceptance = client
         .recv_fetch_header(stream_id, &FetchHeader { request_id: 4 })
-        .expect_err("未知の Request ID の FETCH_HEADER は拒否されること");
+        .expect("未知の Request ID でもセッションを閉じないこと");
     assert_eq!(
-        err.code, SESSION_UNEXPECTED_MESSAGE,
-        "未知の request への FETCH_HEADER は UNEXPECTED_MESSAGE (0x303) であること"
+        acceptance,
+        FetchHeaderAcceptance::RequestNotRegistered,
+        "未知の Request ID は再試行可能な結果として返すこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "未知の Request ID の FETCH_HEADER でセッションを閉じないこと"
     );
 }
 

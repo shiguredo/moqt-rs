@@ -749,20 +749,41 @@ fn subscriber_accepts_fill_fetch_headers() {
     assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
-/// 未知 Request ID の FETCH_HEADER は拒否しセッションを閉じる
+/// 未知 Request ID の FETCH_HEADER は再試行可能な結果を返し、セッションを閉じない
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): FILL_PARAMETERS
+/// 付き PUBLISH を送った publisher は初回 fill の fill fetch stream を開く。PUBLISH の bidi
+/// stream と fill の uni stream の到着順序は保証されないため、PUBLISH の処理前に届いた初回
+/// fill は「要求が未登録」として保留・再通知できなければならない。§11.4.1 (Fetch Header) は
+/// 未知の Request ID の扱いを MUST で定めていないため、セッションを閉じる必要はない。
 #[test]
-fn fill_fetch_header_with_unknown_request_id_closes_session() {
+fn fill_fetch_header_with_unknown_request_id_is_retryable() {
+    use shiguredo_moqt::session::types::FetchHeaderAcceptance;
     use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
 
     let (mut client, _server) = establish_pair();
+    let stream_id = DataStreamId(202);
     client
-        .recv_data_stream_type(DataStreamId(202), FETCH_HEADER_TYPE)
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
         .expect("テストフィクスチャの前提条件を満たす");
-    let err = client
-        .recv_fetch_header(DataStreamId(202), &FetchHeader { request_id: 999 })
-        .unwrap_err();
-    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
-    assert_eq!(client.state(), SessionState::Closing);
+    let acceptance = client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: 999 })
+        .expect("未知の Request ID でもセッションを閉じないこと");
+    assert_eq!(
+        acceptance,
+        FetchHeaderAcceptance::RequestNotRegistered,
+        "未知の Request ID は再試行可能な結果として返すこと"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "先着した初回 fill でセッションを終了しないこと"
+    );
+    // 受理しなかったため、stream の登録 (受信 data stream) は残ったままである。
+    // 終端通知が通ることで、caller が保留して再通知できる状態を保っていることを確認する
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("再試行待ちの stream の終端通知が通ること");
 }
 
 /// subscription のキャンセル時は open 中の fill fetch stream を reset する
@@ -1782,4 +1803,522 @@ fn fill_object_outside_effective_range_is_rejected() {
         SessionState::Established,
         "拒否してもセッションは閉じない"
     );
+}
+
+// ─── PUBLISH の FILL_PARAMETERS からの初回 fill ─────────────────
+//
+// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams) は、publisher が
+// FILL_PARAMETERS 付きの PUBLISH を送るときも初回 fill の fill fetch stream を開くと定める。
+// 開設するのは publisher だけであり、PUBLISH を受けて PUBLISH_OK を返す subscriber は開かない。
+// 初回 fill の FETCH_HEADER は subscription の Request ID (PUBLISH の Request ID) を載せる
+// (§3.4 (Fill Semantics) / §6.4.2.1 (Request ID))。
+
+/// publisher が FILL_PARAMETERS 付き PUBLISH を送ると初回 fill を 1 本開く
+///
+/// PUBLISH 自体は bidi request として送られ、初回 fill の開設指示はその後に積まれる
+/// (I/O 層が PUBLISH を書いてから fill stream を開く順序を保ち、PUBLISH の処理前に fill が
+/// 届く競合を減らすため)。fill range は Largest Object までにクランプされ (§3.4)、
+/// 開いた fill fetch stream は PUBLISH の Request ID で登録できる。
+#[test]
+fn publish_with_fill_opens_initial_fill_stream() {
+    let (_client, mut server, sub_rid) = establish_sub_with_object();
+    // sub_rid の購読で server が {0, 0} を公開済みであり、Largest Object は {0, 0} である
+    assert!(server.subscription(sub_rid).is_some());
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            fill_params(MessageParameters::new()),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut events = Vec::new();
+    while let Some(e) = server.poll_event() {
+        events.push(e);
+    }
+    let mut publish_index = None;
+    let mut fill_index = None;
+    let mut fill = None;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            SessionEvent::SendRequest {
+                request_id,
+                message,
+            } => {
+                assert_eq!(*request_id, pub_rid, "PUBLISH の Request ID で送ること");
+                assert!(
+                    matches!(message, ControlMessage::Publish(_)),
+                    "PUBLISH が送信されること"
+                );
+                publish_index = Some(index);
+            }
+            SessionEvent::OpenFillFetchStream {
+                request_id,
+                subscription_request_id,
+                start,
+                end,
+            } => {
+                fill_index = Some(index);
+                fill = Some((*request_id, *subscription_request_id, *start, *end));
+            }
+            SessionEvent::CloseSession(err) => panic!("CloseSession が発行された: {err:?}"),
+            _ => {}
+        }
+    }
+    let publish_index = publish_index.expect("PUBLISH が送信されること");
+    let fill_index = fill_index.expect("初回 fill が 1 本開くこと");
+    assert!(
+        publish_index < fill_index,
+        "PUBLISH を送ってから初回 fill を開くこと"
+    );
+    let (request_id, subscription_request_id, start, end) =
+        fill.expect("fill の値を取得できること");
+    assert_eq!(
+        request_id, pub_rid,
+        "初回 fill の FETCH_HEADER には PUBLISH の Request ID を載せること"
+    );
+    assert_eq!(
+        subscription_request_id, pub_rid,
+        "fill 対象 subscription は PUBLISH が作る subscription であること"
+    );
+    assert_eq!(
+        (start.group_id, start.object_id),
+        (0, 0),
+        "開始は Track の先頭であること"
+    );
+    assert_eq!(
+        (end.group_id, end.object_id),
+        (0, 0),
+        "終端は Largest Object でクランプされること"
+    );
+
+    // 開いた fill fetch stream は PUBLISH の Request ID で登録でき、range 内の Object だけを
+    // 送れる (§3.4 の fill range は Object 送出の上限でもある)
+    let stream_id = DataStreamId(310);
+    server
+        .send_fill_fetch_header(stream_id, pub_rid)
+        .expect("PUBLISH 起因の初回 fill stream を登録できること");
+    server
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 0,
+                object_id: 0,
+            },
+        )
+        .expect("fill range 内の Object は送信できること");
+    let err = server
+        .send_fetch_object(
+            stream_id,
+            &shiguredo_moqt::message::common::Location {
+                group_id: 1,
+                object_id: 0,
+            },
+        )
+        .expect_err("fill range 外の Object は拒否されること");
+    assert_eq!(
+        err,
+        shiguredo_moqt::session::types::SendRequestError::LocalFilterMismatch
+    );
+    server
+        .send_fetch_data_stream_closed(stream_id)
+        .expect("fill stream の終端を通知できること");
+    assert_eq!(server.state(), SessionState::Established);
+}
+
+/// PAUSED=1 の PUBLISH に FILL_PARAMETERS が付いても fill は開かない
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): "FILL_PARAMETERS
+/// carried while the subscription is paused opens no fill fetch stream." paused な subscription
+/// では live の Object も送らないため、fill だけを開く理由がない (§3.1.1)。
+#[test]
+fn publish_with_fill_and_paused_opens_nothing() {
+    let (_client, mut server, _sub_rid) = establish_sub_with_object();
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            fill_params_with_paused(MessageParameters::new(), 1),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    // PUBLISH は paused の初期状態を伝えるために送られる
+    assert_eq!(take_send_request(&mut server).0, pub_rid);
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "paused な PUBLISH では fill stream を開いてはならない"
+    );
+}
+
+/// FILL_PARAMETERS を持たない PUBLISH では fill を開かない
+///
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): "A fill fetch stream is
+/// opened only when FILL_PARAMETERS is present." PUBLISH のパラメータに FILL が無ければ、
+/// Largest Object が既知でも開設しない。
+#[test]
+fn publish_without_fill_opens_nothing() {
+    let (_client, mut server, _sub_rid) = establish_sub_with_object();
+    server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "FILL_PARAMETERS が無ければ fill stream を開かないこと"
+    );
+}
+
+/// Largest Object が未知のまま FILL_PARAMETERS 付き PUBLISH を送っても fill は開かない
+///
+/// draft-ietf-moq-transport-23 §3.4 (Fill Semantics): fill range は Largest Object を超えられず、
+/// 送れる Object が確定しないため開設しない。PUBLISH 自体は初期パラメータを伝えるために送る。
+#[test]
+fn publish_with_fill_and_no_largest_object_opens_nothing() {
+    let (_client, mut server) = establish_pair();
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            fill_params(MessageParameters::new()),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert!(
+        server.subscription(pub_rid).is_some(),
+        "PUBLISH は受理されること"
+    );
+    assert_eq!(take_send_request(&mut server).0, pub_rid);
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "Largest Object が未知なら fill stream を開いてはならない"
+    );
+}
+
+/// Table 7 外の内側パラメータを持つ FILL 付き PUBLISH は送信前に拒否し副作用を残さない
+///
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter) の Table 7 は内側に
+/// 置けるパラメータを列挙し、それ以外は INVALID_PARAMETER でセッションを閉じる MUST。
+/// PUBLISH 送信側は request_id 発行・状態登録より前に拒否し、孤児状態を作らない。
+#[test]
+fn publish_with_out_of_scope_inner_fill_rejected_without_side_effects() {
+    let mut inner = MessageParameters::new();
+    inner.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
+    });
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            fill_params(inner),
+            TrackProperties::new(),
+        )
+        .expect_err("Table 7 外の内側パラメータは送信前に拒否されること");
+    assert_eq!(
+        err.as_session_error()
+            .expect("セッションエラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(
+        server.subscriptions().count(),
+        0,
+        "拒否した PUBLISH は登録されてはならない"
+    );
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(
+                e,
+                SessionEvent::SendRequest { .. }
+                    | SessionEvent::OpenFillFetchStream { .. }
+                    | SessionEvent::CloseSession(_)
+            ),
+            "拒否した送信で SendRequest / OpenFillFetchStream / CloseSession は発行されないこと"
+        );
+    }
+}
+
+/// INCLUDE_PROPERTIES は PUBLISH のパラメータではないため、送信前に拒否し fill も開かない
+///
+/// draft-ietf-moq-transport-23 §9.8 (PUBLISH) の Parameters の列挙に INCLUDE_PROPERTIES は無い。
+/// fill のプロパティ条件は subscription 側の INCLUDE_PROPERTIES が担い、PUBLISH の
+/// FILL_PARAMETERS からは制御しない (§9.19.15 の Table 7 にも含まれない)。
+#[test]
+fn publish_with_include_properties_is_rejected_without_side_effects() {
+    use shiguredo_moqt::message_parameter::PARAM_INCLUDE_PROPERTIES;
+
+    let mut params = fill_params(MessageParameters::new());
+    params.push(MessageParameter {
+        param_type: PARAM_INCLUDE_PROPERTIES,
+        value: MessageParameterValue::Uint8(0),
+    });
+    let (_client, mut server) = establish_pair();
+    let err = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            params,
+            TrackProperties::new(),
+        )
+        .expect_err("PUBLISH で許可されないパラメータは送信前に拒否されること");
+    assert_eq!(
+        err.as_session_error()
+            .expect("セッションエラーであること")
+            .code,
+        SESSION_PROTOCOL_VIOLATION
+    );
+    assert_eq!(server.subscriptions().count(), 0);
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        Vec::<u64>::new(),
+        "拒否した PUBLISH で fill stream を開いてはならない"
+    );
+}
+
+/// PUBLISH を受けた subscriber は fill を開かず、publisher が開いた初回 fill を受理する
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): fill fetch stream
+/// を開くのは publisher である。PUBLISH_OK を返す subscriber が開設すると、同じ fill を
+/// 両端が開くことになる。初回 fill の FETCH_HEADER は PUBLISH の Request ID を載せる
+/// (§3.4) ため、subscriber は PUBLISH の Request ID で受理する。
+#[test]
+fn subscriber_receives_publish_with_fill_and_opens_nothing() {
+    use shiguredo_moqt::session::types::FetchHeaderAcceptance;
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    let (mut client, mut server, _sub_rid) = establish_sub_with_object();
+    let pub_rid = server
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            999,
+            fill_params(MessageParameters::new()),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, publish_msg) = take_send_request(&mut server);
+    assert_eq!(
+        drain_open_fill_events(&mut server),
+        vec![pub_rid],
+        "publisher である server だけが初回 fill を開くこと"
+    );
+
+    client
+        .recv_request(publish_msg)
+        .expect("FILL_PARAMETERS 付き PUBLISH を受理できること");
+    assert!(
+        client.subscription(pub_rid).is_some(),
+        "PUBLISH が subscription を作ること"
+    );
+    assert_eq!(
+        drain_open_fill_events(&mut client),
+        Vec::<u64>::new(),
+        "PUBLISH を受けた subscriber は fill stream を開いてはならない"
+    );
+
+    // publisher が開いた初回 fill は PUBLISH の Request ID を載せて届き、subscriber は受理する
+    let stream_id = DataStreamId(311);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_fetch_header(
+                stream_id,
+                &FetchHeader {
+                    request_id: pub_rid
+                }
+            )
+            .expect("初回 fill の FETCH_HEADER が受理されること"),
+        FetchHeaderAcceptance::Accepted
+    );
+    client
+        .recv_fetch_entry(stream_id)
+        .expect("受理した fill stream の Object 通知が通ること");
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("fill stream の終端通知が通ること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// PUBLISH の処理前に届いた初回 fill は、PUBLISH の受理後に同じ stream を再通知して受理できる
+///
+/// draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams): 初回 fill は
+/// PUBLISH を送った直後に別の uni stream で開かれるため、PUBLISH の処理前に到着しうる。
+/// `Session` は未知の Request ID でセッションを閉じず、状態も変えずに
+/// `FetchHeaderAcceptance::RequestNotRegistered` を返す。caller は stream と decode 済み
+/// ヘッダを保留し、PUBLISH の受理後に再通知する。
+#[test]
+fn fetch_header_is_accepted_after_publish_arrives() {
+    use shiguredo_moqt::message::Publish;
+    use shiguredo_moqt::session::types::FetchHeaderAcceptance;
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    let (mut client, mut server) = establish_pair();
+    // PUBLISH は server (publisher) が発行するため、Request ID は server 側の採番である
+    let pub_rid = server
+        .next_local_request_id()
+        .expect("テストフィクスチャの前提条件を満たす");
+    let stream_id = DataStreamId(312);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_fetch_header(
+                stream_id,
+                &FetchHeader {
+                    request_id: pub_rid
+                }
+            )
+            .expect("先着した初回 fill でセッションを閉じないこと"),
+        FetchHeaderAcceptance::RequestNotRegistered,
+        "PUBLISH が未登録であることを再試行可能な結果で返すこと"
+    );
+    assert_eq!(client.state(), SessionState::Established);
+
+    // PUBLISH を処理すると、同じ stream の再通知が受理される
+    client
+        .recv_request(ControlMessage::Publish(Publish {
+            request_id: pub_rid,
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+            track_alias: 7,
+            parameters: fill_params(MessageParameters::new()),
+            track_properties: TrackProperties::new(),
+        }))
+        .expect("FILL_PARAMETERS 付き PUBLISH を受理できること");
+    assert_eq!(
+        client
+            .recv_fetch_header(
+                stream_id,
+                &FetchHeader {
+                    request_id: pub_rid
+                }
+            )
+            .expect("PUBLISH の受理後の再通知が受理されること"),
+        FetchHeaderAcceptance::Accepted
+    );
+    client
+        .recv_fetch_entry(stream_id)
+        .expect("受理した fill stream の Object 通知が通ること");
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("fill stream の終端通知が通ること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// 初回 fill (PUBLISH 起因) と REQUEST_UPDATE 起因の fill は別の Request ID を持つ
+///
+/// draft-ietf-moq-transport-23 §6.4.2.1 (Request ID): REQUEST_UPDATE は PUBLISH / SUBSCRIBE とは
+/// 別の Request ID を消費する。§3.4 (Fill Semantics) により初回 fill の FETCH_HEADER は
+/// subscription の Request ID、REQUEST_UPDATE 起因の fill は REQUEST_UPDATE 自身の
+/// Request ID を載せる。subscriber はどちらの fill も subscription へ解決して受理する。
+#[test]
+fn initial_and_update_fill_use_distinct_request_ids() {
+    use shiguredo_moqt::stream::FETCH_HEADER_TYPE;
+
+    // subscriber (client) が SUBSCRIBE を送り、publisher (server) が SUBSCRIBE_OK を返す
+    let (mut client, mut server) = establish_pair();
+    let sub_rid = client
+        .send_subscribe(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            fill_params(MessageParameters::new()),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(sub_rid, 1, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(sub_rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // Largest Object が未知のため SUBSCRIBE では fill を開かない。公開してから
+    // REQUEST_UPDATE で fill を開かせる
+    let sg_stream = DataStreamId(401);
+    server
+        .send_subgroup_header(
+            sg_stream,
+            sub_rid,
+            &SubgroupHeader {
+                track_alias: 1,
+                group_id: 0,
+                subgroup_id: SubgroupIdMode::Explicit(0),
+                publisher_priority: Some(128),
+                has_properties: false,
+                end_of_group: false,
+                first_object: false,
+            },
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subgroup_object(sg_stream, 0, None)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let update_rid = send_update_to_server(
+        &mut client,
+        &mut server,
+        sub_rid,
+        fill_params(MessageParameters::new()),
+    );
+    assert_eq!(drain_open_fill_events(&mut server), vec![update_rid]);
+    assert_ne!(
+        update_rid, sub_rid,
+        "REQUEST_UPDATE は購読とは別の Request ID を消費すること"
+    );
+
+    // subscriber は REQUEST_UPDATE 起因の fill を REQUEST_UPDATE の Request ID で受理する
+    let update_stream = DataStreamId(402);
+    client
+        .recv_data_stream_type(update_stream, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            update_stream,
+            &FetchHeader {
+                request_id: update_rid,
+            },
+        )
+        .expect("REQUEST_UPDATE 起因の fill FETCH_HEADER が受理されること");
+    client
+        .recv_data_stream_closed(update_stream, RequestStreamEnd::Fin)
+        .expect("fill stream の終端通知が通ること");
+
+    // 初回 fill は購読の Request ID で受理する (REQUEST_UPDATE の Request ID とは別)
+    let initial_stream = DataStreamId(403);
+    client
+        .recv_data_stream_type(initial_stream, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    client
+        .recv_fetch_header(
+            initial_stream,
+            &FetchHeader {
+                request_id: sub_rid,
+            },
+        )
+        .expect("初回 fill の FETCH_HEADER が受理されること");
+    client
+        .recv_data_stream_closed(initial_stream, RequestStreamEnd::Fin)
+        .expect("fill stream の終端通知が通ること");
+    assert_eq!(client.state(), SessionState::Established);
 }
