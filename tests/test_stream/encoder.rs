@@ -867,11 +867,12 @@ fn test_descending_group_change_uses_absolute_object_id() {
 
 /// Descending (0x02) で End of Range (0x8C / 0x10C / 0x20C / 0x40C) と Object を混在できること
 ///
-/// draft-ietf-moq-transport-23 §11.4.2 (End of Range): End of Range の Group ID /
-/// Object ID は絶対値で、以後の prior 参照文脈はその値を使う。4 種すべての End of Range で
-/// Group を直前 Object の Group と変えることで、エンコーダが End of Range の値を prior として
-/// デルタを計算していることを検証する。エントリ境界で終端したストリームを `finish` が
-/// 受容することも合わせて確認する。
+/// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding): FETCH_HEADER 直後の先頭 entry だけが
+/// Group ID / Object ID を絶対値で符号化し、それ以降は直前の Object または End of Range の
+/// 解決値からのデルタになる (Group ID Delta が 0 なら Object ID は prior + delta + 1)。
+/// 4 種すべての End of Range で Group を直前 Object の Group と変えることで、エンコーダが
+/// End of Range の値を prior としてデルタを計算していることを検証する。エントリ境界で
+/// 終端したストリームを `finish` が受容することも合わせて確認する。
 #[test]
 fn test_descending_end_of_range_mixed_with_objects() {
     let mut encoder =

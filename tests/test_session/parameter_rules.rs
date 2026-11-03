@@ -3435,19 +3435,6 @@ fn expires_parameters() -> MessageParameters {
     parameters
 }
 
-/// NEW_GROUP_REQUEST を 1 つ持つパラメータ列 (PUBLISH では不許可)
-fn new_group_request_parameters() -> MessageParameters {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
-    };
-    let mut parameters = MessageParameters::new();
-    parameters.push(MessageParameter {
-        param_type: PARAM_NEW_GROUP_REQUEST,
-        value: MessageParameterValue::VarInt(1),
-    });
-    parameters
-}
-
 /// LARGEST_OBJECT を 1 つ持つパラメータ列 (FETCH では不許可)
 fn largest_object_parameters() -> MessageParameters {
     use shiguredo_moqt::message_parameter::{
@@ -3535,7 +3522,7 @@ fn recv_request_with_disallowed_parameter_closes_session() {
             track_namespace: ns(&[b"live"]),
             track_name: b"cam".to_vec(),
             track_alias: 1,
-            parameters: new_group_request_parameters(),
+            parameters: new_group_request_params(1),
             track_properties: TrackProperties::new(),
         }),
         "PUBLISH + NEW_GROUP_REQUEST",

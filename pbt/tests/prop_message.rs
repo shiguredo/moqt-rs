@@ -30,8 +30,8 @@ use shiguredo_moqt::{
         PARAM_GROUP_ORDER, PARAM_INCLUDE_PROPERTIES, PARAM_LARGEST_OBJECT, PARAM_LOCATION_FILTER,
         PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER,
         PARAM_OBJECTID_FILTER, PARAM_PAUSED, PARAM_PRIORITY_FILTER,
-        PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBER_PRIORITY,
-        PARAM_TRACK_NAMESPACE_PREFIX, PARAM_TRACK_PROPERTY_FILTER,
+        PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBE_TRACKS_ID,
+        PARAM_SUBSCRIBER_PRIORITY, PARAM_TRACK_NAMESPACE_PREFIX, PARAM_TRACK_PROPERTY_FILTER,
     },
     track_properties::TrackProperties,
     varint,
@@ -51,7 +51,10 @@ fn sample_parameter_from(ctx: &mut noprop::TestCaseContext, param_type: u64) -> 
         | PARAM_SUBGROUP_DELIVERY_TIMEOUT
         | PARAM_EXPIRES
         | PARAM_FILL_TIMEOUT
-        | PARAM_NEW_GROUP_REQUEST => MessageParameter {
+        | PARAM_NEW_GROUP_REQUEST
+        // draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter):
+        // 値は元の SUBSCRIBE_TRACKS の Request ID であり varint である
+        | PARAM_SUBSCRIBE_TRACKS_ID => MessageParameter {
             param_type,
             value: MessageParameterValue::VarInt(sample_small_varint(ctx)),
         },
@@ -353,6 +356,12 @@ const PUBLISH_PARAMS: &[u64] = &[
     PARAM_SUBSCRIBER_PRIORITY,
     PARAM_LOCATION_FILTER,
     PARAM_GROUP_ORDER,
+    // draft-ietf-moq-transport-23 §9.8 (PUBLISH) は FILL_PARAMETERS と SUBSCRIBE_TRACKS_ID も
+    // 列挙する。§3.4.1 (Opening and Closing Fill Fetch Streams) は PUBLISH の
+    // FILL_PARAMETERS でも初回 fill の fill fetch stream を開くと定め、§9.19.21
+    // (SUBSCRIBE_TRACKS_ID Parameter) は SUBSCRIBE_TRACKS 由来の PUBLISH にだけ載ると定める。
+    PARAM_FILL_PARAMETERS,
+    PARAM_SUBSCRIBE_TRACKS_ID,
 ];
 const FETCH_PARAMS: &[u64] = &[
     PARAM_AUTHORIZATION_TOKEN,
@@ -377,6 +386,26 @@ const PUBLISH_STATE_NOTIFY_PARAMS: &[u64] =
 const TRACK_STATUS_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN, PARAM_INCLUDE_PROPERTIES];
 
 // ─── メッセージ生成 ──────────────────────────────────────────
+
+/// UNSUPPORTED_PROPERTY Detail に載せられる Property Type を生成する
+///
+/// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) の値は Mandatory Track
+/// Property の Property Type である。§3.7 (Mandatory to Understand Track Properties) の範囲は
+/// 0x4000-0x7FFF だが、同範囲の GREASE 値 (§13 (Grease)) は Mandatory Track Property では
+/// ないため、範囲内かつ GREASE でない型だけを生成する。
+fn sample_unsupported_property_type(ctx: &mut noprop::TestCaseContext) -> u64 {
+    let property_type = noprop::sample_u64_in(
+        ctx,
+        shiguredo_moqt::track_properties::MANDATORY_TRACK_PROPERTY_MIN
+            ..=shiguredo_moqt::track_properties::MANDATORY_TRACK_PROPERTY_MAX,
+    );
+    if shiguredo_moqt::grease::is_grease(property_type) {
+        // GREASE 値は 0x7F 間隔で孤立しているため、+1 すれば範囲内かつ GREASE でない値になる
+        property_type + 1
+    } else {
+        property_type
+    }
+}
 
 /// 任意の ControlMessage を生成する (15 ブランチを等確率で選ぶ)
 fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
@@ -489,7 +518,7 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             let mut details = ErrorDetails::new();
             for _ in 0..count {
                 details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
-                    property_type: noprop::sample_u64_in(ctx, 0x4000..=0x7FFF),
+                    property_type: sample_unsupported_property_type(ctx),
                 }));
             }
             ControlMessage::RequestError(RequestError {
@@ -593,6 +622,33 @@ fn request_ok_params_cover_all_types() -> noprop::TestResult {
     assert!(
         largest_object_seen.get(),
         "LARGEST_OBJECT が生成されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// PUBLISH の sampler が §9.8 の 11 種すべてを生成すること
+///
+/// `roundtrip` は sampler が生成した値だけを往復させるため、sampler が特定の型を生成しないと
+/// その型の往復が検証されない。draft-ietf-moq-transport-23 §9.8 (PUBLISH) が列挙する 11 種が
+/// すべて現れることをここで固定する。SUBSCRIBE_TRACKS_ID は SUBSCRIBE_TRACKS 由来の PUBLISH
+/// にだけ載るが (§9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))、codec の往復はその由来に依存
+/// しないため、通常の PUBLISH と同じく生成対象にする。
+#[test]
+fn publish_params_cover_all_types() -> noprop::TestResult {
+    // パラメータ型は 0x36 以下なので、u64 のビットで出現済みを表せる
+    let seen = std::cell::Cell::new(0u64);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        for param in sample_scoped_parameters(ctx, PUBLISH_PARAMS).as_slice() {
+            seen.set(seen.get() | (1u64 << param.param_type));
+        }
+        Ok(())
+    })?;
+    let expected = PUBLISH_PARAMS.iter().fold(0u64, |acc, t| acc | (1u64 << t));
+    assert_eq!(
+        seen.get(),
+        expected,
+        "PUBLISH の sampler が §9.8 の 11 種すべてを生成すること\n{runner}"
     );
     Ok(())
 }
@@ -755,7 +811,7 @@ fn unsupported_property_details_roundtrip() -> noprop::TestResult {
         let mut details = ErrorDetails::new();
         let mut expected = Vec::new();
         for _ in 0..count {
-            let property_type = noprop::sample_u64_in(ctx, 0x4000..=0x7FFF);
+            let property_type = sample_unsupported_property_type(ctx);
             expected.push(property_type);
             details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
                 property_type,

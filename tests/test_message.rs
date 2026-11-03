@@ -799,6 +799,36 @@ mod request_error_details {
         );
     }
 
+    /// Mandatory Track Property でない型を持つ UNSUPPORTED_PROPERTY は encode できない
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) の値は
+    /// "the Property Type (vi64) of a Mandatory Track Property" である。§3.7
+    /// (Mandatory to Understand Track Properties) は 0x4000-0x7FFF を Mandatory Track
+    /// Property の範囲とし、同範囲の GREASE 値 (§13 (Grease)) は Mandatory Track Property
+    /// ではないと定める。範囲外と GREASE 値のどちらも送信側で拒否する。
+    #[test]
+    fn encode_unsupported_property_outside_mandatory_range_is_protocol_violation() {
+        // 0x0001 は範囲の下限未満、0x3FFF は直前、0x8000 は上限の直後、
+        // 0x409C は 0x7F * 129 + 0x9D で範囲内の GREASE 値
+        for property_type in [0x0001_u64, 0x3FFF, 0x8000, 0x409C] {
+            let mut details = ErrorDetails::new();
+            details.push(ErrorDetail::UnsupportedProperty(UnsupportedProperty {
+                property_type,
+            }));
+            let msg = ControlMessage::RequestError(RequestError {
+                error_code: shiguredo_moqt::error::REQUEST_UNSUPPORTED_EXTENSION,
+                retry_interval: 0,
+                reason: ReasonPhrase::new("unsupported").expect("正当な Reason Phrase である"),
+                error_details: details,
+            });
+            let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
+            assert!(
+                matches!(err, MessageError::ProtocolViolation(_)),
+                "型 {property_type:#x} の encode は ProtocolViolation であるべきだが {err:?}"
+            );
+        }
+    }
+
     /// UNSUPPORTED_PROPERTY の値 (vi64) が途中終端すると MALFORMED_MESSAGE
     ///
     /// KVP の値はメッセージ Length の内側にあるため、値の varint が途中で切れた場合は
@@ -1826,7 +1856,9 @@ mod error_cases {
 
 mod publish {
     use super::*;
-    use shiguredo_moqt::message::{Fetch, Publish, RequestUpdate, Subscribe, TrackStatus};
+    use shiguredo_moqt::message::{
+        Fetch, Publish, PublishStateNotify, RequestUpdate, Subscribe, TrackStatus,
+    };
     use shiguredo_moqt::message_parameter::{
         MessageParameter, MessageParameterValue, PARAM_SUBSCRIBE_TRACKS_ID,
     };
@@ -1894,6 +1926,8 @@ mod publish {
     /// draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter) は出現先を
     /// PUBLISH に限り、§9.19.1 (Parameter Scope) は許可されないメッセージ型での受信を
     /// INVALID_PARAMETER で閉じることを MUST とする。encode / decode の両経路を固定する。
+    /// 実装しない SUBSCRIBE_TRACKS (0x51) は codec 層が本体を解析しないため、
+    /// スコープ検証がセッション層にあることも併せて固定する。
     #[test]
     fn subscribe_tracks_id_rejected_outside_publish() {
         let parameters = || {
@@ -1927,6 +1961,9 @@ mod publish {
                 request_id: 0,
                 track_namespace: namespace(),
                 track_name: b"cam".to_vec(),
+                parameters: parameters(),
+            }),
+            ControlMessage::PublishStateNotify(PublishStateNotify {
                 parameters: parameters(),
             }),
         ];
@@ -1974,6 +2011,53 @@ mod publish {
                 Err(MessageError::InvalidParameter)
             ),
             "REQUEST_UPDATE に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+        // TRACK_STATUS (0x0D) は SUBSCRIBE と同じ本体構造である
+        let track_status = vec![
+            0x0D, 0x0F, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x03, 0x63, 0x61, 0x6D, 0x01,
+            0x01, 0x36, 0x81, 0x2C,
+        ];
+        assert!(
+            matches!(
+                ControlMessage::decode(&track_status),
+                Err(MessageError::InvalidParameter)
+            ),
+            "TRACK_STATUS に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+        // PUBLISH_STATE_NOTIFY (0x22), Length = 4,
+        // Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
+        let publish_state_notify = vec![0x22, 0x04, 0x01, 0x36, 0x81, 0x2C];
+        assert!(
+            matches!(
+                ControlMessage::decode(&publish_state_notify),
+                Err(MessageError::InvalidParameter)
+            ),
+            "PUBLISH_STATE_NOTIFY に載った SUBSCRIBE_TRACKS_ID の decode は拒否されること"
+        );
+        // SUBSCRIBE_TRACKS (0x51) は本ライブラリが実装しない request であり、codec は本体を
+        // 解析せず `Unsupported` として保持する (§1.6 (Modularity) の SHOULD)。§9.19.1
+        // (Parameter Scope) の MUST 検証はセッション層 (`handle_unsupported_request`) が
+        // 行うため、ここでは decode が生バイト列をそのまま保つことだけを固定する。
+        // 本体は Request ID = 0、Track Namespace Prefix: count=1 / "live"、
+        // Parameters: count=1 / delta=0x36 / 値=300 (0x81 0x2C)
+        let subscribe_tracks = vec![
+            0x51, 0x0B, 0x00, 0x01, 0x04, 0x6C, 0x69, 0x76, 0x65, 0x01, 0x36, 0x81, 0x2C,
+        ];
+        let (decoded, consumed) = ControlMessage::decode(&subscribe_tracks)
+            .expect("SUBSCRIBE_TRACKS は未対応型として decode できること");
+        assert_eq!(
+            consumed,
+            subscribe_tracks.len(),
+            "SUBSCRIBE_TRACKS のフレーム全体を消費すること"
+        );
+        assert_eq!(
+            decoded,
+            ControlMessage::Unsupported {
+                type_id: 0x51,
+                request_id: Some(0),
+                body: subscribe_tracks[2..].to_vec(),
+            },
+            "SUBSCRIBE_TRACKS は本体を解析せず Unsupported として保持されること"
         );
     }
 }
@@ -2060,7 +2144,8 @@ mod request_ok {
         MessageParameter, MessageParameterValue, PARAM_EXPIRES, PARAM_LARGEST_OBJECT,
         PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST, PARAM_OBJECT_DELIVERY_TIMEOUT,
         PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER, PARAM_PAUSED, PARAM_PRIORITY_FILTER,
-        PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBER_PRIORITY,
+        PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBE_TRACKS_ID,
+        PARAM_SUBSCRIBER_PRIORITY,
     };
 
     /// 和集合外のパラメータを含む REQUEST_OK は codec 層で INVALID_PARAMETER になる
@@ -2068,11 +2153,11 @@ mod request_ok {
     /// draft-ietf-moq-transport-23 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
     /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.19.1 (Parameter Scope) の
     /// MUST により INVALID_PARAMETER で閉じる。encode と decode の両経路で同じ検証が働くことを
-    /// 固定する。和集合外の 10 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
+    /// 固定する。和集合外の 11 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
     #[test]
     fn out_of_scope_params_are_protocol_violation() {
         // (Parameter Type, typed 値, wire 上の値バイト列)
-        let out_of_scope: [(u64, MessageParameterValue, &[u8]); 10] = [
+        let out_of_scope: [(u64, MessageParameterValue, &[u8]); 11] = [
             (
                 PARAM_OBJECT_DELIVERY_TIMEOUT,
                 MessageParameterValue::VarInt(1),
@@ -2118,6 +2203,14 @@ mod request_ok {
             ),
             (
                 PARAM_NEW_GROUP_REQUEST,
+                MessageParameterValue::VarInt(1),
+                &[0x01],
+            ),
+            // SUBSCRIBE_TRACKS_ID は SUBSCRIBE_TRACKS 由来の PUBLISH にだけ出現し
+            // (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))、
+            // REQUEST_OK のどの context でも許可されない。
+            (
+                PARAM_SUBSCRIBE_TRACKS_ID,
                 MessageParameterValue::VarInt(1),
                 &[0x01],
             ),

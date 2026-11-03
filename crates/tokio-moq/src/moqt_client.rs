@@ -150,6 +150,11 @@ pub struct IncomingRequest {
 /// 応答は [`MoqtClient::send_request_ok`] / [`MoqtClient::send_request_error`] で行う。
 /// パラメータの検証 (scope / Range Filter / PAUSED 値域) は session 層が受信時に
 /// 済ませており、ここに来た更新は購読状態へ反映済みである。
+///
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): Track が
+/// `DYNAMIC_GROUPS=1` を告知していなくても NEW_GROUP_REQUEST はここに届く。動的 Group に
+/// 対応しない original publisher は同節の "it ignores the parameter" に従うため、対応しない
+/// Track ではアプリが無視する。
 #[derive(Debug)]
 pub struct IncomingRequestUpdate {
     /// 対象 request の Request ID

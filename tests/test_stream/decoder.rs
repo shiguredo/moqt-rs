@@ -1214,9 +1214,10 @@ fn test_fetch_descending_group_order_resolves_absolute_values() {
 /// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding): FETCH_HEADER 直後以外の
 /// End of Range は Group ID を昇順なら加算・降順なら減算し、Group ID Delta が 0 なら
 /// Object ID は prior + delta + 1、Group が変わるなら Object ID Delta が絶対値になる。
-/// 3 種すべての End of Range で Group を直前 Location の Group と変え、
-/// 直後の Object では直前 Location +1 の省略形を使うことで、各 variant が
-/// prior Location を更新していること自体を検証する。
+/// 3 種すべての End of Range で Group を直前 Location の Group と変え、直後の Object は
+/// 最初の 2 つでは Group ID Delta を明示して Object ID を絶対値で与え、最後の 1 つだけ
+/// 直前 Location +1 の省略形を使う。これにより、各 variant が prior Location を更新して
+/// いることと、End of Range 直後でも省略形が解決されることを併せて検証する。
 /// エントリ境界で終端したストリームを `finish` が受容することも合わせて確認する。
 #[test]
 fn test_fetch_descending_end_of_range_entries_are_resolved_from_previous_location() {

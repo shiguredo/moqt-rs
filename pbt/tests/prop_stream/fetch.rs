@@ -174,7 +174,7 @@ fn fetch_stream_object_roundtrip_has_prior() -> noprop::TestResult {
 
 /// NoPriorActualObject 文脈での FETCH_STREAM_OBJECT ラウンドトリップ。
 /// Group ID / Object ID は prior 参照 (None) が許されるが、Publisher Priority は必須で
-/// prior-relative subgroup mode は禁止される (draft-ietf-moq-transport-23 §11.4.2 (End of Range))。
+/// prior-relative subgroup mode は禁止される (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。
 #[test]
 fn fetch_stream_object_roundtrip_no_prior_actual() -> noprop::TestResult {
     let mut runner = test_runner()?;

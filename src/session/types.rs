@@ -231,6 +231,11 @@ pub enum SessionEvent {
     /// `parameters` は受信した 1 通のパラメータではなく、未応答の先行更新と今回の更新を
     /// 受信順に合体した累積表示である ([`Subscription::pending_update_view`])。
     /// 受信時に拒否を決めた更新についてはイベントを発行しない (応答は Session が自動送出する)。
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): 動的 Group に
+    /// 対応しない original publisher は NEW_GROUP_REQUEST を無視するため、Track が
+    /// `DYNAMIC_GROUPS=1` を告知していなくても NEW_GROUP_REQUEST はイベントとして通知される。
+    /// 対応しない Track ではアプリが無視する。
     RequestUpdateReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -1365,14 +1370,23 @@ pub struct StreamCountState {
 /// 「未判明」と「既知の非対応」を区別しないと `REQUEST_UPDATE` に `NEW_GROUP_REQUEST` を
 /// 載せてよいかを正しく判定できない。同節は、dynamic Groups に対応しない original
 /// publisher が `NEW_GROUP_REQUEST` を無視することも定める。
+///
+/// `INCLUDE_PROPERTIES=0` を指定して空の Track Properties を受け取った場合を「未判明」と
+/// 扱うのは、§9.19.19 の "has received the Track's Properties" が抑止された空リストを
+/// 含まないという解釈による (§9.19.22 (INCLUDE_PROPERTIES Parameter) は `0` のとき空に
+/// することを SHOULD で定めるだけで、受信済みかどうかには触れていない)。厳格に読めば空
+/// リストも「受け取った Track Properties」に当たり MUST NOT になり得るため、将来 draft が
+/// この点を明確化したら見直す。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicGroupsSupport {
-    /// Track Properties をまだ受け取っておらず、対応しているか判明していない
+    /// Track Properties をまだ受け取っていない、または `INCLUDE_PROPERTIES=0` で空の
+    /// Track Properties を受け取った (対応しているか判明していない)
     Unknown,
-    /// Track Properties (自側の発行値または peer の受信値) の `DYNAMIC_GROUPS` が `1`
+    /// 自側の発行値または受信値の `DYNAMIC_GROUPS` が `1`
     Supported,
-    /// Track Properties を受け取ったが `DYNAMIC_GROUPS` が `1` ではなかった (`0` または欠落)
+    /// 自側の発行値または受信値の `DYNAMIC_GROUPS` が `0` または欠落しており、
+    /// 非対応と判明している
     Unsupported,
 }
 
@@ -1394,6 +1408,13 @@ impl DynamicGroupsSupport {
     /// `DYNAMIC_GROUPS` を告知していないだけで、対応しているかは判明しないため
     /// [`Unknown`](Self::Unknown) を保つ。`0` を指定していない場合と、`0` を指定しても空で
     /// なかった場合は受け取った値をそのまま反映する (`1` 以外は非対応)。
+    ///
+    /// 空を未判明として扱う根拠は、§9.19.19 (NEW GROUP REQUEST Parameter) の
+    /// "has received the Track's Properties" が抑止された空リストを含まないという解釈である。
+    /// 同節の MUST NOT を厳格に読むと空リストも「受け取った Track Properties」に当たり
+    /// `NEW_GROUP_REQUEST` を送れなくなり得るが、§9.19.22 は空にしてよい (SHOULD) と定める
+    /// だけで送信可否には触れていないため、この解釈を採る。将来 draft がこの点を明確化したら
+    /// 見直す。この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     ///
     /// `PUBLISH` は `INCLUDE_PROPERTIES` を運ばないため、呼び出し側は `None` を渡す。
     pub fn from_peer_properties(
@@ -1423,7 +1444,9 @@ impl DynamicGroupsSupport {
     /// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): Track Properties を
     /// 受け取っていない間は MUST NOT の条件 ("has received the Track's Properties and they did
     /// not include the DYNAMIC_GROUPS Property with value 1") を満たさないため送信できる。
-    /// 既知の非対応と判明した後だけ送信してはならない。
+    /// 既知の非対応と判明した後だけ送信してはならない。`INCLUDE_PROPERTIES=0` で空の
+    /// Track Properties を受け取った場合も未判明として送信できる
+    /// ([`from_peer_properties`](Self::from_peer_properties) の解釈を参照)。
     pub const fn allows_new_group_request(self) -> bool {
         !matches!(self, Self::Unsupported)
     }
@@ -1560,12 +1583,18 @@ pub struct Subscription {
     pub subscribe_tracks_id: Option<u64>,
     /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
     ///
-    /// この subscription の OK 応答 (SUBSCRIBE_OK) の Track Properties を支配する値。
-    /// 自側が subscriber なら SUBSCRIBE で自側が指定した値、自側が publisher なら peer の
-    /// SUBSCRIBE が指定した値が入る。`Some(0)` のとき OK 応答の Track Properties は存在
-    /// するが空になる (SHOULD)。`None` (省略時) は default 1 として扱う。
-    /// subscriber 側では、空の Track Properties を受けたときに DYNAMIC_GROUPS の対応状況を
-    /// 未判明のまま保つ判定にも使う ([`DynamicGroupsSupport::from_peer_properties`])。
+    /// この subscription の OK 応答 (SUBSCRIBE_OK) に載せる Track Properties を支配する値。
+    /// `Some(0)` のとき Track Properties は存在するが空になり (SHOULD)、`None` (省略時) は
+    /// default の 1 として扱う。意味は自側の役割で異なる。
+    ///
+    /// - 自側が publisher の場合: peer の SUBSCRIBE が指定した値を保持し、SUBSCRIBE_OK の
+    ///   Track Properties を空にするかの判断に使う。空にしても自側の `DYNAMIC_GROUPS` の
+    ///   対応状況は発行値から別途求める ([`DynamicGroupsSupport::from_local_properties`])。
+    /// - 自側が subscriber の場合: SUBSCRIBE で自側が指定した値を保持し、受け取った Track
+    ///   Properties が抑止された空リストかどうかの判定に使う。空なら `DYNAMIC_GROUPS` の
+    ///   対応状況を未判明のまま保つ ([`DynamicGroupsSupport::from_peer_properties`])。
+    ///
+    /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub include_properties: Option<u8>,
     /// 解決済みの Location Filter の Start Location (draft §3.3.1 (Location Filters))
     ///

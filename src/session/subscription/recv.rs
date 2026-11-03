@@ -1209,7 +1209,8 @@ impl Session {
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の値域検証は
         // 呼び出し元 `handle_peer_request_update` が dispatch 前に済ませている
         // (同一の `MessageParameters` を渡すため、ここで再検証しても到達しない)。
-        // ローカル終端済みの request はここまでの MUST 検証だけを行い、状態遷移と
+        // ローカル終端済みの request は、呼び出し元 `handle_peer_request_update` と
+        // `validate_subscription_request_update` が済ませた MUST 検証だけを通し、状態遷移と
         // イベント発行 (pending_update_params / RequestUpdateReceived / fill stream 開設) はしない
         if locally_terminated {
             return Ok(());

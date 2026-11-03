@@ -538,7 +538,11 @@ pub struct FetchStreamDecoder {
     group_order: u8,
     /// FetchPriorContext の現在の状態
     prior_context: FetchPriorContext,
-    /// 前回のオブジェクト情報（デルタ解決用）
+    /// 直前の解決済み Location と prior 参照用フィールド (デルタ解決用)
+    ///
+    /// Object だけでなく End of Range も Group ID / Object ID を更新する
+    /// (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。Subgroup ID と Publisher
+    /// Priority は直前の actual Object の値を保持する (§11.4.2.2 (Prior Object Fields))。
     prior_state: Option<FetchPriorState>,
     /// End of Track を受信済みか
     ///

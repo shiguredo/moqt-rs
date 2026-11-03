@@ -655,6 +655,11 @@ impl Redirect {
 ///
 /// Type は偶数 0x02 のため、KVP の値は Property Type の vi64 そのものであり Length
 /// フィールドを持たない (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。
+///
+/// [`property_type`](Self::property_type) は Mandatory Track Property の範囲
+/// (0x4000-0x7FFF) のうち GREASE 値 (§13 (Grease)) でない型でなければならない
+/// (§9.4.2.2 の "the Property Type (vi64) of a Mandatory Track Property" / §3.7)。
+/// `ErrorDetails` のエンコードは送信前にこの条件を検証する。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsupportedProperty {
@@ -705,6 +710,19 @@ impl ErrorDetail {
             Self::UnsupportedProperty(_) => error_code == REQUEST_UNSUPPORTED_EXTENSION,
         }
     }
+}
+
+/// Mandatory Track Property の型かどうかを返す
+///
+/// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 0x4000-0x7FFF
+/// が Mandatory Track Property の範囲であり、同範囲の GREASE 値
+/// (draft-ietf-moq-transport-23 §13 (Grease)) は Mandatory Track Property ではない。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+fn is_mandatory_track_property_type(property_type: u64) -> bool {
+    (crate::track_properties::MANDATORY_TRACK_PROPERTY_MIN
+        ..=crate::track_properties::MANDATORY_TRACK_PROPERTY_MAX)
+        .contains(&property_type)
+        && !crate::grease::is_grease(property_type)
 }
 
 /// REQUEST_ERROR の Error Details 列 (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
@@ -797,10 +815,17 @@ impl ErrorDetails {
     /// Error Code = REDIRECT のときは REDIRECT Detail が必須であり、欠落も拒否する
     /// (§9.4.2.1)。
     ///
+    /// UNSUPPORTED_PROPERTY Detail の値は Mandatory Track Property の Property Type である
+    /// (§9.4.2.2)。§3.7 (Mandatory to Understand Track Properties) の範囲 (0x4000-0x7FFF) に
+    /// 入らない型と、同範囲の GREASE 値 (§13 (Grease)) はこの Detail の対象になり得ないため
+    /// 送信側で拒否する。
+    ///
     /// # Errors
     ///
     /// - 適用されない Detail、単一インスタンス型の重複、REDIRECT Detail の欠落:
     ///   `ProtocolViolation`
+    /// - Mandatory Track Property の範囲外または GREASE 値の Property Type を持つ
+    ///   UNSUPPORTED_PROPERTY Detail: `ProtocolViolation`
     /// - REDIRECT の値長が 2^16-1 バイトを超える: `FieldLengthExceeded`
     /// - Redirect target の Full Track Name が 4,096 バイトを超える: `FieldLengthExceeded`
     ///   (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
@@ -825,7 +850,17 @@ impl ErrorDetails {
                 }
                 // draft-ietf-moq-transport-23 §9.4.2.2 (UNSUPPORTED_PROPERTY) は複数
                 // インスタンスを明示的に許可するため、重複を拒否しない。
-                ErrorDetail::UnsupportedProperty(_) => {}
+                // 値は "the Property Type (vi64) of a Mandatory Track Property" であり、
+                // §3.7 (Mandatory to Understand Track Properties) の範囲外の型と、同範囲の
+                // GREASE 値 (§13 (Grease)) はこの Detail が指す対象になり得ない。送信側で
+                // そのような Detail を生成しないよう拒否する。
+                ErrorDetail::UnsupportedProperty(unsupported) => {
+                    if !is_mandatory_track_property_type(unsupported.property_type) {
+                        return Err(MessageError::ProtocolViolation(
+                            "unsupported property type is not a mandatory track property",
+                        ));
+                    }
+                }
             }
         }
         if error_code == REQUEST_REDIRECT && !seen_redirect {
@@ -1830,6 +1865,36 @@ mod tests {
                 "単一 Track 専用のパラメータ {param_type:#x} を SUBSCRIBE_TRACKS の集合に含めてはならない"
             );
         }
+    }
+
+    /// PUBLISH の許可集合が draft-ietf-moq-transport-23 §9.8 の明示リストと一致すること
+    ///
+    /// §9.8 (PUBLISH) は許可パラメータを 11 種の明示リストで列挙する。列挙の取りこぼしは
+    /// 仕様が許容するメッセージを INVALID_PARAMETER で閉じ、逆に余分な型は §9.19.1
+    /// (Parameter Scope) の MUST に反する。集合の一致で両方向の退行を検出する。
+    #[test]
+    fn publish_allowed_params_matches_spec_list() {
+        let expected = [
+            PARAM_OBJECT_DELIVERY_TIMEOUT,
+            PARAM_AUTHORIZATION_TOKEN,
+            PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+            PARAM_EXPIRES,
+            PARAM_LARGEST_OBJECT,
+            PARAM_PAUSED,
+            PARAM_SUBSCRIBER_PRIORITY,
+            PARAM_LOCATION_FILTER,
+            PARAM_GROUP_ORDER,
+            PARAM_FILL_PARAMETERS,
+            PARAM_SUBSCRIBE_TRACKS_ID,
+        ];
+        let mut actual = PUBLISH_ALLOWED_PARAMS.to_vec();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "PUBLISH の許可集合が §9.8 の明示リストと一致すること"
+        );
     }
 
     /// 許可パラメータ集合の対応表が Request ID を持つ未対応 request の集合と一致すること
