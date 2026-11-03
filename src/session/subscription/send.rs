@@ -26,10 +26,10 @@ use super::super::core::{
     insert_alias_holder,
 };
 use super::super::types::{
-    DeadlineTimer, DeliveryTimeoutState, RequestKind, RequestStreamEnd, SendRequestError,
-    SessionError, SessionEvent, StreamCountState, Subscription, SubscriptionInitiator,
-    SubscriptionRangeFilters, SubscriptionState, TerminationReason, TrackRole,
-    terminationreason_from_end,
+    DeadlineTimer, DeliveryTimeoutState, DynamicGroupsSupport, RequestKind, RequestStreamEnd,
+    SendRequestError, SessionError, SessionEvent, StreamCountState, Subscription,
+    SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState, TerminationReason,
+    TrackRole, terminationreason_from_end,
 };
 use super::delivery::{
     compute_effective_delivery_timeout_ms, set_subscription_expires,
@@ -182,7 +182,7 @@ impl Session {
         if let Some(order) = group_order {
             validate_group_order(order)?;
         }
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 送信前に値域を検証し、不正値の送出と状態登録を防ぐ
         if let Some(v) = parameters.include_properties() {
             validate_include_properties(v)?;
@@ -214,10 +214,10 @@ impl Session {
                 subgroup_overrides: HashMap::new(),
             },
             expires: None,
-            // Subscriber 役では track_properties を持たないため false で初期化する。
-            // 受信した SUBSCRIBE_OK の値で更新され、REQUEST_UPDATE 送信時の
-            // NEW_GROUP_REQUEST 検証に使われる。
-            dynamic_groups: false,
+            // Subscriber 役では Track Properties をまだ受け取っていないため未判明で初期化する。
+            // 受信した SUBSCRIBE_OK の値で handle_peer_subscribe_ok が更新し、
+            // REQUEST_UPDATE 送信時の NEW_GROUP_REQUEST 検証に使われる。
+            dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {
@@ -233,8 +233,11 @@ impl Session {
             // SUBSCRIBE に SUBSCRIBE_TRACKS_ID は出現しない
             // (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
             subscribe_tracks_id: None,
-            // 自側は subscriber のため SUBSCRIBE_OK を送らず、INCLUDE_PROPERTIES の保持は不要
-            include_properties: None,
+            // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
+            // 自側が SUBSCRIBE で指定した値を保持する。SUBSCRIBE_OK の Track Properties が
+            // 空で届いたとき、それが自側の 0 指定によって空にされた結果なのか、peer が
+            // DYNAMIC_GROUPS を告知しなかった結果なのかを区別するために使う (§9.19.19)。
+            include_properties: parameters.include_properties(),
             filter_start,
             filter_end,
             range_filters,
@@ -417,10 +420,11 @@ impl Session {
         let expires = parameters
             .expires()
             .map(|expires_ms| DeadlineTimer::new(expires_ms, self.timing.last_tick_ms));
-        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): 自側 Publisher が発行する DYNAMIC_GROUPS Property の値を
-        // 覚えておく。peer からの REQUEST_UPDATE に NEW_GROUP_REQUEST が
-        // 含まれる場合の検証に用いる。
-        let dynamic_groups = track_properties.dynamic_groups() == Some(1);
+        // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS) / §9.19.19 (NEW GROUP REQUEST
+        // Parameter): 自側 Publisher が発行する DYNAMIC_GROUPS Property の値を対応状況として
+        // 保持する。peer からの REQUEST_UPDATE に NEW_GROUP_REQUEST が含まれる場合の判断材料
+        // になる。publisher 側は wire 上に提示する値そのものが判定材料であり、未判明にはならない。
+        let dynamic_groups = DynamicGroupsSupport::from_local_properties(&track_properties);
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = track_properties.default_publisher_priority();
         let default_publisher_group_order = track_properties.default_publisher_group_order();
@@ -664,8 +668,12 @@ impl Session {
             .expect("subscription presence already checked above");
         subscription.track_alias = Some(track_alias);
         subscription.state = SubscriptionState::Established;
-        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): SUBSCRIBE_OK で発行する DYNAMIC_GROUPS を記録する
-        subscription.dynamic_groups = track_properties.dynamic_groups() == Some(1);
+        // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS) / §9.19.19 (NEW GROUP REQUEST
+        // Parameter): SUBSCRIBE_OK で発行する DYNAMIC_GROUPS を対応状況として記録する。
+        // この時点の値は空化前の発行値であり、INCLUDE_PROPERTIES=0 で wire 上を空にしても
+        // ローカルの対応情報は失われない。
+        subscription.dynamic_groups =
+            DynamicGroupsSupport::from_local_properties(&track_properties);
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         subscription.default_publisher_priority = track_properties.default_publisher_priority();
         subscription.default_publisher_group_order =
@@ -687,7 +695,7 @@ impl Session {
             track_alias,
             request_id,
         );
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // peer が SUBSCRIBE で INCLUDE_PROPERTIES=0 を指定したとき、SUBSCRIBE_OK の
         // Track Properties は存在するが空にする (SHOULD)。状態への反映
         // (dynamic_groups 等) には元の発行値を使い、wire 上の値だけ空化する。
@@ -716,10 +724,13 @@ impl Session {
     /// 検証する。subscription のみ、PAUSED parameter が含まれていれば
     /// `paused` を楽観的に更新する。
     ///
-    /// draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter):
-    /// `DYNAMIC_GROUPS` が `1` でない Track の subscription に `NEW_GROUP_REQUEST` を
-    /// 含めると `SESSION_PROTOCOL_VIOLATION` を返す (`SUBSCRIBE` での foreknowledge 無しの
-    /// 送信は許可されるため対象外)。
+    /// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter):
+    /// Track Properties を受け取っていない間 ([`DynamicGroupsSupport::Unknown`]) と
+    /// `DYNAMIC_GROUPS=1` が判明している間 ([`DynamicGroupsSupport::Supported`]) は
+    /// `NEW_GROUP_REQUEST` を送れる。`DYNAMIC_GROUPS` が `1` でないと判明している
+    /// ([`DynamicGroupsSupport::Unsupported`]) subscription に含めると
+    /// `SESSION_PROTOCOL_VIOLATION` を返す (`SUBSCRIBE` での foreknowledge 無しの送信は
+    /// 許可されるため対象外)。
     ///
     /// draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): クレジットは送信が
     /// 確定したときのみ消費される (検証失敗で送信されない場合は消費されない。
@@ -910,16 +921,19 @@ impl Session {
         // FILL 内側の Table 7 スコープと LOCATION_FILTER も送信前に検証し、
         // 不正値の送出を防ぐ (楽観的状態更新より前に置き、エラー時に更新済み状態を残さない)
         super::fill::validate_outgoing_fill_parameters(parameters)?;
-        // draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter):
-        // subscriber MUST NOT send this parameter in REQUEST_UPDATE if the Track did not
-        // include the DYNAMIC_GROUPS Property with value 1. 受信側
-        // `handle_update_for_subscription` と同じ MUST を送信側でも守る。SUBSCRIBE での
-        // foreknowledge 無しの送信は許可されるため REQUEST_UPDATE のみを対象とする。
+        // draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter):
+        // "A subscriber MUST NOT send this parameter in REQUEST_UPDATE if it has received
+        // the Track's Properties and they did not include the DYNAMIC_GROUPS Property with
+        // value 1." Track Properties をまだ受け取っていない間は Must Not の条件を満たさない
+        // ため、既知の非対応と判明した後だけ拒否する。SUBSCRIBE での foreknowledge 無しの
+        // 送信は許可されるため REQUEST_UPDATE のみを対象とする。
         // 楽観的状態更新より前に置き、拒否時は併載パラメータをローカルに適用しない。
-        if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
+        if parameters.new_group_request().is_some()
+            && !subscription.dynamic_groups.allows_new_group_request()
+        {
             return Err(SessionError::new(
                 SESSION_PROTOCOL_VIOLATION,
-                "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
+                "NEW_GROUP_REQUEST in REQUEST_UPDATE for a track known not to support dynamic groups",
             ));
         }
         update_subscription_subscriber_delivery_timeouts_if_present(subscription, parameters);

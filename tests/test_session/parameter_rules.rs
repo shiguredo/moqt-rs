@@ -1,14 +1,46 @@
 use super::*;
 use shiguredo_moqt::track_properties::TrackProperties;
 
-// ─── NEW_GROUP_REQUEST / DYNAMIC_GROUPS 検証 (draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter)) ────
+/// `NEW_GROUP_REQUEST` だけを持つパラメータ群を作る
+///
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): 値は「購読者が知って
+/// いる最大の Group ID + 1」であり、0 は「Group の情報を持たない」ことを表す。
+fn new_group_request_params(next_group_id: u64) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
+    };
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_NEW_GROUP_REQUEST,
+        value: MessageParameterValue::VarInt(next_group_id),
+    });
+    params
+}
+
+/// `INCLUDE_PROPERTIES` だけを持つパラメータ群を作る
+///
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): 0 は応答の Track
+/// Properties を空にする (SHOULD)、1 は含める (省略時の default も 1)。
+fn include_properties_params(value: u8) -> MessageParameters {
+    use shiguredo_moqt::message_parameter::{
+        MessageParameter, MessageParameterValue, PARAM_INCLUDE_PROPERTIES,
+    };
+    let mut params = MessageParameters::new();
+    params.push(MessageParameter {
+        param_type: PARAM_INCLUDE_PROPERTIES,
+        value: MessageParameterValue::Uint8(value),
+    });
+    params
+}
+
+// ─── NEW_GROUP_REQUEST / DYNAMIC_GROUPS 検証 (draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter) / §10.6 (DYNAMIC GROUPS)) ────
 
 /// PUBLISH_OK + NEW_GROUP_REQUEST は送信側で拒否される
 ///
-/// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
+/// draft-ietf-moq-transport-23 Appendix A.3 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
 /// NEW_GROUP_REQUEST は SUBSCRIBE / REQUEST_UPDATE にのみ出現する
-/// (draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter))。
+/// (draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter))。
 /// DYNAMIC_GROUPS の有無にかかわらず送信側スコープ検証で拒否される。
 /// NEW_GROUP_REQUEST の DYNAMIC_GROUPS 連動検証は REQUEST_UPDATE 経路の
 /// `request_update_with_new_group_request_*` で行う。
@@ -49,13 +81,16 @@ fn publish_ok_with_new_group_request_is_rejected() {
     );
 }
 
-/// DYNAMIC_GROUPS を含まない Track に対する REQUEST_UPDATE + NEW_GROUP_REQUEST は
-/// PROTOCOL_VIOLATION
+/// DYNAMIC_GROUPS を含まない Track への REQUEST_UPDATE + NEW_GROUP_REQUEST は無視される
+///
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): dynamic Groups に
+/// 対応しない original publisher は "it ignores the parameter" であり、subscriber の
+/// MUST NOT 違反に対する受信側の close は規定されない。本実装はリレーではないため、
+/// 要求を upstream へ転送せず、パラメータを無視して他のパラメータの処理を続ける。
 #[test]
-fn request_update_with_new_group_request_without_dynamic_groups_rejected() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
-    };
+fn request_update_with_new_group_request_for_unsupported_track_is_ignored() {
+    use shiguredo_moqt::message_parameter::PARAM_PAUSED;
+
     let (mut client, mut server) = establish_pair();
     // Subscriber-initiated な Subscription を作り、Server が publisher となる
     let rid = client
@@ -73,32 +108,74 @@ fn request_update_with_new_group_request_without_dynamic_groups_rejected() {
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // 送信側検証の追加後は subscriber API からは送出できないため、
-    // NEW_GROUP_REQUEST 付き REQUEST_UPDATE を直接構築して受信側 MUST 検証を維持する
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_NEW_GROUP_REQUEST,
-        value: MessageParameterValue::VarInt(2),
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Unsupported,
+        "DYNAMIC_GROUPS の欠落は既知の非対応として記録されること"
+    );
+    // 送信側は既知の非対応への NEW_GROUP_REQUEST を拒否するため、
+    // 受信側の無視を検証するメッセージを直接構築する。無視するのは
+    // NEW_GROUP_REQUEST だけであり、併載した PAUSED は通常どおり適用されることを見る
+    let mut update_params = new_group_request_params(2);
+    update_params.push(MessageParameter {
+        param_type: PARAM_PAUSED,
+        value: MessageParameterValue::Uint8(1),
     });
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
         request_id: rid + 2,
-        parameters: params,
+        parameters: update_params,
     });
-    // server 側で受信すると PROTOCOL_VIOLATION
-    let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+    // セッションを閉じず、更新として受理する
+    server.recv_stream_message(rid, update).expect(
+        "対応しない original publisher は NEW_GROUP_REQUEST を無視し、セッションを閉じないこと",
+    );
+    // アプリには更新として通知する (キーフレームを要求できるかはアプリが判断する)
+    let mut notified = false;
+    while let Some(event) = server.poll_event() {
+        if let SessionEvent::RequestUpdateReceived {
+            request_id,
+            parameters,
+        } = event
+        {
+            assert_eq!(request_id, rid, "購読の Request ID で通知されること");
+            assert_eq!(
+                parameters.new_group_request(),
+                Some(2),
+                "無視する要求もアプリが判断できるようパラメータとして通知されること"
+            );
+            notified = true;
+        }
+    }
+    assert!(notified, "無視した要求もアプリへ通知されること");
+    // 更新を受理して応答できること
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("更新を受理して REQUEST_UPDATE_OK を返せること");
+    let subscription = server
+        .subscription(rid)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        subscription.state,
+        SubscriptionState::Established,
+        "購読は Established のままであること"
+    );
+    assert!(
+        subscription.paused,
+        "無視するのは NEW_GROUP_REQUEST だけで、併載した PAUSED は適用されること"
+    );
+    assert_ne!(
+        server.state(),
+        SessionState::Closing,
+        "セッションを閉じないこと"
+    );
 }
 
-/// DYNAMIC_GROUPS=0 (値あり) の Track に対する REQUEST_UPDATE + NEW_GROUP_REQUEST も
-/// PROTOCOL_VIOLATION (なし と同等に扱う)
+/// DYNAMIC_GROUPS=0 (値あり) の Track への REQUEST_UPDATE + NEW_GROUP_REQUEST も無視される
 #[test]
-fn request_update_with_new_group_request_dynamic_groups_zero_rejected() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
-    };
-    use shiguredo_moqt::track_properties::{
-        PROP_DYNAMIC_GROUPS, TrackProperty, TrackPropertyValue,
-    };
+fn request_update_with_new_group_request_dynamic_groups_zero_is_ignored() {
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
@@ -108,32 +185,38 @@ fn request_update_with_new_group_request_dynamic_groups_zero_rejected() {
         .recv_request(sub_msg)
         .expect("テストフィクスチャの前提条件を満たす");
     // server は DYNAMIC_GROUPS=0 で SUBSCRIBE_OK
-    let mut tp = TrackProperties::new();
-    tp.push(TrackProperty {
-        prop_type: PROP_DYNAMIC_GROUPS,
-        value: TrackPropertyValue::VarInt(0),
-    });
     server
-        .send_subscribe_ok(rid, 1, MessageParameters::new(), tp)
+        .send_subscribe_ok(
+            rid,
+            1,
+            MessageParameters::new(),
+            track_properties_with_dynamic_groups_value(0),
+        )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, ok_msg) = take_send_on_stream(&mut server);
     client
         .recv_stream_message(rid, ok_msg)
         .expect("テストフィクスチャの前提条件を満たす");
-    // 送信側検証の追加後は subscriber API からは送出できないため、
-    // NEW_GROUP_REQUEST 付き REQUEST_UPDATE を直接構築して受信側 MUST 検証を維持する
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_NEW_GROUP_REQUEST,
-        value: MessageParameterValue::VarInt(2),
-    });
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Unsupported,
+        "値 0 は既知の非対応として記録されること"
+    );
     let update = ControlMessage::RequestUpdate(shiguredo_moqt::message::RequestUpdate {
         request_id: rid + 2,
-        parameters: params,
+        parameters: new_group_request_params(2),
     });
-    // server 側で受信すると PROTOCOL_VIOLATION
-    let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
+    server
+        .recv_stream_message(rid, update)
+        .expect("値 0 の Track でも NEW_GROUP_REQUEST を無視して更新を受理すること");
+    assert_ne!(
+        server.state(),
+        SessionState::Closing,
+        "セッションを閉じないこと"
+    );
 }
 
 /// DYNAMIC_GROUPS=1 の Track ならば REQUEST_UPDATE + NEW_GROUP_REQUEST は受理される
@@ -183,12 +266,13 @@ fn request_update_with_new_group_request_dynamic_groups_one_accepted() {
     );
 }
 
-/// DYNAMIC_GROUPS 非対応 Track への REQUEST_UPDATE + NEW_GROUP_REQUEST は
-/// 送信側でも PROTOCOL_VIOLATION となり、併載した他パラメータがローカルに適用されない
+/// DYNAMIC_GROUPS 非対応と判明した Track への REQUEST_UPDATE + NEW_GROUP_REQUEST は
+/// 送信側で PROTOCOL_VIOLATION となり、併載した他パラメータがローカルに適用されない
 ///
-/// draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter):
-/// "A subscriber MUST NOT send this parameter in REQUEST_UPDATE if the Track did not
-/// include the DYNAMIC_GROUPS Property with value 1."
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter):
+/// "A subscriber MUST NOT send this parameter in REQUEST_UPDATE if it has received the
+/// Track's Properties and they did not include the DYNAMIC_GROUPS Property with value 1."
+/// Track Properties を受け取って非対応と判明した後だけ送信を拒否する (未判明の間は送れる)。
 #[test]
 fn request_update_with_new_group_request_send_side_rejected_without_dynamic_groups() {
     use shiguredo_moqt::message_parameter::{
@@ -233,7 +317,8 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     // 同じコードを返す他の送信前検証 (PAUSED / filter / fill 等) と区別する
     assert_eq!(
-        err.reason, "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
+        err.reason,
+        "NEW_GROUP_REQUEST in REQUEST_UPDATE for a track known not to support dynamic groups",
         "NEW_GROUP_REQUEST の検証で拒否されなければならない"
     );
     // 拒否時に REQUEST_UPDATE が送信イベントとして積まれないこと
@@ -282,21 +367,13 @@ fn request_update_with_new_group_request_send_side_rejected_without_dynamic_grou
 
 /// SUBSCRIBE の NEW_GROUP_REQUEST は foreknowledge 無しでも送信できる
 ///
-/// draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter):
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter):
 /// "A subscriber MAY include this parameter in SUBSCRIBE without foreknowledge of support."
 #[test]
 fn subscribe_with_new_group_request_without_foreknowledge_accepted() {
-    use shiguredo_moqt::message_parameter::{
-        MessageParameter, MessageParameterValue, PARAM_NEW_GROUP_REQUEST,
-    };
     let (mut client, _server) = establish_pair();
-    let mut params = MessageParameters::new();
-    params.push(MessageParameter {
-        param_type: PARAM_NEW_GROUP_REQUEST,
-        value: MessageParameterValue::VarInt(0),
-    });
     let rid = client
-        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), params)
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), new_group_request_params(0))
         .expect("SUBSCRIBE の NEW_GROUP_REQUEST は foreknowledge 無しでも許可される");
     let (sent_rid, msg) = take_send_request(&mut client);
     assert_eq!(sent_rid, rid);
@@ -310,6 +387,293 @@ fn subscribe_with_new_group_request_without_foreknowledge_accepted() {
         }
         other => panic!("Subscribe が期待されたが {other:?} を受け取った"),
     }
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Unknown,
+        "SUBSCRIBE 送信時点の対応状況は未判明であること"
+    );
+}
+
+/// SUBSCRIBE_OK の Track Properties から DYNAMIC_GROUPS の 3 状態を判別すること
+///
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter) の default は 1 であり、
+/// Track Properties を受け取った場合は `DYNAMIC_GROUPS` の値 1 を既知の対応、値 0 と欠落を
+/// 既知の非対応として扱う (§10.6 (DYNAMIC GROUPS): 省略時の値は 0)。
+#[test]
+fn dynamic_groups_support_classifies_track_properties() {
+    use shiguredo_moqt::track_properties::{
+        PROP_IMMUTABLE_PROPERTIES, TrackProperty, TrackPropertyValue,
+    };
+    // publisher 側は発行値そのもので判定する
+    assert_eq!(
+        DynamicGroupsSupport::from_local_properties(&track_properties_with_dynamic_groups_value(1)),
+        DynamicGroupsSupport::Supported,
+        "値 1 は既知の対応であること"
+    );
+    assert_eq!(
+        DynamicGroupsSupport::from_local_properties(&track_properties_with_dynamic_groups_value(0)),
+        DynamicGroupsSupport::Unsupported,
+        "値 0 は既知の非対応であること"
+    );
+    assert_eq!(
+        DynamicGroupsSupport::from_local_properties(&TrackProperties::new()),
+        DynamicGroupsSupport::Unsupported,
+        "欠落は既知の非対応であること"
+    );
+    // draft-ietf-moq-transport-23 §10.7 (Immutable Properties) の "MUST search both" に従い、
+    // IMMUTABLE_PROPERTIES の内側の DYNAMIC_GROUPS も判定材料になる
+    let mut immutable = TrackProperties::new();
+    immutable.push(TrackProperty {
+        prop_type: PROP_IMMUTABLE_PROPERTIES,
+        value: TrackPropertyValue::Bytes(vec![0x30, 0x01]),
+    });
+    assert_eq!(
+        DynamicGroupsSupport::from_local_properties(&immutable),
+        DynamicGroupsSupport::Supported,
+        "IMMUTABLE_PROPERTIES の内側の値 1 も既知の対応として扱うこと"
+    );
+    // subscriber 側は INCLUDE_PROPERTIES を指定していない場合、空は欠落として扱う
+    assert_eq!(
+        DynamicGroupsSupport::from_peer_properties(&TrackProperties::new(), None),
+        DynamicGroupsSupport::Unsupported,
+        "INCLUDE_PROPERTIES 省略時の空の Properties は欠落として扱うこと"
+    );
+    assert_eq!(
+        DynamicGroupsSupport::from_peer_properties(&TrackProperties::new(), Some(1)),
+        DynamicGroupsSupport::Unsupported,
+        "INCLUDE_PROPERTIES=1 の空の Properties は欠落として扱うこと"
+    );
+    // INCLUDE_PROPERTIES=0 の空応答だけは未判明を保つ (peer が空にしただけで告知していない)
+    assert_eq!(
+        DynamicGroupsSupport::from_peer_properties(&TrackProperties::new(), Some(0)),
+        DynamicGroupsSupport::Unknown,
+        "INCLUDE_PROPERTIES=0 の空の Properties は未判明であること"
+    );
+    // 0 を指定していても空でなければ受け取った値を反映する
+    assert_eq!(
+        DynamicGroupsSupport::from_peer_properties(
+            &track_properties_with_dynamic_groups_value(1),
+            Some(0)
+        ),
+        DynamicGroupsSupport::Supported,
+        "INCLUDE_PROPERTIES=0 でも空でない値 1 は既知の対応であること"
+    );
+    assert_eq!(
+        DynamicGroupsSupport::from_peer_properties(
+            &track_properties_with_dynamic_groups_value(0),
+            Some(0)
+        ),
+        DynamicGroupsSupport::Unsupported,
+        "INCLUDE_PROPERTIES=0 でも空でない値 0 は既知の非対応であること"
+    );
+    // REQUEST_UPDATE の NEW_GROUP_REQUEST は既知の非対応のときだけ送信できない
+    assert!(
+        DynamicGroupsSupport::Unknown.allows_new_group_request(),
+        "未判明の間は送信できること"
+    );
+    assert!(
+        DynamicGroupsSupport::Supported.allows_new_group_request(),
+        "既知の対応なら送信できること"
+    );
+    assert!(
+        !DynamicGroupsSupport::Unsupported.allows_new_group_request(),
+        "既知の非対応なら送信できないこと"
+    );
+}
+
+/// SUBSCRIBE_OK の Track Properties が REQUEST_UPDATE の送信可否を決めること
+///
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): 値 1 が判明すれば
+/// REQUEST_UPDATE に `NEW_GROUP_REQUEST` を載せられ、値 0 と欠落が判明すれば載せられない。
+#[test]
+fn subscribe_ok_track_properties_determine_new_group_request_permission() {
+    // ケース: ラベル / SUBSCRIBE_OK の Track Properties / 期待する状態 / 送信可否
+    let cases: [(&str, TrackProperties, DynamicGroupsSupport, bool); 3] = [
+        (
+            "DYNAMIC_GROUPS=1",
+            track_properties_with_dynamic_groups_value(1),
+            DynamicGroupsSupport::Supported,
+            true,
+        ),
+        (
+            "DYNAMIC_GROUPS=0",
+            track_properties_with_dynamic_groups_value(0),
+            DynamicGroupsSupport::Unsupported,
+            false,
+        ),
+        (
+            "DYNAMIC_GROUPS 欠落",
+            TrackProperties::new(),
+            DynamicGroupsSupport::Unsupported,
+            false,
+        ),
+    ];
+    for (label, properties, expected, allowed) in cases {
+        let (mut client, mut server) = establish_pair();
+        let rid = client
+            .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, sub_msg) = take_send_request(&mut client);
+        server
+            .recv_request(sub_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        server
+            .send_subscribe_ok(rid, 9, MessageParameters::new(), properties)
+            .expect("テストフィクスチャの前提条件を満たす");
+        let (_, ok_msg) = take_send_on_stream(&mut server);
+        client
+            .recv_stream_message(rid, ok_msg)
+            .expect("テストフィクスチャの前提条件を満たす");
+        assert_eq!(
+            client
+                .subscription(rid)
+                .expect("テストフィクスチャの前提条件を満たす")
+                .dynamic_groups,
+            expected,
+            "SUBSCRIBE_OK の Track Properties から対応状況を求めること: {label}"
+        );
+        let result = client.send_request_update(rid, new_group_request_params(7));
+        if allowed {
+            result.expect("既知の対応なら NEW_GROUP_REQUEST を送信できること");
+            let (sent_rid, msg) = take_send_on_stream(&mut client);
+            assert_eq!(sent_rid, rid, "REQUEST_UPDATE は購読の stream に送ること");
+            assert!(
+                matches!(msg, ControlMessage::RequestUpdate(_)),
+                "REQUEST_UPDATE が送出されること: {label}"
+            );
+        } else {
+            let err = result.expect_err("既知の非対応なら NEW_GROUP_REQUEST は送信できないこと");
+            assert_eq!(
+                err.code, SESSION_PROTOCOL_VIOLATION,
+                "既知の非対応の拒否コード: {label}"
+            );
+        }
+    }
+}
+
+/// INCLUDE_PROPERTIES=0 の空の Track Properties では未判明を保ち、publisher は対応情報を失わない
+///
+/// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): 0 を指定すると応答の
+/// Track Properties は存在するが空になる (SHOULD)。空は「DYNAMIC_GROUPS を告知しなかった」
+/// ことを意味しないため subscriber 側は未判明のままとする (§9.19.19)。publisher 側は
+/// 空化前の発行値で対応状況を保持する。
+#[test]
+fn include_properties_zero_empty_response_keeps_dynamic_groups_unknown() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            include_properties_params(0),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            rid,
+            9,
+            MessageParameters::new(),
+            track_properties_with_dynamic_groups(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    match &ok_msg {
+        ControlMessage::SubscribeOk(ok) => {
+            assert!(
+                ok.track_properties.is_empty(),
+                "INCLUDE_PROPERTIES=0 では SUBSCRIBE_OK の Track Properties が空になること"
+            );
+        }
+        other => panic!("SUBSCRIBE_OK が期待されたが {other:?} を受け取った"),
+    }
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Unknown,
+        "空の Track Properties を受けた subscriber は未判明のままであること"
+    );
+    assert_eq!(
+        server
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Supported,
+        "publisher は空化前の発行値で対応状況を保持すること"
+    );
+    // 未判明のため subscriber は REQUEST_UPDATE に NEW_GROUP_REQUEST を載せられる
+    client
+        .send_request_update(rid, new_group_request_params(0))
+        .expect("未判明の間は NEW_GROUP_REQUEST を送信できること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    // 自側の Track Properties で対応している publisher は要求を受理できる
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("対応している publisher は NEW_GROUP_REQUEST 付き更新を受理すること");
+}
+
+/// 初回 SUBSCRIBE の NEW_GROUP_REQUEST の後、Properties の判明で対応ありへ遷移すること
+///
+/// draft-ietf-moq-transport-23 §3.5.1 (Dynamically Starting New Groups) は、Location Filter を
+/// 次の Group に向けた SUBSCRIBE に `NEW_GROUP_REQUEST=0` を載せ、SUBSCRIBE_OK の
+/// `DYNAMIC_GROUPS` で対応を知る経路を挙げる。SUBSCRIBE の送信時点は未判明であり、
+/// `DYNAMIC_GROUPS=1` の判明後は REQUEST_UPDATE でも送信できる (§9.19.19)。
+#[test]
+fn new_group_request_transitions_from_unknown_to_supported() {
+    let (mut client, mut server) = establish_pair();
+    // Properties 未受信でも SUBSCRIBE には載せられる
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), new_group_request_params(0))
+        .expect("SUBSCRIBE の NEW_GROUP_REQUEST は foreknowledge 無しでも許可される");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Unknown,
+        "SUBSCRIBE 送信時点は未判明であること"
+    );
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(
+            rid,
+            9,
+            MessageParameters::new(),
+            track_properties_with_dynamic_groups(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .subscription(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .dynamic_groups,
+        DynamicGroupsSupport::Supported,
+        "SUBSCRIBE_OK で DYNAMIC_GROUPS=1 が判明すること"
+    );
+    client
+        .send_request_update(rid, new_group_request_params(3))
+        .expect("既知の対応へ遷移した後も REQUEST_UPDATE に NEW_GROUP_REQUEST を載せられること");
+    let (_, upd_msg) = take_send_on_stream(&mut client);
+    server
+        .recv_stream_message(rid, upd_msg)
+        .expect("対応している publisher は NEW_GROUP_REQUEST 付き更新を受理すること");
 }
 
 /// SUBSCRIBE の AUTHORIZATION_TOKEN (REGISTER) を peer_auth_token_cache に登録する
@@ -2037,8 +2401,9 @@ fn subscribe_ok_with_invalid_track_properties_keeps_subscription_pending() {
     // track_alias が設定されていない
     assert_eq!(sub.track_alias, None);
     // track_properties 由来の適用 (DYNAMIC_GROUPS) も行われていない
-    assert!(
-        !sub.dynamic_groups,
+    assert_eq!(
+        sub.dynamic_groups,
+        DynamicGroupsSupport::Unknown,
         "track_properties 検証エラー時に DYNAMIC_GROUPS は適用されないこと"
     );
     // MessageParameters 由来の適用 (EXPIRES) も行われていない

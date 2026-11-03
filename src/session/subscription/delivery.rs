@@ -352,8 +352,8 @@ mod tests {
     use crate::message::common::TrackNamespace;
     use crate::message_parameter::{MessageParameter, MessageParameterValue, PARAM_EXPIRES};
     use crate::session::types::{
-        DeliveryTimeoutState, StreamCountState, SubscriptionInitiator, SubscriptionRangeFilters,
-        SubscriptionState, TrackRole,
+        DeliveryTimeoutState, DynamicGroupsSupport, StreamCountState, SubscriptionInitiator,
+        SubscriptionRangeFilters, SubscriptionState, TrackRole,
     };
 
     fn empty_subscription() -> Subscription {
@@ -378,7 +378,7 @@ mod tests {
                 subgroup_overrides: hashbrown::HashMap::new(),
             },
             expires: None,
-            dynamic_groups: false,
+            dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority: None,
             default_publisher_group_order: None,
             stream_counts: StreamCountState {
@@ -392,7 +392,7 @@ mod tests {
             subscriber_priority: None,
             group_order: None,
             subscribe_tracks_id: None,
-            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
+            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-23 §9.19.22)
             include_properties: None,
             filter_start: None,
             filter_end: None,

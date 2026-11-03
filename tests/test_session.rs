@@ -31,8 +31,8 @@ use shiguredo_moqt::parameter::{
 use shiguredo_moqt::session::{
     core::PUBLISH_DONE_STREAM_COUNT_UNKNOWN,
     types::{
-        DataStreamResetReason, DatagramAcceptance, FetchState, RequestKind, SubscriptionState,
-        TerminationReason, TrackDataAcceptance, TrackRole,
+        DataStreamResetReason, DatagramAcceptance, DynamicGroupsSupport, FetchState, RequestKind,
+        SubscriptionState, TerminationReason, TrackDataAcceptance, TrackRole,
     },
 };
 use shiguredo_moqt::stream::{FETCH_HEADER_TYPE, subgroup::SubgroupIdMode};
@@ -328,17 +328,23 @@ fn expires_params(expires_ms: u64) -> MessageParameters {
     params
 }
 
-/// DYNAMIC_GROUPS=1 の Track を発行する (draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS))
-fn track_properties_with_dynamic_groups() -> TrackProperties {
+/// DYNAMIC_GROUPS に指定値を載せた Track Properties を作る
+/// (draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): 許容値は 0 または 1)
+fn track_properties_with_dynamic_groups_value(value: u64) -> TrackProperties {
     use shiguredo_moqt::track_properties::{
         PROP_DYNAMIC_GROUPS, TrackProperty, TrackPropertyValue,
     };
     let mut tp = TrackProperties::new();
     tp.push(TrackProperty {
         prop_type: PROP_DYNAMIC_GROUPS,
-        value: TrackPropertyValue::VarInt(1),
+        value: TrackPropertyValue::VarInt(value),
     });
     tp
+}
+
+/// DYNAMIC_GROUPS=1 の Track を発行する (draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS))
+fn track_properties_with_dynamic_groups() -> TrackProperties {
+    track_properties_with_dynamic_groups_value(1)
 }
 
 fn track_properties_with_delivery_timeout(delivery_timeout_ms: u64) -> TrackProperties {

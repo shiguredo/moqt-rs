@@ -27,10 +27,10 @@ use super::super::core::{
     RequestTable, Session, alias_used_by_different_track, range_filter_usage,
 };
 use super::super::types::{
-    DeadlineTimer, DeliveryTimeoutState, MAX_PENDING_UPDATE_GROUPS, PendingUpdateGroup,
-    PendingUpdateRejection, RequestKind, SessionError, SessionEvent, StreamCountState,
-    Subscription, SubscriptionInitiator, SubscriptionRangeFilters, SubscriptionState,
-    TerminationReason, TrackRole,
+    DeadlineTimer, DeliveryTimeoutState, DynamicGroupsSupport, MAX_PENDING_UPDATE_GROUPS,
+    PendingUpdateGroup, PendingUpdateRejection, RequestKind, SessionError, SessionEvent,
+    StreamCountState, Subscription, SubscriptionInitiator, SubscriptionRangeFilters,
+    SubscriptionState, TerminationReason, TrackRole,
 };
 use super::delivery::{
     compute_effective_delivery_timeout_ms, record_publish_done, set_subscription_expires,
@@ -125,8 +125,8 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(false);
         }
-        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.8 (GROUP ORDER Parameter) /
-        // §9.20.21 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
+        // draft-ietf-moq-transport-23 は値域 MUST (§9.19.8 (GROUP ORDER Parameter) /
+        // §9.19.22 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
         // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
         // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
         // 観測されるのは API 経路で手組みしたメッセージのみ)。
@@ -209,7 +209,7 @@ impl Session {
         };
         let subscriber_priority = subscribe.parameters.subscriber_priority();
         let group_order = subscribe.parameters.group_order();
-        // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+        // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
         // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
         // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = subscribe.parameters.include_properties();
@@ -274,8 +274,9 @@ impl Session {
             },
             expires: None,
             // SUBSCRIBE には TrackProperties は含まれない。Publisher である自側が
-            // send_subscribe_ok で TrackProperties を発行するタイミングで dynamic_groups を設定する。
-            dynamic_groups: false,
+            // send_subscribe_ok で TrackProperties を発行するタイミングで対応状況を確定する。
+            // 確定するまでは未判明である。
+            dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority,
             default_publisher_group_order,
             stream_counts: StreamCountState {
@@ -291,7 +292,7 @@ impl Session {
             // SUBSCRIBE に SUBSCRIBE_TRACKS_ID は出現しない
             // (draft-ietf-moq-transport-23 §9.19.21 (SUBSCRIBE_TRACKS_ID Parameter))
             subscribe_tracks_id: None,
-            // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
+            // draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter):
             // peer が SUBSCRIBE で指定した値を保持し、SUBSCRIBE_OK 送信時に参照する
             include_properties,
             filter_start,
@@ -353,8 +354,8 @@ impl Session {
             self.emit_request_error(request_id, REQUEST_INVALID_FILTER, reason);
             return Ok(());
         }
-        // draft-ietf-moq-transport-22 は値域 MUST (§9.20.8 (GROUP ORDER Parameter) /
-        // §9.20.21 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
+        // draft-ietf-moq-transport-23 は値域 MUST (§9.19.8 (GROUP ORDER Parameter) /
+        // §9.19.22 (INCLUDE_PROPERTIES Parameter) 等) と予約名前空間拒否の優先順位を規定しない。
         // 宛先自体が仕様上存在しない予約名前空間の拒否を優先する意図した選択である
         // (値域 MUST は wire 経路では decode 層がハンドラ到達前に発火するため、優先順位が
         // 観測されるのは API 経路で手組みしたメッセージのみ)。
@@ -506,10 +507,13 @@ impl Session {
             .parameters
             .expires()
             .map(|expires_ms| DeadlineTimer::new(expires_ms, self.timing.last_tick_ms));
-        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): peer が発行した PUBLISH の TrackProperties に
-        // DYNAMIC_GROUPS=1 があれば記録する。自側が (responder として) REQUEST_UPDATE 応答可否を
-        // 判断する際の NEW_GROUP_REQUEST 検証の材料となる。
-        let dynamic_groups = publish.track_properties.dynamic_groups() == Some(1);
+        // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS) / §9.19.19 (NEW GROUP REQUEST
+        // Parameter): peer が発行した PUBLISH の TrackProperties から対応状況を求める。
+        // PUBLISH は INCLUDE_PROPERTIES を運ばず (draft-ietf-moq-transport-23 §9.19.22 の
+        // MAY appear 列挙に含まれない)、本実装は SUBSCRIBE_TRACKS も実装しないため、
+        // 受け取った Track Properties は常に判明値として扱う。
+        let dynamic_groups =
+            DynamicGroupsSupport::from_peer_properties(&publish.track_properties, None);
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         let default_publisher_priority = publish.track_properties.default_publisher_priority();
         let default_publisher_group_order =
@@ -567,7 +571,7 @@ impl Session {
             subscriber_priority,
             group_order,
             subscribe_tracks_id,
-            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-22 §9.20.21)
+            // PUBLISH に INCLUDE_PROPERTIES は出現しない (draft-ietf-moq-transport-23 §9.19.22)
             include_properties: None,
             filter_start,
             filter_end,
@@ -712,10 +716,17 @@ impl Session {
                 object_id,
             });
         }
-        // draft-ietf-moq-transport-22 §10.6 (DYNAMIC GROUPS) / §9.20.19 (NEW GROUP REQUEST Parameter): SUBSCRIBE_OK で peer publisher が発行する
-        // DYNAMIC_GROUPS を記録する (自側が subscriber なので REQUEST_UPDATE 送信時の
-        // NEW_GROUP_REQUEST 可否を判断するために使う)
-        subscription.dynamic_groups = ok.track_properties.dynamic_groups() == Some(1);
+        // draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS) / §9.19.19 (NEW GROUP REQUEST
+        // Parameter): SUBSCRIBE_OK で peer publisher が発行した Track Properties から
+        // DYNAMIC_GROUPS の対応状況を求める (自側が subscriber なので REQUEST_UPDATE 送信時の
+        // NEW_GROUP_REQUEST 可否を判断するために使う)。INCLUDE_PROPERTIES=0 を指定して空の
+        // Track Properties を受け取った場合は、peer が告知しなかっただけであり判明していない
+        // ため未判明を保つ ([`DynamicGroupsSupport::from_peer_properties`])。
+        let requested_include_properties = subscription.include_properties;
+        subscription.dynamic_groups = DynamicGroupsSupport::from_peer_properties(
+            &ok.track_properties,
+            requested_include_properties,
+        );
         // draft §10.4 (DEFAULT PUBLISHER PRIORITY) / §10.5 (DEFAULT PUBLISHER GROUP ORDER)
         subscription.default_publisher_priority = ok.track_properties.default_publisher_priority();
         subscription.default_publisher_group_order =
@@ -870,10 +881,9 @@ impl Session {
         // キャッシュで alias を解決するだけで実キャッシュを変更せず、解決できない alias も
         // 判定対象から外すため、未登録 alias の扱いは適用経路のまま変わらない。
         // セッション終了の検証 (§9.20.1 の context スコープ / §9.5 と §3.1・§3.2 の
-        // state・role / §9.19.18 の PAUSED 値域) は上で済ませてある。§9.20.19
-        // (NEW_GROUP_REQUEST) だけは対象 subscription のトラックプロパティを要するため
-        // dispatch 側に残る (メッセージ単位の reject が先行し得る。受信側の close は
-        // 実装判断であり MUST ではない)。
+        // state・role / §9.19.18 の PAUSED 値域) は上で済ませてある。§9.19.19
+        // (NEW_GROUP_REQUEST) は subscriber の MUST NOT を送信側で担保するものであり、
+        // 受信側では同節の無視する規則に従って拒否しない (`handle_update_for_subscription`)。
         if self
             .validate_peer_message_auth_token_uniqueness(&update.parameters)
             .is_err()
@@ -904,8 +914,7 @@ impl Session {
         // ローカル終端済みの request は送信方向を reset 済みで拒否応答 (REQUEST_ERROR) を
         // 送れないため、拒否せず dispatch へ進む。Range Filter の内容検証自体は省略され
         // (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、応答を送れない以上
-        // 満たせない)、NEW_GROUP_REQUEST・PAUSED の MUST 検証は各ハンドラで行い、
-        // 状態遷移はしない
+        // 満たせない)、PAUSED の MUST 検証は dispatch 前に行い、状態遷移はしない
         if let Err(reason) = self.check_incoming_range_filters(&update.parameters)
             && !locally_terminated
         {
@@ -1142,31 +1151,25 @@ impl Session {
     ) -> Result<(), SessionError> {
         // ローカル終端済みの request (`rejected_request_ids` に記録。GOAWAY の deadline 満了や
         // malformed 終端) は送信方向を reset 済みだが、peer が reset を観測する前に送った
-        // REQUEST_UPDATE は正当に届く。その場合は本関数の残りの検証 (NEW_GROUP_REQUEST)
-        // だけを行い、状態遷移とイベント発行はしない (Request ID / MAX_REQUEST_UPDATES /
-        // state・role / auth token / パラメータスコープ / PAUSED 値域の検証は呼び出し元
-        // `handle_peer_request_update` で済んでいる)。
+        // REQUEST_UPDATE は正当に届く。その場合は状態遷移とイベント発行をせずに return する
+        // (Request ID / MAX_REQUEST_UPDATES / state・role / auth token / パラメータスコープ /
+        // PAUSED 値域の検証は呼び出し元 `handle_peer_request_update` で済んでいる)。
         // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
         // 送信者を特定できないため従来どおり UNEXPECTED_MESSAGE になる。
         let subscription = self
             .subscriptions
             .get(&request_id)
             .expect("locate_request guarantees key presence");
-        // draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter): subscriber MUST NOT send NEW_GROUP_REQUEST in
-        // REQUEST_UPDATE if Track did not include DYNAMIC_GROUPS Property with value 1.
-        // 同節は送信側の MUST NOT のみを定め、受信側の close は規定しない。そのため
-        // メッセージ単位の reject (§8.9 の不正トークン / §3.3.2 の INVALID_FILTER) との
-        // 順序を競わせず、DYNAMIC_GROUPS を持つ subscription entry を要する本検証を
-        // dispatch 側に残す (重複トークン付きの REQUEST_UPDATE が先行して reject され得るが、
-        // 受信側 MUST ではないため適法)。
-        if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
-            let err = SessionError::new(
-                SESSION_INVALID_PARAMETER,
-                "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
-            );
-            self.fail(err.clone());
-            return Err(err);
-        }
+        // draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): subscriber には
+        // "MUST NOT send this parameter in REQUEST_UPDATE if it has received the Track's
+        // Properties and they did not include the DYNAMIC_GROUPS Property with value 1." が
+        // 課されるが、同節は受信側の close を規定しない。同節は動的 Group に対応しない
+        // original publisher について "it ignores the parameter" と定めるため、本実装は
+        // NEW_GROUP_REQUEST を拒否せず無視する (パラメータはアプリへ渡し、キーフレームを
+        // 要求できるかはアプリが `dynamic_groups` と自側の能力から判断する)。
+        // 本実装はリレーではないため、同節の Relay Handling (Established でない subscription
+        // の upstream への転送、outstanding な要求の管理) は行わない。
+        //
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の値域検証は
         // 呼び出し元 `handle_peer_request_update` が dispatch 前に済ませている
         // (同一の `MessageParameters` を渡すため、ここで再検証しても到達しない)。

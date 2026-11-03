@@ -8,6 +8,7 @@ use crate::message::{
     ControlMessage, ErrorDetails, ReasonPhrase, common::Location, common::TrackNamespace,
 };
 use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet};
+use crate::track_properties::TrackProperties;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
@@ -1052,8 +1053,8 @@ impl DeadlineTimer {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadlineTimer, DeliveryTimeoutState, HashMap, StreamCountState, Subscription,
-        SubscriptionInitiator, SubscriptionPublishDone, SubscriptionRangeFilters,
+        DeadlineTimer, DeliveryTimeoutState, DynamicGroupsSupport, HashMap, StreamCountState,
+        Subscription, SubscriptionInitiator, SubscriptionPublishDone, SubscriptionRangeFilters,
         SubscriptionState, TrackNamespace, TrackRole,
     };
     use crate::message::ReasonPhrase;
@@ -1088,7 +1089,7 @@ mod tests {
                 subgroup_overrides: HashMap::new(),
             },
             expires: None,
-            dynamic_groups: false,
+            dynamic_groups: DynamicGroupsSupport::Unknown,
             default_publisher_priority: None,
             default_publisher_group_order: None,
             stream_counts: StreamCountState {
@@ -1311,6 +1312,79 @@ pub struct StreamCountState {
     pub open_incoming_subgroup_count: u64,
 }
 
+/// この subscription で判明している Track の `DYNAMIC_GROUPS` Property の対応状況
+///
+/// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter):
+/// "A subscriber MUST NOT send this parameter in REQUEST_UPDATE if it has received the
+/// Track's Properties and they did not include the DYNAMIC_GROUPS Property with value 1."
+/// Track Properties をまだ受け取っていない間はこの MUST NOT の条件を満たさないため、
+/// 「未判明」と「既知の非対応」を区別しないと `REQUEST_UPDATE` に `NEW_GROUP_REQUEST` を
+/// 載せてよいかを正しく判定できない。同節は、dynamic Groups に対応しない original
+/// publisher が `NEW_GROUP_REQUEST` を無視することも定める。
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicGroupsSupport {
+    /// Track Properties をまだ受け取っておらず、対応しているか判明していない
+    Unknown,
+    /// Track Properties (自側の発行値または peer の受信値) の `DYNAMIC_GROUPS` が `1`
+    Supported,
+    /// Track Properties を受け取ったが `DYNAMIC_GROUPS` が `1` ではなかった (`0` または欠落)
+    Unsupported,
+}
+
+impl DynamicGroupsSupport {
+    /// 自側が発行する Track Properties から対応状況を求める (publisher 側)
+    ///
+    /// peer へ提示する `SUBSCRIBE_OK` の Track Properties を `INCLUDE_PROPERTIES=0` で
+    /// 空にする場合も、判定材料は空にする前の発行値である。空にした値を渡すと、対応して
+    /// いる Track を非対応と誤認する。
+    pub fn from_local_properties(properties: &TrackProperties) -> Self {
+        Self::from_dynamic_groups_value(properties.dynamic_groups())
+    }
+
+    /// peer から受け取った Track Properties から対応状況を求める (subscriber 側)
+    ///
+    /// `requested_include_properties` は `SUBSCRIBE` で自側が指定した `INCLUDE_PROPERTIES`。
+    /// draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter): `0` を指定すると
+    /// 応答の Track Properties は「存在するが空」になる (SHOULD)。空で届いた場合は peer が
+    /// `DYNAMIC_GROUPS` を告知していないだけで、対応しているかは判明しないため
+    /// [`Unknown`](Self::Unknown) を保つ。`0` を指定していない場合と、`0` を指定しても空で
+    /// なかった場合は受け取った値をそのまま反映する (`1` 以外は非対応)。
+    ///
+    /// `PUBLISH` は `INCLUDE_PROPERTIES` を運ばないため、呼び出し側は `None` を渡す。
+    pub fn from_peer_properties(
+        properties: &TrackProperties,
+        requested_include_properties: Option<u8>,
+    ) -> Self {
+        if requested_include_properties == Some(0) && properties.is_empty() {
+            return Self::Unknown;
+        }
+        Self::from_dynamic_groups_value(properties.dynamic_groups())
+    }
+
+    /// `DYNAMIC_GROUPS` の値 (未告知は `None`) を対応状況へ写す
+    ///
+    /// draft-ietf-moq-transport-23 §10.6 (DYNAMIC GROUPS): 値 `1` だけが動的 Group の
+    /// 対応を表し、`0` と省略 (省略時の値は 0) は非対応である。
+    fn from_dynamic_groups_value(value: Option<u64>) -> Self {
+        if value == Some(1) {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// `REQUEST_UPDATE` に `NEW_GROUP_REQUEST` を載せてよいか
+    ///
+    /// draft-ietf-moq-transport-23 §9.19.19 (NEW GROUP REQUEST Parameter): Track Properties を
+    /// 受け取っていない間は MUST NOT の条件 ("has received the Track's Properties and they did
+    /// not include the DYNAMIC_GROUPS Property with value 1") を満たさないため送信できる。
+    /// 既知の非対応と判明した後だけ送信してはならない。
+    pub const fn allows_new_group_request(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
 /// Subscription 単位の状態
 #[derive(Debug, Clone)]
 pub struct Subscription {
@@ -1365,16 +1439,18 @@ pub struct Subscription {
     ///
     /// sender がこの subscription を終了しうる時刻の advisory deadline を表す。
     pub expires: Option<DeadlineTimer>,
-    /// Track の DYNAMIC_GROUPS Property (draft §10.6 (DYNAMIC GROUPS)) が `1` で発行されているか
+    /// Track の DYNAMIC_GROUPS Property (draft §10.6 (DYNAMIC GROUPS)) の対応状況
     ///
     /// 自側が Publisher として送信した PUBLISH / SUBSCRIBE_OK、または peer から受信した
-    /// PUBLISH / SUBSCRIBE_OK の `TrackProperties` の `DYNAMIC_GROUPS` が `1` であれば `true`。
-    /// Publisher 側は peer が `INCLUDE_PROPERTIES=0` を指定して wire 上を空化しても発行時の値で
-    /// 保持するが、Subscriber 側は空化された Track Properties を受けるため `false` のままとなり、
-    /// その subscription からは `NEW_GROUP_REQUEST` を送れない。
-    /// draft-ietf-moq-transport-22 §9.20.19 (NEW GROUP REQUEST Parameter): `NEW_GROUP_REQUEST` parameter は `DYNAMIC_GROUPS == 1` の
-    /// Track 以外で REQUEST_UPDATE に送受信してはならない。
-    pub dynamic_groups: bool,
+    /// PUBLISH / SUBSCRIBE_OK の `TrackProperties` から求める。Track Properties をまだ
+    /// 受け取っていない subscriber 側は [`DynamicGroupsSupport::Unknown`] であり、
+    /// `SUBSCRIBE` に `NEW_GROUP_REQUEST` を載せられる (draft-ietf-moq-transport-23
+    /// §9.19.19 (NEW GROUP REQUEST Parameter) は foreknowledge 無しの `SUBSCRIBE` を認める)。
+    /// Publisher 側は peer が `INCLUDE_PROPERTIES=0` を指定して wire 上を空化しても、空に
+    /// する前の発行値で対応状況を保持する。Subscriber 側は `INCLUDE_PROPERTIES=0` で空の
+    /// Track Properties を受けた場合も未判明のまま保ち、値 `1`・値 `0`・欠落を受けた場合に
+    /// 既知の対応 / 既知の非対応へ遷移する。
+    pub dynamic_groups: DynamicGroupsSupport,
     /// Track Property の DEFAULT_PUBLISHER_PRIORITY (draft §10.4 (DEFAULT PUBLISHER PRIORITY))
     ///
     /// PUBLISH / SUBSCRIBE_OK / REQUEST_OK の `TrackProperties` から取り込む。
@@ -1438,10 +1514,14 @@ pub struct Subscription {
     /// 自側が publisher の場合は `send_publish` に渡した値が入る。省略時は `None`。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub subscribe_tracks_id: Option<u64>,
-    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
+    /// INCLUDE_PROPERTIES (draft-ietf-moq-transport-23 §9.19.22 (INCLUDE_PROPERTIES Parameter))
     ///
-    /// peer が SUBSCRIBE で指定した値。`Some(0)` のとき OK 応答の Track Properties を
-    /// 空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
+    /// この subscription の OK 応答 (SUBSCRIBE_OK) の Track Properties を支配する値。
+    /// 自側が subscriber なら SUBSCRIBE で自側が指定した値、自側が publisher なら peer の
+    /// SUBSCRIBE が指定した値が入る。`Some(0)` のとき OK 応答の Track Properties は存在
+    /// するが空になる (SHOULD)。`None` (省略時) は default 1 として扱う。
+    /// subscriber 側では、空の Track Properties を受けたときに DYNAMIC_GROUPS の対応状況を
+    /// 未判明のまま保つ判定にも使う ([`DynamicGroupsSupport::from_peer_properties`])。
     pub include_properties: Option<u8>,
     /// 解決済みの Location Filter の Start Location (draft §3.3.1 (Location Filters))
     ///

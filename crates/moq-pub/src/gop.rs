@@ -11,7 +11,7 @@
 //! 判定は入力フレームの Timestamp の差分だけで行う。live capture の Timestamp は
 //! 起源が経路によって異なるため、絶対値ではなく差分を使う。
 //!
-//! 購読者からの `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-22 §9.20.19) による Group 開始の
+//! 購読者からの `NEW_GROUP_REQUEST` (draft-ietf-moq-transport-23 §9.19.19) による Group 開始の
 //! 前倒しもここで扱う。直前の Group が最小長に達するまでは前倒しせず、達した最初の入力
 //! フレームでキーフレームを要求する (同節が認める遅延)。`--gop-duration` による通常の境界が
 //! 先に来た場合は、そこで Group が始まって要求は満たされる。
@@ -26,14 +26,14 @@ fn gop_duration_us(gop_duration_ms: u32) -> u64 {
 
 /// `NEW_GROUP_REQUEST` に応じてキーフレームを要求するときの最小 Group 長 (マイクロ秒)
 ///
-/// draft-ietf-moq-transport-22 §9.20.19 は、Group 長の最小値を実現するなどの実装固有の
+/// draft-ietf-moq-transport-23 §9.19.19 は、Group 長の最小値を実現するなどの実装固有の
 /// 理由で `NEW_GROUP_REQUEST` を遅延させてよい (MAY) と定める。連続する要求で
 /// キーフレームが乱発しないよう、直前の Group がこの長さに達するまでは要求を保留する。
 const MIN_GROUP_DURATION_US: u64 = 300_000;
 
 /// `NEW_GROUP_REQUEST` の値を受け付けるかどうかを返す
 ///
-/// draft-ietf-moq-transport-22 §9.20.19 は、値が 0 (購読者が Group の情報を持たない) か、
+/// draft-ietf-moq-transport-23 §9.19.19 は、値が 0 (購読者が Group の情報を持たない) か、
 /// 現在の Group より大きい場合に、現在の Group を終えて新しい Group を開始することを
 /// SHOULD とする。`current_group_id` は直前に開始した Group の ID であり、まだ Group を
 /// 開始していない場合は `None`。
@@ -316,7 +316,7 @@ mod tests {
 
     /// NEW_GROUP_REQUEST の値が 0 か現在の Group より大きいときだけ受け付けること
     ///
-    /// draft-ietf-moq-transport-22 §9.20.19 は、値が 0 (購読者が Group の情報を持たない)
+    /// draft-ietf-moq-transport-23 §9.19.19 は、値が 0 (購読者が Group の情報を持たない)
     /// か、現在の Group より大きい場合に新しい Group を開始することを SHOULD とする。
     #[test]
     fn accepts_new_group_request_only_for_zero_or_a_future_group() {
@@ -360,8 +360,8 @@ mod tests {
 
     /// NEW_GROUP_REQUEST は直前の Group が最小長に達するまで保留すること
     ///
-    /// 連続する要求でキーフレームが乱発しないようにする (draft-ietf-moq-transport-22
-    /// §9.20.19 が認める遅延)。保留した要求は破棄しない。
+    /// 連続する要求でキーフレームが乱発しないようにする (draft-ietf-moq-transport-23
+    /// §9.19.19 が認める遅延)。保留した要求は破棄しない。
     #[test]
     fn a_new_group_request_waits_for_the_minimum_group_duration() {
         let mut tracker = GopTracker::new(2_000);
