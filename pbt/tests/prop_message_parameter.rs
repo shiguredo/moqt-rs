@@ -2,7 +2,15 @@ use shiguredo_moqt::{
     message::common::Location, message_parameter::AuthorizationToken,
     message_parameter::LocationFilter, message_parameter::LocationFilterContext,
     message_parameter::MessageParameter, message_parameter::MessageParameterValue,
-    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN, varint,
+    message_parameter::MessageParameters, message_parameter::PARAM_AUTHORIZATION_TOKEN,
+    message_parameter::PARAM_EXPIRES, message_parameter::PARAM_FILL_PARAMETERS,
+    message_parameter::PARAM_FILL_TIMEOUT, message_parameter::PARAM_FORWARD,
+    message_parameter::PARAM_GROUP_ORDER, message_parameter::PARAM_INCLUDE_PROPERTIES,
+    message_parameter::PARAM_LARGEST_OBJECT, message_parameter::PARAM_LOCATION_FILTER,
+    message_parameter::PARAM_NEW_GROUP_REQUEST, message_parameter::PARAM_OBJECT_DELIVERY_TIMEOUT,
+    message_parameter::PARAM_OBJECT_PROPERTY_FILTER, message_parameter::PARAM_OBJECTID_FILTER,
+    message_parameter::PARAM_PRIORITY_FILTER, message_parameter::PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    message_parameter::PARAM_SUBGROUP_FILTER, message_parameter::PARAM_SUBSCRIBER_PRIORITY, varint,
 };
 
 use pbt::common::{RANGE_FILTER_TYPES, has_property_type_field, sample_small_varint, test_runner};
@@ -628,6 +636,256 @@ fn auth_token_encode_rejects_duplicates_but_decode_accepts_them() -> noprop::Tes
     assert!(
         duplicate_seen.get(),
         "重複した (Token Type, Token Value) の decode が 1 つも観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+// ─── FILL_PARAMETERS の個数符号化 (draft-ietf-moq-transport-23 §9.19.15) ────────
+
+/// FILL_PARAMETERS の内側に出現できる型 (Table 7)
+///
+/// `src/message_parameter.rs` の `FILL_PARAMETERS_ALLOWED_PARAMS` と一致させること。
+const FILL_INNER_TYPES: &[u64] = &[
+    PARAM_FILL_TIMEOUT,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_LOCATION_FILTER,
+    PARAM_GROUP_ORDER,
+    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECTID_FILTER,
+    PARAM_PRIORITY_FILTER,
+    PARAM_OBJECT_PROPERTY_FILTER,
+];
+
+/// FILL_PARAMETERS (0x23) より小さい型の外側パラメータ候補
+///
+/// 外側のデルタの基準が内側へ漏れないことを確かめるため、FILL_PARAMETERS の前に置く。
+const OUTER_LOWER_TYPES: &[u64] = &[
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_EXPIRES,
+    PARAM_LARGEST_OBJECT,
+    PARAM_FILL_TIMEOUT,
+    PARAM_FORWARD,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_LOCATION_FILTER,
+    PARAM_GROUP_ORDER,
+];
+
+/// FILL_PARAMETERS (0x23) より大きい型の外側パラメータ候補
+///
+/// 内側の個数で読み終えたあとに残る外側パラメータとして置き、内側へ巻き込まれないことを
+/// 確かめる。
+const OUTER_HIGHER_TYPES: &[u64] = &[
+    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECTID_FILTER,
+    PARAM_PRIORITY_FILTER,
+    PARAM_OBJECT_PROPERTY_FILTER,
+    PARAM_NEW_GROUP_REQUEST,
+    PARAM_INCLUDE_PROPERTIES,
+];
+
+/// 型の候補から重複なしで `count` 個を選び、昇順に並べて返す
+///
+/// draft-ietf-moq-transport-23 §9.19 (Control Message Parameters) は、パラメータ定義が
+/// 明示的に複数出現を許可していない型の繰り返しを送信側の MUST NOT と定める。
+/// 同一メッセージ内で型が重複しないよう、Fisher-Yates で候補から選ぶ。
+fn sample_distinct_types(
+    ctx: &mut noprop::TestCaseContext,
+    types: &[u64],
+    count: usize,
+) -> Vec<u64> {
+    let mut pool = types.to_vec();
+    for i in 0..count {
+        let j = i + noprop::sample_usize_in(ctx, 0..(pool.len() - i));
+        pool.swap(i, j);
+    }
+    pool.truncate(count);
+    pool.sort_unstable();
+    pool
+}
+
+/// Table 7 の LOCATION_FILTER 用に、§9.19.9 の値域を満たす typed filter を生成する
+///
+/// AbsoluteRange 系の `StartGroup + EndGroupDelta` が 2^64 - 1 を超えないよう、
+/// 各値は小さな varint に限定する。
+fn sample_fill_location_filter(ctx: &mut noprop::TestCaseContext) -> LocationFilter {
+    let start = Location {
+        group_id: sample_small_varint(ctx),
+        object_id: sample_small_varint(ctx),
+    };
+    match noprop::sample_usize_in(ctx, 0..=5) {
+        0 => LocationFilter::NoFilter,
+        1 => LocationFilter::RelativeGroup {
+            start_group: sample_small_varint(ctx),
+        },
+        2 => LocationFilter::AbsoluteStart { start },
+        3 => LocationFilter::AbsoluteRange {
+            start,
+            end_group_delta: sample_small_varint(ctx),
+        },
+        4 => LocationFilter::AbsoluteRangeWithEnd {
+            start,
+            end_group_delta: sample_small_varint(ctx),
+            end_object: sample_small_varint(ctx),
+        },
+        _ => LocationFilter::NextObject,
+    }
+}
+
+/// Range Filter 1 インスタンスのバイト列を生成する
+///
+/// draft-ietf-moq-transport-22 §8.6 (Range Filter Structure): SetID (8 bits) と、
+/// 0x28 系のみが持つ Property Type (偶数) のあとに、開始位置 1 の open-ended な Range を
+/// 1 つ置く。PRIORITY_FILTER (0x27) の 0..=255 制約も満たす。
+fn sample_range_filter_value(ctx: &mut noprop::TestCaseContext, param_type: u64) -> Vec<u8> {
+    let mut bytes = vec![noprop::sample_u8(ctx)];
+    if has_property_type_field(param_type) {
+        // draft-ietf-moq-transport-22 §9.20.13 / §9.20.14: Property Type MUST be even
+        varint::encode(noprop::sample_choice(ctx, &[0u64, 2u64]), &mut bytes);
+    }
+    varint::encode(1, &mut bytes);
+    bytes
+}
+
+/// Table 7 の範囲で 0 個以上の内側パラメータ群を生成する
+fn sample_inner_parameters(ctx: &mut noprop::TestCaseContext) -> MessageParameters {
+    let max_count = FILL_INNER_TYPES.len().min(4);
+    let count = noprop::sample_usize_in(ctx, 0..=max_count);
+    let mut params = MessageParameters::new();
+    for param_type in sample_distinct_types(ctx, FILL_INNER_TYPES, count) {
+        let value = match param_type {
+            PARAM_FILL_TIMEOUT => MessageParameterValue::VarInt(sample_small_varint(ctx)),
+            PARAM_SUBSCRIBER_PRIORITY => MessageParameterValue::Uint8(noprop::sample_u8(ctx)),
+            PARAM_GROUP_ORDER => {
+                MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[1u8, 2u8]))
+            }
+            PARAM_LOCATION_FILTER => {
+                MessageParameterValue::LocationFilter(sample_fill_location_filter(ctx))
+            }
+            PARAM_SUBGROUP_FILTER
+            | PARAM_OBJECTID_FILTER
+            | PARAM_PRIORITY_FILTER
+            | PARAM_OBJECT_PROPERTY_FILTER => {
+                MessageParameterValue::LengthPrefixed(sample_range_filter_value(ctx, param_type))
+            }
+            _ => panic!("FILL_PARAMETERS の内側に置けない型: {param_type}"),
+        };
+        params.push(MessageParameter { param_type, value });
+    }
+    params
+}
+
+/// 外側のパラメータ群を生成する (型は昇順、重複なし)
+fn sample_outer_parameters(ctx: &mut noprop::TestCaseContext, types: &[u64]) -> MessageParameters {
+    let count = noprop::sample_usize_in(ctx, 0..=types.len());
+    let mut params = MessageParameters::new();
+    for param_type in sample_distinct_types(ctx, types, count) {
+        let value = match param_type {
+            PARAM_OBJECT_DELIVERY_TIMEOUT
+            | PARAM_SUBGROUP_DELIVERY_TIMEOUT
+            | PARAM_EXPIRES
+            | PARAM_FILL_TIMEOUT
+            | PARAM_NEW_GROUP_REQUEST => MessageParameterValue::VarInt(sample_small_varint(ctx)),
+            PARAM_LARGEST_OBJECT => MessageParameterValue::Location {
+                group: sample_small_varint(ctx),
+                object: sample_small_varint(ctx),
+            },
+            PARAM_FORWARD | PARAM_INCLUDE_PROPERTIES => {
+                MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[0u8, 1u8]))
+            }
+            PARAM_SUBSCRIBER_PRIORITY => MessageParameterValue::Uint8(noprop::sample_u8(ctx)),
+            PARAM_GROUP_ORDER => {
+                MessageParameterValue::Uint8(noprop::sample_choice(ctx, &[1u8, 2u8]))
+            }
+            PARAM_LOCATION_FILTER => {
+                MessageParameterValue::LocationFilter(sample_fill_location_filter(ctx))
+            }
+            PARAM_SUBGROUP_FILTER
+            | PARAM_OBJECTID_FILTER
+            | PARAM_PRIORITY_FILTER
+            | PARAM_OBJECT_PROPERTY_FILTER => {
+                MessageParameterValue::LengthPrefixed(sample_range_filter_value(ctx, param_type))
+            }
+            _ => panic!("外側に置く型として未定義: {param_type}"),
+        };
+        params.push(MessageParameter { param_type, value });
+    }
+    params
+}
+
+/// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
+/// FILL_PARAMETERS の値は `Number of Parameters (vi64)` とその個数の Parameters であり、
+/// 外側の byte length を持たない。
+///
+/// 内側の個数ぶんだけをデコードし、外側の後続パラメータを内側へ巻き込まないことを
+/// 任意の内側パラメータ数で検証する。外側には FILL_PARAMETERS より小さい型のパラメータを
+/// 前、大きい型のパラメータを後ろに置く。内側の delta の基準は 0 から取り直すため、
+/// 前段の型が何であっても内側の先頭の型はその delta のまま解決される。
+///
+/// 期待値は decode 結果と encode 入力を突き合わせて求める。外側の並びが変われば
+/// 後続パラメータが内側へ吸われたことになり、内側が変われば個数の読み進め方が壊れている。
+#[test]
+fn fill_parameters_count_framing_roundtrip() -> noprop::TestResult {
+    // 内側 0 個 / 内側 2 個以上 / 外側に後続パラメータあり の観測をカバレッジゲートで検証する
+    let empty_inner_seen = std::cell::Cell::new(false);
+    let multiple_inner_seen = std::cell::Cell::new(false);
+    let following_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let inner = sample_inner_parameters(ctx);
+        let mut params = sample_outer_parameters(ctx, OUTER_LOWER_TYPES);
+        params.push(MessageParameter {
+            param_type: PARAM_FILL_PARAMETERS,
+            value: MessageParameterValue::FillParameters(inner.clone()),
+        });
+        let following = sample_outer_parameters(ctx, OUTER_HIGHER_TYPES);
+        let has_following = !following.is_empty();
+        for param in following.as_slice() {
+            params.push(param.clone());
+        }
+
+        if inner.is_empty() {
+            empty_inner_seen.set(true);
+        }
+        if inner.len() > 1 {
+            multiple_inner_seen.set(true);
+        }
+        if has_following {
+            following_seen.set(true);
+        }
+
+        let mut buf = Vec::new();
+        params
+            .encode(&mut buf)
+            .expect("正当なパラメータ群は encode できなければならない");
+        let (decoded, consumed) = MessageParameters::decode(&buf)
+            .expect("encode したパラメータ群は decode できなければならない");
+        assert_eq!(consumed, buf.len(), "生成したバイト列をすべて消費すること");
+
+        let expected_types: Vec<u64> = params.as_slice().iter().map(|p| p.param_type).collect();
+        let actual_types: Vec<u64> = decoded.as_slice().iter().map(|p| p.param_type).collect();
+        assert_eq!(
+            actual_types, expected_types,
+            "外側のパラメータ型の並びが保たれること (後続が内側へ巻き込まれないこと)"
+        );
+        assert_eq!(
+            decoded.fill_parameters(),
+            Some(&inner),
+            "内側のパラメータ群が件数・内容ともに保たれること"
+        );
+        Ok(())
+    })?;
+    assert!(
+        empty_inner_seen.get(),
+        "内側 0 個の FILL_PARAMETERS が 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        multiple_inner_seen.get(),
+        "内側 2 個以上の FILL_PARAMETERS が 1 つも観測されなかった\n{runner}"
+    );
+    assert!(
+        following_seen.get(),
+        "FILL_PARAMETERS の後続する外側パラメータが 1 つも観測されなかった\n{runner}"
     );
     Ok(())
 }
