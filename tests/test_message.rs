@@ -287,135 +287,467 @@ mod goaway {
     }
 }
 
-mod request_flow {
+mod request_error_details {
     use super::*;
+    use shiguredo_moqt::message::{ErrorDetail, ErrorDetails};
 
-    // ─── REQUEST_ERROR の REDIRECT present 整合検証 (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format)) ────
-    //
-    // draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format) "Redirect: Present only when Error Code is REDIRECT" に基づき、
-    // error_code と Redirect の present 整合をデコード・エンコード双方で強制する。
-    // 以下は意図的エラーパス (PBT のラウンドトリップでは表現できない) の単体テスト。
+    /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
+    const MSG_REQUEST_ERROR: u64 = 0x05;
 
-    /// REDIRECT なのに Redirect 本体を欠くバイト列をデコードすると PROTOCOL_VIOLATION
-    /// (UnexpectedEof ではなく ProtocolViolation であること)
-    #[test]
-    fn request_error_redirect_missing_redirect_is_protocol_violation() {
-        // type=0x05, length=3 (vi64), payload=[error_code=0x34 (REDIRECT), retry=0x00, reason_len=0x00]
-        // reason まで読むと pos == payload.len() となり Redirect が欠落している
-        let bytes = [0x05u8, 0x03, 0x34, 0x00, 0x00];
-        let err = ControlMessage::decode(&bytes).unwrap_err();
-        assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
-            "REDIRECT で Redirect 欠落は ProtocolViolation であるべきだが {err:?}"
-        );
+    /// REDIRECT Error Detail の Type 値 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
+    const ERROR_DETAIL_REDIRECT: u64 = 0x01;
+
+    /// REDIRECT Detail を 1 つだけ持つ Error Details を組み立てる
+    fn redirect_details(redirect: Redirect) -> ErrorDetails {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::Redirect(redirect));
+        details
     }
 
-    /// 非 REDIRECT なのに末尾に余剰バイトがあるバイト列をデコードすると、末尾チェックで
-    /// MALFORMED_MESSAGE になる
-    #[test]
-    fn request_error_non_redirect_trailing_bytes_is_malformed_message() {
-        // type=0x05, length=4 (vi64), payload=[error_code=0x03, retry=0x00, reason_len=0x00, 余剰=0xAB]
-        // error_code != REDIRECT なので redirect=None となり、余剰バイトで pos != payload.len()
-        let bytes = [0x05u8, 0x04, 0x03, 0x00, 0x00, 0xAB];
-        let err = ControlMessage::decode(&bytes).unwrap_err();
-        assert!(
-            matches!(err, MessageError::MalformedMessage(_)),
-            "非 REDIRECT で末尾余剰は MALFORMED_MESSAGE であるべきだが {err:?}"
-        );
-    }
-
-    /// REDIRECT で Redirect が途中で切れたバイト列をデコードすると MALFORMED_MESSAGE になる
+    /// すべてのフィールドが空の REDIRECT を組み立てる
     ///
-    /// 外側フレームの Length は揃っているため、本文の途中で終わるのは本文長の不一致である
-    /// (draft-ietf-moq-transport-23 §9 (Control Messages))。
-    #[test]
-    fn request_error_redirect_truncated_redirect_is_malformed_message() {
-        // type=0x05, length=4 (vi64), payload=[error_code=0x34, retry=0x00, reason_len=0x00,
-        // connect_uri_len=0x05 (但し後続バイトなし)]。Redirect::decode_from が checked_len で
-        // UnexpectedEof を返し、ControlMessage::decode が MalformedMessage へ写す
-        let bytes = [0x05u8, 0x04, 0x34, 0x00, 0x00, 0x05];
-        let err = ControlMessage::decode(&bytes).unwrap_err();
-        assert!(
-            matches!(err, MessageError::MalformedMessage(_)),
-            "Redirect 途中切れは MALFORMED_MESSAGE であるべきだが {err:?}"
-        );
+    /// Track Name が空でも正当である。namespace-scoped request 向けの REDIRECT は空の
+    /// Track Name を要求する (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
+    fn empty_redirect() -> Redirect {
+        Redirect {
+            connect_uri: Vec::new(),
+            track_namespace: TrackNamespace::new(Vec::new())
+                .expect("0 フィールドの Track Namespace は正当である"),
+            track_name: Vec::new(),
+        }
     }
 
-    /// REDIRECT なのに redirect=None の RequestError をエンコードすると PROTOCOL_VIOLATION
-    #[test]
-    fn request_error_encode_redirect_code_without_redirect_is_protocol_violation() {
-        let msg = ControlMessage::RequestError(RequestError {
-            error_code: 0x34, // REQUEST_REDIRECT
-            retry_interval: 0,
-            reason: ReasonPhrase::new("redirect").expect("テストフィクスチャの前提条件を満たす"),
-            redirect: None,
-        });
-        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
-        assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
-            "REDIRECT + None のエンコードは ProtocolViolation であるべきだが {err:?}"
-        );
-    }
-
-    /// 非 REDIRECT なのに redirect=Some の RequestError をエンコードすると PROTOCOL_VIOLATION
-    #[test]
-    fn request_error_encode_non_redirect_code_with_redirect_is_protocol_violation() {
-        let ns = TrackNamespace::new(vec![b"example.com".to_vec()])
-            .expect("テストフィクスチャの前提条件を満たす");
-        let msg = ControlMessage::RequestError(RequestError {
-            error_code: 3, // REDIRECT 以外
-            retry_interval: 0,
-            reason: ReasonPhrase::new("not found").expect("テストフィクスチャの前提条件を満たす"),
-            redirect: Some(Redirect {
-                connect_uri: vec![],
-                track_namespace: ns,
-                track_name: vec![],
-            }),
-        });
-        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
-        assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
-            "非 REDIRECT + Some のエンコードは ProtocolViolation であるべきだが {err:?}"
-        );
-    }
-
-    /// REDIRECT + retry_interval=0 の RequestError は encode/decode で往復できる
+    /// REDIRECT Detail を含む REQUEST_ERROR のゴールデンバイト列
     ///
-    /// draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format): retry_interval の
-    /// 意味論 (plus one、値 1 は即時可、値 0 は SHOULD NOT retry as sent) は doc で確認し、
-    /// ここでは値 0 が欠落なく往復することと Redirect 本体が保持されることを固定する。
+    /// draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format) の
+    /// "Error Details (..) ..." は Error Reason の後ろからメッセージ末尾までを占める
+    /// Key-Value-Pair 列であり、REDIRECT Detail は Type 0x01 の length-prefixed 値である
+    /// (§9.4.2.1)。空の REDIRECT の値は Connect URI 長 (0) + Track Namespace フィールド数 (0)
+    /// + Track Name 長 (0) の 3 バイトになる。
     #[test]
-    fn request_error_redirect_with_zero_retry_interval_round_trip() {
-        let ns = TrackNamespace::new(vec![b"example.com".to_vec()])
-            .expect("テストフィクスチャの前提条件を満たす");
+    fn redirect_golden_bytes() {
         let msg = ControlMessage::RequestError(RequestError {
             error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
             retry_interval: 0,
-            reason: ReasonPhrase::new("redirect").expect("テストフィクスチャの前提条件を満たす"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: ns,
-                track_name: Vec::new(),
+            reason: ReasonPhrase::new("").expect("空の Reason Phrase は正当である"),
+            error_details: redirect_details(empty_redirect()),
+        });
+        let encoded = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("正当な REDIRECT は encode できる");
+        assert_eq!(
+            encoded,
+            vec![
+                MSG_REQUEST_ERROR as u8,     // Type = 0x05
+                0x08,                        // Length = 8 バイト
+                0x34,                        // Error Code = REDIRECT
+                0x00,                        // Retry Interval
+                0x00,                        // Error Reason 長 = 0
+                ERROR_DETAIL_REDIRECT as u8, // Error Detail の Delta Type
+                0x03,                        // REDIRECT 値の Length = 3 バイト
+                0x00,                        // Connect URI 長 = 0
+                0x00,                        // Track Namespace フィールド数 = 0
+                0x00,                        // Track Name 長 = 0
+            ],
+            "REDIRECT Error Detail を含む REQUEST_ERROR のゴールデンバイト列"
+        );
+        let (decoded, consumed) =
+            ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
+        assert_eq!(
+            consumed,
+            encoded.len(),
+            "エンコードした全バイトを消費すること"
+        );
+        assert_eq!(decoded, msg, "ゴールデンバイト列が同じ構造へ戻ること");
+    }
+
+    /// 非空のフィールドを持つ REDIRECT でも Length が値を覆い、全フィールドが往復すること
+    #[test]
+    fn redirect_golden_bytes_with_content() {
+        let connect_uri = b"moqt://relay.example/".to_vec();
+        let track_namespace =
+            TrackNamespace::new(vec![b"ns".to_vec()]).expect("正当な Track Namespace である");
+        let track_name = b"cam".to_vec();
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な Reason Phrase である"),
+            error_details: redirect_details(Redirect {
+                connect_uri: connect_uri.clone(),
+                track_namespace: track_namespace.clone(),
+                track_name: track_name.clone(),
             }),
         });
         let encoded = msg
             .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-            .expect("正当なテスト入力の encode は成功する");
+            .expect("正当な REDIRECT は encode できる");
+        // REDIRECT 値 = Connect URI 長 (1) + Connect URI (21) + Track Namespace
+        // (フィールド数 1 + フィールド長 1 + "ns" 2) + Track Name 長 (1) + Track Name (3)
+        // = 30 バイト。全体 Length = Error Code (1) + Retry Interval (1) + Error Reason (9)
+        // + Detail の Type (1) + Detail の Length (1) + REDIRECT 値 (30) = 43 バイト。
+        let mut expected = vec![
+            MSG_REQUEST_ERROR as u8, // Type = 0x05
+            0x2B,                    // Length = 43 バイト
+            0x34,                    // Error Code = REDIRECT
+            0x00,                    // Retry Interval
+            0x08,                    // Error Reason 長 = 8
+        ];
+        expected.extend_from_slice(b"redirect");
+        expected.extend_from_slice(&[
+            ERROR_DETAIL_REDIRECT as u8, // Delta Type = 0x01
+            0x1E,                        // REDIRECT 値の Length = 30
+            0x15,                        // Connect URI 長 = 21
+        ]);
+        expected.extend_from_slice(&connect_uri);
+        expected.extend_from_slice(&[
+            0x01, // Track Namespace フィールド数 = 1
+            0x02, // Track Namespace フィールド長 = 2
+        ]);
+        expected.extend_from_slice(b"ns");
+        expected.extend_from_slice(&[
+            0x03, // Track Name 長 = 3
+        ]);
+        expected.extend_from_slice(&track_name);
+        assert_eq!(encoded, expected, "REDIRECT Detail のフィールド配置");
+
         let (decoded, consumed) =
             ControlMessage::decode(&encoded).expect("encode 直後の decode は成功する");
         assert_eq!(consumed, encoded.len());
-        assert_eq!(decoded, msg);
-        let ControlMessage::RequestError(decoded_err) = decoded else {
-            panic!("REDIRECT が往復すること");
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
         };
-        // 全体一致に含まれるが、失敗時の診断粒度のために個別にも固定する。
         assert_eq!(
-            decoded_err.retry_interval, 0,
-            "retry_interval=0 が欠落なく往復すること"
+            decoded.error_details.redirect(),
+            Some(&Redirect {
+                connect_uri,
+                track_namespace,
+                track_name,
+            }),
+            "REDIRECT の全フィールドが往復すること"
         );
+    }
+
+    /// Error Code = REDIRECT で REDIRECT Detail が無いと MALFORMED_MESSAGE
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): "An endpoint that receives a
+    /// REQUEST_ERROR with Error Code REDIRECT and no REDIRECT Error Detail MUST close the
+    /// session with MALFORMED_MESSAGE."
+    #[test]
+    fn redirect_missing_detail_is_malformed_message() {
+        // Type=0x05, Length=3, payload=[Error Code=0x34, Retry Interval=0x00, Error Reason 長=0]
+        let bytes = [MSG_REQUEST_ERROR as u8, 0x03, 0x34, 0x00, 0x00];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            decoded_err.redirect.is_some(),
-            "Redirect 本体が保持されること"
+            matches!(err, MessageError::MalformedMessage(_)),
+            "REDIRECT で REDIRECT Detail 欠落は MALFORMED_MESSAGE であるべきだが {err:?}"
+        );
+    }
+
+    /// Error Code = REDIRECT で REDIRECT Detail を持たない RequestError は encode できない
+    #[test]
+    fn encode_redirect_without_detail_is_protocol_violation() {
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な Reason Phrase である"),
+            error_details: ErrorDetails::new(),
+        });
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "REDIRECT + Detail 無しの encode は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// 適用外の Error Code に REDIRECT Detail を付けた RequestError は encode できない
+    ///
+    /// 受信側は適用外の既知 Detail を無視する (draft-ietf-moq-transport-23 §9.4.2) ため、
+    /// 送信側で生成を許すと decode で Detail が落ちて往復が崩れる。
+    #[test]
+    fn encode_non_redirect_with_redirect_detail_is_protocol_violation() {
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_NOT_SUPPORTED,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("not supported").expect("正当な Reason Phrase である"),
+            error_details: redirect_details(empty_redirect()),
+        });
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "適用外 Detail の encode は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT Detail を 2 つ持つ RequestError は encode できない
+    ///
+    /// REDIRECT の定義は単一インスタンスのみを許す (draft-ietf-moq-transport-23 §9.4.2.1)。
+    #[test]
+    fn encode_duplicate_redirect_detail_is_protocol_violation() {
+        let mut details = redirect_details(empty_redirect());
+        details.push(ErrorDetail::Redirect(empty_redirect()));
+        let msg = ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: ReasonPhrase::new("redirect").expect("正当な Reason Phrase である"),
+            error_details: details,
+        });
+        let err = msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "REDIRECT Detail の重複は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT Detail が 2 つあるバイト列の decode は ProtocolViolation
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2: 型の定義が複数インスタンスを明示的に許可しない限り
+    /// 送信側は同じ Error Detail 型を繰り返してはならない (MUST NOT)。
+    #[test]
+    fn duplicate_redirect_detail_is_protocol_violation() {
+        let bytes = [
+            MSG_REQUEST_ERROR as u8,
+            0x0D, // Length = 13 バイト
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+            ERROR_DETAIL_REDIRECT as u8,
+            0x03, // REDIRECT 値の Length = 3
+            0x00,
+            0x00,
+            0x00,
+            0x00, // 2 つ目の Delta Type = 0 (同じ型)
+            0x03, // REDIRECT 値の Length = 3
+            0x00,
+            0x00,
+            0x00,
+        ];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::ProtocolViolation(_)),
+            "REDIRECT Detail の重複は ProtocolViolation であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT Detail の Length が残りバイトを超えると MALFORMED_KEY_VALUE
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 受信側が型を理解する場合、
+    /// Length/Value が定義と一致しなければ MALFORMED_KEY_VALUE でセッションを閉じる (MUST)。
+    #[test]
+    fn redirect_detail_length_exceeds_remaining_bytes_is_key_value_formatting_error() {
+        let bytes = [
+            MSG_REQUEST_ERROR as u8,
+            0x06, // Length = 6 バイト
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+            ERROR_DETAIL_REDIRECT as u8,
+            0x05, // REDIRECT 値の Length = 5 だが残りは 1 バイト
+            0x00, // Connect URI 長 = 0
+        ];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Detail の Length 超過は MALFORMED_KEY_VALUE であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT Detail の Length が REDIRECT のフィールドを覆い切れないと MALFORMED_KEY_VALUE
+    #[test]
+    fn redirect_detail_length_smaller_than_fields_is_key_value_formatting_error() {
+        let bytes = [
+            MSG_REQUEST_ERROR as u8,
+            0x06, // Length = 6 バイト
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+            ERROR_DETAIL_REDIRECT as u8,
+            0x01, // REDIRECT 値の Length = 1 (Connect URI 長だけ)
+            0x00, // Connect URI 長 = 0
+        ];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Detail の Length 不足は MALFORMED_KEY_VALUE であるべきだが {err:?}"
+        );
+    }
+
+    /// REDIRECT Detail の Length が REDIRECT 構造より長いと MALFORMED_KEY_VALUE
+    ///
+    /// Length が覆う範囲のうち REDIRECT 構造が消費しないバイトは、次の KVP の境界を
+    /// 壊すため MALFORMED_KEY_VALUE として拒否する。
+    #[test]
+    fn redirect_detail_trailing_bytes_inside_value_is_key_value_formatting_error() {
+        let bytes = [
+            MSG_REQUEST_ERROR as u8,
+            0x09, // Length = 9 バイト
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+            ERROR_DETAIL_REDIRECT as u8,
+            0x04, // REDIRECT 値の Length = 4 (構造は 3 バイト)
+            0x00, // Connect URI 長 = 0
+            0x00, // Track Namespace フィールド数 = 0
+            0x00, // Track Name 長 = 0
+            0xAB, // REDIRECT 構造の外にある余剰バイト
+        ];
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::KeyValueFormattingError(_)),
+            "Detail 値内の余剰バイトは MALFORMED_KEY_VALUE であるべきだが {err:?}"
+        );
+    }
+
+    /// 未知の Error Detail は無視され、セッションを閉じない
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2: "Receivers MUST ignore unknown Error Detail types."
+    /// 偶数 Type は vi64、奇数 Type は Length + bytes という KVP の形式だけで値を読み飛ばす
+    /// (§8.3)。
+    #[test]
+    fn unknown_details_are_ignored() {
+        let mut payload = vec![
+            0x03, // Error Code = NOT_SUPPORTED
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        // 未知の奇数 Type 3: Delta Type=0x03, Length=2, 値 2 バイト
+        payload.extend_from_slice(&[0x03, 0x02, 0xAA, 0xBB]);
+        // 未知の偶数 Type 4: Delta Type=0x01 (4 - 3), 値 vi64=0x7F
+        payload.extend_from_slice(&[0x01, 0x7F]);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let (decoded, consumed) =
+            ControlMessage::decode(&bytes).expect("未知の Error Detail は無視され、decode できる");
+        assert_eq!(consumed, bytes.len(), "メッセージ全体を消費すること");
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            decoded.error_details.is_empty(),
+            "未知の Detail は保持しないこと"
+        );
+    }
+
+    /// 未知の Error Detail の後ろにある REDIRECT Detail も受理される
+    ///
+    /// Error Details は順序を持たない KVP 列であり、REDIRECT Detail が先頭にある必要は
+    /// ない。Delta Type 0 の未知の偶数 Type 0x00 を先に置き、Delta Type 1 で REDIRECT を
+    /// 続けても、メッセージ末尾までの KVP 列として解釈できる。
+    #[test]
+    fn redirect_after_unknown_detail_is_accepted() {
+        let mut payload = vec![
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        // 未知の偶数 Type 0x00: Delta Type=0x00, 値 vi64=0x7F
+        payload.extend_from_slice(&[0x00, 0x7F]);
+        // REDIRECT: Delta Type=0x01 (0x01 - 0x00), Length=3, 空の REDIRECT
+        payload.extend_from_slice(&[0x01, 0x03, 0x00, 0x00, 0x00]);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let (decoded, consumed) =
+            ControlMessage::decode(&bytes).expect("REDIRECT Detail は位置に依存せず受理される");
+        assert_eq!(consumed, bytes.len());
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            decoded.error_details.redirect().is_some(),
+            "未知 Detail の後ろの REDIRECT Detail が保持されること"
+        );
+    }
+
+    /// 未知の Error Detail の重複は許可される
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2: "Receivers MUST allow duplicates of unknown Error
+    /// Detail types." 2 つ目の Delta Type は 0 になる。
+    #[test]
+    fn duplicate_unknown_details_are_ignored() {
+        let mut payload = vec![
+            0x03, // Error Code = NOT_SUPPORTED
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        // 未知の奇数 Type 5
+        payload.extend_from_slice(&[0x05, 0x01, 0xAA]);
+        // 同じ Type 5 の重複 (Delta Type=0)
+        payload.extend_from_slice(&[0x00, 0x02, 0xBB, 0xCC]);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let (decoded, consumed) =
+            ControlMessage::decode(&bytes).expect("未知 Detail の重複は許可され、decode できる");
+        assert_eq!(consumed, bytes.len());
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(decoded.error_details.is_empty());
+    }
+
+    /// 適用されない Error Code の REDIRECT Detail は無視される
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2: "Receivers MUST ... ignore a known Error Detail type
+    /// that accompanies an Error Code it is not defined for." 非ゼロの Connect URI を持つ
+    /// REDIRECT Detail でも、REDIRECT 以外の Error Code では役割検証に渡らない。
+    #[test]
+    fn redirect_detail_for_other_error_code_is_ignored() {
+        let mut payload = vec![
+            0x03, // Error Code = NOT_SUPPORTED
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        // Type 0x01, Length=4, Connect URI 長=1, URI="x", Namespace 0 フィールド, Track Name 長=0
+        payload.extend_from_slice(&[0x01, 0x04, 0x01, b'x', 0x00, 0x00]);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let (decoded, consumed) =
+            ControlMessage::decode(&bytes).expect("適用外の既知 Detail は無視され、decode できる");
+        assert_eq!(consumed, bytes.len());
+        let ControlMessage::RequestError(decoded) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            decoded.error_details.is_empty(),
+            "適用外の REDIRECT Detail は保持しないこと"
+        );
+    }
+
+    /// Error Details を読み切ったあとの余剰バイトは MALFORMED_MESSAGE
+    ///
+    /// Error Details はメッセージ末尾までを占める (§9.4.1) ため、Detail として解釈できない
+    /// 残りは本文長の不一致として MALFORMED_MESSAGE になる (draft-ietf-moq-transport-23 §9)。
+    #[test]
+    fn trailing_garbage_after_details_is_malformed_message() {
+        let mut payload = vec![
+            0x34, // Error Code = REDIRECT
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        payload.extend_from_slice(&[ERROR_DETAIL_REDIRECT as u8, 0x03, 0x00, 0x00, 0x00]);
+        // 0xAB は 2 バイト vi64 の先頭バイトであり、Length が揃わない未知 Detail になる
+        payload.push(0xAB);
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::MalformedMessage(_)),
+            "Detail のあとの余剰バイトは MALFORMED_MESSAGE であるべきだが {err:?}"
+        );
+    }
+
+    /// Error Detail の Length が 2^16-1 を超えると FIELD_LENGTH_EXCEEDED
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): "The maximum length of a
+    /// value is 2^16-1 bytes. If an endpoint receives a length larger than the maximum, it MUST
+    /// close the session with FIELD_LENGTH_EXCEEDED."
+    #[test]
+    fn detail_length_exceeding_maximum_is_field_length_exceeded() {
+        let mut payload = vec![
+            0x03, // Error Code = NOT_SUPPORTED
+            0x00, // Retry Interval
+            0x00, // Error Reason 長 = 0
+        ];
+        payload.push(0x05); // 未知の奇数 Type 5
+        varint::encode(65_536, &mut payload); // 上限 65,535 を 1 バイト超える
+        let bytes = frame(MSG_REQUEST_ERROR, &payload);
+        let err = ControlMessage::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, MessageError::FieldLengthExceeded(_)),
+            "Detail の Length 上限超過は FIELD_LENGTH_EXCEEDED であるべきだが {err:?}"
         );
     }
 }
@@ -546,44 +878,48 @@ mod fetch {
 
 mod redirect_full_track_name {
     use super::*;
-    use shiguredo_moqt::message::{Redirect, RequestError};
-    use shiguredo_moqt::varint;
+    use shiguredo_moqt::message::{ErrorDetail, ErrorDetails, Redirect, RequestError};
 
-    /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-22 §9 Table 5)
+    /// REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
     const MSG_REQUEST_ERROR: u64 = 0x05;
 
-    /// 合計 4,096 バイトの Full Track Name を持つ Redirect を組み立てる
+    /// REDIRECT Error Detail の Type 値 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
+    const ERROR_DETAIL_REDIRECT: u64 = 0x01;
+
+    /// 合計 4,096 バイト + `extra` の Full Track Name を持つ REDIRECT を組み立てる
     ///
     /// `extra` バイトだけ Track Name を伸ばす。
     fn request_error_with_redirect_total(extra: usize) -> RequestError {
         const NAMESPACE_LEN: usize = 4096 - 1;
-        let fields = vec![vec![b'a'; NAMESPACE_LEN]];
-        let ns = TrackNamespace::new(fields).expect("正当な namespace である");
+        let ns = TrackNamespace::new(vec![vec![b'a'; NAMESPACE_LEN]])
+            .expect("正当な Track Namespace である");
         let track_name = vec![b'b'; 1 + extra];
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::Redirect(Redirect {
+            connect_uri: Vec::new(),
+            track_namespace: ns,
+            track_name,
+        }));
         RequestError {
             error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
             retry_interval: 0,
-            reason: ReasonPhrase::new("redirect").expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: ns,
-                track_name,
-            }),
+            reason: ReasonPhrase::new("redirect").expect("正当な Reason Phrase である"),
+            error_details: details,
         }
     }
 
-    /// 合計 4,096 バイトちょうどの Redirect は encode / decode とも成功する (境界の非退行)
+    /// 合計 4,096 バイトちょうどの Redirect target は encode / decode とも成功する (境界の非退行)
     #[test]
     fn redirect_at_limit_round_trips() {
         let msg = ControlMessage::RequestError(request_error_with_redirect_total(0));
         let bytes = msg
             .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-            .expect("4,096 バイトちょうどは encode できること");
+            .expect("4,096 バイトちょうどの Full Track Name は encode できること");
         let (decoded, _) = ControlMessage::decode(&bytes).expect("decode できること");
         assert_eq!(decoded, msg);
     }
 
-    /// 合計 4,096 バイトを超える Redirect は encode で拒否される
+    /// 合計 4,096 バイトを超える Redirect target は encode で拒否される
     ///
     /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): "If an endpoint receives a
     /// Track Namespace or a Full Track Name exceeding 4,096 bytes, it MUST close the session
@@ -597,22 +933,28 @@ mod redirect_full_track_name {
         ));
     }
 
-    /// 合計 4,096 バイトを超える Redirect は decode で拒否される
+    /// 合計 4,096 バイトを超える Redirect target は decode で拒否される
+    ///
+    /// Detail の Length は正しく設定し、Full Track Name の上限だけを超過させる。
     #[test]
     fn redirect_over_limit_is_rejected_on_decode() {
-        // encode を通さずワイヤバイト列を組み立てる (1 バイト超過)
         const NAMESPACE_LEN: usize = 4096 - 1;
+        let mut value = Vec::new();
+        varint::encode(0, &mut value); // Connect URI 長
+        varint::encode(1, &mut value); // Track Namespace フィールド数
+        varint::encode(NAMESPACE_LEN as u64, &mut value);
+        value.extend_from_slice(&vec![b'a'; NAMESPACE_LEN]);
+        varint::encode(2, &mut value); // Track Name 長 (合計 4,097)
+        value.extend_from_slice(b"bb");
+
         let mut payload = Vec::new();
         varint::encode(shiguredo_moqt::error::REQUEST_REDIRECT, &mut payload);
-        payload.push(0); // retry_interval
-        varint::encode(1, &mut payload); // reason length
-        payload.push(b'x'); // reason
-        varint::encode(0, &mut payload); // connect_uri length
-        varint::encode(1, &mut payload); // Track Namespace field count
-        varint::encode(NAMESPACE_LEN as u64, &mut payload);
-        payload.extend_from_slice(&vec![b'a'; NAMESPACE_LEN]);
-        varint::encode(2, &mut payload); // Track Name length (合計 4,097)
-        payload.extend_from_slice(b"bb");
+        payload.push(0); // Retry Interval
+        varint::encode(1, &mut payload); // Error Reason 長
+        payload.push(b'x'); // Error Reason
+        varint::encode(ERROR_DETAIL_REDIRECT, &mut payload);
+        varint::encode(value.len() as u64, &mut payload);
+        payload.extend_from_slice(&value);
 
         let bytes = frame(MSG_REQUEST_ERROR, &payload);
 

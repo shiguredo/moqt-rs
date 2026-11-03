@@ -24,8 +24,8 @@ use shiguredo_moqt::session::types::{
 };
 use shiguredo_moqt::stream::encode_control_stream_setup;
 use shiguredo_moqt::{
-    error::SESSION_PROTOCOL_VIOLATION, message::ControlMessage, message::ReasonPhrase,
-    message::common::Location, message::common::TrackNamespace,
+    error::SESSION_PROTOCOL_VIOLATION, message::ControlMessage, message::ErrorDetails,
+    message::ReasonPhrase, message::common::Location, message::common::TrackNamespace,
     message_parameter::AuthorizationToken, message_parameter::MessageParameter,
     message_parameter::MessageParameterValue, message_parameter::MessageParameters,
     message_parameter::PARAM_AUTHORIZATION_TOKEN, message_parameter::PARAM_SUBSCRIBER_PRIORITY,
@@ -2073,7 +2073,7 @@ impl MoqtClient {
             let phrase = ReasonPhrase::new(reason)
                 .map_err(|e| TransportError::Internal(format!("reason phrase: {e}")))?;
             session
-                .send_request_error(request_id, error_code, 0, phrase, None)
+                .send_request_error(request_id, error_code, 0, phrase, ErrorDetails::new())
                 .map_err(|e| TransportError::Internal(format!("send_request_error: {e}")))?;
         }
         self.drain_events().await

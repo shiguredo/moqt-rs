@@ -298,7 +298,7 @@ fn request_error_terminates_pending_subscription() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("nope".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);

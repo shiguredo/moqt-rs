@@ -5,7 +5,7 @@
 //! 可能性がある。
 
 use crate::message::{
-    ControlMessage, ReasonPhrase, Redirect, common::Location, common::TrackNamespace,
+    ControlMessage, ErrorDetails, ReasonPhrase, common::Location, common::TrackNamespace,
 };
 use crate::message_parameter::{LocationFilter, MessageParameters, RangeFilterSet};
 use alloc::vec::Vec;
@@ -320,14 +320,19 @@ pub enum SessionEvent {
         /// 値 0 は再送すべきでない (SHOULD NOT retry) ことを表す。REDIRECT 応答では
         /// 元のリクエストを as sent で再送すべきでないが、提供された URI への接続または
         /// Redirect target を使った再送 (follow) を妨げない
-        /// (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format)
-        /// および §9.4.2 内の REDIRECT 定義)。
+        /// (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format))。
         /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         retry_interval: u64,
         /// 理由
         reason: ReasonPhrase,
-        /// Error Code = REDIRECT の場合のみ付加される (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format))
-        redirect: Option<Redirect>,
+        /// 構造化されたエラー詳細 (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
+        ///
+        /// Error Code = REDIRECT の場合は REDIRECT Detail を必ず 1 つ含む
+        /// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
+        /// 未知の Detail と、適用されない Error Code の Detail は受信時に無視されるため
+        /// 含まれない (§9.4.2)。REDIRECT の内容は
+        /// [`ErrorDetails::redirect`](crate::message::ErrorDetails::redirect) で取得する。
+        error_details: ErrorDetails,
     },
     /// bidi request stream の終端 (または REQUEST_ERROR 等による) で request が
     /// Terminated 状態に遷移した (draft-ietf-moq-transport-22 §6.4.2.3 (Request Cancellation and Rejection))

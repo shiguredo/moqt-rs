@@ -132,7 +132,7 @@ fn decode(buf: &[u8]) -> Result<(ControlMessage, usize), MessageError>
 | --- | --- |
 | `Setup(Setup)` | セッション確立 |
 | `Goaway(Goaway)` | セッション終了通知 |
-| `RequestOk` / `RequestError` | 共通応答 (PUBLISH への PUBLISH_OK は `RequestOk` の別名) |
+| `RequestOk` / `RequestError` | 共通応答 (PUBLISH への PUBLISH_OK は `RequestOk` の別名)。`RequestError` は Error Details (REDIRECT Error Detail) を運ぶ |
 | `Subscribe` / `SubscribeOk` | SUBSCRIBE |
 | `Publish` / `PublishDone` | PUBLISH |
 | `PublishStateNotify` | 状態通知 |
@@ -293,7 +293,7 @@ pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 | `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 |
 | `FetchOkReceived { request_id, end_location, end_of_track }` | FETCH_OK 受信 |
 | `PublishDoneReceived { request_id, status_code, stream_count, reason }` | PUBLISH_DONE 受信 |
-| `RequestErrorReceived { request_id, error_code, retry_interval, reason, redirect }` | REQUEST_ERROR 受信 |
+| `RequestErrorReceived { request_id, error_code, retry_interval, reason, error_details }` | REQUEST_ERROR 受信 (`error_details.redirect()` で REDIRECT を取得) |
 | `RequestTerminated { request_id, kind, reason }` | request が Terminated に遷移 |
 | `GoawayReceived { new_session_uri, timeout, on_request_stream }` | GOAWAY 受信 |
 | `GoawayDrainReady` | 自側 GOAWAY の drain 完了 (open request が無くなった。NO_ERROR で閉じてよい) |
@@ -321,7 +321,7 @@ fill fetch stream は subscription への帰属を保ったまま受理する (�
 REQUEST_UPDATE / PUBLISH_STATE_NOTIFY は、各ハンドラがそのメッセージに該当する仕様の検証
 (送信者・種別・自側の役割・パラメータスコープ・PAUSED・Track Alias・Request ID・
 MAX_REQUEST_UPDATES・auth token・End Location) を行ったうえで、状態遷移せず受理する
-(subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.1 Redirect 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
+(subscription の遅延 REQUEST_ERROR は呼び出し元の §9.4.2.1 REDIRECT 検証のみで受理する)。遅延した REQUEST_ERROR では `RequestErrorReceived`
 のみを通知する (他の応答は状態遷移もイベント発行もしない)。ローカル終端済みの REQUEST_UPDATE では
 Range Filter の内容検証を省略する (draft §3.3.2 の MUST は REQUEST_ERROR による拒否であり、
 送信方向を reset 済みで応答を送れないため満たせない)。終端で PUBLISH_OK / REQUEST_UPDATE_OK の
@@ -479,7 +479,7 @@ fn send_request_error(
     error_code: u64,
     retry_interval: u64,
     reason: ReasonPhrase,
-    redirect: Option<Redirect>,
+    error_details: ErrorDetails,
 ) -> Result<(), SessionError>
 ```
 

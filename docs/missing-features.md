@@ -30,7 +30,7 @@ MoQ リレー専用の機能 (`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` / `SUB
    MSF の変数置換、パディング、`publishTracks`、Audio Level、`END_OF_GROUP`、
    Range Filters を有効にする `MAX_FILTER_RANGES` など。
 3. **アプリ機能として欠けているもの**: request stream GOAWAY の非空 URI による個別 request
-   移行 (2 session の併走が必要)、REQUEST_ERROR の Redirect 追随、トラック選択と切替、
+   移行 (2 session の併走が必要)、REQUEST_ERROR の REDIRECT 追随、トラック選択と切替、
    シーク / 巻き戻し、ライブ中の track 追加への追随、配信終了のシグナリング、統計表示。
 4. **MUST 未達・仕様違反になりうる箇所**: Object 側 `IMMUTABLE_PROPERTIES` の探索 (§10.7)、
    `isLive=false` の `targetLatency` (MSF §5.2.8)、catalog 更新をまたいだ
@@ -370,12 +370,12 @@ session で再発行する。
   観測し、現在 URL への移行を開始する。QUIC / QMux は drain 通知が無いため MOQT GOAWAY 起点のみ。
 - 期限を過ぎても移行できない場合は従来どおり終了する。
 
-### 6.7 REQUEST_ERROR の Redirect に追随しない
+### 6.7 REQUEST_ERROR の REDIRECT に追随しない
 
-`Redirect` structure 付きの `REQUEST_ERROR` (`0x34`、§9.4.1) を example は解釈しない。
-session は `redirect` と `retry_interval` をイベントに載せる
-(`src/session/types.rs:283-289`) が、transport 層は `(error_code, reason)` だけを記録して
-`redirect` を捨てる (`crates/tokio-moq/src/moqt_client.rs:2676-2690`)。
+REDIRECT Error Detail (`0x01`) 付きの `REQUEST_ERROR` (`0x34`、§9.4.2.1) を example は解釈しない。
+session は `error_details` と `retry_interval` をイベントに載せる
+(`src/session/types.rs`) が、transport 層は `(error_code, reason)` だけを記録して
+`error_details` を捨てる (`crates/tokio-moq/src/moqt_client.rs`)。
 リダイレクト先へ購読を張り直す経路が無い。
 
 ### 6.8 TRACK_STATUS を使わない
@@ -528,7 +528,7 @@ moqt-js (HEAD `6da25d10`) の playout のうち、次の 2 つは移植してい
 8. トラック選択 (6.2) と `isLive=false` の扱い (4.2 / 4.3) — 意図しないトラックを選ぶ
 9. Object 側 `IMMUTABLE_PROPERTIES` の探索 (4.1) — §10.7 MUST 未達の疑い
 10. `END_OF_GROUP` (3 章) / Track Properties / `EXPIRES` (5.2〜5.5) — リレーと購読者への情報不足
-11. Range Filters の有効化 (5.6 / 6.10)、TRACK_STATUS (5.7 / 6.8)、Redirect (6.7)、pause (6.9)
+11. Range Filters の有効化 (5.6 / 6.10)、TRACK_STATUS (5.7 / 6.8)、REDIRECT (6.7)、pause (6.9)
 12. STOP_SENDING 時の open stream の reset (4.7) — アプリが閉じ忘れると cleanup が進まない
 13. Timeline / 変数置換 / Metrics (5.13、6.12)、複数トラック配信 (5.10)
 14. extension negotiation の API 非公開 (4.8)、PUBLISH_OK / FETCH_OK 前の Object 送信 (3 章、いずれも MAY)

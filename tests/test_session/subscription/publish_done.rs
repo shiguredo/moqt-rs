@@ -164,7 +164,7 @@ fn terminated_subscription_does_not_finish_on_publish_done() {
             REQUEST_DOES_NOT_EXIST,
             0,
             shiguredo_moqt::message::ReasonPhrase::new("no").expect("正当な reason phrase である"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     while server.poll_event().is_some() {}
@@ -1646,7 +1646,7 @@ fn update_failed_publish_done_then_peer_fin_terminates_request() {
                 error_code: REQUEST_INVALID_FILTER,
                 retry_interval: 0,
                 reason: ReasonPhrase::new("rejected").expect("正当な reason phrase である"),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             }),
         )
         .expect("REQUEST_ERROR を受理すること");

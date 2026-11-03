@@ -10,7 +10,9 @@ use shiguredo_moqt::error::{
     SESSION_PROTOCOL_VIOLATION, STREAM_DELIVERY_TIMEOUT, STREAM_INTERNAL_ERROR,
 };
 use shiguredo_moqt::loc::{LocProperties, LocProperty, LocPropertyValue, PROP_TIMESTAMP};
-use shiguredo_moqt::message::{ControlMessage, Goaway, Setup, common::TrackNamespace};
+use shiguredo_moqt::message::{
+    ControlMessage, ErrorDetails, Goaway, Setup, common::TrackNamespace,
+};
 use shiguredo_moqt::message_parameter::{
     AuthorizationToken, MessageParameter, MessageParameterValue, MessageParameters, PARAM_EXPIRES,
     PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER, PARAM_SUBGROUP_DELIVERY_TIMEOUT,

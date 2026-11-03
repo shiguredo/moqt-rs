@@ -122,7 +122,7 @@ fn track_status_completes_on_request_error() {
                 error_code: REQUEST_DOES_NOT_EXIST,
                 retry_interval: 0,
                 reason: ReasonPhrase::new("no such track").expect("正当な reason phrase である"),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             }),
         )
         .expect("REQUEST_ERROR の受信に成功すること");
@@ -290,7 +290,7 @@ fn track_status_request_error_send_closes_stream_with_fin() {
             REQUEST_DOES_NOT_EXIST,
             0,
             ReasonPhrase::new("no such track").expect("正当な reason phrase である"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("受信した TRACK_STATUS を REQUEST_ERROR で拒否できること");
     let (send_rid, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
@@ -341,7 +341,7 @@ fn track_status_double_response_is_rejected() {
             REQUEST_DOES_NOT_EXIST,
             0,
             ReasonPhrase::new("no").expect("正当な reason phrase である"),
-            None,
+            ErrorDetails::new(),
         )
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
@@ -442,7 +442,7 @@ fn responder_receiving_request_error_closes_session() {
                 error_code: REQUEST_DOES_NOT_EXIST,
                 retry_interval: 0,
                 reason: ReasonPhrase::new("no").expect("正当な reason phrase である"),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             }),
         )
         .unwrap_err();

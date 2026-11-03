@@ -615,7 +615,7 @@ fn publishing_rejected_with_uninterested_stops_open_incoming_streams() {
             0,
             ReasonPhrase::new("not interested".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let mut stop_sending = None;

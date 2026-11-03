@@ -2,6 +2,8 @@ use shiguredo_moqt::error::MessageError;
 use shiguredo_moqt::parameter::DEFAULT_MAX_CONTROL_MESSAGE_SIZE;
 use shiguredo_moqt::{
     message::ControlMessage,
+    message::ErrorDetail,
+    message::ErrorDetails,
     message::Fetch,
     message::FetchOk,
     message::Goaway,
@@ -390,9 +392,9 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
             parameters: sample_scoped_parameters(ctx, REQUEST_OK_PARAMS),
             track_properties: TrackProperties::default(),
         }),
-        // RequestError (非 REDIRECT: error_code から 0x34 を除外し redirect=None)
-        // draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format) のエンコード整合検証により、非 REDIRECT + Some や
-        // REDIRECT + None はエンコードが Err を返すため、整合した組のみを生成する。
+        // RequestError (非 REDIRECT: error_code から 0x34 を除外し Error Details は空)
+        // draft-ietf-moq-transport-23 §9.4.2 (Error Details): REDIRECT 以外の Error Code には
+        // 適用される Error Detail が無いため、空の Error Details を生成する。
         3 => {
             let v = noprop::sample_usize_in(ctx, 0..1000) as u64;
             // 0x34 (REQUEST_REDIRECT) を除外する (0..=999 のうち 52 を飛ばして 53..=1000 に射影)
@@ -401,16 +403,20 @@ fn sample_control_message(ctx: &mut noprop::TestCaseContext) -> ControlMessage {
                 error_code,
                 retry_interval: sample_small_varint(ctx),
                 reason: sample_reason_phrase(ctx),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             })
         }
-        // RequestError (REDIRECT: error_code=0x34 で redirect=Some)
-        4 => ControlMessage::RequestError(RequestError {
-            error_code: 0x34, // REQUEST_REDIRECT
-            retry_interval: sample_small_varint(ctx),
-            reason: sample_reason_phrase(ctx),
-            redirect: Some(sample_redirect(ctx)),
-        }),
+        // RequestError (REDIRECT: error_code=0x34 で REDIRECT Error Detail を 1 つ持つ)
+        4 => {
+            let mut details = ErrorDetails::new();
+            details.push(ErrorDetail::Redirect(sample_redirect(ctx)));
+            ControlMessage::RequestError(RequestError {
+                error_code: 0x34, // REQUEST_REDIRECT
+                retry_interval: sample_small_varint(ctx),
+                reason: sample_reason_phrase(ctx),
+                error_details: details,
+            })
+        }
         // Subscribe
         5 => ControlMessage::Subscribe(Subscribe {
             request_id: sample_request_id(ctx),
@@ -639,6 +645,74 @@ fn encode_respects_max_control_message_size() -> noprop::TestResult {
                 "FieldLengthExceeded を期待したが {err:?} になった"
             );
         }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// 未知の Error Detail 型だけを持つ REQUEST_ERROR を読み飛ばして受理すること
+///
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details): "Receivers MUST ignore unknown Error
+/// Detail types." と "Receivers MUST allow duplicates of unknown Error Detail types."
+/// 同 §8.3 (Key-Value-Pair Structure): 偶数 Type の Value は vi64、奇数 Type の Value は
+/// Length (vi64) + バイト列である。未知の型でもこの 2 形式だけで値を読み飛ばせるため、
+/// 任意の未知 Detail 列 (既知の 0x01 / 0x02 を除く) を後ろに付けても REQUEST_ERROR の
+/// decode は成功し、Detail は保持されない。
+#[test]
+fn unknown_error_details_are_skipped() -> noprop::TestResult {
+    // REDIRECT 以外の Error Code を使う (REDIRECT Detail が必須にならないようにする)
+    const ERROR_CODE: u64 = shiguredo_moqt::error::REQUEST_INTERNAL_ERROR;
+    // REQUEST_ERROR のメッセージ型 ID (draft-ietf-moq-transport-23 §9 Table 5)
+    const MSG_REQUEST_ERROR: u64 = 0x05;
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        // Delta Type は昇順でなければならないため、未知 Type を並べてからソートする。
+        // 重複は未知 Type の重複として許可される (§9.4.2)。
+        let count = noprop::sample_usize_in(ctx, 0..=8);
+        let mut types = Vec::new();
+        for _ in 0..count {
+            // 0x01 (REDIRECT) と 0x02 (UNSUPPORTED_PROPERTY) は既知のため避ける
+            types.push(noprop::sample_u64_in(ctx, 0x03..=0x1FF));
+        }
+        types.sort_unstable();
+
+        let mut details = Vec::new();
+        let mut prev_type = 0;
+        for detail_type in types {
+            varint::encode(detail_type - prev_type, &mut details);
+            if detail_type % 2 == 0 {
+                // 偶数 Type の Value は vi64
+                varint::encode(sample_small_varint(ctx), &mut details);
+            } else {
+                // 奇数 Type の Value は Length (vi64) + バイト列
+                let len = noprop::sample_usize_in(ctx, 0..=32);
+                let value = noprop::sample_bytes_vec(ctx, len);
+                varint::encode(len as u64, &mut details);
+                details.extend_from_slice(&value);
+            }
+            prev_type = detail_type;
+        }
+
+        let mut payload = Vec::new();
+        varint::encode(ERROR_CODE, &mut payload);
+        varint::encode(0, &mut payload); // Retry Interval
+        varint::encode(0, &mut payload); // Error Reason 長
+        payload.extend_from_slice(&details);
+        let mut frame = Vec::new();
+        varint::encode(MSG_REQUEST_ERROR, &mut frame);
+        varint::encode(payload.len() as u64, &mut frame);
+        frame.extend_from_slice(&payload);
+
+        let (decoded, consumed) =
+            ControlMessage::decode(&frame).expect("未知の Error Detail だけなら decode できる");
+        assert_eq!(consumed, frame.len(), "フレーム全体を消費すること");
+        let ControlMessage::RequestError(err) = decoded else {
+            panic!("RequestError が期待された");
+        };
+        assert!(
+            err.error_details.is_empty(),
+            "未知の Error Detail は保持しないこと"
+        );
         Ok(())
     })?;
     Ok(())

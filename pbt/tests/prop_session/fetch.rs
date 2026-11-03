@@ -373,7 +373,7 @@ fn fetch_request_error_then_forget() -> noprop::TestResult {
                     retry_interval: 0,
                     reason: shiguredo_moqt::message::ReasonPhrase::new(String::new())
                         .expect("テストフィクスチャの前提条件を満たす"),
-                    redirect: None,
+                    error_details: shiguredo_moqt::message::ErrorDetails::new(),
                 }),
             )
             .expect("テストフィクスチャの前提条件を満たす");

@@ -531,29 +531,39 @@ impl RequestOk {
     }
 }
 
-/// リダイレクト情報 (draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure))
+/// REDIRECT Error Detail の Type 値 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
+const ERROR_DETAIL_REDIRECT: u64 = 0x01;
+
+/// Error Detail の値長の上限 (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))
 ///
-/// Error Code = REDIRECT の場合のみ REQUEST_ERROR 末尾に付加される。
+/// "The maximum length of a value is 2^16-1 bytes." Length が上限を超える KVP を
+/// 受信した場合は FIELD_LENGTH_EXCEEDED でセッションを閉じる (MUST)。
+const MAX_ERROR_DETAIL_LENGTH: u64 = 65_535;
+
+/// リダイレクト情報 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
+///
+/// Error Code = REDIRECT の REQUEST_ERROR に付加される REDIRECT Error Detail の値である。
 /// Connect URI 長が 0 なら現在のセッションの URI を使うことが推奨される (SHOULD)。
 /// Track Name は namespace-scoped リクエスト (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE /
-/// SUBSCRIBE_TRACKS) では意味を持たず空でなければならない (MUST)。
+/// SUBSCRIBE_TRACKS) では意味を持たず空でなければならない (MUST)。track-scoped リクエスト
+/// (SUBSCRIBE / FETCH / PUBLISH / TRACK_STATUS / REQUEST_UPDATE) では空でもよい。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
-    /// リダイレクト先の Connect URI (draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure))
+    /// リダイレクト先の Connect URI (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
     pub connect_uri: Vec<u8>,
-    /// リダイレクト先のトラック名前空間 (draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure))
+    /// リダイレクト先のトラック名前空間 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
     pub track_namespace: TrackNamespace,
-    /// リダイレクト先のトラック名 (draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure))
+    /// リダイレクト先のトラック名 (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
     pub track_name: Vec<u8>,
 }
 
 impl Redirect {
     fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の
-        // 最大長は 4,096 バイト。§9.4.1 (Redirect Structure) は Track Namespace と Track Name を
-        // まとめて "Redirect target" と呼び、§2.4.1 (Track Naming) のとおりこれは
-        // Full Track Name そのものであるため、同じ上限を適用する。
+        // 最大長は 4,096 バイト。draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) は Track
+        // Namespace と Track Name をまとめて "Redirect target" と呼び、§2.4.1 (Track Naming)
+        // のとおりこれは Full Track Name そのものであるため、同じ上限を適用する。
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         varint::encode(self.connect_uri.len() as u64, buf);
         buf.extend_from_slice(&self.connect_uri);
@@ -563,10 +573,12 @@ impl Redirect {
     }
 
     fn decode_from(buf: &[u8], pos: &mut usize) -> Result<Self, MessageError> {
-        // 内容検証 (server 受信時の非ゼロ Connect URI 長拒否・ namespace-scoped 要求時の
-        // 非空 Track Name 拒否) はここでは行わない。どちらも decode 時点では不明な
-        // 文脈 (自 role ・元リクエスト種別) を要するため、Session 層の
-        // `handle_peer_request_error` (draft-ietf-moq-transport-22 §9.4.1) で検証する。
+        // server 受信時の非ゼロ Connect URI 長の拒否はここでは行わない。decode 時点では
+        // 自 role が不明なため、Session 層の `handle_peer_request_error`
+        // (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT)) で検証する。
+        // namespace-scoped 要求の Track Name が空であることの検証もここでは行わない。
+        // 本ライブラリは namespace-scoped 要求を実装せず、track-scoped 要求には Track Name の
+        // 制約がないためである。
         let (uri_len, n) = varint::decode(&buf[*pos..])?;
         *pos += n;
         let uri_len = varint::checked_len(uri_len, buf[*pos..].len())?;
@@ -585,24 +597,326 @@ impl Redirect {
     }
 }
 
-/// REQUEST_ERROR メッセージ (draft-ietf-moq-transport-22 §9.4 (REQUEST_ERROR))
+/// REQUEST_ERROR の Error Detail (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
+///
+/// Error Detail の型と値の対応は "MOQT Error Detail Types" レジストリ
+/// (draft-ietf-moq-transport-23 §16.11 (Error Detail Types)) が定める。
+/// 受信側が知らない型は無視し、既知の型でも当該 Error Code に適用されないものは無視する
+/// (MUST)。同じ型の重複は、型の定義が複数インスタンスを明示的に許可しない限り
+/// 送信側の MUST NOT 違反である。この節番号・規則は draft 由来であり将来の draft 改版で
+/// 変わる可能性がある。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorDetail {
+    /// Type 0x01: REDIRECT (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))
+    ///
+    /// リダイレクト先を指示する Detail であり、Error Code = REDIRECT でのみ意味を持つ。
+    /// Error Code = REDIRECT の REQUEST_ERROR はこの Detail を必ず 1 つ含む。
+    Redirect(Redirect),
+}
+
+impl ErrorDetail {
+    /// KVP の Type 値を返す
+    fn detail_type(&self) -> u64 {
+        match self {
+            Self::Redirect(_) => ERROR_DETAIL_REDIRECT,
+        }
+    }
+
+    /// この Error Detail が `error_code` の REQUEST_ERROR に適用されるかを返す
+    ///
+    /// draft-ietf-moq-transport-23 §9.4.2 (Error Details): "Each Error Detail type specifies
+    /// which Error Codes it can accompany." 適用されない Detail は受信時に無視する (MUST)。
+    fn applies_to(&self, error_code: u64) -> bool {
+        match self {
+            Self::Redirect(_) => error_code == REQUEST_REDIRECT,
+        }
+    }
+}
+
+/// REQUEST_ERROR の Error Details 列 (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
+///
+/// ワイヤ上は Error Reason の後ろからメッセージ末尾までを占める Delta Type 付きの
+/// Key-Value-Pair 列である (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message
+/// Format) / §8.3 (Key-Value-Pair Structure))。未知の型と、既知でも当該 Error Code に
+/// 適用されない型は受信時に取り込まない (MUST ignore) ため、この型が保持するのは
+/// 受信側が解釈した Detail だけになる。
+///
+/// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ErrorDetails(Vec<ErrorDetail>);
+
+impl ErrorDetails {
+    /// Detail を 1 つも持たない Error Details を作成する
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Detail を末尾に追加する
+    pub fn push(&mut self, detail: ErrorDetail) {
+        self.0.push(detail);
+    }
+
+    /// Detail 数を返す
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Detail が 1 つも無いかを返す
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Detail のスライスを返す
+    pub fn as_slice(&self) -> &[ErrorDetail] {
+        &self.0
+    }
+
+    /// REDIRECT Detail を返す
+    ///
+    /// Error Code = REDIRECT の REQUEST_ERROR では必ず 1 つ存在する。それ以外の
+    /// Error Code では `None` を返す。
+    pub fn redirect(&self) -> Option<&Redirect> {
+        // Error Detail が 1 種類しかない現状では全要素が Redirect になるが、型が増えても
+        // 最初の REDIRECT を返す形を保つためイテレータで走査する。
+        self.0
+            .iter()
+            .map(|detail| match detail {
+                ErrorDetail::Redirect(redirect) => redirect,
+            })
+            .next()
+    }
+
+    /// `error_code` に適用される Detail だけを残した複製を返す
+    ///
+    /// decode 済みメッセージを直接受け取る API 経路では、ワイヤの decode が行う適用規則
+    /// (draft-ietf-moq-transport-23 §9.4.2 (Error Details)) を通らないメッセージを構築できる。
+    /// Session はイベントへ載せる前にこのメソッドで適用外の Detail を取り除き、ワイヤ経由の
+    /// メッセージと同じ解釈に揃える。
+    pub(crate) fn applicable(&self, error_code: u64) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|detail| detail.applies_to(error_code))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Error Details の KVP 列を `buf` に追記する
+    ///
+    /// `error_code` と [`ErrorDetail::applies_to`] の整合を検証し、適用外の Detail や
+    /// 単一インスタンスのみ許す型の重複を `ProtocolViolation` として拒否する。
+    /// 受信側は適用外の Detail を無視する (draft-ietf-moq-transport-23 §9.4.2) ため、
+    /// 送信側が同じ形を生成すると decode で落ちて往復が崩れる。その不整合を送信前に防ぐ。
+    /// Error Code = REDIRECT のときは REDIRECT Detail が必須であり、欠落も拒否する
+    /// (§9.4.2.1)。
+    ///
+    /// # Errors
+    ///
+    /// - 適用されない Detail、単一インスタンス型の重複、REDIRECT Detail の欠落:
+    ///   `ProtocolViolation`
+    /// - REDIRECT の値長が 2^16-1 バイトを超える: `FieldLengthExceeded`
+    /// - Redirect target の Full Track Name が 4,096 バイトを超える: `ProtocolViolation`
+    fn encode(&self, error_code: u64, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        let mut seen_redirect = false;
+        for detail in &self.0 {
+            if !detail.applies_to(error_code) {
+                return Err(MessageError::ProtocolViolation(
+                    "error detail is not defined for this error code",
+                ));
+            }
+            match detail {
+                ErrorDetail::Redirect(_) => {
+                    // draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) は単一インスタンス
+                    // のみを定義する。多重は送信側の MUST NOT 違反であり生成を拒否する。
+                    if seen_redirect {
+                        return Err(MessageError::ProtocolViolation(
+                            "duplicate REDIRECT error detail",
+                        ));
+                    }
+                    seen_redirect = true;
+                }
+            }
+        }
+        if error_code == REQUEST_REDIRECT && !seen_redirect {
+            // §9.4.2.1: "It accompanies Error Code REDIRECT and MUST be present when the
+            // Error Code is REDIRECT."
+            return Err(MessageError::ProtocolViolation(
+                "REQUEST_ERROR with REDIRECT error code requires a REDIRECT error detail",
+            ));
+        }
+        // Delta Type は直前の Type からの差分であるため、Type の昇順に並べて書き出す。
+        // 単一インスタンス型の重複は上で拒否済みなので、ソートで意味は変わらない。
+        let mut sorted: Vec<&ErrorDetail> = self.0.iter().collect();
+        sorted.sort_by_key(|detail| detail.detail_type());
+        let mut prev_type = 0;
+        for detail in sorted {
+            crate::kvp::encode_delta_key(prev_type, detail.detail_type(), buf);
+            match detail {
+                ErrorDetail::Redirect(redirect) => encode_redirect_detail(redirect, buf)?,
+            }
+            prev_type = detail.detail_type();
+        }
+        Ok(())
+    }
+
+    /// `buf` の `pos` からメッセージ末尾まで Error Details の KVP 列をデコードする
+    ///
+    /// `error_code` は REDIRECT Detail の必須性と適用規則の判定に使う。
+    /// 未知の型は値の形式だけ KVP の規則に従って読み飛ばして無視する
+    /// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure))。同じ未知 Type が
+    /// 複数回出現しても許可する (§9.4.2 の MUST)。既知の型でも `error_code` に適用されない
+    /// ものは読み飛ばして保持しない (§9.4.2 の MUST ignore)。
+    ///
+    /// # Errors
+    ///
+    /// - `pos` が `buf` の末尾に達する前に varint が尽きた: `UnexpectedEof`
+    /// - 奇数型の Length が 2^16-1 バイトを超えた: `FieldLengthExceeded`
+    /// - 奇数型の Length が残りバイトを超える、REDIRECT の Length が REDIRECT 構造と
+    ///   一致しない: `KeyValueFormattingError`
+    /// - 単一インスタンスのみ許す既知型 (REDIRECT) が重複した: `ProtocolViolation`
+    /// - Error Code = REDIRECT なのに REDIRECT Detail が無い: `MalformedMessage`
+    fn decode_from(buf: &[u8], pos: &mut usize, error_code: u64) -> Result<Self, MessageError> {
+        let mut details = Vec::new();
+        let mut prev_type = 0;
+        let mut seen_redirect = false;
+        while *pos < buf.len() {
+            let (detail_type, _) = crate::kvp::decode_delta_key(prev_type, buf, pos)?;
+            match detail_type {
+                ERROR_DETAIL_REDIRECT => {
+                    // §9.4.2.1 は単一インスタンスのみを定義する。多重は送信側の MUST NOT
+                    // 違反であり、KVP 列の構造としても不正なため ProtocolViolation にする。
+                    if seen_redirect {
+                        return Err(MessageError::ProtocolViolation(
+                            "duplicate REDIRECT error detail",
+                        ));
+                    }
+                    seen_redirect = true;
+                    let redirect = decode_redirect_detail(buf, pos)?;
+                    // 適用されない Error Code では意味を持たないため保持しない (§9.4.2)。
+                    if error_code == REQUEST_REDIRECT {
+                        details.push(ErrorDetail::Redirect(redirect));
+                    }
+                }
+                // 未知の型は KVP の形式だけ読み飛ばして無視する (§9.4.2)。
+                _ => skip_error_detail_value(buf, pos, detail_type)?,
+            }
+            prev_type = detail_type;
+        }
+        if error_code == REQUEST_REDIRECT && !seen_redirect {
+            // draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): "An endpoint that receives a
+            // REQUEST_ERROR with Error Code REDIRECT and no REDIRECT Error Detail MUST close
+            // the session with MALFORMED_MESSAGE."
+            return Err(MessageError::MalformedMessage(
+                "REQUEST_ERROR with REDIRECT error code has no REDIRECT error detail",
+            ));
+        }
+        Ok(Self(details))
+    }
+}
+
+/// 未知の Error Detail の値を KVP の規則に従って読み飛ばす
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 偶数 Type の Value は
+/// vi64 1 つ、奇数 Type の Value は Length (vi64) + その長さのバイト列である。
+/// 型を知らなくてもこの形式だけで値を読み飛ばせるため、後続の KVP の境界を保てる。
+fn skip_error_detail_value(
+    buf: &[u8],
+    pos: &mut usize,
+    detail_type: u64,
+) -> Result<(), MessageError> {
+    if detail_type.is_multiple_of(2) {
+        let (_, n) = varint::decode(&buf[*pos..])?;
+        *pos += n;
+        return Ok(());
+    }
+    let (len, n) = varint::decode(&buf[*pos..])?;
+    *pos += n;
+    check_error_detail_length(len)?;
+    let len = varint::checked_len(len, buf[*pos..].len()).map_err(|_| {
+        MessageError::KeyValueFormattingError("error detail value length exceeds remaining buffer")
+    })?;
+    *pos += len;
+    Ok(())
+}
+
+/// Error Detail の値長が上限以内かを検証する
+///
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長の上限は 2^16-1 バイト。
+/// 超過は FIELD_LENGTH_EXCEEDED でセッションを閉じる (MUST)。
+fn check_error_detail_length(len: u64) -> Result<(), MessageError> {
+    if len > MAX_ERROR_DETAIL_LENGTH {
+        return Err(MessageError::FieldLengthExceeded(
+            "error detail value length exceeds 65535",
+        ));
+    }
+    Ok(())
+}
+
+/// REDIRECT Error Detail の値 (Length + REDIRECT 構造) をデコードする
+///
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) の構造を KVP の Length が覆う範囲
+/// だけで読み、Length と構造の消費バイト数が一致しない場合は MALFORMED_KEY_VALUE
+/// (§8.3 の MUST) にする。Length の外にはみ出すフィールドは、後続の KVP の境界を壊すため
+/// 読み進めずに拒否する。
+fn decode_redirect_detail(buf: &[u8], pos: &mut usize) -> Result<Redirect, MessageError> {
+    let (len, n) = varint::decode(&buf[*pos..])?;
+    *pos += n;
+    check_error_detail_length(len)?;
+    let len = varint::checked_len(len, buf[*pos..].len()).map_err(|_| {
+        MessageError::KeyValueFormattingError(
+            "REDIRECT error detail length exceeds remaining buffer",
+        )
+    })?;
+    let end = *pos + len;
+    let mut inner = 0;
+    let redirect = Redirect::decode_from(&buf[*pos..end], &mut inner).map_err(|err| match err {
+        // Length が REDIRECT 構造を覆い切れていない (フィールドが Length の外へはみ出す)
+        MessageError::UnexpectedEof => MessageError::KeyValueFormattingError(
+            "REDIRECT error detail length does not cover its fields",
+        ),
+        other => other,
+    })?;
+    if inner != len {
+        return Err(MessageError::KeyValueFormattingError(
+            "REDIRECT error detail has trailing bytes in its value",
+        ));
+    }
+    *pos = end;
+    Ok(redirect)
+}
+
+/// REDIRECT Error Detail の値を KVP の Length + バイト列として `buf` に追記する
+fn encode_redirect_detail(redirect: &Redirect, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+    let mut value = Vec::new();
+    redirect.encode_to(&mut value)?;
+    let len = value.len() as u64;
+    check_error_detail_length(len)?;
+    varint::encode(len, buf);
+    buf.extend_from_slice(&value);
+    Ok(())
+}
+
+/// REQUEST_ERROR メッセージ (draft-ietf-moq-transport-23 §9.4 (REQUEST_ERROR))
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestError {
-    /// エラーコード (draft-ietf-moq-transport-22 §16.11.2 (REQUEST_ERROR Codes))
+    /// エラーコード (draft-ietf-moq-transport-23 §16.12.2 (REQUEST_ERROR Codes))
     pub error_code: u64,
     /// 再送までの最小待ち時間 (ms) に 1 を足した値 (plus one)。
     /// 値 1 は即時リトライ可を表す。
     /// 値 0 は再送すべきでない (SHOULD NOT retry) ことを表す。REDIRECT 応答では
     /// 元のリクエストを as sent で再送すべきでないが、提供された URI への接続または
     /// Redirect target を使った再送 (follow) を妨げない
-    /// (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format)
-    /// および §9.4.2 内の REDIRECT 定義)。
+    /// (draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format))。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub retry_interval: u64,
-    /// 人間可読な失敗理由 (draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure))
+    /// 人間可読な失敗理由 (draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure))
     pub reason: ReasonPhrase,
-    /// Error Code = REDIRECT の場合のみ付加される (draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format))
-    pub redirect: Option<Redirect>,
+    /// 構造化されたエラー詳細 (draft-ietf-moq-transport-23 §9.4.2 (Error Details))
+    ///
+    /// Error Code = REDIRECT の場合は REDIRECT Detail を必ず 1 つ含む
+    /// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
+    pub error_details: ErrorDetails,
 }
 
 impl RequestError {
@@ -611,27 +925,16 @@ impl RequestError {
         varint::encode(self.error_code, buf);
         varint::encode(self.retry_interval, buf);
         self.reason.encode_to(buf);
-        // draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format) "Redirect: Present only when Error Code is REDIRECT"
-        // error_code と redirect の present 整合を生成側でも強制する。
-        // 不整合な組み合わせは ProtocolViolation で生成を拒否する。
-        match (self.error_code == REQUEST_REDIRECT, &self.redirect) {
-            (true, Some(redirect)) => redirect.encode_to(buf)?,
-            (true, None) => {
-                return Err(MessageError::ProtocolViolation(
-                    "REQUEST_ERROR with REDIRECT error code requires a Redirect",
-                ));
-            }
-            (false, Some(_)) => {
-                return Err(MessageError::ProtocolViolation(
-                    "REQUEST_ERROR without REDIRECT error code must not carry a Redirect",
-                ));
-            }
-            (false, None) => {}
-        }
+        // draft-ietf-moq-transport-23 §9.4.1 (REQUEST_ERROR Message Format):
+        // Error Details は Error Reason の後ろからメッセージ末尾までを占める。
+        self.error_details.encode(self.error_code, buf)?;
         Ok(())
     }
 
     /// `payload` 先頭から自身を構築し `(Self, 消費バイト数)` を返す
+    ///
+    /// Error Details はメッセージ末尾までを占めるため、消費バイト数は常に
+    /// `payload.len()` になる。
     pub(crate) fn decode_message_body(payload: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
         let (error_code, n) = varint::decode(&payload[pos..])?;
@@ -639,29 +942,13 @@ impl RequestError {
         let (retry_interval, n) = varint::decode(&payload[pos..])?;
         pos += n;
         let reason = ReasonPhrase::decode_from(payload, &mut pos)?;
-        // draft-ietf-moq-transport-22 §9.4.2 (REQUEST_ERROR Message Format) "Redirect: Present only when Error Code is REDIRECT"
-        // REDIRECT のときは Redirect が必須 (retry 先指示なしの REDIRECT は意味を
-        // なさないため、欠落は PROTOCOL_VIOLATION)。pos == payload.len() の明示
-        // チェックを省くと空スライスに対する Redirect::decode_from が UnexpectedEof を
-        // 返してしまい、完了条件が要求する ProtocolViolation にならない。
-        // error_code != REDIRECT で末尾に余剰がある場合は redirect = None のまま、
-        // 末尾チェック (pos != payload.len()) が MALFORMED_MESSAGE にする。
-        let redirect = if error_code == REQUEST_REDIRECT {
-            if pos == payload.len() {
-                return Err(MessageError::ProtocolViolation(
-                    "REQUEST_ERROR with REDIRECT error code must contain a Redirect",
-                ));
-            }
-            Some(Redirect::decode_from(payload, &mut pos)?)
-        } else {
-            None
-        };
+        let error_details = ErrorDetails::decode_from(payload, &mut pos, error_code)?;
         Ok((
             Self {
                 error_code,
                 retry_interval,
                 reason,
-                redirect,
+                error_details,
             },
             pos,
         ))

@@ -87,7 +87,7 @@ fn request_stream_goaway_timeout_absorbs_late_response() {
                 retry_interval: 0,
                 reason: shiguredo_moqt::message::ReasonPhrase::new("failed")
                     .expect("テストフィクスチャの前提条件を満たす"),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             }),
         )
         .expect("終端済み request への遅延 REQUEST_ERROR が no-op で吸収されること");
@@ -399,10 +399,23 @@ fn request_stream_goaway_timeout_absorbs_request_update_from_legitimate_sender()
 ///
 /// 吸収は「ローカル終端済み request へ届いた応答」を対象にするが、メッセージ内容そのものの
 /// 違反 (draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) の Track Properties、
-/// §9.4.1 (Redirect Structure) の Connect URI) は終端後も検出してセッションを閉じる。
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) の Connect URI) は終端後も検出して
+/// セッションを閉じる。
 #[test]
 fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
+    use shiguredo_moqt::message::{ErrorDetail, Redirect};
     use shiguredo_moqt::track_properties::{TrackProperty, TrackPropertyValue};
+
+    /// 非ゼロ Connect URI を持つ REDIRECT Error Detail を組み立てる
+    fn redirect_details() -> ErrorDetails {
+        let mut details = ErrorDetails::new();
+        details.push(ErrorDetail::Redirect(Redirect {
+            connect_uri: b"moqt://relay.example/".to_vec(),
+            track_namespace: ns(&[b"live"]),
+            track_name: b"cam".to_vec(),
+        }));
+        details
+    }
 
     // TRACK_STATUS 以外の context へ Track Properties 付き REQUEST_OK
     let (_client, mut server, rid) = establish_subscribe_track(831);
@@ -435,11 +448,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
                 retry_interval: 0,
                 reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                     .expect("テストフィクスチャの前提条件を満たす"),
-                redirect: Some(shiguredo_moqt::message::Redirect {
-                    connect_uri: b"moqt://relay.example/".to_vec(),
-                    track_namespace: ns(&[b"live"]),
-                    track_name: b"cam".to_vec(),
-                }),
+                error_details: redirect_details(),
             }),
         )
         .unwrap_err();
@@ -461,11 +470,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
                 retry_interval: 0,
                 reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                     .expect("テストフィクスチャの前提条件を満たす"),
-                redirect: Some(shiguredo_moqt::message::Redirect {
-                    connect_uri: b"moqt://relay.example/".to_vec(),
-                    track_namespace: ns(&[b"live"]),
-                    track_name: b"cam".to_vec(),
-                }),
+                error_details: redirect_details(),
             }),
         )
         .unwrap_err();

@@ -592,7 +592,7 @@ fn send_request_error_for_subscription_in_established_transitions_to_terminated(
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     // Terminated に遷移していること
@@ -690,7 +690,7 @@ fn peer_request_error_for_subscription_in_established_transitions_to_terminated_
             100,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -714,14 +714,17 @@ fn peer_request_error_for_subscription_in_established_transitions_to_terminated_
             error_code,
             retry_interval,
             reason,
-            redirect,
+            error_details,
         } = e
         {
             assert_eq!(request_id, rid);
             assert_eq!(error_code, 0x42);
             assert_eq!(retry_interval, 100);
             assert_eq!(reason.as_str(), "update failed");
-            assert!(redirect.is_none());
+            assert!(
+                error_details.is_empty(),
+                "Error Detail の無い REQUEST_ERROR は空の Error Details になること"
+            );
             seen = true;
         }
     }
@@ -775,7 +778,7 @@ fn subscription_terminated_by_peer_request_error_accepts_subsequent_publish_done
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     // REQUEST_ERROR と PUBLISH_DONE(UPDATE_FAILED) を順に client に配送
@@ -917,7 +920,7 @@ fn subscription_terminated_by_peer_request_error_forgets_after_stream_fin_and_pu
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -1009,7 +1012,7 @@ fn publish_done_auto_sent_after_request_error_in_established() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
@@ -1129,7 +1132,7 @@ fn send_subgroup_object_to_terminated_subscription_rejected() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
@@ -1357,7 +1360,7 @@ fn fail_request_update(client: &mut Session, server: &mut Session, rid: u64) {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let events = drain_events(server);
@@ -1679,7 +1682,7 @@ fn request_error_resets_open_fill_streams_before_publish_done() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
@@ -1782,7 +1785,7 @@ fn pending_publish_done_discarded_on_forget_subscription() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -1877,7 +1880,7 @@ fn send_request_error_for_publish_path_in_established_sends_publish_done() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
@@ -1971,7 +1974,7 @@ fn send_request_error_in_established_with_open_streams_uses_published_stream_cou
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
@@ -2025,7 +2028,7 @@ fn send_request_error_for_subscription_in_pending_does_not_send_publish_done() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("nope".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
 
@@ -2075,7 +2078,7 @@ fn send_request_error_for_subscription_in_terminated_errors() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("nope".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
@@ -2093,7 +2096,7 @@ fn send_request_error_for_subscription_in_terminated_errors() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("again".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .unwrap_err();
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
@@ -2117,7 +2120,7 @@ fn request_error_received_event_emitted_for_pending_subscription() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("nope".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -2573,7 +2576,7 @@ fn request_error_discards_coalesced_pending_params() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update rejected".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert!(
@@ -3691,7 +3694,7 @@ fn send_request_error_from_subscriber_side_on_established_closes_session() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect_err("subscriber 側の Established REQUEST_ERROR は PROTOCOL_VIOLATION になる");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);

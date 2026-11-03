@@ -1666,7 +1666,7 @@ fn credit_restore_does_not_underflow_on_second_response() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("rejected")
                 .expect("1024 バイト以下の reason は常に有効"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
 

@@ -1002,7 +1002,7 @@ fn publish_origin_update_failed_resets_open_fill_streams_and_flushes_publish_don
                 error_code: REQUEST_INVALID_FILTER,
                 retry_interval: 0,
                 reason: ReasonPhrase::new("rejected").expect("正当な reason phrase である"),
-                redirect: None,
+                error_details: ErrorDetails::new(),
             }),
         )
         .expect("REQUEST_ERROR を受理すること");
@@ -1578,7 +1578,7 @@ fn request_error_resets_fills_and_sends_publish_done() {
             0x01,
             0,
             ReasonPhrase::new("fail").expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(server.open_outgoing_fill_stream_count(sub_rid), 0);

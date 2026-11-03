@@ -495,7 +495,7 @@ impl Session {
         &mut self,
         request_id: u64,
     ) -> Result<(), SessionError> {
-        // ローカル終端済みの request は検証 (呼び出し元の Redirect 検証) だけを行い、
+        // ローカル終端済みの request は検証 (呼び出し元の REDIRECT Detail の検証) だけを行い、
         // 状態遷移はしない (peer が reset を観測する前に送った正当な応答が遅延して届く)。
         // `RequestErrorReceived` は呼び出し元 `handle_peer_request_error` が通知する
         if self.is_locally_terminated_request(request_id) {

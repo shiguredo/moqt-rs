@@ -983,7 +983,7 @@ fn peer_goaway_does_not_suppress_send_request_error() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("rejected")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("peer GOAWAY 受信後も REQUEST_ERROR は送信可能であること");
 }
@@ -1706,7 +1706,7 @@ fn request_stream_goaway_deadline_is_cleared_by_request_error_with_publish_done(
             0,
             shiguredo_moqt::message::ReasonPhrase::new("failed")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
@@ -1763,7 +1763,7 @@ fn request_stream_goaway_reset_discards_pending_publish_done() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("failed")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
@@ -1845,7 +1845,7 @@ fn request_stream_goaway_deadline_is_cleared_by_pending_publish_done_flush() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("failed")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
@@ -1920,7 +1920,7 @@ fn request_stream_goaway_deadline_is_cleared_by_request_error_alone() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("failed")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     let (_, _, fin) = take_send_on_stream_with_fin(&mut server);

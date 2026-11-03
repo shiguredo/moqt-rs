@@ -480,7 +480,7 @@ fn track_status_responder_survives_requester_fin() -> TestResult {
                     shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST,
                     0,
                     ReasonPhrase::new("no such track").expect("正当な reason phrase である"),
-                    None,
+                    shiguredo_moqt::message::ErrorDetails::new(),
                 )
                 .expect("requester の FIN 後でも REQUEST_ERROR を送れること");
         }

@@ -4,6 +4,7 @@ use shiguredo_moqt::error::{
     REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
     SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_KEY_VALUE_FORMATTING_ERROR,
 };
+use shiguredo_moqt::message::{ErrorDetail, Redirect, RequestError};
 use shiguredo_moqt::message_parameter::{
     PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT, PARAM_SUBGROUP_FILTER,
 };
@@ -44,7 +45,7 @@ fn request_stream_tracks_subscribe_lifecycle() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("rejected")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -107,7 +108,7 @@ fn request_stream_tracks_publish_lifecycle() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("no")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -185,7 +186,7 @@ fn request_stream_tracks_fetch_lifecycle() {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("err")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let _ = take_send_on_stream(&mut server);
@@ -2205,7 +2206,7 @@ fn responder_sends_request_error_after_requester_fin() {
             shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST,
             0,
             ReasonPhrase::new("no such track").expect("正当な reason phrase である"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("requester の FIN 後でも REQUEST_ERROR を送れること");
     let (_, err_msg, fin) = take_send_on_stream_with_fin(&mut server);
@@ -2704,7 +2705,7 @@ fn fetch_responder_terminates_on_request_error_after_requester_fin() {
             shiguredo_moqt::error::REQUEST_DOES_NOT_EXIST,
             0,
             ReasonPhrase::new("not found").expect("正当な reason phrase である"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("requester の FIN 後でも REQUEST_ERROR を送れること");
     let (_, _, fin) = take_send_on_stream_with_fin(&mut server);
@@ -2988,15 +2989,28 @@ fn publish_on_established_subscription_is_accepted_in_draft_20() {
     assert!(client.subscription(publish_rid).is_some());
 }
 
-/// Server が非ゼロ Connect URI の Redirect 付き REQUEST_ERROR を受信したら PROTOCOL_VIOLATION
+/// REDIRECT Error Detail を 1 つだけ持つ Error Details を組み立てる
 ///
-/// draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure):
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): Track Namespace は固定値でよい。
+fn redirect_details(connect_uri: &[u8], track_name: &[u8]) -> ErrorDetails {
+    let mut details = ErrorDetails::new();
+    details.push(ErrorDetail::Redirect(Redirect {
+        connect_uri: connect_uri.to_vec(),
+        track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
+            .expect("正当な namespace である"),
+        track_name: track_name.to_vec(),
+    }));
+    details
+}
+
+/// Server が非ゼロ Connect URI の REDIRECT Error Detail を受信したら PROTOCOL_VIOLATION
+///
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT):
 /// "If a server receives a Redirect with a non-zero Connect URI Length
-/// it MUST close the session with a PROTOCOL_VIOLATION."
+/// it MUST close the session with ROLE_VIOLATION."
+/// 本クレートのセッション終了コードは細分類に未対応のため PROTOCOL_VIOLATION になる。
 #[test]
 fn server_receives_redirect_nonzero_connect_uri_closes_session() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
     let (_client, mut server, rid) = establish_subscribe_track(1);
     let err = server
         .recv_stream_message(
@@ -3006,12 +3020,7 @@ fn server_receives_redirect_nonzero_connect_uri_closes_session() {
                 retry_interval: 0,
                 reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                     .expect("正当な reason phrase である"),
-                redirect: Some(Redirect {
-                    connect_uri: b"moqt://relay.example/".to_vec(),
-                    track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                        .expect("正当な namespace である"),
-                    track_name: b"track".to_vec(),
-                }),
+                error_details: redirect_details(b"moqt://relay.example/", b"track"),
             }),
         )
         .unwrap_err();
@@ -3019,14 +3028,12 @@ fn server_receives_redirect_nonzero_connect_uri_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// Server が空 Connect URI の Redirect 付き REQUEST_ERROR を受信した場合は通常処理される
+/// Server が空 Connect URI の REDIRECT Error Detail を受信した場合は通常処理される
 ///
-/// draft-ietf-moq-transport-22 §9.4.1: 非ゼロの場合のみ MUST close であるため、
+/// draft-ietf-moq-transport-23 §9.4.2.1: 非ゼロの場合のみ MUST close であるため、
 /// 空 Connect URI は許容される。
 #[test]
 fn server_receives_redirect_zero_connect_uri_accepted() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
     let (_client, mut server, rid) = establish_subscribe_track(2);
     let result = server.recv_stream_message(
         rid,
@@ -3035,12 +3042,7 @@ fn server_receives_redirect_zero_connect_uri_accepted() {
             retry_interval: 0,
             reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                 .expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                    .expect("正当な namespace である"),
-                track_name: b"track".to_vec(),
-            }),
+            error_details: redirect_details(&[], b"track"),
         }),
     );
     // 空 connect_uri は許容されるためエラーにならない
@@ -3048,14 +3050,38 @@ fn server_receives_redirect_zero_connect_uri_accepted() {
     assert_eq!(server.state(), SessionState::Established);
 }
 
-/// Client が非ゼロ Connect URI の Redirect 付き REQUEST_ERROR を受信した場合は通常処理される
+/// Server が REDIRECT Detail の無い REDIRECT を受信したら MALFORMED_MESSAGE
 ///
-/// draft-ietf-moq-transport-22 §9.4.1 の MUST close は Server 受信時のみに適用される。
-/// Client が受信する Redirect は正常なリダイレクト指示として扱われる。
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): "An endpoint that receives a
+/// REQUEST_ERROR with Error Code REDIRECT and no REDIRECT Error Detail MUST close the
+/// session with MALFORMED_MESSAGE."
+/// ワイヤの decode は同じ検証を行うが、decode 済みメッセージを直接受け取る API 経路でも
+/// セッションを閉じることを固定する。
+#[test]
+fn server_receives_redirect_missing_detail_closes_session() {
+    let (_client, mut server, rid) = establish_subscribe_track(3);
+    let err = server
+        .recv_stream_message(
+            rid,
+            ControlMessage::RequestError(RequestError {
+                error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+                retry_interval: 0,
+                reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
+                    .expect("正当な reason phrase である"),
+                error_details: ErrorDetails::new(),
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, SESSION_MALFORMED_MESSAGE);
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// Client が非ゼロ Connect URI の REDIRECT Error Detail を受信した場合は通常処理される
+///
+/// draft-ietf-moq-transport-23 §9.4.2.1 の MUST close は Server 受信時のみに適用される。
+/// Client が受信する REDIRECT は正常なリダイレクト指示として扱われる。
 #[test]
 fn client_receives_redirect_nonzero_connect_uri_accepted() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(
@@ -3075,26 +3101,81 @@ fn client_receives_redirect_nonzero_connect_uri_accepted() {
             retry_interval: 0,
             reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                 .expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: b"moqt://relay.example/".to_vec(),
-                track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                    .expect("正当な namespace である"),
-                track_name: b"track".to_vec(),
-            }),
+            error_details: redirect_details(b"moqt://relay.example/", b"track"),
         }),
     );
     assert!(result.is_ok());
     assert_eq!(client.state(), SessionState::Established);
+
+    // イベントには REDIRECT の内容がそのまま載る
+    let mut saw = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestErrorReceived {
+            request_id,
+            error_details,
+            ..
+        } = e
+        {
+            assert_eq!(request_id, rid);
+            assert_eq!(
+                error_details
+                    .redirect()
+                    .expect("REDIRECT Detail が保持されること")
+                    .connect_uri,
+                b"moqt://relay.example/".to_vec(),
+                "REDIRECT の Connect URI がイベントに載ること"
+            );
+            saw = true;
+        }
+    }
+    assert!(saw, "RequestErrorReceived イベントが発行されること");
 }
 
-/// SUBSCRIBE (track-scoped) への REQUEST_ERROR で Redirect の Track Name が non-empty でもセッションは閉じない
+/// REDIRECT 以外の Error Code に REDIRECT Detail が付いていても無視され、セッションは閉じない
 ///
-/// Track Name の空制約は namespace-scoped request のみに適用される。
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details): 既知の Detail でも当該 Error Code に
+/// 適用されないものは無視する (MUST)。server の非ゼロ Connect URI 検証も適用外の Detail には
+/// 及ばない。
+#[test]
+fn server_receives_inapplicable_redirect_detail_accepted() {
+    let (_client, mut server, rid) = establish_subscribe_track(4);
+    let result = server.recv_stream_message(
+        rid,
+        ControlMessage::RequestError(RequestError {
+            error_code: REQUEST_NOT_SUPPORTED,
+            retry_interval: 0,
+            reason: shiguredo_moqt::message::ReasonPhrase::new("not supported")
+                .expect("正当な reason phrase である"),
+            error_details: redirect_details(b"moqt://relay.example/", b"track"),
+        }),
+    );
+    assert!(
+        result.is_ok(),
+        "適用外の REDIRECT Detail で閉じてはならない"
+    );
+    assert_eq!(server.state(), SessionState::Established);
+
+    // イベントの Error Details からも適用外の Detail は落ちる
+    let mut saw = false;
+    while let Some(e) = server.poll_event() {
+        if let SessionEvent::RequestErrorReceived { error_details, .. } = e {
+            assert!(
+                error_details.is_empty(),
+                "適用外の REDIRECT Detail はイベントに載らないこと"
+            );
+            saw = true;
+        }
+    }
+    assert!(saw, "RequestErrorReceived イベントが発行されること");
+}
+
+/// SUBSCRIBE (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty でもセッションは閉じない
+///
+/// Track Name の空制約は namespace-scoped request のみに適用される
+/// (draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT))。
 /// SUBSCRIBE は track-scoped であるため、non-empty Track Name は許容される。
 #[test]
 fn redirect_nonempty_track_name_for_subscribe_accepted() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
@@ -3111,26 +3192,49 @@ fn redirect_nonempty_track_name_for_subscribe_accepted() {
             retry_interval: 0,
             reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                 .expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                    .expect("正当な namespace である"),
-                track_name: b"track".to_vec(),
-            }),
+            error_details: redirect_details(&[], b"track"),
         }),
     );
     assert!(result.is_ok());
     assert_eq!(client.state(), SessionState::Established);
 }
 
-/// FETCH (track-scoped) への REQUEST_ERROR で Redirect の Track Name が non-empty でもセッションは閉じない
+/// namespace-scoped request 向けの空 Track Name を持つ REDIRECT も受理される
+///
+/// draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): namespace-scoped request
+/// (SUBSCRIBE_NAMESPACE / PUBLISH_NAMESPACE / SUBSCRIBE_TRACKS) の Track Name は空でなければ
+/// ならない (MUST)。本クレートは namespace-scoped request を実装しないが、REDIRECT の値として
+/// 空の Track Name を表現でき、track-scoped request でも空のまま受理される。
+#[test]
+fn redirect_empty_track_name_accepted() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, msg) = take_send_request(&mut client);
+    server
+        .recv_request(msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let result = client.recv_stream_message(
+        rid,
+        ControlMessage::RequestError(RequestError {
+            error_code: shiguredo_moqt::error::REQUEST_REDIRECT,
+            retry_interval: 0,
+            reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
+                .expect("正当な reason phrase である"),
+            error_details: redirect_details(&[], &[]),
+        }),
+    );
+    assert!(result.is_ok());
+    assert_eq!(client.state(), SessionState::Established);
+}
+
+/// FETCH (track-scoped) への REQUEST_ERROR で REDIRECT の Track Name が non-empty でもセッションは閉じない
 ///
 /// Track Name の空制約は namespace-scoped request のみに適用される。
 /// FETCH は track-scoped であるため、non-empty Track Name は許容される。
 #[test]
 fn redirect_nonempty_track_name_for_fetch_accepted() {
-    use shiguredo_moqt::message::{Redirect, RequestError};
-
     let (mut client, mut server) = establish_pair();
     let rid = client
         .send_fetch(
@@ -3160,16 +3264,57 @@ fn redirect_nonempty_track_name_for_fetch_accepted() {
             retry_interval: 0,
             reason: shiguredo_moqt::message::ReasonPhrase::new("redirect")
                 .expect("正当な reason phrase である"),
-            redirect: Some(Redirect {
-                connect_uri: Vec::new(),
-                track_namespace: TrackNamespace::new(vec![b"ns".to_vec()])
-                    .expect("正当な namespace である"),
-                track_name: b"track".to_vec(),
-            }),
+            error_details: redirect_details(&[], b"track"),
         }),
     );
     assert!(result.is_ok());
     assert_eq!(client.state(), SessionState::Established);
+}
+
+/// 未知の Error Detail とその重複は無視され、セッションを閉じない
+///
+/// draft-ietf-moq-transport-23 §9.4.2 (Error Details): 未知の Error Detail 型は無視し (MUST)、
+/// 未知 Type の重複は許可する (MUST allow)。ワイヤの decode が未知 Detail を落とすため、
+/// セッションは通常の REQUEST_ERROR として処理する。
+#[test]
+fn client_receives_error_with_unknown_details_accepted() {
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, msg) = take_send_request(&mut client);
+    server
+        .recv_request(msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    // 未知の奇数 Type 3 の Detail を 2 つ (2 つ目は Delta Type=0 の重複) 持つ REQUEST_ERROR
+    let mut payload = Vec::new();
+    shiguredo_moqt::varint::encode(REQUEST_NOT_SUPPORTED, &mut payload);
+    shiguredo_moqt::varint::encode(0, &mut payload); // Retry Interval
+    shiguredo_moqt::varint::encode(0, &mut payload); // Error Reason 長
+    payload.extend_from_slice(&[0x03, 0x01, 0xAA]); // Delta Type=3, Length=1
+    payload.extend_from_slice(&[0x00, 0x02, 0xBB, 0xCC]); // 同じ Type 3 の重複
+    let mut frame = Vec::new();
+    shiguredo_moqt::varint::encode(0x05, &mut frame); // REQUEST_ERROR の型 ID
+    shiguredo_moqt::varint::encode(payload.len() as u64, &mut frame);
+    frame.extend_from_slice(&payload);
+
+    let (msg, consumed) =
+        ControlMessage::decode(&frame).expect("未知の Error Detail は decode で無視される");
+    assert_eq!(consumed, frame.len());
+    let result = client.recv_stream_message(rid, msg);
+    assert!(result.is_ok(), "未知の Error Detail で閉じてはならない");
+    assert_eq!(client.state(), SessionState::Established);
+
+    // イベントの Error Details は空である (未知 Detail は保持しない)
+    let mut saw = false;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestErrorReceived { error_details, .. } = e {
+            assert!(error_details.is_empty(), "未知 Detail は保持しないこと");
+            saw = true;
+        }
+    }
+    assert!(saw, "RequestErrorReceived イベントが発行されること");
 }
 
 /// Client の採番は偶数で、SUBSCRIBE 送信で +2 進む

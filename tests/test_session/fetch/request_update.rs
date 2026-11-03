@@ -172,7 +172,7 @@ fn fetch_request_error_in_established_transitions_to_terminated() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
@@ -366,7 +366,7 @@ fn request_error_update_failure_transitions_to_terminated_and_auto_resets_data_s
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(
@@ -511,7 +511,7 @@ fn terminated_fetch_rejects_late_request_update() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -610,7 +610,7 @@ fn terminated_fetch_absorbs_reset_via_recv_data_stream_closed() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);

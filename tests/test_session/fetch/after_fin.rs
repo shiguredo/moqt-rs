@@ -244,7 +244,7 @@ fn request_error_after_fin_accepted() {
             0,
             ReasonPhrase::new("fetch failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -302,7 +302,7 @@ fn fetch_ok_after_request_error_after_fin_fails_session() {
             0,
             ReasonPhrase::new("fetch failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -464,7 +464,7 @@ fn request_error_after_fetch_ok_after_fin_accepted() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -524,7 +524,7 @@ fn request_error_in_pending_transitions_to_terminated() {
             0,
             ReasonPhrase::new("fetch failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -786,7 +786,7 @@ fn request_error_for_failed_update_after_fin_accepted() {
             0,
             ReasonPhrase::new("update failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(&mut server);
@@ -966,7 +966,7 @@ fn send_fetch_error(client: &mut Session, server: &mut Session, rid: u64) {
             0,
             shiguredo_moqt::message::ReasonPhrase::new("fetch failed".to_string())
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let (_, err_msg) = take_send_on_stream(server);

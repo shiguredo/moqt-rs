@@ -10,8 +10,8 @@ use crate::error::{
     STREAM_CANCELLED,
 };
 use crate::message::{
-    FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify, ReasonPhrase,
-    RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
+    ErrorDetails, FETCH_UPDATE_ALLOWED_PARAMS, Publish, PublishDone, PublishStateNotify,
+    ReasonPhrase, RequestUpdate, SUBSCRIPTION_UPDATE_ALLOWED_PARAMS, Subscribe, SubscribeOk,
     common::{Location, TrackNamespace},
 };
 use crate::message_parameter::{
@@ -934,9 +934,13 @@ impl Session {
             // REQUEST_UPDATE fails for a FETCH, the publisher MUST reset the FETCH data
             // stream." の MUST と fetch state の遷移は `send_request_error`
             // (`send_err_for_fetch`) が担う。`emit_request_error` では reset が発行されない。
-            Some(RequestTable::Fetch) => {
-                self.send_request_error(request_id, error_code, 0, reason_phrase(), None)
-            }
+            Some(RequestTable::Fetch) => self.send_request_error(
+                request_id,
+                error_code,
+                0,
+                reason_phrase(),
+                ErrorDetails::new(),
+            ),
             Some(RequestTable::Subscription) => {
                 let my_role = self
                     .subscriptions
@@ -944,9 +948,13 @@ impl Session {
                     .expect("locate_request guarantees key presence")
                     .my_role;
                 match my_role {
-                    TrackRole::Publisher => {
-                        self.send_request_error(request_id, error_code, 0, reason_phrase(), None)
-                    }
+                    TrackRole::Publisher => self.send_request_error(
+                        request_id,
+                        error_code,
+                        0,
+                        reason_phrase(),
+                        ErrorDetails::new(),
+                    ),
                     TrackRole::Subscriber => {
                         self.emit_request_error(request_id, error_code, reason);
                         Ok(())

@@ -22,14 +22,14 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
-    REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
-    SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD, SESSION_INVALID_PATH,
-    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE,
-    SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
-    is_local_error_code,
+    REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_REDIRECT,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
+    SESSION_INVALID_FIELD, SESSION_INVALID_PATH, SESSION_KEY_VALUE_FORMATTING_ERROR,
+    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH,
+    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
 };
 use crate::message::{
-    ControlMessage, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase, Redirect,
+    ControlMessage, ErrorDetails, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase,
     RequestError, RequestOk, Setup, TRACK_STATUS_OK_ALLOWED_PARAMS, common::Location,
     common::TrackNamespace, unsupported_request_allowed_params,
 };
@@ -1725,15 +1725,35 @@ impl Session {
         self.rejected_request_ids.contains(&request_id)
     }
 
-    /// draft-ietf-moq-transport-22 §9.4.1 (Redirect Structure) の MUST を検証する
+    /// peer REQUEST_ERROR の Error Details にある REDIRECT の MUST を検証する
     ///
-    /// "If a server receives a Redirect with a non-zero Connect URI Length it MUST close the
-    /// session with a PROTOCOL_VIOLATION." この検証は request の state に依存しないため、
-    /// 応答を通常処理する経路と、応答を吸収する経路の両方から呼ぶ。
-    /// 将来のドラフト改訂で変更される可能性がある。
+    /// - draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): "An endpoint that receives a
+    ///   REQUEST_ERROR with Error Code REDIRECT and no REDIRECT Error Detail MUST close the
+    ///   session with MALFORMED_MESSAGE."
+    /// - 同節: "If a server receives a Redirect with a non-zero Connect URI Length it MUST
+    ///   close the session with ROLE_VIOLATION."
+    ///
+    /// 適用されない Error Code の Detail は無視する (draft-ietf-moq-transport-23 §9.4.2)。
+    /// この検証は request の state に依存しないため、応答を通常処理する経路と、応答を吸収する
+    /// 経路の両方から呼ぶ。decode 済みメッセージを直接受け取る API 経路でも、ワイヤの decode が
+    /// 検出するのと同じ不正 (必須 Detail の欠落) をここで検出する。
+    /// 本クレートのセッション終了コードは細分類に未対応のため、ROLE_VIOLATION は従来どおり
+    /// PROTOCOL_VIOLATION で閉じる。
+    /// 節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     fn validate_peer_redirect(&mut self, err: &RequestError) -> Result<(), SessionError> {
+        if err.error_code != REQUEST_REDIRECT {
+            return Ok(());
+        }
+        if err.error_details.redirect().is_none() {
+            let e = SessionError::new(
+                SESSION_MALFORMED_MESSAGE,
+                "REQUEST_ERROR with REDIRECT error code has no REDIRECT error detail",
+            );
+            self.fail(e.clone());
+            return Err(e);
+        }
         if self.role == Role::Server
-            && let Some(ref redirect) = err.redirect
+            && let Some(redirect) = err.error_details.redirect()
             && !redirect.connect_uri.is_empty()
         {
             let e = SessionError::new(
@@ -2026,13 +2046,19 @@ impl Session {
     ///
     /// ローカル専用コード (`SESSION_LOCAL_FILTER_MISMATCH` / `SESSION_LOCAL_DATAGRAM_TIMEOUT`) を
     /// `error_code` に渡した場合は `REQUEST_INTERNAL_ERROR` に置換し、未登録値を wire に出さない。
+    ///
+    /// `error_details` は REQUEST_ERROR の Error Details である
+    /// (draft-ietf-moq-transport-23 §9.4.2 (Error Details))。Error Code = REDIRECT のときは
+    /// REDIRECT Detail を必ず含めること (§9.4.2.1)。適用外の Detail や REDIRECT Detail の
+    /// 欠落は `ControlMessage::RequestError` のエンコード検証で拒否されるため、本関数は
+    /// そのままイベントへ載せる。
     pub fn send_request_error(
         &mut self,
         request_id: u64,
         error_code: u64,
         retry_interval: u64,
         reason: ReasonPhrase,
-        redirect: Option<Redirect>,
+        error_details: ErrorDetails,
     ) -> Result<(), SessionError> {
         self.require_established()?;
         // ローカル専用コードが wire に流出しないよう、REQUEST_ERROR レジストリの
@@ -2068,7 +2094,7 @@ impl Session {
             error_code,
             retry_interval,
             reason,
-            redirect,
+            error_details,
         });
         // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES): 応答送信で peer クレジット回復
         self.restore_incoming_request_update_credit(request_id);
@@ -2190,12 +2216,16 @@ impl Session {
         // subscription / fetch は REQUEST_UPDATE 失敗応答で `Terminated` に遷移する
         // (subscription: draft §3.1.2 の REQUEST_ERROR 受信で subscription state を終える帰結)。
         if result.is_ok() {
+            // decode 済みメッセージを直接受け取る API 経路では、ワイヤの decode が落とす
+            // 適用外の Detail が残りうる。ワイヤ経由と同じく、適用される Detail だけを
+            // イベントへ載せる (draft-ietf-moq-transport-23 §9.4.2 (Error Details))。
+            let error_code = err.error_code;
             self.events.push_back(SessionEvent::RequestErrorReceived {
                 request_id,
-                error_code: err.error_code,
+                error_code,
                 retry_interval: err.retry_interval,
                 reason: err.reason,
-                redirect: err.redirect,
+                error_details: err.error_details.applicable(error_code),
             });
         }
         result
@@ -2591,7 +2621,7 @@ impl Session {
             retry_interval: 0,
             reason: ReasonPhrase::new(reason)
                 .expect("emit_request_error reason must be <= 1024 bytes"),
-            redirect: None,
+            error_details: ErrorDetails::new(),
         });
         // draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES):
         // "Each REQUEST_OK or REQUEST_ERROR response restores one credit on that stream"。

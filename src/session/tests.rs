@@ -214,7 +214,7 @@ fn forget_subscription_cleans_datagram_header_complete_entries() {
             0,
             crate::message::ReasonPhrase::new("rejected")
                 .expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            crate::message::ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = client
@@ -335,7 +335,7 @@ fn forget_subscription_cleans_request_update_credit_entries() {
             REQUEST_INTERNAL_ERROR,
             0,
             ReasonPhrase::new("rejected").expect("テストフィクスチャの前提条件を満たす"),
-            None,
+            crate::message::ErrorDetails::new(),
         )
         .expect("テストフィクスチャの前提条件を満たす");
     let sub = client
@@ -1053,7 +1053,7 @@ fn send_request_error_replaces_local_error_code_with_request_internal_error() {
             SESSION_LOCAL_FILTER_MISMATCH,
             0,
             ReasonPhrase::new("local filter mismatch").expect("有効な reason"),
-            None,
+            crate::message::ErrorDetails::new(),
         )
         .expect("REQUEST_ERROR の送信に成功すること");
     match take_send_on_stream_for_local_code_tests(&mut server) {
@@ -1932,7 +1932,7 @@ fn inject_request_error(client: &mut Session, rid: u64) {
                 error_code: REQUEST_INTERNAL_ERROR,
                 retry_interval: 0,
                 reason: ReasonPhrase::new("update failed").expect("有効な reason"),
-                redirect: None,
+                error_details: crate::message::ErrorDetails::new(),
             }),
         )
         .expect("REQUEST_ERROR の受信に成功すること");
