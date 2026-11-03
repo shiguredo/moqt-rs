@@ -3,7 +3,7 @@
 - Created: 2026-11-03
 - Completed: {YYYY-MM-DD}
 - Branch: feature/update-c4m-draft-02-documentation-and-coverage
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-11-03
 
 ## 目的
 
@@ -16,6 +16,7 @@ src/c4m.rs と各サブモジュール、docs/c4m.md、skills/shiguredo-moqt/SKI
 JWT proof と moqt scopes 配列、旧ベクタを前提にする。
 crates/tokio-moq/src/lib.rs の c4m_authorization_token は token をそのまま運ぶが、
 token の運搬と認可・proof 検証を区別した説明が必要である。
+README.md の対応仕様、Cargo.toml の C4M 依存コメント、docs/missing-features.md の基準版・CWT proof 未実装表・節番号にも draft 01 の記述が残る。
 
 ## 設計方針
 
@@ -24,6 +25,17 @@ token の運搬と認可・proof 検証を区別した説明が必要である�
 I/O、時計、接続識別子、replay state の所有者を明記する。
 暫定 claim label と未確定の proof の運搬方法を正式仕様として確定させない。
 未確定の actx / ath 番号や AUTHORIZATION_TOKEN 内の独自 proof envelope を黙って割り当てない。
+
+## 変更対象
+
+- `README.md` の C4M の対応仕様・使用例
+- `docs/c4m.md` と `docs/missing-features.md` の C4M の対応版・実装状況・未対応項目
+- `skills/shiguredo-moqt/SKILL.md` の C4M の対応版・API・使用例・仕様参照
+- `src/c4m.rs` と各サブモジュールの公開 API・モジュール説明、`Cargo.toml` の C4M 依存コメント
+- `crates/tokio-moq/src/lib.rs` の `c4m_authorization_token` の token 運搬に関する説明
+
+0404 が扱う MOQT の説明更新とは C4M の範囲で分担し、未対応項目は先行 issue の実装結果を確認して更新する。
+0412〜0419 が完了しても、0345 / 0346 / 0356 の既知ギャップまで解消済みとは扱わない。各課題の実装状況を確認し、残る制約と利用側の追加検証を説明する。0345 が未完了なら、サンプルでは非ゼロの moqt-reval を無条件に認可せず、利用側での拒否または再検証能力に応じた判定・実行を示す。
 
 ## draft 01 → 02 の差分対照
 
@@ -48,10 +60,12 @@ I/O、時計、接続識別子、replay state の所有者を明記する。
 
 ## 完了条件
 
-- docs/c4m.md、公開 SKILL、モジュール説明とサンプルが実装済みの draft 02 API に一致すること。
+- README.md、docs/c4m.md、docs/missing-features.md、公開 SKILL、モジュール説明とサンプル、Cargo.toml の C4M 依存コメントが実装済みの draft 02 API に一致すること。
+- `c4m_authorization_token` が token bytes を運ぶだけで認可・proof 検証を行わないことを、利用側が判断できる説明にすること。
 - 必須の検証と呼び出し側に残る責務、暫定番号・未対応項目を利用者が判断できること。
 - 旧 JWT / compact / key 3 の互換 API を残す場合、現在の C4M の標準形式と混同しないこと。
 - 0345 / 0346 / 0356 と新しい追従 issue の関係が明確であること。
+- 既知ギャップが未完了の場合も対応済みと断定せず、特に非ゼロ moqt-reval を既定の `CatClaims::validate` だけで受理してよいと説明しないこと。
 
 ## 依存・関連
 
