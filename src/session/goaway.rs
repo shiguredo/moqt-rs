@@ -464,9 +464,9 @@ impl Session {
     /// `Role` とも publisher / subscriber の `TrackRole` 単独とも一致しない。
     /// 判定はイベントや deadline を積む前に行い、拒否時は session の状態を変更しない。
     /// 自側 state に該当 request が無い場合も receiver であることを確認できないため拒否する。
-    /// 送信はローカルで止められるが、受信は判定できない場合も受理する
-    /// ([`Self::handle_peer_goaway_on_request_stream`] の doc を参照)。非対称なのは、
-    /// 判定できない受信を違反として閉じると正当な GOAWAY でセッションを落とすためである。
+    /// 送信はローカルで止められるが、受信は判定できない場合も受理する (受信側の判定は
+    /// `handle_peer_goaway_on_request_stream` を参照)。非対称なのは、判定できない受信を
+    /// 違反として閉じると正当な GOAWAY でセッションを落とすためである。
     pub fn send_goaway_on_request_stream(
         &mut self,
         request_id: u64,
