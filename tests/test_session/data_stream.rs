@@ -2539,6 +2539,63 @@ fn malformed_track_absorbs_late_fetch_ok_on_terminated_fetch() {
     );
 }
 
+/// malformed track でローカル終端した FETCH への遅延 FETCH 応答 stream は破棄対象として吸収する
+///
+/// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出で同じ Track の FETCH も cancel
+/// されるが、publisher が cancel を観測する前に開いた FETCH 応答 stream は正当に届く。
+/// bidi request stream の reset は送信方向だけを閉じるため
+/// (draft-ietf-moq-transport-23 §6.4.2.2 (Graceful Request Stream Closure))、data stream は
+/// 別 stream であり到着順の保証もない。ローカル終端済み (`rejected_request_ids` に記録済み) の
+/// request への遅延 FETCH_HEADER は破棄対象 stream として登録し、以後の受信と終端通知を
+/// no-op で吸収する。
+#[test]
+fn malformed_track_absorbs_late_fetch_data_stream_on_terminated_fetch() {
+    use shiguredo_moqt::session::types::FetchHeaderAcceptance;
+
+    let (mut client, mut server) = establish_pair();
+    let alias = 628;
+    let subscription_rid =
+        establish_subscription_as_subscriber(&mut client, &mut server, b"cam", alias);
+    publish_one_object_on_track(&mut server, subscription_rid, alias, DataStreamId(45));
+    let fetch_rid = establish_fetch_as_subscriber(&mut client, &mut server, b"cam");
+
+    trigger_malformed_priority_mismatch(&mut client, alias, DataStreamId(46), DataStreamId(47));
+    assert_eq!(
+        client.fetch(fetch_rid).expect("fetch が存在する").state,
+        FetchState::Terminated,
+        "malformed 検出で同じ Track の FETCH もローカル終端されること"
+    );
+
+    // publisher が cancel を観測する前に開いた FETCH 応答 stream が遅延して届く
+    let stream_id = DataStreamId(48);
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("テストフィクスチャの前提条件を満たす");
+    assert_eq!(
+        client
+            .recv_fetch_header(
+                stream_id,
+                &FetchHeader {
+                    request_id: fetch_rid
+                }
+            )
+            .expect("終端済み fetch への遅延 FETCH_HEADER が受理されること"),
+        FetchHeaderAcceptance::Accepted,
+        "破棄対象 stream として受理すること"
+    );
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "遅延 data stream でセッションを閉じないこと"
+    );
+
+    // 破棄対象 stream として終端 (FIN) も吸収する
+    client
+        .recv_data_stream_closed(stream_id, RequestStreamEnd::Fin)
+        .expect("破棄対象 stream の終端通知が吸収されること");
+    assert_eq!(client.state(), SessionState::Established);
+}
+
 /// Malformed Track 検出時に別 Track と publisher 役の subscription は影響を受けない
 #[test]
 fn malformed_track_keeps_other_track_and_publisher_role_requests() {

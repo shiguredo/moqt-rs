@@ -269,6 +269,12 @@ codes.")。各 codec は長さと溢出を他の検証より先に判定する�
   新規 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS は `SendRequestError::PeerGoawayReceived` で拒否されます (draft-ietf-moq-transport-22 §9.2 の SHOULD NOT)。
 - 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下です。二重受信は `UNEXPECTED_MESSAGE` (`0x303`)、client からの非空 URI は `ROLE_VIOLATION` (`0x304`)、8192 バイト超は `FIELD_LENGTH_EXCEEDED` (`0x401`) です。`tick(now_ms)` が期限を進め、
   open request が残ったまま期限を過ぎると `CloseSession(GOAWAY_TIMEOUT)` を積みます (control stream)。request stream の GOAWAY は期限で当該 request stream を `GOING_AWAY` で reset します。
+- request stream の GOAWAY の role: 送れるのは request の receiver だけです (draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "Only the receiver of a request can send GOAWAY on its request stream.")。
+  request の sender (initiator) が `send_goaway_on_request_stream` を呼ぶと `PROTOCOL_VIOLATION` (`0x3`) で拒否し、イベントも期限 state も作りません。自側 state に request が無い場合も
+  receiver であることを確認できないため同じく拒否します。受信側では、自側が receiver (応答側) のときに sender から GOAWAY を受け取ると、
+  同節の "If the receiver of a request receives a GOAWAY on that request stream, it MUST close the session with a PROTOCOL_VIOLATION." に従って
+  `PROTOCOL_VIOLATION` でセッションを閉じます。sender が receiver から受け取る GOAWAY は正当であり、`GoawayReceived { on_request_stream: Some(..) }` で通知します。
+  破棄済みなどで sender / receiver を判定できない場合は §9.2 の MUST の条件が成立しないため、閉じずに受理して通知します。
 - drain 完了: 自側が control GOAWAY を送ったあと、open request が無くなると `GoawayDrainReady` を 1 回発行します (`goaway_drain_ready()` でも参照可能)。アプリはこの時点で NO_ERROR で閉じるのが RECOMMENDED です (§6.6.1)。期限まで待つ必要はありません。
 - example の client は受信した control GOAWAY で新 session をバックグラウンドで確立し、期限付きで
   再試行しながら購読 / 配信を張り直してから旧 session を NO_ERROR で閉じます。subscriber は

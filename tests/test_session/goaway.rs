@@ -1636,6 +1636,65 @@ fn request_stream_goaway_deadline_is_cleared_by_local_fin() {
     }
 }
 
+/// forget で request stream GOAWAY の reset deadline は解除される
+///
+/// GOAWAY を送れるのは request の receiver だけである (§9.2 (GOAWAY))。PUBLISH の receiver は
+/// subscriber なので、PUBLISH 起点 subscription では subscriber 側が GOAWAY を送る。
+/// subscriber は STOP_SENDING で購読を終端してから破棄でき、破棄済みの request に reset を送る
+/// 意味は残らないため deadline も解除される (STOP_SENDING だけでは解除されない)。
+#[test]
+fn request_stream_goaway_deadline_is_cleared_by_forget() {
+    let (mut client, mut server) = establish_pair();
+    // client (publisher) が PUBLISH を送り、server (subscriber) が receiver になる
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            904,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, publish_msg) = take_send_request(&mut client);
+    server
+        .recv_request(publish_msg)
+        .expect("PUBLISH の受信に成功すること");
+    server
+        .send_request_ok(rid, MessageParameters::new(), TrackProperties::new())
+        .expect("PUBLISH_OK の送信に成功すること");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("PUBLISH_OK の受信に成功すること");
+
+    server.tick(1_000);
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("request stream GOAWAY の送信に成功すること");
+    let (_, _) = take_send_on_stream(&mut server);
+
+    // STOP_SENDING による購読の終端では deadline は解除されない
+    server
+        .stop_sending(rid)
+        .expect("stop_sending に成功すること");
+    // forget で deadline が解除される
+    server
+        .forget_subscription(rid)
+        .expect("forget に成功すること");
+    assert!(
+        server.subscription(rid).is_none(),
+        "forget 後に subscription が残らないこと"
+    );
+
+    server.tick(2_000);
+    while let Some(e) = server.poll_event() {
+        assert!(
+            !matches!(e, SessionEvent::ResetRequestStream { .. }),
+            "forget 後は reset しないこと"
+        );
+    }
+}
+
 /// REQUEST_ERROR + PUBLISH_DONE (FIN) で request stream GOAWAY の deadline は解除される
 #[test]
 fn request_stream_goaway_deadline_is_cleared_by_request_error_with_publish_done() {

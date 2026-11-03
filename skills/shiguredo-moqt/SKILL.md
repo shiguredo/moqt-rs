@@ -220,6 +220,16 @@ fn send_goaway_on_request_stream(
 ) -> Result<(), SessionError>
 ```
 
+request stream 上の GOAWAY を送れるのは request の receiver だけである
+(draft-ietf-moq-transport-23 §9.2 (GOAWAY) の "Only the receiver of a request can send GOAWAY on
+its request stream.")。request の sender (initiator) が `send_goaway_on_request_stream` を呼ぶと
+`PROTOCOL_VIOLATION` (`0x3`) で拒否され、イベントも期限 state も残らない。自側 state に該当 request が
+無い場合も receiver であることを確認できないため、同じく拒否する。受信側では、自側が receiver
+(応答側) のときに sender から GOAWAY を受け取ると、同節の MUST に従って `PROTOCOL_VIOLATION` で
+セッションを閉じる。sender が receiver から受け取る GOAWAY は正当であり、
+`GoawayReceived { on_request_stream: Some(..) }` で通知する。request を破棄済みなどで sender /
+receiver を判定できない場合は MUST の条件が成立しないため、閉じずに受理して通知する。
+
 `tick(now_ms)` には単調増加ミリ秒時刻を渡す。control message / GOAWAY のセッション全体の
 タイムアウトと data stream timeout を評価する。control message / GOAWAY と FETCH stream の
 data stream timeout の満了時は `CloseSession` をキューへ積む。subgroup stream の data stream

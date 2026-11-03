@@ -1,6 +1,6 @@
 //! GOAWAY / Migration / Tick 関連
 //!
-//! draft-ietf-moq-transport-22 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY) に対応する
+//! draft-ietf-moq-transport-23 §6.6 (Termination), §6.6.1 (Graceful Session Migration), §9.2 (GOAWAY) に対応する
 //! `impl Session` のメソッドをまとめる。sans-I/O 制約のため、session 自体はタイマーを
 //! 持たず、外部時計から渡される `tick(now_ms)` だけが時刻源となる。
 //! draft 由来の実装のため将来変更される可能性がある。
@@ -22,7 +22,7 @@ use super::types::{
 
 /// GOAWAY URI の検証ヘルパー (送信側)
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の URI 長制限と Client の非空 URI 制限を検証する。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の URI 長制限と Client の非空 URI 制限を検証する。
 fn validate_outgoing_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionError> {
     if uri.len() > MAX_NEW_SESSION_URI_LENGTH {
         return Err(SessionError::new(
@@ -41,7 +41,7 @@ fn validate_outgoing_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionErr
 
 /// GOAWAY URI の検証ヘルパー (受信側)
 ///
-/// draft-ietf-moq-transport-22 §9.2 (GOAWAY) の URI 長制限と Client の非空 URI 制限を検証する。
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の URI 長制限と Client の非空 URI 制限を検証する。
 /// 受信側では Role を反転して使う (自側 Server → peer Client)。
 fn validate_incoming_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionError> {
     if uri.len() > MAX_NEW_SESSION_URI_LENGTH {
@@ -116,14 +116,14 @@ impl Session {
 
     // ─── 送信 API ──────────────────────────────────────────
 
-    /// GOAWAY を送信する (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// GOAWAY を送信する (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     ///
     /// 制約:
     /// - `Role::Client` は `new_session_uri` を空にする必要がある
     /// - `new_session_uri` の長さは 8192 バイト以下
     /// - 各エンドポイントから 1 回のみ
     ///
-    /// draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): GOAWAY は新規セッションへの
+    /// draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration): GOAWAY は新規セッションへの
     /// 移行合図 (drain) であり、Established subscription の自動終端は行わない。
     /// 移行する subscription への PUBLISH_DONE 送出はアプリケーションの責務であり、
     /// 送らずに GOAWAY_TIMEOUT の期限切れに任せる選択もある。
@@ -141,7 +141,7 @@ impl Session {
             ));
         }
         validate_outgoing_goaway_uri(self.role, &new_session_uri)?;
-        // draft-ietf-moq-transport-22 Appendix A.4 (Since draft-ietf-moq-transport-18) #1623:
+        // draft-ietf-moq-transport-23 Appendix A.5 (Since draft-ietf-moq-transport-18) #1623:
         // GOAWAY から Request ID は削除された。Message Body は URI + Timeout のみ。
         let msg = ControlMessage::Goaway(Goaway {
             new_session_uri,
@@ -149,7 +149,7 @@ impl Session {
         });
         self.events.push_back(SessionEvent::SendControl(msg));
         self.goaway.local_sent = true;
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): timeout==0 は specific timeout なし。自動判定しない。
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): timeout==0 は specific timeout なし。自動判定しない。
         if timeout > 0 {
             if let Some(now) = self.timing.last_tick_ms {
                 self.goaway.local_deadline_ms = Some(now.saturating_add(timeout));
@@ -177,7 +177,7 @@ impl Session {
     /// また subgroup stream の DATA_STREAM_TIMEOUT が満了した場合は、セッションを閉じずに
     /// 当該 stream の `StopSendingDataStream` を積み、その stream を破棄対象として会計から外す
     /// (保持期間の間、遅延して届く Object / FIN / RESET_STREAM は no-op で吸収する)。
-    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の MAY が挙げる措置は
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の MAY が挙げる措置は
     /// STOP_SENDING と購読終了であり、セッション全体のクローズは挙げていない
     /// (§6.6 (Termination) は単一購読の条件をセッションエラーへ昇格させることを MAY で
     /// 認めているため、クローズも仕様違反ではない。他の購読への影響を避けるため本実装は
@@ -208,7 +208,7 @@ impl Session {
         self.tick_discarded_data_stream_ids(now_ms);
 
         // 以下、3 種の session close timeout を固定順で評価する。
-        // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) は各エラーコードを定義するのみで、
+        // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) は各エラーコードを定義するのみで、
         // 複数 timeout の優先順位を規定していないため、実装で
         // control → data_stream → goaway の順に固定する。
         // 同一 tick に複数の deadline が満了しても、評価順で決定的に 1 つのエラーコードが
@@ -218,7 +218,7 @@ impl Session {
         // 0x12 で閉じる)。
         // (将来の draft で変更される可能性がある)
 
-        // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される CONTROL_MESSAGE_TIMEOUT
+        // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で定義される CONTROL_MESSAGE_TIMEOUT
         for deadline in self.timing.control_message_deadlines.values_mut() {
             deadline.tick(now_ms);
             if deadline.expired {
@@ -229,7 +229,7 @@ impl Session {
                 return;
             }
         }
-        // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される DATA_STREAM_TIMEOUT
+        // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で定義される DATA_STREAM_TIMEOUT
         //
         // open な subgroup stream で新しい object header を待って timeout した場合、同節は
         // "it MAY send a STOP_SENDING on that stream or terminate the subscription" と定め、
@@ -262,7 +262,7 @@ impl Session {
                 return;
             }
             for stream_id in expired {
-                // draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes) には
+                // draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes) には
                 // DATA_STREAM_TIMEOUT に対応する stream reset code が無いため、stream の cancel を
                 // 表す CANCELLED を使う
                 self.events.push_back(SessionEvent::StopSendingDataStream {
@@ -272,7 +272,7 @@ impl Session {
                 self.discard_timed_out_subgroup_stream(stream_id);
             }
         }
-        // draft-ietf-moq-transport-22 §6.6.1 (Graceful Session Migration): 自側が GOAWAY を
+        // draft-ietf-moq-transport-23 §6.6.1 (Graceful Session Migration): 自側が GOAWAY を
         // 送った場合、open request が無くなった時点で NO_ERROR で閉じてよい。drain 完了を
         // 1 回だけイベントで知らせ、アプリが `goaway_drain_ready` を毎 tick ポーリングしなくて
         // 済むようにする。
@@ -283,7 +283,7 @@ impl Session {
             self.goaway.local_drain_ready_emitted = true;
             self.events.push_back(SessionEvent::GoawayDrainReady);
         }
-        // draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) で定義される GOAWAY_TIMEOUT
+        // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で定義される GOAWAY_TIMEOUT
         // (発生条件は §6.6.1 (Graceful Session Migration) / §9.2 (GOAWAY) を参照)
         if let Some(deadline) = self.goaway.local_deadline_ms
             && now_ms >= deadline
@@ -295,7 +295,7 @@ impl Session {
             ));
             return;
         }
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): "When sent on a request stream, the sender
         // SHOULD reset the stream with GOING_AWAY after the indicated timeout." セッションは
         // 閉じず、当該 request stream の reset イベントを 1 回だけ発行する。
         let mut expired = Vec::new();
@@ -329,7 +329,7 @@ impl Session {
 
     /// request stream 上の GOAWAY の reset deadline 満了で request の遅延状態を整理する
     ///
-    /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "When sent on a request stream, the sender
     /// SHOULD reset the stream with GOING_AWAY after the indicated timeout." の reset 時点で
     /// まだ終端していない request を終端し、[`SessionEvent::RequestTerminated`] を 1 回だけ
     /// 発行できるよう `RequestKind` を返す (既に終端済み・未登録なら `None`)。
@@ -364,7 +364,7 @@ impl Session {
                 if subscription.state == SubscriptionState::Terminated {
                     return None;
                 }
-                // draft-ietf-moq-transport-22 §3.4.1 (Opening and Closing Fill Fetch Streams):
+                // draft-ietf-moq-transport-23 §3.4.1 (Opening and Closing Fill Fetch Streams):
                 // "When the subscription is cancelled, the publisher MUST reset any open fill
                 // fetch streams." 送信方向の reset は §6.4.2.3 (Request Cancellation and
                 // Rejection) の cancel の一部であり、購読を自側で終端する以上 open 中の
@@ -405,11 +405,11 @@ impl Session {
         } else if let Some(fetch) = self.fetches.get_mut(&request_id) {
             fetch.state = FetchState::Terminated;
         } else if let Some(entry) = self.track_status_requests.get_mut(&request_id) {
-            // 自側の送信方向が閉じたため以後の応答は送れない (draft-ietf-moq-transport-22
-            // §6.4.2.3 (Request Cancellation and Rejection))。`terminated` を立てれば
-            // `forget_track_status` と GOAWAY drain の判定は成立するため、`response` は
-            // 変更しない。requester 側で応答待ちの entry に `Error` を合成すると、peer が
-            // GOAWAY / reset を観測する前に送った正当な応答と二重応答を区別できなくなる。
+            // 自側 (TRACK_STATUS の responder) の送信方向が reset で閉じたため、以後の応答は
+            // 送れない (draft-ietf-moq-transport-23 §6.4.2.3 (Request Cancellation and
+            // Rejection))。`terminated` を立てれば `forget_track_status` と GOAWAY drain の
+            // 判定は成立するため、`response` は変更しない。送れなかった応答の成否を `response`
+            // に書くと、アプリが「応答を送れた」ものとして扱ってしまう。
             entry.terminated = true;
         }
         // 以後の close 通知を no-op で吸収できるよう、未終端の request_streams entry を
@@ -439,7 +439,7 @@ impl Session {
         self.goaway.request_stream_deadlines.remove(&request_id);
     }
 
-    /// リクエストストリーム上で GOAWAY を送信する (draft-ietf-moq-transport-22 §9.2 (GOAWAY))
+    /// リクエストストリーム上で GOAWAY を送信する (draft-ietf-moq-transport-23 §9.2 (GOAWAY))
     ///
     /// 個別リクエストストリームに GOAWAY を送信し、そのリクエストのマイグレーションを開始する。
     /// `timeout > 0` の場合は request 単位の reset deadline を設定し、期限到達時に
@@ -464,6 +464,9 @@ impl Session {
     /// `Role` とも publisher / subscriber の `TrackRole` 単独とも一致しない。
     /// 判定はイベントや deadline を積む前に行い、拒否時は session の状態を変更しない。
     /// 自側 state に該当 request が無い場合も receiver であることを確認できないため拒否する。
+    /// 送信はローカルで止められるが、受信は判定できない場合も受理する
+    /// ([`Self::handle_peer_goaway_on_request_stream`] の doc を参照)。非対称なのは、
+    /// 判定できない受信を違反として閉じると正当な GOAWAY でセッションを落とすためである。
     pub fn send_goaway_on_request_stream(
         &mut self,
         request_id: u64,
@@ -506,7 +509,7 @@ impl Session {
             fin: false,
         });
         self.goaway.request_stream_sent.insert(request_id);
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): "When sent on a request stream, the sender
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY): "When sent on a request stream, the sender
         // SHOULD reset the stream with GOING_AWAY after the indicated timeout. A value of 0
         // indicates the sender has no specific timeout, but the recipient SHOULD migrate as
         // quickly as possible." timeout == 0 は deadline を登録しない。
@@ -562,9 +565,10 @@ impl Session {
     /// 同節: "Only the receiver of a request can send GOAWAY on its request stream. If the
     /// receiver of a request receives a GOAWAY on that request stream, it MUST close the
     /// session with a PROTOCOL_VIOLATION."
-    /// したがって peer が receiver である場合 (自側が request の sender の場合) だけ受理し、
-    /// 自側が receiver の場合、および該当 request を特定できない場合は PROTOCOL_VIOLATION で
-    /// セッションを閉じる。
+    /// したがって自側が receiver の場合だけ PROTOCOL_VIOLATION でセッションを閉じ、
+    /// peer が receiver である場合 (自側が request の sender の場合) は受理する。
+    /// 自側 state に request が無く receiver かどうかを判定できない場合も受理する
+    /// (理由は実装コメントを参照)。
     pub(super) fn handle_peer_goaway_on_request_stream(
         &mut self,
         request_id: u64,
@@ -595,26 +599,22 @@ impl Session {
         // draft-ietf-moq-transport-23 §9.2 (GOAWAY): GOAWAY を送れるのは request の受信側だけ
         // である。自側が request の送信側 (requester) なら peer が受信側であり、peer からの
         // GOAWAY は正当である。自側が受信側の場合は peer が送信側であり、§9.2 の MUST に
-        // 従って PROTOCOL_VIOLATION (0x3) で閉じる。該当 request を特定できない場合も、
-        // receiver でないことを確認できないため同じく閉じる。
-        match self.is_request_receiver(request_id) {
-            Some(false) => {}
-            Some(true) => {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "GOAWAY received on a request stream from the sender of the request",
-                );
-                self.fail(err.clone());
-                return Err(err);
-            }
-            None => {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "GOAWAY received on a request stream without a tracked request",
-                );
-                self.fail(err.clone());
-                return Err(err);
-            }
+        // 従って PROTOCOL_VIOLATION (0x3) で閉じる。
+        //
+        // 自側 state に request が無い場合は receiver かどうかを判定できないため受理する。
+        // §9.2 の MUST は「request の受信側が受け取った場合」にだけ掛かる条件であり、判定材料が
+        // 無い状態は条件不成立である。request を破棄した側は、cancel / close を終えた request の
+        // 送信側であることが多く、その場合は receiver (responder) から送られた正当な GOAWAY を
+        // 受け取る立場にある。判定できないことを理由に閉じると、この正当な GOAWAY でセッションを
+        // 落とすことになる。Request ID はセッション内で再利用されない (§6.4.2.1) ため、破棄済みの
+        // id を別の request と取り違えることもない。移行の判断はアプリに委ねる。
+        if self.is_request_receiver(request_id) == Some(true) {
+            let err = SessionError::new(
+                SESSION_PROTOCOL_VIOLATION,
+                "GOAWAY received on a request stream from the sender of the request",
+            );
+            self.fail(err.clone());
+            return Err(err);
         }
         self.goaway.request_stream_received.insert(request_id);
         self.events.push_back(SessionEvent::GoawayReceived {

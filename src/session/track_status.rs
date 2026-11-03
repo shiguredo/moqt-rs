@@ -62,8 +62,9 @@ impl Session {
     /// `PROTOCOL_VIOLATION` で session が Closing になる)。応答前に stream が終端した
     /// 場合は `close_track_status_on_stream_end` が requester 側で `Error` を記録し、
     /// responder 側では `terminated` を立てるため、どちらも除去できる。request stream 上の
-    /// GOAWAY の deadline 満了で終端した場合も requester 側で `terminated` を立てる
-    /// (送信方向を reset 済みで応答を送れないため `Error` は合成しない)。
+    /// GOAWAY の deadline 満了で終端した場合も responder 側で `terminated` を立てる
+    /// (GOAWAY を送れるのは request の受信側、すなわち TRACK_STATUS では publisher であり、
+    /// その送信方向を reset 済みで応答を送れないため `Error` は合成しない)。
     /// 受理条件は内部の `is_track_status_discardable` に集約する。
     pub fn forget_track_status(&mut self, request_id: u64) -> Option<TrackStatusEntry> {
         let entry = self.track_status_requests.get(&request_id)?;
@@ -342,13 +343,21 @@ impl Session {
         Ok(terminationreason_from_end(end))
     }
 
+    /// 受信した REQUEST_OK (TRACK_STATUS_OK) を requester 側の entry に反映する
+    ///
+    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
+    /// (responder) であり、自側は subscriber (requester) である。
+    ///
+    /// ローカル終端済み (`rejected_request_ids` に記録済み) の entry を吸収する経路は持たない。
+    /// 終端を記録するのは request stream 上の GOAWAY の deadline 満了だが、GOAWAY を送れるのは
+    /// request の受信側 (§9.2 (GOAWAY))、すなわち TRACK_STATUS では publisher であり、
+    /// requester (subscriber) 側の entry はローカル終端されない。publisher 側の entry に
+    /// REQUEST_OK が届くのは role 違反であり、下の role 検証が状態判定より先に拒否する。
     pub(crate) fn handle_ok_for_track_status(
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
     ) -> Result<(), SessionError> {
-        // 借用の都合で可変借用より前に判定する
-        let locally_terminated = self.is_locally_terminated_request(request_id);
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
@@ -371,9 +380,6 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
-        if locally_terminated {
-            return Ok(());
-        }
         // draft §9.20.17 (LARGEST OBJECT Parameter): TRACK_STATUS への REQUEST_OK は LARGEST_OBJECT を含み得る
         let largest_location = parameters
             .largest_object()
@@ -392,12 +398,16 @@ impl Session {
         Ok(())
     }
 
+    /// 受信した REQUEST_ERROR を requester 側の entry に反映する
+    ///
+    /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): REQUEST_ERROR を送るのは publisher
+    /// (responder) であり、自側は subscriber (requester) である。ローカル終端済みの entry を
+    /// 吸収する経路を持たない理由は
+    /// [`Session::handle_ok_for_track_status`] の doc と同じである。
     pub(crate) fn handle_err_for_track_status(
         &mut self,
         request_id: u64,
     ) -> Result<(), SessionError> {
-        // 借用の都合で可変借用より前に判定する
-        let locally_terminated = self.is_locally_terminated_request(request_id);
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
@@ -419,9 +429,6 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
-        }
-        if locally_terminated {
-            return Ok(());
         }
         entry.response = Some(TrackStatusResponse::Error);
         Ok(())

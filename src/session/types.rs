@@ -363,8 +363,9 @@ pub enum SessionEvent {
     /// Closure))、自側が SUBSCRIBE / FETCH / TRACK_STATUS の responder、または PUBLISH を
     /// 送った側 (publisher 役) で `Established` の場合は peer の FIN と自側が最終メッセージと
     /// ともに送る FIN の両方が揃った時点で発行される (FIN の到着順に依存しない)。
-    /// `GoawayTimeout` で終端した後に peer から届く応答 (SUBSCRIBE_OK 等) は Session が no-op で
-    /// 吸収するため、本イベントが再度発行されることはない。
+    /// `GoawayTimeout` で終端した後に peer が GOAWAY / reset を観測する前に送ったメッセージ
+    /// (REQUEST_UPDATE / PUBLISH_DONE / PUBLISH_STATE_NOTIFY 等) は Session が no-op で吸収する
+    /// ため、本イベントが再度発行されることはない。
     RequestTerminated {
         /// 対象 request の Request ID
         request_id: u64,
@@ -848,11 +849,13 @@ pub enum TerminationReason {
     /// request を Session がローカルで終端したことを表す。この終端は仕様が要求するものでは
     /// なく、reset 後に最終メッセージ (PUBLISH_DONE 等) を送れないことから Session が
     /// 終端を確定させる実装判断である。reset するのは送信方向だけなので peer の送信方向は
-    /// 開いたままであり、peer が GOAWAY / reset を観測する前に送った応答は Session が no-op で
-    /// 吸収する ([`Session::recv_stream_message`](crate::session::core::Session::recv_stream_message)
+    /// 開いたままであり、peer が GOAWAY / reset を観測する前に送ったメッセージは Session が
+    /// no-op で吸収する
+    /// ([`Session::recv_stream_message`](crate::session::core::Session::recv_stream_message)
     /// の doc 参照)。1 回目の peer FIN / RESET_STREAM も同じく no-op で吸収される。
-    /// peer の応答の受領は保証されないため、応答待ちだった requester 側の entry は応答を
-    /// 持たないまま残る (`Session::forget_*` で回収できる)。publisher 役 fetch の open 中の
+    /// GOAWAY を送れるのは request の受信側 (responder) だけなので (§9.2)、終端されるのは
+    /// 自側が応答側だった entry であり、応答を送れないまま応答を持たずに残る
+    /// (`Session::forget_*` で回収できる)。publisher 役 fetch の open 中の
     /// outgoing FETCH data stream は Session が reset しないため、アプリが
     /// `Session::send_fetch_data_stream_closed` で閉じること。publisher 役 subscription の
     /// open 中の outgoing subgroup stream も同様に Session が reset しないため、

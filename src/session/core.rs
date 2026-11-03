@@ -322,6 +322,13 @@ pub(super) struct GoawayState {
     /// 観測する前に peer が開いた stream は正当に届くため、個別に区別しない
     /// (`RequestKind` ごとの終端理由は `TerminationReason` としてアプリへ通知される)。
     pub(super) request_stream_sent: HashSet<u64>,
+    /// 自側が request stream 上の GOAWAY を受信した request id
+    ///
+    /// draft-ietf-moq-transport-23 §9.2 (GOAWAY): "The endpoint MUST close the session with
+    /// UNEXPECTED_MESSAGE (Section 12.2) if it receives more than one GOAWAY on the control
+    /// stream or on a single request stream." の重複判定に使う。request の sender / receiver を
+    /// 判定できなかった場合も、受理した GOAWAY の記録として残す (2 回目は重複として閉じる)。
+    /// request 数に比例する有界の集合であり、セッション寿命まで保持する。
     pub(super) request_stream_received: HashSet<u64>,
     pub(super) peer: Option<PeerGoawayInfo>,
     pub(super) local_deadline_ms: Option<u64>,
@@ -1756,14 +1763,10 @@ impl Session {
     pub(super) fn is_request_receiver(&self, request_id: u64) -> Option<bool> {
         if let Some(subscription) = self.subscriptions.get(&request_id) {
             // SUBSCRIBE は subscriber、PUBLISH は publisher が request を開始した側である。
-            // `initiator` と `my_role` が同じなら自側が request の送信側になる。
+            // `Subscription::is_initiator_self` が true なら自側が request の送信側になる。
             // 例: 自側が受けた SUBSCRIBE は initiator=Subscriber / my_role=Publisher で受信側、
             // 自側が受けた PUBLISH は initiator=Publisher / my_role=Subscriber で受信側になる。
-            let local_is_sender = match subscription.initiator {
-                SubscriptionInitiator::Subscriber => subscription.my_role == TrackRole::Subscriber,
-                SubscriptionInitiator::Publisher => subscription.my_role == TrackRole::Publisher,
-            };
-            return Some(!local_is_sender);
+            return Some(!subscription.is_initiator_self());
         }
         // FETCH / TRACK_STATUS は subscriber が要求を開始する (§9.11 / §9.12)。
         // 自側が publisher なら request の受信側である。

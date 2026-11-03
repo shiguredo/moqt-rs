@@ -132,6 +132,39 @@ fn publish_sender_cannot_send_goaway_on_request_stream() {
     assert!(matches!(message, ControlMessage::Goaway(_)));
 }
 
+/// client が PUBLISH の sender、server が receiver のケースでも sender は GOAWAY を送信できない
+///
+/// client / server の `Role` ではなく request の initiator で判定していることを、
+/// PUBLISH の sender / receiver を server / client から入れ替えて固定する。
+#[test]
+fn client_publish_sender_cannot_send_goaway_on_request_stream() {
+    // client (publisher) が PUBLISH の sender、server (subscriber) が receiver
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            405,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, publish_msg) = take_send_request(&mut client);
+    server
+        .recv_request(publish_msg)
+        .expect("PUBLISH の受信に成功すること");
+
+    assert_send_goaway_rejected(&mut client, rid);
+
+    // receiver である server は送信できる
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("PUBLISH の receiver は GOAWAY を送信できること");
+    let (sent_rid, message) = take_send_on_stream(&mut server);
+    assert_eq!(sent_rid, rid);
+    assert!(matches!(message, ControlMessage::Goaway(_)));
+}
+
 /// FETCH の sender である subscriber は GOAWAY を送信できない
 #[test]
 fn fetch_sender_cannot_send_goaway_on_request_stream() {
@@ -243,6 +276,35 @@ fn publish_receiver_recv_goaway_from_sender_closes_session() {
     assert_eq!(client.state(), SessionState::Closing);
 }
 
+/// client が PUBLISH の sender、server が receiver のケースでも受信側は GOAWAY で閉じる
+///
+/// 上の PUBLISH テストと sender / receiver を入れ替えたケースである。
+/// request の initiator は publisher であり、どちらの `Role` が publisher でも同じ結果になる。
+#[test]
+fn client_publish_receiver_recv_goaway_from_sender_closes_session() {
+    // client (publisher) が sender、server (subscriber) が receiver
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            406,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, publish_msg) = take_send_request(&mut client);
+    server
+        .recv_request(publish_msg)
+        .expect("PUBLISH の受信に成功すること");
+
+    let err = server
+        .recv_stream_message(rid, goaway_on_request_stream())
+        .expect_err("request の receiver への GOAWAY は受理されないこと");
+    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(server.state(), SessionState::Closing);
+}
+
 /// FETCH の receiver が sender からの GOAWAY を受信するとセッションを閉じる
 #[test]
 fn fetch_receiver_recv_goaway_from_sender_closes_session() {
@@ -294,15 +356,86 @@ fn track_status_receiver_recv_goaway_from_sender_closes_session() {
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// 自側 state に無い request stream 上の GOAWAY 受信はセッションを閉じる
+/// 自側 state に無い request stream 上の GOAWAY 受信は受理してイベントを発行する
+///
+/// draft-ietf-moq-transport-23 §9.2 (GOAWAY) の MUST は「request の受信側が受け取った場合」に
+/// だけ掛かる条件である。自側 state に request が無い場合は受信側かどうかを判定できないため、
+/// 条件不成立として受理する (判定できないことを理由に閉じると、正当な GOAWAY でセッションを
+/// 落とすことになる)。
 #[test]
-fn unknown_request_recv_goaway_closes_session() {
+fn unknown_request_recv_goaway_is_accepted() {
     let (_client, mut server) = establish_pair();
+    server
+        .recv_stream_message(0, goaway_on_request_stream())
+        .expect("request を特定できない GOAWAY も受理すること");
+    assert_eq!(
+        server.state(),
+        SessionState::Established,
+        "判定できない GOAWAY でセッションを閉じないこと"
+    );
+    let mut received = false;
+    while let Some(event) = server.poll_event() {
+        if let SessionEvent::GoawayReceived {
+            on_request_stream, ..
+        } = event
+        {
+            assert_eq!(
+                on_request_stream,
+                Some(0),
+                "request stream 上の GOAWAY として通知すること"
+            );
+            received = true;
+        }
+    }
+    assert!(received, "GoawayReceived が発行されること");
+
+    // 同じ request stream への 2 回目の GOAWAY は UNEXPECTED_MESSAGE (§9.2)
     let err = server
         .recv_stream_message(0, goaway_on_request_stream())
-        .expect_err("request を特定できない GOAWAY は受理されないこと");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("同一 request stream への 2 回目の GOAWAY は拒否されること");
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
+}
+
+/// request を forget した sender が receiver からの正当な GOAWAY を受信できる
+///
+/// requester は cancel 後に request を破棄できる。破棄後も peer (receiver) が request stream 上で
+/// GOAWAY を送ることは正当であり (§9.2 は GOAWAY を送れるのは receiver だけと定める)、
+/// 自側 state に request が無いことを理由にセッションを閉じてはならない。
+#[test]
+fn forgotten_request_accepts_receiver_goaway() {
+    // client (subscriber) が SUBSCRIBE の sender、server (publisher) が receiver
+    let (mut client, _server, rid) = establish_subscribe_track(405);
+    client
+        .stop_sending(rid)
+        .expect("stop_sending に成功すること");
+    client
+        .forget_subscription(rid)
+        .expect("forget に成功すること");
+    assert!(
+        client.subscription(rid).is_none(),
+        "forget 後に subscription が残らないこと"
+    );
+
+    client
+        .recv_stream_message(rid, goaway_on_request_stream())
+        .expect("forget 済み request への receiver からの GOAWAY が受理されること");
+    assert_eq!(
+        client.state(),
+        SessionState::Established,
+        "破棄済み request への正当な GOAWAY でセッションを閉じないこと"
+    );
+    let mut received = false;
+    while let Some(event) = client.poll_event() {
+        if let SessionEvent::GoawayReceived {
+            on_request_stream, ..
+        } = event
+        {
+            assert_eq!(on_request_stream, Some(rid));
+            received = true;
+        }
+    }
+    assert!(received, "GoawayReceived が発行されること");
 }
 
 // ─── 正当な receiver からの GOAWAY ─────────────────────────
@@ -355,6 +488,36 @@ fn track_status_receiver_goaway_is_accepted_by_sender() {
     server
         .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
         .expect("TRACK_STATUS の receiver は GOAWAY を送信できること");
+    let (sent_rid, message) = take_send_on_stream(&mut server);
+    assert_eq!(sent_rid, rid);
+    assert_receiver_goaway_accepted(&mut client, rid, message);
+}
+
+/// client が PUBLISH の sender のケースでも receiver (server) からの GOAWAY は受理される
+///
+/// SUBSCRIBE / FETCH / TRACK_STATUS は client が sender、PUBLISH は server が sender になる
+/// 既存テストばかりであるため、PUBLISH の sender を client に入れ替えた向きも固定する。
+#[test]
+fn client_publish_sender_accepts_receiver_goaway() {
+    // client (publisher) が sender、server (subscriber) が receiver
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_publish(
+            ns(&[b"live"]),
+            b"cam".to_vec(),
+            407,
+            MessageParameters::new(),
+            TrackProperties::new(),
+        )
+        .expect("PUBLISH の送信に成功すること");
+    let (_, publish_msg) = take_send_request(&mut client);
+    server
+        .recv_request(publish_msg)
+        .expect("PUBLISH の受信に成功すること");
+
+    server
+        .send_goaway_on_request_stream(rid, b"moqt://relay.example/".to_vec(), 100)
+        .expect("PUBLISH の receiver は GOAWAY を送信できること");
     let (sent_rid, message) = take_send_on_stream(&mut server);
     assert_eq!(sent_rid, rid);
     assert_receiver_goaway_accepted(&mut client, rid, message);
