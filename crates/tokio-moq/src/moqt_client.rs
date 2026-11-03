@@ -107,7 +107,7 @@ pub(crate) enum BidiMessage {
     /// §3.3.2 に違反する場合は INVALID_FILTER で拒否し、PUBLISH_NAMESPACE /
     /// SUBSCRIBE_NAMESPACE が Range Filter を載せている場合は §9.20.1 (Parameter Scope) 違反で
     /// セッションを閉じる。7 種類以外は
-    /// `PROTOCOL_VIOLATION` でセッションを閉じる。どちらの判定も `Session::recv_request` が
+    /// `UNEXPECTED_MESSAGE` でセッションを閉じる。どちらの判定も `Session::recv_request` が
     /// 持つため、main ループはこの variant をそのまま `Session::recv_request` へ渡す。アプリへ
     /// 要求として渡さないのは、未対応 request にアプリが応答すると
     /// `Session::send_request_error` が未登録の Request ID を拒否して example が致命終了する
@@ -695,10 +695,10 @@ impl DataPlaneHandle {
 
     /// Object のシリアライズ途中で FIN が届いたことを Session に通知する (subscriber 側)
     ///
-    /// draft-ietf-moq-transport-22 §11.3 (Subgroup Streams): "If a stream ends gracefully
+    /// draft-ietf-moq-transport-23 §11.3 (Subgroup Streams): "If a stream ends gracefully
     /// (i.e., the stream terminates with a FIN) in the middle of a serialized Object, the
-    /// session SHOULD be closed with a PROTOCOL_VIOLATION." 破棄対象の stream では Session が
-    /// no-op で吸収する。
+    /// receiver SHOULD close the session with TRUNCATED_OBJECT." 破棄対象の stream では
+    /// Session が no-op で吸収する。
     pub fn report_mid_object_fin(&self, stream_id: DataStreamId) -> Result<()> {
         let mut session = lock_session(&self.session);
         session
@@ -3259,8 +3259,8 @@ async fn send_control_stream_setup(
 /// SETUP 交換中に失敗した session を終了コード付きで閉じる
 ///
 /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
-/// KEY_VALUE_FORMATTING_ERROR で、§8.9 (Authorization Token Compression) は Token 構造を
-/// decode できない場合を KEY_VALUE_FORMATTING_ERROR で、それぞれセッションを閉じることを
+/// MALFORMED_KEY_VALUE で、§8.9 (Authorization Token Compression) は Token 構造を
+/// decode できない場合を MALFORMED_KEY_VALUE で、それぞれセッションを閉じることを
 /// MUST で要求する (§8.9 の整形式だが不正な Token はメッセージ単位の reject を要求するが、
 /// SETUP は Request ID を持たず reject できないため、同じくセッションを閉じる)。
 /// 確立前の失敗では `MoqtClient` がまだ存在しないため、この関数が Session と送信ハンドルを
@@ -3315,7 +3315,7 @@ fn take_close_session(session: &mut Session) -> Option<SessionError> {
 ///
 /// SETUP 交換中の失敗は終了コード付きで閉じる。control stream の先頭は
 /// `SETUP_STREAM_TYPE` (0x2F00) であり、未知の stream type の受信は
-/// `PROTOCOL_VIOLATION` で閉じる (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional
+/// `INVALID_STREAM_HEADER` で閉じる (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional
 /// Streams) / §12.2 (Session Termination Codes))。ストリームが stream type を読む前に終端した
 /// 場合も同じである。既知だが control stream でない型を先頭に置く peer は、本 example が
 /// 最初の uni stream を control stream として受理するため同じ経路で閉じる。

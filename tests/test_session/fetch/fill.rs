@@ -729,7 +729,7 @@ fn subscriber_accepts_fill_fetch_headers() {
             },
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     // キャンセル由来 (publish_done なし) の Terminated subscription を指す FETCH_HEADER は拒否する。
     // 起因 REQUEST_UPDATE の Request ID からも購読へ解決できることの確認を兼ねる。
     client
@@ -746,7 +746,7 @@ fn subscriber_accepts_fill_fetch_headers() {
             },
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 /// 未知 Request ID の FETCH_HEADER は拒否しセッションを閉じる
@@ -761,7 +761,7 @@ fn fill_fetch_header_with_unknown_request_id_closes_session() {
     let err = client
         .recv_fetch_header(DataStreamId(202), &FetchHeader { request_id: 999 })
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 

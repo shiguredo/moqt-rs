@@ -25,12 +25,12 @@ const AUDIO_LEVEL_MAX: u64 = 255;
 ///
 /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
 /// 受信側が既知 Type の Value が定義された serialization と一致しない場合、
-/// KEY_VALUE_FORMATTING_ERROR でセッションを閉じなければならない (MUST)。
+/// MALFORMED_KEY_VALUE でセッションを閉じなければならない (MUST)。
 ///
 /// 送信側も不正な値を送出しないよう同じ検証を行う。
 fn validate_known_property(prop_id: u64, value: u64) -> Result<(), MessageError> {
     match prop_id {
-        PROP_AUDIO_LEVEL if value > AUDIO_LEVEL_MAX => Err(MessageError::KeyValueFormattingError(
+        PROP_AUDIO_LEVEL if value > AUDIO_LEVEL_MAX => Err(MessageError::MalformedKeyValue(
             "Audio Level value exceeds 8-bit range (draft-ietf-moq-loc-04 §2.3.3.2)",
         )),
         _ => Ok(()),
@@ -42,14 +42,14 @@ fn validate_known_property(prop_id: u64, value: u64) -> Result<(), MessageError>
 /// draft-ietf-moq-loc-04 §2.3.2.2: Video Frame Marking の `Length: Varies (1-4 bytes)`。
 /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
 /// 受信側が既知 Type の Length が定義された serialization と一致しない場合、
-/// KEY_VALUE_FORMATTING_ERROR でセッションを閉じなければならない (MUST)。
+/// MALFORMED_KEY_VALUE でセッションを閉じなければならない (MUST)。
 ///
 /// `len` は宣言長 (encode 時は `Bytes` の実長、decode 時は length フィールドの値) であり、
 /// 汎用長さ検査 (65535 超過) の直後、decode では切り詰め検査より前に呼ぶ。
 fn validate_known_property_len(prop_id: u64, len: u64) -> Result<(), MessageError> {
     match prop_id {
         PROP_VIDEO_FRAME_MARKING if !(1..=4).contains(&len) => {
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "Video Frame Marking length must be 1-4 bytes (draft-ietf-moq-loc-04 §2.3.2.2)",
             ))
         }
@@ -199,8 +199,8 @@ impl LocProperties {
     /// - 奇数 ID に `VarInt` 値: `ProtocolViolation`
     /// - 重複するプロパティ ID: `ProtocolViolation`
     /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
-    /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `KeyValueFormattingError`
-    /// - Video Frame Marking の長さが 1-4 バイトでない: `KeyValueFormattingError`
+    /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `MalformedKeyValue`
+    /// - Video Frame Marking の長さが 1-4 バイトでない: `MalformedKeyValue`
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header):
         // "Objects with no properties or non-Normal status set Properties Length to 0."
@@ -269,8 +269,8 @@ impl LocProperties {
     ///
     /// - 重複するプロパティ ID / delta-key のオーバーフロー: `ProtocolViolation`
     /// - 奇数 ID の宣言長が 65535 バイトを超える: `ProtocolViolation`
-    /// - Audio Level が 255 を超える: `KeyValueFormattingError`
-    /// - Video Frame Marking の宣言長が 1-4 バイトでない: `KeyValueFormattingError`
+    /// - Audio Level が 255 を超える: `MalformedKeyValue`
+    /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
     ///   (宣言長の検証は切り詰め検査 `UnexpectedEof` より先に行う)
     /// - バッファが不足する: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
@@ -575,7 +575,7 @@ mod tests {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -590,7 +590,7 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -629,7 +629,7 @@ mod tests {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -644,7 +644,7 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -658,7 +658,7 @@ mod tests {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -674,14 +674,14 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
     #[test]
     fn video_frame_marking_declared_len_out_of_range_beats_truncation() {
         // 宣言長 5 (範囲外) で実バイト 2 の入力は UnexpectedEof ではなく
-        // KEY_VALUE_FORMATTING_ERROR になる (宣言長検証が切り詰め検査に優先する)
+        // MALFORMED_KEY_VALUE になる (宣言長検証が切り詰め検査に優先する)
         let mut inner = Vec::new();
         varint::encode(PROP_VIDEO_FRAME_MARKING, &mut inner); // delta = prop_id
         varint::encode(5, &mut inner); // length = 5 (範囲外)
@@ -691,7 +691,7 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 

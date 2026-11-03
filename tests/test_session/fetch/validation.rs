@@ -675,15 +675,15 @@ fn fetch_ok_end_before_start_with_unknown_mandatory_closes_session() {
         )
         .unwrap_err();
     // End Location 検証が先に評価されセッションレベルのエラーになる
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
 }
 
 // ─── GROUP_ORDER 値域検証 (draft §9.20.8) ──────────────────────────────────
 
-/// GROUP_ORDER 値域外の FETCH 受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// GROUP_ORDER 値域外の FETCH 受信は INVALID_PARAMETER でセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の値は
-/// "MUST close the session with PROTOCOL_VIOLATION"。ワイヤデコード層は値域外を
+/// "MUST close the session with INVALID_PARAMETER"。ワイヤデコード層は値域外を
 /// 弾くため、セッション層に到達するのはアプリが MessageParameters を直接構築して
 /// 渡した場合のみ。
 #[test]
@@ -705,16 +705,16 @@ fn fetch_with_invalid_group_order_closes_session() {
             track_name: b"cam".to_vec(),
             parameters: params,
         }))
-        .expect_err("値域外 GROUP_ORDER は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 GROUP_ORDER は INVALID_PARAMETER になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -755,7 +755,7 @@ fn send_fetch_with_invalid_group_order_returns_error_without_closing() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     // セッションは閉じない (CloseSession イベントが発行されない)
     while let Some(e) = client.poll_event() {
@@ -908,16 +908,16 @@ fn fetch_invalid_location_filter_with_regular_namespace_closes_session() {
             track_name: b"cam".to_vec(),
             parameters: params,
         }))
-        .expect_err("不正な LOCATION_FILTER は PROTOCOL_VIOLATION になる");
+        .expect_err("不正な LOCATION_FILTER は DELTA_ENCODING_OVERFLOW になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_DELTA_ENCODING_OVERFLOW
     );
     assert_eq!(server.state(), SessionState::Closing);
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_DELTA_ENCODING_OVERFLOW),
+        other => panic!("CloseSession(DELTA_ENCODING_OVERFLOW) が期待されたが {other:?}"),
     }
 }

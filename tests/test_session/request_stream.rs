@@ -2,7 +2,7 @@ use super::*;
 use shiguredo_moqt::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_GOING_AWAY, REQUEST_INVALID_FILTER,
     REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_NOT_SUPPORTED, SESSION_AUTH_TOKEN_CACHE_OVERFLOW,
-    SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_KEY_VALUE_FORMATTING_ERROR,
+    SESSION_DUPLICATE_AUTH_TOKEN_ALIAS, SESSION_MALFORMED_KEY_VALUE,
 };
 use shiguredo_moqt::message::{ErrorDetail, Redirect, RequestError, UnsupportedProperty};
 use shiguredo_moqt::message_parameter::{
@@ -319,7 +319,7 @@ fn recv_request_unsupported_message_closes_session() {
     let RecvRequestError::Session(session_err) = err else {
         panic!("Session のバリアントが期待されたが BeforeSessionEstablished を受け取った");
     };
-    assert_eq!(session_err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(session_err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -879,7 +879,7 @@ fn unsupported_request_single_period_with_out_of_scope_parameter_closes_session(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
 }
@@ -1070,7 +1070,7 @@ fn unsupported_request_range_filter_in_namespace_request_closes_session() {
             err.as_session_error()
                 .expect("Session エラーであること")
                 .code,
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_INVALID_PARAMETER,
             "Range Filter を許可しない request はスコープ違反で閉じること: {type_id:#x}"
         );
         assert_eq!(server.state(), SessionState::Closing);
@@ -1152,7 +1152,7 @@ fn unsupported_request_range_filter_rejection_prefers_session_terminating_checks
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
 }
@@ -1363,7 +1363,7 @@ fn unsupported_request_register_without_cache_closes_session() {
 ///
 /// draft-ietf-moq-transport-23 §9 (Control Messages) の Length と本体の不一致は
 /// MALFORMED_MESSAGE、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の Token
-/// 直列化の不整合は KEY_VALUE_FORMATTING_ERROR で閉じる。
+/// 直列化の不整合は MALFORMED_KEY_VALUE で閉じる。
 #[test]
 fn unsupported_request_body_decode_errors_close_session() {
     // 本体が Request ID で終わっている (Track Namespace Prefix とパラメータが無い)
@@ -1379,7 +1379,7 @@ fn unsupported_request_body_decode_errors_close_session() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_MALFORMED_MESSAGE
     );
 
     // Track Namespace Prefix の書式不正 (フィールド数 1 に対してフィールドが無い)
@@ -1395,7 +1395,7 @@ fn unsupported_request_body_decode_errors_close_session() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_MALFORMED_MESSAGE
     );
 
     // パラメータブロックの後ろに余剰バイトがある (count=0 のあとに 1 バイト)
@@ -1444,7 +1444,7 @@ fn unsupported_request_body_decode_errors_close_session() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_KEY_VALUE_FORMATTING_ERROR
+        SESSION_MALFORMED_AUTH_TOKEN
     );
 
     // 本体の先頭の Request ID が `ControlMessage::Unsupported` の request_id と食い違う
@@ -1460,14 +1460,14 @@ fn unsupported_request_body_decode_errors_close_session() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_MALFORMED_MESSAGE
     );
 }
 
 /// 未対応 request のパラメータ KVP の宣言長で終了コードが分かれること
 ///
 /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解したうえで
-/// Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR、値長が 2^16-1 バイトを
+/// Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE、値長が 2^16-1 バイトを
 /// 超える場合は PROTOCOL_VIOLATION でセッションを閉じる。
 #[test]
 fn unsupported_request_kvp_length_errors_close_with_mapped_code() {
@@ -1486,8 +1486,8 @@ fn unsupported_request_kvp_length_errors_close_with_mapped_code() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_KEY_VALUE_FORMATTING_ERROR,
-        "宣言長が残りバッファを超える場合は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+        SESSION_MALFORMED_KEY_VALUE,
+        "宣言長が残りバッファを超える場合は MALFORMED_KEY_VALUE (0x6) であること"
     );
     assert!(matches!(
         server.state(),
@@ -1508,7 +1508,7 @@ fn unsupported_request_kvp_length_errors_close_with_mapped_code() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION,
+        SESSION_FIELD_LENGTH_EXCEEDED,
         "値長が 2^16-1 を超える場合は PROTOCOL_VIOLATION (0x3) のままであること"
     );
 }
@@ -1537,7 +1537,7 @@ fn unsupported_request_rejects_out_of_scope_parameter() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
 
@@ -1570,7 +1570,7 @@ fn unsupported_request_rejects_out_of_scope_parameter() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
 }
@@ -1708,7 +1708,7 @@ fn subscribe_namespace_parameter_scope_is_validated() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
 }
@@ -1810,7 +1810,7 @@ fn response_only_message_as_request_start_closes_session() {
             err.as_session_error()
                 .expect("Session エラーであること")
                 .code,
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_UNEXPECTED_MESSAGE,
             "応答専用の型は PROTOCOL_VIOLATION になること: {type_id:#x}"
         );
         assert_eq!(server.state(), SessionState::Closing);
@@ -1830,7 +1830,7 @@ fn response_only_message_as_request_start_closes_session() {
             err.as_session_error()
                 .expect("Session エラーであること")
                 .code,
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_UNEXPECTED_MESSAGE,
             "応答専用の型に Request ID を付けても PROTOCOL_VIOLATION になること: {type_id:#x}"
         );
         assert_eq!(server.state(), SessionState::Closing);
@@ -3024,7 +3024,7 @@ fn server_receives_redirect_nonzero_connect_uri_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 

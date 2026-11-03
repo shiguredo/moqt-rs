@@ -1,6 +1,6 @@
 # Media over QUIC Transport (MOQT)
 
-[draft-ietf-moq-transport-22](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-22) の実装状況です。
+[draft-ietf-moq-transport-23](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-23) の実装状況です。
 
 ## コントロールメッセージ
 
@@ -30,7 +30,9 @@
 - Object Status (Normal / End of Group / End of Track)
 - Object Properties
 - Padding (stream / datagram、stream 側は読み捨て)
-- Type Flags の未知 set bit は PROTOCOL_VIOLATION として拒否する
+- Type Flags の未知 set bit は INVALID_STREAM_HEADER (`0x200`) として拒否する。Object Status の
+  未知値と非 Normal Status への Properties は INVALID_OBJECT_STATUS (`0x202`)、Object の
+  復号失敗は MALFORMED_OBJECT (`0x201`)、シリアライズ途中の FIN は TRUNCATED_OBJECT (`0x203`)
 
 ## Setup Options
 
@@ -101,7 +103,8 @@
 - Subgroup 再オープン禁止の検証 (`subgroup_tracker::SubgroupTracker`)
 - 到着の揺らぎと実出力の先行量からの再生予算、鳴らす時刻の決定、A/V 同期の遅延制御、音声と映像の共通の時間軸、表示時刻に合わせたフレームの選択、時間圧縮・伸長と欠落の補間 (`playout::{timeline, scheduler, buffer, stretch, expansion, predictor, gap, splice_fade, timing, catch_up}`)
 - メディア時刻の Unix epoch の壁時計への換算 (`media_clock::WallClockMapper`)
-- セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)
+- セッション終了 / REQUEST_ERROR / PUBLISH_DONE / Stream Reset のエラーコード (`error` モジュール)。
+  セッション終了コードの分類は後述の「セッション終了コードの分類」を参照
 
 ## 未対応
 
@@ -141,8 +144,8 @@ SHOULD)。
   request は、§2.4.3 第 1 段落が未認識の予約名前空間を Application へ渡すことを MUST とするが、
   本ライブラリには未対応 request を Application へ渡す経路が無いため `NOT_SUPPORTED` のまま
   とする
-- §9.20.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
-  `PROTOCOL_VIOLATION` でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
+- §9.19.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
+  `INVALID_PARAMETER` (`0x305`) でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
   許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.18 の列挙に加えて
   §3.6.2 (Parameters on SUBSCRIBE_TRACKS) の "Any Parameter that can be specified on a
   Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS" を採り、SUBSCRIBE の許可
@@ -155,16 +158,17 @@ SHOULD)。
   token cache とメッセージ内の先行 REGISTER / DELETE から解決する。解決できない alias は
   一意性の判定対象から外し、未登録 alias の扱いは経路ごとの現行挙動のまま変えない。
   DELETE / USE_ALIAS / USE_VALUE は失敗するメッセージのパラメータとして適用しない
-- 本体が共通構造に従わない場合は原因に応じたコード (`PROTOCOL_VIOLATION` /
-  `KEY_VALUE_FORMATTING_ERROR`) でセッションを閉じる
+- 本体が共通構造に従わない場合は原因に応じたコード (`INVALID_TRACK_NAMESPACE` /
+  `MALFORMED_KEY_VALUE` / `INVALID_PARAMETER` / `MALFORMED_MESSAGE` /
+  `DELTA_ENCODING_OVERFLOW` / `FIELD_LENGTH_EXCEEDED`) でセッションを閉じる
 - REGISTER の適用自体が失敗した場合はセッションを閉じる (`DUPLICATE_AUTH_TOKEN_ALIAS`:
   登録済み alias の再登録、`AUTH_TOKEN_CACHE_OVERFLOW`: 自側が宣言した
   `MAX_AUTH_TOKEN_CACHE_SIZE` を超える登録。REQUEST_ERROR は送らない)
 
 応答専用の 3 種 (`NAMESPACE` / `NAMESPACE_DONE` / `PUBLISH_SKIPPED`) は応答先の request を
 持たず Table 5 で "First" を持たないため、request stream の先頭および 2 通目以降のいずれでも
-`SESSION_PROTOCOL_VIOLATION` でセッションを閉じる。§9 Table 5 に無い型も従来どおり
-`MessageError::InvalidMessageType` で拒否する。
+`UNEXPECTED_MESSAGE` (`0x303`) でセッションを閉じる。§9 Table 5 に無い型も
+`MessageError::InvalidMessageType` (セッション終了コードは `UNEXPECTED_MESSAGE`) で拒否する。
 
 MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TIMEOUT Parameter) と
 §16.7 (Message Parameters) の Table 14 に定義済みのため、SUBSCRIBE への出現は受理する。
@@ -215,13 +219,45 @@ uni data stream と datagram の送受信 state も扱います。
 REQUEST_UPDATE / PUBLISH_DONE / STOP_SENDING、FETCH、GOAWAY ハンドシェイクと drain、delivery timeout などの deadline 管理 (`tick` 駆動) も行います。
 一方で I/O、非同期処理、MoQ リレーが担う namespace 発見・告知と forwarding は含みません。
 
+## セッション終了コードの分類
+
+draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) / §16.12.1
+(Session Termination Error Codes) のコードを `error` モジュールで定義し、違反の原因を失わない
+最も具体的なコードで `Session` を閉じる。汎用の `PROTOCOL_VIOLATION` (`0x3`) は、より具体的な
+コードが定められていない違反にだけ使う。
+
+| コード | 定数 | 主な発生源 |
+| --- | --- | --- |
+| `0x6` | `SESSION_MALFORMED_KEY_VALUE` | KVP の Length/Value が型の定義と一致しない (§8.3) |
+| `0x16` | `SESSION_MALFORMED_AUTH_TOKEN` | Authorization Token の構造が不正 (§8.9) |
+| `0x200` | `SESSION_INVALID_STREAM_HEADER` | 未知のストリーム型 / データグラム型、不正な Type Flags (§6.4.1 / §11) |
+| `0x201` | `SESSION_MALFORMED_OBJECT` | Object の直列化を復号できない (§11.4.1 / §11.4.2.2) |
+| `0x202` | `SESSION_INVALID_OBJECT_STATUS` | 未知の Object Status、非 Normal Status への Properties (§11.1.1 / §11.1.2) |
+| `0x203` | `SESSION_TRUNCATED_OBJECT` | シリアライズ途中の Object での FIN (§11.3) |
+| `0x300` | `SESSION_MALFORMED_MESSAGE` | 制御メッセージを解析できない、本文長が Length と一致しない (§9) |
+| `0x301` | `SESSION_INVALID_FIELD` | 制御メッセージは解析できたがフィールド値が許容範囲外 (§9.3 / §9.2) |
+| `0x302` | `SESSION_INVALID_TRACK_NAMESPACE` | 空の Track Namespace Field、32 超のフィールド (§8.7) |
+| `0x303` | `SESSION_UNEXPECTED_MESSAGE` | 未知のメッセージ型、誤ったストリーム、順序違反、重複応答 (§6.3 / §9) |
+| `0x304` | `SESSION_ROLE_VIOLATION` | peer の role では送れないメッセージ / フィールド (§9.1.4 / §9.4.2.1) |
+| `0x305` | `SESSION_INVALID_PARAMETER` | Message Parameter の未知・重複・不許可・値域外 (§9.19) |
+| `0x306` | `SESSION_CLOSED_CONTROL_STREAM` | 制御ストリームの閉鎖 (§6.3) |
+| `0x400` | `SESSION_DELTA_ENCODING_OVERFLOW` | デルタエンコーディングの復号結果が u64 の範囲外 (§8.3 / §9.19 / §11) |
+| `0x401` | `SESSION_FIELD_LENGTH_EXCEEDED` | フィールド / 構造が最大長を超える (§8.3 / §8.7 / §9) |
+
+長さ超過とデルタ溢出は他の分類より優先する (§12.2 の "When more than one code applies, an
+endpoint uses DELTA_ENCODING_OVERFLOW or FIELD_LENGTH_EXCEEDED in preference to the other
+codes.")。各 codec は長さと溢出を他の検証より先に判定する。
+
+未知の終了コードは `normalize_session_termination_code` が `INTERNAL_ERROR` (`0x1`) に正規化する
+(§13 (Grease))。定義済みコードは正規化で変化しない。
+
 ## GOAWAY によるセッション移行
 
 `Session` は GOAWAY を移行の合図として扱い、接続の張り替え自体は I/O 層とアプリに任せます (Sans-I/O)。仕様と実装の責務は次のとおりです。
 
 - 受信側: `GoawayReceived { new_session_uri, timeout, on_request_stream }` を発行し、`peer_goaway()` でも同じ情報を参照できます。control stream の GOAWAY は session 全体、request stream の GOAWAY は当該 request だけが対象です (`on_request_stream`)。control GOAWAY の受信後、自側からの
   新規 SUBSCRIBE / PUBLISH / FETCH / TRACK_STATUS は `SendRequestError::PeerGoawayReceived` で拒否されます (draft-ietf-moq-transport-22 §9.2 の SHOULD NOT)。
-- 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下、二重送信・二重受信は PROTOCOL_VIOLATION です。`tick(now_ms)` が期限を進め、
+- 送信側: `send_goaway` / `send_goaway_on_request_stream` で送ります。client は空の New Session URI を送る MUST、URI は 8192 バイト以下です。二重受信は `UNEXPECTED_MESSAGE` (`0x303`)、client からの非空 URI は `INVALID_FIELD` (`0x301`)、8192 バイト超は `FIELD_LENGTH_EXCEEDED` (`0x401`) です。`tick(now_ms)` が期限を進め、
   open request が残ったまま期限を過ぎると `CloseSession(GOAWAY_TIMEOUT)` を積みます (control stream)。request stream の GOAWAY は期限で当該 request stream を `GOING_AWAY` で reset します。
 - drain 完了: 自側が control GOAWAY を送ったあと、open request が無くなると `GoawayDrainReady` を 1 回発行します (`goaway_drain_ready()` でも参照可能)。アプリはこの時点で NO_ERROR で閉じるのが RECOMMENDED です (§6.6.1)。期限まで待つ必要はありません。
 - example の client は受信した control GOAWAY で新 session をバックグラウンドで確立し、期限付きで

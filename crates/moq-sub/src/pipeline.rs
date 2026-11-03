@@ -868,15 +868,20 @@ fn should_close_gracefully(session_terminated: bool) -> bool {
 /// join の前に 1 件だけ回収し、それ以降に届いた依頼は破棄される。
 /// LOC Properties の書式違反を受けてセッション終了を main ループへ依頼する
 ///
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
+/// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
 /// セッション終了の対象とする MUST を定める。Properties の解釈経路 (`deliver` 系) は
-/// [`request_session_termination_for_decode_error`] の分類対象外であり、従来どおり
-/// `session_error_code` で終了コードを決める。
+/// [`request_session_termination_for_decode_error`] の分類対象外であり、
+/// `MessageError::data_plane_session_termination_code` で終了コードを決める
+/// (Object の直列化の破損は MALFORMED_OBJECT / MALFORMED_KEY_VALUE などに写る)。
 fn request_session_termination(
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     error: &MessageError,
 ) {
-    let code = session_error_code(error);
+    // データプレーンの decode エラーは Object のシリアライズ単位で分類する
+    // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
+    let code = error
+        .data_plane_session_termination_code()
+        .unwrap_or(shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION);
     let reason = error.reason();
     if termination_tx
         .try_send(SessionError::new(code, reason))
@@ -3797,7 +3802,8 @@ async fn receive_registered_stream_data(
 
 /// 途中終了した FIN を `Session::report_mid_object_fin` へ報告すべきか
 ///
-/// draft-ietf-moq-transport-22 §11.3 (Subgroup Streams): FIN の途中終了は PROTOCOL_VIOLATION。
+/// draft-ietf-moq-transport-23 §11.3 (Subgroup Streams): FIN の途中終了は
+/// TRUNCATED_OBJECT でセッションを閉じる。
 /// RESET_STREAM は §11.3.2 (Closing Subgroup Streams) の正常経路であり、header 未受信の
 /// `finish()` も §11.3 の「シリアライズ途中の Object」ではないため報告しない。
 fn mid_object_fin_should_report(
@@ -6489,7 +6495,7 @@ mod tests {
         }
     }
 
-    use shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR;
+    use shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE;
     use shiguredo_moqt::loc::LocProperty;
     use shiguredo_moqt::message_parameter::LocationFilterUpdate;
     use shiguredo_opus::{Application, Encoder, EncoderConfig, FrameDuration};
@@ -7735,10 +7741,10 @@ mod tests {
         );
     }
 
-    /// LOC の書式違反 (Video Frame Marking の宣言長 5) は KeyValueFormattingError
+    /// LOC の書式違反 (Video Frame Marking の宣言長 5) は MalformedKeyValue
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は、理解している型の
-    /// Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) で
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は、理解している型の
+    /// Length/Value が定義と一致しない場合に MALFORMED_KEY_VALUE (0x6) で
     /// セッションを閉じる MUST を定める。Video Frame Marking の Length は 1-4 バイト
     /// (draft-ietf-moq-loc-04 §2.3.2.2 (Video Frame Marking)) である。
     /// 書式違反をプロパティ無しに潰さないことを固定する。
@@ -7750,8 +7756,8 @@ mod tests {
         bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
         let err = extract_video_config(Some(&bytes)).expect_err("書式違反はエラーになること");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "Video Frame Marking の宣言長違反は KeyValueFormattingError であること: {err:?}"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "Video Frame Marking の宣言長違反は MalformedKeyValue であること: {err:?}"
         );
     }
 
@@ -7818,7 +7824,7 @@ mod tests {
         );
     }
 
-    /// LOC の書式違反 (Audio Level 256) は KeyValueFormattingError
+    /// LOC の書式違反 (Audio Level 256) は MalformedKeyValue
     ///
     /// Audio Level は 8 bit 範囲 (draft-ietf-moq-loc-04 §2.3.3.2 (Audio Level)) のため、256 は
     /// §8.3 (Key-Value-Pair Structure) の書式違反になる。Audio Config / Timestamp /
@@ -7835,13 +7841,13 @@ mod tests {
         );
         let err = extract_audio_config(Some(&bytes)).expect_err("書式違反はエラーになること");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "Audio Level の値域違反は KeyValueFormattingError であること: {err:?}"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "Audio Level の値域違反は MalformedKeyValue であること: {err:?}"
         );
         let err =
             extract_timestamp_timescale(Some(&bytes)).expect_err("書式違反はエラーになること");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
+            matches!(err, MessageError::MalformedKeyValue(_)),
             "Timestamp / Timescale の抽出でも同じエラーになること: {err:?}"
         );
     }
@@ -8014,8 +8020,8 @@ mod tests {
     async fn request_session_termination_sends_error_and_keeps_first_request() {
         let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel::<SessionError>(1);
 
-        // 書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) として送られる
-        let error = MessageError::KeyValueFormattingError("LOC property value is out of range");
+        // 書式違反は MALFORMED_KEY_VALUE (0x6) として送られる
+        let error = MessageError::MalformedKeyValue("LOC property value is out of range");
         request_session_termination(&termination_tx, &error);
 
         // 容量 1 のため、依頼が積まれている間の 2 件目は届かない (panic もしない)
@@ -8026,7 +8032,7 @@ mod tests {
                 .await
                 .expect("終了依頼が送られること"),
             Some(SessionError::new(
-                SESSION_KEY_VALUE_FORMATTING_ERROR,
+                SESSION_MALFORMED_KEY_VALUE,
                 "LOC property value is out of range",
             )),
             "先に積まれた書式違反の依頼が届き、後続の依頼で置き換わらないこと"
@@ -8755,8 +8761,8 @@ mod tests {
             .expect("セッション終了が依頼されること");
         assert_eq!(
             termination.code,
-            shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION,
-            "書式違反のセッション終了コードであること"
+            shiguredo_moqt::error::SESSION_MALFORMED_OBJECT,
+            "Object の直列化を復号できないため MALFORMED_OBJECT であること"
         );
         assert!(
             audio_rx.try_recv().is_err(),

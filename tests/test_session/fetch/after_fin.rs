@@ -289,7 +289,7 @@ fn request_error_after_fin_accepted() {
 /// response to a FETCH."
 #[test]
 fn fetch_ok_after_request_error_after_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     use shiguredo_moqt::message::{FetchOk as WireFetchOk, ReasonPhrase, common::Location};
     let (mut client, mut server, rid) = send_fetch_pending();
     client
@@ -325,7 +325,7 @@ fn fetch_ok_after_request_error_after_fin_fails_session() {
             }),
         )
         .expect_err("二重応答の FETCH_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 /// 二重応答: FIN → FETCH_OK → FETCH_OK で ProtocolViolation になりセッションが fail すること
@@ -334,7 +334,7 @@ fn fetch_ok_after_request_error_after_fin_fails_session() {
 /// response to a FETCH."
 #[test]
 fn fetch_ok_twice_after_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
     let (mut client, _server, rid) = send_fetch_pending();
     client
@@ -367,7 +367,7 @@ fn fetch_ok_twice_after_fin_fails_session() {
             }),
         )
         .expect_err("2 回目の FETCH_OK は二重応答として ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 /// 二重応答: FIN 前 (Established) の FETCH_OK → FETCH_OK でも ProtocolViolation になり
@@ -380,7 +380,7 @@ fn fetch_ok_twice_after_fin_fails_session() {
 /// response to a FETCH.")。
 #[test]
 fn fetch_ok_twice_before_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
     use shiguredo_moqt::session::types::FetchState;
     let (mut client, mut server, rid) = send_fetch_pending();
@@ -422,7 +422,7 @@ fn fetch_ok_twice_before_fin_fails_session() {
             }),
         )
         .expect_err("Established での 2 回目の FETCH_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 /// FIN → FETCH_OK → REQUEST_ERROR の順で届いても fail しないこと
@@ -621,7 +621,6 @@ fn fetch_ok_after_reset_stream_accepted() {
 /// fail すること (draft-ietf-moq-transport-22 §9.12 (FETCH_OK))
 #[test]
 fn fetch_ok_end_before_start_after_fin_fails_session() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
     use shiguredo_moqt::message::{FetchOk as WireFetchOk, common::Location};
     let (mut client, mut server) = establish_pair();
     let rid = client
@@ -663,7 +662,7 @@ fn fetch_ok_end_before_start_after_fin_fails_session() {
         .expect_err(
             "End Location < Start Location の FETCH_OK は ProtocolViolation で fail すること",
         );
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
 }
 
 /// `Terminated` 状態で unknown mandatory を含む FETCH_OK が届いた場合、`RequestTerminated` が
@@ -934,7 +933,7 @@ fn empty_fetch_response_then_fetch_ok_accepted() {
 /// peer の違反である。
 #[test]
 fn request_ok_in_pending_fails_session() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     use shiguredo_moqt::message::RequestOk as WireRequestOk;
     let (mut client, _server, rid) = send_fetch_pending();
     // server 側の `send_request_ok` は Established 状態を要求するため、ワイヤメッセージを直接注入する
@@ -947,7 +946,7 @@ fn request_ok_in_pending_fails_session() {
             }),
         )
         .expect_err("Pending 状態の REQUEST_OK は ProtocolViolation で fail すること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 // ─── FETCH_ERROR 後の遅延 in-flight FETCH data stream ─────────────────
@@ -1044,7 +1043,7 @@ fn request_error_then_late_fetch_data_stream_after_forget_is_discarded() {
 /// PROTOCOL_VIOLATION で閉じること
 #[test]
 fn terminated_fetch_without_request_error_rejects_late_fetch_header() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     let (mut client, _server, rid) = send_fetch_pending();
     client
         .recv_fetch_data_stream_closed(rid, RequestStreamEnd::Fin)
@@ -1056,7 +1055,7 @@ fn terminated_fetch_without_request_error_rejects_late_fetch_header() {
     let err = client
         .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
         .expect_err("FETCH_ERROR を受けていない終端済み fetch への遅延 header は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
@@ -1064,7 +1063,7 @@ fn terminated_fetch_without_request_error_rejects_late_fetch_header() {
 /// 単一 stream 制約違反で閉じること
 #[test]
 fn request_error_then_concurrent_second_fetch_data_stream_is_rejected() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     let (mut client, mut server, rid) = send_fetch_pending();
     send_fetch_error(&mut client, &mut server, rid);
     let first = DataStreamId(504);
@@ -1081,14 +1080,14 @@ fn request_error_then_concurrent_second_fetch_data_stream_is_rejected() {
     let err = client
         .recv_fetch_header(second, &FetchHeader { request_id: rid })
         .expect_err("2 本目の FETCH_HEADER は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
 /// 遅延 FETCH data stream の終端後は同じ request ID の 2 本目を受理しないこと
 #[test]
 fn late_fetch_data_stream_fin_removes_tolerance() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     let (mut client, mut server, rid) = send_fetch_pending();
     send_fetch_error(&mut client, &mut server, rid);
     let first = DataStreamId(506);
@@ -1109,14 +1108,14 @@ fn late_fetch_data_stream_fin_removes_tolerance() {
     let err = client
         .recv_fetch_header(second, &FetchHeader { request_id: rid })
         .expect_err("FIN 後の 2 本目 FETCH_HEADER は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
 /// 保持期間が経過すると遅延 FETCH data stream の許容が解除されること
 #[test]
 fn fetch_error_late_stream_tolerance_expires() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     let (mut client, mut server, rid) = send_fetch_pending();
     send_fetch_error(&mut client, &mut server, rid);
     // 十分に時間を進めて保持期間を経過させる (1 回目の tick で開始時刻が確定するため 2 回進める)
@@ -1129,14 +1128,14 @@ fn fetch_error_late_stream_tolerance_expires() {
     let err = client
         .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
         .expect_err("保持期間経過後の遅延 FETCH_HEADER は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
 /// forget_fetch 後でも同じ request ID の 2 本目の遅延 FETCH_HEADER は拒否されること
 #[test]
 fn request_error_then_second_late_fetch_data_stream_after_forget_is_rejected() {
-    use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+    use shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE;
     let (mut client, mut server, rid) = send_fetch_pending();
     send_fetch_error(&mut client, &mut server, rid);
     client
@@ -1156,7 +1155,7 @@ fn request_error_then_second_late_fetch_data_stream_after_forget_is_rejected() {
     let err = client
         .recv_fetch_header(second, &FetchHeader { request_id: rid })
         .expect_err("forget 後の 2 本目 FETCH_HEADER は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 

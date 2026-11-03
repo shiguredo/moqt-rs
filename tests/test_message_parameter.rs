@@ -86,7 +86,7 @@ mod error_cases {
 
         assert!(matches!(
             MessageParameters::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -100,9 +100,9 @@ mod error_cases {
         assert!(
             matches!(
                 MessageParameters::decode(&buf),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
-            "旧 FORWARD (0x10) は未知のパラメータ型として PROTOCOL_VIOLATION になること"
+            "旧 FORWARD (0x10) は未知のパラメータ型として INVALID_PARAMETER になること"
         );
     }
 
@@ -118,9 +118,7 @@ mod error_cases {
 
         assert_eq!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
-                "unknown message parameter type"
-            )),
+            Err(MessageError::InvalidParameter),
             "旧 FORWARD (0x10) の Type は encode でも未知として拒否されること"
         );
     }
@@ -137,10 +135,7 @@ mod error_cases {
             });
             let mut buf = Vec::new();
             assert!(
-                matches!(
-                    params.encode(&mut buf),
-                    Err(MessageError::ProtocolViolation(_))
-                ),
+                matches!(params.encode(&mut buf), Err(MessageError::InvalidParameter)),
                 "PAUSED={value} は encode で拒否されること"
             );
         }
@@ -154,7 +149,7 @@ mod error_cases {
             assert!(
                 matches!(
                     MessageParameters::decode(&buf),
-                    Err(MessageError::ProtocolViolation(_))
+                    Err(MessageError::InvalidParameter)
                 ),
                 "PAUSED={value} は decode で拒否されること"
             );
@@ -178,7 +173,7 @@ mod error_cases {
         // count=1, type=PARAM_AUTHORIZATION_TOKEN (length-prefixed) で宣言長 10 だが
         // 残りは 3 バイトしかない。Type を理解したうえで Length/Value が直列化と一致しないため、
         // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST により
-        // KEY_VALUE_FORMATTING_ERROR になる。
+        // MALFORMED_KEY_VALUE になる。
         let mut buf = Vec::new();
         // count = 1
         buf.push(0x01);
@@ -191,7 +186,7 @@ mod error_cases {
 
         assert_eq!(
             MessageParameters::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "message parameter value length exceeds remaining buffer"
             ))
         );
@@ -235,7 +230,7 @@ mod error_cases {
         // FILL_PARAMETERS の内側にも長さプレフィックス付きの値 (Range Filter) は載る。
         // 内側: Number of Parameters=1, delta=PARAM_SUBGROUP_FILTER、宣言長 10、データ 3 バイト。
         // 宣言長が残りバッファ全体を超えるため、内側の個数とは独立に
-        // KEY_VALUE_FORMATTING_ERROR になる (draft-ietf-moq-transport-22 §8.3
+        // MALFORMED_KEY_VALUE になる (draft-ietf-moq-transport-22 §8.3
         // (Key-Value-Pair Structure))。
         let mut buf = Vec::new();
         varint::encode(1, &mut buf); // 外側の Number of Parameters
@@ -247,10 +242,10 @@ mod error_cases {
 
         assert_eq!(
             MessageParameters::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "message parameter value length exceeds remaining buffer"
             )),
-            "FILL_PARAMETERS 内側の Length 超過も KEY_VALUE_FORMATTING_ERROR であること"
+            "FILL_PARAMETERS 内側の Length 超過も MALFORMED_KEY_VALUE であること"
         );
     }
 
@@ -270,7 +265,7 @@ mod error_cases {
 
         assert!(matches!(
             MessageParameters::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -291,14 +286,15 @@ mod error_cases {
 
         assert!(matches!(
             MessageParameters::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::DeltaEncodingOverflow(_))
         ));
     }
 
     #[test]
     fn unknown_location_filter_type_is_protocol_violation() {
         // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
-        // "Any other Location Filter Type is a PROTOCOL_VIOLATION."
+        // "If an endpoint receives any other Location Filter Type, it MUST close the session with
+        // INVALID_PARAMETER." (draft-ietf-moq-transport-23 §9.19.9)
         let buf = vec![
             0x01, // count = 1
             0x21, // delta = PARAM_LOCATION_FILTER
@@ -307,7 +303,7 @@ mod error_cases {
 
         assert!(matches!(
             MessageParameters::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -369,7 +365,7 @@ mod error_cases {
 
         assert!(matches!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::DeltaEncodingOverflow(_))
         ));
     }
 }
@@ -667,7 +663,7 @@ mod accessors {
         assert!(
             matches!(
                 subscribe.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
             "FILL_TIMEOUT は SUBSCRIBE で拒否される"
         );
@@ -755,7 +751,7 @@ mod accessors {
     /// INCLUDE_PROPERTIES の範囲外値 (2+) は encode/decode 両経路で拒否される
     ///
     /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
-    /// 範囲外受信時は MUST close the session with PROTOCOL_VIOLATION。
+    /// 範囲外受信時は MUST close the session with INVALID_PARAMETER。
     #[test]
     fn include_properties_out_of_range_rejected() {
         let mut params = MessageParameters::new();
@@ -773,21 +769,21 @@ mod accessors {
         assert!(
             matches!(
                 MessageParameters::decode(&raw),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
-            "範囲外値の decode は PROTOCOL_VIOLATION になる"
+            "範囲外値の decode は INVALID_PARAMETER になる"
         );
     }
 
     #[test]
     fn empty_authorization_token_is_error() {
         // 空の AUTHORIZATION_TOKEN は Token 構造としてデコードできないため
-        // KEY_VALUE_FORMATTING_ERROR になる
+        // MALFORMED_AUTH_TOKEN になる (draft-ietf-moq-transport-23 §8.9)
         // 手動でバイト列を構築する: count=1, delta=0x03, length=0
         let buf = vec![0x01, 0x03, 0x00];
         assert!(matches!(
             MessageParameters::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedAuthToken(_))
         ));
     }
 }
@@ -848,7 +844,7 @@ mod location_filter_update {
 
         assert!(matches!(
             params.location_filter_update(),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -869,7 +865,7 @@ mod location_filter_update {
 
         assert!(matches!(
             params.location_filter_update(),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::DeltaEncodingOverflow(_))
         ));
     }
 
@@ -1058,7 +1054,7 @@ mod location_filter_derivation {
         let bytes = vec![0x00, 0x01];
         assert!(matches!(
             LocationFilter::decode(&bytes),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -1067,7 +1063,7 @@ mod location_filter_derivation {
         // Type 0x06 以上は PROTOCOL_VIOLATION (draft-ietf-moq-transport-22 §9.20.9)
         assert!(matches!(
             LocationFilter::decode(&[0x06]),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -1273,7 +1269,7 @@ mod kvp_value_length_limit {
         assert!(
             matches!(
                 params.encode(&mut buf),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::FieldLengthExceeded(_))
             ),
             "65536 バイトの LengthPrefixed 値は ProtocolViolation で拒否される"
         );
@@ -1292,7 +1288,7 @@ mod kvp_value_length_limit {
         buf.push(0); // dummy data byte
         let err = MessageParameters::decode(&buf).unwrap_err();
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::FieldLengthExceeded(_)),
             "Expected ProtocolViolation, got {err:?}"
         );
     }
@@ -1327,7 +1323,7 @@ mod kvp_value_length_limit {
                 assert_eq!(decoded.authorization_tokens(), vec![&token]);
             } else {
                 assert!(
-                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    matches!(result, Err(MessageError::FieldLengthExceeded(_))),
                     "65536 バイトの AuthorizationToken 値は ProtocolViolation で拒否される"
                 );
             }
@@ -1521,7 +1517,7 @@ mod merge_from_range_filter {
         assert!(
             matches!(
                 base.validate_range_filters(),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
             "型と値形式の不一致は validate_range_filters でも検出されなければならない"
         );
@@ -1755,7 +1751,7 @@ mod range_filter_multiple_appearance {
     /// 同一 Parameter Type ・異なる SetID の 2 件が round-trip すること
     ///
     /// 2 件目は Type Delta = 0 でエンコードされる。修正前はこの delta=0 を
-    /// decode 側が PROTOCOL_VIOLATION として拒否していた。
+    /// decode 側が INVALID_PARAMETER として拒否していた。
     #[test]
     fn same_type_different_set_id_roundtrips() {
         let mut params = MessageParameters::new();
@@ -2314,10 +2310,8 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS inner parameter not allowed in this context"
-            )),
-            "Table 7 外の内側パラメータは PROTOCOL_VIOLATION であること"
+            Err(MessageError::InvalidParameter),
+            "Table 7 外の内側パラメータは INVALID_PARAMETER であること"
         );
     }
 
@@ -2330,10 +2324,8 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "unknown message parameter type"
-            )),
-            "内側の未知の型は PROTOCOL_VIOLATION であること"
+            Err(MessageError::InvalidParameter),
+            "内側の未知の型は INVALID_PARAMETER であること"
         );
     }
 
@@ -2347,10 +2339,8 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "duplicate message parameter type"
-            )),
-            "内側の同一型の繰り返しは PROTOCOL_VIOLATION であること"
+            Err(MessageError::InvalidParameter),
+            "内側の同一型の繰り返しは INVALID_PARAMETER であること"
         );
     }
 
@@ -2365,10 +2355,8 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS must not be nested"
-            )),
-            "FILL の入れ子は内側の値の検証より先に PROTOCOL_VIOLATION で拒否されること"
+            Err(MessageError::InvalidParameter),
+            "FILL の入れ子は内側の値の検証より先に INVALID_PARAMETER で拒否されること"
         );
     }
 
@@ -2383,9 +2371,7 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS must not be nested"
-            )),
+            Err(MessageError::InvalidParameter),
             "FILL の入れ子は再帰前に拒否されること"
         );
     }
@@ -2428,9 +2414,7 @@ mod fill_parameters {
 
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS must not be nested"
-            )),
+            Err(MessageError::InvalidParameter),
             "1000 段の入れ子の FILL_PARAMETERS でも同じ入れ子エラーで拒否されること"
         );
     }
@@ -2442,19 +2426,19 @@ mod fill_parameters {
         let wire = vec![0x01, 0x23, 0x3F];
         assert_eq!(
             MessageParameters::decode(&wire),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::MalformedMessage(
                 "message parameter count exceeds buffer capacity"
             )),
-            "内側の count がバッファ容量を超える場合は PROTOCOL_VIOLATION であること"
+            "内側の count がバッファ容量を超える場合は MALFORMED_MESSAGE であること"
         );
 
         // 外側ブロック単体でも同じ分類になることの確認 (count=2 に対して残り 1 バイト)
         assert_eq!(
             MessageParameters::decode(&[0x02, 0x0A]),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::MalformedMessage(
                 "message parameter count exceeds buffer capacity"
             )),
-            "外側の count がバッファ容量を超える場合も PROTOCOL_VIOLATION であること"
+            "外側の count がバッファ容量を超える場合も MALFORMED_MESSAGE であること"
         );
     }
 
@@ -2511,7 +2495,7 @@ mod fill_parameters {
         assert!(
             matches!(
                 MessageParameters::decode(&wire),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
             "FILL の重複 decode は拒否されること"
         );
@@ -2566,9 +2550,7 @@ mod fill_parameters {
         let mut buf = Vec::new();
         assert_eq!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS inner parameter not allowed in this context"
-            )),
+            Err(MessageError::InvalidParameter),
             "内側の Table 7 外の型は encode で拒否されること"
         );
     }
@@ -2588,9 +2570,7 @@ mod fill_parameters {
         let mut buf = Vec::new();
         assert_eq!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
-                "FILL_PARAMETERS inner parameter not allowed in this context"
-            )),
+            Err(MessageError::InvalidParameter),
             "入れ子の FILL_PARAMETERS は encode で拒否されること"
         );
     }
@@ -2621,9 +2601,9 @@ mod fill_parameters {
         assert!(
             matches!(
                 MessageParameters::decode(&wire),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
-            "Table 7 外の 0x29 は PROTOCOL_VIOLATION であること"
+            "Table 7 外の 0x29 は INVALID_PARAMETER であること"
         );
     }
 }
@@ -2753,8 +2733,8 @@ mod resulting_publish_parameters {
 /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) / §9.1.4 (AUTHORIZATION
 /// TOKEN) のエラー経路。
 ///
-/// §8.9: "If the Token structure cannot be decoded, the receiver MUST close the
-/// Session with KEY_VALUE_FORMATTING_ERROR."
+/// §8.9: "If the Token structure cannot be decoded, including an unknown Alias Type, the
+/// receiver MUST close the Session with MALFORMED_AUTH_TOKEN."
 mod authorization_token_errors {
     use super::*;
     use shiguredo_moqt::message_parameter::PARAM_AUTHORIZATION_TOKEN;
@@ -2769,56 +2749,56 @@ mod authorization_token_errors {
     }
 
     #[test]
-    fn delete_with_trailing_bytes_is_key_value_formatting_error() {
+    fn delete_with_trailing_bytes_is_malformed_auth_token() {
         // DELETE (0x0) は Token Alias だけを運ぶ。余剰バイトがあれば Token 構造として
-        // デコードできないため KEY_VALUE_FORMATTING_ERROR (§8.9 MUST)
+        // デコードできないため MALFORMED_AUTH_TOKEN (§8.9 MUST)
         let buf = parameters_with_token_value(&[0x00, 0x01, 0xFF]);
         assert!(
             matches!(
                 MessageParameters::decode(&buf),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedAuthToken(_))
             ),
-            "DELETE の余剰バイトは KEY_VALUE_FORMATTING_ERROR であること"
+            "DELETE の余剰バイトは MALFORMED_AUTH_TOKEN であること"
         );
     }
 
     #[test]
-    fn use_alias_with_trailing_bytes_is_key_value_formatting_error() {
+    fn use_alias_with_trailing_bytes_is_malformed_auth_token() {
         // USE_ALIAS (0x2) も Token Alias だけを運ぶ
         let buf = parameters_with_token_value(&[0x02, 0x01, 0xFF]);
         assert!(
             matches!(
                 MessageParameters::decode(&buf),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedAuthToken(_))
             ),
-            "USE_ALIAS の余剰バイトは KEY_VALUE_FORMATTING_ERROR であること"
+            "USE_ALIAS の余剰バイトは MALFORMED_AUTH_TOKEN であること"
         );
     }
 
     #[test]
-    fn unknown_alias_type_is_key_value_formatting_error() {
+    fn unknown_alias_type_is_malformed_auth_token() {
         // Alias Type は 0x0 (DELETE) / 0x1 (REGISTER) / 0x2 (USE_ALIAS) /
         // 0x3 (USE_VALUE) のみ定義されている。0x04 は未知である
         let buf = parameters_with_token_value(&[0x04, 0x01]);
         assert!(
             matches!(
                 MessageParameters::decode(&buf),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedAuthToken(_))
             ),
-            "未知の Alias Type は KEY_VALUE_FORMATTING_ERROR であること"
+            "未知の Alias Type は MALFORMED_AUTH_TOKEN であること"
         );
     }
 
     #[test]
-    fn delete_without_alias_is_key_value_formatting_error() {
-        // DELETE の Token Alias が欠けている場合も KEY_VALUE_FORMATTING_ERROR
+    fn delete_without_alias_is_malformed_auth_token() {
+        // DELETE の Token Alias が欠けている場合も MALFORMED_AUTH_TOKEN
         let buf = parameters_with_token_value(&[0x00]);
         assert!(
             matches!(
                 MessageParameters::decode(&buf),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedAuthToken(_))
             ),
-            "Token Alias 欠落は KEY_VALUE_FORMATTING_ERROR であること"
+            "Token Alias 欠落は MALFORMED_AUTH_TOKEN であること"
         );
     }
 
@@ -2838,7 +2818,7 @@ mod authorization_token_errors {
         let mut buf = Vec::new();
         assert_eq!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::FieldLengthExceeded(
                 "message parameter value length exceeds 65535"
             )),
             "65536 バイトの Token Value は encode できないこと"
@@ -2879,7 +2859,7 @@ mod authorization_token_errors {
         let mut buf = Vec::new();
         assert_eq!(
             params.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::FieldLengthExceeded(
                 "message parameter value length exceeds 65535"
             )),
             "65536 バイトの LengthPrefixed は encode できないこと"

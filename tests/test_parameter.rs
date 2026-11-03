@@ -98,8 +98,8 @@ mod max_control_message_size {
         let wire = [0x09u8, 0x02, 0xC0, 0xFF, 0xFF];
         let err = SetupOptions::decode(&wire).expect_err("Length と varint 長の不一致は拒否される");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "KeyValueFormattingError を期待したが {err:?} になった"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "MalformedKeyValue を期待したが {err:?} になった"
         );
     }
 
@@ -111,8 +111,8 @@ mod max_control_message_size {
         let wire = [0x09u8, 0x00];
         let err = SetupOptions::decode(&wire).expect_err("Length 0 の値は拒否される");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "KeyValueFormattingError を期待したが {err:?} になった"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "MalformedKeyValue を期待したが {err:?} になった"
         );
     }
 
@@ -126,8 +126,8 @@ mod max_control_message_size {
         let wire = [0x09u8, 0x03, 0xC0, 0xFF];
         let err = SetupOptions::decode(&wire).expect_err("Length 超過は拒否される");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "KeyValueFormattingError を期待したが {err:?} になった"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "MalformedKeyValue を期待したが {err:?} になった"
         );
     }
 
@@ -140,8 +140,8 @@ mod max_control_message_size {
         let wire = [0x09u8, 0x04, 0xC0, 0xFF, 0xFF, 0x00];
         let err = SetupOptions::decode(&wire).expect_err("値の余剰バイトは拒否される");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "KeyValueFormattingError を期待したが {err:?} になった"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "MalformedKeyValue を期待したが {err:?} になった"
         );
     }
 
@@ -263,7 +263,7 @@ mod max_control_message_size {
         wire.extend_from_slice(&[0x03, 0xC0, 0xFF, 0xFF]); // Length 3 + 65535
         let err = SetupOptions::decode(&wire).expect_err("0x09 の重複は decode で拒否される");
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::InvalidField(_)),
             "既知型の重複は ProtocolViolation であること: {err:?}"
         );
     }
@@ -491,11 +491,11 @@ mod error_cases {
     #[test]
     fn length_prefix_exceeding_remaining_is_key_value_formatting_error() {
         // delta=1 (奇数型)、宣言長 10、データは 3 バイトのみ。
-        // Type を理解したうえで Length/Value が直列化と一致しないため KEY_VALUE_FORMATTING_ERROR。
+        // Type を理解したうえで Length/Value が直列化と一致しないため MALFORMED_KEY_VALUE。
         let buf = vec![0x01, 0x0A, 0x01, 0x02, 0x03];
         assert_eq!(
             SetupOptions::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "setup option value length exceeds remaining buffer"
             ))
         );
@@ -695,7 +695,7 @@ mod setup_option_value_length_limit {
                 assert!(path.iter().all(|&b| b == b'/'));
             } else {
                 assert!(
-                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    matches!(result, Err(MessageError::FieldLengthExceeded(_))),
                     "65536 バイトの Setup Option 値は ProtocolViolation で拒否される"
                 );
             }
@@ -712,7 +712,7 @@ mod setup_option_value_length_limit {
         varint::encode(65536, &mut buf);
         let err = SetupOptions::decode(&buf).unwrap_err();
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::FieldLengthExceeded(_)),
             "ProtocolViolation を期待したが {err:?} になった"
         );
     }
@@ -743,7 +743,7 @@ mod setup_option_value_length_limit {
                 assert_eq!(decoded.authorization_tokens(), vec![&token]);
             } else {
                 assert!(
-                    matches!(result, Err(MessageError::ProtocolViolation(_))),
+                    matches!(result, Err(MessageError::FieldLengthExceeded(_))),
                     "65536 バイトの Setup AuthorizationToken 値は ProtocolViolation で拒否される"
                 );
             }
@@ -775,7 +775,7 @@ mod setup_authorization_token_scope {
         let wire = setup_option_wire(&[0x00, 0x01]);
         assert_eq!(
             SetupOptions::decode(&wire),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::RoleViolation(
                 "DELETE alias type is not allowed in SETUP"
             )),
             "SETUP の DELETE は PROTOCOL_VIOLATION であること"
@@ -788,7 +788,7 @@ mod setup_authorization_token_scope {
         let wire = setup_option_wire(&[0x02, 0x01]);
         assert_eq!(
             SetupOptions::decode(&wire),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::RoleViolation(
                 "USE_ALIAS alias type is not allowed in SETUP"
             )),
             "SETUP の USE_ALIAS は PROTOCOL_VIOLATION であること"
@@ -806,7 +806,7 @@ mod setup_authorization_token_scope {
         let mut buf = Vec::new();
         assert_eq!(
             options.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::RoleViolation(
                 "DELETE alias type is not allowed in SETUP"
             )),
             "SETUP への DELETE の encode は拒否されること"
@@ -823,7 +823,7 @@ mod setup_authorization_token_scope {
         let mut buf = Vec::new();
         assert_eq!(
             options.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
+            Err(MessageError::RoleViolation(
                 "USE_ALIAS alias type is not allowed in SETUP"
             )),
             "SETUP への USE_ALIAS の encode は拒否されること"
@@ -860,16 +860,16 @@ mod setup_authorization_token_scope {
     }
 
     #[test]
-    fn delete_with_trailing_bytes_is_key_value_formatting_error() {
-        // Token 構造としてデコードできない場合は §8.9 により
-        // KEY_VALUE_FORMATTING_ERROR (SETUP スコープ検証より前)
+    fn delete_with_trailing_bytes_is_malformed_auth_token() {
+        // Token 構造としてデコードできない場合は draft-ietf-moq-transport-23 §8.9 により
+        // MALFORMED_AUTH_TOKEN (SETUP スコープ検証より前)
         let wire = setup_option_wire(&[0x00, 0x01, 0xFF]);
         assert!(
             matches!(
                 SetupOptions::decode(&wire),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedAuthToken(_))
             ),
-            "Token 構造のデコード失敗は KEY_VALUE_FORMATTING_ERROR であること"
+            "Token 構造のデコード失敗は MALFORMED_AUTH_TOKEN であること"
         );
     }
 }

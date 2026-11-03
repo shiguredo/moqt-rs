@@ -25,7 +25,7 @@
 //! Object scope では本モジュールのアクセサ (`object_delivery_timeout` / `subgroup_delivery_timeout`) から参照する。
 //!
 //! IMMUTABLE_PROPERTIES (0x0B) は奇数型だが、その値は「入れ子の Key-Value-Pair リスト」。
-//! 入れ子の IMMUTABLE_PROPERTIES は許されず、検出した場合は PROTOCOL_VIOLATION
+//! 入れ子の IMMUTABLE_PROPERTIES は許されず、検出した場合は MalformedTrack
 //! (draft-ietf-moq-transport-22 §10.7 (Immutable Properties): "An Object contains an Immutable Properties property that contains
 //! another Immutable Properties key" → malformed)。
 //!
@@ -193,16 +193,25 @@ impl ObjectProperties {
     ///
     /// # Errors
     ///
-    /// `decode` の失敗要因 (KVP 層の malformed 等) は区別せず、末尾の余分バイトと同じ
-    /// `ProtocolViolation("invalid object properties framing")` に写す。
-    /// [`ObjectPropertyTracker::observe_object`] が従来からこの写像を使っており、
-    /// 呼び出し元 (Session の受信経路と FETCH decoder) の挙動を変えないためである。
+    /// `decode` の失敗要因 (KVP 層の malformed、長さ超過、デルタ溢出など) は原因を保ったまま
+    /// 返す。末尾に余分バイトが残る場合は、Properties Length が実際の
+    /// Key-Value-Pair 列と一致しない = Object の直列化を復号できないため
+    /// `MalformedObject` (MALFORMED_OBJECT 0x201) とする
+    /// (draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §12.2
+    /// (Session Termination Codes))。
     pub(crate) fn decode_exact(buf: &[u8]) -> Result<Self, MessageError> {
-        let (properties, consumed) = Self::decode(buf)
-            .map_err(|_| MessageError::ProtocolViolation("invalid object properties framing"))?;
+        // `buf` は Properties Length を含む完結したブロックであるため、内側の varint が
+        // 途中で切れることは「追加データ待ち」ではなく直列化の破損を意味する。
+        // データ不足の `UnexpectedEof` は MALFORMED_OBJECT に写す。
+        let (properties, consumed) = Self::decode(buf).map_err(|err| match err {
+            MessageError::UnexpectedEof => MessageError::MalformedObject(
+                "object properties are shorter than their declared length",
+            ),
+            other => other,
+        })?;
         if consumed != buf.len() {
-            return Err(MessageError::ProtocolViolation(
-                "invalid object properties framing",
+            return Err(MessageError::MalformedObject(
+                "object properties length does not match its contents",
             ));
         }
         Ok(properties)

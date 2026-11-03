@@ -15,7 +15,7 @@ fn zero_length_normal_object_without_status_rejected() {
     let encoded = dg.encode().expect("正当なテスト入力の encode は成功する");
     assert!(matches!(
         ObjectDatagram::decode(&encoded),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -32,7 +32,7 @@ fn status_and_end_of_group_encode_error() {
     };
     assert!(matches!(
         dg.encode(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -42,7 +42,7 @@ fn status_and_end_of_group_decode_error() {
     let buf = vec![0x22, 0x01, 0x01];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -52,7 +52,7 @@ fn subgroup_type_decode_error() {
     let buf = vec![0x10, 0x01, 0x01, 0x80];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -71,7 +71,7 @@ fn non_normal_status_with_properties_rejected() {
     shiguredo_moqt::varint::encode(0x03, &mut buf); // status = End of Group (非 Normal)
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -87,7 +87,7 @@ fn unknown_object_status_rejected() {
     shiguredo_moqt::varint::encode(0x02, &mut buf); // status = 0x02 (無効)
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -106,13 +106,13 @@ fn status_object_with_payload_rejected() {
     encoded.push(0xAA);
     assert!(matches!(
         ObjectDatagram::decode(&encoded),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
 // ─── Properties Length のデコード境界 (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram)) ────
 
-/// PROPERTIES bit が立っているのに Properties Length = 0 のバイト列は PROTOCOL_VIOLATION。
+/// PROPERTIES bit が立っているのに Properties Length = 0 のバイト列は MALFORMED_OBJECT。
 /// checked_len 化後もこの datagram 固有チェック (subgroup では 0 が合法) が保持されること。
 #[test]
 fn properties_length_zero_rejected() {
@@ -122,7 +122,7 @@ fn properties_length_zero_rejected() {
     let buf = vec![0x0Du8, 0x00, 0x00, 0x00];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 
@@ -182,10 +182,7 @@ fn encode_rejects_empty_properties_data() {
         end_of_group: false,
         status: Some(0),
     };
-    assert!(matches!(
-        dg.encode(),
-        Err(MessageError::ProtocolViolation(_))
-    ));
+    assert!(matches!(dg.encode(), Err(MessageError::MalformedObject(_))));
 }
 
 /// Properties Length varint が途中で切れた blob は encode で拒否される
@@ -201,10 +198,7 @@ fn encode_rejects_truncated_properties_length_varint() {
         end_of_group: false,
         status: Some(0),
     };
-    assert!(matches!(
-        dg.encode(),
-        Err(MessageError::ProtocolViolation(_))
-    ));
+    assert!(matches!(dg.encode(), Err(MessageError::MalformedObject(_))));
 }
 
 /// Properties Length = 0 は encode で拒否される (datagram では禁止)
@@ -219,10 +213,7 @@ fn encode_rejects_properties_length_zero() {
         end_of_group: false,
         status: Some(0),
     };
-    assert!(matches!(
-        dg.encode(),
-        Err(MessageError::ProtocolViolation(_))
-    ));
+    assert!(matches!(dg.encode(), Err(MessageError::MalformedObject(_))));
 }
 
 /// 宣言 Length と実データ長の不一致は encode で拒否される
@@ -238,10 +229,7 @@ fn encode_rejects_properties_length_mismatch() {
         end_of_group: false,
         status: Some(0),
     };
-    assert!(matches!(
-        dg.encode(),
-        Err(MessageError::ProtocolViolation(_))
-    ));
+    assert!(matches!(dg.encode(), Err(MessageError::MalformedObject(_))));
 }
 
 #[test]
@@ -251,7 +239,7 @@ fn undefined_bit_0x40_rejected() {
     let buf = vec![0x40, 0x01, 0x01];
     assert!(matches!(
         ObjectDatagram::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 

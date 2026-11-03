@@ -453,8 +453,9 @@ impl SetupOptions {
     /// - MAX_CONTROL_MESSAGE_SIZE が 65535 未満
     ///   (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)): `InvalidField`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
-    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS): `ProtocolViolation`
-    /// - 値長が 2^16-1 バイトを超える Setup Option 値 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
+    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS): `RoleViolation`
+    /// - 値長が 2^16-1 バイトを超える Setup Option 値
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)): `FieldLengthExceeded`
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.option_type);
@@ -532,7 +533,7 @@ impl SetupOptions {
                 SetupOptionValue::Bytes(bytes) => {
                     // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
                     if bytes.len() > 65535 {
-                        return Err(MessageError::ProtocolViolation(
+                        return Err(MessageError::FieldLengthExceeded(
                             "setup option value too long",
                         ));
                     }
@@ -541,12 +542,12 @@ impl SetupOptions {
                 }
                 SetupOptionValue::AuthorizationToken(token) => {
                     // draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN):
-                    // SETUP で DELETE / USE_ALIAS は PROTOCOL_VIOLATION
+                    // SETUP で DELETE / USE_ALIAS は ROLE_VIOLATION
                     token.validate_setup_scope()?;
                     // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
                     let bytes = token.encode_to_bytes();
                     if bytes.len() > 65535 {
-                        return Err(MessageError::ProtocolViolation(
+                        return Err(MessageError::FieldLengthExceeded(
                             "setup option value too long",
                         ));
                     }
@@ -572,18 +573,20 @@ impl SetupOptions {
     ///
     /// # Errors
     ///
-    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS)、2^16-1 バイトを超える
-    ///   値長 (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))、既知の Setup Option
-    ///   型の重複、KVP Type の delta オーバーフロー: `ProtocolViolation`
+    /// - SETUP で許可されない AUTHORIZATION_TOKEN (DELETE / USE_ALIAS): `RoleViolation`
+    /// - 2^16-1 バイトを超える値長
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)): `FieldLengthExceeded`
+    /// - 既知の Setup Option 型の重複: `InvalidField`
+    /// - KVP Type の delta オーバーフロー: `DeltaEncodingOverflow`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     /// - MAX_CONTROL_MESSAGE_SIZE が 65535 未満
     ///   (draft-ietf-moq-transport-23 §9.1.8 (MAX_CONTROL_MESSAGE_SIZE)): `InvalidField`
     /// - MAX_CONTROL_MESSAGE_SIZE の Length と varint のバイト数が一致しない、または
-    ///   Length の中身が varint として復号できない (§8.3 の MUST): `KeyValueFormattingError`
+    ///   Length の中身が varint として復号できない (§8.3 の MUST): `MalformedKeyValue`
     /// - AUTHORIZATION_TOKEN の Token 構造が不正な場合 (未知の Alias Type など):
-    ///   `KeyValueFormattingError`
+    ///   `MalformedKeyValue`
     /// - 奇数型の値で Length varint は読めるが宣言長が残りバッファを超える場合 (Type を理解した
-    ///   うえで Length/Value が直列化と一致しないため §8.3 の MUST): `KeyValueFormattingError`
+    ///   うえで Length/Value が直列化と一致しないため §8.3 の MUST): `MalformedKeyValue`
     /// - delta key / Type / Length / 偶数型の値の varint が途中で切れている場合: `UnexpectedEof`
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
@@ -602,26 +605,26 @@ impl SetupOptions {
                 let (len, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 if len > 65535 {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::FieldLengthExceeded(
                         "setup option value too long",
                     ));
                 }
                 let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
+                    MessageError::MalformedKeyValue(
                         "setup option value length exceeds remaining buffer",
                     )
                 })?;
                 let value = &buf[pos..pos + len];
                 pos += len;
                 // Type を理解したうえで Length/Value が直列化と一致しない場合は
-                // KEY_VALUE_FORMATTING_ERROR (§8.3 の MUST)
+                // MALFORMED_KEY_VALUE (§8.3 の MUST)
                 let (v, consumed) = varint::decode(value).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
+                    MessageError::MalformedKeyValue(
                         "MAX_CONTROL_MESSAGE_SIZE value is not a variable-length integer",
                     )
                 })?;
                 if consumed != len {
-                    return Err(MessageError::KeyValueFormattingError(
+                    return Err(MessageError::MalformedKeyValue(
                         "MAX_CONTROL_MESSAGE_SIZE value length does not match the varint",
                     ));
                 }
@@ -641,16 +644,16 @@ impl SetupOptions {
                 let (len, n) = varint::decode(&buf[pos..])?;
                 pos += n;
                 if len > 65535 {
-                    return Err(MessageError::ProtocolViolation(
+                    return Err(MessageError::FieldLengthExceeded(
                         "setup option value too long",
                     ));
                 }
                 // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解した
-                // うえで Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR。
+                // うえで Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE。
                 // `varint::checked_len` は他の用途と共有しているため、ここで文脈に応じた
                 // variant へ写す。
                 let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
+                    MessageError::MalformedKeyValue(
                         "setup option value length exceeds remaining buffer",
                     )
                 })?;
@@ -660,10 +663,11 @@ impl SetupOptions {
                 if option_type == SETUP_OPTION_AUTHORIZATION_TOKEN {
                     // draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN): Message Parameter の AUTHORIZATION_TOKEN と
                     // 機能的に等価。Token 構造としてデコードする。
-                    // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): デコード失敗時は KEY_VALUE_FORMATTING_ERROR
+                    // draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
+                    // デコード失敗時は MALFORMED_AUTH_TOKEN
                     let token = AuthorizationToken::decode(&bytes)?;
-                    // draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN):
-                    // SETUP で DELETE / USE_ALIAS を受信した場合は PROTOCOL_VIOLATION
+                    // draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN):
+                    // SETUP で DELETE / USE_ALIAS を受信した場合は ROLE_VIOLATION
                     token.validate_setup_scope()?;
                     SetupOptionValue::AuthorizationToken(token)
                 } else {
@@ -694,7 +698,7 @@ impl SetupOptions {
             if window[0].option_type == window[1].option_type
                 && known_types.contains(&window[0].option_type)
             {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::InvalidField(
                     "duplicate known setup option type",
                 ));
             }

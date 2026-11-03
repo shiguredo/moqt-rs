@@ -279,7 +279,7 @@ fn publish_recv_with_invalid_group_order_closes_session() {
         err.as_session_error()
             .expect("セッションエラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     assert_eq!(server.state(), SessionState::Closing);
     assert_eq!(
@@ -320,7 +320,7 @@ fn publish_recv_with_filter_end_group_overflow_closes_session() {
         err.as_session_error()
             .expect("セッションエラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_DELTA_ENCODING_OVERFLOW
     );
     assert_eq!(server.state(), SessionState::Closing);
     assert_eq!(

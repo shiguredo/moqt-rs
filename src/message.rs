@@ -97,8 +97,8 @@ pub(crate) const SUBSCRIBE_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LA
 /// TRACK_STATUS_OK では EXPIRES と LARGEST_OBJECT の 2 型で和集合が尽きる (実装しない
 /// SUBSCRIBE_NAMESPACE_OK / SUBSCRIBE_TRACKS_OK / PUBLISH_NAMESPACE_OK も EXPIRES のみ)。
 ///
-/// 和集合外のパラメータの受信は §9.20.1 (Parameter Scope) の MUST により
-/// PROTOCOL_VIOLATION で閉じる。decode 側はこの MUST に対応する検証であり、encode 側の
+/// 和集合外のパラメータの受信は §9.19.1 (Parameter Scope) の MUST により
+/// INVALID_PARAMETER で閉じる。decode 側はこの MUST に対応する検証であり、encode 側の
 /// 同じ検証は非準拠のワイヤを生成しないためのライブラリの防御である。
 ///
 /// 応答 context ごとの厳密な検証はセッション層が `*_OK_ALLOWED_PARAMS` で行う。
@@ -108,8 +108,8 @@ const REQUEST_OK_ALLOWED_PARAMS: &[u64] = &[PARAM_EXPIRES, PARAM_LARGEST_OBJECT]
 //
 // draft-ietf-moq-transport-22 §9.3 (REQUEST_OK): REQUEST_OK (Type 0x07) は PUBLISH_OK /
 // REQUEST_UPDATE_OK / TRACK_STATUS_OK が共有する単一ワイヤメッセージ。
-// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope) は許可されない context に出現したパラメータの受信を
-// PROTOCOL_VIOLATION でクローズすることを MUST で要求する。各集合は §9.3 の context 別列挙と
+// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) は許可されない context に出現したパラメータの受信を
+// INVALID_PARAMETER でクローズすることを MUST で要求する。各集合は §9.3 の context 別列挙と
 // 各 Parameter 節の "MAY appear in" から導出している (将来 draft 改版で変わりうる)。
 
 /// PUBLISH_OK context で許可されるパラメータ型 (draft-ietf-moq-transport-22 §9.20.16 (EXPIRES Parameter) の MAY appear 列挙)
@@ -247,8 +247,8 @@ pub(crate) const FETCH_ALLOWED_PARAMS: &[u64] = &[
 ///
 /// FETCH_OK はパラメータを運べない (draft-ietf-moq-transport-22 §9.12 (FETCH_OK) の
 /// Parameters フィールドは存在するが、許可されるパラメータは 0 個。
-/// §9.20.1 (Parameter Scope) は許可されないパラメータを含むメッセージの受信を
-/// PROTOCOL_VIOLATION で拒否する MUST を規定する)。
+/// §9.19.1 (Parameter Scope) は許可されないパラメータを含むメッセージの受信を
+/// INVALID_PARAMETER で拒否する MUST を規定する)。
 /// 送信側の `send_fetch_ok` (src/session/fetch.rs) が状態遷移前にスコープ検証するために
 /// `pub(crate)` で公開している。
 pub(crate) const FETCH_OK_ALLOWED_PARAMS: &[u64] = &[];
@@ -264,8 +264,8 @@ pub(crate) const TRACK_STATUS_ALLOWED_PARAMS: &[u64] =
 // ─── 未対応 request の許可パラメータ集合 ─────────────────────────
 //
 // 本ライブラリが実装しない 3 種の request も、本体を解析してパラメータのスコープを検証する。
-// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): "If a parameter appears in some other
-// type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION."
+// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): "If a parameter appears in some other
+// type of message, the receiving endpoint MUST close the session with INVALID_PARAMETER."
 // 未対応 request でもパラメータを解析する以上、この MUST は適用される。各集合は各メッセージ節が
 // 列挙する許可パラメータから導出している (将来 draft 改版で変わりうる)。
 
@@ -394,14 +394,11 @@ impl ReasonPhrase {
     fn decode_from(buf: &[u8], pos: &mut usize) -> Result<Self, MessageError> {
         let (len, n) = varint::decode(&buf[*pos..])?;
         *pos += n;
-        // draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure):
-        // 1024 バイトを超える Reason Phrase の受信は PROTOCOL_VIOLATION で
-        // セッションを閉じなければならない (MUST)。encode 側の公開コンストラクタ
-        // `ReasonPhrase::new` は入力検証として `ReasonPhraseTooLong` を返す。
+        // draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure) / §12.2
+        // (Session Termination Codes): 1024 バイトを超える Reason Phrase の受信は
+        // FIELD_LENGTH_EXCEEDED (0x401) でセッションを閉じる (MUST)。
         if len > 1024 {
-            return Err(MessageError::ProtocolViolation(
-                "reason phrase exceeds 1024 bytes",
-            ));
+            return Err(MessageError::ReasonPhraseTooLong);
         }
         let len = varint::checked_len(len, buf[*pos..].len())?;
         let s = core::str::from_utf8(&buf[*pos..*pos + len])
@@ -450,9 +447,10 @@ pub struct Goaway {
 impl Goaway {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §12.2 (Session Termination Codes):
+        // New Session URI は最大 8192 バイトであり、超過は FIELD_LENGTH_EXCEEDED (0x401)。
         if self.new_session_uri.len() > 8192 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::FieldLengthExceeded(
                 "new session URI too long (max 8192)",
             ));
         }
@@ -471,9 +469,10 @@ impl Goaway {
         let mut pos = 0;
         let (uri_len, n) = varint::decode(&payload[pos..])?;
         pos += n;
-        // draft-ietf-moq-transport-22 §9.2 (GOAWAY): New Session URI は最大 8192 バイト
+        // draft-ietf-moq-transport-23 §9.2 (GOAWAY) / §12.2 (Session Termination Codes):
+        // New Session URI は最大 8192 バイトであり、超過は FIELD_LENGTH_EXCEEDED (0x401)。
         if uri_len > 8192 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::FieldLengthExceeded(
                 "new session URI too long (max 8192)",
             ));
         }
@@ -564,10 +563,11 @@ pub struct Redirect {
 
 impl Redirect {
     fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の
-        // 最大長は 4,096 バイト。draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT) は Track
-        // Namespace と Track Name をまとめて "Redirect target" と呼び、§2.4.1 (Track Naming)
-        // のとおりこれは Full Track Name そのものであるため、同じ上限を適用する。
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の
+        // 最大長は 4,096 バイトであり、超過は FIELD_LENGTH_EXCEEDED でセッションを閉じる
+        // (MUST)。§9.4.2.1 (REDIRECT) は Track Namespace と Track Name をまとめて
+        // "Redirect target" と呼び、§2.4.1 (Track Naming) のとおりこれは Full Track Name
+        // そのものであるため、同じ上限を適用する。
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         varint::encode(self.connect_uri.len() as u64, buf);
         buf.extend_from_slice(&self.connect_uri);
@@ -590,8 +590,9 @@ impl Redirect {
         *pos += uri_len;
         let track_namespace = TrackNamespace::decode_from(buf, pos)?;
         let track_name = decode_track_name(buf, pos)?;
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Redirect target は
-        // Full Track Name であるため 4,096 バイト上限を decode 側でも検証する (MUST close)
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Redirect target は
+        // Full Track Name であるため 4,096 バイト上限を decode 側でも検証する
+        // (FIELD_LENGTH_EXCEEDED で MUST close)
         validate_full_track_name(&track_namespace, &track_name)?;
         Ok(Self {
             connect_uri,
@@ -757,7 +758,8 @@ impl ErrorDetails {
     /// - 適用されない Detail、単一インスタンス型の重複、REDIRECT Detail の欠落:
     ///   `ProtocolViolation`
     /// - REDIRECT の値長が 2^16-1 バイトを超える: `FieldLengthExceeded`
-    /// - Redirect target の Full Track Name が 4,096 バイトを超える: `ProtocolViolation`
+    /// - Redirect target の Full Track Name が 4,096 バイトを超える: `FieldLengthExceeded`
+    ///   (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
     fn encode(&self, error_code: u64, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         let mut seen_redirect = false;
         for detail in &self.0 {
@@ -822,7 +824,7 @@ impl ErrorDetails {
     /// - `pos` が `buf` の末尾に達する前に varint が尽きた: `UnexpectedEof`
     /// - 奇数型の Length が 2^16-1 バイトを超えた: `FieldLengthExceeded`
     /// - 奇数型の Length が残りバイトを超える、REDIRECT の Length が REDIRECT 構造と
-    ///   一致しない: `KeyValueFormattingError`
+    ///   一致しない: `MalformedKeyValue`
     /// - 単一インスタンスのみ許す既知型 (REDIRECT) が重複した: `ProtocolViolation`
     /// - Error Code = REDIRECT なのに REDIRECT Detail が無い: `MalformedMessage`
     fn decode_from(buf: &[u8], pos: &mut usize, error_code: u64) -> Result<Self, MessageError> {
@@ -896,7 +898,7 @@ fn skip_error_detail_value(
     *pos += n;
     check_error_detail_length(len)?;
     let len = varint::checked_len(len, buf[*pos..].len()).map_err(|_| {
-        MessageError::KeyValueFormattingError("error detail value length exceeds remaining buffer")
+        MessageError::MalformedKeyValue("error detail value length exceeds remaining buffer")
     })?;
     *pos += len;
     Ok(())
@@ -926,21 +928,19 @@ fn decode_redirect_detail(buf: &[u8], pos: &mut usize) -> Result<Redirect, Messa
     *pos += n;
     check_error_detail_length(len)?;
     let len = varint::checked_len(len, buf[*pos..].len()).map_err(|_| {
-        MessageError::KeyValueFormattingError(
-            "REDIRECT error detail length exceeds remaining buffer",
-        )
+        MessageError::MalformedKeyValue("REDIRECT error detail length exceeds remaining buffer")
     })?;
     let end = *pos + len;
     let mut inner = 0;
     let redirect = Redirect::decode_from(&buf[*pos..end], &mut inner).map_err(|err| match err {
         // Length が REDIRECT 構造を覆い切れていない (フィールドが Length の外へはみ出す)
-        MessageError::UnexpectedEof => MessageError::KeyValueFormattingError(
+        MessageError::UnexpectedEof => MessageError::MalformedKeyValue(
             "REDIRECT error detail length does not cover its fields",
         ),
         other => other,
     })?;
     if inner != len {
-        return Err(MessageError::KeyValueFormattingError(
+        return Err(MessageError::MalformedKeyValue(
             "REDIRECT error detail has trailing bytes in its value",
         ));
     }
@@ -1033,7 +1033,7 @@ pub struct Subscribe {
 impl Subscribe {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters.validate_scope(SUBSCRIBE_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
@@ -1047,7 +1047,7 @@ impl Subscribe {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;
@@ -1167,7 +1167,7 @@ pub struct Publish {
 impl Publish {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters.validate_scope(PUBLISH_ALLOWED_PARAMS)?;
         encode_request_id_and_namespace(self.request_id, &self.track_namespace, buf)?;
@@ -1186,7 +1186,7 @@ impl Publish {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (track_alias, n) = varint::decode(&payload[pos..])?;
         pos += n;
@@ -1296,7 +1296,7 @@ impl Fetch {
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         self.parameters.validate_scope(FETCH_ALLOWED_PARAMS)?;
         varint::encode(self.request_id, buf);
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.track_namespace.encode_to(buf)?;
         encode_track_name(&self.track_name, buf);
@@ -1407,7 +1407,7 @@ pub struct TrackStatus {
 impl TrackStatus {
     /// 自身のペイロードを `buf` に追記する (type_id は ControlMessage 側が持つ)
     pub(crate) fn encode_message_body(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&self.track_namespace, &self.track_name)?;
         self.parameters
             .validate_scope(TRACK_STATUS_ALLOWED_PARAMS)?;
@@ -1422,7 +1422,7 @@ impl TrackStatus {
         let mut pos = 0;
         let (request_id, track_namespace) = decode_request_id_and_namespace(payload, &mut pos)?;
         let track_name = decode_track_name(payload, &mut pos)?;
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
+        // draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の 4096 バイト制限
         validate_full_track_name(&track_namespace, &track_name)?;
         let (parameters, n) = MessageParameters::decode(&payload[pos..])?;
         pos += n;

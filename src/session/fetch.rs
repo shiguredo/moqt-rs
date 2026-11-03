@@ -6,8 +6,9 @@
 //! 将来 draft 側で変更される可能性がある。
 
 use crate::error::{
-    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE,
-    SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED,
+    REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_INVALID_RANGE, SESSION_INVALID_FIELD,
+    SESSION_INVALID_PARAMETER, SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION,
+    SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED,
 };
 use crate::message::{
     ControlMessage, FETCH_ALLOWED_PARAMS, FETCH_OK_ALLOWED_PARAMS, Fetch as WireFetch,
@@ -130,10 +131,12 @@ impl Session {
     /// request stream を閉じる前でも破棄できる。破棄後に届く bidi request stream close は
     /// `rejected_request_ids` 経由で no-op で吸収する。応答 (REQUEST_OK / REQUEST_ERROR) と
     /// REQUEST_UPDATE は、request 種別と状態が失われているため unknown request id として
-    /// PROTOCOL_VIOLATION で fail する
+    /// UNEXPECTED_MESSAGE で fail する
     /// (アプリは peer が request stream を閉じるまで `forget_fetch` を待つこと)
     /// (draft §9.5 の "An endpoint that receives a REQUEST_UPDATE other than in the two
-    /// cases above MUST close the session with a PROTOCOL_VIOLATION." に従う。
+    /// cases above MUST close the session with a PROTOCOL_VIOLATION." に従い、セッション終了
+    /// コードは draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
+    /// UNEXPECTED_MESSAGE / ROLE_VIOLATION に細分類する。
     /// 破棄済み request への REQUEST_UPDATE は「sender が同じ bidi stream に後から
     /// REQUEST_UPDATE を送れる」規定の対象外と解釈する)。
     /// なお control message deadline は publisher 側では開始されない (subscriber 側の
@@ -669,9 +672,14 @@ impl Session {
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let filter = match fetch.parameters.location_filter_typed() {
             Ok(filter) => filter,
-            Err(_) => {
-                let err =
-                    SessionError::new(SESSION_PROTOCOL_VIOLATION, "invalid fetch filter encoding");
+            Err(msg_err) => {
+                // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): 未知の
+                // Location Filter Type は INVALID_PARAMETER、StartGroup + EndGroupDelta の
+                // オーバーフローは DELTA_ENCODING_OVERFLOW で閉じる (MUST)。
+                let err = crate::session::core::session_error_from_message(
+                    &msg_err,
+                    SESSION_INVALID_PARAMETER,
+                );
                 self.fail(err.clone());
                 return Err(err);
             }
@@ -771,7 +779,8 @@ impl Session {
             }
         }
         // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
-        // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
+        // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = fetch.parameters.include_properties();
         if let Some(v) = include_properties
             && let Err(err) = super::subscription::validation::validate_include_properties(v)
@@ -817,7 +826,7 @@ impl Session {
     ///   保持期間と終端手順を定めるが、"Established" という状態は §3.1 (Subscriptions) の
     ///   購読にしか定義されていない。Established を要求する本検証は本実装の判断である。
     ///   Terminated の fetch には更新対象が無く、応答 (REQUEST_ERROR) も送れないため、
-    ///   subscription と同様に PROTOCOL_VIOLATION でセッションを閉じる
+    ///   subscription と同様に UNEXPECTED_MESSAGE でセッションを閉じる
     ///   (tests/test_session/fetch/request_update.rs の
     ///   `terminated_fetch_rejects_late_request_update` と同じ判断)
     ///
@@ -839,7 +848,7 @@ impl Session {
         let state = fetch.state;
         if my_role != TrackRole::Publisher {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_UPDATE (fetch) received on subscriber side",
             );
             self.fail(err.clone());
@@ -847,7 +856,7 @@ impl Session {
         }
         if state != FetchState::Established && !locally_terminated {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_UPDATE requires Established fetch",
             );
             self.fail(err.clone());
@@ -896,7 +905,7 @@ impl Session {
         self.clear_control_message_deadline(request_id);
         let Some(fetch) = self.fetches.get(&request_id) else {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "FETCH_OK received for unknown request id",
             );
             self.fail(err.clone());
@@ -904,7 +913,7 @@ impl Session {
         };
         if fetch.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "FETCH_OK received on publisher side",
             );
             self.fail(err.clone());
@@ -917,7 +926,7 @@ impl Session {
         // state ベースの二重応答判定は FIN 後到着を誤って fail させる)。
         if fetch.response_received {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "FETCH_OK received twice for the same fetch",
             );
             self.fail(err.clone());
@@ -933,14 +942,15 @@ impl Session {
         // `Terminated` のみで、`Established` 分岐は invariant が崩れた場合の防御となる。
         if fetch.state == FetchState::Established {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "FETCH_OK in unexpected fetch state",
             );
             self.fail(err.clone());
             return Err(err);
         }
-        // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): End Location < Start Location なら
-        // PROTOCOL_VIOLATION。Start Location は送信時に LOCATION_FILTER から解決した
+        // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): End Location < Start Location は
+        // フィールド値が許されないため INVALID_FIELD (0x301)。
+        // Start Location は送信時に LOCATION_FILTER から解決した
         // `fetch_start` を使う。相対指定は Largest 未知のため先頭寄りに解決され、
         // 真の Start を下回る End の検出漏れがありうる (送信者が peer の Largest を
         // 知り得ないための限定事項)。
@@ -953,7 +963,7 @@ impl Session {
             && ok.end_location < *start
         {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_FIELD,
                 "FETCH_OK End Location smaller than Start Location",
             );
             self.fail(err.clone());
@@ -1088,7 +1098,7 @@ impl Session {
             .expect("locate_request guarantees key presence");
         if fetch.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_OK (fetch) received on publisher side",
             );
             self.fail(err.clone());
@@ -1109,7 +1119,7 @@ impl Session {
             // draft-ietf-moq-transport-22 §9.12 (FETCH_OK): "A publisher sends a FETCH_OK as the first message
             // on the bidi stream" により、REQUEST_OK が FETCH_OK より先に届くことはない。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_OK for fetch requires Established or Terminated state",
             );
             self.fail(err.clone());
@@ -1224,7 +1234,7 @@ impl Session {
             .expect("locate_request guarantees key presence");
         if fetch.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_ERROR (fetch) received on publisher side",
             );
             self.fail(err.clone());

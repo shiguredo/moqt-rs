@@ -54,7 +54,7 @@ fn non_normal_status_with_properties_rejected() {
     shiguredo_moqt::varint::encode(0x03, &mut buf); // status = End of Group (非 Normal)
     assert!(matches!(
         SubgroupObject::decode(&buf, true),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -101,7 +101,7 @@ fn non_normal_status_with_properties_encode_rejected() {
     let mut buf = Vec::new();
     assert!(matches!(
         obj.encode(true, Some(&props_data), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -114,7 +114,7 @@ fn unknown_object_status_rejected() {
     shiguredo_moqt::varint::encode(0x01, &mut buf); // status = 0x01 (無効)
     assert!(matches!(
         SubgroupObject::decode(&buf, false),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
 }
 
@@ -145,7 +145,7 @@ fn invalid_status_does_not_partially_write() {
     let mut buf = vec![0xAA, 0xBB, 0xCC];
     assert!(matches!(
         obj.encode(false, None, &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB, 0xCC], "失敗時に buf が変化しないこと");
 
@@ -153,7 +153,7 @@ fn invalid_status_does_not_partially_write() {
     let mut buf = vec![0xAA, 0xBB];
     assert!(matches!(
         obj.encode(true, Some(&[0x00]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidObjectStatus(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
 }
@@ -222,7 +222,7 @@ fn truncated_properties_length_rejected() {
     let mut buf = vec![0xAA, 0xBB];
     assert!(matches!(
         obj.encode(true, Some(&[0x80]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
 }
@@ -239,7 +239,7 @@ fn properties_length_mismatch_rejected() {
     let mut buf = vec![0xAA, 0xBB];
     assert!(matches!(
         obj.encode(true, Some(&[0x40]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
 
@@ -252,7 +252,7 @@ fn properties_length_mismatch_rejected() {
     let mut buf = Vec::new();
     assert!(matches!(
         obj.encode(true, Some(&[0x00, 0xAA]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 
     // Length = 0 を宣言して余分な 1 バイト (非 Normal status) も拒否する
@@ -264,7 +264,7 @@ fn properties_length_mismatch_rejected() {
     let mut buf = Vec::new();
     assert!(matches!(
         obj.encode(true, Some(&[0x00, 0xAA]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 
@@ -279,7 +279,7 @@ fn properties_length_u64_max_rejected() {
     let mut buf = vec![0xAA];
     assert!(matches!(
         obj.encode(true, Some(&[0xFF; 9]), &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと");
 }

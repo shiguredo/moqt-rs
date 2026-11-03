@@ -529,10 +529,10 @@ fn terminated_fetch_rejects_late_request_update() {
             }),
         )
         .expect_err("Terminated の fetch への REQUEST_UPDATE は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_ROLE_VIOLATION),
+        other => panic!("CloseSession(ROLE_VIOLATION) が期待されたが {other:?}"),
     }
 }
 

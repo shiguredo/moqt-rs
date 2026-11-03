@@ -470,7 +470,7 @@ fn wire_subscribe_with_duplicate_tokens_is_rejected_by_session() {
 /// draft-ietf-moq-transport-22 §3.2.4 (Fetch State Management) は fetch 状態の保持期間と
 /// 終端手順を定めるが、"Established" という状態は §3.1 (Subscriptions) の購読にしか
 /// 定義されていない。本実装は Terminated の fetch への REQUEST_UPDATE を状態機械の違反として
-/// PROTOCOL_VIOLATION で閉じる
+/// UNEXPECTED_MESSAGE で閉じる
 /// (tests/test_session/fetch/request_update.rs の `terminated_fetch_rejects_late_request_update`
 /// と同じ判断)。この検証は §8.9 のメッセージ単位 reject より先に行われるため、
 /// 重複トークンを含んでいても MALFORMED_AUTH_TOKEN の REQUEST_ERROR にはならない。
@@ -535,7 +535,7 @@ fn request_update_for_terminated_fetch_with_duplicate_tokens_closes_session() {
     let err = server
         .recv_stream_message(rid, second)
         .expect_err("Terminated な fetch への REQUEST_UPDATE は session error になること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert!(
         matches!(server.state(), SessionState::Closing | SessionState::Closed),
         "§9.5 の MUST close でセッションが Closing に遷移すること"
@@ -568,7 +568,7 @@ fn request_update_from_publisher_with_duplicate_tokens_closes_session() {
     let err = client
         .recv_stream_message(rid, update)
         .expect_err("subscriber 起点 subscription への REQUEST_UPDATE は session error になること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert!(
         matches!(client.state(), SessionState::Closing | SessionState::Closed),
         "§9.5 の MUST close でセッションが Closing に遷移すること"
@@ -581,7 +581,7 @@ fn request_update_from_publisher_with_duplicate_tokens_closes_session() {
 /// メッセージは吸収するが、送信者・自側の役割の検証は応答の有無に依存しない。
 /// 自側が SUBSCRIBE を送った subscription へ peer publisher が REQUEST_UPDATE を送るのは
 /// draft-ietf-moq-transport-22 §9.5 (REQUEST_UPDATE) の 2 ケース外であり、重複トークンを
-/// 含んでいてもセッションを PROTOCOL_VIOLATION で閉じる。
+/// 含んでいてもセッションを ROLE_VIOLATION で閉じる。
 #[test]
 fn locally_terminated_subscription_update_with_duplicate_tokens_closes_session() {
     let (mut client, mut server) = establish_pair_with_self_auth_cache(1024);
@@ -620,7 +620,7 @@ fn locally_terminated_subscription_update_with_duplicate_tokens_closes_session()
     let err = client
         .recv_stream_message(rid, update)
         .expect_err("ローカル終端済みでも正当でない送信者の REQUEST_UPDATE は session error");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert!(
         matches!(client.state(), SessionState::Closing | SessionState::Closed),
         "§9.5 の検証でセッションが Closing に遷移すること"

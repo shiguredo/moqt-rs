@@ -1,4 +1,4 @@
-//! Control Message 共通のワイヤ型 (draft-ietf-moq-transport-22 §8.2 (Location Structure) / §8.7 (Track Namespace Structure))
+//! Control Message 共通のワイヤ型 (draft-ietf-moq-transport-23 §8.2 (Location Structure) / §8.7 (Track Namespace Structure))
 //!
 //! `TrackNamespace` / `Location` は `message.rs` と `message_parameter.rs` の両方から使用される。
 //! 従来 `message.rs` に定義し `message_parameter.rs` から import する構成だったため、
@@ -10,7 +10,7 @@
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
 
-/// Full Track Name / Track Namespace の最大バイト長 (draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure))
+/// Full Track Name / Track Namespace の最大バイト長 (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
 pub(crate) const MAX_TRACK_NAME_LENGTH: usize = 4096;
 
 /// トラック名前空間 (0–32 フィールド、各フィールドは 1 バイト以上)
@@ -24,29 +24,31 @@ impl TrackNamespace {
     /// フィールドリストから TrackNamespace を作成する
     ///
     /// フィールド数の下限は 0、上限は 32 (draft-ietf-moq-transport-22 §2.4.1 (Track Naming))。
+    /// 各フィールドは 1 バイト以上であり、合計 4,096 バイト以下でなければならない
+    /// (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))。
     ///
     /// # Errors
     ///
-    /// フィールド数が 32 超、0 バイトのフィールドが含まれる、または合計バイト長が 4096 を超える場合
+    /// - 合計バイト長が 4,096 を超える: `FieldLengthExceeded`
+    /// - フィールド数が 32 超、または 0 バイトのフィールドが含まれる: `InvalidTrackNamespace`
+    ///
+    /// 長さ超過と構造違反が同時に該当する場合は、draft-ietf-moq-transport-23 §12.2
+    /// (Session Termination Codes) の優先規則に従い `FieldLengthExceeded` を優先する。
     pub fn new(fields: Vec<Vec<u8>>) -> Result<Self, MessageError> {
-        if fields.len() > 32 {
-            return Err(MessageError::ProtocolViolation(
+        let ns = Self(fields);
+        if ns.byte_length() > MAX_TRACK_NAME_LENGTH {
+            return Err(MessageError::FieldLengthExceeded(
+                "track namespace exceeds 4096 bytes",
+            ));
+        }
+        if ns.0.len() > 32 {
+            return Err(MessageError::InvalidTrackNamespace(
                 "track namespace field count exceeds 32",
             ));
         }
-        for f in &fields {
-            if f.is_empty() {
-                return Err(MessageError::ProtocolViolation(
-                    "track namespace field length is 0",
-                ));
-            }
-        }
-        let ns = Self(fields);
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
-        // PROTOCOL_VIOLATION
-        if ns.byte_length() > MAX_TRACK_NAME_LENGTH {
-            return Err(MessageError::ProtocolViolation(
-                "track namespace exceeds 4096 bytes",
+        if ns.0.iter().any(|f| f.is_empty()) {
+            return Err(MessageError::InvalidTrackNamespace(
+                "track namespace field length is 0",
             ));
         }
         Ok(ns)
@@ -75,7 +77,7 @@ impl TrackNamespace {
 
     /// 全フィールドの値バイト数の合計を返す
     ///
-    /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): "The length of a Track
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): "The length of a Track
     /// Namespace is the sum of the Track Namespace Field Length fields."
     pub fn byte_length(&self) -> usize {
         self.0.iter().map(|f| f.len()).sum()
@@ -83,11 +85,11 @@ impl TrackNamespace {
 
     /// バッファにエンコードする
     ///
-    /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
-    /// PROTOCOL_VIOLATION
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Track Namespace が
+    /// 4096 バイトを超えたら FIELD_LENGTH_EXCEEDED (0x401) でセッションを閉じる (MUST)。
     pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         if self.byte_length() > MAX_TRACK_NAME_LENGTH {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::FieldLengthExceeded(
                 "track namespace exceeds 4096 bytes",
             ));
         }
@@ -100,33 +102,42 @@ impl TrackNamespace {
     }
 
     /// バッファの `pos` 位置からデコードする (0–32 フィールド)
+    ///
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): 長さ 0 の Track
+    /// Namespace Field と 32 を超えるフィールド数は INVALID_TRACK_NAMESPACE (0x302)、
+    /// 4,096 バイトを超える Track Namespace は FIELD_LENGTH_EXCEEDED (0x401) で
+    /// セッションを閉じる (MUST)。
+    ///
+    /// 長さ超過と構造違反が同時に該当する場合は、§12.2 (Session Termination Codes) の
+    /// 優先規則に従い、フィールドを最後まで読んで総バイト長を確定させてから長さを先に
+    /// 判定する (フィールド数の早期拒否は優先規則を破るため行わない)。
     pub(crate) fn decode_from(buf: &[u8], pos: &mut usize) -> Result<Self, MessageError> {
         let (count, n) = varint::decode(&buf[*pos..])?;
         *pos += n;
-        if count > 32 {
-            return Err(MessageError::ProtocolViolation(
-                "track namespace field count exceeds 32",
-            ));
-        }
         let mut fields = Vec::new();
         for _ in 0..count {
             let (len, n) = varint::decode(&buf[*pos..])?;
             *pos += n;
-            if len == 0 {
-                return Err(MessageError::ProtocolViolation(
-                    "track namespace field length is 0",
-                ));
-            }
+            // 長さ 0 のフィールドは構造違反だが、ここでは読むだけに留める。
+            // 総バイト長の判定を先に行うため、早期拒否はしない。
             let len = varint::checked_len(len, buf[*pos..].len())?;
             fields.push(buf[*pos..*pos + len].to_vec());
             *pos += len;
         }
         let ns = Self(fields);
-        // draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Track Namespace が 4096 バイトを超えたら
-        // PROTOCOL_VIOLATION
         if ns.byte_length() > MAX_TRACK_NAME_LENGTH {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::FieldLengthExceeded(
                 "track namespace exceeds 4096 bytes",
+            ));
+        }
+        if ns.0.len() > 32 {
+            return Err(MessageError::InvalidTrackNamespace(
+                "track namespace field count exceeds 32",
+            ));
+        }
+        if ns.0.iter().any(|f| f.is_empty()) {
+            return Err(MessageError::InvalidTrackNamespace(
+                "track namespace field length is 0",
             ));
         }
         Ok(ns)
@@ -135,13 +146,14 @@ impl TrackNamespace {
 
 /// Full Track Name (Track Namespace + Track Name) の長さ制限を検証する
 ///
-/// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): Full Track Name の合計バイト長は 4096 バイトまで
+/// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): Full Track Name の合計
+/// バイト長は 4,096 バイトまでであり、超過は FIELD_LENGTH_EXCEEDED (0x401) で閉じる (MUST)。
 pub(crate) fn validate_full_track_name(
     ns: &TrackNamespace,
     track_name: &[u8],
 ) -> Result<(), MessageError> {
     if ns.byte_length() + track_name.len() > MAX_TRACK_NAME_LENGTH {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::FieldLengthExceeded(
             "full track name exceeds 4096 bytes",
         ));
     }
@@ -151,7 +163,7 @@ pub(crate) fn validate_full_track_name(
 /// length-prefixed な Track Name (vi64 length + bytes) をバッファにエンコードする
 ///
 /// Track Name は Track Namespace の後に Length (vi64) + バイト列として現れる
-/// (draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure))。
+/// (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))。
 pub(crate) fn encode_track_name(track_name: &[u8], buf: &mut Vec<u8>) {
     varint::encode(track_name.len() as u64, buf);
     buf.extend_from_slice(track_name);
@@ -167,14 +179,14 @@ pub(crate) fn decode_track_name(buf: &[u8], pos: &mut usize) -> Result<Vec<u8>, 
     Ok(track_name)
 }
 
-/// グループ内のオブジェクト位置 (draft-ietf-moq-transport-22 §8.2 (Location Structure))
+/// グループ内のオブジェクト位置 (draft-ietf-moq-transport-23 §8.2 (Location Structure))
 ///
 /// 比較は (group_id, object_id) の辞書順で行う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
-    /// グループ ID (draft-ietf-moq-transport-22 §8.2 (Location Structure))
+    /// グループ ID (draft-ietf-moq-transport-23 §8.2 (Location Structure))
     pub group_id: u64,
-    /// オブジェクト ID (draft-ietf-moq-transport-22 §8.2 (Location Structure))
+    /// オブジェクト ID (draft-ietf-moq-transport-23 §8.2 (Location Structure))
     pub object_id: u64,
 }
 

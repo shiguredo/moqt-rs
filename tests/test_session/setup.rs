@@ -345,7 +345,7 @@ fn recv_control_after_close_is_noop() {
     assert!(res.is_ok());
 }
 
-/// Established 中に peer control stream が FIN で閉じたら PROTOCOL_VIOLATION
+/// Established 中に peer control stream が FIN で閉じたら CLOSED_CONTROL_STREAM
 #[test]
 fn control_stream_fin_closes_established_session() {
     use shiguredo_moqt::session::types::RequestStreamEnd;
@@ -353,15 +353,15 @@ fn control_stream_fin_closes_established_session() {
     let err = client
         .recv_control_stream_closed(RequestStreamEnd::Fin)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_CLOSED_CONTROL_STREAM);
     assert_eq!(client.state(), SessionState::Closing);
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_CLOSED_CONTROL_STREAM),
         _ => unreachable!(),
     }
 }
 
-/// Established 中に peer control stream が RESET_STREAM されたら PROTOCOL_VIOLATION
+/// Established 中に peer control stream が RESET_STREAM されたら CLOSED_CONTROL_STREAM
 #[test]
 fn control_stream_reset_closes_established_session() {
     use shiguredo_moqt::session::types::RequestStreamEnd;
@@ -372,15 +372,15 @@ fn control_stream_reset_closes_established_session() {
             reliable_size: None,
         })
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_CLOSED_CONTROL_STREAM);
     assert_eq!(client.state(), SessionState::Closing);
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_CLOSED_CONTROL_STREAM),
         _ => unreachable!(),
     }
 }
 
-/// SETUP 交換中でも peer control stream の終端は PROTOCOL_VIOLATION
+/// SETUP 交換中でも peer control stream の終端は CLOSED_CONTROL_STREAM
 #[test]
 fn control_stream_close_in_local_setup_sent_closes_session() {
     use shiguredo_moqt::session::types::RequestStreamEnd;
@@ -389,11 +389,11 @@ fn control_stream_close_in_local_setup_sent_closes_session() {
     let err = client
         .recv_control_stream_closed(RequestStreamEnd::Fin)
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_CLOSED_CONTROL_STREAM);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// Phase 1 では SETUP 以外の制御メッセージは PROTOCOL_VIOLATION
+/// Phase 1 では SETUP 以外の制御メッセージは UNEXPECTED_MESSAGE
 #[test]
 fn non_setup_control_message_is_violation_in_phase_one() {
     use shiguredo_moqt::message::Goaway;
@@ -406,7 +406,7 @@ fn non_setup_control_message_is_violation_in_phase_one() {
             timeout: 1000,
         }))
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 // ─── Phase 2: Request ID 管理 ─────────────────────────────

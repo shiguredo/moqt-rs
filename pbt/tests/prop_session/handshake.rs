@@ -72,7 +72,11 @@ fn second_peer_setup_is_always_violation() -> noprop::TestResult {
                 options: SetupOptions::new(),
             }))
             .unwrap_err();
-        assert_eq!(err.code, shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION);
+        assert_eq!(
+            err.code,
+            shiguredo_moqt::error::SESSION_UNEXPECTED_MESSAGE,
+            "重複 SETUP は UNEXPECTED_MESSAGE であること"
+        );
         Ok(())
     })?;
     Ok(())

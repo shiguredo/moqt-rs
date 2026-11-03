@@ -6,8 +6,9 @@
 //! draft 由来の実装のため将来変更される可能性がある。
 
 use crate::error::{
-    SESSION_CONTROL_MESSAGE_TIMEOUT, SESSION_DATA_STREAM_TIMEOUT, SESSION_GOAWAY_TIMEOUT,
-    SESSION_PROTOCOL_VIOLATION, STREAM_GOING_AWAY,
+    SESSION_CONTROL_MESSAGE_TIMEOUT, SESSION_DATA_STREAM_TIMEOUT, SESSION_FIELD_LENGTH_EXCEEDED,
+    SESSION_GOAWAY_TIMEOUT, SESSION_INVALID_FIELD, SESSION_PROTOCOL_VIOLATION,
+    SESSION_UNEXPECTED_MESSAGE, STREAM_GOING_AWAY,
 };
 use crate::message::{ControlMessage, Goaway};
 use alloc::vec::Vec;
@@ -44,15 +45,19 @@ fn validate_outgoing_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionErr
 /// 受信側では Role を反転して使う (自側 Server → peer Client)。
 fn validate_incoming_goaway_uri(role: Role, uri: &[u8]) -> Result<(), SessionError> {
     if uri.len() > MAX_NEW_SESSION_URI_LENGTH {
+        // 長さの超過は draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
+        // 優先規則により FIELD_LENGTH_EXCEEDED (0x401) で閉じる。
         return Err(SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_FIELD_LENGTH_EXCEEDED,
             "received GOAWAY new_session_uri exceeds 8192 bytes",
         ));
     }
-    // draft-ietf-moq-transport-22 §9.2 (GOAWAY): server (自側) は client (peer) からの non-zero URI を拒否
+    // draft-ietf-moq-transport-23 §9.2 (GOAWAY): "A client MUST send a zero-length New Session
+    // URI". server (自側) は client (peer) からの non-zero URI を、フィールド値の逸脱として
+    // INVALID_FIELD (0x301) で拒否する。
     if role == Role::Server && !uri.is_empty() {
         return Err(SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_INVALID_FIELD,
             "client sent non-zero new_session_uri",
         ));
     }
@@ -490,15 +495,18 @@ impl Session {
 
     pub(super) fn handle_peer_goaway(&mut self, msg: Goaway) -> Result<(), SessionError> {
         if self.state != SessionState::Established {
+            // SETUP 交換前の GOAWAY は順序違反であり UNEXPECTED_MESSAGE (0x303)
+            // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "GOAWAY received before session established",
             );
             self.fail(err.clone());
             return Err(err);
         }
         if self.goaway.peer.is_some() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, "duplicate GOAWAY received");
+            // 許容回数を超える GOAWAY は UNEXPECTED_MESSAGE (0x303)。
+            let err = SessionError::new(SESSION_UNEXPECTED_MESSAGE, "duplicate GOAWAY received");
             self.fail(err.clone());
             return Err(err);
         }
@@ -528,8 +536,10 @@ impl Session {
         msg: Goaway,
     ) -> Result<(), SessionError> {
         if self.state != SessionState::Established {
+            // SETUP 交換前の GOAWAY は順序違反であり UNEXPECTED_MESSAGE (0x303)
+            // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "GOAWAY received before session established",
             );
             self.fail(err.clone());
@@ -537,7 +547,7 @@ impl Session {
         }
         if self.goaway.request_stream_received.contains(&request_id) {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "duplicate GOAWAY received on request stream",
             );
             self.fail(err.clone());

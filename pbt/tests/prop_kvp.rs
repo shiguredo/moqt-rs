@@ -81,10 +81,11 @@ fn delta_key_roundtrip() -> noprop::TestResult {
     Ok(())
 }
 
-/// overflow guard: 絶対キー復元 (prev + delta) が u64 を超える wire は PROTOCOL_VIOLATION で弾かれる
+/// overflow guard: 絶対キー復元 (prev + delta) が u64 を超える wire は DELTA_ENCODING_OVERFLOW で弾かれる
 ///
 /// 先頭キーを u64::MAX - 1 (偶数) に置き、続く delta >= 2 を与えると 2 個目の絶対キー復元で
-/// checked_add が overflow する。decode_delta_key がこれを ProtocolViolation にすることを検証する。
+/// checked_add が overflow する。draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の
+/// MUST に従い、decode_delta_key がこれを DeltaEncodingOverflow にすることを検証する。
 #[test]
 fn delta_key_overflow_rejected() -> noprop::TestResult {
     let mut runner = test_runner()?;
@@ -100,7 +101,7 @@ fn delta_key_overflow_rejected() -> noprop::TestResult {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::DeltaEncodingOverflow(_))
         ));
         Ok(())
     })?;

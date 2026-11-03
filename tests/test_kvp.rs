@@ -66,7 +66,7 @@ fn near_max_keys_roundtrip() {
     }
 }
 
-/// 絶対キー復元 (prev + delta) の overflow は PROTOCOL_VIOLATION で弾かれる
+/// 絶対キー復元 (prev + delta) の overflow は DELTA_ENCODING_OVERFLOW で弾かれる
 #[test]
 fn decode_overflow_rejected() {
     // 内側: キー MAX - 1・値 0 の 1 件目に続き、delta 2 で MAX + 1 溢出する 2 件目
@@ -80,7 +80,7 @@ fn decode_overflow_rejected() {
     buf.extend_from_slice(&inner);
     let err = LocProperties::decode(&buf).expect_err("溢出する delta は拒否されること");
     assert!(
-        matches!(err, MessageError::ProtocolViolation(_)),
-        "KVP type delta overflow で PROTOCOL_VIOLATION になること: {err:?}"
+        matches!(err, MessageError::DeltaEncodingOverflow(_)),
+        "KVP type delta overflow で DELTA_ENCODING_OVERFLOW になること: {err:?}"
     );
 }

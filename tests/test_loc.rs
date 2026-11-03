@@ -239,7 +239,7 @@ mod error_cases {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -253,7 +253,7 @@ mod error_cases {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 
@@ -266,7 +266,7 @@ mod error_cases {
         });
         assert!(matches!(
             props.encode(),
-            Err(MessageError::KeyValueFormattingError(_))
+            Err(MessageError::MalformedKeyValue(_))
         ));
     }
 

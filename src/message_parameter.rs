@@ -158,9 +158,7 @@ fn value_encoding(param_type: u64) -> Result<ValueEncoding, MessageError> {
         PARAM_PRIORITY_FILTER => Ok(ValueEncoding::LengthPrefixed),
         PARAM_OBJECT_PROPERTY_FILTER => Ok(ValueEncoding::LengthPrefixed),
         PARAM_TRACK_PROPERTY_FILTER => Ok(ValueEncoding::LengthPrefixed),
-        _ => Err(MessageError::ProtocolViolation(
-            "unknown message parameter type",
-        )),
+        _ => Err(MessageError::InvalidParameter),
     }
 }
 
@@ -213,24 +211,25 @@ pub enum AuthorizationToken {
 impl AuthorizationToken {
     /// Length-prefixed バイト列から Token 構造をデコードする
     ///
-    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
-    /// デコード失敗時は KEY_VALUE_FORMATTING_ERROR を返す。
+    /// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression): "If the Token
+    /// structure cannot be decoded, including an unknown Alias Type, the receiver MUST close
+    /// the Session with MALFORMED_AUTH_TOKEN." (MUST) に従い、デコード失敗時は
+    /// MALFORMED_AUTH_TOKEN を返す。
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, MessageError> {
         let mut pos = 0;
-        let (alias_type, n) = varint::decode(bytes).map_err(|_| {
-            MessageError::KeyValueFormattingError("failed to decode Token Alias Type")
-        })?;
+        let (alias_type, n) = varint::decode(bytes)
+            .map_err(|_| MessageError::MalformedAuthToken("failed to decode Token Alias Type"))?;
         pos += n;
 
         match alias_type {
             // DELETE (0x0): Token Alias のみ
             0 => {
                 let (alias, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                    MessageError::KeyValueFormattingError("failed to decode Token Alias in DELETE")
+                    MessageError::MalformedAuthToken("failed to decode Token Alias in DELETE")
                 })?;
                 pos += n;
                 if pos != bytes.len() {
-                    return Err(MessageError::KeyValueFormattingError(
+                    return Err(MessageError::MalformedAuthToken(
                         "DELETE token has trailing bytes",
                     ));
                 }
@@ -239,13 +238,11 @@ impl AuthorizationToken {
             // REGISTER (0x1): Token Alias + Token Type + Token Value
             1 => {
                 let (alias, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
-                        "failed to decode Token Alias in REGISTER",
-                    )
+                    MessageError::MalformedAuthToken("failed to decode Token Alias in REGISTER")
                 })?;
                 pos += n;
                 let (token_type, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                    MessageError::KeyValueFormattingError("failed to decode Token Type in REGISTER")
+                    MessageError::MalformedAuthToken("failed to decode Token Type in REGISTER")
                 })?;
                 pos += n;
                 // Token Value は残りのバイト列すべて
@@ -259,13 +256,11 @@ impl AuthorizationToken {
             // USE_ALIAS (0x2): Token Alias のみ
             2 => {
                 let (alias, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
-                        "failed to decode Token Alias in USE_ALIAS",
-                    )
+                    MessageError::MalformedAuthToken("failed to decode Token Alias in USE_ALIAS")
                 })?;
                 pos += n;
                 if pos != bytes.len() {
-                    return Err(MessageError::KeyValueFormattingError(
+                    return Err(MessageError::MalformedAuthToken(
                         "USE_ALIAS token has trailing bytes",
                     ));
                 }
@@ -274,9 +269,7 @@ impl AuthorizationToken {
             // USE_VALUE (0x3): Token Type + Token Value (Alias なし)
             3 => {
                 let (token_type, n) = varint::decode(&bytes[pos..]).map_err(|_| {
-                    MessageError::KeyValueFormattingError(
-                        "failed to decode Token Type in USE_VALUE",
-                    )
+                    MessageError::MalformedAuthToken("failed to decode Token Type in USE_VALUE")
                 })?;
                 pos += n;
                 let token_value = bytes[pos..].to_vec();
@@ -285,9 +278,7 @@ impl AuthorizationToken {
                     token_value,
                 })
             }
-            _ => Err(MessageError::KeyValueFormattingError(
-                "unknown Token Alias Type",
-            )),
+            _ => Err(MessageError::MalformedAuthToken("unknown Token Alias Type")),
         }
     }
 
@@ -312,15 +303,18 @@ impl AuthorizationToken {
 
     /// SETUP の AUTHORIZATION_TOKEN として許可されるか検証する
     ///
-    /// draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN):
-    /// SETUP で DELETE / USE_ALIAS は PROTOCOL_VIOLATION。encode / decode の両経路で
-    /// 同一の検証を行うため本メソッドに集約する。
+    /// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): "If a server receives Alias
+    /// Type DELETE (0x0) or USE_ALIAS (0x2) in a SETUP message, it MUST close the session with
+    /// ROLE_VIOLATION." encode / decode の両経路で同一の検証を行うため本メソッドに集約する。
+    /// 仕様が MUST を課すのは server 受信時だが、SETUP は最初のメッセージであり DELETE /
+    /// USE_ALIAS が参照できる登録済み Alias は存在しないため、client 受信時も同じ分類
+    /// (送信者の role では送れないフィールド) とする。
     pub(crate) fn validate_setup_scope(&self) -> Result<(), MessageError> {
         match self {
-            Self::Delete { .. } => Err(MessageError::ProtocolViolation(
+            Self::Delete { .. } => Err(MessageError::RoleViolation(
                 "DELETE alias type is not allowed in SETUP",
             )),
-            Self::UseAlias { .. } => Err(MessageError::ProtocolViolation(
+            Self::UseAlias { .. } => Err(MessageError::RoleViolation(
                 "USE_ALIAS alias type is not allowed in SETUP",
             )),
             _ => Ok(()),
@@ -515,18 +509,20 @@ impl LocationFilter {
     ///
     /// 公開 [`LocationFilter::encode_to_bytes`] の逆関数であり、Location Filter 単体の
     /// バイト列を扱う利用者向けに公開する。バイト列は Location Filter 1 つ分とみなし、
-    /// 余剰バイトがあれば `KeyValueFormattingError` を返す。
+    /// 余剰バイトがあれば `MalformedKeyValue` を返す。
     ///
     /// # Errors
     ///
-    /// - Location Filter Type が 0x06 以上: `ProtocolViolation` (§9.20.9)
+    /// - Location Filter Type が 0x06 以上: `InvalidParameter`
+    ///   (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
     /// - Type が要求するフィールドがバッファ終端で欠落: `UnexpectedEof`
-    /// - `StartGroup + EndGroupDelta` が 2^64 - 1 を超える: `ProtocolViolation` (§9.20.9)
-    /// - フィールドを読み切ったあとに余剰バイトがある: `KeyValueFormattingError`
+    /// - `StartGroup + EndGroupDelta` が 2^64 - 1 を超える: `DeltaEncodingOverflow`
+    ///   (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))
+    /// - フィールドを読み切ったあとに余剰バイトがある: `MalformedKeyValue`
     pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
         let (filter, consumed) = Self::decode_partial(buf)?;
         if consumed != buf.len() {
-            return Err(MessageError::KeyValueFormattingError(
+            return Err(MessageError::MalformedKeyValue(
                 "LOCATION_FILTER has trailing bytes",
             ));
         }
@@ -542,8 +538,9 @@ impl LocationFilter {
     /// 定めるため、フィールド数不一致を表すワイヤは存在しない。
     ///
     /// 欠落したフィールド (バッファ終端) は `UnexpectedEof`、Type 0x06 以上は
-    /// `ProtocolViolation`、`StartGroup + EndGroupDelta` のオーバーフローは
-    /// `ProtocolViolation` になる。
+    /// `InvalidParameter`、`StartGroup + EndGroupDelta` のオーバーフローは
+    /// `DeltaEncodingOverflow` になる
+    /// (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter))。
     fn decode_partial(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let (filter_type, mut pos) = varint::decode(buf)?;
 
@@ -583,9 +580,7 @@ impl LocationFilter {
             // draft-ietf-moq-transport-22 §9.20.9: "Any other Location Filter Type is a
             // PROTOCOL_VIOLATION."
             _ => {
-                return Err(MessageError::ProtocolViolation(
-                    "unknown Location Filter Type",
-                ));
+                return Err(MessageError::InvalidParameter);
             }
         };
 
@@ -765,7 +760,7 @@ fn decode_location(buf: &[u8], pos: &mut usize) -> Result<Location, MessageError
 /// Delta = 0 は当該 Group の残り全部であり常に正当。
 fn check_end_group_overflow(start_group: u64, end_group_delta: u64) -> Result<(), MessageError> {
     if end_group_delta != 0 && start_group.checked_add(end_group_delta).is_none() {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::DeltaEncodingOverflow(
             "LOCATION_FILTER end group ID overflows u64",
         ));
     }
@@ -895,10 +890,11 @@ impl MessageParameters {
     /// - 同一 Parameter Type の重複、型と値形式の不整合: `InvalidParameter`
     /// - 未知の Parameter Type、uint8 値域違反 (PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES)、
     ///   FILL_PARAMETERS の内側スコープ違反
-    ///   (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter))、
-    ///   LOCATION_FILTER の StartGroup + EndGroupDelta オーバーフロー
-    ///   (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))、
-    ///   値長が 2^16-1 バイトを超える KVP (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)): `ProtocolViolation`
+    ///   (draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter)): `InvalidParameter`
+    /// - LOCATION_FILTER の StartGroup + EndGroupDelta オーバーフロー
+    ///   (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter)): `DeltaEncodingOverflow`
+    /// - 値長が 2^16-1 バイトを超える KVP
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)): `FieldLengthExceeded`
     /// - AUTHORIZATION_TOKEN の (Token Type, Token Value) 重複: `MalformedAuthToken`
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
         // 同一 Parameter Type が複数ある場合、安定ソートにより push 順が保たれたまま隣接し、
@@ -964,20 +960,25 @@ impl MessageParameters {
     /// ため、KVP の宣言長がパラメータブロックの終端を超えても Track Properties の範囲に収まる
     /// 場合は本メソッドでは検出できず、Track Properties 側の検証に委ねる。KVP の Length varint は
     /// 読めるが宣言長が渡されたスライスの残りを超える場合は、Type を理解したうえで Length/Value が
-    /// 直列化と一致しないため `KeyValueFormattingError` にする (§8.3 の MUST)。
+    /// 直列化と一致しないため `MalformedKeyValue` にする (§8.3 の MUST)。
     ///
     /// # Errors
     ///
     /// - 未知の Parameter Type、同一 Parameter Type の重複、FILL_PARAMETERS の入れ子、Table 7 外の
     ///   内側パラメータ、uint8 値域違反 (PAUSED / GROUP_ORDER / INCLUDE_PROPERTIES)、
-    ///   LOCATION_FILTER の未知の Location Filter Type と StartGroup + EndGroupDelta
-    ///   オーバーフロー (draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter))、
-    ///   Track Namespace のデコード失敗
-    ///   (フィールド数超過 / 空フィールド / 4096 バイト超過)、フレーミング違反 (KVP Type の delta
-    ///   オーバーフロー、count がバッファ容量を超える場合、値長が 2^16-1 バイトを超える KVP
-    ///   (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))): `ProtocolViolation`
+    ///   LOCATION_FILTER の未知の Location Filter Type
+    ///   (draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter)): `InvalidParameter`
+    /// - LOCATION_FILTER の StartGroup + EndGroupDelta オーバーフロー、KVP Type / Parameter Type
+    ///   の delta オーバーフロー (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) /
+    ///   §9.19 (Control Message Parameters)): `DeltaEncodingOverflow`
+    /// - Track Namespace のデコード失敗 (空フィールド / フィールド数超過):
+    ///   `InvalidTrackNamespace`、4,096 バイト超過: `FieldLengthExceeded`
+    ///   (draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure))
+    /// - 値長が 2^16-1 バイトを超える KVP
+    ///   (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)): `FieldLengthExceeded`
+    /// - count がバッファ容量を超える場合: `MalformedMessage`
     /// - 値の直列化 (Length/Value) が型の定義と一致しない場合 (壊れた AUTHORIZATION_TOKEN、
-    ///   宣言長が残りバッファを超える KVP): `KeyValueFormattingError`
+    ///   宣言長が残りバッファを超える KVP): `MalformedKeyValue`
     /// - ヘッダや値の varint が途中で切れている場合 (count / delta key / Type varint / Length
     ///   varint / 偶数型の値 varint の途中終端、LOCATION_FILTER の必須フィールド欠落、
     ///   TRACK_NAMESPACE_PREFIX の Track Namespace 値が途中で切れている場合、
@@ -1001,7 +1002,7 @@ impl MessageParameters {
         // count (u64) を usize に切り捨ててから比較すると 32bit 環境で巨大 count が
         // ガードをすり抜けるため、u64 空間で比較する ((remaining / 2) as u64 は widening で安全)
         if count > (remaining / 2) as u64 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedMessage(
                 "message parameter count exceeds buffer capacity",
             ));
         }
@@ -1022,9 +1023,7 @@ impl MessageParameters {
                 && param_type != PARAM_AUTHORIZATION_TOKEN
                 && !is_range_filter_type(param_type)
             {
-                return Err(MessageError::ProtocolViolation(
-                    "duplicate message parameter type",
-                ));
+                return Err(MessageError::InvalidParameter);
             }
 
             // 未知のパラメータ型は PROTOCOL_VIOLATION
@@ -1036,7 +1035,7 @@ impl MessageParameters {
 
             // draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression): AUTHORIZATION_TOKEN は Token 構造として検証する
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 既知 Type の Value が定義された serialization と
-            // 一致しない場合は KEY_VALUE_FORMATTING_ERROR
+            // 一致しない場合は MALFORMED_KEY_VALUE
             if param_type == PARAM_AUTHORIZATION_TOKEN
                 && let MessageParameterValue::LengthPrefixed(ref bytes) = value
             {
@@ -1191,8 +1190,8 @@ impl MessageParameters {
     ///
     /// # Errors
     ///
-    /// 0x21 の値が Location Filter 形式でない、または `StartGroup + EndGroupDelta` が
-    /// 2^64 - 1 を超える場合は `ProtocolViolation` を返す。
+    /// 0x21 の値が Location Filter 形式でない場合は `InvalidParameter`、
+    /// `StartGroup + EndGroupDelta` が 2^64 - 1 を超える場合は `DeltaEncodingOverflow` を返す。
     pub fn location_filter_typed(&self) -> Result<Option<LocationFilter>, MessageError> {
         match self.location_filter_update()? {
             LocationFilterUpdate::Set(filter) => Ok(Some(filter)),
@@ -1209,17 +1208,15 @@ impl MessageParameters {
     /// # Errors
     ///
     /// 0x21 の値が Location Filter 形式でない (公開 API による in-memory 構築でのみ
-    /// 起こりうる)、または `StartGroup + EndGroupDelta` が 2^64 - 1 を超える場合は
-    /// `ProtocolViolation` を返す。
+    /// 起こりうる) 場合は `InvalidParameter`、`StartGroup + EndGroupDelta` が 2^64 - 1 を
+    /// 超える場合は `DeltaEncodingOverflow` を返す。
     pub fn location_filter_update(&self) -> Result<LocationFilterUpdate, MessageError> {
         for p in &self.0 {
             if p.param_type != PARAM_LOCATION_FILTER {
                 continue;
             }
             let MessageParameterValue::LocationFilter(filter) = &p.value else {
-                return Err(MessageError::ProtocolViolation(
-                    "LOCATION_FILTER parameter has a non-Location Filter value",
-                ));
+                return Err(MessageError::InvalidParameter);
             };
             filter.validate()?;
             return Ok(if *filter == LocationFilter::NoFilter {
@@ -1393,9 +1390,7 @@ impl MessageParameters {
     pub fn validate_scope(&self, allowed: &[u64]) -> Result<(), MessageError> {
         for p in &self.0 {
             if !allowed.contains(&p.param_type) {
-                return Err(MessageError::ProtocolViolation(
-                    "message parameter not allowed in this message type",
-                ));
+                return Err(MessageError::InvalidParameter);
             }
         }
         Ok(())
@@ -1405,8 +1400,7 @@ impl MessageParameters {
     ///
     /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): 内側のパラメータは
     /// `FILL_PARAMETERS_ALLOWED_PARAMS` に限られ、それ以外の受信は INVALID_PARAMETER で
-    /// セッションを閉じる MUST。本 codec は既存の写像に合わせて `ProtocolViolation` を返し、
-    /// セッション終了コードへの変換は session 層が担う。また同 §9.19 (Control Message
+    /// セッションを閉じる MUST。本 codec も `InvalidParameter` を返す。また同 §9.19 (Control Message
     /// Parameters) は、同じパラメータ型の繰り返しを送信側の MUST NOT、受信側の SHOULD 検証
     /// (INVALID_PARAMETER で閉じる) と定める。wire では内側スコープを
     /// `decode_fill_parameters` が、重複を `decode_inner` の一般規則が検証する。
@@ -1418,27 +1412,21 @@ impl MessageParameters {
                 continue;
             }
             // 同じパラメータ型の繰り返しは §9.19 (Control Message Parameters) が送信側の
-            // MUST NOT、受信側の SHOULD 検証 (PROTOCOL_VIOLATION) と定める
+            // MUST NOT、受信側の SHOULD 検証 (INVALID_PARAMETER) と定める
             if seen {
-                return Err(MessageError::ProtocolViolation("duplicate FILL_PARAMETERS"));
+                return Err(MessageError::InvalidParameter);
             }
             seen = true;
             match &p.value {
                 MessageParameterValue::FillParameters(inner) => {
                     inner
                         .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
-                        .map_err(|_| {
-                            MessageError::ProtocolViolation(
-                                "FILL_PARAMETERS inner parameter not allowed in this context",
-                            )
-                        })?;
+                        .map_err(|_| MessageError::InvalidParameter)?;
                 }
                 // wire の decode は型と値の不一致を拒否する。decode を通らない手組み
                 // メッセージも同じくセッションを閉じる (他の手組み不正パラメータと同じ扱い)
                 _ => {
-                    return Err(MessageError::ProtocolViolation(
-                        "FILL_PARAMETERS parameter has invalid value encoding",
-                    ));
+                    return Err(MessageError::InvalidParameter);
                 }
             }
         }
@@ -1527,9 +1515,7 @@ impl MessageParameters {
                 continue;
             }
             let MessageParameterValue::LengthPrefixed(bytes) = &p.value else {
-                return Err(MessageError::ProtocolViolation(
-                    "Range Filter parameter has non-bytes value",
-                ));
+                return Err(MessageError::InvalidParameter);
             };
             // draft-ietf-moq-transport-22 §3.3.2: Length=0 は REQUEST_UPDATE でのフィルタ削除を表し、
             // SetID フィールド自体がワイヤ上に存在しない (ペイロードが空)。仕様の重複規則が対象とする
@@ -1599,15 +1585,9 @@ impl MessageParameters {
 /// encode と decode の両経路で同一の検証を行い、検証の非対称を防ぐ。
 fn validate_uint8_param_value(param_type: u64, value: u8) -> Result<(), MessageError> {
     match param_type {
-        PARAM_PAUSED if value > 1 => Err(MessageError::ProtocolViolation(
-            "PAUSED parameter value must be 0 (unpaused) or 1 (paused)",
-        )),
-        PARAM_GROUP_ORDER if value != 1 && value != 2 => Err(MessageError::ProtocolViolation(
-            "GROUP_ORDER parameter value must be 1 (Ascending) or 2 (Descending)",
-        )),
-        PARAM_INCLUDE_PROPERTIES if value > 1 => Err(MessageError::ProtocolViolation(
-            "INCLUDE_PROPERTIES parameter value must be 0 or 1",
-        )),
+        PARAM_PAUSED if value > 1 => Err(MessageError::InvalidParameter),
+        PARAM_GROUP_ORDER if value != 1 && value != 2 => Err(MessageError::InvalidParameter),
+        PARAM_INCLUDE_PROPERTIES if value > 1 => Err(MessageError::InvalidParameter),
         _ => Ok(()),
     }
 }
@@ -1680,11 +1660,7 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
     if let MessageParameterValue::FillParameters(inner) = &param.value {
         inner
             .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
-            .map_err(|_| {
-                MessageError::ProtocolViolation(
-                    "FILL_PARAMETERS inner parameter not allowed in this context",
-                )
-            })?;
+            .map_err(|_| MessageError::InvalidParameter)?;
     }
 
     Ok(())
@@ -1703,29 +1679,23 @@ fn validate_param_encoding(param: &MessageParameter) -> Result<(), MessageError>
 /// 内側のデルタの基準は 0 から取り直す (`decode_inner` が新規に `prev_type = 0` で読む)。
 ///
 /// - `Number of Parameters` の varint が無い / 途中で切れている場合は `UnexpectedEof`
-/// - 内側の個数がバッファ容量を超える場合はフレーミング違反として `ProtocolViolation`、
+/// - 内側の個数がバッファ容量を超える場合はフレーミング違反として `MalformedMessage`、
 ///   内側の varint (delta key / Type / Length / 偶数型の値) が途中で切れている場合も
 ///   `UnexpectedEof` になる
 /// - 内側の長さプレフィックス付き値の宣言長が残りバッファを超える場合は、Type を理解した
-///   うえで Length/Value が直列化と一致しないため `KeyValueFormattingError` になる
+///   うえで Length/Value が直列化と一致しないため `MalformedKeyValue` になる
 /// - 内側の重複型は `decode_inner` の一般規則 (§9.19 (Control Message Parameters)) が
-///   `ProtocolViolation` として検出する
+///   `InvalidParameter` として検出する
 /// - 内側に FILL_PARAMETERS 自身は現れない (Table 7)。`decode_value` が内側を読む前に
-///   `ProtocolViolation` として拒否するため、深い入れ子でも再帰しない
-/// - Table 7 外のパラメータがある場合は §9.19.15 の MUST に従って拒否する。本 codec は
-///   `validate_scope` の既存の写像に合わせて `ProtocolViolation` を返し、セッション終了
-///   コード (INVALID_PARAMETER) への変換は session 層が担う
+///   `InvalidParameter` として拒否するため、深い入れ子でも再帰しない
+/// - Table 7 外のパラメータがある場合は §9.19.15 の MUST に従って `InvalidParameter` で拒否する
 ///
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn decode_fill_parameters(bytes: &[u8]) -> Result<(MessageParameters, usize), MessageError> {
     let (inner, consumed) = MessageParameters::decode_inner(bytes, false)?;
     inner
         .validate_scope(FILL_PARAMETERS_ALLOWED_PARAMS)
-        .map_err(|_| {
-            MessageError::ProtocolViolation(
-                "FILL_PARAMETERS inner parameter not allowed in this context",
-            )
-        })?;
+        .map_err(|_| MessageError::InvalidParameter)?;
     Ok((inner, consumed))
 }
 
@@ -1745,7 +1715,7 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
         MessageParameterValue::LengthPrefixed(bytes) => {
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
             if bytes.len() > 65535 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::FieldLengthExceeded(
                     "message parameter value length exceeds 65535",
                 ));
             }
@@ -1761,7 +1731,7 @@ fn encode_value(value: &MessageParameterValue, buf: &mut Vec<u8>) -> Result<(), 
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
             let bytes = token.encode_to_bytes();
             if bytes.len() > 65535 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::FieldLengthExceeded(
                     "message parameter value length exceeds 65535",
                 ));
             }
@@ -1814,16 +1784,16 @@ fn decode_value(
             let (len, n) = varint::decode(buf)?;
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 値長上限は 2^16-1 バイト
             if len > 65535 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::FieldLengthExceeded(
                     "message parameter value length exceeds 65535",
                 ));
             }
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): Type を理解した
-            // うえで Length/Value が直列化と一致しない場合は KEY_VALUE_FORMATTING_ERROR。
+            // うえで Length/Value が直列化と一致しない場合は MALFORMED_KEY_VALUE。
             // `varint::checked_len` は他の用途と共有しているため、ここで文脈に応じた
             // variant へ写す。
             let len_usize = varint::checked_len(len, buf[n..].len()).map_err(|_| {
-                MessageError::KeyValueFormattingError(
+                MessageError::MalformedKeyValue(
                     "message parameter value length exceeds remaining buffer",
                 )
             })?;
@@ -1848,9 +1818,7 @@ fn decode_value(
             // 内側に FILL_PARAMETERS 自身は現れない (Table 7 外)。再帰を許すと 1 メッセージで
             // 任意深さの再帰になりスタックを消費するため、内側を読む前に拒否する。
             if !allow_fill {
-                return Err(MessageError::ProtocolViolation(
-                    "FILL_PARAMETERS must not be nested",
-                ));
+                return Err(MessageError::InvalidParameter);
             }
             let (inner, n) = decode_fill_parameters(buf)?;
             Ok((MessageParameterValue::FillParameters(inner), n))

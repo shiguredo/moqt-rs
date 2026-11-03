@@ -317,8 +317,8 @@ fn object_with_prior_ref_rejected_without_prior_object() -> noprop::TestResult {
             let err = FetchStreamEntry::decode(&buf, context)
                 .expect_err("prior なし文脈の prior 参照は拒否されること");
             assert!(
-                matches!(err, MessageError::ProtocolViolation(_)),
-                "PROTOCOL_VIOLATION で拒否されること: {err:?}"
+                matches!(err, MessageError::MalformedObject(_)),
+                "MALFORMED_OBJECT で拒否されること: {err:?}"
             );
         }
         Ok(())

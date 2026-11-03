@@ -188,7 +188,7 @@ impl SubgroupStreamDecoder {
                     Some(prev) => prev
                         .checked_add(obj.object_id_delta)
                         .and_then(|v| v.checked_add(1))
-                        .ok_or(MessageError::ProtocolViolation(
+                        .ok_or(MessageError::DeltaEncodingOverflow(
                             "subgroup object ID delta overflow",
                         ))?,
                 };
@@ -726,7 +726,7 @@ impl FetchStreamDecoder {
                         .checked_add(id)
                         .and_then(|v| v.checked_add(1))
                         .ok_or({
-                            MessageError::ProtocolViolation(
+                            MessageError::DeltaEncodingOverflow(
                                 "fetch group ID delta overflow in ascending order",
                             )
                         })?,
@@ -734,7 +734,7 @@ impl FetchStreamDecoder {
                         .checked_sub(id)
                         .and_then(|v| v.checked_sub(1))
                         .ok_or({
-                            MessageError::ProtocolViolation(
+                            MessageError::DeltaEncodingOverflow(
                                 "fetch group ID delta underflow in descending order",
                             )
                         })?,
@@ -753,7 +753,7 @@ impl FetchStreamDecoder {
             FetchSubgroupIdMode::PreviousPlusOne => prior.map_or(Ok(1), |p| {
                 p.subgroup_id
                     .checked_add(1)
-                    .ok_or(MessageError::ProtocolViolation(
+                    .ok_or(MessageError::DeltaEncodingOverflow(
                         "fetch subgroup ID delta overflow",
                     ))
             })?,
@@ -765,33 +765,36 @@ impl FetchStreamDecoder {
         // 同 Group: Object ID Delta present → prior + delta、absent → prior + 1
         // (draft-ietf-moq-transport-22 §11.4.1.1 (Flags))
         // 注: Subgroup (§11.3.1) と異なり Fetch の Object ID Delta に +1 は付かない
-        let object_id = if prior.is_none() {
-            obj.object_id.unwrap_or(0)
-        } else {
-            let prev_group = prior.map_or(0, |p| p.group_id);
-            let prev_object = prior.map_or(0, |p| p.object_id);
-            if group_id != prev_group {
-                // Group 変更時: Object ID Delta は絶対値、absent なら prior + 1
-                match obj.object_id {
-                    Some(absolute_id) => absolute_id,
-                    None => prev_object
-                        .checked_add(1)
-                        .ok_or(MessageError::ProtocolViolation("fetch object ID overflow"))?,
-                }
-            } else if let Some(delta) = obj.object_id {
-                // 同 Group: Object ID = prior + delta (Subgroup と異なり +1 しない)
-                prev_object
-                    .checked_add(delta)
-                    .ok_or(MessageError::ProtocolViolation(
-                        "fetch object ID delta overflow",
-                    ))?
+        let object_id =
+            if prior.is_none() {
+                obj.object_id.unwrap_or(0)
             } else {
-                // Object ID Delta absent: prior + 1 (group に関係なく)
-                prev_object
-                    .checked_add(1)
-                    .ok_or(MessageError::ProtocolViolation("fetch object ID overflow"))?
-            }
-        };
+                let prev_group = prior.map_or(0, |p| p.group_id);
+                let prev_object = prior.map_or(0, |p| p.object_id);
+                if group_id != prev_group {
+                    // Group 変更時: Object ID Delta は絶対値、absent なら prior + 1
+                    match obj.object_id {
+                        Some(absolute_id) => absolute_id,
+                        None => prev_object.checked_add(1).ok_or(
+                            MessageError::DeltaEncodingOverflow("fetch object ID overflow"),
+                        )?,
+                    }
+                } else if let Some(delta) = obj.object_id {
+                    // 同 Group: Object ID = prior + delta (Subgroup と異なり +1 しない)
+                    prev_object
+                        .checked_add(delta)
+                        .ok_or(MessageError::DeltaEncodingOverflow(
+                            "fetch object ID delta overflow",
+                        ))?
+                } else {
+                    // Object ID Delta absent: prior + 1 (group に関係なく)
+                    prev_object
+                        .checked_add(1)
+                        .ok_or(MessageError::DeltaEncodingOverflow(
+                            "fetch object ID overflow",
+                        ))?
+                }
+            };
 
         let publisher_priority = obj
             .publisher_priority

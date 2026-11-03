@@ -13,7 +13,9 @@
 //! are sent." したがって受信側は subscription state も Track Alias も作らず、Objects も送らない。
 //! この節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 
-use crate::error::SESSION_PROTOCOL_VIOLATION;
+use crate::error::{
+    SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
+};
 use crate::message::{
     ControlMessage, TrackStatus as WireTrackStatus, common::Location, common::TrackNamespace,
 };
@@ -175,7 +177,8 @@ impl Session {
             return Ok(());
         }
         // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
-        // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる
+        // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
+        // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = track_status.parameters.include_properties();
         if let Some(v) = include_properties
             && let Err(err) = super::subscription::validation::validate_include_properties(v)
@@ -352,7 +355,7 @@ impl Session {
         // responder の entry に REQUEST_OK が届くのは peer の違反である (§9.13)
         if entry.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_OK (track_status) received on responder side",
             );
             self.fail(err.clone());
@@ -360,7 +363,7 @@ impl Session {
         }
         if entry.response.is_some() {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_OK (track_status) on already-responded entry",
             );
             self.fail(err.clone());
@@ -401,7 +404,7 @@ impl Session {
         // responder の entry に REQUEST_ERROR が届くのは peer の違反である (§9.13)
         if entry.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_ERROR (track_status) received on responder side",
             );
             self.fail(err.clone());
@@ -409,7 +412,7 @@ impl Session {
         }
         if entry.response.is_some() {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_ERROR (track_status) on already-responded entry",
             );
             self.fail(err.clone());

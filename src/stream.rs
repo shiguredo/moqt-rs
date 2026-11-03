@@ -37,7 +37,7 @@ pub enum DataStreamType {
     /// `recv_data_stream_type` でこの種別を得たあと、後続バイトを読み捨てるだけでよい。
     ///
     /// Session が種別だけを保持するのは、同一ストリームに subgroup / fetch header が
-    /// 来た場合を `PROTOCOL_VIOLATION` として弾くためである。
+    /// 来た場合を `INVALID_STREAM_HEADER` として弾くためである。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     Padding,
 }
@@ -65,7 +65,8 @@ pub const SETUP_STREAM_TYPE: u64 = 0x2F00;
 /// - それ以外 → `None`
 ///
 /// 予約済みの `SUBGROUP_ID_MODE = 0b11` を含む type 値も `Subgroup` として返す。
-/// それらは後続の [`crate::stream::subgroup::SubgroupHeader`] デコードが `PROTOCOL_VIOLATION` として reject する。
+/// それらは後続の [`crate::stream::subgroup::SubgroupHeader`] デコードが
+/// `INVALID_STREAM_HEADER` として reject する。
 pub fn classify_data_stream_type(type_id: u64) -> Option<DataStreamType> {
     // control stream (SETUP_STREAM_TYPE = 0x2F00) は data stream ではないため除外する
     // (draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams) Table 2 で制御ストリームは別扱い)
@@ -130,12 +131,14 @@ pub const OBJECT_STATUS_END_OF_TRACK: u64 = 0x4;
 /// draft-ietf-moq-transport-22 §11.1.1 (Object Status): Object Status の値域を検証する
 ///
 /// 有効値は IANA Object Status registry に登録された値 (0x0 Normal, 0x3 End of Group,
-/// 0x4 End of Track)。未知の status code は draft-ietf-moq-transport-22 §11.1.1 に従い
-/// SHOULD be treated as a protocol error (PROTOCOL_VIOLATION でセッションを閉じる)。
+/// 0x4 End of Track)。未知の status code は draft-ietf-moq-transport-23 §11.1.1
+/// (Object Status) に従い INVALID_OBJECT_STATUS (0x202) でセッションを閉じる。
 pub(crate) fn validate_object_status(status: u64) -> Result<(), MessageError> {
     match status {
         OBJECT_STATUS_NORMAL | OBJECT_STATUS_END_OF_GROUP | OBJECT_STATUS_END_OF_TRACK => Ok(()),
-        _ => Err(MessageError::ProtocolViolation(
+        // draft-ietf-moq-transport-23 §11.1.1 (Object Status) / §12.2
+        // (Session Termination Codes): 定義値以外の Status は INVALID_OBJECT_STATUS (0x202)。
+        _ => Err(MessageError::InvalidObjectStatus(
             "unknown object status value",
         )),
     }
@@ -149,11 +152,14 @@ pub(crate) fn validate_object_status(status: u64) -> Result<(), MessageError> {
 /// `ProtocolViolation` とする。
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 fn validate_properties_blob(data: &[u8]) -> Result<u64, MessageError> {
+    // draft-ietf-moq-transport-23 §11.1.2 (Object Properties) / §12.2
+    // (Session Termination Codes): Properties Length と実データ長が一致しない Object は
+    // 直列化を復号できないため MALFORMED_OBJECT (0x201) で閉じる。
     let (prop_len, n) = varint::decode(data)
-        .map_err(|_| MessageError::ProtocolViolation("malformed properties length"))?;
+        .map_err(|_| MessageError::MalformedObject("malformed properties length"))?;
     // varint::decode が Ok のとき n <= data.len() が保証されるため減算で桁あふれしない
     if prop_len != (data.len() - n) as u64 {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::MalformedObject(
             "properties length does not match the actual data length",
         ));
     }

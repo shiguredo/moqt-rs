@@ -463,9 +463,9 @@ fn peer_request_ok_for_subscription_in_pending_subscriber_closes_session() {
         track_properties: TrackProperties::new(),
     });
     let err = client.recv_stream_message(rid, reqok).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_UNEXPECTED_MESSAGE),
         _ => unreachable!(),
     }
 }
@@ -836,7 +836,7 @@ fn subscription_terminated_by_peer_request_error_accepts_subsequent_publish_done
     let err = client
         .recv_stream_message(rid, duplicate_done)
         .expect_err("重複 PUBLISH_DONE は PROTOCOL_VIOLATION になること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert!(matches!(
         client.state(),
         SessionState::Closing | SessionState::Closed
@@ -2226,7 +2226,7 @@ fn peer_request_update_in_pending_subscriber_closes_session() {
         parameters: MessageParameters::new(),
     });
     let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -2261,7 +2261,7 @@ fn peer_request_update_in_pending_publisher_closes_session() {
         parameters: MessageParameters::new(),
     });
     let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -2721,7 +2721,7 @@ fn peer_request_update_from_publisher_on_subscribe_closes_session() {
         parameters: MessageParameters::new(),
     });
     let err = client.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
@@ -2755,7 +2755,7 @@ fn send_request_update_rejects_invalid_paused_value() {
         value: MessageParameterValue::Uint8(2),
     });
     let err = client.send_request_update(rid, params).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // 検証エラー時に delivery timeout が適用されていないこと (部分適用の残留を防ぐ)
     let sub = client
         .subscription(rid)
@@ -3250,7 +3250,7 @@ fn send_request_update_rejects_invalid_paused_before_invalid_filter() {
         }),
     });
     let err = client.send_request_update(rid, params).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // PAUSED 検証が先に失敗するため、filter 検証のエラーメッセージにはならないこと
     assert_eq!(
         err.reason, "invalid paused value",
@@ -3523,10 +3523,10 @@ fn subscribe_request_update_with_track_property_filter_rejected() {
         parameters: params,
     });
     let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // セッションがクローズされること
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
         _ => unreachable!(),
     }
 }
@@ -3577,7 +3577,7 @@ fn subscribe_request_update_with_subgroup_filter_accepted() {
 }
 
 /// PAUSED 値域外 (2) を含む REQUEST_UPDATE の受信で、`Err` と
-/// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、`pending_update_params` に保存されず
+/// `CloseSession(INVALID_PARAMETER)` の両方が発生し、`pending_update_params` に保存されず
 /// `RequestUpdateReceived` も発火しないこと
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
@@ -3625,7 +3625,7 @@ fn peer_request_update_with_invalid_paused_closes_session() {
             }),
         )
         .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // pending_update_params に保存されないこと (状態非汚染)
     assert!(
         client
@@ -3636,8 +3636,8 @@ fn peer_request_update_with_invalid_paused_closes_session() {
         "値域違反時に pending_update_params に保存されないこと"
     );
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
     // RequestUpdateReceived イベントが発火しないこと
     // (CloseSession を先に消費してから確認する。イベントは CloseSession が最後に積まれる)
@@ -4107,14 +4107,14 @@ fn publish_originated_responder_request_ok_in_pending_closes_session() {
         track_properties: TrackProperties::default(),
     });
     let err = server.recv_stream_message(rid, reqok).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(
         err.reason, "REQUEST_OK (subscription) received on responder side",
         "responder 側の受信として拒否されること"
     );
     assert_eq!(server.state(), SessionState::Closing);
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_ROLE_VIOLATION),
         _ => unreachable!("CloseSession イベントが発行されること"),
     }
     assert_eq!(
@@ -4306,14 +4306,14 @@ fn subscribe_originated_responder_request_ok_in_established_closes_session() {
         track_properties: TrackProperties::default(),
     });
     let err = server.recv_stream_message(rid, reqok).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(
         err.reason, "REQUEST_OK (subscription) received on responder side",
         "responder 側の受信として拒否されること"
     );
     assert_eq!(server.state(), SessionState::Closing);
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_ROLE_VIOLATION),
         _ => unreachable!("CloseSession イベントが発行されること"),
     }
 }

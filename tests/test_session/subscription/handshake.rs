@@ -185,7 +185,7 @@ fn publish_ok_emits_publish_ok_received_event_with_parameters() {
 /// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): LOCATION_FILTER は REQUEST_UPDATE (要求) に出現し、
 /// PUBLISH_OK には出現しない。送信側は状態を変更せずエラーを返し、受信側は
-/// PROTOCOL_VIOLATION でセッションを閉じる。
+/// INVALID_PARAMETER でセッションを閉じる。
 #[test]
 fn publish_ok_with_location_filter_rejected() {
     use shiguredo_moqt::message_parameter::{
@@ -230,15 +230,15 @@ fn publish_ok_with_location_filter_rejected() {
             .is_pending_publisher()
     );
 
-    // 受信側: ワイヤメッセージ直接注入で PROTOCOL_VIOLATION により閉じる
+    // 受信側: ワイヤメッセージ直接注入で INVALID_PARAMETER により閉じる
     let ok_msg = ControlMessage::RequestOk(shiguredo_moqt::message::RequestOk {
         parameters: location_params,
         track_properties: TrackProperties::default(),
     });
     let err = client
         .recv_stream_message(rid, ok_msg)
-        .expect_err("LOCATION_FILTER を含む PUBLISH_OK 受信は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("LOCATION_FILTER を含む PUBLISH_OK 受信は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
@@ -572,11 +572,11 @@ fn send_subscribe_rejects_invalid_paused_value() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
 }
 
-/// send_publish に PAUSED=2 を渡すと SESSION_PROTOCOL_VIOLATION が返る
+/// send_publish に PAUSED=2 を渡すと INVALID_PARAMETER が返る
 #[test]
 fn send_publish_rejects_invalid_paused_value() {
     use shiguredo_moqt::message_parameter::{
@@ -601,7 +601,7 @@ fn send_publish_rejects_invalid_paused_value() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
 }
 
@@ -776,7 +776,7 @@ fn send_publish_single_period_namespace_rejected() {
 }
 
 /// SUBSCRIBE 受信の PAUSED 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
-/// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、セッションが閉じること
+/// `CloseSession(INVALID_PARAMETER)` の両方が発生し、セッションが閉じること
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
 /// value outside this range, it MUST close the session with INVALID_PARAMETER."
@@ -803,12 +803,12 @@ fn subscribe_with_invalid_paused_closes_session() {
             track_name: b"cam".to_vec(),
             parameters: params,
         }))
-        .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 PAUSED は INVALID_PARAMETER になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     // 検証失敗時に Subscription が登録されないこと (検証は insert より前)
     assert!(
@@ -816,13 +816,13 @@ fn subscribe_with_invalid_paused_closes_session() {
         "検証エラー時に Subscription が登録されないこと"
     );
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
 /// PUBLISH 受信の PAUSED 値域外 (0 / 1 以外) で、`Err(RecvRequestError::Session(...))` と
-/// `CloseSession(PROTOCOL_VIOLATION)` の両方が発生し、セッションが閉じること
+/// `CloseSession(INVALID_PARAMETER)` の両方が発生し、セッションが閉じること
 ///
 /// draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): "If an endpoint receives a
 /// value outside this range, it MUST close the session with INVALID_PARAMETER."
@@ -847,12 +847,12 @@ fn publish_with_invalid_paused_closes_session() {
             parameters: params,
             track_properties: TrackProperties::new(),
         }))
-        .expect_err("値域外 PAUSED は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 PAUSED は INVALID_PARAMETER になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     // 検証失敗時に Subscription が登録されないこと (検証は insert より前)
     assert!(
@@ -860,8 +860,8 @@ fn publish_with_invalid_paused_closes_session() {
         "検証エラー時に Subscription が登録されないこと"
     );
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 

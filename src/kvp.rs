@@ -1,6 +1,6 @@
 //! デルタエンコードされた KVP (Key-Value-Pair) の delta-key 骨格
 //!
-//! draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
+//! draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure)
 //!
 //! 複数の KVP モジュール (`loc` / `parameter` / `track_properties` / `object_properties` /
 //! `message_parameter`) が共有する「キー昇順ソート → 前要素との delta を varint で読み書き →
@@ -28,9 +28,12 @@ pub(crate) fn encode_delta_key(prev: u64, key: u64, buf: &mut Vec<u8>) {
 
 /// `buf` の `pos` 位置から delta varint を読み、絶対キーを復元して `(key, delta)` を返す
 ///
-/// `prev.checked_add(delta)` の overflow は PROTOCOL_VIOLATION で弾く
-/// (draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure))。delta を併せて返すのは、
-/// 各モジュールの delta==0 重複検出が delta を直接参照するため (隠蔽すると検出を残せない)。
+/// `prev.checked_add(delta)` の overflow は DELTA_ENCODING_OVERFLOW (0x400) で弾く
+/// (draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の "The previous Type value
+/// plus the Delta Type MUST NOT be greater than 2^64 - 1. If a Delta Type is received that
+/// would be too large, the Session MUST be closed with DELTA_ENCODING_OVERFLOW.")。delta を
+/// 併せて返すのは、各モジュールの delta==0 重複検出が delta を直接参照するため
+/// (隠蔽すると検出を残せない)。
 pub(crate) fn decode_delta_key(
     prev: u64,
     buf: &[u8],
@@ -40,6 +43,8 @@ pub(crate) fn decode_delta_key(
     *pos += n;
     let key = prev
         .checked_add(delta)
-        .ok_or(MessageError::ProtocolViolation("KVP type delta overflow"))?;
+        .ok_or(MessageError::DeltaEncodingOverflow(
+            "KVP type delta overflow",
+        ))?;
     Ok((key, delta))
 }

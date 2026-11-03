@@ -419,7 +419,7 @@ fn responder_receiving_request_ok_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -446,7 +446,7 @@ fn responder_receiving_request_error_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 

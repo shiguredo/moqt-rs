@@ -517,31 +517,33 @@ fn prior_object_id_gap_of_reads_the_property() {
         "IMMUTABLE_PROPERTIES の内側の PRIOR_OBJECT_ID_GAP も読むこと"
     );
 
-    // 宣言長が実データ長を超えるブロック
+    // 宣言長が実データ長を超えるブロックは、Properties Length で閉じたブロックの
+    // 直列化が破損しているため MALFORMED_OBJECT になる
     assert!(
         matches!(
             prior_object_id_gap_of(Some(b"\x05\x3e")),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::MalformedObject(_))
         ),
-        "宣言長に対してデータが足りない Properties は書式違反として拒否すること"
+        "宣言長に対してデータが足りない Properties は MALFORMED_OBJECT として拒否すること"
     );
     // 空のバイト列 (Properties Length すら無い)
     assert!(
         matches!(
             prior_object_id_gap_of(Some(&[])),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::MalformedObject(_))
         ),
-        "空の Properties は書式違反として拒否すること"
+        "空の Properties は MALFORMED_OBJECT として拒否すること"
     );
-    // 末尾に余分なバイトがあるブロック
+    // 末尾に余分なバイトがあるブロックは、Object の直列化を復号できないため
+    // MALFORMED_OBJECT として拒否する (draft-ietf-moq-transport-23 §12.2)
     let mut extra_bytes = gap_bytes.clone();
     extra_bytes.push(0x00);
     assert!(
         matches!(
             prior_object_id_gap_of(Some(&extra_bytes)),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::MalformedObject(_))
         ),
-        "宣言長と実データ長が一致しない Properties は書式違反として拒否すること"
+        "宣言長と実データ長が一致しない Properties は MALFORMED_OBJECT として拒否すること"
     );
 }
 

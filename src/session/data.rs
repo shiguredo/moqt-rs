@@ -6,9 +6,10 @@
 //! sans I/O API を提供する。
 
 use crate::error::{
-    MessageError, PUBLISH_DONE_UPDATE_FAILED, SESSION_KEY_VALUE_FORMATTING_ERROR,
-    SESSION_PROTOCOL_VIOLATION, STREAM_CANCELLED, STREAM_INTERNAL_ERROR, STREAM_MALFORMED_TRACK,
-    is_local_error_code,
+    MessageError, PUBLISH_DONE_UPDATE_FAILED, SESSION_INVALID_STREAM_HEADER,
+    SESSION_MALFORMED_OBJECT, SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION,
+    SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE, STREAM_CANCELLED, STREAM_INTERNAL_ERROR,
+    STREAM_MALFORMED_TRACK, is_local_error_code,
 };
 use crate::message::{ControlMessage, PublishDone, ReasonPhrase, common::Location};
 use crate::object_properties::{DeliveryMode, ObjectFieldTracker, ObjectProperties};
@@ -1034,8 +1035,9 @@ impl Session {
     /// それ以外の uni stream について本 API を呼ぶ。
     ///
     /// draft §6.3 (Session initialization) に従い、SETUP 完了前の到着は `BeforeSessionEstablished`
-    /// を返して caller に buffer 判断を委ねる。unknown stream type は draft §6.4.1 (Unidirectional Streams) に
-    /// 従い `PROTOCOL_VIOLATION` で session を閉じる。
+    /// を返して caller に buffer 判断を委ねる。unknown stream type は draft §6.4.1
+    /// (Unidirectional Streams) に従い `INVALID_STREAM_HEADER` で session を閉じる
+    /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
     pub fn recv_data_stream_type(
         &mut self,
         stream_id: DataStreamId,
@@ -1051,7 +1053,9 @@ impl Session {
             )));
         }
         let Some(kind) = classify_data_stream_type(stream_type) else {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, "unknown data stream type");
+            // draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams): 未知のストリーム型は
+            // INVALID_STREAM_HEADER (0x200) でセッションを閉じる (MUST)。
+            let err = SessionError::new(SESSION_INVALID_STREAM_HEADER, "unknown data stream type");
             self.fail(err.clone());
             return Err(RecvDataStreamError::Session(err));
         };
@@ -1102,8 +1106,10 @@ impl Session {
             Some(IncomingDataStream::AwaitingHeader {
                 kind: DataStreamType::Fetch,
             }) => {
+                // ストリーム型と受信ヘッダの種別が一致しない場合は
+                // INVALID_STREAM_HEADER (0x200)。
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "subgroup header received on fetch stream",
                 ));
             }
@@ -1118,15 +1124,17 @@ impl Session {
                     // ある stream は帰属先にとって生きた stream なので吸収しない
                     cancelled_request_id = Some(stream.request_id);
                 } else {
+                    // 2 回目の SUBGROUP_HEADER は UNEXPECTED_MESSAGE (0x303)
+                    // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
                     return Err(SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
+                        SESSION_UNEXPECTED_MESSAGE,
                         "subgroup header already received for stream id",
                     ));
                 }
             }
             Some(IncomingDataStream::Fetch { .. }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "subgroup header received after fetch header",
                 ));
             }
@@ -1134,7 +1142,7 @@ impl Session {
                 kind: DataStreamType::Padding,
             }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "subgroup header received on padding stream",
                 ));
             }
@@ -1356,7 +1364,8 @@ impl Session {
     ///
     /// 破棄対象の stream (破棄対象の保持集合または `Discarded` variant) への Object 受信は
     /// no-op で吸収するため `Ok(None)` を返す。`Subgroup` variant 以外の状態への Object 受信は
-    /// `PROTOCOL_VIOLATION` である。
+    /// `MALFORMED_OBJECT` (ヘッダ未受信) または `INVALID_STREAM_HEADER` (stream 種別の不一致)
+    /// である (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
     ///
     /// 返す写しは本段階の更新前の値を持つ。先頭 Object フラグが `false` なら、これから処理する
     /// Object が Subgroup の先頭である。wire 構造に属する更新 (先頭 Object フラグ・最終 Object ID・
@@ -1383,14 +1392,16 @@ impl Session {
                 snapshot
             }
             Some(IncomingDataStream::AwaitingHeader { .. }) => {
+                // ヘッダ無しで Object を復号することはできないため MALFORMED_OBJECT (0x201)
+                // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_MALFORMED_OBJECT,
                     "subgroup object received before subgroup header",
                 ));
             }
             Some(IncomingDataStream::Fetch { .. }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "subgroup object received on fetch stream",
                 ));
             }
@@ -2066,11 +2077,11 @@ impl Session {
                 Ok(())
             }
             Some(IncomingDataStream::AwaitingHeader { .. }) => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_MALFORMED_OBJECT,
                 "fetch entry received before fetch header",
             )),
             Some(IncomingDataStream::Subgroup(_)) => Err(SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_STREAM_HEADER,
                 "fetch entry received on subgroup stream",
             )),
             // 破棄対象 stream への entry は no-op で吸収する (遅延 in-flight stream の
@@ -2103,7 +2114,8 @@ impl Session {
     /// 同じく `Terminated` の fetch へ遅延して届いた FETCH 応答 stream も
     /// 破棄対象 stream として吸収する。
     /// それ以外 (未知 ID / 非 subscriber 役 / 上記以外の `Terminated`) は
-    /// PROTOCOL_VIOLATION でセッションを閉じる。
+    /// `UNEXPECTED_MESSAGE` または `ROLE_VIOLATION` でセッションを閉じる
+    /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
     /// fill は複数本の同時存在を許すため `has_other_fetch_stream` 検証は行わない。
     /// なお FETCH と fill の判別は Session が行うため、アプリは request id 種別を
     /// 自前で管理する必要はない。
@@ -2126,25 +2138,25 @@ impl Session {
                 kind: DataStreamType::Subgroup,
             }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "fetch header received on subgroup stream",
                 ));
             }
             Some(IncomingDataStream::Fetch { .. }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "fetch header already received for stream id",
                 ));
             }
             Some(IncomingDataStream::Subgroup(_)) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "fetch header received after subgroup header",
                 ));
             }
             Some(IncomingDataStream::Discarded { .. }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "fetch header received on discarded stream",
                 ));
             }
@@ -2152,7 +2164,7 @@ impl Session {
                 kind: DataStreamType::Padding,
             }) => {
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_INVALID_STREAM_HEADER,
                     "fetch header received on padding stream",
                 ));
             }
@@ -2175,8 +2187,10 @@ impl Session {
             .map(|fetch| (fetch.my_role, fetch.state));
         if let Some((role, state)) = fetch_state {
             if role != TrackRole::Subscriber {
+                // 自側が publisher の FETCH へ FETCH_HEADER を送るのは role 違反
+                // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_ROLE_VIOLATION,
                     "FETCH_HEADER received on publisher side",
                 );
                 self.fail(err.clone());
@@ -2185,8 +2199,11 @@ impl Session {
             // draft-ietf-moq-transport-22 §3.2.1 (Fetch Object Delivery): 1 つの FETCH の
             // 応答は 1 本の data stream に限る。遅延 stream の許容判定より先に検証する。
             if self.has_other_fetch_stream(stream_id, header.request_id) {
+                // 1 つの FETCH の応答は 1 本の data stream に限る
+                // (draft-ietf-moq-transport-23 §3.2.1 (Fetch Object Delivery))。
+                // 許容回数を超える stream は UNEXPECTED_MESSAGE (0x303)。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "concurrent FETCH data streams for the same request id",
                 );
                 self.fail(err.clone());
@@ -2201,7 +2218,7 @@ impl Session {
                     return Ok(());
                 }
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "FETCH_HEADER received for terminated fetch",
                 );
                 self.fail(err.clone());
@@ -2226,7 +2243,7 @@ impl Session {
                     .any(|existing| *existing == header.request_id)
                 {
                     let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
+                        SESSION_UNEXPECTED_MESSAGE,
                         "concurrent FETCH data streams for the same request id",
                     );
                     self.fail(err.clone());
@@ -2248,7 +2265,7 @@ impl Session {
                 self.resolve_fill_subscription(header.request_id)
             else {
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "FETCH_HEADER received for unknown request id",
                 );
                 self.fail(err.clone());
@@ -2292,15 +2309,17 @@ impl Session {
 
                 (TrackRole::Subscriber, SubscriptionState::Terminated, false) => {
                     let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
+                        SESSION_UNEXPECTED_MESSAGE,
                         "FETCH_HEADER received for cancelled subscription",
                     );
                     self.fail(err.clone());
                     return Err(err);
                 }
                 _ => {
+                    // 自側が publisher の subscription へ FETCH_HEADER を送るのは role 違反
+                    // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
                     let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
+                        SESSION_ROLE_VIOLATION,
                         "FETCH_HEADER received for publisher-side subscription",
                     );
                     self.fail(err.clone());
@@ -2398,19 +2417,20 @@ impl Session {
         {
             return Err(session_error_from_data_message(err).into());
         }
-        // draft-ietf-moq-transport-22 §11.1.1 (Object Status):
-        // "Any other value SHOULD be treated as a protocol error and the session SHOULD be
-        //  closed with a PROTOCOL_VIOLATION (Section 12.2)."
-        // 未知 status は wire 生成前 (フィルタ評価と最大位置更新より前) に拒否する。
+        // draft-ietf-moq-transport-23 §11.1.1 (Object Status) / §12.2
+        // (Session Termination Codes): 定義値以外の Status は INVALID_OBJECT_STATUS (0x202) で
+        // セッションを閉じる。未知 status は wire 生成前 (フィルタ評価と最大位置更新より前) に
+        // 拒否する。
         // 判定は encoder (`ObjectDatagram::encode`) と同じ validate_object_status を使う。
         if let Some(status) = status
             && let Err(err) = crate::stream::validate_object_status(status)
         {
             return Err(session_error_from_data_message(err).into());
         }
-        // draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): STATUS (0x20) と
+        // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): STATUS (0x20) と
         // END_OF_GROUP (0x02) の両方が立った Type 値は無効であり、受信側は
-        // PROTOCOL_VIOLATION でセッションを閉じる。wire を生成しないよう送信前にも拒否する。
+        // INVALID_STREAM_HEADER (0x200) でセッションを閉じる。wire を生成しないよう
+        // 送信前にも拒否する。
         // 判定は encoder (`ObjectDatagram::encode`) と同じ条件を使い、フィルタ評価と
         // 最大位置更新より前に置いて拒否時に状態を汚染しない。
         if status.is_some() && end_of_group {
@@ -2556,8 +2576,9 @@ impl Session {
     ///
     /// §11 は "All MOQT datagrams start with a variable-length integer indicating the type
     /// of the datagram." と "An endpoint that receives an unknown datagram type MUST close
-    /// the session." を規定する。エラーコードは §11 では指定されていないため、§11.2.1 が
-    /// 不正な Object Datagram Type 値に対して規定する PROTOCOL_VIOLATION に準拠する。
+    /// the session with INVALID_STREAM_HEADER." を規定する
+    /// (draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams) / §12.2
+    /// (Session Termination Codes))。
     ///
     /// Sans I/O の Session が raw bytes を受け取るのは、先頭 varint による type 分岐が
     /// プロトコル状態の判定にあたるためである。分岐後の処理は
@@ -2570,8 +2591,10 @@ impl Session {
     pub fn recv_datagram(&mut self, raw: &[u8]) -> Result<DatagramAcceptance, SessionError> {
         self.require_established()?;
         let Ok((type_id, _)) = varint::decode(raw) else {
+            // datagram の先頭 varint を復号できない = ストリーム/データグラムの型が不正
+            // (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_STREAM_HEADER,
                 "datagram type varint could not be decoded",
             );
             self.fail(err.clone());
@@ -2585,17 +2608,21 @@ impl Session {
         // draft §11.2.1 (Object Datagram): type 値の妥当性だけを先に判定し、
         // unknown type とヘッダ本体の不正を別の reason で区別する
         if validate_object_datagram_type(type_id).is_err() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, "unknown datagram type");
+            // draft-ietf-moq-transport-23 §11 (Data Streams and Datagrams): 未知の datagram
+            // type は INVALID_STREAM_HEADER (0x200) で閉じる (MUST)。
+            let err = SessionError::new(SESSION_INVALID_STREAM_HEADER, "unknown datagram type");
             self.fail(err.clone());
             return Err(err);
         }
-        let Ok((datagram, _)) = ObjectDatagram::decode(raw) else {
-            let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
-                "malformed OBJECT_DATAGRAM header",
-            );
-            self.fail(err.clone());
-            return Err(err);
+        let datagram = match ObjectDatagram::decode(raw) {
+            Ok((datagram, _)) => datagram,
+            Err(err) => {
+                // decode が返す原因 (INVALID_OBJECT_STATUS / MALFORMED_OBJECT など) を
+                // 失わずにセッション終了コードへ写す。
+                let err = session_error_from_data_message(err);
+                self.fail(err.clone());
+                return Err(err);
+            }
         };
         self.recv_object_datagram(&datagram)
             .map(DatagramAcceptance::Object)
@@ -2661,7 +2688,7 @@ impl Session {
                     .status
                     .is_some_and(|status| status != OBJECT_STATUS_NORMAL)
             {
-                Some(crate::error::MessageError::ProtocolViolation(
+                Some(crate::error::MessageError::InvalidObjectStatus(
                     "properties on non-Normal status object is not allowed",
                 ))
             } else {
@@ -3163,8 +3190,9 @@ impl Session {
     /// シリアライズ途中の Object で stream が graceful 終了したことを報告する
     /// (draft §11.3 (Subgroup Streams))
     ///
-    /// §11.3: "If a stream ends gracefully (i.e., the stream terminates with a FIN) in the
-    /// middle of a serialized Object, the session SHOULD be closed with a PROTOCOL_VIOLATION."
+    /// draft-ietf-moq-transport-23 §11.3 (Subgroup Streams): "If a stream ends gracefully
+    /// (i.e., the stream terminates with a FIN) in the middle of a serialized Object, the
+    /// receiver SHOULD close the session with TRUNCATED_OBJECT."
     ///
     /// Sans I/O の Session は decoder を持たない (`SubgroupStreamDecoder` /
     /// `FetchStreamDecoder` はアプリケーションが Session の外で保持する) ため、
@@ -3172,7 +3200,7 @@ impl Session {
     /// アプリケーションがそれを検出したときに本 API を呼ぶ。
     ///
     /// §11.3 は SHOULD なので、本 API を **呼ぶこと自体が** セッションを閉じる判断である。
-    /// 呼び出すと `PROTOCOL_VIOLATION` で session fail し `Err` を返す。
+    /// 呼び出すと `TRUNCATED_OBJECT` で session fail し `Err` を返す。
     ///
     /// 例外は破棄対象 stream のみである。`Discarded` variant、またはキャンセル由来
     /// `Terminated` に属し現在も生きた Object の帰属先が無い `Subgroup` variant は
@@ -3215,8 +3243,11 @@ impl Session {
         if self.data_streams.discarded.contains_key(&stream_id) {
             return Ok(());
         }
+        // draft-ietf-moq-transport-23 §11.3 (Subgroup Streams) / §12.2
+        // (Session Termination Codes): シリアライズ途中の Object での FIN は
+        // TRUNCATED_OBJECT (0x203) でセッションを閉じる。
         let err = SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_TRUNCATED_OBJECT,
             "data stream finished in the middle of a serialized object",
         );
         self.fail(err.clone());
@@ -4360,15 +4391,26 @@ fn payload_key_of(status: Option<u64>, payload_length: Option<u64>) -> [u8; 18] 
     key
 }
 
+/// データプレーンの decode エラーをセッション終了コードへ写す
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
+/// [`MessageError::session_termination_code`] が返す最も具体的なコードを使う。
+/// データプレーン固有の差分は次の 2 点である。
+///
+/// - `UnexpectedEof` は制御メッセージの途中終端ではなく、データストリーム /
+///   データグラムが Object のシリアライズ途中で終わったことを表すため
+///   MALFORMED_OBJECT (0x201) に写す (§11.3 (Subgroup Streams) の FIN 途中断は
+///   [`Session::report_mid_object_fin`] が TRUNCATED_OBJECT を返す)
+/// - `MalformedTrack` は draft §12.1 (Malformed Tracks) の検出でありセッションを
+///   閉じないため、購読 cancel の理由を添えて `PROTOCOL_VIOLATION` に写す
+///
+/// セッション終了コードを持たない variant (MSF カタログ等) は、データプレーンでは
+/// 発生しない想定の防御として `PROTOCOL_VIOLATION` にフォールバックする。
 fn session_error_from_data_message(err: crate::error::MessageError) -> SessionError {
-    match err {
-        crate::error::MessageError::ProtocolViolation(msg)
-        | crate::error::MessageError::MalformedTrack(msg) => {
-            SessionError::new(SESSION_PROTOCOL_VIOLATION, msg)
-        }
-        crate::error::MessageError::KeyValueFormattingError(msg) => {
-            SessionError::new(SESSION_KEY_VALUE_FORMATTING_ERROR, msg)
-        }
-        _ => SessionError::new(SESSION_PROTOCOL_VIOLATION, "data plane decode error"),
+    match err.data_plane_session_termination_code() {
+        Some(code) => SessionError::new(code, err.reason()),
+        // draft §12.1 (Malformed Tracks) は購読 cancel でありセッションを閉じない。
+        // 呼び出し側は戻り値の reason を cancel 理由として使う。
+        None => SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason()),
     }
 }

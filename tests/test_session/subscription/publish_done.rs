@@ -1107,7 +1107,7 @@ fn peer_publish_done_in_pending_subscriber_closes_session() {
             .expect("テストフィクスチャの前提条件を満たす"),
     });
     let err = client.recv_stream_message(rid, done).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 

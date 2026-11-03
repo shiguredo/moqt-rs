@@ -1,7 +1,7 @@
 //! キャンセル済み subscription への Object の破棄と stream 会計のテスト
 
 use super::*;
-use shiguredo_moqt::error::SESSION_PROTOCOL_VIOLATION;
+use shiguredo_moqt::error::{SESSION_TRUNCATED_OBJECT, SESSION_UNEXPECTED_MESSAGE};
 use shiguredo_moqt::message_parameter::PARAM_OBJECTID_FILTER;
 
 /// キャンセル済み subscription への Object は Discarded として返ること
@@ -485,7 +485,7 @@ fn report_mid_object_fin_with_attribution_closes_session() {
     let err = client
         .report_mid_object_fin(stream_id)
         .expect_err("帰属実績のある stream の mid-object FIN はセッションを閉じること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_TRUNCATED_OBJECT);
     assert!(
         matches!(client.state(), SessionState::Closing | SessionState::Closed),
         "帰属実績のある mid-object FIN でセッションが閉じること"
@@ -808,7 +808,7 @@ fn re_subgroup_header_with_live_attribution_is_rejected() {
     let err = client
         .recv_subgroup_header(stream_id, &header)
         .expect_err("生きた帰属先がある stream への再 SUBGROUP_HEADER は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Established);
 
     // 拒否後も stream は帰属先 rid2 が受信し続けられる

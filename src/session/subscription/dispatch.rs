@@ -2,7 +2,8 @@
 //! draft-ietf-moq-transport-22 §9.3-§9.4, §9.5.1 に対応。将来 draft 側で変更される可能性がある。
 
 use crate::error::{
-    PUBLISH_DONE_UPDATE_FAILED, SESSION_PROTOCOL_VIOLATION, STREAM_DELIVERY_TIMEOUT,
+    PUBLISH_DONE_UPDATE_FAILED, SESSION_INVALID_PARAMETER, SESSION_PROTOCOL_VIOLATION,
+    SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE, STREAM_DELIVERY_TIMEOUT,
 };
 use crate::message::{
     ControlMessage, PUBLISH_OK_ALLOWED_PARAMS, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS,
@@ -77,7 +78,7 @@ impl Session {
         };
         // draft §9.20.1 (Parameter Scope): スコープ外パラメータを含む REQUEST_OK では
         // 状態を一切変更せずエラーを返す。受信側はスコープ外パラメータで
-        // PROTOCOL_VIOLATION により接続を閉じる (MUST) ため、送信側でも
+        // INVALID_PARAMETER により接続を閉じる (MUST) ため、送信側でも
         // 状態遷移・パラメータ適用より前に検証して自側の状態整合性を保つ。
         // 検証が遷移後に走ると、PUBLISH_OK 経路では subscription が Established のまま、
         // REQUEST_UPDATE_OK 経路では pending_update_params が消費されパラメータが
@@ -146,14 +147,15 @@ impl Session {
                         Ok(LocationFilterUpdate::Set(filter)) => {
                             subscription.filter = Some(filter);
                         }
-                        Err(_) => {
-                            // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
-                            // StartGroup + EndGroupDelta のオーバーフローは MUST close the session with
-                            // PROTOCOL_VIOLATION。受信メッセージでは decode 層が先に拒否するため
-                            // 到達せず、API 経由で手組みしたメッセージに対してのみ安全側に閉じる
-                            let err = SessionError::new(
-                                SESSION_PROTOCOL_VIOLATION,
-                                "invalid subscription filter encoding in pending REQUEST_UPDATE",
+                        Err(msg_err) => {
+                            // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter):
+                            // 未知の Location Filter Type は INVALID_PARAMETER、StartGroup +
+                            // EndGroupDelta のオーバーフローは DELTA_ENCODING_OVERFLOW で閉じる
+                            // (MUST)。受信メッセージでは decode 層が先に拒否するため到達せず、
+                            // API 経由で手組みしたメッセージに対してのみ閉じる
+                            let err = crate::session::core::session_error_from_message(
+                                &msg_err,
+                                SESSION_INVALID_PARAMETER,
                             );
                             self.fail(err.clone());
                             return Err(err);
@@ -351,7 +353,7 @@ impl Session {
             || (locally_terminated && subscription.my_role == TrackRole::Subscriber))
         {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_OK (subscription) received on responder side",
             );
             self.fail(err.clone());
@@ -360,7 +362,7 @@ impl Session {
         // draft §9.20.1 (Parameter Scope): Subscription context の REQUEST_OK は
         // subscription.state で PUBLISH_OK (Pending(Publisher)) と REQUEST_UPDATE_OK
         // (Established) に確定する。それぞれの許可パラメータ集合で検証し、許可外
-        // パラメータは PROTOCOL_VIOLATION でセッションをクローズする。Established 分岐は
+        // パラメータは INVALID_PARAMETER でセッションをクローズする。Established 分岐は
         // 元々 largest_object / expires しか参照しないため、この検証追加は additive。
         let context_allowed = match subscription.state {
             SubscriptionState::Pending if subscription.is_pending_publisher() => Some((
@@ -378,7 +380,8 @@ impl Session {
         if let Some((allowed, message)) = context_allowed
             && parameters.validate_scope(allowed).is_err()
         {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, message);
+            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, message);
             self.fail(err.clone());
             return Err(err);
         }
@@ -394,7 +397,7 @@ impl Session {
                 .any(|allowed| parameters.validate_scope(allowed).is_ok())
         {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_PARAMETER,
                 "REQUEST_OK parameter not allowed in any context",
             );
             self.fail(err.clone());
@@ -464,7 +467,7 @@ impl Session {
                     return Ok(());
                 }
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_OK for subscription requires Pending(Publisher) or Established state",
                 );
                 self.fail(err.clone());
@@ -552,7 +555,7 @@ impl Session {
                 }
                 SubscriptionState::Terminated => {
                     let err = SessionError::new(
-                        SESSION_PROTOCOL_VIOLATION,
+                        SESSION_UNEXPECTED_MESSAGE,
                         "REQUEST_ERROR on terminated subscription",
                     );
                     self.fail(err.clone());

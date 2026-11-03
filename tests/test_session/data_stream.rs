@@ -25,13 +25,13 @@ fn unknown_data_stream_type_closes_session() {
         .unwrap_err();
     match err {
         shiguredo_moqt::session::types::RecvDataStreamError::Session(err) => {
-            assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+            assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER);
         }
         other => panic!("予期しないエラー: {other:?}"),
     }
     assert_eq!(client.state(), SessionState::Closing);
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(err) => assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION),
+        SessionEvent::CloseSession(err) => assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER),
         other => panic!("予期しないイベント: {other:?}"),
     }
 }
@@ -1032,7 +1032,7 @@ fn send_object_datagram_failure_does_not_update_location() {
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
-        Some(SESSION_PROTOCOL_VIOLATION)
+        Some(SESSION_MALFORMED_OBJECT)
     );
     let sub = server.subscription(rid).expect("subscription が存在する");
     assert_eq!(sub.largest_received_location, None);
@@ -1054,8 +1054,8 @@ fn send_object_datagram_rejects_invalid_properties_length() {
             .unwrap_err();
         assert_eq!(
             err.as_session_error().map(|e| e.code),
-            Some(SESSION_PROTOCOL_VIOLATION),
-            "{label}"
+            Some(SESSION_MALFORMED_OBJECT),
+            "{label}: datagram の Properties 直列化を復号できないため MALFORMED_OBJECT であること"
         );
         assert_eq!(
             server
@@ -1243,7 +1243,7 @@ fn send_object_datagram_with_end_of_group_is_accepted() {
 /// STATUS と END_OF_GROUP の同時指定は送信前に拒否され、最大位置は更新されない
 ///
 /// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram) は STATUS (0x20) と END_OF_GROUP (0x02) の
-/// 両方が立った Type 値を無効とし、受信側は PROTOCOL_VIOLATION でセッションを閉じる。
+/// 両方が立った Type 値を無効とし、受信側は INVALID_STREAM_HEADER でセッションを閉じる。
 /// wire を生成しないよう送信 API でも同じ条件で拒否する。
 #[test]
 fn send_object_datagram_rejected_for_status_with_end_of_group() {
@@ -1671,7 +1671,7 @@ fn padding_datagram_bytes(length: usize) -> Vec<u8> {
 /// MUST close the session."
 ///
 /// `0x10` は bit4 が立っており §11.2.1 の `0b00X0XXXX` の形に合わない。
-/// §11.2.1 は無効 Type 値に対して PROTOCOL_VIOLATION を規定する。
+/// draft-ietf-moq-transport-23 §11.2.1 は無効 Type 値に対して INVALID_STREAM_HEADER を規定する。
 #[test]
 fn recv_datagram_unknown_type_closes_session() {
     let (mut client, _server) = establish_pair();
@@ -1679,14 +1679,14 @@ fn recv_datagram_unknown_type_closes_session() {
     let err = client
         .recv_datagram(&[0x10, 0x00, 0x00, 0x00])
         .expect_err("未知 datagram type はセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER);
     assert_eq!(
         err.reason, "unknown datagram type",
         "ヘッダ本体の不正ではなく type の不正として区別されること"
     );
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_STREAM_HEADER),
+        other => panic!("CloseSession(INVALID_STREAM_HEADER) が期待されたが {other:?}"),
     }
 }
 
@@ -1701,7 +1701,7 @@ fn recv_datagram_status_with_end_of_group_closes_session() {
         let err = client
             .recv_datagram(&[type_id, 0x00, 0x00, 0x00])
             .expect_err("STATUS + END_OF_GROUP の type は拒否される");
-        assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "type={type_id:#x}");
+        assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER, "type={type_id:#x}");
         assert_eq!(
             err.reason, "unknown datagram type",
             "type={type_id:#x}: 無効 type として扱われること"
@@ -1842,10 +1842,10 @@ fn recv_datagram_malformed_object_header_closes_session() {
     let err = client
         .recv_datagram(&[0x00])
         .expect_err("ヘッダ本体が不足していればセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
     assert_eq!(
-        err.reason, "malformed OBJECT_DATAGRAM header",
-        "unknown type と区別されること"
+        err.reason, "unexpected end of buffer",
+        "unknown type ではなくヘッダ本体の途中終端として区別されること"
     );
 }
 
@@ -1856,7 +1856,7 @@ fn recv_datagram_empty_closes_session() {
     let err = client
         .recv_datagram(&[])
         .expect_err("type varint が読めなければセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER);
     assert_eq!(err.reason, "datagram type varint could not be decoded");
 }
 
@@ -1937,11 +1937,11 @@ fn object_boundary_fin_is_accepted() {
     );
 }
 
-/// payload 途中での graceful FIN は PROTOCOL_VIOLATION でセッションを閉じる
+/// payload 途中での graceful FIN は TRUNCATED_OBJECT でセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §11.3: "If a stream ends gracefully (i.e., the stream
 /// terminates with a FIN) in the middle of a serialized Object, the session SHOULD be
-/// closed with a PROTOCOL_VIOLATION."
+/// receiver SHOULD close the session with TRUNCATED_OBJECT."
 #[test]
 fn mid_payload_fin_closes_session() {
     let alias = 821;
@@ -1978,18 +1978,18 @@ fn mid_payload_fin_closes_session() {
     let err = client
         .report_mid_object_fin(stream_id)
         .expect_err("mid-object FIN はセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_TRUNCATED_OBJECT);
     assert_eq!(
         err.reason,
         "data stream finished in the middle of a serialized object"
     );
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_TRUNCATED_OBJECT),
+        other => panic!("CloseSession(TRUNCATED_OBJECT) が期待されたが {other:?}"),
     }
 }
 
-/// Object ヘッダ途中での graceful FIN も PROTOCOL_VIOLATION でセッションを閉じる
+/// Object ヘッダ途中での graceful FIN も TRUNCATED_OBJECT でセッションを閉じる
 #[test]
 fn mid_object_header_fin_closes_session() {
     let alias = 822;
@@ -2019,7 +2019,7 @@ fn mid_object_header_fin_closes_session() {
     let err = client
         .report_mid_object_fin(stream_id)
         .expect_err("mid-object FIN はセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_TRUNCATED_OBJECT);
     assert!(matches!(
         drain_until_close(&mut client),
         SessionEvent::CloseSession(_)
@@ -2049,7 +2049,7 @@ fn report_mid_object_fin_after_stream_closed_still_closes_session() {
     let err = client
         .report_mid_object_fin(stream_id)
         .expect_err("登録解除済みでもセッションを閉じる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_TRUNCATED_OBJECT);
     assert!(matches!(
         drain_until_close(&mut client),
         SessionEvent::CloseSession(_)
@@ -3998,9 +3998,9 @@ fn malformed_object_properties_blob() -> Vec<u8> {
 /// フレーミングは正しいが KVP が不正な Object Properties を subgroup Object で受信すると
 /// Malformed Track として subscription が終端される
 ///
-/// `ObjectProperties::decode_exact` は KVP 層の失敗要因を区別せず `ProtocolViolation` に写すため
-/// (`ObjectPropertyTracker::observe_object` と同じ写像)、Session の応答は
-/// `SESSION_PROTOCOL_VIOLATION` + 該当 subscription の終端になる。
+/// `ObjectProperties::decode_exact` は KVP 層の失敗要因を原因を保ったまま返すため、
+/// Object scope の必須 Track Property は draft-ietf-moq-transport-23 §12.1
+/// (Malformed Tracks) の `MalformedTrack` として購読の終端になる。
 #[test]
 fn subgroup_object_with_malformed_properties_kvp_terminates_subscription() {
     let alias = 842u64;
@@ -4035,8 +4035,8 @@ fn subgroup_object_with_malformed_properties_kvp_terminates_subscription() {
         .expect_err("不正な Object Properties は Malformed Track");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(
-        err.reason, "invalid object properties framing",
-        "Object Properties のデコード失敗として扱うこと"
+        err.reason, "mandatory property in object scope",
+        "Object scope の必須 Track Property として Malformed Track にすること"
     );
     assert_eq!(
         client.state(),
@@ -4116,10 +4116,10 @@ fn subgroup_object_with_trailing_bytes_in_properties_terminates_subscription() {
             },
         )
         .expect_err("宣言長より後ろに余分なバイトがある Object Properties は Malformed Track");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
     assert_eq!(
-        err.reason, "invalid object properties framing",
-        "framing 違反として扱うこと"
+        err.reason, "object properties length does not match its contents",
+        "MALFORMED_OBJECT として扱うこと"
     );
     assert_eq!(
         client.state(),
@@ -4171,8 +4171,8 @@ fn datagram_with_malformed_properties_kvp_terminates_subscription() {
         .expect_err("不正な Object Properties は Malformed Track");
     assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
     assert_eq!(
-        err.reason, "invalid object properties framing",
-        "Object Properties のデコード失敗として扱うこと"
+        err.reason, "mandatory property in object scope",
+        "Object scope の必須 Track Property として Malformed Track にすること"
     );
     assert_eq!(
         client.state(),
@@ -5496,7 +5496,7 @@ fn second_close_after_reset_is_still_protocol_violation() {
 ///
 /// draft-ietf-moq-transport-22 §11.1.1 (Object Status):
 /// "Any other value SHOULD be treated as a protocol error and the session SHOULD be
-///  closed with a PROTOCOL_VIOLATION (Section 12.2)."
+///  closed with INVALID_OBJECT_STATUS (Section 12.2)."
 #[test]
 fn send_object_datagram_rejected_for_unknown_status() {
     let (_, mut server, rid) = establish_subscribe_track(512);
@@ -5505,7 +5505,7 @@ fn send_object_datagram_rejected_for_unknown_status() {
         .unwrap_err();
     assert_eq!(
         err.as_session_error().map(|e| e.code),
-        Some(SESSION_PROTOCOL_VIOLATION)
+        Some(SESSION_INVALID_OBJECT_STATUS)
     );
     // 拒否時は状態を汚染しない (未送信の Object を観測済みにしない)
     let sub = server.subscription(rid).expect("subscription が存在する");
@@ -5565,7 +5565,7 @@ fn recv_object_datagram_rejects_unknown_status() {
             status: Some(0x5),
         })
         .expect_err("未知 status は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_OBJECT_STATUS);
     assert_eq!(
         client
             .subscription(rid)
@@ -5592,7 +5592,7 @@ fn recv_object_datagram_rejects_status_with_end_of_group() {
             status: Some(0x3),
         })
         .expect_err("STATUS と END_OF_GROUP の同時指定は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER);
 }
 
 /// 非 Normal status への Properties 付与は拒否される
@@ -5611,7 +5611,7 @@ fn recv_object_datagram_rejects_properties_on_non_normal_status() {
             status: Some(0x4),
         })
         .expect_err("非 Normal status の Properties は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_OBJECT_STATUS);
 }
 
 /// Properties blob の宣言長と実データ長の不一致は拒否される
@@ -5630,7 +5630,7 @@ fn recv_object_datagram_rejects_malformed_properties_blob() {
             status: None,
         })
         .expect_err("Properties blob の長さ不一致は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
 }
 
 /// Properties Length = 0 の blob は拒否される
@@ -5648,7 +5648,7 @@ fn recv_object_datagram_rejects_zero_length_properties_blob() {
             status: None,
         })
         .expect_err("Properties Length = 0 は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
 }
 
 /// 登録済みの stream へ同じ subgroup header を再登録すると拒否され、セッションは閉じない
@@ -5699,8 +5699,8 @@ fn re_subgroup_header_for_registered_stream_is_rejected() {
         .recv_subgroup_header(stream_id, &header)
         .expect_err("登録済みの stream への再登録は拒否されること");
     assert_eq!(
-        err.code, SESSION_PROTOCOL_VIOLATION,
-        "再登録は SESSION_PROTOCOL_VIOLATION で拒否されること"
+        err.code, SESSION_UNEXPECTED_MESSAGE,
+        "再登録は SESSION_UNEXPECTED_MESSAGE で拒否されること"
     );
     assert_eq!(
         client.state(),

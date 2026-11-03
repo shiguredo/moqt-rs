@@ -117,7 +117,7 @@ impl TrackProperties {
     /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `ProtocolViolation`
     /// - トップレベルのバイト列が 65535 バイトを超える: `PayloadTooLong`
     /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過など):
-    ///   `ProtocolViolation` (decode 層の `KeyValueFormattingError` を `ProtocolViolation`
+    ///   `ProtocolViolation` (decode 層の `MalformedKeyValue` を `ProtocolViolation`
     ///   に写す)
     /// - IMMUTABLE_PROPERTIES の内側 KVP の varint が途中終端: `UnexpectedEof`
     ///   (呼び出し側が渡した直列化の切り詰めであり、透過する)
@@ -166,16 +166,14 @@ impl TrackProperties {
                         && let Err(err) = decode_track_kv_pairs(bytes, false)
                     {
                         // ローカル入力の検証である encode では、内側 KVP の書式違反
-                        // (KeyValueFormattingError) を、既存の encode 検証 (重複・2^16-1 超)
+                        // (MalformedKeyValue) を、既存の encode 検証 (重複・2^16-1 超)
                         // と同じ ProtocolViolation に揃える。内側 decode の切り詰め
                         // (UnexpectedEof) は呼び出し側が渡した直列化の切り詰めであるため
                         // そのまま透過する。
                         return Err(match err {
-                            MessageError::KeyValueFormattingError(_) => {
-                                MessageError::ProtocolViolation(
-                                    "immutable properties inner KVP length exceeds remaining buffer",
-                                )
-                            }
+                            MessageError::MalformedKeyValue(_) => MessageError::ProtocolViolation(
+                                "immutable properties inner KVP length exceeds remaining buffer",
+                            ),
                             other => other,
                         });
                     }
@@ -197,8 +195,8 @@ impl TrackProperties {
     /// # Errors
     ///
     /// - delta key / 偶数 Type の値 / 奇数 Type の Length の varint 途中終端: `UnexpectedEof`
-    /// - 奇数 Type の宣言長が 2^16-1 超: `ProtocolViolation`
-    /// - 奇数 Type の宣言長が 2^16-1 以下で残りバイト超: `KeyValueFormattingError`
+    /// - 奇数 Type の宣言長が 2^16-1 超: `FieldLengthExceeded`
+    /// - 奇数 Type の宣言長が 2^16-1 以下で残りバイト超: `MalformedKeyValue`
     ///   (既知 Type は draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST。
     ///   未知 Type も §16.8 (Properties) の length による skip が成立しないため同じ分類に
     ///   揃える)
@@ -397,9 +395,9 @@ fn validate_track_property_value_range(
 /// IMMUTABLE_PROPERTIES (0x0B) の内側検証 (encode / decode)、統合検索の内側展開の各所から呼ばれる。
 ///
 /// 奇数 Type の宣言長が 2^16-1 以下で残りバイトを超える場合は
-/// `MessageError::KeyValueFormattingError` を返す。既知 Type は draft-ietf-moq-transport-22
+/// `MessageError::MalformedKeyValue` を返す。既知 Type は draft-ietf-moq-transport-22
 /// §8.3 (Key-Value-Pair Structure) の MUST であり、未知 Type も §16.8 (Properties) の
-/// length による skip が成立しないため同じ分類に揃える。2^16-1 超は `ProtocolViolation`、
+/// length による skip が成立しないため同じ分類に揃える。2^16-1 超は `FieldLengthExceeded`、
 /// Length フィールドの varint 自体が途中で切れる場合は `UnexpectedEof` とする。
 ///
 /// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する。入れ子の
@@ -446,13 +444,16 @@ fn decode_track_kv_pairs(
             // 奇数型: 長さ付きバイト列
             let (len, n) = varint::decode(&buf[pos..])?;
             pos += n;
+            // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長の上限は
+            // 2^16-1 バイトであり、超過は FIELD_LENGTH_EXCEEDED (0x401) で閉じる (MUST)。
+            // §12.2 (Session Termination Codes) の優先規則により、他の分類より先に判定する。
             if len > 65535 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::FieldLengthExceeded(
                     "track property value too long",
                 ));
             }
             // draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): 受信側が Type を
-            // 理解する場合、Length/Value が定義と一致しないときは KEY_VALUE_FORMATTING_ERROR
+            // 理解する場合、Length/Value が定義と一致しないときは MALFORMED_KEY_VALUE
             // (0x6) でセッションを閉じる MUST。Length フィールド自体の varint 途中終端は
             // UnexpectedEof のまま (フレーミングの切り詰め) とし、宣言長が残りバイトを
             // 超える場合だけを書式違反として分類する。§8.3 の MUST は受信側が Type を
@@ -462,7 +463,7 @@ fn decode_track_kv_pairs(
             // Track / request を特定できず購読 cancel を発行できないため、§8.3 のセッション
             // 終了を優先する (本実装の判断であり、§10.7 への写像は別途対応する)。
             let len = varint::checked_len(len, buf[pos..].len()).map_err(|_| {
-                MessageError::KeyValueFormattingError(
+                MessageError::MalformedKeyValue(
                     "track property value length exceeds remaining buffer",
                 )
             })?;

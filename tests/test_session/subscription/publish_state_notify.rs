@@ -362,7 +362,7 @@ fn notify_received_on_publisher_side_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -387,7 +387,7 @@ fn notify_for_non_subscription_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -412,7 +412,7 @@ fn notify_to_pending_subscriber_state_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
@@ -436,7 +436,7 @@ fn notify_to_pending_publisher_responder_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -457,7 +457,7 @@ fn notify_with_invalid_paused_closes_session() {
             ControlMessage::PublishStateNotify(PublishStateNotify { parameters: params }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -681,7 +681,7 @@ fn notify_send_with_invalid_paused_rejected_without_side_effects() {
     let err = server
         .send_publish_state_notify(sub_rid, paused_params(2))
         .expect_err("値域外 PAUSED の通知は送信前に拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // paused は変わらず、イベントも発行されない
     assert!(
         !server
@@ -755,6 +755,6 @@ fn notify_with_filter_end_group_overflow_closes_session() {
             ControlMessage::PublishStateNotify(PublishStateNotify { parameters: params }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }

@@ -15,10 +15,14 @@ pub enum MessageError {
     ///
     /// `ControlMessage::decode` は既にデコード済みの型を扱う Session の外側 (I/O 層) に
     /// 本エラーを伝える。`Session::recv_control` / `recv_request` は decode 済みの
-    /// `ControlMessage` を受け取るため、本エラーの検出と PROTOCOL_VIOLATION による
+    /// `ControlMessage` を受け取るため、本エラーの検出と UNEXPECTED_MESSAGE による
     /// session close は I/O 層の責務である。
     InvalidMessageType(u64),
-    /// ペイロード長が 65535 バイトを超えた
+    /// Key-Value-Pair の値長が 65535 バイトを超えた
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 値長の上限は 2^16-1
+    /// バイトであり、超過は FIELD_LENGTH_EXCEEDED (0x401) でセッションを閉じる (MUST)。
+    /// [`Self::session_termination_code`] は本 variant を FIELD_LENGTH_EXCEEDED に写す。
     PayloadTooLong,
     /// 制御メッセージの長さが上限を超えた
     ///
@@ -62,14 +66,53 @@ pub enum MessageError {
     MalformedTrack(&'static str),
     /// Key-Value-Pair の Length/Value が定義された serialization と一致しない
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure):
-    /// 受信側が Type を理解する場合、KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを
-    /// 閉じなければならない (MUST)。宣言長が残りバイトを超える場合は、未知 Type でも
-    /// length による skip が成立しないため同じ分類に揃える (§16.8 (Properties))。
-    KeyValueFormattingError(&'static str),
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure): 受信側が Type を
+    /// 理解する場合、MALFORMED_KEY_VALUE (0x6) でセッションを閉じなければならない (MUST)。
+    /// 宣言長が残りバイトを超える場合は、未知 Type でも length による skip が成立しないため
+    /// 同じ分類に揃える (§16.8 (Properties))。
+    MalformedKeyValue(&'static str),
+    /// データストリーム / データグラムのヘッダが不正
+    ///
+    /// draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) の未知のストリーム型、
+    /// §11.2.1 (Object Datagram) / §11.3.1 (Subgroup Header) の不正な Type Flags を表す。
+    /// いずれも受信側は INVALID_STREAM_HEADER (0x200) でセッションを閉じる (MUST)。
+    InvalidStreamHeader(&'static str),
+    /// Object の直列化を復号できない
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) の未知の Serialization Flags、
+    /// §11.4.2.2 (Prior Object Fields) の存在しない prior Object 参照、Properties Length と
+    /// 実データ長の不一致などを表す。受信側は MALFORMED_OBJECT (0x201) でセッションを
+    /// 閉じる (MUST)。
+    MalformedObject(&'static str),
+    /// Object Status が定義値以外、または非 Normal の Object に Properties が付いている
+    ///
+    /// draft-ietf-moq-transport-23 §11.1.1 (Object Status) / §11.1.2 (Object Properties):
+    /// 受信側は INVALID_OBJECT_STATUS (0x202) でセッションを閉じる (MUST / SHOULD)。
+    InvalidObjectStatus(&'static str),
+    /// peer の role では送信できないメッセージまたはフィールド
+    ///
+    /// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN) の SETUP における
+    /// DELETE / USE_ALIAS など、送信者の role に許されない値を表す。受信側は
+    /// ROLE_VIOLATION (0x304) でセッションを閉じる (MUST)。
+    RoleViolation(&'static str),
+    /// Track Namespace が §8.7 の構造に適合しない
+    ///
+    /// draft-ietf-moq-transport-23 §8.7 (Track Namespace Structure): 長さ 0 の Track
+    /// Namespace Field、または 32 を超える Track Namespace Field を受信した場合、受信側は
+    /// INVALID_TRACK_NAMESPACE (0x302) でセッションを閉じる (MUST)。
+    /// 4,096 バイトの長さ制限は [`Self::FieldLengthExceeded`] が表す (§12.2 の優先規則)。
+    InvalidTrackNamespace(&'static str),
+    /// デルタエンコーディングの復号結果が u64 の範囲を超えた
+    ///
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の Type 差分、
+    /// §9.19 (Control Message Parameters) の Parameter Type 差分、
+    /// §11.3.1 (Subgroup Header) の Object ID、§11.4 (Fetch Streams) の Group / Object /
+    /// Subgroup ID の差分が 2^64-1 を超えた場合に返る。受信側は
+    /// DELTA_ENCODING_OVERFLOW (0x400) でセッションを閉じる (MUST)。
+    DeltaEncodingOverflow(&'static str),
     /// AUTHORIZATION_TOKEN が不正 (説明付き)
     ///
-    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression):
+    /// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression):
     /// 受信側は MALFORMED_AUTH_TOKEN でメッセージを reject しなければならない。
     MalformedAuthToken(&'static str),
     /// MSF カタログの JSON フォーマットが不正 (説明付き)
@@ -95,9 +138,15 @@ impl core::fmt::Display for MessageError {
             Self::InvalidParameter => write!(f, "invalid parameter encoding"),
             Self::ProtocolViolation(msg) => write!(f, "protocol violation: {msg}"),
             Self::MalformedTrack(msg) => write!(f, "malformed track: {msg}"),
-            Self::KeyValueFormattingError(msg) => {
-                write!(f, "key-value formatting error: {msg}")
+            Self::MalformedKeyValue(msg) => {
+                write!(f, "malformed key-value: {msg}")
             }
+            Self::InvalidStreamHeader(msg) => write!(f, "invalid stream header: {msg}"),
+            Self::MalformedObject(msg) => write!(f, "malformed object: {msg}"),
+            Self::InvalidObjectStatus(msg) => write!(f, "invalid object status: {msg}"),
+            Self::RoleViolation(msg) => write!(f, "role violation: {msg}"),
+            Self::InvalidTrackNamespace(msg) => write!(f, "invalid track namespace: {msg}"),
+            Self::DeltaEncodingOverflow(msg) => write!(f, "delta encoding overflow: {msg}"),
             Self::MalformedAuthToken(msg) => write!(f, "malformed auth token: {msg}"),
             Self::InvalidCatalog(msg) => write!(f, "invalid MSF catalog: {msg}"),
             Self::InvalidCatalogVersion(v) => write!(f, "unsupported MSF catalog version: {v}"),
@@ -119,11 +168,17 @@ impl MessageError {
         match self {
             Self::ProtocolViolation(msg)
             | Self::MalformedTrack(msg)
-            | Self::KeyValueFormattingError(msg)
+            | Self::MalformedKeyValue(msg)
             | Self::MalformedAuthToken(msg)
             | Self::FieldLengthExceeded(msg)
             | Self::MalformedMessage(msg)
-            | Self::InvalidField(msg) => msg,
+            | Self::InvalidField(msg)
+            | Self::InvalidStreamHeader(msg)
+            | Self::MalformedObject(msg)
+            | Self::InvalidObjectStatus(msg)
+            | Self::RoleViolation(msg)
+            | Self::InvalidTrackNamespace(msg)
+            | Self::DeltaEncodingOverflow(msg) => msg,
             Self::UnexpectedEof => "unexpected end of buffer",
             Self::InvalidMessageType(_) => "invalid message type",
             Self::PayloadTooLong => "payload too long",
@@ -136,6 +191,21 @@ impl MessageError {
         }
     }
 
+    /// データプレーンの decode エラーでセッションを閉じる場合の終了コードを返す
+    ///
+    /// [`Self::session_termination_code`] と同じ分類を使うが、`UnexpectedEof` だけは
+    /// 制御メッセージの解析失敗ではなくデータストリーム / データグラムの Object が
+    /// シリアライズ途中で終わったことを表すため MALFORMED_OBJECT (0x201) に写す
+    /// (draft-ietf-moq-transport-23 §11.3 (Subgroup Streams) / §12.2
+    /// (Session Termination Codes))。`MalformedTrack` は draft §12.1 (Malformed Tracks) の
+    /// 購読 cancel でありセッションを閉じないため `None` を返す。
+    pub fn data_plane_session_termination_code(&self) -> Option<u64> {
+        match self {
+            Self::UnexpectedEof => Some(SESSION_MALFORMED_OBJECT),
+            other => other.session_termination_code(),
+        }
+    }
+
     /// `MalformedTrack` の理由を取り出す (他の variant は `None`)
     ///
     /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出かどうかを判定しつつ
@@ -144,6 +214,48 @@ impl MessageError {
         match self {
             Self::MalformedTrack(msg) => Some(msg),
             _ => None,
+        }
+    }
+
+    /// このエラーでセッションを閉じる場合の終了コードを返す
+    ///
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
+    /// 原因を失わない最も具体的なコードを返す。セッション終了を伴わない variant
+    /// (draft §12.1 (Malformed Tracks) の `MalformedTrack` と、MSF カタログ / Timeline の
+    /// アプリケーションエラー) は `None` を返す。`None` のときにセッションを閉じるかは
+    /// 呼び出し側の判断であり、閉じる場合は `PROTOCOL_VIOLATION` などの汎用コードを使う。
+    ///
+    /// 長さ超過とデルタ溢出は他の分類より優先する (§12.2 の "When more than one code
+    /// applies, an endpoint uses DELTA_ENCODING_OVERFLOW or FIELD_LENGTH_EXCEEDED in
+    /// preference to the other codes.")。本関数は variant ごとに 1 つのコードしか持たないが、
+    /// 各 codec は長さ超過とデルタ溢出を他の検証より先に判定することでこの規則を満たす。
+    pub fn session_termination_code(&self) -> Option<u64> {
+        match self {
+            Self::MalformedKeyValue(_) => Some(SESSION_MALFORMED_KEY_VALUE),
+            Self::MalformedAuthToken(_) => Some(SESSION_MALFORMED_AUTH_TOKEN),
+            Self::InvalidStreamHeader(_) => Some(SESSION_INVALID_STREAM_HEADER),
+            Self::MalformedObject(_) => Some(SESSION_MALFORMED_OBJECT),
+            Self::InvalidObjectStatus(_) => Some(SESSION_INVALID_OBJECT_STATUS),
+            Self::DeltaEncodingOverflow(_) => Some(SESSION_DELTA_ENCODING_OVERFLOW),
+            Self::FieldLengthExceeded(_) | Self::PayloadTooLong | Self::ReasonPhraseTooLong => {
+                Some(SESSION_FIELD_LENGTH_EXCEEDED)
+            }
+            // 制御メッセージの本文を最後まで解析できない場合は MALFORMED_MESSAGE (§9)。
+            // 本文長の不一致は `MalformedMessage` が、本文の途中終端は `UnexpectedEof` が表す。
+            Self::MalformedMessage(_) | Self::UnexpectedEof => Some(SESSION_MALFORMED_MESSAGE),
+            Self::InvalidField(_) => Some(SESSION_INVALID_FIELD),
+            Self::RoleViolation(_) => Some(SESSION_ROLE_VIOLATION),
+            Self::InvalidTrackNamespace(_) => Some(SESSION_INVALID_TRACK_NAMESPACE),
+            // 未知のメッセージ型は UNEXPECTED_MESSAGE で閉じる (§9 の MUST)。
+            Self::InvalidMessageType(_) => Some(SESSION_UNEXPECTED_MESSAGE),
+            Self::InvalidParameter => Some(SESSION_INVALID_PARAMETER),
+            Self::ProtocolViolation(_) => Some(SESSION_PROTOCOL_VIOLATION),
+            // draft §12.1 の Malformed Track は購読の cancel であり、セッションは閉じない。
+            Self::MalformedTrack(_)
+            | Self::InvalidCatalog(_)
+            | Self::InvalidCatalogVersion(_)
+            | Self::GzipDecode(_)
+            | Self::GzipEncode(_) => None,
         }
     }
 }
@@ -205,7 +317,7 @@ pub const SESSION_INVALID_REQUEST_ID: u64 = 0x4;
 /// 重複する Track Alias
 pub const SESSION_DUPLICATE_TRACK_ALIAS: u64 = 0x5;
 /// Key-Value-Pair フォーマットエラー
-pub const SESSION_KEY_VALUE_FORMATTING_ERROR: u64 = 0x6;
+pub const SESSION_MALFORMED_KEY_VALUE: u64 = 0x6;
 /// 無効な PATH
 pub const SESSION_INVALID_PATH: u64 = 0x8;
 /// 不正な PATH フォーマット
@@ -233,13 +345,44 @@ pub const SESSION_MALFORMED_AUTHORITY: u64 = 0x1A;
 /// REQUEST_UPDATE 上限超過 (draft-ietf-moq-transport-22 §9.1.7 (MAX_REQUEST_UPDATES))
 pub const SESSION_TOO_MANY_REQUEST_UPDATES: u64 = 0x1B;
 // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加・整理されたコード。
-// 制御メッセージの長さ検証は draft-23 の分類に従う。
+// 0x200-0x2FF はデータストリーム / データグラム、0x300-0x3FF は制御ストリーム /
+// 制御メッセージ、0x400-0x4FF は双方で発生しうるエラーである (§12.2)。
+/// データストリーム / データグラムの型または Type Flags が不正
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_INVALID_STREAM_HEADER: u64 = 0x200;
+/// Object の直列化を復号できない
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_MALFORMED_OBJECT: u64 = 0x201;
+/// Object Status が不正、または非 Normal の Object に Properties が付いている
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_INVALID_OBJECT_STATUS: u64 = 0x202;
+/// シリアライズ途中の Object でデータストリームが FIN した
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_TRUNCATED_OBJECT: u64 = 0x203;
 /// 制御メッセージを解析できない、または必須要素が欠けている
 /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
 pub const SESSION_MALFORMED_MESSAGE: u64 = 0x300;
 /// 制御メッセージは解析できたが、フィールドの値が許容範囲外
 /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
 pub const SESSION_INVALID_FIELD: u64 = 0x301;
+/// Track Namespace が §8.7 の構造に適合しない
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_INVALID_TRACK_NAMESPACE: u64 = 0x302;
+/// 未知の制御メッセージ型、誤ったストリーム、順序違反、許容回数超過
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_UNEXPECTED_MESSAGE: u64 = 0x303;
+/// peer の role では送信できないメッセージまたはフィールド
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_ROLE_VIOLATION: u64 = 0x304;
+/// Message Parameter が未知、重複、メッセージに不許可、または値域外
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_INVALID_PARAMETER: u64 = 0x305;
+/// peer が制御ストリームを閉じた
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_CLOSED_CONTROL_STREAM: u64 = 0x306;
+/// デルタエンコーディングの復号結果が u64 の範囲を超えた
+/// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
+pub const SESSION_DELTA_ENCODING_OVERFLOW: u64 = 0x400;
 /// フィールドまたは構造が最大許容長を超えている
 /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))
 pub const SESSION_FIELD_LENGTH_EXCEEDED: u64 = 0x401;
@@ -347,7 +490,7 @@ pub const STREAM_MALFORMED_TRACK: u64 = 0x12;
 
 // ─── 未知のエラーコードの文脈別正規化 ─────────────────────────
 //
-// draft-ietf-moq-transport-22 §13 (Grease): "Receipt of an unknown error code in any error
+// draft-ietf-moq-transport-23 §13 (Grease): "Receipt of an unknown error code in any error
 // context (Session Termination, REQUEST_ERROR, PUBLISH_DONE, or Data Stream Reset) MUST be
 // treated as equivalent to INTERNAL_ERROR for that context."
 //
@@ -357,8 +500,10 @@ pub const STREAM_MALFORMED_TRACK: u64 = 0x12;
 
 /// Session Termination 文脈で既知のコード
 ///
-/// draft-ietf-moq-transport-22 §16.11.1 (Session Termination Error Codes) のレジストリと、
-/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) で追加されたコードを含む。
+/// draft-ietf-moq-transport-23 §16.12.1 (Session Termination Error Codes) のレジストリ
+/// (Table 20) に載る全コードと、レジストリには載らないが同節のコード表で定義された
+/// `0x6` (MALFORMED_KEY_VALUE) を含む。greasing 用の予約値 (0x7f * N + 0x9D) は
+/// 未知コードとして扱い、`INTERNAL_ERROR` に正規化する (§13 (Grease))。
 const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_NO_ERROR,
     SESSION_INTERNAL_ERROR,
@@ -366,7 +511,7 @@ const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_PROTOCOL_VIOLATION,
     SESSION_INVALID_REQUEST_ID,
     SESSION_DUPLICATE_TRACK_ALIAS,
-    SESSION_KEY_VALUE_FORMATTING_ERROR,
+    SESSION_MALFORMED_KEY_VALUE,
     SESSION_INVALID_PATH,
     SESSION_MALFORMED_PATH,
     SESSION_GOAWAY_TIMEOUT,
@@ -380,8 +525,18 @@ const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_INVALID_AUTHORITY,
     SESSION_MALFORMED_AUTHORITY,
     SESSION_TOO_MANY_REQUEST_UPDATES,
+    SESSION_INVALID_STREAM_HEADER,
+    SESSION_MALFORMED_OBJECT,
+    SESSION_INVALID_OBJECT_STATUS,
+    SESSION_TRUNCATED_OBJECT,
     SESSION_MALFORMED_MESSAGE,
     SESSION_INVALID_FIELD,
+    SESSION_INVALID_TRACK_NAMESPACE,
+    SESSION_UNEXPECTED_MESSAGE,
+    SESSION_ROLE_VIOLATION,
+    SESSION_INVALID_PARAMETER,
+    SESSION_CLOSED_CONTROL_STREAM,
+    SESSION_DELTA_ENCODING_OVERFLOW,
     SESSION_FIELD_LENGTH_EXCEEDED,
 ];
 
@@ -436,7 +591,7 @@ const KNOWN_STREAM_RESET_CODES: &[u64] = &[
 
 /// Session Termination 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。`code` はアプリケーションの transport 層が
+/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。`code` はアプリケーションの transport 層が
 /// 観測した接続終了コード (peer の CONNECTION_CLOSE / WebTransport close code) を想定する。
 /// ライブラリは peer の Session Termination コードをイベントとして公開しないため、本関数は
 /// アプリが transport 層から得た値を分類するために使う。
@@ -450,7 +605,7 @@ pub fn normalize_session_termination_code(code: u64) -> u64 {
 
 /// REQUEST_ERROR 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。
+/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。
 pub fn normalize_request_error_code(code: u64) -> u64 {
     if KNOWN_REQUEST_ERROR_CODES.contains(&code) {
         code
@@ -461,7 +616,7 @@ pub fn normalize_request_error_code(code: u64) -> u64 {
 
 /// PUBLISH_DONE 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。
+/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。
 pub fn normalize_publish_done_code(code: u64) -> u64 {
     if KNOWN_PUBLISH_DONE_CODES.contains(&code) {
         code
@@ -472,7 +627,7 @@ pub fn normalize_publish_done_code(code: u64) -> u64 {
 
 /// Stream Reset 文脈の未知コードを INTERNAL_ERROR 相当に正規化する
 ///
-/// draft-ietf-moq-transport-22 §13 (Grease) の MUST。アプリケーションエラーコードが
+/// draft-ietf-moq-transport-23 §13 (Grease) の MUST。アプリケーションエラーコードが
 /// 無い (`None`) 場合は写像しないため、呼び出し側が `Option` を保持したまま扱う。
 pub fn normalize_stream_reset_code(code: u64) -> u64 {
     if KNOWN_STREAM_RESET_CODES.contains(&code) {

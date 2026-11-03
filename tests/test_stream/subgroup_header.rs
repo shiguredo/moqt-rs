@@ -6,7 +6,7 @@ fn reserved_subgroup_id_mode_returns_error() {
     let buf = vec![0x16, 0x01, 0x01, 0x80];
     assert!(matches!(
         SubgroupHeader::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -16,7 +16,7 @@ fn wrong_type_no_bit4() {
     let buf = vec![0x00, 0x01, 0x01, 0x80];
     assert!(matches!(
         SubgroupHeader::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -64,7 +64,7 @@ fn undefined_bits_at_or_above_128_rejected() {
     shiguredo_moqt::varint::encode(1, &mut buf); // group_id
     assert!(matches!(
         SubgroupHeader::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 
@@ -93,6 +93,6 @@ fn type_flags_known_mask_boundary() {
     shiguredo_moqt::varint::encode(0x80, &mut buf);
     assert!(matches!(
         SubgroupHeader::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }

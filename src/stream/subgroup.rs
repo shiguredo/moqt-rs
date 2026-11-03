@@ -3,7 +3,9 @@
 //! Type Flags の定義済み bit: bit0 (0x01) / bits 1-2 (mask 0x06) / bit3 (0x08) /
 //! bit4 (0x10、必須) / bit5 (0x20) / bit6 (0x40)。
 //! 128 以上の値は未定義であり、意味未定義の set bit があれば
-//! PROTOCOL_VIOLATION でセッションを閉じなければならない (MUST)。
+//! INVALID_STREAM_HEADER でセッションを閉じなければならない (MUST)
+//! (draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §12.2
+//! (Session Termination Codes))。
 //! - bit0 = PROPERTIES
 //! - bit1-2 = SUBGROUP_ID_MODE (0b11 は予約済みで無効)
 //! - bit3 = END_OF_GROUP
@@ -97,16 +99,18 @@ impl SubgroupHeader {
         let (type_id, n) = varint::decode(&buf[pos..])?;
         pos += n;
 
-        // bit4 が必須
+        // bit4 が必須。draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) は
+        // bit4 が立っていない値、意味未定義の set bit (128 以上を含む) の値、
+        // SUBGROUP_ID_MODE 0b11 の値を受信した場合に INVALID_STREAM_HEADER (0x200) で
+        // セッションを閉じることを MUST とする。
         if type_id & 0x10 == 0 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidStreamHeader(
                 "subgroup header type must have bit4 set",
             ));
         }
-        // 意味未定義の set bit (128 以上) があれば PROTOCOL_VIOLATION
-        // (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))
+        // 意味未定義の set bit (128 以上)
         if type_id & !SUBGROUP_HEADER_KNOWN_MASK != 0 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidStreamHeader(
                 "subgroup header type has undefined bits set",
             ));
         }
@@ -120,7 +124,7 @@ impl SubgroupHeader {
 
         // SUBGROUP_ID_MODE = 0b11 は予約済み
         if subgroup_id_mode == 0b11 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidStreamHeader(
                 "subgroup_id_mode 0b11 is reserved",
             ));
         }
@@ -259,11 +263,12 @@ impl SubgroupObject {
         if let Some(props) = properties_data {
             let prop_len = validate_properties_blob(props)?;
             // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外の
-            // オブジェクトに実際のプロパティデータ (Properties Length > 0) が付いている場合は PROTOCOL_VIOLATION。
+            // オブジェクトに実際のプロパティデータ (Properties Length > 0) が付いている場合は
+            // INVALID_OBJECT_STATUS。
             // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
             // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
             if prop_len > 0 && matches!(self.status, Some(s) if s != OBJECT_STATUS_NORMAL) {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::InvalidObjectStatus(
                     "properties on non-Normal status object is not allowed",
                 ));
             }
@@ -329,7 +334,7 @@ impl SubgroupObject {
         };
 
         // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
-        // 実際のプロパティデータ (Properties Length > 0) が付いている場合は PROTOCOL_VIOLATION。
+        // 実際のプロパティデータ (Properties Length > 0) が付いている場合は INVALID_OBJECT_STATUS。
         // PROPERTIES bit はストリーム全体のフラグであり、non-Normal オブジェクトは
         // Properties Length = 0 で「プロパティなし」を表現する (draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header))。
         // Properties Length の読み取りは encode 側と同じ validate_properties_blob に寄せる。
@@ -340,7 +345,7 @@ impl SubgroupObject {
         {
             let prop_len = validate_properties_blob(props)?;
             if prop_len > 0 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::InvalidObjectStatus(
                     "properties on non-Normal status object is not allowed",
                 ));
             }

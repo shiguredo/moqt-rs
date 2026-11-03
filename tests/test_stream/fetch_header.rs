@@ -5,7 +5,7 @@ fn wrong_type_error() {
     let buf = vec![0x10, 0x01]; // SUBGROUP_HEADER 型
     assert!(matches!(
         FetchHeader::decode(&buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::InvalidStreamHeader(_))
     ));
 }
 

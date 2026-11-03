@@ -70,11 +70,11 @@ mod error_cases {
         // delta=1 (未知の奇数 Type), Length=10 に対して実体が 3 バイトしかない。
         // §8.3 (Key-Value-Pair Structure) の MUST は既知 Type が条件だが、未知 Type も
         // §16.8 (Properties) の length による skip が成立しないため、同じ分類の
-        // KEY_VALUE_FORMATTING_ERROR (0x6) で拒否する (本実装の方針)
+        // MALFORMED_KEY_VALUE (0x6) で拒否する (本実装の方針)
         let buf = vec![0x01, 0x0A, 0x01, 0x02, 0x03];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "track property value length exceeds remaining buffer"
             ))
         );
@@ -107,11 +107,11 @@ mod error_cases {
     #[test]
     fn value_length_65535_with_no_remaining_bytes_is_key_value_formatting_error() {
         // 2^16-1 は上限内であるため ProtocolViolation ではなく、残りバイト超過として
-        // KeyValueFormattingError になる (65536 は ProtocolViolation のまま)
+        // MalformedKeyValue になる (65536 は ProtocolViolation のまま)
         let buf = vec![0x01, 0xC0, 0xFF, 0xFF];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "track property value length exceeds remaining buffer"
             ))
         );
@@ -123,7 +123,7 @@ mod error_cases {
         let buf = vec![0x02, 0x01, 0x01, 0x0A, 0x01, 0x02, 0x03];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "track property value length exceeds remaining buffer"
             ))
         );
@@ -136,7 +136,7 @@ mod error_cases {
         let buf = vec![0x0B, 0x05, 0x01];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "track property value length exceeds remaining buffer"
             ))
         );
@@ -154,7 +154,7 @@ mod error_cases {
 
         assert!(matches!(
             TrackProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::FieldLengthExceeded(_))
         ));
     }
 
@@ -610,7 +610,7 @@ mod immutable_properties {
         let buf = vec![0x0B, 0x03, 0x01, 0x05, 0x01];
         assert_eq!(
             TrackProperties::decode(&buf),
-            Err(MessageError::KeyValueFormattingError(
+            Err(MessageError::MalformedKeyValue(
                 "track property value length exceeds remaining buffer"
             ))
         );
@@ -819,7 +819,7 @@ mod immutable_properties {
     #[test]
     fn encode_maps_inner_length_exceeding_buffer_to_protocol_violation() {
         // encode はローカル入力の検証であるため、内側 KVP の宣言長超過
-        // (decode 層では KeyValueFormattingError) を ProtocolViolation に写す
+        // (decode 層では MalformedKeyValue) を ProtocolViolation に写す
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
             prop_type: PROP_IMMUTABLE_PROPERTIES,
@@ -842,7 +842,7 @@ mod immutable_properties {
         let buf = vec![0x0B, 0x04, 0x01, 0xC1, 0x00, 0x00];
         assert!(matches!(
             TrackProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::FieldLengthExceeded(_))
         ));
     }
 

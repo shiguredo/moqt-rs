@@ -231,7 +231,7 @@ fn request_stream_goaway_timeout_rejects_late_message_from_unexpected_sender() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(client.state(), SessionState::Closing);
 
     // 自側が PUBLISH を送った側のとき、subscriber (peer) からの PUBLISH_STATE_NOTIFY は
@@ -247,7 +247,7 @@ fn request_stream_goaway_timeout_rejects_late_message_from_unexpected_sender() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -392,7 +392,7 @@ fn request_stream_goaway_timeout_absorbs_request_update_from_legitimate_sender()
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
 }
 
 /// 応答の内容に対する MUST close は吸収より優先される
@@ -434,7 +434,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
     assert_eq!(server.state(), SessionState::Closing);
 
     // server が非 0 の Connect URI を持つ Redirect を受信
@@ -452,7 +452,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 
     // 破棄済み request (state テーブルから除去済み) でも server の Redirect MUST は検証する
@@ -474,7 +474,7 @@ fn request_stream_goaway_timeout_does_not_absorb_invalid_response_content() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
@@ -556,7 +556,7 @@ fn request_stream_goaway_timeout_rejects_late_track_status_ok_with_invalid_scope
             }),
         )
         .expect_err("TRACK_STATUS_OK で許可されない EXPIRES は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
 }
 
 /// PUBLISH 起点 subscription の subscriber 側でも遅延 REQUEST_UPDATE_OK でセッションを閉じない
@@ -638,7 +638,7 @@ fn request_stream_goaway_timeout_rejects_late_request_ok_for_responder_publisher
             }),
         )
         .expect_err("自側 publisher への遅延 REQUEST_OK は拒否されること");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_ROLE_VIOLATION);
     assert_eq!(server.state(), SessionState::Closing);
 }
 

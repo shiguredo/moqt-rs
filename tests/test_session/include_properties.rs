@@ -221,10 +221,10 @@ fn fetch_include_properties_zero_empties_fetch_ok() {
         .expect("テストフィクスチャの前提条件を満たす");
 }
 
-/// 値域外 INCLUDE_PROPERTIES の SUBSCRIBE 受信は PROTOCOL_VIOLATION でセッションを閉じる
+/// 値域外 INCLUDE_PROPERTIES の SUBSCRIBE 受信は INVALID_PARAMETER でセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
-/// 値域外の値は "MUST close the session with PROTOCOL_VIOLATION"。
+/// 値域外の値は "MUST close the session with INVALID_PARAMETER"。
 /// ワイヤデコード層は値域外を弾くため、セッション層に到達するのはアプリが
 /// MessageParameters を直接構築して渡した場合のみ。
 #[test]
@@ -239,16 +239,16 @@ fn subscribe_with_invalid_include_properties_closes_session() {
                 parameters: include_properties_params(2),
             },
         ))
-        .expect_err("値域外 INCLUDE_PROPERTIES は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 INCLUDE_PROPERTIES は INVALID_PARAMETER になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -271,7 +271,7 @@ fn send_subscribe_with_invalid_include_properties_returns_error_without_closing(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     // セッションは閉じない (CloseSession イベントが発行されない)
     while let Some(e) = client.poll_event() {
@@ -289,7 +289,7 @@ fn send_subscribe_with_invalid_include_properties_returns_error_without_closing(
 }
 
 /// 値域外 INCLUDE_PROPERTIES の FETCH / TRACK_STATUS / SUBSCRIBE_TRACKS 受信は
-/// PROTOCOL_VIOLATION でセッションを閉じる
+/// INVALID_PARAMETER でセッションを閉じる
 ///
 /// draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
 /// 受信経路は独立配線のため、SUBSCRIBE 代表に加えて FETCH と TRACK_STATUS も検証する。
@@ -320,14 +320,14 @@ fn invalid_include_properties_closes_session_for_fetch_and_track_status() {
     for (label, msg) in cases {
         let (_client, mut server) = establish_pair();
         let err = server.recv_request(msg).expect_err(&format!(
-            "{label} の値域外 INCLUDE_PROPERTIES は PROTOCOL_VIOLATION になる"
+            "{label} の値域外 INCLUDE_PROPERTIES は INVALID_PARAMETER になる"
         ));
         assert_eq!(
             err.as_session_error()
                 .expect("Session エラーであること")
                 .code,
-            SESSION_PROTOCOL_VIOLATION,
-            "{label} のエラーコードが PROTOCOL_VIOLATION であること"
+            SESSION_INVALID_PARAMETER,
+            "{label} のエラーコードが INVALID_PARAMETER であること"
         );
         assert_eq!(
             server.state(),
@@ -336,10 +336,10 @@ fn invalid_include_properties_closes_session_for_fetch_and_track_status() {
         );
         match drain_until_close(&mut server) {
             SessionEvent::CloseSession(e) => assert_eq!(
-                e.code, SESSION_PROTOCOL_VIOLATION,
-                "{label} の CloseSession コードが PROTOCOL_VIOLATION であること"
+                e.code, SESSION_INVALID_PARAMETER,
+                "{label} の CloseSession コードが INVALID_PARAMETER であること"
             ),
-            other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+            other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
         }
     }
 }

@@ -1328,7 +1328,7 @@ fn second_invalid_filter_rejection_after_termination_closes_session() {
             inject_request_update(rid + 4, one_range_subgroup_filter()),
         )
         .expect_err("Terminated への REQUEST_UPDATE は拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
     // 追加の REQUEST_ERROR を送らないこと (保留 PUBLISH_DONE の順序保証を壊さない)
     while let Some(ev) = server.poll_event() {
@@ -1384,7 +1384,7 @@ fn invalid_filter_rejection_on_pending_subscription_closes_session() {
             inject_request_update(rid + 2, one_range_subgroup_filter()),
         )
         .expect_err("Pending への REQUEST_UPDATE は state 違反");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(server.state(), SessionState::Closing);
     // fin 付き REQUEST_ERROR を送って以降の応答 (SUBSCRIBE_OK) を閉じないこと
     while let Some(ev) = server.poll_event() {
@@ -1471,7 +1471,7 @@ fn incoming_distinct_set_id_range_filters_are_accepted() {
 ///
 /// draft-ietf-moq-transport-22 Appendix A.3 #1790 (Subscription parameters appear in
 /// REQUEST_UPDATE, not PUBLISH_OK): PUBLISH_OK は EXPIRES のみを運ぶ。
-/// Range Filter を含む PUBLISH_OK はスコープ外として PROTOCOL_VIOLATION で
+/// Range Filter を含む PUBLISH_OK はスコープ外として INVALID_PARAMETER で
 /// セッションを閉じる。
 ///
 /// 送信経路もスコープ外パラメータを弾くため、send_request_ok では作れない。
@@ -1507,15 +1507,15 @@ fn publish_ok_with_range_filter_closes_session() {
 
     let err = client
         .recv_stream_message(rid, ok_msg)
-        .expect_err("Range Filter を含む PUBLISH_OK は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("Range Filter を含む PUBLISH_OK は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     assert_eq!(
         err.reason, "REQUEST_OK (publish) parameter not allowed in this context",
         "スコープ検証で拒否されなければならない"
     );
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -1590,7 +1590,7 @@ fn request_update_credit_recovers_after_protocol_level_error() {
         "拒否でクレジットが回復していれば上限超過にならない"
     );
     assert_eq!(
-        err.code, SESSION_PROTOCOL_VIOLATION,
+        err.code, SESSION_UNEXPECTED_MESSAGE,
         "上限チェックを通過し状態違反で拒否されること"
     );
 }
@@ -1957,7 +1957,7 @@ fn initial_publish_with_range_filter_closes_session_with_protocol_violation() {
     }));
     match result {
         Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
-            assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+            assert_eq!(err.code, SESSION_INVALID_PARAMETER);
         }
         other => panic!("PUBLISH の Range Filter は PROTOCOL_VIOLATION になること: {other:?}"),
     }
@@ -1968,7 +1968,7 @@ fn initial_publish_with_range_filter_closes_session_with_protocol_violation() {
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::CloseSession(err) => {
-                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER);
                 close_sessions += 1;
             }
             SessionEvent::SendOnStream {
@@ -2291,16 +2291,16 @@ fn subscribe_with_invalid_group_order_closes_session() {
                 parameters: params,
             },
         ))
-        .expect_err("値域外 GROUP_ORDER は PROTOCOL_VIOLATION になる");
+        .expect_err("値域外 GROUP_ORDER は INVALID_PARAMETER になる");
     assert_eq!(
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     match drain_until_close(&mut server) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -2327,7 +2327,7 @@ fn send_subscribe_with_invalid_group_order_returns_error_without_closing() {
         err.as_session_error()
             .expect("Session エラーであること")
             .code,
-        SESSION_PROTOCOL_VIOLATION
+        SESSION_INVALID_PARAMETER
     );
     // セッションは閉じない (CloseSession イベントが発行されない)
     while let Some(e) = client.poll_event() {

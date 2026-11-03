@@ -10,15 +10,15 @@
 use super::*;
 use shiguredo_moqt::message::common::Location;
 
-/// スコープ違反が PROTOCOL_VIOLATION になり REQUEST_ERROR に格下げされないことを断言する
+/// スコープ違反が INVALID_PARAMETER になり REQUEST_ERROR に格下げされないことを断言する
 fn assert_scope_violation_closes_session(server: &mut Session, rid: u64) {
     let err = server
         .recv_stream_message(
             rid,
             inject_request_update(rid + 2, one_range_subgroup_filter()),
         )
-        .expect_err("スコープ違反は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("スコープ違反は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     let mut saw_close = false;
     while let Some(e) = server.poll_event() {
         match e {
@@ -32,7 +32,7 @@ fn assert_scope_violation_closes_session(server: &mut Session, rid: u64) {
                 );
             }
             SessionEvent::CloseSession(e) => {
-                assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION);
+                assert_eq!(e.code, SESSION_INVALID_PARAMETER);
                 saw_close = true;
             }
             _ => {}
@@ -40,7 +40,7 @@ fn assert_scope_violation_closes_session(server: &mut Session, rid: u64) {
     }
     assert!(
         saw_close,
-        "CloseSession(PROTOCOL_VIOLATION) が発行されること"
+        "CloseSession(INVALID_PARAMETER) が発行されること"
     );
 }
 
@@ -119,8 +119,8 @@ fn invalid_paused_takes_precedence_over_range_filter_rejection() {
 
     let err = server
         .recv_stream_message(rid, inject_request_update(rid + 2, params))
-        .expect_err("PAUSED 値域外は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("PAUSED 値域外は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
 
     let mut saw_close = false;
     while let Some(e) = server.poll_event() {
@@ -135,7 +135,7 @@ fn invalid_paused_takes_precedence_over_range_filter_rejection() {
                 );
             }
             SessionEvent::CloseSession(e) => {
-                assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION);
+                assert_eq!(e.code, SESSION_INVALID_PARAMETER);
                 saw_close = true;
             }
             _ => {}
@@ -143,6 +143,6 @@ fn invalid_paused_takes_precedence_over_range_filter_rejection() {
     }
     assert!(
         saw_close,
-        "CloseSession(PROTOCOL_VIOLATION) が発行されること"
+        "CloseSession(INVALID_PARAMETER) が発行されること"
     );
 }

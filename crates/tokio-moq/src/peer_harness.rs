@@ -907,9 +907,10 @@ mod tests {
     use std::time::Duration;
 
     use shiguredo_moqt::error::{
-        REQUEST_NOT_SUPPORTED, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
-        SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID, SESSION_KEY_VALUE_FORMATTING_ERROR,
-        SESSION_MALFORMED_AUTH_TOKEN, SESSION_PROTOCOL_VIOLATION,
+        REQUEST_NOT_SUPPORTED, SESSION_CLOSED_CONTROL_STREAM, SESSION_FIELD_LENGTH_EXCEEDED,
+        SESSION_INVALID_FIELD, SESSION_INVALID_PATH, SESSION_INVALID_REQUEST_ID,
+        SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_KEY_VALUE,
+        SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
     };
     use shiguredo_moqt::message::RequestOk;
     use shiguredo_moqt::message::Subscribe;
@@ -1060,14 +1061,15 @@ mod tests {
         }
     }
 
-    /// 確立後に届いた 2 通目の SETUP で PROTOCOL_VIOLATION の終了コードを送ること
+    /// 確立後に届いた 2 通目の SETUP で UNEXPECTED_MESSAGE の終了コードを送ること
     ///
-    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は「各 peer は SETUP で始まる
+    /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は「各 peer は SETUP で始まる
     /// control stream を 1 本だけ開く」とし、§9.1 (SETUP) も SETUP を control stream の最初の
-    /// メッセージとする。確立後に届いた 2 通目の SETUP は Session が PROTOCOL_VIOLATION で
-    /// 閉じる。`pump_once` は Session が積んだ `CloseSession` を drain してから error を返す。
+    /// メッセージとする。確立後に届いた 2 通目の SETUP は Session が UNEXPECTED_MESSAGE で
+    /// 閉じる (§12.2 (Session Termination Codes))。`pump_once` は Session が積んだ
+    /// `CloseSession` を drain してから error を返す。
     #[tokio::test(flavor = "multi_thread")]
-    async fn established_duplicate_setup_closes_with_protocol_violation() {
+    async fn established_duplicate_setup_closes_with_unexpected_message() {
         run_with_timeout(async {
             let (mut peer, mut client) = connect_pair().await;
 
@@ -1095,8 +1097,8 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "duplicate SETUP は PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_UNEXPECTED_MESSAGE,
+                "duplicate SETUP は UNEXPECTED_MESSAGE (0x303) であること"
             );
         })
         .await;
@@ -1106,10 +1108,10 @@ mod tests {
     ///
     /// draft-ietf-moq-transport-22 §9 Table 5 は "Messages marked \"First\" MUST be the first
     /// message on a new request stream." と定める。確立後の request stream に 2 通目の
-    /// SUBSCRIBE が届くと Session は PROTOCOL_VIOLATION で閉じる。`pump_once` は
+    /// SUBSCRIBE が届くと Session は UNEXPECTED_MESSAGE で閉じる。`pump_once` は
     /// `recv_stream_message` の失敗で `CloseSession` を drain してから error を返す。
     #[tokio::test(flavor = "multi_thread")]
-    async fn established_request_stream_error_closes_with_protocol_violation() {
+    async fn established_request_stream_error_closes_with_unexpected_message() {
         run_with_timeout(async {
             let (mut peer, mut client) = connect_pair().await;
 
@@ -1165,8 +1167,8 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "request stream の \"First\" 違反は PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_UNEXPECTED_MESSAGE,
+                "request stream の \"First\" 違反は UNEXPECTED_MESSAGE (0x303) であること"
             );
         })
         .await;
@@ -1300,13 +1302,13 @@ mod tests {
                 .await
                 .expect("request stream を開けること");
 
-            // example は PROTOCOL_VIOLATION でセッションを閉じる
+            // example は UNEXPECTED_MESSAGE でセッションを閉じる
             let event = client.next_event().await.expect("イベントを取得できること");
             match event {
                 Some(ClientEvent::Session(SessionEvent::CloseSession(error))) => {
                     assert_eq!(
-                        error.code, SESSION_PROTOCOL_VIOLATION,
-                        "PROTOCOL_VIOLATION で閉じること"
+                        error.code, SESSION_UNEXPECTED_MESSAGE,
+                        "UNEXPECTED_MESSAGE で閉じること"
                     );
                 }
                 other => panic!("CloseSession が届くこと: {other:?}"),
@@ -1486,14 +1488,14 @@ mod tests {
         (peer, establish)
     }
 
-    /// 初回 SETUP のトークン構造の decode 失敗で KEY_VALUE_FORMATTING_ERROR を送ること
+    /// 初回 SETUP のトークン構造の decode 失敗で MALFORMED_AUTH_TOKEN を送ること
     ///
-    /// draft-ietf-moq-transport-22 §8.9 (Authorization Token Compression) は Token 構造を
-    /// decode できない場合に KEY_VALUE_FORMATTING_ERROR で閉じることを MUST で要求する。
+    /// draft-ietf-moq-transport-23 §8.9 (Authorization Token Compression) は Token 構造を
+    /// decode できない場合に MALFORMED_AUTH_TOKEN で閉じることを MUST で要求する。
     /// AUTHORIZATION_TOKEN (0x03) の値に未知の Alias Type (0x04) を置くと
-    /// `AuthorizationToken::decode` が `KeyValueFormattingError` を返す。
+    /// `AuthorizationToken::decode` が `MalformedAuthToken` を返す。
     #[tokio::test(flavor = "multi_thread")]
-    async fn initial_setup_with_unknown_token_alias_closes_with_key_value_formatting_error() {
+    async fn initial_setup_with_unknown_token_alias_closes_with_malformed_auth_token() {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
@@ -1515,20 +1517,20 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_KEY_VALUE_FORMATTING_ERROR,
-                "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+                SESSION_MALFORMED_AUTH_TOKEN,
+                "トークン構造の不正は MALFORMED_AUTH_TOKEN (0x16) であること"
             );
         })
         .await;
     }
 
     /// 初回 SETUP の Setup Options で KVP の宣言長が残りを超えると
-    /// KEY_VALUE_FORMATTING_ERROR を送ること
+    /// MALFORMED_KEY_VALUE を送ること
     ///
     /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure): "If a receiver understands a
     /// Type, and the following Value or Length/Value does not match the serialization defined by
     /// that Type, the receiver MUST close the session with error code
-    /// KEY_VALUE_FORMATTING_ERROR." Type を理解している (option type 0x03) が、宣言長 10 に対して
+    /// MALFORMED_KEY_VALUE." Type を理解している (option type 0x03) が、宣言長 10 に対して
     /// 値が 3 バイトしかない。
     #[tokio::test(flavor = "multi_thread")]
     async fn initial_setup_with_kvp_length_exceeding_options_closes_with_key_value_formatting_error()
@@ -1554,8 +1556,8 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_KEY_VALUE_FORMATTING_ERROR,
-                "KVP の宣言長超過は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+                SESSION_MALFORMED_KEY_VALUE,
+                "KVP の宣言長超過は MALFORMED_KEY_VALUE (0x6) であること"
             );
         })
         .await;
@@ -1756,13 +1758,13 @@ mod tests {
         .await;
     }
 
-    /// control stream の stream type が不一致だと PROTOCOL_VIOLATION を送ること
+    /// control stream の stream type が不一致だと INVALID_STREAM_HEADER を送ること
     ///
-    /// draft-ietf-moq-transport-22 §6.4.1 (Unidirectional Streams) は control stream の先頭を
+    /// draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) は control stream の先頭を
     /// `SETUP_STREAM_TYPE` (0x2F00) に限り、未知の stream type の受信でセッションを閉じる。
-    /// 終了コードは §12.2 (Session Termination Codes) の PROTOCOL_VIOLATION (0x3) である。
+    /// 終了コードは §12.2 (Session Termination Codes) の INVALID_STREAM_HEADER (0x200) である。
     #[tokio::test(flavor = "multi_thread")]
-    async fn control_stream_with_wrong_stream_type_closes_with_protocol_violation() {
+    async fn control_stream_with_wrong_stream_type_closes_with_invalid_stream_header() {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
@@ -1782,19 +1784,19 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "stream type の不一致は PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_INVALID_STREAM_HEADER,
+                "stream type の不一致は INVALID_STREAM_HEADER (0x200) であること"
             );
         })
         .await;
     }
 
-    /// SETUP の前に control stream が終端すると PROTOCOL_VIOLATION を送ること
+    /// SETUP の前に control stream が終端すると CLOSED_CONTROL_STREAM を送ること
     ///
     /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は control stream を
     /// セッション中に閉じることを禁じる。
     #[tokio::test(flavor = "multi_thread")]
-    async fn control_stream_finished_before_setup_closes_with_protocol_violation() {
+    async fn control_stream_finished_before_setup_closes_with_closed_control_stream() {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
@@ -1815,22 +1817,22 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "SETUP 前の終端は PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_CLOSED_CONTROL_STREAM,
+                "SETUP 前の終端は CLOSED_CONTROL_STREAM (0x306) であること"
             );
         })
         .await;
     }
 
-    /// 初回 SETUP の decode 失敗で写像が PROTOCOL_VIOLATION を選ぶこと
+    /// 初回 SETUP の decode 失敗で写像が ROLE_VIOLATION を選ぶこと
     ///
-    /// draft-ietf-moq-transport-22 §9.1.4 (AUTHORIZATION TOKEN) は SETUP の Token に DELETE /
-    /// USE_ALIAS を許さず、受信側は PROTOCOL_VIOLATION でセッションを閉じる (原文の MUST は
+    /// draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN) は SETUP の Token に DELETE /
+    /// USE_ALIAS を許さず、受信側は ROLE_VIOLATION でセッションを閉じる (原文の MUST は
     /// server が受信する場合について述べているが、library は役割によらず同じ検証をする)。
-    /// SETUP の decode 失敗なので写像 (`session_error_code`) の 3 つ目の分岐を通り、
-    /// §12.2 (Session Termination Codes) の PROTOCOL_VIOLATION (0x3) で閉じる。
+    /// SETUP の decode 失敗なので写像 (`session_error_code`) を通り、
+    /// §12.2 (Session Termination Codes) の ROLE_VIOLATION (0x304) で閉じる。
     #[tokio::test(flavor = "multi_thread")]
-    async fn initial_setup_with_delete_token_closes_with_protocol_violation() {
+    async fn initial_setup_with_delete_token_closes_with_role_violation() {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
@@ -1852,23 +1854,23 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "DELETE トークンは PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_ROLE_VIOLATION,
+                "DELETE トークンは ROLE_VIOLATION (0x304) であること"
             );
         })
         .await;
     }
 
-    /// stream type の直後に control stream が終端すると PROTOCOL_VIOLATION を送ること
+    /// stream type の直後に control stream が終端すると CLOSED_CONTROL_STREAM を送ること
     ///
     /// stream type は正当だが SETUP を送らずに終端する場合であり、`finish_handshake` の
     /// 「control stream closed before SETUP」経路を通る (stream type を読む前に終端する
     /// [`control_stream_finished_before_setup_closes_with_protocol_violation`] とは別の経路)。
-    /// draft-ietf-moq-transport-22 §6.3 (Session initialization) は control stream を
+    /// draft-ietf-moq-transport-23 §6.3 (Session initialization) は control stream を
     /// セッション中に閉じることを禁じ、§12.2 (Session Termination Codes) の
-    /// PROTOCOL_VIOLATION (0x3) で閉じる。
+    /// CLOSED_CONTROL_STREAM (0x306) で閉じる。
     #[tokio::test(flavor = "multi_thread")]
-    async fn control_stream_finished_after_stream_type_closes_with_protocol_violation() {
+    async fn control_stream_finished_after_stream_type_closes_with_closed_control_stream() {
         run_with_timeout(async {
             let (mut peer, establish) = connect_handshake().await;
 
@@ -1895,8 +1897,8 @@ mod tests {
                 peer.recv_close_code()
                     .await
                     .expect("終了コードを観測できること"),
-                SESSION_PROTOCOL_VIOLATION,
-                "SETUP 前の終端は PROTOCOL_VIOLATION (0x3) であること"
+                SESSION_CLOSED_CONTROL_STREAM,
+                "SETUP 前の終端は CLOSED_CONTROL_STREAM (0x306) であること"
             );
         })
         .await;

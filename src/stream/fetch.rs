@@ -35,7 +35,9 @@ impl FetchHeader {
         let (type_id, n) = varint::decode(&buf[pos..])?;
         pos += n;
         if type_id != FETCH_HEADER_TYPE {
-            return Err(MessageError::ProtocolViolation(
+            // draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams): 未知の
+            // ストリーム型は INVALID_STREAM_HEADER (0x200) でセッションを閉じる (MUST)。
+            return Err(MessageError::InvalidStreamHeader(
                 "fetch header type must be 0x05",
             ));
         }
@@ -281,11 +283,14 @@ impl FetchStreamEntry {
             _ => {
                 // Table 8 の 3 値以外の 128 以上は未知値として先に拒否する。
                 // prior 文脈違反より未知 flags 自体を優先して報告するのは
-                // 実装の診断選択である (いずれも PROTOCOL_VIOLATION であり、
+                // 実装の診断選択である (いずれもセッション終了であり、
                 // draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) は
                 // 優先順位を規定しない)。
                 if flags >= 128 {
-                    return Err(MessageError::ProtocolViolation(
+                    // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): Table 8 に無い
+                    // 128 以上の Serialization Flags は MALFORMED_OBJECT (0x201) で閉じる
+                    // (MUST)。
+                    return Err(MessageError::MalformedObject(
                         "invalid fetch serialization flags",
                     ));
                 }
@@ -319,14 +324,14 @@ impl FetchStreamEntry {
         // prior Subgroup ID 参照の検証 (First / NoPriorActualObject 共通)
         // subgroup_id mode 1 (PreviousSame) または 2 (PreviousPlusOne) は prior 参照
         if subgroup_id_mode == 0x01 || subgroup_id_mode == 0x02 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedObject(
                 "fetch object must not use prior-relative subgroup ID mode without a prior actual object",
             ));
         }
         // prior Priority 参照の検証 (First / NoPriorActualObject 共通)
         // priority 未指定は prior Priority を意味する
         if !has_priority {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::MalformedObject(
                 "fetch object must include explicit Publisher Priority without a prior actual object",
             ));
         }
@@ -338,13 +343,13 @@ impl FetchStreamEntry {
 
             // object_id 未指定は prior Object ID + 1 を意味する
             if !has_object_id {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::MalformedObject(
                     "first fetch object must include explicit Object ID",
                 ));
             }
             // group_id 未指定は prior Group ID を意味する
             if !has_group_id {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::MalformedObject(
                     "first fetch object must include explicit Group ID",
                 ));
             }
@@ -515,7 +520,8 @@ impl FetchStreamObject {
     /// 128 未満の全 bit は定義済み (Table 9 の 0x03 / Table 10 の
     /// 0x04 / 0x08 / 0x10 / 0x20 / 0x40) のため mask 検証は no-op であり、
     /// Table 8 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は
-    /// PROTOCOL_VIOLATION とする ("Any other value 128 or greater is a PROTOCOL_VIOLATION")。
+    /// MALFORMED_OBJECT とする ("If an endpoint receives any other value greater than 127,
+    /// it MUST close the session with MALFORMED_OBJECT.")。
     /// 128 以上の検査は呼び出し側 (`decode_with_properties`) でも行う二重検査で
     /// あり、ここは将来の単独利用に備えた防御である。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
@@ -525,7 +531,8 @@ impl FetchStreamObject {
     ) -> Result<(Self, Option<Vec<u8>>, usize), MessageError> {
         // flags が 128 以上は通常のフラグではない (特殊値はこのメソッドに来ない)
         if flags >= 128 {
-            return Err(MessageError::ProtocolViolation(
+            // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): MALFORMED_OBJECT (0x201)。
+            return Err(MessageError::MalformedObject(
                 "invalid fetch serialization flags",
             ));
         }

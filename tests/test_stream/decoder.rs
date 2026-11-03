@@ -617,7 +617,7 @@ fn test_subgroup_rejects_object_id_delta_overflow() {
     // 2 番目のオブジェクトでオーバーフローが検出される
     assert!(matches!(
         decoder.try_decode_object(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::DeltaEncodingOverflow(_))
     ));
 }
 
@@ -979,7 +979,7 @@ fn test_fetch_rejects_object_id_delta_overflow() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::DeltaEncodingOverflow(_))
     ));
 }
 
@@ -1027,7 +1027,7 @@ fn test_fetch_rejects_group_id_delta_overflow_in_ascending_mode() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::DeltaEncodingOverflow(_))
     ));
 }
 
@@ -1074,7 +1074,7 @@ fn test_fetch_rejects_subgroup_id_previous_plus_one_overflow() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::DeltaEncodingOverflow(_))
     ));
 }
 
@@ -1119,9 +1119,11 @@ fn test_fetch_rejects_ascending_group_in_descending_mode() {
     assert!(matches!(first, DecodedFetchEntry::Object(_)));
     drain_fetch_payload(&mut decoder, 1);
 
+    // Descending では昇順の Group は delta の減算が 0 未満になるため
+    // DELTA_ENCODING_OVERFLOW (0x400) で拒否する
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::DeltaEncodingOverflow(_))
     ));
 }
 
@@ -1375,7 +1377,7 @@ fn test_fetch_rejects_malformed_object_properties() {
 
     assert!(matches!(
         decoder.try_decode_entry(),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 

@@ -2,7 +2,9 @@
 //!
 //! Type Flags の定義済み bit: 0x01 / 0x02 / 0x04 / 0x08 / 0x20。
 //! 0x10 は予約、0x40 は未定義であり、意味未定義の set bit があれば
-//! PROTOCOL_VIOLATION でセッションを閉じなければならない (MUST)。
+//! INVALID_STREAM_HEADER でセッションを閉じなければならない (MUST)
+//! (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) / §12.2
+//! (Session Termination Codes))。
 //! - bit0 = PROPERTIES
 //! - bit1 = END_OF_GROUP
 //! - bit2 = ZERO_OBJECT_ID (1 のとき Object ID フィールド省略、値は 0)
@@ -21,7 +23,8 @@ use alloc::vec::Vec;
 /// draft-ietf-moq-transport-22 §11.2.1 (Object Datagram): Datagram の properties_data は
 /// Properties Length varint + Properties の生バイト列であり、SubgroupObject /
 /// FetchStreamObject と同じく Length を含む規約である。Datagram では Properties Length = 0 は
-/// プロトコル違反 (受信側は §11.2.1 で PROTOCOL_VIOLATION)。
+/// プロトコル違反 (受信側は MALFORMED_OBJECT。draft-ietf-moq-transport-23 §11.2.1
+/// (Object Datagram))。
 /// 空スライス (Length varint すら含まない)・途中で切れた Length varint・
 /// 宣言 Length と実データ長の不一致も拒否する。
 ///
@@ -30,7 +33,7 @@ use alloc::vec::Vec;
 /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
 pub(crate) fn validate_datagram_properties_blob(data: &[u8]) -> Result<(), MessageError> {
     if validate_properties_blob(data)? == 0 {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::MalformedObject(
             "datagram properties length 0 is invalid when PROPERTIES bit is set",
         ));
     }
@@ -43,8 +46,9 @@ const OBJECT_DATAGRAM_KNOWN_MASK: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
 
 /// Object Datagram Type として有効か検証する (draft-ietf-moq-transport-22 §11.2.1 (Object Datagram))
 ///
-/// §11.2.1 は無効な Type 値を列挙し "If an endpoint receives a datagram with any of these
-/// values, it MUST close the session with a PROTOCOL_VIOLATION" と規定する。
+/// draft-ietf-moq-transport-23 §11.2.1 (Object Datagram) は無効な Type 値を列挙し
+/// "If an endpoint receives a datagram with any of these values, it MUST close the session
+/// with INVALID_STREAM_HEADER" と規定する。
 ///
 /// - 意味未定義の set bit がある値 (0x10 予約・ 0x40 未定義・ 128 以上を含む)
 /// - STATUS (0x20) と END_OF_GROUP (0x02) の両方が立っている値
@@ -53,15 +57,17 @@ const OBJECT_DATAGRAM_KNOWN_MASK: u64 = 0x01 | 0x02 | 0x04 | 0x08 | 0x20;
 /// `ObjectDatagram::decode` と、Session の datagram type 分岐が同じ判定を使うために
 /// 切り出している。節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 pub fn validate_object_datagram_type(type_id: u64) -> Result<(), MessageError> {
-    // 意味未定義の set bit があれば PROTOCOL_VIOLATION
+    // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): 意味未定義の set bit と
+    // STATUS / END_OF_GROUP の同時指定を受信した場合、受信側は INVALID_STREAM_HEADER
+    // (0x200) でセッションを閉じる (MUST)。
     if type_id & !OBJECT_DATAGRAM_KNOWN_MASK != 0 {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::InvalidStreamHeader(
             "object datagram type has undefined bits set",
         ));
     }
     // STATUS と END_OF_GROUP の同時指定は無効
     if type_id & 0x20 != 0 && type_id & 0x02 != 0 {
-        return Err(MessageError::ProtocolViolation(
+        return Err(MessageError::InvalidStreamHeader(
             "STATUS and END_OF_GROUP cannot both be set",
         ));
     }
@@ -111,7 +117,9 @@ impl ObjectDatagram {
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         // STATUS と END_OF_GROUP の同時指定は無効
         if self.status.is_some() && self.end_of_group {
-            return Err(MessageError::ProtocolViolation(
+            // 受信側と同じく Type Flags の不正として扱う
+            // (draft-ietf-moq-transport-23 §11.2.1 (Object Datagram))。
+            return Err(MessageError::InvalidStreamHeader(
                 "STATUS and END_OF_GROUP cannot both be set",
             ));
         }
@@ -121,7 +129,7 @@ impl ObjectDatagram {
         }
         // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal 以外のオブジェクトに Properties は不可
         if self.properties_data.is_some() && matches!(self.status, Some(s) if s != 0) {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidObjectStatus(
                 "properties on non-Normal status object is not allowed",
             ));
         }
@@ -228,7 +236,10 @@ impl ObjectDatagram {
             let (ext_len, n) = varint::decode(&buf[pos..])?;
             pos += n;
             if ext_len == 0 {
-                return Err(MessageError::ProtocolViolation(
+                // draft-ietf-moq-transport-23 §11.2.1 (Object Datagram): PROPERTIES bit が
+                // 立っている datagram の Properties Length が 0 なら MALFORMED_OBJECT
+                // (0x201) でセッションを閉じる (MUST)。
+                return Err(MessageError::MalformedObject(
                     "datagram properties length 0 is invalid when PROPERTIES bit is set",
                 ));
             }
@@ -252,9 +263,9 @@ impl ObjectDatagram {
         };
 
         // draft-ietf-moq-transport-22 §11.1.2 (Object Properties): status が Normal (0x0) 以外のオブジェクトに
-        // Properties が付いている場合は PROTOCOL_VIOLATION
+        // Properties が付いている場合は INVALID_OBJECT_STATUS
         if properties_data.is_some() && matches!(status, Some(s) if s != 0) {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidObjectStatus(
                 "properties on non-Normal status object is not allowed",
             ));
         }
@@ -262,12 +273,12 @@ impl ObjectDatagram {
         let remaining_payload_len = buf.len() - pos;
         if status.is_some() {
             if remaining_payload_len != 0 {
-                return Err(MessageError::ProtocolViolation(
+                return Err(MessageError::InvalidObjectStatus(
                     "status object must not carry payload",
                 ));
             }
         } else if remaining_payload_len == 0 {
-            return Err(MessageError::ProtocolViolation(
+            return Err(MessageError::InvalidObjectStatus(
                 "zero-length object must explicitly encode Normal status",
             ));
         }

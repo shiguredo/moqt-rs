@@ -6,6 +6,7 @@
 mod auth_token;
 mod common;
 mod datagram;
+mod error_codes;
 mod fetch;
 mod goaway;
 mod handshake;

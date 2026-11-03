@@ -232,9 +232,9 @@ mod goaway {
 
         let buf = frame(0x10, &payload); // MSG_GOAWAY
 
-        let err = ControlMessage::decode(&buf).expect_err("URI > 8192 は PROTOCOL_VIOLATION");
+        let err = ControlMessage::decode(&buf).expect_err("URI > 8192 は FIELD_LENGTH_EXCEEDED");
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::FieldLengthExceeded(_)),
             "got {err:?}"
         );
     }
@@ -279,9 +279,9 @@ mod goaway {
         });
         let err = msg
             .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
-            .expect_err("URI > 8192 のエンコードは PROTOCOL_VIOLATION");
+            .expect_err("URI > 8192 のエンコードは FIELD_LENGTH_EXCEEDED");
         assert!(
-            matches!(err, MessageError::ProtocolViolation(_)),
+            matches!(err, MessageError::FieldLengthExceeded(_)),
             "got {err:?}"
         );
     }
@@ -550,7 +550,7 @@ mod request_error_details {
         ];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
+            matches!(err, MessageError::MalformedKeyValue(_)),
             "Detail の Length 超過は MALFORMED_KEY_VALUE であるべきだが {err:?}"
         );
     }
@@ -570,7 +570,7 @@ mod request_error_details {
         ];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
+            matches!(err, MessageError::MalformedKeyValue(_)),
             "Detail の Length 不足は MALFORMED_KEY_VALUE であるべきだが {err:?}"
         );
     }
@@ -596,7 +596,7 @@ mod request_error_details {
         ];
         let err = ControlMessage::decode(&bytes).unwrap_err();
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
+            matches!(err, MessageError::MalformedKeyValue(_)),
             "Detail 値内の余剰バイトは MALFORMED_KEY_VALUE であるべきだが {err:?}"
         );
     }
@@ -1071,7 +1071,7 @@ mod fetch {
         });
         assert!(matches!(
             msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -1100,7 +1100,7 @@ mod fetch {
 
         assert!(matches!(
             ControlMessage::decode(&encoded),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 }
@@ -1152,13 +1152,13 @@ mod redirect_full_track_name {
     ///
     /// draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure): "If an endpoint receives a
     /// Track Namespace or a Full Track Name exceeding 4,096 bytes, it MUST close the session
-    /// with a PROTOCOL_VIOLATION."
+    /// with FIELD_LENGTH_EXCEEDED."
     #[test]
     fn redirect_over_limit_is_rejected_on_encode() {
         let msg = ControlMessage::RequestError(request_error_with_redirect_total(1));
         assert!(matches!(
             msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::FieldLengthExceeded(_))
         ));
     }
 
@@ -1189,7 +1189,7 @@ mod redirect_full_track_name {
 
         assert!(matches!(
             ControlMessage::decode(&bytes),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::FieldLengthExceeded(_))
         ));
     }
 }
@@ -1240,7 +1240,7 @@ mod error_cases {
         // payload 長は実際のバイト数と一致しているが、パラメータの KVP が宣言長 10 に対して
         // 3 バイトしか持たない。外側フレームは正常で、Type を理解したうえで Length/Value が
         // 直列化と一致しないため、draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure)
-        // の MUST により KEY_VALUE_FORMATTING_ERROR になる。
+        // の MUST により MALFORMED_KEY_VALUE になる。
         let payload: Vec<u8> = vec![
             0x00, // Request ID
             0x01, 0x04, b'l', b'i', b'v', b'e', // Track Namespace (1 field)
@@ -1255,16 +1255,16 @@ mod error_cases {
         assert!(
             matches!(
                 ControlMessage::decode(&wire),
-                Err(MessageError::KeyValueFormattingError(_))
+                Err(MessageError::MalformedKeyValue(_))
             ),
-            "KVP の宣言長超過は KEY_VALUE_FORMATTING_ERROR であること"
+            "KVP の宣言長超過は MALFORMED_KEY_VALUE であること"
         );
     }
 
-    /// Track Properties の KVP 宣言長超過が KEY_VALUE_FORMATTING_ERROR になること
+    /// Track Properties の KVP 宣言長超過が MALFORMED_KEY_VALUE になること
     ///
     /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) は既知 Type の
-    /// Length/Value が定義と一致しない場合に KEY_VALUE_FORMATTING_ERROR (0x6) でセッションを
+    /// Length/Value が定義と一致しない場合に MALFORMED_KEY_VALUE (0x6) でセッションを
     /// 閉じる MUST。SUBSCRIBE_OK の Track Properties は KVP 列であり、宣言長が残りバイトを
     /// 超える場合は TrackProperties::decode の分類がそのままメッセージ層へ返る。
     #[test]
@@ -1277,8 +1277,8 @@ mod error_cases {
         let err = ControlMessage::decode(&wire)
             .expect_err("Track Properties の宣言長超過は decode に失敗すること");
         assert!(
-            matches!(err, MessageError::KeyValueFormattingError(_)),
-            "Track Properties の宣言長超過は KEY_VALUE_FORMATTING_ERROR であること: {err:?}"
+            matches!(err, MessageError::MalformedKeyValue(_)),
+            "Track Properties の宣言長超過は MALFORMED_KEY_VALUE であること: {err:?}"
         );
     }
 
@@ -1320,9 +1320,10 @@ mod error_cases {
     }
 
     #[test]
-    fn decode_rejects_reason_phrase_longer_than_1024_as_protocol_violation() {
-        // draft-ietf-moq-transport-22 §8.5 (Reason Phrase Structure):
-        // 1024 バイトを超える Reason Phrase の受信は PROTOCOL_VIOLATION。
+    fn decode_rejects_reason_phrase_longer_than_1024_as_field_length_exceeded() {
+        // draft-ietf-moq-transport-23 §8.5 (Reason Phrase Structure) / §12.2
+        // (Session Termination Codes): 1024 バイトを超える Reason Phrase の受信は
+        // FIELD_LENGTH_EXCEEDED (0x401)。
         // PUBLISH_DONE (0x0B) のペイロードに長さ 1025 の Reason Phrase を載せる。
         let mut payload = vec![
             0x00, // status_code = 0
@@ -1336,9 +1337,9 @@ mod error_cases {
         assert!(
             matches!(
                 ControlMessage::decode(&buf),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::ReasonPhraseTooLong)
             ),
-            "1024 バイト超の Reason Phrase の decode は PROTOCOL_VIOLATION になること"
+            "1024 バイト超の Reason Phrase の decode は FIELD_LENGTH_EXCEEDED になること"
         );
     }
 
@@ -1364,7 +1365,7 @@ mod error_cases {
     /// draft-ietf-moq-transport-22 §9.20.6 (RENDEZVOUS TIMEOUT Parameter): "The
     /// RENDEZVOUS_TIMEOUT parameter (Parameter Type 0x04) MAY appear in a SUBSCRIBE message."
     /// §16.7 (Message Parameters) の Table 14 にも登録されており、§9.20 (Control Message
-    /// Parameters) が PROTOCOL_VIOLATION を要求する「未知のパラメータ」には該当しない。
+    /// Parameters) が INVALID_PARAMETER を要求する「未知のパラメータ」には該当しない。
     /// 本ライブラリは値を解釈しないが、受理して `MessageParameters` に残す。
     #[test]
     fn subscribe_with_rendezvous_timeout_is_accepted() {
@@ -1531,8 +1532,8 @@ mod error_cases {
     /// FILL_PARAMETERS を許可しないメッセージに届いた FILL_PARAMETERS の分類
     ///
     /// 値のデコードが scope 検証より先に走るため、内側の値が途中で切れている場合は
-    /// scope 違反の PROTOCOL_VIOLATION ではなく値の形式違反の MALFORMED_MESSAGE を返す。
-    /// 値が最後まで読めれば従来どおり scope 違反の PROTOCOL_VIOLATION になる。
+    /// scope 違反の INVALID_PARAMETER ではなく値の形式違反の MALFORMED_MESSAGE を返す。
+    /// 値が最後まで読めれば scope 違反の INVALID_PARAMETER になる。
     /// どちらもセッションを閉じるが、報告される code が変わることを固定する。
     #[test]
     fn subscribe_ok_with_fill_parameters_reports_value_error_first() {
@@ -1552,16 +1553,16 @@ mod error_cases {
         assert!(
             matches!(
                 ControlMessage::decode(&[0x04, 0x04, 0x00, 0x01, 0x23, 0x00]),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
-            "値が最後まで読めれば Table 7 外として PROTOCOL_VIOLATION になること"
+            "値が最後まで読めれば Table 7 外として INVALID_PARAMETER になること"
         );
     }
 
     /// Table 14 に無い未定義のパラメータ型は encode / decode で拒否される
     ///
     /// draft-ietf-moq-transport-22 §9.20 (Control Message Parameters): "An endpoint that
-    /// receives an unknown Message Parameter MUST close the session with PROTOCOL_VIOLATION."
+    /// receives an unknown Message Parameter MUST close the session with INVALID_PARAMETER."
     #[test]
     fn subscribe_with_undefined_parameter_type_is_rejected() {
         use shiguredo_moqt::message::Subscribe;
@@ -1582,7 +1583,7 @@ mod error_cases {
         assert!(
             matches!(
                 msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-                Err(MessageError::ProtocolViolation(_))
+                Err(MessageError::InvalidParameter)
             ),
             "未定義のパラメータ型は encode で拒否されること"
         );
@@ -1605,7 +1606,7 @@ mod error_cases {
         });
         assert!(matches!(
             msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -1625,7 +1626,7 @@ mod error_cases {
         });
         assert!(matches!(
             msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 }
@@ -1687,7 +1688,7 @@ mod publish_state_notify {
         let msg = ControlMessage::PublishStateNotify(PublishStateNotify { parameters: params });
         assert!(matches!(
             msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 
@@ -1699,7 +1700,7 @@ mod publish_state_notify {
         let buf = frame(0x22, &payload); // MSG_PUBLISH_STATE_NOTIFY
         assert!(matches!(
             ControlMessage::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::InvalidParameter)
         ));
     }
 }
@@ -1715,11 +1716,11 @@ mod request_ok {
         PARAM_SUBGROUP_DELIVERY_TIMEOUT, PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBER_PRIORITY,
     };
 
-    /// 和集合外のパラメータを含む REQUEST_OK は codec 層で PROTOCOL_VIOLATION になる
+    /// 和集合外のパラメータを含む REQUEST_OK は codec 層で INVALID_PARAMETER になる
     ///
     /// draft-ietf-moq-transport-22 §9.3 (REQUEST_OK) が応答 context ごとに列挙する許可パラメータの
     /// 和集合は `EXPIRES` と `LARGEST_OBJECT` の 2 型であり、それ以外は §9.20.1 (Parameter Scope) の
-    /// MUST により PROTOCOL_VIOLATION で閉じる。encode と decode の両経路で同じ検証が働くことを
+    /// MUST により INVALID_PARAMETER で閉じる。encode と decode の両経路で同じ検証が働くことを
     /// 固定する。和集合外の 10 型すべてを対象にし、1 型だけ受理する退行も検出できるようにする。
     #[test]
     fn out_of_scope_params_are_protocol_violation() {
@@ -1784,9 +1785,9 @@ mod request_ok {
             assert!(
                 matches!(
                     msg.encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE),
-                    Err(MessageError::ProtocolViolation(_))
+                    Err(MessageError::InvalidParameter)
                 ),
-                "型 {param_type:#x} の encode は PROTOCOL_VIOLATION になること"
+                "型 {param_type:#x} の encode は INVALID_PARAMETER になること"
             );
 
             // decode 経路: 同じパラメータを wire 形式で手組みする
@@ -1800,9 +1801,9 @@ mod request_ok {
             assert!(
                 matches!(
                     ControlMessage::decode(&wire),
-                    Err(MessageError::ProtocolViolation(_))
+                    Err(MessageError::InvalidParameter)
                 ),
-                "型 {param_type:#x} の decode は PROTOCOL_VIOLATION になること"
+                "型 {param_type:#x} の decode は INVALID_PARAMETER になること"
             );
         }
     }

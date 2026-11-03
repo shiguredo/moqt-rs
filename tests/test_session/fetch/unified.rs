@@ -425,7 +425,7 @@ fn fetch_ok_end_before_start_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
 }
 
 /// FETCH_OK で End Location == Start Location は許容する (空レンジ許容)
@@ -856,7 +856,7 @@ fn fetch_entry_before_header_is_rejected() {
     let err = client
         .recv_fetch_entry(stream_id)
         .expect_err("FETCH_HEADER 未受信では拒否される");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_MALFORMED_OBJECT);
     assert_eq!(err.reason, "fetch entry received before fetch header");
 }
 
@@ -1162,7 +1162,7 @@ fn forgotten_fetch_rejects_late_request_update() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(
         server.state(),
         SessionState::Closing,

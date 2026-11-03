@@ -7,21 +7,17 @@
 //! MOQT メッセージの encode / decode 失敗をどのセッション終了コードで閉じるかも、この層の
 //! [`session_error_code`] に集約する (`moq-pub` / `moq-sub` / 確立前の `MoqtClient` が共有する)。
 
-use shiguredo_moqt::error::{
-    MessageError, SESSION_FIELD_LENGTH_EXCEEDED, SESSION_INVALID_FIELD,
-    SESSION_KEY_VALUE_FORMATTING_ERROR, SESSION_MALFORMED_AUTH_TOKEN, SESSION_MALFORMED_MESSAGE,
-    SESSION_PROTOCOL_VIOLATION,
-};
+use shiguredo_moqt::error::{MessageError, SESSION_PROTOCOL_VIOLATION};
 
 // 未知エラーコードの文脈別正規化は library の helper をそのまま公開する
-// (draft-ietf-moq-transport-22 §13 (Grease) の MUST)。
+// (draft-ietf-moq-transport-23 §13 (Grease) の MUST)。
 pub use shiguredo_moqt::error::normalize_publish_done_code;
 pub use shiguredo_moqt::error::normalize_request_error_code;
 
 /// data stream の復号エラーをセッション終了コードへ分類する
 ///
-/// draft-ietf-moq-transport-22 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) は
-/// 不正な Subgroup Header / Object ID overflow / 非 Normal status への Properties 付与に
+/// draft-ietf-moq-transport-23 §11.3.1 (Subgroup Header) / §11.1.2 (Object Properties) は
+/// 不正な Subgroup Header / Object ID delta overflow / 非 Normal status への Properties 付与に
 /// セッション終了を MUST とする。一方、`MessageError::UnexpectedEof` は `try_decode_*` が
 /// データ不足として `Ok(None)` に吸収するため通常は届かず、届いてもセッション終了の対象外とする
 /// (`finish()` の `UnexpectedEof` は mid-object FIN として別に扱う)。
@@ -36,34 +32,24 @@ pub fn data_stream_termination_code(error: &MessageError) -> Option<u64> {
 
 /// encode / decode 失敗を閉じる終了コード
 ///
-/// library の data plane (`src/session/data.rs` の `session_error_from_data_message`) と
-/// 異なるのは `MalformedAuthToken` の写像 (0x16) と、制御メッセージ長の写像
-/// (`FieldLengthExceeded` → 0x401 / `MalformedMessage` → 0x300 / `InvalidField` → 0x301)
-/// である。draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) が MUST を定める
-/// 書式違反は KEY_VALUE_FORMATTING_ERROR (0x6)、それ以外は PROTOCOL_VIOLATION (0x3) で閉じる。
+/// library の [`MessageError::session_termination_code`] に写像を委譲する。
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、原因を失わない
+/// 最も具体的なコードを返す (MALFORMED_KEY_VALUE / MALFORMED_AUTH_TOKEN /
+/// INVALID_STREAM_HEADER / MALFORMED_OBJECT / INVALID_OBJECT_STATUS /
+/// DELTA_ENCODING_OVERFLOW / FIELD_LENGTH_EXCEEDED / MALFORMED_MESSAGE / INVALID_FIELD /
+/// INVALID_TRACK_NAMESPACE / UNEXPECTED_MESSAGE / INVALID_PARAMETER)。
 ///
 /// Request ID を持つ request メッセージの不正トークンは、library のセッションが
 /// REQUEST_ERROR (MALFORMED_AUTH_TOKEN) でメッセージ単位に拒否するためここには届かない。
 /// ここへ届く `MalformedAuthToken` は、自側で重複トークンを組み立てた encode 失敗と、
 /// peer の SETUP (確立前後を問わない) の decode 失敗である。確立前の SETUP の decode 失敗も
 /// `MoqtClient::establish_*` がこの写像で終了コードを決める。
-///
-/// 終了コードは §12.2 (Session Termination Codes) の MALFORMED_AUTH_TOKEN (0x16)
-/// 「registration 中の不正な Auth Token 直列化」を使う (PROTOCOL_VIOLATION では原因を
-/// 伝えられない)。encode と decode はこの層では区別できないが、いずれも
-/// AUTHORIZATION_TOKEN の直列化の不整合であり、reason phrase が実際の条件を示す。
+/// セッション終了を伴わない variant (draft §12.1 の `MalformedTrack`、MSF の
+/// アプリケーションエラー) は `PROTOCOL_VIOLATION` にフォールバックする。
 pub fn session_error_code(error: &MessageError) -> u64 {
-    match error {
-        MessageError::KeyValueFormattingError(_) => SESSION_KEY_VALUE_FORMATTING_ERROR,
-        MessageError::MalformedAuthToken(_) => SESSION_MALFORMED_AUTH_TOKEN,
-        // draft-ietf-moq-transport-23 §9 (Control Messages): 受信上限を超える Length の宣言は
-        // FIELD_LENGTH_EXCEEDED、本文長の不一致は MALFORMED_MESSAGE で閉じる (MUST)。
-        // §9.1.8 (MAX_CONTROL_MESSAGE_SIZE) の最小値違反は INVALID_FIELD (§12.2)。
-        MessageError::FieldLengthExceeded(_) => SESSION_FIELD_LENGTH_EXCEEDED,
-        MessageError::MalformedMessage(_) => SESSION_MALFORMED_MESSAGE,
-        MessageError::InvalidField(_) => SESSION_INVALID_FIELD,
-        _ => SESSION_PROTOCOL_VIOLATION,
-    }
+    error
+        .session_termination_code()
+        .unwrap_or(SESSION_PROTOCOL_VIOLATION)
 }
 
 /// 共有トランスポート層のエラー型
@@ -265,6 +251,7 @@ pub type Result<T> = std::result::Result<T, TransportError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_moqt::error::{SESSION_FIELD_LENGTH_EXCEEDED, SESSION_MALFORMED_KEY_VALUE};
 
     /// `MessageError` は variant を保って伝わる
     ///
@@ -285,13 +272,13 @@ mod tests {
         );
     }
 
-    /// Track Properties の宣言長超過が decode で KEY_VALUE_FORMATTING_ERROR になり、
+    /// Track Properties の宣言長超過が decode で MALFORMED_KEY_VALUE になり、
     /// session_error_code がセッション終了コード 0x6 に写すこと
     ///
-    /// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST を、
+    /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の MUST を、
     /// wire の decode からセッション終了コードへの写像まで通しで固定する。
     #[test]
-    fn track_property_length_error_maps_to_key_value_formatting_error() {
+    fn track_property_length_error_maps_to_malformed_key_value() {
         use shiguredo_moqt::message::ControlMessage;
         // SUBSCRIBE_OK (0x04), Length = 7 (vi64), Track Alias = 0, Parameters: count=0,
         // Track Properties: delta=0x0B (既知の奇数型 IMMUTABLE_PROPERTIES) /
@@ -301,60 +288,115 @@ mod tests {
             .expect_err("Track Properties の宣言長超過は decode に失敗すること");
         assert_eq!(
             session_error_code(&err),
-            SESSION_KEY_VALUE_FORMATTING_ERROR,
-            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
+            SESSION_MALFORMED_KEY_VALUE,
+            "書式違反は MALFORMED_KEY_VALUE (0x6) であること"
         );
     }
 
-    /// encode / decode 失敗がセッション終了コードへ写ること
+    /// encode / decode 失敗が原因を失わずセッション終了コードへ写ること
     ///
-    /// draft-ietf-moq-transport-22 §12.2 (Session Termination Codes) の
-    /// KEY_VALUE_FORMATTING_ERROR (0x6)、MALFORMED_AUTH_TOKEN (0x16)、
-    /// PROTOCOL_VIOLATION (0x3) を使い分ける。
+    /// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類を
+    /// variant ごとに固定する。制御メッセージの解析失敗とフレーミング違反が同じ
+    /// PROTOCOL_VIOLATION に畳まれないことを確認する。
     #[test]
     fn session_error_code_maps_message_failures() {
-        assert_eq!(
-            session_error_code(&MessageError::KeyValueFormattingError(
-                "test formatting error"
-            )),
-            SESSION_KEY_VALUE_FORMATTING_ERROR,
-            "書式違反は KEY_VALUE_FORMATTING_ERROR (0x6) であること"
-        );
-        // Request ID を持たない経路 (SETUP の AUTHORIZATION_TOKEN) の不正トークンは
-        // セッション終了コードの MALFORMED_AUTH_TOKEN (0x16) へ写す
-        assert_eq!(
-            session_error_code(&MessageError::MalformedAuthToken("test malformed token")),
-            SESSION_MALFORMED_AUTH_TOKEN,
-            "不正トークンは MALFORMED_AUTH_TOKEN (0x16) であること"
-        );
-        assert_eq!(
-            session_error_code(&MessageError::FieldLengthExceeded(
-                "test field length exceeded"
-            )),
-            SESSION_FIELD_LENGTH_EXCEEDED,
-            "上限超過は FIELD_LENGTH_EXCEEDED (0x401) であること"
-        );
-        assert_eq!(
-            session_error_code(&MessageError::MalformedMessage("test malformed message")),
-            SESSION_MALFORMED_MESSAGE,
-            "本文長の不一致は MALFORMED_MESSAGE (0x300) であること"
-        );
-        assert_eq!(
-            session_error_code(&MessageError::InvalidField("test invalid field")),
-            SESSION_INVALID_FIELD,
-            "フィールド値の範囲外は INVALID_FIELD (0x301) であること"
-        );
-        assert_eq!(
-            session_error_code(&MessageError::ProtocolViolation("test violation")),
-            SESSION_PROTOCOL_VIOLATION,
-            "プロトコル違反は PROTOCOL_VIOLATION (0x3) であること"
-        );
-        // メッセージを持たない失敗も PROTOCOL_VIOLATION として扱う
-        assert_eq!(
-            session_error_code(&MessageError::UnexpectedEof),
-            SESSION_PROTOCOL_VIOLATION,
-            "切り詰めは PROTOCOL_VIOLATION (0x3) であること"
-        );
+        use shiguredo_moqt::error::{
+            SESSION_DELTA_ENCODING_OVERFLOW, SESSION_INVALID_FIELD, SESSION_INVALID_OBJECT_STATUS,
+            SESSION_INVALID_PARAMETER, SESSION_INVALID_STREAM_HEADER,
+            SESSION_INVALID_TRACK_NAMESPACE, SESSION_MALFORMED_AUTH_TOKEN,
+            SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_OBJECT, SESSION_PROTOCOL_VIOLATION,
+            SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
+        };
+        let cases: &[(MessageError, u64, &str)] = &[
+            (
+                MessageError::MalformedKeyValue("test kvp"),
+                SESSION_MALFORMED_KEY_VALUE,
+                "KVP の直列化不整合は MALFORMED_KEY_VALUE (0x6)",
+            ),
+            (
+                MessageError::MalformedAuthToken("test malformed token"),
+                SESSION_MALFORMED_AUTH_TOKEN,
+                "不正トークンは MALFORMED_AUTH_TOKEN (0x16)",
+            ),
+            (
+                MessageError::FieldLengthExceeded("test field length exceeded"),
+                SESSION_FIELD_LENGTH_EXCEEDED,
+                "上限超過は FIELD_LENGTH_EXCEEDED (0x401)",
+            ),
+            (
+                MessageError::PayloadTooLong,
+                SESSION_FIELD_LENGTH_EXCEEDED,
+                "KVP 値長の上限超過も FIELD_LENGTH_EXCEEDED (0x401)",
+            ),
+            (
+                MessageError::ReasonPhraseTooLong,
+                SESSION_FIELD_LENGTH_EXCEEDED,
+                "Reason Phrase の長さ超過も FIELD_LENGTH_EXCEEDED (0x401)",
+            ),
+            (
+                MessageError::MalformedMessage("test malformed message"),
+                SESSION_MALFORMED_MESSAGE,
+                "本文長の不一致は MALFORMED_MESSAGE (0x300)",
+            ),
+            (
+                MessageError::UnexpectedEof,
+                SESSION_MALFORMED_MESSAGE,
+                "制御メッセージの途中終端は MALFORMED_MESSAGE (0x300)",
+            ),
+            (
+                MessageError::InvalidField("test invalid field"),
+                SESSION_INVALID_FIELD,
+                "フィールド値の範囲外は INVALID_FIELD (0x301)",
+            ),
+            (
+                MessageError::InvalidTrackNamespace("test namespace"),
+                SESSION_INVALID_TRACK_NAMESPACE,
+                "Track Namespace の構造違反は INVALID_TRACK_NAMESPACE (0x302)",
+            ),
+            (
+                MessageError::InvalidMessageType(0x3F),
+                SESSION_UNEXPECTED_MESSAGE,
+                "未知のメッセージ型は UNEXPECTED_MESSAGE (0x303)",
+            ),
+            (
+                MessageError::RoleViolation("test role"),
+                SESSION_ROLE_VIOLATION,
+                "role 違反は ROLE_VIOLATION (0x304)",
+            ),
+            (
+                MessageError::InvalidParameter,
+                SESSION_INVALID_PARAMETER,
+                "Message Parameter の違反は INVALID_PARAMETER (0x305)",
+            ),
+            (
+                MessageError::InvalidStreamHeader("test header"),
+                SESSION_INVALID_STREAM_HEADER,
+                "ストリームヘッダの不正は INVALID_STREAM_HEADER (0x200)",
+            ),
+            (
+                MessageError::MalformedObject("test object"),
+                SESSION_MALFORMED_OBJECT,
+                "Object の復号失敗は MALFORMED_OBJECT (0x201)",
+            ),
+            (
+                MessageError::InvalidObjectStatus("test status"),
+                SESSION_INVALID_OBJECT_STATUS,
+                "Object Status の不正は INVALID_OBJECT_STATUS (0x202)",
+            ),
+            (
+                MessageError::DeltaEncodingOverflow("test delta"),
+                SESSION_DELTA_ENCODING_OVERFLOW,
+                "デルタ溢出は DELTA_ENCODING_OVERFLOW (0x400)",
+            ),
+            (
+                MessageError::ProtocolViolation("test violation"),
+                SESSION_PROTOCOL_VIOLATION,
+                "汎用のプロトコル違反は PROTOCOL_VIOLATION (0x3)",
+            ),
+        ];
+        for (error, expected, message) in cases {
+            assert_eq!(session_error_code(error), *expected, "{message}: {error:?}");
+        }
     }
 
     /// data stream の復号エラー分類: 終了対象と対象外が区別されること
@@ -366,12 +408,21 @@ mod tests {
             Some(SESSION_PROTOCOL_VIOLATION)
         );
         assert_eq!(
-            super::data_stream_termination_code(&MessageError::KeyValueFormattingError("bad kvp")),
-            Some(shiguredo_moqt::error::SESSION_KEY_VALUE_FORMATTING_ERROR)
+            super::data_stream_termination_code(&MessageError::MalformedKeyValue("bad kvp")),
+            Some(shiguredo_moqt::error::SESSION_MALFORMED_KEY_VALUE)
         );
         assert_eq!(
             super::data_stream_termination_code(&MessageError::MalformedAuthToken("bad token")),
             Some(shiguredo_moqt::error::SESSION_MALFORMED_AUTH_TOKEN)
+        );
+        // データプレーンの delta overflow / status 不正も原因を失わない
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::DeltaEncodingOverflow("bad delta")),
+            Some(shiguredo_moqt::error::SESSION_DELTA_ENCODING_OVERFLOW)
+        );
+        assert_eq!(
+            super::data_stream_termination_code(&MessageError::InvalidObjectStatus("bad status")),
+            Some(shiguredo_moqt::error::SESSION_INVALID_OBJECT_STATUS)
         );
         assert_eq!(
             super::data_stream_termination_code(&MessageError::UnexpectedEof),

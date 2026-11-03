@@ -6,7 +6,8 @@
 
 use crate::error::{
     REQUEST_DOES_NOT_EXIST, REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN,
-    REQUEST_UNSUPPORTED_EXTENSION, SESSION_DUPLICATE_TRACK_ALIAS, SESSION_PROTOCOL_VIOLATION,
+    REQUEST_UNSUPPORTED_EXTENSION, SESSION_DUPLICATE_TRACK_ALIAS, SESSION_INVALID_PARAMETER,
+    SESSION_PROTOCOL_VIOLATION, SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE,
     STREAM_CANCELLED,
 };
 use crate::message::{
@@ -161,7 +162,7 @@ impl Session {
         // DUPLICATE_SUBSCRIPTION による拒否は行わない。
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED パラメータの
         // 抽出 (不在時は既定型 0 = unpaused)。値域外 (0 / 1 以外) の受信は MUST で
-        // セッションを PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と
+        // セッションを INVALID_PARAMETER (0x305) により閉じる (GROUP_ORDER の値域検証と
         // 同じパターン。`?` 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を
         // `paused` の設定に使い、`paused()` の検索結果を検証に再利用する
         // (検証を呼び出しと分離し、同じパラメータを 2 回解釈しない)。
@@ -182,14 +183,15 @@ impl Session {
             Ok(LocationFilterUpdate::Set(filter)) => Some(filter),
             // 省略時と Location Filter Type 0x00 (None) はどちらも unfiltered として扱う
             Ok(_) => None,
-            Err(_) => {
-                // draft-ietf-moq-transport-22 §9.20.9 (LOCATION FILTER Parameter):
-                // StartGroup + EndGroupDelta のオーバーフローは MUST close the session with
-                // PROTOCOL_VIOLATION。Location Filter 形式でない値は API 経由で手組みした
-                // メッセージでのみ起こり、wire 経路では decode 層が先に拒否するため到達しない
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "invalid subscription filter encoding",
+            Err(msg_err) => {
+                // draft-ietf-moq-transport-23 §9.19.9 (LOCATION FILTER Parameter): 未知の
+                // Location Filter Type は INVALID_PARAMETER、StartGroup + EndGroupDelta の
+                // オーバーフローは DELTA_ENCODING_OVERFLOW で閉じる (MUST)。wire 経路では
+                // decode 層が先に拒否するため、ここへ届くのは API 経由で手組みした
+                // メッセージだけである。
+                let err = crate::session::core::session_error_from_message(
+                    &msg_err,
+                    SESSION_INVALID_PARAMETER,
                 );
                 self.fail(err.clone());
                 return Err(err);
@@ -198,7 +200,8 @@ impl Session {
         let subscriber_priority = subscribe.parameters.subscriber_priority();
         let group_order = subscribe.parameters.group_order();
         // draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter):
-        // 値域外 (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        // 値域外 (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により
+        // 閉じる (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
         let include_properties = subscribe.parameters.include_properties();
         if let Some(v) = include_properties
             && let Err(err) = validate_include_properties(v)
@@ -412,7 +415,7 @@ impl Session {
         }
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): PAUSED パラメータの
         // 抽出 (不在時は既定型 0 = unpaused)。値域外 (0 / 1 以外) の受信は MUST で
-        // セッションを PROTOCOL_VIOLATION により閉じる (GROUP_ORDER の値域検証と
+        // セッションを INVALID_PARAMETER (0x305) により閉じる (GROUP_ORDER の値域検証と
         // 同じパターン。`?` 伝播のみだとセッションが開いたまま残る)。検証の `Ok` 値を
         // `paused` の設定に使い、`paused()` の検索結果を検証に再利用する
         // (検証を呼び出しと分離し、同じパラメータを 2 回解釈しない)。
@@ -427,7 +430,7 @@ impl Session {
             None => false,
         };
         // draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter): 値域外の受信は
-        // MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        // MUST でセッションを INVALID_PARAMETER (0x305) により閉じる。
         // この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
         let group_order = publish.parameters.group_order();
         if let Some(order) = group_order
@@ -446,10 +449,10 @@ impl Session {
             Ok(_) => None,
             // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
             // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
-            Err(_) => {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "invalid publish filter encoding",
+            Err(msg_err) => {
+                let err = crate::session::core::session_error_from_message(
+                    &msg_err,
+                    SESSION_INVALID_PARAMETER,
                 );
                 self.fail(err.clone());
                 return Err(err);
@@ -569,7 +572,7 @@ impl Session {
         let locally_terminated = self.is_locally_terminated_request(request_id);
         let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "SUBSCRIBE_OK received for unknown request id",
             );
             self.fail(err.clone());
@@ -579,7 +582,7 @@ impl Session {
             || !(subscription.is_pending_subscriber() || locally_terminated)
         {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "SUBSCRIBE_OK in unexpected subscription state",
             );
             self.fail(err.clone());
@@ -738,11 +741,13 @@ impl Session {
                 return Err(err);
             }
         }
-        // draft §9.20.1 (Parameter Scope): context 別の許可パラメータ集合で
-        // 検証する。違反時は PROTOCOL_VIOLATION でセッションをクローズする (MUST)。
+        // draft §9.19.1 (Parameter Scope): context 別の許可パラメータ集合で
+        // 検証する。違反時は INVALID_PARAMETER でセッションをクローズする (MUST)。
         // あわせて draft §9.5 (REQUEST_UPDATE): "An endpoint that receives a REQUEST_UPDATE
         // other than in the two cases above MUST close the session with a PROTOCOL_VIOLATION."
         // を満たすため、更新できない request (TRACK_STATUS / 未知 id) もここで閉じる。
+        // セッション終了コードは draft-ietf-moq-transport-23 §12.2 (Session Termination Codes)
+        // に従い UNEXPECTED_MESSAGE / ROLE_VIOLATION / INVALID_PARAMETER に細分類する。
         // 対象 request の state / role (§3.1 / §3.2 / §9.5) もここで検証する。
         //
         // この検証は Range Filter の内容検証より先に行う。Range Filter を許可しない
@@ -778,29 +783,32 @@ impl Session {
             }
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",
                 );
                 self.fail(err.clone());
                 return Err(err);
             }
         };
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
         if update.parameters.validate_scope(allowed).is_err() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, scope_error);
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, scope_error);
             self.fail(err.clone());
             return Err(err);
         }
         // draft-ietf-moq-transport-22 §9.20.15 (FILL PARAMETERS Parameter): 内側の
         // パラメータも許可集合に限る。wire 経路では decode 層が検証済みだが、decode 済み
         // メッセージを直接受け取る API 経路ではここで検証する。
-        if let Err(err) = update.parameters.validate_fill_parameters_scope() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
+        if let Err(msg_err) = update.parameters.validate_fill_parameters_scope() {
+            // draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter):
+            // 内側スコープ違反は INVALID_PARAMETER (0x305)。
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, msg_err.reason());
             self.fail(err.clone());
             return Err(err);
         }
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter):
         // PAUSED は 0 (unpaused) / 1 (paused) のみが有効であり、値域外を受信した
-        // endpoint は PROTOCOL_VIOLATION でセッションを閉じる MUST。Range Filter の
+        // endpoint は INVALID_PARAMETER (0x305) でセッションを閉じる MUST。Range Filter の
         // 拒否 (INVALID_FILTER の REQUEST_ERROR) より先に検証し、MUST close が
         // REQUEST_ERROR に隠れないようにする。
         if let Some(value) = update.parameters.paused()
@@ -886,10 +894,10 @@ impl Session {
             RequestTable::Fetch => {
                 self.handle_update_for_fetch(request_id, update.parameters, locally_terminated)
             }
-            // 上の検証で TRACK_STATUS は PROTOCOL_VIOLATION としてセッション終了済み (防御)
+            // 上の検証で TRACK_STATUS は UNEXPECTED_MESSAGE としてセッション終了済み (防御)
             RequestTable::TrackStatus => {
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",
                 );
                 self.fail(err.clone());
@@ -929,7 +937,7 @@ impl Session {
     /// - Pending / Terminated: 呼び出し元の state 検証でセッション終了になるため
     ///   到達しない (本関数は state を見ない前提)。
     /// - TRACK_STATUS / 未知 id: 呼び出し元の request 種別判定 (`locate_request`) で
-    ///   PROTOCOL_VIOLATION に落ちるため到達しない (防御として閉じる)。
+    ///   UNEXPECTED_MESSAGE に落ちるため到達しない (防御として閉じる)。
     ///
     /// `reason` は §8.5 (Reason Phrase Structure) の 1024 バイト上限以下であること
     /// (超過時は panic)。
@@ -976,11 +984,11 @@ impl Session {
                 }
             }
             // draft §9.5 (REQUEST_UPDATE): 更新できない request への受信は
-            // PROTOCOL_VIOLATION で閉じる MUST。呼び出し元の request 種別判定
+            // UNEXPECTED_MESSAGE で閉じる。呼び出し元の request 種別判定
             // (`locate_request`) で検出済み (防御)
             Some(RequestTable::TrackStatus) | None => {
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_UPDATE received for unknown or unsupported request id",
                 );
                 self.fail(err.clone());
@@ -996,10 +1004,10 @@ impl Session {
     /// PROTOCOL_VIOLATION." の MUST を満たす。
     ///
     /// - draft §3.1 (Subscriptions) / state diagram: REQUEST_UPDATE は Established の
-    ///   self loop。Pending* / Terminated での受信は PROTOCOL_VIOLATION
+    ///   self loop。Pending* / Terminated での受信は UNEXPECTED_MESSAGE
     /// - REQUEST_UPDATE を送れる側は (a) 元 request の initiator (自側は responder)、
     ///   (b) PUBLISH 経由の subscription の subscriber。自側が initiator かつ subscriber
-    ///   (SUBSCRIBE 経由で peer が publisher) での受信は PROTOCOL_VIOLATION
+    ///   (SUBSCRIBE 経由で peer が publisher) での受信は ROLE_VIOLATION
     ///
     /// `locally_terminated` は送信方向を reset 済みの request を表す。応答を送れないため
     /// state 検証のみ緩める (role 検証は応答の有無に依存しないため常に行う)。
@@ -1020,7 +1028,7 @@ impl Session {
         let is_initiator_self = subscription.is_initiator_self();
         if state != SubscriptionState::Established && !locally_terminated {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "REQUEST_UPDATE requires Established subscription",
             );
             self.fail(err.clone());
@@ -1028,7 +1036,7 @@ impl Session {
         }
         if is_initiator_self && my_role != TrackRole::Publisher {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "REQUEST_UPDATE cannot be received by subscriber initiator",
             );
             self.fail(err.clone());
@@ -1051,7 +1059,7 @@ impl Session {
         // state・role / auth token / パラメータスコープ / PAUSED 値域の検証は呼び出し元
         // `handle_peer_request_update` で済んでいる)。
         // なお state テーブルから破棄済み (`forget_*` 後) の request への REQUEST_UPDATE は、
-        // 送信者を特定できないため従来どおり PROTOCOL_VIOLATION になる。
+        // 送信者を特定できないため従来どおり UNEXPECTED_MESSAGE になる。
         let subscription = self
             .subscriptions
             .get(&request_id)
@@ -1065,7 +1073,7 @@ impl Session {
         // 受信側 MUST ではないため適法)。
         if parameters.new_group_request().is_some() && !subscription.dynamic_groups {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_PARAMETER,
                 "NEW_GROUP_REQUEST in REQUEST_UPDATE without DYNAMIC_GROUPS=1 track",
             );
             self.fail(err.clone());
@@ -1165,7 +1173,7 @@ impl Session {
     /// publisher のみが subscription の bidi stream 上で送る一方向通知であり、
     /// 応答は不要、MAX_REQUEST_UPDATES のクレジットも消費しない。
     /// subscription 以外への受信・ subscriber からの受信は MUST でセッションを
-    /// PROTOCOL_VIOLATION により閉じる。PAUSED / LOCATION_FILTER /
+    /// UNEXPECTED_MESSAGE / ROLE_VIOLATION により閉じる。PAUSED / LOCATION_FILTER /
     /// LARGEST_OBJECT は subscription 状態に即時反映する。
     /// この節番号・規則は draft 由来であり将来の draft 改版で変わる可能性がある。
     pub(crate) fn handle_peer_publish_state_notify(
@@ -1175,18 +1183,18 @@ impl Session {
     ) -> Result<(), SessionError> {
         let Some(subscription) = self.subscriptions.get(&request_id) else {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "PUBLISH_STATE_NOTIFY received for unknown or unsupported request id",
             );
             self.fail(err.clone());
             return Err(err);
         };
         // draft-ietf-moq-transport-22 §9.10 (PUBLISH_STATE_NOTIFY):
-        // subscription 以外・ subscriber からの受信は PROTOCOL_VIOLATION (MUST)。
+        // subscription 以外・ subscriber からの受信は ROLE_VIOLATION (MUST)。
         // `subscriptions` 索引に無い request (fetch / namespace 系等) は上記で弾かれる。
         if subscription.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "PUBLISH_STATE_NOTIFY received on publisher side",
             );
             self.fail(err.clone());
@@ -1197,18 +1205,18 @@ impl Session {
         // (`rejected_request_ids` に記録) では、peer が reset を観測する前に送った通知が
         // 正当に届くため、残りの検証 (PAUSED / LOCATION_FILTER) だけを行い状態遷移はしない。
         // 破棄済み (`forget_*` 後) の request への通知は送信者を特定できないため
-        // 従来どおり PROTOCOL_VIOLATION になる。
+        // 従来どおり UNEXPECTED_MESSAGE になる。
         let locally_terminated = self.is_locally_terminated_request(request_id);
         if subscription.state != SubscriptionState::Established && !locally_terminated {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "PUBLISH_STATE_NOTIFY requires Established subscription",
             );
             self.fail(err.clone());
             return Err(err);
         }
         // draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter): 値域外
-        // (0 / 1 以外) の受信は MUST でセッションを PROTOCOL_VIOLATION により閉じる。
+        // (0 / 1 以外) の受信は MUST でセッションを INVALID_PARAMETER (0x305) により閉じる。
         if let Some(value) = notify.parameters.paused()
             && let Err(err) = validate_paused(value)
         {
@@ -1221,10 +1229,10 @@ impl Session {
             Ok(update) => update,
             // 受信メッセージでは decode 層が値域と形式を検証済みのため到達しない。
             // API 経由で手組みしたメッセージに対しては安全側にセッションを閉じる。
-            Err(_) => {
-                let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
-                    "invalid filter encoding in PUBLISH_STATE_NOTIFY",
+            Err(msg_err) => {
+                let err = crate::session::core::session_error_from_message(
+                    &msg_err,
+                    SESSION_INVALID_PARAMETER,
                 );
                 self.fail(err.clone());
                 return Err(err);
@@ -1292,7 +1300,7 @@ impl Session {
         let locally_terminated = self.is_locally_terminated_request(request_id);
         let Some(subscription) = self.subscriptions.get_mut(&request_id) else {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "PUBLISH_DONE received for unknown request id",
             );
             self.fail(err.clone());
@@ -1300,7 +1308,7 @@ impl Session {
         };
         if subscription.my_role != TrackRole::Subscriber {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "PUBLISH_DONE received on publisher side",
             );
             self.fail(err.clone());
@@ -1312,13 +1320,13 @@ impl Session {
         // draft §3.1 (Subscriptions): publisher は Pending (Publisher) / Established
         // からしか PUBLISH_DONE を送れない。したがって peer が SUBSCRIBE の
         // initiator であり自側が publisher responder となる Pending(Subscriber) からの
-        // PUBLISH_DONE 受信は PROTOCOL_VIOLATION。
+        // PUBLISH_DONE 受信は UNEXPECTED_MESSAGE。
         //
         // ただし REQUEST_UPDATE 失敗応答経路の `Terminated` (draft §3.1.2 の
         // REQUEST_ERROR 受信で subscription state を終える帰結として
         // `handle_err_for_subscription` の Established 分岐で遷移) には、
         // publisher が §9.5.1 の MUST に基づき送る PUBLISH_DONE(UPDATE_FAILED) が続く。
-        // これを拒否するとセッションが PROTOCOL_VIOLATION で閉じられる回帰になるため、
+        // これを拒否するとセッションが UNEXPECTED_MESSAGE で閉じられる回帰になるため、
         // 未記録 (`publish_done` が `None`) の `Terminated` に届く PUBLISH_DONE を受理する。
         // 受理条件はデータプレーン吸収 `is_cancelled_terminated` (`src/session/data.rs`) と同一で、
         // 記録済み (`publish_done` が `Some`) への重複 PUBLISH_DONE は従来どおり拒否される。
@@ -1331,7 +1339,7 @@ impl Session {
                 && subscription.publish_done.is_none());
         if !allow_publish_done {
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "PUBLISH_DONE requires Pending(Publisher), Established, or unrecorded Terminated state",
             );
             self.fail(err.clone());

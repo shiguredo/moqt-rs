@@ -280,7 +280,7 @@ fn timeout_priority_goaway_only() {
 fn recv_control_stream_type_unknown_stream_type_rejected() {
     let (mut client, _server) = establish_pair();
     let err = client.recv_control_stream_type(0x1234).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_STREAM_HEADER);
 }
 
 /// control_message_timeout_ms の set/get ラウンドトリップ

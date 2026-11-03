@@ -5,7 +5,7 @@
 //! 将来 draft 側で変更される可能性がある。
 
 use super::super::types::{Subscription, SubscriptionRangeFilters};
-use crate::error::SESSION_PROTOCOL_VIOLATION;
+use crate::error::SESSION_INVALID_PARAMETER;
 use crate::message::common::Location;
 use crate::message_parameter::{
     LocationFilter, LocationFilterContext, MessageParameters, PARAM_OBJECT_PROPERTY_FILTER,
@@ -17,16 +17,16 @@ use super::super::types::SessionError;
 
 /// GROUP_ORDER の値域を検証する (draft-ietf-moq-transport-22 §9.20.8 (GROUP ORDER Parameter))
 ///
-/// 許容値は Ascending (0x1) または Descending (0x2) のみ。それ以外は PROTOCOL_VIOLATION。
+/// 許容値は Ascending (0x1) または Descending (0x2) のみ。それ以外は INVALID_PARAMETER。
 /// ワイヤデコード層でも値域検証を行うが、API 経路 (MessageParameters を直接構築して
 /// セッション層 API に渡す経路) からの不正値投入を防ぐため、セッション層でも検証する。
-/// 受信経路で値域外を検出した場合は、MUST でセッションを PROTOCOL_VIOLATION により
+/// 受信経路で値域外を検出した場合は、MUST でセッションを INVALID_PARAMETER により
 /// 閉じる (self.fail() を呼ぶ)。
 /// この仕様は将来変更される可能性がある。
 pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
     if order != 0x1 && order != 0x2 {
         return Err(SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_INVALID_PARAMETER,
             "invalid group order value",
         ));
     }
@@ -36,7 +36,7 @@ pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
 /// PAUSED の値を検証し、paused 状態へ変換する
 /// (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter))
 ///
-/// 許容値は 0 (unpaused) と 1 (paused) のみ。それ以外は PROTOCOL_VIOLATION。
+/// 許容値は 0 (unpaused) と 1 (paused) のみ。それ以外は INVALID_PARAMETER。
 /// 値域内なら `1` を `true` (paused)、`0` を `false` (unpaused) として返す。
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
@@ -44,12 +44,12 @@ pub fn validate_group_order(order: u8) -> Result<(), SessionError> {
 /// SUBSCRIBE / PUBLISH / REQUEST_UPDATE / PUBLISH_STATE_NOTIFY の受信経路
 /// (`handle_peer_subscribe` / `handle_peer_publish` / `handle_peer_request_update` /
 /// `handle_peer_publish_state_notify`) では、値域外の受信は同節の MUST (INVALID_PARAMETER)
-/// を、本実装では既存の写像に合わせて PROTOCOL_VIOLATION として扱う。呼び出し側が
+/// を、本実装では既存の写像に合わせて INVALID_PARAMETER として扱う。呼び出し側が
 /// `self.fail()` を呼んでセッションを閉じる (`?` 伝播のみではセッションが開いたまま残る)。
 pub fn validate_paused(value: u8) -> Result<bool, SessionError> {
     if value > 1 {
         return Err(SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_INVALID_PARAMETER,
             "invalid paused value",
         ));
     }
@@ -58,17 +58,17 @@ pub fn validate_paused(value: u8) -> Result<bool, SessionError> {
 
 /// INCLUDE_PROPERTIES の値を検証する (draft-ietf-moq-transport-22 §9.20.21 (INCLUDE_PROPERTIES Parameter))
 ///
-/// 許容値は 0 (送らない) と 1 (送る) のみ。それ以外は PROTOCOL_VIOLATION。
+/// 許容値は 0 (送らない) と 1 (送る) のみ。それ以外は INVALID_PARAMETER。
 /// デコード層 (`message_parameter.rs`) でもワイヤフォーマット上の検証を行うが、
 /// API 経路からの不正値投入を防ぐためセッション層でも検証する。
 ///
 /// SUBSCRIBE / FETCH / TRACK_STATUS 受信経路では、値域外の受信は
 /// draft §9.20.21 の MUST に従い呼び出し側が `self.fail()` を呼んでセッションを
-/// PROTOCOL_VIOLATION により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
+/// INVALID_PARAMETER により閉じる (`?` 伝播のみではセッションが開いたまま残る)。
 pub fn validate_include_properties(value: u8) -> Result<(), SessionError> {
     if value > 1 {
         return Err(SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
+            SESSION_INVALID_PARAMETER,
             "invalid include_properties value",
         ));
     }

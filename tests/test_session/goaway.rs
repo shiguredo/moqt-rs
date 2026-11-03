@@ -257,7 +257,7 @@ fn goaway_on_request_stream_duplicate_receive_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
@@ -340,11 +340,11 @@ fn goaway_on_request_stream_before_established_closes_session() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_UNEXPECTED_MESSAGE);
     assert_eq!(client.state(), SessionState::Closing);
 }
 
-/// Server が control stream で非空 new_session_uri の GOAWAY を受信したら PROTOCOL_VIOLATION
+/// Server が control stream で非空 new_session_uri の GOAWAY を受信したら INVALID_FIELD
 ///
 /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): Server (受信側) は Client (peer) からの
 /// non-zero new_session_uri を拒否する。送信側検証
@@ -359,11 +359,11 @@ fn server_recv_control_goaway_with_non_zero_uri_rejected() {
             timeout: 10000,
         }))
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
     assert_eq!(server.state(), SessionState::Closing);
 }
 
-/// Server が request stream で非空 new_session_uri の GOAWAY を受信したら PROTOCOL_VIOLATION
+/// Server が request stream で非空 new_session_uri の GOAWAY を受信したら INVALID_FIELD
 ///
 /// draft-ietf-moq-transport-22 §9.2 (GOAWAY): request stream 上の GOAWAY でも Server (受信側) は Client からの
 /// non-zero new_session_uri を拒否する (`handle_peer_goaway_on_request_stream`)。control stream 版と対をなす。
@@ -379,7 +379,7 @@ fn server_recv_request_stream_goaway_with_non_zero_uri_rejected() {
             }),
         )
         .unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_FIELD);
     assert_eq!(server.state(), SessionState::Closing);
 }
 

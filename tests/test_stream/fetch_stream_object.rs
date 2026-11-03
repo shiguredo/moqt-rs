@@ -330,7 +330,7 @@ fn decode_no_prior_actual_object_with_prior_subgroup_rejected() {
     shiguredo_moqt::varint::encode(0, &mut buf); // payload_length
     assert!(matches!(
         FetchStreamEntry::decode(&buf, FetchPriorContext::NoPriorActualObject),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 
@@ -345,14 +345,15 @@ fn decode_no_prior_actual_object_without_priority_rejected() {
     shiguredo_moqt::varint::encode(0, &mut buf); // payload_length
     assert!(matches!(
         FetchStreamEntry::decode(&buf, FetchPriorContext::NoPriorActualObject),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 
 #[test]
 fn unknown_flags_at_or_above_128_rejected() {
-    // Table 8 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は PROTOCOL_VIOLATION
-    // (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header): "Any other value 128 or greater is a PROTOCOL_VIOLATION")
+    // Table 8 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は MALFORMED_OBJECT
+    // (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header): "If an endpoint receives any other
+    // value greater than 127, it MUST close the session with MALFORMED_OBJECT.")
     // 0x8D は 128 以上かつ特殊値ではない。First 文脈で decode し、prior 文脈違反
     // ではなく未知 flags としての拒否であることをメッセージで断定する
     // (未知値チェックが prior チェックより先行することの固定)。
@@ -360,7 +361,7 @@ fn unknown_flags_at_or_above_128_rejected() {
     shiguredo_moqt::varint::encode(0x8D, &mut buf);
     assert!(matches!(
         FetchStreamEntry::decode(&buf, FetchPriorContext::First),
-        Err(MessageError::ProtocolViolation(
+        Err(MessageError::MalformedObject(
             "invalid fetch serialization flags"
         ))
     ));
@@ -445,7 +446,7 @@ fn encode_truncated_properties_length_rejected() {
     let mut buf = vec![0xAA, 0xBB];
     assert!(matches!(
         obj.encode(Some(&[0x80]), FetchPriorContext::HasPriorObject, &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
 }
@@ -466,7 +467,7 @@ fn encode_properties_length_mismatch_rejected() {
     let mut buf = vec![0xAA, 0xBB];
     assert!(matches!(
         obj.encode(Some(&[0x40]), FetchPriorContext::HasPriorObject, &mut buf),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA, 0xBB], "失敗時に buf が変化しないこと");
     // Length = 0 を宣言して余分な 1 バイト
@@ -477,7 +478,7 @@ fn encode_properties_length_mismatch_rejected() {
             FetchPriorContext::HasPriorObject,
             &mut buf
         ),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
 }
 
@@ -500,7 +501,7 @@ fn encode_properties_length_u64_max_rejected() {
             FetchPriorContext::HasPriorObject,
             &mut buf
         ),
-        Err(MessageError::ProtocolViolation(_))
+        Err(MessageError::MalformedObject(_))
     ));
     assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと");
 }

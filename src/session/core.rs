@@ -23,10 +23,12 @@ use hashbrown::{HashMap, HashSet};
 use crate::error::{
     MessageError, PUBLISH_DONE_UPDATE_FAILED, REQUEST_DOES_NOT_EXIST, REQUEST_INTERNAL_ERROR,
     REQUEST_INVALID_FILTER, REQUEST_MALFORMED_AUTH_TOKEN, REQUEST_REDIRECT,
-    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_INTERNAL_ERROR, SESSION_INVALID_AUTHORITY,
-    SESSION_INVALID_FIELD, SESSION_INVALID_PATH, SESSION_KEY_VALUE_FORMATTING_ERROR,
-    SESSION_MALFORMED_AUTHORITY, SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH,
-    SESSION_PROTOCOL_VIOLATION, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS, is_local_error_code,
+    SESSION_AUTH_TOKEN_CACHE_OVERFLOW, SESSION_CLOSED_CONTROL_STREAM, SESSION_INTERNAL_ERROR,
+    SESSION_INVALID_AUTHORITY, SESSION_INVALID_FIELD, SESSION_INVALID_PARAMETER,
+    SESSION_INVALID_PATH, SESSION_INVALID_STREAM_HEADER, SESSION_MALFORMED_AUTHORITY,
+    SESSION_MALFORMED_MESSAGE, SESSION_MALFORMED_PATH, SESSION_PROTOCOL_VIOLATION,
+    SESSION_ROLE_VIOLATION, SESSION_UNEXPECTED_MESSAGE, SESSION_UNKNOWN_AUTH_TOKEN_ALIAS,
+    is_local_error_code,
 };
 use crate::message::{
     ControlMessage, ErrorDetails, PublishDone, REQUEST_UPDATE_OK_ALLOWED_PARAMS, ReasonPhrase,
@@ -904,7 +906,8 @@ impl Session {
     /// 受信した制御メッセージを処理する
     ///
     /// 制御ストリーム上で受け取れるのは SETUP と GOAWAY のみ (draft §9.1 (SETUP) / §9.2 (GOAWAY))。
-    /// それ以外のメッセージは PROTOCOL_VIOLATION としてクローズする。
+    /// それ以外のメッセージは UNEXPECTED_MESSAGE としてクローズする
+    /// (draft-ietf-moq-transport-23 §12.2 (Session Termination Codes))。
     ///
     /// クローズ処理中 / クローズ済みの呼び出しは `Ok(())` で no-op。
     pub fn recv_control(&mut self, msg: ControlMessage) -> Result<(), SessionError> {
@@ -915,8 +918,10 @@ impl Session {
             ControlMessage::Setup(setup) => self.handle_peer_setup(setup),
             ControlMessage::Goaway(g) => self.handle_peer_goaway(g),
             _ => {
+                // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
+                // UNEXPECTED_MESSAGE: 制御ストリーム上で受信できないメッセージ。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "unsupported control stream message",
                 );
                 self.fail(err.clone());
@@ -929,7 +934,9 @@ impl Session {
     ///
     /// draft §6.4.1 (Unidirectional Streams): control stream の stream type は
     /// `SETUP_STREAM_TYPE` (0x2F00) でなければならない。
-    /// 受信した stream type が異なる場合は `PROTOCOL_VIOLATION` でセッションを閉じる。
+    /// 受信した stream type が異なる場合は `INVALID_STREAM_HEADER` でセッションを閉じる
+    /// (draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams) / §12.2
+    /// (Session Termination Codes))。
     ///
     /// クローズ処理中 / クローズ済みの呼び出しは no-op。
     pub fn recv_control_stream_type(&mut self, stream_type: u64) -> Result<(), SessionError> {
@@ -937,8 +944,12 @@ impl Session {
             return Ok(());
         }
         if stream_type != SETUP_STREAM_TYPE {
-            let err =
-                SessionError::new(SESSION_PROTOCOL_VIOLATION, "unexpected control stream type");
+            // draft-ietf-moq-transport-23 §6.4.1 (Unidirectional Streams): 未知のストリーム型は
+            // INVALID_STREAM_HEADER (0x200) でセッションを閉じる (MUST)。
+            let err = SessionError::new(
+                SESSION_INVALID_STREAM_HEADER,
+                "unexpected control stream type",
+            );
             self.fail(err.clone());
             return Err(err);
         }
@@ -950,7 +961,9 @@ impl Session {
     /// draft-ietf-moq-transport-22 §6.3 (Session initialization): control stream は
     /// session の lifetime 中に閉じてはならない。SETUP 交換中
     /// (`LocalSetupSent`) であっても、transport 層で peer control stream が
-    /// 閉じた時点で `PROTOCOL_VIOLATION` として扱う。
+    /// 閉じた時点で `CLOSED_CONTROL_STREAM` として扱う
+    /// (draft-ietf-moq-transport-23 §6.3 (Session initialization) / §12.2
+    /// (Session Termination Codes))。
     ///
     /// クローズ処理中 / クローズ済みの呼び出しは `Ok(())` で no-op。
     pub fn recv_control_stream_closed(
@@ -960,13 +973,15 @@ impl Session {
         if matches!(self.state, SessionState::Closing | SessionState::Closed) {
             return Ok(());
         }
+        // draft-ietf-moq-transport-23 §6.3 (Session initialization) / §12.2
+        // (Session Termination Codes): 制御ストリームの終端は CLOSED_CONTROL_STREAM (0x306)。
         let err = match end {
             RequestStreamEnd::Fin => SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_CLOSED_CONTROL_STREAM,
                 "peer control stream closed with FIN",
             ),
             RequestStreamEnd::Reset { .. } => {
-                SessionError::new(SESSION_PROTOCOL_VIOLATION, "peer control stream reset")
+                SessionError::new(SESSION_CLOSED_CONTROL_STREAM, "peer control stream reset")
             }
         };
         self.fail(err.clone());
@@ -1068,8 +1083,8 @@ impl Session {
     /// - `allowed_params` に無いメッセージパラメータ、および FILL_PARAMETERS の内側に
     ///   `FILL_PARAMETERS_ALLOWED_PARAMS` 外のパラメータが無いかを検証する (draft §9.20.1
     ///   (Parameter Scope) / §9.20.15 (FILL PARAMETERS Parameter) の MUST close)。
-    ///   FILL_PARAMETERS の重複は §9.20 (Control Message Parameters) の受信側 SHOULD 検証として
-    ///   PROTOCOL_VIOLATION で閉じる。いずれもセッション終了を伴う検証であり、下の
+    ///   FILL_PARAMETERS の重複は §9.19 (Control Message Parameters) の受信側 SHOULD 検証として
+    ///   INVALID_PARAMETER で閉じる。いずれもセッション終了を伴う検証であり、下の
     ///   メッセージ単位の reject より先に処理する
     /// - 構造は正しいが内容が不正な AUTHORIZATION_TOKEN を含む場合は
     ///   REQUEST_ERROR(MALFORMED_AUTH_TOKEN) を送信し `Ok(false)` を返す
@@ -1139,13 +1154,15 @@ impl Session {
         // メッセージ型ごとの許可パラメータと FILL_PARAMETERS の内側スコープを検証する。
         // これらはセッション終了の MUST であり、AUTH_TOKEN 一意性や GOAWAY 拒否などの
         // メッセージ単位の reject より先に処理する (未対応 request と同じ順序)。
+        // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope) / §9.19.15 (FILL PARAMETERS
+        // Parameter): 許可されないパラメータは INVALID_PARAMETER (0x305) で閉じる (MUST)。
         if parameters.validate_scope(allowed_params).is_err() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, scope_error_reason);
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, scope_error_reason);
             self.fail(err.clone());
             return Err(err);
         }
         if let Err(err) = parameters.validate_fill_parameters_scope() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, err.reason());
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, err.reason());
             self.fail(err.clone());
             return Err(err);
         }
@@ -1232,14 +1249,14 @@ impl Session {
     /// 本体の解析に失敗した場合 (フレーミング違反 / Track Namespace の書式不正)、許可されない
     /// パラメータを含む場合 (draft §9.20.1 (Parameter Scope))、REGISTER が token cache の上限や
     /// alias 重複に触れる場合は、原因に応じた終了コード
-    /// (`PROTOCOL_VIOLATION` / `KEY_VALUE_FORMATTING_ERROR` / `AUTH_TOKEN_CACHE_OVERFLOW` /
-    /// `DUPLICATE_AUTH_TOKEN_ALIAS`) で session を closing に遷移させる。
-    /// 7 種類以外の message type
-    /// (draft §6.3 (Session initialization) 違反) は `PROTOCOL_VIOLATION` で session を
+    /// (`INVALID_TRACK_NAMESPACE` / `MALFORMED_KEY_VALUE` / `INVALID_PARAMETER` /
+    /// `AUTH_TOKEN_CACHE_OVERFLOW` / `DUPLICATE_AUTH_TOKEN_ALIAS` など) で session を
+    /// closing に遷移させる。7 種類以外の message type
+    /// (draft §6.3 (Session initialization) 違反) は `UNEXPECTED_MESSAGE` で session を
     /// closing に遷移させる。
     ///
-    /// draft-ietf-moq-transport-22 §9.20.1 (Parameter Scope): メッセージ型ごとに許可された
-    /// パラメータ以外の受信は PROTOCOL_VIOLATION でセッションを閉じる MUST。§9.20.15
+    /// draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): メッセージ型ごとに許可された
+    /// パラメータ以外の受信は INVALID_PARAMETER でセッションを閉じる MUST。§9.19.15
     /// (FILL PARAMETERS Parameter) の内側パラメータも同じく検証する。wire 経路では
     /// `ControlMessage::decode` が検証するが、本 API は decode 済みの `ControlMessage` を
     /// 直接受け取るため、decode を通らない手組みメッセージでは session 層が検証する。
@@ -1269,8 +1286,11 @@ impl Session {
                 self.handle_unsupported_request(type_id, request_id, &body)?;
             }
             _ => {
+                // draft-ietf-moq-transport-23 §6.3 (Session initialization): bidi stream の
+                // 先頭に置けるのは 7 種の request だけであり、それ以外は
+                // UNEXPECTED_MESSAGE (0x303) で閉じる (MUST)。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "unsupported request message in current phase",
                 );
                 self.fail(err.clone());
@@ -1302,10 +1322,10 @@ impl Session {
     /// 1. Request ID の parity と重複 (`validate_peer_request_id`)
     /// 2. 本体の解析 (`decode_unsupported_request_body`)。失敗は原因に応じた終了コードで
     ///    セッションを閉じる (REQUEST_ERROR は送らない)
-    /// 3. 本体の Request ID とメッセージの Request ID の一致 (不一致は PROTOCOL_VIOLATION で
+    /// 3. 本体の Request ID とメッセージの Request ID の一致 (不一致は MALFORMED_MESSAGE で
     ///    セッションを閉じる)
-    /// 4. パラメータのスコープ検証 (draft §9.20.1 (Parameter Scope) の MUST。違反は
-    ///    PROTOCOL_VIOLATION でセッションを閉じる)
+    /// 4. パラメータのスコープ検証 (draft §9.19.1 (Parameter Scope) の MUST。違反は
+    ///    INVALID_PARAMETER でセッションを閉じる)
     /// 5. AUTHORIZATION_TOKEN の一意性 (draft §8.9 の MUST。alias 解決後の (Token Type,
     ///    Token Value) の重複を対象とする。違反は REGISTER を適用したうえで REQUEST_ERROR
     ///    (MALFORMED_AUTH_TOKEN) を返し、セッションは維持する。alias を解決できない
@@ -1321,7 +1341,7 @@ impl Session {
     /// 9. REQUEST_GOING_AWAY (control GOAWAY 送信済み) または REQUEST_NOT_SUPPORTED
     ///
     /// 応答専用の型 (NAMESPACE / NAMESPACE_DONE / PUBLISH_SKIPPED) は応答先の request を
-    /// 持たないため `PROTOCOL_VIOLATION` でセッションを閉じる。公開 enum を手組みして
+    /// 持たないため `UNEXPECTED_MESSAGE` でセッションを閉じる。公開 enum を手組みして
     /// 応答専用の型に Request ID を付けた場合も同じ扱いにする。
     /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
     fn handle_unsupported_request(
@@ -1336,8 +1356,10 @@ impl Session {
         let (Some(request_id), Some(allowed_params)) =
             (request_id, unsupported_request_allowed_params(type_id))
         else {
+            // draft-ietf-moq-transport-23 §6.3 (Session initialization): request stream の
+            // 先頭に置けないメッセージ型は UNEXPECTED_MESSAGE (0x303)。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "control message type cannot start a request stream",
             );
             self.fail(err.clone());
@@ -1357,18 +1379,22 @@ impl Session {
         // 本体の先頭の Request ID はメッセージ decode が取り出した値と一致しなければならない。
         // `ControlMessage::decode` を通った場合は同じバイト列に由来するため必ず一致する。
         if body_request_id != request_id {
+            // 本体の Request ID がメッセージの Request ID と食い違う直列化は、制御メッセージ
+            // として解析できないため MALFORMED_MESSAGE (0x300)
+            // (draft-ietf-moq-transport-23 §9 (Control Messages))。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_MALFORMED_MESSAGE,
                 "unsupported request body has a different request id",
             );
             self.fail(err.clone());
             return Err(err);
         }
-        // draft §9.20.1 (Parameter Scope): メッセージ型ごとに許可されるパラメータ以外の受信は
-        // PROTOCOL_VIOLATION で閉じる (MUST)。NOT_SUPPORTED の判断は変えない。
+        // draft §9.19.1 (Parameter Scope): メッセージ型ごとに許可されるパラメータ以外の受信は
+        // INVALID_PARAMETER で閉じる (MUST)。NOT_SUPPORTED の判断は変えない。
         if parameters.validate_scope(allowed_params).is_err() {
+            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_PARAMETER,
                 "parameter is not allowed in the unsupported request",
             );
             self.fail(err.clone());
@@ -1756,8 +1782,11 @@ impl Session {
             && let Some(redirect) = err.error_details.redirect()
             && !redirect.connect_uri.is_empty()
         {
+            // draft-ietf-moq-transport-23 §9.4.2.1 (REDIRECT): "If a server receives a
+            // Redirect with a non-zero Connect URI Length it MUST close the session with
+            // ROLE_VIOLATION."
             let e = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_ROLE_VIOLATION,
                 "server received redirect with non-zero connect URI length",
             );
             self.fail(e.clone());
@@ -1850,8 +1879,10 @@ impl Session {
         msg: ControlMessage,
     ) -> Result<(), SessionError> {
         if self.state != SessionState::Established {
+            // draft-ietf-moq-transport-23 §6.3 (Session initialization): SETUP 交換前の応答は
+            // 順序違反であり UNEXPECTED_MESSAGE (0x303)。
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_UNEXPECTED_MESSAGE,
                 "response received before session established",
             );
             self.fail(err.clone());
@@ -1873,8 +1904,10 @@ impl Session {
                 // draft-ietf-moq-transport-22 §9 Table 5: PUBLISH (0x1D) は Request, First。
                 // Messages marked "First" MUST be the first message on a new request stream.
                 // 既存 bidi stream 上の PUBLISH はプロトコル違反。
+                // draft-ietf-moq-transport-23 §9 Table 5: "First" のメッセージを既存 bidi
+                // stream 上で受信した場合は UNEXPECTED_MESSAGE (0x303)。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "PUBLISH MUST be the first message on a new request stream (draft §9 Table 5)",
                 );
                 self.fail(err.clone());
@@ -1888,8 +1921,10 @@ impl Session {
             // PUBLISH_SKIPPED) は応答先の request を持たないため、いずれも PROTOCOL_VIOLATION
             // でセッションを閉じる。
             _ => {
+                // draft-ietf-moq-transport-23 §9 Table 5 の "First" を持つ型と、応答専用の型を
+                // 既存 request stream 上で受信した場合は UNEXPECTED_MESSAGE (0x303)。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "unsupported stream message in current phase",
                 );
                 self.fail(err.clone());
@@ -2202,8 +2237,10 @@ impl Session {
             Some(RequestTable::Fetch) => self.handle_err_for_fetch(request_id),
             Some(RequestTable::TrackStatus) => self.handle_err_for_track_status(request_id),
             None => {
+                // 応答先の request を持たない REQUEST_ERROR は
+                // UNEXPECTED_MESSAGE (0x303) (draft-ietf-moq-transport-23 §12.2)。
                 let e = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_ERROR received for unknown request id",
                 );
                 self.fail(e.clone());
@@ -2243,8 +2280,10 @@ impl Session {
         // draft §9.3 (REQUEST_OK): TRACK_STATUS_OK 以外の context では
         // TrackProperties は空でなければならない。違反時は PROTOCOL_VIOLATION でセッションクローズ。
         if !matches!(table, Some(RequestTable::TrackStatus)) && !ok.track_properties.is_empty() {
+            // draft-ietf-moq-transport-23 §9.3 (REQUEST_OK): "If an endpoint receives Track
+            // Properties in one of these messages it MUST close the session with INVALID_FIELD."
             let err = SessionError::new(
-                SESSION_PROTOCOL_VIOLATION,
+                SESSION_INVALID_FIELD,
                 "REQUEST_OK track_properties must be empty in this context",
             );
             self.fail(err.clone());
@@ -2271,7 +2310,8 @@ impl Session {
         if let Some((allowed, message)) = context_allowed
             && ok.parameters.validate_scope(allowed).is_err()
         {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, message);
+            // draft-ietf-moq-transport-23 §9.19.1 (Parameter Scope): INVALID_PARAMETER (0x305)。
+            let err = SessionError::new(SESSION_INVALID_PARAMETER, message);
             self.fail(err.clone());
             return Err(err);
         }
@@ -2284,8 +2324,9 @@ impl Session {
                 self.handle_ok_for_track_status(request_id, &ok.parameters)
             }
             None => {
+                // 応答先の request を持たない REQUEST_OK は UNEXPECTED_MESSAGE (0x303)。
                 let err = SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_UNEXPECTED_MESSAGE,
                     "REQUEST_OK received for unknown request id",
                 );
                 self.fail(err.clone());
@@ -2664,7 +2705,9 @@ impl Session {
     fn handle_peer_setup(&mut self, setup: Setup) -> Result<(), SessionError> {
         // draft §9.1 (SETUP): SETUP は各エンドポイントから 1 回のみ
         if self.setup.peer.is_some() {
-            let err = SessionError::new(SESSION_PROTOCOL_VIOLATION, "duplicate SETUP received");
+            // draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の
+            // UNEXPECTED_MESSAGE: 許容回数を超えて受信したメッセージ。
+            let err = SessionError::new(SESSION_UNEXPECTED_MESSAGE, "duplicate SETUP received");
             self.fail(err.clone());
             return Err(err);
         }
@@ -2972,7 +3015,7 @@ impl Session {
 ///
 /// - Request ID / Track Namespace / パラメータのデコード失敗: 各デコーダのエラー
 ///   (Track Namespace の書式不正は `ProtocolViolation`、KVP の宣言長が残りバッファを超える
-///   場合は `KeyValueFormattingError`)
+///   場合は `MalformedKeyValue`)
 /// - パラメータブロックを読み切ったあとに余剰バイトがある (draft-ietf-moq-transport-23 §9
 ///   (Control Messages) の Length の不一致): `MalformedMessage`
 fn decode_unsupported_request_body(
@@ -2993,29 +3036,32 @@ fn decode_unsupported_request_body(
 
 /// 未対応 request の本体解析エラーをセッション終了コードへ写す
 ///
-/// - draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の値の直列化不整合:
-///   `KEY_VALUE_FORMATTING_ERROR`
-/// - draft-ietf-moq-transport-23 §9 (Control Messages) の本文長不一致:
-///   `MALFORMED_MESSAGE`
-/// - draft-ietf-moq-transport-22 §8.7 (Track Namespace Structure) /
-///   §9.20 (Control Message Parameters) のフレーミング違反: `PROTOCOL_VIOLATION`
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
+/// [`MessageError::session_termination_code`] が返す最も具体的なコードを使う。
+/// 例: KVP の直列化不整合は MALFORMED_KEY_VALUE、Track Namespace の構造違反は
+/// INVALID_TRACK_NAMESPACE、パラメータ違反は INVALID_PARAMETER、本文長不一致は
+/// MALFORMED_MESSAGE になる。セッション終了を伴わない variant は
+/// `PROTOCOL_VIOLATION` にフォールバックする。
 ///
-/// 値の長さプレフィックスが残りバッファを超える場合は codec が
-/// `KeyValueFormattingError` を返すため `KEY_VALUE_FORMATTING_ERROR` に写る
-/// (§8.3 の MUST)。`MalformedAuthToken` は SETUP の decode だけが返すため、
-/// 本経路の catch-all は `PROTOCOL_VIOLATION` で足りる。
+/// `MalformedAuthToken` は SETUP の decode だけが返すため本経路には届かないが、
+/// 届いた場合も MALFORMED_AUTH_TOKEN に写る (汎用の分類より原因を保つ)。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 fn session_error_from_request_body(err: MessageError) -> SessionError {
-    match err {
-        MessageError::KeyValueFormattingError(msg) => {
-            SessionError::new(SESSION_KEY_VALUE_FORMATTING_ERROR, msg)
-        }
-        MessageError::MalformedMessage(msg) => SessionError::new(SESSION_MALFORMED_MESSAGE, msg),
-        MessageError::ProtocolViolation(msg) => SessionError::new(SESSION_PROTOCOL_VIOLATION, msg),
-        _ => SessionError::new(
-            SESSION_PROTOCOL_VIOLATION,
-            "unsupported request body decode error",
-        ),
+    session_error_from_message(&err, SESSION_PROTOCOL_VIOLATION)
+}
+
+/// codec のエラーをセッション終了コードへ写す共通ヘルパー
+///
+/// draft-ietf-moq-transport-23 §12.2 (Session Termination Codes) の分類に従い、
+/// [`MessageError::session_termination_code`] が返す最も具体的なコードを使う。
+/// セッション終了を伴わない variant (`MalformedTrack` と MSF のアプリケーション
+/// エラー) は `fallback` に写す。`fallback` は呼び出し文脈で決める
+/// (制御メッセージなら `PROTOCOL_VIOLATION`、メッセージパラメータなら
+/// `INVALID_PARAMETER` など)。
+pub(crate) fn session_error_from_message(err: &MessageError, fallback: u64) -> SessionError {
+    match err.session_termination_code() {
+        Some(code) => SessionError::new(code, err.reason()),
+        None => SessionError::new(fallback, err.reason()),
     }
 }
 
@@ -3138,8 +3184,10 @@ fn register_setup_auth_tokens(
                 // cache 操作なし
             }
             AuthorizationToken::Delete { .. } | AuthorizationToken::UseAlias { .. } => {
+                // draft-ietf-moq-transport-23 §9.1.4 (AUTHORIZATION TOKEN): SETUP の
+                // DELETE / USE_ALIAS は ROLE_VIOLATION (0x304) で閉じる (MUST)。
                 return Err(SessionError::new(
-                    SESSION_PROTOCOL_VIOLATION,
+                    SESSION_ROLE_VIOLATION,
                     "DELETE / USE_ALIAS not allowed in SETUP",
                 ));
             }

@@ -86,7 +86,7 @@ fn request_update_with_new_group_request_without_dynamic_groups_rejected() {
     });
     // server 側で受信すると PROTOCOL_VIOLATION
     let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
 }
 
 /// DYNAMIC_GROUPS=0 (値あり) の Track に対する REQUEST_UPDATE + NEW_GROUP_REQUEST も
@@ -133,7 +133,7 @@ fn request_update_with_new_group_request_dynamic_groups_zero_rejected() {
     });
     // server 側で受信すると PROTOCOL_VIOLATION
     let err = server.recv_stream_message(rid, update).unwrap_err();
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
 }
 
 /// DYNAMIC_GROUPS=1 の Track ならば REQUEST_UPDATE + NEW_GROUP_REQUEST は受理される
@@ -1119,7 +1119,7 @@ fn publish_with_invalid_group_order_rejected_on_send() {
         )
         .unwrap_err();
     match err {
-        SendRequestError::Session(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
+        SendRequestError::Session(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
         other => panic!("SendRequestError::Session が期待される: {other:?}"),
     }
     // SendRequest イベントが積まれないこと
@@ -2517,7 +2517,7 @@ fn publish_advertised_largest_preserved_after_publish_ok() {
 /// PUBLISH_OK に出現しない (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter) の
 /// MAY appear 列挙にも PUBLISH_OK は無い) ため、スコープ検証で PROTOCOL_VIOLATION により
 /// 閉じる。スコープ検証は状態遷移・パラメータ適用より前に実行されるため、部分適用は
-/// 残留しない。セッションを PROTOCOL_VIOLATION で閉じる (MUST) ため、CloseSession の
+/// 残留しない。セッションを INVALID_PARAMETER で閉じる (MUST) ため、CloseSession の
 /// 発生も検証する。
 #[test]
 fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
@@ -2560,8 +2560,8 @@ fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
                 track_properties: TrackProperties::new(),
             }),
         )
-        .expect_err("スコープ外の PAUSED は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("スコープ外の PAUSED は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // subscription は Pending(Publisher) のまま (状態不変)
     let sub = client
         .subscription(rid)
@@ -2575,8 +2575,8 @@ fn request_ok_publish_with_paused_keeps_subscription_pending_on_recv() {
     );
     // セッションが PROTOCOL_VIOLATION で閉じること (パラメータスコープ違反の MUST)
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
     // RequestOkReceived イベントが積まれないこと
     // (CloseSession を先に消費してから確認する。イベントは CloseSession が最後に積まれる)
@@ -2634,18 +2634,18 @@ fn request_ok_publish_with_location_filter_keeps_subscription_pending_on_recv() 
                 track_properties: TrackProperties::new(),
             }),
         )
-        .expect_err("LOCATION_FILTER を含む PUBLISH_OK は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("LOCATION_FILTER を含む PUBLISH_OK は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // subscription は Pending(Publisher) のまま (状態不変)
     let sub = client
         .subscription(rid)
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(sub.state, SubscriptionState::Pending);
     assert!(sub.is_pending_publisher());
-    // セッションが PROTOCOL_VIOLATION で閉じること (Location Filter は fail + Err)
+    // セッションが INVALID_PARAMETER で閉じること (Location Filter は fail + Err)
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -2693,8 +2693,8 @@ fn request_ok_publish_with_largest_object_closes_session_on_recv() {
                 track_properties: TrackProperties::new(),
             }),
         )
-        .expect_err("LARGEST_OBJECT を含む PUBLISH_OK は PROTOCOL_VIOLATION になる");
-    assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+        .expect_err("LARGEST_OBJECT を含む PUBLISH_OK は INVALID_PARAMETER になる");
+    assert_eq!(err.code, SESSION_INVALID_PARAMETER);
     // subscription は Pending(Publisher) のまま (状態不変)
     let sub = client
         .subscription(rid)
@@ -2702,8 +2702,8 @@ fn request_ok_publish_with_largest_object_closes_session_on_recv() {
     assert_eq!(sub.state, SubscriptionState::Pending);
     assert!(sub.is_pending_publisher());
     match drain_until_close(&mut client) {
-        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_PROTOCOL_VIOLATION),
-        other => panic!("CloseSession(PROTOCOL_VIOLATION) が期待されたが {other:?}"),
+        SessionEvent::CloseSession(e) => assert_eq!(e.code, SESSION_INVALID_PARAMETER),
+        other => panic!("CloseSession(INVALID_PARAMETER) が期待されたが {other:?}"),
     }
 }
 
@@ -2773,19 +2773,19 @@ fn fill_parameters(inner: MessageParameters) -> MessageParameters {
 fn assert_scope_violation(server: &mut Session, message: ControlMessage, label: &str) {
     match server.recv_request(message) {
         Err(shiguredo_moqt::session::types::RecvRequestError::Session(err)) => {
-            assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "{label}");
+            assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
         }
         other => panic!("{label}: PROTOCOL_VIOLATION が期待された: {other:?}"),
     }
     assert_eq!(server.state(), SessionState::Closing, "{label}");
-    // MUST close がメッセージ単位の reject に隠れず、CloseSession(PROTOCOL_VIOLATION) だけが
+    // MUST close がメッセージ単位の reject に隠れず、CloseSession(INVALID_PARAMETER) だけが
     // 発行され、REQUEST_ERROR を送らないこと
     let mut close_sessions = 0;
     let mut request_errors = 0;
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::CloseSession(err) => {
-                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION, "{label}");
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER, "{label}");
                 close_sessions += 1;
             }
             SessionEvent::SendOnStream {
@@ -3183,7 +3183,7 @@ fn recv_request_update_fill_parameters_inner_scope_violation_closes_session() {
         parameters: fill_parameters(expires_parameters()),
     });
     match server.recv_stream_message(rid, update) {
-        Err(err) => assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION),
+        Err(err) => assert_eq!(err.code, SESSION_INVALID_PARAMETER),
         Ok(()) => {
             panic!("REQUEST_UPDATE の FILL_PARAMETERS 内側違反は PROTOCOL_VIOLATION になること")
         }
@@ -3195,7 +3195,7 @@ fn recv_request_update_fill_parameters_inner_scope_violation_closes_session() {
     while let Some(e) = server.poll_event() {
         match e {
             SessionEvent::CloseSession(err) => {
-                assert_eq!(err.code, SESSION_PROTOCOL_VIOLATION);
+                assert_eq!(err.code, SESSION_INVALID_PARAMETER);
                 close_sessions += 1;
             }
             SessionEvent::SendOnStream {
