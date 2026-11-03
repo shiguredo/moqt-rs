@@ -4097,14 +4097,18 @@ fn duplicate_object_with_same_fields_is_not_malformed() {
 ///
 /// 必須トラックプロパティ (0x4000-0x7FFF) を Object Property として載せる
 /// (draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties): "An Object received with a
-/// Mandatory Track Property as an Object Property is malformed")。この範囲の拒否は decode 側
-/// (`decode_kv_pairs`) にあるため encode は成功し、Properties Length も実データと一致する。
-/// 入口のフレーミング検証は通過し、Object Properties のデコードで初めて失敗する。
+/// Mandatory Track Property as an Object Property is malformed")。この範囲を Object scope に
+/// 載せた直列化は `ObjectProperties::encode` がローカル入力の検証として拒否するため、wire
+/// 表現を手組みする。Properties Length は実データと一致させ、入口のフレーミング検証は通過
+/// させたうえで、Object Properties のデコードで初めて失敗させる。
 fn malformed_object_properties_blob() -> Vec<u8> {
-    encode_properties([ObjectProperty {
-        prop_type: 0x4000,
-        value: ObjectPropertyValue::VarInt(1),
-    }])
+    let mut kvps = Vec::new();
+    shiguredo_moqt::varint::encode(0x4000, &mut kvps); // delta = 0x4000 (偶数型)
+    shiguredo_moqt::varint::encode(1, &mut kvps); // varint 値
+    let mut block = Vec::new();
+    shiguredo_moqt::varint::encode(kvps.len() as u64, &mut block);
+    block.extend_from_slice(&kvps);
+    block
 }
 
 /// フレーミングは正しいが KVP が不正な Object Properties を subgroup Object で受信すると

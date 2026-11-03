@@ -180,15 +180,28 @@ mod error_cases {
 mod duplicate_property_type {
     use super::*;
 
+    /// 単一に限られる既知 Property が重複したときの理由
+    const DUPLICATE: &str = "duplicate track property";
+
     #[test]
-    fn decode_rejects_delta_zero_after_first_entry() {
-        // type=14 (0x0E, delta=14), value=1, その後 delta=0 を読んだ時点で重複として reject する
-        let buf = vec![0x0E, 0x01, 0x00];
+    fn decode_keeps_delta_zero_duplicate_and_validate_reports_malformed_track() {
+        // type=14 (0x0E, delta=14), value=1, その後 delta=0 (同じ 0x0E) で value=2。
+        // 構造 decode は重複を保持し、意味検証が malformed Track として報告する
+        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 9)。
+        let buf = vec![0x0E, 0x01, 0x00, 0x02];
+        let decoded =
+            TrackProperties::decode(&buf).expect("重複した Type は構造 decode を失敗させないこと");
+        assert_eq!(decoded.len(), 2, "重複したインスタンスを保持すること");
+        assert_eq!(decoded.as_slice()[0].prop_type, 0x0E);
+        assert_eq!(decoded.as_slice()[1].prop_type, 0x0E);
         assert_eq!(
-            TrackProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(
-                "duplicate track property type"
-            ))
+            decoded.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+        assert_eq!(
+            decoded.validate(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
         );
     }
 
@@ -200,11 +213,17 @@ mod duplicate_property_type {
         let decoded = TrackProperties::decode(&buf).expect("先頭の delta=0 は受理されるべき");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded.find_varint(0x00), Some(5));
+        assert_eq!(
+            decoded.validate(),
+            Ok(()),
+            "型 0 は未知型であり、単一インスタンスなら多重違反にならないこと"
+        );
     }
 
     #[test]
-    fn encode_rejects_duplicate_prop_type() {
-        // 同一 prop_type を 2 回 push して encode すると ProtocolViolation を返す
+    fn encode_rejects_duplicate_known_prop_type() {
+        // 単一に限られる既知 prop_type (OBJECT_DELIVERY_TIMEOUT) を 2 回 push して encode
+        // すると、ローカル入力の検証として ProtocolViolation を返す
         let mut props = TrackProperties::new();
         props.push(TrackProperty {
             prop_type: 0x02,
@@ -218,9 +237,7 @@ mod duplicate_property_type {
         let mut buf = Vec::new();
         assert_eq!(
             props.encode(&mut buf),
-            Err(MessageError::ProtocolViolation(
-                "duplicate track property type"
-            ))
+            Err(MessageError::ProtocolViolation(DUPLICATE))
         );
     }
 }
@@ -966,11 +983,10 @@ mod property_scope {
     /// 拒否しないことを固定する。
     #[test]
     fn validate_scope_accepts_track_and_both_scope_and_unknown() {
+        // 0x02 (Track,Object) は単一に限られるため、mutable リストに置いたら内側には置かない
+        // (draft-ietf-moq-transport-23 §10.7 (Immutable Properties) が同じ型を両方に置けるのは
+        // 複数の値を許す Property に限る)。内側には未知型と GREASE だけを置く。
         let mut inner = TrackProperties::new();
-        inner.push(TrackProperty {
-            prop_type: 0x02, // OBJECT_DELIVERY_TIMEOUT (Track,Object)
-            value: TrackPropertyValue::VarInt(100),
-        });
         inner.push(TrackProperty {
             prop_type: 0x1000, // 未知 (偶数型)
             value: TrackPropertyValue::VarInt(1),
@@ -1066,6 +1082,232 @@ mod property_scope {
         assert_eq!(
             props.encode(&mut buf),
             Err(MessageError::ProtocolViolation(OBJECT_ONLY))
+        );
+    }
+}
+
+/// Property の多重可否 (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) /
+/// §12.1 (Malformed Tracks) 条件 9) の検証。
+///
+/// 未知の Type は §8.4 の "MUST allow multiple instances of the Property" により複数
+/// インスタンスを保持して往復できる。単一に限られる既知 Type の重複は構造 decode では保持し、
+/// `TrackProperties::validate` が受信 Track の malformed として報告する。ローカル入力の
+/// `encode` は受信 Track の取消と混同しないよう `ProtocolViolation` で拒否する。
+mod property_multiplicity {
+    use super::*;
+    use shiguredo_moqt::track_properties::PROP_IMMUTABLE_PROPERTIES;
+
+    /// 単一に限られる既知 Property が重複したときの理由
+    const DUPLICATE: &str = "duplicate track property";
+
+    /// 偶数型 Property の KVP 生バイト列 (先頭の delta は型そのもの)
+    fn even_kvp(prop_type: u64, value: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        shiguredo_moqt::varint::encode(prop_type, &mut bytes);
+        shiguredo_moqt::varint::encode(value, &mut bytes);
+        bytes
+    }
+
+    /// 同じ型を delta=0 で繰り返す偶数型 Property の KVP 生バイト列
+    fn repeated_even_kvp(prop_type: u64, values: &[u64]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        shiguredo_moqt::varint::encode(prop_type, &mut bytes);
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                // delta=0 で直前と同じ型を表す
+                shiguredo_moqt::varint::encode(0, &mut bytes);
+            }
+            shiguredo_moqt::varint::encode(*value, &mut bytes);
+        }
+        bytes
+    }
+
+    /// 未知の Type の同値・異値の複数インスタンスが lossless に往復すること
+    ///
+    /// encode は型の昇順に安定ソートするため、同一 Type 内の入力順が保たれる。
+    #[test]
+    fn unknown_duplicate_types_roundtrip_losslessly() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x1000,
+            value: TrackPropertyValue::VarInt(7),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x1000,
+            value: TrackPropertyValue::VarInt(8),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x1001,
+            value: TrackPropertyValue::Bytes(vec![0xAA]),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x1001,
+            value: TrackPropertyValue::Bytes(vec![0xBB]),
+        });
+        props.push(TrackProperty {
+            prop_type: 0x1001,
+            value: TrackPropertyValue::Bytes(vec![0xBB]),
+        });
+
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("未知 Type の重複は encode できること");
+        let decoded = TrackProperties::decode(&buf).expect("未知 Type の重複は decode できること");
+        assert_eq!(
+            decoded, props,
+            "未知 Type の同値・異値の複数インスタンスが入力順のまま往復すること"
+        );
+        assert_eq!(decoded.validate(), Ok(()), "多重違反にならないこと");
+        assert_eq!(
+            decoded.find_varint(0x1000),
+            Some(7),
+            "重複した未知 Type は最初のインスタンスを返すこと"
+        );
+
+        // 受信した直列化を再 encode しても同じインスタンス列に戻ること
+        let mut reencoded = Vec::new();
+        decoded
+            .encode(&mut reencoded)
+            .expect("decode した未知 Type の重複を再 encode できること");
+        assert_eq!(
+            TrackProperties::decode(&reencoded),
+            Ok(props),
+            "再 encode しても lossless であること"
+        );
+    }
+
+    /// 既知 Type の重複は構造 decode が保持し、`validate` が MalformedTrack にする
+    #[test]
+    fn validate_reports_duplicate_known_type_as_malformed_track() {
+        let buf = repeated_even_kvp(0x02, &[1, 2]);
+        let decoded = TrackProperties::decode(&buf)
+            .expect("重複した既知 Type は構造 decode を失敗させないこと");
+        assert_eq!(decoded.len(), 2, "重複したインスタンスを保持すること");
+        assert_eq!(
+            decoded.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の既知 Type の重複も MalformedTrack になる
+    #[test]
+    fn validate_reports_duplicate_known_type_inside_immutable() {
+        let inner = repeated_even_kvp(0x02, &[1, 2]);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner.clone()),
+        });
+        assert_eq!(
+            props.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+        // wire を経由しても同じ判定になる
+        let mut bytes = Vec::new();
+        shiguredo_moqt::varint::encode(PROP_IMMUTABLE_PROPERTIES, &mut bytes);
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut bytes);
+        bytes.extend_from_slice(&inner);
+        let decoded =
+            TrackProperties::decode(&bytes).expect("内側の重複は構造 decode を失敗させないこと");
+        assert_eq!(
+            decoded.validate(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+    }
+
+    /// mutable リストと IMMUTABLE_PROPERTIES の内側にまたがる既知 Type の重複も検出する
+    ///
+    /// draft-ietf-moq-transport-23 §10.7 (Immutable Properties) は、複数の値を許す Property に
+    /// 限り同じ型を両方に置けると定める。単一の型を両方に置くと 2 インスタンスである。
+    #[test]
+    fn validate_reports_duplicate_across_mutable_and_immutable() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x02,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(even_kvp(0x02, 2)),
+        });
+        assert_eq!(
+            props.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES が複数あると MalformedTrack になる
+    #[test]
+    fn validate_reports_duplicate_immutable_properties() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(Vec::new()),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(Vec::new()),
+        });
+        assert_eq!(
+            props.validate_multiplicity(),
+            Err(MessageError::MalformedTrack(DUPLICATE))
+        );
+    }
+
+    /// IMMUTABLE_PROPERTIES の内側の未知 Type の重複を受理し、生バイト列を書き換えないこと
+    #[test]
+    fn unknown_duplicates_inside_immutable_are_accepted_and_bytes_are_kept() {
+        let inner = repeated_even_kvp(0x1000, &[3, 3]);
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x02,
+            value: TrackPropertyValue::VarInt(1),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(inner.clone()),
+        });
+        assert_eq!(
+            props.validate(),
+            Ok(()),
+            "既知 Type は mutable に 1 つ、未知 Type は内側に複数あり、多重違反にならないこと"
+        );
+
+        let mut buf = Vec::new();
+        props
+            .encode(&mut buf)
+            .expect("未知 Type の重複を含む IMMUTABLE は encode できること");
+        let decoded = TrackProperties::decode(&buf)
+            .expect("未知 Type の重複を含む IMMUTABLE は decode できること");
+        assert_eq!(
+            decoded
+                .as_slice()
+                .iter()
+                .find(|p| p.prop_type == PROP_IMMUTABLE_PROPERTIES)
+                .map(|p| &p.value),
+            Some(&TrackPropertyValue::Bytes(inner.clone())),
+            "受信した IMMUTABLE の生バイト列を書き換えないこと"
+        );
+        assert_eq!(decoded.validate(), Ok(()));
+    }
+
+    /// ローカル encode は IMMUTABLE をまたぐ既知 Type の重複を入力検証エラーにする
+    #[test]
+    fn encode_rejects_duplicate_known_type_across_immutable() {
+        let mut props = TrackProperties::new();
+        props.push(TrackProperty {
+            prop_type: 0x0E,
+            value: TrackPropertyValue::VarInt(128),
+        });
+        props.push(TrackProperty {
+            prop_type: PROP_IMMUTABLE_PROPERTIES,
+            value: TrackPropertyValue::Bytes(even_kvp(0x0E, 1)),
+        });
+        let mut buf = Vec::new();
+        assert_eq!(
+            props.encode(&mut buf),
+            Err(MessageError::ProtocolViolation(DUPLICATE))
         );
     }
 }

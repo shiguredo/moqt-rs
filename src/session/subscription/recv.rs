@@ -404,14 +404,16 @@ impl Session {
         // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): "An endpoint that
         // supports a Property and receives it outside its scope (e.g. a Track-only Property as
         // an Object Property) MUST treat the Track as malformed" / §12.1 (Malformed Tracks)
-        // 条件 8。この実装が意味を理解する Property のスコープを検証する。
+        // 条件 8。同じ §8.4 は、定義が複数を許す場合を除いて 1 インスタンスまでと定め、
+        // 超過受信も malformed Track とする (§12.1 条件 9)。この実装が意味を理解する
+        // Property のスコープと多重可否を検証する。
         // 初回 PUBLISH は購読を登録する前なので、受信メッセージの Request ID と Full Track
         // Name から同じ Track の既存要求を取消対象として解決し、この PUBLISH 自身も購読と
         // して登録せず bidi request stream の cancel と `RequestTerminated` で終端する
         // (アプリへ正常な受信として通知しない)。未知 Mandatory Track Property の拒否
         // (§3.7) を先に判定するのは、draft が両条件の優先順位を定めておらず、既存の
         // request 拒否を維持するためである。
-        if let Err(err) = publish.track_properties.validate_scope() {
+        if let Err(err) = publish.track_properties.validate() {
             self.terminate_malformed_track_for_publish(
                 request_id,
                 &publish.track_namespace,
@@ -721,12 +723,13 @@ impl Session {
             return Ok(());
         }
         // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
-        // (Malformed Tracks) 条件 8: この実装が意味を理解する Property をスコープ外で
-        // 受信したら Track を malformed とする (MUST)。購読を cancel し、同じ Track の
-        // FETCH も取消対象にして、アプリへ `MalformedTrack` を通知する (既存の malformed
-        // Track 経路)。未知 Mandatory Track Property の cancel (§3.7) を先に判定するのは、
-        // draft が両条件の優先順位を定めていないためである。
-        if let Err(err) = ok.track_properties.validate_scope() {
+        // (Malformed Tracks) 条件 8 / 9: この実装が意味を理解する Property をスコープ外で
+        // 受信した場合と、定義が複数を許す Property を超過して受信した場合に Track を
+        // malformed とする (MUST)。購読を cancel し、同じ Track の FETCH も取消対象にして、
+        // アプリへ `MalformedTrack` を通知する (既存の malformed Track 経路)。未知
+        // Mandatory Track Property の cancel (§3.7) を先に判定するのは、draft が両条件の
+        // 優先順位を定めていないためである。
+        if let Err(err) = ok.track_properties.validate() {
             self.terminate_malformed_track(request_id, None, err.reason());
             return Ok(());
         }

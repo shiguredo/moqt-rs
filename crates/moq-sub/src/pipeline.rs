@@ -484,7 +484,10 @@ impl AudioDelivery<'_> {
     /// `decoder` が `None` のとき (再生しない指定、デコーダを生成できないとき) は
     /// 録画だけを行う (購読の境界以下は Audio Config の検証だけを行い、録画も復号もしない)。
     /// 返り値は呼び出し側が処理を継続してよいかどうかで、`false` は LOC Properties の書式違反で
-    /// セッション終了を依頼したか、デコード済みフレームの送り先が閉じたことを表す。
+    /// セッション終了を依頼したか、デコード済みフレームの送り先が閉じたことを表す。malformed
+    /// Track (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+    /// (Malformed Tracks) 条件 9) はセッション終了を依頼せず、この Object だけを捨てて `true`
+    /// を返す ([`skip_object_on_properties_error`])。
     ///
     /// Properties の書式違反は「配送する Object」だけを対象にする。フィルタ不通過などで
     /// 配送しない Object は呼び出し側がこの関数を呼ばない。
@@ -503,17 +506,11 @@ impl AudioDelivery<'_> {
         // ここでは常に抽出する (検証は下の swap で 1 回に絞る)
         let audio_config = match extract_audio_config(properties_bytes) {
             Ok(config) => config,
-            Err(e) => {
-                request_session_termination(self.termination_tx, &e);
-                return false;
-            }
+            Err(e) => return skip_object_on_properties_error(self.termination_tx, &e),
         };
         let (timestamp, timescale) = match extract_timestamp_timescale(properties_bytes) {
             Ok(ts) => ts,
-            Err(e) => {
-                request_session_termination(self.termination_tx, &e);
-                return false;
-            }
+            Err(e) => return skip_object_on_properties_error(self.termination_tx, &e),
         };
         // TIMESTAMP の種類を求める。壁時計の TIMESTAMP を持つ音だけが、受信側の時間軸へ
         // 観測して表示時刻を決められる (TIMESCALE を持つ音はメディア時刻である)
@@ -854,19 +851,6 @@ fn should_close_gracefully(session_terminated: bool) -> bool {
     !session_terminated
 }
 
-/// LOC Properties の decode 失敗を main ループへ伝え、セッション終了を依頼する
-///
-/// 呼び出し側はこの後その stream の処理を打ち切る。transport close を送出できるのは
-/// `MoqtClient` を所有する main ループだけであり (`DataPlaneHandle` は `Session` しか
-/// 共有していない)、stream task から直接 `Session::close` を呼ぶと main ループが
-/// `SessionEvent::CloseSession` を観測できないまま accept 分岐が接続クローズを拾い、
-/// `Session closed: ...` のログが落ちる。そのため終了コードと理由を渡し、close は
-/// I/O 層である main ループが行う。
-///
-/// `try_send` が失敗するのは、別の終了依頼が既に積まれている (容量 1 のため理由を問わず
-/// 2 件目は入らない) か、main ループが受信ループを終えて受信側を drop した場合である。
-/// 複数の stream が同時に失敗した場合は最初の 1 件のコードで閉じる。受信ループの終了後は
-/// join の前に 1 件だけ回収し、それ以降に届いた依頼は破棄される。
 /// LOC Properties の書式違反を受けてセッション終了を main ループへ依頼する
 ///
 /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) は書式違反の受信を
@@ -874,6 +858,20 @@ fn should_close_gracefully(session_terminated: bool) -> bool {
 /// [`request_session_termination_for_decode_error`] の分類対象外であり、
 /// `MessageError::data_plane_session_termination_code` で終了コードを決める
 /// (Object の直列化の破損は MALFORMED_OBJECT / MALFORMED_KEY_VALUE などに写る)。
+///
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+/// Tracks) 条件 9 の malformed Track はここへ渡さない ([`skip_object_on_properties_error`]
+/// が Object を捨てるだけに留める)。セッション終了を依頼された場合、呼び出し側はこの後
+/// その stream の処理を打ち切る。transport close を送出できるのは `MoqtClient` を所有する
+/// main ループだけであり (`DataPlaneHandle` は `Session` しか共有していない)、stream task から
+/// 直接 `Session::close` を呼ぶと main ループが `SessionEvent::CloseSession` を観測できない
+/// まま accept 分岐が接続クローズを拾い、`Session closed: ...` のログが落ちる。そのため終了
+/// コードと理由を渡し、close は I/O 層である main ループが行う。
+///
+/// `try_send` が失敗するのは、別の終了依頼が既に積まれている (容量 1 のため理由を問わず
+/// 2 件目は入らない) か、main ループが受信ループを終えて受信側を drop した場合である。
+/// 複数の stream が同時に失敗した場合は最初の 1 件のコードで閉じる。受信ループの終了後は
+/// join の前に 1 件だけ回収し、それ以降に届いた依頼は破棄される。
 fn request_session_termination(
     termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
     error: &MessageError,
@@ -892,6 +890,32 @@ fn request_session_termination(
         return;
     }
     tracing::warn!("Closing session on LOC property error: {code:#x} {reason}");
+}
+
+/// Properties の再 decode 失敗を分類し、この Object を捨てて配送を続けるかを返す
+///
+/// 返り値は「この Object だけを捨てて配送を続けるか」である。
+///
+/// - `MalformedTrack`: draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) /
+///   §12.1 (Malformed Tracks) 条件 9 の malformed Track は、セッション終了ではなく同じ
+///   Track の購読・fetch の cancel を求める。Session の data plane が同じ Object Properties
+///   を decode して既に cancel しているため、ここでセッションを閉じると無関係な Track まで
+///   巻き込む。セッション終了は依頼せず、`true` を返してこの Object を捨てる
+/// - それ以外: draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の書式違反で
+///   あり、[`request_session_termination`] へ渡して `false` を返す (配送を打ち切る)
+///
+/// どちらの場合もアプリへは配送しない (Properties を解釈できない Object は正しい表示時刻や
+/// コーデック設定を持たない)。
+fn skip_object_on_properties_error(
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    error: &MessageError,
+) -> bool {
+    if let MessageError::MalformedTrack(reason) = error {
+        tracing::warn!("Skipping an object of a malformed track: {reason}");
+        return true;
+    }
+    request_session_termination(termination_tx, error);
+    false
 }
 
 /// data stream の decoder が返した復号エラーを受けてセッション終了を main ループへ依頼する
@@ -2681,7 +2705,8 @@ pub async fn run(
                             .await
                         {
                             // LOC Properties の書式違反でセッション終了を依頼したか、
-                            // 再生側が終了した
+                            // 再生側が終了した。malformed Track はこの Object を捨てて
+                            // 継続するため `true` が返る
                             break 'receive;
                         }
                     }
@@ -5675,7 +5700,7 @@ async fn decode_video_stream(
         .await
         {
             VideoDelivery::Delivered(frames_delivered) => frames += frames_delivered,
-            VideoDelivery::Terminated => return frames,
+            VideoDelivery::MalformedTrack | VideoDelivery::Terminated => return frames,
         }
     }
 }
@@ -5711,8 +5736,29 @@ async fn wait_until_video_deliverable(
 enum VideoDelivery {
     /// 配送した (復号して送出したフレーム数)。配送しなかった場合も 0 で表す
     Delivered(u64),
+    /// LOC Properties が malformed Track を示した (セッション終了は依頼せず、読み取りを打ち切る)
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+    /// Tracks) 条件 9 はセッションを閉じず購読・fetch の cancel を求める。Session の data
+    /// plane が同じ Object Properties を decode して既に cancel しているため、この stream の
+    /// 読み取りだけを打ち切る。
+    MalformedTrack,
     /// LOC Properties の書式違反によりセッション終了を依頼した (読み取りを打ち切る)
     Terminated,
+}
+
+/// Properties の再 decode 失敗を [`VideoDelivery`] の扱いへ写す
+///
+/// 分類の根拠は [`skip_object_on_properties_error`] を参照。
+fn video_delivery_on_properties_error(
+    termination_tx: &tokio::sync::mpsc::Sender<SessionError>,
+    error: &MessageError,
+) -> VideoDelivery {
+    if skip_object_on_properties_error(termination_tx, error) {
+        VideoDelivery::MalformedTrack
+    } else {
+        VideoDelivery::Terminated
+    }
 }
 
 /// 映像 Object 1 つを live と同じ配送経路 (録画 → 復号順の判定 → 復号 → 購読境界の判定 →
@@ -5753,24 +5799,17 @@ async fn deliver_video_object(
             loc_timestamp_us(timestamp, timescale),
             timestamp_kind_of(timestamp, timescale),
         ),
-        Err(e) => {
-            request_session_termination(termination_tx, &e);
-            return VideoDelivery::Terminated;
-        }
+        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
     };
     let video_config = match extract_video_config(properties_bytes) {
         Ok(config) => config,
-        Err(e) => {
-            request_session_termination(termination_tx, &e);
-            return VideoDelivery::Terminated;
-        }
+        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
     };
     if let Some(recorder) = recorder
         && let Err(e) =
             record_video_object(recorder, properties_bytes, video_config.as_deref(), payload)
     {
-        request_session_termination(termination_tx, &e);
-        return VideoDelivery::Terminated;
+        return video_delivery_on_properties_error(termination_tx, &e);
     }
     // 再生しない指定と、表示待ちの超過でデコードをスキップする場合は復号器が無い。
     // 録画だけを行って配送を終える
@@ -5781,18 +5820,12 @@ async fn deliver_video_object(
     // 映像も復号できるように、PROP_VIDEO_CONFIG の有無で代用する。
     let is_key_frame = match is_video_keyframe(properties_bytes, video_config.as_deref()) {
         Ok(keyframe) => keyframe,
-        Err(e) => {
-            request_session_termination(termination_tx, &e);
-            return VideoDelivery::Terminated;
-        }
+        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
     };
     // Prior Object ID Gap は Object Properties から読む (Property が無ければ 0)
     let prior_object_id_gap = match prior_object_id_gap_of(properties_bytes) {
         Ok(gap) => gap,
-        Err(e) => {
-            request_session_termination(termination_tx, &e);
-            return VideoDelivery::Terminated;
-        }
+        Err(e) => return video_delivery_on_properties_error(termination_tx, &e),
     };
     // 復号してよい Object か判定する。Group ごとに別の stream で届くため、判定の状態は
     // 購読で共有する (draft-ietf-moq-transport-22 §2.1.2 (Object States))。ロックは判定の
@@ -5894,9 +5927,13 @@ type ExtractResult<T> = std::result::Result<T, MessageError>;
 /// object の properties バイト列から PROP_VIDEO_CONFIG を取り出す
 ///
 /// `Ok(None)` は「Properties が無い、または PROP_VIDEO_CONFIG を持たない」を意味する。
-/// `LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST に従って
-/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+/// `LocProperties::decode` の失敗は `Err` で返し、
+/// 失敗の分類 (セッション終了を依頼するか、malformed Track として Object を捨てるか) は
+/// [`skip_object_on_properties_error`] が行う。書式違反を「プロパティ無し」に潰さない。
+/// 未知 ID の複数インスタンスは draft-ietf-moq-transport-23 §8.4 (Track and Object
+/// Properties) の "MUST allow multiple instances of the Property" により正当であり、
+/// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
+/// Tracks) 条件 9 の malformed Track である。
 fn extract_video_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
     let Some(bytes) = properties_bytes else {
         return Ok(None);
@@ -5915,9 +5952,13 @@ fn extract_video_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option
 /// object の properties バイト列から PROP_TIMESTAMP / PROP_TIMESCALE を取り出す
 ///
 /// `Ok((None, None))` は「Properties が無い、または Timestamp / Timescale を持たない」を
-/// 意味する。`LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST に従って
-/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+/// 意味する。`LocProperties::decode` の失敗は `Err` で返し、
+/// 失敗の分類 (セッション終了を依頼するか、malformed Track として Object を捨てるか) は
+/// [`skip_object_on_properties_error`] が行う。書式違反を「プロパティ無し」に潰さない。
+/// 未知 ID の複数インスタンスは draft-ietf-moq-transport-23 §8.4 (Track and Object
+/// Properties) の "MUST allow multiple instances of the Property" により正当であり、
+/// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
+/// Tracks) 条件 9 の malformed Track である。
 fn extract_timestamp_timescale(
     properties_bytes: Option<&[u8]>,
 ) -> ExtractResult<(Option<u64>, Option<u64>)> {
@@ -5971,7 +6012,7 @@ fn extract_video_keyframe(properties_bytes: Option<&[u8]>) -> ExtractResult<Opti
 /// キーフレーム判定は PROP_VIDEO_FRAME_MARKING (I ビット) を使い、プロパティが無い場合は
 /// PROP_VIDEO_CONFIG の有無で代用する (Group の先頭がキーフレームである publisher の映像も
 /// 復号できるようにするため)。同じ規則を録画と復号順の判定で共有する。
-/// 書式違反は `Err` で返し、呼び出し側がセッションを閉じる。
+/// 書式違反は `Err` で返し、分類は [`skip_object_on_properties_error`] が行う。
 fn is_video_keyframe(
     properties_bytes: Option<&[u8]>,
     video_config: Option<&[u8]>,
@@ -5985,7 +6026,7 @@ fn is_video_keyframe(
 /// video object を録画用に writer へ送る
 ///
 /// キーフレーム判定は [`is_video_keyframe`] に従う。Timestamp / Timescale の書式違反は
-/// `Err` で返し、呼び出し側がセッションを閉じる。
+/// `Err` で返し、分類は [`skip_object_on_properties_error`] が行う。
 fn record_video_object(
     recorder: &RecorderSender,
     properties_bytes: Option<&[u8]>,
@@ -6130,9 +6171,13 @@ fn parse_opus_head(bytes: &[u8]) -> Option<mp4::OpusHeadConfig> {
 /// object の properties バイト列から PROP_AUDIO_CONFIG のバイト列を取り出す
 ///
 /// `Ok(None)` は「Properties が無い、または PROP_AUDIO_CONFIG を持たない」を意味する。
-/// `LocProperties::decode` の失敗は `Err` で返し、呼び出し側が
-/// draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST に従って
-/// セッションを閉じる。書式違反を「プロパティ無し」に潰さない。
+/// `LocProperties::decode` の失敗は `Err` で返し、
+/// 失敗の分類 (セッション終了を依頼するか、malformed Track として Object を捨てるか) は
+/// [`skip_object_on_properties_error`] が行う。書式違反を「プロパティ無し」に潰さない。
+/// 未知 ID の複数インスタンスは draft-ietf-moq-transport-23 §8.4 (Track and Object
+/// Properties) の "MUST allow multiple instances of the Property" により正当であり、
+/// `LocProperties::decode` は受理する。単一に限られる既知 ID の重複は §12.1 (Malformed
+/// Tracks) 条件 9 の malformed Track である。
 fn extract_audio_config(properties_bytes: Option<&[u8]>) -> ExtractResult<Option<Vec<u8>>> {
     let Some(bytes) = properties_bytes else {
         return Ok(None);
@@ -6608,7 +6653,7 @@ async fn read_video_fetch_stream(
         .await
         {
             VideoDelivery::Delivered(_) => {}
-            VideoDelivery::Terminated => return,
+            VideoDelivery::MalformedTrack | VideoDelivery::Terminated => return,
         }
     }
 }
@@ -8977,6 +9022,164 @@ mod tests {
         assert!(
             audio_rx.try_recv().is_err(),
             "書式違反の Object はデコードしないこと"
+        );
+    }
+
+    /// テスト用: 同じ LOC Property ID を繰り返す Properties の wire 表現を作る
+    ///
+    /// LOC Properties は `Properties Length (varint) | Key-Value-Pairs...` であり、同じ ID は
+    /// delta=0 で表現する。単一に限られる既知 ID を繰り返すと malformed Track
+    /// (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+    /// Tracks) 条件 9)、未知 ID を繰り返すと正当な複数インスタンスになる。
+    fn duplicate_loc_properties(prop_id: u64, values: &[u64]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(prop_id, &mut inner);
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                shiguredo_moqt::varint::encode(0, &mut inner);
+            }
+            shiguredo_moqt::varint::encode(*value, &mut inner);
+        }
+        let mut block = Vec::new();
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut block);
+        block.extend_from_slice(&inner);
+        block
+    }
+
+    /// 音声配送は既知 LOC Property の重複をセッション終了へ変換しないこと
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+    /// Tracks) 条件 9 はセッション終了ではなく購読・fetch の cancel を求める。Session の
+    /// data plane が同じ Object Properties を decode して cancel 済みのため、ここでは
+    /// セッション終了を依頼せず、この Object だけを捨てて配送を続ける。
+    #[tokio::test]
+    async fn audio_delivery_does_not_request_session_termination_on_malformed_track() {
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+
+        // TIMESTAMP (0x10) を 2 インスタンス持つ Object Properties
+        let properties = duplicate_loc_properties(0x10, &[1_000, 2_000]);
+        let deliver = delivery
+            .deliver(Some(loc(1, 0)), Some(&properties), b"payload", None)
+            .await;
+
+        assert!(
+            deliver,
+            "malformed Track はこの Object だけを捨てて配送を続けること"
+        );
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "malformed Track でセッション終了を依頼しないこと"
+        );
+        assert!(
+            audio_rx.try_recv().is_err(),
+            "malformed Track の Object はデコードしないこと"
+        );
+    }
+
+    /// 音声配送は未知 LOC Property の複数インスタンスを受理すること
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) の "MUST allow multiple
+    /// instances of the Property" / §16.8 (Properties) の "Endpoints MUST ignore unknown
+    /// Property types"。
+    #[tokio::test]
+    async fn audio_delivery_accepts_unknown_duplicate_loc_properties() {
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let audio_config_handled = std::sync::atomic::AtomicBool::new(false);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let catch_up = std::sync::Mutex::new(AudioReceiveCatchUp::new());
+        let delivery_order = std::sync::Mutex::new(AudioDeliveryOrder::new(None));
+        let delivery = test_audio_delivery(
+            &audio_tx,
+            &audio_config_handled,
+            &termination_tx,
+            &catch_up,
+            &delivery_order,
+            None,
+        );
+
+        // 未知 ID (0x1000) を同値・異値で 2 インスタンス持つ Object Properties
+        let properties = duplicate_loc_properties(0x1000, &[1, 2]);
+        let deliver = delivery
+            .deliver(Some(loc(1, 0)), Some(&properties), b"payload", None)
+            .await;
+
+        assert!(deliver, "未知 ID の重複は配送を妨げないこと");
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "未知 ID の重複でセッション終了を依頼しないこと"
+        );
+        assert!(
+            audio_rx.try_recv().is_err(),
+            "デコーダが無いためフレームは送出しないこと"
+        );
+    }
+
+    /// 映像配送は既知 LOC Property の重複をセッション終了へ変換しないこと
+    ///
+    /// 音声配送と同じく、malformed Track はセッション終了ではなく配送の打ち切りになる。
+    #[tokio::test]
+    async fn video_delivery_does_not_request_session_termination_on_malformed_track() {
+        let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+        let display_backlog = std::sync::atomic::AtomicI64::new(0);
+        let (termination_tx, mut termination_rx) = tokio::sync::mpsc::channel(1);
+        let decode_order = std::sync::Arc::new(tokio::sync::Mutex::new(VideoDecodeOrder::new()));
+        let delivery_order =
+            std::sync::Arc::new(std::sync::Mutex::new(VideoDeliveryOrder::new(None)));
+        let sink = FrameSink {
+            frame_tx: &frame_tx,
+            display_backlog: &display_backlog,
+        };
+
+        // VIDEO_CONFIG (0x0D) を 2 インスタンス持つ Object Properties を手組みする
+        // (奇数型は長さ付きバイト列であり、`duplicate_loc_properties` は varint 値専用のため)
+        let mut inner = Vec::new();
+        shiguredo_moqt::varint::encode(0x0D, &mut inner);
+        shiguredo_moqt::varint::encode(1, &mut inner);
+        inner.push(0xAA);
+        shiguredo_moqt::varint::encode(0, &mut inner);
+        shiguredo_moqt::varint::encode(1, &mut inner);
+        inner.push(0xBB);
+        let mut properties = Vec::new();
+        shiguredo_moqt::varint::encode(inner.len() as u64, &mut properties);
+        properties.extend_from_slice(&inner);
+
+        let result = deliver_video_object(
+            10,
+            0,
+            Some(&properties),
+            b"payload",
+            &decode_order,
+            &delivery_order,
+            None,
+            &sink,
+            None,
+            &termination_tx,
+        )
+        .await;
+
+        assert!(
+            matches!(result, VideoDelivery::MalformedTrack),
+            "malformed Track として配送を打ち切ること: {result:?}"
+        );
+        assert!(
+            termination_rx.try_recv().is_err(),
+            "malformed Track でセッション終了を依頼しないこと"
+        );
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "malformed Track の Object は送出しないこと"
         );
     }
 

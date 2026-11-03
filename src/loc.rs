@@ -11,9 +11,26 @@
 //!
 //! 本モジュールは Public/Private の区別なくプロパティの encode/decode を提供する。
 //! Public/Private の配置はアプリケーション層の責務である。
+//!
+//! # 多重可否
+//!
+//! draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) は、Property の定義が
+//! 複数を許す場合を除いて Track / Object に 1 インスタンスだけ載せてよいと定め、許される数より
+//! 多く受信したエンドポイントに Track を malformed とすることを MUST とする (§12.1
+//! (Malformed Tracks) 条件 9)。LOC Properties の各定義 (draft-ietf-moq-loc-05 §2.3) にも
+//! 複数を許す規則は無いため、この実装が意味を理解する既知 ID は単一に限られる。未知 ID は
+//! §8.4 の "MUST allow multiple instances of the Property" と §16.8 (Properties) の
+//! "Endpoints MUST ignore unknown Property types" に従って複数インスタンスを保持する。多重
+//! 可否の表は `crate::property_scope` に集約する。
 
 use crate::{error::MessageError, varint};
 use alloc::vec::Vec;
+
+/// 単一に限られる既知プロパティが複数現れたときの説明
+///
+/// 受信時の `MalformedTrack` とローカル入力検証時の `ProtocolViolation` が同じ理由を
+/// 指すように 1 箇所に置く (どちらも `MessageError` の `&'static str` である)。
+const DUPLICATE_LOC_PROPERTY: &str = "duplicate LOC property ID";
 
 /// Audio Level の最大値 (下位 8 bit = 0-255)
 ///
@@ -192,12 +209,16 @@ impl LocProperties {
     ///
     /// prop_id の昇順にソートして delta encoding でエンコードする。
     /// 空のコレクションは Properties Length = 0 としてエンコードする。
+    /// 未知 ID は複数インスタンスを保持したまま書き出す (draft-ietf-moq-transport-23 §8.4
+    /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
+    /// 同一 ID の並び順はソートが安定であるため入力順を保つ。
     ///
     /// # Errors
     ///
     /// - 偶数 ID に `Bytes` 値: `ProtocolViolation`
     /// - 奇数 ID に `VarInt` 値: `ProtocolViolation`
-    /// - 重複するプロパティ ID: `ProtocolViolation`
+    /// - 単一に限られる既知 ID の重複: `ProtocolViolation`
+    ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - バイト列が 65535 バイトを超える: `PayloadTooLong`
     /// - 既知プロパティの値域違反 (Audio Level が 255 超過): `MalformedKeyValue`
     /// - Video Frame Marking の長さが 1-4 バイトでない: `MalformedKeyValue`
@@ -214,12 +235,12 @@ impl LocProperties {
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.prop_id);
 
-        // 重複プロパティ ID を検出する
-        // delta encoding では同一 Type が複数回出現することを想定していない
-        for w in sorted.windows(2) {
-            if w[0].prop_id == w[1].prop_id {
-                return Err(MessageError::ProtocolViolation("duplicate LOC property ID"));
-            }
+        // 単一に限られる既知プロパティの重複を検出する (draft-ietf-moq-transport-23 §8.4
+        // (Track and Object Properties) / §12.1 (Malformed Tracks) 条件 9)。未知 ID は
+        // 複数インスタンスを許す。encode はローカル入力の検証であるため ProtocolViolation で
+        // 拒否する。
+        if crate::property_scope::has_duplicate_single_property(sorted.iter().map(|p| p.prop_id)) {
+            return Err(MessageError::ProtocolViolation(DUPLICATE_LOC_PROPERTY));
         }
 
         let mut inner = Vec::new();
@@ -265,9 +286,15 @@ impl LocProperties {
     ///
     /// フォーマット: `Properties Length (varint) | Key-Value-Pairs...`
     ///
+    /// 未知 ID の複数インスタンスは正当として保持する (draft-ietf-moq-transport-23 §8.4
+    /// (Track and Object Properties) の "MUST allow multiple instances of the Property")。
+    ///
     /// # Errors
     ///
-    /// - 重複するプロパティ ID / delta-key のオーバーフロー: `ProtocolViolation`
+    /// - delta-key のオーバーフロー: `ProtocolViolation`
+    /// - 単一に限られる既知 ID の重複: `MalformedTrack`
+    ///   (draft-ietf-moq-transport-23 §8.4 / §12.1 (Malformed Tracks) 条件 9。呼び出し側は
+    ///   セッション終了ではなく、同じ Track の購読・fetch の取消へ渡す)
     /// - 奇数 ID の宣言長が 65535 バイトを超える: `FieldLengthExceeded`
     /// - Audio Level が 255 を超える: `MalformedKeyValue`
     /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
@@ -294,13 +321,7 @@ impl LocProperties {
         let mut prev_id: u64 = 0;
 
         while inner_pos < inner.len() {
-            let (prop_id, delta) = crate::kvp::decode_delta_key(prev_id, inner, &mut inner_pos)?;
-
-            // 重複プロパティ ID を検出する
-            // delta == 0 かつ最初のプロパティでない場合は同一 ID の繰り返し
-            if delta == 0 && !properties.is_empty() {
-                return Err(MessageError::ProtocolViolation("duplicate LOC property ID"));
-            }
+            let (prop_id, _delta) = crate::kvp::decode_delta_key(prev_id, inner, &mut inner_pos)?;
 
             prev_id = prop_id;
 
@@ -332,6 +353,16 @@ impl LocProperties {
             };
 
             properties.push(LocProperty { prop_id, value });
+        }
+
+        // 単一に限られる既知 ID の重複を malformed Track として報告する
+        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 9)。未知 ID の重複は §8.4 の "MUST allow multiple
+        // instances of the Property" により正当である。
+        if crate::property_scope::has_duplicate_single_property(
+            properties.iter().map(|p| p.prop_id),
+        ) {
+            return Err(MessageError::MalformedTrack(DUPLICATE_LOC_PROPERTY));
         }
 
         Ok((Self(properties), pos))
@@ -731,8 +762,10 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_property_id_rejected_on_decode() {
-        // delta=0 を含むワイヤーフォーマットを手動構築する
+    fn duplicate_property_id_is_malformed_on_decode() {
+        // 単一に限られる既知 ID (Timestamp) の重複は malformed Track
+        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 9)。delta=0 を含むワイヤーフォーマットを手動構築する
         let mut inner = Vec::new();
         varint::encode(PROP_TIMESTAMP, &mut inner); // delta = 0x10
         varint::encode(1000, &mut inner); // value
@@ -743,7 +776,55 @@ mod tests {
         buf.extend_from_slice(&inner);
         assert!(matches!(
             LocProperties::decode(&buf),
-            Err(MessageError::ProtocolViolation(_))
+            Err(MessageError::MalformedTrack(_))
         ));
+    }
+
+    #[test]
+    fn unknown_duplicate_property_id_accepted_on_decode() {
+        // 未知 ID の複数インスタンスは §8.4 の "MUST allow multiple instances of the
+        // Property" により正当であり、同値・異値のどちらも保持する
+        let mut inner = Vec::new();
+        varint::encode(0x101, &mut inner); // 未知の奇数 ID (delta = 0x101)
+        varint::encode(1, &mut inner); // length = 1
+        inner.push(0xAA);
+        varint::encode(0, &mut inner); // delta = 0 (同一 ID の 2 個目)
+        varint::encode(1, &mut inner); // length = 1
+        inner.push(0xBB);
+        varint::encode(0, &mut inner); // delta = 0 (同一 ID の 3 個目、同値)
+        varint::encode(1, &mut inner); // length = 1
+        inner.push(0xBB);
+        let mut buf = Vec::new();
+        varint::encode(inner.len() as u64, &mut buf);
+        buf.extend_from_slice(&inner);
+
+        let (decoded, consumed) =
+            LocProperties::decode(&buf).expect("未知 ID の重複は受理されること");
+        assert_eq!(consumed, buf.len());
+        let values: Vec<&[u8]> = decoded
+            .iter()
+            .map(|p| match &p.value {
+                LocPropertyValue::Bytes(b) => b.as_slice(),
+                LocPropertyValue::VarInt(_) => panic!("奇数 ID は Bytes 値を持つこと"),
+            })
+            .collect();
+        assert_eq!(values, vec![&[0xAAu8][..], &[0xBB][..], &[0xBB][..]]);
+    }
+
+    #[test]
+    fn unknown_duplicate_property_id_roundtrips_on_encode() {
+        // 未知 ID の複数インスタンスは encode → decode で順序も含めて往復する
+        let mut props = LocProperties::new();
+        for value in [0x11u8, 0x22, 0x33] {
+            props.push(LocProperty {
+                prop_id: 0x101,
+                value: LocPropertyValue::Bytes(vec![value]),
+            });
+        }
+        let encoded = props.encode().expect("未知 ID の重複は encode できること");
+        let (decoded, consumed) =
+            LocProperties::decode(&encoded).expect("未知 ID の重複は decode できること");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, props);
     }
 }

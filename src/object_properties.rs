@@ -24,7 +24,7 @@
 //! 0x02 / 0x06 は Track scope の定義元 (`track_properties` モジュール) と共通の型番号で、
 //! Object scope では本モジュールのアクセサ (`object_delivery_timeout` / `subgroup_delivery_timeout`) から参照する。
 //!
-//! # スコープ検証
+//! # スコープ検証と多重検証
 //!
 //! draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) は、エンドポイントが意味を
 //! 理解する Property をスコープ外で受信した場合に Track を malformed とすることを MUST とする
@@ -33,6 +33,12 @@
 //! `MalformedTrack` を返す。mutable リストと IMMUTABLE_PROPERTIES の内側の両方に同じ規則を
 //! 適用する (§10.7 (Immutable Properties))。未知の型はスコープを推測できないため拒否しない。
 //! ローカル入力の `encode` は受信 Track の判定と混同しないよう `ProtocolViolation` で拒否する。
+//!
+//! 同じ §8.4 は、Property の定義が複数を許す場合を除いて 1 インスタンスまでしか載せては
+//! ならないと定め、許される数より多く受信した場合も Track を malformed とすることを MUST と
+//! する (§12.1 条件 9)。本モジュールの decode は同一 Type をそのまま保持して [`ObjectProperties::validate`]
+//! で判定し、未知の Type の複数は正当として受理する (§8.4 の "MUST allow multiple instances
+//! of the Property")。多重可否の表は `crate::property_scope` に集約する。
 //!
 //! IMMUTABLE_PROPERTIES (0x0B) は奇数型だが、その値は「入れ子の Key-Value-Pair リスト」。
 //! 入れ子の IMMUTABLE_PROPERTIES は許されず、検出した場合は MalformedTrack
@@ -66,6 +72,12 @@ pub const PROP_PRIOR_OBJECT_ID_GAP: u64 = 0x3E;
 /// 受信時の `MalformedTrack` とローカル入力検証時の `ProtocolViolation` が同じ理由を
 /// 指すように 1 箇所に置く (どちらも `MessageError` の `&'static str` である)。
 const TRACK_ONLY_IN_OBJECT_SCOPE: &str = "Track-only property in Object scope";
+
+/// 単一に限られる既知 Property が複数現れたときの説明
+///
+/// 受信時の `MalformedTrack` とローカル入力検証時の `ProtocolViolation` が同じ理由を
+/// 指すように 1 箇所に置く (どちらも `MessageError` の `&'static str` である)。
+const DUPLICATE_OBJECT_PROPERTY: &str = "duplicate object property";
 
 /// Object Property の値
 ///
@@ -132,12 +144,16 @@ impl ObjectProperties {
     /// Object Properties ブロック全体を `buf` に追記する
     ///
     /// 空の場合は Properties Length = 0 のみを書き出す (draft-ietf-moq-transport-22 §11.1.2 (Object Properties) / §11.3.1 (Subgroup Header))。
-    /// prop_type の昇順にソートし、delta encoding で圧縮する。
+    /// prop_type の昇順にソートし、delta encoding で圧縮する。未知の型は複数インスタンスを
+    /// 保持したまま書き出す (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties)
+    /// の "MUST allow multiple instances of the Property")。同一 Type の並び順はソートが
+    /// 安定であるため入力順を保つ。
     ///
     /// # Errors
     ///
     /// - 偶数型に `Bytes` 値、または奇数型に `VarInt` 値: `ProtocolViolation`
-    /// - 同一 prop_type の重複: `ProtocolViolation`
+    /// - 単一に限られる既知 prop_type の重複 (IMMUTABLE_PROPERTIES の内側との重複を含む):
+    ///   `ProtocolViolation` (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - Track 専用の既知 Property (MAX_CACHE_DURATION など) を含む: `ProtocolViolation`
     ///   (ローカル入力の検証であり、受信 Track の malformed 判定とは別)
     /// - IMMUTABLE_PROPERTIES の内側に IMMUTABLE_PROPERTIES を含む: `ProtocolViolation`
@@ -148,17 +164,17 @@ impl ObjectProperties {
             return Ok(());
         }
 
+        // ローカル入力の意味検証 (スコープと多重可否) を行う。受信 Track の malformed 判定と
+        // 混同しないよう、MalformedTrack を ProtocolViolation に写す
+        // (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 8 / 9)。
+        self.validate().map_err(|err| match err {
+            MessageError::MalformedTrack(reason) => MessageError::ProtocolViolation(reason),
+            other => other,
+        })?;
+
         let mut sorted = self.0.clone();
         sorted.sort_by_key(|p| p.prop_type);
-
-        // 重複 prop_type を検出する
-        for w in sorted.windows(2) {
-            if w[0].prop_type == w[1].prop_type {
-                return Err(MessageError::ProtocolViolation(
-                    "duplicate object property type",
-                ));
-            }
-        }
 
         let mut inner = Vec::new();
         let mut prev_type: u64 = 0;
@@ -173,14 +189,6 @@ impl ObjectProperties {
                     ));
                 }
             }
-            // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): Track 専用の
-            // 既知 Property を Object scope に載せた直列化は生成しない。encode は受信 Track の
-            // 判定ではなくローカル入力の検証であるため、MalformedTrack ではなく
-            // ProtocolViolation で拒否する (§12.1 (Malformed Tracks) の cancel を起こさない)。
-            if crate::property_scope::is_track_only(prop.prop_type) {
-                return Err(MessageError::ProtocolViolation(TRACK_ONLY_IN_OBJECT_SCOPE));
-            }
-
             crate::kvp::encode_delta_key(prev_type, prop.prop_type, &mut inner);
             prev_type = prop.prop_type;
 
@@ -192,17 +200,11 @@ impl ObjectProperties {
                     if b.len() > 65535 {
                         return Err(MessageError::PayloadTooLong);
                     }
-                    // IMMUTABLE_PROPERTIES の内側に IMMUTABLE_PROPERTIES を含まないか検証する
+                    // IMMUTABLE_PROPERTIES の内側に IMMUTABLE_PROPERTIES を含まないか、
+                    // 内側の KVP が書式として壊れていないかを検証する。内側の意味検証
+                    // (スコープと多重可否) は上の `validate` が両リストを合わせて行う。
                     if prop.prop_type == PROP_IMMUTABLE_PROPERTIES {
-                        // 内側に Track 専用 Property がある場合、decode 層は受信時の意味検証
-                        // として MalformedTrack を返す。encode はローカル入力の検証であるため
-                        // 受信 Track の取消と混同せず ProtocolViolation に写す。
-                        validate_immutable_inner(b).map_err(|err| match err {
-                            MessageError::MalformedTrack(_) => {
-                                MessageError::ProtocolViolation(TRACK_ONLY_IN_OBJECT_SCOPE)
-                            }
-                            other => other,
-                        })?;
+                        validate_immutable_inner(b)?;
                     }
                     varint::encode(b.len() as u64, &mut inner);
                     inner.extend_from_slice(b);
@@ -257,14 +259,19 @@ impl ObjectProperties {
     ///
     /// フォーマット: `Properties Length (varint) | Key-Value-Pairs...`
     ///
+    /// 同一 Type の複数インスタンスは構造として保持してから [`ObjectProperties::validate`] で
+    /// 意味検証する。未知の Type の複数は draft-ietf-moq-transport-23 §8.4 (Track and Object
+    /// Properties) の "MUST allow multiple instances of the Property" により正当である。
+    ///
     /// # Errors
     ///
     /// draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) の書式違反に加え、
     /// §8.4 (Track and Object Properties) / §12.1 (Malformed Tracks) 条件 8 の
-    /// スコープ違反 (Track 専用の既知 Property を Object Properties で受信) と、
+    /// スコープ違反 (Track 専用の既知 Property を Object Properties で受信)、
     /// §3.7 (Mandatory to Understand Track Properties) の Mandatory Track Property を
-    /// Object scope で受信した場合に `MalformedTrack` を返す。mutable リストと
-    /// IMMUTABLE_PROPERTIES の内側の両方を検証する (§10.7 (Immutable Properties))。
+    /// Object scope で受信した場合、および §12.1 条件 9 の多重違反 (単一に限られる既知
+    /// Property の重複) に `MalformedTrack` を返す。mutable リストと IMMUTABLE_PROPERTIES の
+    /// 内側の両方を検証する (§10.7 (Immutable Properties))。
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), MessageError> {
         let mut pos = 0;
         let (prop_len, n) = varint::decode(&buf[pos..])?;
@@ -280,7 +287,47 @@ impl ObjectProperties {
         pos += prop_len;
 
         let props = decode_kv_pairs(inner, true)?;
-        Ok((Self(props), pos))
+        let properties = Self(props);
+        properties.validate()?;
+        Ok((properties, pos))
+    }
+
+    /// Object Properties の意味検証 (スコープと多重可否) を行う
+    ///
+    /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+    /// Tracks) 条件 8 / 9 の検証をまとめて行う。mutable リストと IMMUTABLE_PROPERTIES (0x0B)
+    /// の内側を合わせて調べる (§10.7 (Immutable Properties) の "MUST search both")。
+    ///
+    /// - この実装が意味を理解する Track-only Property を Object scope で検出したら
+    ///   `MalformedTrack`
+    /// - §3.7 (Mandatory to Understand Track Properties) の 0x4000-0x7FFF のうち GREASE
+    ///   予約値でない型を検出したら `MalformedTrack`
+    /// - 単一に限られる既知 Property が 2 インスタンス以上あれば `MalformedTrack`。同じ型が
+    ///   mutable リストと内側の両方に現れた場合も 2 インスタンスと数える
+    ///
+    /// 未知の型はスコープと多重可否を推測せず受理する (§8.4 の転送 MUST / §16.8 (Properties)
+    /// の "Endpoints MUST ignore unknown Property types")。
+    ///
+    /// `push` で積んだ IMMUTABLE_PROPERTIES の内側が破損していてデコードできない場合、内側は
+    /// 調べられない ([`ObjectProperties::find_varint`] と同じ制約)。wire 経由の値は `decode` が
+    /// 内側の書式を検証済みなので、この制約が観測されるのは in-memory 構築の入力だけである。
+    ///
+    /// # Errors
+    ///
+    /// 上記のいずれかに該当する場合に `MalformedTrack`。
+    pub fn validate(&self) -> Result<(), MessageError> {
+        let inner = self.immutable_inner_properties();
+        for p in self.0.iter().chain(inner.iter()) {
+            validate_object_property_type(p.prop_type)?;
+        }
+        // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
+        // (Malformed Tracks) 条件 9: 単一に限られる既知 Property は 1 インスタンスまで。
+        if crate::property_scope::has_duplicate_single_property(
+            self.0.iter().chain(inner.iter()).map(|p| p.prop_type),
+        ) {
+            return Err(MessageError::MalformedTrack(DUPLICATE_OBJECT_PROPERTY));
+        }
+        Ok(())
     }
 
     /// OBJECT_DELIVERY_TIMEOUT の値を返す (draft-ietf-moq-transport-22 §10.2)
@@ -321,6 +368,10 @@ impl ObjectProperties {
     /// IMMUTABLE_PROPERTIES (0x0B) の内側 KVP をデコードして返す
     ///
     /// 破損していれば空 Vec を返す (draft-ietf-moq-transport-22 §10.7 (Immutable Properties)「MUST search both」対応)。
+    /// 最初の IMMUTABLE_PROPERTIES のみを対象とする。0x0B は単一に限られるため、`decode` が
+    /// 保持した重複や `push` で積んだ重複は [`ObjectProperties::validate`] が malformed Track
+    /// として拒否する。2 つ目以降の内側を探索しないのは、その前提が破れた入力に対する防御で
+    /// ある。
     fn immutable_inner_properties(&self) -> Vec<ObjectProperty> {
         let Some(bytes) = self.immutable_properties() else {
             return Vec::new();
@@ -335,6 +386,20 @@ impl ObjectProperties {
     ///
     /// draft-ietf-moq-transport-22 §3.3.2 (Range Filters) の OBJECT_PROPERTY_FILTER は任意の
     /// 偶数 Property Type を対象にできるため、型別 accessor では足りず本メソッドを公開している。
+    /// 同じ型が複数インスタンスある場合 (未知の型で許される重複) は最初のインスタンスを返す。
+    pub fn find_varint(&self, prop_type: u64) -> Option<u64> {
+        // mutable リストを先に、続けて IMMUTABLE_PROPERTIES の内側を探索する (mutable 優先)
+        let inner = self.immutable_inner_properties();
+        for p in self.0.iter().chain(inner.iter()) {
+            if p.prop_type == prop_type
+                && let ObjectPropertyValue::VarInt(v) = p.value
+            {
+                return Some(v);
+            }
+        }
+        None
+    }
+
     /// 指定 prop_type のインスタンス数を mutable リストと IMMUTABLE_PROPERTIES 内側の両方で数える
     ///
     /// draft-ietf-moq-transport-22 §10.8 (Prior Group ID Gap) / §10.9 (Prior Object ID Gap):
@@ -352,19 +417,6 @@ impl ObjectProperties {
             .chain(inner.iter())
             .filter(|p| p.prop_type == prop_type)
             .count()
-    }
-
-    pub fn find_varint(&self, prop_type: u64) -> Option<u64> {
-        // mutable リストを先に、続けて IMMUTABLE_PROPERTIES の内側を探索する (mutable 優先)
-        let inner = self.immutable_inner_properties();
-        for p in self.0.iter().chain(inner.iter()) {
-            if p.prop_type == prop_type
-                && let ObjectPropertyValue::VarInt(v) = p.value
-            {
-                return Some(v);
-            }
-        }
-        None
     }
 }
 
@@ -573,18 +625,56 @@ impl ObjectPropertyTracker {
     }
 }
 
-/// IMMUTABLE_PROPERTIES の中身バイト列を検証する
+/// Object scope の 1 インスタンスについて、型のスコープと Mandatory Track Property を検証する
 ///
-/// 内側に IMMUTABLE_PROPERTIES を含む場合は `ProtocolViolation`。内側に Track 専用の既知
-/// Property を含む場合は、decode と同じく `decode_kv_pairs` が返す `MalformedTrack` を
-/// そのまま返す (受信した Object の意味検証)。`ObjectProperties::encode` はローカル入力の
-/// 検証であるため、呼び出し側で `ProtocolViolation` に写す。
+/// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) の "An endpoint that
+/// supports a Property and receives it outside its scope (e.g. a Track-only Property as an
+/// Object Property) MUST treat the Track as malformed" / §12.1 (Malformed Tracks) 条件 8 と、
+/// draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties) の
+/// "An Object received with a Mandatory Track Property as an Object Property is malformed"。
+/// mutable リストと IMMUTABLE_PROPERTIES の内側のどちらにも適用する (§10.7 (Immutable
+/// Properties))。
+///
+/// draft-ietf-moq-transport-22 §3.7 の 0x4000-0x7FFF のうち GREASE 予約値
+/// (§16.8 (Properties) Table 15 が Scope Any として予約する `0x7f * N + 0x9D`) は、IANA に
+/// 登録された Property ではないため Mandatory Track Property に含めない。この解釈は §13
+/// (Grease) の "Endpoints MUST NOT close the session solely because they received an unknown
+/// value." と §8.4 の未知 Property の転送 MUST に整合する。GREASE 値は未知 Property として
+/// §8.4 / §16.8 に従い保持・転送する。draft 内部の登録ポリシーと予約値の関係は将来の draft
+/// 改版で変わりうる。
+fn validate_object_property_type(prop_type: u64) -> Result<(), MessageError> {
+    if (crate::track_properties::MANDATORY_TRACK_PROPERTY_MIN
+        ..=crate::track_properties::MANDATORY_TRACK_PROPERTY_MAX)
+        .contains(&prop_type)
+        && !crate::grease::is_grease(prop_type)
+    {
+        return Err(MessageError::MalformedTrack(
+            "mandatory property in object scope",
+        ));
+    }
+    if crate::property_scope::is_track_only(prop_type) {
+        return Err(MessageError::MalformedTrack(TRACK_ONLY_IN_OBJECT_SCOPE));
+    }
+    Ok(())
+}
+
+/// IMMUTABLE_PROPERTIES の中身バイト列を書式として検証する
+///
+/// 内側に IMMUTABLE_PROPERTIES を含む場合や、KVP の宣言長が残りバイトを超える場合に失敗する
+/// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-22 §10.7 (Immutable Properties)
+/// により禁止)。内側の意味検証 (スコープと多重可否) は
+/// [`ObjectProperties::validate`] が mutable リストと合わせて行う。
 fn validate_immutable_inner(bytes: &[u8]) -> Result<(), MessageError> {
     decode_kv_pairs(bytes, false)?;
     Ok(())
 }
 
 /// 長さ付きバッファから K-V ペア列をパースする
+///
+/// 構造だけを読み、意味検証 (スコープ [draft-ietf-moq-transport-23 §8.4 (Track and Object
+/// Properties)] と多重可否 [§12.1 (Malformed Tracks) 条件 9]) は
+/// [`ObjectProperties::validate`] が行う。同一 Type の KVP はそのまま複数読み取る (§8.4 の
+/// "MUST allow multiple instances of the Property" により未知の Type の複数は正当である)。
 ///
 /// `allow_immutable` が false の場合、IMMUTABLE_PROPERTIES (0x0B) の出現を拒否する
 /// (入れ子 IMMUTABLE_PROPERTIES は draft-ietf-moq-transport-22 §10.7 (Immutable Properties) により禁止)。
@@ -597,51 +687,13 @@ fn decode_kv_pairs(
     let mut prev_type: u64 = 0;
 
     while inner_pos < inner.len() {
-        let (prop_type, delta) = crate::kvp::decode_delta_key(prev_type, inner, &mut inner_pos)?;
-
-        // delta == 0 は重複 (最初のエントリを除く)
-        if delta == 0 && !props.is_empty() {
-            return Err(MessageError::ProtocolViolation(
-                "duplicate object property type",
-            ));
-        }
+        let (prop_type, _delta) = crate::kvp::decode_delta_key(prev_type, inner, &mut inner_pos)?;
 
         if !allow_immutable && prop_type == PROP_IMMUTABLE_PROPERTIES {
             return Err(MessageError::ProtocolViolation(
                 "nested IMMUTABLE_PROPERTIES is not allowed (draft-ietf-moq-transport-22 §10.7 (Immutable Properties))",
             ));
         }
-
-        // draft-ietf-moq-transport-22 §3.7 (Mandatory to Understand Track Properties): 必須トラックプロパティ
-        // (0x4000-0x7FFF) は Track スコープのみ。Object Properties で受信したら malformed track。
-        //
-        // ただし §16.8 (Properties) の Table 15 が GREASE の Property Type
-        // (`0x7f * N + 0x9D`) を Scope Any として予約しており、その一部 (N = 128 の 0x401D から
-        // N = 256 の 0x7F9D まで) はこの範囲に入る。GREASE 値は IANA に登録された Property では
-        // ないため、§3.7 の「Mandatory Track Property」は登録された必須トラックプロパティを指し、
-        // 予約値である GREASE を含まないと解釈する。この解釈は §13 (Grease) の
-        // "Endpoints MUST NOT close the session solely because they received an unknown value."
-        // と §8.4 (Track and Object Properties) の未知 Property の転送 MUST に整合する。
-        // GREASE 値は未知 Property として §8.4 / §16.8 に従い保持・転送する。
-        // draft 内部の登録ポリシーと予約値の関係は将来の draft 改版で変わりうる。
-        if (crate::track_properties::MANDATORY_TRACK_PROPERTY_MIN
-            ..=crate::track_properties::MANDATORY_TRACK_PROPERTY_MAX)
-            .contains(&prop_type)
-            && !crate::grease::is_grease(prop_type)
-        {
-            return Err(MessageError::MalformedTrack(
-                "mandatory property in object scope",
-            ));
-        }
-        // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties): この実装が意味を
-        // 理解する Track 専用 Property を Object scope で受信したら malformed track
-        // (§12.1 (Malformed Tracks) 条件 8)。IMMUTABLE_PROPERTIES の内側も同じ関数で
-        // 再帰的に検証する (§10.7 (Immutable Properties) は内側も Track or Object Property
-        // と対称に定義する)。
-        if crate::property_scope::is_track_only(prop_type) {
-            return Err(MessageError::MalformedTrack(TRACK_ONLY_IN_OBJECT_SCOPE));
-        }
-
         prev_type = prop_type;
 
         let value = if prop_type % 2 == 0 {

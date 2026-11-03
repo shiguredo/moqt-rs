@@ -328,10 +328,20 @@ pub fn sample_non_immutable_property(ctx: &mut noprop::TestCaseContext) -> Track
 }
 
 /// IMMUTABLE_PROPERTIES (0x0B) を生成する。内側は非 IMMUTABLE な正規の Track Property KVP 列。
-pub fn sample_immutable_property(ctx: &mut noprop::TestCaseContext) -> TrackProperty {
+///
+/// `excluded_types` は mutable リストに既に現れた型である。単一に限られる既知 Property は
+/// Track 全体で 1 インスタンスまでであり (draft-ietf-moq-transport-23 §8.4 (Track and Object
+/// Properties) / §12.1 (Malformed Tracks) 条件 9)、mutable リストと内側の両方に現れると
+/// encode がローカル入力の検証として拒否するため、内側からは除外する。未知の型は複数
+/// インスタンスを許すため除外しない。
+pub fn sample_immutable_property(
+    ctx: &mut noprop::TestCaseContext,
+    excluded_types: &[u64],
+) -> TrackProperty {
     let inner_count = noprop::sample_usize_in(ctx, 0..=4);
     let mut inner_props = (0..inner_count)
         .map(|_| sample_non_immutable_property(ctx))
+        .filter(|p| !excluded_types.contains(&p.prop_type))
         .collect::<Vec<_>>();
     inner_props.sort_by_key(|p| p.prop_type);
     inner_props.dedup_by_key(|p| p.prop_type);
@@ -349,21 +359,26 @@ pub fn sample_immutable_property(ctx: &mut noprop::TestCaseContext) -> TrackProp
     }
 }
 
-/// Track Property を生成する (非 IMMUTABLE : IMMUTABLE = 4 : 1)
-pub fn sample_track_property(ctx: &mut noprop::TestCaseContext) -> TrackProperty {
-    match noprop::sample_weighted_index(ctx, &[4, 1]) {
-        0 => sample_non_immutable_property(ctx),
-        _ => sample_immutable_property(ctx),
-    }
-}
-
+/// 正常系の Track Properties を生成する
+///
+/// 単一に限られる既知 Property が同一 Track に 2 回現れないよう、mutable リストは型で
+/// 重複除去し、IMMUTABLE_PROPERTIES の内側からは mutable リストの型を除外する
+/// (draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+/// Tracks) 条件 9)。
 pub fn sample_track_properties(ctx: &mut noprop::TestCaseContext) -> TrackProperties {
     let count = noprop::sample_usize_in(ctx, 0..=8);
     let mut props = (0..count)
-        .map(|_| sample_track_property(ctx))
+        .map(|_| sample_non_immutable_property(ctx))
         .collect::<Vec<_>>();
     props.sort_by_key(|p| p.prop_type);
     props.dedup_by_key(|p| p.prop_type);
+    // 非 IMMUTABLE : IMMUTABLE = 4 : 1
+    if noprop::sample_weighted_index(ctx, &[4, 1]) == 1 {
+        let mutable_types: Vec<u64> = props.iter().map(|p| p.prop_type).collect();
+        props.push(sample_immutable_property(ctx, &mutable_types));
+    }
+    // encode / decode は型の昇順で並ぶため、比較用に生成結果も昇順へ揃える
+    props.sort_by_key(|p| p.prop_type);
     let mut result = TrackProperties::new();
     for p in props {
         result.push(p);

@@ -351,10 +351,13 @@ fn publish_with_object_only_property_cancels_existing_subscription_for_same_trac
 #[test]
 fn publish_with_unknown_and_both_scope_properties_is_accepted() {
     let (mut client, mut server) = establish_pair();
-    // 内側にだけ両スコープ (0x02, TIMESCALE 0x08) と未知 (0x1000) を置く
+    // 内側にだけ両スコープ (0x06, TIMESCALE 0x08) と未知 (0x1000) を置く。0x02 は mutable
+    // リスト側に置くため、内側には置かない (単一に限られる既知 Property を両方に置くと
+    // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed
+    // Tracks) 条件 9 の多重違反になる)。
     let mut inner = TrackProperties::new();
     inner.push(TrackProperty {
-        prop_type: 0x02,
+        prop_type: 0x06,
         value: TrackPropertyValue::VarInt(100),
     });
     inner.push(TrackProperty {

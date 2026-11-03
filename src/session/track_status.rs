@@ -388,10 +388,10 @@ impl Session {
             return Err(err);
         }
         // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
-        // (Malformed Tracks) 条件 8: Track Properties のスコープを検証する。違反時は
-        // TrackStatusResponse::Ok を記録せず、malformed Track の終端経路へ渡す
+        // (Malformed Tracks) 条件 8 / 9: Track Properties のスコープと多重可否を検証する。
+        // 違反時は TrackStatusResponse::Ok を記録せず、malformed Track の終端経路へ渡す
         // (この request 自身は応答済みの失敗として確定し、アプリへ理由を届ける)。
-        if let Err(err) = track_properties.validate_scope() {
+        if let Err(err) = track_properties.validate() {
             self.terminate_malformed_track(request_id, None, err.reason());
             return Ok(());
         }
