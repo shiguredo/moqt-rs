@@ -3144,16 +3144,20 @@ pub async fn run(
                         Some(ClientEvent::Session(SessionEvent::FetchOkReceived {
                             request_id,
                             end_location,
-                            end_of_track,
+                            ..
                         })) => {
-                            // 自側が発行したメディア FETCH の応答である。End Location と
-                            // End of Track を残す。対応表への記録は応答 stream が FETCH_OK
-                            // より先に届きうるため FETCH の発行時に行っており、ここでは
-                            // 記録済みの種別を添えて確定した終端情報を残す
+                            // 自側が発行したメディア FETCH の応答である。FETCH_OK は応答範囲の
+                            // 終端 (LARGEST_OBJECT または要求の End Location) だけを示し、
+                            // Track / Group の終端はデータストリームの End of Track /
+                            // End of Group で通知される (draft-ietf-moq-transport-23
+                            // §3.2.2 (Gaps in a Fetch Stream) / §11.4.2.2 (Prior Object
+                            // Fields))。そのため旧 FETCH_OK の End of Track フラグは読まず、
+                            // 対応表への記録は応答 stream が FETCH_OK より先に届きうるため
+                            // FETCH の発行時に行っておく。
                             let kind = fetch_targets.get(&request_id);
                             tracing::info!(
                                 "Received FETCH_OK: request_id={request_id}, kind={kind:?}, \
-                                 end_location=({}, {}), end_of_track={end_of_track}",
+                                 end_location=({}, {})",
                                 end_location.group_id,
                                 end_location.object_id,
                             );
@@ -4329,7 +4333,10 @@ async fn read_catalog_fetch_objects(
             },
             _ => Vec::new(),
         };
-        // Object 以外 (End of Range 系) は catalog の Object ではない
+        // Object 以外 (End of Range / End of Group / End of Track) は catalog の Object では
+        // ないため捨てる。marker は直前の Object が Group / Track の終端であることを示すだけで
+        // (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))、catalog の値そのものを
+        // 持たない。
         let DecodedFetchEntry::Object(obj) = &entry else {
             continue;
         };
@@ -6418,7 +6425,9 @@ fn fetch_stream_action(
 /// `Ok(None)` は stream の終端 (FIN / RESET_STREAM / Session からの STOP_SENDING 指示) を
 /// 表す。`Err` は wire の書式違反、Session への登録失敗、payload を読み切る前の終端を
 /// 表し、呼び出し側が読み取りを打ち切る (ログは呼び出し側が出す)。
-/// End of Range の entry は payload を持たないため payload は空になる。
+/// End of Range / End of Group / End of Track の entry は payload を持たないため
+/// payload は空になる (draft-ietf-moq-transport-23 §11.4.2 (End of Range) /
+/// §11.4.2.2 (Prior Object Fields))。
 async fn read_fetch_entry(
     stream: &mut transport::RecvStream,
     data_plane: &DataPlaneHandle,
@@ -6442,8 +6451,8 @@ async fn read_fetch_entry(
                 RegisteredStreamData::StoppedBySession => return Ok(None),
             },
         };
-        // entry を読むたびに Session の activity を更新する。Object と End of Range の
-        // どちらも DATA_STREAM_TIMEOUT の activity に含まれる
+        // entry を読むたびに Session の activity を更新する。Object と End of Range /
+        // marker のどれも DATA_STREAM_TIMEOUT の activity に含まれる
         // (draft-ietf-moq-transport-22 §12.2 (Session Termination Codes))。
         // 失敗は読み取りを打ち切る (この stream の会計が進まない)
         data_plane.recv_fetch_entry(stream_id)?;
@@ -6479,27 +6488,38 @@ async fn read_fetch_entry(
     }
 }
 
-/// FETCH 応答の End of Range を「取得できなかった範囲」としてログに残す
+/// FETCH 応答の Object 以外の entry をログに残す
 ///
-/// End of Range は Object ではないため配送しない。3 種は取得できなかった理由が異なる
+/// Object 以外の entry は配送しない。End of Range の 3 種は取得できなかった理由が異なる
 /// (存在しない / 不明 / 期限切れ) ため、それぞれ別のメッセージで残す
-/// (draft-ietf-moq-transport-22 §3.2.2 (Gaps in a Fetch Stream) /
-/// §11.4.1.2 (End of Range))。Object の entry では何もしない。
-fn log_end_of_range(stream_num: u64, entry: &DecodedFetchEntry) {
+/// (draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream) /
+/// §11.4.2 (End of Range))。
+/// End of Group / End of Track は直前の Object が Group / Track の最終 Object であることを
+/// 示す marker であり (同 §11.4.2.2 (Prior Object Fields))、応答の終端としてログに残すだけで
+/// 配送しない。Object の entry では何もしない。
+fn log_fetch_boundary(stream_num: u64, entry: &DecodedFetchEntry) {
     let (reason, group_id, object_id) = match entry {
         DecodedFetchEntry::Object(_) => return,
         DecodedFetchEntry::EndOfNonExistentRange {
             group_id,
             object_id,
-        } => ("non-existent", group_id, object_id),
+        } => ("non-existent", *group_id, *object_id),
         DecodedFetchEntry::EndOfUnknownRange {
             group_id,
             object_id,
-        } => ("unknown", group_id, object_id),
+        } => ("unknown", *group_id, *object_id),
         DecodedFetchEntry::EndOfTimedOutRange {
             group_id,
             object_id,
-        } => ("timed-out", group_id, object_id),
+        } => ("timed-out", *group_id, *object_id),
+        DecodedFetchEntry::EndOfGroup { group_id } => {
+            tracing::info!("Stream #{stream_num}: FETCH group ended: group={group_id}");
+            return;
+        }
+        DecodedFetchEntry::EndOfTrack { group_id } => {
+            tracing::info!("Stream #{stream_num}: FETCH track ended: group={group_id}");
+            return;
+        }
     };
     tracing::info!(
         "Stream #{stream_num}: FETCH could not retrieve a {reason} range: \
@@ -6551,7 +6571,7 @@ async fn read_video_fetch_stream(
             }
         };
         let DecodedFetchEntry::Object(obj) = &entry else {
-            log_end_of_range(stream_num, &entry);
+            log_fetch_boundary(stream_num, &entry);
             continue;
         };
         // payload を持たない Object (Object Status のみ) は live と同じく配送しない

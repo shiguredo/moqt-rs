@@ -619,3 +619,128 @@ fn end_of_range_raw_fields_do_not_depend_on_prior_context() {
         );
     }
 }
+
+/// End of Group / End of Track の Serialization Flags は 128 以上の 1 値であり、
+/// 後続フィールドを持たないこと
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): "When Serialization Flags is
+/// 0x80 (End of Group) or 0x81 (End of Track), no other fields are present."
+/// 0x80 は 2 バイト varint (`0x80 0x80`)、0x81 も 2 バイト varint (`0x80 0x81`) であり、
+/// marker の直後のバイトは次の entry の Serialization Flags になる。
+/// そのため marker の直後に別の entry を置いても、後続 ID フィールドを誤って読まないことを
+/// 固定する。
+#[test]
+fn end_group_and_track_markers_have_no_following_fields() {
+    for (entry, expected_bytes) in [
+        (FetchStreamEntry::EndOfGroup, vec![0x80, 0x80]),
+        (FetchStreamEntry::EndOfTrack, vec![0x80, 0x81]),
+    ] {
+        let mut buf = Vec::new();
+        entry
+            .encode(None, FetchPriorContext::First, &mut buf)
+            .expect("marker は prior 文脈によらずエンコードできる");
+        assert_eq!(
+            buf, expected_bytes,
+            "marker は 1 個の vi64 だけを書き出すこと: {entry:?}"
+        );
+
+        for context in [
+            FetchPriorContext::First,
+            FetchPriorContext::NoPriorActualObject,
+            FetchPriorContext::HasPriorObject,
+        ] {
+            let (decoded, consumed) = FetchStreamEntry::decode(&expected_bytes, context)
+                .expect("marker は prior 文脈によらずデコードできる");
+            assert_eq!(
+                consumed,
+                expected_bytes.len(),
+                "marker は vi64 の 2 バイトだけを消費すること: {entry:?}"
+            );
+            assert_eq!(decoded, entry, "marker が往復すること: {context:?}");
+        }
+    }
+}
+
+/// marker の分割受信が vi64 の境界でデータ不足になり、揃った時点で確定すること
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) の marker は
+/// 後続 ID フィールドを持たない。そのため 1 バイト目 (`0x80`) だけでは varint が
+/// 未完成でデータ不足になり、2 バイト目 (`0x80`) が届いた時点で entry が確定し、
+/// 続くバイトは次の entry として読まれる。
+#[test]
+fn end_group_marker_split_across_the_varint_is_completed_by_the_second_byte() {
+    let mut buf = Vec::new();
+    FetchStreamEntry::EndOfGroup
+        .encode(None, FetchPriorContext::First, &mut buf)
+        .expect("marker は prior 文脈によらずエンコードできる");
+    // marker の直後に通常の Object を置き、marker が余分なバイトを消費しないことを見る
+    FetchStreamEntry::Object(FetchStreamObject {
+        group_id: Some(7),
+        subgroup_id: FetchSubgroupIdMode::Explicit(0),
+        object_id: Some(2),
+        publisher_priority: Some(128),
+        has_properties: false,
+        is_datagram_origin: false,
+        payload_length: 0,
+    })
+    .encode(None, FetchPriorContext::HasPriorObject, &mut buf)
+    .expect("marker の後の Object はエンコードできる");
+
+    assert!(matches!(
+        FetchStreamEntry::decode(&buf[..1], FetchPriorContext::First),
+        Err(MessageError::UnexpectedEof)
+    ));
+
+    let (decoded, consumed) = FetchStreamEntry::decode(&buf[..2], FetchPriorContext::First)
+        .expect("2 バイト目の到着で marker が確定すること");
+    assert_eq!(consumed, 2);
+    assert_eq!(decoded, FetchStreamEntry::EndOfGroup);
+
+    // marker の直後から次の entry を読める (marker が後続バイトを消費しない)
+    let (next, next_consumed) =
+        FetchStreamEntry::decode(&buf[2..], FetchPriorContext::HasPriorObject)
+            .expect("marker の直後の Object を読めること");
+    assert_eq!(next_consumed + 2, buf.len());
+    assert!(matches!(
+        next,
+        FetchStreamEntry::Object(FetchStreamObject {
+            group_id: Some(7),
+            object_id: Some(2),
+            ..
+        })
+    ));
+}
+
+/// marker に properties_data を渡すと書き込み前に拒否されること
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+/// "no other fields are present" により Properties フィールドも存在しない。
+#[test]
+fn encode_end_group_and_track_with_properties_rejected() {
+    for entry in [FetchStreamEntry::EndOfGroup, FetchStreamEntry::EndOfTrack] {
+        let mut buf = vec![0xAA];
+        assert!(
+            matches!(
+                entry.encode(Some(&[0x00]), FetchPriorContext::HasPriorObject, &mut buf),
+                Err(MessageError::ProtocolViolation(_))
+            ),
+            "marker に properties_data を渡したら拒否すること: {entry:?}"
+        );
+        assert_eq!(buf, vec![0xAA], "失敗時に buf が変化しないこと: {entry:?}");
+    }
+}
+
+/// 非最小形の varint で書かれた marker も同じ値として受理されること
+///
+/// draft-ietf-moq-transport-23 §8.1 (Variable-Length Integers) は
+/// "Variable-length integers do not need to be encoded using the minimum number of bytes" と
+/// 定めるため、0x80 は 4 バイト形 (`0xE0 0x00 0x00 0x80`) でも送られ得る。
+/// marker の判定は wire のバイト数ではなく復号した値で行うことを固定する。
+#[test]
+fn non_minimal_marker_encoding_is_accepted() {
+    let non_minimal = [0xE0, 0x00, 0x00, 0x80];
+    let (decoded, consumed) = FetchStreamEntry::decode(&non_minimal, FetchPriorContext::First)
+        .expect("非最小形の marker もデコードできる");
+    assert_eq!(consumed, non_minimal.len());
+    assert_eq!(decoded, FetchStreamEntry::EndOfGroup);
+}

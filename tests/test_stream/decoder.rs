@@ -665,6 +665,9 @@ fn encode_fetch_stream(header: &FetchHeader, entries: &[FetchEntryTuple<'_>]) ->
                     prior = FetchPriorContext::NoPriorActualObject;
                 }
             }
+            // marker は prior 参照のフィールドを持たず、prior 文脈も変えない
+            // (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))
+            FetchStreamEntry::EndOfGroup | FetchStreamEntry::EndOfTrack => {}
         }
     }
     buf
@@ -1281,7 +1284,9 @@ fn test_fetch_descending_end_of_range_entries_are_resolved_from_previous_locatio
             DecodedFetchEntry::Object(_) => drain_fetch_payload(&mut decoder, 1),
             DecodedFetchEntry::EndOfNonExistentRange { .. }
             | DecodedFetchEntry::EndOfUnknownRange { .. }
-            | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+            | DecodedFetchEntry::EndOfTimedOutRange { .. }
+            | DecodedFetchEntry::EndOfGroup { .. }
+            | DecodedFetchEntry::EndOfTrack { .. } => {}
         }
         entries.push(entry);
     }

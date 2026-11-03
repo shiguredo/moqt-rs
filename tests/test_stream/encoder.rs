@@ -927,7 +927,9 @@ fn test_descending_end_of_range_mixed_with_objects() {
             DecodedFetchEntry::Object(_) => drain_fetch_payload(&mut decoder, 1),
             DecodedFetchEntry::EndOfNonExistentRange { .. }
             | DecodedFetchEntry::EndOfUnknownRange { .. }
-            | DecodedFetchEntry::EndOfTimedOutRange { .. } => {}
+            | DecodedFetchEntry::EndOfTimedOutRange { .. }
+            | DecodedFetchEntry::EndOfGroup { .. }
+            | DecodedFetchEntry::EndOfTrack { .. } => {}
         }
         entries.push(entry);
     }

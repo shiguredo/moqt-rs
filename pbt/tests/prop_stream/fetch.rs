@@ -328,3 +328,77 @@ fn prior_reference_object_rejected_without_prior_actual_object() -> noprop::Test
     })?;
     Ok(())
 }
+
+/// End of Group / End of Track (0x80 / 0x81) のラウンドトリップ
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+/// "When Serialization Flags is 0x80 (End of Group) or 0x81 (End of Track), no other fields
+/// are present." marker は prior Object を参照するフィールドを持たないため、prior 文脈に
+/// よらず同じ 1 個の vi64 になり、消費バイト数も 2 バイト (0x80 / 0x81 の vi64) で一定である。
+#[test]
+fn fetch_stream_marker_roundtrip() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let entry = if noprop::sample_bool(ctx) {
+            FetchStreamEntry::EndOfGroup
+        } else {
+            FetchStreamEntry::EndOfTrack
+        };
+        for context in [
+            FetchPriorContext::First,
+            FetchPriorContext::NoPriorActualObject,
+            FetchPriorContext::HasPriorObject,
+        ] {
+            let mut buf = Vec::new();
+            entry
+                .encode(None, context, &mut buf)
+                .expect("marker は prior 文脈によらずエンコードできる");
+            assert_eq!(
+                buf.len(),
+                2,
+                "marker は 1 個の vi64 (2 バイト) だけを書き出すこと: {entry:?}"
+            );
+            let (decoded, consumed) = FetchStreamEntry::decode(&buf, context)
+                .expect("marker は prior 文脈によらずデコードできる");
+            assert_eq!(
+                consumed,
+                buf.len(),
+                "marker は後続 ID フィールドを読まないこと: {entry:?}"
+            );
+            assert_eq!(decoded, entry, "marker が往復すること: {context:?}");
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// marker に properties_data を渡すと prior 文脈によらず拒否されること
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+/// "no other fields are present"。
+#[test]
+fn fetch_stream_marker_rejects_properties() -> noprop::TestResult {
+    let mut runner = test_runner()?;
+    runner.run(64, |ctx| {
+        let entry = if noprop::sample_bool(ctx) {
+            FetchStreamEntry::EndOfGroup
+        } else {
+            FetchStreamEntry::EndOfTrack
+        };
+        let props = length_prefixed_properties(&noprop::sample_bytes_vec(ctx, 0));
+        let mut buf = Vec::new();
+        let err = entry
+            .encode(Some(&props), FetchPriorContext::HasPriorObject, &mut buf)
+            .expect_err("marker に properties_data は渡せない");
+        assert!(
+            matches!(
+                err,
+                shiguredo_moqt::error::MessageError::ProtocolViolation(_)
+            ),
+            "ProtocolViolation で拒否されること: {err:?}"
+        );
+        assert!(buf.is_empty(), "拒否した場合は書き込みを行わないこと");
+        Ok(())
+    })?;
+    Ok(())
+}

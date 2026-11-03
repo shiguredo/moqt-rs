@@ -238,7 +238,9 @@ pub(crate) fn drive_fetch_with_group_order(
                         DecodedFetchEntry::Object(object) => object.payload_length,
                         DecodedFetchEntry::EndOfNonExistentRange { .. }
                         | DecodedFetchEntry::EndOfUnknownRange { .. }
-                        | DecodedFetchEntry::EndOfTimedOutRange { .. } => 0,
+                        | DecodedFetchEntry::EndOfTimedOutRange { .. }
+                        | DecodedFetchEntry::EndOfGroup { .. }
+                        | DecodedFetchEntry::EndOfTrack { .. } => 0,
                     };
                     if payload_length > 0 {
                         match decoder.try_read_payload() {
@@ -278,6 +280,132 @@ fn fetch_decoder_split_invariance() -> noprop::TestResult {
     assert!(
         decoded_seen.get(),
         "オブジェクトを 1 つ以上デコードするケースが観測されなかった\n{runner}"
+    );
+    Ok(())
+}
+
+/// marker (End of Group / End of Track) を含む Fetch のワイヤバイト列を valid-by-construction で
+/// 生成する
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): marker は直前の Object が
+/// Group / Track の最終 Object であることを示し、ID フィールドを持たない。marker の後に
+/// Object を置く場合は新しい Group に移り、Group ID Delta と絶対 Object ID を明示する
+/// (§11.4.1.1 (Flags))。marker の後に End of Track を置いた場合はそこで生成を終える。
+fn sample_fetch_stream_with_markers(ctx: &mut noprop::TestCaseContext) -> Vec<u8> {
+    let mut bytes = FetchHeader {
+        request_id: sample_varint(ctx),
+    }
+    .encode();
+    let object_count = noprop::sample_usize_in(ctx, 1..=4);
+    let mut group_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+    let mut object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+    let mut prior_group_id = group_id;
+    for index in 0..object_count {
+        // 最初の Object は Group ID / Object ID が絶対値、以降は直前 Group からのデルタになる
+        let group_id_field = if index == 0 {
+            group_id
+        } else {
+            group_id - prior_group_id - 1
+        };
+        let payload_length = noprop::sample_u64_in(ctx, 0..=16);
+        let object = FetchStreamObject {
+            group_id: Some(group_id_field),
+            subgroup_id: FetchSubgroupIdMode::Zero,
+            object_id: Some(object_id),
+            publisher_priority: Some(128),
+            has_properties: false,
+            is_datagram_origin: false,
+            payload_length,
+        };
+        let prior_context = if index == 0 {
+            FetchPriorContext::First
+        } else {
+            FetchPriorContext::HasPriorObject
+        };
+        FetchStreamEntry::Object(object)
+            .encode(None, prior_context, &mut bytes)
+            .expect("valid-by-construction な FetchStreamObject はエンコードできる");
+        bytes.extend_from_slice(&noprop::sample_bytes_vec(ctx, payload_length as usize));
+        prior_group_id = group_id;
+
+        if index + 1 >= object_count {
+            // 最後の Object の後にも marker を置ける
+            match noprop::sample_usize_in(ctx, 0..3) {
+                0 => FetchStreamEntry::EndOfGroup
+                    .encode(None, FetchPriorContext::HasPriorObject, &mut bytes)
+                    .expect("marker はエンコードできる"),
+                1 => {
+                    FetchStreamEntry::EndOfTrack
+                        .encode(None, FetchPriorContext::HasPriorObject, &mut bytes)
+                        .expect("marker はエンコードできる");
+                    return bytes;
+                }
+                _ => {}
+            }
+            break;
+        }
+
+        match noprop::sample_usize_in(ctx, 0..3) {
+            0 => FetchStreamEntry::EndOfGroup
+                .encode(None, FetchPriorContext::HasPriorObject, &mut bytes)
+                .expect("marker はエンコードできる"),
+            1 => {
+                FetchStreamEntry::EndOfTrack
+                    .encode(None, FetchPriorContext::HasPriorObject, &mut bytes)
+                    .expect("marker はエンコードできる");
+                return bytes;
+            }
+            _ => {}
+        }
+
+        // 次の Object は新しい Group に置く (marker の有無によらず Group ID Delta が present)
+        group_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
+        object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+    }
+    bytes
+}
+
+/// marker を含む Fetch バイト列でも、任意の 1 分割で push した結果が一括 push と一致する
+///
+/// marker は後続 ID フィールドを持たないため、vi64 の途中で分割されるとデータ不足になり、
+/// 2 バイト目が届いた時点で確定する。分割位置によって entry の解釈が変わらないことを固定する。
+#[test]
+fn fetch_decoder_split_invariance_with_markers() -> noprop::TestResult {
+    let decoded_seen = std::cell::Cell::new(false);
+    let group_end_seen = std::cell::Cell::new(false);
+    let track_end_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let bytes = sample_fetch_stream_with_markers(ctx);
+        let at = noprop::sample_usize_in(ctx, 0..=bytes.len());
+        let whole = drive_fetch(&[&bytes]);
+        let split = drive_fetch(&[&bytes[..at], &bytes[at..]]);
+        assert_eq!(whole, split, "分割してもデコード結果が一致すること");
+        if let Ok(entries) = &whole {
+            for (entry, _) in entries {
+                match entry {
+                    DecodedFetchEntry::EndOfGroup { .. } => group_end_seen.set(true),
+                    DecodedFetchEntry::EndOfTrack { .. } => track_end_seen.set(true),
+                    _ => {}
+                }
+            }
+            if !entries.is_empty() {
+                decoded_seen.set(true);
+            }
+        }
+        Ok(())
+    })?;
+    assert!(
+        decoded_seen.get(),
+        "エントリを 1 つ以上デコードするケースが観測されなかった\n{runner}"
+    );
+    assert!(
+        group_end_seen.get(),
+        "End of Group を含むケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        track_end_seen.get(),
+        "End of Track を含むケースが生成されなかった\n{runner}"
     );
     Ok(())
 }

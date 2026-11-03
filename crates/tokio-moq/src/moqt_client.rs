@@ -279,11 +279,15 @@ pub struct SubscribeResult {
 
 /// FETCH 応答ストリームの writer (publisher 側)
 ///
-/// [`MoqtClient::open_fetch_response`] が返す。1 本の uni stream に Object と End of Range を
-/// 順に書き、[`FetchResponseWriter::finish`] で FIN する。
+/// [`MoqtClient::open_fetch_response`] が返す。1 本の uni stream に Object と End of Range、
+/// End of Group / End of Track の marker を順に書き、[`FetchResponseWriter::finish`] で FIN する。
 ///
 /// End of Range は「直前に書いた entry の Location から自分の Location までの区間」を表すため
 /// (draft-ietf-moq-transport-22 §11.4.1.2)、書く順序と Location は呼び出し側が決める。
+/// End of Group / End of Track は ID を持たず、直前に書いた Object が Group / Track の
+/// 最終 Object であることだけを示す (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object
+/// Fields))。どちらを書くかは、応答末尾の Object が Group / Track の終端と分かっている
+/// 場合に呼び出し側が決める。
 pub struct FetchResponseWriter {
     /// 応答を書く送信ストリーム
     stream: crate::transport::SendStream,
@@ -291,7 +295,7 @@ pub struct FetchResponseWriter {
     data_plane: DataPlaneHandle,
     /// 応答 stream の ID (Session への通知と終了に使う)
     stream_id: DataStreamId,
-    /// Object と End of Range のエンコーダ (直前の Location を保持する)
+    /// Object と End of Range、marker のエンコーダ (直前の Location を保持する)
     encoder: FetchStreamEncoder,
 }
 
@@ -361,6 +365,44 @@ impl FetchResponseWriter {
         self.encoder
             .encode_end_of_unknown_range(location.group_id, location.object_id, &mut buf)
             .map_err(|e| TransportError::Internal(format!("fetch end of range encode: {e}")))?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
+    /// End of Group を書く
+    ///
+    /// 直前までに書いた Object がその Group の最終 Object であることを示す
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。marker は ID を持たない
+    /// ため、書けるのは直前の Object または End of Range がある場合だけである。書いた後は
+    /// 同じ Group に Object を置けず、次の Object は新しい Group に置く必要がある。
+    ///
+    /// # Errors
+    ///
+    /// 直前の Object も End of Range も無い場合は [`TransportError`] になる。
+    pub async fn write_end_of_group(&mut self) -> Result<()> {
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_end_of_group(&mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch end of group encode: {e}")))?;
+        self.stream.send(Bytes::from(buf)).await?;
+        Ok(())
+    }
+
+    /// End of Track を書く
+    ///
+    /// 直前までに書いた Object がその Track の最終 Object であることを示す
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。End of Track は
+    /// End of Group も意味し、書いた後は Object も End of Range も書けなくなる。
+    /// 応答末尾の Object が Track の終端と分かっている場合に使う。
+    ///
+    /// # Errors
+    ///
+    /// 直前の Object も End of Range も無い場合は [`TransportError`] になる。
+    pub async fn write_end_of_track(&mut self) -> Result<()> {
+        let mut buf = Vec::new();
+        self.encoder
+            .encode_end_of_track(&mut buf)
+            .map_err(|e| TransportError::Internal(format!("fetch end of track encode: {e}")))?;
         self.stream.send(Bytes::from(buf)).await?;
         Ok(())
     }

@@ -497,3 +497,162 @@ fn object_id_delta_matches_draft_23_rule() -> noprop::TestResult {
     })?;
     Ok(())
 }
+
+/// End of Group / End of Track を混ぜた操作列のエンコード → デコード往復
+///
+/// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): marker は直前の Object が
+/// Group / Track の最終 Object であることを示し、prior Object ID を `2^64 - 1` にする。
+/// そのため marker の後に Object を置く場合は新しい Group に移り、Group ID Delta と絶対
+/// Object ID を持つ必要がある。エンコーダがその制約を満たすバイト列を書き、デコーダが
+/// marker の前後の Group と Object ID を復元することを検証する。
+///
+/// 分割受信でも marker の位置と前後の entry が変わらないこと、および marker の直後に
+/// 後続 ID フィールドが無いことを、低水準 codec の消費バイト数で独立に確認する。
+#[test]
+fn encoder_decoder_roundtrip_with_group_and_track_end() -> noprop::TestResult {
+    let group_end_seen = std::cell::Cell::new(false);
+    let track_end_seen = std::cell::Cell::new(false);
+    let mut runner = test_runner()?;
+    runner.run(256, |ctx| {
+        let request_id = sample_varint(ctx);
+        let group_order = if noprop::sample_bool(ctx) { 0x01 } else { 0x02 };
+        let mut encoder = FetchStreamEncoder::new_with_group_order(request_id, group_order)
+            .expect("0x01 / 0x02 は有効な Group Order");
+        let mut bytes = encoder.encode_header();
+        let mut expected_entries = Vec::new();
+        let mut expected_payloads = Vec::new();
+
+        // 降順は減算で underflow しないよう十分大きい初期値から始める
+        let mut group_id = if group_order == 0x02 {
+            noprop::sample_u64_in(ctx, 5_000..=1_000_000)
+        } else {
+            noprop::sample_u64_in(ctx, 0..=1_000_000)
+        };
+        let mut object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+        let first_group_object_count = noprop::sample_usize_in(ctx, 1..=3);
+        for index in 0..first_group_object_count {
+            if index > 0 {
+                object_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
+            }
+            let payload_length = noprop::sample_u64_in(ctx, 0..=16);
+            let payload = noprop::sample_bytes_vec(ctx, payload_length as usize);
+            encoder
+                .encode_object(
+                    &FetchObjectInput {
+                        group_id,
+                        subgroup_id: 0,
+                        object_id,
+                        publisher_priority: 128,
+                        has_properties: false,
+                        is_datagram_origin: false,
+                        payload_length,
+                    },
+                    None,
+                    &mut bytes,
+                )
+                .expect("狭義単調な Location はエンコードできる");
+            bytes.extend_from_slice(&payload);
+            expected_entries.push(DecodedFetchEntry::Object(DecodedFetchObject {
+                group_id,
+                subgroup_id: 0,
+                object_id,
+                publisher_priority: 128,
+                is_datagram_origin: false,
+                payload_length,
+                properties_bytes: None,
+            }));
+            expected_payloads.push(payload);
+        }
+
+        // Group の終端を宣言し、次の Group の Object を書く
+        encoder
+            .encode_end_of_group(&mut bytes)
+            .expect("直前の Object があるため End of Group を書ける");
+        group_end_seen.set(true);
+        expected_entries.push(DecodedFetchEntry::EndOfGroup { group_id });
+        expected_payloads.push(Vec::new());
+
+        let group_delta = 1 + noprop::sample_u64_in(ctx, 0..=1000);
+        group_id = if group_order == 0x02 {
+            group_id - group_delta
+        } else {
+            group_id + group_delta
+        };
+        object_id = noprop::sample_u64_in(ctx, 0..=1_000_000);
+        let second_group_object_count = noprop::sample_usize_in(ctx, 1..=2);
+        for index in 0..second_group_object_count {
+            if index > 0 {
+                object_id += 1 + noprop::sample_u64_in(ctx, 0..=1000);
+            }
+            let payload_length = noprop::sample_u64_in(ctx, 0..=16);
+            let payload = noprop::sample_bytes_vec(ctx, payload_length as usize);
+            encoder
+                .encode_object(
+                    &FetchObjectInput {
+                        group_id,
+                        subgroup_id: 0,
+                        object_id,
+                        publisher_priority: 128,
+                        has_properties: false,
+                        is_datagram_origin: false,
+                        payload_length,
+                    },
+                    None,
+                    &mut bytes,
+                )
+                .expect("End of Group の後の新しい Group の Object はエンコードできる");
+            bytes.extend_from_slice(&payload);
+            expected_entries.push(DecodedFetchEntry::Object(DecodedFetchObject {
+                group_id,
+                subgroup_id: 0,
+                object_id,
+                publisher_priority: 128,
+                is_datagram_origin: false,
+                payload_length,
+                properties_bytes: None,
+            }));
+            expected_payloads.push(payload);
+        }
+
+        // 応答末尾の Object が Track の終端と分かる場合は End of Track を書く
+        let write_track_end = noprop::sample_bool(ctx);
+        if write_track_end {
+            encoder
+                .encode_end_of_track(&mut bytes)
+                .expect("直前の Object があるため End of Track を書ける");
+            track_end_seen.set(true);
+            expected_entries.push(DecodedFetchEntry::EndOfTrack { group_id });
+            expected_payloads.push(Vec::new());
+        }
+
+        let decoded = drive_fetch_with_group_order(&[&bytes], group_order)
+            .expect("エンコーダ出力はデコードできる");
+        // marker を含むストリームも、任意の 1 分割で push した結果が一括 push と一致する
+        let at = noprop::sample_usize_in(ctx, 0..=bytes.len());
+        let split = drive_fetch_with_group_order(&[&bytes[..at], &bytes[at..]], group_order)
+            .expect("分割したエンコーダ出力もデコードできる");
+        assert_eq!(
+            split, decoded,
+            "End of Group / End of Track の分割受信でデコード結果が変わらないこと"
+        );
+        let decoded_entries: Vec<DecodedFetchEntry> =
+            decoded.iter().map(|(entry, _)| entry.clone()).collect();
+        let decoded_payloads: Vec<Vec<u8>> =
+            decoded.iter().map(|(_, payload)| payload.clone()).collect();
+        assert_eq!(
+            decoded_entries, expected_entries,
+            "marker の前後の Group と Object ID が往復すること"
+        );
+        assert_eq!(decoded_payloads, expected_payloads);
+        Ok(())
+    })?;
+    assert!(
+        group_end_seen.get(),
+        "End of Group を含むケースが生成されなかった\n{runner}"
+    );
+    assert!(
+        track_end_seen.get(),
+        "End of Track を含むケースが生成されなかった\n{runner}"
+    );
+    Ok(())
+}

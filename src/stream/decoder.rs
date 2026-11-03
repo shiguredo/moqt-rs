@@ -342,6 +342,8 @@ impl Default for SubgroupStreamDecoder {
 /// End of Range の Group ID / Object ID は、
 /// draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding) に従って直前の Object または
 /// End of Range の Location から解決した絶対 Location である。
+/// End of Group / End of Track は marker 自身が ID を運ばないため、直前の Object または
+/// End of Range の解決済み Group ID だけを提供する (§11.4.2.2 (Prior Object Fields))。
 /// ペイロードは含まない。呼び出し側が `payload_length` バイト分を消費する。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedFetchEntry {
@@ -367,6 +369,27 @@ pub enum DecodedFetchEntry {
         group_id: u64,
         /// 終端 Object ID (絶対値)
         object_id: u64,
+    },
+    /// End of Group (0x80)
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): 直前の Object が
+    /// その Group の最終 Object であることを示す。marker は ID フィールドを持たず、
+    /// デコーダは直前の Object または End of Range の Group ID をそのまま引き継ぐ。
+    /// prior Object ID は `2^64 - 1` になるが、これは実在する Object ではなく
+    /// 「これより大きい Object ID は存在しない」ことを表す sentinel であるため、
+    /// この variant は Object ID を持たない。
+    EndOfGroup {
+        /// 終端した Group の Group ID (直前の Object または End of Range の解決済み値)
+        group_id: u64,
+    },
+    /// End of Track (0x81)
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): 直前の Object が
+    /// Track の最終 Object であることを示す。End of Track は End of Group も意味する。
+    /// prior Object ID が `2^64 - 1` になる点は [`DecodedFetchEntry::EndOfGroup`] と同じ。
+    EndOfTrack {
+        /// 終端した Track の最後の Group ID (直前の Object または End of Range の解決済み値)
+        group_id: u64,
     },
 }
 
@@ -413,6 +436,14 @@ enum FetchDecoderState {
 /// Priority は End of Range を挟んでも直前の actual Object の値である。
 /// actual Object がまだ出現していない場合、Subgroup ID / Priority は `None` になり、
 /// それらを参照する Object は MALFORMED_OBJECT になる。
+///
+/// End of Group / End of Track は marker 自身が ID を運ばないため、`group_id` を保持したまま
+/// `object_id` だけを `2^64 - 1` にする (§11.4.2.2 (Prior Object Fields): "The prior Object ID
+/// becomes 2^64-1.")。`2^64 - 1` は実在する Object ではなく、同じ Group の次の Object ID が
+/// 表現できないことを表す sentinel であり、後続 Object がこの sentinel を参照すると
+/// DELTA_ENCODING_OVERFLOW (0x400) になる (draft-ietf-moq-transport-23 §12.2
+/// (Session Termination Codes): "When more than one code applies, an endpoint uses
+/// DELTA_ENCODING_OVERFLOW or FIELD_LENGTH_EXCEEDED in preference to the other codes.")。
 #[derive(Debug, Clone, Copy)]
 struct FetchPriorState {
     group_id: u64,
@@ -448,6 +479,8 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 /// End of Range の Group ID Delta / Object ID Delta も絶対 Location に解決する
 /// (draft-ietf-moq-transport-23 §11.4.2.1 (ID Decoding))。低水準 codec は wire の生値を
 /// 扱うのに対し、このモジュールは常に絶対 Location を扱う。
+/// End of Group / End of Track は ID フィールドを持たないため、直前の解決済み Group ID を
+/// 引き継ぎ、prior Object ID を `2^64 - 1` にする (§11.4.2.2 (Prior Object Fields))。
 ///
 /// ペイロードはデコーダの責務外。`try_decode_entry` が返す `payload_length` バイト分を
 /// 呼び出し側がバッファから消費した後、`consume_payload` を呼んで次のエントリに進む。
@@ -474,7 +507,7 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 ///             // ...
 ///             decoder.consume_payload(obj.payload_length);
 ///         }
-///         Some(_) => { /* EndOfRange エントリ */ }
+///         Some(_) => { /* EndOfRange / EndOfGroup / EndOfTrack エントリ */ }
 ///         None => {
 ///             decoder.push(&more_data);
 ///         }
@@ -490,6 +523,14 @@ pub struct FetchStreamDecoder {
     prior_context: FetchPriorContext,
     /// 前回のオブジェクト情報（デルタ解決用）
     prior_state: Option<FetchPriorState>,
+    /// End of Track を受信済みか
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) の End of Track は
+    /// Track の最終 Object を宣言する。同 §12.1 (Malformed Tracks) 条件 5 は
+    /// "An Object is received whose Group and Object ID are larger than the final Object in
+    /// the Track." を malformed とするため、宣言後の Object と End of Range を拒否する。
+    /// End of Track は End of Group も意味するため、marker の重複は受理する。
+    track_ended: bool,
     /// malformed track 条件の検証状態
     validation: FetchValidationState,
 }
@@ -513,6 +554,7 @@ impl FetchStreamDecoder {
             group_order,
             prior_context: FetchPriorContext::First,
             prior_state: None,
+            track_ended: false,
             validation: FetchValidationState::default(),
         }
     }
@@ -613,9 +655,17 @@ impl FetchStreamDecoder {
     ///   Object エントリの場合、呼び出し側は `payload_length` バイト分のペイロードを
     ///   バッファから読み出した後 `consume_payload` を呼ぶこと。
     ///   Object エントリの Object Properties は `properties_bytes` に保持される。
-    ///   EndOfRange エントリの場合、`consume_payload` は不要。
+    ///   EndOfRange / EndOfGroup / EndOfTrack エントリの場合、`consume_payload` は不要。
+    ///   EndOfGroup / EndOfTrack は marker 自身が ID フィールドを持たないため、
+    ///   直前の Object または End of Range の Group ID だけを提供する
+    ///   (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。
     /// - `Ok(None)` — データ不足、追加データが必要
     /// - `Err(e)` — デコードエラー
+    ///
+    /// End of Track の後の Object / End of Range は `MalformedTrack` を返す
+    /// (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 5)。
+    /// marker の前後に Object または End of Range が無い marker は `MalformedObject` を返す
+    /// (同 §11.4.2.2 の prior Object が存在しない)。
     pub fn try_decode_entry(&mut self) -> Result<Option<DecodedFetchEntry>, MessageError> {
         if !matches!(self.state, FetchDecoderState::AwaitingEntry) {
             return Err(MessageError::ProtocolViolation(
@@ -642,6 +692,22 @@ impl FetchStreamDecoder {
         entry: FetchStreamEntry,
         properties_bytes: Option<Vec<u8>>,
     ) -> Result<DecodedFetchEntry, MessageError> {
+        // draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 5:
+        // "An Object is received whose Group and Object ID are larger than the final Object in
+        // the Track." End of Track の後の Object と End of Range は、Track の最終 Object より
+        // 後ろの Location を指すため malformed track になる。marker の重複は受理する
+        // (§11.4.2.2 (Prior Object Fields): End of Track は End of Group も意味するため、
+        // どちらの marker も直前状態を変えずに読み直せる)。
+        if self.track_ended
+            && !matches!(
+                entry,
+                FetchStreamEntry::EndOfGroup | FetchStreamEntry::EndOfTrack
+            )
+        {
+            return Err(MessageError::MalformedTrack(
+                "malformed track: fetch entry received after end of track",
+            ));
+        }
         match entry {
             FetchStreamEntry::Object(obj) => {
                 let resolved = self.resolve_object(&obj, properties_bytes)?;
@@ -699,6 +765,46 @@ impl FetchStreamDecoder {
                     object_id,
                 })
             }
+            FetchStreamEntry::EndOfGroup => self.resolve_end_marker(false),
+            FetchStreamEntry::EndOfTrack => self.resolve_end_marker(true),
+        }
+    }
+
+    /// End of Group / End of Track の prior 状態を更新する
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+    /// "The prior Object is the last Object in its Group, or in the Track, respectively.
+    /// End of Track also indicates End of Group. The prior Object ID becomes 2^64-1."
+    ///
+    /// marker は ID フィールドを持たないため、Group ID は直前の Object または End of Range の
+    /// 解決済み値をそのまま引き継ぎ、Object ID だけを `2^64 - 1` にする。Subgroup ID と
+    /// Priority は直前の actual Object の値を保持する (End of Range と同じ扱い)。
+    ///
+    /// 直前の Object も End of Range も無い場合、`The prior Object is the last Object` が
+    /// 指す Object が存在しないため MALFORMED_OBJECT (0x201) にする
+    /// (draft-ietf-moq-transport-23 §12.2: "a flag references a prior Object that does not
+    /// exist")。
+    fn resolve_end_marker(&mut self, track: bool) -> Result<DecodedFetchEntry, MessageError> {
+        let Some(prior) = self.prior_state else {
+            return Err(MessageError::MalformedObject(
+                "end of group or end of track must follow an object or an end of range indicator",
+            ));
+        };
+        self.prior_state = Some(FetchPriorState {
+            group_id: prior.group_id,
+            object_id: u64::MAX,
+            subgroup_id: prior.subgroup_id,
+            publisher_priority: prior.publisher_priority,
+        });
+        if track {
+            self.track_ended = true;
+            Ok(DecodedFetchEntry::EndOfTrack {
+                group_id: prior.group_id,
+            })
+        } else {
+            Ok(DecodedFetchEntry::EndOfGroup {
+                group_id: prior.group_id,
+            })
         }
     }
 

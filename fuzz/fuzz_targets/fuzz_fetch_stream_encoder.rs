@@ -16,6 +16,13 @@ struct ObjectInput {
     is_datagram_origin: bool,
     payload_length: u64,
     properties: Vec<u8>,
+    /// Object の後に End of Group を書くか
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) の marker は直前の
+    /// Object が Group の最終 Object であることを示す。
+    end_of_group: bool,
+    /// Object の後に End of Track を書くか
+    end_of_track: bool,
 }
 
 /// エンコーダへ与える入力列
@@ -43,5 +50,14 @@ fuzz_target!(|input: Input| {
             payload_length: object.payload_length,
         };
         let _ = encoder.encode_object(&object_input, properties, &mut buf);
+        // End of Track は End of Group も意味するため、両方を書く入力もそのまま通す。
+        // marker を書いた後の Object は前後関係の検証で拒否されることがあるが、
+        // エンコーダが panic しないことだけを確認する。
+        if object.end_of_group {
+            let _ = encoder.encode_end_of_group(&mut buf);
+        }
+        if object.end_of_track {
+            let _ = encoder.encode_end_of_track(&mut buf);
+        }
     }
 });

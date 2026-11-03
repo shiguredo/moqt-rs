@@ -5,7 +5,9 @@
 //!
 //! End of Range (draft-ietf-moq-transport-23 §11.4.2 (End of Range)) も絶対 Location を
 //! 受け取り、内部で Group ID Delta / Object ID Delta に変換する (§11.4.2.1 (ID Decoding))。
-//! 低水準 codec が wire の生値を扱うのに対し、このモジュールは常に絶対 Location を扱う。
+//! End of Group / End of Track は ID フィールドを持たない marker であり
+//! (§11.4.2.2 (Prior Object Fields))、直前に書いた Object を Group / Track の最終 Object に
+//! する。低水準 codec が wire の生値を扱うのに対し、このモジュールは常に絶対 Location を扱う。
 //!
 //! このモジュールは I/O を持たず、バイト列生成とプロトコル状態管理のみを提供する。
 //! ペイロードの書き込みは呼び出し側が行う。
@@ -60,6 +62,11 @@ struct PriorActualObject {
 /// デルタ圧縮の基準になる。`actual_object` は直前の actual Object のフィールドであり、
 /// End of Range では更新しない。End of Range だけが先頭に現れた場合 `None` のままになり、
 /// その状態で prior Subgroup ID / Priority を参照する Object は低水準 codec が拒否する。
+///
+/// End of Group / End of Track は `group_id` を保持したまま `object_id` を `2^64 - 1` にする
+/// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。`actual_object` は
+/// 直前の actual Object のまま残す。`2^64 - 1` は実在しない sentinel であり、
+/// 同じ Group に後続 Object を置けなくするために使う。
 #[derive(Debug, Clone, Copy)]
 struct PriorEncodeState {
     group_id: u64,
@@ -96,6 +103,14 @@ pub struct FetchStreamEncoder {
     group_order: u8,
     prior_context: FetchPriorContext,
     prior_state: Option<PriorEncodeState>,
+    /// End of Track を書いたか
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) の End of Track は
+    /// Track の最終 Object を宣言する。それ以降に Object や End of Range を書くと
+    /// §12.1 (Malformed Tracks) 条件 5 の malformed track を自分で作ることになるため、
+    /// エンコーダは書き出し前に拒否する。End of Track は End of Group も意味するので、
+    /// marker の重複は受理する。
+    track_ended: bool,
     /// Subgroup ごとの最後の Publisher Priority
     ///
     /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) 条件 1:
@@ -137,6 +152,7 @@ impl FetchStreamEncoder {
             group_order,
             prior_context: FetchPriorContext::First,
             prior_state: None,
+            track_ended: false,
             subgroup_priorities: HashMap::new(),
         }
     }
@@ -180,6 +196,14 @@ impl FetchStreamEncoder {
         properties_data: Option<&[u8]>,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
+        // draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): End of Track は
+        // Track の最終 Object を宣言するため、その後に Object を書くと §12.1
+        // (Malformed Tracks) 条件 5 の malformed track を自分で作ることになる。
+        if self.track_ended {
+            return Err(MessageError::ProtocolViolation(
+                "object must not follow end of track",
+            ));
+        }
         // draft-ietf-moq-transport-22 §11.4.1.1 (Flags): Datagram 起源 (0x40) の Object は
         // Subgroup ID を運ばず、デコーダも下位 2 bit を無視して 0 に解決する。
         // エンコード側も入力値ではなく 0 を正として扱い、prior 状態にも 0 を保存する。
@@ -204,6 +228,14 @@ impl FetchStreamEncoder {
                 )
             }
             Some(prior) => {
+                // draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): End of Group の
+                // 後は prior Object ID が 2^64-1 になり、同じ Group の Object ID はそれを
+                // 超えられない。デルタ計算の underflow ではなく明示的に拒否する。
+                if input.group_id == prior.group_id && prior.object_id == u64::MAX {
+                    return Err(MessageError::ProtocolViolation(
+                        "object must not follow the final object of the group in the same group",
+                    ));
+                }
                 if input.group_id == prior.group_id && input.object_id <= prior.object_id {
                     return Err(MessageError::ProtocolViolation(
                         "FETCH response objects within the same group must be strictly increasing by object ID",
@@ -448,6 +480,73 @@ impl FetchStreamEncoder {
         )
     }
 
+    /// End of Group をエンコードする (draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    ///
+    /// 直前に書いた Object がその Group の最終 Object であることを示す。marker は ID
+    /// フィールドを持たず (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))、
+    /// 直前の Object または End of Range の Group ID をそのまま引き継ぐ。
+    /// 書き出し後は prior Object ID が `2^64 - 1` になるため、次に書く Object は新しい Group に
+    /// 置き、Group ID Delta と Object ID Delta の両方を持たせる必要がある。
+    ///
+    /// # Errors
+    ///
+    /// - 直前の Object も End of Range も無い: `ProtocolViolation`
+    ///   (Group の最終 Object が存在しないため)
+    /// - End of Track を書いた後でも marker の重複は受理する
+    ///   (End of Track は End of Group も意味する)
+    pub fn encode_end_of_group(&mut self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        self.encode_end_marker(FetchStreamEntry::EndOfGroup, buf)
+    }
+
+    /// End of Track をエンコードする (draft-ietf-moq-transport-23 §11.4.1 Table 8)
+    ///
+    /// 直前に書いた Object が Track の最終 Object であることを示す。End of Track は
+    /// End of Group も意味し、prior Object ID は `2^64 - 1` になる
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields))。
+    /// 書き出し後は Object も End of Range も書けなくなる。
+    ///
+    /// # Errors
+    ///
+    /// - 直前の Object も End of Range も無い: `ProtocolViolation`
+    /// - End of Track を書いた後に呼んでも成功する (重複した marker は直前状態を変えない)
+    pub fn encode_end_of_track(&mut self, buf: &mut Vec<u8>) -> Result<(), MessageError> {
+        self.encode_end_marker(FetchStreamEntry::EndOfTrack, buf)
+    }
+
+    /// End of Group / End of Track の marker を書く
+    ///
+    /// marker は ID フィールドを持たないため、直前の解決済み状態をそのまま使う。
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+    /// "The prior Object is the last Object in its Group, or in the Track, respectively.
+    /// End of Track also indicates End of Group. The prior Object ID becomes 2^64-1."
+    ///
+    /// # Errors
+    ///
+    /// 直前の Object も End of Range も無い場合に `ProtocolViolation` を返す。
+    fn encode_end_marker(
+        &mut self,
+        entry: FetchStreamEntry,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), MessageError> {
+        let Some(prior) = self.prior_state else {
+            return Err(MessageError::ProtocolViolation(
+                "end of group or end of track must follow an object or an end of range indicator",
+            ));
+        };
+        entry.encode(None, self.prior_context, buf)?;
+
+        self.prior_state = Some(PriorEncodeState {
+            group_id: prior.group_id,
+            object_id: u64::MAX,
+            actual_object: prior.actual_object,
+        });
+        if matches!(entry, FetchStreamEntry::EndOfTrack) {
+            self.track_ended = true;
+        }
+
+        Ok(())
+    }
+
     /// End of Range の絶対 Location をエンコードする
     ///
     /// `build_entry` は生の Group ID Delta / Object ID Delta を受け取って variant を組み立てる。
@@ -457,6 +556,9 @@ impl FetchStreamEncoder {
     /// # Errors
     ///
     /// 直前の Location との差分が表現できない場合に `ProtocolViolation` を返す。
+    /// End of Track の後の End of Range も、Track の最終 Object より後ろの Location を
+    /// 指すため (draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) 条件 5)、
+    /// 書き出し前に `ProtocolViolation` を返す。
     fn encode_end_of_range(
         &mut self,
         group_id: u64,
@@ -464,6 +566,11 @@ impl FetchStreamEncoder {
         build_entry: fn(u64, u64) -> FetchStreamEntry,
         buf: &mut Vec<u8>,
     ) -> Result<(), MessageError> {
+        if self.track_ended {
+            return Err(MessageError::ProtocolViolation(
+                "end of range must not follow end of track",
+            ));
+        }
         let (group_id_delta, object_id_delta) = self.end_of_range_deltas(group_id, object_id)?;
         let entry = build_entry(group_id_delta, object_id_delta);
         entry.encode(None, self.prior_context, buf)?;

@@ -2414,6 +2414,175 @@ mod tests {
         .await;
     }
 
+    /// peer から届いた FETCH に、End of Group / End of Track を書いた応答を返す
+    ///
+    /// publisher 側の writer が marker を送出できること
+    /// (draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields)) と、peer 側の
+    /// [`FetchStreamDecoder`] が marker の前後の Group を解決することを、実際の uni stream で
+    /// 固定する。marker が後続 ID フィールドを書かないため、次の entry が marker の直後から
+    /// 読めることも確認する。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_response_writer_writes_end_of_group_and_track() {
+        use shiguredo_moqt::message::Fetch;
+        use shiguredo_moqt::message::common::Location;
+        use shiguredo_moqt::message_parameter::MessageParameters;
+        use shiguredo_moqt::stream::decoder::{DecodedFetchEntry, FetchStreamDecoder};
+        use shiguredo_moqt::stream::encoder::FetchObjectInput;
+
+        run_with_timeout(async {
+            let (mut peer, mut client) = connect_pair().await;
+
+            // peer (relay) が publisher へ FETCH を送る
+            let request_id = peer.next_request_id().expect("Request ID を採番できること");
+            let namespace =
+                TrackNamespace::new(vec![b"live".to_vec()]).expect("名前空間を作れること");
+            peer.send_request_start(ControlMessage::Fetch(Fetch {
+                request_id,
+                track_namespace: namespace,
+                track_name: b"video".to_vec(),
+                parameters: MessageParameters::new(),
+            }))
+            .await
+            .expect("FETCH を送れること");
+
+            // client が request として受理する
+            match client.next_event().await.expect("イベントを取得できること") {
+                Some(ClientEvent::Request(request)) => assert!(
+                    matches!(request.message, ControlMessage::Fetch(_)),
+                    "FETCH として受理されること"
+                ),
+                other => panic!("FETCH がアプリへ届くこと: {other:?}"),
+            }
+
+            // FETCH_OK の End Location は marker が示す最終 Object に合わせる
+            client
+                .send_fetch_ok(
+                    request_id,
+                    0,
+                    Location {
+                        group_id: 2,
+                        object_id: 0,
+                    },
+                    MessageParameters::new(),
+                    TrackProperties::new(),
+                )
+                .await
+                .expect("FETCH_OK を返せること");
+            let mut writer = client
+                .open_fetch_response(request_id)
+                .await
+                .expect("FETCH 応答 stream を開けること");
+            let properties: Vec<u8> = vec![0x00];
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 1,
+                        subgroup_id: 0,
+                        object_id: 0,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    b"ab",
+                    Some(&properties),
+                )
+                .await
+                .expect("1 件目の Object を書けること");
+            // 1 件目の Object が Group 1 の最終 Object であることを示す
+            writer
+                .write_end_of_group()
+                .await
+                .expect("End of Group を書けること");
+            writer
+                .write_object(
+                    &FetchObjectInput {
+                        group_id: 2,
+                        subgroup_id: 0,
+                        object_id: 0,
+                        publisher_priority: 128,
+                        has_properties: true,
+                        is_datagram_origin: false,
+                        payload_length: 2,
+                    },
+                    b"cd",
+                    Some(&properties),
+                )
+                .await
+                .expect("2 件目の Object を書けること");
+            // 2 件目の Object が Track の最終 Object であることを示す
+            writer
+                .write_end_of_track()
+                .await
+                .expect("End of Track を書けること");
+            writer.finish().await.expect("応答を FIN で閉じられること");
+
+            // peer が応答 stream を読み、FETCH_HEADER と entry を decode する
+            let bytes = peer
+                .recv_uni_data_stream()
+                .await
+                .expect("FETCH 応答 stream を読めること");
+            let mut decoder = FetchStreamDecoder::new();
+            decoder.push(&bytes);
+            let header = decoder
+                .try_decode_header()
+                .expect("FETCH_HEADER を decode できること")
+                .expect("FETCH_HEADER があること");
+            assert_eq!(header.request_id, request_id, "FETCH_HEADER の Request ID");
+
+            let mut decoded = Vec::new();
+            while let Some(entry) = decoder
+                .try_decode_entry()
+                .expect("entry を decode できること")
+            {
+                let payload = match &entry {
+                    DecodedFetchEntry::Object(object) if object.payload_length > 0 => {
+                        decoder.try_read_payload().expect("payload を読めること")
+                    }
+                    _ => Vec::new(),
+                };
+                decoded.push((entry, payload));
+            }
+            assert_eq!(
+                decoded.len(),
+                4,
+                "Object / End of Group / Object / End of Track の 4 件"
+            );
+            match (&decoded[0].0, &decoded[0].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 1);
+                    assert_eq!(object.object_id, 0);
+                    assert_eq!(payload.as_slice(), b"ab", "1 件目の payload");
+                }
+                other => panic!("1 件目が Object であること: {other:?}"),
+            }
+            match &decoded[1].0 {
+                DecodedFetchEntry::EndOfGroup { group_id } => {
+                    assert_eq!(*group_id, 1, "Group 1 の終端であること");
+                }
+                other => panic!("2 件目が End of Group であること: {other:?}"),
+            }
+            match (&decoded[2].0, &decoded[2].1) {
+                (DecodedFetchEntry::Object(object), payload) => {
+                    assert_eq!(object.group_id, 2, "marker の次の Group が復元されること");
+                    assert_eq!(object.object_id, 0);
+                    assert_eq!(payload.as_slice(), b"cd", "2 件目の payload");
+                }
+                other => panic!("3 件目が Object であること: {other:?}"),
+            }
+            match &decoded[3].0 {
+                DecodedFetchEntry::EndOfTrack { group_id } => {
+                    assert_eq!(*group_id, 2, "Group 2 で Track が終端されること");
+                }
+                other => panic!("4 件目が End of Track であること: {other:?}"),
+            }
+            decoder
+                .finish()
+                .expect("entry 境界で終端した応答は finish で受容されること");
+        })
+        .await;
+    }
+
     /// client が FETCH を発行し、FETCH_OK と応答 stream の Object / End of Range を受け取る
     ///
     /// subscriber 側の取得経路を固定する。`MoqtClient::fetch` → `FetchOkReceived` の配送 →

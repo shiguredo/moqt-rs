@@ -10,6 +10,10 @@
 //! - Object Payload Length (vi64)
 //! - [Object Payload (..)]
 //!
+//! End of Group (0x80) / End of Track (0x81) は
+//! draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields) に従い、他のフィールドを
+//! 持たない 1 個の vi64 だけで直前の Object が Group / Track の最終 Object であることを示す。
+//!
 //! End of Range 指示 (0x8C / 0x10C / 0x20C) は
 //! draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従い Group ID Delta と
 //! Object ID Delta を運ぶ。FETCH_HEADER 直後の最初の entry だけが絶対 ID で、
@@ -64,6 +68,13 @@ pub(crate) const FETCH_END_OF_NON_EXISTENT_RANGE: u64 = 0x8C;
 pub(crate) const FETCH_END_OF_UNKNOWN_RANGE: u64 = 0x10C;
 /// Serialization Flags の特殊値: End of Timed-Out Range (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
 pub(crate) const FETCH_END_OF_TIMED_OUT_RANGE: u64 = 0x20C;
+/// Serialization Flags の特殊値: End of Group (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
+///
+/// 0x80 は 128 以上であり、通常のフラグ (128 未満) ではなく特殊値として扱う
+/// (§11.4.1: "When 128 or greater, the value signals an indicator")。
+pub(crate) const FETCH_END_OF_GROUP: u64 = 0x80;
+/// Serialization Flags の特殊値: End of Track (draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8)
+pub(crate) const FETCH_END_OF_TRACK: u64 = 0x81;
 
 /// Fetch ストリームの prior 参照文脈 (draft-ietf-moq-transport-23 §11.4.1.1 (Flags) / §11.4.2.1 (ID Decoding))
 ///
@@ -101,9 +112,14 @@ pub enum FetchSubgroupIdMode {
 
 /// Fetch ストリーム内の Object または範囲指示
 ///
-/// `Object` 以外の variant は End of Range 指示であり、
-/// draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従って Group ID Delta と
-/// Object ID Delta を運ぶ。Subgroup ID / Priority / Properties は持たない。
+/// `Object` 以外の variant は、直前の Object が Group / Track の最終 Object であることを
+/// 示す marker (`EndOfGroup` / `EndOfTrack`) と、Object が存在しない / 不明 / 期限切れで
+/// ある範囲を示す End of Range 指示 (`EndOfNonExistentRange` など) である。
+///
+/// End of Range は draft-ietf-moq-transport-23 §11.4.2 (End of Range) に従って
+/// Group ID Delta と Object ID Delta を運ぶ。Subgroup ID / Priority / Properties は持たない。
+/// marker は同 §11.4.2.2 (Prior Object Fields) に従って他のフィールドを持たず、
+/// 後続 ID フィールドが存在しない。
 ///
 /// End of Range の 2 フィールドは wire に現れた生値であり、絶対 Location ではない。
 /// [`FetchPriorContext::First`] (FETCH_HEADER 直後の最初の entry) では両フィールドが
@@ -156,6 +172,20 @@ pub enum FetchStreamEntry {
         /// [`FetchPriorContext::First`] では絶対 Object ID になる。
         object_id_delta: u64,
     },
+    /// End of Group (0x80)
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): "no other fields are
+    /// present. The prior Object is the last Object in its Group". marker 自身は
+    /// Group ID も Object ID も運ばないため、後続 ID フィールドを持たない。
+    /// 直前の Object の Object ID が Group の最終 Object ID になり、それより後ろの
+    /// Object は同じ Group に存在しない。
+    EndOfGroup,
+    /// End of Track (0x81)
+    ///
+    /// draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields): "The prior Object is the
+    /// last Object in ... the Track ... End of Track also indicates End of Group.
+    /// The prior Object ID becomes 2^64-1." marker 自身は後続 ID フィールドを持たない。
+    EndOfTrack,
 }
 
 /// Fetch ストリーム内のオブジェクトヘッダ (draft-ietf-moq-transport-22 §11.4.1 (Fetch Header))
@@ -204,7 +234,9 @@ impl FetchStreamEntry {
     /// 空スライス (`Some(&[])`) は Properties Length varint を含まない契約違反入力である。
     /// オブジェクト以外の variant (`EndOfNonExistentRange` など) には `None` を渡す
     /// (draft-ietf-moq-transport-23 §11.4.2 (End of Range):
-    /// "Subgroup ID, Priority and Properties are not present")。
+    /// "Subgroup ID, Priority and Properties are not present"。marker も
+    /// §11.4.2.2 (Prior Object Fields) の "no other fields are present" により
+    /// Properties を持たない)。
     ///
     /// # Errors
     ///
@@ -236,7 +268,7 @@ impl FetchStreamEntry {
                 group_id_delta,
                 object_id_delta,
             } => {
-                reject_end_of_range_properties(properties_data)?;
+                reject_marker_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_NON_EXISTENT_RANGE, buf);
                 varint::encode(*group_id_delta, buf);
                 varint::encode(*object_id_delta, buf);
@@ -246,7 +278,7 @@ impl FetchStreamEntry {
                 group_id_delta,
                 object_id_delta,
             } => {
-                reject_end_of_range_properties(properties_data)?;
+                reject_marker_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_UNKNOWN_RANGE, buf);
                 varint::encode(*group_id_delta, buf);
                 varint::encode(*object_id_delta, buf);
@@ -256,10 +288,22 @@ impl FetchStreamEntry {
                 group_id_delta,
                 object_id_delta,
             } => {
-                reject_end_of_range_properties(properties_data)?;
+                reject_marker_properties(properties_data)?;
                 varint::encode(FETCH_END_OF_TIMED_OUT_RANGE, buf);
                 varint::encode(*group_id_delta, buf);
                 varint::encode(*object_id_delta, buf);
+                Ok(())
+            }
+            // draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+            // "no other fields are present"。marker の vi64 だけを書き出す。
+            Self::EndOfGroup => {
+                reject_marker_properties(properties_data)?;
+                varint::encode(FETCH_END_OF_GROUP, buf);
+                Ok(())
+            }
+            Self::EndOfTrack => {
+                reject_marker_properties(properties_data)?;
+                varint::encode(FETCH_END_OF_TRACK, buf);
                 Ok(())
             }
             Self::Object(obj) => obj.encode(properties_data, prior_context, buf),
@@ -277,6 +321,11 @@ impl FetchStreamEntry {
     /// その意味が変わる。`First` では絶対 ID、それ以外では直前の Location からのデルタである
     /// (§11.4.2.1 (ID Decoding))。絶対 Location への解決と overflow 検証は
     /// 高水準の `FetchStreamDecoder` が行う。
+    ///
+    /// `EndOfGroup` / `EndOfTrack` は後続フィールドを持たないため、`prior_context` に
+    /// よらず同じ 1 個の vi64 を読むだけで確定する (§11.4.2.2 (Prior Object Fields))。
+    /// marker は prior Object を参照するフィールドを持たないので、`First` 文脈でも
+    /// 妥当性検証の対象にならない。
     pub fn decode(
         buf: &[u8],
         prior_context: FetchPriorContext,
@@ -343,8 +392,13 @@ impl FetchStreamEntry {
                     pos,
                 ))
             }
+            // draft-ietf-moq-transport-23 §11.4.2.2 (Prior Object Fields):
+            // "no other fields are present"。marker の vi64 だけを読んで終わる。
+            // 後続 ID フィールドが無いため、分割受信では vi64 が揃った時点で entry が確定する。
+            FETCH_END_OF_GROUP => Ok((Self::EndOfGroup, None, pos)),
+            FETCH_END_OF_TRACK => Ok((Self::EndOfTrack, None, pos)),
             _ => {
-                // Table 8 の 3 値以外の 128 以上は未知値として先に拒否する。
+                // Table 8 の特殊値以外の 128 以上は未知値として先に拒否する。
                 // prior 文脈違反より未知 flags 自体を優先して報告するのは
                 // 実装の診断選択である (いずれもセッション終了であり、
                 // draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) は
@@ -579,10 +633,10 @@ impl FetchStreamObject {
 
     /// Serialization Flags を既にデコード済みの状態からフィールドをデコードする
     ///
-    /// draft-ietf-moq-transport-22 §11.4.1 (Fetch Header) Table 8 / §11.4.1.1 (Flags):
+    /// draft-ietf-moq-transport-23 §11.4.1 (Fetch Header) Table 8 / §11.4.1.1 (Flags):
     /// 128 未満の全 bit は定義済み (Table 9 の 0x03 / Table 10 の
     /// 0x04 / 0x08 / 0x10 / 0x20 / 0x40) のため mask 検証は no-op であり、
-    /// Table 8 の 3 値 (0x8C / 0x10C / 0x20C) 以外の 128 以上は
+    /// Table 8 の特殊値 (0x80 / 0x81 / 0x8C / 0x10C / 0x20C) 以外の 128 以上は
     /// MALFORMED_OBJECT とする ("If an endpoint receives any other value greater than 127,
     /// it MUST close the session with MALFORMED_OBJECT.")。
     /// 128 以上の検査は呼び出し側 (`decode_with_properties`) でも行う二重検査で
@@ -688,18 +742,19 @@ impl FetchStreamObject {
     }
 }
 
-/// End of Range のエントリに `properties_data` を渡していないことを検証する
+/// Object 以外の entry に `properties_data` を渡していないことを検証する
 ///
-/// draft-ietf-moq-transport-23 §11.4.2 (End of Range):
-/// "Subgroup ID, Priority and Properties are not present"。
-/// End of Range のエントリに Properties フィールドは存在しないため、
-/// `Some(...)` は呼び出し側の渡し間違いとして `ProtocolViolation` にする。
+/// End of Range は draft-ietf-moq-transport-23 §11.4.2 (End of Range) の
+/// "Subgroup ID, Priority and Properties are not present" により Properties を持たず、
+/// End of Group / End of Track も §11.4.2.2 (Prior Object Fields) の
+/// "no other fields are present" により持たない。したがって `Some(...)` は
+/// 呼び出し側の渡し間違いとして `ProtocolViolation` にする。
 /// `None` はそのまま受理する。
-fn reject_end_of_range_properties(properties_data: Option<&[u8]>) -> Result<(), MessageError> {
+fn reject_marker_properties(properties_data: Option<&[u8]>) -> Result<(), MessageError> {
     match properties_data {
         None => Ok(()),
         Some(_) => Err(MessageError::ProtocolViolation(
-            "properties_data must be None for an end of range entry",
+            "properties_data must be None for an entry without fields",
         )),
     }
 }

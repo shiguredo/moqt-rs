@@ -61,6 +61,9 @@ mod fetch_end_of_range;
 #[path = "test_stream/fetch_object_id_delta.rs"]
 mod fetch_object_id_delta;
 
+#[path = "test_stream/fetch_group_track_end.rs"]
+mod fetch_group_track_end;
+
 #[path = "test_stream/object_datagram.rs"]
 mod object_datagram;
 
