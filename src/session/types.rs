@@ -268,6 +268,9 @@ pub enum SessionEvent {
     /// PAUSED (draft-ietf-moq-transport-23 §9.19.18 (PAUSED Parameter)) は REQUEST_OK には
     /// 出現しない。購読の paused 状態は REQUEST_UPDATE の送信時に楽観的に
     /// `Subscription::paused` へ反映され、応答のパラメータから読み取る値ではない。
+    ///
+    /// TRACK_STATUS_OK が未知の Mandatory Track Property を含む場合は成功として扱わず、
+    /// 本イベントの代わりに [`SessionEvent::TrackStatusUnsupported`] を発行する。
     RequestOkReceived {
         /// 対象 request の Request ID
         request_id: u64,
@@ -275,6 +278,31 @@ pub enum SessionEvent {
         request_kind: RequestKind,
         /// 受信したパラメータ
         parameters: MessageParameters,
+    },
+    /// peer からの TRACK_STATUS_OK が未知の Mandatory Track Property を含んでいた
+    ///
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties):
+    /// 0x4000-0x7FFF の Mandatory Track Property のうち意味を理解しない型を含む
+    /// TRACK_STATUS_OK を受信した endpoint は、その Track を処理してはならない (MUST)。
+    /// 本ライブラリはリレーではないため、同節がリレーに求める downstream の TRACK_STATUS への
+    /// TRACK_STATUS_ERROR 伝播は行わない。代わりに、応答を受領済みのローカル未対応結果として
+    /// [`TrackStatusResponse::Unsupported`] を記録し、本イベントでアプリへ通知する。
+    ///
+    /// `unsupported_property_types` は §3.7 の 0x4000-0x7FFF のうち、§16.8 (Properties) の
+    /// 既知型と §13 (Grease) の GREASE 値を除いた型の一覧である。§10.7 (Immutable
+    /// Properties) の "MUST search both" に従い IMMUTABLE_PROPERTIES の内側も探索し、
+    /// 昇順・重複なしで並べる。
+    ///
+    /// 本イベントを発行するとき [`SessionEvent::RequestOkReceived`] は発行しない。
+    /// request の応答タイマーは解除され、FIN と
+    /// [`Session::forget_track_status`](crate::session::core::Session::forget_track_status) は
+    /// TRACK_STATUS_OK を受信した単発要求と同じ条件に従う。
+    /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+    TrackStatusUnsupported {
+        /// 対象 request の Request ID
+        request_id: u64,
+        /// 未知の Mandatory Track Property の型 (昇順・重複なし)
+        unsupported_property_types: Vec<u64>,
     },
     /// peer から FETCH の初回成功応答 (REQUEST_OK、別名 FETCH_OK) を受信した
     ///
@@ -2002,8 +2030,8 @@ pub struct Fetch {
 /// TRACK_STATUS (draft §9.13 (TRACK_STATUS)) の応答
 ///
 /// `TrackStatusEntry.response` が `None` なら応答待ち、`Some(_)` なら応答済み。
-/// `Ok` / `Error` で成功失敗を区別する。`error_code` 等の詳細は `SessionEvent`
-/// 経由で application へ通知済みなので本構造体には含めない。
+/// `Ok` / `Unsupported` / `Error` で結果を区別する。`error_code` 等の詳細や未対応の
+/// Property Type は `SessionEvent` 経由で application へ通知済みなので本構造体には含めない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackStatusResponse {
     /// REQUEST_OK 受信 / 送信済み (LARGEST_OBJECT parameter があれば保持する)
@@ -2011,6 +2039,13 @@ pub enum TrackStatusResponse {
         /// 確定した Largest Location
         largest_location: Option<Location>,
     },
+    /// REQUEST_OK 受信済みだが、未知の Mandatory Track Property を含むため Track を利用しない
+    ///
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 未知の
+    /// Mandatory Track Property を含む TRACK_STATUS_OK を受信した endpoint は、その Track を
+    /// 処理してはならない (MUST)。応答自体は受領済みであるため [`Self::Error`] とは区別し、
+    /// 未対応の型は [`SessionEvent::TrackStatusUnsupported`] が運ぶ。
+    Unsupported,
     /// REQUEST_ERROR 受信 / 送信済み
     Error,
 }
@@ -2040,6 +2075,8 @@ pub struct TrackStatusEntry {
     /// Track Properties を空にする。`None` (省略時) は default 1 として扱い従来どおり含める。
     pub include_properties: Option<u8>,
     /// 応答情報。`None` = 応答待ち、`Some(Ok { .. })` = TRACK_STATUS_OK 受信 / 送信済み、
+    /// `Some(Unsupported)` = 未知の Mandatory Track Property を含む TRACK_STATUS_OK を受信済み
+    /// (`draft-ietf-moq-transport-23` §3.7 (Mandatory to Understand Track Properties))、
     /// `Some(Error)` = REQUEST_ERROR 受信 / 送信。
     pub response: Option<TrackStatusResponse>,
     /// 自側の送信方向が閉じたか

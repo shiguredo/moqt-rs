@@ -1258,6 +1258,11 @@ fn is_notable_event(event: &SessionEvent) -> bool {
             // (draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK))。応答範囲の
             // 終端はアプリが応答 stream を読む範囲の決定に使うため、アプリへ届ける
             | SessionEvent::FetchOkReceived { .. }
+            // TrackStatusUnsupported は自側が送った TRACK_STATUS への応答が未知の
+            // Mandatory Track Property を含むことを示す
+            // (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties))。
+            // 未対応の型はアプリが Track を利用しない判断に使うため、アプリへ届ける
+            | SessionEvent::TrackStatusUnsupported { .. }
     )
 }
 
@@ -3533,6 +3538,12 @@ impl MoqtClient {
                 // FetchOkReceived は自側が FETCH を発行したときの初回応答である
                 // (draft-ietf-moq-transport-23 §3.2 (Fetch) / §9.3 (REQUEST_OK))。
                 // I/O 層で行うことは無く、アプリが応答範囲の終端を使って応答 stream を読む
+                // TrackStatusUnsupported は自側が送った TRACK_STATUS への応答が未知の
+                // Mandatory Track Property を含むことを示す
+                // (draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track
+                // Properties))。I/O 層で行うことは無く、未対応の型はアプリが Track を
+                // 利用しない判断に使う
+                | SessionEvent::TrackStatusUnsupported { .. }
                 | SessionEvent::FetchOkReceived { .. }) => {
                     // アプリ (`next_event`) が観測する notable イベント。ここで捨てると
                     // `take_notable_event` が取り出せない

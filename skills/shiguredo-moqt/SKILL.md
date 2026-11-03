@@ -301,7 +301,8 @@ pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 | `CloseSession(SessionError)` | 接続を閉じる |
 | `RequestUpdateReceived { request_id, parameters }` | REQUEST_UPDATE 受信 |
 | `PublishStateNotifyReceived { request_id, parameters }` | PUBLISH_STATE_NOTIFY 受信 |
-| `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 |
+| `RequestOkReceived { request_id, request_kind, parameters }` | REQUEST_OK 受信 (TRACK_STATUS_OK が未知の Mandatory Track Property を含む場合は発行せず `TrackStatusUnsupported` を発行する) |
+| `TrackStatusUnsupported { request_id, unsupported_property_types }` | TRACK_STATUS_OK が未知の Mandatory Track Property を含む (draft-ietf-moq-transport-23 §3.7)。`unsupported_property_types` は昇順・重複なしの Property Type 一覧。entry は `TrackStatusResponse::Unsupported` になり、応答タイマーは解除される |
 | `FetchOkReceived { request_id, end_location, end_of_track }` | FETCH_OK 受信 |
 | `PublishDoneReceived { request_id, status_code, stream_count, reason }` | PUBLISH_DONE 受信 |
 | `RequestErrorReceived { request_id, error_code, retry_interval, reason, error_details }` | REQUEST_ERROR 受信 (`error_details.redirect()` で REDIRECT、`error_details.unsupported_properties()` で未対応 Property Type の一覧を取得) |
@@ -994,6 +995,7 @@ fn default_publisher_group_order(&self) -> Option<u8>
 fn object_delivery_timeout(&self) -> Option<u64>
 fn subgroup_delivery_timeout(&self) -> Option<u64>
 fn has_unknown_mandatory(&self) -> bool
+fn unknown_mandatory_types(&self) -> Vec<u64>
 ```
 
 | 定数 | 値 |

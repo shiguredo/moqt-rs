@@ -348,23 +348,35 @@ impl Session {
     /// draft-ietf-moq-transport-22 §9.13 (TRACK_STATUS): TRACK_STATUS_OK を送るのは publisher
     /// (responder) であり、自側は subscriber (requester) である。
     ///
+    /// draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 0x4000-0x7FFF
+    /// の Mandatory Track Property のうち意味を理解しない型を含む TRACK_STATUS_OK を受信した
+    /// endpoint は、その Track を処理してはならない (MUST)。本ライブラリはリレーではないため
+    /// 同節がリレーに求める downstream への TRACK_STATUS_ERROR 伝播は行わず、応答を成功として
+    /// 確定せずに `TrackStatusResponse::Unsupported` を記録し、
+    /// `SessionEvent::TrackStatusUnsupported` で未対応の型をアプリへ通知する。
+    ///
     /// draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1 (Malformed Tracks)
-    /// 条件 8: この実装が意味を理解する Property をスコープ外で受信したら Track を malformed
+    /// 条件 8 / 9: この実装が意味を理解する Property をスコープ外で受信したら Track を malformed
     /// とする (MUST)。TRACK_STATUS_OK の Track Properties は検証対象であり、違反時は応答を
     /// 成功として確定せず、同じ Track の subscription / FETCH を cancel してアプリへ
-    /// `MalformedTrack` を通知する (既存の malformed Track 経路)。
+    /// `MalformedTrack` を通知する (既存の malformed Track 経路)。draft が未知 Mandatory
+    /// Track Property と malformed Track の優先順位を定めていないため、§3.7 の判定を先に行う。
     ///
-    /// ローカル終端済み (`rejected_request_ids` に記録済み) の entry を吸収する経路は持たない。
-    /// 終端を記録するのは request stream 上の GOAWAY の deadline 満了だが、GOAWAY を送れるのは
-    /// request の受信側 (§9.2 (GOAWAY))、すなわち TRACK_STATUS では publisher であり、
-    /// requester (subscriber) 側の entry はローカル終端されない。publisher 側の entry に
-    /// REQUEST_OK が届くのは role 違反であり、下の role 検証が状態判定より先に拒否する。
+    /// ローカル終端済み (`rejected_request_ids` に記録済み) の entry は遅延応答を吸収し、
+    /// 状態遷移とイベント発行を行わない。この実装が TRACK_STATUS の requester entry を
+    /// ローカル終端するのは、同じ Track の Malformed Track 検出が sibling として cancel した
+    /// 場合だけである。自側が request stream の送信方向を reset しても peer の送信方向は開いた
+    /// ままなので (§6.4.2.2 (Graceful Request Stream Closure))、peer が reset を観測する前に
+    /// 送った TRACK_STATUS_OK は正当に届く。publisher 側の entry に REQUEST_OK が届くのは role
+    /// 違反であり、下の role 検証が状態判定より先に拒否する。
     pub(crate) fn handle_ok_for_track_status(
         &mut self,
         request_id: u64,
         parameters: &MessageParameters,
         track_properties: &TrackProperties,
     ) -> Result<(), SessionError> {
+        // 借用の都合で可変借用より前に判定する
+        let locally_terminated = self.is_locally_terminated_request(request_id);
         let entry = self
             .track_status_requests
             .get_mut(&request_id)
@@ -379,6 +391,12 @@ impl Session {
             self.fail(err.clone());
             return Err(err);
         }
+        // ローカル終端済みの entry は遅延して届いた正当な応答を吸収する。応答は既に
+        // `Error` として確定しており、未知 Mandatory Track Property の判定も行わない
+        // (利用しないと決めた Track の未対応型を改めて通知する意味がない)。
+        if locally_terminated {
+            return Ok(());
+        }
         if entry.response.is_some() {
             let err = SessionError::new(
                 SESSION_UNEXPECTED_MESSAGE,
@@ -386,6 +404,24 @@ impl Session {
             );
             self.fail(err.clone());
             return Err(err);
+        }
+        // draft-ietf-moq-transport-23 §3.7 (Mandatory to Understand Track Properties): 未知の
+        // Mandatory Track Property を含む TRACK_STATUS_OK は成功として確定しない。応答自体は
+        // 受領済みなので「応答待ち」に戻さず、未対応結果として記録してアプリへ型を通知する。
+        // 既に届いた応答に対して REQUEST_ERROR を返すことはしない (peer は応答を送り終えて
+        // おり、返すと応答の二重送信になる)。
+        let unsupported_types = track_properties.unknown_mandatory_types();
+        if !unsupported_types.is_empty() {
+            entry.response = Some(TrackStatusResponse::Unsupported);
+            self.events.push_back(SessionEvent::TrackStatusUnsupported {
+                request_id,
+                unsupported_property_types: unsupported_types,
+            });
+            // 応答を受領したため CONTROL_MESSAGE_TIMEOUT の deadline を解除する。FIN の交換と
+            // `forget_track_status` の受理条件は通常の TRACK_STATUS_OK と同じである
+            // (`is_track_status_discardable` が `response` の有無だけを見る)。
+            self.clear_control_message_deadline(request_id);
+            return Ok(());
         }
         // draft-ietf-moq-transport-23 §8.4 (Track and Object Properties) / §12.1
         // (Malformed Tracks) 条件 8 / 9: Track Properties のスコープと多重可否を検証する。
