@@ -1020,6 +1020,438 @@ fn descending_multi_group_gap_is_clamped_to_request() {
     );
 }
 
+/// FETCH_OK より先に届いた降順 multi-group のデータで応答後半を誤拒否しない
+///
+/// draft-ietf-moq-transport-23 §3.2 (Fetch) は FETCH_OK がオブジェクト配信より後に
+/// 届くことを許す。§3.2.2 (Gaps in a Fetch Stream) の降順 multi-group では先頭の期待
+/// Location が {End Location.Group, 0} であるため、応答終端が未確定のうちに要求 Start を
+/// 基準に先頭 gap を計算すると、後から届く経由 Group の正当な Object を不存在として
+/// 記録してしまう。
+#[test]
+fn descending_data_before_fetch_ok_keeps_later_objects() {
+    let start = Location {
+        group_id: 2,
+        object_id: 0,
+    };
+    let end = Location {
+        group_id: 5,
+        object_id: 2,
+    };
+    let mut params = fetch_range_params(start, end);
+    params.push(MessageParameter {
+        param_type: shiguredo_moqt::message_parameter::PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(2),
+    });
+    let (mut client, mut server) = establish_pair();
+    let alias = 720;
+    let sub_rid = establish_subscription(
+        &mut client,
+        &mut server,
+        MessageParameters::new(),
+        alias,
+        end,
+    );
+    // FETCH_OK を送らないまま FETCH を登録する
+    let fetch_rid = client
+        .send_fetch(track_namespace(), track_name(), params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch_stream = DataStreamId(240);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(5, 1))
+        .expect("応答順の先頭 Object は受理されること");
+
+    // 応答の終端を後から知らせる。ここで先頭 gap が要求 Start 基準で確定すると、
+    // 経由 Group 全体が不存在として記録される
+    server
+        .send_fetch_ok(
+            fetch_rid,
+            fetch_ok_params(Some(end)),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(fetch_rid, ok_msg)
+        .expect("FETCH_OK を受理すること");
+
+    // 応答後半の経由 Group の Object は、要求 Start ではなく {End.Group, 0} を基準に
+    // 判定されなければならない
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(4, 3))
+        .expect("FETCH_OK 後の応答後半の正当な Object を誤拒否しないこと");
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(3, 0))
+        .expect("経由 Group の正当な Object を誤拒否しないこと");
+    finish_fetch_stream(&mut client, fetch_stream);
+
+    // 先頭 gap は {End.Group, 0} から最初の Object までになる
+    let subgroup_stream = DataStreamId(241);
+    open_subgroup_stream(&mut client, alias, 5, 0, subgroup_stream);
+    let err = client
+        .recv_subgroup_object(
+            subgroup_stream,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("先頭 gap 内の Object は Malformed Track になる");
+    assert_eq!(
+        err.reason,
+        "malformed track: object received in a range recorded as non-existent"
+    );
+    assert_eq!(
+        client
+            .subscription(sub_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// FETCH_OK より先に届いた昇順のデータでも応答後半を誤拒否しない
+///
+/// 昇順では要求 Start が先頭の期待 Location になるが、応答終端が未確定の間は末尾 gap を
+/// 確定できない。FETCH_OK で確定した LARGEST_OBJECT より後ろの Location を誤って
+/// 不存在にしないことを固定する。
+#[test]
+fn ascending_data_before_fetch_ok_keeps_later_objects() {
+    let start = Location {
+        group_id: 1,
+        object_id: 0,
+    };
+    let end = Location {
+        group_id: 1,
+        object_id: 5,
+    };
+    let largest = Location {
+        group_id: 1,
+        object_id: 3,
+    };
+    let (mut client, mut server) = establish_pair();
+    let alias = 721;
+    // 応答を LARGEST_OBJECT (1, 3) で終わらせるため、購読の Largest Object も同じ値にする
+    // (publisher 側の観測値が FETCH_OK の LARGEST_OBJECT を上書きするため)
+    let sub_rid = establish_subscription(
+        &mut client,
+        &mut server,
+        MessageParameters::new(),
+        alias,
+        largest,
+    );
+    // FETCH_OK を送らないまま FETCH を登録する
+    let fetch_rid = client
+        .send_fetch(
+            track_namespace(),
+            track_name(),
+            fetch_range_params(start, end),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch_stream = DataStreamId(242);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(1, 1))
+        .expect("先頭 Object は受理されること");
+
+    // 応答の終端を後から知らせ、その後に応答後半の Object を届ける
+    server
+        .send_fetch_ok(
+            fetch_rid,
+            fetch_ok_params(Some(largest)),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(fetch_rid, ok_msg)
+        .expect("FETCH_OK を受理すること");
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(1, 2))
+        .expect("FETCH_OK 後の応答後半の正当な Object を誤拒否しないこと");
+    finish_fetch_stream(&mut client, fetch_stream);
+
+    // 応答は LARGEST_OBJECT (1, 3) で終わるため、要求 End (1, 5) 側は存在を否定しない
+    let outside_stream = DataStreamId(243);
+    open_subgroup_stream(&mut client, alias, 1, 4, outside_stream);
+    recv_subgroup_object(&mut client, outside_stream, 4);
+    assert_eq!(
+        client
+            .subscription(sub_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Established,
+        "LARGEST_OBJECT より後ろの Object を誤拒否しないこと"
+    );
+
+    // 先頭 gap は要求 Start から最初の Object までになる
+    let gap_stream = DataStreamId(244);
+    open_subgroup_stream(&mut client, alias, 1, 0, gap_stream);
+    let err = client
+        .recv_subgroup_object(
+            gap_stream,
+            &DecodedSubgroupObject {
+                object_id: 0,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("先頭 gap 内の Object は Malformed Track になる");
+    assert_eq!(
+        err.reason,
+        "malformed track: object received in a range recorded as non-existent"
+    );
+}
+
+/// FETCH_OK より先に届いた先頭 End of Non-Existent Range を応答終端で解決する
+///
+/// 降順 multi-group で応答終端が未確定の間は先頭 marker の基準点も決まらない。要求 Start を
+/// 基準にすると経由 Group の正当な Object を不存在として記録してしまう。
+#[test]
+fn descending_leading_marker_before_fetch_ok_is_resolved() {
+    let start = Location {
+        group_id: 2,
+        object_id: 0,
+    };
+    let end = Location {
+        group_id: 5,
+        object_id: 2,
+    };
+    let mut params = fetch_range_params(start, end);
+    params.push(MessageParameter {
+        param_type: shiguredo_moqt::message_parameter::PARAM_GROUP_ORDER,
+        value: MessageParameterValue::Uint8(2),
+    });
+    let (mut client, mut server) = establish_pair();
+    let alias = 722;
+    let sub_rid = establish_subscription(
+        &mut client,
+        &mut server,
+        MessageParameters::new(),
+        alias,
+        end,
+    );
+    // FETCH_OK を送らないまま FETCH を登録する
+    let fetch_rid = client
+        .send_fetch(track_namespace(), track_name(), params)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch_stream = DataStreamId(245);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_end_of_non_existent_range_entry(5, 0))
+        .expect("先頭の End of Non-Existent Range は受理されること");
+
+    // 応答終端を確定させてから、経由 Group の正当な Object を届ける
+    server
+        .send_fetch_ok(
+            fetch_rid,
+            fetch_ok_params(Some(end)),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(fetch_rid, ok_msg)
+        .expect("FETCH_OK を受理すること");
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(4, 3))
+        .expect("経由 Group の正当な Object を誤拒否しないこと");
+    finish_fetch_stream(&mut client, fetch_stream);
+
+    // marker (5, 0) と次の Object (4, 3) の間は不存在になる
+    let subgroup_stream = DataStreamId(246);
+    open_subgroup_stream(&mut client, alias, 5, 1, subgroup_stream);
+    let err = client
+        .recv_subgroup_object(
+            subgroup_stream,
+            &DecodedSubgroupObject {
+                object_id: 1,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("先頭 marker から次の Object までの Object は Malformed Track になる");
+    assert_eq!(
+        err.reason,
+        "malformed track: object received in a range recorded as non-existent"
+    );
+    assert_eq!(
+        client
+            .subscription(sub_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// FIN でしか確定できない末尾 gap が、FETCH_OK の後に記録される
+///
+/// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): "Gaps at the end of a
+/// stream are only detectable when the stream is terminated by a FIN." 応答終端が未確定の
+/// まま FIN した場合も、FETCH_OK の到着時に保留していた末尾 gap を確定しなければならない。
+#[test]
+fn fin_before_fetch_ok_records_trailing_gap() {
+    let start = Location {
+        group_id: 0,
+        object_id: 0,
+    };
+    let end = Location {
+        group_id: 0,
+        object_id: 5,
+    };
+    let largest = Location {
+        group_id: 0,
+        object_id: 4,
+    };
+    let (mut client, mut server) = establish_pair();
+    let alias = 723;
+    let sub_rid = establish_subscription(
+        &mut client,
+        &mut server,
+        MessageParameters::new(),
+        alias,
+        end,
+    );
+    // FETCH_OK を送らないまま FETCH を登録する
+    let fetch_rid = client
+        .send_fetch(
+            track_namespace(),
+            track_name(),
+            fetch_range_params(start, end),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, fetch_msg) = take_send_request(&mut client);
+    server
+        .recv_request(fetch_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    let fetch_stream = DataStreamId(247);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(0, 2))
+        .expect("Object は受理されること");
+    // 応答終端が未確定のまま FIN する。末尾 gap の判定は FETCH_OK まで保留される
+    finish_fetch_stream(&mut client, fetch_stream);
+    server
+        .send_fetch_ok(
+            fetch_rid,
+            fetch_ok_params(Some(largest)),
+            TrackProperties::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(fetch_rid, ok_msg)
+        .expect("FIN 後の FETCH_OK を受理すること");
+
+    // 最後の Object (0, 2) から応答終端 (0, 4) までが不存在になる
+    let subgroup_stream = DataStreamId(248);
+    open_subgroup_stream(&mut client, alias, 0, 3, subgroup_stream);
+    let err = client
+        .recv_subgroup_object(
+            subgroup_stream,
+            &DecodedSubgroupObject {
+                object_id: 3,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("FIN と FETCH_OK で確定した末尾 gap 内の Object は Malformed Track になる");
+    assert_eq!(
+        err.reason,
+        "malformed track: object received in a range recorded as non-existent"
+    );
+    assert_eq!(
+        client
+            .subscription(sub_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
+/// data stream の id を使わない終端通知でも FIN 時点の末尾 gap を記録する
+///
+/// `recv_fetch_data_stream_closed` は request ID だけを受け取る。受理済みの FETCH 応答
+/// stream が残っている場合は、stream id 経由の終端通知と同じく末尾 gap を確定する。
+#[test]
+fn direct_fetch_data_stream_fin_records_trailing_gap() {
+    let start = Location {
+        group_id: 0,
+        object_id: 0,
+    };
+    let end = Location {
+        group_id: 0,
+        object_id: 4,
+    };
+    let (mut client, mut server) = establish_pair();
+    let alias = 724;
+    let sub_rid = establish_subscription(
+        &mut client,
+        &mut server,
+        MessageParameters::new(),
+        alias,
+        end,
+    );
+    let fetch_rid = establish_fetch(
+        &mut client,
+        &mut server,
+        fetch_range_params(start, end),
+        end,
+    );
+    let fetch_stream = DataStreamId(249);
+    open_fetch_stream(&mut client, fetch_rid, fetch_stream);
+    client
+        .recv_fetch_entry(fetch_stream, &fetch_object_entry(0, 1))
+        .expect("Object は受理されること");
+    // stream id ではなく request ID だけで FIN を通知する
+    client
+        .recv_fetch_data_stream_closed(fetch_rid, RequestStreamEnd::Fin)
+        .expect("request ID だけの FIN 通知を受理すること");
+
+    // 最後の Object (0, 1) から応答終端 (0, 4) までが不存在になる
+    let subgroup_stream = DataStreamId(250);
+    open_subgroup_stream(&mut client, alias, 0, 3, subgroup_stream);
+    let err = client
+        .recv_subgroup_object(
+            subgroup_stream,
+            &DecodedSubgroupObject {
+                object_id: 3,
+                payload_length: 1,
+                status: None,
+                properties_bytes: None,
+            },
+        )
+        .expect_err("request ID だけの FIN でも末尾 gap 内の Object は Malformed Track になる");
+    assert_eq!(
+        err.reason,
+        "malformed track: object received in a range recorded as non-existent"
+    );
+    assert_eq!(
+        client
+            .subscription(sub_rid)
+            .expect("subscription が存在する")
+            .state,
+        SubscriptionState::Terminated
+    );
+}
+
 /// fill fetch stream も同じ Track 履歴を共有する
 ///
 /// draft-ietf-moq-transport-23 §3.4 (Fill Semantics) の fill fetch stream は FETCH 応答と

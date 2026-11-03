@@ -887,15 +887,12 @@ fn fetch_continues_known_objects_after_end_of_unknown_range() {
     client
         .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
         .expect("FETCH_HEADER の受信に成功すること");
-    for label in ["End of Unknown Range", "後続の既知 Object"] {
-        let entry = match label {
-            "End of Non-Existent Range" => fetch_end_of_non_existent_range_entry(0, 0),
-            _ => fetch_end_of_unknown_range_entry(0, 0),
-        };
-        client
-            .recv_fetch_entry(stream_id, &entry)
-            .unwrap_or_else(|e| panic!("{label}: 取り込みに成功すること: {e:?}"));
-    }
+    client
+        .recv_fetch_entry(stream_id, &fetch_end_of_unknown_range_entry(0, 0))
+        .expect("End of Unknown Range の取り込みに成功すること");
+    client
+        .recv_fetch_entry(stream_id, &fetch_object_entry(5, 0))
+        .expect("Unknown 範囲の後続の既知 Object の取り込みに成功すること");
     // subscriber 側にも reset / STOP_SENDING の指示が積まれていないこと
     while let Some(event) = client.poll_event() {
         assert!(

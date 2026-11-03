@@ -14,12 +14,16 @@
 //!
 //! 本モジュールはこの判定を Track (同一 peer の Full Track Name) 単位で行う。
 //! 履歴は subscription / FETCH / fill fetch stream をまたいで共有し、単一 stream の Group 前進や
-//! 1 件の request の破棄では消さない。節番号・規則は draft 由来であり、将来の draft 改版で
-//! 変更される可能性がある。
+//! 1 件の request の破棄では消さない。保持する Group 数には上限を設け、超過時は保持中の
+//! Group のうち Group ID が最小のものから破棄する (§2.3.1 (Group IDs) が Group ID は時間と
+//! ともに増加する SHOULD と定めるため、最も古いとみなす)。破棄した Group の照合情報は
+//! 失われる (known limitation)。
+//! 節番号・規則は draft 由来であり、将来の draft 改版で変更される可能性がある。
 
 use crate::error::MessageError;
 use crate::message::common::{Location, TrackNamespace};
 use crate::object_properties::{ObjectProperties, ObjectPropertyTracker, RangeSet};
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -117,12 +121,36 @@ impl ObjectLocationSet {
     }
 }
 
+/// Track 単位で保持する Group 数の上限
+///
+/// 1 Group あたり既出 Object の範囲と Prior Gap の検証状態を保持するため、Group 数に比例して
+/// 履歴が増える。長期ライブ配信で無制限に増えないよう上限を設け、超過時は保持中の Group の
+/// うち Group ID が最小のもの (draft-ietf-moq-transport-23 §2.3.1 (Group IDs) が Group ID は
+/// 時間とともに増加する SHOULD と定めるため、最も古いとみなす) から丸ごと破棄する。
+///
+/// 30 fps のライブ配信で約 1 時間分に相当する 10 万 Group を採用する。既存の datagram の
+/// 追跡エントリ上限 (`MAX_DATAGRAM_TRACKING_ENTRIES_PER_SUBSCRIPTION`) と同じ値であり、
+/// 1 Group あたり数個の HashMap エントリと区間であるため、10 万 Group でも Track ごとの
+/// 履歴は数十 MB 程度に収まる。
+///
+/// 破棄した Group の既出 Object と不存在区間は以後照合できない。誤検出ではなく検出漏れに
+/// 倒す既知の制限である (条件 10 の検出は best-effort になる)。
+const MAX_RETAINED_GROUPS_PER_TRACK: usize = 100_000;
+
 /// Track 単位の存在・不存在履歴
 ///
-/// 履歴を参照している request (`Subscriber` 役の subscription / FETCH) と受理済み受信 data
-/// stream の数を保持し、参照が 0 になった時点で破棄する。単一 request の破棄では消さず、
-/// 他の参照が残る間は同じ Track の照合に使う。
-#[derive(Debug, Clone)]
+/// 履歴を参照している request (`Subscriber` 役の subscription / FETCH) の数を保持し、
+/// 参照が 0 になった時点で破棄する。単一 request の破棄では消さず、他の参照が残る間は
+/// 同じ Track の照合に使う。
+///
+/// 受理済み受信 data stream は request の破棄時に必ず一緒に取り除かれるため、data stream
+/// だけが request より長く履歴を参照することはない。したがって参照カウントは request
+/// 単位だけで足りる。
+///
+/// 保持する Group 数には [`MAX_RETAINED_GROUPS_PER_TRACK`] の上限を設ける。上限超過時は
+/// 最も古い Group の照合情報を破棄するため、破棄済み Group に対する条件 10 の検出は
+/// 行われない (known limitation)。
+#[derive(Debug)]
 pub(super) struct PeerTrackHistory {
     /// 存在が確認できた Location
     existing: ObjectLocationSet,
@@ -133,8 +161,13 @@ pub(super) struct PeerTrackHistory {
     /// 条件 10 の逆方向 (不存在通知が既出 Object を覆う) と Prior Gap の一貫性を
     /// Track 単位で共有するために保持する。
     properties: ObjectPropertyTracker,
-    /// この履歴を参照している request と受理済み data stream の数
+    /// この履歴を参照している request の数
     refs: usize,
+    /// Group 単位の状態を持つ Group の集合
+    ///
+    /// 上限超過時に Group ID の小さい順 (古い順) に破棄するために保持する。
+    /// `missing.groups` のような Group 区間は区間のまま保持するため、ここには含めない。
+    retained_groups: BTreeSet<u64>,
 }
 
 impl PeerTrackHistory {
@@ -145,6 +178,7 @@ impl PeerTrackHistory {
             missing: ObjectLocationSet::default(),
             properties: ObjectPropertyTracker::new(),
             refs: 0,
+            retained_groups: BTreeSet::new(),
         }
     }
 
@@ -178,6 +212,9 @@ impl PeerTrackHistory {
                 "malformed track: object received in a range recorded as non-existent",
             ));
         }
+        // Group 単位の状態を保持する前に上限を適用する。Prior Gap の検証が失敗しても
+        // 内部に Group 単位の途中状態が残りうるため、検証より先に古い Group を破棄する。
+        self.prepare_group(location.group_id);
         // Prior Gap の検証は Track 単位で共有する。別 request で受信した Object を覆う
         // Gap 通知や、Gap 内の Object 受信をここで検出する。
         self.properties.observe_decoded_object(
@@ -202,8 +239,34 @@ impl PeerTrackHistory {
                 "malformed track: non-existent range covers a received object",
             ));
         }
+        if let MissingRange::Objects { group_id, .. } = range {
+            self.prepare_group(group_id);
+        }
         self.missing.insert(range);
         Ok(())
+    }
+
+    /// Group 単位の状態を保持する準備をする
+    ///
+    /// 未保持の Group を追加する前に、上限に達していれば保持中で最も古い Group を破棄する。
+    /// 破棄対象は `existing` / `missing` の Group 内区間と、Prior Gap の Group 単位の
+    /// 検証状態である。Group 区間のまま保持する `missing.groups` は容量が区間数に
+    /// 比例するため対象外とする。
+    fn prepare_group(&mut self, group_id: u64) {
+        if self.retained_groups.contains(&group_id) {
+            return;
+        }
+        while self.retained_groups.len() >= MAX_RETAINED_GROUPS_PER_TRACK {
+            let Some(oldest) = self.retained_groups.pop_first() else {
+                break;
+            };
+            self.existing.objects.remove(&oldest);
+            self.missing.objects.remove(&oldest);
+            // Prior Gap の検証状態も同じ Group だけを破棄する。上限到達後は新しい Group ごとに
+            // 1 回走るため、全 Group を走査する prune ではなく O(1) の削除を使う。
+            self.properties.remove_group(oldest);
+        }
+        self.retained_groups.insert(group_id);
     }
 }
 
@@ -345,6 +408,29 @@ fn clamp_one(
             if group_start > group_end {
                 return;
             }
+            // 要求範囲が単一 Group に収まる場合、Group 全域の範囲は要求の Object ID で
+            // 両端を切り詰めなければならない。Group 全域のまま残すと、要求範囲外の
+            // Object ID まで不存在として記録してしまう。
+            if group_start == group_end {
+                let object_start = if group_start == start.group_id {
+                    start.object_id
+                } else {
+                    0
+                };
+                let object_end = if group_start == end.group_id {
+                    end.object_id
+                } else {
+                    u64::MAX
+                };
+                if object_start <= object_end {
+                    out.push(MissingRange::Objects {
+                        group_id: group_start,
+                        start: object_start,
+                        end: object_end,
+                    });
+                }
+                return;
+            }
             // 端の Group は要求範囲の Object ID で切り詰める必要があるため、
             // Group 全域ではなく Object ID 区間として記録する
             let mut full_start = group_start;
@@ -355,10 +441,7 @@ fn clamp_one(
                     start: start.object_id,
                     end: u64::MAX,
                 });
-                match group_start.checked_add(1) {
-                    Some(next) => full_start = next,
-                    None => return,
-                }
+                full_start = group_start.saturating_add(1);
             }
             if group_end == end.group_id && end.object_id < u64::MAX {
                 out.push(MissingRange::Objects {
@@ -659,6 +742,127 @@ mod tests {
         );
     }
 
+    /// 要求範囲が単一 Group に収まるとき、Group 全域は両端の Object ID で切り詰められる
+    ///
+    /// Group 全域のまま記録すると、要求範囲外の Object ID まで不存在として扱ってしまう。
+    #[test]
+    fn clamp_single_group_fills_both_object_bounds() {
+        let ranges = clamp_to_request(
+            vec![MissingRange::Groups { start: 3, end: 3 }],
+            loc(3, 2),
+            Some(loc(3, 7)),
+        );
+        assert_eq!(
+            ranges,
+            vec![MissingRange::Objects {
+                group_id: 3,
+                start: 2,
+                end: 7,
+            }]
+        );
+    }
+
+    /// 降順で応答終端が未確定の間は先頭 gap の基準点を返さない
+    ///
+    /// 要求 Start を基準にすると、FETCH_OK の到着後に届く応答後半の正当な Object を
+    /// 不存在として記録してしまう。
+    #[test]
+    fn leading_anchor_is_deferred_until_end_is_known() {
+        let pending = FetchGapContext {
+            group_order: FETCH_GROUP_ORDER_DESCENDING,
+            has_range_filters: false,
+            start: Some(loc(2, 0)),
+            end: None,
+        };
+        assert!(
+            pending.leading_anchor().is_none(),
+            "応答終端が未確定の降順では基準点を決めない"
+        );
+        let resolved = FetchGapContext {
+            end: Some(loc(5, 2)),
+            ..pending
+        };
+        assert_eq!(
+            resolved.leading_anchor(),
+            Some(loc(5, 0)),
+            "応答終端が確定したら {{End.Group, 0}} を基準にする"
+        );
+    }
+
+    /// Group 単位の保持数が上限を超えると、最も古い Group から破棄される
+    ///
+    /// 破棄した Group の不存在は以後照合できない (検出漏れに倒す既知の制限)。
+    #[test]
+    fn group_cap_evicts_oldest_retained_group() {
+        let mut history = PeerTrackHistory::new();
+        for group_id in 0..MAX_RETAINED_GROUPS_PER_TRACK as u64 {
+            history
+                .observe_missing(MissingRange::Objects {
+                    group_id,
+                    start: 0,
+                    end: 0,
+                })
+                .expect("重複しない不存在の記録は成功する");
+        }
+        assert_eq!(history.retained_groups.len(), MAX_RETAINED_GROUPS_PER_TRACK);
+
+        let newest = MAX_RETAINED_GROUPS_PER_TRACK as u64;
+        history
+            .observe_missing(MissingRange::Objects {
+                group_id: newest,
+                start: 0,
+                end: 0,
+            })
+            .expect("上限超過時も新しい Group の記録は成功する");
+        assert_eq!(history.retained_groups.len(), MAX_RETAINED_GROUPS_PER_TRACK);
+        assert!(
+            !history.retained_groups.contains(&0),
+            "最古 Group が破棄される"
+        );
+        assert!(
+            history.retained_groups.contains(&newest),
+            "新しい Group は保持される"
+        );
+        // 破棄していない Group の不存在は引き続き検出する
+        let err = history
+            .observe_object(loc(2, 0), None)
+            .expect_err("保持中の Group の不存在は引き続き検出される");
+        assert!(matches!(err, MessageError::MalformedTrack(_)));
+        // 破棄した Group は既出 Object の照合情報を失う (known limitation)
+        history
+            .observe_object(loc(0, 0), None)
+            .expect("破棄済み Group の Object は照合できず受理される");
+    }
+
+    /// Group 上限は既出 Object と Prior Gap の Group 単位状態にも適用される
+    #[test]
+    fn group_cap_limits_object_and_property_groups() {
+        let mut history = PeerTrackHistory::new();
+        for group_id in 0..MAX_RETAINED_GROUPS_PER_TRACK as u64 {
+            history
+                .observe_object(loc(group_id, 0), None)
+                .expect("重複しない Object の記録は成功する");
+        }
+        assert_eq!(history.retained_groups.len(), MAX_RETAINED_GROUPS_PER_TRACK);
+        assert_eq!(
+            history.properties.seen_object_group_count(),
+            MAX_RETAINED_GROUPS_PER_TRACK
+        );
+
+        history
+            .observe_object(loc(MAX_RETAINED_GROUPS_PER_TRACK as u64, 0), None)
+            .expect("上限超過時も新しい Group の Object は受理される");
+        assert_eq!(history.retained_groups.len(), MAX_RETAINED_GROUPS_PER_TRACK);
+        assert_eq!(
+            history.properties.seen_object_group_count(),
+            MAX_RETAINED_GROUPS_PER_TRACK
+        );
+        assert!(
+            !history.existing.objects.contains_key(&0),
+            "最古 Group の既出 Object が破棄される"
+        );
+    }
+
     /// 不存在後の Object は MalformedTrack になる
     #[test]
     fn object_in_missing_range_is_rejected() {
@@ -710,8 +914,8 @@ mod tests {
 
 // ─── Session 連携 ───────────────────────────────────────────────
 //
-// 履歴の所有者は Session であり、reference (request) と受理済み data stream の数で寿命を
-// 管理する。request を 1 件破棄しただけでは他の参照が残る限り履歴を消さない。
+// 履歴の所有者は Session であり、参照している request の数で寿命を管理する。
+// request を 1 件破棄しただけでは他の参照が残る限り履歴を消さない。
 
 use super::core::Session;
 use super::types::{DataStreamId, SessionError, TrackRole};
@@ -763,8 +967,13 @@ impl FetchGapContext {
     /// 応答順で最初の entry より手前の基準点
     ///
     /// 降順で Start と End の Group が異なる場合、最初に期待される Location は
-    /// `{End Location.Group, 0}` である (§3.2.2)。
+    /// `{End Location.Group, 0}` である (§3.2.2)。応答終端が未確定の間は End が決まらず
+    /// 要求 Start を基準にすると、FETCH_OK 到着後に届く応答後半の正当な Object まで
+    /// 不存在として記録してしまうため、基準点を返さず判定を保留させる。
     pub(super) fn leading_anchor(&self) -> Option<Location> {
+        if self.boundary_pending() {
+            return None;
+        }
         let start = self.start?;
         if self.group_order == FETCH_GROUP_ORDER_DESCENDING
             && let Some(end) = self.end
@@ -816,7 +1025,7 @@ const FETCH_GROUP_ORDER_DESCENDING: u8 = 0x02;
 ///
 /// データや FIN が FETCH_OK より先に届いた場合、[`Session`] はこの状態を保持し、
 /// FETCH_OK の受信時に境界依存の判定を行う。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(super) struct PendingFetchTail {
     /// leading gap の判定を待つ先頭 Object
     pub(super) leading_object: Option<Location>,
@@ -835,7 +1044,7 @@ pub(super) struct PendingFetchTail {
 /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL_PARAMETERS は
 /// 購読状態として保持されないため、fill fetch stream を受信する側が送信時に使った値を
 /// 覚えておく必要がある。省略されたパラメータは購読の値を使う (同節)。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct FillContext {
     /// FILL 内側の LOCATION_FILTER
     filter: FillLocationFilter,
@@ -901,40 +1110,9 @@ impl Session {
 
     /// Track 履歴の参照を 1 つ解放する
     ///
-    /// 最後の参照が外れた時点で履歴を破棄する。他の request や受理済み data stream が
-    /// 参照している間は保持する。
+    /// 最後の参照が外れた時点で履歴を破棄する。他の request が参照している間は保持する。
     pub(super) fn release_peer_track_history(&mut self, request_id: u64) {
         let Some(key) = self.track_history_requests.remove(&request_id) else {
-            return;
-        };
-        self.release_peer_track_history_key(&key);
-    }
-
-    /// 受理済み受信 data stream の参照を 1 つ取得する
-    ///
-    /// request を破棄した後も stream の終端まで履歴を保持するために数える。
-    pub(super) fn acquire_peer_track_history_stream(
-        &mut self,
-        stream_id: DataStreamId,
-        request_id: u64,
-    ) {
-        if self.track_history_streams.contains_key(&stream_id) {
-            return;
-        }
-        let Some(key) = self.track_key_for_received_request(request_id) else {
-            return;
-        };
-        if let Some(history) = self.peer_track_history.get_mut(&key) {
-            history.acquire();
-        }
-        self.track_history_streams.insert(stream_id, key);
-    }
-
-    /// 受理済み受信 data stream の参照を 1 つ解放する
-    ///
-    /// data stream の登録解除経路から呼ぶ。登録されていない id では何もしない。
-    pub(super) fn release_peer_track_history_stream(&mut self, stream_id: DataStreamId) {
-        let Some(key) = self.track_history_streams.remove(&stream_id) else {
             return;
         };
         self.release_peer_track_history_key(&key);

@@ -130,8 +130,8 @@ impl Session {
     ///
     /// また本関数は受信側の追跡状態 (`ObjectFieldTracker`) と Track 履歴の参照を除去し、
     /// 受信 stream の帰属も除去する (共有 Track Alias で帰属先の生きた subscription が他にある場合は
-    /// その subscription へ移管する)。Track 履歴は同じ Track の他の request や受理済み data
-    /// stream が参照している間は保持する。
+    /// その subscription へ移管する)。Track 履歴は同じ Track の他の request が参照している
+    /// 間は保持する。
     pub fn forget_subscription(&mut self, request_id: u64) -> Option<Subscription> {
         let entry = self.subscriptions.get(&request_id)?;
         if !entry.cleanup_ready() {
@@ -182,8 +182,8 @@ impl Session {
             }
         }
         self.remove_incoming_data_streams_for_request(request_id);
-        // Track 履歴の参照を解放する。同じ Track の他の request や受理済み data stream が
-        // 参照している間は履歴を保持する。
+        // Track 履歴の参照を解放する。同じ Track の他の request が参照している間は
+        // 履歴を保持する。
         self.release_peer_track_history(request_id);
         self.pending_fetch_tails.remove(&request_id);
         self.remove_outgoing_data_plane_for_request(request_id);

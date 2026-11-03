@@ -14,4 +14,5 @@ mod request_id;
 mod request_stream;
 mod subgroup;
 mod subscription;
+mod track_history;
 mod track_status;

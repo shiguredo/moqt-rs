@@ -572,6 +572,12 @@ impl Session {
     /// stream id 系 (`recv_data_stream_closed`) で通知すること
     /// (fill 終端は subscription の state を変えず、Stream Count の open 数だけを戻す)。
     ///
+    /// この API は data stream の id を受け取らないため、受理済みの FETCH 応答 stream が
+    /// まだ登録されていれば、stream id 経由の終端と同じく FIN 時点の末尾 gap を確定させる
+    /// (`recv_data_stream_closed` で既に終端済みなら対象が無く no-op)。FIN の時点で応答
+    /// 終端 (FETCH_OK の LARGEST_OBJECT) が未確定なら、判定は FETCH_OK の受信まで保留する。
+    /// 同じ data stream の終端を `recv_data_stream_closed` と本 API の両方で通知しないこと。
+    ///
     /// draft-ietf-moq-transport-23 §3.2.4 (Fetch State Management): subscriber は FETCH_HEADER
     /// stream の FIN 受信、または publisher 側 RESET_STREAM 受信で FETCH state を
     /// 終える。state は `Terminated` に遷移する。
@@ -586,6 +592,10 @@ impl Session {
         request_id: u64,
         end: RequestStreamEnd,
     ) -> Result<(), SessionError> {
+        self.require_established()?;
+        // 応答の終端が確定済みでも、FIN でしか検出できない末尾 gap を state 遷移より先に
+        // 確定する (state 遷移は保留中の判定を整理するため、順序を逆にすると失われる)。
+        self.finish_fetch_gap_streams_for_request(request_id, end)?;
         let kind = match end {
             RequestStreamEnd::Fin => SubscriberFetchCloseKind::DataStreamFin,
             RequestStreamEnd::Reset { .. } => SubscriberFetchCloseKind::DataStreamReset,
@@ -728,7 +738,12 @@ impl Session {
             }
             fetch.state = FetchState::Terminated;
         }
-        self.pending_fetch_tails.remove(&request_id);
+        // FIN の時点で応答終端が未確定だった場合、保留中の gap 判定は FETCH_OK の到着まで
+        // 保持する (§3.2 (Fetch) は FETCH_OK がオブジェクト配信より後に届くことを許す)。
+        // RESET_STREAM / STOP_SENDING では応答範囲を確定できないため破棄する。
+        if kind != SubscriberFetchCloseKind::DataStreamFin {
+            self.pending_fetch_tails.remove(&request_id);
+        }
         self.remove_incoming_data_streams_for_request(request_id);
         Ok(())
     }

@@ -618,8 +618,10 @@ impl ObjectPropertyTracker {
     /// - descending: current_group 超過の group を prune
     ///
     /// 単一 stream の Group 前進を根拠に prune すると、同じ Track の別 request が参照している
-    /// 既出 Object / 不存在区間の照合情報を失う。Track 単位で履歴を共有する `Session` は
-    /// このメソッドを呼ばず、Session の生存期間にわたって保持する。
+    /// 既出 Object / 不存在区間の照合情報を失う。Track 単位で履歴を共有する `Session` は、
+    /// Group 単位の保持数の上限に達したときだけ、最も古い Group を破棄するために呼ぶ
+    /// (`PeerTrackHistory::prepare_group` 参照)。それ以外では Session の生存期間にわたって
+    /// 保持し、他の request が参照する照合情報を失わない。
     ///
     /// cross-group な `seen_groups` / `prior_group_gaps` は
     /// 将来 object の PRIOR_GROUP_ID_GAP 検証に必要なため残置する。
@@ -635,6 +637,23 @@ impl ObjectPropertyTracker {
             self.seen_objects.retain(|&g, _| g <= current_group);
             self.prior_object_gaps.retain(|&g, _| g <= current_group);
         }
+    }
+
+    /// 指定 Group の検証状態だけを破棄する
+    ///
+    /// Track 単位の履歴が Group 数の上限に達したとき、最も古い Group の状態だけを O(1) で
+    /// 破棄するために使う。`seen_groups` / `prior_group_gaps` の Group 区間は、将来の
+    /// PRIOR_GROUP_ID_GAP 検証に必要な cross-group の情報であるため残す。
+    pub(crate) fn remove_group(&mut self, group_id: u64) {
+        self.group_gap_values.remove(&group_id);
+        self.seen_objects.remove(&group_id);
+        self.prior_object_gaps.remove(&group_id);
+    }
+
+    /// 既出 Object を記録している Group 数 (診断用)
+    #[cfg(test)]
+    pub(crate) fn seen_object_group_count(&self) -> usize {
+        self.seen_objects.len()
     }
 }
 

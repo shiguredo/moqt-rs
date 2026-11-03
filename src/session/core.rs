@@ -456,15 +456,14 @@ pub struct Session {
     ///
     /// draft-ietf-moq-transport-23 §2.1.2 (Object States) / §3.2.2 (Gaps in a Fetch Stream) /
     /// §11.4.2 (End of Range) / §12.1 (Malformed Tracks) 条件 10 の判定を、subscription /
-    /// FETCH / fill fetch stream をまたいで共有する。参照している request と受理済み受信
-    /// data stream が残る間は保持し、最後の参照が外れた時点で破棄する。
+    /// FETCH / fill fetch stream をまたいで共有する。参照している request が残る間は保持し、
+    /// 最後の参照が外れた時点で破棄する。受理済み受信 data stream は request の破棄時に
+    /// 一緒に取り除かれるため、request 単位の参照で寿命を管理できる。
     /// 詳細は [`super::track_history`] を参照する。
     pub(super) peer_track_history:
         HashMap<super::track_history::TrackKey, super::track_history::PeerTrackHistory>,
     /// Track 履歴を参照している request id → Track キー
     pub(super) track_history_requests: HashMap<u64, super::track_history::TrackKey>,
-    /// Track 履歴を参照している受理済み受信 data stream id → Track キー
-    pub(super) track_history_streams: HashMap<DataStreamId, super::track_history::TrackKey>,
     /// 受信した fill fetch stream の実効フィルタ (fill の Request ID → フィルタ)
     ///
     /// draft-ietf-moq-transport-23 §9.19.15 (FILL PARAMETERS Parameter): FILL_PARAMETERS は
@@ -743,7 +742,6 @@ impl Session {
             pending_fill_ranges: HashMap::new(),
             peer_track_history: HashMap::new(),
             track_history_requests: HashMap::new(),
-            track_history_streams: HashMap::new(),
             fill_contexts: HashMap::new(),
             pending_fetch_tails: HashMap::new(),
             peer_object_fields: HashMap::new(),
