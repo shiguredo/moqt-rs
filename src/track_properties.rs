@@ -114,7 +114,7 @@ impl TrackProperties {
     ///
     /// - 同一 `prop_type` の重複: `ProtocolViolation`
     /// - 型と値形式の不一致: `InvalidParameter`
-    /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `ProtocolViolation`
+    /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `MalformedKeyValue`
     /// - トップレベルのバイト列が 65535 バイトを超える: `PayloadTooLong`
     /// - IMMUTABLE_PROPERTIES の内側 KVP が不正 (入れ子の 0x0B、宣言長が残りバイト超過など):
     ///   `ProtocolViolation` (decode 層の `MalformedKeyValue` を `ProtocolViolation`
@@ -200,8 +200,9 @@ impl TrackProperties {
     ///   (既知 Type は draft-ietf-moq-transport-22 §8.3 (Key-Value-Pair Structure) の MUST。
     ///   未知 Type も §16.8 (Properties) の length による skip が成立しないため同じ分類に
     ///   揃える)
-    /// - 重複 Type / KVP Type の delta overflow / 入れ子の IMMUTABLE_PROPERTIES /
-    ///   既知 Type の値域違反: `ProtocolViolation`
+    /// - 重複 Type / KVP Type の delta overflow / 入れ子の IMMUTABLE_PROPERTIES:
+    ///   `ProtocolViolation`
+    /// - 既知 Type の値域違反 (DYNAMIC_GROUPS が 0/1 以外など): `MalformedKeyValue`
     pub fn decode(buf: &[u8]) -> Result<Self, MessageError> {
         Ok(Self(decode_track_kv_pairs(buf, true)?))
     }

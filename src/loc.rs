@@ -268,7 +268,7 @@ impl LocProperties {
     /// # Errors
     ///
     /// - 重複するプロパティ ID / delta-key のオーバーフロー: `ProtocolViolation`
-    /// - 奇数 ID の宣言長が 65535 バイトを超える: `ProtocolViolation`
+    /// - 奇数 ID の宣言長が 65535 バイトを超える: `FieldLengthExceeded`
     /// - Audio Level が 255 を超える: `MalformedKeyValue`
     /// - Video Frame Marking の宣言長が 1-4 バイトでない: `MalformedKeyValue`
     ///   (宣言長の検証は切り詰め検査 `UnexpectedEof` より先に行う)

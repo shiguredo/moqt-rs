@@ -161,6 +161,24 @@ fn nested_immutable_properties_rejected_on_decode() {
 }
 
 #[test]
+fn value_length_over_65535_is_field_length_exceeded() {
+    // 奇数型 (0x09 VIDEO_FRAME_MARKING) の宣言長 65,536 (2^16) は §8.3 の上限超過。
+    // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) / §12.2 の優先規則により
+    // FIELD_LENGTH_EXCEEDED で閉じる。
+    let mut inner = Vec::new();
+    inner.push(0x09u8); // delta=9 → prop_type=9 (奇数)
+    inner.extend_from_slice(&[0xE0, 0x01, 0x00, 0x00]); // 65,536 の vi64
+    let mut buf = vec![inner.len() as u8];
+    buf.extend_from_slice(&inner);
+    assert_eq!(
+        ObjectProperties::decode(&buf),
+        Err(MessageError::FieldLengthExceeded(
+            "object property value length exceeds 65535"
+        ))
+    );
+}
+
+#[test]
 fn parity_mismatch_rejected() {
     // 偶数型に Bytes
     let mut props = ObjectProperties::new();

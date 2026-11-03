@@ -285,6 +285,24 @@ mod error_cases {
     }
 
     #[test]
+    fn decode_value_length_over_65535_is_field_length_exceeded() {
+        // 奇数 ID (0x09 VIDEO_FRAME_MARKING) の宣言長 65,536 (2^16) は §8.3 の上限超過。
+        // draft-ietf-moq-transport-23 §8.3 (Key-Value-Pair Structure) / §12.2 の優先規則により
+        // FIELD_LENGTH_EXCEEDED で閉じる。
+        let mut inner = Vec::new();
+        inner.push(0x09u8); // delta=9 → prop_id=9 (奇数)
+        inner.extend_from_slice(&[0xE0, 0x01, 0x00, 0x00]); // 65,536 の vi64
+        let mut buf = vec![inner.len() as u8];
+        buf.extend_from_slice(&inner);
+        assert_eq!(
+            LocProperties::decode(&buf),
+            Err(MessageError::FieldLengthExceeded(
+                "odd type key-value-pair length exceeds 65535"
+            ))
+        );
+    }
+
+    #[test]
     fn decode_truncated_inner() {
         // length=5 だが実際には 2 バイトしかない
         let buf = vec![0x05, 0x02, 0x01];
