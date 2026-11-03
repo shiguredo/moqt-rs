@@ -12,20 +12,26 @@
 #   fragment は ::add-mask:: でマスクする
 # - issues/ 配下だけを変更した push / pull_request では workflow を起動しない。
 #   issue ファイルはコードに影響しないため、実 relay を必要とする E2E テストを実行する意味がない
+# - 接続先の relay が MOQT draft 23 に対応するまでの間は自動実行しない。本リポジトリは
+#   draft 23 の wire (制御メッセージ長の varint 化、PAUSED、Error Details など) を送るため、
+#   draft 22 までの relay では必ず失敗する。relay の対応を確認できたら push / pull_request の
+#   トリガーを戻す
 
 name: E2E Test
 
 on:
-  # issues/ 配下だけの更新では E2E テストを起動しない (ci.yml と同じ paths-ignore を使う)
-  push:
-    branches:
-      - develop
-      - "feature/**"
-    paths-ignore:
-      - "issues/**"
-  pull_request:
-    paths-ignore:
-      - "issues/**"
+  # 自動実行は無効化している。relay の draft 23 対応を確認したら push / pull_request の
+  # トリガーを復活させる。手動実行は workflow_dispatch で行える。
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - develop
+  #     - "feature/**"
+  #   paths-ignore:
+  #     - "issues/**"
+  # pull_request:
+  #   paths-ignore:
+  #     - "issues/**"
 
 permissions:
   contents: read
