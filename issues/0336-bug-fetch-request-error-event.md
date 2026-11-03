@@ -31,7 +31,7 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   発行済みである (`src/session/core.rs` の `handle_peer_request_error` と
   `src/session/fetch.rs` の `handle_err_for_fetch`)。欠けているのは example の配送だけであり、
   `src/session/` の変更は不要である。
-- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_groups` は `MoqtClient::fetch` を
+- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_video_groups` は `MoqtClient::fetch` を
   呼ぶ唯一の example の実運用経路であり、「(`SessionEvent::RequestErrorReceived` は notable
   イベントではない) ためログに残せない」と doc に書いている。配送を実装するとこの記述は
   実態と合わなくなる。
@@ -78,7 +78,7 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   `FetchOkReceived` / `OpenFillFetchStream` / `RequestErrorReceived` を追加する。
 - `fetch` の doc は現行の `SessionEvent::RequestErrorReceived` のままで正しくなる。
   `retry_interval` / `redirect` も届くことを 1 文追記する。
-- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_groups` の doc を更新し、
+- `crates/moq-sub/src/pipeline.rs` の `fetch_recent_video_groups` の doc を更新し、
   `next_event` の `RequestErrorReceived` arm で `request_id` / `error_code` /
   `retry_interval` / `reason` / `redirect` をログに残す（ログメッセージは英語）。
   FETCH の拒否であれば `media_fetch_targets` から該当 `request_id` を削除する
@@ -98,7 +98,7 @@ doc が約束する配送を実装し、doc と実装を一致させる。
     REQUEST_ERROR 配送を固定するテストを追加する。
     `rejected_fetch_is_not_delivered_to_the_application` は変更しない。
 - `crates/moq-sub/src/pipeline.rs`
-  - `fetch_recent_groups` の doc と `next_event` の `RequestErrorReceived` arm
+  - `fetch_recent_video_groups` の doc と `next_event` の `RequestErrorReceived` arm
 - `docs/missing-features.md` §6.7
 
 ## 完了条件
@@ -116,7 +116,7 @@ doc が約束する配送を実装し、doc と実装を一致させる。
   `media_fetch_targets` から該当 request を除去すること。
 - `rejected_fetch_is_not_delivered_to_the_application` が変更されずに通ること
   (peer 起点 FETCH の拒否が `ClientEvent::Request` として渡らないこと)。
-- `next_event` / `fetch` / `fetch_recent_groups` / `docs/missing-features.md` §6.7 の
+- `next_event` / `fetch` / `fetch_recent_video_groups` / `docs/missing-features.md` §6.7 の
   記述が実装と一致すること。
 - `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` /
   `cargo fmt --all -- --check` が通ること。
