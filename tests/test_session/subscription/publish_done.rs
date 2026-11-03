@@ -246,6 +246,62 @@ fn publish_done_full_cycle() {
     assert!(got_event);
 }
 
+/// 認可失効で購読を終える PUBLISH_DONE の EXPIRED_AUTH_TOKEN (0x7) がそのまま通知されること
+///
+/// draft-ietf-moq-transport-23 §9.9 (PUBLISH_DONE): "A publisher that ends a subscription
+/// because the authorization token that authorized it has expired SHOULD send PUBLISH_DONE
+/// with status code EXPIRED_AUTH_TOKEN." §12.4 (Publish Done Codes) は同コードを 0x7 と定義し、
+/// §16.12.3 (PUBLISH_DONE Codes) のレジストリに載る。受信側の正規化
+/// (`normalize_publish_done_code`) で INTERNAL_ERROR (0x0) に落ちないため、アプリは
+/// 「認可が失効した」原因を保持したまま再認可などの判断に使える。
+#[test]
+fn publish_done_expired_auth_token_is_not_normalized() {
+    use shiguredo_moqt::error::{PUBLISH_DONE_EXPIRED_AUTH_TOKEN, normalize_publish_done_code};
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, m) = take_send_request(&mut client);
+    server
+        .recv_request(m)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_subscribe_ok(rid, 2, MessageParameters::new(), TrackProperties::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, ok_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, ok_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    server
+        .send_publish_done(
+            rid,
+            PUBLISH_DONE_EXPIRED_AUTH_TOKEN,
+            0,
+            shiguredo_moqt::message::ReasonPhrase::new("auth token expired")
+                .expect("テストフィクスチャの前提条件を満たす"),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, done_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, done_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut got_status = None;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::PublishDoneReceived { status_code, .. } = e {
+            got_status = Some(status_code);
+        }
+    }
+    assert_eq!(got_status, Some(PUBLISH_DONE_EXPIRED_AUTH_TOKEN));
+    assert_eq!(
+        normalize_publish_done_code(PUBLISH_DONE_EXPIRED_AUTH_TOKEN),
+        PUBLISH_DONE_EXPIRED_AUTH_TOKEN,
+        "EXPIRED_AUTH_TOKEN は正規化で INTERNAL_ERROR に落ちないこと"
+    );
+}
+
 #[test]
 fn publish_done_drain_waits_for_timeout_and_open_stream_close() {
     let (mut client, mut server) = establish_pair();

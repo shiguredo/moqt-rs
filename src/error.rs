@@ -389,7 +389,7 @@ pub const SESSION_FIELD_LENGTH_EXCEEDED: u64 = 0x401;
 
 // ─── REQUEST_ERROR Codes ──────────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §16.11.2 (REQUEST_ERROR Codes)
+// draft-ietf-moq-transport-23 §12.3 (Request Error Codes) / §16.12.2 (REQUEST_ERROR Codes)
 // REQUEST_ERROR メッセージで使用されるエラーコード。
 
 /// 実装固有のエラー
@@ -408,16 +408,26 @@ pub const REQUEST_EXPIRED_AUTH_TOKEN: u64 = 0x5;
 pub const REQUEST_GOING_AWAY: u64 = 0x6;
 /// 過負荷
 pub const REQUEST_EXCESSIVE_LOAD: u64 = 0x9;
+/// 現時点では要求を満たせないが、後で満たせる可能性がある
+///
+/// draft-ietf-moq-transport-23 §12.3 (Request Error Codes): "The responder cannot fulfill
+/// this request at this time, but might be able to later; for example, a relay lacks stream
+/// credit to forward it upstream (see Section 7.4). The sender SHOULD use the Retry Interval
+/// to indicate when the request can be retried."
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+pub const REQUEST_UNAVAILABLE: u64 = 0x0A;
 /// トラックまたは名前空間が存在しない
 pub const REQUEST_DOES_NOT_EXIST: u64 = 0x10;
 /// 無効なフィルタ範囲
 pub const REQUEST_INVALID_RANGE: u64 = 0x11;
-/// 不正なトラック (draft-ietf-moq-transport-22 §12.3 (Request Error Codes))
+/// 不正なトラック (draft-ietf-moq-transport-23 §12.3 (Request Error Codes))
 pub const REQUEST_MALFORMED_TRACK: u64 = 0x12;
 /// 興味なし
 pub const REQUEST_UNINTERESTED: u64 = 0x20;
-/// プレフィックスの重複
-pub const REQUEST_PREFIX_OVERLAP: u64 = 0x30;
+// 0x30 (旧 draft の PREFIX_OVERLAP) は draft-ietf-moq-transport-23 §12.3 /
+// §16.12.2 のレジストリから削除された。既知コードとして定義せず、受信した場合は
+// §13 (Grease) の未知コード規則に従って `normalize_request_error_code` が
+// INTERNAL_ERROR (0x0) に正規化する。
 /// 名前空間が大きすぎる
 pub const REQUEST_NAMESPACE_TOO_LARGE: u64 = 0x31;
 /// 未対応の必須拡張
@@ -431,7 +441,7 @@ pub const REQUEST_INVALID_FILTER: u64 = 0x36;
 
 // ─── PUBLISH_DONE Codes ──────────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §16.11.3 (PUBLISH_DONE Codes)
+// draft-ietf-moq-transport-23 §12.4 (Publish Done Codes) / §16.12.3 (PUBLISH_DONE Codes)
 // PUBLISH_DONE メッセージで使用されるステータスコード。
 
 /// 実装固有のエラー
@@ -446,13 +456,22 @@ pub const PUBLISH_DONE_GOING_AWAY: u64 = 0x4;
 pub const PUBLISH_DONE_TOO_FAR_BEHIND: u64 = 0x5;
 /// 有効期限切れ
 pub const PUBLISH_DONE_EXPIRED: u64 = 0x6;
+/// 認可トークンの有効期限切れ
+///
+/// draft-ietf-moq-transport-23 §12.4 (Publish Done Codes): "The authorization token that
+/// authorized the subscription has expired (see Section 9.9)." §9.9 (PUBLISH_DONE) は
+/// "A publisher that ends a subscription because the authorization token that authorized it
+/// has expired SHOULD send PUBLISH_DONE with status code EXPIRED_AUTH_TOKEN." (SHOULD) と
+/// 定める。認可失効で購読を終えるアプリは本コードを `Session::send_publish_done` に渡す。
+/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+pub const PUBLISH_DONE_EXPIRED_AUTH_TOKEN: u64 = 0x7;
 /// REQUEST_UPDATE 失敗
 pub const PUBLISH_DONE_UPDATE_FAILED: u64 = 0x8;
 /// 過負荷
 pub const PUBLISH_DONE_EXCESSIVE_LOAD: u64 = 0x9;
-/// 不正なトラック (draft-ietf-moq-transport-22 §12.4 (Publish Done Codes))
+/// 不正なトラック (draft-ietf-moq-transport-23 §12.4 (Publish Done Codes))
 ///
-/// draft-ietf-moq-transport-22 §12.4 (Publish Done Codes): "A relay publisher
+/// draft-ietf-moq-transport-23 §12.4 (Publish Done Codes): "A relay publisher
 /// detected that the track was malformed (see Section 12.1)." relay が downstream の
 /// subscription を終端するために送る。`Session` (endpoint-local) は自動送出せず、
 /// relay 実装が明示的に送る前提である。
@@ -461,8 +480,8 @@ pub const PUBLISH_DONE_MALFORMED_TRACK: u64 = 0x12;
 
 // ─── Stream Reset Error Codes ─────────────────────────────────
 //
-// draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes)
-// (IANA レジストリは draft-ietf-moq-transport-22 §16.11.4 (Stream Reset Error Codes))
+// draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes)
+// (IANA レジストリは draft-ietf-moq-transport-23 §16.12.4 (Stream Reset Error Codes))
 // QUIC RESET_STREAM / RESET_STREAM_AT フレームで任意のストリームを
 // リセットする際に使用されるエラーコード。draft-ietf-moq-transport-22 で全リクエスト
 // ストリームに適用されるよう汎用化された。
@@ -479,13 +498,17 @@ pub const STREAM_SESSION_CLOSED: u64 = 0x3;
 pub const STREAM_GOING_AWAY: u64 = 0x4;
 /// 遅延しすぎ
 pub const STREAM_TOO_FAR_BEHIND: u64 = 0x5;
-/// 未知の Object Status
-pub const STREAM_UNKNOWN_OBJECT_STATUS: u64 = 0x6;
+// 0x6 (旧 draft の UNKNOWN_OBJECT_STATUS) は draft-ietf-moq-transport-23 §12.5 /
+// §16.12.4 のレジストリから削除された。FETCH 応答で Object の status を判定できない
+// 場合は stream を reset せず、対象範囲を End of Unknown Range (0x10C、§11.4.2
+// (End of Range)) で示して残りの既知 Object の配送を続ける (§3.2.2 (Gaps in a Fetch
+// Stream))。旧値を受信した場合は §13 (Grease) の未知コード規則に従って
+// `normalize_stream_reset_code` が INTERNAL_ERROR (0x0) に正規化する。
 /// 認証トークンの有効期限切れ
 pub const STREAM_EXPIRED_AUTH_TOKEN: u64 = 0x7;
 /// 過負荷
 pub const STREAM_EXCESSIVE_LOAD: u64 = 0x9;
-/// 不正なトラック (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))
+/// 不正なトラック (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
 pub const STREAM_MALFORMED_TRACK: u64 = 0x12;
 
 // ─── 未知のエラーコードの文脈別正規化 ─────────────────────────
@@ -540,7 +563,11 @@ const KNOWN_SESSION_TERMINATION_CODES: &[u64] = &[
     SESSION_FIELD_LENGTH_EXCEEDED,
 ];
 
-/// REQUEST_ERROR 文脈で既知のコード (draft §12.3 の registry)
+/// REQUEST_ERROR 文脈で既知のコード
+///
+/// draft-ietf-moq-transport-23 §16.12.2 (REQUEST_ERROR Codes) のレジストリ (Table 21) と
+/// §12.3 (Request Error Codes) のコード表に載る全コード。draft-23 で削除された
+/// 0x30 (PREFIX_OVERLAP) は既知コードに含めない (§13 (Grease) の未知コード規則)。
 const KNOWN_REQUEST_ERROR_CODES: &[u64] = &[
     REQUEST_INTERNAL_ERROR,
     REQUEST_UNAUTHORIZED,
@@ -550,11 +577,11 @@ const KNOWN_REQUEST_ERROR_CODES: &[u64] = &[
     REQUEST_EXPIRED_AUTH_TOKEN,
     REQUEST_GOING_AWAY,
     REQUEST_EXCESSIVE_LOAD,
+    REQUEST_UNAVAILABLE,
     REQUEST_DOES_NOT_EXIST,
     REQUEST_INVALID_RANGE,
     REQUEST_MALFORMED_TRACK,
     REQUEST_UNINTERESTED,
-    REQUEST_PREFIX_OVERLAP,
     REQUEST_NAMESPACE_TOO_LARGE,
     REQUEST_UNSUPPORTED_EXTENSION,
     REQUEST_REDIRECT,
@@ -562,7 +589,10 @@ const KNOWN_REQUEST_ERROR_CODES: &[u64] = &[
     REQUEST_INVALID_FILTER,
 ];
 
-/// PUBLISH_DONE 文脈で既知のコード (draft §12.4 の registry)
+/// PUBLISH_DONE 文脈で既知のコード
+///
+/// draft-ietf-moq-transport-23 §16.12.3 (PUBLISH_DONE Codes) のレジストリ (Table 22) と
+/// §12.4 (Publish Done Codes) のコード表に載る全コード。
 const KNOWN_PUBLISH_DONE_CODES: &[u64] = &[
     PUBLISH_DONE_INTERNAL_ERROR,
     PUBLISH_DONE_UNAUTHORIZED,
@@ -570,12 +600,18 @@ const KNOWN_PUBLISH_DONE_CODES: &[u64] = &[
     PUBLISH_DONE_GOING_AWAY,
     PUBLISH_DONE_TOO_FAR_BEHIND,
     PUBLISH_DONE_EXPIRED,
+    PUBLISH_DONE_EXPIRED_AUTH_TOKEN,
     PUBLISH_DONE_UPDATE_FAILED,
     PUBLISH_DONE_EXCESSIVE_LOAD,
     PUBLISH_DONE_MALFORMED_TRACK,
 ];
 
-/// Stream Reset 文脈で既知のコード (draft §12.5 の registry)
+/// Stream Reset 文脈で既知のコード
+///
+/// draft-ietf-moq-transport-23 §16.12.4 (Stream Reset Error Codes) のレジストリ
+/// (Table 23) と §12.5 (Stream Reset Error Codes) のコード表に載る全コード。
+/// draft-23 で削除された 0x6 (UNKNOWN_OBJECT_STATUS) は既知コードに含めない
+/// (§13 (Grease) の未知コード規則)。
 const KNOWN_STREAM_RESET_CODES: &[u64] = &[
     STREAM_INTERNAL_ERROR,
     STREAM_CANCELLED,
@@ -583,7 +619,6 @@ const KNOWN_STREAM_RESET_CODES: &[u64] = &[
     STREAM_SESSION_CLOSED,
     STREAM_GOING_AWAY,
     STREAM_TOO_FAR_BEHIND,
-    STREAM_UNKNOWN_OBJECT_STATUS,
     STREAM_EXPIRED_AUTH_TOKEN,
     STREAM_EXCESSIVE_LOAD,
     STREAM_MALFORMED_TRACK,

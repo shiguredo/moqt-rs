@@ -265,6 +265,39 @@ codes.")。各 codec は長さと溢出を他の検証より先に判定する�
 未知の終了コードは `normalize_session_termination_code` が `INTERNAL_ERROR` (`0x1`) に正規化する
 (§13 (Grease))。定義済みコードは正規化で変化しない。
 
+## 要求・配送終了・stream reset のエラーコード
+
+draft-ietf-moq-transport-23 §12.3 (Request Error Codes) / §16.12.2 (REQUEST_ERROR Codes)、
+§12.4 (Publish Done Codes) / §16.12.3 (PUBLISH_DONE Codes)、§12.5 (Stream Reset Error Codes) /
+§16.12.4 (Stream Reset Error Codes) のコードを `error` モジュールで定数として定義する
+(`REQUEST_*` / `PUBLISH_DONE_*` / `STREAM_*`)。
+
+- REQUEST_ERROR は `UNAVAILABLE` (`0x0A`、`REQUEST_UNAVAILABLE`) を持つ。応答側が現時点では
+  要求を満たせないが後で満たせる可能性があることを表し、Retry Interval で再試行可能な時刻を
+  示す (§12.3)
+- PUBLISH_DONE は `EXPIRED_AUTH_TOKEN` (`0x7`、`PUBLISH_DONE_EXPIRED_AUTH_TOKEN`) を持つ。
+  購読を認可したトークンの有効期限が切れたために購読を終える場合、publisher は本コードを
+  `send_publish_done` に渡す (§9.9 の SHOULD、§12.4)
+- Stream Reset は `EXPIRED_AUTH_TOKEN` (`0x7`、`STREAM_EXPIRED_AUTH_TOKEN`) を持ち、
+  `DataStreamResetReason::ExpiredAuthToken` から選べる (§12.5)
+- draft-23 は REQUEST_ERROR の `PREFIX_OVERLAP` (`0x30`) と Stream Reset の
+  `UNKNOWN_OBJECT_STATUS` (`0x6`) をレジストリから削除した。どちらも既知コードとして定義せず、
+  受信した場合は §13 (Grease) の未知コード規則に従って `normalize_request_error_code` /
+  `normalize_stream_reset_code` がそれぞれの `INTERNAL_ERROR` に正規化する
+- `DataStreamResetReason` は Stream Reset Error Code を型で固定する公開 enum であり、
+  削除された `UNKNOWN_OBJECT_STATUS` に対応する variant を持たない
+
+未知コードの正規化は文脈ごとの関数 (`normalize_request_error_code` /
+`normalize_publish_done_code` / `normalize_stream_reset_code`) が担う。§13 (Grease) の
+"Receipt of an unknown error code in any error context (Session Termination, REQUEST_ERROR,
+PUBLISH_DONE, or Data Stream Reset) MUST be treated as equivalent to INTERNAL_ERROR for that
+context." に従い、既知コードはそのまま返し、未知コードはその文脈の `INTERNAL_ERROR` を返す。
+
+FETCH 応答で Object の status を判定できない場合は stream を reset せず、対象範囲を
+End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) で示して残りの既知 Object の配送を
+続ける (§3.2.2 (Gaps in a Fetch Stream))。subscriber は End of Unknown Range の entry を
+受理した後も同じ stream から後続の既知 Object を受け取る。
+
 ## GOAWAY によるセッション移行
 
 `Session` は GOAWAY を移行の合図として扱い、接続の張り替え自体は I/O 層とアプリに任せます (Sans-I/O)。仕様と実装の責務は次のとおりです。

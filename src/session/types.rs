@@ -607,7 +607,7 @@ pub enum SessionEvent {
     },
 }
 
-/// data stream を reset する理由 (draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes))
+/// data stream を reset する理由 (draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes))
 ///
 /// §12.5: "The application SHOULD use a relevant error code when resetting or sending
 /// STOP_SENDING on any stream."
@@ -616,6 +616,15 @@ pub enum SessionEvent {
 /// 適切なコードが載るようにする。生のコードを指定したい場合は
 /// [`Session::reset_outgoing_data_stream_with_code`](crate::session::core::Session::reset_outgoing_data_stream_with_code)
 /// を使う。
+///
+/// draft-ietf-moq-transport-23 §12.5 は `UNKNOWN_OBJECT_STATUS` (0x6) を定義しない。
+/// FETCH 応答で Object の status を判定できない場合は stream を reset する代わりに、対象範囲を
+/// End of Unknown Range (0x10C、§11.4.2 (End of Range)) で示して残りの既知 Object の配送を
+/// 続ける (§3.2.2 (Gaps in a Fetch Stream) の "it indicates the range of Unknown Objects (End of
+/// Unknown Range, see Section 11.4.2) and continues serving other known Objects.")。
+/// そのため本 enum に「status が判定できない」を表す variant は無い。旧値を受信した場合は
+/// §13 (Grease) の未知コード規則に従い、`normalize_stream_reset_code` が INTERNAL_ERROR (0x0)
+/// に正規化する。
 /// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataStreamResetReason {
@@ -644,11 +653,6 @@ pub enum DataStreamResetReason {
     /// §12.5: "The corresponding subscription has exceeded the publisher's resource limits and
     /// is being terminated (see Section 5.2)."
     TooFarBehind,
-    /// FETCH 応答で次の Object の status を判定できない → `UNKNOWN_OBJECT_STATUS` (0x6)
-    ///
-    /// §12.5: "In response to a FETCH, the publisher is unable to determine the status of the
-    /// next Object in the requested range."
-    UnknownObjectStatus,
     /// 認証トークンの有効期限切れ → `EXPIRED_AUTH_TOKEN` (0x7)
     ///
     /// §12.5: "The authorization token for the request has expired."
@@ -657,7 +661,7 @@ pub enum DataStreamResetReason {
     ExcessiveLoad,
     /// Malformed Track の検出 → `MALFORMED_TRACK` (0x12)
     ///
-    /// draft-ietf-moq-transport-22 §12.1 (Malformed Tracks) の検出経路 (Data Stream 側のヘッダ検証・
+    /// draft-ietf-moq-transport-23 §12.1 (Malformed Tracks) の検出経路 (Data Stream 側のヘッダ検証・
     /// unique-key 違反・ relay の Object 変更検出など) で Session が自動発行する。
     /// 具体的な発行は `data.rs::terminate_malformed_track` を経由する。
     MalformedTrack,
@@ -673,7 +677,6 @@ impl DataStreamResetReason {
             Self::SessionClosed => crate::error::STREAM_SESSION_CLOSED,
             Self::GoingAway => crate::error::STREAM_GOING_AWAY,
             Self::TooFarBehind => crate::error::STREAM_TOO_FAR_BEHIND,
-            Self::UnknownObjectStatus => crate::error::STREAM_UNKNOWN_OBJECT_STATUS,
             Self::ExpiredAuthToken => crate::error::STREAM_EXPIRED_AUTH_TOKEN,
             Self::ExcessiveLoad => crate::error::STREAM_EXCESSIVE_LOAD,
             Self::MalformedTrack => crate::error::STREAM_MALFORMED_TRACK,

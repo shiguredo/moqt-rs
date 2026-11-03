@@ -3440,14 +3440,13 @@ fn datagram_end_of_group_bit_sets_group_end() {
 
 // ─── Stream Reset Error Codes (draft §12.5 / §11.3.2) ────────────
 
-/// 理由からエラーコードへの対応表が draft §12.5 と一致する
+/// 理由からエラーコードへの対応表が draft-ietf-moq-transport-23 §12.5 と一致する
 #[test]
 fn data_stream_reset_reason_maps_to_spec_codes() {
     use shiguredo_moqt::error::{
         STREAM_CANCELLED, STREAM_DELIVERY_TIMEOUT, STREAM_EXCESSIVE_LOAD,
         STREAM_EXPIRED_AUTH_TOKEN, STREAM_GOING_AWAY, STREAM_INTERNAL_ERROR,
         STREAM_MALFORMED_TRACK, STREAM_SESSION_CLOSED, STREAM_TOO_FAR_BEHIND,
-        STREAM_UNKNOWN_OBJECT_STATUS,
     };
     use shiguredo_moqt::session::types::DataStreamResetReason as R;
     assert_eq!(R::InternalError.error_code(), STREAM_INTERNAL_ERROR);
@@ -3456,10 +3455,6 @@ fn data_stream_reset_reason_maps_to_spec_codes() {
     assert_eq!(R::SessionClosed.error_code(), STREAM_SESSION_CLOSED);
     assert_eq!(R::GoingAway.error_code(), STREAM_GOING_AWAY);
     assert_eq!(R::TooFarBehind.error_code(), STREAM_TOO_FAR_BEHIND);
-    assert_eq!(
-        R::UnknownObjectStatus.error_code(),
-        STREAM_UNKNOWN_OBJECT_STATUS
-    );
     assert_eq!(R::ExpiredAuthToken.error_code(), STREAM_EXPIRED_AUTH_TOKEN);
     assert_eq!(R::ExcessiveLoad.error_code(), STREAM_EXCESSIVE_LOAD);
     assert_eq!(R::MalformedTrack.error_code(), STREAM_MALFORMED_TRACK);
@@ -3628,35 +3623,6 @@ fn reset_does_not_affect_subscription_state() {
     server
         .send_subgroup_object(next_stream, 0, None)
         .expect("reset 後も同一 subscription で送信できること");
-}
-
-/// FETCH 応答で次の Object の status が判定できない場合は UNKNOWN_OBJECT_STATUS を使える
-///
-/// draft-ietf-moq-transport-22 §12.5 (Stream Reset Error Codes): "UNKNOWN_OBJECT_STATUS (0x6):
-/// In response to a FETCH, the publisher is unable to determine the status of the next Object in
-/// the requested range."
-#[test]
-fn unknown_object_status_code_is_available() {
-    let alias = 802;
-    let (_client, mut server, rid) = establish_subscribe_track(alias);
-    let stream_id = DataStreamId(98);
-    open_outgoing_subgroup(&mut server, rid, stream_id, alias, 3, 0);
-    while server.poll_event().is_some() {}
-
-    server
-        .reset_outgoing_data_stream(stream_id, DataStreamResetReason::UnknownObjectStatus)
-        .expect("reset に成功すること");
-
-    let mut codes = Vec::new();
-    while let Some(e) = server.poll_event() {
-        if let SessionEvent::ResetDataStream { error_code, .. } = e {
-            codes.push(error_code);
-        }
-    }
-    assert_eq!(
-        codes,
-        vec![shiguredo_moqt::error::STREAM_UNKNOWN_OBJECT_STATUS]
-    );
 }
 
 /// 生のコード指定もできる

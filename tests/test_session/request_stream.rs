@@ -3667,3 +3667,59 @@ fn server_request_id_advances_odd() {
         .expect("テストフィクスチャの前提条件を満たす");
     assert_eq!(rid2, 3, "2 回目の PUBLISH は request_id 3 を使うこと");
 }
+
+/// REQUEST_ERROR の UNAVAILABLE (0x0A) がそのまま通知されること
+///
+/// draft-ietf-moq-transport-23 §12.3 (Request Error Codes) / §16.12.2 (REQUEST_ERROR Codes):
+/// UNAVAILABLE (0x0A) は responder が現時点では要求を満たせないが後で満たせる可能性がある
+/// ことを表す。受信側の正規化 (`normalize_request_error_code`) で INTERNAL_ERROR (0x0) に
+/// 落ちないため、アプリは Retry Interval と併せて再試行の判断に使える。
+#[test]
+fn request_error_unavailable_is_not_normalized() {
+    use shiguredo_moqt::error::{REQUEST_UNAVAILABLE, normalize_request_error_code};
+
+    let (mut client, mut server) = establish_pair();
+    let rid = client
+        .send_subscribe(ns(&[b"live"]), b"cam".to_vec(), MessageParameters::new())
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, sub_msg) = take_send_request(&mut client);
+    server
+        .recv_request(sub_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+    server
+        .send_request_error(
+            rid,
+            REQUEST_UNAVAILABLE,
+            1_000,
+            shiguredo_moqt::message::ReasonPhrase::new("no stream credit")
+                .expect("テストフィクスチャの前提条件を満たす"),
+            ErrorDetails::new(),
+        )
+        .expect("テストフィクスチャの前提条件を満たす");
+    let (_, err_msg) = take_send_on_stream(&mut server);
+    client
+        .recv_stream_message(rid, err_msg)
+        .expect("テストフィクスチャの前提条件を満たす");
+
+    let mut got = None;
+    while let Some(e) = client.poll_event() {
+        if let SessionEvent::RequestErrorReceived {
+            error_code,
+            retry_interval,
+            ..
+        } = e
+        {
+            got = Some((error_code, retry_interval));
+        }
+    }
+    assert_eq!(
+        got,
+        Some((REQUEST_UNAVAILABLE, 1_000)),
+        "UNAVAILABLE と Retry Interval がそのまま通知されること"
+    );
+    assert_eq!(
+        normalize_request_error_code(REQUEST_UNAVAILABLE),
+        REQUEST_UNAVAILABLE,
+        "UNAVAILABLE は正規化で INTERNAL_ERROR に落ちないこと"
+    );
+}

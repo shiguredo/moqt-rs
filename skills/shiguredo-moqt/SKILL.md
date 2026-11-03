@@ -287,6 +287,12 @@ pub enum PeerControlMessageSizeLimit { BeforeSetup, Omitted, Advertised(u64) }
 ```
 
 `DataStreamResetReason` は `fn error_code(self) -> u64` で対応する Stream Reset Error Code を取得できる。
+draft-ietf-moq-transport-23 §12.5 (Stream Reset Error Codes) は `UNKNOWN_OBJECT_STATUS` (`0x6`) を
+定義しない。FETCH 応答で Object の status を判定できない場合は `send_fetch_end_of_range` で
+End of Unknown Range (`0x10C`、§11.4.2 (End of Range)) を示したうえで残りの既知 Object を
+`send_fetch_object` で送り続ける (§3.2.2 (Gaps in a Fetch Stream))。また、認可トークンの失効で
+購読を終える場合は `send_publish_done` に `PUBLISH_DONE_EXPIRED_AUTH_TOKEN` (`0x7`) を渡す
+(§9.9 (PUBLISH_DONE) の SHOULD)。
 
 ### `SessionEvent`
 

@@ -814,7 +814,7 @@ fn subscriber_receives_fetch_object_via_session() {
 
 /// End of Range マーカーを取り込める
 ///
-/// draft-ietf-moq-transport-22 §11.4.1.2 (End of Range) の種別ごとの
+/// draft-ietf-moq-transport-23 §11.4.2 (End of Range) の種別ごとの
 /// デコード検証は codec 側 (`tests/test_stream.rs`) が担う。Session 層では
 /// entry 到着の受理のみ検証する。
 #[test]
@@ -833,6 +833,82 @@ fn subscriber_receives_end_of_range_markers() {
             .unwrap_or_else(|e| panic!("{label}: 取り込みに成功すること: {e:?}"));
         // 取り込み成功自体が検証
     }
+}
+
+/// End of Unknown Range の後も既知の Object を同じ stream で配送し続けられる
+///
+/// draft-ietf-moq-transport-23 §3.2.2 (Gaps in a Fetch Stream): "If a Publisher receives a
+/// FETCH with a range that includes one or more Objects with Unknown state, it indicates the
+/// range of Unknown Objects (End of Unknown Range, see Section 11.4.2) and continues serving
+/// other known Objects." したがって publisher は Unknown 範囲を示した後も stream を reset
+/// せず既知 Object を送り、subscriber も同じ stream から受け取り続ける。§12.5 (Stream Reset
+/// Error Codes) の stream reset では中断しない。
+#[test]
+fn fetch_continues_known_objects_after_end_of_unknown_range() {
+    use shiguredo_moqt::message::common::Location;
+
+    let (mut client, mut server, rid) = establish_fetch();
+    let stream_id = DataStreamId(127);
+    // publisher 側: FETCH_HEADER → End of Unknown Range → 既知 Object の順に通知する
+    server
+        .send_fetch_header(stream_id, rid)
+        .expect("FETCH_HEADER の送信に成功すること");
+    server
+        .send_fetch_end_of_range(stream_id)
+        .expect("End of Unknown Range の後も stream を継続できること");
+    server
+        .send_fetch_object(
+            stream_id,
+            &Location {
+                group_id: 5,
+                object_id: 0,
+            },
+        )
+        .expect("Unknown 範囲の後も既知 Object を送信できること");
+    // publisher 側に reset の指示が積まれていないこと
+    while let Some(event) = server.poll_event() {
+        assert!(
+            !matches!(
+                event,
+                SessionEvent::ResetDataStream { stream_id: id, .. } if id == stream_id
+            ),
+            "End of Unknown Range の後に stream を reset してはいけない"
+        );
+    }
+
+    // subscriber 側: Unknown 範囲の entry と後続の既知 Object の entry を同じ stream で受理する
+    client
+        .recv_data_stream_type(stream_id, FETCH_HEADER_TYPE)
+        .expect("stream type の通知に成功すること");
+    client
+        .recv_fetch_header(stream_id, &FetchHeader { request_id: rid })
+        .expect("FETCH_HEADER の受信に成功すること");
+    for label in ["End of Unknown Range", "後続の既知 Object"] {
+        client
+            .recv_fetch_entry(stream_id)
+            .unwrap_or_else(|e| panic!("{label}: 取り込みに成功すること: {e:?}"));
+    }
+    // subscriber 側にも reset / STOP_SENDING の指示が積まれていないこと
+    while let Some(event) = client.poll_event() {
+        assert!(
+            !matches!(
+                event,
+                SessionEvent::ResetDataStream { stream_id: id, .. }
+                    | SessionEvent::StopSendingDataStream { stream_id: id, .. }
+                    if id == stream_id
+            ),
+            "End of Unknown Range の後に stream を止めてはいけない"
+        );
+    }
+    // セッションも FETCH も継続していること
+    assert_eq!(client.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .fetch(rid)
+            .expect("テストフィクスチャの前提条件を満たす")
+            .state,
+        FetchState::Established
+    );
 }
 
 /// FETCH_HEADER 未受信のまま entry を渡すと拒否される
