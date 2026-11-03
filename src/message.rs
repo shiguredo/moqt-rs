@@ -289,37 +289,39 @@ const SUBSCRIBE_NAMESPACE_ALLOWED_PARAMS: &[u64] = &[PARAM_AUTHORIZATION_TOKEN];
 
 /// SUBSCRIBE_TRACKS で許可されるパラメータ型
 ///
-/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の列挙
+/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) が列挙する 14 種をそのまま採る
 /// (OBJECT_DELIVERY_TIMEOUT / AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT / PAUSED /
 /// SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS / SUBGROUP_FILTER /
 /// OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER / TRACK_PROPERTY_FILTER /
-/// INCLUDE_PROPERTIES) と、§3.6.2 (Parameters on SUBSCRIBE_TRACKS) の
-/// "Any Parameter that can be specified on a Subscription (ie: in SUBSCRIBE) is valid in
-/// SUBSCRIBE_TRACKS, unless otherwise specified." の和集合である。
+/// INCLUDE_PROPERTIES)。
 ///
-/// TRACK_PROPERTY_FILTER は SUBSCRIBE に出現しない SUBSCRIBE_TRACKS 固有の型である
-/// (§3.6.1 (Filtering SUBSCRIBE_TRACKS))。
+/// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Parameters that only
+/// apply to a SUBSCRIBE for a single Track, such as RENDEZVOUS_TIMEOUT and NEW_GROUP_REQUEST,
+/// cannot appear in SUBSCRIBE_TRACKS." のため、SUBSCRIBE が許可する 2 型
+/// (RENDEZVOUS_TIMEOUT / NEW_GROUP_REQUEST) は含めない。単一 Track の購読にだけ意味を持つ
+/// 値を namespace 単位の購読へ載せると、どの Track に対する値か決まらないためである。
+/// AUTHORIZATION_TOKEN と TRACK_PROPERTY_FILTER は SUBSCRIBE_TRACKS 自体に作用し、それ以外は
+/// resulting PUBLISH の initial Subscription parameters になる (同 §3.6.2 / §9.19.2 /
+/// §9.19.14)。
 ///
-/// [`SUBSCRIBE_ALLOWED_PARAMS`] を変更するときは本定数も追随させること
-/// (`subscribe_tracks_allowed_params_covers_subscribe_params` が固定する)。
-/// 節番号・規則は draft 由来であり将来 draft 改定で変わる可能性がある。
+/// 許可されないパラメータの受信は §9.19.1 (Parameter Scope) の MUST により
+/// INVALID_PARAMETER でセッションを閉じる。節番号・規則は draft 由来であり将来 draft 改定で
+/// 変わる可能性がある。
 const SUBSCRIBE_TRACKS_ALLOWED_PARAMS: &[u64] = &[
-    PARAM_AUTHORIZATION_TOKEN,
-    PARAM_RENDEZVOUS_TIMEOUT,
     PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_AUTHORIZATION_TOKEN,
     PARAM_SUBGROUP_DELIVERY_TIMEOUT,
-    PARAM_SUBSCRIBER_PRIORITY,
     PARAM_PAUSED,
+    PARAM_SUBSCRIBER_PRIORITY,
     PARAM_LOCATION_FILTER,
     PARAM_GROUP_ORDER,
-    PARAM_NEW_GROUP_REQUEST,
-    PARAM_INCLUDE_PROPERTIES,
     PARAM_FILL_PARAMETERS,
     PARAM_SUBGROUP_FILTER,
     PARAM_OBJECTID_FILTER,
     PARAM_PRIORITY_FILTER,
     PARAM_OBJECT_PROPERTY_FILTER,
     PARAM_TRACK_PROPERTY_FILTER,
+    PARAM_INCLUDE_PROPERTIES,
 ];
 
 /// 未対応 request の型 ID から、そのメッセージで許可されるパラメータ集合を返す
@@ -1798,24 +1800,58 @@ impl ControlMessage {
 mod tests {
     use super::*;
 
-    /// SUBSCRIBE_TRACKS の許可集合が SUBSCRIBE の許可集合を覆うこと
+    /// SUBSCRIBE_TRACKS の許可集合が draft-ietf-moq-transport-23 §9.17 の明示リストと一致すること
     ///
-    /// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that
-    /// can be specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS,
-    /// unless otherwise specified." 和集合の取りこぼしで、仕様が許容するメッセージを
-    /// PROTOCOL_VIOLATION で閉じないよう、定数の追随を固定する。
+    /// §9.17 (SUBSCRIBE_TRACKS) は許可パラメータを 14 種の明示リストで列挙する。
+    /// 列挙の取りこぼしは仕様が許容するメッセージを INVALID_PARAMETER で閉じ、逆に余分な型は
+    /// §9.19.1 (Parameter Scope) の MUST に反する。集合の一致で両方向の退行を検出する。
     #[test]
-    fn subscribe_tracks_allowed_params_covers_subscribe_params() {
-        for param_type in SUBSCRIBE_ALLOWED_PARAMS {
+    fn subscribe_tracks_allowed_params_matches_spec_list() {
+        let expected = [
+            PARAM_OBJECT_DELIVERY_TIMEOUT,
+            PARAM_AUTHORIZATION_TOKEN,
+            PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+            PARAM_PAUSED,
+            PARAM_SUBSCRIBER_PRIORITY,
+            PARAM_LOCATION_FILTER,
+            PARAM_GROUP_ORDER,
+            PARAM_FILL_PARAMETERS,
+            PARAM_SUBGROUP_FILTER,
+            PARAM_OBJECTID_FILTER,
+            PARAM_PRIORITY_FILTER,
+            PARAM_OBJECT_PROPERTY_FILTER,
+            PARAM_TRACK_PROPERTY_FILTER,
+            PARAM_INCLUDE_PROPERTIES,
+        ];
+        let mut actual = SUBSCRIBE_TRACKS_ALLOWED_PARAMS.to_vec();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "SUBSCRIBE_TRACKS の許可集合が §9.17 の明示リストと一致すること"
+        );
+    }
+
+    /// 単一 Track の購読にだけ意味を持つ 2 型が SUBSCRIBE_TRACKS で許可されないこと
+    ///
+    /// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Parameters that
+    /// only apply to a SUBSCRIBE for a single Track, such as RENDEZVOUS_TIMEOUT and
+    /// NEW_GROUP_REQUEST, cannot appear in SUBSCRIBE_TRACKS." の規定を固定する。
+    /// 2 型は SUBSCRIBE では許可されるため、SUBSCRIBE 側の集合に残っていることも併せて
+    /// 確認し、SUBSCRIBE と SUBSCRIBE_TRACKS の差異を明示する。
+    #[test]
+    fn subscribe_tracks_allowed_params_excludes_subscribe_only_params() {
+        for param_type in [PARAM_RENDEZVOUS_TIMEOUT, PARAM_NEW_GROUP_REQUEST] {
             assert!(
-                SUBSCRIBE_TRACKS_ALLOWED_PARAMS.contains(param_type),
-                "SUBSCRIBE_TRACKS の許可集合が SUBSCRIBE のパラメータ {param_type:#x} を欠いている"
+                SUBSCRIBE_ALLOWED_PARAMS.contains(&param_type),
+                "単一 Track の SUBSCRIBE では許可されるパラメータ {param_type:#x} が SUBSCRIBE の集合に無い"
+            );
+            assert!(
+                !SUBSCRIBE_TRACKS_ALLOWED_PARAMS.contains(&param_type),
+                "単一 Track 専用のパラメータ {param_type:#x} を SUBSCRIBE_TRACKS の集合に含めてはならない"
             );
         }
-        assert!(
-            SUBSCRIBE_TRACKS_ALLOWED_PARAMS.contains(&PARAM_TRACK_PROPERTY_FILTER),
-            "SUBSCRIBE_TRACKS 固有の TRACK_PROPERTY_FILTER が許可集合に無い"
-        );
     }
 
     /// 許可パラメータ集合の対応表が Request ID を持つ未対応 request の集合と一致すること

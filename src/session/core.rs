@@ -3028,9 +3028,10 @@ impl Session {
 /// 未対応 request の本体を解析して Request ID、Track Namespace Prefix、パラメータを取り出す
 ///
 /// draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE) /
-/// §9.18 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) → Track Namespace Prefix →
-/// Number of Parameters → Parameters の順に直列化する。`ControlMessage::Unsupported` は本体を
-/// 生バイト列で保持するだけなので、3 種の構造を知るセッション層が本関数で解析する。
+/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の 3 種は共通して
+/// Request ID (vi64) → Track Namespace Prefix → Number of Parameters → Parameters の順に
+/// 直列化する。`ControlMessage::Unsupported` は本体を生バイト列で保持するだけなので、
+/// 3 種の構造を知るセッション層が本関数で解析する。
 ///
 /// Request ID はメッセージ decode が取り出した値と一致することを呼び出し側が確認する
 /// (公開 enum を手組みして食い違わせた場合は PROTOCOL_VIOLATION)。

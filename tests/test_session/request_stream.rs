@@ -6,7 +6,11 @@ use shiguredo_moqt::error::{
 };
 use shiguredo_moqt::message::{ErrorDetail, Redirect, RequestError, UnsupportedProperty};
 use shiguredo_moqt::message_parameter::{
-    PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT, PARAM_SUBGROUP_FILTER,
+    LocationFilter, PARAM_AUTHORIZATION_TOKEN, PARAM_FILL_PARAMETERS, PARAM_FILL_TIMEOUT,
+    PARAM_GROUP_ORDER, PARAM_INCLUDE_PROPERTIES, PARAM_LOCATION_FILTER, PARAM_NEW_GROUP_REQUEST,
+    PARAM_OBJECT_DELIVERY_TIMEOUT, PARAM_OBJECT_PROPERTY_FILTER, PARAM_OBJECTID_FILTER,
+    PARAM_PAUSED, PARAM_PRIORITY_FILTER, PARAM_RENDEZVOUS_TIMEOUT, PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_SUBGROUP_FILTER, PARAM_SUBSCRIBER_PRIORITY, PARAM_TRACK_PROPERTY_FILTER,
 };
 use shiguredo_moqt::parameter::SETUP_OPTION_MAX_FILTER_RANGES;
 
@@ -408,9 +412,9 @@ fn recv_many_out_of_order_request_ids_keeps_session_open() {
 // ─── 未対応 request の本体 (PUBLISH_NAMESPACE / SUBSCRIBE_NAMESPACE / SUBSCRIBE_TRACKS) ───
 //
 // draft-ietf-moq-transport-22 §9.14 (PUBLISH_NAMESPACE) / §9.15 (SUBSCRIBE_NAMESPACE) /
-// §9.18 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) → Track Namespace Prefix (..) →
-// Number of Parameters (vi64) → Parameters (..) の順に直列化する。Track Namespace の encode API は
-// crate 内に閉じているため、wire 表現を直接組み立てる。
+// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) の 3 種は共通して Request ID (vi64) →
+// Track Namespace Prefix (..) → Number of Parameters (vi64) → Parameters (..) の順に直列化する。
+// Track Namespace の encode API は crate 内に閉じているため、wire 表現を直接組み立てる。
 
 /// Track Namespace Prefix "live" のワイヤ表現 (フィールド数 1 + フィールド長 4 + "live")
 fn live_namespace_prefix() -> Vec<u8> {
@@ -1634,7 +1638,7 @@ fn unsupported_request_rejects_out_of_scope_parameter() {
     );
     assert_eq!(server.state(), SessionState::Closing);
 
-    // SUBSCRIBE_TRACKS は GROUP_ORDER を許可する (§9.18) ため、同じ種類のパラメータでも拒否だけになる
+    // SUBSCRIBE_TRACKS は GROUP_ORDER を許可する (§9.17) ため、同じ種類のパラメータでも拒否だけになる
     let (_client, mut server) = establish_pair();
     let mut parameters = MessageParameters::new();
     parameters.push(MessageParameter {
@@ -1692,73 +1696,187 @@ fn unsupported_request_with_duplicate_tokens_prefers_malformed_over_not_supporte
     assert_token_alias(&server, 2);
 }
 
-/// SUBSCRIBE_TRACKS は §3.6.2 の包括許可により SUBSCRIBE のパラメータも載せられる
+/// draft-ietf-moq-transport-23 §9.17 が SUBSCRIBE_TRACKS で許可する 14 種
 ///
-/// draft-ietf-moq-transport-22 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Any Parameter that can
-/// be specified on a Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS, unless
-/// otherwise specified." 同節は LOCATION_FILTER と FILL_PARAMETERS を SUBSCRIBE_TRACKS に
-/// 載せられると明記しており (§9.18 の列挙には無い)、スコープ違反としてセッションを閉じない。
+/// §9.17 (SUBSCRIBE_TRACKS): "The parameters that can appear in a SUBSCRIBE_TRACKS are
+/// OBJECT_DELIVERY_TIMEOUT, AUTHORIZATION_TOKEN, SUBGROUP_DELIVERY_TIMEOUT, PAUSED,
+/// SUBSCRIBER_PRIORITY, LOCATION_FILTER, GROUP_ORDER, FILL_PARAMETERS, SUBGROUP_FILTER,
+/// OBJECTID_FILTER, PRIORITY_FILTER, OBJECT_PROPERTY_FILTER, TRACK_PROPERTY_FILTER and
+/// INCLUDE_PROPERTIES." 仕様の列挙順のまま保持する。
+const SUBSCRIBE_TRACKS_ALLOWED_PARAM_TYPES: [u64; 14] = [
+    PARAM_OBJECT_DELIVERY_TIMEOUT,
+    PARAM_AUTHORIZATION_TOKEN,
+    PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+    PARAM_PAUSED,
+    PARAM_SUBSCRIBER_PRIORITY,
+    PARAM_LOCATION_FILTER,
+    PARAM_GROUP_ORDER,
+    PARAM_FILL_PARAMETERS,
+    PARAM_SUBGROUP_FILTER,
+    PARAM_OBJECTID_FILTER,
+    PARAM_PRIORITY_FILTER,
+    PARAM_OBJECT_PROPERTY_FILTER,
+    PARAM_TRACK_PROPERTY_FILTER,
+    PARAM_INCLUDE_PROPERTIES,
+];
+
+/// §9.17 の明示リストにあるパラメータ型 1 つの値を組み立てる
+///
+/// Range Filter (0x25-0x29) は SetID 0 の 1 Range (Start 0 / End delta 1) とし、
+/// OBJECT_PROPERTY_FILTER / TRACK_PROPERTY_FILTER は Property Type 2 (偶数) を前置する。
+/// FILL_PARAMETERS は内側 0 個 (fill fetch stream を開く条件のみを満たす) とする。
+fn subscribe_tracks_parameter(param_type: u64) -> MessageParameter {
+    let value = match param_type {
+        PARAM_OBJECT_DELIVERY_TIMEOUT | PARAM_SUBGROUP_DELIVERY_TIMEOUT => {
+            MessageParameterValue::VarInt(1000)
+        }
+        PARAM_AUTHORIZATION_TOKEN => {
+            MessageParameterValue::AuthorizationToken(AuthorizationToken::UseValue {
+                token_type: 2,
+                token_value: b"tok".to_vec(),
+            })
+        }
+        PARAM_PAUSED | PARAM_INCLUDE_PROPERTIES => MessageParameterValue::Uint8(1),
+        PARAM_SUBSCRIBER_PRIORITY => MessageParameterValue::Uint8(128),
+        PARAM_LOCATION_FILTER => MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
+        PARAM_GROUP_ORDER => MessageParameterValue::Uint8(1),
+        PARAM_FILL_PARAMETERS => MessageParameterValue::FillParameters(MessageParameters::new()),
+        PARAM_SUBGROUP_FILTER | PARAM_OBJECTID_FILTER | PARAM_PRIORITY_FILTER => {
+            MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01])
+        }
+        PARAM_OBJECT_PROPERTY_FILTER | PARAM_TRACK_PROPERTY_FILTER => {
+            // SetID 0 / Property Type 2 / Start 0 / End delta 1
+            MessageParameterValue::LengthPrefixed(vec![0x00, 0x02, 0x00, 0x01])
+        }
+        other => panic!("§9.17 の明示リストに無いパラメータ型 {other:#x} が渡された"),
+    };
+    MessageParameter { param_type, value }
+}
+
+/// SUBSCRIBE_TRACKS の明示リストにある各パラメータは単独でも NOT_SUPPORTED で拒否される
+///
+/// draft-ietf-moq-transport-23 §9.17 (SUBSCRIBE_TRACKS) は許可パラメータを 14 種の明示リストで
+/// 列挙する。同節の列挙をそのまま採るため、14 種のいずれも §9.19.1 (Parameter Scope) の
+/// スコープ違反にならない。本ライブラリは SUBSCRIBE_TRACKS 自体を実装しないので、
+/// §1.6 (Modularity) の SHOULD に従い REQUEST_ERROR (NOT_SUPPORTED) と FIN でメッセージ単位に
+/// 拒否し、セッションは維持する。ワイヤの encode / decode を通すことで、組み立てた正当な
+/// SUBSCRIBE_TRACKS が codec 層でも受理されることを併せて固定する。
 #[test]
-fn subscribe_tracks_with_subscribe_parameters_is_rejected_with_not_supported() {
-    use shiguredo_moqt::message_parameter::{LocationFilter, PARAM_LOCATION_FILTER};
-    let (_client, mut server) = establish_pair();
+fn subscribe_tracks_accepts_each_parameter_from_message_definition() {
+    for param_type in SUBSCRIBE_TRACKS_ALLOWED_PARAM_TYPES {
+        let mut parameters = MessageParameters::new();
+        parameters.push(subscribe_tracks_parameter(param_type));
+        // Range Filter を 1 つ含みうるため、server の MAX_FILTER_RANGES を宣言する
+        // (未宣言の既定値 0 では §3.3.2 の上限超過で INVALID_FILTER になる)
+        let (_client, mut server) =
+            establish_pair_with_options(SetupOptions::new(), max_filter_options());
+        let msg = unsupported_request(0x51, 0, &parameters);
+        let bytes = msg
+            .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+            .expect("§9.17 のパラメータを含む SUBSCRIBE_TRACKS は encode できること");
+        let (decoded, _) = ControlMessage::decode(&bytes)
+            .expect("§9.17 のパラメータを含む SUBSCRIBE_TRACKS は decode できること");
+        server
+            .recv_request(decoded)
+            .expect("§9.17 のパラメータはスコープ違反にならず、拒否は Result::Ok であること");
+        assert_eq!(
+            server.state(),
+            SessionState::Established,
+            "型 {param_type:#x} の受信でセッションを閉じないこと"
+        );
+        assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+    }
+}
+
+/// SUBSCRIBE_TRACKS の明示リスト 14 種を同時に載せた要求も NOT_SUPPORTED で拒否される
+///
+/// §9.17 のリストを 1 メッセージにすべて載せ、デルタエンコーディングと複数 Range Filter /
+/// FILL_PARAMETERS の併存でもスコープ検証と拒否経路が成立することを固定する。
+#[test]
+fn subscribe_tracks_accepts_all_parameters_together() {
     let mut parameters = MessageParameters::new();
-    parameters.push(MessageParameter {
-        param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
-    });
+    for param_type in SUBSCRIBE_TRACKS_ALLOWED_PARAM_TYPES {
+        parameters.push(subscribe_tracks_parameter(param_type));
+    }
+    // Range Filter は 5 種それぞれ 1 Range なので MAX_FILTER_RANGES を 5 以上にする
+    let (_client, mut server) =
+        establish_pair_with_options(SetupOptions::new(), max_filter_options());
+    let msg = unsupported_request(0x51, 0, &parameters);
+    let bytes = msg
+        .encode(DEFAULT_MAX_CONTROL_MESSAGE_SIZE)
+        .expect("14 種のパラメータを含む SUBSCRIBE_TRACKS は encode できること");
+    let (decoded, _) = ControlMessage::decode(&bytes)
+        .expect("14 種のパラメータを含む SUBSCRIBE_TRACKS は decode できること");
     server
-        .recv_request(unsupported_request(0x51, 0, &parameters))
-        .expect("§3.6.2 の包括許可に入るパラメータでセッションを閉じないこと");
+        .recv_request(decoded)
+        .expect("14 種のパラメータはスコープ違反にならず、拒否は Result::Ok であること");
     assert_eq!(server.state(), SessionState::Established);
     assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
 }
 
-/// SUBSCRIBE_TRACKS は TRACK_PROPERTY_FILTER と他の許可パラメータを同時に載せられる
+/// 単一 Track の購読専用パラメータは INVALID_PARAMETER になり副作用を残さない
 ///
-/// draft-ietf-moq-transport-22 §9.18 (SUBSCRIBE_TRACKS) は TRACK_PROPERTY_FILTER と
-/// GROUP_ORDER 等を同じ列挙で許可し、§3.6.1 (Filtering SUBSCRIBE_TRACKS) は同メッセージの
-/// Track Property Filter による絞り込みを定める。許可集合は §3.6.2 の包括許可との和集合なので、
-/// 複数の型を組み合わせてもスコープ違反にしない。
+/// draft-ietf-moq-transport-23 §3.6.2 (Parameters on SUBSCRIBE_TRACKS): "Parameters that only
+/// apply to a SUBSCRIBE for a single Track, such as RENDEZVOUS_TIMEOUT and NEW_GROUP_REQUEST,
+/// cannot appear in SUBSCRIBE_TRACKS." 許可されないパラメータの受信は §9.19.1 (Parameter
+/// Scope) の MUST により INVALID_PARAMETER (0x305) でセッションを閉じる。
+///
+/// セッション終了を伴う検証は §8.9 (Authorization Token Compression) の REGISTER 適用より
+/// 先に評価するため、同じメッセージに含まれる REGISTER も token cache へ反映しない
+/// (同節の MUST は "does not result in a Session error" の場合に限る)。NOT_SUPPORTED の
+/// REQUEST_ERROR も送らず、subscription / fetch / track status の要求状態を作らない。
 #[test]
-fn subscribe_tracks_allows_track_property_filter_with_other_parameters() {
-    use shiguredo_moqt::message_parameter::{
-        LocationFilter, PARAM_GROUP_ORDER, PARAM_LOCATION_FILTER, PARAM_TRACK_PROPERTY_FILTER,
-    };
-
-    // TRACK_PROPERTY_FILTER 単独 (§9.18 の列挙のうち SUBSCRIBE に無い型)
-    let mut alone = MessageParameters::new();
-    alone.push(MessageParameter {
-        param_type: PARAM_TRACK_PROPERTY_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
-    });
-    // TRACK_PROPERTY_FILTER + LOCATION_FILTER + GROUP_ORDER (§9.18 と §3.6.2 の両方にまたがる)
-    let mut combined = MessageParameters::new();
-    combined.push(MessageParameter {
-        param_type: PARAM_TRACK_PROPERTY_FILTER,
-        value: MessageParameterValue::LengthPrefixed(vec![0x00, 0x00, 0x01]),
-    });
-    combined.push(MessageParameter {
-        param_type: PARAM_LOCATION_FILTER,
-        value: MessageParameterValue::LocationFilter(LocationFilter::NoFilter),
-    });
-    combined.push(MessageParameter {
-        param_type: PARAM_GROUP_ORDER,
-        value: MessageParameterValue::Uint8(1),
-    });
-
-    for parameters in [alone, combined] {
-        // Range Filter を含むため、server の MAX_FILTER_RANGES を Range 総数 (1) 以上に宣言する
-        // (未宣言の既定値 0 では §3.3.2 の上限超過で INVALID_FILTER になる)
-        let (_client, mut server) = establish_pair_with_options(
-            SetupOptions::new(),
-            opts_with(SETUP_OPTION_MAX_FILTER_RANGES, 1),
-        );
-        server
+fn subscribe_tracks_rejects_single_track_only_parameters() {
+    for param_type in [PARAM_RENDEZVOUS_TIMEOUT, PARAM_NEW_GROUP_REQUEST] {
+        let (_client, mut server) = establish_pair_with_self_auth_cache(1024);
+        let mut parameters = register_token_parameters(1);
+        parameters.push(MessageParameter {
+            param_type,
+            value: MessageParameterValue::VarInt(1000),
+        });
+        let err = server
             .recv_request(unsupported_request(0x51, 0, &parameters))
-            .expect("許可集合の和集合に入るパラメータでセッションを閉じないこと");
-        assert_eq!(server.state(), SessionState::Established);
-        assert_request_error(&mut server, 0, REQUEST_NOT_SUPPORTED);
+            .unwrap_err();
+        assert_eq!(
+            err.as_session_error()
+                .expect("Session エラーであること")
+                .code,
+            SESSION_INVALID_PARAMETER,
+            "型 {param_type:#x} は INVALID_PARAMETER で拒否されること"
+        );
+        assert_eq!(
+            server.state(),
+            SessionState::Closing,
+            "型 {param_type:#x} はセッションを Closing にすること"
+        );
+        // セッション終了だけを発行し、メッセージ単位の拒否 (REQUEST_ERROR) を送らないこと
+        let mut close_sessions = 0;
+        while let Some(event) = server.poll_event() {
+            match event {
+                SessionEvent::CloseSession(err) => {
+                    assert_eq!(
+                        err.code, SESSION_INVALID_PARAMETER,
+                        "型 {param_type:#x} の終了コードが INVALID_PARAMETER であること"
+                    );
+                    close_sessions += 1;
+                }
+                SessionEvent::SendOnStream {
+                    message: ControlMessage::RequestError(_),
+                    ..
+                } => panic!("型 {param_type:#x} のスコープ違反で REQUEST_ERROR を送ってはならない"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            close_sessions, 1,
+            "型 {param_type:#x} で CloseSession が 1 回だけ発行されること"
+        );
+        // §8.9 の REGISTER 適用 MUST はセッションエラーになるメッセージには及ばない
+        assert!(
+            server.peer_auth_token_cache().resolve(1).is_none(),
+            "型 {param_type:#x} の拒否で token cache に alias を残さないこと"
+        );
+        assert_no_tracked_requests(&server);
     }
 }
 

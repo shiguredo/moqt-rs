@@ -146,12 +146,16 @@ SHOULD)。
   とする
 - §9.19.1 (Parameter Scope): メッセージ型ごとに許可されないパラメータの受信は
   `INVALID_PARAMETER` (`0x305`) でセッションを閉じる。`PUBLISH_NAMESPACE` / `SUBSCRIBE_NAMESPACE` が
-  許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.18 の列挙に加えて
-  §3.6.2 (Parameters on SUBSCRIBE_TRACKS) の "Any Parameter that can be specified on a
-  Subscription (ie: in SUBSCRIBE) is valid in SUBSCRIBE_TRACKS" を採り、SUBSCRIBE の許可
-  パラメータとの和集合とする (同節が SUBSCRIBE_TRACKS に載せられると明記する LOCATION_FILTER /
-  FILL_PARAMETERS を §9.18 の列挙が含まないため。仕様が許容するメッセージでセッションを
-  閉じない側を選ぶ)
+  許可するのは AUTHORIZATION_TOKEN のみ。`SUBSCRIBE_TRACKS` は §9.17 (SUBSCRIBE_TRACKS) が
+  列挙する 14 種 (OBJECT_DELIVERY_TIMEOUT / AUTHORIZATION_TOKEN / SUBGROUP_DELIVERY_TIMEOUT /
+  PAUSED / SUBSCRIBER_PRIORITY / LOCATION_FILTER / GROUP_ORDER / FILL_PARAMETERS /
+  SUBGROUP_FILTER / OBJECTID_FILTER / PRIORITY_FILTER / OBJECT_PROPERTY_FILTER /
+  TRACK_PROPERTY_FILTER / INCLUDE_PROPERTIES) をそのまま採る。§3.6.2 (Parameters on
+  SUBSCRIBE_TRACKS) は単一 Track の SUBSCRIBE にだけ意味を持つ RENDEZVOUS_TIMEOUT /
+  NEW_GROUP_REQUEST を SUBSCRIBE_TRACKS に載せられないと定めるため、SUBSCRIBE の許可集合との
+  和集合にはしない。2 型は `INVALID_PARAMETER` で拒否し、セッション終了を伴う検証は
+  §8.9 (Authorization Token Compression) の REGISTER 適用より先に評価するため、同じ
+  メッセージの REGISTER も token cache へ残さない
 - §8.9 (Authorization Token Compression): Alias Type REGISTER のトークンは拒否する場合も
   token cache へ登録し (MUST)、(Token Type, Token Value) の重複は alias 解決後まで含めて判定し
   `REQUEST_ERROR` の `MALFORMED_AUTH_TOKEN` でメッセージ単位に拒否する。alias は peer の
@@ -170,10 +174,12 @@ SHOULD)。
 `UNEXPECTED_MESSAGE` (`0x303`) でセッションを閉じる。§9 Table 5 に無い型も
 `MessageError::InvalidMessageType` (セッション終了コードは `UNEXPECTED_MESSAGE`) で拒否する。
 
-MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.20.6 (RENDEZVOUS TIMEOUT Parameter) と
+MoQ リレー専用の `RENDEZVOUS_TIMEOUT` (`0x04`) は §9.19.6 (RENDEZVOUS TIMEOUT Parameter) と
 §16.7 (Message Parameters) の Table 14 に定義済みのため、SUBSCRIBE への出現は受理する。
 ただし本ライブラリは MoQ リレーを実装しないため値を解釈せず、`Subscription` にも保持しない。
-アプリは decode 済みの `MessageParameters` から読める。
+アプリは decode 済みの `MessageParameters` から読める。SUBSCRIBE_TRACKS へは載せられない
+(§3.6.2) ため、受信すると `INVALID_PARAMETER` でセッションを閉じる。`NEW_GROUP_REQUEST`
+(`0x32`) も同じ扱いである (§9.19.19)。
 
 ## モジュール構成
 
